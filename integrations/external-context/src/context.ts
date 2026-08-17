@@ -36,7 +36,7 @@ export function renderExternalContext(
     }
   }
 
-  return JSON.stringify(envelope(items));
+  return serializeEnvelope(items);
 }
 
 function compactItem(source: ExternalContextItem): ExternalContextItem {
@@ -95,7 +95,13 @@ function fitNewestItemToBudget(items: ExternalContextItem[]): boolean {
 }
 
 function fitsBudget(items: readonly ExternalContextItem[]): boolean {
-  return JSON.stringify(envelope(items)).length <= MAX_RENDERED_CHARS;
+  return serializeEnvelope(items).length <= MAX_RENDERED_CHARS;
+}
+
+function serializeEnvelope(items: readonly ExternalContextItem[]): string {
+  return JSON.stringify(envelope(items))
+    .replaceAll('<', '\\u003c')
+    .replaceAll('>', '\\u003e');
 }
 
 function envelope(items: readonly ExternalContextItem[]) {

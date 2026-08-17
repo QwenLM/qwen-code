@@ -6,7 +6,9 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentViewSessionStateFile } from '../agent-view/protocol.js';
+import { createAgentViewWorkerSidebandEnv } from '../agent-view/worker-sideband.js';
 import { routeManagedAgentViewResume } from './agent-view-resume.js';
+import { isAgentViewWorkerResumeCommandBlocked } from './agent-view-resume-guard.js';
 
 const mockReadAgentViewSessionState = vi.hoisted(() => vi.fn());
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
@@ -50,6 +52,21 @@ describe('routeManagedAgentViewResume', () => {
     expect(process.exitCode).toBeUndefined();
   });
 
+  it('rejects one-shot input for managed Agent View resumes', async () => {
+    mockReadAgentViewSessionState.mockResolvedValue(state('managed'));
+
+    await expect(
+      routeManagedAgentViewResume('session-1', process.env, true),
+    ).resolves.toBe(true);
+
+    expect(mockEnsureAgentViewSupervisor).not.toHaveBeenCalled();
+    expect(mockAttach).not.toHaveBeenCalled();
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('Cannot use one-shot input'),
+    );
+    expect(process.exitCode).toBe(1);
+  });
+
   it('marks managed Agent View resume failures as unsuccessful', async () => {
     mockReadAgentViewSessionState.mockResolvedValue(state('managed'));
     mockAttach.mockRejectedValueOnce(new Error('attach failed'));
@@ -82,11 +99,34 @@ describe('routeManagedAgentViewResume', () => {
     await expect(
       routeManagedAgentViewResume('session-1', {
         QWEN_AGENT_VIEW_WORKER: '1',
+        QWEN_AGENT_VIEW_SESSION_ID: 'session-1',
       }),
     ).resolves.toBe(false);
 
     expect(mockReadAgentViewSessionState).not.toHaveBeenCalled();
     expect(mockWriteStderrLine).not.toHaveBeenCalled();
+  });
+});
+
+describe('isAgentViewWorkerResumeCommandBlocked', () => {
+  it('blocks /resume only inside a fully-initialized attached worker', () => {
+    expect(
+      isAgentViewWorkerResumeCommandBlocked(
+        createAgentViewWorkerSidebandEnv({
+          sessionId: 'session-1',
+          sidebandEndpoint: 'unix:/tmp/qwen-agent-view.sock',
+          token: 'token-1',
+          activeCwd: '/repo',
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it('does not block on a stray worker marker alone', () => {
+    expect(
+      isAgentViewWorkerResumeCommandBlocked({ QWEN_AGENT_VIEW_WORKER: '1' }),
+    ).toBe(false);
+    expect(isAgentViewWorkerResumeCommandBlocked({})).toBe(false);
   });
 });
 

@@ -270,6 +270,17 @@ const packageJsonPath =
   packageJsonPathCandidates.find((candidate) => existsSync(candidate)) ??
   packageJsonPathCandidates[0];
 
+// Keep this separate from CLI_VERSION: esbuild replaces CLI_VERSION with the
+// build package version, while this value must survive nested wrapper calls.
+if (!process.env['QWEN_CODE_STARTUP_VERSION']?.trim()) {
+  try {
+    const pkg = JSON.parse(readFileSync(packageJsonPath, 'utf8'));
+    process.env['QWEN_CODE_STARTUP_VERSION'] = pkg.version || 'unknown';
+  } catch {
+    // The CLI has its own version fallback when package metadata is unavailable.
+  }
+}
+
 if (isTopLevelVersion) {
   try {
     const { readFileSync } = await import('node:fs');
@@ -362,6 +373,9 @@ if (isInProcessFastPath()) {
       QWEN_CODE_RELAUNCH_ARGS: JSON.stringify(cliArgs),
       QWEN_CODE_SKIP_UPDATE_CHECK_ONCE: 'true',
     };
+    // This is a new startup after the managed update; let the new package stamp
+    // its own version instead of inheriting the old process's session version.
+    delete relaunchEnv['QWEN_CODE_STARTUP_VERSION'];
     delete relaunchEnv['QWEN_CODE_MANAGED_NPM_PIN'];
     const relaunchResult =
       process.platform === 'win32' && launcher.endsWith('.cmd')

@@ -249,7 +249,7 @@ export const addCommand: CommandModule = {
       })
       .option('trust', {
         describe:
-          'Trust the server (bypass all tool call confirmation prompts)',
+          'Trust the server (bypass its tool call confirmations in a trusted workspace)',
         type: 'boolean',
       })
       .option('description', {

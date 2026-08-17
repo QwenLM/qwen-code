@@ -23,33 +23,17 @@ import * as fs from 'node:fs';
 import type { TaskBase, TaskRegistration } from '../agents/tasks/types.js';
 import { atomicWriteFileSync } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { todoWorkChainContext } from '../utils/promptIdContext.js';
+import {
+  isBidiControlChar,
+  stripDisplayControlChars,
+  truncateNotificationLabel,
+} from '../utils/terminalSafe.js';
 import { escapeXml } from '../utils/xml.js';
 
 const debugLogger = createDebugLogger('BACKGROUND_SHELLS');
-const MAX_NOTIFICATION_COMMAND_LENGTH = 80;
 const MAX_NOTIFICATION_MODEL_COMMAND_LENGTH = 500;
 export const MAX_NOTIFICATION_OUTPUT_TAIL_BYTES = 8192;
-
-/**
- * Strip C0 control characters (except tab) and C1 control characters from
- * terminal/UI display strings. Shell commands and errors are usually
- * user-authored, but this keeps escape sequences out of the visible
- * notification surface if a caller passes unsanitized text.
- */
-function stripDisplayControlChars(text: string): string {
-  let out = '';
-  for (let i = 0; i < text.length; i++) {
-    const code = text.charCodeAt(i);
-    if (code === 0x09) {
-      out += text[i];
-      continue;
-    }
-    if (code < 0x20) continue;
-    if (code >= 0x80 && code <= 0x9f) continue;
-    out += text[i];
-  }
-  return out;
-}
 
 function stripOutputControlChars(text: string): string {
   let out = '';
@@ -61,6 +45,9 @@ function stripOutputControlChars(text: string): string {
     }
     if (code < 0x20) continue;
     if (code >= 0x80 && code <= 0x9f) continue;
+    // Same bidi set as the shared display helper, in its own loop only
+    // because the tail must keep \n and \r, which that helper strips.
+    if (isBidiControlChar(code)) continue;
     out += text[i];
   }
   return out;
@@ -123,14 +110,6 @@ function readOutputTail(outputFile: string): OutputTailResult {
 function getReadOutputOpenFlags(): number {
   const constants = fs.constants;
   return (constants?.O_RDONLY ?? 0) | (constants?.O_NOFOLLOW ?? 0);
-}
-
-function truncateCommandForDisplay(command: string): string {
-  const normalized = stripDisplayControlChars(command).replace(/\s+/g, ' ');
-  if (normalized.length <= MAX_NOTIFICATION_COMMAND_LENGTH) {
-    return normalized;
-  }
-  return normalized.slice(0, MAX_NOTIFICATION_COMMAND_LENGTH - 3) + '...';
 }
 
 function truncateCommandForModel(command: string): {
@@ -244,6 +223,7 @@ export interface ShellNotificationMeta {
   shellId: string;
   status: BackgroundShellStatus;
   exitCode?: number;
+  todoWorkChainId?: string;
 }
 
 export type BackgroundShellNotificationCallback = (
@@ -309,6 +289,7 @@ export class BackgroundShellRegistry {
     entry.outputFile = registration.outputPath;
     entry.outputOffset = 0;
     entry.notified = false;
+    entry.todoWorkChainId ??= todoWorkChainContext.getStore();
     this.entries.set(entry.shellId, entry);
     this.writeStatusFile(entry);
     this.fireRegister(entry);
@@ -505,7 +486,7 @@ export class BackgroundShellRegistry {
         : entry.status === 'failed'
           ? 'failed'
           : 'was cancelled';
-    const commandLabel = truncateCommandForDisplay(entry.command);
+    const commandLabel = truncateNotificationLabel(entry.command);
     const commandForModel = truncateCommandForModel(entry.command);
     const displayText = `Background shell "${commandLabel}" ${statusText}.`;
 
@@ -550,6 +531,7 @@ export class BackgroundShellRegistry {
       shellId: entry.shellId,
       status: entry.status,
       exitCode: entry.exitCode,
+      todoWorkChainId: entry.todoWorkChainId,
     };
 
     try {

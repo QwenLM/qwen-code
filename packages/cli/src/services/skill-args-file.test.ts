@@ -16,7 +16,7 @@ import {
   statSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, isAbsolute, relative, resolve } from 'node:path';
+import { dirname, join, isAbsolute, relative, resolve } from 'node:path';
 import {
   skillArgsPath,
   writeSkillArgs,
@@ -103,19 +103,33 @@ describe('writeSkillArgs', () => {
     const target = join(dir, 'victim.txt');
     writeFileSync(target, 'precious');
     const linkPath = skillArgsPath('review');
-    mkdirSync(join(dir, '.qwen', 'tmp'), { recursive: true });
+    mkdirSync(dirname(linkPath), { recursive: true });
     symlinkSync(target, linkPath);
 
     expect(writeSkillArgs('review', 'attacker')).toBeNull();
     expect(readFileSync(target, 'utf8')).toBe('precious'); // untouched
   });
 
-  it('writes the file mode 0600 — arguments can carry a secret', () => {
-    if (process.platform === 'win32') return;
-    writeSkillArgs('review', 'TOKEN=sk-secret');
-    const mode = statSync(skillArgsPath('review')).mode & 0o777;
-    expect(mode).toBe(0o600);
+  it('refuses a dangling symlink planted at its path', () => {
+    // On POSIX this is caught by O_NOFOLLOW (ELOOP) even without the lstat
+    // pre-check — deleting that block leaves the test green here. The pre-check
+    // is the best-effort guard for Windows, where O_NOFOLLOW does not exist; CI
+    // runs on POSIX, so this case does not isolate that guard on its own.
+    const linkPath = skillArgsPath('review');
+    mkdirSync(dirname(linkPath), { recursive: true });
+    symlinkSync(join(dir, 'missing.txt'), linkPath);
+
+    expect(writeSkillArgs('review', 'attacker')).toBeNull();
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'writes the file mode 0600 — arguments can carry a secret',
+    () => {
+      writeSkillArgs('review', 'TOKEN=sk-secret');
+      const mode = statSync(skillArgsPath('review')).mode & 0o777;
+      expect(mode).toBe(0o600);
+    },
+  );
 
   it('writes a large argument string completely (no short write)', () => {
     // `writeSync` may write fewer bytes than asked and return the count; a

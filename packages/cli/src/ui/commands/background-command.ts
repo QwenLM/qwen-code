@@ -11,7 +11,7 @@ import {
   type SlashCommand,
 } from './types.js';
 import { t } from '../../i18n/index.js';
-import { isAgentViewWorkerEnv } from '../../agent-view/worker-sideband.js';
+import { readAgentViewWorkerSidebandEnv } from '../../agent-view/worker-sideband.js';
 
 export const backgroundCommand: SlashCommand = {
   name: 'background',
@@ -24,7 +24,7 @@ export const backgroundCommand: SlashCommand = {
   action: async (
     context,
   ): Promise<AgentViewDetachActionReturn | MessageActionReturn> => {
-    if (isAgentViewWorkerEnv()) {
+    if (readAgentViewWorkerSidebandEnv() !== undefined) {
       return { type: 'agent_view_detach' };
     }
 
@@ -33,7 +33,7 @@ export const backgroundCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'error',
-        content: 'Cannot detach Agent View while a question is waiting.',
+        content: t('Cannot detach Agent View while a question is waiting.'),
       };
     }
 
@@ -41,8 +41,9 @@ export const backgroundCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'error',
-        content:
+        content: t(
           'Cannot detach Agent View while a tool confirmation is pending.',
+        ),
       };
     }
 
@@ -50,8 +51,9 @@ export const backgroundCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'error',
-        content:
+        content: t(
           'Cannot detach Agent View while a command confirmation is pending.',
+        ),
       };
     }
 
@@ -59,7 +61,9 @@ export const backgroundCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'error',
-        content: 'Cannot detach Agent View while a foreground shell is active.',
+        content: t(
+          'Cannot detach Agent View while a foreground shell is active.',
+        ),
       };
     }
 
@@ -67,8 +71,9 @@ export const backgroundCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'error',
-        content:
+        content: t(
           'Cannot detach Agent View while the background tasks dialog is open.',
+        ),
       };
     }
 
@@ -76,7 +81,7 @@ export const backgroundCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'error',
-        content: 'Cannot detach Agent View while prompts are queued.',
+        content: t('Cannot detach Agent View while prompts are queued.'),
       };
     }
 
@@ -84,7 +89,7 @@ export const backgroundCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'error',
-        content: 'Cannot detach Agent View while a turn is running.',
+        content: t('Cannot detach Agent View while a turn is running.'),
       };
     }
 
@@ -93,7 +98,7 @@ export const backgroundCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'error',
-        content: 'Cannot detach Agent View before configuration is loaded.',
+        content: t('Cannot detach Agent View before configuration is loaded.'),
       };
     }
 
@@ -102,7 +107,7 @@ export const backgroundCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'error',
-        content: 'Cannot detach Agent View before the session is saved.',
+        content: t('Cannot detach Agent View before the session is saved.'),
       };
     }
 

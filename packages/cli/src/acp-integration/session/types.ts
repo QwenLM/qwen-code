@@ -138,6 +138,12 @@ export interface TodoItem {
   id: string;
   content: string;
   status: 'pending' | 'in_progress' | 'completed';
+  blockedBy?: string[];
+}
+
+export interface TodoPlanSnapshot {
+  planId?: string;
+  todos: TodoItem[];
 }
 
 /**

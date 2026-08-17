@@ -5,7 +5,13 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { ROOT_CONTEXT, SpanStatusCode } from '@opentelemetry/api';
+import {
+  context as otelContext,
+  createContextKey,
+  ROOT_CONTEXT,
+  SpanStatusCode,
+  trace,
+} from '@opentelemetry/api';
 
 const mockState = vi.hoisted(() => ({
   sdkInitialized: true,
@@ -13,10 +19,12 @@ const mockState = vi.hoisted(() => ({
   // try/catch hardening in end*Span helpers (span.end() must still run).
   throwOnSetAttributes: false,
   throwOnSetStatus: false,
+  throwOnStartSpan: false,
   // When set, `context.active()` returns a context that carries this fake
   // span and `trace.getSpan()` reports it. Lets tests exercise the
   // active-OTel-span fallback in resolveParentContext (#4212).
   activeOtelSpan: undefined as unknown,
+  activeOtelContext: undefined as unknown,
 }));
 
 const mockMetrics = vi.hoisted(() => ({
@@ -61,6 +69,30 @@ vi.mock('@opentelemetry/api', async () => {
     await vi.importActual<typeof import('@opentelemetry/api')>(
       '@opentelemetry/api',
     );
+
+  function createMockContext(
+    properties: Record<string, unknown> = {},
+    values: Map<unknown, unknown> = new Map(),
+    inheritedContext?: { getValue: (key: unknown) => unknown },
+  ) {
+    const mockContext = {
+      ...properties,
+      getValue: (key: unknown) =>
+        values.has(key) ? values.get(key) : inheritedContext?.getValue(key),
+      setValue: (key: unknown, value: unknown) => {
+        const nextValues = new Map(values);
+        nextValues.set(key, value);
+        return createMockContext(properties, nextValues, inheritedContext);
+      },
+      deleteValue: (key: unknown) => {
+        const nextValues = new Map(values);
+        nextValues.delete(key);
+        return createMockContext(properties, nextValues, inheritedContext);
+      },
+    };
+    Object.defineProperty(mockContext, '__contextValues', { value: values });
+    return mockContext;
+  }
 
   function createMockSpan(
     name: string,
@@ -123,7 +155,12 @@ vi.mock('@opentelemetry/api', async () => {
       name: string,
       opts?: { kind?: number; attributes?: Record<string, unknown> },
       parentCtx?: unknown,
-    ) => createMockSpan(name, opts, parentCtx),
+    ) => {
+      if (mockState.throwOnStartSpan) {
+        throw new Error('startSpan failed');
+      }
+      return createMockSpan(name, opts, parentCtx);
+    },
   };
 
   return {
@@ -132,21 +169,40 @@ vi.mock('@opentelemetry/api', async () => {
     SpanStatusCode: actual.SpanStatusCode,
     trace: {
       getTracer: () => mockTracer,
-      setSpan: (ctx: unknown, _span: unknown) => ({
-        ...(ctx as object),
-        __parentSpan: _span,
-      }),
+      setSpan: (ctx: unknown, _span: unknown) =>
+        createMockContext(
+          {
+            ...(ctx as object),
+            __parentSpan: _span,
+          },
+          typeof ctx === 'object' && ctx !== null && '__contextValues' in ctx
+            ? ((ctx as { __contextValues: Map<unknown, unknown> })
+                .__contextValues as Map<unknown, unknown>)
+            : new Map(),
+          typeof ctx === 'object' &&
+            ctx !== null &&
+            'getValue' in ctx &&
+            typeof ctx.getValue === 'function'
+            ? (ctx as { getValue: (key: unknown) => unknown })
+            : undefined,
+        ),
       getSpan: (ctx: unknown) =>
-        typeof ctx === 'object' && ctx !== null && '__activeSpan' in ctx
-          ? (ctx as { __activeSpan: unknown }).__activeSpan
+        typeof ctx === 'object' && ctx !== null
+          ? '__parentSpan' in ctx
+            ? (ctx as { __parentSpan: unknown }).__parentSpan
+            : '__activeSpan' in ctx
+              ? (ctx as { __activeSpan: unknown }).__activeSpan
+              : undefined
           : undefined,
       wrapSpanContext: actual.trace.wrapSpanContext,
     },
     context: {
-      active: () =>
-        mockState.activeOtelSpan
-          ? { __activeSpan: mockState.activeOtelSpan }
-          : {},
+      active: () => {
+        if (mockState.activeOtelContext) return mockState.activeOtelContext;
+        return mockState.activeOtelSpan
+          ? createMockContext({ __activeSpan: mockState.activeOtelSpan })
+          : createMockContext();
+      },
       with: <T>(_ctx: unknown, fn: () => T): T => fn(),
     },
   };
@@ -158,6 +214,7 @@ import {
   endInteractionSpan,
   withInteractionSpan,
   startLLMRequestSpan,
+  startLLMRequestSpanWithContext,
   endLLMRequestSpan,
   startToolSpan,
   endToolSpan,
@@ -176,17 +233,24 @@ import {
   runTTLSweepForTesting,
   truncateSpanError,
 } from './session-tracing.js';
-import { setSessionContext } from './session-context.js';
+import {
+  getSessionIdFromContext,
+  setSessionContext,
+  setSessionIdOnContext,
+} from './session-context.js';
+import { sessionIdContext } from '../utils/sessionIdContext.js';
 
 function createMockConfig(
   overrides: Partial<{
     sessionId: string;
     approvalMode: string;
+    userId: string;
   }> = {},
 ): Config {
   return {
     getSessionId: () => overrides.sessionId ?? 'test-session-id',
     getApprovalMode: () => overrides.approvalMode ?? 'suggest',
+    getTelemetryUserId: () => overrides.userId,
   } as unknown as Config;
 }
 
@@ -198,7 +262,9 @@ describe('session-tracing', () => {
     mockState.sdkInitialized = true;
     mockState.throwOnSetAttributes = false;
     mockState.throwOnSetStatus = false;
+    mockState.throwOnStartSpan = false;
     mockState.activeOtelSpan = undefined;
+    mockState.activeOtelContext = undefined;
   });
 
   afterEach(() => {
@@ -207,7 +273,7 @@ describe('session-tracing', () => {
 
   describe('interaction spans', () => {
     it('starts and ends an interaction span with ok status', () => {
-      const config = createMockConfig();
+      const config = createMockConfig({ userId: 'user-1' });
       startInteractionSpan(config, {
         promptId: 'prompt-1',
         model: 'test-model',
@@ -217,6 +283,7 @@ describe('session-tracing', () => {
       expect(mockSpans).toHaveLength(1);
       expect(mockSpans[0]!.name).toBe('qwen-code.interaction');
       expect(mockSpans[0]!.attributes['session.id']).toBe('test-session-id');
+      expect(mockSpans[0]!.attributes['gen_ai.user.id']).toBe('user-1');
       expect(mockSpans[0]!.attributes['qwen-code.prompt_id']).toBe('prompt-1');
       expect(mockSpans[0]!.attributes['qwen-code.model']).toBe('test-model');
 
@@ -239,14 +306,22 @@ describe('session-tracing', () => {
     });
 
     it('runs scoped interaction spans without mutating the global interaction context', async () => {
-      const config = createMockConfig({ sessionId: 'scoped-session' });
+      const contextWithSpy = vi.spyOn(otelContext, 'with');
+      const config = createMockConfig({
+        sessionId: 'scoped-session',
+        userId: 'scoped-user',
+      });
+      const parentContext = ROOT_CONTEXT.setValue(
+        createContextKey('daemon-parent'),
+        'daemon',
+      );
       const result = await withInteractionSpan(
         config,
         {
           promptId: 'prompt-scoped',
           model: 'test-model',
           messageType: 'acp_prompt',
-          parentContext: { parent: 'daemon' } as never,
+          parentContext,
         },
         async () => 'done',
       );
@@ -254,13 +329,17 @@ describe('session-tracing', () => {
       expect(result).toBe('done');
       expect(mockSpans).toHaveLength(1);
       expect(mockSpans[0]!.name).toBe('qwen-code.interaction');
-      expect(mockSpans[0]!.parentContext).toEqual({ parent: 'daemon' });
+      expect(mockSpans[0]!.parentContext).toBe(parentContext);
       expect(mockSpans[0]!.attributes['session.id']).toBe('scoped-session');
+      expect(mockSpans[0]!.attributes['gen_ai.user.id']).toBe('scoped-user');
       expect(mockSpans[0]!.attributes['qwen-code.message_type']).toBe(
         'acp_prompt',
       );
       expect(mockSpans[0]!.ended).toBe(true);
       expect(mockSpans[0]!.statuses.at(-1)?.code).toBe(SpanStatusCode.OK);
+      expect(getSessionIdFromContext(contextWithSpy.mock.calls[0]![0])).toBe(
+        'scoped-session',
+      );
     });
 
     it('marks the interaction span ERROR when getResultStatus returns "error"', async () => {
@@ -424,6 +503,16 @@ describe('session-tracing', () => {
   });
 
   describe('LLM request spans', () => {
+    it('preserves the no-op span context when telemetry is disabled', () => {
+      mockState.sdkInitialized = false;
+
+      const { span, context } = startLLMRequestSpanWithContext('m', 'p', {
+        sessionId: 'owner-session',
+      });
+
+      expect(trace.getSpan(context)).toBe(span);
+    });
+
     it('creates and ends an LLM request span', () => {
       const span = startLLMRequestSpan('test-model', 'prompt-llm');
 
@@ -482,6 +571,137 @@ describe('session-tracing', () => {
       expect(mockSpans[0]!.attributes['llm_request.context']).toBe(
         'standalone',
       );
+    });
+
+    it('uses the owning config identity instead of a stale global session', () => {
+      setSessionContext(undefined, 'bootstrap-session');
+
+      const { span, context } = startLLMRequestSpanWithContext('m', 'p', {
+        sessionId: 'owner-session',
+        userId: 'owner-user',
+      });
+
+      expect(mockSpans[0]!.attributes).toMatchObject({
+        'session.id': 'owner-session',
+        'gen_ai.conversation.id': 'owner-session',
+        'gen_ai.user.id': 'owner-user',
+      });
+      expect(getSessionIdFromContext(context)).toBe('owner-session');
+      endLLMRequestSpan(span, { success: true });
+    });
+
+    it('keeps the logical parent identity ahead of an explicit owner', () => {
+      startInteractionSpan(
+        createMockConfig({
+          sessionId: 'parent-session',
+          userId: 'parent-user',
+        }),
+        { promptId: 'p', model: 'm', messageType: 'userQuery' },
+      );
+
+      const { span, context } = startLLMRequestSpanWithContext('m', 'p', {
+        sessionId: 'different-owner',
+        userId: 'different-user',
+      });
+
+      const record = mockSpans.find(
+        (candidate) => candidate.name === 'qwen-code.llm_request',
+      );
+      expect(record?.attributes['session.id']).toBe('parent-session');
+      expect(record?.attributes['gen_ai.conversation.id']).toBe(
+        'parent-session',
+      );
+      expect(record?.attributes['gen_ai.user.id']).toBe('parent-user');
+      expect(getSessionIdFromContext(context)).toBe('parent-session');
+      endLLMRequestSpan(span, { success: true });
+      endInteractionSpan('ok');
+    });
+
+    it('keeps the logical tool identity ahead of an explicit owner', () => {
+      const contextWithSpy = vi.spyOn(otelContext, 'with');
+      startInteractionSpan(
+        createMockConfig({
+          sessionId: 'parent-session',
+          userId: 'parent-user',
+        }),
+        { promptId: 'p', model: 'm', messageType: 'userQuery' },
+      );
+      const toolSpan = startToolSpan('agent');
+
+      runInToolSpanContext(toolSpan, () => {
+        const { span, context } = startLLMRequestSpanWithContext('m', 'p', {
+          sessionId: 'different-owner',
+          userId: 'different-user',
+        });
+        const record = mockSpans.find(
+          (candidate) => candidate.name === 'qwen-code.llm_request',
+        );
+        expect(record?.attributes['session.id']).toBe('parent-session');
+        expect(record?.attributes['gen_ai.user.id']).toBe('parent-user');
+        expect(getSessionIdFromContext(context)).toBe('parent-session');
+        endLLMRequestSpan(span, { success: true });
+      });
+
+      endToolSpan(toolSpan, { success: true });
+      endInteractionSpan('ok');
+      expect(getSessionIdFromContext(contextWithSpy.mock.calls[0]![0])).toBe(
+        'parent-session',
+      );
+    });
+
+    it('uses the per-request session context before the global fallback', () => {
+      setSessionContext(undefined, 'bootstrap-session');
+
+      const span = sessionIdContext.run('request-session', () =>
+        startLLMRequestSpan('m', 'p'),
+      );
+
+      expect(mockSpans[0]!.attributes['session.id']).toBe('request-session');
+      endLLMRequestSpan(span, { success: true });
+    });
+
+    it('uses the scoped OTel session before per-request and global fallbacks', () => {
+      setSessionContext(undefined, 'bootstrap-session');
+      mockState.activeOtelContext = setSessionIdOnContext(
+        ROOT_CONTEXT,
+        'otel-session',
+      );
+
+      const span = sessionIdContext.run('request-session', () =>
+        startLLMRequestSpan('m', 'p'),
+      );
+
+      expect(mockSpans[0]!.attributes['session.id']).toBe('otel-session');
+      endLLMRequestSpan(span, { success: true });
+    });
+
+    it('keeps standalone owner contexts isolated', async () => {
+      setSessionContext(undefined, 'bootstrap-session');
+
+      const sessionIds = ['session-A', 'session-B'];
+      const started = await Promise.all(
+        sessionIds.map(async (sessionId) =>
+          startLLMRequestSpanWithContext('m', `prompt-${sessionId}`, {
+            sessionId,
+          }),
+        ),
+      );
+
+      for (const [index, sessionId] of sessionIds.entries()) {
+        const record = mockSpans.find(
+          (candidate) =>
+            candidate.attributes['qwen-code.prompt_id'] ===
+            `prompt-${sessionId}`,
+        );
+        expect(record?.attributes['session.id']).toBe(sessionId);
+        expect(record?.attributes['gen_ai.conversation.id']).toBe(sessionId);
+        expect(getSessionIdFromContext(started[index]!.context)).toBe(
+          sessionId,
+        );
+      }
+      for (const { span } of started) {
+        endLLMRequestSpan(span, { success: true });
+      }
     });
 
     it('LLM request span re-parents to active OTel span when no interaction is set (#4212)', () => {
@@ -609,7 +829,7 @@ describe('session-tracing', () => {
       expect(attrs['gen_ai.usage.cached_tokens']).toBeUndefined();
     });
 
-    it('keeps private ttft_ms without emitting the incompatible GenAI alias', () => {
+    it('keeps private ttft_ms and derives sampling_ms without the incompatible GenAI alias', () => {
       const span = startLLMRequestSpan('m', 'p');
       endLLMRequestSpan(span, {
         success: true,
@@ -619,6 +839,7 @@ describe('session-tracing', () => {
 
       const attrs = mockSpans[0]!.attributes;
       expect(attrs['ttft_ms']).toBe(234);
+      expect(attrs['sampling_ms']).toBe(766);
       expect(attrs['gen_ai.server.time_to_first_token']).toBeUndefined();
     });
 
@@ -1074,6 +1295,15 @@ describe('session-tracing', () => {
   });
 
   describe('tool spans', () => {
+    it('returns a NOOP span when telemetry start fails', () => {
+      mockState.throwOnStartSpan = true;
+
+      const span = startToolSpan('ReadFile');
+
+      expect(span.spanContext().traceId).toBe('0'.repeat(32));
+      expect(mockSpans).toHaveLength(0);
+    });
+
     it('creates and ends a tool span', () => {
       const span = startToolSpan('ReadFile', { 'tool.call_id': 'call-1' });
 
@@ -1118,6 +1348,17 @@ describe('session-tracing', () => {
 
       expect(mockSpans[0]!.statuses[0]!.code).toBe(SpanStatusCode.ERROR);
       expect(mockSpans[0]!.statuses[0]!.message).toBe('command failed');
+    });
+
+    it('records cancellation without marking the tool span as an error', () => {
+      const span = startToolSpan('Bash');
+      endToolSpan(span, { success: false, cancelled: true });
+
+      expect(mockSpans[0]!.attributes).toMatchObject({
+        success: false,
+        'tool.failure_kind': 'cancelled',
+      });
+      expect(mockSpans[0]!.statuses).toEqual([{ code: SpanStatusCode.UNSET }]);
     });
 
     it('does not set status when no metadata is passed', () => {
@@ -1173,6 +1414,24 @@ describe('session-tracing', () => {
   });
 
   describe('session.id derives from the owning session, not the process-global (#4602 review)', () => {
+    it('keeps a nested tool on its logical tool session', () => {
+      setSessionContext(undefined, 'bootstrap-session');
+      const outerTool = sessionIdContext.run('tool-session', () =>
+        startToolSpan('outer'),
+      );
+
+      runInToolSpanContext(outerTool, () => {
+        const nestedTool = startToolSpan('nested');
+        const nestedRecord = mockSpans.find(
+          (candidate) => candidate.attributes['gen_ai.tool.name'] === 'nested',
+        );
+        expect(nestedRecord?.attributes['session.id']).toBe('tool-session');
+        endToolSpan(nestedTool, { success: true });
+      });
+
+      endToolSpan(outerTool, { success: true });
+    });
+
     it('stamps a tool span with the interaction session.id even when the process-global belongs to another session', () => {
       // Daemon scenario: telemetry init left the process-global pointing at
       // session B, but the active interaction belongs to session A.
@@ -1314,7 +1573,179 @@ describe('session-tracing', () => {
     });
   });
 
+  describe('gen_ai.user.id propagation', () => {
+    it('propagates from an interaction to LLM and tool spans', () => {
+      startInteractionSpan(
+        createMockConfig({ sessionId: 'session-A', userId: 'user-A' }),
+        {
+          promptId: 'p-a',
+          model: 'm',
+          messageType: 'userQuery',
+        },
+      );
+
+      const llmSpan = startLLMRequestSpan('m', 'p-a');
+      const toolSpan = startToolSpan('Read', { 'tool.call_id': 'call-1' });
+
+      expect(
+        mockSpans.find((span) => span.name === 'qwen-code.llm_request')
+          ?.attributes['gen_ai.user.id'],
+      ).toBe('user-A');
+      expect(
+        mockSpans.find((span) => span.name === 'qwen-code.tool')?.attributes[
+          'gen_ai.user.id'
+        ],
+      ).toBe('user-A');
+
+      endLLMRequestSpan(llmSpan, { success: true });
+      endToolSpan(toolSpan, { success: true });
+      endInteractionSpan('ok');
+    });
+
+    it('does not let tool attributes override the interaction user ID', () => {
+      startInteractionSpan(createMockConfig({ userId: 'canonical-user' }), {
+        promptId: 'p',
+        model: 'm',
+        messageType: 'userQuery',
+      });
+
+      const toolSpan = startToolSpan('Read', {
+        'gen_ai.user.id': 'spoofed-user',
+      });
+      const record = mockSpans.find((span) => span.name === 'qwen-code.tool');
+
+      expect(record?.attributes['gen_ai.user.id']).toBe('canonical-user');
+      endToolSpan(toolSpan, { success: true });
+      endInteractionSpan('ok');
+    });
+
+    it('omits the user ID from standalone LLM and tool spans', () => {
+      const llmSpan = startLLMRequestSpan('m', 'p');
+      const toolSpan = startToolSpan('Read');
+
+      for (const record of mockSpans) {
+        expect(record.attributes).not.toHaveProperty('gen_ai.user.id');
+      }
+
+      endLLMRequestSpan(llmSpan, { success: true });
+      endToolSpan(toolSpan, { success: true });
+    });
+
+    it('propagates across tool-result turns by prompt ID without changing span parenting', () => {
+      startInteractionSpan(createMockConfig({ userId: 'continuation-user' }), {
+        promptId: 'continuation-prompt',
+        model: 'm',
+        messageType: 'userQuery',
+      });
+      endInteractionSpan('ok');
+
+      const llmSpan = startLLMRequestSpan('m', 'continuation-prompt');
+      const toolSpan = startToolSpan(
+        'Read',
+        { 'tool.call_id': 'call-2' },
+        undefined,
+        'continuation-prompt',
+      );
+
+      const llmRecord = mockSpans.find(
+        (span) => span.name === 'qwen-code.llm_request',
+      );
+      const toolRecord = mockSpans.find(
+        (span) => span.name === 'qwen-code.tool',
+      );
+      expect(llmRecord?.attributes['gen_ai.user.id']).toBe('continuation-user');
+      expect(toolRecord?.attributes['gen_ai.user.id']).toBe(
+        'continuation-user',
+      );
+      expect(llmRecord?.parentContext).not.toHaveProperty('__parentSpan');
+      expect(toolRecord?.parentContext).not.toHaveProperty('__parentSpan');
+
+      endLLMRequestSpan(llmSpan, { success: true });
+      endToolSpan(toolSpan, { success: true });
+    });
+
+    it('expires prompt identity with the existing span TTL', () => {
+      startInteractionSpan(createMockConfig({ userId: 'expired-user' }), {
+        promptId: 'expired-prompt',
+        model: 'm',
+        messageType: 'userQuery',
+      });
+      endInteractionSpan('ok');
+      runTTLSweepForTesting(Date.now() + 31 * 60 * 1000);
+
+      const llmSpan = startLLMRequestSpan('m', 'expired-prompt');
+      const llmRecord = mockSpans.find(
+        (span) => span.name === 'qwen-code.llm_request',
+      );
+      expect(llmRecord?.attributes).not.toHaveProperty('gen_ai.user.id');
+      endLLMRequestSpan(llmSpan, { success: true });
+    });
+
+    it('keeps the creation-time user ID across failures and repeated endings', () => {
+      startInteractionSpan(createMockConfig({ userId: 'stable-user' }), {
+        promptId: 'failure-prompt',
+        model: 'm',
+        messageType: 'userQuery',
+      });
+      const llmSpan = startLLMRequestSpan('m', 'failure-prompt');
+      const toolSpan = startToolSpan('Read');
+
+      endLLMRequestSpan(llmSpan, { success: false, error: 'failed' });
+      endLLMRequestSpan(llmSpan, { success: true });
+      endToolSpan(toolSpan, { success: false, error: 'failed' });
+      endToolSpan(toolSpan, { success: true });
+      endInteractionSpan('cancelled');
+      endInteractionSpan('ok');
+
+      for (const record of mockSpans) {
+        expect(record.attributes['gen_ai.user.id']).toBe('stable-user');
+      }
+    });
+
+    it('isolates user IDs across concurrent scoped interactions', async () => {
+      await Promise.all([
+        withInteractionSpan(
+          createMockConfig({ sessionId: 'session-A', userId: 'user-A' }),
+          { promptId: 'pa', model: 'm', messageType: 'acp_prompt' },
+          async () => {
+            await Promise.resolve();
+            endToolSpan(startToolSpan('Read'), { success: true });
+          },
+        ),
+        withInteractionSpan(
+          createMockConfig({ sessionId: 'session-B', userId: 'user-B' }),
+          { promptId: 'pb', model: 'm', messageType: 'acp_prompt' },
+          async () => {
+            await Promise.resolve();
+            endToolSpan(startToolSpan('Write'), { success: true });
+          },
+        ),
+      ]);
+
+      const readSpan = mockSpans.find(
+        (span) => span.attributes['gen_ai.tool.name'] === 'Read',
+      );
+      const writeSpan = mockSpans.find(
+        (span) => span.attributes['gen_ai.tool.name'] === 'Write',
+      );
+      expect(readSpan?.attributes['gen_ai.user.id']).toBe('user-A');
+      expect(writeSpan?.attributes['gen_ai.user.id']).toBe('user-B');
+    });
+  });
+
   describe('tool execution sub-spans', () => {
+    it('returns a NOOP span when execution telemetry start fails', () => {
+      mockState.throwOnStartSpan = true;
+
+      const span = startToolExecutionSpan({
+        toolName: 'Bash',
+        callId: 'call-1',
+      });
+
+      expect(span.spanContext().traceId).toBe('0'.repeat(32));
+      expect(mockSpans).toHaveLength(0);
+    });
+
     it('creates a tool execution span as child of tool span via runInToolSpanContext', () => {
       const toolSpan = startToolSpan('Bash');
 
@@ -1331,6 +1762,21 @@ describe('session-tracing', () => {
       endToolSpan(toolSpan, { success: true });
 
       expect(mockSpans[1]!.ended).toBe(true);
+    });
+
+    it('records optional tool identity on execution spans', () => {
+      const execSpan = startToolExecutionSpan({
+        toolName: 'Bash',
+        callId: 'call-1',
+      });
+
+      const record = mockSpans.find(
+        (span) => span.name === 'qwen-code.tool.execution',
+      );
+      expect(record?.attributes['gen_ai.tool.name']).toBe('Bash');
+      expect(record?.attributes['tool.call_id']).toBe('call-1');
+
+      endToolExecutionSpan(execSpan, { success: true });
     });
 
     it('returns NOOP span when SDK is not initialized', () => {
@@ -1401,6 +1847,38 @@ describe('session-tracing', () => {
       expect(record?.statuses).toHaveLength(1);
       expect(record?.statuses[0]!.code).toBe(SpanStatusCode.ERROR);
       expect(record?.statuses[0]!.message).toBe('Tool execution failed');
+    });
+
+    it('records canonical execution outcome and structured error type', () => {
+      const execSpan = startToolExecutionSpan();
+      endToolExecutionSpan(execSpan, {
+        success: false,
+        error: 'Tool execution failed',
+        executionStatus: 'error',
+        errorType: 'execution_failed',
+      });
+
+      const record = mockSpans.find(
+        (span) => span.name === 'qwen-code.tool.execution',
+      );
+      expect(record?.attributes['execution_status']).toBe('error');
+      expect(record?.attributes['error_type']).toBe('execution_failed');
+      expect(record?.attributes['error.type']).toBe('execution_failed');
+      expect(record?.statuses[0]!.code).toBe(SpanStatusCode.ERROR);
+    });
+
+    it('uses execution_status to keep cancellation UNSET', () => {
+      const execSpan = startToolExecutionSpan();
+      endToolExecutionSpan(execSpan, {
+        success: false,
+        executionStatus: 'cancelled',
+      });
+
+      const record = mockSpans.find(
+        (span) => span.name === 'qwen-code.tool.execution',
+      );
+      expect(record?.attributes['execution_status']).toBe('cancelled');
+      expect(record?.statuses).toHaveLength(0);
     });
   });
 
@@ -1971,6 +2449,30 @@ describe('session-tracing', () => {
       sessionId: 'session-uuid',
     } as const;
 
+    it('keeps the logical parent session ahead of the explicit owner', () => {
+      startInteractionSpan(createMockConfig({ sessionId: 'parent-session' }), {
+        promptId: 'p',
+        model: 'm',
+        messageType: 'userQuery',
+      });
+
+      const span = startSubagentSpan({
+        ...baseOpts,
+        sessionId: 'different-owner',
+        invocationKind: 'foreground',
+      });
+      const record = mockSpans.find(
+        (candidate) => candidate.name === 'qwen-code.subagent',
+      );
+      expect(record?.attributes['session.id']).toBe('parent-session');
+      expect(record?.attributes['gen_ai.conversation.id']).toBe(
+        'parent-session',
+      );
+
+      endSubagentSpan(span, { status: 'completed' });
+      endInteractionSpan('ok');
+    });
+
     it('foreground invocation creates a child span (no root flag, no links)', () => {
       const span = startSubagentSpan({
         ...baseOpts,
@@ -1994,6 +2496,7 @@ describe('session-tracing', () => {
       expect(record!.attributes['gen_ai.operation.name']).toBe('invoke_agent');
       expect(record!.attributes['gen_ai.provider.name']).toBeUndefined();
       expect(record!.attributes['gen_ai.conversation.id']).toBe('session-uuid');
+      expect(record!.attributes['session.id']).toBe('session-uuid');
       // Vendor concept attrs.
       expect(record!.attributes['qwen-code.subagent.invocation_kind']).toBe(
         'foreground',
@@ -2060,6 +2563,73 @@ describe('session-tracing', () => {
         'background',
       );
       endSubagentSpan(span, { status: 'completed' });
+    });
+
+    it.each(['foreground', 'fork', 'background'] as const)(
+      '%s invocation and its children inherit the interaction user ID',
+      async (invocationKind) => {
+        startInteractionSpan(createMockConfig({ userId: 'agent-user' }), {
+          promptId: 'p',
+          model: 'm',
+          messageType: 'userQuery',
+        });
+        const span = startSubagentSpan({
+          ...baseOpts,
+          invocationKind,
+        });
+        const record = mockSpans.find(
+          (candidate) => candidate.name === 'qwen-code.subagent',
+        );
+        expect(record?.attributes['gen_ai.user.id']).toBe('agent-user');
+
+        await runInSubagentSpanContext(span, async () => {
+          const llmSpan = startLLMRequestSpan('m', 'subagent-p');
+          const toolSpan = startToolSpan('Read');
+          const childSpans = mockSpans.filter(
+            (candidate) =>
+              candidate.name === 'qwen-code.llm_request' ||
+              candidate.name === 'qwen-code.tool',
+          );
+          expect(childSpans).toHaveLength(2);
+          for (const child of childSpans) {
+            expect(child.attributes['gen_ai.user.id']).toBe('agent-user');
+          }
+          endLLMRequestSpan(llmSpan, { success: true });
+          endToolSpan(toolSpan, { success: true });
+        });
+
+        endSubagentSpan(span, { status: 'completed' });
+        endInteractionSpan('ok');
+      },
+    );
+
+    it('inherits the user ID from an Agent tool on a continuation turn', async () => {
+      startInteractionSpan(createMockConfig({ userId: 'agent-tool-user' }), {
+        promptId: 'agent-tool-prompt',
+        model: 'm',
+        messageType: 'userQuery',
+      });
+      endInteractionSpan('ok');
+      const toolSpan = startToolSpan(
+        'agent',
+        undefined,
+        undefined,
+        'agent-tool-prompt',
+      );
+
+      await runInToolSpanContext(toolSpan, async () => {
+        const agentSpan = startSubagentSpan({
+          ...baseOpts,
+          invocationKind: 'background',
+        });
+        const record = mockSpans.find(
+          (candidate) => candidate.name === 'qwen-code.subagent',
+        );
+        expect(record?.attributes['gen_ai.user.id']).toBe('agent-tool-user');
+        endSubagentSpan(agentSpan, { status: 'completed' });
+      });
+
+      endToolSpan(toolSpan, { success: true });
     });
 
     it('captures optional attrs: parentAgentId, invokingRequestId, modelOverride', () => {
@@ -2167,16 +2737,16 @@ describe('session-tracing', () => {
     });
 
     it('runInSubagentSpanContext wraps fn in context.with', async () => {
-      // Our mocked context.with just runs fn (line 119). The behavioral
-      // assertion is "fn was called and its result returned"; the parent-
-      // context behavior is covered by the integration test in
-      // agent.test.ts where real OTel context propagation matters.
+      const contextWithSpy = vi.spyOn(otelContext, 'with');
       const span = startSubagentSpan({
         ...baseOpts,
         invocationKind: 'foreground',
       });
       const result = await runInSubagentSpanContext(span, async () => 42);
       expect(result).toBe(42);
+      expect(getSessionIdFromContext(contextWithSpy.mock.calls[0]![0])).toBe(
+        'session-uuid',
+      );
       endSubagentSpan(span, { status: 'completed' });
     });
 

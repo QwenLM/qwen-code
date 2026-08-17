@@ -65,6 +65,11 @@ export interface AgentViewSupervisorClientOptions {
   authToken?: string;
 }
 
+export interface AgentViewSupervisorSubscriptionOptions
+  extends AgentViewSupervisorClientOptions {
+  onError?: (error: Error) => void;
+}
+
 export interface AgentViewSupervisorAdoptParams
   extends Record<string, unknown> {
   sessionId: string;
@@ -171,10 +176,10 @@ export async function requestAgentViewSupervisor(
   options: AgentViewSupervisorClientOptions = {},
 ): Promise<AgentViewSupervisorResponse> {
   const timeoutMs = options.timeoutMs ?? 5000;
-  const requestWithProtocol =
-    request.protocolVersion === undefined
-      ? { ...request, protocolVersion: AGENT_VIEW_PROTOCOL_VERSION }
-      : request;
+  const requestWithProtocol = {
+    ...request,
+    protocolVersion: request.protocolVersion ?? AGENT_VIEW_PROTOCOL_VERSION,
+  };
   if (options.authToken && requestWithProtocol.authToken === undefined) {
     requestWithProtocol.authToken = options.authToken;
   }
@@ -292,12 +297,15 @@ export async function attachAgentViewSupervisorTerminal(
       );
     }
 
+    const controller = new AbortController();
+    socket.once('close', () => controller.abort());
+    socket.on('error', () => {});
+
     if (leftover.length > 0) {
+      socket.pause();
       await writeToWritable(stdout, leftover);
     }
 
-    const controller = new AbortController();
-    socket.once('close', () => controller.abort());
     const restoreRawMode = setRawMode(stdin, options.rawMode ?? true);
     try {
       return await bridgeAgentViewTerminal({
@@ -309,18 +317,30 @@ export async function attachAgentViewSupervisorTerminal(
           },
           onData(callback) {
             socket.on('data', callback);
+            socket.resume();
             return {
               dispose: () => {
                 socket.off('data', callback);
               },
             };
           },
+          pause() {
+            socket.pause();
+          },
+          resume() {
+            socket.resume();
+          },
           resize: (size) => {
-            void callAgentViewSupervisor(socketPath, 'resize', {
-              sessionId,
-              columns: size.columns,
-              rows: size.rows,
-            }).catch(() => {});
+            void callAgentViewSupervisor(
+              socketPath,
+              'resize',
+              {
+                sessionId,
+                columns: size.columns,
+                rows: size.rows,
+              },
+              options.authToken ? { authToken: options.authToken } : undefined,
+            ).catch(() => {});
           },
         },
         detachSignal: controller.signal,
@@ -337,17 +357,29 @@ export async function attachAgentViewSupervisorTerminal(
 export function subscribeAgentViewSupervisor(
   socketPath: string,
   onEvent: (event: AgentViewSupervisorEvent) => void,
-  options: AgentViewSupervisorClientOptions = {},
+  options: AgentViewSupervisorSubscriptionOptions = {},
 ): AgentViewSupervisorSubscription {
   const socket = net.createConnection(socketPath);
   let buffer = '';
   let subscribed = false;
+  let disposed = false;
+  let errorNotified = false;
   const request: AgentViewSupervisorRequest = {
     id: createRequestId(),
     protocolVersion: AGENT_VIEW_PROTOCOL_VERSION,
     ...(options.authToken ? { authToken: options.authToken } : {}),
     op: 'subscribe',
   };
+
+  const handshakeTimeout = setTimeout(() => {
+    notifySubscriptionError(
+      new AgentViewSupervisorClientError(
+        'Timed out waiting for Agent View subscription handshake.',
+        'timeout',
+      ),
+    );
+    socket.destroy();
+  }, options.timeoutMs ?? 5000);
 
   socket.setEncoding('utf8');
   socket.on('connect', () => {
@@ -363,11 +395,31 @@ export function subscribeAgentViewSupervisor(
       if (!line) continue;
 
       if (!subscribed) {
+        let response: AgentViewSupervisorResponse;
         try {
-          subscribed = parseSupervisorResponse(line).ok;
-        } catch {
-          continue;
+          response = parseSupervisorResponse(line);
+        } catch (parseError) {
+          notifySubscriptionError(
+            new AgentViewSupervisorClientError(
+              `Invalid subscription response: ${parseError instanceof Error ? parseError.message : String(parseError)}`,
+              'invalid_response',
+            ),
+          );
+          socket.destroy();
+          return;
         }
+        if (!response.ok) {
+          notifySubscriptionError(
+            new AgentViewSupervisorClientError(
+              response.error.message,
+              response.error.code,
+            ),
+          );
+          socket.destroy();
+          return;
+        }
+        subscribed = true;
+        clearTimeout(handshakeTimeout);
         continue;
       }
 
@@ -377,16 +429,39 @@ export function subscribeAgentViewSupervisor(
       } catch {
         continue;
       }
-      if (event) onEvent(event);
+      if (event) {
+        try {
+          onEvent(event);
+        } catch {
+          // Keep malformed subscribers from crashing the socket reader.
+        }
+      }
     }
   });
-  socket.on('error', () => {});
+  socket.on('error', (error) => notifySubscriptionError(error));
+  socket.on('close', () => {
+    clearTimeout(handshakeTimeout);
+    notifySubscriptionError(
+      new AgentViewSupervisorClientError(
+        'Agent View supervisor subscription closed.',
+        'closed',
+      ),
+    );
+  });
 
   return {
     dispose() {
+      disposed = true;
+      clearTimeout(handshakeTimeout);
       socket.destroy();
     },
   };
+
+  function notifySubscriptionError(error: Error): void {
+    if (disposed || errorNotified) return;
+    errorNotified = true;
+    options.onError?.(error);
+  }
 }
 
 function createRequestId(): string {

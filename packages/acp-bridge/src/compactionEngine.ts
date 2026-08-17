@@ -23,11 +23,14 @@ export {
   DEFAULT_COMPACTED_REPLAY_MAX_BYTES,
   DEFAULT_MAX_JOURNAL_BYTES,
   DEFAULT_MAX_JOURNAL_EVENTS,
+  JOURNAL_GROWTH_HARD_CAP_BYTES,
   MAX_COMPACTED_REPLAY_MAX_BYTES,
   normalizeCompactedReplayMaxBytes,
+  normalizeJournalGrowthPoolBytes,
   normalizeMaxJournalBytes,
   normalizeMaxJournalEvents,
 } from './replayWindowLimits.js';
+export type { JournalGrowthSessionLimit } from './replayWindowLimits.js';
 
 interface SessionUpdateData {
   update?: {
@@ -54,6 +57,7 @@ const LATEST_WINS_UPDATES = new Set([
   'current_mode_update',
 ]);
 const REPLAY_SEGMENT_COMPACT_THRESHOLD = 64;
+const LIVE_JOURNAL_TEXT_CHUNKS_PER_EVENT = 256;
 
 type CompactedSlot =
   | {
@@ -83,6 +87,18 @@ interface ReplaySegment {
   turnCount: number;
 }
 
+interface LiveJournalTextSegment {
+  sessionUpdate: 'agent_message_chunk' | 'agent_thought_chunk';
+  chunks: string[];
+  sourceRecordIds?: readonly string[];
+  parentToolCallId?: string;
+  promptId?: string;
+  originatorClientId?: string;
+  sessionId?: string;
+  firstEvent: BridgeEvent;
+  lastEvent: BridgeEvent;
+}
+
 function replayRecordId(event: BridgeEvent): string | undefined {
   if (event.type !== 'session_update') return undefined;
   const data = event.data;
@@ -100,6 +116,14 @@ function replayRecordId(event: BridgeEvent): string | undefined {
   return typeof recordId === 'string' ? recordId : undefined;
 }
 
+function lastRecordIdIn(events: BridgeEvent[]): string | undefined {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const id = replayRecordId(events[i]!);
+    if (id !== undefined) return id;
+  }
+  return undefined;
+}
+
 export interface ReplayWindowEviction {
   droppedBytes: number;
   droppedEvents: number;
@@ -110,22 +134,67 @@ export interface ReplayWindowEviction {
   retainedEvents: number;
 }
 
+/** Current journal caps of a growth request/acknowledgement. */
+export interface JournalLimits {
+  maxEvents: number;
+  maxBytes: number;
+}
+
+/**
+ * Asked before the journal evicts entries past its caps. Returning larger
+ * caps raises them in place (no eviction needed while under the new caps);
+ * returning `undefined` — or throwing — falls through to eviction. The
+ * engine may ask several times per breach while walking toward a grant
+ * that retains more; a refusal throttles later asks.
+ */
+export type JournalGrowthAdvisor = (
+  current: JournalLimits,
+) => JournalLimits | undefined;
+
 export interface TurnBoundaryCompactionEngineOptions {
   maxReplayBytes?: number;
   onReplayWindowEviction?: (eviction: ReplayWindowEviction) => void;
   /**
-   * Caps on the in-flight live journal (DAEMON-009). The journal holds the
-   * RAW events of the current unfinished turn and is only reset at turn
-   * boundaries, so a single long-running streaming turn grew it — and the
-   * cost of every `snapshot()` — without bound. When either cap is hit the
-   * oldest journal entries are dropped and `snapshot()` prepends a
-   * `history_truncated` marker (`reason: 'replay_window_exceeded'`,
-   * `scope: 'live_journal'`) to the live journal. Turn compaction is
-   * unaffected: it folds from the `slots` working set, not the journal.
+   * Caps on the in-flight live journal (DAEMON-009). Compatible consecutive
+   * text/thought chunks are grouped into bounded replay events; other events
+   * retain their original boundaries. When either cap is hit the oldest
+   * journal entries are dropped whole (merged segments included), so the
+   * retained tail can be much smaller than the byte cap, and `snapshot()`
+   * prepends a `history_truncated` marker
+   * (`reason: 'replay_window_exceeded'`, `scope: 'live_journal'`). Turn
+   * compaction is unaffected: it folds from the `slots` working set, not
+   * the journal.
    */
   maxJournalEvents?: number;
   maxJournalBytes?: number;
+  /**
+   * Adaptive growth hook: consulted before evicting when a turn outgrows
+   * the caps above. Absent → behavior is exactly the fixed-cap eviction.
+   */
+  onJournalGrowth?: JournalGrowthAdvisor;
+  /**
+   * Test seam for the growth-refusal throttle. Must be a monotonic
+   * millisecond clock; defaults to `performance.now()`, so a backward
+   * wall-clock correction cannot stretch a throttle window.
+   */
+  now?: () => number;
 }
+
+/**
+ * After a growth refusal, don't ask again until this much later — a turn
+ * that keeps overflowing would otherwise call the advisor on every append.
+ * A grant resets the throttle (doubling means at most ~log2(hard cap /
+ * baseline) asks per session).
+ */
+const JOURNAL_GROWTH_REASK_INTERVAL_MS = 10_000;
+
+/**
+ * Step budget for walking reachable grants on one breach. A well-behaved
+ * policy doubles toward the hard cap (~log2 steps) and refuses once the
+ * pool is empty; the budget only guards a misbehaving advisor granting
+ * unbounded non-improving increments.
+ */
+const JOURNAL_GROWTH_MAX_GRANTS_PER_BREACH = 64;
 
 /**
  * Compaction engine that merges events at turn boundaries.
@@ -140,23 +209,50 @@ export interface TurnBoundaryCompactionEngineOptions {
  */
 export class TurnBoundaryCompactionEngine implements CompactionEngine {
   private readonly maxReplayBytes: number;
-  private readonly maxJournalEvents: number;
-  private readonly maxJournalBytes: number;
+  // Mutable: adaptive growth (see `maybeGrowJournalLimits`) raises these
+  // in place when the advisor grants headroom.
+  private maxJournalEvents: number;
+  private maxJournalBytes: number;
+  private readonly onJournalGrowth: JournalGrowthAdvisor | undefined;
+  private readonly now: () => number;
+  private journalGrowthDeniedAt: number | undefined;
   private readonly onReplayWindowEviction:
     | ((eviction: ReplayWindowEviction) => void)
     | undefined;
   private replaySegments: ReplaySegment[] = [];
   private replaySegmentStart = 0;
   private replayBytes = 0;
-  private liveJournal: BridgeEvent[] = [];
-  /** Serialized size of each `liveJournal` entry, index-parallel. */
+  private liveJournal: Array<BridgeEvent | LiveJournalTextSegment> = [];
+  /** Serialized source-event size of each `liveJournal` entry, index-parallel. */
   private journalEntryBytes: number[] = [];
+  /** Raw event count represented by each `liveJournal` entry. */
+  private journalEntryEvents: number[] = [];
   private journalTotalBytes = 0;
+  private journalTotalEvents = 0;
   private journalTruncatedEvents = 0;
+  private liveJournalTextSegment: LiveJournalTextSegment | undefined;
   private lastEventId = 0;
   private closed = false;
   private truncatedEvents = 0;
   private truncatedTurns = 0;
+  // Most recent `qwen.session.recordId` observed on an ingested or seeded
+  // `session_update`. Surfaced on the `history_truncated` marker emitted by
+  // `snapshot()` so clients that lost every turn-boundary event from their
+  // retained window (e.g. a live-journal truncation during a single long
+  // in-flight turn) still have an anchor for `beforeRecordId` transcript
+  // pagination. Undefined until at least one recordId has been observed;
+  // omitted from the marker in that case.
+  private activeRecordId: string | undefined;
+  // Pagination anchor for the replay-path `history_truncated` marker,
+  // frozen at the first replay-window eviction. Prefers the first
+  // retained recordId (the eviction boundary, so `beforeRecordId`
+  // fetches exactly the dropped records with no overlap); falls back to
+  // the last dropped recordId when the retained window carries no
+  // recordId. Deliberately NOT `activeRecordId` — that one is advanced
+  // by `ingest()` on every turn boundary and, when a retained segment
+  // carries the last seed recordId, would place the anchor inside the
+  // retained window and re-fetch records the client already displays.
+  private replayAnchorRecordId: string | undefined;
 
   private slots: CompactedSlot[] = [];
   private toolSlotIndex: Map<string, number> = new Map();
@@ -172,7 +268,14 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
     this.maxReplayBytes = normalizeCompactedReplayMaxBytes(opts.maxReplayBytes);
     this.maxJournalEvents = normalizeMaxJournalEvents(opts.maxJournalEvents);
     this.maxJournalBytes = normalizeMaxJournalBytes(opts.maxJournalBytes);
+    this.onJournalGrowth = opts.onJournalGrowth;
+    this.now = opts.now ?? (() => performance.now());
     this.onReplayWindowEviction = opts.onReplayWindowEviction;
+  }
+
+  /** Current journal caps — may have grown past the configured baseline. */
+  journalLimits(): JournalLimits {
+    return { maxEvents: this.maxJournalEvents, maxBytes: this.maxJournalBytes };
   }
 
   ingest(event: BridgeEvent, byteLength?: number): void {
@@ -183,27 +286,18 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
 
     if (TRANSIENT_TYPES.has(event.type)) return;
 
-    this.liveJournal.push(event);
-    // The bus passes the byte size it already computed at publish time;
-    // self-compute only for callers that don't (defensive — events in the
-    // journal passed the publish serializability gate, so `?? 0` is
-    // unreachable in practice).
-    const bytes = byteLength ?? serializedBridgeEventByteLength(event) ?? 0;
-    this.journalEntryBytes.push(bytes);
-    this.journalTotalBytes += bytes;
-    // Journal cap (DAEMON-009): drop the OLDEST entries once either limit
-    // is exceeded. The byte cap keeps at least one entry (first-item rule,
-    // matching the queue byte cap) so a single oversized event doesn't
-    // wedge the journal empty forever.
-    while (
-      this.liveJournal.length > this.maxJournalEvents ||
-      (this.journalTotalBytes > this.maxJournalBytes &&
-        this.liveJournal.length > 1)
-    ) {
-      this.liveJournal.shift();
-      this.journalTotalBytes -= this.journalEntryBytes.shift() ?? 0;
-      this.journalTruncatedEvents += 1;
+    // Track the latest recordId seen on any session_update so a later
+    // `snapshot()` can surface it on a `history_truncated` marker as a
+    // pagination anchor. Runs for every non-transient event — recordIds
+    // are sparse (only stamped on session_updates at turn boundaries),
+    // so `replayRecordId` returning undefined is the common case and
+    // intentionally leaves `activeRecordId` untouched.
+    const seenRecordId = replayRecordId(event);
+    if (seenRecordId !== undefined) {
+      this.activeRecordId = seenRecordId;
     }
+
+    this.appendLiveJournal(event, byteLength);
 
     if (TURN_BOUNDARY_TYPES.has(event.type)) {
       this.compactCurrentTurn(event);
@@ -225,7 +319,15 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
         this.makeHistoryTruncatedEvent(compactedTurns.length),
       );
     }
-    const liveJournal = this.liveJournal.slice();
+    const liveJournal = this.liveJournal.map((entry) =>
+      isLiveJournalTextSegment(entry)
+        ? mergeLiveJournalTextEvent(
+            entry.firstEvent,
+            entry.lastEvent,
+            entry.chunks,
+          )
+        : entry,
+    );
     if (this.journalTruncatedEvents > 0) {
       // Same wire shape as the compacted-window marker: the SDK's
       // normalizer and type guard both REQUIRE
@@ -240,9 +342,13 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
           reason: 'replay_window_exceeded',
           scope: 'live_journal',
           truncatedEvents: this.journalTruncatedEvents,
-          retainedEvents: this.liveJournal.length,
+          retainedEvents: this.journalTotalEvents,
           maxBytes: this.maxJournalBytes,
           maxEvents: this.maxJournalEvents,
+          // Pagination anchor — see makeHistoryTruncatedEvent.
+          ...(this.activeRecordId !== undefined
+            ? { recordId: this.activeRecordId }
+            : {}),
           fullTranscriptAvailable: true,
         },
       });
@@ -258,6 +364,14 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
     if (this.closed) return;
     this.resetReplayWindow();
     this.lastEventId = snapshot.lastEventId;
+    // Drop any previously-observed recordId anchor: the seeded compacted
+    // turns are a fresh replay basis and the prior anchor refers to a
+    // now-stale position. `activeRecordId` will be rebuilt from any
+    // `session_update` recordIds encountered on subsequent `ingest()` calls.
+    this.activeRecordId = undefined;
+    // Pre-scan seeded compactedTurns for the last recordId (mirrors
+    // seedReplayEvents) so eviction by addReplaySegment doesn't lose it.
+    this.activeRecordId = lastRecordIdIn(snapshot.compactedTurns);
     for (const event of snapshot.compactedTurns) {
       if (TRANSIENT_TYPES.has(event.type)) continue;
       this.addReplaySegment([event], 0);
@@ -271,6 +385,14 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
   seedReplayEvents(events: BridgeEvent[]): void {
     if (this.closed) return;
     this.resetReplayWindow();
+    this.activeRecordId = undefined;
+    // Pre-scan for the last recordId BEFORE segments are added (and
+    // possibly evicted) so a subsequent `snapshot()` can still stamp it
+    // on a `history_truncated` marker as a pagination anchor. Without
+    // this, a seed whose head is evicted by the replay-byte cap would
+    // lose its only recordId-bearing events and the marker would ship
+    // with no anchor, breaking transcript pagination on reconnect.
+    this.activeRecordId = lastRecordIdIn(events);
     let recordEvents: BridgeEvent[] = [];
     let recordId: string | undefined;
     const flushRecord = () => {
@@ -305,9 +427,177 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
     this.closed = true;
     this.resetReplayWindow();
     this.resetJournal();
+    this.activeRecordId = undefined;
     this.slots = [];
     this.toolSlotIndex.clear();
     this.clearTextSlotIndex();
+  }
+
+  private appendLiveJournal(event: BridgeEvent, byteLength?: number): void {
+    const bytes = byteLength ?? serializedBridgeEventByteLength(event) ?? 0;
+    const textChunk = liveJournalTextChunk(event);
+    const current = this.liveJournalTextSegment;
+    const currentIndex = this.liveJournal.length - 1;
+    if (
+      textChunk &&
+      current &&
+      this.liveJournal[currentIndex] === current &&
+      current.chunks.length < LIVE_JOURNAL_TEXT_CHUNKS_PER_EVENT &&
+      this.journalEntryBytes[currentIndex]! + bytes <= this.maxJournalBytes &&
+      current.sessionUpdate === textChunk.sessionUpdate &&
+      current.parentToolCallId === textChunk.parentToolCallId &&
+      stringArraysEqual(current.sourceRecordIds, textChunk.sourceRecordIds) &&
+      current.promptId === event.promptId &&
+      current.originatorClientId === event.originatorClientId &&
+      current.sessionId === captureSessionId(event) &&
+      hasOnlyTimestampEnvelopeMeta(current.lastEvent._meta) &&
+      hasOnlyTimestampEnvelopeMeta(event._meta)
+    ) {
+      current.chunks.push(textChunk.text);
+      current.lastEvent = event;
+      this.journalEntryBytes[currentIndex]! += bytes;
+      this.journalEntryEvents[currentIndex]! += 1;
+      this.journalTotalBytes += bytes;
+      this.journalTotalEvents += 1;
+    } else {
+      let entry: BridgeEvent | LiveJournalTextSegment = event;
+      if (textChunk) {
+        const segment: LiveJournalTextSegment = {
+          sessionUpdate: textChunk.sessionUpdate,
+          chunks: [textChunk.text],
+          sourceRecordIds: textChunk.sourceRecordIds,
+          parentToolCallId: textChunk.parentToolCallId,
+          promptId: event.promptId,
+          originatorClientId: event.originatorClientId,
+          sessionId: captureSessionId(event),
+          firstEvent: event,
+          lastEvent: event,
+        };
+        entry = segment;
+        this.liveJournalTextSegment = segment;
+      } else {
+        this.liveJournalTextSegment = undefined;
+      }
+      this.liveJournal.push(entry);
+      this.journalEntryBytes.push(bytes);
+      this.journalEntryEvents.push(1);
+      this.journalTotalBytes += bytes;
+      this.journalTotalEvents += 1;
+    }
+
+    // Mirror the eviction condition exactly: at a single entry the byte
+    // loop below keeps the last entry, so a grant there would charge the
+    // shared pool while buying zero eviction. Skip boundary appends for
+    // the same reason: compactCurrentTurn() discards the journal right
+    // after this call, so a grant would be charged for nothing.
+    if (
+      !TURN_BOUNDARY_TYPES.has(event.type) &&
+      (this.liveJournal.length > this.maxJournalEvents ||
+        (this.journalTotalBytes > this.maxJournalBytes &&
+          this.liveJournal.length > 1))
+    ) {
+      this.maybeGrowJournalLimits();
+    }
+
+    while (
+      this.liveJournal.length > this.maxJournalEvents ||
+      (this.journalTotalBytes > this.maxJournalBytes &&
+        this.liveJournal.length > 1)
+    ) {
+      const dropped = this.liveJournal.shift();
+      this.journalTotalBytes -= this.journalEntryBytes.shift() ?? 0;
+      const droppedEvents = this.journalEntryEvents.shift() ?? 0;
+      this.journalTotalEvents -= droppedEvents;
+      this.journalTruncatedEvents += droppedEvents;
+      if (dropped === this.liveJournalTextSegment) {
+        this.liveJournalTextSegment = undefined;
+      }
+    }
+  }
+
+  /**
+   * Consults the growth advisor once the journal breaches its caps and
+   * applies a grant in place, so the eviction loop below only drops what
+   * still exceeds the (possibly raised) caps. An intermediate grant that
+   * does not yet retain an extra entry is still applied tentatively —
+   * each applied cap is what the next ask reports and is charged for —
+   * and the walk continues until a grant retains strictly more than the
+   * pre-breach caps, the advisor refuses, or the step budget runs out. A
+   * walk that never improves retention rolls back to the original caps
+   * and counts as a refusal, so the pool is never charged for growth that
+   * preserves no replay. Never throws: a misbehaving advisor degrades to
+   * plain eviction, matching the engine's best-effort contract.
+   */
+  private maybeGrowJournalLimits(): void {
+    const advisor = this.onJournalGrowth;
+    if (!advisor || this.closed) return;
+    const now = this.now();
+    if (this.journalGrowthDeniedAt !== undefined) {
+      const sinceDenialMs = now - this.journalGrowthDeniedAt;
+      // A negative reading means the injected clock jumped backward; treat
+      // the window as elapsed rather than refusing asks until the old
+      // wall-clock time is reached again.
+      if (
+        sinceDenialMs >= 0 &&
+        sinceDenialMs < JOURNAL_GROWTH_REASK_INTERVAL_MS
+      ) {
+        return;
+      }
+    }
+    const originalEvents = this.maxJournalEvents;
+    const originalBytes = this.maxJournalBytes;
+    const originalRetained = this.retainedTailCount(
+      originalEvents,
+      originalBytes,
+    );
+    for (let step = 0; step < JOURNAL_GROWTH_MAX_GRANTS_PER_BREACH; step++) {
+      let grant: JournalLimits | undefined;
+      try {
+        grant = advisor({
+          maxEvents: this.maxJournalEvents,
+          maxBytes: this.maxJournalBytes,
+        });
+      } catch {
+        grant = undefined;
+      }
+      if (
+        !grant ||
+        !Number.isSafeInteger(grant.maxBytes) ||
+        !Number.isSafeInteger(grant.maxEvents) ||
+        grant.maxBytes <= this.maxJournalBytes ||
+        grant.maxEvents < this.maxJournalEvents
+      ) {
+        break;
+      }
+      this.maxJournalBytes = grant.maxBytes;
+      this.maxJournalEvents = grant.maxEvents;
+      if (
+        this.retainedTailCount(grant.maxEvents, grant.maxBytes) >
+        originalRetained
+      ) {
+        this.journalGrowthDeniedAt = undefined;
+        return;
+      }
+    }
+    this.maxJournalEvents = originalEvents;
+    this.maxJournalBytes = originalBytes;
+    this.journalGrowthDeniedAt = now;
+  }
+
+  /** Entries of the newest-first tail the eviction loop would retain. */
+  private retainedTailCount(maxEvents: number, maxBytes: number): number {
+    let count = 0;
+    let bytes = 0;
+    for (let i = this.liveJournal.length - 1; i >= 0; i--) {
+      const entryBytes = this.journalEntryBytes[i] ?? 0;
+      if (count + 1 > maxEvents) break;
+      // Mirror the eviction loop: a single entry is always kept, even one
+      // that alone exceeds the byte cap.
+      if (count >= 1 && bytes + entryBytes > maxBytes) break;
+      count += 1;
+      bytes += entryBytes;
+    }
+    return count;
   }
 
   private classifySessionUpdate(event: BridgeEvent): void {
@@ -321,7 +611,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
 
     switch (updateType) {
       case 'agent_message_chunk': {
-        if (hasTodoStopGuardDiscreteMeta(data?.update?._meta)) {
+        if (hasDiscreteMessageMeta(data?.update?._meta)) {
           this.slots.push({ kind: 'misc', event });
           break;
         }
@@ -329,6 +619,10 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
         break;
       }
       case 'agent_thought_chunk': {
+        if (hasDiscreteMessageMeta(data?.update?._meta)) {
+          this.slots.push({ kind: 'misc', event });
+          break;
+        }
         this.mergeTextSlot('thought', event, data);
         break;
       }
@@ -516,8 +810,15 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
   private resetJournal(): void {
     this.liveJournal = [];
     this.journalEntryBytes = [];
+    this.journalEntryEvents = [];
     this.journalTotalBytes = 0;
+    this.journalTotalEvents = 0;
     this.journalTruncatedEvents = 0;
+    this.liveJournalTextSegment = undefined;
+    // Grown caps intentionally persist across turn boundaries — they are
+    // session ceilings, not per-turn state. A refusal, however, belonged
+    // to the finished turn's pressure; a new turn gets a fresh ask.
+    this.journalGrowthDeniedAt = undefined;
   }
 
   private addReplaySegment(events: BridgeEvent[], turnCount: number): void {
@@ -547,6 +848,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
     let droppedBytes = 0;
     let droppedEvents = 0;
     let droppedTurns = 0;
+    let lastDroppedRecordId: string | undefined;
 
     while (
       this.replayBytes > this.maxReplayBytes &&
@@ -561,9 +863,28 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
       this.replayBytes -= dropped.bytes;
       this.truncatedEvents += dropped.events.length;
       this.truncatedTurns += dropped.turnCount;
+      const droppedRecordId = lastRecordIdIn(dropped.events);
+      if (droppedRecordId !== undefined) {
+        lastDroppedRecordId = droppedRecordId;
+      }
     }
 
     if (droppedSegmentCount > 0) {
+      // Freeze the pagination anchor at the first eviction so later
+      // ingests don't move it. Prefer the FIRST retained recordId — the
+      // eviction boundary itself — so `beforeRecordId` fetches exactly
+      // the dropped records with no overlap against the retained window.
+      // Only when the retained window carries no recordId at all (the
+      // live-journal-overflow fallback this anchor exists for) fall back
+      // to the last dropped recordId, which still reaches the older
+      // history without touching the recordId-less retained window.
+      // Using the pre-scanned `activeRecordId` (last recordId across ALL
+      // seed events) here was wrong: when a retained segment carried it,
+      // the anchor sat inside the retained window and `beforeRecordId`
+      // re-fetched records the client already displays, duplicating
+      // transcript blocks (prepend has no dedup).
+      this.replayAnchorRecordId ??=
+        this.firstRetainedReplayRecordId() ?? lastDroppedRecordId;
       this.compactReplaySegmentQueueIfNeeded();
       this.notifyReplayWindowEviction({
         droppedBytes,
@@ -575,6 +896,14 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
         retainedEvents: this.flattenReplaySegments().length,
       });
     }
+  }
+
+  private firstRetainedReplayRecordId(): string | undefined {
+    for (let i = this.replaySegmentStart; i < this.replaySegments.length; i++) {
+      const recordId = lastRecordIdIn(this.replaySegments[i]!.events);
+      if (recordId !== undefined) return recordId;
+    }
+    return undefined;
   }
 
   private flattenReplaySegments(): BridgeEvent[] {
@@ -613,6 +942,17 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
         ...(this.truncatedTurns > 0
           ? { truncatedTurns: this.truncatedTurns }
           : {}),
+        // Pagination anchor for clients whose retained window lost every
+        // turn-boundary event (e.g. live-journal truncation during one
+        // long in-flight turn). Uses the eviction-time anchor, not
+        // `activeRecordId`, so a post-seed `ingest()` can't push it past
+        // records the client already displays. Undefined when no recordId
+        // was observed before the first eviction — the field is
+        // intentionally omitted in that case so old clients continue to
+        // validate the marker shape.
+        ...(this.replayAnchorRecordId !== undefined
+          ? { recordId: this.replayAnchorRecordId }
+          : {}),
         fullTranscriptAvailable: true,
       },
     };
@@ -624,12 +964,100 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
     this.replayBytes = 0;
     this.truncatedEvents = 0;
     this.truncatedTurns = 0;
+    this.replayAnchorRecordId = undefined;
   }
 
   private clearTextSlotIndex(): void {
     this.textSlotIndex.text.clear();
     this.textSlotIndex.thought.clear();
   }
+}
+
+function isLiveJournalTextSegment(
+  entry: BridgeEvent | LiveJournalTextSegment,
+): entry is LiveJournalTextSegment {
+  return 'firstEvent' in entry;
+}
+
+function liveJournalTextChunk(event: BridgeEvent):
+  | {
+      sessionUpdate: 'agent_message_chunk' | 'agent_thought_chunk';
+      text: string;
+      sourceRecordIds?: readonly string[];
+      parentToolCallId?: string;
+    }
+  | undefined {
+  if (event.type !== 'session_update') return undefined;
+  const data = event.data as SessionUpdateData | undefined;
+  const sessionUpdate = data?.update?.sessionUpdate;
+  if (
+    sessionUpdate !== 'agent_message_chunk' &&
+    sessionUpdate !== 'agent_thought_chunk'
+  ) {
+    return undefined;
+  }
+  if (!hasOnlyModeledChunkKeys(data)) {
+    return undefined;
+  }
+  if (
+    hasDiscreteMessageMeta(data?.update?._meta) ||
+    hasUnmodeledTextMeta(data?.update?._meta)
+  ) {
+    return undefined;
+  }
+  const content = data?.update?.content;
+  if (content?.type !== 'text' || typeof content.text !== 'string') {
+    return undefined;
+  }
+  return {
+    sessionUpdate,
+    text: content.text,
+    sourceRecordIds: extractSourceRecordIdsFromMeta(data?.update?._meta),
+    parentToolCallId: extractParentToolCallIdFromMeta(data?.update?._meta),
+  };
+}
+
+// `mergeLiveJournalTextEvent` rebuilds a merged entry by spread-merging
+// the segment's first and last source events, so only chunks whose data,
+// update, and content carry exactly the modeled keys can join a segment —
+// extra data/update keys would leak into the merged aggregate, and extra
+// content keys (ACP TextContent `annotations` / `_meta`) would be dropped
+// by the `{ type, text }` content rebuild, so such chunks stay raw entries.
+function hasOnlyModeledChunkKeys(data: SessionUpdateData | undefined): boolean {
+  if (!data || !data.update) return false;
+  const content: unknown = data.update.content;
+  return (
+    Object.keys(data).every((key) => key === 'sessionId' || key === 'update') &&
+    Object.keys(data.update).every(
+      (key) => key === 'sessionUpdate' || key === 'content' || key === '_meta',
+    ) &&
+    (content === undefined ||
+      (typeof content === 'object' &&
+        content !== null &&
+        Object.keys(content).every((key) => key === 'type' || key === 'text')))
+  );
+}
+
+function mergeLiveJournalTextEvent(
+  existing: BridgeEvent,
+  incoming: BridgeEvent,
+  chunks: readonly string[],
+): BridgeEvent {
+  const existingData = existing.data as SessionUpdateData;
+  const incomingData = incoming.data as SessionUpdateData;
+  return {
+    ...existing,
+    ...incoming,
+    data: {
+      ...existingData,
+      ...incomingData,
+      update: {
+        ...existingData.update,
+        ...incomingData.update,
+        content: { type: 'text', text: chunks.join('') },
+      },
+    },
+  };
 }
 
 function makeMergedSessionUpdateEvent(
@@ -739,13 +1167,68 @@ function stringArraysEqual(
   return left.every((value, index) => value === right[index]);
 }
 
-function hasTodoStopGuardDiscreteMeta(meta: unknown): boolean {
+function hasDiscreteMessageMeta(meta: unknown): boolean {
   return (
     typeof meta === 'object' &&
     meta !== null &&
-    (meta as Record<string, unknown>)['qwenDiscreteMessage'] === true &&
-    (meta as Record<string, unknown>)['source'] === 'todo_stop_guard'
+    (meta as Record<string, unknown>)['qwenDiscreteMessage'] === true
   );
+}
+
+function hasOnlyTimestampEnvelopeMeta(meta: unknown): boolean {
+  if (meta === undefined) return true;
+  if (typeof meta !== 'object' || meta === null) return false;
+  return Object.keys(meta).every(
+    (key) => key === 'timestamp' || key === 'serverTimestamp',
+  );
+}
+
+function hasUnmodeledTextMeta(meta: unknown): boolean {
+  if (meta === undefined) return false;
+  if (typeof meta !== 'object' || meta === null) return true;
+  const record = meta as Record<string, unknown>;
+  for (const [key, value] of Object.entries(record)) {
+    if (key === 'timestamp' || key === 'serverTimestamp') {
+      continue;
+    }
+    if (key === 'parentToolCallId') {
+      // Empty strings model "no parent": extractParentToolCallIdFromMeta
+      // ignores them, so both replay surfaces agree the chunk is top-level.
+      if (typeof value !== 'string') return true;
+      continue;
+    }
+    if (key === 'subagentType') {
+      // Display label SubAgentTracker pairs with parentToolCallId. The
+      // completed-turn path merges by parentToolCallId alone and lets the
+      // latest meta carry the label, so the live view must match instead
+      // of splitting on it.
+      if (typeof value !== 'string') return true;
+      continue;
+    }
+    if (key === 'qwenTranscript') {
+      if (typeof value !== 'object' || value === null) return true;
+      const transcript = value as Record<string, unknown>;
+      for (const [field, fieldValue] of Object.entries(transcript)) {
+        if (field === 'sourceRecordIds') {
+          if (
+            !Array.isArray(fieldValue) ||
+            fieldValue.some((id) => typeof id !== 'string')
+          ) {
+            return true;
+          }
+          continue;
+        }
+        if (field === 'planToolCallId') {
+          if (typeof fieldValue !== 'string') return true;
+          continue;
+        }
+        return true;
+      }
+      continue;
+    }
+    return true;
+  }
+  return false;
 }
 
 function mergeToolCallEvent(

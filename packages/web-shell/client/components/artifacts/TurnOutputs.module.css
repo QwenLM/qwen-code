@@ -13,15 +13,15 @@
 
 .summary {
   display: grid;
-  grid-template-columns: 34px minmax(0, 1fr) auto;
+  grid-template-columns: 36px minmax(0, 1fr) auto;
   gap: 12px;
   align-items: center;
   padding: 12px;
 }
 
 .icon {
-  width: 34px;
-  height: 34px;
+  width: 36px;
+  height: 36px;
   border-radius: 6px;
   background: var(--accent);
   color: var(--muted-foreground);
@@ -43,6 +43,25 @@
   font-weight: 400;
 }
 
+.reviewSummary {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.reviewSummaryWithStats {
+  display: grid;
+  gap: 0;
+}
+
+.reviewMeta {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .linkButton,
 .reviewButton,
 .showMoreButton {
@@ -55,8 +74,6 @@
 }
 
 .linkButton {
-  margin-top: 2px;
-  margin-left: 8px;
   padding: 0;
   color: var(--muted-foreground);
   font-size: 13px;
@@ -88,10 +105,18 @@
   padding: 4px 10px;
   font-size: 14px;
   font-weight: 400;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .reviewButton:hover {
   background: var(--accent);
+}
+
+.reviewButton:disabled {
+  cursor: default;
+  opacity: 0.6;
 }
 
 .list {
@@ -172,7 +197,6 @@
 .artifactInfo {
   min-width: 0;
   display: grid;
-  gap: 2px;
 }
 
 .artifactMeta {

@@ -29,6 +29,7 @@ export interface WorkspaceRuntimeEnvMetadata {
 export interface WorkspaceRuntime {
   readonly workspaceId: string;
   readonly workspaceCwd: string;
+  readonly sessionRuntimeBaseDir: string;
   /** Optional presentation-only name. Workspace identity remains id/cwd. */
   displayName?: string;
   readonly primary: boolean;

@@ -57,6 +57,7 @@ export interface UIActions {
     fastModelMode?: boolean;
     voiceModelMode?: boolean;
     visionModelMode?: boolean;
+    compactionModelMode?: boolean;
     imageModelMode?: boolean;
   }) => void;
   openArenaDialog: (type: Exclude<ArenaDialogType, null>) => void;
@@ -77,11 +78,15 @@ export interface UIActions {
   refreshStatic: () => void;
   handleFinalSubmit: (
     value: string,
-    options?: { deferUntilIdle?: boolean },
+    options?: {
+      deferUntilIdle?: boolean;
+      submittedPrompt?: string;
+    },
   ) => void;
   handleRetryLastPrompt: () => void;
   handleClearScreen: () => void;
   popAllQueuedMessages: () => string | null;
+  invalidateSubmittedPromptProvenance: () => void;
   // Welcome back dialog
   handleWelcomeBackSelection: (choice: 'continue' | 'restart') => void;
   handleWelcomeBackClose: () => void;

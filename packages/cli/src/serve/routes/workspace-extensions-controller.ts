@@ -43,6 +43,7 @@ const sanitizeDaemonMessage = (message: string): string =>
 
 export const redactExtensionDisplaySource = (source: string): string => {
   const redacted = redactUrlCredentials(source);
+  if (redacted.startsWith('upload:')) return redacted;
   if (/^[A-Za-z]:[\\/]/.test(redacted)) return redacted;
   try {
     const url = new URL(redacted);
@@ -683,14 +684,18 @@ export function createExtensionsController(
                   const startedAt = Date.now();
                   try {
                     runtime.workspaceService.invalidateWorkspaceSkillsStatus();
-                    return {
-                      status: 'fulfilled' as const,
-                      result:
-                        await runtime.bridge.refreshExtensionsForAllSessions(
-                          bridgeMutationEvent(event),
-                        ),
-                      elapsedMs: Date.now() - startedAt,
-                    };
+                    try {
+                      return {
+                        status: 'fulfilled' as const,
+                        result:
+                          await runtime.bridge.refreshExtensionsForAllSessions(
+                            bridgeMutationEvent(event),
+                          ),
+                        elapsedMs: Date.now() - startedAt,
+                      };
+                    } finally {
+                      runtime.workspaceService.invalidateWorkspaceSkillsStatus();
+                    }
                   } catch (reason) {
                     return {
                       status: 'rejected' as const,
@@ -771,10 +776,14 @@ export function createExtensionsController(
             const { result, elapsedMs } = await runReconciliation(async () => {
               workspace.invalidateWorkspaceSkillsStatus();
               const startedAt = Date.now();
-              const result = await bridge.refreshExtensionsForAllSessions(
-                bridgeMutationEvent(event),
-              );
-              return { result, elapsedMs: Date.now() - startedAt };
+              try {
+                const result = await bridge.refreshExtensionsForAllSessions(
+                  bridgeMutationEvent(event),
+                );
+                return { result, elapsedMs: Date.now() - startedAt };
+              } finally {
+                workspace.invalidateWorkspaceSkillsStatus();
+              }
             });
             const warnings: NonNullable<ExtensionOperationStatus['warnings']> =
               [...commitWarnings];

@@ -60,8 +60,10 @@ import { MemorySavedMessage } from './messages/MemorySavedMessage.js';
 import { DiffStatsDisplay } from './messages/DiffStatsDisplay.js';
 import { GoalStatusMessage } from './messages/GoalStatusMessage.js';
 import { useSettings } from '../contexts/SettingsContext.js';
+import { useVirtualViewport } from '../contexts/VirtualViewportContext.js';
 import { useThoughtExpanded } from '../contexts/ThoughtExpandedContext.js';
 import { useMouseEvents } from '../hooks/useMouseEvents.js';
+import { useMouseTrackingEnabled } from '../hooks/use-mouse-tracking-enabled.js';
 import type { MouseEvent } from '../utils/mouse.js';
 import {
   measureElementPosition,
@@ -85,7 +87,7 @@ interface HistoryItemDisplayProps {
   /** Force thinking blocks expanded (e.g. in SessionPreview). */
   thoughtExpanded?: boolean;
   /**
-   * Transcript full-detail mode (Ctrl+O). When true, collapse is lifted:
+   * Full-detail mode (Ctrl+O). When true, collapse is lifted:
    * thinking blocks render expanded and tool groups force `forceExpandAll`
    * + `forceShowResult` (every tool with its full, untruncated result).
    * Default false (main view stays at the #5661 partition baseline).
@@ -125,7 +127,10 @@ const ClickableThinkMessage: React.FC<{
   const pressRef = useRef<{ col: number; row: number } | null>(null);
   const { rows: terminalHeight } = useTerminalSize();
   const settings = useSettings();
-  const clickable = !!settings.merged.ui?.useTerminalBuffer;
+  const mouseTrackingEnabled = useMouseTrackingEnabled();
+  const clickable =
+    useVirtualViewport(settings.merged.ui?.useTerminalBuffer) &&
+    mouseTrackingEnabled;
   const isActive = !isPending;
 
   useMouseEvents(
@@ -212,6 +217,7 @@ function getHistoryItemMarginTop(item: HistoryItem): number {
     case 'stop_hook_loop':
     case 'stop_hook_system_message':
     case 'goal_status':
+    case 'goal_state':
     case 'vision_notice':
       return 0;
     default:
@@ -294,6 +300,8 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           )}
           <AssistantMessage
             text={itemForDisplay.text}
+            images={itemForDisplay.images}
+            omittedImageCount={itemForDisplay.omittedImageCount}
             isPending={isPending}
             availableTerminalHeight={
               availableTerminalHeightGemini ?? availableTerminalHeight
@@ -306,6 +314,8 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       {itemForDisplay.type === 'gemini_content' && (
         <AssistantMessageContent
           text={itemForDisplay.text}
+          images={itemForDisplay.images}
+          omittedImageCount={itemForDisplay.omittedImageCount}
           isPending={isPending}
           availableTerminalHeight={
             availableTerminalHeightGemini ?? availableTerminalHeight
@@ -507,6 +517,12 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           iterations={itemForDisplay.iterations}
           durationMs={itemForDisplay.durationMs}
           lastReason={itemForDisplay.lastReason}
+        />
+      )}
+      {itemForDisplay.type === 'goal_state' && (
+        <GoalStatusMessage
+          snapshot={itemForDisplay.snapshot}
+          cause={itemForDisplay.cause}
         />
       )}
     </Box>

@@ -5,18 +5,28 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
+import {
+  accessSync,
+  closeSync,
+  constants as fsConstants,
+  lstatSync,
+  openSync,
+  statSync,
+} from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as net from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { AgentViewLaunchFile } from './protocol.js';
+import { PTY_HOST_AUTH_TOKEN_ENV } from './pty-host-env.js';
 import {
   BoundedOutputRing,
   launchAgentViewPtyHost,
   type AgentViewPtyDisposable,
   type AgentViewPtyHostExit,
   type AgentViewPtyHostHandle,
+  type AgentViewPtyImplementation,
 } from './pty-host.js';
 import { getAgentViewSessionPaths } from './supervisor-store.js';
 import { bridgeAgentViewTerminal } from './terminal-bridge.js';
@@ -25,13 +35,18 @@ import { buildCurrentQwenCliArgv } from './current-cli-argv.js';
 export const INTERNAL_AGENT_VIEW_PTY_HOST_ARG =
   '--internal-agent-view-pty-host';
 
-const HOST_READY_RETRIES = 300;
+// Wall budget ≈ 15 s once per-probe request timeouts are counted.
+const HOST_READY_RETRIES = 50;
 const CONNECT_HOST_READY_RETRIES = 10;
 const HOST_READY_DELAY_MS = 50;
+const HOST_READY_REQUEST_TIMEOUT_MS = 250;
 const REMOTE_HOST_EXIT_POLL_MS = 5000;
+const SHUTDOWN_GRACE_MS = 2_000;
 const UNIX_SOCKET_PATH_LIMIT = 100;
 const MAX_PTY_HOST_REQUEST_LINE_BYTES = 1024 * 1024;
-const PTY_HOST_AUTH_TOKEN_ENV = 'QWEN_AGENT_VIEW_PTY_HOST_TOKEN';
+// JSON escaping inflates control bytes up to 6x, so a full 1 MiB
+// retained ring can serialize to ~6 MiB; keep the wire cap above that.
+const MAX_PTY_HOST_RESPONSE_LINE_BYTES = 8 * 1024 * 1024;
 const ALLOWED_KILL_SIGNALS = new Set<NodeJS.Signals>([
   'SIGINT',
   'SIGKILL',
@@ -45,6 +60,15 @@ type AgentViewPtyHostOperation =
   | 'kill'
   | 'shutdown'
   | 'attachStream';
+
+const HOST_OPERATIONS = [
+  'status',
+  'logs',
+  'resize',
+  'kill',
+  'shutdown',
+  'attachStream',
+] as const satisfies readonly AgentViewPtyHostOperation[];
 
 type AgentViewPtyHostResponse =
   | { id: string; ok: true; result: unknown }
@@ -62,6 +86,7 @@ export interface AgentViewPtyHostProcessOptions {
   spawnProcess?: (
     args: readonly string[],
     env: Readonly<Record<string, string>>,
+    stderrLogPath?: string,
   ) => ChildProcess;
 }
 
@@ -69,6 +94,7 @@ export interface RunAgentViewPtyHostProcessOptions {
   launchPath: string;
   socketPath: string;
   authToken?: string;
+  loadPty?: () => Promise<AgentViewPtyImplementation | null>;
 }
 
 export async function launchAgentViewPtyHostProcess(
@@ -81,13 +107,21 @@ export async function launchAgentViewPtyHostProcess(
   const launchPath = getAgentViewSessionPaths(launch.sessionId, {
     ...(options.globalDir ? { globalDir: options.globalDir } : {}),
   }).launchPath;
+  const stderrLogPath = `${launchPath}.host-stderr.log`;
   const child = (options.spawnProcess ?? defaultSpawnPtyHost)(
     [INTERNAL_AGENT_VIEW_PTY_HOST_ARG, launchPath, socketPath],
     { [PTY_HOST_AUTH_TOKEN_ENV]: authToken },
+    stderrLogPath,
   );
   child.unref?.();
 
-  const status = await waitForSpawnedPtyHost(socketPath, child, authToken);
+  let status: { pid: number; workerPid: number };
+  try {
+    status = await waitForSpawnedPtyHost(socketPath, child, authToken);
+  } catch (error) {
+    child.kill?.('SIGKILL');
+    throw await withHostStderrTail(error, stderrLogPath);
+  }
   return createRemotePtyHostHandle({
     socketPath,
     launch,
@@ -98,15 +132,25 @@ export async function launchAgentViewPtyHostProcess(
   });
 }
 
+export interface AgentViewPtyHostConnectOptions {
+  readyRetries?: number;
+  requestTimeoutMs?: number;
+}
+
 export async function connectAgentViewPtyHostProcess(
   launch: AgentViewLaunchFile,
   socketPath: string,
   authToken?: string,
+  options: AgentViewPtyHostConnectOptions = {},
 ): Promise<AgentViewPtyHostHandle> {
   const status = await waitForPtyHost(
     socketPath,
-    CONNECT_HOST_READY_RETRIES,
+    options.readyRetries ?? CONNECT_HOST_READY_RETRIES,
     authToken,
+    {
+      requestTimeoutMs:
+        options.requestTimeoutMs ?? HOST_READY_REQUEST_TIMEOUT_MS,
+    },
   );
   return createRemotePtyHostHandle({
     socketPath,
@@ -154,11 +198,18 @@ function createRemotePtyHostHandle({
       return '';
     },
     write(data: Buffer): void {
-      attachSocket?.write(data);
+      if (!attachSocket) {
+        throw new Error(
+          'Agent View PTY host input requires an active attach stream.',
+        );
+      }
+      attachSocket.write(data);
     },
     onData(callback: (data: string) => void): AgentViewPtyDisposable {
+      attachSocket?.destroy();
       const socket = net.createConnection(socketPath);
       attachSocket = socket;
+      socket.setEncoding('utf8');
       socket.write(
         `${JSON.stringify({
           id: createRequestId(),
@@ -168,18 +219,34 @@ function createRemotePtyHostHandle({
       );
       let attached = false;
       let buffer = '';
-      const onData = (chunk: Buffer | string) => {
-        const textChunk =
-          typeof chunk === 'string' ? chunk : chunk.toString('utf8');
+      const onData = (textChunk: string) => {
         if (attached) {
           output.append(textChunk);
           callback(textChunk);
           return;
         }
         buffer += textChunk;
+        if (
+          Buffer.byteLength(buffer, 'utf8') > MAX_PTY_HOST_RESPONSE_LINE_BYTES
+        ) {
+          socket.destroy(
+            new AgentViewPtyHostProtocolError(
+              'Agent View PTY host response line is too large.',
+            ),
+          );
+          return;
+        }
         const newline = buffer.indexOf('\n');
         if (newline === -1) return;
-        const response = parseHostResponse(buffer.slice(0, newline));
+        let response: AgentViewPtyHostResponse;
+        try {
+          response = parseHostResponse(buffer.slice(0, newline));
+        } catch (error) {
+          socket.destroy(
+            error instanceof Error ? error : new Error(String(error)),
+          );
+          return;
+        }
         if (!response.ok) {
           socket.destroy(new Error(response.error.message));
           return;
@@ -220,9 +287,15 @@ function createRemotePtyHostHandle({
       const allowedSignal = killSignalValue(signal);
       void callAgentViewPtyHost(socketPath, authToken, 'kill', {
         signal: allowedSignal,
-      }).catch(() => {});
-      child?.kill(allowedSignal);
-      if (!child) {
+      }).catch(() => {
+        child?.kill(allowedSignal);
+      });
+      // Only SIGKILL cannot be trapped, so it is the only kill that
+      // guarantees the worker is gone — resolve the exit tracker immediately
+      // for it. SIGINT/SIGTERM can be trapped and survived (the server-side
+      // kill op, unlike shutdown, has no SIGKILL escalation), so let the
+      // remote exit poller observe whether the worker actually exits.
+      if (!child && allowedSignal === 'SIGKILL') {
         exitTracker.resolve({ exitCode: 1 });
       }
     },
@@ -236,10 +309,11 @@ function createRemotePtyHostHandle({
       }
     },
     dispose(): void {
+      void callAgentViewPtyHost(socketPath, authToken, 'shutdown').catch(() => {
+        child?.kill('SIGTERM');
+      });
       attachSocket?.destroy();
-      if (!child) {
-        exitTracker.resolve({ exitCode: 1 });
-      }
+      exitTracker.resolve({ exitCode: 1 });
     },
   };
 }
@@ -251,9 +325,11 @@ function createChildExitTracker(child: ChildProcess): {
   let resolveExit: (exit: AgentViewPtyHostExit) => void = () => {};
   const exited = new Promise<AgentViewPtyHostExit>((resolve) => {
     resolveExit = resolve;
-    child.once('exit', (code) => {
+    child.once('exit', (code, signal) => {
+      const signalNumber = signal ? os.constants.signals[signal] : undefined;
       resolve({
         exitCode: typeof code === 'number' ? code : 1,
+        ...(signalNumber ? { signal: signalNumber } : {}),
       });
     });
   });
@@ -272,10 +348,17 @@ function createRemoteExitTracker(
   const exited = new Promise<AgentViewPtyHostExit>((resolve) => {
     resolveExit = resolve;
   });
+  let consecutiveFailures = 0;
   const interval = setInterval(() => {
-    void callAgentViewPtyHost(socketPath, authToken, 'status').catch(() => {
-      resolveExitOnce({ exitCode: 1 });
-    });
+    void callAgentViewPtyHost(socketPath, authToken, 'status')
+      .then(() => {
+        consecutiveFailures = 0;
+      })
+      .catch(() => {
+        if (++consecutiveFailures >= 2) {
+          resolveExitOnce({ exitCode: 1 });
+        }
+      });
   }, REMOTE_HOST_EXIT_POLL_MS);
   interval.unref?.();
 
@@ -292,17 +375,26 @@ export async function runAgentViewPtyHostProcess({
   launchPath,
   socketPath,
   authToken,
-}: RunAgentViewPtyHostProcessOptions): Promise<void> {
+  loadPty,
+}: RunAgentViewPtyHostProcessOptions): Promise<AgentViewPtyHostExit> {
   const launch = JSON.parse(await fs.readFile(launchPath, 'utf8')) as unknown;
-  const host = await launchAgentViewPtyHost(launch);
+  const host = await launchAgentViewPtyHost(launch, {
+    ...(loadPty ? { loadPty } : {}),
+  });
   const server = createAgentViewPtyHostServer(host, socketPath, {
     authToken: authToken ?? process.env[PTY_HOST_AUTH_TOKEN_ENV],
   });
-  await server.listen();
-  await host.exited.finally(async () => {
+  try {
+    await server.listen();
+  } catch (error) {
+    host.dispose();
+    throw error;
+  }
+  const exit = await host.exited.finally(async () => {
     host.dispose();
     await server.close();
   });
+  return exit;
 }
 
 export function getAgentViewPtyHostSocketPath(
@@ -322,7 +414,30 @@ export function getAgentViewPtyHostSocketPath(
   if (Buffer.byteLength(candidate) < UNIX_SOCKET_PATH_LIMIT) {
     return candidate;
   }
-  return path.join(os.tmpdir(), `qwen-agent-pty-${digest}.sock`);
+  const uid = typeof process.getuid === 'function' ? process.getuid() : 'user';
+  const fallbackCandidates = [
+    path.join(os.tmpdir(), `qwen-avp-${uid}`, `${digest}.sock`),
+    path.join('/tmp', `qwen-avp-${uid}`, `${digest}.sock`),
+  ];
+  const fallback = fallbackCandidates.find(
+    (item) =>
+      Buffer.byteLength(item) < UNIX_SOCKET_PATH_LIMIT &&
+      canPrepareSocketDirectory(path.dirname(item)),
+  );
+  const lengthFallback = fallbackCandidates.find(
+    (item) => Buffer.byteLength(item) < UNIX_SOCKET_PATH_LIMIT,
+  );
+  if (fallback) {
+    return fallback;
+  }
+  if (lengthFallback) {
+    // Both fallback directories failed the availability check; fail fast
+    // instead of spawning a host that can never bind its socket.
+    throw new Error(
+      'Agent View PTY host socket fallback directories are not writable.',
+    );
+  }
+  throw new Error('Agent View PTY host socket path is too long.');
 }
 
 async function callAgentViewPtyHost(
@@ -330,20 +445,46 @@ async function callAgentViewPtyHost(
   authToken: string | undefined,
   op: AgentViewPtyHostOperation,
   params?: Record<string, unknown>,
+  timeoutMs?: number,
 ): Promise<unknown> {
-  const response = await requestAgentViewPtyHost(socketPath, {
-    id: createRequestId(),
-    op,
-    ...(authToken ? { authToken } : {}),
-    ...(params ? { params } : {}),
-  });
+  const response = await requestAgentViewPtyHost(
+    socketPath,
+    {
+      id: createRequestId(),
+      op,
+      ...(authToken ? { authToken } : {}),
+      ...(params ? { params } : {}),
+    },
+    timeoutMs ? { timeoutMs } : {},
+  );
   if (response.ok) return response.result;
-  throw new Error(response.error.message);
+  throw new AgentViewPtyHostRequestError(
+    response.error.code,
+    response.error.message,
+  );
+}
+
+class AgentViewPtyHostRequestError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'AgentViewPtyHostRequestError';
+  }
+}
+
+class AgentViewPtyHostProtocolError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AgentViewPtyHostProtocolError';
+  }
 }
 
 async function requestAgentViewPtyHost(
   socketPath: string,
   request: AgentViewPtyHostRequest,
+  options: { timeoutMs?: number } = {},
 ): Promise<AgentViewPtyHostResponse> {
   return new Promise((resolve, reject) => {
     const socket = net.createConnection(socketPath);
@@ -355,7 +496,7 @@ async function requestAgentViewPtyHost(
         new Error('Timed out waiting for Agent View PTY host.'),
       );
       socket.destroy();
-    }, 5000);
+    }, options.timeoutMs ?? 5000);
     const finish = (
       response: AgentViewPtyHostResponse | undefined,
       error?: Error,
@@ -376,6 +517,18 @@ async function requestAgentViewPtyHost(
     });
     socket.on('data', (chunk) => {
       buffer += chunk;
+      if (
+        Buffer.byteLength(buffer, 'utf8') > MAX_PTY_HOST_RESPONSE_LINE_BYTES
+      ) {
+        finish(
+          undefined,
+          new AgentViewPtyHostProtocolError(
+            'Agent View PTY host response line is too large.',
+          ),
+        );
+        socket.destroy();
+        return;
+      }
       const newline = buffer.indexOf('\n');
       if (newline === -1) return;
       try {
@@ -387,33 +540,46 @@ async function requestAgentViewPtyHost(
       }
     });
     socket.on('error', (error) => finish(undefined, error));
+    socket.on('close', () => {
+      finish(undefined, new Error('Agent View PTY host connection closed.'));
+    });
   });
 }
 
 export function createAgentViewPtyHostServer(
   host: AgentViewPtyHostHandle,
   socketPath: string,
-  options: { authToken?: string } = {},
+  options: { authToken?: string; shutdownGraceMs?: number } = {},
 ): { listen(): Promise<void>; close(): Promise<void> } {
   const attachState: {
     activeAttachSocket: net.Socket | undefined;
   } = {
     activeAttachSocket: undefined,
   };
+  const openSockets = new Set<net.Socket>();
   const server = net.createServer((socket) => {
-    socket.setEncoding('utf8');
-    let buffer = '';
-    socket.on('data', (chunk) => {
-      buffer += chunk;
-      if (Buffer.byteLength(buffer, 'utf8') > MAX_PTY_HOST_REQUEST_LINE_BYTES) {
+    openSockets.add(socket);
+    socket.once('close', () => {
+      openSockets.delete(socket);
+    });
+    socket.on('error', () => {});
+    socket.setTimeout(5000, () => {
+      socket.destroy();
+    });
+    // Byte-transparent framing: only the request line is decoded, so
+    // coalesced keystrokes after an attach request reach the worker verbatim.
+    let buffer = Buffer.alloc(0);
+    socket.on('data', (chunk: Buffer) => {
+      buffer = buffer.length === 0 ? chunk : Buffer.concat([buffer, chunk]);
+      if (buffer.length > MAX_PTY_HOST_REQUEST_LINE_BYTES) {
         socket.destroy();
         return;
       }
-      const newline = buffer.indexOf('\n');
+      const newline = buffer.indexOf(0x0a);
       if (newline === -1) return;
-      const line = buffer.slice(0, newline);
-      const leftover = buffer.slice(newline + 1);
-      buffer = '';
+      const line = buffer.toString('utf8', 0, newline);
+      const leftover = Buffer.from(buffer.subarray(newline + 1));
+      buffer = Buffer.alloc(0);
       socket.pause();
       void respondToHostLine(
         host,
@@ -422,26 +588,68 @@ export function createAgentViewPtyHostServer(
         attachState,
         leftover,
         options.authToken,
-      );
+        options.shutdownGraceMs,
+      ).catch(() => {
+        socket.destroy();
+      });
     });
   });
 
+  let releaseLock: (() => Promise<void>) | undefined;
   return {
     async listen() {
-      await prepareSocketPath(socketPath);
-      await new Promise<void>((resolve, reject) => {
-        server.once('error', reject);
-        server.listen(socketPath, () => {
-          server.off('error', reject);
-          if (isWindowsPipePath(socketPath)) {
-            resolve();
-            return;
-          }
-          fs.chmod(socketPath, 0o600).then(resolve, reject);
+      if (!isWindowsPipePath(socketPath)) {
+        releaseLock = await acquireSocketPathLock(socketPath);
+      }
+      try {
+        await prepareSocketPath(socketPath);
+        await new Promise<void>((resolve, reject) => {
+          server.once('error', reject);
+          server.listen(socketPath, () => {
+            server.off('error', reject);
+            server.on('error', () => {});
+            if (isWindowsPipePath(socketPath)) {
+              resolve();
+              return;
+            }
+            fs.chmod(socketPath, 0o600).then(resolve, (error) => {
+              server.close(() => reject(error));
+            });
+          });
         });
-      });
+        if (!isWindowsPipePath(socketPath)) {
+          // The reclaim path is racy: two processes can both delete a stale
+          // lock and proceed, and a rival can reclaim this process's
+          // lockfile between its O_EXCL create and the pid write. Re-verify
+          // lock ownership now and fail closed when displaced, so at most one
+          // host serves the socket.
+          const lockContent = await fs
+            .readFile(`${socketPath}.lock`, 'utf8')
+            .catch(() => '');
+          if (lockContent !== String(process.pid)) {
+            releaseLock = undefined; // the lock no longer belongs to us
+            for (const socket of openSockets) {
+              socket.destroy();
+            }
+            await new Promise<void>((resolve) => server.close(() => resolve()));
+            const displaced = new Error(
+              `Agent View PTY host socket is already in use: ${socketPath}`,
+            ) as NodeJS.ErrnoException;
+            displaced.code = 'EADDRINUSE';
+            throw displaced;
+          }
+        }
+      } catch (error) {
+        await releaseLock?.();
+        releaseLock = undefined;
+        throw error;
+      }
     },
     async close() {
+      attachState.activeAttachSocket?.destroy();
+      for (const socket of openSockets) {
+        socket.destroy();
+      }
       await new Promise<void>((resolve, reject) => {
         if (!server.listening) {
           resolve();
@@ -449,7 +657,9 @@ export function createAgentViewPtyHostServer(
         }
         server.close((error) => (error ? reject(error) : resolve()));
       });
-      await removeSocketPath(socketPath);
+      await removeOwnedSocketPath(socketPath);
+      await releaseLock?.();
+      releaseLock = undefined;
     },
   };
 }
@@ -461,8 +671,9 @@ async function respondToHostLine(
   attachState: {
     activeAttachSocket: net.Socket | undefined;
   },
-  leftover = '',
+  leftover: Buffer = Buffer.alloc(0),
   authToken?: string,
+  shutdownGraceMs?: number,
 ): Promise<void> {
   const request = parseHostRequest(line);
   if (!request) {
@@ -499,6 +710,7 @@ async function respondToHostLine(
     }
 
     attachState.activeAttachSocket = socket;
+    host.resetInput?.();
     const clearActiveAttach = () => {
       if (attachState.activeAttachSocket === socket) {
         attachState.activeAttachSocket = undefined;
@@ -506,6 +718,7 @@ async function respondToHostLine(
     };
     socket.once('close', clearActiveAttach);
     socket.removeAllListeners('data');
+    socket.setTimeout(0);
     socket.resume();
     try {
       socket.write(
@@ -515,9 +728,9 @@ async function respondToHostLine(
           result: { attached: true },
         })}\n`,
       );
-      if (leftover) {
+      if (leftover.length > 0) {
         // Forward keystrokes that were coalesced with the attach request.
-        host.write(Buffer.from(leftover, 'utf8'));
+        host.write(leftover);
       }
       await bridgeAgentViewTerminal({
         stdin: socket,
@@ -533,7 +746,7 @@ async function respondToHostLine(
   }
 
   try {
-    const result = await handleHostRequest(host, request);
+    const result = await handleHostRequest(host, request, shutdownGraceMs);
     socket.end(`${JSON.stringify({ id: request.id, ok: true, result })}\n`);
   } catch (error) {
     socket.end(
@@ -551,6 +764,7 @@ async function respondToHostLine(
 async function handleHostRequest(
   host: AgentViewPtyHostHandle,
   request: AgentViewPtyHostRequest,
+  shutdownGraceMs?: number,
 ): Promise<unknown> {
   switch (request.op) {
     case 'status':
@@ -567,10 +781,14 @@ async function handleHostRequest(
       });
       return { resized: true };
     case 'kill':
-      host.kill(signalParam(request.params));
+      // Default to SIGTERM, not node-pty's POSIX fallback SIGHUP: SIGHUP is
+      // outside ALLOWED_KILL_SIGNALS and is commonly ignored (nohup-style
+      // workers), so kill and shutdown would disagree on whether the worker
+      // dies.
+      host.kill(signalParam(request.params) ?? 'SIGTERM');
       return { killed: true };
     case 'shutdown':
-      await shutdownHost(host);
+      await shutdownHost(host, shutdownGraceMs);
       return { shuttingDown: true };
     case 'attachStream':
       throw new Error('attachStream must use the streaming path.');
@@ -581,12 +799,28 @@ async function handleHostRequest(
   }
 }
 
-async function shutdownHost(host: AgentViewPtyHostHandle): Promise<void> {
+async function shutdownHost(
+  host: AgentViewPtyHostHandle,
+  graceMs: number = SHUTDOWN_GRACE_MS,
+): Promise<void> {
   if (host.shutdown) {
     await host.shutdown();
-    return;
+  } else {
+    host.kill('SIGTERM');
   }
-  host.kill('SIGTERM');
+  // A TERM-resistant worker (e.g. `trap '' TERM`) would otherwise keep
+  // host.exited pending forever: the host process would never exit and its
+  // socket lock would block every future launch of the session.
+  const timer = setTimeout(() => {
+    try {
+      host.kill('SIGKILL');
+    } catch {
+      // The worker exited between the grace deadline and this kill.
+    }
+  }, graceMs);
+  timer.unref?.();
+  const cancel = () => clearTimeout(timer);
+  void host.exited.then(cancel, cancel);
 }
 
 async function waitForSpawnedPtyHost(
@@ -596,8 +830,11 @@ async function waitForSpawnedPtyHost(
 ): Promise<{ pid: number; workerPid: number }> {
   return new Promise((resolve, reject) => {
     let settled = false;
+    const abortController = new AbortController();
     const cleanup = () => {
+      abortController.abort();
       child.off('exit', onExit);
+      child.off('error', onError);
     };
     const finishResolve = (value: { pid: number; workerPid: number }) => {
       if (settled) return;
@@ -617,11 +854,20 @@ async function waitForSpawnedPtyHost(
         new Error(`Agent View PTY host exited before ready (${suffix}).`),
       );
     };
+    const onError = (error: Error) => {
+      finishReject(error);
+    };
     child.once('exit', onExit);
-    void waitForPtyHost(socketPath, HOST_READY_RETRIES, authToken).then(
+    child.once('error', onError);
+    void waitForPtyHost(socketPath, HOST_READY_RETRIES, authToken, {
+      requestTimeoutMs: HOST_READY_REQUEST_TIMEOUT_MS,
+      signal: abortController.signal,
+    }).then(
       (status) => finishResolve(status),
-      (error) =>
-        finishReject(error instanceof Error ? error : new Error(String(error))),
+      (error) => {
+        if (abortController.signal.aborted && settled) return;
+        finishReject(error instanceof Error ? error : new Error(String(error)));
+      },
     );
   });
 }
@@ -630,13 +876,22 @@ async function waitForPtyHost(
   socketPath: string,
   retries = HOST_READY_RETRIES,
   authToken?: string,
+  options: { requestTimeoutMs?: number; signal?: AbortSignal } = {},
 ): Promise<{ pid: number; workerPid: number }> {
+  const requestTimeoutMs = options.requestTimeoutMs ?? 5000;
+  // Model the deadline as a wall-clock budget covering each probe's delay
+  // and request timeout, so slow probes cannot silently exhaust retries.
+  const deadlineMs =
+    Date.now() + retries * (HOST_READY_DELAY_MS + requestTimeoutMs);
   for (let attempt = 0; attempt < retries; attempt++) {
+    if (options.signal?.aborted || Date.now() >= deadlineMs) break;
     try {
       const result = await callAgentViewPtyHost(
         socketPath,
         authToken,
         'status',
+        undefined,
+        requestTimeoutMs,
       );
       if (isRecord(result) && Number.isInteger(result['workerPid'])) {
         return {
@@ -646,10 +901,17 @@ async function waitForPtyHost(
           workerPid: Number(result['workerPid']),
         };
       }
-    } catch {
+    } catch (error) {
+      if (
+        error instanceof AgentViewPtyHostProtocolError ||
+        (error instanceof AgentViewPtyHostRequestError &&
+          error.code === 'unauthorized')
+      ) {
+        throw error;
+      }
       // Retry until the host socket is ready.
     }
-    await delay(HOST_READY_DELAY_MS);
+    await delay(HOST_READY_DELAY_MS, options.signal);
   }
   throw new Error('Agent View PTY host did not become ready.');
 }
@@ -657,17 +919,46 @@ async function waitForPtyHost(
 function defaultSpawnPtyHost(
   args: readonly string[],
   env: Readonly<Record<string, string>>,
+  stderrLogPath?: string,
 ): ChildProcess {
   const argv = buildCurrentQwenCliArgv(args);
-  return spawn(argv[0]!, argv.slice(1), {
-    detached: true,
-    stdio: 'ignore',
-    env: {
-      ...process.env,
-      ...env,
-      QWEN_CODE_NO_RELAUNCH: '1',
-    },
-  });
+  // Route stderr to a per-session file so fail-closed startup errors stay
+  // observable; a pipe would tie the detached host's lifetime to ours.
+  let stderrFd: number | undefined;
+  if (stderrLogPath) {
+    try {
+      stderrFd = openSync(stderrLogPath, 'w', 0o600);
+    } catch {
+      // Fall back to discarding stderr.
+    }
+  }
+  try {
+    return spawn(argv[0]!, argv.slice(1), {
+      detached: true,
+      windowsHide: true,
+      stdio: ['ignore', 'ignore', stderrFd ?? 'ignore'],
+      env: {
+        ...process.env,
+        ...env,
+        QWEN_CODE_NO_RELAUNCH: '1',
+      },
+    });
+  } finally {
+    if (stderrFd !== undefined) closeSync(stderrFd);
+  }
+}
+
+async function withHostStderrTail(
+  error: unknown,
+  stderrLogPath: string,
+): Promise<Error> {
+  const base = error instanceof Error ? error : new Error(String(error));
+  const tail = await fs
+    .readFile(stderrLogPath, 'utf8')
+    .then((text) => text.trim().slice(-2048))
+    .catch(() => '');
+  if (!tail) return base;
+  return new Error(`${base.message} Host stderr: ${tail}`, { cause: base });
 }
 
 function parseHostRequest(line: string): AgentViewPtyHostRequest | undefined {
@@ -694,9 +985,18 @@ function parseHostRequest(line: string): AgentViewPtyHostRequest | undefined {
 }
 
 function parseHostResponse(line: string): AgentViewPtyHostResponse {
-  const parsed = JSON.parse(line) as unknown;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line) as unknown;
+  } catch (error) {
+    throw new AgentViewPtyHostProtocolError(
+      error instanceof Error ? error.message : 'Invalid PTY host response.',
+    );
+  }
   if (!isRecord(parsed) || typeof parsed['id'] !== 'string') {
-    throw new Error('Invalid Agent View PTY host response.');
+    throw new AgentViewPtyHostProtocolError(
+      'Invalid Agent View PTY host response.',
+    );
   }
   if (parsed['ok'] === true) {
     return { id: parsed['id'], ok: true, result: parsed['result'] };
@@ -716,18 +1016,13 @@ function parseHostResponse(line: string): AgentViewPtyHostResponse {
       },
     };
   }
-  throw new Error('Invalid Agent View PTY host response.');
+  throw new AgentViewPtyHostProtocolError(
+    'Invalid Agent View PTY host response.',
+  );
 }
 
 function isHostOperation(value: unknown): value is AgentViewPtyHostOperation {
-  return (
-    value === 'status' ||
-    value === 'logs' ||
-    value === 'resize' ||
-    value === 'kill' ||
-    value === 'shutdown' ||
-    value === 'attachStream'
-  );
+  return HOST_OPERATIONS.includes(value as AgentViewPtyHostOperation);
 }
 
 function errorResponse(
@@ -738,10 +1033,122 @@ function errorResponse(
   return { id, ok: false, error: { code, message } };
 }
 
+// A pid lockfile makes the prepare->listen sequence mutually exclusive:
+// canConnect alone is a false-negative-prone liveness oracle, so two
+// concurrent launches could both unlink and bind the same session path.
+async function acquireSocketPathLock(
+  socketPath: string,
+): Promise<() => Promise<void>> {
+  const lockPath = `${socketPath}.lock`;
+  await fs.mkdir(path.dirname(socketPath), { recursive: true, mode: 0o700 });
+  // Loop until the O_EXCL create wins or a confirmed-live holder is found:
+  // every iteration that continues has just removed a stale lock, so a
+  // successful reclaim always earns another create attempt.
+  while (true) {
+    try {
+      await fs.writeFile(lockPath, String(process.pid), { flag: 'wx' });
+      return async () => {
+        // Only remove a lock that still belongs to this process: a rival
+        // reclaim may have replaced it, and removing the replacement would
+        // strip the new owner's lock.
+        const current = await fs.readFile(lockPath, 'utf8').catch(() => '');
+        if (current === String(process.pid)) {
+          await fs.rm(lockPath, { force: true });
+        }
+      };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      const raw = await fs.readFile(lockPath, 'utf8').catch(() => '');
+      const holderPid = Number.parseInt(raw, 10);
+      // An empty/non-numeric lock means the writer died before recording its
+      // pid; reclaim it the same as a confirmed-dead holder.
+      if (!Number.isInteger(holderPid) || !isProcessAlive(holderPid)) {
+        // Re-read right before removing: a concurrent reclaim may have
+        // already replaced the stale lock, and removing the replacement
+        // would delete the new owner's lock.
+        const current = await fs.readFile(lockPath, 'utf8').catch(() => '');
+        if (current === raw) {
+          await fs.rm(lockPath, { force: true });
+        }
+        continue;
+      }
+      break;
+    }
+  }
+  const busy = new Error(
+    `Agent View PTY host socket is already in use: ${socketPath}`,
+  ) as NodeJS.ErrnoException;
+  busy.code = 'EADDRINUSE';
+  throw busy;
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
 async function prepareSocketPath(socketPath: string): Promise<void> {
   if (isWindowsPipePath(socketPath)) return;
-  await fs.mkdir(path.dirname(socketPath), { recursive: true, mode: 0o700 });
+  const socketDir = path.dirname(socketPath);
+  await fs.mkdir(socketDir, { recursive: true, mode: 0o700 });
+  await ensurePrivateSocketDirectory(socketDir);
+  if (!(await socketPathExists(socketPath))) return;
+  // Fail closed instead of unlinking a live socket: the listening host is
+  // detached and untracked, so replacing it would orphan it irrecoverably.
+  if (await canConnect(socketPath)) {
+    const error = new Error(
+      `Agent View PTY host socket is already in use: ${socketPath}`,
+    ) as NodeJS.ErrnoException;
+    error.code = 'EADDRINUSE';
+    throw error;
+  }
   await removeSocketPath(socketPath);
+}
+
+async function ensurePrivateSocketDirectory(socketDir: string): Promise<void> {
+  // lstat (not stat) so a planted symlink at the predictable fallback
+  // location cannot redirect the ownership check, chmod, or socket bind.
+  const stat = await fs.lstat(socketDir);
+  if (stat.isSymbolicLink()) {
+    throw new Error('Agent View PTY host socket parent must not be a symlink.');
+  }
+  if (!stat.isDirectory()) {
+    throw new Error('Agent View PTY host socket parent is not a directory.');
+  }
+  if (typeof process.getuid === 'function' && stat.uid !== process.getuid()) {
+    throw new Error('Agent View PTY host socket parent is not owned by you.');
+  }
+  if ((stat.mode & 0o077) !== 0) {
+    await fs.chmod(socketDir, 0o700);
+  }
+}
+
+function canPrepareSocketDirectory(socketDir: string): boolean {
+  try {
+    const stat = lstatSync(socketDir);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) return false;
+    if (typeof process.getuid === 'function' && stat.uid !== process.getuid()) {
+      return false;
+    }
+    accessSync(socketDir, fsConstants.W_OK | fsConstants.X_OK);
+    return true;
+  } catch (error) {
+    if (!isNodeError(error) || error.code !== 'ENOENT') return false;
+  }
+
+  const parentDir = path.dirname(socketDir);
+  try {
+    const parentStat = statSync(parentDir);
+    if (!parentStat.isDirectory()) return false;
+    accessSync(parentDir, fsConstants.W_OK | fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function removeSocketPath(socketPath: string): Promise<void> {
@@ -753,6 +1160,44 @@ async function removeSocketPath(socketPath: string): Promise<void> {
       throw error;
     }
   }
+}
+
+async function removeOwnedSocketPath(socketPath: string): Promise<void> {
+  if (isWindowsPipePath(socketPath)) return;
+  if (!(await socketPathExists(socketPath))) return;
+  // A live listener means a replacement host took over the path while this
+  // server was shutting down; unlinking would orphan its socket.
+  if (await canConnect(socketPath)) return;
+  await removeSocketPath(socketPath);
+}
+
+async function socketPathExists(socketPath: string): Promise<boolean> {
+  try {
+    await fs.lstat(socketPath);
+    return true;
+  } catch (error) {
+    if (isNodeError(error) && error.code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+async function canConnect(socketPath: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.createConnection(socketPath);
+    let settled = false;
+    function finish(result: boolean) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      socket.removeAllListeners();
+      socket.destroy();
+      resolve(result);
+    }
+
+    socket.once('connect', () => finish(true));
+    socket.once('error', () => finish(false));
+    const timeout = setTimeout(() => finish(false), 250);
+  });
 }
 
 function positiveIntegerParam(
@@ -809,13 +1254,27 @@ function isWindowsPipePath(socketPath: string): boolean {
 }
 
 function shortHash(value: string): string {
-  return createHash('sha256').update(value).digest('hex').slice(0, 16);
+  return createHash('sha256').update(value).digest('hex').slice(0, 12);
 }
 
 function createRequestId(): string {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-async function delay(ms: number): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, ms));
+async function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  await new Promise<void>((resolve) => {
+    if (signal?.aborted) {
+      resolve();
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timeout);
+      resolve();
+    };
+    const timeout = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 }

@@ -21,7 +21,7 @@ import {
 } from './agent-transcript.js';
 import { AgentEventEmitter, AgentEventType } from './runtime/agent-events.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
-import type { Content, FunctionDeclaration } from '@google/genai';
+import type { Content } from '@google/genai';
 
 describe('agent-transcript', () => {
   describe('path helpers', () => {
@@ -138,12 +138,14 @@ describe('agent-transcript', () => {
         status: 'running',
         subagentName: 'explore',
         resolvedApprovalMode: 'auto-edit',
+        executionAllowedTools: [],
       });
 
       expect(readAgentMeta(metaPath)).toMatchObject({
         agentId: 'a',
         status: 'running',
         subagentName: 'explore',
+        executionAllowedTools: [],
       });
     });
   });
@@ -172,8 +174,6 @@ describe('agent-transcript', () => {
       extra: {
         initialUserPrompt?: string;
         bootstrapHistory?: Content[];
-        bootstrapSystemInstruction?: string | Content;
-        bootstrapTools?: Array<string | FunctionDeclaration>;
         launchTaskPrompt?: string;
       } = {},
     ) {
@@ -261,11 +261,6 @@ describe('agent-transcript', () => {
       const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
       const { cleanup } = makeWriter(jsonlPath, {
         bootstrapHistory: [],
-        bootstrapSystemInstruction: {
-          role: 'system',
-          parts: [{ text: 'fork system' }],
-        },
-        bootstrapTools: [{ name: 'Bash' }],
         launchTaskPrompt: 'Begin.',
       });
 
@@ -279,12 +274,10 @@ describe('agent-transcript', () => {
       expect(records[0]?.systemPayload).toMatchObject({
         kind: 'fork',
         history: [],
-        systemInstruction: {
-          role: 'system',
-          parts: [{ text: 'fork system' }],
-        },
-        tools: [{ name: 'Bash' }],
       });
+      expect(records[0]?.systemPayload).not.toHaveProperty(
+        'executionAllowedTools',
+      );
     });
 
     it('writes a ROUND_TEXT event as an assistant record with text part', () => {

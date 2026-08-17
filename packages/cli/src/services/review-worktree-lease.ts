@@ -12,9 +12,12 @@ import {
 } from 'node:fs';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
-import { REVIEW_TMP_DIR, reviewBranch } from '../commands/review/lib/paths.js';
+import {
+  LEASE_PREFIX,
+  REVIEW_TMP_DIR,
+  reviewBranch,
+} from '../commands/review/lib/paths.js';
 
-const LEASE_PREFIX = 'qwen-review-lease-';
 const GIT_TIMEOUT_MS = 120_000;
 const debugLogger = createDebugLogger('REVIEW_WORKTREE_LEASE');
 

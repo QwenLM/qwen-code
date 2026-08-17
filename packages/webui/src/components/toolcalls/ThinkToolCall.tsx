@@ -8,6 +8,7 @@
 
 import type { FC } from 'react';
 import {
+  CollapsibleOutput,
   ToolCallContainer,
   ToolCallCard,
   ToolCallRow,
@@ -50,15 +51,23 @@ export const ThinkToolCall: FC<BaseToolCallProps> = ({
     const isLong = thoughts.length > 200;
 
     if (isLong) {
-      const truncatedThoughts =
-        thoughts.length > 500 ? thoughts.substring(0, 500) + '...' : thoughts;
+      const isCollapsible = thoughts.length > 500;
 
       return (
         <ToolCallCard icon="💭">
           <ToolCallRow label="Think">
-            <div className="italic opacity-90 leading-relaxed">
-              {truncatedThoughts}
-            </div>
+            {isCollapsible ? (
+              <CollapsibleOutput
+                isCollapsible
+                className="italic opacity-90 leading-relaxed"
+              >
+                {thoughts}
+              </CollapsibleOutput>
+            ) : (
+              <div className="italic opacity-90 leading-relaxed">
+                {thoughts}
+              </div>
+            )}
           </ToolCallRow>
         </ToolCallCard>
       );

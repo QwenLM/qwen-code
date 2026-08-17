@@ -4,6 +4,7 @@ import { projectMainTranscriptEventsForTesting } from './DaemonSessionProvider.j
 
 describe('on-demand subagent transcript projection', () => {
   it('drops child events and bounds the root agent payload', () => {
+    const todoId = `todo-${'x'.repeat(160)}`;
     const events: DaemonUiEvent[] = [
       {
         type: 'tool.update',
@@ -13,9 +14,11 @@ describe('on-demand subagent transcript projection', () => {
         rawInput: {
           subagent_type: 'explore',
           prompt: 'p'.repeat(400),
+          todo_id: todoId,
         },
         rawOutput: {
           type: 'task_execution',
+          subagentColor: 'red',
           status: 'completed',
           terminateReason: 'max_turns',
           result: 'large result',
@@ -54,9 +57,10 @@ describe('on-demand subagent transcript projection', () => {
     expect(result[0]).toMatchObject({
       type: 'tool.update',
       toolCallId: 'agent-1',
-      rawInput: { subagent_type: 'explore' },
+      rawInput: { subagent_type: 'explore', todo_id: todoId },
       rawOutput: {
         type: 'task_execution',
+        subagentColor: 'red',
         status: 'completed',
         terminateReason: 'max_turns',
         executionSummary: {

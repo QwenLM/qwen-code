@@ -1,16 +1,21 @@
 use async_trait::async_trait;
-use cua_driver_core::{protocol::ToolResult, tool::{Tool, ToolDef}};
+use cua_driver_core::{
+    protocol::ToolResult,
+    tool::{Tool, ToolDef},
+};
 use serde_json::Value;
 use std::sync::Arc;
 
-use super::{write_driver_config_updates, ConfigOverrides, ToolState};
+use super::{write_driver_config_key, ConfigOverrides, ToolState};
 
 pub struct SetConfigTool {
     state: Arc<ToolState>,
 }
 
 impl SetConfigTool {
-    pub fn new(state: Arc<ToolState>) -> Self { Self { state } }
+    pub fn new(state: Arc<ToolState>) -> Self {
+        Self { state }
+    }
 }
 
 static DEF: std::sync::OnceLock<ToolDef> = std::sync::OnceLock::new();
@@ -19,13 +24,12 @@ fn def() -> &'static ToolDef {
     DEF.get_or_init(|| ToolDef {
         name: "set_config".into(),
         description: "Update cua-driver-rs configuration. Changes to \
-            max_image_dimension and capture_scope take effect immediately. The \
+            max_image_dimension take effect immediately. The \
             experimental_pip keys are persisted to ~/.cua-driver/config.json and \
             take effect on the next daemon restart (the PiP backend is \
             initialised once at startup).\n\nNote: capture_mode is a per-call \
-            param (on get_window_state / click), not a stored setting. \
-            capture_scope gates get_desktop_state (full-display capture requires \
-            capture_scope=desktop) and is isolated per named MCP session.".into(),
+            param (on get_window_state / click), not a stored setting. Capture \
+            scope is selected by start_session, not set_config.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -41,14 +45,6 @@ fn def() -> &'static ToolDef {
                 "max_image_dimension": {
                     "type": "integer",
                     "description": "Max dimension for screenshot resizing (0 = no limit)."
-                },
-                "capture_scope": {
-                    "type": "string",
-                    "enum": ["window", "desktop"],
-                    "description": "Capture scope: \"window\" (default) or \"desktop\". Desktop \
-                        scope enables get_desktop_state (full-display capture). A window-less \
-                        screen-absolute click still requires per-call scope=desktop; scroll remains \
-                        window-targeted. Session-scoped for MCP; takes effect immediately."
                 },
                 "experimental_pip": {
                     "type": "boolean",
@@ -72,10 +68,24 @@ fn def() -> &'static ToolDef {
 
 #[async_trait]
 impl Tool for SetConfigTool {
-    fn def(&self) -> &ToolDef { def() }
+    fn def(&self) -> &ToolDef {
+        def()
+    }
 
     async fn invoke(&self, args: Value) -> ToolResult {
         use cua_driver_core::tool_args::ArgsExt;
+        if args.get("capture_scope").is_some()
+            || args.get("key").and_then(Value::as_str) == Some("capture_scope")
+        {
+            return ToolResult::error(
+                "config key 'capture_scope' is retired; pass capture_scope=auto|window|desktop to start_session",
+            )
+            .with_structured(serde_json::json!({
+                "code": "config_key_retired",
+                "key": "capture_scope",
+                "replacement": "start_session.capture_scope",
+            }));
+        }
         // The daemon injects `_session_id` for non-anonymous MCP sessions.
         // Absent => anonymous/global session (CLI one-shot, legacy proxy) =>
         // today's behavior: write the shared global DriverConfig + persist to
@@ -84,173 +94,101 @@ impl Tool for SetConfigTool {
         // sessions don't clobber each other or the persisted default.
         let session_id = args.opt_str("_session_id");
 
-        // Accept BOTH shapes, matching Windows/Linux + the CLI `config set`:
-        //   - direct fields:  {"capture_scope":"desktop"}
-        //   - {key, value}:    {"key":"capture_scope","value":"desktop"}
-        // A direct field wins if both are somehow present.
+        // Accept BOTH the direct field and {key,value} shapes.
         let kv: Option<(String, Value)> = args
             .opt_str("key")
             .and_then(|k| args.get("value").map(|v| (k, v.clone())));
         let kv_u64 = |name: &str| -> Option<u64> {
-            kv.as_ref().filter(|(k, _)| k == name).and_then(|(_, v)| v.as_u64())
+            kv.as_ref()
+                .filter(|(k, _)| k == name)
+                .and_then(|(_, v)| v.as_u64())
         };
 
         // Validate max_image_dimension up front so both branches share the
         // u32 check and we never half-apply.
-        let max_dim: Option<u32> = match args.opt_u64("max_image_dimension").or_else(|| kv_u64("max_image_dimension")) {
+        let max_dim: Option<u32> = match args
+            .opt_u64("max_image_dimension")
+            .or_else(|| kv_u64("max_image_dimension"))
+        {
             Some(dim) => match u32::try_from(dim) {
                 Ok(d) => Some(d),
-                Err(_) => return ToolResult::error(format!("max_image_dimension {dim} exceeds u32::MAX")),
+                Err(_) => {
+                    return ToolResult::error(format!("max_image_dimension {dim} exceeds u32::MAX"))
+                }
             },
             None => None,
         };
 
-        let scope_arg = args.opt_str("capture_scope").or_else(|| {
-            kv.as_ref()
-                .filter(|(k, _)| k == "capture_scope")
-                .and_then(|(_, v)| v.as_str().map(str::to_owned))
-        });
-        if let Some(ref scope) = scope_arg {
-            if scope != "window" && scope != "desktop" {
-                return ToolResult::error(format!(
-                    "`capture_scope` must be \"window\" or \"desktop\", got \"{scope}\"."
-                ));
-            }
-        }
-
-        let pip_enabled = args.get("experimental_pip").and_then(|v| v.as_bool());
-        let pip_geometry = args.opt_str("experimental_pip_geometry");
-        if let Some(ref geometry) = pip_geometry {
-            if pip_preview::PipGeometry::parse(geometry).is_none() {
-                return ToolResult::error(format!(
-                    "experimental_pip_geometry `{geometry}` is not a valid WxH or WxH+X+Y string"
-                ));
-            }
-        }
-
-        let mut updates = Vec::new();
-        if session_id.is_none() {
-            if let Some(dim32) = max_dim {
-                updates.push(("max_image_dimension", Value::Number(u64::from(dim32).into())));
-            }
-            if let Some(ref scope) = scope_arg {
-                updates.push(("capture_scope", Value::String(scope.clone())));
-            }
-        }
-        if let Some(enabled) = pip_enabled {
-            updates.push(("experimental_pip", Value::Bool(enabled)));
-        }
-        if let Some(ref geometry) = pip_geometry {
-            updates.push(("experimental_pip_geometry", Value::String(geometry.clone())));
-        }
-        let persisted_global = if !updates.is_empty() {
-            match write_driver_config_updates(&updates, || {
-                if let Some(sid) = session_id.as_deref() {
-                    self.state.session_config.set(sid, ConfigOverrides {
-                        max_image_dimension: max_dim,
-                        capture_scope: scope_arg.clone(),
-                    });
-                    return None;
-                }
-                let mut cfg = self.state.config.write().unwrap();
-                if let Some(dim32) = max_dim {
-                    cfg.max_image_dimension = dim32;
-                }
-                if let Some(ref scope) = scope_arg {
-                    cfg.capture_scope = scope.clone();
-                }
-                Some((cfg.max_image_dimension, cfg.capture_scope.clone()))
-            }) {
-                Ok(applied) => applied,
-                Err(e) => {
-                    return ToolResult::error(format!(
-                        "failed to persist cua-driver configuration: {e}"
-                    ));
-                }
-            }
-        } else {
-            None
-        };
-
-        let (effective_dim, effective_scope) = if let Some(sid) = session_id.as_deref() {
-            // These session-scoped fields are in-memory only; PiP settings above
-            // remain global because the backend reads them once at daemon startup.
-            // When PiP persistence was part of this call, the override committed
-            // inside the same config transaction above; otherwise no disk state
-            // changed and this single registry write is already atomic.
-            if updates.is_empty() {
-                self.state.session_config.set(sid, ConfigOverrides {
+        let effective_dim = if let Some(sid) = session_id.as_deref() {
+            // Session-scoped override: in-memory only, no global write, no disk.
+            self.state.session_config.set(
+                sid,
+                ConfigOverrides {
                     max_image_dimension: max_dim,
-                    capture_scope: scope_arg.clone(),
-                });
-            }
-            let cfg = self.state.config.read().unwrap();
-            self.state.session_config.effective_config(Some(sid), &cfg)
-        } else if let Some(applied) = persisted_global {
-            applied
+                },
+            );
+            self.state
+                .session_config
+                .effective_max_image_dimension(Some(sid), &self.state.config.read().unwrap())
         } else {
-            let cfg = self.state.config.read().unwrap();
-            (cfg.max_image_dimension, cfg.capture_scope.clone())
+            // Anonymous/global session: write the shared global + persist.
+            let mut cfg = self.state.config.write().unwrap();
+            if let Some(dim32) = max_dim {
+                cfg.max_image_dimension = dim32;
+                if let Err(e) = write_driver_config_key(
+                    "max_image_dimension",
+                    &Value::Number(u64::from(dim32).into()),
+                ) {
+                    tracing::warn!("set_config: failed to persist max_image_dimension: {e}");
+                }
+            }
+            cfg.max_image_dimension
         };
         // PiP keys persist to the same config.json but take effect only on
         // next daemon restart — the backend is initialised once at startup.
         let mut pip_note = String::new();
-        if let Some(enabled) = pip_enabled {
-            pip_note = format!(" — restart cua-driver for experimental_pip={enabled} to take effect");
+        if let Some(enabled) = args.get("experimental_pip").and_then(|v| v.as_bool()) {
+            if let Err(e) = pip_preview::write_config_key("experimental_pip", Value::Bool(enabled))
+            {
+                return ToolResult::error(format!("failed to persist experimental_pip: {e}"));
+            }
+            pip_note =
+                format!(" — restart qwen-cua-driver for experimental_pip={enabled} to take effect");
         }
-        if let Some(geom) = pip_geometry {
+        if let Some(geom) = args.opt_str("experimental_pip_geometry") {
+            // Validate before persisting so the user gets an immediate error.
+            if pip_preview::PipGeometry::parse(&geom).is_none() {
+                return ToolResult::error(format!(
+                    "experimental_pip_geometry `{geom}` is not a valid WxH or WxH+X+Y string"
+                ));
+            }
+            if let Err(e) = pip_preview::write_config_key(
+                "experimental_pip_geometry",
+                Value::String(geom.clone()),
+            ) {
+                return ToolResult::error(format!(
+                    "failed to persist experimental_pip_geometry: {e}"
+                ));
+            }
             if pip_note.is_empty() {
-                pip_note = format!(" — restart cua-driver for experimental_pip_geometry={geom} to take effect");
+                pip_note = format!(
+                    " — restart qwen-cua-driver for experimental_pip_geometry={geom} to take effect"
+                );
             }
         }
-        let capture_scope_note = scope_arg
-            .as_ref()
-            .map(|scope| format!(", capture_scope={scope}"))
-            .unwrap_or_default();
-
         let scope_note = if session_id.is_some() {
             " (session-scoped; persisted default unchanged)"
         } else {
             ""
         };
-        // Echo the config back in structured content (matches Windows/Linux
-        // set_config, which callers/tests read for the applied capture_scope).
         ToolResult::text(format!(
-            "Config updated: max_image_dimension={}{}{}{}",
-            effective_dim, capture_scope_note, scope_note, pip_note
+            "Config updated: max_image_dimension={}{}{}",
+            effective_dim, scope_note, pip_note
         ))
         .with_structured(serde_json::json!({
             "version": env!("CARGO_PKG_VERSION"),
             "platform": "macos",
             "max_image_dimension": effective_dim,
-            "capture_scope": effective_scope,
         }))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn invalid_pip_geometry_does_not_apply_session_overrides() {
-        let state = Arc::new(ToolState::default());
-        let global_scope = state.config.read().unwrap().capture_scope.clone();
-        let requested_scope = if global_scope == "window" { "desktop" } else { "window" };
-        let tool = SetConfigTool::new(state.clone());
-        let session = "set-config-validation-test";
-
-        let result = tool.invoke(serde_json::json!({
-            "_session_id": session,
-            "capture_scope": requested_scope,
-            "experimental_pip_geometry": "bad",
-        })).await;
-
-        assert_eq!(result.is_error, Some(true));
-        let cfg = state.config.read().unwrap();
-        assert_eq!(
-            state.session_config.effective_capture_scope(Some(session), &cfg),
-            global_scope,
-        );
     }
 }

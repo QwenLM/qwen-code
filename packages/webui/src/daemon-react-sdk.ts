@@ -46,6 +46,8 @@ export { useDaemonActions as useActions } from './daemon/index.js';
 /** Connection status, capabilities, and model info. */
 export { useDaemonConnection as useConnection } from './daemon/index.js';
 
+export { useDaemonSessionOwnerGuard } from './daemon/session/DaemonSessionProvider.js';
+
 /** Current session metadata (id, model, approval mode). */
 export { useDaemonSession as useSession } from './daemon/index.js';
 
@@ -209,6 +211,7 @@ export type {
   DaemonStreamingState,
   /** Prompt submission status: `'idle' | 'waiting' | 'streaming'`. */
   DaemonPromptStatus,
+  DaemonReasoningControls,
   /** Hook return value for daemon follow-up suggestions. */
   UseDaemonFollowupSuggestionReturn,
   /** Image attachment (base64 data + MIME type) for prompt submission. */
@@ -242,6 +245,11 @@ export type {
   /** Result of non-blocking `submitPrompt()`: the daemon-assigned promptId. */
   SubmitPromptResult,
 } from './daemon/index.js';
+export type {
+  DaemonSessionOwnerGuard,
+  DaemonSessionOwnerSnapshot,
+  DaemonSessionTransition,
+} from './daemon/session/types.js';
 
 // ── Types: Todos ─────────────────────────────────────────────────
 
@@ -372,6 +380,12 @@ export type {
   DaemonWorkspaceProviderModel,
   DaemonChannelConfigFieldKind,
   DaemonChannelConfigFieldDescriptor,
+  DaemonChannelConfigValueFieldDescriptor,
+  DaemonChannelConfigPlainValueFieldDescriptor,
+  DaemonChannelConfigEnumFieldDescriptor,
+  DaemonChannelConfigNumberFieldDescriptor,
+  DaemonChannelConfigObjectFieldDescriptor,
+  DaemonChannelConfigNestedFieldDescriptor,
   DaemonChannelTypeDescriptor,
   DaemonChannelTypeCatalog,
   DaemonChannelRuntimeState,
@@ -384,9 +398,13 @@ export type {
   DaemonChannelStartupRequest,
   DaemonChannelMutationResult,
   DaemonChannelPairingRequest,
+  DaemonChannelPairingSubject,
   DaemonChannelPairingRequestsSnapshot,
   DaemonChannelPairingApprovalRequest,
   DaemonChannelPairingApprovalResult,
+  DaemonChannelPairingApprovalsSnapshot,
+  DaemonChannelPairingRevocationRequest,
+  DaemonChannelPairingRevocationResult,
   /** Request/result for DELETE /workspace/models. */
   DaemonModelDeleteRequest,
   DaemonModelDeleteResult,

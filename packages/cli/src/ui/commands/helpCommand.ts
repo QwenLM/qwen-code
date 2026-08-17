@@ -13,6 +13,7 @@ export const helpCommand: SlashCommand = {
   altNames: ['?'],
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive'] as const,
+  canRunDuringStreaming: true,
   get description() {
     return t('for help on Qwen Code');
   },

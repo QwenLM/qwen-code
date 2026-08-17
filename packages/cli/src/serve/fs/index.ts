@@ -21,6 +21,7 @@ export {
 export {
   MAX_READ_BYTES,
   MAX_WRITE_BYTES,
+  MAX_UPLOAD_BYTES,
   BINARY_PROBE_BYTES,
   assertTrustedForIntent,
   detectBinary,
@@ -55,6 +56,7 @@ export {
   type ReadMeta,
   type ReadTextOptions,
   type RequestContext,
+  type SameHostToolTextWriteRequest,
   type WorkspaceFileSystem,
   type WorkspaceFileSystemFactory,
   type WriteMode,
@@ -62,3 +64,4 @@ export {
   type WriteTextAtomicOptions,
   type WriteTextAtomicOutcome,
 } from './workspace-file-system.js';
+export { MAX_TEXT_CURSOR_CHARS } from './text-cursor.js';

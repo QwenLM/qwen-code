@@ -59,7 +59,7 @@ function stringifyOptional(value: unknown): string | undefined {
 }
 
 function stringifySandbox(value: unknown): string | undefined {
-  if (value === undefined) return undefined;
+  if (value === undefined || value === null) return undefined;
   if (typeof value === 'string') return value;
   if (typeof value === 'boolean') return String(value);
   return JSON.stringify(value);

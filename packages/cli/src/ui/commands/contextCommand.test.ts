@@ -110,11 +110,15 @@ describe('collectContextData (contextCommand)', () => {
     // per-session value and must win.
     mockGetLastPromptTokenCount.mockReturnValue(999_000); // wrong session's global value
     const getLastPromptTokenCount = vi.fn().mockReturnValue(50_000);
+    const isLastPromptTokenCountEstimated = vi.fn().mockReturnValue(false);
     const config = {
       ...makeMockConfig(200_000),
       getGeminiClient: vi.fn().mockReturnValue({
         isInitialized: vi.fn().mockReturnValue(true),
-        getChat: vi.fn().mockReturnValue({ getLastPromptTokenCount }),
+        getChat: vi.fn().mockReturnValue({
+          getLastPromptTokenCount,
+          isLastPromptTokenCountEstimated,
+        }),
       }),
     } as unknown as Config;
 
@@ -124,6 +128,28 @@ describe('collectContextData (contextCommand)', () => {
     expect(data.totalTokens).toBe(50_000);
     // 50K < warn(150K); if the 999K global had leaked through it would be `hard`.
     expect(data.breakdown.currentTier).toBe('safe');
+  });
+
+  it('reports a nonzero compression-derived count as estimated', async () => {
+    const config = {
+      ...makeMockConfig(200_000),
+      getGeminiClient: vi.fn().mockReturnValue({
+        isInitialized: vi.fn().mockReturnValue(true),
+        getChat: vi.fn().mockReturnValue({
+          getLastPromptTokenCount: vi.fn().mockReturnValue(50_000),
+          isLastPromptTokenCountEstimated: vi.fn().mockReturnValue(true),
+        }),
+      }),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, false);
+
+    expect(data.isEstimated).toBe(true);
+    expect(data.totalTokens).toBe(50_000);
+    expect(data.breakdown.freeSpace).toBeLessThan(150_000);
+    const text = formatContextUsageText(data);
+    expect(text).toContain('Token usage is estimated');
+    expect(text).not.toContain('No API response yet');
   });
 
   it('falls back to the global singleton when the session chat is not initialized', async () => {

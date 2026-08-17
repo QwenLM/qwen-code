@@ -11,7 +11,6 @@ import {
   useResumeCommand,
 } from './useResumeCommand.js';
 import { useHistory } from './useHistoryManager.js';
-import { restoreGoalFromHistory } from '../utils/restoreGoal.js';
 
 import type { Content } from '@google/genai';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -97,7 +96,6 @@ vi.mock('../../startup/agent-view-resume-guard.js', () => ({
 vi.mock('../../startup/agent-view-resume-sessions.js', () => ({
   getAgentViewProjectSessionService: vi.fn(async () => undefined),
 }));
-
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const original =
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
@@ -256,6 +254,7 @@ describe('useResumeCommand', () => {
       loadHistory: vi.fn(),
     };
     const startNewSession = vi.fn();
+    const clearPendingState = vi.fn();
     const geminiClient = {
       initialize: vi.fn().mockResolvedValue(undefined),
     };
@@ -266,6 +265,7 @@ describe('useResumeCommand', () => {
       getTargetDir: () => '/tmp',
       getGeminiClient: () => geminiClient,
       startNewSession: vi.fn(),
+      getGoalRuntimeReady: vi.fn().mockResolvedValue({}),
       getBackgroundTaskRegistry: () => ({
         hasRunningTasks: vi.fn().mockReturnValue(false),
         reset: vi.fn(),
@@ -302,6 +302,7 @@ describe('useResumeCommand', () => {
         settings: mockSettings,
         historyManager,
         startNewSession,
+        clearPendingState,
       }),
     );
 
@@ -340,16 +341,12 @@ describe('useResumeCommand', () => {
     expect(geminiClient.initialize).toHaveBeenCalledWith();
     expect(historyManager.clearItems).toHaveBeenCalledTimes(1);
     expect(historyManager.loadHistory).toHaveBeenCalledTimes(1);
-    expect(resetMonitorRegistry).toHaveBeenCalledTimes(1);
-    // Goal must be re-armed under the resumed sessionId so the in-memory
-    // activeGoalStore entry (potentially stale across /new + /resume) gets
-    // a fresh setAt / hookId / observer — otherwise the footer pill ticks
-    // from the pre-/new setAt and the Stop hook is silently dead.
-    expect(restoreGoalFromHistory).toHaveBeenCalledWith(
-      expect.any(Array),
-      config,
-      historyManager.addItem,
+    expect(clearPendingState).toHaveBeenCalledTimes(1);
+    expect(clearPendingState.mock.invocationCallOrder[0]).toBeLessThan(
+      historyManager.loadHistory.mock.invocationCallOrder[0]!,
     );
+    expect(resetMonitorRegistry).toHaveBeenCalledTimes(1);
+    expect(config.getGoalRuntimeReady).toHaveBeenCalledTimes(1);
   });
 
   it('adds a recovery notice when resuming an interrupted tool turn', async () => {
@@ -371,6 +368,7 @@ describe('useResumeCommand', () => {
       getTargetDir: () => '/tmp',
       getGeminiClient: () => geminiClient,
       startNewSession: vi.fn(),
+      getGoalRuntimeReady: vi.fn().mockResolvedValue({}),
       getBackgroundTaskRegistry: () => ({
         hasRunningTasks: vi.fn().mockReturnValue(false),
         reset: vi.fn(),
@@ -454,6 +452,7 @@ describe('useResumeCommand', () => {
       getTargetDir: () => '/tmp',
       getGeminiClient: () => geminiClient,
       startNewSession: vi.fn(),
+      getGoalRuntimeReady: vi.fn().mockResolvedValue({}),
       getBackgroundTaskRegistry: () => ({
         hasRunningTasks: vi.fn().mockReturnValue(false),
         reset: vi.fn(),
@@ -549,6 +548,7 @@ describe('useResumeCommand', () => {
       getTargetDir: () => '/tmp',
       getGeminiClient: () => geminiClient,
       startNewSession: vi.fn(),
+      getGoalRuntimeReady: vi.fn().mockResolvedValue({}),
       getBackgroundTaskRegistry: () => ({
         hasRunningTasks: vi.fn().mockReturnValue(false),
         reset: vi.fn(),
@@ -603,9 +603,6 @@ describe('useResumeCommand', () => {
       }),
       expect.any(Number),
     );
-    expect(historyManager.loadHistory.mock.invocationCallOrder[0]).toBeLessThan(
-      historyManager.addItem.mock.invocationCallOrder[0]!,
-    );
   });
 
   it('blocks resume when the current session still has running background work', async () => {
@@ -619,6 +616,15 @@ describe('useResumeCommand', () => {
     const config = {
       getBackgroundTaskRegistry: () => ({
         hasRunningTasks: vi.fn().mockReturnValue(true),
+        getAll: vi.fn().mockReturnValue([
+          {
+            agentId: 'bg_ab12cd34',
+            isBackgrounded: true,
+            status: 'running',
+            description: 'long-running research',
+            startTime: Date.now(),
+          },
+        ]),
         reset: vi.fn(),
       }),
       getBackgroundShellRegistry: () => ({
@@ -632,6 +638,7 @@ describe('useResumeCommand', () => {
       }),
       getWorkflowRunRegistry: () => ({
         hasRunningEntries: vi.fn().mockReturnValue(false),
+        list: vi.fn().mockReturnValue([]),
         reset: vi.fn(),
         abortAll: vi.fn(),
       }),
@@ -664,13 +671,14 @@ describe('useResumeCommand', () => {
     expect(startNewSession).not.toHaveBeenCalled();
     expect(historyManager.clearItems).not.toHaveBeenCalled();
     expect(historyManager.loadHistory).not.toHaveBeenCalled();
-    expect(historyManager.addItem).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: 'error',
-        text: BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE,
-      }),
-      expect.any(Number),
-    );
+    expect(historyManager.addItem).toHaveBeenCalledTimes(1);
+    const blockedItem = historyManager.addItem.mock.calls[0]?.[0] as {
+      type: string;
+      text: string;
+    };
+    expect(blockedItem.type).toBe('error');
+    expect(blockedItem.text).toContain(BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE);
+    expect(blockedItem.text).toContain('[bg_ab12cd34]');
   });
 
   it('blocks resume when the current session still has a running monitor', async () => {
@@ -684,6 +692,7 @@ describe('useResumeCommand', () => {
     const config = {
       getBackgroundTaskRegistry: () => ({
         hasRunningTasks: vi.fn().mockReturnValue(false),
+        getAll: vi.fn().mockReturnValue([]),
         reset: vi.fn(),
       }),
       getBackgroundShellRegistry: () => ({
@@ -696,12 +705,15 @@ describe('useResumeCommand', () => {
           {
             monitorId: 'mon_123',
             status: 'running',
+            description: 'tail -f /var/log/app.log',
+            startTime: Date.now(),
           },
         ]),
         reset: vi.fn(),
       }),
       getWorkflowRunRegistry: () => ({
         hasRunningEntries: vi.fn().mockReturnValue(false),
+        list: vi.fn().mockReturnValue([]),
         reset: vi.fn(),
         abortAll: vi.fn(),
       }),
@@ -734,29 +746,29 @@ describe('useResumeCommand', () => {
     expect(startNewSession).not.toHaveBeenCalled();
     expect(historyManager.clearItems).not.toHaveBeenCalled();
     expect(historyManager.loadHistory).not.toHaveBeenCalled();
-    expect(historyManager.addItem).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: 'error',
-        text: BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE,
-      }),
-      expect.any(Number),
-    );
+    expect(historyManager.addItem).toHaveBeenCalledTimes(1);
+    const blockedItem = historyManager.addItem.mock.calls[0]?.[0] as {
+      type: string;
+      text: string;
+    };
+    expect(blockedItem.type).toBe('error');
+    expect(blockedItem.text).toContain(BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE);
+    expect(blockedItem.text).toContain('[mon_123]');
   });
 
-  it('rolls core back to the old session when something fails after core swap but before UI swap', async () => {
+  it('rolls core back when persisted Goal state is malformed', async () => {
     const startNewSession = vi.fn();
     const geminiClient = {
-      initialize: vi
-        .fn()
-        .mockRejectedValueOnce(new Error('init boom'))
-        .mockResolvedValueOnce(undefined),
+      initialize: vi.fn().mockResolvedValue(undefined),
     };
+    const goalFailure = new Error('unsupported Goal lifecycle record');
 
     const config = {
       getSessionId: () => 'old-session-id',
       getTargetDir: () => '/tmp',
       getGeminiClient: () => geminiClient,
       startNewSession: vi.fn(),
+      getGoalRuntimeReady: vi.fn().mockRejectedValue(goalFailure),
       getBackgroundTaskRegistry: () => ({
         hasRunningTasks: vi.fn().mockReturnValue(false),
         reset: vi.fn(),
@@ -814,6 +826,9 @@ describe('useResumeCommand', () => {
       'old-session-id',
       undefined,
     );
+    expect(config.loadPausedBackgroundAgents).toHaveBeenCalledWith(
+      'old-session-id',
+    );
     // UI never swapped.
     expect(startNewSession).not.toHaveBeenCalled();
     expect(historyManager.clearItems).not.toHaveBeenCalled();
@@ -822,17 +837,12 @@ describe('useResumeCommand', () => {
     expect(historyManager.addItem).toHaveBeenCalledWith(
       expect.objectContaining({
         type: 'error',
-        text: expect.stringMatching(/Failed to resume session.*init boom/),
+        text: expect.stringMatching(
+          /Failed to resume session.*unsupported Goal lifecycle record/,
+        ),
       }),
       expect.any(Number),
     );
-    // The rollback reloads the old session's still-on-disk background agents
-    // so `list_agents` is not left empty after core is restored. The forward
-    // path never reached its own load (initialize threw first), so this call
-    // is the rollback reload, scoped to the old session.
-    expect(config.loadPausedBackgroundAgents).toHaveBeenCalledTimes(1);
-    expect(config.loadPausedBackgroundAgents).toHaveBeenCalledWith(
-      'old-session-id',
-    );
+    expect(geminiClient.initialize).not.toHaveBeenCalled();
   });
 });

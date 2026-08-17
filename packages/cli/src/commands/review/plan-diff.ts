@@ -19,6 +19,7 @@ import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { REVIEW_TMP_DIR } from './lib/paths.js';
+import { planEffortField } from './lib/effort.js';
 import type { ReviewEffort } from './parse-args.js';
 import {
   buildDiffPlan,
@@ -90,11 +91,11 @@ function runPlanDiff(args: PlanDiffArgs): void {
     ...(args.pr !== undefined && args.repo !== undefined
       ? { prNumber: String(args.pr), ownerRepo: args.repo }
       : {}),
-    ...(args.effort ? { effort: args.effort } : {}),
     // No `git show` is possible here — there is no ref to resolve a path
     // against — so per-file line counts and heaviness are unavailable. Chunk
     // coverage, which is what Step 3B needs, is not.
     ...buildPlanReport(plan, null),
+    ...planEffortField(args.effort),
   };
 
   mkdirSync(REVIEW_TMP_DIR, { recursive: true });

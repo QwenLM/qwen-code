@@ -8,12 +8,9 @@
  * Workspace-wide `/goal` listing — the daemon-side surface behind the Web Shell
  * "Goals" page.
  *
- * A goal is a session-scoped Stop hook whose state (condition, judge turn count,
- * last verdict) lives only in the `qwen --acp` child's in-memory store. The serve
- * process holds no copy, so this route fans out one `sessionGoalGet` ext-method
- * call per live session and collects the answers. There is no durable goal store
- * to read instead: a goal only advances while its session is resident, so "the
- * live sessions" IS the complete set of goals that are actually running.
+ * The canonical Goal runtime is session scoped and owned by each `qwen --acp`
+ * child. The serve process holds no mutable copy, so this route fans out one
+ * `sessionGoalGet` ext-method call per live session and collects the answers.
  *
  * A session whose child is wedged or dying rejects; those are dropped (and
  * logged) rather than failing the whole list, so one bad session can't hide the
@@ -22,8 +19,8 @@
  * one per session.
  *
  * Read-only: clearing a goal stays on `POST /session/:id/goal/clear`, and
- * setting one stays a prompt (`/goal <condition>` registers the hook and kicks
- * off the first turn — it is not a pure write).
+ * setting one stays a prompt (`/goal <objective>` updates the owning runtime,
+ * which schedules the first Goal turn).
  */
 
 import type { Application } from 'express';

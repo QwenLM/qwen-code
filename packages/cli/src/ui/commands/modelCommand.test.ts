@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { modelCommand } from './modelCommand.js';
+import { modelCommand, isPickerOnlyModelInvocation } from './modelCommand.js';
 import { type CommandContext } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import { SettingScope } from '../../config/settings.js';
@@ -46,7 +46,7 @@ describe('modelCommand', () => {
   it('should have the correct name and description', () => {
     expect(modelCommand.name).toBe('model');
     expect(modelCommand.description).toBe(
-      'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --image for the image generation model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).',
+      'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --compaction for chat compression model, --image for the image generation model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).',
     );
   });
 
@@ -70,6 +70,44 @@ describe('modelCommand', () => {
     const result = await modelCommand.completion!(mockContext, '--image q');
 
     expect(result).toEqual(['qwen-image-2.0']);
+  });
+
+  it('should complete compaction-eligible models for --compaction flag', async () => {
+    mockContext.services.config = {
+      getAvailableModels: vi.fn().mockReturnValue([
+        {
+          id: 'qwen-max',
+          authType: AuthType.USE_OPENAI,
+        },
+        {
+          id: 'qw-voice-model',
+          authType: AuthType.USE_OPENAI,
+          voiceOnly: true,
+        },
+        {
+          id: 'qw-image-model',
+          authType: AuthType.USE_OPENAI,
+          imageOnly: true,
+        },
+        {
+          id: 'qw-vision-model',
+          authType: AuthType.USE_OPENAI,
+          visionOnly: true,
+        },
+        {
+          id: 'qw-fast-model',
+          authType: AuthType.USE_OPENAI,
+          fastOnly: true,
+        },
+      ]),
+    } as unknown as Config;
+
+    const result = await modelCommand.completion!(
+      mockContext,
+      '--compaction qw',
+    );
+
+    expect(result).toEqual(['qwen-max']);
   });
 
   it('should return error when config is not available', async () => {
@@ -1803,6 +1841,189 @@ describe('modelCommand', () => {
     });
   });
 
+  describe('--compaction handler', () => {
+    it('should set compaction model', async () => {
+      const setValue = vi.fn();
+      const setCompactionModel = vi.fn();
+      mockContext = createMockCommandContext({
+        invocation: {
+          raw: '/model --compaction compaction-model',
+          name: 'model',
+          args: '--compaction compaction-model',
+        },
+        services: {
+          config: {
+            getContentGeneratorConfig: vi.fn().mockReturnValue({
+              model: 'gpt-4',
+              authType: AuthType.USE_OPENAI,
+            }),
+            getAllConfiguredModels: vi.fn().mockReturnValue([
+              {
+                id: 'compaction-model',
+                label: 'Compaction Model',
+                authType: AuthType.USE_OPENAI,
+              },
+              {
+                id: 'gpt-4',
+                label: 'GPT-4',
+                authType: AuthType.USE_OPENAI,
+              },
+            ]),
+            setCompactionModel,
+          },
+          settings: createMockSettings(setValue),
+        },
+      });
+
+      const result = await modelCommand.action!(
+        mockContext,
+        '--compaction compaction-model',
+      );
+
+      expect(setValue).toHaveBeenCalledWith(
+        expect.any(String),
+        'compactionModel',
+        'compaction-model',
+      );
+      expect(setCompactionModel).toHaveBeenCalledWith('compaction-model');
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: 'Compaction Model: compaction-model',
+      });
+    });
+
+    it('should reject unavailable compaction models', async () => {
+      const setCompactionModel = vi.fn();
+      mockContext = createMockCommandContext({
+        invocation: {
+          raw: '/model --compaction missing-model',
+          name: 'model',
+          args: '--compaction missing-model',
+        },
+        services: {
+          config: {
+            getContentGeneratorConfig: vi.fn().mockReturnValue({
+              model: 'gpt-4',
+              authType: AuthType.USE_OPENAI,
+            }),
+            getAllConfiguredModels: vi
+              .fn()
+              .mockReturnValue([{ id: 'gpt-4', label: 'GPT-4' }]),
+            setCompactionModel,
+          },
+          settings: createMockSettings(),
+        },
+      });
+
+      const result = await modelCommand.action!(
+        mockContext,
+        '--compaction missing-model',
+      );
+
+      expect(setCompactionModel).not.toHaveBeenCalled();
+      expect(result).toMatchObject({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining('missing-model'),
+      });
+    });
+
+    it('should show compaction model info in non-interactive mode', async () => {
+      mockContext = createMockCommandContext({
+        executionMode: 'non_interactive',
+        invocation: { args: '--compaction' },
+        services: {
+          config: createMockConfig({
+            model: 'gpt-4',
+            authType: AuthType.USE_OPENAI,
+          }),
+          settings: {
+            merged: {
+              compactionModel: 'compaction-model',
+            } as Record<string, unknown>,
+          },
+        },
+      });
+
+      const result = await modelCommand.action!(mockContext, '--compaction');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content:
+          'Current compaction model: compaction-model\nUse "/model --compaction <model-id>" to set compaction model, or "/model --compaction clear" to clear the override.',
+      });
+    });
+
+    it('should show fallback info when compaction model is not set', async () => {
+      mockContext = createMockCommandContext({
+        executionMode: 'non_interactive',
+        invocation: { args: '--compaction' },
+        services: {
+          config: {
+            getContentGeneratorConfig: vi.fn().mockReturnValue({
+              model: 'gpt-4',
+              authType: AuthType.USE_OPENAI,
+            }),
+            getFastModel: vi.fn().mockReturnValue('fast-model'),
+            getModel: vi.fn().mockReturnValue('gpt-4'),
+          } as unknown as Partial<Config>,
+          settings: {
+            merged: {} as Record<string, unknown>,
+          },
+        },
+      });
+
+      const result = await modelCommand.action!(mockContext, '--compaction');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content:
+          'Current compaction model: not set (falls back to the main model)\nUse "/model --compaction <model-id>" to set compaction model, or "/model --compaction clear" to clear the override.',
+      });
+    });
+
+    it('should clear compaction model override with --compaction clear', async () => {
+      const setValue = vi.fn();
+      const setCompactionModel = vi.fn();
+      mockContext = createMockCommandContext({
+        invocation: {
+          raw: '/model --compaction clear',
+          name: 'model',
+          args: '--compaction clear',
+        },
+        services: {
+          config: {
+            getContentGeneratorConfig: vi.fn().mockReturnValue({
+              model: 'gpt-4',
+              authType: AuthType.USE_OPENAI,
+            }),
+            setCompactionModel,
+          },
+          settings: createMockSettings(setValue),
+        },
+      });
+
+      const result = await modelCommand.action!(
+        mockContext,
+        '--compaction clear',
+      );
+
+      expect(setValue).toHaveBeenCalledWith(
+        expect.any(String),
+        'compactionModel',
+        undefined,
+      );
+      expect(setCompactionModel).toHaveBeenCalledWith(undefined);
+      expect(result).toMatchObject({
+        type: 'message',
+        messageType: 'info',
+      });
+    });
+  });
+
   describe('non-interactive mode', () => {
     it('should use interactive-only wording for unavailable direct switches', async () => {
       const setValue = vi.fn();
@@ -2420,5 +2641,37 @@ describe('modelCommand', () => {
         dialog: 'model',
       });
     });
+  });
+});
+
+describe('isPickerOnlyModelInvocation', () => {
+  it.each([
+    '',
+    '   ',
+    '--fast',
+    '--voice',
+    '--vision',
+    '--compaction',
+    '--image',
+    '--project',
+    '--global',
+    '--fast --project',
+    '--vision --global',
+    '  --fast   --voice  ',
+  ])('treats %j as picker-only', (args) => {
+    expect(isPickerOnlyModelInvocation(args)).toBe(true);
+  });
+
+  it.each([
+    '--fast qwen3-coder-flash',
+    '--vision qwen-vl-max',
+    '--project qwen-max',
+    '--fast --global qwen-max',
+    '--invalid-flag',
+    '--fastx',
+    'qwen-max',
+    'qwen-max write a one-off prompt',
+  ])('treats %j as not picker-only', (args) => {
+    expect(isPickerOnlyModelInvocation(args)).toBe(false);
   });
 });

@@ -29,7 +29,7 @@ export const resumeCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'error',
-        content: AGENT_VIEW_WORKER_RESUME_MESSAGE,
+        content: t(AGENT_VIEW_WORKER_RESUME_MESSAGE),
       };
     }
 

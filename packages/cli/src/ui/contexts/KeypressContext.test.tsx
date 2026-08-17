@@ -250,6 +250,96 @@ describe('KeypressContext - Kitty Protocol', () => {
       }
     });
 
+    it('rewrites macOS composed Option+v glyph "√" to Alt+v', () => {
+      const originalPlatform = process.platform;
+      Object.defineProperty(process, 'platform', {
+        value: 'darwin',
+        configurable: true,
+        writable: true,
+      });
+      try {
+        const keyHandler = vi.fn();
+
+        const { result } = renderHook(() => useKeypressContext(), {
+          wrapper,
+        });
+
+        act(() => {
+          result.current.subscribe(keyHandler);
+        });
+
+        act(() => {
+          stdin.pressKey({
+            name: '',
+            ctrl: false,
+            meta: false,
+            shift: false,
+            paste: false,
+            sequence: '√',
+          });
+        });
+
+        expect(keyHandler).toHaveBeenCalledWith(
+          expect.objectContaining({
+            name: 'v',
+            meta: true,
+            sequence: '√',
+          }),
+        );
+      } finally {
+        Object.defineProperty(process, 'platform', {
+          value: originalPlatform,
+          configurable: true,
+          writable: true,
+        });
+      }
+    });
+
+    it('leaves "√" untouched on non-macOS platforms', () => {
+      const originalPlatform = process.platform;
+      Object.defineProperty(process, 'platform', {
+        value: 'linux',
+        configurable: true,
+        writable: true,
+      });
+      try {
+        const keyHandler = vi.fn();
+
+        const { result } = renderHook(() => useKeypressContext(), {
+          wrapper,
+        });
+
+        act(() => {
+          result.current.subscribe(keyHandler);
+        });
+
+        act(() => {
+          stdin.pressKey({
+            name: '',
+            ctrl: false,
+            meta: false,
+            shift: false,
+            paste: false,
+            sequence: '√',
+          });
+        });
+
+        expect(keyHandler).toHaveBeenCalledWith(
+          expect.objectContaining({
+            name: '',
+            meta: false,
+            sequence: '√',
+          }),
+        );
+      } finally {
+        Object.defineProperty(process, 'platform', {
+          value: originalPlatform,
+          configurable: true,
+          writable: true,
+        });
+      }
+    });
+
     it('should recognize regular enter key (keycode 13) in kitty protocol', async () => {
       const keyHandler = vi.fn();
 
@@ -387,6 +477,84 @@ describe('KeypressContext - Kitty Protocol', () => {
           meta: true,
           shift: false,
         }),
+      );
+    });
+
+    it('maps the Kitty Super (Command) bit to meta so Cmd+C does not leak "c"', () => {
+      // A Kitty-protocol terminal forwards Cmd+C as ESC [ 99 ; 9 u (keycode 99
+      // = "c", modifier 9 = base 1 + Super bit 8) while performing the copy
+      // itself. If the Super bit is dropped, this parses as a bare printable
+      // "c" (meta: false) and the text buffer inserts it. Super must surface as
+      // meta so the input handler skips insertion. See issue #7990.
+      const keyHandler = vi.fn();
+
+      const { result } = renderHook(() => useKeypressContext(), {
+        wrapper: ({ children }) =>
+          wrapper({ children, kittyProtocolEnabled: true }),
+      });
+
+      act(() => {
+        result.current.subscribe(keyHandler);
+      });
+
+      act(() => {
+        stdin.sendKittySequence(`\x1b[99;9u`);
+      });
+
+      expect(keyHandler).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'c',
+          kittyProtocol: true,
+          ctrl: false,
+          meta: true,
+          shift: false,
+        }),
+      );
+    });
+
+    it('maps the Kitty Super bit to meta on the reverse-tab path', () => {
+      const keyHandler = vi.fn();
+
+      const { result } = renderHook(() => useKeypressContext(), {
+        wrapper: ({ children }) =>
+          wrapper({ children, kittyProtocolEnabled: true }),
+      });
+
+      act(() => {
+        result.current.subscribe(keyHandler);
+      });
+
+      // Cmd+Shift+Tab: modifier 10 = base 1 + Shift 1 + Super 8
+      act(() => {
+        stdin.sendKittySequence(`\x1b[1;10Z`);
+      });
+
+      expect(keyHandler).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'tab', shift: true, meta: true }),
+      );
+    });
+
+    it('maps the Kitty Super bit to meta on the functional-keys path', () => {
+      const keyHandler = vi.fn();
+
+      const { result } = renderHook(() => useKeypressContext(), {
+        wrapper: ({ children }) =>
+          wrapper({ children, kittyProtocolEnabled: true }),
+      });
+
+      act(() => {
+        result.current.subscribe(keyHandler);
+      });
+
+      // Cmd+Home: modifier 9 = base 1 + Super 8. Use Home (H), not an arrow
+      // (A/B/C/D): readline claims modified arrows before they reach the Kitty
+      // arrowPrefix decoder, so an arrow case would pass even without the fix.
+      act(() => {
+        stdin.sendKittySequence(`\x1b[1;9H`);
+      });
+
+      expect(keyHandler).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'home', meta: true }),
       );
     });
 
@@ -861,6 +1029,26 @@ describe('KeypressContext - Kitty Protocol', () => {
         }),
       );
     });
+
+    it('should still treat Kitty Ctrl+C as the escape hatch', async () => {
+      const keyHandler = vi.fn();
+      const { result } = renderHook(() => useKeypressContext(), { wrapper });
+      act(() => result.current.subscribe(keyHandler));
+
+      // Modifier 5 is Ctrl
+      act(() => {
+        stdin.sendKittySequence(`\x1b[99;5u`);
+      });
+
+      expect(keyHandler).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'c',
+          ctrl: true,
+          shift: false,
+          kittyProtocol: true,
+        }),
+      );
+    });
   });
 
   describe('paste mode', () => {
@@ -1060,6 +1248,111 @@ describe('KeypressContext - Kitty Protocol', () => {
         });
         // The garbage never reconstructs into a real mouse event.
         expect(mouseHandler).not.toHaveBeenCalled();
+      });
+
+      it('dispatches a standalone SGR wheel event to mouse subscribers (pasteWorkaround path)', async () => {
+        const mouseHandler = vi.fn();
+
+        const { result } = renderHook(() => useKeypressContext(), {
+          wrapper: ({ children }) =>
+            wrapper({ children, pasteWorkaround: true }),
+        });
+
+        act(() => {
+          result.current.subscribeMouse(mouseHandler);
+        });
+
+        // A pure SGR scroll-down event (button 65) arriving alone.
+        act(() => {
+          stdin.emit('data', Buffer.from('\x1b[<65;10;20M'));
+        });
+
+        await waitFor(() => {
+          expect(mouseHandler).toHaveBeenCalledTimes(1);
+        });
+        expect(mouseHandler).toHaveBeenCalledWith(
+          expect.objectContaining({ name: 'scroll-down', col: 10, row: 20 }),
+        );
+      });
+
+      it('dispatches SGR wheel event arriving in fragmented chunks (pasteWorkaround path)', async () => {
+        const mouseHandler = vi.fn();
+
+        const { result } = renderHook(() => useKeypressContext(), {
+          wrapper: ({ children }) =>
+            wrapper({ children, pasteWorkaround: true }),
+        });
+
+        act(() => {
+          result.current.subscribeMouse(mouseHandler);
+        });
+
+        // SGR sequence split across two stdin chunks.
+        act(() => {
+          stdin.emit('data', Buffer.from('\x1b[<64;5'));
+          stdin.emit('data', Buffer.from(';15M'));
+        });
+
+        await waitFor(() => {
+          expect(mouseHandler).toHaveBeenCalledTimes(1);
+        });
+        expect(mouseHandler).toHaveBeenCalledWith(
+          expect.objectContaining({ name: 'scroll-up', col: 5, row: 15 }),
+        );
+      });
+
+      it('dispatches SGR wheel event when \\r arrives in the same chunk (pasteWorkaround path)', async () => {
+        const mouseHandler = vi.fn();
+        const keyHandler = vi.fn();
+
+        const { result } = renderHook(() => useKeypressContext(), {
+          wrapper: ({ children }) =>
+            wrapper({ children, pasteWorkaround: true }),
+        });
+
+        act(() => {
+          result.current.subscribe(keyHandler);
+          result.current.subscribeMouse(mouseHandler);
+        });
+
+        // Windows Terminal may deliver a preceding Enter (\r) in the same
+        // stdin chunk as the SGR mouse sequence. The \r must not cause
+        // shouldFlushRawDataAsPaste to misclassify the SGR data as paste.
+        act(() => {
+          stdin.emit('data', Buffer.from('\r\x1b[<65;10;20M'));
+        });
+
+        await waitFor(() => {
+          expect(mouseHandler).toHaveBeenCalledTimes(1);
+        });
+        expect(mouseHandler).toHaveBeenCalledWith(
+          expect.objectContaining({ name: 'scroll-down', col: 10, row: 20 }),
+        );
+      });
+
+      it('dispatches SGR wheel event when \\r\\n arrives in the same chunk (pasteWorkaround path)', async () => {
+        const mouseHandler = vi.fn();
+
+        const { result } = renderHook(() => useKeypressContext(), {
+          wrapper: ({ children }) =>
+            wrapper({ children, pasteWorkaround: true }),
+        });
+
+        act(() => {
+          result.current.subscribeMouse(mouseHandler);
+        });
+
+        // Windows-style \r\n followed by SGR in one chunk.
+        act(() => {
+          stdin.emit('data', Buffer.from('\r\n\x1b[<65;3;7M'));
+        });
+
+        await waitFor(() => {
+          expect(mouseHandler).toHaveBeenCalledTimes(1);
+        });
+        expect(mouseHandler).toHaveBeenCalledWith(
+          expect.objectContaining({ name: 'scroll-down', col: 3, row: 7 }),
+        );
       });
 
       it('should handle empty paste sequence', async () => {

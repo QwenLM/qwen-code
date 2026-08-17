@@ -3,10 +3,10 @@
 # ============================================================
 
 # --- CODEOWNERS file itself ---
-/.github/CODEOWNERS    @pomelo-nwu
+/.github/CODEOWNERS    @pomelo-nwu @wenshao
 
 # --- Core package ---
-/packages/core/        @wenshao @tanzhenxin @yiliang114 @LaZzyMan
+/packages/core/        @wenshao @tanzhenxin @yiliang114 @LaZzyMan @doudouOUC
 
 # --- CUA Driver & Mobile MCP ---
 /packages/cua-driver/  @LaZzyMan

@@ -210,6 +210,10 @@ export function splitCommands(command: string): string[] {
   let inDoubleQuotes = false;
   let inBackticks = false;
   let substitutionDepth = 0;
+  // Quote state of each enclosing level, saved on `$(` and restored on the
+  // matching `)`, so a substitution body's quotes cannot leak outwards and the
+  // surrounding quotes cannot mask the body's closing paren.
+  const quoteStack: Array<{ single: boolean; double: boolean }> = [];
   let i = 0;
 
   const previousNonWhitespaceChar = (index: number): string | undefined => {
@@ -250,25 +254,39 @@ export function splitCommands(command: string): string[] {
       char === '$' &&
       nextChar === '('
     ) {
+      // A substitution body is quoted independently of its surroundings, so
+      // save the enclosing quote state and start the body unquoted. `"$(...)"`
+      // is the common case: the double quote belongs to the outer command and
+      // must not make the body's `)` look quoted.
+      quoteStack.push({ single: inSingleQuotes, double: inDoubleQuotes });
+      inSingleQuotes = false;
+      inDoubleQuotes = false;
       substitutionDepth++;
       currentCommand += '$(';
       i += 2;
       continue;
-    } else if (!inBackticks && substitutionDepth > 0 && char === ')') {
-      substitutionDepth--;
     } else if (
       !inBackticks &&
-      substitutionDepth === 0 &&
-      char === "'" &&
+      substitutionDepth > 0 &&
+      char === ')' &&
+      !inSingleQuotes &&
       !inDoubleQuotes
     ) {
+      // A quoted `)` inside the body is data, not the closing paren. Closing
+      // on it ended the substitution early and left the body's closing quote
+      // to flip the parser into "in quote" state, which then swallowed every
+      // separator to the end of the line -- so `echo $(echo ')') ; rm -rf x`
+      // came back as one segment with `rm` nowhere in it.
+      const enclosing = quoteStack.pop();
+      inSingleQuotes = enclosing?.single ?? false;
+      inDoubleQuotes = enclosing?.double ?? false;
+      substitutionDepth--;
+    } else if (!inBackticks && char === "'" && !inDoubleQuotes) {
+      // Tracked at every depth, not just the top level: without this the
+      // quotes inside a substitution body are invisible and the `)` guard
+      // above has nothing to test.
       inSingleQuotes = !inSingleQuotes;
-    } else if (
-      !inBackticks &&
-      substitutionDepth === 0 &&
-      char === '"' &&
-      !inSingleQuotes
-    ) {
+    } else if (!inBackticks && char === '"' && !inSingleQuotes) {
       inDoubleQuotes = !inDoubleQuotes;
     }
 

@@ -92,6 +92,7 @@ export interface CronJob {
   delivery?: CronTaskDelivery;
   /** One-shot that was due while no owning session ran — fired late. */
   missed?: boolean;
+  todoWorkChainId?: string;
 }
 
 /**
@@ -104,6 +105,7 @@ interface SessionWakeup {
   fireAtMs: number;
   prompt: string;
   createdAt: number;
+  todoWorkChainId?: string;
 }
 
 /**
@@ -219,6 +221,7 @@ function wakeupToJob(wakeup: SessionWakeup): CronJob {
     expiresAt: Infinity,
     fireAtMs: wakeup.fireAtMs,
     jitterMs: 0,
+    todoWorkChainId: wakeup.todoWorkChainId,
   };
 }
 
@@ -426,6 +429,7 @@ export class CronScheduler {
   scheduleWakeup(
     delaySeconds: number,
     prompt: string,
+    todoWorkChainId?: string,
   ): {
     id: string;
     scheduledFor: string;
@@ -472,7 +476,13 @@ export class CronScheduler {
     if (replacedId) {
       debugLogger.debug(`Replacing pending wakeup ${replacedId}`);
     }
-    this.wakeups.set(id, { id, fireAtMs, prompt, createdAt: now });
+    this.wakeups.set(id, {
+      id,
+      fireAtMs,
+      prompt,
+      createdAt: now,
+      todoWorkChainId,
+    });
     debugLogger.debug(
       `Wakeup ${id} scheduled for ${new Date(fireAtMs).toISOString()} ` +
         `(delay=${clampedDelaySeconds}s)`,

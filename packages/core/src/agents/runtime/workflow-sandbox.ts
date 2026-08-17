@@ -363,6 +363,7 @@ function isRegexContext(source: string, i: number): boolean {
 
 import * as vm from 'node:vm';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import type { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
 
 // Shared with workflow-orchestrator (avoids a duplicate createDebugLogger
 // instance with the same 'WORKFLOW' namespace). Re-exported so orchestrator
@@ -468,6 +469,14 @@ export interface SandboxOptions {
   /** Value bound to the `args` global inside the script. */
   args: unknown;
   /**
+   * The owning run's id. Stamped onto every dispatch rejection that
+   * crosses the vm boundary so the adoption-escape hook (see `run()`)
+   * attributes a process-level unhandledRejection to THIS run when
+   * multiple runs share one process (background runs). Omitted by
+   * bare-sandbox tests.
+   */
+  runId?: string;
+  /**
    * Function called by the script's `agent(prompt, opts)` global. Returns the
    * agent's final text. Injected so tests can mock without spawning an LLM.
    */
@@ -538,6 +547,25 @@ export interface SandboxOptions {
    * dialog / detail body) can re-render without polling `getPhases()`.
    */
   emitter?: WorkflowOrchestratorEmitter;
+  /**
+   * The run's dispatch scheduler. When provided, the async wall-clock
+   * watchdog suspends only while the scheduler is `paused`: by then no
+   * dispatch is in flight or being issued, so paused time must neither
+   * burn wall-clock budget nor let the timer kill the run mid-pause
+   * (resume would then be impossible). During `pausing` the backstop
+   * stays armed because an in-flight dispatch is typically still
+   * executing real work. Known limitation: an in-flight dispatch parked
+   * on a tool approval waits on the user rather than executing, but
+   * `pausing` time still burns wall-clock budget until the approval is
+   * answered (the watchdog cannot suspend on `pausing` without losing
+   * the backstop for genuinely executing dispatches, and `resume()`
+   * only works from `paused`).
+   *
+   * The guarantee covers dispatch-gated code only: script awaits outside
+   * a scheduler gate keep executing while paused and are not covered by
+   * the wall-clock backstop until resume.
+   */
+  scheduler?: WorkflowDispatchScheduler;
 }
 
 /**
@@ -563,6 +591,68 @@ function resolveMaxWallClockMs(opts: SandboxOptions): number {
   return DEFAULT_MAX_WALL_CLOCK_MS;
 }
 
+/**
+ * Async wall-clock watchdog whose budget only accrues while armed.
+ * `pause()` clears the timer and banks the unconsumed remainder;
+ * `resume()` re-arms with that remainder — so pause/resume cycles
+ * neither extend the total active-time budget nor lose any of it.
+ */
+class WallClockWatchdog {
+  private timer: ReturnType<typeof setTimeout> | undefined;
+  private remainingMs: number;
+  private armedAt = 0;
+  private paused = false;
+  private stopped = false;
+
+  constructor(
+    budgetMs: number,
+    private readonly onFire: () => void,
+  ) {
+    this.remainingMs = budgetMs;
+    this.arm();
+  }
+
+  pause(): void {
+    if (this.stopped || this.paused || this.timer === undefined) return;
+    this.paused = true;
+    clearTimeout(this.timer);
+    this.timer = undefined;
+    // The deadline is a setTimeout (libuv's monotonic loop clock), so the
+    // elapsed-armed-time deduction must measure with the monotonic clock
+    // too: Date.now() diverges on system suspend and any NTP / manual
+    // clock step, corrupting the banked remainder in both directions.
+    this.remainingMs = Math.max(
+      0,
+      this.remainingMs - (performance.now() - this.armedAt),
+    );
+  }
+
+  resume(): void {
+    if (this.stopped || !this.paused) return;
+    this.paused = false;
+    this.arm();
+  }
+
+  stop(): void {
+    this.stopped = true;
+    if (this.timer !== undefined) clearTimeout(this.timer);
+    this.timer = undefined;
+  }
+
+  private arm(): void {
+    this.armedAt = performance.now();
+    this.timer = setTimeout(() => {
+      this.stopped = true;
+      this.timer = undefined;
+      this.onFire();
+    }, this.remainingMs);
+    // Don't keep the event loop alive on Node — if the run resolves
+    // quickly, the timer will be stopped in finally; this guards against
+    // edge cases where the caller drops the promise.
+    this.timer.unref?.();
+  }
+}
+
 export interface WorkflowSandbox {
   /**
    * Execute the user-authored script source. The script is wrapped as an async
@@ -577,6 +667,14 @@ export interface WorkflowSandbox {
   getPhases(): string[];
   /** Log lines emitted by the script in order. */
   getLogs(): string[];
+  /**
+   * Append a log line produced by a nested workflow run. Nested logs
+   * reach no production surface on their own (the nested sandbox's
+   * buffer is never read by the orchestrator), so the orchestrator
+   * merges them into the parent run's logs at nested settlement —
+   * including the nested unconsumed-rejection mirror lines.
+   */
+  appendLog(line: string): void;
   /**
    * The script's `export const meta = {...}` declaration, validated and
    * extracted before the script body runs. `null` when the script omits
@@ -688,6 +786,62 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
   if (opts.args !== undefined) validateArgs(opts.args);
   const argsJson = opts.args === undefined ? null : JSON.stringify(opts.args);
 
+  // Unconsumed-rejection mirror bookkeeping (see `observeDispatch` in the
+  // init script below). The verdict is deferred to run settlement: an entry
+  // recorded at rejection-settlement time is cleared if the script still
+  // consumes the promise afterwards (a delayed `await` / `.catch`), and
+  // only still-uncleared entries are flushed into the run log in `run()`'s
+  // `finally`. A rejection whose root the script attached a rejection
+  // handler to anywhere in the chain is never mirrored — the script had a
+  // chance to surface it itself. Keys are opaque ids; the bridge contract
+  // only allows primitives across, so the vm side passes ids and strings.
+  //
+  // All four are reset at the top of `run()`: the bookkeeping is per-run,
+  // and latching it for the sandbox's lifetime would let a second `run()`
+  // on the same sandbox bypass the deferred-verdict design entirely (every
+  // rejection would take the post-settlement immediate-mirror path).
+  // Per-root mirror state. rejectionHandled: the script attached a
+  // visible rejection handler — the strongest "never mirror" marker.
+  // adoptedOut: a native adoption attach (await / Promise.resolve / a
+  // returned thenable) consumed the root; the rejection's fate then
+  // rides the (unobserved) adopting promise, so the flush defers
+  // forwarded sibling entries to the adopting chain — handled there
+  // they need no signal, forgotten there the escape hook provides one.
+  const unconsumedRoots = new Map<
+    number,
+    { rejectionHandled: boolean; adoptedOut: boolean }
+  >();
+  interface UnconsumedRejectionEntry {
+    rootId: number;
+    isRoot: boolean;
+    dispatchFailed: boolean;
+    msg: string;
+  }
+  const unconsumedRejections = new Map<number, UnconsumedRejectionEntry>();
+  let nextUnconsumedId = 1;
+  let unconsumedSettled = false;
+  // Per-run dedupe keys (rootId + msg) shared by the flush and the
+  // adoption-escape hook in run(): one failed dispatch fanned out into
+  // N unconsumed branches is one failure and must surface as exactly
+  // one log line, whichever surface reports it first (R11-11).
+  let mirroredEscapeKeys = new Set<string>();
+
+  // Precise attribution: 'dispatch failed' only when the root dispatch
+  // itself rejected (marked at the vm boundary), '(result not consumed)'
+  // only when the root was never attached to.
+  const unconsumedRejectionLine = (rec: UnconsumedRejectionEntry): string => {
+    if (rec.dispatchFailed) {
+      return rec.isRoot
+        ? 'dispatch failed (result not consumed): ' + rec.msg
+        : 'dispatch failed (rejection not handled): ' + rec.msg;
+    }
+    // The root WAS attached to in every shape that reaches this branch
+    // (a derived node exists only because the root was attached), so
+    // '(result not consumed)' contradicts the attribution contract —
+    // '(rejection not handled)' matches the sibling non-root branch.
+    return 'script handler failed (rejection not handled): ' + rec.msg;
+  };
+
   // FIX-Round1-T1/T8/T14: build EVERY sandbox global inside the vm-realm
   // via the init script below. Host-realm objects (Promises returned by host
   // async functions, Error objects thrown by host code) leak the host Function
@@ -717,6 +871,63 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
           `slot set to null (non-JSON-serializable thunk return).`,
       );
     },
+    // --- Unconsumed-rejection mirror bookkeeping ---
+    wfRegisterRoot: (): number => {
+      const id = nextUnconsumedId++;
+      unconsumedRoots.set(id, { rejectionHandled: false, adoptedOut: false });
+      return id;
+    },
+    wfMarkRejectionHandled: (rootId: number): void => {
+      const root = unconsumedRoots.get(rootId);
+      if (root) root.rejectionHandled = true;
+    },
+    wfIsRootHandled: (rootId: number): boolean =>
+      unconsumedRoots.get(rootId)?.rejectionHandled === true,
+    wfMarkAdopted: (rootId: number): void => {
+      const root = unconsumedRoots.get(rootId);
+      if (root) root.adoptedOut = true;
+    },
+    runId: opts.runId ?? '',
+    wfReportUnconsumed: (
+      rootId: number,
+      isRoot: boolean,
+      dispatchFailed: boolean,
+      msg: string,
+    ): number => {
+      if (unconsumedSettled) {
+        // Post-settlement rejection: the script can no longer consume it
+        // (the run's finally already flushed), so mirror it immediately.
+        const rec: UnconsumedRejectionEntry = {
+          rootId,
+          isRoot,
+          dispatchFailed,
+          msg,
+        };
+        const rootState = unconsumedRoots.get(rootId);
+        if (
+          !rootState?.rejectionHandled &&
+          !(dispatchFailed && rootState?.adoptedOut)
+        ) {
+          safeLog(unconsumedRejectionLine(rec));
+        }
+        return 0;
+      }
+      const id = nextUnconsumedId++;
+      unconsumedRejections.set(id, { rootId, isRoot, dispatchFailed, msg });
+      return id;
+    },
+    wfClearUnconsumed: (id: number): void => {
+      unconsumedRejections.delete(id);
+    },
+    // R10-1: teardown discrimination cannot key on the error name alone.
+    // The dominant in-flight cancellation path (controller.abort() →
+    // subagent returns terminateMode=CANCELLED → runSingleDispatch throws
+    // a PLAIN Error) never produces an 'AbortError', so the mirror would
+    // log a spurious dispatch failure for a correctly-cancelled run. Once
+    // the run's abort signal has fired, the run is already settling as
+    // cancelled / timed-out — every rejection still crossing the boundary
+    // is teardown noise regardless of its shape.
+    isRunAborted: (): boolean => opts.abortOnTimeout?.signal.aborted === true,
     // The truthy flags distinguish "injected" from "default stub" inside the
     // init script without leaking the host function itself when not used.
     hasParallel: !!opts.parallel,
@@ -799,27 +1010,318 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
       // those wrappers will produce vm-realm results); reject with a
       // freshly-constructed vm-realm Error so e.constructor.constructor
       // stays in the vm realm.
+      // Dispatch promises are ObservedPromise instances (a vm-realm
+      // Promise subclass). Its then override marks the result consumed
+      // and re-attaches the teardown observer to the derived promise, so
+      // script-derived chains (agent(...).then(...), await, and the
+      // ELEMENTS of static-combinator aggregates — everything that
+      // funnels through then) stay observed at every depth. The
+      // AGGREGATES of Promise.all/race/any are built by the native
+      // statics and never pass through the observed then, so those
+      // statics are wrapped explicitly below (observeAggregate).
+      // Without this, a correctly-cancelled run holding a pending derived
+      // chain fired a process-level unhandledRejection even though the
+      // bare dispatch promise was observed.
+      //
+      // Unconsumed rejections of an observed node are recorded through
+      // the bridge and mirrored into the run log at run settlement (a
+      // later consumption clears the record first) — a dispatch refused
+      // at the entry gate (budget / agent cap) or failing mid-run reaches
+      // no other surface, so without the mirror the failure leaves no
+      // log, alarm, or telemetry.
+      function mapDispatchError(hostErr) {
+        var msg;
+        try {
+          msg = (hostErr && hostErr.message != null)
+            ? String(hostErr.message)
+            : String(hostErr);
+        } catch (e) {
+          msg = '[unserializable rejection value]';
+        }
+        const vmErr = new Error(msg);
+        // Teardown discrimination at the host boundary — before the error
+        // is flattened into a vm-realm Error. Two shapes count as
+        // teardown: an error NAMED 'AbortError' (the scheduler's
+        // abortError() DOMException), and ANY rejection that crosses
+        // after the run's abort signal has fired — the dominant
+        // cancellation path rejects with a plain Error ('did not complete
+        // (terminate mode: CANCELLED).'), which a name-only match would
+        // mirror as a spurious dispatch failure on a correctly-cancelled
+        // run. Matching the name here (rather than the message text)
+        // still suppresses teardown noise without swallowing genuine
+        // failures whose message merely contains 'aborted' (e.g. a
+        // network-layer 'connection aborted by peer').
+        var isAbort = false;
+        try {
+          isAbort = !!(hostErr && hostErr.name === 'AbortError');
+        } catch (e) {
+          isAbort = false;
+        }
+        if (isAbort || __b.isRunAborted()) vmErr.__wfAbort = true;
+        vmErr.__wfDispatchFailed = true;
+        return vmErr;
+      }
+      function readFlag(value, name) {
+        try {
+          return !!(value && value[name]);
+        } catch (e) {
+          return false;
+        }
+      }
+      function observeDispatch(promise) {
+        // Direct native-then call: routing through ObservedPromise.then
+        // would mark the promise consumed and recurse the observer. The
+        // observer body must be exception-safe on ANY rejection value:
+        // a script handler can throw an exotic value (a message getter
+        // that throws, a Proxy with throwing traps), and an observer
+        // killed mid-body would turn the very rejection it watches into
+        // a process-level unhandledRejection — the exact failure class
+        // the observer exists to remove.
+        Promise.prototype.then.call(promise, undefined, function (err) {
+          if (promise.__wfConsumed) return;
+          // R11-30: also suppress on the run-level abort state, not just
+          // the rejection's own marker — a wrapped Promise.any aggregate
+          // rejects with a natively built AggregateError that carries
+          // neither marker, so teardown rejections of a correctly-
+          // cancelled run would still be mirrored when it is unconsumed.
+          if (readFlag(err, '__wfAbort') || __b.isRunAborted()) return;
+          var dispatchFailed = readFlag(err, '__wfDispatchFailed');
+          var errors = null;
+          try {
+            if (err && Array.isArray(err.errors)) errors = err.errors;
+          } catch (e) {
+            errors = null;
+          }
+          if (!dispatchFailed && errors) {
+            // R11-4: Promise.any rejects with a fresh vm-realm
+            // AggregateError carrying no flags; the element errors are
+            // reachable on .errors with their markers preserved. Derive
+            // the attribution from the causes instead of blaming the
+            // script for a dispatch failure.
+            for (var i = 0; i < errors.length; i++) {
+              if (readFlag(errors[i], '__wfDispatchFailed')) {
+                dispatchFailed = true;
+                break;
+              }
+            }
+          }
+          // R11-15: cross-root suppression — aggregate roots track
+          // rejectionHandled independently of their elements' roots, so
+          // a forwarded dispatch failure whose originating element root
+          // the script already handled must not mirror from the
+          // aggregate. The element rootId is stamped in vmAsync;
+          // Promise.all/race forward the element's own reason,
+          // Promise.any surfaces them on .errors.
+          try {
+            var sourceIds = [];
+            if (err && err.__wfRootId) {
+              sourceIds.push(err.__wfRootId);
+            } else if (errors) {
+              for (var j = 0; j < errors.length; j++) {
+                if (errors[j] && errors[j].__wfRootId) {
+                  sourceIds.push(errors[j].__wfRootId);
+                }
+              }
+            }
+            for (var k = 0; k < sourceIds.length; k++) {
+              if (
+                sourceIds[k] !== promise.__wfRootId &&
+                __b.wfIsRootHandled(sourceIds[k])
+              ) {
+                return;
+              }
+            }
+          } catch (e) {
+            // A throwing exotic value must not kill the observer; fall
+            // through and mirror conservatively.
+          }
+          var msg;
+          try {
+            msg = String(err && err.message != null ? err.message : err);
+          } catch (e) {
+            msg = '[unserializable rejection value]';
+          }
+          promise.__wfUnconsumedId = __b.wfReportUnconsumed(
+            promise.__wfRootId,
+            promise.__wfIsRoot === true,
+            dispatchFailed,
+            msg,
+          );
+        });
+      }
+      // R11-3: await / Promise.resolve / returning a thenable from a
+      // handler adopts an ObservedPromise through this then with the
+      // adopting promise's capability (resolve, reject) pair — native
+      // functions, indistinguishable from real handlers by arity. They
+      // are detected by the native toString signature. Adoption
+      // CONSUMES the result (a delayed adoption clears a recorded
+      // verdict exactly like a delayed await) but is NOT a rejection
+      // handler: the rejection transfers into the adopting promise —
+      // typically an async wrapper's implicit promise, which is a plain
+      // vm-realm Promise the mirror cannot observe. Marking adoption as
+      // handling would silently disarm the mirror for the forgotten-
+      // await failure class; the run-level escape hook in the host
+      // surfaces those escapes instead. Bound script functions also
+      // stringify as native code; misreading one as adoption only
+      // forgoes the rejectionHandled marking, never native semantics.
+      function isAdoptionAttach(handler) {
+        try {
+          return (
+            typeof handler === 'function' &&
+            Function.prototype.toString
+              .call(handler)
+              .indexOf('[native code]') !== -1
+          );
+        } catch (e) {
+          return false;
+        }
+      }
+      class ObservedPromise extends Promise {
+        then(onFulfilled, onRejected) {
+          // R11-26: introspect the handler BEFORE any state mutation.
+          // The read is guarded because a script-supplied handler can
+          // be exotic (a revoked Proxy wrapping a function, a throwing
+          // accessor) — an unguarded read made .then() throw
+          // synchronously, something native then never does, leaving
+          // the promise marked consumed with no handler attached.
+          var rethrows = false;
+          try {
+            rethrows = !!(onRejected && onRejected.__wfRethrows);
+          } catch (e) {
+            rethrows = false;
+          }
+          this.__wfConsumed = true;
+          // An attached rejection handler means the script can surface the
+          // root rejection itself; the mirror stays silent for it. The
+          // finally override below routes through this then with marked
+          // rethrow combinators — those re-raise the rejection instead of
+          // handling it, so they must NOT set the flag (marking them
+          // handled would silently drop a fire-and-forget
+          // agent(...).finally(...) failure). Adoption attaches count
+          // as consumption only, never handling (see isAdoptionAttach):
+          // they mark adoptedOut so forwarded sibling entries defer to
+          // the adopting chain / escape hook instead of mirroring.
+          if (isAdoptionAttach(onRejected)) {
+            __b.wfMarkAdopted(this.__wfRootId);
+          } else if (typeof onRejected === 'function' && !rethrows) {
+            __b.wfMarkRejectionHandled(this.__wfRootId);
+          }
+          // A delayed consumption clears a verdict recorded at
+          // rejection-settlement time, so a late-but-real await is not
+          // misreported as unconsumed.
+          if (this.__wfUnconsumedId !== undefined) {
+            __b.wfClearUnconsumed(this.__wfUnconsumedId);
+            this.__wfUnconsumedId = undefined;
+          }
+          const derived = super.then(onFulfilled, onRejected);
+          derived.__wfRootId = this.__wfRootId;
+          observeDispatch(derived);
+          return derived;
+        }
+        finally(onFinally) {
+          // Native Promise.prototype.finally calls the observed then with
+          // two function combinators, indistinguishable there from a real
+          // then(f, g) — which would mark the root rejection handled even
+          // though finally rethrows it. Implement finally through the
+          // observed then with an explicitly-marked rethrow combinator so
+          // the mirror stays armed for finally-only chains.
+          if (typeof onFinally !== 'function') {
+            return this.then(undefined, undefined);
+          }
+          const onRethrow = function (err) {
+            return Promise.resolve(onFinally()).then(function () {
+              throw err;
+            });
+          };
+          onRethrow.__wfRethrows = true;
+          return this.then(
+            function (value) {
+              return Promise.resolve(onFinally()).then(function () {
+                return value;
+              });
+            },
+            onRethrow,
+          );
+        }
+      }
+      // --- Static combinators: observe the aggregate promise ---
+      // Promise.all/race/any build their aggregate via the native static;
+      // it never passes through the observed then, so a fire-and-forget
+      // aggregate holding a failed dispatch would escape the run-log
+      // mirror. While the run is live the host's adoption-escape hook
+      // (R11-3) still catches and mirrors the process-level
+      // unhandledRejection — a round-14 A/B confirmed that hook, not
+      // this wrap, is the live-run backstop — but only with the coarse
+      // '(rejection not handled)' wording, and once the run's hook is
+      // detached nothing in the sandbox catches the escape. R14-A:
+      // wrapping the statics gives each aggregate its own observer, so
+      // consumption tracking works through the aggregate's own observed
+      // then (await / .catch / .then marks it handled) and the mirror
+      // itself classifies the rejection; the elements still funnel
+      // through the then override via the native static's internal
+      // attach, so they stay marked consumed.
+      function observeAggregate(nativeAggregate) {
+        const rootId = __b.wfRegisterRoot();
+        const observed = new ObservedPromise(function (resolve, reject) {
+          Promise.prototype.then.call(nativeAggregate, resolve, reject);
+        });
+        observed.__wfRootId = rootId;
+        observed.__wfIsRoot = true;
+        observeDispatch(observed);
+        return observed;
+      }
+      const nativePromiseAll = Promise.all;
+      const nativePromiseRace = Promise.race;
+      const nativePromiseAny = Promise.any;
+      // R11-16: a static called on a script-defined Promise subclass
+      // must honor the species contract and return a subclass instance,
+      // so non-default receivers bypass observation (their elements
+      // still funnel through the observed then, and a fire-and-forget
+      // dispatch failure escaping such an aggregate is still caught by
+      // the host's adoption-escape hook via its stamped markers).
+      Promise.all = function (items) {
+        if (this !== Promise) return nativePromiseAll.call(this, items);
+        return observeAggregate(nativePromiseAll.call(this, items));
+      };
+      Promise.race = function (items) {
+        if (this !== Promise) return nativePromiseRace.call(this, items);
+        return observeAggregate(nativePromiseRace.call(this, items));
+      };
+      Promise.any = function (items) {
+        if (this !== Promise) return nativePromiseAny.call(this, items);
+        return observeAggregate(nativePromiseAny.call(this, items));
+      };
       function vmAsync(hostFn) {
         return function (...vmArgs) {
-          return new Promise(function (resolve, reject) {
+          const rootId = __b.wfRegisterRoot();
+          const p = new ObservedPromise(function (resolve, reject) {
+            function rejectMapped(hostErr) {
+              const vmErr = mapDispatchError(hostErr);
+              // Stamp the originating root and run BEFORE the error can
+              // be forwarded into aggregate promises: the observer's
+              // cross-root suppression (R11-15) reads __wfRootId and
+              // the host's adoption-escape hook (R11-3) attributes by
+              // __wfRunId.
+              try {
+                vmErr.__wfRootId = rootId;
+                vmErr.__wfRunId = __b.runId;
+              } catch (e) {}
+              reject(vmErr);
+            }
             try {
               const hostPromise = hostFn.apply(null, vmArgs);
               hostPromise.then(
                 function (value) { resolve(value); },
-                function (hostErr) {
-                  const msg = (hostErr && hostErr.message != null)
-                    ? String(hostErr.message)
-                    : String(hostErr);
-                  reject(new Error(msg));
-                }
+                rejectMapped
               );
             } catch (hostErr) {
-              const msg = (hostErr && hostErr.message != null)
-                ? String(hostErr.message)
-                : String(hostErr);
-              reject(new Error(msg));
+              rejectMapped(hostErr);
             }
           });
+          p.__wfRootId = rootId;
+          p.__wfIsRoot = true;
+          observeDispatch(p);
+          return p;
         };
       }
 
@@ -1119,60 +1621,217 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
 
   const maxWallClockMs = resolveMaxWallClockMs(opts);
 
+  // Flush still-unconsumed rejection entries into the run log. Called from
+  // `run()`'s finally: the one-macrotask yield lets rejection observers
+  // queued behind the script's settlement microtasks land before the
+  // verdict. When no dispatch root was ever registered the yield is skipped
+  // — dispatch-free runs keep their settlement free of timer dependencies
+  // (load-bearing for fake-timer tests of the wall-clock backstop).
+  const flushUnconsumedRejections = async (): Promise<void> => {
+    unconsumedSettled = true;
+    if (nextUnconsumedId === 1) return;
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve);
+    });
+    for (const rec of unconsumedRejections.values()) {
+      // Contract: a rejection whose root the script attached a
+      // rejection handler to anywhere in the chain is never mirrored —
+      // regardless of attribution (R11-14). A forwarded dispatch
+      // rejection whose root was adopted out defers to the adopting
+      // chain too (see unconsumedRoots): handled there it needs no
+      // signal, forgotten there the escape hook provides it, deduped
+      // by the shared key below.
+      const rootState = unconsumedRoots.get(rec.rootId);
+      if (rootState?.rejectionHandled) {
+        continue;
+      }
+      if (rec.dispatchFailed && rootState?.adoptedOut) {
+        continue;
+      }
+      const key = rec.rootId + '\u0000' + rec.msg;
+      if (mirroredEscapeKeys.has(key)) continue;
+      mirroredEscapeKeys.add(key);
+      safeLog(unconsumedRejectionLine(rec));
+    }
+    // Clear after flushing so a subsequent flush (a reused sandbox's next
+    // run) does not re-log entries this run already reported.
+    unconsumedRejections.clear();
+  };
+
+  // R11-3: adoption (await / Promise.resolve / returning a thenable
+  // from a handler) forwards a root rejection into the adopting
+  // promise — typically an async wrapper's implicit promise, a plain
+  // vm-realm Promise the mirror cannot observe. When the script never
+  // handles that promise, Node fires a process-level
+  // 'unhandledRejection' carrying the marked vm-realm error; this hook
+  // mirrors those escapes into the run log while the run is live, so a
+  // forgotten dispatch failure no longer loses its only log / alarm /
+  // telemetry surface. Roots whose rejection the script handled stay
+  // silent here too (the contract keys on the root, same as the flush).
+  // The hook is installed per run() and matches only this run's stamped
+  // rejections, so concurrent runs don't log into each other. Known
+  // limits: a rejection landing after this run's flush (a fire-and-
+  // forget dispatch outliving the run) escapes as before, and the event
+  // itself cannot be cancelled from inside the sandbox — a host with
+  // its own unhandledRejection listener still observes it.
+  const hookRunId = opts.runId ?? '';
+  const adoptionEscapeHook = (
+    reason: unknown,
+    _promise: Promise<unknown>,
+  ): void => {
+    try {
+      if (!reason || typeof reason !== 'object') return;
+      const marked = reason as {
+        __wfDispatchFailed?: unknown;
+        __wfRunId?: unknown;
+        __wfRootId?: unknown;
+        message?: unknown;
+      };
+      if (marked.__wfDispatchFailed !== true) return;
+      if (String(marked.__wfRunId ?? '') !== hookRunId) return;
+      const rootId =
+        typeof marked.__wfRootId === 'number' ? marked.__wfRootId : undefined;
+      if (
+        rootId !== undefined &&
+        unconsumedRoots.get(rootId)?.rejectionHandled
+      ) {
+        return;
+      }
+      let msg: string;
+      try {
+        msg = marked.message != null ? String(marked.message) : String(reason);
+      } catch {
+        msg = '[unserializable rejection value]';
+      }
+      const key = String(rootId ?? '') + '\u0000' + msg;
+      if (mirroredEscapeKeys.has(key)) return;
+      mirroredEscapeKeys.add(key);
+      safeLog('dispatch failed (rejection not handled): ' + msg);
+    } catch (e) {
+      debugLogger.warn('adoptionEscapeHook failed:', e);
+    }
+  };
+
   let extractedMeta: WorkflowMeta | null = null;
   return {
     async run(scriptSource: string): Promise<unknown> {
-      // P4: extract `export const meta = {...}` once before the body runs.
-      // The stripped source is what the vm executes; the meta object is
-      // surfaced via `getMeta()` after the run (or after a malformed-meta
-      // throw, in which case the caller's catch block sees a clear error).
-      const { stripped, meta } = extractAndStripMeta(scriptSource);
-      extractedMeta = meta;
-      const wrapped = `(async () => {\n${stripped}\n})()`;
-      const script = new vm.Script(wrapped, {
-        filename: 'workflow.js',
-      });
-      // 30s sync wall-clock cap inside vm — covers `while(true){}` style
-      // synchronous loops only. Once the IIFE hits its first `await`,
-      // `runInContext` returns and this timer is disarmed.
-      const runOpts: vm.RunningScriptOptions = {
-        timeout: 30_000,
-      };
-      const result = script.runInContext(ctx, runOpts) as Promise<unknown>;
+      // R10-7: the unconsumed-rejection bookkeeping is per-run. Reset it
+      // here (not just in flush) so a second run() on the same sandbox
+      // starts from the same clean slate as a fresh sandbox — otherwise
+      // the first run's flush latches unconsumedSettled for the sandbox's
+      // lifetime and every later rejection takes the immediate-mirror
+      // path, bypassing the deferred verdict.
+      unconsumedSettled = false;
+      unconsumedRoots.clear();
+      unconsumedRejections.clear();
+      nextUnconsumedId = 1;
+      mirroredEscapeKeys = new Set();
 
-      // T23 (PR #4732 R2): async wall-clock cap covers everything past the
-      // first await — `return new Promise(() => {})`, async infinite loops,
-      // hung network calls — none of which the vm timeout or future P5
-      // budget can stop (a 0-token hang spends no budget). Permanent
-      // defense-in-depth; default 30 min, env-tunable.
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const timeoutPromise = new Promise<never>((_, reject) => {
-        timer = setTimeout(() => {
-          // T40 (PR #4732 R4): abort linked controller BEFORE rejecting so
-          // in-flight subagents see the cancellation and stop. Order
-          // matters: rejecting first then aborting would race the
-          // caller's finally block.
-          opts.abortOnTimeout?.abort();
-          reject(
-            new Error(
-              `Workflow execution timed out after ${maxWallClockMs} ms wall clock. ` +
-                'Override via SandboxOptions.maxWallClockMs or QWEN_CODE_MAX_WORKFLOW_SECONDS env var.',
-            ),
-          );
-        }, maxWallClockMs);
-        // Don't keep the event loop alive on Node — if the run resolves
-        // quickly, the timer will be cleared in finally; this guards against
-        // edge cases where the caller drops the promise.
-        timer.unref?.();
-      });
+      let watchdog: WallClockWatchdog | undefined;
+      let stopWatchingState: (() => void) | undefined;
+      let rearmWatchdogOnAbort: (() => void) | undefined;
+      process.on('unhandledRejection', adoptionEscapeHook);
       try {
+        // P4: extract `export const meta = {...}` once before the body runs.
+        // The stripped source is what the vm executes; the meta object is
+        // surfaced via `getMeta()` after the run (or after a malformed-meta
+        // throw, in which case the caller's catch block sees a clear error).
+        const { stripped, meta } = extractAndStripMeta(scriptSource);
+        extractedMeta = meta;
+        const wrapped = `(async () => {\n${stripped}\n})()`;
+        const script = new vm.Script(wrapped, {
+          filename: 'workflow.js',
+        });
+        // 30s sync wall-clock cap inside vm — covers `while(true){}` style
+        // synchronous loops only. Once the IIFE hits its first `await`,
+        // `runInContext` returns and this timer is disarmed.
+        const runOpts: vm.RunningScriptOptions = {
+          timeout: 30_000,
+        };
+        const result = script.runInContext(ctx, runOpts) as Promise<unknown>;
+
+        // T23 (PR #4732 R2): async wall-clock cap covers everything past the
+        // first await — `return new Promise(() => {})`, async infinite loops,
+        // hung network calls — none of which the vm timeout or future P5
+        // budget can stop (a 0-token hang spends no budget). Permanent
+        // defense-in-depth; default 30 min, env-tunable.
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          watchdog = new WallClockWatchdog(maxWallClockMs, () => {
+            // T40 (PR #4732 R4): abort linked controller BEFORE rejecting so
+            // in-flight subagents see the cancellation and stop. Order
+            // matters: rejecting first then aborting would race the
+            // caller's finally block.
+            opts.abortOnTimeout?.abort();
+            reject(
+              new Error(
+                `Workflow execution exceeded ${maxWallClockMs} ms of active time (paused time is not counted). ` +
+                  'Override via SandboxOptions.maxWallClockMs or QWEN_CODE_MAX_WORKFLOW_SECONDS env var.',
+              ),
+            );
+          });
+        });
+        // Pause-aware watchdog: suspend only while the scheduler is
+        // `paused` — once truly idle, the run must neither burn budget it
+        // will need after resume nor be killed mid-pause (resume would
+        // then be impossible). During `pausing` the backstop stays armed:
+        // an in-flight dispatch is typically still executing real work.
+        // Known edge: an in-flight dispatch parked on a tool approval
+        // waits on the user, not on real work, yet still burns budget
+        // until it is answered — see the `scheduler` option docs.
+        // Note the suspension assumes the script is idle while paused
+        // (blocked at a dispatch gate); ungated script awaits still run
+        // and are not covered by the backstop until resume. Once the run
+        // is aborted the watchdog must stay armed: a draining in-flight
+        // dispatch can still land a `pausing` → `paused` transition after
+        // the abort, and re-suspending would orphan a hung script.
+        const aborted = (): boolean =>
+          opts.abortOnTimeout?.signal.aborted === true;
+        stopWatchingState = opts.scheduler?.onStateChange(({ state }) => {
+          if (state === 'paused' && !aborted()) watchdog?.pause();
+          else watchdog?.resume();
+        });
+        // A nested sandbox created while the scheduler is ALREADY `paused`
+        // never receives a `paused` transition (the subscription only sees
+        // future transitions), so seed the current state — otherwise the
+        // watchdog stays armed and kills the nested run mid-pause.
+        if (opts.scheduler?.snapshot().state === 'paused' && !aborted()) {
+          watchdog?.pause();
+        }
+        // Cancellation must settle the run even when the script hangs in
+        // ungated code: `registry.cancel()` aborts this controller, but
+        // `abortPending()` emits no state transition, so a pause-suspended
+        // watchdog would never re-arm and the race below has no abort arm
+        // — the hung run would never reach its settlement `finally`
+        // (snapshot, telemetry, and handle release all skipped). Re-arm
+        // with the banked remainder on abort to restore the bound.
+        rearmWatchdogOnAbort = (): void => watchdog?.resume();
+        opts.abortOnTimeout?.signal.addEventListener(
+          'abort',
+          rearmWatchdogOnAbort,
+          { once: true },
+        );
         return await Promise.race([result, timeoutPromise]);
       } finally {
-        if (timer !== undefined) clearTimeout(timer);
+        if (rearmWatchdogOnAbort) {
+          opts.abortOnTimeout?.signal.removeEventListener(
+            'abort',
+            rearmWatchdogOnAbort,
+          );
+        }
+        stopWatchingState?.();
+        watchdog?.stop();
+        // R11-10: the flush shares the finally that wraps the ENTIRE
+        // run body, so a synchronous throw before the race — most
+        // notably runInContext's 30s sync vm timeout, which precedes
+        // it — still surfaces already-queued mirror entries instead of
+        // discarding them with the per-run sandbox.
+        await flushUnconsumedRejections();
+        process.off('unhandledRejection', adoptionEscapeHook);
       }
     },
     getPhases: () => [...phases],
     getLogs: () => [...logs],
+    appendLog: (line: string) => safeLog(line),
     getMeta: () => extractedMeta,
   };
 }

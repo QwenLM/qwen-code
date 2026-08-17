@@ -152,10 +152,17 @@ function isSafeCombinedFlagArg(arg: string): boolean {
     return false;
   }
   const flags = arg.slice(1);
-  // GNU sed treats everything after -i in a combined flag as the backup suffix:
-  // -iE means in-place with .E backup, not -i + -E. Only forms with i last
+  // sed treats everything after -i in a combined flag as the backup suffix:
+  // -iE means in-place with an .E backup, not -i + -E. Only forms with i last
   // (for example, -Ei/-ri) are safe.
-  if (flags.startsWith('i') || !/^[Eri]+$/u.test(flags)) {
+  //
+  // Testing `startsWith('i')` only rejected i FIRST, not i anywhere but last,
+  // so -Eir and -riE were accepted. Real sed reads those as -E plus in-place
+  // with the backup suffix `r` / `E`, writing an f.txtr or f.txtE alongside
+  // the edit. The simulation creates no backup, so the user asked for one and
+  // silently did not get it -- the same reason `-i.bak` is already declined a
+  // few lines up, just spelled as a combined flag.
+  if (!/^[Er]*i?$/u.test(flags)) {
     return false;
   }
   return true;

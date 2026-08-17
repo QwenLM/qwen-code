@@ -122,7 +122,7 @@ describe('agent daemon command', () => {
           throw new Error(message ?? String(error));
         })
         .parseAsync();
-    }).rejects.toThrow('qwen daemon stop requires --any.');
+    }).rejects.toThrow('qwen agents daemon stop requires --any.');
   });
 
   it('accepts daemon stop --any --keep-workers', async () => {

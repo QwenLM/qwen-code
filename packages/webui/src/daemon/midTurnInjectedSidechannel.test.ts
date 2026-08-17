@@ -26,6 +26,43 @@ describe('parseSidechannelMidTurnInjected', () => {
         data: { sessionId: 's-1', messages: ['hi', 'there'] },
       }),
     ).toEqual({ sessionId: 's-1', messages: ['hi', 'there'] });
+    expect(
+      parseSidechannelMidTurnInjected({
+        type: 'mid_turn_message_injected',
+        data: {
+          sessionId: 's-1',
+          messages: ['hi'],
+          messageIds: [''],
+        },
+      }),
+    ).toEqual({ sessionId: 's-1', messages: ['hi'] });
+  });
+
+  it('preserves aligned message ids and drops malformed id arrays', () => {
+    expect(
+      parseSidechannelMidTurnInjected({
+        type: 'mid_turn_message_injected',
+        data: {
+          sessionId: 's-1',
+          messages: ['hi', 'there'],
+          messageIds: ['mid-1', 'mid-2'],
+        },
+      }),
+    ).toEqual({
+      sessionId: 's-1',
+      messages: ['hi', 'there'],
+      messageIds: ['mid-1', 'mid-2'],
+    });
+    expect(
+      parseSidechannelMidTurnInjected({
+        type: 'mid_turn_message_injected',
+        data: {
+          sessionId: 's-1',
+          messages: ['hi', 'there'],
+          messageIds: ['mid-1'],
+        },
+      }),
+    ).toEqual({ sessionId: 's-1', messages: ['hi', 'there'] });
   });
 
   it('lifts originatorClientId off the envelope top-level (not data)', () => {
@@ -134,6 +171,19 @@ describe('mid-turn injected sidechannel pub/sub', () => {
     expect(getSidechannelMidTurnInjected()).toEqual([
       { sessionId: 's-1', messages: ['a'], originatorClientId: 'client-1' },
       { sessionId: 's-1', messages: ['b'] },
+    ]);
+  });
+
+  it('copies message ids when publishing', () => {
+    const messageIds = ['mid-1'];
+    publishSidechannelMidTurnInjected({
+      sessionId: 's-1',
+      messages: ['a'],
+      messageIds,
+    });
+    messageIds[0] = 'mutated';
+    expect(getSidechannelMidTurnInjected()).toEqual([
+      { sessionId: 's-1', messages: ['a'], messageIds: ['mid-1'] },
     ]);
   });
 

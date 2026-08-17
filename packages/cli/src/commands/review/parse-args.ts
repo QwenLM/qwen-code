@@ -19,7 +19,12 @@
 import type { CommandModule } from 'yargs';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { writeStdoutLine } from '../../utils/stdioHelpers.js';
+import {
+  writeStdoutLine,
+  writeStderrLineSafe,
+} from '../../utils/stdioHelpers.js';
+import { operatorReviewSettings } from './lib/review-settings.js';
+import { bundleStalenessNotices } from './lib/stale-bundle.js';
 
 export type ReviewEffort = 'low' | 'medium' | 'high';
 
@@ -41,11 +46,37 @@ export interface ParsedReviewArgs {
   target: ReviewTarget;
   /** Resolved effort after defaults and the `--comment` override. */
   effort: ReviewEffort;
-  effortSource: 'explicit' | 'default' | 'forced-by-comment';
+  effortSource:
+    | 'explicit'
+    | 'configured'
+    | 'default'
+    | 'forced-by-comment'
+    | 'forced-by-fix';
   comment: {
     /** `--comment` appeared in the arguments. */
     requested: boolean;
-    /** `--comment` applies (the target is a PR). */
+    /**
+     * `--comment` applies (the target is a PR and it was requested — by the
+     * flag, or by the standing `review.comment` setting).
+     */
+    effective: boolean;
+  };
+  /**
+   * `--fix`: apply the confirmed findings to the working tree after reporting.
+   *
+   * Deliberately the mirror image of `--comment`, and gated on the opposite
+   * targets. `--comment` writes to a pull request, so it needs a PR; `--fix`
+   * writes to a **working tree**, so it needs one the user keeps. A PR review's
+   * tree is the ephemeral worktree `fetch-pr` creates and Step 9 deletes — edits
+   * there are discarded minutes later, and the one thing worse than not fixing
+   * the findings is reporting that they were fixed into a directory that no
+   * longer exists. So on a PR target `--fix` is ignored with a warning, exactly
+   * as `--comment` is on a local one.
+   */
+  fix: {
+    /** `--fix` appeared in the arguments. */
+    requested: boolean;
+    /** `--fix` applies (the target has a durable working tree). */
     effective: boolean;
   };
   /** Non-flag tokens beyond the first target token, reported not guessed. */
@@ -55,7 +86,11 @@ export interface ParsedReviewArgs {
   warnings: string[];
 }
 
-const EFFORT_LEVELS: ReadonlySet<string> = new Set(['low', 'medium', 'high']);
+export const EFFORT_LEVELS: ReadonlySet<string> = new Set([
+  'low',
+  'medium',
+  'high',
+]);
 
 // The verdict's owner/repo/number are interpolated into `gh` commands by the
 // caller, so they must be established trustworthily, not merely extracted:
@@ -153,13 +188,49 @@ function classifyToken(token: string): ReviewTarget | 'invalid-url' | null {
   return { type: 'file', path: token };
 }
 
-export function parseReviewArgs(raw: string): ParsedReviewArgs {
+export function parseReviewArgs(
+  raw: string,
+  defaults: {
+    /**
+     * The standing default from `review.effort`, raw (`auto` already mapped
+     * to undefined by the caller), applied when no `--effort` flag is
+     * present. Validated case-insensitively exactly like an explicit flag —
+     * an invalid value warns and falls back instead of dropping silently.
+     * An explicit flag still wins; the `--comment`/`--fix` forcings still
+     * override it.
+     */
+    effort?: string;
+    /**
+     * The standing `review.comment` setting: treat a PR review as if
+     * `--comment` was passed. The target binding is untouched — the run still
+     * authorises only the PR the arguments name.
+     */
+    comment?: boolean;
+  } = {},
+): ParsedReviewArgs {
   const tokens = tokenizeArgs(raw);
   const warnings: string[] = [];
   const unknownFlags: string[] = [];
 
-  let commentRequested = false;
+  let commentRequestedByFlag = false;
+  let fixRequested = false;
   let explicitEffort: ReviewEffort | null = null;
+
+  // The configured default gets the same validation as an explicit flag:
+  // settings loading performs no enum validation, so a hand-edited typo
+  // reaches this far raw. Discarding it silently would run every review at
+  // the built-in default while the operator believes another level is on —
+  // the flag path warns on the identical typo, so this one does too.
+  let configuredEffort: ReviewEffort | undefined;
+  let invalidConfiguredEffort: string | undefined;
+  if (defaults.effort !== undefined) {
+    const normalized = asEffort(defaults.effort);
+    if (normalized !== null) {
+      configuredEffort = normalized;
+    } else {
+      invalidConfiguredEffort = defaults.effort;
+    }
+  }
 
   // Warnings about a rejected `--effort` occurrence must state what effort
   // is ACTUALLY in effect — which is not known until every occurrence is
@@ -189,7 +260,12 @@ export function parseReviewArgs(raw: string): ParsedReviewArgs {
     const token = tokens[i];
 
     if (token === '--comment') {
-      commentRequested = true;
+      commentRequestedByFlag = true;
+      continue;
+    }
+
+    if (token === '--fix') {
+      fixRequested = true;
       continue;
     }
 
@@ -283,10 +359,23 @@ export function parseReviewArgs(raw: string): ParsedReviewArgs {
 
   const isPr = target.type === 'pr-number' || target.type === 'pr-url';
 
+  const commentRequested = commentRequestedByFlag || defaults.comment === true;
   const commentEffective = commentRequested && isPr;
-  if (commentRequested && !isPr) {
+  if (commentRequestedByFlag && !isPr) {
     warnings.push(
       'Warning: `--comment` flag is ignored because the review target is not a PR.',
+    );
+  }
+
+  // `--fix` edits a working tree, so it needs one that outlives the review. A
+  // PR review's tree is the ephemeral worktree Step 9 removes; a `local` or
+  // `file` review's tree is the user's own checkout.
+  const fixEffective = fixRequested && !isPr;
+  if (fixRequested && isPr) {
+    warnings.push(
+      'Warning: `--fix` flag is ignored because a PR review runs in an ephemeral ' +
+        'worktree that is deleted when the review ends — there is no durable tree to ' +
+        'fix. Use `--comment` to publish the findings instead.',
     );
   }
 
@@ -295,6 +384,9 @@ export function parseReviewArgs(raw: string): ParsedReviewArgs {
   if (explicitEffort !== null) {
     effort = explicitEffort;
     effortSource = 'explicit';
+  } else if (configuredEffort !== undefined) {
+    effort = configuredEffort;
+    effortSource = 'configured';
   } else {
     effort = isPr ? 'high' : 'medium';
     effortSource = 'default';
@@ -305,7 +397,26 @@ export function parseReviewArgs(raw: string): ParsedReviewArgs {
     effort = 'high';
     effortSource = 'forced-by-comment';
     warnings.push(
-      '`--comment` requires a verified review; running at high effort.',
+      commentRequestedByFlag
+        ? '`--comment` requires a verified review; running at high effort.'
+        : '`review.comment` is enabled in settings; posting requires a verified review — running at high effort.',
+    );
+  }
+  // Editing the user's files on the strength of an unverified finding is the
+  // same mistake as posting one, aimed at their working tree instead of a pull
+  // request — and low is unverified by construction (it runs no Step 4). So an
+  // effective `--fix` floors the effort at medium, the cheapest tier whose
+  // findings a verifier has ruled on. It does NOT force high: medium's findings
+  // are verified, and the reverse audit high adds looks for findings that are
+  // missing, which is not what deciding whether to apply one turns on.
+  //
+  // `--fix` and `--comment` cannot both be effective — they require opposite
+  // target types — so these two blocks can never fight over the level.
+  if (fixEffective && effort === 'low') {
+    effort = 'medium';
+    effortSource = 'forced-by-fix';
+    warnings.push(
+      '`--fix` edits your working tree, so it requires verified findings; running at medium effort.',
     );
   }
 
@@ -315,8 +426,14 @@ export function parseReviewArgs(raw: string): ParsedReviewArgs {
     effortSource === 'explicit'
       ? `--effort ${effort} (the last valid occurrence) is in effect`
       : effortSource === 'forced-by-comment'
-        ? '`--comment` forces high effort'
-        : 'using the default effort';
+        ? commentRequestedByFlag
+          ? '`--comment` forces high effort'
+          : 'the `review.comment` setting forces high effort'
+        : effortSource === 'forced-by-fix'
+          ? '`--fix` forces at least medium effort'
+          : effortSource === 'configured'
+            ? 'using the configured review.effort'
+            : 'using the default effort';
   for (const issue of effortIssues) {
     switch (issue.kind) {
       case 'invalid-eq':
@@ -341,12 +458,18 @@ export function parseReviewArgs(raw: string): ParsedReviewArgs {
         break;
     }
   }
+  if (invalidConfiguredEffort !== undefined) {
+    warnings.push(
+      `Invalid review.effort value ${JSON.stringify(invalidConfiguredEffort)} in settings; ${resolution}.`,
+    );
+  }
 
   return {
     target,
     effort,
     effortSource,
-    comment: { requested: commentRequested, effective: commentEffective },
+    comment: { requested: commentRequestedByFlag, effective: commentEffective },
+    fix: { requested: fixRequested, effective: fixEffective },
     extraTokens,
     unknownFlags,
     warnings,
@@ -359,10 +482,33 @@ interface ParseArgsCliArgs {
   out: string | undefined;
 }
 
+/**
+ * The standing defaults from `settings.json` (`review.effort`,
+ * `review.comment`), resolved for `parseReviewArgs`: `auto` effort — matched
+ * case-insensitively, like every other value on this path — means the
+ * built-in rule, so it maps to undefined. Any other value passes through
+ * raw — `parseReviewArgs` validates it exactly like an explicit `--effort`
+ * (case normalization included), so a typo warns instead of dropping
+ * silently.
+ */
+function reviewDefaultsFromSettings(): {
+  effort?: string;
+  comment?: boolean;
+} {
+  const review = operatorReviewSettings();
+  return {
+    effort:
+      review.effort === undefined || review.effort.toLowerCase() === 'auto'
+        ? undefined
+        : review.effort,
+    comment: review.comment,
+  };
+}
+
 export const parseArgsCommand: CommandModule = {
   command: 'parse-args [raw]',
   describe:
-    'Parse the /review skill argument string (--comment, --effort, target disambiguation) and emit the verdict as JSON; pass the string on stdin via --stdin (a positional that begins with a dash never reaches this handler — yargs rejects it as an unknown flag)',
+    'Parse the /review skill argument string (--comment, --fix, --effort, target disambiguation) and emit the verdict as JSON; pass the string on stdin via --stdin (a positional that begins with a dash never reaches this handler — yargs rejects it as an unknown flag)',
   builder: (yargs) =>
     yargs
       .positional('raw', {
@@ -411,7 +557,20 @@ export const parseArgsCommand: CommandModule = {
     const rawStr = stdin
       ? readFileSync(0, 'utf8').replace(/\r?\n$/, '')
       : (raw ?? '');
-    const parsed = parseReviewArgs(rawStr);
+    // Before anything is parsed: every step after this one runs the BUILT
+    // bundle, so a review command edited since that build does not take effect
+    // and the run measures the old behaviour without saying so. This is the
+    // first command of a fresh review; `drive` repeats the check, because
+    // the verifier brief sends agents there without a step 1.
+    const bundleNotice = bundleStalenessNotices(process.argv[1]);
+    if (bundleNotice) {
+      // `…Safe`, the convention for diagnostics in this subsystem: stderr
+      // piped to `head` raises EPIPE, and a warning that kills the review it
+      // is warning about would be worse than the staleness it reports.
+      writeStderrLineSafe(bundleNotice);
+    }
+
+    const parsed = parseReviewArgs(rawStr, reviewDefaultsFromSettings());
     const json = JSON.stringify(parsed, null, 2);
     if (out) {
       mkdirSync(dirname(out), { recursive: true });

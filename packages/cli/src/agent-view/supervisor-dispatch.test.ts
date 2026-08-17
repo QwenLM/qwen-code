@@ -7,13 +7,30 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { dispatchAgentViewSession } from './supervisor-dispatch.js';
 import {
+  getAgentViewStorePaths,
   readAgentViewLaunch,
   readAgentViewRoster,
   readAgentViewSessionState,
 } from './supervisor-store.js';
+
+const injected = vi.hoisted(() => ({ failActivityWrite: false }));
+
+vi.mock('./supervisor-store.js', async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import('./supervisor-store.js')>();
+  return {
+    ...original,
+    writeAgentViewActivity: (
+      ...args: Parameters<typeof original.writeAgentViewActivity>
+    ) =>
+      injected.failActivityWrite
+        ? Promise.reject(new Error('injected activity write failure'))
+        : original.writeAgentViewActivity(...args),
+  };
+});
 
 describe('dispatchAgentViewSession', () => {
   let tempDir: string;
@@ -64,17 +81,48 @@ describe('dispatchAgentViewSession', () => {
     });
   });
 
-  it('does not leave a roster entry when persistence fails', async () => {
-    await fs.writeFile(path.join(tempDir, 'jobs'), 'blocked', 'utf8');
+  it('rolls back session files and roster when a mid-dispatch write fails', async () => {
+    // Fail the activity write: the session-state and launch writes have
+    // already succeeded at that point, so rollback must actually remove the
+    // partially written session directory. The roster upsert is the last
+    // persistence step, so the roster must stay empty; this pins the
+    // upsert-last ordering the rollback relies on.
+    injected.failActivityWrite = true;
+    try {
+      await expect(
+        dispatchAgentViewSession('write tests', '/repo/pkg', {
+          globalDir: tempDir,
+          token: 'token',
+          sidebandEndpoint: '/tmp/agent-view.sock',
+        }),
+      ).rejects.toThrow('injected activity write failure');
+    } finally {
+      injected.failActivityWrite = false;
+    }
+
+    const paths = getAgentViewStorePaths({ globalDir: tempDir });
+    const jobs = await fs.readdir(paths.jobsDir);
+    expect(jobs).toEqual([]);
+    await expect(readAgentViewRoster({ globalDir: tempDir })).resolves.toEqual(
+      expect.objectContaining({ sessions: [] }),
+    );
+  });
+
+  it('removes session files when roster persistence fails', async () => {
+    const paths = getAgentViewStorePaths({ globalDir: tempDir });
+    await fs.mkdir(path.join(paths.daemonDir, 'roster.json'), {
+      recursive: true,
+    });
 
     await expect(
       dispatchAgentViewSession('write tests', '/repo/pkg', {
         globalDir: tempDir,
+        token: 'token',
+        sidebandEndpoint: '/tmp/agent-view.sock',
       }),
     ).rejects.toThrow();
 
-    await expect(
-      readAgentViewRoster({ globalDir: tempDir }),
-    ).resolves.toEqual(expect.objectContaining({ sessions: [] }));
+    const jobs = await fs.readdir(paths.jobsDir);
+    expect(jobs).toEqual([]);
   });
 });

@@ -194,6 +194,8 @@ describe('getSandboxPassthroughEnvArgs', () => {
         QWEN_CODE_SKIP_UPDATE_CHECK_ONCE: 'true',
         QWEN_CODE_CUSTOM_SANDBOX_IMAGE: 'example.com/qwen:1.0.0',
         QWEN_CODE_HOST_UPDATE_RELAUNCH: 'false',
+        QWEN_CODE_SERVE: '1',
+        QWEN_CODE_DESKTOP: '1',
       }),
     ).toEqual([
       '--env',
@@ -202,6 +204,33 @@ describe('getSandboxPassthroughEnvArgs', () => {
       'QWEN_CODE_CUSTOM_SANDBOX_IMAGE=example.com/qwen:1.0.0',
       '--env',
       'QWEN_CODE_HOST_UPDATE_RELAUNCH=false',
+      '--env',
+      'QWEN_CODE_SERVE=1',
+      '--env',
+      'QWEN_CODE_DESKTOP=1',
+    ]);
+  });
+
+  it('forwards Agent View worker identity into container sandboxes', () => {
+    expect(
+      getSandboxPassthroughEnvArgs({
+        QWEN_AGENT_VIEW_WORKER: '1',
+        QWEN_AGENT_VIEW_SESSION_ID: 'session-1',
+        QWEN_AGENT_VIEW_SIDEBAND: '/tmp/sideband.sock',
+        QWEN_AGENT_VIEW_TOKEN: 'token',
+        QWEN_AGENT_VIEW_ACTIVE_CWD: '/project',
+      }),
+    ).toEqual([
+      '--env',
+      'QWEN_AGENT_VIEW_WORKER=1',
+      '--env',
+      'QWEN_AGENT_VIEW_SESSION_ID=session-1',
+      '--env',
+      'QWEN_AGENT_VIEW_SIDEBAND=/tmp/sideband.sock',
+      '--env',
+      'QWEN_AGENT_VIEW_TOKEN=token',
+      '--env',
+      'QWEN_AGENT_VIEW_ACTIVE_CWD=/project',
     ]);
   });
 });

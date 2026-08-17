@@ -45,8 +45,13 @@ export function getNpmCliPath(
   // Node version managers (mise, asdf, proto) may replace bin/npm with a shell
   // wrapper instead of a symlink to npm-cli.js. Validate the resolved path is a
   // .js file before returning it; otherwise use the conventional fallback.
-  const npmCliJs = path.join(
-    path.dirname(nodePath),
+  //
+  // This branch is POSIX-only; pin path.posix (not the host-default path) so the
+  // separator stays correct even when a caller passes an explicit `platform`
+  // that differs from the host, e.g. getNpmCliPath('/usr/bin/node', 'linux') on
+  // a Windows host.
+  const npmCliJs = path.posix.join(
+    path.posix.dirname(nodePath),
     '..',
     'lib',
     'node_modules',
@@ -54,7 +59,7 @@ export function getNpmCliPath(
     'bin',
     'npm-cli.js',
   );
-  const adjacentNpm = path.join(path.dirname(nodePath), 'npm');
+  const adjacentNpm = path.posix.join(path.posix.dirname(nodePath), 'npm');
   try {
     const resolved = fs.realpathSync(adjacentNpm);
     if (resolved.endsWith('.js')) return resolved;

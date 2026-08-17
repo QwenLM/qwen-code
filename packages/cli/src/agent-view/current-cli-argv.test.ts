@@ -34,6 +34,13 @@ describe('buildCurrentQwenCliArgv', () => {
     ]);
   });
 
+  it('falls back to qwen when process.argv[1] is undefined', () => {
+    process.argv.splice(1, 1);
+    delete process.env['DEV'];
+
+    expect(buildCurrentQwenCliArgv(['agents'])).toEqual(['qwen', 'agents']);
+  });
+
   it('uses local tsx for dev TypeScript entrypoints', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-dev-argv-'));
     const entrypoint = path.join(root, 'packages', 'cli', 'index.ts');
@@ -57,7 +64,7 @@ describe('buildCurrentQwenCliArgv', () => {
     }
   });
 
-  it('does not resolve tsx from the current working directory', async () => {
+  it('throws when DEV=true with a TypeScript entrypoint but tsx is missing', async () => {
     const entryRoot = await fs.mkdtemp(
       path.join(os.tmpdir(), 'qwen-entry-argv-'),
     );
@@ -80,11 +87,9 @@ describe('buildCurrentQwenCliArgv', () => {
     try {
       process.chdir(cwdRoot);
 
-      expect(buildCurrentQwenCliArgv(['agents'])).toEqual([
-        process.execPath,
-        entrypoint,
-        'agents',
-      ]);
+      expect(() => buildCurrentQwenCliArgv(['agents'])).toThrow(
+        /tsx was not found/,
+      );
     } finally {
       process.chdir(originalCwd);
       await fs.rm(entryRoot, { recursive: true, force: true });

@@ -271,6 +271,127 @@ describe('fleet shepherd workflow', () => {
     );
   });
 
+  it('behaviorally proves liveness attribution refuses an ambiguous dispatch window', () => {
+    // The fork-review bridge dispatches autonomously at arbitrary times, so
+    // the "a dispatch since T0 is ours" window can hold TWO dispatches —
+    // and GitHub may expose a foreign dispatch before our own run appears.
+    // Extract the correlation loop VERBATIM (drift fails the test) and
+    // replay it with a PATH-stubbed gh: a singleton is attributed only once
+    // it is the sole candidate across two consecutive polls, an ambiguous
+    // window records run=none instead of tracking a foreign run, and
+    // dispatches older than T0 do not count.
+    expect(workflow).toContain('if [[ "${COUNT}" == "1" ]]; then');
+    expect(workflow).toContain('attribution ambiguous');
+    expect(workflow).toContain('two consecutive polls');
+    const loop = workflow.match(
+      /(for _ in 1 2 3 4 5; do\n[\s\S]*?\n {16}done\n {16}LIVENESS_RUN_OUT="\$\{ATTRIBUTED:-\}")/,
+    )?.[1];
+    expect(loop).toBeTruthy();
+    const replay = (ghScript) => {
+      const dir = mkdtempSync(join(tmpdir(), 'shepherd-corr-'));
+      try {
+        writeFileSync(join(dir, 'gh'), `#!/bin/bash\n${ghScript}\n`);
+        chmodSync(join(dir, 'gh'), 0o755);
+        // The loop logs an ambiguity note to stdout; the VALUE under test
+        // is the recorded run id, printed last.
+        return execFileSync(
+          'bash',
+          [
+            '-c',
+            `set -eo pipefail
+sleep() { :; }
+${loop.replace(/\n {16}/g, '\n')}
+printf '%s' "${'$'}{LIVENESS_RUN_OUT:-}"`,
+          ],
+          {
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              ACTIONS_TOKEN: 'x',
+              REPO: 'QwenLM/qwen-code',
+              DISPATCH_T0: '2026-08-07T08:00:00Z',
+              DRY_RUN: 'false',
+            },
+            encoding: 'utf8',
+          },
+        )
+          .split('\n')
+          .at(-1);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    const staticStub = (dispatches) =>
+      `if [[ "$1" == 'run' && "$2" == 'list' ]]; then
+  printf '%s' '${JSON.stringify(dispatches)}'
+  exit 0
+fi
+exit 1`;
+    const run = (databaseId, createdAt) => ({ databaseId, createdAt });
+    // Exactly one dispatch in the window, stable across the polls → ours,
+    // attributed by id.
+    expect(replay(staticStub([run(900001, '2026-08-07T08:00:05Z')]))).toBe(
+      '900001',
+    );
+    // Two dispatches in the window (the bridge raced us) → run=none; the
+    // heuristic must not attribute a run it cannot prove is its own.
+    expect(
+      replay(
+        staticStub([
+          run(900001, '2026-08-07T08:00:05Z'),
+          run(900002, '2026-08-07T08:00:06Z'),
+        ]),
+      ),
+    ).toBe('');
+    // Only dispatches older than T0 → nothing attributed.
+    expect(replay(staticStub([run(899999, '2026-08-07T07:59:00Z')]))).toBe('');
+    // Nothing at all → the polling loop exhausts and records nothing.
+    expect(replay(staticStub([]))).toBe('');
+
+    // STATEFUL stubs: a static stub cannot tell single-poll from five-poll,
+    // so loop mutants escape it. These sequences change per call (the last
+    // line repeats), proving the retry-until-appears semantics and the
+    // stabilization window.
+    const statefulStub = (responses) => {
+      const dir = mkdtempSync(join(tmpdir(), 'shepherd-corr-seq-'));
+      try {
+        writeFileSync(join(dir, 'responses'), responses.join('\n'));
+        const script = `if [[ "$1" == 'run' && "$2" == 'list' ]]; then
+  n="$(cat '${dir}/polls' 2>/dev/null || echo 0)"
+  n=$(( n + 1 )); printf '%s' "$n" > '${dir}/polls'
+  line="$(sed -n "$((${responses.length} < n ? ${responses.length} : n))p" '${dir}/responses')"
+  printf '%s' "$line"
+  exit 0
+fi
+exit 1`;
+        return replay(script);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    // First poll empty, our run appears on the second → still attributed.
+    // A loop that broke after the first empty poll would record nothing.
+    expect(
+      statefulStub([
+        '[]',
+        JSON.stringify([run(900001, '2026-08-07T08:00:05Z')]),
+      ]),
+    ).toBe('900001');
+    // The filed defect: a FOREIGN dispatch is visible before our own run.
+    // Accepting the first singleton would attribute the foreign id; the
+    // stabilization window sees two candidates on the next poll and records
+    // run=none instead.
+    expect(
+      statefulStub([
+        JSON.stringify([run(900002, '2026-08-07T08:00:05Z')]),
+        JSON.stringify([
+          run(900002, '2026-08-07T08:00:05Z'),
+          run(900001, '2026-08-07T08:00:07Z'),
+        ]),
+      ]),
+    ).toBe('');
+  });
+
   it('behaviorally proves a failed jobs read yields unknown busy-state, not an empty busy-set', () => {
     // Extract the busy-set walk VERBATIM (drift fails the test) and replay it
     // with a PATH-stubbed gh: one live run whose jobs read fails must flip

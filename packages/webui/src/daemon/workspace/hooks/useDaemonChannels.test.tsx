@@ -22,6 +22,8 @@ const { actions, context } = vi.hoisted(() => ({
     channelPairing: {
       list: vi.fn(),
       approve: vi.fn(),
+      approvals: vi.fn(),
+      revoke: vi.fn(),
     },
   },
   context: {
@@ -87,6 +89,8 @@ describe('useDaemonChannels', () => {
       actions.restartChannel,
       actions.channelPairing.list,
       actions.channelPairing.approve,
+      actions.channelPairing.approvals,
+      actions.channelPairing.revoke,
     ]) {
       action.mockReset();
     }

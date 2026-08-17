@@ -171,6 +171,45 @@ describe('workspace Git log routes', () => {
     });
   });
 
+  it('passes the range query parameter through to fetchGitLog', async () => {
+    fetchGitLogMock.mockResolvedValue({ entries: [], hasMore: false });
+    const app = express();
+    registerWorkspaceGitLogRoutes(app, {
+      boundWorkspace: '/work/main',
+      sendBridgeError,
+    });
+
+    await request(app).get('/workspace/git/log?range=main..HEAD');
+
+    expect(fetchGitLogMock).toHaveBeenCalledWith('/work/main', {
+      limit: 50,
+      skip: 0,
+      range: 'main..HEAD',
+    });
+  });
+
+  it('omits range when the query parameter is absent or blank', async () => {
+    fetchGitLogMock.mockResolvedValue({ entries: [], hasMore: false });
+    const app = express();
+    registerWorkspaceGitLogRoutes(app, {
+      boundWorkspace: '/work/main',
+      sendBridgeError,
+    });
+
+    await request(app).get('/workspace/git/log');
+    expect(fetchGitLogMock).toHaveBeenCalledWith('/work/main', {
+      limit: 50,
+      skip: 0,
+    });
+
+    fetchGitLogMock.mockClear();
+    await request(app).get('/workspace/git/log?range=');
+    expect(fetchGitLogMock).toHaveBeenCalledWith('/work/main', {
+      limit: 50,
+      skip: 0,
+    });
+  });
+
   it('returns commit detail for a valid sha', async () => {
     fetchGitCommitDetailMock.mockResolvedValue({
       ...ENTRY,

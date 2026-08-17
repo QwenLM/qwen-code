@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { buildSessionPathname } from './sessionPath';
+
 /**
  * URL helpers for opening the split view (2+ sessions side by side) in its own
  * browser tab. A `?split=<id>,<id>` query tells the app to enter the split view
@@ -24,8 +26,9 @@ export const MAX_SPLIT_PANES = 6;
 /**
  * Build an absolute URL that opens the app straight into the split view for the
  * given sessions. Derived from the current location so it inherits the origin
- * and any `?daemon=`/`?token=` query a dev deployment relies on; the path is
- * reset to `/` so no single `/session/<id>` deep-link competes with the split.
+ * and any `?daemon=`/`?token=` query a dev deployment relies on; the trailing
+ * `/session/<id>` deep-link is stripped while preserving any deployment base
+ * path, so no single session competes with the split.
  */
 export function buildSplitUrl(
   sessionIds: string[],
@@ -33,7 +36,7 @@ export function buildSplitUrl(
   token?: string,
 ): string {
   const url = new URL(currentHref);
-  url.pathname = '/';
+  url.pathname = buildSessionPathname(url.pathname, undefined);
   url.searchParams.set(SPLIT_PARAM, sessionIds.join(','));
   // The current tab already stripped the daemon token from its URL, so carry it
   // into the new tab's fragment (never sent to the server / logs) — otherwise a

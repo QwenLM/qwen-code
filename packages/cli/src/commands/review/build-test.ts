@@ -39,27 +39,23 @@
 
 import type { CommandModule } from 'yargs';
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import { npmToolchainAdapter } from './lib/npm-toolchain.js';
 import {
-  affectedWorkspaces,
-  buildSetFor,
-  hasUnmodeledWorkspaceGlob,
-  readRootPackage,
-  readWorkspaceGlobs,
-  readWorkspacePackages,
-  type WorkspacePackage,
-} from './lib/workspaces.js';
+  selectToolchainAdapter,
+  type ReviewToolchainAdapter,
+} from './lib/toolchain.js';
+import { type TestScope } from './lib/workspace-scope.js';
 
-/** The build command for a dir: the root package takes no `--workspace`. */
-function buildCommand(dir: string): string {
-  return dir === '.' ? 'npm run build' : `npm run build --workspace="${dir}"`;
-}
-/** The test command for a dir: the root package takes no `--workspace`. */
-function testCommand(dir: string): string {
-  return dir === '.' ? 'npm test' : `npm test --workspace="${dir}"`;
-}
+/**
+ * The root toolchains build-test can select. One today; the registry exists so
+ * the next one is a registration rather than another branch in this file.
+ */
+export const toolchainAdapters: readonly ReviewToolchainAdapter[] = [
+  npmToolchainAdapter,
+];
 
 /** A command this run actually executed, and what it did. */
 export interface CommandResult {
@@ -70,20 +66,43 @@ export interface CommandResult {
   timedOut: boolean;
   /** Trimmed output: enough to correlate a failure with the diff. */
   output: string;
+  /**
+   * The deadline the command was actually given (ms) — the whole-call budget
+   * shortens it below the per-command default, and the timeout note must
+   * quote the number that fired, not the flag default.
+   */
+  deadlineMs?: number;
 }
 
 export interface BuildTestReport {
-  /** `npm` when the workspace scoping applied; `unsupported` otherwise. */
+  /** The scoped toolchain that ran, or `unsupported` when selection was unsafe. */
   toolchain: 'npm' | 'unsupported';
   /** Workspace dirs the diff changed. */
   affected: string[];
   /** What was built, dependencies first — after any widening. */
   buildSet: string[];
+  /**
+   * Packages the whole-call budget stopped BEFORE their build ran, when that
+   * happened. Structural for the same reason `notRun` is: a tree missing
+   * these was never fully compiled, and consumers of this report
+   * (`base-tree`'s availability gate) must be able to see that without
+   * parsing prose.
+   */
+  notBuilt?: string[];
   /** Packages the compiler asked for that the dependency graph had not predicted. */
   widenedWith: string[];
   install: CommandResult | null;
   build: CommandResult[];
   test: CommandResult[];
+  /**
+   * What the test phase covered, so the review can state exactly what was and
+   * was not run: `workspaces` lists exactly the suites the run executes, and
+   * `caveat` — when present — says why that set may be incomplete. Only set
+   * for workspace monorepos on a test-running call: a single-package repo's
+   * one suite IS its full suite, and a build-only probe runs no tests, so
+   * neither may claim a scoping decision it never made.
+   */
+  testScope?: TestScope;
   /**
    * True when every build and test command exited 0. An install that exits non-zero
    * but leaves a usable tree (a failed `prepare` hook) does NOT set this false — the
@@ -103,10 +122,46 @@ export interface BuildTestReport {
 const KEEP_HEAD = 2_000;
 const KEEP_TAIL = 6_000;
 
+/**
+ * Did this spawn die on its deadline?
+ *
+ * Exported so `test-delta`'s rerun asks the SAME question rather than
+ * re-deriving it — a copy there used `error.message.includes('ETIMEDOUT')`,
+ * which misses an external SIGTERM and fed a silent "base is green".
+ */
+export function spawnTimedOut(r: {
+  error?: Error;
+  signal?: NodeJS.Signals | null;
+  status?: number | null;
+}): boolean {
+  return (
+    (r.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT' ||
+    (r.signal === 'SIGTERM' && r.status === null)
+  );
+}
+
 /** The module-resolution errors the widening loop reads to grow the build set. */
 const MODULE_ERROR_RE = /Cannot find module '[^']+'|Could not resolve "[^"]+"/;
 
-function trimOutput(s: string): string {
+/**
+ * Runner summary lines, rescued from a trimmed middle like module errors are.
+ *
+ * On a FAILING suite the failure details land in the tail and push the
+ * `Tests  3 failed | 1132 passed` summary into the omitted middle — measured on
+ * a live review of PR #8176, where `test-plan`'s count check found no summary
+ * anywhere in an 8 000-char report of a 3-failure run. The summary is the one
+ * line that says what the whole run amounted to; keep it.
+ */
+const RUNNER_SUMMARY_RE = /^\s*(?:Tests?|Test Files):?\s+\d/;
+
+/** SGR color sequences — stripped per line before the summary test, because a
+ *  real runner interleaves them BETWEEN tokens (`Tests\x1b[2m  \x1b[22m3 failed`),
+ *  where no anchored pattern can step over them. The rescued line itself keeps
+ *  its original bytes. */
+// eslint-disable-next-line no-control-regex -- ESC is the character under test
+const ANSI_SGR_RE = /\x1b\[[0-9;]*m/g;
+
+export function trimOutput(s: string): string {
   if (s.length <= KEEP_HEAD + KEEP_TAIL) return s;
   const middle = s.slice(KEEP_HEAD, s.length - KEEP_TAIL);
   // Rescue module-resolution errors from the omitted middle. The widening loop
@@ -114,10 +169,22 @@ function trimOutput(s: string): string {
   // find module` line lost to trimming (a long TypeScript log can push one past the
   // head and before the tail) would end the widening early and surface a real
   // graph gap as a false build error. Report stays bounded; the signal survives.
-  const rescued = middle.split('\n').filter((l) => MODULE_ERROR_RE.test(l));
+  // CAPPED: the rescue exists to save a handful of summary/module-error lines,
+  // and an uncapped predicate made the whole trim a no-op on 40k lines of
+  // `Test <n>: …` prose (measured in review — 1.6 MB in, 1.6 MB out). Past the
+  // cap the trim's bounded-output contract wins and the rest stays omitted.
+  const RESCUE_MAX = 40;
+  const rescued = middle
+    .split('\n')
+    .filter(
+      (l) =>
+        MODULE_ERROR_RE.test(l) ||
+        RUNNER_SUMMARY_RE.test(l.replace(ANSI_SGR_RE, '')),
+    )
+    .slice(0, RESCUE_MAX);
   const omitted = s.length - KEEP_HEAD - KEEP_TAIL;
   const marker = rescued.length
-    ? `\n\n... [${omitted} characters omitted; module-resolution errors kept] ...\n${rescued.join('\n')}\n\n`
+    ? `\n\n... [${omitted} characters omitted; module-resolution errors and runner summaries kept] ...\n${rescued.join('\n')}\n\n`
     : `\n\n... [${omitted} characters omitted] ...\n\n`;
   return s.slice(0, KEEP_HEAD) + marker + s.slice(-KEEP_TAIL);
 }
@@ -148,11 +215,17 @@ export function buildRunEnv(
 
 function run(command: string, cwd: string, timeoutMs: number): CommandResult {
   const started = Date.now();
+  // spawnSync validates `timeout` as an unsigned integer: the adapters'
+  // budget arithmetic can hand it a fractional value (a decimal --timeout
+  // or --budget), which throws ERR_OUT_OF_RANGE and kills the whole call
+  // with no report, or zero, which arms no kill timer at all. Coerce once
+  // at the one boundary every command crosses.
+  const deadlineMs = Math.max(1, Math.round(timeoutMs));
   const r = spawnSync(command, {
     cwd,
     shell: true,
     encoding: 'utf8',
-    timeout: timeoutMs,
+    timeout: deadlineMs,
     maxBuffer: 64 * 1024 * 1024,
     // A build that asks a question is a build that hangs until the deadline.
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -162,46 +235,18 @@ function run(command: string, cwd: string, timeoutMs: number): CommandResult {
   // the authoritative signal. The `SIGTERM`/null-status pair is only a fallback: it
   // also matches an external SIGTERM (a container stop), and it misses a non-default
   // `killSignal`. Check the authoritative one first.
-  const timedOut =
-    (r.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT' ||
-    (r.signal === 'SIGTERM' && r.status === null);
+  const timedOut = spawnTimedOut(r);
   return {
     command,
     exitCode: r.status,
     seconds: Math.round((Date.now() - started) / 1000),
     timedOut,
     output: trimOutput(`${r.stdout ?? ''}${r.stderr ?? ''}`),
+    deadlineMs,
   };
 }
 
-/**
- * Workspace packages the compiler said it could not resolve.
- *
- * Only names that belong to a workspace of *this* repo are returned. A missing
- * third-party module is a broken install or a genuine defect in the diff — not
- * something a wider build set can fix — and widening on it would loop.
- */
-export function unresolvedWorkspaceDeps(
-  output: string,
-  packages: WorkspacePackage[],
-): string[] {
-  const known = new Map(packages.map((p) => [p.name, p.dir]));
-  const found = new Set<string>();
-  // `error TS2307: Cannot find module '@qwen-code/webui' or its corresponding
-  // type declarations.` — and the same shape from a bundler.
-  const re = /Cannot find module '([^']+)'|Could not resolve "([^"]+)"/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(output)) !== null) {
-    const name = m[1] ?? m[2];
-    if (!name) continue;
-    // `@scope/pkg/sub` resolves against the package `@scope/pkg`.
-    const base = name.startsWith('@')
-      ? name.split('/').slice(0, 2).join('/')
-      : name.split('/')[0];
-    if (known.has(base)) found.add(base);
-  }
-  return [...found];
-}
+export { unresolvedWorkspaceDeps } from './lib/npm-toolchain.js';
 
 interface BuildTestArgs {
   plan: string;
@@ -209,6 +254,29 @@ interface BuildTestArgs {
   out?: string;
   timeout: number;
   install: boolean;
+  /**
+   * Build, then stop — do not run the changed workspaces' tests.
+   *
+   * For the merge-base tree an A/B probe compares against. Base's tests were
+   * green before this PR existed and running them measures nothing about it;
+   * what the probe needs from that tree is a compiled `dist/` to run against,
+   * and paying for the suite twice is the difference between an A/B a reviewer
+   * will use and one they will skip. Defaults false, so the PR-side call is
+   * unchanged.
+   */
+  buildOnly?: boolean;
+  /**
+   * Whole-call wall-clock budget in seconds (default: 2× `timeout` − 30s of
+   * headroom for process startup and the report write, floored at one
+   * per-command deadline). Measured from the top of the call — install and
+   * build time count against it. The closure's per-command deadlines SUM, and
+   * a large one sums past the tool timeout the brief welds onto the call —
+   * whose outer kill discards the report. Each suite is attempted with
+   * whatever of this budget remains (a suite killed at the boundary is
+   * reported as a timeout — infrastructure, not a finding); only suites never
+   * attempted are named in `notRun`.
+   */
+  budget?: number;
   /**
    * How to run a command. Injectable so the tests can build the states that are
    * hard to force out of real npm — chiefly the one that cost a live review: an
@@ -244,77 +312,71 @@ function changedFilesFrom(planPath: string): string[] {
 }
 
 export function runBuildTest(args: BuildTestArgs): BuildTestReport {
-  const root = resolve(args.worktree);
-  const perCommandMs = args.timeout * 1000;
-  const exec = args.exec ?? run;
-  const changed = changedFilesFrom(args.plan);
-
-  // `unsupported`: build-test cannot safely scope this repo, so the agent's brief
-  // falls back to its build/test precedence (installing dependencies first). `ok` is
-  // true because nothing was found wrong — it is a handoff, not a failure.
-  const unsupportedReport = (note: string): BuildTestReport => ({
-    toolchain: 'unsupported',
-    affected: [],
-    buildSet: [],
-    widenedWith: [],
-    install: null,
-    build: [],
-    test: [],
-    ok: true,
-    timedOut: [],
-    note,
-  });
-
-  const globs = readWorkspaceGlobs(root);
-  let packages = readWorkspacePackages(root);
-
-  // A workspace-less `package.json` with a build/test script is the most common npm
-  // repo shape — treat the root as a single package so it keeps the install, the
-  // deadline, and timeout-as-data, instead of dropping to a precedence list that no
-  // longer installs. Its build/test commands take no `--workspace` (dir `.`).
-  let singleRoot = false;
-  const unmodeled = globs.length > 0 && hasUnmodeledWorkspaceGlob(globs);
-  if (!unmodeled && globs.length === 0) {
-    const rootPkg = readRootPackage(root);
-    if (rootPkg) {
-      packages = [rootPkg];
-      singleRoot = true;
-    }
-  }
-
-  // `unsupported` when there is nothing to scope, OR when the layout uses a glob
-  // shape the walker does not model (`packages/**`, `foo-*`, `*/lib`). The second
-  // is load-bearing: without it, a diff inside an unmodeled workspace resolves to an
-  // EMPTY affected set and the report says "no package to build" — a confident false
-  // green for the review's one deterministic check. Falling back to the brief's
-  // precedence list is the safe direction. The unmodeled check comes FIRST because
-  // `packages/**` also makes `readWorkspacePackages` find nothing.
-  if (
-    unmodeled ||
-    (!singleRoot && (globs.length === 0 || packages.length === 0))
-  ) {
-    return unsupportedReport(
-      unmodeled
-        ? 'This repo uses a workspace glob shape this command does not model ' +
-            '(e.g. `**`, an inner `*`, or a `foo-*` prefix), so it cannot safely decide ' +
-            'which packages the diff touches. Fall back to the build/test precedence in ' +
-            'your brief, and give each command a deadline it can actually meet.'
-        : 'No npm package here to scope (no workspaces, and the root has no build/test ' +
-            'script). Fall back to the build/test precedence in your brief — installing ' +
-            'dependencies first — and give each command a deadline it can actually meet.',
+  // yargs `type: 'number'` coerces `--timeout abc` to NaN rather than
+  // rejecting it; NaN defeats every budget-floor comparison and reaches
+  // spawnSync as an invalid deadline — ERR_OUT_OF_RANGE with no report.
+  // Reject both flags at the one boundary every call crosses.
+  if (!Number.isFinite(args.timeout)) {
+    throw new Error(
+      `build-test: --timeout must be a finite number of seconds (got ${String(args.timeout)}).`,
     );
   }
-
-  // A single-root repo builds and tests its one package whenever the diff changes
-  // anything; a workspace repo maps the changed files to the workspaces they live in.
-  const affected = singleRoot
-    ? changed.length > 0
-      ? ['.']
-      : []
-    : affectedWorkspaces(changed, globs);
-  if (affected.length === 0) {
+  if (args.budget !== undefined && !Number.isFinite(args.budget)) {
+    throw new Error(
+      `build-test: --budget must be a finite number of seconds (got ${String(args.budget)}).`,
+    );
+  }
+  const root = resolve(args.worktree);
+  const changedFiles = changedFilesFrom(args.plan);
+  const runArgs = {
+    root,
+    changedFiles,
+    timeout: args.timeout,
+    install: args.install,
+    buildOnly: args.buildOnly,
+    budget: args.budget,
+    exec: args.exec ?? run,
+  };
+  const { adapter, applicable } = selectToolchainAdapter(
+    root,
+    toolchainAdapters,
+  );
+  if (!adapter) {
+    if (applicable.length > 1) {
+      // Unreachable with one registered adapter, and deliberately kept: the
+      // selection contract is "exactly one, or nothing", and the second
+      // adapter must land in a file that already refuses to guess between
+      // them rather than one that has to grow the branch.
+      return {
+        toolchain: 'unsupported',
+        affected: [],
+        buildSet: [],
+        widenedWith: [],
+        install: null,
+        build: [],
+        test: [],
+        ok: true,
+        timedOut: [],
+        note:
+          'More than one toolchain applies at the repository root. build-test will ' +
+          'not guess which one owns this diff, so it ran nothing — report the ' +
+          'ambiguity as a handoff instead of substituting ad hoc build or test ' +
+          'commands.',
+      };
+    }
+    // A root package.json marks an npm-shaped repo that npm's own gate refused
+    // (an unmodeled workspace glob, workspaces that resolve to no package, or
+    // no root build/test script). Delegate the handoff to the npm adapter so
+    // the report carries its precise reason instead of the generic one — an
+    // agent told "no npm project here" about a repo that IS one gets a worse
+    // steer than the shape it cannot scope named. run() returns its
+    // unsupported report before executing any command on every root where
+    // applies() is false.
+    if (existsSync(join(root, 'package.json'))) {
+      return npmToolchainAdapter.run(runArgs);
+    }
     return {
-      toolchain: 'npm',
+      toolchain: 'unsupported',
       affected: [],
       buildSet: [],
       widenedWith: [],
@@ -324,299 +386,20 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
       ok: true,
       timedOut: [],
       note:
-        `The diff changes ${changed.length} file(s), none of them inside a workspace ` +
-        '(docs, root config, CI). There is no package to build and no test to run — ' +
-        'this is a complete answer, not a skipped step.',
+        'No supported npm project here to scope. Fall back to the ' +
+        'build/test precedence in your brief — installing dependencies first — ' +
+        'and give each command a deadline it can actually meet.',
     };
   }
-
-  const byDir = new Map(packages.map((p) => [p.dir, p]));
-
-  // A changed dir the walker mapped to something that is NOT a package (a nested
-  // package listed before a `*` that also claims its parent segment; a loose file
-  // directly under a `packages/*` base) would be dropped from the build set without
-  // a trace: zero commands, `ok: true`, "Everything passed" — the confident false
-  // green this command exists to prevent. If any affected dir is not a known
-  // package, the scoping cannot be trusted; hand the whole thing to the brief's
-  // precedence rather than certify a build that never ran.
-  const unmapped = affected.filter((d) => d !== '.' && !byDir.has(d));
-  if (unmapped.length > 0) {
-    return unsupportedReport(
-      `The diff touches ${unmapped.join(', ')}, which the workspace globs map to no ` +
-        'package (a nested package ordered before a `*`, or a loose file under a ' +
-        'workspace base). Scoping cannot be trusted here, so fall back to the ' +
-        'build/test precedence in your brief — installing dependencies first — rather ' +
-        'than trust a scoped build that would silently skip it.',
-    );
-  }
-
-  const results: BuildTestReport = {
-    toolchain: 'npm',
-    affected,
-    buildSet: [],
-    widenedWith: [],
-    install: null,
-    build: [],
-    test: [],
-    ok: true,
-    timedOut: [],
-    note: '',
-  };
-
-  // The install. It lives here, not in the orchestrator, because nothing before
-  // this command needs `node_modules`: the eleven diff-reading agents read the
-  // diff and grep the source. Run from the orchestrator it blocks the fan-out;
-  // run here it overlaps the other agents, which are still reading.
-  //
-  // A non-zero exit is NOT the end of the run, and finding that out cost a live
-  // review. `npm ci` executes the project's `prepare` lifecycle script, and this
-  // repo's runs `npm run build` and `npm run bundle` — the whole monorepo. On the
-  // PR under review that build hit a **pre-existing** type error in a package the
-  // diff does not touch, `npm ci` exited 1, and this command gave up having built
-  // and tested nothing: the one deterministic signal a review has, withheld
-  // because an unrelated package failed to compile during an install.
-  //
-  // The packages were installed. `node_modules` was on disk. So the test is not
-  // the exit code, it is whether the tree we need is there — and the scoped build
-  // below is the authoritative answer anyway. Report the install failure, and
-  // carry on to ask the question the review actually came to ask.
-  //
-  // A **timeout** is the exception, and it is not the same case. A `prepare` hook
-  // that fails leaves a *complete* `node_modules` and only the post-install build
-  // broken; a timeout kills `npm ci` mid-download and leaves a **partial** tree.
-  // Building against that produces "module not found" errors that look like defects
-  // in the diff and are not — so a timed-out install aborts, exactly like an install
-  // that left no tree at all.
-  //
-  // Whether to install is gated on npm's **completeness marker**, not the bare
-  // directory. `npm ci` writes `node_modules/.package-lock.json` only once the tree
-  // is fully materialised, so a partial tree — left by a timeout here, or by the
-  // agent's own shell-tool kill one level up — has the directory but not the marker.
-  // Gating on the directory would let every later run *skip* the install and build
-  // against that partial tree; gating on the marker reinstalls it.
-  //
-  // But `npm ci` is only right for an npm repo. `workspaces` is also yarn/bun/pnpm
-  // syntax, and those write no `package-lock.json`, so `npm ci` would fail-fast on
-  // the missing lockfile and mislabel a perfectly usable `node_modules` as a failed
-  // install. So install only when there IS a `package-lock.json` (an npm repo) whose
-  // tree is incomplete; a non-npm repo that already has a tree is trusted — the build
-  // is the authoritative signal, by this command's own argument.
-  const npmLock = existsSync(join(root, 'package-lock.json'));
-  const installComplete = (): boolean =>
-    existsSync(join(root, 'node_modules', '.package-lock.json'));
-
-  // A non-npm repo (yarn/bun/pnpm — `workspaces` is their syntax too) with no
-  // installed tree cannot be installed here: `npm ci` needs the npm lockfile, and
-  // building against absent dependencies fails with `Cannot find module` **inside the
-  // PR's own changed files** — the false-Critical steer this command exists to
-  // prevent. A review worktree is cold by construction, so this is the common case,
-  // not an edge. Hand it to the brief, naming the tool to install with. (The warm
-  // case — a tree already present — is trusted below and never reaches here.)
-  if (args.install && !npmLock && !existsSync(join(root, 'node_modules'))) {
-    const altLock = [
-      ['yarn.lock', 'yarn install --frozen-lockfile'],
-      ['pnpm-lock.yaml', 'pnpm install --frozen-lockfile'],
-      ['bun.lockb', 'bun install --frozen-lockfile'],
-      ['bun.lock', 'bun install --frozen-lockfile'],
-    ].find(([f]) => existsSync(join(root, f)));
-    return unsupportedReport(
-      altLock
-        ? `This is a ${altLock[0]} repo with no installed \`node_modules\`, so \`npm ci\` ` +
-            `cannot install it. Run \`${altLock[1]}\` first, then fall back to the ` +
-            'build/test precedence in your brief, each command with a deadline it can meet.'
-        : 'There is no lockfile and no `node_modules` here, so nothing can be installed ' +
-            'deterministically. Install dependencies first, then fall back to the ' +
-            'build/test precedence in your brief.',
-    );
-  }
-  if (args.install && npmLock && !installComplete()) {
-    const install = exec('npm ci --no-audit --no-fund', root, perCommandMs);
-    results.install = install;
-    if (install.timedOut) results.timedOut.push(install.command);
-    // A timeout leaves a partial tree — remove it, so this is not mistaken next time
-    // for a complete install to build against. `spawnSync`'s SIGTERM only kills the
-    // direct shell; the orphaned `npm`/`node` grandchildren keep writing the tree, so
-    // `rmSync` can race them and throw `ENOTEMPTY` — which must not replace the whole
-    // report with a raw error. Best-effort with retries; the marker gate below still
-    // decides the outcome.
-    if (install.timedOut) {
-      try {
-        rmSync(join(root, 'node_modules'), {
-          recursive: true,
-          force: true,
-          maxRetries: 3,
-        });
-      } catch {
-        // Best effort — a partial tree left behind is caught by the marker gate.
-      }
-    }
-    if (install.timedOut || !installComplete()) {
-      results.ok = false;
-      results.note = install.timedOut
-        ? `\`${install.command}\` ran out of time (${args.timeout}s) and left an ` +
-          'incomplete `node_modules`, so nothing could be built or tested against it. ' +
-          'This is an infrastructure result, not a defect in the diff — report it as ' +
-          'informational.'
-        : 'The install failed and left no usable `node_modules`, so nothing could be ' +
-          'built or tested. This is an environment failure, not a defect in the diff — ' +
-          'report it as informational.';
-      return results;
-    }
-  }
-
-  const alsoBuild: string[] = [];
-  let set = buildSetFor(affected, packages);
-  const built = new Set<string>();
-  const widened = new Set<string>();
-
-  // Build, and let the compiler correct the set. Three widenings is generous: each
-  // one is a package the graph could not have known about, and a fourth would mean
-  // the graph is not wrong but absent.
-  for (let attempt = 0; attempt <= 3; attempt++) {
-    let failure: CommandResult | null = null;
-
-    for (const dir of set) {
-      if (built.has(dir)) continue;
-      const pkg = byDir.get(dir);
-      if (!pkg?.scripts.includes('build')) {
-        built.add(dir); // Nothing to build is not a failure to build.
-        continue;
-      }
-      const r = exec(buildCommand(dir), root, perCommandMs);
-      results.build.push(r);
-      if (r.timedOut) results.timedOut.push(r.command);
-      if (r.exitCode !== 0) {
-        failure = r;
-        break;
-      }
-      built.add(dir);
-    }
-
-    if (!failure) break;
-
-    // Did it fail because the set was too small — or mis-ordered? The declared graph
-    // under-approximates whenever a package reaches into another's *sources* (a
-    // tsconfig `paths` entry into `../cli/src/...` compiles that package's imports
-    // without declaring a dependency), and the compiler names the package it could
-    // not resolve. Filter on `!built.has(dir)`, not `!set.includes(dir)`: when BOTH
-    // the needer and the undeclared-needed package are affected and the alphabet
-    // ordered the needer first, the named package is already IN the set but not yet
-    // built — re-seeding it into `alsoBuild` (which sorts first) fixes the order. The
-    // attempt cap bounds the loop; a package that is truly missing is not in the map.
-    //
-    // A **timeout** must not enter this path. A build killed at the deadline leaves
-    // partial output that can happen to contain a `Cannot find module` line, which
-    // would look like a too-small build set and trigger a retry — another full
-    // deadline, and another, up to the attempt cap. A timeout is infrastructure, not
-    // a graph gap: report it and stop, the same way the install path does.
-    const missing = failure.timedOut
-      ? []
-      : unresolvedWorkspaceDeps(failure.output, packages).filter((name) => {
-          const dir = packages.find((p) => p.name === name)?.dir;
-          return dir && !built.has(dir);
-        });
-    if (missing.length === 0 || failure.timedOut || attempt === 3) {
-      results.ok = false;
-      results.note = failure.timedOut
-        ? `\`${failure.command}\` ran out of time (${args.timeout}s). That is an ` +
-          'infrastructure result, not a defect in the diff — report it as informational.'
-        : `\`${failure.command}\` failed. Correlate the errors below with the diff: a ` +
-          'compile error in a file the PR changed is a Critical; one in a file it did not ' +
-          'touch is a pre-existing failure, and belongs in the terminal, not on the PR.';
-      results.buildSet = set;
-      results.widenedWith = [...widened];
-      return results;
-    }
-
-    // Drop the failed attempt from the report. It is about to be retried with the
-    // package it asked for, and it is **not evidence about this PR**: the build set
-    // was too small, which is this command's mistake, not the author's. Left in
-    // `build[]`, an agent told "a build failure in a changed file is a Critical"
-    // reads `packages/vscode-ide-companion rc=2` and files exactly that — a public
-    // blocker on a PR whose build passes. (A timed-out failure cannot reach here — it
-    // is terminal above — so only `build[]`, never `timedOut`, can hold it.)
-    results.build = results.build.filter((r) => r !== failure);
-
-    for (const name of missing) widened.add(name);
-    for (const name of missing) {
-      const dir = packages.find((p) => p.name === name)?.dir;
-      if (dir) alsoBuild.push(dir);
-    }
-    // As `alsoBuild`, never as `affected`. The compiler asked for this package
-    // because something compiles *against* it; the PR did not change it, so its
-    // consumers cannot have been broken by the PR and must not be built.
-    set = buildSetFor(affected, packages, alsoBuild);
-  }
-
-  results.buildSet = set;
-  results.widenedWith = [...widened];
-
-  // Test only what changed. `npm test` at the root runs every workspace in
-  // parallel and does not finish; the packages the diff did not touch cannot have
-  // been broken by it, and their tests were green before this PR and will be green
-  // after it.
-  for (const dir of affected) {
-    const pkg = byDir.get(dir);
-    if (!pkg?.scripts.includes('test')) continue;
-    const r = exec(testCommand(dir), root, perCommandMs);
-    results.test.push(r);
-    if (r.timedOut) results.timedOut.push(r.command);
-    if (r.exitCode !== 0) results.ok = false;
-  }
-
-  if (!results.note) {
-    const failed = [...results.build, ...results.test].filter(
-      (r) => r.exitCode !== 0,
-    );
-    // A timeout is a failure (its exitCode is null), but it is NOT a defect in the
-    // diff, and the note must not tell the agent to correlate it with one — the
-    // brief says timeouts are infrastructure, and an agent trusts the data over its
-    // instructions. So a test that runs out of time gets the same infrastructure
-    // framing the build-timeout path already gives, not the "a failure is a Critical"
-    // message meant for a real compile/assertion failure.
-    const realFailures = failed.filter((r) => !r.timedOut);
-    if (results.ok) {
-      results.note =
-        `Built ${results.buildSet.length} of ${packages.length} workspaces (the ${affected.length} the ` +
-        `diff changes, plus what they compile against${
-          widened.size
-            ? `, plus ${[...widened].join(', ')} the compiler asked for`
-            : ''
-        }) and ran the tests of the changed ones. Everything passed.`;
-    } else if (realFailures.length === 0) {
-      results.note =
-        `${failed.length} command(s) ran out of time (${args.timeout}s). A timeout is an ` +
-        'infrastructure result, not a defect in the diff — report it as informational.';
-    } else {
-      results.note =
-        `${realFailures.length} command(s) failed. Correlate each error with the diff: a failure in a ` +
-        'file the PR changed is a Critical; one in a file it did not touch is pre-existing.' +
-        (failed.length > realFailures.length
-          ? ' (Commands that timed out are infrastructure, not findings.)'
-          : '');
-    }
-  }
-
-  // The install exited non-zero but left a usable tree, so the run went ahead. Say
-  // so — the build and test results below are real, and the install failure is not
-  // a finding about this PR. (A `prepare` script that builds the whole project,
-  // as this repo's does, fails on any pre-existing error anywhere in it.)
-  if (results.install && results.install.exitCode !== 0) {
-    results.note =
-      `\`${results.install.command}\` exited ${results.install.exitCode} but left a usable ` +
-      '`node_modules`, so the build and test below ran anyway and their results stand. ' +
-      'The install failure is an environment/infrastructure result — report it as ' +
-      'informational, never as a Critical, and never against this PR. ' +
-      results.note;
-  }
-  return results;
+  return adapter.run(runArgs);
 }
 
 export const buildTestCommand: CommandModule = {
   command: 'build-test',
   describe:
-    'Build and test the workspaces the diff changes (and what they compile ' +
-    'against), with a deadline the commands can actually meet',
+    'Build the workspaces the diff changes (and what they compile against), ' +
+    'test those plus their dependents, with a deadline the commands can ' +
+    'actually meet',
   builder: (yargs) =>
     yargs
       .option('plan', {
@@ -643,13 +426,34 @@ export const buildTestCommand: CommandModule = {
           'Per-command deadline in seconds. Kept strictly below the 600s (600000ms) ' +
           "tool timeout the agent's brief welds onto the whole call, so a single hung " +
           "command's own deadline fires — and build-test reports it as data — before " +
-          'the outer shell kill would discard the report. (A giant PR whose commands ' +
-          'sum past the tool ceiling is a separate, acknowledged follow-up.)',
+          'the outer shell kill would discard the report. Commands that would SUM ' +
+          'past the whole call are stopped and disclosed instead — see --budget.',
+      })
+      .option('budget', {
+        type: 'number',
+        describe:
+          'Whole-call wall-clock budget in seconds, measured from the top of ' +
+          'the call — install and build time count against it (default: 2× ' +
+          '--timeout minus 30s of headroom for process startup and the report ' +
+          'write). Each suite is attempted with whatever of the budget ' +
+          'remains — a suite killed at the boundary is a timeout, reported as ' +
+          'infrastructure — and only suites never attempted are named notRun. ' +
+          'A partial report survives where the outer shell kill would discard ' +
+          'the whole one.',
       })
       .option('install', {
         type: 'boolean',
         default: true,
-        describe: 'Run `npm ci` first when node_modules is absent',
+        describe:
+          'Fetch dependencies first: `npm ci` when node_modules is absent',
+      })
+      .option('build-only', {
+        type: 'boolean',
+        default: false,
+        describe:
+          "Build, then stop — skip the changed workspaces' tests. For the " +
+          'merge-base tree an A/B probe compares against, whose suite says ' +
+          'nothing about this PR.',
       }),
   handler: (argv) => {
     const args = argv as unknown as BuildTestArgs;

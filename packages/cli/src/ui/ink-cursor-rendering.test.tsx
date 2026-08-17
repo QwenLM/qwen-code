@@ -215,7 +215,46 @@ describe.each([false, true])(
 
       expect(cursorRenderCount).toBe(1);
       expect(capture.read()).toContain(ansiEscapes.clearTerminal);
-      expect(capture.read()).toContain(expectedCursorSuffix(3));
+      // Fullscreen mode (output >= terminal rows) omits the trailing newline,
+      // so the cursor starts one line higher: moveUp = visibleLines - 1 - y.
+      expect(capture.read()).toContain(expectedCursorSuffix(2));
+      await unmount(app);
+    });
+
+    it('positions the hardware cursor at the correct row in fullscreen (y > 0)', async () => {
+      // Regression test for QwenLM/qwen-code#7980: in fullscreen mode the
+      // output has no trailing newline, so the terminal cursor sits ON the
+      // last line rather than one past it. buildCursorSuffix must account
+      // for this, otherwise the hardware cursor lands one row too high.
+      const capture = createTestStdout(3);
+
+      function CursorOwner() {
+        // y=1 — the second row of the 3-line output. With the old bug the
+        // escape sequence would move the cursor to y=0 instead.
+        useCursor().setCursorPosition({ x: 2, y: 1 });
+        return <Text>input</Text>;
+      }
+
+      const app = await mount(
+        <Box flexDirection="column">
+          <CursorOwner />
+          <Text>{'mid\nbottom'}</Text>
+        </Box>,
+        capture.stdout,
+        incrementalRendering,
+      );
+
+      // 3 visible lines, fullscreen (3 >= 3 rows), no trailing \n.
+      // Terminal cursor after write: line 2. Target: y=1.
+      // Correct moveUp = 2 - 1 = 1.
+      const output = capture.read();
+      expect(output).toContain(
+        ansiEscapes.cursorUp(1) + ansiEscapes.cursorTo(2) + SHOW_CURSOR,
+      );
+      // The buggy value would have been cursorUp(2) — verify it's absent.
+      expect(output).not.toContain(
+        ansiEscapes.cursorUp(2) + ansiEscapes.cursorTo(2) + SHOW_CURSOR,
+      );
       await unmount(app);
     });
 
@@ -243,6 +282,41 @@ describe.each([false, true])(
       await updateAndFlush(app, moveCursor);
 
       expect(capture.read()).toContain(expectedCursorSuffix(2, 4));
+      await unmount(app);
+    });
+
+    it('preserves cursor-only position updates in fullscreen', async () => {
+      const capture = createTestStdout(2);
+      let moveCursor!: () => void;
+
+      function CursorOwner() {
+        const [x, setX] = useState(2);
+        moveCursor = () => setX(4);
+        useCursor().setCursorPosition({ x, y: 0 });
+        return <Text>input</Text>;
+      }
+
+      const app = await mount(
+        <Box flexDirection="column">
+          <CursorOwner />
+          <Text>footer</Text>
+        </Box>,
+        capture.stdout,
+        incrementalRendering,
+      );
+      capture.reset();
+
+      await updateAndFlush(app, moveCursor);
+
+      // Fullscreen (2 lines >= 2 rows): no trailing newline, so
+      // moveUp = (visibleLines - 1) - y = 1, not visibleLines - y = 2.
+      const output = capture.read();
+      expect(output).toContain(
+        ansiEscapes.cursorUp(1) + ansiEscapes.cursorTo(4) + SHOW_CURSOR,
+      );
+      expect(output).not.toContain(
+        ansiEscapes.cursorUp(2) + ansiEscapes.cursorTo(4) + SHOW_CURSOR,
+      );
       await unmount(app);
     });
 

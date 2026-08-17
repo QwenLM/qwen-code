@@ -26,4 +26,13 @@ describe('toDaemonPromptContent', () => {
       { type: 'image', data: 'b', mimeType: 'image/jpeg' },
     ]);
   });
+
+  it('preserves an image-only BMP prompt as canonical daemon content', () => {
+    expect(
+      toDaemonPromptContent('', [{ data: 'Qk0=', mimeType: 'image/bmp' }]),
+    ).toEqual([
+      { type: 'text', text: '' },
+      { type: 'image', data: 'Qk0=', mimeType: 'image/bmp' },
+    ]);
+  });
 });

@@ -652,9 +652,15 @@ describe('ToolCallEmitter', () => {
           message: [],
           resultDisplay: {
             type: 'todo_list',
+            planId: 'plan-1',
             todos: [
               { id: '1', content: 'Task 1', status: 'pending' },
-              { id: '2', content: 'Task 2', status: 'in_progress' },
+              {
+                id: '2',
+                content: 'Task 2',
+                status: 'in_progress',
+                blockedBy: ['1'],
+              },
             ],
           },
         });
@@ -663,9 +669,23 @@ describe('ToolCallEmitter', () => {
         expect(sendUpdateSpy).toHaveBeenCalledWith({
           sessionUpdate: 'plan',
           entries: [
-            { content: 'Task 1', priority: 'medium', status: 'pending' },
-            { content: 'Task 2', priority: 'medium', status: 'in_progress' },
+            {
+              content: 'Task 1',
+              priority: 'medium',
+              status: 'pending',
+              _meta: { qwenTodo: { id: '1' } },
+            },
+            {
+              content: 'Task 2',
+              priority: 'medium',
+              status: 'in_progress',
+              _meta: { qwenTodo: { id: '2', blockedBy: ['1'] } },
+            },
           ],
+          _meta: {
+            qwenTodoPlan: { id: 'plan-1' },
+            qwenTranscript: { planToolCallId: 'call-todo' },
+          },
         });
       });
 
@@ -684,8 +704,14 @@ describe('ToolCallEmitter', () => {
         expect(sendUpdateSpy).toHaveBeenCalledWith({
           sessionUpdate: 'plan',
           entries: [
-            { content: 'From args', priority: 'medium', status: 'completed' },
+            {
+              content: 'From args',
+              priority: 'medium',
+              status: 'completed',
+              _meta: { qwenTodo: { id: '1' } },
+            },
           ],
+          _meta: { qwenTranscript: { planToolCallId: 'call-todo' } },
         });
       });
 
@@ -708,6 +734,48 @@ describe('ToolCallEmitter', () => {
           success: true,
           message: [],
           resultDisplay: 'Some string result',
+        });
+
+        expect(sendUpdateSpy).not.toHaveBeenCalled();
+      });
+
+      it('should not publish rejected TodoWrite arguments as a plan', async () => {
+        await emitter.emitResult({
+          toolName: ToolNames.TODO_WRITE,
+          callId: 'call-invalid-todo',
+          success: true,
+          message: [],
+          resultDisplay:
+            'Error writing todos: dependency graph contains a cycle',
+          args: {
+            todos: [
+              {
+                id: 'a',
+                content: 'Invalid cycle',
+                status: 'pending',
+                blockedBy: ['a'],
+              },
+            ],
+          },
+        });
+
+        expect(sendUpdateSpy).not.toHaveBeenCalled();
+      });
+
+      it('does not promote a subagent TodoWrite as the session plan', async () => {
+        await emitter.emitResult({
+          toolName: ToolNames.TODO_WRITE,
+          callId: 'call-subagent-todo',
+          success: true,
+          message: [],
+          resultDisplay: {
+            type: 'todo_list',
+            todos: [{ id: '1', content: 'Child task', status: 'pending' }],
+          },
+          subagentMeta: {
+            parentToolCallId: 'parent-agent',
+            subagentType: 'explore',
+          },
         });
 
         expect(sendUpdateSpy).not.toHaveBeenCalled();
@@ -989,6 +1057,9 @@ describe('ToolCallEmitter', () => {
         expect(sendUpdateSpy).toHaveBeenCalledWith({
           sessionUpdate: 'plan',
           entries: [],
+          _meta: {
+            qwenTranscript: { planToolCallId: 'call-todo-empty' },
+          },
         });
       });
 
@@ -1011,6 +1082,9 @@ describe('ToolCallEmitter', () => {
         expect(sendUpdateSpy).toHaveBeenCalledWith({
           sessionUpdate: 'plan',
           entries: [],
+          _meta: {
+            qwenTranscript: { planToolCallId: 'call-todo-cleared' },
+          },
         });
       });
     });

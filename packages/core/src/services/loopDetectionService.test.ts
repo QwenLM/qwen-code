@@ -18,6 +18,7 @@ import { LoopType } from '../telemetry/types.js';
 import {
   DEFAULT_MAX_TOOL_CALLS_PER_TURN,
   LoopDetectionService,
+  getToolCallRepeatKey,
 } from './loopDetectionService.js';
 
 vi.mock('../telemetry/loggers.js', () => ({
@@ -611,6 +612,65 @@ describe('LoopDetectionService', () => {
       expect(isLoop).toBe(false);
       expect(loggers.logLoopDetected).not.toHaveBeenCalled();
     });
+  });
+
+  describe('Content element detection', () => {
+    const feed = (content: string, times: number): boolean => {
+      let isLoop = false;
+      for (let i = 0; i < times; i++) {
+        isLoop = service.addAndCheck(createContentEvent(content));
+      }
+      return isLoop;
+    };
+
+    // A list item resets tracking so a long list is not mistaken for a loop.
+    // `-` is the most common bullet in markdown, and it used to be the one
+    // marker the check could not see.
+    it.each([['-'], ['*'], ['+']])(
+      'should treat "%s" as a list item and not report a loop',
+      (marker) => {
+        service.reset('');
+        const bullet = `${marker} ${createRepetitiveContent(1, CONTENT_CHUNK_SIZE)}\n`;
+
+        expect(feed(bullet, CONTENT_LOOP_THRESHOLD * 2)).toBe(false);
+        expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+      },
+    );
+
+    it('should still report a loop for repeated non-list content', () => {
+      service.reset('');
+      const notABullet = `${createRepetitiveContent(1, CONTENT_CHUNK_SIZE)}\n`;
+
+      expect(feed(notABullet, CONTENT_LOOP_THRESHOLD)).toBe(true);
+    });
+
+    // A divider suppresses detection outright, so anything wrongly classified
+    // as one becomes invisible to the detector. Uppercase letters and digits
+    // fall inside the U+002B-U+005F span that the old pattern accidentally
+    // described, which made a model chanting such a token undetectable.
+    it.each([['ABCDE'], ['01234'], ['SELEC']])(
+      'should detect a loop when the model chants "%s"',
+      (token) => {
+        service.reset('');
+        const chant = token.repeat(CONTENT_CHUNK_SIZE / token.length);
+
+        expect(feed(chant, CONTENT_LOOP_THRESHOLD)).toBe(true);
+      },
+    );
+
+    // Guards against over-correcting. Real horizontal rules must keep
+    // suppressing detection, including the box-drawing span that is a
+    // deliberate range. These pass both before and after the fix.
+    it.each([['-'], ['='], ['*'], ['_'], ['+'], ['─'], ['━']])(
+      'should still treat a rule of "%s" as a divider',
+      (char) => {
+        service.reset('');
+        const rule = char.repeat(CONTENT_CHUNK_SIZE);
+
+        expect(feed(rule, CONTENT_LOOP_THRESHOLD * 2)).toBe(false);
+        expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+      },
+    );
   });
 
   describe('Content Loop Detection with Code Blocks', () => {
@@ -1242,8 +1302,8 @@ describe('LoopDetectionService', () => {
       primeNonReadTool();
 
       // Mix of read-like tool names that either appear in the exact allowlist
-      // (read_file, read_many_files, list_directory) or match the read_/list_
-      // prefix fallback used for MCP-provided tools.
+      // (read_file, read_many_files, list_directory, zoom_image) or match the
+      // read_/list_ prefix fallback used for MCP-provided tools.
       service.addAndCheck(
         createToolCallRequestEvent('read_many_files', {
           paths: ['file1.txt'],
@@ -1256,7 +1316,13 @@ describe('LoopDetectionService', () => {
         createToolCallRequestEvent('read_resource', { uri: 'a' }),
       );
       service.addAndCheck(
-        createToolCallRequestEvent('read_file', { path: 'file3.txt' }),
+        createToolCallRequestEvent('zoom_image', {
+          file_path: 'chart.png',
+          x1: 0,
+          y1: 0,
+          x2: 500,
+          y2: 500,
+        }),
       );
       service.addAndCheck(createToolCallRequestEvent('list_projects', {}));
       service.addAndCheck(
@@ -1971,6 +2037,32 @@ describe('LoopDetectionService', () => {
         expect.objectContaining({
           loop_type: 'alternating_tool_call_pattern',
         }),
+      );
+    });
+  });
+
+  describe('getToolCallRepeatKey', () => {
+    it('resolves legacy aliases to the same key as the canonical name', () => {
+      // Extracting the repeat key also canonicalized legacy aliases, which
+      // widens every detector keyed off it — pin that equivalence so a
+      // future split between classification and keying cannot ship silent.
+      expect(getToolCallRepeatKey('task', { subagent_type: 'explore' })).toBe(
+        getToolCallRepeatKey('agent', { subagent_type: 'explore' }),
+      );
+      expect(getToolCallRepeatKey('replace', { file: 'a.ts' })).toBe(
+        getToolCallRepeatKey('edit', { file: 'a.ts' }),
+      );
+      expect(getToolCallRepeatKey('search_file_content', { q: 'x' })).toBe(
+        getToolCallRepeatKey('grep_search', { q: 'x' }),
+      );
+    });
+
+    it('is stable across object key order but not across different args', () => {
+      expect(getToolCallRepeatKey('read_file', { a: 1, b: 2 })).toBe(
+        getToolCallRepeatKey('read_file', { b: 2, a: 1 }),
+      );
+      expect(getToolCallRepeatKey('read_file', { a: 1 })).not.toBe(
+        getToolCallRepeatKey('read_file', { a: 2 }),
       );
     });
   });

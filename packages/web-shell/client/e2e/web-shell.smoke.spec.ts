@@ -17,6 +17,13 @@ import {
   type MockDaemonController,
   type WebShellDaemonScenario,
 } from './utils/mockDaemon';
+import {
+  emptyMobileComposerLayout,
+  emptyMobileComposerSelectors,
+  expectEmptyMobileComposerAnchored,
+  expectEmptyMobileWelcomeChromeVisible,
+  gotoEmptyMobileWelcomeHarness,
+} from './utils/emptyMobileComposer';
 
 const COMPOSER_VIEWPORT_HEIGHTS = [1000, 800, 600] as const;
 
@@ -40,6 +47,30 @@ test('loads replayed transcript and connects to fake daemon @smoke', async ({
   await expect(page.locator('[data-web-shell-message-list]')).toContainText(
     'Hello from fake daemon',
   );
+
+  // #8214: pin the explicit ::selection rule on message content. This
+  // asserts the rule is present and matches every [data-user-selectable]
+  // wrapper row (user and assistant alike), not just the first one; it
+  // does not verify the Firefox paint effect itself (this repo's Playwright
+  // projects are chromium-only).
+  const selectionBackgrounds = await page.evaluate(() => {
+    // Match the wrapper rows themselves, not their descendants - a single
+    // row renders many descendant elements, so counting descendants does
+    // not enforce the "both roles present" invariant.
+    const rows = document.querySelectorAll('[data-user-selectable]');
+    return Array.from(rows, (row) => {
+      // ::selection applies to the element's text content; sample the first
+      // text-bearing descendant (or the row itself if it has none).
+      const target = row.querySelector('*') ?? row;
+      return getComputedStyle(target, '::selection').backgroundColor;
+    });
+  });
+  // The fixture renders both a user and an assistant message, so there must
+  // be at least two selectable rows and every one must carry the rule.
+  expect(selectionBackgrounds.length).toBeGreaterThanOrEqual(2);
+  for (const bg of selectionBackgrounds) {
+    expect(bg).toBe('rgba(0, 128, 255, 0.3)');
+  }
 });
 
 test('submits a prompt and renders a streamed assistant response @smoke', async ({
@@ -66,6 +97,296 @@ test('submits a prompt and renders a streamed assistant response @smoke', async 
 
   await expect(page.locator('[data-web-shell-message-list]')).toContainText(
     'Pong from fake SSE',
+  );
+});
+
+test('configures qwen3.8-max reasoning from the model popover @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario({
+    currentModel: 'qwen3.8-max',
+    state: {
+      configOptions: [
+        {
+          id: 'reasoning_effort',
+          name: 'Reasoning effort',
+          type: 'select',
+          currentValue: 'xhigh',
+          options: [
+            { value: 'none', name: 'Thinking off' },
+            { value: 'low', name: 'Low' },
+            { value: 'medium', name: 'Medium' },
+            { value: 'xhigh', name: 'Extra high' },
+          ],
+          _meta: {
+            'qwenCode/reasoning': { defaultEffort: 'xhigh' },
+          },
+        },
+      ],
+    },
+  });
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoSession(page, scenario, daemon);
+
+  await page.locator('[data-web-shell-model-button]').click();
+  const controls = page.locator('[data-web-shell-model-reasoning]');
+  const modelButton = page.locator('[data-web-shell-model-button]');
+  const modelSubmenu = page.locator('[data-web-shell-model-submenu-trigger]');
+  const thinking = controls.locator('[data-web-shell-thinking-toggle]');
+  const medium = controls.locator('[data-web-shell-effort="medium"]');
+  const xhigh = controls.locator('[data-web-shell-effort="xhigh"]');
+  await expect(controls).toBeVisible();
+  await expect(modelSubmenu).toBeVisible();
+  await expect(modelButton).toContainText('Extra High');
+  await expect(thinking).toBeChecked();
+  await expect(xhigh).toHaveAttribute('aria-pressed', 'true');
+
+  await medium.click();
+  await expect.poll(() => daemon.configOptionRequests().length).toBe(1);
+  expect(
+    requestBodyRecord(firstRequest(daemon.configOptionRequests())),
+  ).toEqual({ configId: 'reasoning_effort', value: 'medium' });
+  await expect(medium).toHaveAttribute('aria-pressed', 'true');
+  await expect(modelButton).toContainText('Medium');
+
+  await thinking.click();
+  await expect.poll(() => daemon.configOptionRequests().length).toBe(2);
+  expect(requestBodyRecord(daemon.configOptionRequests()[1]!)).toEqual({
+    configId: 'reasoning_effort',
+    value: 'none',
+  });
+  await expect(thinking).not.toBeChecked();
+  await expect(medium).toBeDisabled();
+  await expect(medium).toHaveAttribute('aria-pressed', 'true');
+  await expect(modelButton).toContainText('Thinking Off');
+
+  await thinking.click();
+  await expect.poll(() => daemon.configOptionRequests().length).toBe(3);
+  expect(requestBodyRecord(daemon.configOptionRequests()[2]!)).toEqual({
+    configId: 'reasoning_effort',
+    value: 'medium',
+  });
+  await expect(thinking).toBeChecked();
+  await expect(modelButton).toContainText('Medium');
+
+  await modelSubmenu.click();
+  await expect(page.locator('[data-web-shell-model-submenu]')).toBeVisible();
+  await expect(
+    page.locator('[data-web-shell-model-submenu] input[type="search"]'),
+  ).toBeVisible();
+});
+
+test('uploads an Extension archive from the manager @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  let uploadUrl = '';
+  let uploadHeaders: Record<string, string> = {};
+  let uploadBody: Buffer | null = null;
+  let rejectUpload = false;
+  await page.route(
+    '**/workspace/extensions/install-archive?*',
+    async (route) => {
+      uploadUrl = route.request().url();
+      uploadHeaders = route.request().headers();
+      uploadBody = route.request().postDataBuffer();
+      await route.fulfill({
+        contentType: 'application/json',
+        status: rejectUpload ? 400 : 202,
+        body: JSON.stringify(
+          rejectUpload
+            ? { error: 'Archive rejected for test' }
+            : { accepted: true, operationId: 'op-upload' },
+        ),
+      });
+    },
+  );
+  await page.route(
+    '**/workspace/extensions/operations/op-upload',
+    async (route) => {
+      await route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({
+          v: 1,
+          operationId: 'op-upload',
+          operation: 'install',
+          status: 'succeeded',
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          result: {
+            status: 'installed',
+            source: 'upload:demo.zip',
+            name: 'demo',
+            version: '1.0.0',
+          },
+        }),
+      });
+    },
+  );
+
+  await gotoSession(page, scenario, daemon);
+  await submitLocalCommand(page, '/extensions');
+  await page.getByRole('button', { name: 'Add' }).click();
+  await page.getByRole('tab', { name: 'Archive' }).click();
+  const archiveInput = page.getByLabel('Select a .zip or .tar.gz archive.');
+  await archiveInput.setInputFiles({
+    name: 'stale.zip',
+    mimeType: 'application/zip',
+    buffer: Buffer.from('stale-archive'),
+  });
+  await page.getByRole('button', { name: 'Cancel' }).click();
+  await page.getByRole('button', { name: 'Add' }).click();
+  await page.getByRole('tab', { name: 'Archive' }).click();
+  await expect(page.getByText('Selected archive: stale.zip')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Install' })).toBeDisabled();
+
+  await archiveInput.setInputFiles({
+    name: 'backup.gz',
+    mimeType: 'application/gzip',
+    buffer: Buffer.from('archive-content'),
+  });
+  await expect(
+    page.getByText(
+      'Select a .zip or .tar.gz Extension archive with a valid filename up to 255 bytes.',
+    ),
+  ).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Install' })).toBeDisabled();
+
+  await archiveInput.setInputFiles({
+    name: `${'扩'.repeat(84)}.zip`,
+    mimeType: 'application/zip',
+    buffer: Buffer.from('archive-content'),
+  });
+  await expect(
+    page.getByText(
+      'Select a .zip or .tar.gz Extension archive with a valid filename up to 255 bytes.',
+    ),
+  ).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Install' })).toBeDisabled();
+
+  for (const name of ['bad\\name.zip', 'bad\u007fname.zip']) {
+    await archiveInput.setInputFiles({
+      name,
+      mimeType: 'application/zip',
+      buffer: Buffer.from('archive-content'),
+    });
+    await expect(
+      page.getByText(
+        'Select a .zip or .tar.gz Extension archive with a valid filename up to 255 bytes.',
+      ),
+    ).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Install' })).toBeDisabled();
+  }
+
+  await archiveInput.setInputFiles({
+    name: 'empty.zip',
+    mimeType: 'application/zip',
+    buffer: Buffer.alloc(0),
+  });
+  await expect(
+    page.getByText('The selected Extension archive is empty.'),
+  ).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Install' })).toBeDisabled();
+
+  await archiveInput.setInputFiles({
+    name: `${'a'.repeat(251)}.zip`,
+    mimeType: 'application/zip',
+    buffer: Buffer.from('archive-content'),
+  });
+  await expect(page.getByRole('button', { name: 'Install' })).toBeEnabled();
+
+  await archiveInput.setInputFiles({
+    name: 'exact.zip',
+    mimeType: 'application/zip',
+    buffer: Buffer.alloc(10 * 1024 * 1024),
+  });
+  await expect(page.getByRole('button', { name: 'Install' })).toBeEnabled();
+
+  await archiveInput.setInputFiles({
+    name: 'large.zip',
+    mimeType: 'application/zip',
+    buffer: Buffer.alloc(10 * 1024 * 1024 + 1),
+  });
+  await expect(
+    page.getByText('Extension archives must be 10 MB or smaller.'),
+  ).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Install' })).toBeDisabled();
+
+  await archiveInput.setInputFiles({
+    name: 'demo.tar.gz',
+    mimeType: 'application/gzip',
+    buffer: Buffer.from('archive-content'),
+  });
+  await expect(page.getByText('Selected archive: demo.tar.gz')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Install' })).toBeEnabled();
+
+  await archiveInput.setInputFiles({
+    name: 'demo.zip',
+    mimeType: 'application/zip',
+    buffer: Buffer.from('archive-content'),
+  });
+  await expect(page.getByText('Selected archive: demo.zip')).toBeVisible();
+  rejectUpload = true;
+  await page.getByRole('button', { name: 'Install' }).click();
+  await expect(page.getByText('Archive rejected for test')).toBeVisible();
+  await expect(
+    page.getByRole('heading', { name: 'Add Extension' }),
+  ).toBeVisible();
+  await expect(page.getByText('Selected archive: demo.zip')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Install' })).toBeEnabled();
+
+  uploadUrl = '';
+  uploadHeaders = {};
+  uploadBody = null;
+  rejectUpload = false;
+  await page.getByRole('button', { name: 'Install' }).click();
+
+  await expect
+    .poll(() => uploadUrl)
+    .toContain(
+      '/workspace/extensions/install-archive?filename=demo.zip&consent=true',
+    );
+  expect(uploadHeaders['content-type']).toBe('application/octet-stream');
+  expect(uploadHeaders['x-qwen-client-id']).toBe(scenario.clientId);
+  expect(uploadBody?.toString()).toBe('archive-content');
+  await expect(
+    page.getByRole('heading', { name: 'Add Extension' }),
+  ).toHaveCount(0);
+  await expect(page.getByText('Extension "demo" installed.')).toBeVisible();
+  await page.getByRole('button', { name: 'Add' }).click();
+  await expect(page.getByRole('tab', { name: 'Source' })).toHaveAttribute(
+    'aria-selected',
+    'true',
+  );
+  await page.getByRole('tab', { name: 'Archive' }).click();
+  await expect(page.getByText('Selected archive: demo.zip')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Install' })).toBeDisabled();
+});
+
+test('pastes long plain text as editable composer content @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  const pasted = `${'original '.repeat(151)}end`;
+  const edited = `${pasted} edited`;
+
+  await gotoSession(page, scenario, daemon);
+  await pasteComposerText(page, pasted);
+
+  const editor = page.locator('[data-web-shell-composer-editor] .cm-content');
+  await expect(editor).toHaveText(pasted);
+  await expect(editor).not.toContainText('Pasted Content');
+
+  await page.keyboard.type(' edited');
+  await expect(editor).toHaveText(edited);
+  await page.locator('[data-web-shell-composer-submit]').click();
+
+  await expect.poll(() => daemon.promptRequests().length).toBe(1);
+  expectPromptBodyToContainText(
+    requestBodyRecord(firstRequest(daemon.promptRequests())),
+    edited,
   );
 });
 
@@ -354,6 +675,188 @@ test('gates voice dictation on the workspace voice setting @smoke', async ({
   await expect(voiceButton).toBeVisible();
 });
 
+test('loads Voice status from the active secondary workspace @smoke', async ({
+  page,
+}, testInfo) => {
+  const secondaryCwd = '/work/secondary';
+  const scenario = createWebShellDaemonScenario({
+    workspaceCwd: secondaryCwd,
+    capabilities: {
+      workspaceCwd: '/work/primary',
+      features: [
+        'session_events',
+        'workspace_qualified_voice',
+        'workspace_qualified_rest_core',
+        'workspace_settings',
+      ],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/work/primary',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'secondary',
+          cwd: secondaryCwd,
+          primary: false,
+          trusted: true,
+        },
+      ],
+    },
+    voice: { enabled: true, workspaceCwd: secondaryCwd },
+  });
+  const daemon = await installScenario(page, scenario, testInfo);
+
+  await gotoSession(page, scenario, daemon);
+  await expect(
+    page.getByRole('button', { name: 'Start voice dictation' }),
+  ).toBeVisible();
+  await expect
+    .poll(
+      () =>
+        daemon.requests.filter(
+          (request) =>
+            request.method === 'GET' &&
+            request.path === '/workspaces/secondary/voice',
+        ).length,
+    )
+    .toBeGreaterThan(0);
+  expect(
+    daemon.requests.some(
+      (request) =>
+        request.method === 'GET' && request.path === '/workspace/voice',
+    ),
+  ).toBe(false);
+});
+
+test('anchors the empty mobile composer to the chat pane across the breakpoint @smoke', async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 760, height: 900 });
+  const scenario = createWebShellDaemonScenario();
+  await installScenario(page, scenario, testInfo);
+
+  await gotoEmptyMobileWelcomeHarness(page);
+  const editor = page.locator('[data-web-shell-composer-editor] .cm-content');
+  await expectEmptyMobileWelcomeChromeVisible(page);
+
+  const narrowLayout = await emptyMobileComposerLayout(page);
+  expectEmptyMobileComposerAnchored(narrowLayout);
+
+  await editor.click();
+  await page.keyboard.type('Composer remains interactive');
+  await expect(editor).toContainText('Composer remains interactive');
+
+  await page.setViewportSize({ width: 761, height: 900 });
+  await expect
+    .poll(() => emptyMobileComposerLayout(page))
+    .toMatchObject({
+      chatViewPosition: 'relative',
+      footerPosition: 'relative',
+    });
+  const wideLayout = await emptyMobileComposerLayout(page);
+  if (
+    wideLayout.welcomeFooterTop === null ||
+    wideLayout.welcomeFooterBottom === null
+  ) {
+    throw new Error('Expected a visible welcome footer above the breakpoint.');
+  }
+  expect(wideLayout.welcomeFooterBottom).toBeGreaterThan(
+    wideLayout.welcomeFooterTop,
+  );
+
+  await page.setViewportSize({ width: 760, height: 900 });
+  await expect
+    .poll(() => emptyMobileComposerLayout(page))
+    .toMatchObject({
+      chatViewPosition: 'static',
+      footerPosition: 'absolute',
+    });
+  const narrowLayoutAfterResize = await emptyMobileComposerLayout(page);
+  expectEmptyMobileComposerAnchored(narrowLayoutAfterResize);
+});
+
+test('anchors the empty mobile composer without a welcome footer @smoke', async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 760, height: 900 });
+  const scenario = createWebShellDaemonScenario();
+  await installScenario(page, scenario, testInfo);
+
+  await gotoEmptyMobileWelcomeHarness(page, { welcomeFooter: false });
+  await expectEmptyMobileWelcomeChromeVisible(page, {
+    requireWelcomeFooter: false,
+  });
+
+  const layout = await emptyMobileComposerLayout(page, {
+    requireWelcomeFooter: false,
+  });
+  expectEmptyMobileComposerAnchored(layout, {
+    requireWelcomeFooter: false,
+  });
+});
+
+test('keeps the bottom status panel visible in the custom footer mobile welcome variant @smoke', async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 760, height: 900 });
+  const scenario = createWebShellDaemonScenario();
+  await installScenario(page, scenario, testInfo);
+
+  await gotoEmptyMobileWelcomeHarness(page, { customFooter: true });
+  const composer = page.locator(emptyMobileComposerSelectors.composerSurface);
+  const customFooter = page.locator('[data-e2e-custom-footer]');
+  const statusItem = page.getByText('Bottom status item');
+  const chatPane = page.getByTestId('chat-pane-container');
+
+  await expect(composer).toBeVisible();
+  await expect(customFooter).toBeVisible();
+  await expect(statusItem).toHaveCount(1);
+
+  const statusPanelBox = await statusItem.boundingBox();
+  const chatPaneBox = await chatPane.boundingBox();
+  if (!statusPanelBox || !chatPaneBox) {
+    throw new Error('Expected the status panel and chat pane to be measured.');
+  }
+  expect(statusPanelBox.height).toBeGreaterThan(0);
+  expect(statusPanelBox.y).toBeGreaterThanOrEqual(chatPaneBox.y);
+  expect(statusPanelBox.y + statusPanelBox.height).toBeLessThanOrEqual(
+    chatPaneBox.y + chatPaneBox.height,
+  );
+
+  // This variant renders the composer footer `display: contents`, so the
+  // anchored-layout helper has no footer box to measure and must reject
+  // instead of reporting a misleading zero rect.
+  await expect(emptyMobileComposerLayout(page)).rejects.toThrow(
+    /custom footer welcome variant/,
+  );
+});
+
+test('anchors the empty mobile composer with a custom footer but no welcome footer @smoke', async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 760, height: 900 });
+  const scenario = createWebShellDaemonScenario();
+  await installScenario(page, scenario, testInfo);
+
+  await gotoEmptyMobileWelcomeHarness(page, {
+    customFooter: true,
+    welcomeFooter: false,
+  });
+  await expect(page.locator('[data-e2e-custom-footer]')).toBeVisible();
+  await expectEmptyMobileWelcomeChromeVisible(page, {
+    requireWelcomeFooter: false,
+  });
+
+  const layout = await emptyMobileComposerLayout(page, {
+    requireWelcomeFooter: false,
+  });
+  expectEmptyMobileComposerAnchored(layout, {
+    requireWelcomeFooter: false,
+  });
+});
+
 for (const viewportHeight of COMPOSER_VIEWPORT_HEIGHTS) {
   test(`grows long text to the responsive composer cap at ${viewportHeight}px @smoke`, async ({
     page,
@@ -401,6 +904,9 @@ for (const viewportHeight of COMPOSER_VIEWPORT_HEIGHTS) {
         return panelBox.y + panelBox.height - surfaceBox.y;
       })
       .toBeLessThanOrEqual(-7);
+    // The search input takes focus asynchronously after Ctrl+R; Escape only
+    // dismisses the panel when it lands on that input, so pin focus first.
+    await expect(historySearch).toBeFocused();
     await page.keyboard.press('Escape');
     await expect(historySearch).toHaveCount(0);
 
@@ -557,6 +1063,56 @@ test('lets a pasted image grow the composer without collapsing the text viewport
   await expect.poll(() => composerHeight(page)).toBe(initialHeight);
 });
 
+test('drops ordered PNG and BMP images and submits them without text @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+
+  await gotoSession(page, scenario, daemon);
+  const surface = page.locator('[data-web-shell-composer-surface]');
+  await dragComposerFileOver(surface);
+  await expect(surface).toHaveAttribute('data-image-drag-active', 'true');
+
+  await dropComposerImages(surface);
+  await expect(surface).not.toHaveAttribute('data-image-drag-active');
+  await expect(surface).not.toHaveAttribute('aria-busy');
+  const images = surface.locator(
+    '[data-web-shell-composer-attachments] img[src^="data:image/"]',
+  );
+  await expect(images).toHaveCount(2);
+  await expectImagesDecoded(images);
+
+  const submit = page.locator('[data-web-shell-composer-submit]');
+  await expect(submit).toBeEnabled();
+  await submit.click();
+
+  await expect.poll(() => daemon.promptRequests().length).toBe(1);
+  const prompt = requestBodyRecord(firstRequest(daemon.promptRequests()))[
+    'prompt'
+  ];
+  expect(Array.isArray(prompt)).toBe(true);
+  const blocks = prompt as Array<Record<string, unknown>>;
+  expect(blocks[0]).toMatchObject({ type: 'text', text: '' });
+  expect(blocks.slice(1)).toEqual([
+    {
+      type: 'image',
+      data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+      mimeType: 'image/png',
+    },
+    {
+      type: 'image',
+      data: 'Qk06AAAAAAAAADYAAAAoAAAAAQAAAAEAAAABABgAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAD/AA==',
+      mimeType: 'image/bmp',
+    },
+  ]);
+  const transcriptImages = page.locator(
+    '[data-web-shell-message-list] img[src^="data:image/"]',
+  );
+  await expect(transcriptImages).toHaveCount(2);
+  await expectImagesDecoded(transcriptImages);
+});
+
 async function installScenario(
   page: Page,
   scenario: WebShellDaemonScenario,
@@ -628,6 +1184,20 @@ async function replaceComposerText(page: Page, text: string): Promise<void> {
   await page.keyboard.insertText(text);
 }
 
+async function pasteComposerText(page: Page, text: string): Promise<void> {
+  const origin = new URL(page.url()).origin;
+  await page
+    .context()
+    .grantPermissions(['clipboard-read', 'clipboard-write'], { origin });
+  await page.evaluate((clipboardText) => {
+    return navigator.clipboard.writeText(clipboardText);
+  }, text);
+  await page.locator('[data-web-shell-composer-editor] .cm-content').click();
+  await page.keyboard.press(
+    process.platform === 'darwin' ? 'Meta+V' : 'Control+V',
+  );
+}
+
 async function pasteComposerImages(page: Page, count: number): Promise<void> {
   const editor = page.locator('[data-web-shell-composer-editor] .cm-content');
   await editor.evaluate((element, imageCount) => {
@@ -649,6 +1219,64 @@ async function pasteComposerImages(page: Page, count: number): Promise<void> {
       }),
     );
   }, count);
+}
+
+async function dragComposerFileOver(surface: Locator): Promise<void> {
+  await surface.evaluate((element) => {
+    const transfer = new DataTransfer();
+    transfer.items.add(
+      new File([new Uint8Array([0])], 'dragged.png', { type: 'image/png' }),
+    );
+    element.dispatchEvent(
+      new DragEvent('dragenter', {
+        bubbles: true,
+        cancelable: true,
+        dataTransfer: transfer,
+      }),
+    );
+  });
+}
+
+async function dropComposerImages(surface: Locator): Promise<void> {
+  await surface.evaluate((element) => {
+    const pngBase64 =
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+    const binary = atob(pngBase64);
+    const pngBytes = Uint8Array.from(binary, (byte) => byte.charCodeAt(0));
+    const bmpBytes = new Uint8Array(58);
+    const view = new DataView(bmpBytes.buffer);
+    bmpBytes.set([0x42, 0x4d]);
+    view.setUint32(2, bmpBytes.length, true);
+    view.setUint32(10, 54, true);
+    view.setUint32(14, 40, true);
+    view.setInt32(18, 1, true);
+    view.setInt32(22, 1, true);
+    view.setUint16(26, 1, true);
+    view.setUint16(28, 24, true);
+    view.setUint32(34, 4, true);
+    bmpBytes.set([0x00, 0x00, 0xff, 0x00], 54);
+    const transfer = new DataTransfer();
+    transfer.items.add(
+      new File([pngBytes], 'first.png', { type: 'image/png' }),
+    );
+    transfer.items.add(
+      new File([bmpBytes], 'second.bmp', { type: 'image/bmp' }),
+    );
+    element.dispatchEvent(
+      new DragEvent('dragover', {
+        bubbles: true,
+        cancelable: true,
+        dataTransfer: transfer,
+      }),
+    );
+    element.dispatchEvent(
+      new DragEvent('drop', {
+        bubbles: true,
+        cancelable: true,
+        dataTransfer: transfer,
+      }),
+    );
+  });
 }
 
 async function expectImagesDecoded(images: Locator): Promise<void> {

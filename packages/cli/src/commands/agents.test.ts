@@ -6,9 +6,11 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import yargs, { type Argv } from 'yargs';
+import * as path from 'node:path';
 import {
   agentsCommand,
   agentsInteractiveSession,
+  agentsListCommand,
   handleAgentViewBackgroundPrompt,
   runAgentsInteractiveSession,
 } from './agents.js';
@@ -55,7 +57,7 @@ const mockSupervisor = vi.hoisted(() => ({
         attachState: 'detached',
         projectCwd: '/tmp/workspace',
         originalCwd: '/tmp/workspace',
-        activeCwd: '/tmp/workspace',
+        activeCwd: '/tmp/workspace/.qwen/worktrees/fix-tests',
         createdAt: '2026-07-17T09:00:00.000Z',
         updatedAt: '2026-07-17T09:00:00.000Z',
         worktree: {
@@ -66,6 +68,8 @@ const mockSupervisor = vi.hoisted(() => ({
       activity: {
         schemaVersion: 1,
         summary: 'write tests',
+        waitingFor: 'permission',
+        queuedPromptCount: 2,
         lastActivityAt: '2026-07-17T09:00:00.000Z',
         capabilities: [],
       },
@@ -84,6 +88,23 @@ const mockSupervisor = vi.hoisted(() => ({
         pinned: true,
         createdAt: '2026-07-17T09:00:00.000Z',
         updatedAt: '2026-07-17T09:00:00.000Z',
+      },
+    },
+    {
+      sessionId: 'session-attached',
+      state: {
+        schemaVersion: 1,
+        sessionId: 'session-attached',
+        ownership: 'managed',
+        sessionState: 'idle',
+        processState: 'alive',
+        attachState: 'attached',
+        projectCwd: '/tmp/workspace',
+        originalCwd: '/tmp/workspace',
+        activeCwd: '/tmp/other-project',
+        createdAt: '2026-07-17T08:30:00.000Z',
+        updatedAt: '2026-07-17T08:30:00.000Z',
+        worktree: { mode: 'none' },
       },
     },
     {
@@ -160,8 +181,7 @@ vi.mock('../agent-view/supervisor-runner.js', () => ({
 }));
 
 vi.mock('../config/settings.js', async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import('../config/settings.js')>();
+  const actual = await importOriginal<typeof import('../config/settings.js')>();
   return {
     ...actual,
     loadSettings: mockLoadSettings,
@@ -183,9 +203,9 @@ interface AgentsArgs {
 }
 
 function buildParser(): Argv<AgentsArgs> {
-  const builder = agentsCommand.builder;
+  const builder = agentsListCommand.builder;
   if (typeof builder !== 'function') {
-    throw new Error('agents command builder must be a function');
+    throw new Error('agents list command builder must be a function');
   }
   return builder(
     yargs([]).exitProcess(false).fail(false).locale('en'),
@@ -203,12 +223,37 @@ describe('agents command', () => {
 
   it('has the Phase 1 command definition', () => {
     expect(agentsCommand.command).toBe('agents');
-    expect(agentsCommand.describe).toBe('List background agents');
+    expect(agentsCommand.describe).toBe('Manage Agent View background agents');
     expect(typeof agentsCommand.builder).toBe('function');
     expect(typeof agentsCommand.handler).toBe('function');
   });
 
-  it('registers --cwd and --json options', () => {
+  it.each([
+    ['routes bare `agents` to the list handler', ''],
+    ['routes `agents --json` to the list handler', '--json'],
+  ])('%s', async (_label, flags) => {
+    const builder = agentsCommand.builder;
+    if (typeof builder !== 'function') {
+      throw new Error('agents command builder must be a function');
+    }
+    const parser = await Promise.resolve(
+      builder(
+        yargs([])
+          .exitProcess(false)
+          .fail((message, error) => {
+            throw error ?? new Error(message);
+          })
+          .locale('en'),
+      ),
+    );
+
+    await parser.parseAsync(`agents ${flags}`.trim());
+
+    expect(mockSupervisor.list).toHaveBeenCalled();
+    expect(mockWriteStdoutLine).toHaveBeenCalled();
+  });
+
+  it('registers --cwd, --json, and --all options', () => {
     const options = (
       buildParser() as Argv & {
         getOptions(): { key: Record<string, boolean> };
@@ -222,8 +267,8 @@ describe('agents command', () => {
 
   it('prints active agents as a JSON array without entering interactive helper', async () => {
     const runSpy = vi.spyOn(agentsInteractiveSession, 'run');
-    const handler = agentsCommand.handler;
-    if (!handler) throw new Error('agents command handler missing');
+    const handler = agentsListCommand.handler;
+    if (!handler) throw new Error('agents list command handler missing');
 
     await handler(
       buildParser().parseSync('--cwd /tmp/workspace --json') as Parameters<
@@ -241,21 +286,34 @@ describe('agents command', () => {
         state: 'working',
         processState: 'alive',
         projectCwd: '/tmp/workspace',
-        activeCwd: '/tmp/workspace',
+        activeCwd: '/tmp/workspace/.qwen/worktrees/fix-tests',
         attached: false,
         pinned: true,
         createdAt: '2026-07-17T09:00:00.000Z',
         updatedAt: '2026-07-17T09:00:00.000Z',
         summary: 'write tests',
+        waitingFor: 'permission',
+        queuedPromptCount: 2,
+      }),
+      expect.objectContaining({
+        sessionId: 'session-attached',
+        state: 'idle',
+        processState: 'alive',
+        projectCwd: '/tmp/workspace',
+        activeCwd: '/tmp/other-project',
+        attached: true,
+        pinned: false,
       }),
     ]);
-    expect(mockSupervisor.list).toHaveBeenCalledWith('/tmp/workspace');
+    expect(mockSupervisor.list).toHaveBeenCalledWith(
+      path.resolve('/tmp/workspace'),
+    );
     expect(runSpy).not.toHaveBeenCalled();
   });
 
   it('lists all projects by default for JSON output', async () => {
-    const handler = agentsCommand.handler;
-    if (!handler) throw new Error('agents command handler missing');
+    const handler = agentsListCommand.handler;
+    if (!handler) throw new Error('agents list command handler missing');
 
     await handler(
       buildParser().parseSync('--json') as Parameters<typeof handler>[0],
@@ -265,8 +323,8 @@ describe('agents command', () => {
   });
 
   it('includes completed agents in JSON output with --all', async () => {
-    const handler = agentsCommand.handler;
-    if (!handler) throw new Error('agents command handler missing');
+    const handler = agentsListCommand.handler;
+    if (!handler) throw new Error('agents list command handler missing');
 
     await handler(
       buildParser().parseSync(
@@ -279,9 +337,10 @@ describe('agents command', () => {
     ) as Array<{ sessionId: string; state: string }>;
     expect(payload.map((agent) => agent.sessionId)).toEqual([
       'session-1',
+      'session-attached',
       'session-done',
     ]);
-    expect(payload[1]).toMatchObject({
+    expect(payload[2]).toMatchObject({
       sessionId: 'session-done',
       state: 'completed',
       processState: 'exited',
@@ -300,8 +359,8 @@ describe('agents command', () => {
     const runSpy = vi
       .spyOn(agentsInteractiveSession, 'run')
       .mockResolvedValue(undefined);
-    const handler = agentsCommand.handler;
-    if (!handler) throw new Error('agents command handler missing');
+    const handler = agentsListCommand.handler;
+    if (!handler) throw new Error('agents list command handler missing');
 
     await handler(
       buildParser().parseSync('--cwd /tmp/workspace') as Parameters<
@@ -342,7 +401,7 @@ describe('agents command', () => {
           displayName: 'Write Tests',
           pinned: true,
           stateLabel: 'Working',
-          cwd: '/tmp/workspace',
+          cwd: '/tmp/workspace/.qwen/worktrees/fix-tests',
           summary: 'write tests',
         }),
       ]),
@@ -691,8 +750,8 @@ describe('agents command', () => {
     expect(mockWriteStdoutLine.mock.calls.map((call) => call[0])).toEqual([
       'Started background agent session-2.',
       'Open with qwen agents.',
-      'Attach with qwen attach session-2.',
-      'View logs with qwen logs session-2.',
+      'Attach with qwen agents attach session-2.',
+      'View logs with qwen agents logs session-2.',
     ]);
   });
 });

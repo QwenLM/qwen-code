@@ -109,6 +109,29 @@ export function replaceImageMarkers(
   return result;
 }
 
+export function stripPartialImageMarker(text: string): string {
+  const visibleText = maskCode(text);
+  // Require at least the 'I' of 'IMAGE' so a bare trailing '[' (code output,
+  // a link split mid-stream) survives instead of becoming a false
+  // '[Image pending]' claim in final user-visible text.
+  const partialMarker = /\[I(?:M(?:A(?:G(?:E(?::[^\]\r\n]*)?)?)?)?)?$/i.exec(
+    visibleText,
+  );
+  if (partialMarker?.index === undefined) return text;
+  return `${text.slice(0, partialMarker.index)}[Image pending]`;
+}
+
+export function sanitizeStreamingImageMarkers(text: string): string {
+  const markers = findImageMarkers(text);
+  return stripPartialImageMarker(
+    replaceImageMarkers(
+      text,
+      markers,
+      markers.map(() => '[Image pending]'),
+    ),
+  );
+}
+
 function isInside(realPath: string, directory: string): boolean {
   const pathFromDirectory = relative(directory, realPath);
   return (

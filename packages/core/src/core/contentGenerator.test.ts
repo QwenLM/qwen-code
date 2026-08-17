@@ -9,21 +9,37 @@ import {
   createContentGenerator,
   createContentGeneratorConfig,
   AuthType,
+  preloadContentGenerator,
+  resetPreloadedContentGenerator,
 } from './contentGenerator.js';
 import { GoogleGenAI } from '@google/genai';
 import type { Config } from '../config/config.js';
+import type {
+  ContentGenerator,
+  ContentGeneratorConfig,
+} from './contentGenerator.js';
 
 vi.mock('@google/genai');
 
 const openaiMockState = vi.hoisted(() => ({
   generatorError: null as Error | null,
   createCount: 0,
+  constructionGates: [] as Array<Promise<void> | undefined>,
+  deferredErrors: [] as Array<Error | undefined>,
 }));
 
 const qwenMockState = vi.hoisted(() => ({
   oauthError: null as Error | null,
   oauthCount: 0,
   constructorCount: 0,
+  constructorModels: [] as Array<string | undefined>,
+}));
+
+const openaiLoggerMockState = vi.hoisted(() => ({
+  constructorCalls: [] as Array<{
+    customLogDir: string | undefined;
+    cwd: string | undefined;
+  }>,
 }));
 
 vi.mock('./openaiContentGenerator/index.js', () => ({
@@ -31,8 +47,9 @@ vi.mock('./openaiContentGenerator/index.js', () => ({
     if (openaiMockState.generatorError) {
       throw openaiMockState.generatorError;
     }
+    const attempt = openaiMockState.createCount;
     openaiMockState.createCount += 1;
-    return {
+    const createGenerator = () => ({
       generateContent: async () => ({}),
       generateContentStream: async () =>
         (async function* () {
@@ -41,7 +58,16 @@ vi.mock('./openaiContentGenerator/index.js', () => ({
       countTokens: async () => ({ totalTokens: 1 }),
       embedContent: async () => ({ embeddings: [] }),
       useSummarizedThinking: () => false,
-    };
+    });
+    const gate = openaiMockState.constructionGates[attempt];
+    if (!gate) {
+      return createGenerator();
+    }
+    return gate.then(() => {
+      const error = openaiMockState.deferredErrors[attempt];
+      if (error) throw error;
+      return createGenerator();
+    });
   },
 }));
 
@@ -57,8 +83,9 @@ vi.mock('../qwen/qwenOAuth2.js', () => ({
 
 vi.mock('../qwen/qwenContentGenerator.js', () => ({
   QwenContentGenerator: class {
-    constructor() {
+    constructor(_client: unknown, generatorConfig: { model?: string }) {
       qwenMockState.constructorCount += 1;
+      qwenMockState.constructorModels.push(generatorConfig.model);
     }
 
     async countTokens() {
@@ -71,14 +98,26 @@ vi.mock('../qwen/qwenContentGenerator.js', () => ({
   },
 }));
 
+vi.mock('../utils/openaiLogger.js', () => ({
+  OpenAILogger: class {
+    constructor(customLogDir?: string, cwd?: string) {
+      openaiLoggerMockState.constructorCalls.push({ customLogDir, cwd });
+    }
+  },
+}));
+
 describe('createContentGenerator', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     openaiMockState.generatorError = null;
     openaiMockState.createCount = 0;
+    openaiMockState.constructionGates = [];
+    openaiMockState.deferredErrors = [];
     qwenMockState.oauthError = null;
     qwenMockState.oauthCount = 0;
     qwenMockState.constructorCount = 0;
+    qwenMockState.constructorModels = [];
+    openaiLoggerMockState.constructorCalls = [];
   });
 
   it('should defer Gemini content generator creation until first use', async () => {
@@ -188,6 +227,294 @@ describe('createContentGenerator', () => {
     expect(openaiMockState.createCount).toBe(1);
   });
 
+  it('does not preload non-lazy content generators', async () => {
+    const generator: ContentGenerator = {
+      generateContent: vi.fn(),
+      generateContentStream: vi.fn(),
+      countTokens: vi.fn(),
+      embedContent: vi.fn(),
+      useSummarizedThinking: vi.fn(),
+    };
+
+    await expect(preloadContentGenerator(generator)).resolves.toBeUndefined();
+    resetPreloadedContentGenerator(generator);
+    expect(generator.generateContent).not.toHaveBeenCalled();
+    expect(generator.generateContentStream).not.toHaveBeenCalled();
+    expect(generator.countTokens).not.toHaveBeenCalled();
+    expect(generator.embedContent).not.toHaveBeenCalled();
+    expect(generator.useSummarizedThinking).not.toHaveBeenCalled();
+  });
+
+  it('loads a provider once across concurrent preload and first use', async () => {
+    const mockConfig = {
+      getUsageStatisticsEnabled: () => false,
+      getContentGeneratorConfig: () => ({}),
+      getCliVersion: () => '1.0.0',
+      getTelemetryEnabled: () => false,
+      getSessionId: () => 'test-session',
+    } as unknown as Config;
+    const generator = await createContentGenerator(
+      {
+        model: 'test-model',
+        apiKey: 'test-key',
+        authType: AuthType.USE_OPENAI,
+      },
+      mockConfig,
+    );
+
+    await Promise.all([
+      preloadContentGenerator(generator),
+      generator.countTokens({ model: 'test-model', contents: 'hello' }),
+    ]);
+
+    expect(openaiMockState.createCount).toBe(1);
+  });
+
+  it('discards an unused preload after session configuration changes', async () => {
+    const mockConfig = {
+      getUsageStatisticsEnabled: () => false,
+      getContentGeneratorConfig: () => ({}),
+      getCliVersion: () => '1.0.0',
+      getTelemetryEnabled: () => false,
+      getSessionId: () => 'test-session',
+    } as unknown as Config;
+    const generator = await createContentGenerator(
+      {
+        model: 'test-model',
+        apiKey: 'test-key',
+        authType: AuthType.USE_OPENAI,
+      },
+      mockConfig,
+    );
+
+    await preloadContentGenerator(generator);
+    resetPreloadedContentGenerator(generator);
+    await generator.countTokens({
+      model: 'test-model',
+      contents: 'hello',
+    });
+
+    expect(openaiMockState.createCount).toBe(2);
+  });
+
+  it('does not discard a generator that has already been used', async () => {
+    const mockConfig = {
+      getUsageStatisticsEnabled: () => false,
+      getContentGeneratorConfig: () => ({}),
+      getCliVersion: () => '1.0.0',
+      getTelemetryEnabled: () => false,
+      getSessionId: () => 'test-session',
+    } as unknown as Config;
+    const generator = await createContentGenerator(
+      {
+        model: 'test-model',
+        apiKey: 'test-key',
+        authType: AuthType.USE_OPENAI,
+      },
+      mockConfig,
+    );
+
+    await preloadContentGenerator(generator);
+    await generator.countTokens({
+      model: 'test-model',
+      contents: 'first',
+    });
+    resetPreloadedContentGenerator(generator);
+    await generator.countTokens({
+      model: 'test-model',
+      contents: 'second',
+    });
+
+    expect(openaiMockState.createCount).toBe(1);
+  });
+
+  it('does not discard an in-flight preload after real use begins', async () => {
+    let releaseConstruction: () => void = () => undefined;
+    openaiMockState.constructionGates = [
+      new Promise<void>((resolve) => {
+        releaseConstruction = resolve;
+      }),
+    ];
+    const mockConfig = {
+      getUsageStatisticsEnabled: () => false,
+      getContentGeneratorConfig: () => ({}),
+      getCliVersion: () => '1.0.0',
+      getTelemetryEnabled: () => false,
+      getSessionId: () => 'test-session',
+    } as unknown as Config;
+    const generator = await createContentGenerator(
+      {
+        model: 'test-model',
+        apiKey: 'test-key',
+        authType: AuthType.USE_OPENAI,
+      },
+      mockConfig,
+    );
+
+    const preload = preloadContentGenerator(generator);
+    await vi.waitFor(() => expect(openaiMockState.createCount).toBe(1));
+    const firstUse = generator.countTokens({
+      model: 'test-model',
+      contents: 'hello',
+    });
+    resetPreloadedContentGenerator(generator);
+    releaseConstruction();
+
+    await expect(preload).resolves.toBeUndefined();
+    await expect(firstUse).resolves.toEqual({ totalTokens: 1 });
+    expect(openaiMockState.createCount).toBe(1);
+  });
+
+  it('isolates a reset in-flight preload from the replacement first use', async () => {
+    let releasePreload: () => void = () => undefined;
+    let releaseFirstUse: () => void = () => undefined;
+    const preloadError = new Error('discarded preload failed');
+    openaiMockState.constructionGates = [
+      new Promise<void>((resolve) => {
+        releasePreload = resolve;
+      }),
+      new Promise<void>((resolve) => {
+        releaseFirstUse = resolve;
+      }),
+    ];
+    openaiMockState.deferredErrors = [preloadError];
+    const mockConfig = {
+      getUsageStatisticsEnabled: () => false,
+      getContentGeneratorConfig: () => ({}),
+      getCliVersion: () => '1.0.0',
+      getTelemetryEnabled: () => false,
+      getSessionId: () => 'test-session',
+    } as unknown as Config;
+    const generator = await createContentGenerator(
+      {
+        model: 'test-model',
+        apiKey: 'test-key',
+        authType: AuthType.USE_OPENAI,
+      },
+      mockConfig,
+    );
+
+    const discardedPreload = preloadContentGenerator(generator).catch(
+      (error: unknown) => error,
+    );
+    await vi.waitFor(() => expect(openaiMockState.createCount).toBe(1));
+    resetPreloadedContentGenerator(generator);
+    const firstUse = generator.countTokens({
+      model: 'test-model',
+      contents: 'hello',
+    });
+    await vi.waitFor(() => expect(openaiMockState.createCount).toBe(2));
+
+    releaseFirstUse();
+    await expect(firstUse).resolves.toEqual({ totalTokens: 1 });
+    releasePreload();
+    await expect(discardedPreload).resolves.toBe(preloadError);
+    await expect(
+      generator.countTokens({
+        model: 'test-model',
+        contents: 'still uses the replacement',
+      }),
+    ).resolves.toEqual({ totalTokens: 1 });
+    expect(openaiMockState.createCount).toBe(2);
+  });
+
+  it('rebuilds a preloaded Qwen generator from a hot-switched config', async () => {
+    const generatorConfig: ContentGeneratorConfig = {
+      model: 'qwen3-coder-flash',
+      authType: AuthType.QWEN_OAUTH,
+    };
+    const mockConfig = {
+      getUsageStatisticsEnabled: () => false,
+      getContentGeneratorConfig: () => generatorConfig,
+      getCliVersion: () => '1.0.0',
+      getTelemetryEnabled: () => false,
+      getSessionId: () => 'test-session',
+    } as unknown as Config;
+    const generator = await createContentGenerator(generatorConfig, mockConfig);
+
+    await preloadContentGenerator(generator);
+    generatorConfig.model = 'coder-model';
+    resetPreloadedContentGenerator(generator);
+    await generator.countTokens({
+      model: 'coder-model',
+      contents: 'hello',
+    });
+
+    expect(qwenMockState.constructorModels).toEqual([
+      'qwen3-coder-flash',
+      'coder-model',
+    ]);
+  });
+
+  it('rebuilds OpenAI logging with the relocated working directory', async () => {
+    let workingDir = '/workspace/before';
+    const mockConfig = {
+      getUsageStatisticsEnabled: () => false,
+      getContentGeneratorConfig: () => ({}),
+      getCliVersion: () => '1.0.0',
+      getTelemetryEnabled: () => false,
+      getSessionId: () => 'test-session',
+      getWorkingDir: () => workingDir,
+    } as unknown as Config;
+    const generator = await createContentGenerator(
+      {
+        model: 'test-model',
+        apiKey: 'test-key',
+        authType: AuthType.USE_OPENAI,
+        enableOpenAILogging: true,
+        openAILoggingDir: 'logs',
+      },
+      mockConfig,
+    );
+
+    await preloadContentGenerator(generator);
+    workingDir = '/workspace/after';
+    resetPreloadedContentGenerator(generator);
+    await generator.countTokens({
+      model: 'test-model',
+      contents: 'hello',
+    });
+
+    expect(openaiLoggerMockState.constructorCalls).toEqual([
+      { customLogDir: 'logs', cwd: '/workspace/before' },
+      { customLogDir: 'logs', cwd: '/workspace/after' },
+    ]);
+  });
+
+  it('memoizes preload rejection for the first use', async () => {
+    const mockConfig = {
+      getUsageStatisticsEnabled: () => false,
+      getContentGeneratorConfig: () => ({}),
+      getCliVersion: () => '1.0.0',
+      getTelemetryEnabled: () => false,
+      getSessionId: () => 'test-session',
+    } as unknown as Config;
+    const moduleError = new Error(
+      "Cannot find module './openaiContentGenerator-STALE.js'",
+    );
+    (moduleError as NodeJS.ErrnoException).code = 'ERR_MODULE_NOT_FOUND';
+    openaiMockState.generatorError = moduleError;
+    const generator = await createContentGenerator(
+      {
+        model: 'test-model',
+        apiKey: 'test-key',
+        authType: AuthType.USE_OPENAI,
+      },
+      mockConfig,
+    );
+
+    const preloadError = await preloadContentGenerator(generator).catch(
+      (error: unknown) => error,
+    );
+    const firstUseError = await generator
+      .countTokens({ model: 'test-model', contents: 'hello' })
+      .catch((error: unknown) => error);
+
+    expect(preloadError).toBeInstanceOf(Error);
+    expect(firstUseError).toBe(preloadError);
+    expect((preloadError as Error).cause).toBe(moduleError);
+  });
+
   it('checks Qwen credentials before deferring provider creation', async () => {
     const mockConfig = {
       getUsageStatisticsEnabled: () => false,
@@ -289,9 +616,13 @@ describe('createContentGenerator - ERR_MODULE_NOT_FOUND handling', () => {
   beforeEach(() => {
     openaiMockState.generatorError = null;
     openaiMockState.createCount = 0;
+    openaiMockState.constructionGates = [];
+    openaiMockState.deferredErrors = [];
     qwenMockState.oauthError = null;
     qwenMockState.oauthCount = 0;
     qwenMockState.constructorCount = 0;
+    qwenMockState.constructorModels = [];
+    openaiLoggerMockState.constructorCalls = [];
     vi.resetModules();
   });
 

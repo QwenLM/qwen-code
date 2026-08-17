@@ -341,7 +341,7 @@ describe('parseChannelConfig', () => {
     expect(result.senderPolicy).toBe('open');
     expect(result.allowedUsers).toEqual(['alice']);
     expect(result.sessionScope).toBe('thread');
-    expect(result.cwd).toBe('/custom');
+    expect(result.cwd).toBe(path.resolve('/custom'));
     expect(result.approvalMode).toBe('auto');
     expect(result.instructions).toBe('Be helpful');
     expect(result.identity).toEqual({

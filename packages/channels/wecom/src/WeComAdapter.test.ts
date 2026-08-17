@@ -3319,44 +3319,47 @@ describe('WeComChannel', () => {
     await vi.waitFor(() => expect(existsSync(dirname(filePath!))).toBe(false));
   });
 
-  it('continues attachment cleanup when one dir removal fails', async () => {
-    const parent = join(tmpdir(), 'channel-files');
-    mkdirSync(parent, { recursive: true });
-    const blockedParent = mkdtempSync(join(parent, 'wecom-blocked-'));
-    const firstDir = join(blockedParent, 'first');
-    mkdirSync(firstDir);
-    chmodSync(blockedParent, 0o500);
-    const secondDir = mkdtempSync(join(parent, 'wecom-test-'));
-    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
-    const harness = channel as unknown as {
-      rememberAttachmentDir(
-        dir: string,
-        messageId?: string,
-        routeKey?: string,
-      ): void;
-      cleanupAllAttachmentDirs(): void;
-    };
-    harness.rememberAttachmentDir(firstDir, 'msg-first');
-    harness.rememberAttachmentDir(secondDir, 'msg-second');
-    const stderr = vi
-      .spyOn(process.stderr, 'write')
-      .mockImplementation(() => true);
+  it.skipIf(process.platform === 'win32')(
+    'continues attachment cleanup when one dir removal fails',
+    async () => {
+      const parent = join(tmpdir(), 'channel-files');
+      mkdirSync(parent, { recursive: true });
+      const blockedParent = mkdtempSync(join(parent, 'wecom-blocked-'));
+      const firstDir = join(blockedParent, 'first');
+      mkdirSync(firstDir);
+      chmodSync(blockedParent, 0o500);
+      const secondDir = mkdtempSync(join(parent, 'wecom-test-'));
+      const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+      const harness = channel as unknown as {
+        rememberAttachmentDir(
+          dir: string,
+          messageId?: string,
+          routeKey?: string,
+        ): void;
+        cleanupAllAttachmentDirs(): void;
+      };
+      harness.rememberAttachmentDir(firstDir, 'msg-first');
+      harness.rememberAttachmentDir(secondDir, 'msg-second');
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
 
-    try {
-      harness.cleanupAllAttachmentDirs();
+      try {
+        harness.cleanupAllAttachmentDirs();
 
-      expect(existsSync(firstDir)).toBe(true);
-      expect(existsSync(secondDir)).toBe(false);
-      expect(stderr).toHaveBeenCalledWith(
-        expect.stringContaining('failed to remove attachment dir'),
-      );
-    } finally {
-      stderr.mockRestore();
-      chmodSync(blockedParent, 0o700);
-      rmSync(blockedParent, { recursive: true, force: true });
-      rmSync(secondDir, { recursive: true, force: true });
-    }
-  });
+        expect(existsSync(firstDir)).toBe(true);
+        expect(existsSync(secondDir)).toBe(false);
+        expect(stderr).toHaveBeenCalledWith(
+          expect.stringContaining('failed to remove attachment dir'),
+        );
+      } finally {
+        stderr.mockRestore();
+        chmodSync(blockedParent, 0o700);
+        rmSync(blockedParent, { recursive: true, force: true });
+        rmSync(secondDir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('removes session attachment dirs when prompt end has no message id', async () => {
     const bridge = makeBridge();

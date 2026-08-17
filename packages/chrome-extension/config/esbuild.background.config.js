@@ -16,7 +16,10 @@ const projectRoot = path.resolve(__dirname, '..');
 
 const isWatch = process.argv.includes('--watch');
 const isProduction = process.argv.includes('--production');
-const outDir = process.env.EXTENSION_OUT_DIR || 'dist/extension';
+const outDir = path.resolve(
+  projectRoot,
+  process.env.EXTENSION_OUT_DIR || 'dist/extension',
+);
 
 // Resolve an entry point, preferring .ts when present (fallback to .js)
 function resolveEntry(relativePathWithoutExt) {
@@ -27,28 +30,53 @@ function resolveEntry(relativePathWithoutExt) {
   return path.join(projectRoot, `${relativePathWithoutExt}.js`);
 }
 
-const entryPoints = [resolveEntry('src/background/service-worker')];
+const builds = [
+  {
+    entryPoints: [resolveEntry('src/background/service-worker')],
+  },
+  {
+    entryPoints: [resolveEntry('src/sidepanel/capability-status')],
+    globalName: 'QwenCapabilityStatus',
+  },
+];
 
 async function build() {
-  const ctx = await esbuild.context({
-    entryPoints,
-    bundle: true,
-    platform: 'browser',
-    format: 'iife',
-    target: ['chrome115'],
-    minify: isProduction,
-    sourcemap: !isProduction,
-    outdir: path.join(projectRoot, outDir),
-    outbase: path.join(projectRoot, 'src'),
-    logLevel: 'info',
-  });
+  const contexts = await Promise.all(
+    builds.map((buildOptions) =>
+      esbuild.context({
+        ...buildOptions,
+        bundle: true,
+        platform: 'browser',
+        format: 'iife',
+        target: ['chrome115'],
+        minify: isProduction,
+        sourcemap: !isProduction,
+        metafile: !isWatch,
+        outdir: outDir,
+        outbase: path.join(projectRoot, 'src'),
+        logLevel: 'info',
+      }),
+    ),
+  );
 
   if (isWatch) {
     console.log('Watching background/content scripts...');
-    await ctx.watch();
+    await Promise.all(contexts.map((ctx) => ctx.watch()));
   } else {
-    await ctx.rebuild();
-    await ctx.dispose();
+    const results = await Promise.all(contexts.map((ctx) => ctx.rebuild()));
+    const metafile = results.reduce(
+      (combined, result) => ({
+        inputs: { ...combined.inputs, ...result.metafile.inputs },
+        outputs: { ...combined.outputs, ...result.metafile.outputs },
+      }),
+      { inputs: {}, outputs: {} },
+    );
+    // Lands next to the output directory root (dist/esbuild.json by default)
+    // so artifact-scan.js resolves the same path, including overrides.
+    const metafilePath = path.join(path.dirname(outDir), 'esbuild.json');
+    fs.mkdirSync(path.dirname(metafilePath), { recursive: true });
+    fs.writeFileSync(metafilePath, JSON.stringify(metafile, null, 2));
+    await Promise.all(contexts.map((ctx) => ctx.dispose()));
     console.log('Background/content build complete!');
   }
 }

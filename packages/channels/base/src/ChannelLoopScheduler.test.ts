@@ -366,6 +366,82 @@ describe('ChannelLoopScheduler', () => {
     writeSpy.mockRestore();
   });
 
+  it('clears an in-flight loop aborted by bridge recovery instead of failing it', async () => {
+    jobs = [{ ...baseJob, consecutiveFailures: 4 }];
+    const scheduler = new ChannelLoopScheduler({
+      store,
+      channels: new Map([['feishu-main', { runLoopPrompt }]]),
+      now: () => new Date(nowMs),
+      nextFireTime: () => new Date(nowMs - 60_000),
+      maxConsecutiveFailures: 5,
+    });
+    runLoopPrompt.mockImplementation(async () => {
+      // The bridge is replaced mid-prompt; recovery marks the scheduler before
+      // the in-flight prompt rejects.
+      scheduler.markBridgeRecovery();
+      throw new Error('bridge replaced during prompt');
+    });
+
+    await scheduler.tick();
+
+    await vi.waitFor(() => {
+      expect(store.update).toHaveBeenCalledWith(
+        'job-1',
+        expect.objectContaining({
+          lastStatus: 'error',
+          lastError: 'bridge replaced during prompt',
+          runningSince: undefined,
+        }),
+      );
+    });
+    const failureCountWrites = (
+      store.update as ReturnType<typeof vi.fn>
+    ).mock.calls.filter(
+      ([, patch]) =>
+        (patch as { consecutiveFailures?: number }).consecutiveFailures !==
+        undefined,
+    );
+    expect(failureCountWrites).toHaveLength(0);
+    expect(jobs[0]?.consecutiveFailures).toBe(4);
+    expect(jobs[0]?.enabled).toBe(true);
+  });
+
+  it('records a genuine failure when recovery starts before the prompt runs', async () => {
+    let releaseUpdate!: () => void;
+    const updateBlocked = new Promise<void>((r) => (releaseUpdate = r));
+    store.update = vi.fn(async (id, patch) => {
+      if ((patch as { runningSince?: string }).runningSince) {
+        await updateBlocked;
+      }
+      jobs = jobs.map((job) => (job.id === id ? { ...job, ...patch } : job));
+      return true;
+    });
+    runLoopPrompt.mockRejectedValue(new Error('genuine failure on new bridge'));
+    const scheduler = new ChannelLoopScheduler({
+      store,
+      channels: new Map([['feishu-main', { runLoopPrompt }]]),
+      now: () => new Date(nowMs),
+      nextFireTime: () => new Date(nowMs - 60_000),
+    });
+
+    const tick = scheduler.tick();
+    await vi.waitFor(() => expect(store.update).toHaveBeenCalledOnce());
+    scheduler.markBridgeRecovery();
+    releaseUpdate();
+    await tick;
+
+    await vi.waitFor(() => {
+      expect(store.update).toHaveBeenCalledWith(
+        'job-1',
+        expect.objectContaining({
+          lastStatus: 'error',
+          lastError: 'genuine failure on new bridge',
+          consecutiveFailures: 1,
+        }),
+      );
+    });
+  });
+
   it('disables one-shot loops after a failed attempt', async () => {
     jobs = [{ ...baseJob, recurring: false }];
     runLoopPrompt.mockRejectedValue(new Error('cannot cold send'));

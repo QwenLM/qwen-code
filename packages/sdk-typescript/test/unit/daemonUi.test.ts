@@ -296,6 +296,53 @@ describe('daemon UI normalizer and transcript reducer', () => {
     });
   });
 
+  it('keeps discrete thought messages separate with their metadata', () => {
+    const makeThought = (id: number, text: string, taskId: string) =>
+      normalizeDaemonEvent({
+        id,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_thought_chunk',
+            content: { type: 'text', text },
+            _meta: {
+              qwenDiscreteMessage: true,
+              backgroundTask: { taskId },
+            },
+          },
+        },
+      });
+
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        ...makeThought(11, 'first thought', 'task-a'),
+        ...makeThought(12, 'second thought', 'task-b'),
+      ],
+      { now: 2 },
+    );
+
+    expect(state.blocks).toMatchObject([
+      {
+        kind: 'thought',
+        text: 'first thought',
+        meta: {
+          qwenDiscreteMessage: true,
+          backgroundTask: { taskId: 'task-a' },
+        },
+      },
+      {
+        kind: 'thought',
+        text: 'second thought',
+        meta: {
+          qwenDiscreteMessage: true,
+          backgroundTask: { taskId: 'task-b' },
+        },
+      },
+    ]);
+  });
+
   it('keeps discrete assistant messages separate from normal text blocks', () => {
     const normalBefore = normalizeDaemonEvent({
       id: 11,
@@ -362,9 +409,18 @@ describe('daemon UI normalizer and transcript reducer', () => {
         update: {
           sessionUpdate: 'plan',
           entries: [
-            { content: 'Task', status: 'completed', priority: 'medium' },
+            {
+              content: 'Task',
+              status: 'completed',
+              priority: 'medium',
+              _meta: {
+                qwenTodo: { id: 'task', blockedBy: ['prepare'] },
+              },
+            },
           ],
           _meta: {
+            qwenTodoPlan: { id: 'plan-1' },
+            qwenTranscript: { planToolCallId: 'call-1' },
             stats: {
               promptTokens: 100,
               cachedTokens: 10,
@@ -381,7 +437,15 @@ describe('daemon UI normalizer and transcript reducer', () => {
       type: 'tool.update',
       toolName: 'todo_write',
       rawOutput: {
-        entries: [{ content: 'Task', status: 'completed', priority: 'medium' }],
+        entries: [
+          {
+            content: 'Task',
+            status: 'completed',
+            priority: 'medium',
+            _meta: { qwenTodo: { id: 'task', blockedBy: ['prepare'] } },
+          },
+        ],
+        plan: { id: 'plan-1', sourceCallId: 'call-1' },
         stats: {
           promptTokens: 100,
           cachedTokens: 10,
@@ -2492,6 +2556,131 @@ describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
     ]);
   });
 
+  it('does not surface usage_update as a debug transcript event', () => {
+    const events = normalizeDaemonEvent(
+      envelopeOf('session_update', {
+        update: {
+          sessionUpdate: 'usage_update',
+          used: 46_351,
+          size: 1_000_000,
+        },
+      }),
+    );
+    expect(events).toEqual([]);
+  });
+
+  it('stamps debugReason on unrecognized daemon events', () => {
+    const events = normalizeDaemonEvent(
+      envelopeOf('some_future_event', { sessionId: 's1' }),
+    );
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'debug',
+        debugReason: 'unrecognized_event',
+      }),
+    ]);
+  });
+
+  it('stamps debugReason on unrecognized session_update kinds', () => {
+    const events = normalizeDaemonEvent(
+      envelopeOf('session_update', {
+        update: { sessionUpdate: 'some_future_kind', payload: { a: 1 } },
+      }),
+    );
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'debug',
+        debugReason: 'unrecognized_session_update',
+      }),
+    ]);
+  });
+
+  it('classifies a session_update with no usable discriminator as malformed', () => {
+    // `getSessionUpdatePayload` accepts any record, so these reach the default
+    // branch with `kind === undefined`. They are broken frames, not kinds from
+    // a newer daemon — marking them unrecognized would let renderers hide the
+    // only diagnostic they produce.
+    for (const update of [
+      {},
+      { sessionUpdate: 42 },
+      { sessionUpdate: '' },
+      // Truthy but no more usable than an empty string.
+      { sessionUpdate: '   ' },
+    ]) {
+      expect(
+        normalizeDaemonEvent(envelopeOf('session_update', { update })),
+      ).toEqual([
+        expect.objectContaining({
+          type: 'debug',
+          debugReason: 'malformed_payload',
+        }),
+      ]);
+    }
+  });
+
+  it('stamps debugReason on malformed payloads of known events', () => {
+    const events = normalizeDaemonEvent(
+      envelopeOf('memory_changed', { scope: 'not-a-scope' }),
+    );
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'debug',
+        debugReason: 'malformed_payload',
+      }),
+    ]);
+  });
+
+  it('carries debugReason through the reducer onto the transcript block', () => {
+    // The normalizer tests above inspect events directly and the Web Shell
+    // adapter tests construct blocks by hand, so neither would notice if the
+    // reducer dropped the field on the way across. Production blocks would
+    // then lose their classification and Web Shell would render raw JSON
+    // again with both suites still green.
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      normalizeDaemonEvent(
+        envelopeOf('some_future_event', { sessionId: 's1' }),
+      ),
+    );
+
+    expect(state.blocks).toEqual([
+      expect.objectContaining({
+        kind: 'debug',
+        debugReason: 'unrecognized_event',
+      }),
+    ]);
+  });
+
+  it('leaves client-dispatched debug blocks without a debugReason', () => {
+    // The mirror of the test above, and the invariant that keeps Web Shell's
+    // model-switch summary visible. Without it, defaulting the field in
+    // `appendStatusBlock` (e.g. `event.debugReason ?? 'unrecognized_event'`)
+    // passes every other test in both suites while silently tagging the
+    // summary as unrecognized, which Web Shell then filters out.
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        {
+          type: 'debug',
+          text: 'Model switched to qwen3-coder-plus',
+          source: 'model_switch_summary',
+        },
+      ],
+    );
+
+    expect(state.blocks).toHaveLength(1);
+    expect(state.blocks[0]).toEqual(
+      expect.objectContaining({
+        kind: 'debug',
+        source: 'model_switch_summary',
+      }),
+    );
+    expect(state.blocks[0]).not.toHaveProperty('debugReason');
+  });
+
   it('normalizes memory_changed with closed-enum scope + mode', () => {
     const events = normalizeDaemonEvent(
       envelopeOf('memory_changed', {
@@ -3522,7 +3711,10 @@ describe('daemon UI reducer state machine (PR-E)', () => {
       expect.objectContaining({
         type: 'status',
         source: 'history_truncated',
-        text: expect.stringContaining('History truncated') as string,
+        text: expect.stringContaining(
+          'History truncated in replay history',
+        ) as string,
+        data: expect.objectContaining({ truncatedTurns: 2 }),
       }),
     ]);
 
@@ -3545,6 +3737,80 @@ describe('daemon UI reducer state machine (PR-E)', () => {
     );
   });
 
+  it('describes live truncation precisely and preserves structured data', () => {
+    const data = {
+      reason: 'replay_window_exceeded',
+      scope: 'live_journal',
+      truncatedEvents: 16_371,
+      retainedEvents: 10_000,
+      maxBytes: 8_388_608,
+      maxEvents: 10_000,
+      fullTranscriptAvailable: true,
+    };
+    const [event] = normalizeDaemonEvent({
+      v: 1,
+      type: 'history_truncated',
+      data,
+    } as never);
+
+    expect(event).toMatchObject({
+      type: 'status',
+      source: 'history_truncated',
+      data,
+      text: expect.stringContaining(
+        'kept the latest 10000 source events and dropped 16371 older source events',
+      ) as string,
+    });
+    expect((event as { text: string }).text).toContain(
+      'limits: 10000 replay entries / 8388608 bytes',
+    );
+    expect((event as { text: string }).text).toContain(
+      'Complete content remains available after the turn finishes.',
+    );
+  });
+
+  it('does not promise recovery when a full transcript is unavailable', () => {
+    const [event] = normalizeDaemonEvent({
+      v: 1,
+      type: 'history_truncated',
+      data: {
+        reason: 'replay_window_exceeded',
+        scope: 'live_journal',
+        truncatedEvents: 1,
+        retainedEvents: 2,
+        maxBytes: 512,
+        maxEvents: 2,
+        fullTranscriptAvailable: false,
+      },
+    } as never);
+
+    expect((event as { text: string }).text).toContain(
+      'not available for automatic recovery',
+    );
+    expect((event as { text: string }).text).not.toContain(
+      'remains available after the turn finishes',
+    );
+  });
+
+  it('does not infer replay ownership for a future truncation scope', () => {
+    const [event] = normalizeDaemonEvent({
+      v: 1,
+      type: 'history_truncated',
+      data: {
+        reason: 'replay_window_exceeded',
+        scope: 'future_scope',
+        truncatedEvents: 1,
+        retainedEvents: 2,
+        maxBytes: 512,
+        fullTranscriptAvailable: true,
+      },
+    } as never);
+
+    expect((event as { text: string }).text).toContain('History truncated:');
+    expect((event as { text: string }).text).not.toContain('live turn');
+    expect((event as { text: string }).text).not.toContain('replay history');
+  });
+
   it('routes malformed history truncation payloads to debug', () => {
     const events = normalizeDaemonEvent({
       v: 1,
@@ -3564,6 +3830,29 @@ describe('daemon UI reducer state machine (PR-E)', () => {
         text: 'history_truncated: malformed history_truncated payload',
       }),
     ]);
+  });
+
+  it('routes malformed optional history truncation fields to debug', () => {
+    for (const extra of [{ scope: 5 }, { maxEvents: -1 }, { maxEvents: 1.5 }]) {
+      const events = normalizeDaemonEvent({
+        v: 1,
+        type: 'history_truncated',
+        data: {
+          reason: 'replay_window_exceeded',
+          truncatedEvents: 4,
+          retainedEvents: 2,
+          maxBytes: 512,
+          fullTranscriptAvailable: true,
+          ...extra,
+        },
+      } as never);
+      expect(events).toEqual([
+        expect.objectContaining({
+          type: 'debug',
+          text: 'history_truncated: malformed history_truncated payload',
+        }),
+      ]);
+    }
   });
 
   it('mirrors approval mode from session.approval_mode.changed event', async () => {

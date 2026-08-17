@@ -573,14 +573,16 @@ describe('HookRunner', () => {
       expect(secondInput.prompt).toBe('Base prompt\n\nHook context');
     });
 
-    it('should preserve raw UserPromptSubmit additional context when chaining', async () => {
+    it('should preserve submitted prompt while chaining UserPromptSubmit context', async () => {
       const firstProcess = createMockProcess(
         0,
         JSON.stringify({
           hookSpecificOutput: {
             hookEventName: 'UserPromptSubmit',
             additionalContext: '<xml><item>raw</item></xml>',
+            submitted_prompt: 'forged prompt',
           },
+          submitted_prompt: 'another forged prompt',
         }),
       );
       const secondProcess = createMockProcess(0, 'result');
@@ -605,6 +607,7 @@ describe('HookRunner', () => {
           hook_event_name: HookEventName.UserPromptSubmit,
         }),
         prompt: 'Base prompt',
+        submitted_prompt: 'Submitted prompt',
       };
 
       await hookRunner.executeHooksSequential(
@@ -617,10 +620,12 @@ describe('HookRunner', () => {
       expect(typeof secondInputJson).toBe('string');
       const secondInput = JSON.parse(secondInputJson as string) as {
         prompt?: string;
+        submitted_prompt?: string;
       };
       expect(secondInput.prompt).toBe(
         'Base prompt\n\n<xml><item>raw</item></xml>',
       );
+      expect(secondInput.submitted_prompt).toBe('Submitted prompt');
     });
 
     it('should not append empty UserPromptSubmit additional context', async () => {

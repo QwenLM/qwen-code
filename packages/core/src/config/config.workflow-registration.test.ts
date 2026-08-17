@@ -179,4 +179,11 @@ describe('Workflow anti-recursion guard', () => {
       true,
     );
   });
+
+  it('TodoWrite is in EXCLUDED_TOOLS_FOR_SUBAGENTS', async () => {
+    const { EXCLUDED_TOOLS_FOR_SUBAGENTS } = await import(
+      '../agents/runtime/agent-core.js'
+    );
+    expect(EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.TODO_WRITE)).toBe(true);
+  });
 });

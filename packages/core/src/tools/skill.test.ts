@@ -19,6 +19,7 @@ import {
   clearCollectedSkillEntriesCache,
   renderAvailableSkillsBlock,
 } from './skill-utils.js';
+import { recordAutoSkillUsage } from '../skills/skill-curator.js';
 
 // Type for accessing protected methods in tests
 type SkillToolWithProtectedMethods = SkillTool & {
@@ -37,6 +38,9 @@ type SkillToolWithProtectedMethods = SkillTool & {
 
 // Mock dependencies
 vi.mock('../skills/skill-manager.js');
+vi.mock('../skills/skill-curator.js', () => ({
+  recordAutoSkillUsage: vi.fn().mockResolvedValue(false),
+}));
 vi.mock('../telemetry/index.js', () => ({
   logSkillLaunch: vi.fn(),
   recordSkillInvocation: vi.fn(),
@@ -89,6 +93,7 @@ describe('SkillTool', () => {
     // Create mock config
     config = {
       getProjectRoot: vi.fn().mockReturnValue('/test/project'),
+      getAutoSkillEnabled: vi.fn().mockReturnValue(true),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       getSkillManager: vi.fn(),
       getGeminiClient: vi.fn().mockReturnValue(undefined),
@@ -620,6 +625,46 @@ describe('SkillTool', () => {
         skillName: 'code-review',
         success: true,
       });
+      expect(recordAutoSkillUsage).toHaveBeenCalledWith(
+        '/test/project',
+        mockRuntimeConfig,
+      );
+    });
+
+    it('records usage while Auto Skill generation is disabled', async () => {
+      vi.mocked(config.getAutoSkillEnabled).mockReturnValue(false);
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'code-review' });
+      await invocation.execute();
+
+      expect(recordAutoSkillUsage).toHaveBeenCalledWith(
+        '/test/project',
+        mockRuntimeConfig,
+      );
+    });
+
+    it('keeps skill execution successful when usage recording fails', async () => {
+      vi.mocked(recordAutoSkillUsage).mockRejectedValueOnce(
+        new Error('lock busy'),
+      );
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'code-review' });
+      const result = await invocation.execute();
+
+      expect(partToString(result.llmContent)).toContain(
+        'Review code for quality and best practices.',
+      );
+      expect(result.returnDisplay).toBe(
+        'Specialized skill for reviewing code quality',
+      );
+      expect(recordAutoSkillUsage).toHaveBeenCalledWith(
+        '/test/project',
+        mockRuntimeConfig,
+      );
     });
 
     it('should include allowedTools in result when present', async () => {
@@ -718,6 +763,7 @@ describe('SkillTool', () => {
         skillName: 'code-review',
         success: false,
       });
+      expect(recordAutoSkillUsage).not.toHaveBeenCalled();
     });
 
     it("L3 default is 'ask' so AUTO mode routes through the classifier", async () => {
@@ -1030,6 +1076,32 @@ describe('SkillTool', () => {
           skill_name: 'code-review',
           success: true,
         }),
+      );
+    });
+
+    it('records auto-skill usage on re-invocation of an already-loaded skill', async () => {
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(
+        mockRuntimeConfig,
+      );
+
+      const inv1 = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'code-review' });
+      await inv1.execute();
+
+      vi.mocked(recordAutoSkillUsage).mockClear();
+
+      const inv2 = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'code-review' });
+      const result2 = await inv2.execute();
+
+      expect(partToString(result2.llmContent)).toBe(
+        'Skill "code-review" is already loaded in context.',
+      );
+      expect(recordAutoSkillUsage).toHaveBeenCalledWith(
+        '/test/project',
+        mockRuntimeConfig,
       );
     });
   });

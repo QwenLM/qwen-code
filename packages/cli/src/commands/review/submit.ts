@@ -47,36 +47,29 @@ import type { CommandModule } from 'yargs';
 import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
-import { ghWithInput, setGhHost } from './lib/gh.js';
+import { getCliVersion } from '../../utils/version.js';
+import { operatorReviewSettings } from './lib/review-settings.js';
+import {
+  ghWithInput,
+  isOwnerRepo,
+  resolveGhHost,
+  setGhHost,
+} from './lib/gh.js';
 import { REVIEW_TMP_DIR, tmpFile } from './lib/paths.js';
 import { parseReceiptIds } from './lib/receipt.js';
-import { parseReviewArgs } from './parse-args.js';
 import { composeReview, type ComposeReviewInput } from './compose-review.js';
-import {
-  skillArgsPath,
-  currentSessionId,
-} from '../../services/skill-args-file.js';
+import { reviewWriteAuthorization } from './lib/authorization.js';
 import {
   CRITICAL_PREFIX,
   SUGGESTION_PREFIX,
   countInlineFindings,
   severityOf,
 } from './lib/inline-counts.js';
-
-/**
- * Where the CLI records a skill's invocation arguments, verbatim, before the
- * skill's prompt reaches the model.
- *
- * Derived, not duplicated. A literal here would say "kept in step with
- * `skill-args-file.ts`" and nothing would keep it: rename the file there and the
- * gate silently stops finding the authorisation and refuses every post.
- */
-// Derived from the session id at call time, not a constant: the args file is
-// named for the session that wrote it, and `submit` (a subprocess of that
-// session) reads the same name from the same inherited `QWEN_CODE_SESSION_ID`.
-function defaultSkillArgsPath(): string {
-  return skillArgsPath('review');
-}
+import {
+  footerVersion,
+  reviewFooter,
+  stripReviewFooter,
+} from './lib/review-footer.js';
 
 /** The only events GitHub's Create Review API accepts. */
 const EVENTS = new Set(['APPROVE', 'REQUEST_CHANGES', 'COMMENT']);
@@ -141,6 +134,34 @@ interface ReviewPayload {
   body?: unknown;
 }
 
+function normalizeInlineComments(
+  comments: ReviewComment[],
+  modelId: unknown,
+  cliVersion: string,
+  attribution: boolean,
+): ReviewComment[] {
+  const footer =
+    attribution && typeof modelId === 'string' && modelId.trim() !== ''
+      ? reviewFooter(modelId, cliVersion)
+      : undefined;
+  return comments.map((comment) =>
+    // An empty body stays empty: this runs BEFORE the consistency check, and
+    // a footer pasted onto '' would hide the emptiness from the refusal that
+    // names it ('has no body — an empty comment').
+    typeof comment.body === 'string' && comment.body.trim() !== ''
+      ? {
+          ...comment,
+          // Forged footers are stripped even with attribution off: a comment
+          // authored by the model must not carry one the operator turned off.
+          body:
+            footer === undefined
+              ? stripReviewFooter(comment.body)
+              : `${stripReviewFooter(comment.body)}\n\n${footer}`,
+        }
+      : comment,
+  );
+}
+
 // The severity prefixes and the counting live in `lib/inline-counts.ts`,
 // shared with `compose-review`: the Step 6 verdict line and the Step 7 posted
 // verdict must be the same computation on the same source, and two counting
@@ -149,114 +170,27 @@ interface ReviewPayload {
 /**
  * Was this run authorised to write to the pull request?
  *
- * Exactly two things authorise it, and both are facts rather than impressions:
- * `--comment` in the arguments the user typed (which `parse-args` resolved into
- * `comment.effective`), or `--user-authorized`, which the skill may pass only
- * after the user asked for this review to be published in a message they typed
- * this session.
+ * The gate itself lives in `lib/authorization.ts`, shared verbatim with
+ * `publish-assets` — the only other sanctioned public write. See that file for
+ * why authorisation is re-parsed from the CLI's verbatim record of what the
+ * user typed, and why it binds to a target rather than acting as a bearer
+ * token.
  */
-function authorization(args: SubmitArgs): { ok: boolean; why: string } {
-  if (args.userAuthorized) {
-    return { ok: true, why: 'the user asked for this review to be published' };
-  }
-
-  // Read what the **user typed**, and parse it here.
-  //
-  // The obvious design — take the parser's JSON verdict and read
-  // `comment.effective` out of it — hands the gate a document the caller wrote.
-  // A model that wants to post can write `{"comment":{"effective":true}}` to any
-  // file and point at it, and the gate opens. It is not a hypothetical: this
-  // exact weakness was raised by a review of this very change, and confirmed
-  // against the built CLI in one line.
-  //
-  // The argument string is different in kind. The CLI writes it, verbatim,
-  // before the skill's prompt ever reaches the model — nothing between the user's
-  // keystrokes and this file has an opinion. So the gate reads *that*, and runs
-  // the same tested parser on it. Forging authorisation now means forging the
-  // user's own input, which is not something a careless run does by accident.
-  // The session-scoped path is derived here, from the environment, on both the
-  // write and read sides — the model never names it. `--skill-args` is a test
-  // seam only (there is no session id under vitest); honouring a caller-supplied
-  // path in a real run would hand the gate back the model-writable file the whole
-  // design removed, so it is ignored whenever a session id is present.
-  const sessionScoped = defaultSkillArgsPath();
-  const path =
-    currentSessionId() === '' && args.skillArgs
-      ? args.skillArgs
-      : sessionScoped;
-  let raw: string;
-  try {
-    raw = readFileSync(path, 'utf8');
-  } catch {
-    // No args file means no arguments — which means no `--comment`. Fail closed:
-    // a missing authorisation record is not an absent objection.
-    return {
-      ok: false,
-      why:
-        `no review arguments were recorded at ${path}, so this run cannot ` +
-        'show that `--comment` was requested',
-    };
-  }
-
-  const verdict = parseReviewArgs(raw);
-  if (!verdict.comment.effective) {
-    return {
-      ok: false,
-      why:
-        '`--comment` was not in the review arguments ' +
-        `(${JSON.stringify(raw.trim())})`,
-    };
-  }
-
-  // Authorisation is for a *target*, not a mood. `/review 6771 --comment`
-  // authorises a write to pull request 6771 — and to nothing else. Without this
-  // check the flag is a bearer token: a dry run confirmed that arguments naming
-  // 6771 happily authorised a submission to `--pr 9999 --repo other/repo`, so a
-  // stale args file, or a target swapped anywhere between Step 1 and Step 7,
-  // could put a review on a pull request the user never named.
-  const t = verdict.target;
-  const authorisedPr =
-    t.type === 'pr-number' || t.type === 'pr-url' ? t.number : undefined;
-  if (authorisedPr === undefined) {
-    return {
-      ok: false,
-      why:
-        `the review arguments (${JSON.stringify(raw.trim())}) do not name a ` +
-        'pull request, so they cannot authorise posting to one',
-    };
-  }
-  if (authorisedPr !== args.pr) {
-    return {
-      ok: false,
-      why:
-        `the review arguments authorise pull request #${authorisedPr}, but ` +
-        `this submission targets #${args.pr}`,
-    };
-  }
-  if (t.type === 'pr-url') {
-    const authorisedRepo = `${t.owner}/${t.repo}`;
-    if (authorisedRepo.toLowerCase() !== args.repo.toLowerCase()) {
-      return {
-        ok: false,
-        why:
-          `the review arguments authorise ${authorisedRepo}, but this ` +
-          `submission targets ${args.repo}`,
-      };
-    }
-    if (args.host && t.host.toLowerCase() !== args.host.toLowerCase()) {
-      return {
-        ok: false,
-        why:
-          `the review arguments authorise ${t.host}, but this submission ` +
-          `targets ${args.host}`,
-      };
-    }
-  }
-
-  return {
-    ok: true,
-    why: `\`--comment\` was in the review arguments for #${authorisedPr}`,
-  };
+function authorization(
+  args: SubmitArgs,
+  defaultComment: boolean,
+): { ok: boolean; why: string } {
+  return reviewWriteAuthorization({
+    userAuthorized: args.userAuthorized,
+    defaultComment,
+    skillArgs: args.skillArgs,
+    pr: args.pr,
+    repo: args.repo,
+    // The EFFECTIVE host, not merely the flag: with --host absent the gh
+    // child inherits an operator-exported GH_HOST, so that is where this
+    // write would route — and what the gate must bind.
+    host: resolveGhHost(args.host),
+  });
 }
 
 /**
@@ -276,7 +210,11 @@ function authorization(args: SubmitArgs): { ok: boolean; why: string } {
  * handed over beside the comments, and a number beside a thing is a number that can
  * disagree with it.
  */
-function compose(payload: ReviewPayload): {
+function compose(
+  payload: ReviewPayload,
+  cliVersion: string,
+  attribution: boolean,
+): {
   event: string;
   body: string;
   cappedBy: string[];
@@ -292,15 +230,29 @@ function compose(payload: ReviewPayload): {
   // a non-function value reaching `bilingualFromPlan` throws and drops the Chinese
   // fold through the fail-safe — the exact regression this PR closes. compose-review's
   // own CLI strips both for the same reason.
-  const { env: _dropped, prBodyFetcher: _droppedFetcher, ...rest } = state;
+  // `draftedComments` joins them: the ledger marker's contents are the comments
+  // this submission actually carries, taken from the payload below — not an
+  // assertion a caller's state JSON gets to make about what it reviewed.
+  const {
+    env: _dropped,
+    prBodyFetcher: _droppedFetcher,
+    draftedComments: _droppedDrafted,
+    ...rest
+  } = state;
   void _dropped;
   void _droppedFetcher;
+  void _droppedDrafted;
 
-  const r = composeReview({
-    ...rest,
-    criticalsInline,
-    suggestionsInline,
-  });
+  const r = composeReview(
+    {
+      ...rest,
+      criticalsInline,
+      suggestionsInline,
+      draftedComments: comments,
+    },
+    cliVersion,
+    attribution,
+  );
   return { event: r.event, body: r.body, cappedBy: r.cappedBy };
 }
 
@@ -309,6 +261,28 @@ function structuralProblems(payload: ReviewPayload): string[] {
   const problems: string[] = [];
 
   if (!payload.commit_id) problems.push('`commit_id` is missing');
+
+  // The review JSON is a document the model writes, and `comments` reaches
+  // `.map` in the normalisation below — OUTSIDE `compose`'s try/catch. Any
+  // other shape is refused here as the structured refusal the re-compose
+  // loop parses, not a bare TypeError.
+  if (payload.comments !== undefined && !Array.isArray(payload.comments)) {
+    problems.push(
+      '`comments` is not an array — it is the list of findings this post ' +
+        'carries; any other shape is not a list of findings.',
+    );
+  }
+  if (
+    Array.isArray(payload.comments) &&
+    (payload.comments as unknown[]).some(
+      (c) => c === null || typeof c !== 'object',
+    )
+  ) {
+    problems.push(
+      '`comments` entries must each be an object — a finding is a path, ' +
+        'a line and a body; any other shape is not a finding.',
+    );
+  }
 
   // The verdict is not the caller's to write. Refusing is deliberate: silently
   // ignoring a hand-written `event` would let a run believe it had posted the
@@ -414,28 +388,22 @@ function inconsistencies(payload: ReviewPayload, event: string): string[] {
   return problems;
 }
 
-/**
- * `owner/repo` — and neither half may be a dot segment.
- *
- * The character class alone admits `../repo`, `owner/..` and `./repo`: `.` and
- * `..` are made of legal characters and mean something else entirely once they
- * reach a URL path.
- */
-const REPO_SEGMENT = /^[A-Za-z0-9._-]+$/;
-function isRepo(repo: string): boolean {
-  const parts = repo.split('/');
-  return (
-    parts.length === 2 &&
-    parts.every((p) => REPO_SEGMENT.test(p) && p !== '.' && p !== '..')
-  );
-}
-
-export function runSubmit(args: SubmitArgs): void {
+export function runSubmit(
+  args: SubmitArgs,
+  cliVersion = 'unknown',
+  opts: {
+    /** Append the model/version attribution footer (the `review.attribution` setting). */
+    attribution?: boolean;
+    /** The standing `review.comment` setting, for the authorization gate. */
+    defaultComment?: boolean;
+  } = {},
+): void {
+  const { attribution = true, defaultComment = false } = opts;
   setGhHost(args.host);
 
   // The repo goes straight into the API path. A malformed value does not fail
   // safely — it fails as a confusing 404 from a URL nobody meant to build.
-  if (!isRepo(args.repo)) {
+  if (!isOwnerRepo(args.repo)) {
     throw new Error(
       `--repo ${JSON.stringify(args.repo)} is not <owner>/<repo>.`,
     );
@@ -457,19 +425,33 @@ export function runSubmit(args: SubmitArgs): void {
     );
   }
 
-  const auth = authorization(args);
+  const auth = authorization(args, defaultComment);
   if (!auth.ok) {
     // Not an error the caller can retry around — a refusal it must accept. The
     // findings are not lost: they are in the terminal output and the saved
     // report, and the user can ask for them to be posted.
+    // The advice must match the refusal class, or it misdirects the retry:
+    // the gate refuses either because comment was never requested (its `why`
+    // carries `` `--comment` was ``) or because the recorded arguments do not
+    // bind this target. `--comment` cannot fix the second class — the flag
+    // stands in for nothing a target binding needs, and the `review.comment`
+    // setting already stood in for the flag on exactly those refusals — so
+    // advising it there buys the futile retry loop authorization.ts's refusal
+    // wording exists to prevent.
+    const advice = auth.why.includes('`--comment` was')
+      ? `This is the correct outcome of a review the user did not ask to ` +
+        `publish — report the findings in the terminal and stop. Re-run with ` +
+        `\`--comment\`, or pass --user-authorized only after the user has ` +
+        `asked, in a message they typed, for this review to be published.`
+      : `The recorded arguments do not bind this target — report the ` +
+        `findings in the terminal and stop. Posting to this pull request ` +
+        `needs a review invoked naming it, or --user-authorized after the ` +
+        `user has asked, in a message they typed, for this review to be ` +
+        `published.`;
     writeStderrLine(
       `REFUSED to post to ${args.repo}#${args.pr}: ${auth.why}.\n` +
         `Posting is a public, irreversible write, and this run has no ` +
-        `authorisation for one. This is the correct outcome of a review the ` +
-        `user did not ask to publish — report the findings in the terminal and ` +
-        `stop. Re-run with \`--comment\`, or pass --user-authorized only after ` +
-        `the user has asked, in a message they typed, for this review to be ` +
-        `published.`,
+        `authorisation for one. ${advice}`,
     );
     writeStdoutLine(
       JSON.stringify({ posted: false, reason: auth.why }, null, 2),
@@ -489,12 +471,22 @@ export function runSubmit(args: SubmitArgs): void {
     );
   }
 
+  payload = {
+    ...payload,
+    comments: normalizeInlineComments(
+      payload.comments ?? [],
+      payload.state?.modelId,
+      cliVersion,
+      attribution,
+    ),
+  };
+
   // The verdict, computed here. It was never in the payload.
   let event: string;
   let body: string;
   let cappedBy: string[];
   try {
-    ({ event, body, cappedBy } = compose(payload));
+    ({ event, body, cappedBy } = compose(payload, cliVersion, attribution));
   } catch (err) {
     throw new Error(
       `The review state does not compose into a verdict; refusing to post:\n` +
@@ -548,6 +540,21 @@ export function runSubmit(args: SubmitArgs): void {
     '--input',
     '-',
   );
+  // GitHub's answer, read best-effort: `id` feeds the bypass-audit receipt
+  // below; `html_url` is the deep link to the review just created, surfaced in
+  // both output channels so the summary the user reads can carry it — without
+  // it, "view what was posted" means hand-assembling a PR URL.
+  let reviewId: number | undefined;
+  let reviewUrl: string | undefined;
+  try {
+    const parsed = JSON.parse(response) as { id?: number; html_url?: string };
+    if (typeof parsed.id === 'number') reviewId = parsed.id;
+    if (typeof parsed.html_url === 'string' && parsed.html_url.trim() !== '') {
+      reviewUrl = parsed.html_url;
+    }
+  } catch {
+    /* response metadata only — the post itself succeeded */
+  }
   // Receipt for cleanup's bypass audit: EVERY review this session was
   // authorised to create, by id. The audit lists reviews by the reviewing
   // account inside the window and flags any the receipt does not vouch for —
@@ -562,7 +569,6 @@ export function runSubmit(args: SubmitArgs): void {
   // add this one, dedupe, write back. Best-effort: a receipt failure must
   // never fail a review that DID post.
   try {
-    const reviewId = (JSON.parse(response) as { id?: number }).id;
     if (typeof reviewId === 'number') {
       const receiptPath = tmpFile(`pr-${args.pr}`, 'submit-receipt.json');
       const priorIds = readReceiptIds(receiptPath);
@@ -579,7 +585,8 @@ export function runSubmit(args: SubmitArgs): void {
   writeStderrLine(
     `Posted ${event} to ${args.repo}#${args.pr} — ${auth.why}` +
       (cappedBy.length ? ` (capped by ${cappedBy.join(', ')})` : '') +
-      '.',
+      '.' +
+      (reviewUrl ? ` ${reviewUrl}` : ''),
   );
   writeStdoutLine(
     JSON.stringify(
@@ -588,6 +595,7 @@ export function runSubmit(args: SubmitArgs): void {
         event,
         cappedBy,
         inlineComments: post.comments.length,
+        ...(reviewUrl ? { url: reviewUrl } : {}),
       },
       null,
       2,
@@ -620,7 +628,7 @@ export const submitCommand: CommandModule = {
       .option('skill-args', {
         type: 'string',
         describe:
-          "Path to the CLI-written record of the review's invocation arguments (defaults to .qwen/tmp/qwen-skill-args-review.txt). Its `--comment` is what authorises a post. Deliberately NOT the parser's JSON output: that is a document the caller writes, and a caller that wants to post can write anything in it.",
+          "Path to the CLI-written record of the review's invocation arguments (defaults to .qwen/tmp/qwen-skill-args-review.txt). Its `--comment` — or the standing `review.comment` setting — is what authorises a post. Deliberately NOT the parser's JSON output: that is a document the caller writes, and a caller that wants to post can write anything in it.",
       })
       .option('user-authorized', {
         type: 'boolean',
@@ -637,7 +645,15 @@ export const submitCommand: CommandModule = {
         default: false,
         describe: 'Check authorisation and payload consistency, then stop.',
       }),
-  handler: (argv) => {
-    runSubmit(argv as unknown as SubmitArgs);
+  handler: async (argv) => {
+    // Do not use CLI_VERSION here: esbuild replaces it with a build-time value.
+    const cliVersion =
+      footerVersion(process.env['QWEN_CODE_STARTUP_VERSION']) ??
+      (await getCliVersion());
+    const review = operatorReviewSettings();
+    runSubmit(argv as unknown as SubmitArgs, cliVersion, {
+      attribution: review.attribution,
+      defaultComment: review.comment,
+    });
   },
 };

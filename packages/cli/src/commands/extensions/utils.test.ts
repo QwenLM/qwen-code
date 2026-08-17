@@ -229,4 +229,22 @@ describe('extensionToOutputString', () => {
     expect(result).not.toContain('user');
     expect(result).not.toContain('token');
   });
+
+  it('should display the native Agent Plugins origin', () => {
+    const extension = createMockExtension({
+      installMetadata: {
+        type: 'local',
+        source: '/path/to/portable-plugin',
+        originSource: 'AgentPlugins',
+      },
+    });
+
+    const result = extensionToOutputString(
+      extension,
+      mockExtensionManager,
+      '/workspace',
+    );
+
+    expect(result).toContain('Origin: AgentPlugins');
+  });
 });

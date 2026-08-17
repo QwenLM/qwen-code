@@ -5,6 +5,7 @@
  */
 
 import type { ChildProcess } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -12,6 +13,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { callAgentViewSupervisor } from './supervisor-client.js';
 import { getAgentViewSupervisorSocketPath } from './supervisor-process.js';
 import {
+  connectExistingAgentViewSupervisor,
   INTERNAL_AGENT_VIEW_SUPERVISOR_ARG,
   ensureAgentViewSupervisor,
   runAgentViewSupervisor,
@@ -25,6 +27,17 @@ import {
   readAgentViewSupervisor,
   writeAgentViewSessionState,
 } from './supervisor-store.js';
+
+const mockAttachAgentViewSupervisorTerminal = vi.hoisted(() => vi.fn());
+
+vi.mock('./supervisor-client.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./supervisor-client.js')>();
+  return {
+    ...actual,
+    attachAgentViewSupervisorTerminal: mockAttachAgentViewSupervisorTerminal,
+  };
+});
 
 const cleanupDirs: string[] = [];
 const cleanupServers: AgentViewSupervisorServerHandle[] = [];
@@ -41,6 +54,33 @@ afterEach(async () => {
 });
 
 describe('Agent View supervisor runner', () => {
+  it('returns undefined when no existing supervisor is reachable', async () => {
+    const { globalDir } = await makeSupervisorPath();
+
+    await expect(
+      connectExistingAgentViewSupervisor({ globalDir }),
+    ).resolves.toBeUndefined();
+  });
+
+  it('connects to an existing supervisor handle', async () => {
+    const { globalDir, socketPath } = await makeSupervisorPath();
+    const server = createFakeSupervisor(socketPath, {
+      status: () => ({ state: 'ready' }),
+      list: () => [],
+      shutdown: () => ({ shuttingDown: true }),
+    });
+    await server.listen();
+    cleanupServers.push(server);
+
+    const handle = await connectExistingAgentViewSupervisor({ globalDir });
+
+    expect(handle).toBeDefined();
+    if (!handle) throw new Error('Expected existing supervisor handle.');
+    expect(handle.socketPath).toBe(socketPath);
+    expect(handle.startedProcess).toBeUndefined();
+    await expect(handle.status()).resolves.toEqual({ state: 'ready' });
+  });
+
   it('connects to an existing supervisor without spawning a process', async () => {
     const { globalDir, socketPath } = await makeSupervisorPath();
     const server = createFakeSupervisor(socketPath, {
@@ -61,6 +101,31 @@ describe('Agent View supervisor runner', () => {
     expect(handle.socketPath).toBe(socketPath);
     expect(handle.startedProcess).toBeUndefined();
     await expect(handle.status()).resolves.toEqual({ state: 'ready' });
+  });
+
+  it('binds attach to the blocking terminal bridge', async () => {
+    const { globalDir, socketPath } = await makeSupervisorPath();
+    const server = createFakeSupervisor(socketPath, {
+      status: () => ({ state: 'ready' }),
+      list: () => [],
+      shutdown: () => ({ shuttingDown: true }),
+    });
+    await server.listen();
+    cleanupServers.push(server);
+    mockAttachAgentViewSupervisorTerminal.mockClear();
+
+    const handle = await ensureAgentViewSupervisor({
+      globalDir,
+      spawnProcess: vi.fn(() => createFakeProcess()),
+    });
+
+    await handle.attach('session-9');
+
+    expect(mockAttachAgentViewSupervisorTerminal).toHaveBeenCalledOnce();
+    const [callSocketPath, callSessionId] =
+      mockAttachAgentViewSupervisorTerminal.mock.calls[0];
+    expect(callSocketPath).toBe(socketPath);
+    expect(callSessionId).toBe('session-9');
   });
 
   it('spawns through the injected process factory and waits for readiness', async () => {
@@ -90,6 +155,41 @@ describe('Agent View supervisor runner', () => {
     await expect(handle.status()).resolves.toEqual({ state: 'spawned' });
   });
 
+  it('rejects promptly when the spawned supervisor emits an error', async () => {
+    const { globalDir } = await makeSupervisorPath();
+    const startedProcess = createFakeProcess();
+    const spawnError = new Error('spawn failed');
+
+    const result = ensureAgentViewSupervisor({
+      globalDir,
+      spawnProcess: vi.fn(() => {
+        setImmediate(() => startedProcess.emit('error', spawnError));
+        return startedProcess;
+      }),
+    });
+
+    await expect(result).rejects.toThrow('spawn failed');
+    expect(startedProcess.unref).toHaveBeenCalledOnce();
+  });
+
+  it('rejects promptly when the spawned supervisor exits before readiness', async () => {
+    const { globalDir } = await makeSupervisorPath();
+    const startedProcess = createFakeProcess();
+
+    const result = ensureAgentViewSupervisor({
+      globalDir,
+      spawnProcess: vi.fn(() => {
+        setImmediate(() => startedProcess.emit('exit', 1, null));
+        return startedProcess;
+      }),
+    });
+
+    await expect(result).rejects.toThrow(
+      'Agent View supervisor exited before becoming ready with code 1.',
+    );
+    expect(startedProcess.unref).toHaveBeenCalledOnce();
+  });
+
   it('routes handle status/list/dispatch/shutdown calls through IPC', async () => {
     const { globalDir, socketPath } = await makeSupervisorPath();
     const handler = {
@@ -103,12 +203,22 @@ describe('Agent View supervisor runner', () => {
             result: { subscribed: true },
           })}\n`,
         );
+        socket.write(
+          `${JSON.stringify({
+            type: 'changed',
+            at: '2026-07-17T00:00:00.000Z',
+          })}\n`,
+        );
       }),
       dispatch: vi.fn(() => ({ sessionId: 'session-2' })),
       adopt: vi.fn(() => ({ sessionId: 'session-2', adopted: true })),
       peek: vi.fn(() => ({ sessionId: 'session-3' })),
       send: vi.fn(() => ({ sent: true })),
       answer: vi.fn(() => ({ answered: true })),
+      logs: vi.fn(() => ({ logs: ['line-1'] })),
+      stop: vi.fn(() => ({ stopped: true })),
+      kill: vi.fn(() => ({ killed: true })),
+      remove: vi.fn(() => ({ removed: true })),
       respawn: vi.fn(() => ({ respawned: true })),
       pin: vi.fn(() => ({ sessionId: 'session-3', pinned: true })),
       rename: vi.fn(() => ({
@@ -135,8 +245,14 @@ describe('Agent View supervisor runner', () => {
     ]);
     expect(handler.list).toHaveBeenCalledWith({ cwd: '/workspace/project' });
 
-    const subscription = handle.subscribe(() => {});
+    const eventCallback = vi.fn();
+    const subscription = handle.subscribe(eventCallback);
     await waitFor(() => handler.subscribe.mock.calls.length === 1);
+    await waitFor(() => eventCallback.mock.calls.length === 1);
+    expect(eventCallback).toHaveBeenCalledWith({
+      type: 'changed',
+      at: '2026-07-17T00:00:00.000Z',
+    });
     subscription.dispose();
 
     await expect(
@@ -185,6 +301,26 @@ describe('Agent View supervisor runner', () => {
       text: 'yes',
     });
 
+    await expect(handle.logs('session-3')).resolves.toEqual({
+      logs: ['line-1'],
+    });
+    expect(handler.logs).toHaveBeenCalledWith({ sessionId: 'session-3' });
+
+    await expect(handle.stop('session-3')).resolves.toEqual({
+      stopped: true,
+    });
+    expect(handler.stop).toHaveBeenCalledWith({ sessionId: 'session-3' });
+
+    await expect(handle.kill('session-3')).resolves.toEqual({
+      killed: true,
+    });
+    expect(handler.kill).toHaveBeenCalledWith({ sessionId: 'session-3' });
+
+    await expect(handle.remove('session-3')).resolves.toEqual({
+      removed: true,
+    });
+    expect(handler.remove).toHaveBeenCalledWith({ sessionId: 'session-3' });
+
     await expect(handle.respawn('session-3')).resolves.toEqual({
       respawned: true,
     });
@@ -221,6 +357,11 @@ describe('Agent View supervisor runner', () => {
       shuttingDown: true,
     });
     expect(handler.shutdown).toHaveBeenCalledWith({ keepWorkers: true });
+
+    await expect(handle.shutdown(false)).resolves.toEqual({
+      shuttingDown: true,
+    });
+    expect(handler.shutdown).toHaveBeenCalledWith({ keepWorkers: false });
   });
 
   it('closes the supervisor server when shutdown is requested', async () => {
@@ -236,9 +377,10 @@ describe('Agent View supervisor runner', () => {
         protocolVersion: 1,
       },
     );
+    const authToken = await readAuthToken(globalDir);
     await expect(
       callAgentViewSupervisor(socketPath, 'shutdown', undefined, {
-        authToken: await readAuthToken(globalDir),
+        authToken,
       }),
     ).resolves.toEqual({
       shuttingDown: true,
@@ -246,7 +388,7 @@ describe('Agent View supervisor runner', () => {
     });
     await supervisorPromise;
 
-    await expectSupervisorUnreachable(socketPath);
+    await expectSupervisorUnreachable(socketPath, authToken);
   });
 
   it('auto-exits when maintenance sees only hibernated managed sessions', async () => {
@@ -254,14 +396,15 @@ describe('Agent View supervisor runner', () => {
     const supervisorPromise = runAgentViewSupervisor({
       globalDir,
       maintenanceIntervalMs: 10,
-      hibernationPolicy: { idleMs: 1, autoExitGraceMs: 0 },
+      hibernationPolicy: { autoExitGraceMs: 0 },
     });
 
     await waitForSupervisor(socketPath, globalDir);
+    const authToken = await readAuthToken(globalDir);
     await writeHibernatedSessionForTest(globalDir, 'session-1');
     await supervisorPromise;
 
-    await expectSupervisorUnreachable(socketPath);
+    await expectSupervisorUnreachable(socketPath, authToken);
   });
 });
 
@@ -273,9 +416,9 @@ function createFakeSupervisor(
 }
 
 function createFakeProcess(): ChildProcess {
-  return {
+  return Object.assign(new EventEmitter(), {
     unref: vi.fn(),
-  } as unknown as ChildProcess;
+  }) as unknown as ChildProcess;
 }
 
 async function makeSupervisorPath(): Promise<{
@@ -348,10 +491,14 @@ async function waitFor(predicate: () => boolean): Promise<void> {
   throw new Error('Timed out waiting for supervisor runner test condition.');
 }
 
-async function expectSupervisorUnreachable(socketPath: string): Promise<void> {
+async function expectSupervisorUnreachable(
+  socketPath: string,
+  authToken: string | undefined,
+): Promise<void> {
   for (let attempt = 0; attempt < 20; attempt++) {
     try {
       await callAgentViewSupervisor(socketPath, 'status', undefined, {
+        authToken,
         timeoutMs: 100,
       });
     } catch {

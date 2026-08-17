@@ -38,8 +38,6 @@ type ExtendedDaemonTextTranscriptBlock = DaemonTextTranscriptBlock & {
   meta?: {
     source?: unknown;
     inputAnnotations?: unknown;
-    qwenDiscreteMessage?: boolean;
-    backgroundTask?: unknown;
   };
 };
 
@@ -64,7 +62,7 @@ function collectBackgroundAgentTaskUpdates(
 ): ReadonlyMap<string, BackgroundAgentTaskUpdate> {
   const updates = new Map<string, BackgroundAgentTaskUpdate>();
   for (const block of blocks) {
-    if (block.kind !== 'assistant') continue;
+    if (block.kind !== 'assistant' && block.kind !== 'user') continue;
     const meta = getRecord(block.meta);
     if (
       meta?.['source'] !== 'background_notification' ||
@@ -111,10 +109,85 @@ function applyBackgroundAgentTaskUpdate(
 }
 
 function isIgnoredWebShellStatus(text: string): boolean {
+  // `model.changed` projects to a `status` block, not a `debug` one, so this
+  // stays text-keyed. The Web Shell renders its own richer model-switch
+  // summary (dispatched as a client-side `debug` event) instead.
+  return text.startsWith('Model switched: ');
+}
+
+/**
+ * Whole shape of the legacy top-level projection — `<event-type>
+ * (unrecognized daemon event): <payload>` — anchored at the start. Matching
+ * the marker anywhere in the text would hide any block that merely quotes it,
+ * such as a malformed payload carrying an upstream peer's message.
+ *
+ * The payload is deliberately unconstrained. `DaemonEvent.data` is `unknown`
+ * and `stringifyJson` returns strings verbatim, serializes primitives as
+ * `42` / `true` / `null`, and yields `''` for `undefined` — so keying on a
+ * leading `{` would let every non-object payload slip through. The event-type
+ * prefix plus the fixed phrase is specific enough on its own.
+ */
+const LEGACY_UNRECOGNIZED_EVENT_PATTERN =
+  /^[A-Za-z0-9_.-]+ \(unrecognized daemon event\): /;
+
+/**
+ * The legacy `session_update` projection is `<kind>: <json>` — no marker to
+ * key on, so those blocks can only be matched by kind name. Deliberately
+ * scoped to the kinds known to have leaked into transcripts before the
+ * normalizer suppressed them at the source: `usage_update` (#8790, the
+ * original spam report) and `a2ui`, whose command JSON the bridge splits out
+ * of the tool frame precisely to keep it out of transcripts. Anchored, and
+ * requiring the `: {` shape, so prose starting with the word still renders.
+ */
+const LEGACY_SUPPRESSED_SESSION_UPDATE_PREFIXES = [
+  'usage_update: {',
+  'a2ui: {',
+];
+
+/**
+ * Daemon frames the normalizer had no case for are developer diagnostics —
+ * a raw JSON dump of an event this client does not understand. They routinely
+ * appear whenever the daemon ships a new event kind ahead of the UI, and
+ * rendering them drops unreadable JSON into the middle of the conversation.
+ *
+ * Keyed on the normalizer's `debugReason` rather than the block text. The
+ * SDK names reasons by category: `unrecognized_*` is forward-compat noise,
+ * hidden here by prefix so a reason a newer SDK adds is covered without a
+ * Web Shell change. Everything else deliberately stays visible — `malformed_*`
+ * means a frame this client *does* know arrived broken and is worth
+ * surfacing, and client-dispatched debug blocks (e.g. the model-switch
+ * summary) carry no `debugReason` at all.
+ *
+ * `WebShellTranscript` is a public entry point that takes already-projected
+ * blocks from its caller, so blocks projected — or persisted — by an SDK older
+ * than `debugReason` still arrive here with no reason at all. Those are
+ * matched by shape instead, and only ever by shape: text matching is a
+ * compatibility shim, so it is scoped to `debug` blocks (this helper is also
+ * called for `status`, which never carried these projections) and anchored to
+ * the whole projection, never a substring. A block that merely quotes a
+ * marker — a malformed payload relaying an upstream message, a
+ * client-dispatched summary, an ordinary status line — keeps rendering.
+ *
+ * Legacy `session_update` blocks have no marker, so they are matched by kind
+ * name instead — see the prefix list above. That list is closed on purpose: a
+ * generic `<word>: {` rule would swallow legitimate diagnostics. An old block
+ * for some other unrecognized session-update kind therefore still renders;
+ * new projections carry the reason and are covered.
+ */
+function isUnrecognizedDaemonDebug(
+  block: DaemonStatusTranscriptBlock,
+): boolean {
+  if (block.debugReason !== undefined) {
+    return block.debugReason.startsWith('unrecognized_');
+  }
+  // Only `debug` blocks ever carried an unrecognized projection; a `status`
+  // block matching one of these shapes is real content.
+  if (block.kind !== 'debug') return false;
   return (
-    text.startsWith('language_changed (unrecognized daemon event):') ||
-    text.startsWith('session_cwd_changed (unrecognized daemon event):') ||
-    text.startsWith('Model switched: ')
+    LEGACY_UNRECOGNIZED_EVENT_PATTERN.test(block.text) ||
+    LEGACY_SUPPRESSED_SESSION_UPDATE_PREFIXES.some((prefix) =>
+      block.text.startsWith(prefix),
+    )
   );
 }
 
@@ -172,24 +245,18 @@ function getMidTurnInjectedText(data: unknown): string | null {
   return text || null;
 }
 
-function isBackgroundNotificationAssistantBlock(
+function isBackgroundNotificationBlock(
   block: DaemonTextTranscriptBlock,
 ): boolean {
   const extended = block as ExtendedDaemonTextTranscriptBlock;
-  const meta = extended.meta;
-  return (
-    meta?.['source'] === 'background_notification' &&
-    meta['qwenDiscreteMessage'] === true &&
-    meta['backgroundTask'] !== undefined
-  );
+  return extended.meta?.['source'] === 'background_notification';
 }
 
-function normalizeAssistantTextBlock(
+function getBackgroundNotificationData(
   block: DaemonTextTranscriptBlock,
-): DaemonTextTranscriptBlock | null {
-  if (isBackgroundNotificationAssistantBlock(block)) return null;
-  if (!block.text && !block.usage) return null;
-  return block;
+): Record<string, unknown> | undefined {
+  const extended = block as ExtendedDaemonTextTranscriptBlock;
+  return getRecord(extended.meta?.['backgroundTask']) ?? undefined;
 }
 
 function isTextBlockEmpty(block: DaemonTextTranscriptBlock): boolean {
@@ -276,10 +343,25 @@ export function transcriptBlocksToDaemonMessages(
 
     switch (block.kind) {
       case 'user': {
+        const textBlock = block as DaemonTextTranscriptBlock;
+        if (isBackgroundNotificationBlock(textBlock)) {
+          currentAssistantIdx = null;
+          currentThinkingIdx = null;
+          needsNewContentMessage = true;
+          messages.push({
+            id: block.id,
+            role: 'system',
+            content: textBlock.text,
+            variant: 'info',
+            source: 'background_notification',
+            data: getBackgroundNotificationData(textBlock),
+            timestamp: blockTime,
+          });
+          break;
+        }
         currentAssistantIdx = null;
         currentThinkingIdx = null;
         needsNewContentMessage = false;
-        const textBlock = block as DaemonTextTranscriptBlock;
         const meta = getRecord(
           (textBlock as ExtendedDaemonTextTranscriptBlock).meta,
         );
@@ -307,10 +389,23 @@ export function transcriptBlocksToDaemonMessages(
       }
 
       case 'assistant': {
-        const textBlock = normalizeAssistantTextBlock(
-          block as DaemonTextTranscriptBlock,
-        );
-        if (!textBlock) break;
+        const textBlock = block as DaemonTextTranscriptBlock;
+        if (isBackgroundNotificationBlock(textBlock)) {
+          currentAssistantIdx = null;
+          currentThinkingIdx = null;
+          needsNewContentMessage = true;
+          messages.push({
+            id: block.id,
+            role: 'system',
+            content: textBlock.text,
+            variant: 'info',
+            source: 'background_notification',
+            data: getBackgroundNotificationData(textBlock),
+            timestamp: blockTime,
+          });
+          break;
+        }
+        if (!textBlock.text && !textBlock.usage) break;
 
         const parentSubAgent = textBlock.parentToolCallId
           ? toolsByCallId.get(textBlock.parentToolCallId)
@@ -561,6 +656,7 @@ export function transcriptBlocksToDaemonMessages(
         const existingPermission = toolsByCallId.get(permissionToolCall.callId);
         if (existingPermission) {
           const previousStatus = existingPermission.status;
+          const previousEndTime = existingPermission.endTime;
           permissionToolCall.toolName = existingPermission.toolName;
           if (permBlock.resolved) {
             if (isApprovedPermissionResolution(permBlock.resolved)) {
@@ -574,11 +670,13 @@ export function transcriptBlocksToDaemonMessages(
           }
           mergeToolCall(existingPermission, permissionToolCall);
           if (
-            permBlock.resolved &&
-            isSubAgentPermission &&
-            isApprovedPermissionResolution(permBlock.resolved)
+            isTerminalToolStatus(previousStatus) ||
+            (permBlock.resolved &&
+              isSubAgentPermission &&
+              isApprovedPermissionResolution(permBlock.resolved))
           ) {
             existingPermission.status = previousStatus;
+            existingPermission.endTime = previousEndTime;
           }
           break;
         }
@@ -624,6 +722,7 @@ export function transcriptBlocksToDaemonMessages(
       case 'status':
       case 'debug': {
         const statusBlock = block;
+        if (isUnrecognizedDaemonDebug(statusBlock)) break;
         const branchDisplayName =
           statusBlock.source === 'session_branched'
             ? getSessionBranchDisplayName(statusBlock.data)
@@ -650,10 +749,11 @@ export function transcriptBlocksToDaemonMessages(
           needsNewContentMessage = true;
           break;
         }
-        // Status/debug blocks are daemon-level diagnostics, not tool output.
-        // Keeping them in the main transcript avoids hiding global messages
-        // such as SSE lag warnings, malformed-event debug lines, or shell
-        // result notices inside whichever subAgent happened to be active.
+        // Status blocks and the debug blocks that survive the filter above are
+        // daemon-level diagnostics, not tool output. Keeping them in the main
+        // transcript avoids hiding global messages such as SSE lag warnings,
+        // malformed-event debug lines, or shell result notices inside
+        // whichever subAgent happened to be active.
         messages.push({
           id: block.id,
           role: 'system',
@@ -799,6 +899,10 @@ function mergeToolCall(
   target.rawOutput = source.rawOutput ?? target.rawOutput;
   target.args = source.args ?? target.args;
   target.locations = source.locations ?? target.locations;
+}
+
+function isTerminalToolStatus(status: DaemonMessageToolCallStatus): boolean {
+  return status === 'completed' || status === 'failed';
 }
 
 function isSubAgentToolCall(tool: DaemonMessageToolCall): boolean {
@@ -986,6 +1090,7 @@ function isApprovalToken(token: string): boolean {
     token === 'confirmed' ||
     token === 'proceed' ||
     token === 'proceed_once' ||
+    token === 'proceed_once_and_switch_to_default' ||
     token === 'proceed_always_project' ||
     token === 'proceed_always_user' ||
     token === 'allow_once' ||

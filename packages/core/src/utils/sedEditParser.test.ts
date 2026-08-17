@@ -73,9 +73,30 @@ describe('sedEditParser', () => {
       flags: 'g',
       extendedRegex: true,
     });
+    expect(parseSedEditCommand("sed -Eri 's/foo|bar/baz/g' src/a.ts")).toEqual({
+      filePath: 'src/a.ts',
+      pattern: 'foo|bar',
+      replacement: 'baz',
+      flags: 'g',
+      extendedRegex: true,
+    });
     expect(
       parseSedEditCommand("sed -iE 's/foo|bar/baz/g' src/a.ts"),
     ).toBeNull();
+  });
+
+  // Everything after -i is the backup suffix, so -Eir is `-E` plus in-place
+  // with an `r` suffix: real sed writes src/a.tsr next to the edit. The
+  // simulation makes no backup, so these have to fall through to real sed --
+  // the same reason `-i.bak` is rejected below.
+  it('rejects combined flags where in-place is not last', () => {
+    expect(
+      parseSedEditCommand("sed -Eir 's/foo|bar/baz/g' src/a.ts"),
+    ).toBeNull();
+    expect(
+      parseSedEditCommand("sed -riE 's/foo|bar/baz/g' src/a.ts"),
+    ).toBeNull();
+    expect(parseSedEditCommand("sed -iri 's/foo/bar/' src/a.ts")).toBeNull();
   });
 
   it('parses expression flag forms', () => {

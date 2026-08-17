@@ -5,6 +5,7 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { INTERNAL_SECRET_ENV_VARS } from '@qwen-code/qwen-code-core';
 import {
   AGENT_VIEW_WORKER_ENV_KEYS,
   createAgentViewWorkerSidebandEnv,
@@ -21,6 +22,7 @@ import {
   sendAgentViewWorkerEvent,
   startAgentViewWorkerHeartbeat,
 } from './worker-sideband.js';
+import { INTERNAL_AGENT_VIEW_SUPERVISOR_ENV } from './supervisor-runner.js';
 
 const mockCallAgentViewSupervisor = vi.hoisted(() =>
   vi.fn(async (): Promise<unknown> => ({ accepted: true })),
@@ -55,6 +57,20 @@ describe('worker sideband env', () => {
     expect(AGENT_VIEW_WORKER_ENV_KEYS).toContain(QWEN_AGENT_VIEW_WORKER);
   });
 
+  it('keeps every worker identity key covered by the child-env denylist', () => {
+    // sanitizeChildEnv strips INTERNAL_SECRET_ENV_VARS from agent-run
+    // children; a worker key missing from that list would let a child
+    // inherit the worker identity and impersonate the sideband.
+    for (const key of AGENT_VIEW_WORKER_ENV_KEYS) {
+      expect(INTERNAL_SECRET_ENV_VARS).toContain(key);
+    }
+    // The supervisor startup-gate marker must be stripped too, or an
+    // agent-run child could re-enter supervisor mode.
+    expect(INTERNAL_SECRET_ENV_VARS).toContain(
+      INTERNAL_AGENT_VIEW_SUPERVISOR_ENV,
+    );
+  });
+
   it('detects worker mode only when explicitly enabled', () => {
     expect(isAgentViewWorkerEnv({ [QWEN_AGENT_VIEW_WORKER]: '1' })).toBe(true);
     expect(isAgentViewWorkerEnv({ [QWEN_AGENT_VIEW_WORKER]: 'true' })).toBe(
@@ -81,12 +97,22 @@ describe('worker sideband env', () => {
 
   it('returns undefined outside worker mode or when required fields are absent', () => {
     expect(readAgentViewWorkerSidebandEnv({})).toBeUndefined();
-    expect(
-      readAgentViewWorkerSidebandEnv({
-        [QWEN_AGENT_VIEW_WORKER]: '1',
-        [QWEN_AGENT_VIEW_SESSION_ID]: 'session-1',
-      }),
-    ).toBeUndefined();
+    for (const missingKey of [
+      QWEN_AGENT_VIEW_WORKER,
+      QWEN_AGENT_VIEW_SESSION_ID,
+      QWEN_AGENT_VIEW_SIDEBAND,
+      QWEN_AGENT_VIEW_TOKEN,
+      QWEN_AGENT_VIEW_ACTIVE_CWD,
+    ] as const) {
+      const env = createAgentViewWorkerSidebandEnv({
+        sessionId: 'session-1',
+        sidebandEndpoint: 'pipe:qwen',
+        token: 'token-1',
+        activeCwd: '/repo',
+      });
+      delete env[missingKey];
+      expect(readAgentViewWorkerSidebandEnv(env)).toBeUndefined();
+    }
   });
 
   it('sends worker events through the configured sideband endpoint', async () => {
@@ -115,6 +141,7 @@ describe('worker sideband env', () => {
         type: 'ready',
         cwd: '/repo',
         capabilities: ['ready'],
+        at: expect.any(String),
         sessionId: 'session-1',
         token: 'token-1',
       },
@@ -136,6 +163,7 @@ describe('worker sideband env', () => {
       'workerEvent',
       {
         type: 'detach',
+        at: expect.any(String),
         sessionId: 'session-1',
         token: 'token-1',
       },
@@ -211,6 +239,20 @@ describe('worker sideband env', () => {
     );
   });
 
+  it('ignores malformed worker control responses', async () => {
+    const env = createAgentViewWorkerSidebandEnv({
+      sessionId: 'session-1',
+      sidebandEndpoint: '/tmp/qwen-agent-view.sock',
+      token: 'token-1',
+      activeCwd: '/repo',
+    });
+
+    for (const response of [null, {}, { events: 'invalid' }]) {
+      mockCallAgentViewSupervisor.mockResolvedValueOnce(response);
+      await expect(readAgentViewWorkerControlEvents(env)).resolves.toEqual([]);
+    }
+  });
+
   it('reports worker state through the configured sideband endpoint', async () => {
     const env = createAgentViewWorkerSidebandEnv({
       sessionId: 'session-1',
@@ -238,6 +280,7 @@ describe('worker sideband env', () => {
         cwd: '/repo',
         summary: 'Waiting for Bash',
         waitingFor: 'Bash',
+        at: expect.any(String),
         sessionId: 'session-1',
         token: 'token-1',
       },
@@ -254,6 +297,197 @@ describe('worker sideband env', () => {
 
     await reportAgentViewWorkerState({ sessionState: 'working' }, env);
     await reportAgentViewWorkerState({ sessionState: 'working' }, env);
+
+    expect(mockCallAgentViewSupervisor).toHaveBeenCalledTimes(1);
+  });
+
+  it('deduplicates worker state reports per session', async () => {
+    const firstEnv = createAgentViewWorkerSidebandEnv({
+      sessionId: 'session-1',
+      sidebandEndpoint: '/tmp/qwen-agent-view.sock',
+      token: 'token-1',
+      activeCwd: '/repo',
+    });
+    const secondEnv = createAgentViewWorkerSidebandEnv({
+      sessionId: 'session-2',
+      sidebandEndpoint: '/tmp/qwen-agent-view.sock',
+      token: 'token-2',
+      activeCwd: '/repo',
+    });
+
+    await reportAgentViewWorkerState({ sessionState: 'working' }, firstEnv);
+    await reportAgentViewWorkerState({ sessionState: 'working' }, secondEnv);
+
+    expect(mockCallAgentViewSupervisor).toHaveBeenCalledTimes(2);
+  });
+
+  it('sends same-state reports when details change', async () => {
+    const env = createAgentViewWorkerSidebandEnv({
+      sessionId: 'session-1',
+      sidebandEndpoint: '/tmp/qwen-agent-view.sock',
+      token: 'token-1',
+      activeCwd: '/repo',
+    });
+
+    await reportAgentViewWorkerState(
+      { sessionState: 'working', summary: 'Running build' },
+      env,
+    );
+    await reportAgentViewWorkerState(
+      { sessionState: 'working', summary: 'Waiting for approval' },
+      env,
+    );
+
+    expect(mockCallAgentViewSupervisor).toHaveBeenCalledTimes(2);
+  });
+
+  it('defaults worker state report cwd to the sideband active cwd', async () => {
+    const env = createAgentViewWorkerSidebandEnv({
+      sessionId: 'session-1',
+      sidebandEndpoint: '/tmp/qwen-agent-view.sock',
+      token: 'token-1',
+      activeCwd: '/repo',
+    });
+
+    await reportAgentViewWorkerState({ sessionState: 'working' }, env);
+
+    expect(mockCallAgentViewSupervisor).toHaveBeenCalledWith(
+      '/tmp/qwen-agent-view.sock',
+      'workerEvent',
+      expect.objectContaining({
+        cwd: '/repo',
+      }),
+    );
+  });
+
+  it('retries identical worker state reports after a send failure', async () => {
+    const env = createAgentViewWorkerSidebandEnv({
+      sessionId: 'session-1',
+      sidebandEndpoint: '/tmp/qwen-agent-view.sock',
+      token: 'token-1',
+      activeCwd: '/repo',
+    });
+    mockCallAgentViewSupervisor
+      .mockRejectedValueOnce(new Error('supervisor unavailable'))
+      .mockResolvedValueOnce({ accepted: true });
+
+    await reportAgentViewWorkerState({ sessionState: 'working' }, env);
+    await reportAgentViewWorkerState({ sessionState: 'working' }, env);
+
+    expect(mockCallAgentViewSupervisor).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not deduplicate concurrent state reports before send succeeds', async () => {
+    const env = createAgentViewWorkerSidebandEnv({
+      sessionId: 'session-1',
+      sidebandEndpoint: '/tmp/qwen-agent-view.sock',
+      token: 'token-1',
+      activeCwd: '/repo',
+    });
+    let rejectFirst: (error: Error) => void = () => {};
+    mockCallAgentViewSupervisor
+      .mockImplementationOnce(
+        () =>
+          new Promise<unknown>((_resolve, reject) => {
+            rejectFirst = reject;
+          }),
+      )
+      .mockResolvedValueOnce({ accepted: true });
+
+    const first = reportAgentViewWorkerState({ sessionState: 'working' }, env);
+    const second = reportAgentViewWorkerState({ sessionState: 'working' }, env);
+    rejectFirst(new Error('supervisor unavailable'));
+
+    await Promise.all([first, second]);
+
+    expect(mockCallAgentViewSupervisor).toHaveBeenCalledTimes(2);
+  });
+
+  it('serializes concurrent state reports before recording dedupe keys', async () => {
+    const env = createAgentViewWorkerSidebandEnv({
+      sessionId: 'session-1',
+      sidebandEndpoint: '/tmp/qwen-agent-view.sock',
+      token: 'token-1',
+      activeCwd: '/repo',
+    });
+    let resolveFirst: (value: unknown) => void = () => {};
+    mockCallAgentViewSupervisor
+      .mockImplementationOnce(
+        () =>
+          new Promise<unknown>((resolve) => {
+            resolveFirst = resolve;
+          }),
+      )
+      .mockResolvedValueOnce({ accepted: true })
+      .mockResolvedValueOnce({ accepted: true });
+
+    const first = reportAgentViewWorkerState({ sessionState: 'working' }, env);
+    const second = reportAgentViewWorkerState(
+      { sessionState: 'needs_input' },
+      env,
+    );
+
+    await Promise.resolve();
+    expect(mockCallAgentViewSupervisor).toHaveBeenCalledTimes(1);
+
+    resolveFirst({ accepted: true });
+    await Promise.all([first, second]);
+    await reportAgentViewWorkerState({ sessionState: 'working' }, env);
+
+    expect(
+      mockCallAgentViewSupervisor.mock.calls.map(
+        (call) =>
+          ((call as unknown[])[2] as { sessionState?: string } | undefined)
+            ?.sessionState,
+      ),
+    ).toEqual(['working', 'needs_input', 'working']);
+  });
+
+  it('skips worker events, control reads, and heartbeats outside worker mode', async () => {
+    await expect(
+      sendAgentViewWorkerEvent({ type: 'heartbeat' }, {}),
+    ).resolves.toBeUndefined();
+    await expect(readAgentViewWorkerControlEvents({})).resolves.toEqual([]);
+    expect(startAgentViewWorkerHeartbeat({})).toBeUndefined();
+
+    expect(mockCallAgentViewSupervisor).not.toHaveBeenCalled();
+  });
+
+  it('re-sends a state after an intervening failed report', async () => {
+    const env = createAgentViewWorkerSidebandEnv({
+      sessionId: 'session-1',
+      sidebandEndpoint: '/tmp/qwen-agent-view.sock',
+      token: 'token-1',
+      activeCwd: '/repo',
+    });
+
+    await reportAgentViewWorkerState({ sessionState: 'working' }, env);
+    mockCallAgentViewSupervisor.mockRejectedValueOnce(new Error('offline'));
+    await reportAgentViewWorkerState({ sessionState: 'needs_input' }, env);
+    await reportAgentViewWorkerState({ sessionState: 'working' }, env);
+
+    expect(mockCallAgentViewSupervisor).toHaveBeenCalledTimes(3);
+  });
+
+  it('sends one event for concurrent identical state reports', async () => {
+    const env = createAgentViewWorkerSidebandEnv({
+      sessionId: 'session-1',
+      sidebandEndpoint: '/tmp/qwen-agent-view.sock',
+      token: 'token-1',
+      activeCwd: '/repo',
+    });
+    let release: (value: unknown) => void = () => {};
+    mockCallAgentViewSupervisor.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+
+    const first = reportAgentViewWorkerState({ sessionState: 'working' }, env);
+    const second = reportAgentViewWorkerState({ sessionState: 'working' }, env);
+    release({ accepted: true });
+    await Promise.all([first, second]);
 
     expect(mockCallAgentViewSupervisor).toHaveBeenCalledTimes(1);
   });
@@ -276,21 +510,47 @@ describe('worker sideband env', () => {
 
       const heartbeat = startAgentViewWorkerHeartbeat(env, 100);
       await vi.advanceTimersByTimeAsync(100);
+      await vi.advanceTimersByTimeAsync(100);
 
       expect(mockCallAgentViewSupervisor).toHaveBeenCalledWith(
         '/tmp/qwen-agent-view.sock',
         'workerEvent',
         {
           type: 'heartbeat',
+          at: expect.any(String),
           sessionId: 'session-1',
           token: 'token-1',
         },
       );
+      expect(mockCallAgentViewSupervisor).toHaveBeenCalledTimes(2);
 
       heartbeat?.dispose();
       mockCallAgentViewSupervisor.mockClear();
       await vi.advanceTimersByTimeAsync(100);
       expect(mockCallAgentViewSupervisor).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('ignores heartbeat send failures', async () => {
+    vi.useFakeTimers();
+    try {
+      const env = createAgentViewWorkerSidebandEnv({
+        sessionId: 'session-1',
+        sidebandEndpoint: '/tmp/qwen-agent-view.sock',
+        token: 'token-1',
+        activeCwd: '/repo',
+      });
+      mockCallAgentViewSupervisor.mockRejectedValueOnce(
+        new Error('supervisor unavailable'),
+      );
+
+      const heartbeat = startAgentViewWorkerHeartbeat(env, 100);
+      await vi.advanceTimersByTimeAsync(100);
+
+      expect(mockCallAgentViewSupervisor).toHaveBeenCalledTimes(1);
+      heartbeat?.dispose();
     } finally {
       vi.useRealTimers();
     }

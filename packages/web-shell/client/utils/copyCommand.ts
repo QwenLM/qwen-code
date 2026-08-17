@@ -227,11 +227,16 @@ function selectCodeBlock(
 
   let lang: string | null = null;
   let requestedIndex: number | null = null;
-  const selectorTokens =
-    firstToken === 'code' ? tokens.slice(1) : tokens.map((token) => token);
-  if (firstToken !== 'code') {
-    lang = firstToken;
-  }
+  // Only the leading `code` keyword is consumed here. Every other token is
+  // classified by the loop below, which already assigns `lang` for anything
+  // that is not a number. Seeding `lang` from the first token beforehand was
+  // redundant for `/copy ts` and actively wrong for a bare index: `/copy 3`
+  // set lang to "3" here and requestedIndex to 3 in the loop, so the filter
+  // looked for blocks written in a language called "3", found none, and
+  // reported that no code block matched. The argument hint advertises
+  // `[code|<lang>|latex|inline-latex] [index]` with both groups optional, so
+  // a bare index is exactly what users are told to type.
+  const selectorTokens = firstToken === 'code' ? tokens.slice(1) : tokens;
 
   for (const token of selectorTokens) {
     if (/^\d+$/.test(token)) {

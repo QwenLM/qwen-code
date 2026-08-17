@@ -341,6 +341,10 @@ function applyDaemonTranscriptEvent(
       break;
     case 'status':
     case 'debug':
+      appendStatusBlock(next, event.type, event.text, event, {
+        clearActiveText: event.clearActiveText,
+      });
+      break;
     case 'error':
       appendStatusBlock(next, event.type, event.text, event);
       break;
@@ -1243,6 +1247,10 @@ function appendStatusBlock(
     event.data !== undefined
       ? { data: event.data }
       : {}),
+    ...((event?.type === 'status' || event?.type === 'debug') &&
+    event.debugReason
+      ? { debugReason: event.debugReason }
+      : {}),
     ...(event?.type === 'session.branched'
       ? {
           source: 'session_branched',
@@ -1256,6 +1264,10 @@ function appendStatusBlock(
   };
   appendBlock(state, block);
   if (opts.clearActiveText !== false) clearActiveText(state);
+  // Opt-out only protects the streaming assistant/thought block; the user
+  // pointer must still reset, otherwise a later mergeable user.text.delta
+  // (e.g. a peer client's prompt echo) appends onto the command echo block.
+  else state.activeUserBlockId = undefined;
 }
 
 function appendPromptCancelledBlock(

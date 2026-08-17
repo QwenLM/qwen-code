@@ -6,6 +6,7 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import yargs from 'yargs';
+import { AgentViewSupervisorClientError } from '../agent-view/supervisor-client.js';
 import {
   attachCommand,
   killCommand,
@@ -26,10 +27,12 @@ const mockSupervisor = vi.hoisted(() => ({
   })),
   stop: vi.fn(async (id: string) => ({ command: 'stop', id })),
   kill: vi.fn(async (id: string) => ({ command: 'kill', id })),
-  respawn: vi.fn(async (target?: string) => ({
-    command: 'respawn',
-    target: target ?? 'all',
-  })),
+  respawn: vi.fn(
+    async (target?: string): Promise<Record<string, unknown>> => ({
+      command: 'respawn',
+      target: target ?? 'all',
+    }),
+  ),
   remove: vi.fn(async (id: string) => ({ command: 'rm', id })),
 }));
 const mockEnsureAgentViewSupervisor = vi.hoisted(() =>
@@ -142,6 +145,52 @@ describe('agent session commands', () => {
     });
   });
 
+  it('rejects respawn with both <id> and --all', async () => {
+    await expect(parseCommand('respawn --all session-1')).rejects.toThrow(
+      'qwen agents respawn accepts <id> or --all, not both.',
+    );
+
+    expect(mockSupervisor.respawn).not.toHaveBeenCalled();
+  });
+
+  it('rejects respawn with neither <id> nor --all', async () => {
+    await expect(parseCommand('respawn')).rejects.toThrow(
+      'qwen agents respawn requires <id> or --all.',
+    );
+
+    // The rejection must surface at the yargs check layer, before the
+    // handler ensures (and may start) the daemon supervisor.
+    expect(mockEnsureAgentViewSupervisor).not.toHaveBeenCalled();
+    expect(mockSupervisor.respawn).not.toHaveBeenCalled();
+  });
+
+  it('rejects respawn with an empty <id>', async () => {
+    await expect(parseCommand('respawn ')).rejects.toThrow();
+
+    expect(mockSupervisor.respawn).not.toHaveBeenCalled();
+  });
+
+  it('keeps all-digit session ids as strings', async () => {
+    await parseCommand('stop 12345678');
+
+    expect(mockSupervisor.stop).toHaveBeenCalledWith('12345678');
+
+    mockSupervisor.respawn.mockClear();
+    await parseCommand('respawn 87654321');
+
+    expect(mockSupervisor.respawn).toHaveBeenCalledWith('87654321');
+
+    mockSupervisor.remove.mockClear();
+    await parseCommand('rm 12345678');
+
+    expect(mockSupervisor.remove).toHaveBeenCalledWith('12345678');
+
+    mockSupervisor.attach.mockClear();
+    await parseCommand('attach 12345678');
+
+    expect(mockSupervisor.attach).toHaveBeenCalledWith('12345678');
+  });
+
   it('routes respawn --all to the supervisor and prints JSON', async () => {
     await parseCommand('respawn --all');
 
@@ -150,5 +199,57 @@ describe('agent session commands', () => {
       command: 'respawn',
       target: 'all',
     });
+  });
+
+  it('treats a respawn --all timeout as still in flight', async () => {
+    mockSupervisor.respawn.mockRejectedValueOnce(
+      new AgentViewSupervisorClientError(
+        'Timed out waiting for Agent View supervisor response.',
+        'timeout',
+      ),
+    );
+
+    await parseCommand('respawn --all');
+
+    expect(mockWriteStderrLineSafe).toHaveBeenCalledWith(
+      'Respawn is still running in the supervisor. Check `qwen agents` for session status.',
+    );
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it('rethrows non-timeout respawn --all failures', async () => {
+    mockSupervisor.respawn.mockRejectedValueOnce(
+      new AgentViewSupervisorClientError('daemon gone', 'unavailable'),
+    );
+
+    await expect(parseCommand('respawn --all')).rejects.toThrow('daemon gone');
+  });
+
+  it('fails respawn --all when every session was skipped', async () => {
+    mockSupervisor.respawn.mockResolvedValueOnce({
+      all: true,
+      results: [
+        { id: 'session-1', skipped: true, reason: 'state is not exited' },
+        { id: 'session-2', skipped: true, reason: 'state is not exited' },
+      ],
+    });
+
+    await parseCommand('respawn --all');
+
+    expect(process.exitCode).toBe(1);
+  });
+
+  it('succeeds respawn --all when at least one session respawned', async () => {
+    mockSupervisor.respawn.mockResolvedValueOnce({
+      all: true,
+      results: [
+        { id: 'session-1', skipped: true, reason: 'state is not exited' },
+        { id: 'session-2', respawned: true },
+      ],
+    });
+
+    await parseCommand('respawn --all');
+
+    expect(process.exitCode).toBeUndefined();
   });
 });

@@ -67,7 +67,7 @@ const daemonStopCommand: CommandModule<unknown, DaemonStopArgs> = {
         description: 'Leave worker processes running when stopping the daemon',
       })
       .check((argv) =>
-        argv.any === true ? true : 'qwen daemon stop requires --any.',
+        argv.any === true ? true : 'qwen agents daemon stop requires --any.',
       ),
   handler: async (argv) => {
     const supervisor = await connectExistingAgentViewSupervisor();

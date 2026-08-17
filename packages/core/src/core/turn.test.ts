@@ -14,6 +14,7 @@ import {
   CompressionStatus,
   Turn,
   GeminiEventType,
+  createDuplicateProviderToolCallResponse,
   findRepeatedDuplicateProviderToolCall,
 } from './turn.js';
 import type {
@@ -101,6 +102,21 @@ describe('findRepeatedDuplicateProviderToolCall', () => {
   });
 });
 
+describe('createDuplicateProviderToolCallResponse', () => {
+  it('marks the synthetic response as not started', () => {
+    const response = createDuplicateProviderToolCallResponse({
+      callId: 'duplicate-response',
+      providerCallId: 'provider-call',
+      name: 'read_file',
+      args: {},
+      isClientInitiated: false,
+      prompt_id: 'prompt-duplicate',
+    });
+
+    expect(response.executionStatus).toBe('not_started');
+  });
+});
+
 describe('Turn', () => {
   let turn: Turn;
   // Define a type for the mocked Chat instance for clarity
@@ -174,11 +190,103 @@ describe('Turn', () => {
           config: { abortSignal: expect.any(AbortSignal) },
         },
         'prompt-id-1',
+        undefined,
       );
 
       expect(events).toEqual([
         { type: GeminiEventType.Content, value: 'Hello' },
         { type: GeminiEventType.Content, value: ' world' },
+      ]);
+    });
+
+    it('should preserve ordered image parts in content events', async () => {
+      const mockResponseStream = (async function* () {
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    { text: 'before' },
+                    {
+                      inlineData: {
+                        data: 'aW1hZ2U=',
+                        mimeType: 'image/png',
+                        displayName: 'chart.png',
+                      },
+                    },
+                    { thought: true, text: 'hidden' },
+                    { text: 'after' },
+                  ],
+                },
+              },
+            ],
+          } as GenerateContentResponse,
+        };
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    {
+                      inlineData: {
+                        data: 'c2Vjb25k',
+                        mimeType: 'image/webp',
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          } as GenerateContentResponse,
+        };
+      })();
+      mockSendMessageStream.mockResolvedValue(mockResponseStream);
+
+      const events = [];
+      for await (const event of turn.run(
+        'test-model',
+        [{ text: 'Hi' }],
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+
+      expect(events).toEqual([
+        {
+          type: GeminiEventType.Thought,
+          value: { subject: '', description: 'hidden' },
+        },
+        {
+          type: GeminiEventType.Content,
+          value: 'beforeafter',
+          parts: [
+            { text: 'before' },
+            {
+              inlineData: {
+                data: 'aW1hZ2U=',
+                mimeType: 'image/png',
+                displayName: 'chart.png',
+              },
+            },
+            { text: 'after' },
+          ],
+        },
+        {
+          type: GeminiEventType.Content,
+          value: '',
+          parts: [
+            {
+              inlineData: {
+                data: 'c2Vjb25k',
+                mimeType: 'image/webp',
+              },
+            },
+          ],
+        },
       ]);
     });
 

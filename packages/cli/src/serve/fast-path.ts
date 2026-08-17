@@ -6,6 +6,10 @@
 
 import type { RunHandle } from './run-qwen-serve.js';
 import { MAX_COMPACTED_REPLAY_MAX_BYTES } from '@qwen-code/acp-bridge/replayWindowLimits';
+import {
+  isValidMemoryBudgetMb,
+  memoryBudgetRangeError,
+} from '@qwen-code/acp-bridge/daemonMemoryBudget';
 import { normalizeServeFastPathArgv } from './fast-path-argv.js';
 import type { ServeFastPathSettings } from './fast-path-settings.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
@@ -44,10 +48,12 @@ const NUMBER_OPTIONS = new Map<
   ['maxJournalEvents', 'max-journal-events'],
   ['maxJournalBytes', 'max-journal-bytes'],
   ['mcp-client-budget', 'mcp-client-budget'],
+  ['memoryBudgetMb', 'memory-budget-mb'],
   ['promptDeadlineMs', 'prompt-deadline-ms'],
   ['writerIdleTimeoutMs', 'writer-idle-timeout-ms'],
   ['channelIdleTimeoutMs', 'channel-idle-timeout-ms'],
   ['initializeTimeoutMs', 'initialize-timeout-ms'],
+  ['sessionRestoreTimeoutMs', 'session-restore-timeout-ms'],
   ['sessionReapIntervalMs', 'session-reap-interval-ms'],
   ['sessionIdleTimeoutMs', 'session-idle-timeout-ms'],
   ['permissionResponseTimeoutMs', 'permission-response-timeout-ms'],
@@ -63,6 +69,7 @@ const STRING_OPTION_BY_FLAG = new Map<string, keyof ServeOptions>([
   ['hostname', 'hostname'],
   ['token', 'token'],
   ['workspace', 'workspace'],
+  ['memory-project-scope', 'memoryProjectScope'],
   ['tls-cert', 'tlsCert'],
   ['tls-key', 'tlsKey'],
 ]);
@@ -225,6 +232,11 @@ function getServeFastPathValidationError(
     (!Number.isSafeInteger(maxJournalBytes) || maxJournalBytes < 1)
   ) {
     return 'qwen serve: --max-journal-bytes must be a positive safe integer.';
+  }
+
+  const memoryBudgetMb = parsed.options.memoryBudgetMb;
+  if (memoryBudgetMb !== undefined && !isValidMemoryBudgetMb(memoryBudgetMb)) {
+    return memoryBudgetRangeError();
   }
 
   return null;
@@ -394,6 +406,36 @@ export function parseServeFastPathArgs(
       continue;
     }
 
+    if (flag === 'memory-pressure-mode') {
+      const read = readOptionValue(argv, i, inlineValue);
+      if (!read) return { kind: 'fallback' };
+      i = read.nextIndex;
+      // Unlike mcp-budget-mode, which captures the raw value and validates it
+      // later, an out-of-range value here falls back to the full yargs path:
+      // its `choices` already owns the error message, and letting an unknown
+      // string through would put a value in `ServeOptions` that its own type
+      // says cannot exist.
+      if (read.value !== 'off' && read.value !== 'observe') {
+        return { kind: 'fallback' };
+      }
+      options.memoryPressureMode = read.value;
+      continue;
+    }
+
+    if (flag === 'child-heap-mode') {
+      const read = readOptionValue(argv, i, inlineValue);
+      if (!read) return { kind: 'fallback' };
+      i = read.nextIndex;
+      // Same reasoning as memory-pressure-mode: yargs `choices` already owns
+      // the error message for a bad value, and letting an unknown string past
+      // here would put a value in `ServeOptions` its own type forbids.
+      if (read.value !== 'off' && read.value !== 'observe') {
+        return { kind: 'fallback' };
+      }
+      options.childHeapMode = read.value;
+      continue;
+    }
+
     if (flag === 'mcp-budget-mode') {
       const read = readOptionValue(argv, i, inlineValue);
       if (!read) return { kind: 'fallback' };
@@ -418,6 +460,14 @@ export function parseServeFastPathArgs(
     mcpBudgetModeRaw !== 'enforce' &&
     mcpBudgetModeRaw !== 'warn' &&
     mcpBudgetModeRaw !== 'off'
+  ) {
+    return { kind: 'fallback' };
+  }
+
+  if (
+    options.memoryProjectScope !== undefined &&
+    options.memoryProjectScope !== 'git-root' &&
+    options.memoryProjectScope !== 'workspace'
   ) {
     return { kind: 'fallback' };
   }

@@ -441,6 +441,11 @@ class GrepToolInvocation extends BaseToolInvocation<
 
       if (gitAvailable) {
         strategyUsed = 'git grep';
+        // The pattern goes behind `-e` so that one beginning with a dash is
+        // read as the pattern instead of as an option. Passed positionally,
+        // `git grep -E '-n'` consumes the `-n` as an option and then fails with
+        // `fatal: no pattern given` -- and that failure is swallowed by the
+        // fallback below, which has the same flaw with a quieter symptom.
         const gitArgs = [
           'grep',
           '--untracked',
@@ -448,6 +453,7 @@ class GrepToolInvocation extends BaseToolInvocation<
           '-z',
           '-E',
           '--ignore-case',
+          '-e',
           pattern,
         ];
         if (glob) {
@@ -520,7 +526,12 @@ class GrepToolInvocation extends BaseToolInvocation<
         if (glob) {
           grepArgs.push(`--include=${glob}`);
         }
-        grepArgs.push(pattern);
+        // Same reason as the `-e` above, but this strategy fails silently
+        // rather than loudly: with the pattern passed positionally, grep
+        // consumes a leading-dash pattern as an option and promotes the `.`
+        // search path to be the pattern, which matches every line of every
+        // file. The model is handed the whole tree as if it were the result.
+        grepArgs.push('-e', pattern);
         grepArgs.push('.');
 
         try {

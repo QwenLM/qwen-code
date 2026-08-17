@@ -14,6 +14,8 @@ import {
   findImageMarkers,
   readValidatedImage,
   replaceImageMarkers,
+  sanitizeStreamingImageMarkers,
+  stripPartialImageMarker,
   uploadDingTalkImage,
 } from './outbound-image.js';
 
@@ -78,6 +80,56 @@ describe('outbound image markers', () => {
 
     expect(replaceImageMarkers(text, markers, ['first', 'second'])).toBe(
       ['`[IMAGE: /tmp/same.png]`', 'first', 'second'].join('\n'),
+    );
+  });
+});
+
+describe('partial image markers', () => {
+  it('preserves a bare trailing bracket', () => {
+    expect(stripPartialImageMarker('value is arr[')).toBe('value is arr[');
+    expect(stripPartialImageMarker('see [1] and [')).toBe('see [1] and [');
+  });
+
+  it('still strips partial IMAGE prefixes', () => {
+    expect(stripPartialImageMarker('see [I')).toBe('see [Image pending]');
+    expect(stripPartialImageMarker('see [IMAGE: /tmp/pic.png')).toBe(
+      'see [Image pending]',
+    );
+  });
+});
+
+describe('streaming image markers', () => {
+  it('hides complete and incomplete visible image paths', () => {
+    expect(
+      sanitizeStreamingImageMarkers(
+        'before [IMAGE: /Users/ben/private/image.png] after',
+      ),
+    ).toBe('before [Image pending] after');
+    expect(
+      sanitizeStreamingImageMarkers('before [IMAGE: /Users/ben/private/image'),
+    ).toBe('before [Image pending]');
+    expect(
+      sanitizeStreamingImageMarkers('before [IMAGE: /Users/ben/[private/image'),
+    ).toBe('before [Image pending]');
+  });
+
+  it('preserves image-like text inside code', () => {
+    expect(
+      sanitizeStreamingImageMarkers(
+        [
+          '`[IMAGE: /Users/ben/inline.png]`',
+          '```text',
+          '[IMAGE: /Users/ben/fenced.png]',
+          '```',
+        ].join('\n'),
+      ),
+    ).toBe(
+      [
+        '`[IMAGE: /Users/ben/inline.png]`',
+        '```text',
+        '[IMAGE: /Users/ben/fenced.png]',
+        '```',
+      ].join('\n'),
     );
   });
 });

@@ -20,12 +20,24 @@ const {
   workspaceGitDiff,
   workspaceGitLog,
   workspaceGitHubPullRequests,
+  workspaceGitCommit,
+  workspaceGitPush,
+  workspaceGitBranches,
+  workspaceGitHubDefaultBranch,
+  workspaceGit,
+  workspaceGitHubCreatePullRequest,
   workspaceClient,
   mockState,
 } = vi.hoisted(() => {
   const workspaceGitDiff = vi.fn();
   const workspaceGitLog = vi.fn();
   const workspaceGitHubPullRequests = vi.fn();
+  const workspaceGitCommit = vi.fn();
+  const workspaceGitPush = vi.fn();
+  const workspaceGitBranches = vi.fn();
+  const workspaceGitHubDefaultBranch = vi.fn();
+  const workspaceGit = vi.fn();
+  const workspaceGitHubCreatePullRequest = vi.fn();
   const workspaceClient = {
     workspaceByCwd: () => ({
       workspaceGitDiff,
@@ -33,6 +45,12 @@ const {
       workspaceGitLog,
       workspaceGitCommitDetail: vi.fn(),
       workspaceGitHubPullRequests,
+      workspaceGitCommit,
+      workspaceGitPush,
+      workspaceGitBranches,
+      workspaceGitHubDefaultBranch,
+      workspaceGit,
+      workspaceGitHubCreatePullRequest,
     }),
   };
   const mockState = { capabilities: undefined as unknown };
@@ -40,6 +58,12 @@ const {
     workspaceGitDiff,
     workspaceGitLog,
     workspaceGitHubPullRequests,
+    workspaceGitCommit,
+    workspaceGitPush,
+    workspaceGitBranches,
+    workspaceGitHubDefaultBranch,
+    workspaceGit,
+    workspaceGitHubCreatePullRequest,
     workspaceClient,
     mockState,
   };
@@ -353,6 +377,84 @@ describe('GitDialog', () => {
     ).toBe('true');
   });
 
+  it('passes gitCwd to commit and push SDK calls in the commit view', async () => {
+    workspaceGitDiff.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      filesCount: 0,
+      linesAdded: 0,
+      linesRemoved: 0,
+      files: [],
+      hiddenCount: 0,
+    });
+    workspaceGitCommit.mockResolvedValue({
+      sha: 'abc1234',
+      subject: 'test commit',
+    });
+    workspaceGitPush.mockResolvedValue({
+      success: true,
+      output: '',
+    });
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <GitDialog
+            workspaceCwd="/repo"
+            gitCwd="/worktrees/wt"
+            initialView="commit"
+            onClose={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    const textarea = document.body.querySelector(
+      '[data-web-shell-dialog] textarea',
+    );
+    expect(textarea).toBeTruthy();
+
+    // Set the commit message via React's onChange.
+    await act(async () => {
+      const nativeSetter = Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        'value',
+      )?.set;
+      nativeSetter?.call(textarea, 'fix: test commit');
+      textarea!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await flush();
+
+    // Click "Commit & Push".
+    const buttons = document.body.querySelectorAll(
+      '[data-web-shell-dialog] button',
+    );
+    const commitPushBtn = Array.from(buttons).find((b) =>
+      b.textContent?.includes('Commit and Push'),
+    );
+    expect(commitPushBtn).toBeTruthy();
+
+    await act(async () => {
+      commitPushBtn!.click();
+    });
+    await flush();
+
+    expect(workspaceGitCommit).toHaveBeenCalledWith(
+      'fix: test commit',
+      { all: true },
+      '/worktrees/wt',
+    );
+    expect(workspaceGitPush).toHaveBeenCalledWith(
+      { setUpstream: true },
+      '/worktrees/wt',
+    );
+  });
+
   it('clamps to the diff view when the capability is withdrawn mid-session', async () => {
     workspaceGitDiff.mockResolvedValue({
       v: 1,
@@ -397,5 +499,349 @@ describe('GitDialog', () => {
         .getElementById('git-dialog-panel')
         ?.getAttribute('aria-labelledby'),
     ).toBe('git-dialog-tab-diff');
+  });
+
+  it('lets arrow keys leave the commit tab back to the regular tabs', async () => {
+    workspaceGitDiff.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      filesCount: 0,
+      linesAdded: 0,
+      linesRemoved: 0,
+      files: [],
+      hiddenCount: 0,
+    });
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <GitDialog
+            workspaceCwd="/repo"
+            initialView="commit"
+            onClose={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    const commitTab = document.getElementById('git-dialog-tab-commit');
+    expect(commitTab).toBeTruthy();
+
+    // Commit is the rightmost tab; ArrowLeft moves to the last regular tab
+    // (log, since the PR tab is absent without the capability) instead of
+    // being swallowed.
+    await act(async () => {
+      commitTab?.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }),
+      );
+    });
+    await flush();
+
+    expect(
+      document
+        .getElementById('git-dialog-tab-commit')
+        ?.getAttribute('aria-selected'),
+    ).toBe('false');
+    expect(
+      document
+        .getElementById('git-dialog-tab-log')
+        ?.getAttribute('aria-selected'),
+    ).toBe('true');
+  });
+
+  it('offers a retry when the PR base-branch list fails to load', async () => {
+    workspaceGitDiff.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      filesCount: 0,
+      linesAdded: 0,
+      linesRemoved: 0,
+      files: [],
+      hiddenCount: 0,
+    });
+    workspaceGitHubDefaultBranch.mockResolvedValue({ branch: 'origin/main' });
+    workspaceGit.mockResolvedValue({ branch: 'feat/x', detached: false });
+    workspaceGitBranches.mockRejectedValueOnce(new Error('boom'));
+    mockState.capabilities = { features: ['workspace_github_prs'] };
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <GitDialog
+            workspaceCwd="/repo"
+            initialView="commit"
+            onClose={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    // Open the PR form so the base-branch dropdown fetches (and fails).
+    const createPrBtn = Array.from(
+      document.body.querySelectorAll('[data-web-shell-dialog] button'),
+    ).find((b) => b.textContent?.includes('Create Pull Request'));
+    expect(createPrBtn).toBeTruthy();
+    await act(async () => {
+      createPrBtn!.click();
+    });
+    await flush();
+
+    // Open the base-branch dropdown: it must show an error + retry, not a
+    // permanent "Loading…".
+    const branchTrigger = document.body.querySelector(
+      'button[aria-label="Base branch"]',
+    );
+    expect(branchTrigger).toBeTruthy();
+    await act(async () => {
+      (branchTrigger as HTMLButtonElement).click();
+    });
+    await flush();
+
+    expect(document.body.textContent).toContain('Failed to load branches');
+    const retryBtn = Array.from(document.body.querySelectorAll('button')).find(
+      (b) => b.textContent?.includes('Retry'),
+    );
+    expect(retryBtn).toBeTruthy();
+
+    // Retry succeeds and renders the fetched branches.
+    workspaceGitBranches.mockResolvedValue({
+      local: [{ name: 'main' }],
+      remote: [{ name: 'origin/main' }],
+    });
+    await act(async () => {
+      retryBtn!.click();
+    });
+    await flush();
+
+    expect(document.body.textContent).not.toContain('Failed to load branches');
+    expect(workspaceGitBranches).toHaveBeenCalledTimes(2);
+  });
+
+  it('commits without pushing when only the Commit button is clicked', async () => {
+    workspaceGitDiff.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      filesCount: 0,
+      linesAdded: 0,
+      linesRemoved: 0,
+      files: [],
+      hiddenCount: 0,
+    });
+    workspaceGitCommit.mockResolvedValue({
+      sha: 'abc1234',
+      subject: 'test commit',
+    });
+    workspaceGitPush.mockResolvedValue({ success: true, output: '' });
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <GitDialog
+            workspaceCwd="/repo"
+            initialView="commit"
+            onClose={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    const textarea = document.body.querySelector(
+      '[data-web-shell-dialog] textarea',
+    );
+    expect(textarea).toBeTruthy();
+
+    await act(async () => {
+      const nativeSetter = Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        'value',
+      )?.set;
+      nativeSetter?.call(textarea, 'fix: commit only');
+      textarea!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await flush();
+
+    const buttons = document.body.querySelectorAll(
+      '[data-web-shell-dialog] button',
+    );
+    const commitBtn = Array.from(buttons).find(
+      (b) =>
+        b.textContent?.includes('Commit') &&
+        !b.textContent?.includes('Push') &&
+        b.getAttribute('role') !== 'tab',
+    );
+    expect(commitBtn).toBeTruthy();
+    expect((commitBtn as HTMLButtonElement).disabled).toBe(false);
+
+    await act(async () => {
+      commitBtn!.click();
+    });
+    await flush();
+
+    expect(workspaceGitCommit).toHaveBeenCalledWith(
+      'fix: commit only',
+      { all: true },
+      undefined,
+    );
+    expect(workspaceGitPush).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain('Committed abc1234');
+  });
+
+  it('reports commit-success-push-failed when the push rejects', async () => {
+    workspaceGitCommit.mockResolvedValue({
+      sha: 'def5678',
+      subject: 'test commit',
+    });
+    workspaceGitPush.mockRejectedValue(new Error('network unreachable'));
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <GitDialog
+            workspaceCwd="/repo"
+            initialView="commit"
+            onClose={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    const textarea = document.body.querySelector(
+      '[data-web-shell-dialog] textarea',
+    );
+    await act(async () => {
+      const nativeSetter = Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        'value',
+      )?.set;
+      nativeSetter?.call(textarea, 'fix: will fail push');
+      textarea!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await flush();
+
+    const buttons = document.body.querySelectorAll(
+      '[data-web-shell-dialog] button',
+    );
+    const commitPushBtn = Array.from(buttons).find((b) =>
+      b.textContent?.includes('Commit and Push'),
+    );
+    expect(commitPushBtn).toBeTruthy();
+
+    await act(async () => {
+      commitPushBtn!.click();
+    });
+    await flush();
+
+    expect(workspaceGitCommit).toHaveBeenCalled();
+    expect(workspaceGitPush).toHaveBeenCalled();
+    expect(document.body.textContent).toContain('def5678');
+    expect(document.body.textContent).toContain('network unreachable');
+  });
+
+  it('creates a pull request via the SDK', async () => {
+    workspaceGitDiff.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      filesCount: 0,
+      linesAdded: 0,
+      linesRemoved: 0,
+      files: [],
+      hiddenCount: 0,
+    });
+    workspaceGit.mockResolvedValue({ branch: 'feat/x', detached: false });
+    workspaceGitHubDefaultBranch.mockResolvedValue({ branch: 'origin/main' });
+    workspaceGitBranches.mockResolvedValue({
+      local: [{ name: 'main' }],
+      remote: [{ name: 'origin/main' }],
+    });
+    workspaceGitHubCreatePullRequest.mockResolvedValue({
+      number: 99,
+      url: 'https://github.com/o/r/pull/99',
+    });
+    mockState.capabilities = { features: ['workspace_github_prs'] };
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <GitDialog
+            workspaceCwd="/repo"
+            initialView="commit"
+            onClose={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    // Open the PR form.
+    const createPrBtn = Array.from(
+      document.body.querySelectorAll('[data-web-shell-dialog] button'),
+    ).find((b) => b.textContent?.includes('Create Pull Request'));
+    expect(createPrBtn).toBeTruthy();
+    await act(async () => {
+      createPrBtn!.click();
+    });
+    await flush();
+
+    // Fill in the PR title.
+    const titleInput = document.body.querySelector(
+      '[data-web-shell-dialog] input',
+    );
+    expect(titleInput).toBeTruthy();
+    await act(async () => {
+      const nativeSetter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )?.set;
+      nativeSetter?.call(titleInput, 'feat: add new feature');
+      titleInput!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await flush();
+
+    // Submit the PR.
+    const submitBtn = Array.from(
+      document.body.querySelectorAll('[data-web-shell-dialog] button'),
+    ).find(
+      (b) =>
+        b.textContent?.includes('Create') &&
+        !b.textContent?.includes('Pull Request'),
+    );
+    expect(submitBtn).toBeTruthy();
+    await act(async () => {
+      submitBtn!.click();
+    });
+    await flush();
+
+    expect(workspaceGitHubCreatePullRequest).toHaveBeenCalledWith(
+      {
+        title: 'feat: add new feature',
+        body: undefined,
+        base: 'main',
+      },
+      undefined,
+    );
+    expect(document.body.textContent).toContain('#99');
   });
 });

@@ -21,6 +21,7 @@ import { SettingScope } from '../../config/settings.js';
 import { MessageType, type HistoryItemWithoutId } from '../types.js';
 import {
   type EditorType,
+  type Config,
   checkHasEditorType,
   allowEditorTypeInSandbox,
 } from '@qwen-code/qwen-code-core';
@@ -95,8 +96,17 @@ describe('useEditorSettings', () => {
   });
 
   it('should handle editor selection successfully', () => {
+    const recordSlashCommand = vi.fn();
+    const config = {
+      getChatRecordingService: () => ({ recordSlashCommand }),
+    } as unknown as Config;
     const { result } = renderHook(() =>
-      useEditorSettings(mockLoadedSettings, mockSetEditorError, mockAddItem),
+      useEditorSettings(
+        mockLoadedSettings,
+        mockSetEditorError,
+        mockAddItem,
+        config,
+      ),
     );
 
     const editorType: EditorType = 'vscode';
@@ -120,6 +130,16 @@ describe('useEditorSettings', () => {
       },
       expect.any(Number),
     );
+    expect(recordSlashCommand).toHaveBeenCalledWith({
+      phase: 'result',
+      rawCommand: '/editor',
+      outputHistoryItems: [
+        {
+          type: MessageType.INFO,
+          text: 'Editor preference set to "vscode" in User settings.',
+        },
+      ],
+    });
 
     expect(mockSetEditorError).toHaveBeenCalledWith(null);
     expect(result.current.isEditorDialogOpen).toBe(false);

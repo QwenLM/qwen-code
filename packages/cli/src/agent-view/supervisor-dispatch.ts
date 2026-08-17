@@ -4,10 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
+import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { AGENT_VIEW_PROTOCOL_VERSION } from './protocol.js';
 import {
+  digestAgentViewWorkerToken,
+  getAgentViewSessionPaths,
   removeAgentViewRosterEntry,
   upsertAgentViewRosterEntry,
   writeAgentViewActivity,
@@ -25,7 +28,13 @@ interface DispatchOptions {
   globalDir?: string;
   sidebandEndpoint?: string;
   token?: string;
+  publishRoster?: boolean;
+  promptInArgv?: boolean;
 }
+
+// activity.json is re-read on every list() poll; keep the summary a
+// display-sized preview, matching the queued-prompt preview cap.
+const MAX_ACTIVITY_SUMMARY_CHARS = 500;
 
 export async function dispatchAgentViewSession(
   prompt: string,
@@ -56,7 +65,10 @@ export async function dispatchAgentViewSession(
       {
         schemaVersion: 1,
         sessionId,
-        argv: buildNativeWorkerArgv(sessionId, prompt),
+        argv: buildNativeWorkerArgv(
+          sessionId,
+          options.promptInArgv === false ? undefined : prompt,
+        ),
         env: createAgentViewWorkerSidebandEnv({
           sessionId,
           sidebandEndpoint: options.sidebandEndpoint ?? '',
@@ -79,7 +91,7 @@ export async function dispatchAgentViewSession(
       sessionId,
       {
         schemaVersion: 1,
-        summary: prompt,
+        summary: prompt.slice(0, MAX_ACTIVITY_SUMMARY_CHARS),
         lastActivityAt: now,
         capabilities: [],
       },
@@ -94,21 +106,23 @@ export async function dispatchAgentViewSession(
         ...(options.sidebandEndpoint
           ? { endpoint: options.sidebandEndpoint }
           : {}),
-        tokenDigest: digestToken(token),
+        tokenDigest: digestAgentViewWorkerToken(token),
         recentOutputBytes: 0,
       },
       options,
     );
-    await upsertAgentViewRosterEntry(
-      {
-        sessionId,
-        projectCwd: resolvedCwd,
-        activeCwd: resolvedCwd,
-        createdAt: now,
-        updatedAt: now,
-      },
-      options,
-    );
+    if (options.publishRoster ?? true) {
+      await upsertAgentViewRosterEntry(
+        {
+          sessionId,
+          projectCwd: resolvedCwd,
+          activeCwd: resolvedCwd,
+          createdAt: now,
+          updatedAt: now,
+        },
+        options,
+      );
+    }
   } catch (error) {
     await cleanupFailedDispatchCreation(sessionId, state, options);
     throw error;
@@ -150,21 +164,27 @@ async function cleanupFailedDispatchCreation(
   }
 
   try {
-    await removeAgentViewRosterEntry(sessionId, options);
+    if (options.publishRoster ?? true) {
+      await removeAgentViewRosterEntry(sessionId, options);
+    }
+  } catch {
+    // Best-effort rollback only.
+  }
+
+  try {
+    await fs.rm(getAgentViewSessionPaths(sessionId, options).sessionDir, {
+      recursive: true,
+      force: true,
+    });
   } catch {
     // Best-effort rollback only.
   }
 }
 
-function digestToken(token: string): string {
-  return createHash('sha256').update(token).digest('hex');
-}
-
-function buildNativeWorkerArgv(sessionId: string, prompt: string): string[] {
+function buildNativeWorkerArgv(sessionId: string, prompt?: string): string[] {
   return buildCurrentQwenCliArgv([
     '--session-id',
     sessionId,
-    '--prompt-interactive',
-    prompt,
+    ...(prompt ? ['--prompt-interactive', prompt] : []),
   ]);
 }

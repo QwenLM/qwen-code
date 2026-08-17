@@ -49,12 +49,71 @@ function makeApp(
     broadcastSettingsChanged,
     parseAndValidateClientId: () => undefined,
     captureGenerationAssertion: overrides.captureGenerationAssertion,
+    includeLiveVoice: true,
   });
 
   return { app, persistSetting, broadcastSettingsChanged };
 }
 
 describe('POST /workspace/settings', () => {
+  it('exposes the Live shortcut as user-global and rejects generic writes', async () => {
+    vi.mocked(loadSettings).mockReturnValue({
+      merged: { experimental: { liveVoice: { shortcut: 'Command+W' } } },
+      user: {
+        settings: {
+          experimental: {
+            liveVoice: { enabled: true, shortcut: 'Command+E' },
+          },
+        },
+      },
+      workspace: {
+        settings: {
+          experimental: { liveVoice: { shortcut: 'Command+W' } },
+        },
+      },
+      forScope: vi.fn().mockReturnValue({ settings: {} }),
+    } as never);
+    const { app, persistSetting } = makeApp();
+
+    const read = await request(app).get('/workspace/settings');
+    const shortcut = read.body.settings.find(
+      (setting: { key?: string }) =>
+        setting.key === 'experimental.liveVoice.shortcut',
+    );
+    expect(shortcut).toMatchObject({
+      requiresRestart: false,
+      default: 'Command+E',
+      values: { effective: 'Command+E', user: 'Command+E' },
+    });
+    expect(shortcut.values.workspace).toBeUndefined();
+
+    for (const scope of ['user', 'workspace']) {
+      const write = await request(app).post('/workspace/settings').send({
+        scope,
+        key: 'experimental.liveVoice.shortcut',
+        value: 'Command+K',
+      });
+      expect(write.status).toBe(400);
+      expect(write.body.code).toBe('live_managed_setting');
+    }
+    expect(persistSetting).not.toHaveBeenCalled();
+  });
+
+  it('exposes disabled Live setup settings on the supported WebShell surface', async () => {
+    const { app } = makeApp();
+
+    const read = await request(app).get('/workspace/settings');
+
+    expect(
+      read.body.settings.map((setting: { key?: string }) => setting.key),
+    ).toEqual(
+      expect.arrayContaining([
+        'experimental.liveVoice.enabled',
+        'experimental.liveVoice.shortcut',
+      ]),
+    );
+  });
+
   it('returns 503 without broadcasting when the runtime closes after persist', async () => {
     let generationOpen = true;
     const { app, broadcastSettingsChanged } = makeApp({
@@ -190,6 +249,27 @@ describe('POST /workspace/settings', () => {
     expect(res.body).toMatchObject({ code: 'disallowed_key' });
     expect(persistSetting).not.toHaveBeenCalled();
   });
+
+  it.each(['ui.mouseTracking', 'ui.showScrollbar'])(
+    'rejects a TUI-only key (%s) that has no effect in the web shell',
+    async (key) => {
+      // These keys are read only inside the ink TUI (mouseTracking also
+      // requires a TTY), so exposing them here would be dead toggles in serve
+      // mode. They are filtered out via TUI_ONLY_SETTINGS even though they
+      // declare showInDialog: true.
+      const { app, persistSetting } = makeApp();
+
+      const res = await request(app).post('/workspace/settings').send({
+        scope: 'user',
+        key,
+        value: false,
+      });
+
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({ code: 'disallowed_key' });
+      expect(persistSetting).not.toHaveBeenCalled();
+    },
+  );
 
   it.each(['workspace', 'user'] as const)(
     'accepts %s mcpServers for the MCP manager',

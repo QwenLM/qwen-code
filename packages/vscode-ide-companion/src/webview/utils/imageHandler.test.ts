@@ -5,6 +5,7 @@
  */
 
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   normalizeImageAttachment,
@@ -141,10 +142,11 @@ describe('imageHandler', () => {
 
 describe('buildPromptBlocks', () => {
   it('builds ACP resource_link blocks from saved image attachments', () => {
+    const imagePath = path.resolve('/tmp/My Images/pasted image.png');
     expect(
       buildPromptBlocks('Please inspect this screenshot.', [
         {
-          path: '/tmp/My Images/pasted image.png',
+          path: imagePath,
           name: 'pasted image.png',
           mimeType: 'image/png',
         },
@@ -155,7 +157,7 @@ describe('buildPromptBlocks', () => {
         type: 'resource_link',
         name: 'pasted image.png',
         mimeType: 'image/png',
-        uri: 'file:///tmp/My%20Images/pasted%20image.png',
+        uri: pathToFileURL(imagePath).href,
       },
     ]);
   });
@@ -180,10 +182,11 @@ describe('buildPromptBlocks', () => {
   });
 
   it('returns only resource links when the prompt has images only', () => {
+    const imagePath = path.resolve('/tmp/clipboard/pasted.webp');
     expect(
       buildPromptBlocks('', [
         {
-          path: '/tmp/clipboard/pasted.webp',
+          path: imagePath,
           name: 'pasted.webp',
           mimeType: 'image/webp',
         },
@@ -193,7 +196,7 @@ describe('buildPromptBlocks', () => {
         type: 'resource_link',
         name: 'pasted.webp',
         mimeType: 'image/webp',
-        uri: 'file:///tmp/clipboard/pasted.webp',
+        uri: pathToFileURL(imagePath).href,
       },
     ]);
   });

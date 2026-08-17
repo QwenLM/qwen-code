@@ -8,7 +8,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render } from 'ink-testing-library';
 import { act } from 'react';
 import { Text } from 'ink';
-import { ErrorBoundary } from './ErrorBoundary.js';
+import { ErrorBoundary, consumeLastRenderError } from './ErrorBoundary.js';
 
 // A child that throws during render to trip the boundary.
 const Thrower = ({ message }: { message: string }) => {
@@ -123,5 +123,41 @@ describe('ErrorBoundary', () => {
     const [error] = onError.mock.calls[0];
     expect(error).toBeInstanceOf(Error);
     expect((error as Error).message).toBe('string error');
+  });
+
+  it('stores the error for consumeLastRenderError (VP main-screen echo)', () => {
+    // Drain any leftover state from prior tests.
+    consumeLastRenderError();
+
+    const onError = vi.fn();
+    render(
+      <ErrorBoundary recordForExitEcho onError={onError}>
+        <Thrower message="vp crash" />
+      </ErrorBoundary>,
+    );
+
+    expect(onError).toHaveBeenCalledTimes(1);
+    const err = consumeLastRenderError();
+    expect(err).toBeInstanceOf(Error);
+    expect(err?.message).toBe('vp crash');
+    // Second call returns undefined (consumed).
+    expect(consumeLastRenderError()).toBeUndefined();
+  });
+
+  it('does not store the error without recordForExitEcho (non-fatal boundary)', () => {
+    // A boundary that handles the error itself (e.g. the transcript view)
+    // must not feed the exit-time echo: the app continues normally, so a
+    // later /quit should not print a spurious "Rendering error".
+    consumeLastRenderError();
+
+    const onError = vi.fn();
+    render(
+      <ErrorBoundary onError={onError}>
+        <Thrower message="handled inline" />
+      </ErrorBoundary>,
+    );
+
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(consumeLastRenderError()).toBeUndefined();
   });
 });

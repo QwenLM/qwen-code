@@ -84,6 +84,18 @@ function compactString(
   }
 
   const marker = buildStringCompactionMarker(value, purpose);
+
+  // The marker is 60-80 characters and was appended whatever the limit was,
+  // so a caller-supplied limit below that got back more than it asked for --
+  // and for a limit under the input length, more characters than it passed
+  // in. `compactStringForRecording('x'.repeat(70), 60)` returned 79. When the
+  // marker cannot fit alongside any content there is nothing to announce, so
+  // hard-truncate instead of explaining the truncation at greater length than
+  // the truncated text.
+  if (marker.length >= limit) {
+    return copyString(value.slice(0, safeHeadEnd(value, Math.max(0, limit))));
+  }
+
   const contentBudget = Math.max(0, limit - marker.length);
   const headLength = Math.ceil(contentBudget * 0.6);
   const tailLength = contentBudget - headLength;

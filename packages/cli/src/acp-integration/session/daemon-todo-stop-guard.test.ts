@@ -76,6 +76,36 @@ describe('DaemonTodoStopGuard', () => {
     });
   });
 
+  it('treats in-progress Todo items as unfinished', () => {
+    const guard = new DaemonTodoStopGuard(true);
+    guard.observeTodoWrite(
+      {
+        type: 'todo_list',
+        todos: [{ id: '1', content: 'finish', status: 'in_progress' }],
+      },
+      true,
+    );
+
+    expect(guard.decide(false)).toMatchObject({
+      kind: 'continue',
+      unfinishedCount: 1,
+    });
+  });
+
+  it('reports exhaustion once and keeps the chain hard-suspended', () => {
+    const guard = new DaemonTodoStopGuard(true);
+    guard.observeTodoWrite(pendingResult, true);
+    guard.commitContinuation(1);
+    guard.commitContinuation(2);
+
+    expect(guard.markExhaustionReported()).toBe(true);
+    expect(guard.markExhaustionReported()).toBe(false);
+    guard.observeTodoWrite(pendingResult, true);
+
+    expect(guard.isHardSuspended).toBe(true);
+    expect(guard.decide(false)).toEqual({ kind: 'inactive' });
+  });
+
   it('uses the remaining attempt to close tools after Todo completion', () => {
     const guard = new DaemonTodoStopGuard(true);
     guard.observeTodoWrite(pendingResult, true);

@@ -5,7 +5,11 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { defaultModalities } from './modalityDefaults.js';
+import {
+  defaultModalities,
+  isQwenFamilyWireModel,
+  isTieredEffortWireModel,
+} from './modalityDefaults.js';
 
 describe('defaultModalities', () => {
   describe('Google Gemini', () => {
@@ -293,5 +297,41 @@ describe('defaultModalities', () => {
       expect(a).toEqual(b);
       expect(a).not.toBe(b);
     });
+  });
+});
+
+describe('isQwenFamilyWireModel', () => {
+  it('matches qwen* ids case-insensitively', () => {
+    expect(isQwenFamilyWireModel('qwen3.8-max')).toBe(true);
+    expect(isQwenFamilyWireModel('Qwen3.7-Max')).toBe(true);
+    expect(isQwenFamilyWireModel('qwen-vl-max')).toBe(true);
+  });
+
+  it('matches the coder-model QWEN_OAUTH default', () => {
+    expect(isQwenFamilyWireModel('coder-model')).toBe(true);
+  });
+
+  it('rejects non-qwen ids and empty input', () => {
+    expect(isQwenFamilyWireModel('glm-5.2')).toBe(false);
+    expect(isQwenFamilyWireModel('kimi-k2.6')).toBe(false);
+    expect(isQwenFamilyWireModel('')).toBe(false);
+    expect(isQwenFamilyWireModel(undefined)).toBe(false);
+  });
+});
+
+describe('isTieredEffortWireModel', () => {
+  it('matches the qwen3.8-max family including snapshots and aliases', () => {
+    expect(isTieredEffortWireModel('qwen3.8-max')).toBe(true);
+    expect(isTieredEffortWireModel('qwen3.8-max-preview')).toBe(true);
+    expect(isTieredEffortWireModel('qwen3.8-max-2026-01-15')).toBe(true);
+    expect(isTieredEffortWireModel('qwen3.8-max-latest')).toBe(true);
+    expect(isTieredEffortWireModel('Qwen3.8-Max')).toBe(true);
+  });
+
+  it('rejects other qwen models and non-qwen ids', () => {
+    expect(isTieredEffortWireModel('qwen3.7-max')).toBe(false);
+    expect(isTieredEffortWireModel('coder-model')).toBe(false);
+    expect(isTieredEffortWireModel('glm-5.2')).toBe(false);
+    expect(isTieredEffortWireModel(undefined)).toBe(false);
   });
 });

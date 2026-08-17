@@ -45,6 +45,10 @@ function isRunningAgent(
   );
 }
 
+function hasInlineImageOutput(tool: IndividualToolCallDisplay): boolean {
+  return Boolean(tool.images?.length || tool.omittedImageCount);
+}
+
 /**
  * Predicate: tool entry whose `resultDisplay` is an `AgentResultDisplay`
  * (i.e. a `task_execution` subagent invocation), regardless of status.
@@ -150,7 +154,7 @@ interface ToolGroupMessageProps {
   memoryReadCount?: number;
   isUserInitiated?: boolean;
   /**
-   * Transcript full-detail mode (Ctrl+O). When true, force `forceExpandAll`
+   * Full-detail mode (Ctrl+O). When true, force `forceExpandAll`
    * (skip the type-based partition so every tool renders individually), pass
    * `forceShowResult=true` to each `ToolMessage`, and lift the per-tool
    * terminal-height truncation. Default false (main view keeps the #5661
@@ -283,7 +287,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   // header's "N · done/N" honest, and `availableTerminalHeight` is a hard cap
   // backstop for degenerate cases (many agents finishing at once).
   //
-  // Skipped in transcript full-detail mode (fullDetail) so every agent
+  // Skipped in full-detail mode (fullDetail) so every agent
   // falls through to its own full ToolMessage instead of the dense panel.
   if (
     !fullDetail &&
@@ -332,7 +336,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
 
   // Memory-only groups get their own compact rendering with read/write
   // counts. Check BEFORE the partition logic so they aren't routed through
-  // the collapsible/non-collapsible split. Skipped in transcript full-detail
+  // the collapsible/non-collapsible split. Skipped in full-detail
   // mode (fullDetail) so each memory op renders as its own full ToolMessage
   // rather than collapsing to the "Recalled/Wrote N memories" badge.
   const allMemOpsComplete =
@@ -367,7 +371,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
 
   // Force-expand ALL tools individually when the user must interact or
   // must see full details: confirmation prompts, errors, user-initiated
-  // batches, focused shells, terminal subagents. Transcript full-detail
+  // batches, focused shells, terminal subagents. Full-detail
   // mode (fullDetail) also forces it so every tool renders individually
   // instead of collapsing read/search into a partition summary.
   const hasTerminalSubagent = inlineToolCalls.some(isTerminalSubagentTool);
@@ -388,13 +392,17 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
     ? []
     : inlineToolCalls.filter(
         (t) =>
-          isCollapsibleTool(t.name) && t.status !== ToolCallStatus.Canceled,
+          isCollapsibleTool(t.name) &&
+          t.status !== ToolCallStatus.Canceled &&
+          !hasInlineImageOutput(t),
       );
   const nonCollapsibleTools = forceExpandAll
     ? inlineToolCalls
     : inlineToolCalls.filter(
         (t) =>
-          !isCollapsibleTool(t.name) || t.status === ToolCallStatus.Canceled,
+          !isCollapsibleTool(t.name) ||
+          t.status === ToolCallStatus.Canceled ||
+          hasInlineImageOutput(t),
       );
 
   // Memory badge — shared between all-collapsible and mixed paths.
@@ -448,13 +456,16 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
 
   let countToolCallsWithResults = 0;
   for (const tool of nonCollapsibleTools) {
-    if (tool.resultDisplay !== undefined && tool.resultDisplay !== '') {
+    if (
+      (tool.resultDisplay !== undefined && tool.resultDisplay !== '') ||
+      hasInlineImageOutput(tool)
+    ) {
       countToolCallsWithResults++;
     }
   }
   const countOneLineToolCalls =
     nonCollapsibleTools.length - countToolCallsWithResults;
-  // In transcript full-detail mode, lift the per-tool height truncation so
+  // In full-detail mode, lift the per-tool height truncation so
   // each tool's output renders in full (combined with forceShowResult below).
   const availableTerminalHeightPerToolMessage = fullDetail
     ? undefined

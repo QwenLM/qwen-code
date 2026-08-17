@@ -101,6 +101,10 @@ vi.mock('../contexts/VimModeContext.js', () => ({
   useVimMode: () => mockVimMode,
 }));
 
+vi.mock('./useTerminalSize.js', () => ({
+  useTerminalSize: () => ({ columns: 110, rows: 24 }),
+}));
+
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const original =
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
@@ -209,6 +213,7 @@ describe('useStatusLine', () => {
     mockVimMode.vimEnabled = false;
     mockVimMode.vimMode = 'INSERT';
     mockConfig.getModelDisplayName.mockReturnValue('Test Model');
+    mockConfig.getTargetDir.mockReturnValue('/test/dir');
     mockConfig.getContentGeneratorConfig.mockReturnValue({
       contextWindowSize: 131072,
     });
@@ -319,6 +324,16 @@ describe('useStatusLine', () => {
       expect(result.current.hideContextIndicator).toBe(true);
     });
 
+    it('returns hideContextIndicator false when explicitly disabled for command config', () => {
+      setStatusLineConfig({
+        type: 'command',
+        command: 'echo hello',
+        hideContextIndicator: false,
+      });
+      const { result } = renderHook(() => useStatusLine());
+      expect(result.current.hideContextIndicator).toBe(false);
+    });
+
     it('returns hideContextIndicator true when set in preset config', () => {
       setStatusLineConfig({
         type: 'preset',
@@ -327,6 +342,101 @@ describe('useStatusLine', () => {
       });
       const { result } = renderHook(() => useStatusLine());
       expect(result.current.hideContextIndicator).toBe(true);
+    });
+
+    it.each(['context-used', 'context-remaining'])(
+      'hides the footer indicator when an unset preset shows %s',
+      (contextItem) => {
+        setStatusLineConfig({
+          type: 'preset',
+          items: ['model', contextItem],
+        });
+        const { result } = renderHook(() => useStatusLine());
+        expect(result.current.hideContextIndicator).toBe(true);
+      },
+    );
+
+    it.each(['context-used', 'context-remaining'])(
+      'keeps the footer indicator when a preset showing %s sets hideContextIndicator false',
+      (contextItem) => {
+        setStatusLineConfig({
+          type: 'preset',
+          items: ['model', contextItem],
+          hideContextIndicator: false,
+        });
+        const { result } = renderHook(() => useStatusLine());
+        expect(result.current.hideContextIndicator).toBe(false);
+      },
+    );
+
+    it('keeps the footer indicator for a preset without context items', () => {
+      setStatusLineConfig({
+        type: 'preset',
+        items: ['model', 'git-branch'],
+      });
+      const { result } = renderHook(() => useStatusLine());
+      expect(result.current.hideContextIndicator).toBe(false);
+    });
+
+    it('hides the footer indicator for the built-in default preset', () => {
+      setStatusLineConfig(undefined);
+      const { result } = renderHook(() => useStatusLine());
+      expect(result.current.hideContextIndicator).toBe(true);
+    });
+
+    it('keeps an automatic indicator on narrow displays but honors explicit hiding', () => {
+      setStatusLineConfig({
+        type: 'preset',
+        items: ['model', 'context-used'],
+      });
+      const { result, rerender } = renderHook(() => useStatusLine(true));
+      expect(result.current.hideContextIndicator).toBe(false);
+
+      setStatusLineConfig({
+        type: 'preset',
+        items: ['model', 'context-used'],
+        hideContextIndicator: true,
+      });
+      rerender();
+      expect(result.current.hideContextIndicator).toBe(true);
+    });
+
+    it('keeps an automatic indicator when the rendered footer column clips it', () => {
+      mockConfig.getTargetDir.mockReturnValue(
+        '/home/runner/actions-runner-19/_work/qwen-code/qwen-code',
+      );
+      mockConfig.getModelDisplayName.mockReturnValue('Qwen3 Code Plus');
+      mockConfig.getContentGeneratorConfig.mockReturnValue({
+        contextWindowSize: 131072,
+        reasoning: { effort: 'high' },
+      });
+      setStatusLineConfig({
+        type: 'preset',
+        items: ['model-with-reasoning', 'current-dir', 'context-used'],
+      });
+      const fullWidth = renderHook(() => useStatusLine());
+      expect(fullWidth.result.current.hideContextIndicator).toBe(true);
+      fullWidth.unmount();
+
+      const { result } = renderHook(() => useStatusLine(false, 60));
+
+      expect(result.current.hideContextIndicator).toBe(false);
+    });
+
+    it('keeps the footer over-limit warning for an automatically hidden preset', () => {
+      mockUIState.sessionStats.lastPromptTokenCount = 131073;
+      setStatusLineConfig({
+        type: 'preset',
+        items: ['context-used'],
+      });
+      const { result } = renderHook(() => useStatusLine());
+      expect(result.current.hideContextIndicator).toBe(false);
+    });
+
+    it('keeps the footer indicator when the status line is disabled (null)', () => {
+      setStatusLineConfig(null);
+      const { result } = renderHook(() => useStatusLine());
+      expect(result.current.hideContextIndicator).toBe(false);
     });
   });
 

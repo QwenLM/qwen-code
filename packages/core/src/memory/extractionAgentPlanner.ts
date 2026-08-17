@@ -16,6 +16,7 @@ import {
 } from './prompt.js';
 import {
   AUTO_MEMORY_INDEX_FILENAME,
+  AUTO_MEMORY_PINNED_DIRNAME,
   getAutoMemoryRoot,
   getUserAutoMemoryRoot,
 } from './paths.js';
@@ -156,7 +157,8 @@ function buildTaskPrompt(
     '- You have a limited turn budget. `edit` requires a prior `read_file` of the same file, so the efficient strategy is: first issue all reads in parallel for every file you might update; then issue all `write_file`/`edit` calls in parallel. Do not interleave reads and writes across multiple turns.',
     '- You MUST only use content from the recent conversation history in your context plus the current managed memory files.',
     '- Do not inspect repository code, git history, or unrelated files.',
-    '- Prefer updating an existing memory file over creating a duplicate. Check both directories for an existing entry before creating a new one.',
+    `- Treat files under the top-level \`${AUTO_MEMORY_PINNED_DIRNAME}/\` directory in either managed memory root as protected read-only records. You may read them to avoid duplicates, but never modify, overwrite, rename, merge into, or delete them, and do not intentionally remove their valid entries from \`${AUTO_MEMORY_INDEX_FILENAME}\`.`,
+    '- Prefer updating an existing writable memory file over creating a duplicate. Check both directories for an existing entry before creating a new one.',
     '- Keep one durable memory per file under `user/`, `feedback/`, `project/`, or `reference/` inside the chosen directory.',
     '',
     '## How to save memories',
@@ -259,6 +261,7 @@ export async function runAutoMemoryExtractionByAgent(
   const userMemoryRoot = getUserAutoMemoryRoot();
   const scopedConfig = createMemoryScopedAgentConfig(config, projectRoot, {
     allowShell: true,
+    protectPinnedMemory: true,
   });
 
   const result = await runForkedAgent({
@@ -270,7 +273,7 @@ export async function runAutoMemoryExtractionByAgent(
       topicSummaries,
     ),
     systemPrompt: EXTRACTION_AGENT_SYSTEM_PROMPT,
-    maxTurns: 5,
+    maxTurns: config.getMemoryAgentMaxTurns() ?? 5,
     maxTimeMinutes: config.getMemoryAgentTimeoutMinutes() ?? 2,
     tools: [
       ToolNames.READ_FILE,

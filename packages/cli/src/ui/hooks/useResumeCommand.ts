@@ -15,11 +15,11 @@ import {
   buildResumedHistoryItems,
   applyCollapsePolicyAndSummary,
 } from '../utils/resumeHistoryUtils.js';
-import { restoreGoalFromHistory } from '../utils/restoreGoal.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import { MessageType, type HistoryItemWithoutId } from '../types.js';
 import {
   hasBlockingBackgroundWork,
+  buildBackgroundWorkBlockedMessage,
   resetBackgroundStateForSessionSwitch,
 } from '../utils/backgroundWorkUtils.js';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -30,6 +30,7 @@ import {
   MANAGED_AGENT_VIEW_RESUME_MESSAGE,
 } from '../../startup/agent-view-resume-guard.js';
 import { getAgentViewProjectSessionService } from '../../startup/agent-view-resume-sessions.js';
+import { waitForGoalRuntime } from '../utils/goal-runtime.js';
 
 export interface UseResumeCommandOptions {
   config: Config | null;
@@ -39,6 +40,7 @@ export interface UseResumeCommandOptions {
     'addItem' | 'clearItems' | 'loadHistory'
   >;
   startNewSession: (sessionId: string) => void;
+  clearPendingState?: () => void;
   setSessionName?: (name: string | null) => void;
   remount?: () => void;
 }
@@ -87,6 +89,7 @@ export function useResumeCommand(
     settings,
     historyManager,
     startNewSession,
+    clearPendingState,
     setSessionName,
     remount,
   } = options;
@@ -113,7 +116,10 @@ export function useResumeCommand(
       if (hasBlockingBackgroundWork(config)) {
         const blockedMessage: HistoryItemWithoutId = {
           type: MessageType.ERROR,
-          text: BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE,
+          text: buildBackgroundWorkBlockedMessage(
+            config,
+            BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE,
+          ),
         };
         addItem(blockedMessage, Date.now());
         closeResumeDialog();
@@ -199,20 +205,7 @@ export function useResumeCommand(
         resetBackgroundStateForSessionSwitch(config);
         config.startNewSession(sessionId, sessionData);
         coreSwapped = true;
-
-        // Re-arm /goal: the in-memory activeGoalStore entry (if any) is stale
-        // after `config.startNewSession` rebuilds the hook system — its
-        // `setAt` was captured before /new, and its `hookId` points to a
-        // hook that no longer exists. The cold-boot path runs this same
-        // call in AppContainer; the runtime /resume path needs it too,
-        // otherwise the footer pill keeps ticking from the original setAt
-        // (visible as "几十秒" elapsed immediately after /new + /resume) and
-        // the Stop hook is silently dead until the user re-issues /goal.
-        try {
-          restoreGoalFromHistory(uiHistoryItems, config, addItem);
-        } catch {
-          // Best-effort — never block resume on goal restoration.
-        }
+        await waitForGoalRuntime(config);
         // Rebuild turn boundary tracking so rewind works within resumed sessions.
         config
           .getChatRecordingService()
@@ -231,6 +224,7 @@ export function useResumeCommand(
         //    into the old JSONL (split-brain).
         startNewSession(sessionId);
         setSessionName?.(customTitle ?? null);
+        clearPendingState?.();
         clearItems();
         loadHistory(uiHistoryItems);
         if (recoveredBackgroundAgentsNotice) {
@@ -296,6 +290,7 @@ export function useResumeCommand(
       clearItems,
       loadHistory,
       startNewSession,
+      clearPendingState,
       setSessionName,
       remount,
       settings.merged.ui?.history?.collapseOnResume,

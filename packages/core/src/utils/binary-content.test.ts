@@ -114,11 +114,22 @@ describe('persistBinaryContent', () => {
     expect(fs.readFileSync(path.join(dir, 'webfetch-test-1.pdf'))).toEqual(
       bytes,
     );
-    // Owner-only: fetched content can be sensitive.
-    expect(
-      fs.statSync(path.join(dir, 'webfetch-test-1.pdf')).mode & 0o777,
-    ).toBe(0o600);
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'writes binary content mode 0600',
+    async () => {
+      await persistBinaryContent(
+        Buffer.from([0x25, 0x50, 0x44, 0x46, 0x00, 0xff]),
+        'pdf',
+        dir,
+        'webfetch-test-1',
+      );
+      expect(
+        fs.statSync(path.join(dir, 'webfetch-test-1.pdf')).mode & 0o777,
+      ).toBe(0o600);
+    },
+  );
 
   it('creates the target directory when missing', async () => {
     const nested = path.join(dir, 'does', 'not', 'exist');

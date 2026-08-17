@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import request from 'supertest';
 import {
   buildRecordArtifactReminder,
+  buildWorkspaceArtifactMetadata,
   Ignore,
   type Config,
 } from '@qwen-code/qwen-code-core';
@@ -146,6 +147,102 @@ describe('GET /file', () => {
     });
   });
 
+  it('pages a large file over HTTP with nextCursor', async () => {
+    const lines = Array.from(
+      { length: 4_000 },
+      (_, index) => `line-${index + 1} ${'x'.repeat(80)}`,
+    );
+    const body = lines.join('\n');
+    await fsp.writeFile(path.join(h.workspace, 'paged.log'), body);
+
+    const first = await request(h.app)
+      .get('/file?path=paged.log&limit=500')
+      .set('Host', loopbackHost());
+    expect(first.status).toBe(200);
+    expect(first.body.hasMore).toBe(true);
+    expect(typeof first.body.nextCursor).toBe('string');
+
+    const pages: string[] = [first.body.content];
+    let cursor: string | null = first.body.nextCursor;
+    let guard = 0;
+    while (cursor) {
+      if (guard++ > 50) throw new Error('paging did not terminate');
+      const next = await request(h.app)
+        .get(
+          `/file?path=paged.log&limit=500&cursor=${encodeURIComponent(cursor)}`,
+        )
+        .set('Host', loopbackHost());
+      expect(next.status).toBe(200);
+      pages.push(next.body.content);
+      cursor = next.body.nextCursor;
+    }
+    expect(pages.join('\n')).toBe(body);
+  });
+
+  it('rejects a malformed cursor with 400', async () => {
+    await fsp.writeFile(path.join(h.workspace, 'c.txt'), 'a\nb\n');
+    const res = await request(h.app)
+      .get('/file?path=c.txt&cursor=not-a-cursor')
+      .set('Host', loopbackHost());
+    expect(res.status).toBe(400);
+    expect(res.body.errorKind).toBe('parse_error');
+  });
+
+  it('rejects cursor combined with line', async () => {
+    await fsp.writeFile(path.join(h.workspace, 'cl.txt'), 'a\nb\nc\n');
+    const first = await request(h.app)
+      .get('/file?path=cl.txt&limit=1')
+      .set('Host', loopbackHost());
+    const res = await request(h.app)
+      .get(
+        `/file?path=cl.txt&line=2&cursor=${encodeURIComponent(first.body.nextCursor)}`,
+      )
+      .set('Host', loopbackHost());
+    expect(res.status).toBe(400);
+    expect(res.body.errorKind).toBe('parse_error');
+  });
+
+  it('returns a bounded line window for text above MAX_READ_BYTES', async () => {
+    const { MAX_READ_BYTES } = await import('../fs/policy.js');
+    const lines = Array.from(
+      { length: 4_000 },
+      (_, index) => `line-${index + 1} ${'x'.repeat(80)}`,
+    );
+    const content = lines.join('\n');
+    expect(Buffer.byteLength(content)).toBeGreaterThan(MAX_READ_BYTES);
+    await fsp.writeFile(path.join(h.workspace, 'large.txt'), content);
+
+    const res = await request(h.app)
+      .get('/file?path=large.txt&line=3&limit=20')
+      .set('Host', loopbackHost());
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      kind: 'file',
+      path: 'large.txt',
+      content: lines.slice(2, 22).join('\n'),
+      sizeBytes: Buffer.byteLength(content),
+      truncated: true,
+      originalLineCount: null,
+    });
+    expect(res.body.hash).toBeUndefined();
+  });
+
+  it('keeps an oversized read without a window behind the snapshot cap', async () => {
+    const { MAX_READ_BYTES } = await import('../fs/policy.js');
+    await fsp.writeFile(
+      path.join(h.workspace, 'large-no-window.txt'),
+      'x'.repeat(MAX_READ_BYTES + 1),
+    );
+
+    const res = await request(h.app)
+      .get('/file?path=large-no-window.txt')
+      .set('Host', loopbackHost());
+
+    expect(res.status).toBe(413);
+    expect(res.body.errorKind).toBe('file_too_large');
+  });
+
   it('attaches Cache-Control: no-store and X-Content-Type-Options: nosniff', async () => {
     await fsp.writeFile(path.join(h.workspace, 'a.txt'), 'x');
     const res = await request(h.app)
@@ -181,6 +278,23 @@ describe('GET /file', () => {
     const res = await request(h.app)
       .get('/file?path=bin.dat')
       .set('Host', loopbackHost());
+    expect(res.status).toBe(422);
+    expect(res.body.errorKind).toBe('binary_file');
+  });
+
+  it('returns 422 binary_file for large non-UTF-8 text even with a finite limit', async () => {
+    const { MAX_READ_BYTES } = await import('../fs/policy.js');
+    const body = Buffer.concat([
+      Buffer.from([0xff, 0xfe]),
+      Buffer.from('中文日志行\n'.repeat(30_000), 'utf16le'),
+    ]);
+    expect(body.length).toBeGreaterThan(MAX_READ_BYTES);
+    await fsp.writeFile(path.join(h.workspace, 'large-utf16.txt'), body);
+
+    const res = await request(h.app)
+      .get('/file?path=large-utf16.txt&line=1&limit=20')
+      .set('Host', loopbackHost());
+
     expect(res.status).toBe(422);
     expect(res.body.errorKind).toBe('binary_file');
   });
@@ -551,36 +665,41 @@ describe('capability advertisement', () => {
       expect(res.body.features).toContain('workspace_file_read');
       expect(res.body.features).toContain('workspace_file_bytes');
       expect(res.body.features).toContain('workspace_file_write');
+      expect(res.body.features).toContain('workspace_file_upload');
+      // The upload byte cap is advertised alongside the feature.
+      expect(res.body.limits?.maxWorkspaceFileUploadBytes).toBe(
+        50 * 1024 * 1024,
+      );
     } finally {
       await teardown(h);
     }
   });
 });
 
-// The `record_artifact` hint that `write_file` appends to a successful write
-// names a `workspacePath`, and the model hands that exact string back to this
-// route. Producer and consumer live in different packages, each with its own
-// notion of what the path is relative to — `write_file` starts from the session
-// cwd, the route resolves against the bound workspace root. They agree for an
-// ordinary session and drifted apart for a worktree one, where every artifact
-// preview 404'd. Neither side's unit tests could catch that: both were
-// internally consistent. These pin the round trip instead, over real HTTP.
-describe('record_artifact workspacePath contract (write_file ⇄ GET /file)', () => {
+// The artifact metadata that `write_file` returns for successful writes names a
+// `workspacePath`, and this route later resolves that exact string. Producer and
+// consumer live in different packages, each with its own notion of what the path
+// is relative to — `write_file` starts from the session cwd, the route resolves
+// against the bound workspace root. They agree for an ordinary session and
+// drifted apart for a worktree one, where every artifact preview 404'd. Neither
+// side's unit tests could catch that: both were internally consistent. These pin
+// the round trip instead, over real HTTP.
+describe('artifact workspacePath contract (write_file ⇄ GET /file)', () => {
   const ARTIFACT = '<!doctype html><h1>Quarterly Chart</h1>';
 
-  /** The workspacePath the model is told to send, from the real producer. */
+  /** The workspacePath emitted by the real producer. */
   function emittedWorkspacePath(sessionCwd: string, filePath: string): string {
-    const reminder = buildRecordArtifactReminder(
-      {
-        isRecordArtifactEnabled: () => true,
-        getTargetDir: () => sessionCwd,
-      } as unknown as Config,
-      filePath,
-    );
+    const config = {
+      isRecordArtifactEnabled: () => true,
+      getTargetDir: () => sessionCwd,
+    } as unknown as Config;
+    const reminder = buildRecordArtifactReminder(config, filePath);
     const match = /workspacePath "([^"]+)"/.exec(reminder ?? '');
     if (!match?.[1]) {
       throw new Error(`no workspacePath in reminder: ${reminder ?? 'null'}`);
     }
+    const artifact = buildWorkspaceArtifactMetadata(config, filePath);
+    expect(artifact?.workspacePath).toBe(match[1]);
     return match[1];
   }
 

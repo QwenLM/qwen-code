@@ -82,6 +82,14 @@ export class ClientMcpSenderRegistry {
     string,
     { sender: WsClientMcpSender; owner: string }
   >();
+  private readonly sessionSenders = new Map<
+    string,
+    Map<
+      string,
+      { sender: (payload: unknown) => Promise<unknown>; owner: string }
+    >
+  >();
+  private readonly sessionScopedServerNames = new Set<string>();
 
   /**
    * Record a server's WS sender, owned by `owner` (the registering
@@ -108,6 +116,35 @@ export class ClientMcpSenderRegistry {
     return this.senders.get(serverName)?.owner === owner;
   }
 
+  setSession(
+    serverName: string,
+    sessionId: string,
+    sender: (payload: unknown) => Promise<unknown>,
+    owner: string,
+  ): void {
+    let bySession = this.sessionSenders.get(serverName);
+    if (!bySession) {
+      bySession = new Map();
+      this.sessionSenders.set(serverName, bySession);
+    }
+    bySession.set(sessionId, { sender, owner });
+    this.sessionScopedServerNames.add(serverName);
+  }
+
+  ownsSession(serverName: string, sessionId: string, owner: string): boolean {
+    return this.sessionSenders.get(serverName)?.get(sessionId)?.owner === owner;
+  }
+
+  deleteSession(serverName: string, sessionId: string, owner: string): boolean {
+    const bySession = this.sessionSenders.get(serverName);
+    if (bySession?.get(sessionId)?.owner !== owner) return false;
+    bySession.delete(sessionId);
+    if (bySession.size === 0) {
+      this.sessionSenders.delete(serverName);
+    }
+    return true;
+  }
+
   /** Currently-registered server names (tests / accounting). */
   serverNames(): string[] {
     return [...this.senders.keys()];
@@ -122,9 +159,37 @@ export class ClientMcpSenderRegistry {
    */
   readonly lookup: ClientMcpMessageSender = (serverName: string) => {
     const entry = this.senders.get(serverName);
-    if (!entry) return undefined;
-    return (payload: unknown) =>
-      entry.sender(serverName, payload as JSONRPCMessage) as Promise<unknown>;
+    const sessionEntries = this.sessionSenders.get(serverName);
+    if (!entry && !sessionEntries) return undefined;
+    return (payload, context) => {
+      if (context?.sessionId) {
+        const sessionEntry = sessionEntries?.get(context.sessionId);
+        if (sessionEntry) return sessionEntry.sender(payload);
+        if (this.sessionScopedServerNames.has(serverName)) {
+          return Promise.reject(
+            new Error(
+              `No session-scoped MCP sender for '${serverName}' in session '${context.sessionId}'.`,
+            ),
+          );
+        }
+      }
+      if (this.sessionScopedServerNames.has(serverName)) {
+        return Promise.reject(
+          new Error(
+            `Session-scoped MCP server '${serverName}' requires a session context.`,
+          ),
+        );
+      }
+      if (!entry) {
+        return Promise.reject(
+          new Error(`No client MCP sender for '${serverName}'.`),
+        );
+      }
+      return entry.sender(
+        serverName,
+        payload as JSONRPCMessage,
+      ) as Promise<unknown>;
+    };
   };
 }
 

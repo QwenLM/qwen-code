@@ -28,9 +28,12 @@ export interface RecordArtifactParams {
   metadata?: Record<string, string | number | boolean | null>;
 }
 
-const DESCRIPTION = `Registers a session artifact so clients can show it in an artifacts panel. Use it after creating a useful file, URL, image, report, notebook, or other intermediate result that the user may want to open later.
+const DESCRIPTION = `Registers a session artifact so clients can show it in an artifacts panel. Use it after creating a useful file, URL, image, report, notebook, or other intermediate result that the user may want to open later, unless the producing tool already returned artifact metadata. For example, write_file automatically records HTML, image, PDF, and notebook files it writes inside the workspace, so do not call record_artifact again for the same workspacePath; still call it for other formats such as Markdown, CSV, JSON, and plain text, and for files produced outside write_file. When the session creates a remote resource, such as a pull request, issue, or comment submitted via gh, record its URL with kind "link" and the url locator so the user can reopen it later.
 
 This tool only records metadata. It does not publish, upload, read, write, or verify the referenced resource. Provide exactly one locator: workspacePath, managedId, or url. Use the Artifact tool, not record_artifact, for published interactive HTML artifacts.`;
+
+export const ARTIFACT_TITLE_MAX_LENGTH = 200;
+export const ARTIFACT_WORKSPACE_PATH_MAX_LENGTH = 500;
 
 class RecordArtifactInvocation extends BaseToolInvocation<
   RecordArtifactParams,
@@ -158,7 +161,12 @@ export class RecordArtifactTool extends BaseDeclarativeTool<
     params: RecordArtifactParams,
   ): string | null {
     params.title = (params.title ?? '').trim();
-    const titleError = validateString(params.title, 'title', 200, true);
+    const titleError = validateString(
+      params.title,
+      'title',
+      ARTIFACT_TITLE_MAX_LENGTH,
+      true,
+    );
     if (titleError) {
       return titleError;
     }
@@ -318,7 +326,7 @@ function isDisplayField(field: string): boolean {
   );
 }
 
-function hasControlCharacter(
+export function hasControlCharacter(
   value: string,
   allowLineWhitespace = false,
 ): boolean {
@@ -346,7 +354,7 @@ function hasControlCharacter(
   return false;
 }
 
-function hasUnsafeDisplayPayload(value: string): boolean {
+export function hasUnsafeDisplayPayload(value: string): boolean {
   return (
     /<\s*\/?[a-z!]|&(?:#[0-9]+|#x[0-9a-f]+|[a-z][a-z0-9]+);|javascript\s*:|data\s*:\s*(?:text\/(?:html|javascript)|application\/javascript|image\/svg\+xml)/i.test(
       value,
@@ -356,7 +364,12 @@ function hasUnsafeDisplayPayload(value: string): boolean {
 
 function validateWorkspacePath(value: string): string | null {
   const trimmed = value.trim();
-  const stringError = validateString(trimmed, 'workspacePath', 500, true);
+  const stringError = validateString(
+    trimmed,
+    'workspacePath',
+    ARTIFACT_WORKSPACE_PATH_MAX_LENGTH,
+    true,
+  );
   if (stringError) {
     return stringError;
   }

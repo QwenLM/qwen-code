@@ -26,7 +26,11 @@
 import { accessSync, closeSync, constants, openSync, readSync } from 'node:fs';
 import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
 import { promptIdContext } from './promptIdContext.js';
-import { sessionIdContext, getSessionProjectDir } from './sessionIdContext.js';
+import {
+  sessionIdContext,
+  getSessionProjectDir,
+  getSessionModel,
+} from './sessionIdContext.js';
 import {
   isShellTracePropagationEnabled,
   getTraceContext,
@@ -125,6 +129,25 @@ export function getShellContextEnvVars(): Record<string, string> {
   const cliEntry = process.env['QWEN_CODE_CLI'];
   if (cliEntry) {
     env['QWEN_CODE_CLI'] = isUnusableScriptEntry(cliEntry) ? '' : cliEntry;
+  }
+
+  // The model id that is ACTIVE in this session, for subprocesses that report
+  // which model ran (the /review skill stamps its compose report with one).
+  // Settings files are not a substitute: they miss /model switches, and under
+  // QWEN_HOME isolation they describe a different home entirely. Config
+  // publishes it per session and republishes on every model change
+  // (publishModelEnv in config.ts). Keyed on this session exactly as the
+  // project dir above is — a process-global slot would hold whichever session
+  // booted first, and in daemon mode every later one would hand its
+  // subprocesses another session's model. Falls back to the global slot for the
+  // single-session CLI. Omitted (not blanked) when absent, for the session ID's
+  // reason — no value in this process means the spawn-site spread has nothing
+  // stale to leak.
+  const model =
+    (sessionId ? getSessionModel(sessionId) : undefined) ??
+    process.env['QWEN_CODE_MODEL'];
+  if (model) {
+    env['QWEN_CODE_MODEL'] = model;
   }
 
   // For agent/prompt IDs: explicitly set empty string when no ALS context

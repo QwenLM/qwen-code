@@ -67,6 +67,12 @@ describe('sanitizeChildEnv', () => {
     // Guardrail: this list must not grow to include third-party credentials,
     // which the shell tool legitimately inherits (see #6601 discussion).
     expect([...INTERNAL_SECRET_ENV_VARS].sort()).toEqual([
+      'QWEN_AGENT_VIEW_ACTIVE_CWD',
+      'QWEN_AGENT_VIEW_SESSION_ID',
+      'QWEN_AGENT_VIEW_SIDEBAND',
+      'QWEN_AGENT_VIEW_SUPERVISOR',
+      'QWEN_AGENT_VIEW_TOKEN',
+      'QWEN_AGENT_VIEW_WORKER',
       'QWEN_CODE_PRIVATE_ACP_CAPABILITY',
       'QWEN_DAEMON_TOKEN',
       'QWEN_SERVER_TOKEN',

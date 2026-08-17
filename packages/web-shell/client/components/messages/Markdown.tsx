@@ -7,12 +7,14 @@ import {
   useMemo,
   useRef,
   useState,
+  type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from 'react';
 import { useTheme } from '../../themeContext';
 import { useTranscriptRenderMode } from '../../transcriptRenderMode';
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
-import type { Components } from 'react-markdown';
+import type { Components, Options } from 'react-markdown';
+import { isMarkdownFenceClosed } from '@datafe-open/markdown-chart';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
@@ -23,6 +25,13 @@ import {
   isTooLargeToHighlight,
 } from './codeHighlighter';
 import { useI18n } from '../../i18n';
+import { extractErrorDetail } from '../../utils/errorDetail';
+import {
+  isDesktopShell,
+  isExternalOpenUrl,
+  openExternalUrl,
+} from '../../utils/externalOpen';
+import { requestToast } from '../ToastHost';
 import {
   useWebShellCustomization,
   type MarkdownTableMode,
@@ -30,6 +39,11 @@ import {
 } from '../../customization';
 import { ErrorBoundary } from '../ErrorBoundary';
 import { EnhancedMarkdownTable } from './EnhancedMarkdownTable';
+import {
+  DEFAULT_WEB_SHELL_MARKDOWN_CHART,
+  WebShellMarkdownChartProvider,
+  createWebShellMarkdownChartPre,
+} from './MarkdownChartRenderer';
 import styles from './Markdown.module.css';
 
 interface MarkdownProps {
@@ -143,7 +157,7 @@ export function resolveFenceLanguage(
 }
 
 const SAFE_HREF_SCHEMES = /^(https?:|mailto:)/i;
-const SAFE_IMAGE_DATA_URI = /^data:image\/(png|jpeg|gif|webp);base64,/i;
+const SAFE_IMAGE_DATA_URI = /^data:image\/(png|jpeg|gif|webp|bmp);base64,/i;
 
 export function isSafeHref(url: string | undefined): boolean {
   if (!url) return false;
@@ -549,22 +563,52 @@ const IsStreamingContext = createContext(false);
 const MarkdownSourceContext = createContext<MarkdownContentSource | undefined>(
   undefined,
 );
+const MarkdownDocumentContext = createContext<string | undefined>(undefined);
+
+interface PositionedCodeNode {
+  readonly position?: {
+    readonly start: { readonly offset?: number };
+    readonly end: { readonly offset?: number };
+  };
+}
+
+function isIncompleteTailFence(
+  document: string | undefined,
+  node: PositionedCodeNode | undefined,
+  isStreaming: boolean,
+): boolean {
+  if (!isStreaming || document === undefined) return false;
+  const start = node?.position?.start.offset;
+  const end = node?.position?.end.offset;
+  if (start === undefined || end === undefined) return false;
+  return (
+    !isMarkdownFenceClosed(document.slice(start, end)) &&
+    document.slice(end).trim().length === 0
+  );
+}
 
 function MarkdownCode({
   className,
   children,
+  node,
 }: {
   className?: string;
   children?: ReactNode;
+  node?: PositionedCodeNode;
 }) {
   const isStreaming = useContext(IsStreamingContext);
+  const document = useContext(MarkdownDocumentContext);
   const isBlock =
     className?.startsWith('language-') ||
     (typeof children === 'string' && children.includes('\n'));
 
   if (isBlock) {
     return (
-      <MarkdownFencedCode className={className} isStreaming={isStreaming}>
+      <MarkdownFencedCode
+        className={className}
+        isStreaming={isStreaming}
+        isIncomplete={isIncompleteTailFence(document, node, isStreaming)}
+      >
         {children}
       </MarkdownFencedCode>
     );
@@ -576,10 +620,12 @@ function MarkdownFencedCode({
   className,
   children,
   isStreaming,
+  isIncomplete,
 }: {
   className?: string;
   children?: ReactNode;
   isStreaming?: boolean;
+  isIncomplete?: boolean;
 }) {
   const source = useContext(MarkdownSourceContext);
   const appTheme = useTheme();
@@ -603,6 +649,7 @@ function MarkdownFencedCode({
         className,
         code,
         isStreaming: !!isStreaming,
+        isIncomplete: !!isIncomplete,
         source,
         theme: appTheme,
       });
@@ -616,6 +663,7 @@ function MarkdownFencedCode({
               source,
               appTheme,
               isStreaming ? 'streaming' : 'settled',
+              isIncomplete ? 'incomplete' : 'complete',
               code,
             ]}
           >
@@ -668,6 +716,7 @@ function MarkdownLink({
   children?: ReactNode;
 }) {
   const renderMode = useTranscriptRenderMode();
+  const { t } = useI18n();
   if (href && QWEN_SESSION_SCHEME.test(href.trim())) {
     if (renderMode === 'readonly') {
       return <span className={styles.link}>{children}</span>;
@@ -691,12 +740,28 @@ function MarkdownLink({
     );
   }
   const safeHref = isSafeHref(href) ? href : undefined;
+  const isExternalHref = isExternalOpenUrl(safeHref);
+  // In the packaged desktop shell the webview's implicit `target="_blank"`
+  // handling silently drops the request on failure, so route external clicks
+  // through the shell's explicit opener and surface errors as toasts. Plain
+  // browsers keep the native anchor behavior.
+  const handleClick = (event: ReactMouseEvent<HTMLAnchorElement>) => {
+    if (!isExternalHref || !safeHref || !isDesktopShell()) return;
+    event.preventDefault();
+    openExternalUrl(safeHref).catch((error: unknown) => {
+      requestToast(
+        'error',
+        t('common.openFailed', { message: extractErrorDetail(error) }),
+      );
+    });
+  };
   return (
     <a
       href={safeHref}
       target="_blank"
       rel="noopener noreferrer"
       className={styles.link}
+      onClick={isExternalHref ? handleClick : undefined}
     >
       {children}
     </a>
@@ -706,6 +771,74 @@ function MarkdownLink({
 function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
   const safeSrc = isSafeImageSrc(src) ? src : undefined;
   return <img src={safeSrc} alt={alt || ''} className={styles.image} />;
+}
+
+/**
+ * Throttles a rapidly changing value (like a streaming string) to prevent
+ * O(n²) re-parsing of the entire Markdown AST on every token.
+ */
+function useThrottledValue(
+  value: string,
+  isStreaming: boolean | undefined,
+  intervalMs: number = 80,
+): string {
+  const [throttled, setThrottled] = useState(value);
+  const throttledRef = useRef(throttled);
+  throttledRef.current = throttled;
+  const lastRunRef = useRef(0);
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const valueRef = useRef(value);
+  valueRef.current = value;
+
+  useEffect(() => {
+    if (!isStreaming) {
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
+        timeoutRef.current = null;
+      }
+      // Flush immediately when streaming stops
+      if (throttledRef.current !== value) {
+        setThrottled(value);
+      }
+      return;
+    }
+
+    const now = Date.now();
+    const elapsed = now - lastRunRef.current;
+
+    if (elapsed >= intervalMs) {
+      lastRunRef.current = now;
+      setThrottled(valueRef.current);
+    } else if (!timeoutRef.current) {
+      timeoutRef.current = setTimeout(() => {
+        lastRunRef.current = Date.now();
+        timeoutRef.current = null;
+        setThrottled(valueRef.current);
+      }, intervalMs - elapsed);
+    }
+  }, [value, isStreaming, intervalMs]);
+
+  useEffect(() => {
+    return () => {
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
+        timeoutRef.current = null;
+      }
+    };
+  }, []);
+
+  if (!isStreaming) return value;
+
+  // Bypass throttle for non-monotonic changes
+  if (
+    typeof value === 'string' &&
+    typeof throttled === 'string' &&
+    !value.startsWith(throttled)
+  ) {
+    return value;
+  }
+
+  return throttled;
 }
 
 // `code`/`pre`/`a`/`img` are stable references; only `table` is created per
@@ -743,6 +876,35 @@ function createComponents(
 
 const COMPONENTS_DEFAULT = createComponents();
 
+/**
+ * Isolated memoized renderer. This ensures react-markdown ONLY re-parses
+ * when the throttled content or plugin references actually change.
+ */
+const MemoizedMarkdownRenderer = memo(function MemoizedMarkdownRenderer({
+  content,
+  components,
+  remarkPlugins,
+  rehypePlugins,
+  urlTransform,
+}: {
+  content: string;
+  components: Options['components'];
+  remarkPlugins: Options['remarkPlugins'];
+  rehypePlugins: Options['rehypePlugins'];
+  urlTransform: Options['urlTransform'];
+}) {
+  return (
+    <ReactMarkdown
+      components={components}
+      remarkPlugins={remarkPlugins}
+      rehypePlugins={rehypePlugins}
+      urlTransform={urlTransform}
+    >
+      {content}
+    </ReactMarkdown>
+  );
+});
+
 export const Markdown = memo(function Markdown({
   content,
   source,
@@ -750,20 +912,30 @@ export const Markdown = memo(function Markdown({
   tableMode,
 }: MarkdownProps) {
   const { markdown, markdownTableMode } = useWebShellCustomization();
+  const theme = useTheme();
   const sourceMarkdown = source ? markdown : undefined;
-  const renderedContent =
-    content && source && sourceMarkdown?.transformMarkdown
-      ? sourceMarkdown.transformMarkdown(content, { source })
-      : content;
+
+  const throttledContent = useThrottledValue(content ?? '', isStreaming);
+  const renderedContent = useMemo(
+    () =>
+      throttledContent && source && sourceMarkdown?.transformMarkdown
+        ? sourceMarkdown.transformMarkdown(throttledContent, { source })
+        : throttledContent,
+    [throttledContent, source, sourceMarkdown],
+  );
+
   const effectiveTableMode = isStreaming
     ? 'basic'
     : (tableMode ?? markdownTableMode ?? 'basic');
+
+  // Memoize components so references stay stable during throttle window
   const components = useMemo(() => {
     if (effectiveTableMode === 'advanced') {
       return createComponents('advanced', renderedContent);
     }
     return COMPONENTS_DEFAULT;
   }, [effectiveTableMode, renderedContent]);
+
   const sourceComponents = sourceMarkdown?.components;
   const renderedComponents = useMemo(() => {
     if (!sourceComponents) return components;
@@ -773,14 +945,70 @@ export const Markdown = memo(function Markdown({
       ...(effectiveTableMode === 'advanced' ? { table: components.table } : {}),
     };
   }, [components, effectiveTableMode, sourceComponents]);
+  const chart =
+    source === 'assistant' && !sourceComponents?.code && !sourceComponents?.pre
+      ? (sourceMarkdown?.chart ??
+        (sourceMarkdown?.renderCodeBlock
+          ? undefined
+          : DEFAULT_WEB_SHELL_MARKDOWN_CHART))
+      : undefined;
+  const chartPre = useMemo(
+    () =>
+      chart
+        ? createWebShellMarkdownChartPre(chart.registry, {
+            chartClassName: chart.chartClassName,
+            chartStyle: { minHeight: 360, ...chart.chartStyle },
+          })
+        : undefined,
+    [chart],
+  );
+  const componentsWithCharts = useMemo(
+    () =>
+      chartPre
+        ? {
+            ...renderedComponents,
+            pre: chartPre,
+          }
+        : renderedComponents,
+    [chartPre, renderedComponents],
+  );
+
+  // Memoize plugins so their array references remain stable.
+  const remarkPlugins = useMemo(() => {
+    return sourceMarkdown?.remarkPlugins
+      ? [remarkGfm, remarkMath, ...sourceMarkdown.remarkPlugins]
+      : [remarkGfm, remarkMath];
+  }, [sourceMarkdown?.remarkPlugins]);
+
+  const rehypePlugins = useMemo(() => {
+    return sourceMarkdown?.rehypePlugins
+      ? [rehypeKatex, ...sourceMarkdown.rehypePlugins]
+      : [rehypeKatex];
+  }, [sourceMarkdown?.rehypePlugins]);
 
   if (!content) return null;
-  const remarkPlugins = sourceMarkdown?.remarkPlugins
-    ? [remarkGfm, remarkMath, ...sourceMarkdown.remarkPlugins]
-    : [remarkGfm, remarkMath];
-  const rehypePlugins = sourceMarkdown?.rehypePlugins
-    ? [rehypeKatex, ...sourceMarkdown.rehypePlugins]
-    : [rehypeKatex];
+
+  const renderedMarkdown = (
+    <MemoizedMarkdownRenderer
+      content={renderedContent}
+      components={componentsWithCharts}
+      remarkPlugins={remarkPlugins}
+      rehypePlugins={rehypePlugins}
+      urlTransform={markdownUrlTransform}
+    />
+  );
+  const chartAwareMarkdown = chart ? (
+    <WebShellMarkdownChartProvider
+      customization={chart}
+      source={renderedContent}
+      streaming={!!isStreaming}
+      theme={theme}
+    >
+      {renderedMarkdown}
+    </WebShellMarkdownChartProvider>
+  ) : (
+    renderedMarkdown
+  );
 
   return (
     <div
@@ -789,14 +1017,9 @@ export const Markdown = memo(function Markdown({
     >
       <IsStreamingContext.Provider value={!!isStreaming}>
         <MarkdownSourceContext.Provider value={source}>
-          <ReactMarkdown
-            remarkPlugins={remarkPlugins}
-            rehypePlugins={rehypePlugins}
-            components={renderedComponents}
-            urlTransform={markdownUrlTransform}
-          >
-            {renderedContent}
-          </ReactMarkdown>
+          <MarkdownDocumentContext.Provider value={renderedContent}>
+            {chartAwareMarkdown}
+          </MarkdownDocumentContext.Provider>
         </MarkdownSourceContext.Provider>
       </IsStreamingContext.Provider>
     </div>

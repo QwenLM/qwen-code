@@ -54,7 +54,8 @@ export interface AgentViewWorkerHeartbeat {
   dispose(): void;
 }
 
-let lastStateReportKey: string | undefined;
+const lastStateReportKeys = new Map<string, string>();
+const stateReportChains = new Map<string, Promise<void>>();
 
 export function createAgentViewWorkerSidebandEnv(
   config: AgentViewWorkerSidebandEnv,
@@ -106,6 +107,10 @@ export async function sendAgentViewWorkerEvent(
   if (!sideband) return undefined;
   return callAgentViewSupervisor(sideband.sidebandEndpoint, 'workerEvent', {
     ...event,
+    // Stamp at emit time so the dequeue ordering guard (event.at vs
+    // lastQueuedPromptAt) protects in production — worker events are
+    // otherwise built without an `at` field.
+    at: new Date().toISOString(),
     sessionId: sideband.sessionId,
     token: sideband.token,
   });
@@ -137,21 +142,38 @@ export async function reportAgentViewWorkerState(
   report: AgentViewWorkerStateReport,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<void> {
-  if (!readAgentViewWorkerSidebandEnv(env)) return;
+  const sideband = readAgentViewWorkerSidebandEnv(env);
+  if (!sideband) return;
 
   const event = {
     type: 'state',
     ...report,
-    cwd: report.cwd ?? process.cwd(),
+    // activeCwd is guaranteed by readAgentViewWorkerSidebandEnv and survives
+    // a deleted cwd, unlike process.cwd(), which throws ENOENT.
+    cwd: report.cwd ?? sideband.activeCwd,
   } as const;
   const key = JSON.stringify(event);
-  if (key === lastStateReportKey) return;
-  lastStateReportKey = key;
+  const sendAndRecord = async () => {
+    if (key === lastStateReportKeys.get(sideband.sessionId)) return;
 
+    try {
+      await sendAgentViewWorkerEvent(event, env);
+      lastStateReportKeys.set(sideband.sessionId, key);
+    } catch {
+      lastStateReportKeys.delete(sideband.sessionId);
+    }
+  };
+  const previous = stateReportChains.get(sideband.sessionId);
+  const run = previous
+    ? previous.catch(() => {}).then(sendAndRecord)
+    : sendAndRecord();
+  stateReportChains.set(sideband.sessionId, run);
   try {
-    await sendAgentViewWorkerEvent(event, env);
-  } catch {
-    lastStateReportKey = undefined;
+    await run;
+  } finally {
+    if (stateReportChains.get(sideband.sessionId) === run) {
+      stateReportChains.delete(sideband.sessionId);
+    }
   }
 }
 
@@ -161,7 +183,7 @@ export function startAgentViewWorkerHeartbeat(
 ): AgentViewWorkerHeartbeat | undefined {
   if (!readAgentViewWorkerSidebandEnv(env)) return undefined;
   const interval = setInterval(() => {
-    void sendAgentViewWorkerEvent({ type: 'heartbeat' }, env);
+    void sendAgentViewWorkerEvent({ type: 'heartbeat' }, env).catch(() => {});
   }, intervalMs);
   interval.unref?.();
   return {
@@ -172,7 +194,8 @@ export function startAgentViewWorkerHeartbeat(
 }
 
 export function resetAgentViewWorkerStateReportForTests(): void {
-  lastStateReportKey = undefined;
+  lastStateReportKeys.clear();
+  stateReportChains.clear();
 }
 
 function isAgentViewWorkerControlEvent(

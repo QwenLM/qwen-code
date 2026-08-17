@@ -8,6 +8,7 @@ import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { Socket } from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import * as fs from 'node:fs';
 import {
   AgentViewAttachLeaseManager,
   DEFAULT_AGENT_VIEW_ATTACH_LEASE_TTL_MS,
@@ -16,6 +17,7 @@ import { AGENT_VIEW_PROTOCOL_VERSION } from './protocol.js';
 import type {
   AgentViewActivityFile,
   AgentViewLaunchFile,
+  AgentViewRosterEntry,
   AgentViewSessionSnapshot,
   AgentViewSessionStateFile,
   AgentViewWorkerControlEvent,
@@ -29,14 +31,24 @@ import {
 import { bridgeAgentViewTerminal } from './terminal-bridge.js';
 import { dispatchAgentViewSession } from './supervisor-dispatch.js';
 import {
+  digestAgentViewWorkerToken,
+  getAgentViewSessionPaths,
   getAgentViewStorePaths,
+  inputKindValue,
+  isAgentViewSessionState,
   listAgentViewSessionSnapshots,
   listAgentViewSessionStates,
+  patchAgentViewActivityIf,
+  patchAgentViewSessionState,
+  patchAgentViewSessionStateIf,
   readAgentViewLaunch,
   readAgentViewActivity,
+  readAgentViewRosterForWrite,
   readAgentViewSessionState,
   readAgentViewWorker,
+  redactAgentViewWorker,
   removeAgentViewRosterEntry,
+  sanitizeSessionId,
   upsertAgentViewRosterEntry,
   updateAgentViewRosterEntry,
   writeAgentViewActivity,
@@ -45,7 +57,10 @@ import {
   writeAgentViewWorker,
 } from './supervisor-store.js';
 import type { AgentViewSupervisorHandler } from './supervisor-server.js';
-import { createAgentViewWorkerSidebandEnv } from './worker-sideband.js';
+import {
+  createAgentViewWorkerSidebandEnv,
+  QWEN_AGENT_VIEW_TOKEN,
+} from './worker-sideband.js';
 import {
   buildCurrentQwenCliArgv,
   getCurrentQwenCliEntrypoint,
@@ -56,6 +71,14 @@ import {
   getAgentViewActivityInputState,
 } from './presentation.js';
 
+function resolveSessionCwd(cwd: string): string {
+  try {
+    return fs.realpathSync(cwd);
+  } catch {
+    return path.resolve(cwd);
+  }
+}
+
 const UNIX_SOCKET_PATH_LIMIT = 100;
 const DEFAULT_IDLE_HIBERNATION_MS = 30 * 60 * 1000;
 const DEFAULT_SUPERVISOR_AUTO_EXIT_GRACE_MS = 10 * 60 * 1000;
@@ -65,7 +88,6 @@ const DEFAULT_ATTACH_LEASE_HEARTBEAT_MS =
   DEFAULT_AGENT_VIEW_ATTACH_LEASE_TTL_MS / 3;
 
 export interface AgentViewSupervisorHibernationPolicy {
-  enabled?: boolean;
   idleMs?: number;
   autoExit?: boolean;
   autoExitGraceMs?: number;
@@ -92,6 +114,7 @@ interface AgentViewWorkerReadyWaiter {
   timeout: NodeJS.Timeout;
   resolve(): void;
   reject(error: Error): void;
+  generation: number;
 }
 
 export interface AgentViewSupervisorPathOptions {
@@ -133,31 +156,33 @@ export function getAgentViewSupervisorSocketPath(
     return primaryPath;
   }
 
-  return path.join(
+  // Fall back to a per-uid directory under the runtime dir. prepareSocketPath
+  // creates it 0700 when missing and the socket file is 0600, but the directory
+  // name is predictable: on a shared multi-user tmpdir a pre-existing directory
+  // is reused with its current owner and mode. Callers that need a hardened
+  // path should pass a private 0700 runtimeDir (e.g. XDG_RUNTIME_DIR).
+  const uid = process.getuid?.();
+  const fallbackDir =
+    uid === undefined ? `qwen-agent-view-${digest}` : `qwen-agent-view-${uid}`;
+  const fallbackPath = path.join(
     options.runtimeDir ?? os.tmpdir(),
-    `qwen-agent-view-${digest}.sock`,
+    fallbackDir,
+    `supervisor-${digest}.sock`,
   );
-}
-
-export function getAgentViewSupervisorStaleSocketPath(
-  socketPath: string,
-  marker = `${process.pid}`,
-): string {
-  const safeMarker = marker.replace(/[^a-zA-Z0-9._-]/g, '_');
-  if (socketPath.startsWith('\\\\.\\pipe\\')) {
-    return `\\\\.\\pipe\\qwen-agent-view-stale-${shortHash(
-      `${socketPath}:${safeMarker}`,
-    )}`;
+  if (Buffer.byteLength(fallbackPath) < UNIX_SOCKET_PATH_LIMIT) {
+    return fallbackPath;
   }
 
-  const candidate = `${socketPath}.stale-${safeMarker}`;
-  if (Buffer.byteLength(candidate) < UNIX_SOCKET_PATH_LIMIT) {
-    return candidate;
+  const compactPath = path.join(
+    options.runtimeDir ?? os.tmpdir(),
+    uid === undefined ? `qav-${digest.slice(0, 8)}` : `qav-${uid}`,
+    `${digest}.sock`,
+  );
+  if (Buffer.byteLength(compactPath) < UNIX_SOCKET_PATH_LIMIT) {
+    return compactPath;
   }
-
-  return path.join(
-    path.dirname(socketPath),
-    `qwen-agent-view-stale-${shortHash(`${socketPath}:${safeMarker}`)}.sock`,
+  throw new Error(
+    `Agent View supervisor socket path is too long: ${compactPath}`,
   );
 }
 
@@ -195,7 +220,27 @@ class AgentViewSupervisorProcessHandler
     this.workers = new WorkerRegistry(
       options,
       () => this.notifyChanged(),
-      (sessionId) => this.pendingWorkerControls.delete(sessionId),
+      (sessionId) => {
+        this.pendingWorkerControls.delete(sessionId);
+        void clearPersistedPromptQueue(sessionId, this.store)
+          .then((changed) => {
+            if (changed) this.notifyChanged();
+          })
+          .catch(() => {});
+      },
+      (sessionId) => {
+        // prompt/answer controls hold accepted user input and survive a
+        // worker replacement; superseded stop/redraw controls must not
+        // reach the replacement worker.
+        const kept = (this.pendingWorkerControls.get(sessionId) ?? []).filter(
+          (event) => event.type === 'prompt' || event.type === 'answer',
+        );
+        if (kept.length > 0) {
+          this.pendingWorkerControls.set(sessionId, kept);
+        } else {
+          this.pendingWorkerControls.delete(sessionId);
+        }
+      },
     );
   }
 
@@ -223,22 +268,34 @@ class AgentViewSupervisorProcessHandler
   async list(params?: Record<string, unknown>) {
     const store = this.store;
     const snapshots = [];
+    let changed = false;
     for (const snapshot of (
-      await this.snapshotCache.list(store, Date.now())
-    ).filter((snapshot) => snapshot.state.ownership !== 'unmanaged')) {
-      const state = await this.workers.refreshMissingWorkerState(
-        snapshot.state,
-      );
-      if (state !== snapshot.state) {
-        this.snapshotCache.markDirty();
-      }
-      const activity = await clearStalePendingPromptIfNeeded(
-        state,
-        snapshot.activity,
+      await this.snapshotCache.list(
         store,
-      );
-      if (activity !== snapshot.activity) {
-        this.snapshotCache.markDirty();
+        (this.options.now?.() ?? new Date()).getTime(),
+      )
+    ).filter((snapshot) => snapshot.state.ownership !== 'unmanaged')) {
+      let state = snapshot.state;
+      let activity = snapshot.activity;
+      try {
+        state = await this.workers.refreshMissingWorkerState(snapshot.state);
+        activity = await clearStalePendingPromptIfNeeded(
+          state,
+          snapshot.activity,
+          store,
+          this.hasPendingWorkerInputControl(snapshot.sessionId),
+          this.workers.has(snapshot.sessionId),
+          this.startedAt,
+        );
+      } catch {
+        // Per-session healing is best-effort: one unreadable session
+        // directory must not reject the whole listing — fall back to the
+        // cached snapshot and continue.
+        state = snapshot.state;
+        activity = snapshot.activity;
+      }
+      if (state !== snapshot.state || activity !== snapshot.activity) {
+        changed = true;
       }
       snapshots.push({
         ...snapshot,
@@ -246,14 +303,20 @@ class AgentViewSupervisorProcessHandler
         activity,
       });
     }
+    if (changed) {
+      this.notifyChanged();
+    }
     const cwd = typeof params?.['cwd'] === 'string' ? params['cwd'] : undefined;
     if (!cwd) return snapshots;
     const resolvedCwd = path.resolve(cwd);
+    const descendantPrefix = resolvedCwd.endsWith(path.sep)
+      ? resolvedCwd
+      : `${resolvedCwd}${path.sep}`;
     return snapshots.filter(
       (snapshot) =>
         snapshot.state.projectCwd === resolvedCwd ||
         snapshot.state.activeCwd === resolvedCwd ||
-        snapshot.state.activeCwd.startsWith(`${resolvedCwd}${path.sep}`),
+        snapshot.state.activeCwd.startsWith(descendantPrefix),
     );
   }
   subscribe(
@@ -290,12 +353,15 @@ class AgentViewSupervisorProcessHandler
     const result = await dispatchAgentViewSession(prompt, cwd, {
       ...store,
       sidebandEndpoint: this.socketPath,
+      publishRoster: false,
+      promptInArgv: !shouldWaitForWorkerReady(this.options),
     });
     const launch = await readAgentViewLaunch(result.sessionId, store);
     if (!launch) {
       throw new Error('Agent View dispatch launch record was not written.');
     }
 
+    let readyCompleted = false;
     try {
       const ready = this.workers.waitForWorkerReadyIfNeeded(
         result.sessionId,
@@ -303,6 +369,7 @@ class AgentViewSupervisorProcessHandler
       );
       void ready.catch(() => {});
       const host = await this.workers.launchPtyHostForSupervisor(launch, store);
+      await ensureSessionStillLaunchable(result.sessionId, store, host);
       this.workers.set(result.sessionId, host);
       await writeAgentViewWorker(
         result.sessionId,
@@ -319,180 +386,262 @@ class AgentViewSupervisorProcessHandler
         store,
       );
       await ready;
+      readyCompleted = true;
+      await ensureSessionStillLaunchable(result.sessionId, store);
+      if (shouldWaitForWorkerReady(this.options)) {
+        await this.queuePromptForSession(result.sessionId, prompt);
+      }
+      const state = await readAgentViewSessionState(result.sessionId, store);
+      const publishedAt = new Date().toISOString();
+      try {
+        await upsertAgentViewRosterEntry(
+          {
+            sessionId: result.sessionId,
+            projectCwd: launch.projectCwd,
+            activeCwd: launch.activeCwd,
+            createdAt: state?.createdAt ?? publishedAt,
+            updatedAt: publishedAt,
+          },
+          store,
+        );
+      } catch {
+        // The worker is already running and ready; a roster publication
+        // failure must not fail the dispatch or orphan the live worker.
+      }
       this.notifyChanged();
       return result;
     } catch (error) {
-      this.workers.rejectPendingWorkerReady(result.sessionId, error);
-      this.workers.terminateSession(result.sessionId, 'SIGTERM');
-      await markFailedSession(result.sessionId, error, store);
-      this.notifyChanged();
+      if (!readyCompleted) {
+        if (isStoppedError(error)) {
+          // A deliberate stop during the ready wait must not be mislabeled
+          // as a launch failure. If the racing stop found no host and no
+          // stored pid to signal, it queued no stop control, so nothing
+          // graceful will ever reach the just-launched host —
+          // terminate it. A pending stop control means a graceful stop is
+          // already in flight and must not be hard-killed.
+          if (!this.hasPendingWorkerStopControl(result.sessionId)) {
+            this.workers.terminateSession(result.sessionId, 'SIGTERM');
+          }
+          await markStoppedSession(result.sessionId, store, 'exited');
+        } else {
+          this.workers.rejectPendingWorkerReady(result.sessionId, error);
+          this.workers.terminateSession(result.sessionId, 'SIGTERM');
+          await markFailedSession(result.sessionId, error, store);
+        }
+        this.notifyChanged();
+      }
       throw error;
     }
   }
   async adopt(params?: Record<string, unknown>) {
     const adoption = parseAdoptParams(params);
     const store = this.store;
-    const existingState = await readAgentViewSessionState(
-      adoption.sessionId,
-      store,
-    );
-    if (
-      existingState?.ownership === 'managed' ||
-      existingState?.ownership === 'adopting'
-    ) {
-      return {
-        sessionId: adoption.sessionId,
-        adopted: false,
-        alreadyManaged: true,
-      };
-    }
-    if (this.workers.has(adoption.sessionId)) {
-      throw new Error(
-        `Agent View session ${adoption.sessionId} is already running.`,
+    return this.workers.withHostSetupLock(adoption.sessionId, async () => {
+      const existingState = await readAgentViewSessionState(
+        adoption.sessionId,
+        store,
       );
-    }
-
-    const token = randomUUID();
-    const now = new Date().toISOString();
-    const activeCwd = path.resolve(adoption.activeCwd);
-    const projectCwd = activeCwd;
-    const createdAt = existingState?.createdAt ?? now;
-    const adoptingState = {
-      schemaVersion: 1 as const,
-      sessionId: adoption.sessionId,
-      ownership: 'adopting' as const,
-      sessionState: 'idle' as const,
-      processState: 'starting' as const,
-      attachState: 'detached' as const,
-      projectCwd,
-      originalCwd: activeCwd,
-      activeCwd,
-      createdAt,
-      updatedAt: now,
-      worktree: { mode: 'none' as const },
-    };
-
-    await writeAgentViewSessionState(adoptingState, store);
-    await writeAgentViewLaunch(
-      {
-        schemaVersion: 1,
-        sessionId: adoption.sessionId,
-        argv: buildResumeWorkerArgv(adoption.sessionId),
-        env: createAgentViewWorkerSidebandEnv({
+      if (existingState?.ownership === 'managed') {
+        return {
           sessionId: adoption.sessionId,
-          sidebandEndpoint: this.socketPath,
-          token,
-          activeCwd,
-        }),
-        entrypoint: getCurrentQwenCliEntrypoint(),
-        projectCwd,
-        activeCwd,
-        ...(adoption.approvalMode
-          ? { approvalMode: adoption.approvalMode }
-          : {}),
-        ...(adoption.sandbox ? { sandbox: adoption.sandbox } : {}),
-        includeDirectories: [],
-        terminal: adoption.terminal,
-      },
-      store,
-    );
-    await writeAgentViewActivity(
-      adoption.sessionId,
-      {
-        schemaVersion: 1,
-        summary: 'Backgrounded from native session',
-        lastActivityAt: now,
-        capabilities: [],
-      },
-      store,
-    );
-    await writeAgentViewWorker(
-      adoption.sessionId,
-      {
-        schemaVersion: 1,
-        endpoint: this.socketPath,
-        tokenDigest: digestToken(token),
-        protocolVersion: AGENT_VIEW_PROTOCOL_VERSION,
-        platform: process.platform,
-        recentOutputBytes: 0,
-      },
-      store,
-    );
-    await upsertAgentViewRosterEntry(
-      {
+          adopted: false,
+          alreadyManaged: true,
+        };
+      }
+      if (existingState?.ownership === 'adopting') {
+        const worker = await readAgentViewWorker(adoption.sessionId, store);
+        if (
+          this.workers.has(adoption.sessionId) ||
+          isPidRunning(worker?.hostPid) ||
+          isPidRunning(worker?.workerPid)
+        ) {
+          return {
+            sessionId: adoption.sessionId,
+            adopted: false,
+            alreadyManaged: true,
+          };
+        }
+        // Stale 'adopting' left by a supervisor crash mid-adopt: no live host
+        // or worker process remains, so allow the session to be re-adopted.
+      }
+      if (this.workers.has(adoption.sessionId)) {
+        throw new Error(
+          `Agent View session ${adoption.sessionId} is already running.`,
+        );
+      }
+
+      const token = randomUUID();
+      const now = new Date().toISOString();
+      const activeCwd = path.resolve(adoption.activeCwd);
+      const projectCwd = path.resolve(adoption.projectCwd);
+      const createdAt = existingState?.createdAt ?? now;
+      const adoptingState = {
+        schemaVersion: 1 as const,
         sessionId: adoption.sessionId,
+        ownership: 'adopting' as const,
+        sessionState: 'idle' as const,
+        processState: 'starting' as const,
+        attachState: 'detached' as const,
         projectCwd,
+        originalCwd: activeCwd,
         activeCwd,
         createdAt,
         updatedAt: now,
-      },
-      store,
-    );
+        worktree: { mode: 'none' as const },
+      };
 
-    try {
-      const launch = await readAgentViewLaunch(adoption.sessionId, store);
-      if (!launch) {
-        throw new Error('Agent View adoption launch record was not written.');
-      }
-      const ready = this.workers.waitForWorkerReadyIfNeeded(
-        adoption.sessionId,
-        activeCwd,
-      );
-      void ready.catch(() => {});
-      const host = await this.workers.launchPtyHostForSupervisor(launch, store);
-      this.workers.set(adoption.sessionId, host);
-      await writeAgentViewSessionState(
-        {
-          ...adoptingState,
-          ownership: 'managed',
-          sessionState: 'starting',
-          processState: 'starting',
-          updatedAt: new Date().toISOString(),
-        },
-        store,
-      );
-      await writeAgentViewWorker(
-        adoption.sessionId,
-        {
-          schemaVersion: 1,
-          hostPid: host.pid,
-          workerPid: host.workerPid,
-          ...(host.endpoint ? { hostEndpoint: host.endpoint } : {}),
-          ...(host.authToken ? { hostAuthToken: host.authToken } : {}),
-          protocolVersion: AGENT_VIEW_PROTOCOL_VERSION,
-          platform: process.platform,
-          recentOutputBytes: 0,
-        },
-        store,
-      );
-      await ready;
-      this.notifyChanged();
-      return { sessionId: adoption.sessionId, adopted: true };
-    } catch (error) {
-      this.workers.rejectPendingWorkerReady(adoption.sessionId, error);
-      this.workers.terminateSession(adoption.sessionId, 'SIGTERM');
-      const failedAt = new Date().toISOString();
-      await writeAgentViewSessionState(
-        existingState ?? {
-          ...adoptingState,
-          ownership: 'unmanaged',
-          processState: 'exited',
-          updatedAt: failedAt,
-          lastError: {
-            code: 'adoption_failed',
-            message:
-              error instanceof Error
-                ? error.message
-                : 'Agent View adoption failed.',
-            at: failedAt,
+      try {
+        await writeAgentViewSessionState(adoptingState, store);
+        await writeAgentViewLaunch(
+          {
+            schemaVersion: 1,
+            sessionId: adoption.sessionId,
+            argv: buildResumeWorkerArgv(adoption.sessionId),
+            env: createAgentViewWorkerSidebandEnv({
+              sessionId: adoption.sessionId,
+              sidebandEndpoint: this.socketPath,
+              token,
+              activeCwd,
+            }),
+            entrypoint: getCurrentQwenCliEntrypoint(),
+            projectCwd,
+            activeCwd,
+            ...(adoption.approvalMode
+              ? { approvalMode: adoption.approvalMode }
+              : {}),
+            ...(adoption.sandbox ? { sandbox: adoption.sandbox } : {}),
+            includeDirectories: [],
+            terminal: adoption.terminal,
           },
-        },
-        store,
-      );
-      await removeAgentViewRosterEntry(adoption.sessionId, store);
-      this.notifyChanged();
-      throw error;
-    }
+          store,
+        );
+        await writeAgentViewActivity(
+          adoption.sessionId,
+          {
+            schemaVersion: 1,
+            summary: 'Backgrounded from native session',
+            lastActivityAt: now,
+            capabilities: [],
+          },
+          store,
+        );
+        await writeAgentViewWorker(
+          adoption.sessionId,
+          {
+            schemaVersion: 1,
+            endpoint: this.socketPath,
+            tokenDigest: digestAgentViewWorkerToken(token),
+            protocolVersion: AGENT_VIEW_PROTOCOL_VERSION,
+            platform: process.platform,
+            recentOutputBytes: 0,
+          },
+          store,
+        );
+        await upsertAgentViewRosterEntry(
+          {
+            sessionId: adoption.sessionId,
+            projectCwd,
+            activeCwd,
+            createdAt,
+            updatedAt: now,
+          },
+          store,
+        );
+        const launch = await readAgentViewLaunch(adoption.sessionId, store);
+        if (!launch) {
+          throw new Error('Agent View adoption launch record was not written.');
+        }
+        const ready = this.workers.waitForWorkerReadyIfNeeded(
+          adoption.sessionId,
+          activeCwd,
+        );
+        void ready.catch(() => {});
+        const host = await this.workers.launchPtyHostForSupervisor(
+          launch,
+          store,
+        );
+        await ensureSessionStillLaunchable(adoption.sessionId, store, host);
+        this.workers.set(adoption.sessionId, host);
+        const latestState =
+          (await readAgentViewSessionState(adoption.sessionId, store)) ??
+          adoptingState;
+        await patchAgentViewSessionState(
+          adoption.sessionId,
+          {
+            ownership: 'managed',
+            sessionState:
+              latestState.processState === 'alive'
+                ? latestState.sessionState
+                : 'starting',
+            processState:
+              latestState.processState === 'alive' ? 'alive' : 'starting',
+            attachState: 'detached',
+            updatedAt: new Date().toISOString(),
+          },
+          store,
+        );
+        await writeAgentViewWorker(
+          adoption.sessionId,
+          {
+            schemaVersion: 1,
+            hostPid: host.pid,
+            workerPid: host.workerPid,
+            ...(host.endpoint ? { hostEndpoint: host.endpoint } : {}),
+            ...(host.authToken ? { hostAuthToken: host.authToken } : {}),
+            protocolVersion: AGENT_VIEW_PROTOCOL_VERSION,
+            platform: process.platform,
+            recentOutputBytes: 0,
+          },
+          store,
+        );
+        await ready;
+        await ensureSessionStillLaunchable(adoption.sessionId, store);
+        this.notifyChanged();
+        return { sessionId: adoption.sessionId, adopted: true };
+      } catch (error) {
+        if (isStoppedError(error)) {
+          // A deliberate stop during the adopt ready wait must not be
+          // mislabeled as an adoption failure — matching dispatch()'s
+          // catch, including terminating the host a racing stop could not
+          // reach (no stop control was queued for it).
+          if (!this.hasPendingWorkerStopControl(adoption.sessionId)) {
+            this.workers.terminateSession(adoption.sessionId, 'SIGTERM');
+          }
+          await markStoppedSession(adoption.sessionId, store, 'exited');
+        } else {
+          this.workers.rejectPendingWorkerReady(adoption.sessionId, error);
+          this.workers.terminateSession(adoption.sessionId, 'SIGTERM');
+          const failedAt = new Date().toISOString();
+          // Never restore a stale 'adopting' record: re-persisting it would
+          // lock the session out of every managed operation. Fall through to
+          // the terminal adoption_failed state so a later adopt can retry.
+          const restorableState =
+            existingState && existingState.ownership !== 'adopting'
+              ? existingState
+              : undefined;
+          await writeAgentViewSessionState(
+            restorableState ?? {
+              ...adoptingState,
+              ownership: 'unmanaged',
+              processState: 'exited',
+              updatedAt: failedAt,
+              lastError: {
+                code: 'adoption_failed',
+                message:
+                  error instanceof Error
+                    ? error.message
+                    : 'Agent View adoption failed.',
+                at: failedAt,
+              },
+            },
+            store,
+          );
+        }
+        await removeAgentViewRosterEntry(adoption.sessionId, store);
+        this.notifyChanged();
+        throw error;
+      }
+    });
   }
   async workerEvent(params?: Record<string, unknown>) {
     const event = parseWorkerEvent(params);
@@ -511,8 +660,13 @@ class AgentViewSupervisorProcessHandler
       await applyWorkerHeartbeatEvent(event, this.store);
       return { sessionId: event.sessionId, accepted: true };
     }
+    let applied = true;
     try {
-      await applyWorkerEvent(event, this.store);
+      applied = await applyWorkerEvent(
+        event,
+        this.store,
+        this.hasPendingWorkerInputControl(event.sessionId),
+      );
     } catch (error) {
       if (event.type === 'ready') {
         this.workers.rejectPendingWorkerReady(event.sessionId, error);
@@ -520,7 +674,16 @@ class AgentViewSupervisorProcessHandler
       throw error;
     }
     if (event.type === 'ready') {
-      this.workers.resolvePendingWorkerReady(event.sessionId);
+      if (applied) {
+        this.workers.resolvePendingWorkerReady(event.sessionId);
+      } else {
+        // The ready was dropped (dead-worker guard or in-queue re-validation):
+        // fail the waiter fast instead of hanging until the ready timeout.
+        this.workers.rejectPendingWorkerReady(
+          event.sessionId,
+          new AgentViewSessionStoppedError(event.sessionId, 'worker'),
+        );
+      }
     }
     this.notifyChanged();
     return { sessionId: event.sessionId, accepted: true };
@@ -555,6 +718,10 @@ class AgentViewSupervisorProcessHandler
     requestId: string,
   ): Promise<boolean> {
     try {
+      const state = await readAgentViewSessionState(sessionId, this.store);
+      if (state) {
+        await this.detachIfAttachIsStale(state);
+      }
       if (await this.workers.respawnStoppedOrFailedSessionIfNeeded(sessionId)) {
         this.notifyChanged();
       }
@@ -650,16 +817,25 @@ class AgentViewSupervisorProcessHandler
     if (!state) {
       throw new Error(`No Agent View session found for ${sessionId}.`);
     }
+    const storedActivity = await readAgentViewActivity(sessionId, store);
     const activity = await clearStalePendingPromptIfNeeded(
       state,
-      await readAgentViewActivity(sessionId, store),
+      storedActivity,
       store,
+      this.hasPendingWorkerInputControl(sessionId),
+      this.workers.has(sessionId),
+      this.startedAt,
     );
+    if (activity !== storedActivity) {
+      this.notifyChanged();
+    }
     return {
       sessionId,
       state,
       activity,
-      worker: await readAgentViewWorker(sessionId, store),
+      worker: redactAgentViewWorker(
+        await readAgentViewWorker(sessionId, store),
+      ),
       live: this.workers.has(sessionId),
     };
   }
@@ -724,8 +900,9 @@ class AgentViewSupervisorProcessHandler
       const results = [];
       for (const state of states) {
         if (state.ownership !== 'managed') continue;
+        const attachRefreshedState = await this.detachIfAttachIsStale(state);
         const refreshedState =
-          await this.workers.refreshMissingWorkerState(state);
+          await this.workers.refreshMissingWorkerState(attachRefreshedState);
         const blockReason = getRespawnBlockReason(
           refreshedState,
           await readAgentViewActivity(state.sessionId, this.store),
@@ -738,7 +915,15 @@ class AgentViewSupervisorProcessHandler
           });
           continue;
         }
-        results.push(await this.workers.respawnSession(state.sessionId));
+        try {
+          results.push(await this.workers.respawnSession(state.sessionId));
+        } catch (error) {
+          results.push({
+            sessionId: state.sessionId,
+            skipped: true,
+            reason: error instanceof Error ? error.message : String(error),
+          });
+        }
       }
       this.notifyChanged();
       return { all: true, results };
@@ -747,6 +932,10 @@ class AgentViewSupervisorProcessHandler
       requireSessionId(params),
       this.store,
     );
+    const state = await readAgentViewSessionState(sessionId, this.store);
+    if (state) {
+      await this.detachIfAttachIsStale(state);
+    }
     const result = await this.workers.respawnSession(sessionId);
     this.notifyChanged();
     return result;
@@ -757,8 +946,8 @@ class AgentViewSupervisorProcessHandler
       requireSessionId(params),
       store,
     );
+    await this.workers.killSession(sessionId, 'SIGTERM');
     const state = await readAgentViewSessionState(sessionId, store);
-    this.workers.terminateSession(sessionId, 'SIGTERM');
     if (state) {
       await writeAgentViewSessionState(
         {
@@ -783,15 +972,19 @@ class AgentViewSupervisorProcessHandler
     const pinned =
       typeof params?.['pinned'] === 'boolean' ? params['pinned'] : undefined;
     const now = new Date().toISOString();
-    const entry = await updateAgentViewRosterEntry(
-      sessionId,
-      (current) => ({
-        ...current,
-        pinned: pinned ?? !current.pinned,
-        updatedAt: now,
-      }),
-      store,
-    );
+    const update = (current: AgentViewRosterEntry): AgentViewRosterEntry => ({
+      ...current,
+      pinned: pinned ?? !current.pinned,
+      updatedAt: now,
+    });
+    let entry = await updateAgentViewRosterEntry(sessionId, update, store);
+    if (!entry) {
+      // The dispatch-time roster publication is best-effort (it must not
+      // fail a live dispatch); heal the missing entry lazily so pin/rename
+      // do not wedge forever after a transient roster write failure.
+      await this.republishMissingRosterEntry(sessionId);
+      entry = await updateAgentViewRosterEntry(sessionId, update, store);
+    }
     if (!entry) {
       throw new Error(`No Agent View roster entry found for ${sessionId}.`);
     }
@@ -809,29 +1002,46 @@ class AgentViewSupervisorProcessHandler
         ? params['displayName'].trim()
         : '';
     const now = new Date().toISOString();
-    const entry = await updateAgentViewRosterEntry(
-      sessionId,
-      (current) => {
-        const next = {
-          ...current,
-          updatedAt: now,
+    const update = (current: AgentViewRosterEntry): AgentViewRosterEntry => {
+      const next = {
+        ...current,
+        updatedAt: now,
+      };
+      if (displayName) {
+        return {
+          ...next,
+          displayName,
         };
-        if (displayName) {
-          return {
-            ...next,
-            displayName,
-          };
-        }
-        delete next.displayName;
-        return next;
-      },
-      store,
-    );
+      }
+      delete next.displayName;
+      return next;
+    };
+    let entry = await updateAgentViewRosterEntry(sessionId, update, store);
+    if (!entry) {
+      await this.republishMissingRosterEntry(sessionId);
+      entry = await updateAgentViewRosterEntry(sessionId, update, store);
+    }
     if (!entry) {
       throw new Error(`No Agent View roster entry found for ${sessionId}.`);
     }
     this.notifyChanged();
     return { sessionId, displayName: entry.displayName ?? '' };
+  }
+  private async republishMissingRosterEntry(sessionId: string): Promise<void> {
+    const state = await readAgentViewSessionState(sessionId, this.store);
+    if (!state) {
+      return;
+    }
+    await upsertAgentViewRosterEntry(
+      {
+        sessionId,
+        projectCwd: state.projectCwd,
+        activeCwd: state.activeCwd,
+        createdAt: state.createdAt,
+        updatedAt: new Date().toISOString(),
+      },
+      this.store,
+    );
   }
   async shutdown(params?: Record<string, unknown>) {
     if (params?.['keepWorkers'] === true) {
@@ -887,23 +1097,106 @@ class AgentViewSupervisorProcessHandler
   private async hibernateIdleSessionsWithPolicy(
     policy: ReturnType<typeof getHibernationPolicy>,
   ): Promise<AgentViewSupervisorHibernationResult> {
-    if (!policy.enabled) {
-      return { hibernated: [] };
-    }
-
     const snapshots = await listAgentViewSessionSnapshots(this.store);
     const nowMs = (this.options.now?.() ?? new Date()).getTime();
     const hibernated: string[] = [];
     for (const snapshot of snapshots) {
       const host = this.workers.get(snapshot.sessionId);
-      if (!host || !canHibernateSession(snapshot, nowMs, policy.idleMs)) {
+      if (!host) {
+        await this.workers.refreshMissingWorkerState(snapshot.state);
+        continue;
+      }
+      if (
+        this.hasLiveAttach(snapshot.sessionId) ||
+        this.hasPendingWorkerInputControl(snapshot.sessionId) ||
+        this.hasPendingWorkerStopControl(snapshot.sessionId) ||
+        !canHibernateSession(snapshot, nowMs, policy.idleMs)
+      ) {
         continue;
       }
 
-      await markSessionHibernating(snapshot.state, this.store);
-      await this.workers.shutdownHost(snapshot.sessionId, host);
-      await markSessionHibernated(snapshot.state, this.store);
-      hibernated.push(snapshot.sessionId);
+      const didHibernate = await this.workers.withHostSetupLock(
+        snapshot.sessionId,
+        async () => {
+          // Re-check inside the lock: a concurrent dispatch or respawn
+          // may have changed the session between the snapshot and now.
+          if (
+            this.hasLiveAttach(snapshot.sessionId) ||
+            this.hasPendingWorkerInputControl(snapshot.sessionId) ||
+            this.hasPendingWorkerStopControl(snapshot.sessionId)
+          ) {
+            return false;
+          }
+          // Re-verify the pin inside the lock: the snapshot's rosterEntry
+          // comes from a soft-fail join, so a transient roster read error
+          // must not silently void the user's keep-alive opt-out. An
+          // unreadable roster fails closed (skip this candidate).
+          let roster;
+          try {
+            roster = await readAgentViewRosterForWrite(this.store);
+          } catch {
+            return false;
+          }
+          if (
+            roster.sessions.some(
+              (entry) =>
+                entry.pinned &&
+                sanitizeSessionId(entry.sessionId) === snapshot.sessionId,
+            )
+          ) {
+            return false;
+          }
+          if (!(await markSessionHibernating(snapshot.state, this.store))) {
+            return false;
+          }
+          const latestState = await readAgentViewSessionState(
+            snapshot.sessionId,
+            this.store,
+          );
+          const latestActivity = await readAgentViewActivity(
+            snapshot.sessionId,
+            this.store,
+          );
+          if (
+            !latestState ||
+            latestState.sessionState === 'stopped' ||
+            latestState.sessionState === 'working' ||
+            latestState.processState !== 'hibernating' ||
+            this.hasLiveAttach(snapshot.sessionId) ||
+            this.hasPendingWorkerInputControl(snapshot.sessionId) ||
+            this.hasPendingWorkerStopControl(snapshot.sessionId) ||
+            hasPendingPrompt(latestActivity) ||
+            // Re-run the idle-window freshness check against the re-read
+            // record: activity a worker reported since the pre-lock
+            // snapshot makes hibernating now cost the user a respawn.
+            (latestActivity?.lastActivityAt !== undefined &&
+              nowMs - Date.parse(latestActivity.lastActivityAt) < policy.idleMs)
+          ) {
+            if (latestState?.processState === 'hibernating') {
+              // Flip back inside the queued mutation: a concurrent stop
+              // verdict enqueued between the re-read above and this
+              // rollback must not be re-asserted away by a stale snapshot.
+              await patchAgentViewSessionStateIf(
+                snapshot.sessionId,
+                (existing) =>
+                  existing.processState === 'hibernating'
+                    ? {
+                        processState: 'alive',
+                        updatedAt: new Date().toISOString(),
+                      }
+                    : undefined,
+                this.store,
+              );
+            }
+            return false;
+          }
+          await this.workers.shutdownHost(snapshot.sessionId, host);
+          return markSessionHibernated(snapshot.state, this.store);
+        },
+      );
+      if (didHibernate) {
+        hibernated.push(snapshot.sessionId);
+      }
     }
 
     return { hibernated };
@@ -912,7 +1205,7 @@ class AgentViewSupervisorProcessHandler
   private async shouldAutoExitAfterHibernation(
     policy: ReturnType<typeof getHibernationPolicy>,
   ): Promise<boolean> {
-    if (!policy.enabled || !policy.autoExit) {
+    if (!policy.autoExit) {
       return false;
     }
     pruneClosedSockets(this.subscribers);
@@ -922,6 +1215,44 @@ class AgentViewSupervisorProcessHandler
     }
 
     const states = await listAgentViewSessionStates(this.store);
+    // Reconcile ghost 'adopting' records left by a supervisor that died
+    // mid-adoption: nothing will ever finish them, so they must not block
+    // auto-exit forever. A live adoption holds a fresh starting record and
+    // its own ready timeout bounds how long it can stay that way.
+    const adoptingInFlight: AgentViewSessionStateFile[] = [];
+    for (const state of states) {
+      if (state.ownership !== 'adopting') {
+        continue;
+      }
+      if (
+        isStaleStartingState(state, this.options) ||
+        !isAliveProcessState(state.processState)
+      ) {
+        const failedAt = new Date().toISOString();
+        await writeAgentViewSessionState(
+          {
+            ...state,
+            ownership: 'unmanaged',
+            processState: 'exited',
+            updatedAt: failedAt,
+            lastError: {
+              code: 'adoption_failed',
+              message: 'Agent View adoption did not complete.',
+              at: failedAt,
+            },
+          },
+          this.store,
+        );
+        await removeAgentViewRosterEntry(state.sessionId, this.store);
+        continue;
+      }
+      adoptingInFlight.push(state);
+    }
+    // An adoption in flight launches a detached host and waits for ready; do
+    // not auto-exit underneath it.
+    if (adoptingInFlight.length > 0) {
+      return false;
+    }
     const managed = states.filter((state) => state.ownership === 'managed');
     return (
       states.length > 0 &&
@@ -934,18 +1265,6 @@ class AgentViewSupervisorProcessHandler
     socket: Socket,
     requestId: string,
   ): Promise<void> {
-    await requireKnownSession(sessionId, this.store);
-    const host = this.workers.get(sessionId);
-    if (!host) {
-      writeAttachError(
-        socket,
-        requestId,
-        'not_running',
-        `Agent View session ${sessionId} is not running.`,
-      );
-      return;
-    }
-
     const leaseResult = this.attachLeases.acquire(sessionId);
     if (!leaseResult.ok) {
       writeAttachError(
@@ -957,12 +1276,36 @@ class AgentViewSupervisorProcessHandler
       return;
     }
 
+    try {
+      await requireKnownSession(sessionId, this.store);
+    } catch (error) {
+      this.attachLeases.release(sessionId, leaseResult.lease.leaseId);
+      throw error;
+    }
+    const host = this.workers.get(sessionId);
+    if (!host) {
+      this.attachLeases.release(sessionId, leaseResult.lease.leaseId);
+      writeAttachError(
+        socket,
+        requestId,
+        'not_running',
+        `Agent View session ${sessionId} is not running.`,
+      );
+      return;
+    }
+
     const controller = new AbortController();
     socket.once('close', () => controller.abort());
+    void host.exited
+      .catch(() => {})
+      .finally(() => {
+        controller.abort();
+      });
     const heartbeat = setInterval(() => {
       this.attachLeases.heartbeat(sessionId, leaseResult.lease.leaseId);
     }, DEFAULT_ATTACH_LEASE_HEARTBEAT_MS);
     heartbeat.unref?.();
+    let bridged = false;
     try {
       await writeAttachState(sessionId, 'attached', this.store);
       this.attachSockets.set(sessionId, socket);
@@ -974,6 +1317,7 @@ class AgentViewSupervisorProcessHandler
         })}\n`,
       );
       this.queueWorkerRedraw(sessionId);
+      bridged = true;
       await bridgeAgentViewTerminal({
         stdin: socket,
         stdout: socket,
@@ -986,8 +1330,17 @@ class AgentViewSupervisorProcessHandler
         this.attachSockets.delete(sessionId);
       }
       this.attachLeases.release(sessionId, leaseResult.lease.leaseId);
-      await writeAttachState(sessionId, 'detached', this.store);
-      socket.end();
+      if (bridged) {
+        try {
+          await writeAttachState(sessionId, 'detached', this.store);
+        } catch {
+          // Best-effort: a store error during detach must not mask
+          // the original error from the try block.
+        }
+        socket.end();
+      }
+      // Pre-bridge failure: leave the socket open so the RPC layer can
+      // deliver the structured error envelope instead of a bare EOF.
     }
   }
 
@@ -1024,16 +1377,39 @@ class AgentViewSupervisorProcessHandler
     sessionId: string,
     text: string,
   ): Promise<void> {
-    const state = await readAgentViewSessionState(sessionId, this.store);
+    let state = await readAgentViewSessionState(sessionId, this.store);
     if (!state) {
       throw new Error(`No Agent View session found for ${sessionId}.`);
+    }
+    if (state.attachState === 'attached') {
+      state = await this.detachIfAttachIsStale(state);
     }
     if (state.attachState === 'attached') {
       throw new Error(
         `Agent View session ${sessionId} is currently attached elsewhere.`,
       );
     }
-    const activity = await readAgentViewActivity(sessionId, this.store);
+
+    const respawnedStoppedOrFailed =
+      await this.workers.respawnStoppedOrFailedSessionIfNeeded(sessionId);
+    if (respawnedStoppedOrFailed) {
+      state = await readAgentViewSessionState(sessionId, this.store);
+      if (!state) {
+        throw new Error(`No Agent View session found for ${sessionId}.`);
+      }
+    }
+    // Heal a dead-but-non-terminal session (e.g. persisted 'working' after a
+    // daemon restart) so its orphaned pending-prompt marker can be cleared.
+    state = await this.workers.refreshMissingWorkerState(state);
+
+    const activity = await clearStalePendingPromptIfNeeded(
+      state,
+      await readAgentViewActivity(sessionId, this.store),
+      this.store,
+      this.hasPendingWorkerInputControl(sessionId),
+      this.workers.has(sessionId),
+      this.startedAt,
+    );
     if (
       hasPendingPrompt(activity) ||
       this.hasPendingWorkerInputControl(sessionId)
@@ -1042,18 +1418,53 @@ class AgentViewSupervisorProcessHandler
         `Agent View session ${sessionId} is waiting for the previous response.`,
       );
     }
-    if (!canAgentViewQueueFollowUp(state, activity)) {
+    if (
+      !respawnedStoppedOrFailed &&
+      !canAgentViewQueueFollowUp(state, activity)
+    ) {
       throw new Error(
         `Agent View session ${sessionId} is not ready for follow-up.`,
       );
     }
 
-    await this.workers.respawnStoppedOrFailedSessionIfNeeded(sessionId);
+    if (!this.workers.has(sessionId)) {
+      await this.workers.reconnectSessionHost(sessionId);
+    }
     if (!this.workers.has(sessionId)) {
       await this.workers.respawnSession(sessionId);
     }
 
+    state = await readAgentViewSessionState(sessionId, this.store);
+    if (!state) {
+      throw new Error(`No Agent View session found for ${sessionId}.`);
+    }
+    if (state.attachState === 'attached') {
+      state = await this.detachIfAttachIsStale(state);
+    }
+    if (state.attachState === 'attached' || this.hasLiveAttach(sessionId)) {
+      throw new Error(
+        `Agent View session ${sessionId} is currently attached elsewhere.`,
+      );
+    }
+
     const now = new Date().toISOString();
+    // Re-read so capabilities a just-respawned worker reported in its ready
+    // event win over the pre-respawn snapshot used for the checks above.
+    const latestActivity = await readAgentViewActivity(sessionId, this.store);
+    // Persist the queue marker before pushing the in-memory control: if
+    // this write fails the RPC rejects with no side effects, and a retry
+    // still passes the pending-prompt checks.
+    await writeAgentViewActivity(
+      sessionId,
+      {
+        schemaVersion: 1,
+        ...getQueuedPromptActivityPatch(text, now),
+        lastActivityAt: now,
+        capabilities:
+          latestActivity?.capabilities ?? activity?.capabilities ?? [],
+      },
+      this.store,
+    );
     const events = this.pendingWorkerControls.get(sessionId) ?? [];
     events.push({
       type: 'prompt',
@@ -1062,16 +1473,6 @@ class AgentViewSupervisorProcessHandler
       at: now,
     });
     this.pendingWorkerControls.set(sessionId, events);
-    await writeAgentViewActivity(
-      sessionId,
-      {
-        schemaVersion: 1,
-        ...getQueuedPromptActivityPatch(text, now),
-        lastActivityAt: now,
-        capabilities: [],
-      },
-      this.store,
-    );
   }
 
   private async withPromptQueueLock(
@@ -1103,9 +1504,12 @@ class AgentViewSupervisorProcessHandler
     sessionId: string,
     text: string,
   ): Promise<void> {
-    const state = await readAgentViewSessionState(sessionId, this.store);
+    let state = await readAgentViewSessionState(sessionId, this.store);
     if (!state) {
       throw new Error(`No Agent View session found for ${sessionId}.`);
+    }
+    if (state.attachState === 'attached') {
+      state = await this.detachIfAttachIsStale(state);
     }
     if (state.attachState === 'attached') {
       throw new Error(
@@ -1125,16 +1529,41 @@ class AgentViewSupervisorProcessHandler
       return;
     }
     if (!this.workers.has(sessionId)) {
+      await this.workers.reconnectSessionHost(sessionId);
+    }
+    if (!this.workers.has(sessionId)) {
       throw new Error(`Agent View session ${sessionId} is not running.`);
     }
-    if (
-      (activity?.waitingFor === 'response' && hasPendingPrompt(activity)) ||
-      this.hasPendingWorkerInputControl(sessionId)
-    ) {
+    state = await readAgentViewSessionState(sessionId, this.store);
+    if (!state) {
+      throw new Error(`No Agent View session found for ${sessionId}.`);
+    }
+    if (state.attachState === 'attached') {
+      state = await this.detachIfAttachIsStale(state);
+    }
+    if (state.attachState === 'attached' || this.hasLiveAttach(sessionId)) {
+      throw new Error(
+        `Agent View session ${sessionId} is currently attached elsewhere.`,
+      );
+    }
+    if (this.hasPendingWorkerInputControl(sessionId)) {
       throw new Error(
         `Agent View session ${sessionId} is waiting for the previous response.`,
       );
     }
+    // Touch the activity record before pushing the in-memory control: if
+    // this write fails the RPC rejects with no side effects, and a retry
+    // still passes the pending-answer checks. Queued answers are
+    // intentionally ephemeral — the in-memory control is their only record.
+    await writeAgentViewActivity(
+      sessionId,
+      {
+        schemaVersion: 1,
+        lastActivityAt: now,
+        capabilities: activity?.capabilities ?? [],
+      },
+      this.store,
+    );
     const events = this.pendingWorkerControls.get(sessionId) ?? [];
     events.push({
       type: 'answer',
@@ -1143,18 +1572,6 @@ class AgentViewSupervisorProcessHandler
       at: now,
     });
     this.pendingWorkerControls.set(sessionId, events);
-    await writeAgentViewActivity(
-      sessionId,
-      {
-        schemaVersion: 1,
-        ...(activity?.waitingFor === 'response'
-          ? getQueuedPromptActivityPatch(text, now)
-          : {}),
-        lastActivityAt: now,
-        capabilities: [],
-      },
-      this.store,
-    );
   }
 
   private hasPendingWorkerInputControl(sessionId: string): boolean {
@@ -1162,24 +1579,60 @@ class AgentViewSupervisorProcessHandler
       (event) => event.type === 'prompt' || event.type === 'answer',
     );
   }
+
+  private hasPendingWorkerStopControl(sessionId: string): boolean {
+    return (this.pendingWorkerControls.get(sessionId) ?? []).some(
+      (event) => event.type === 'stop',
+    );
+  }
+
+  private hasLiveAttach(sessionId: string): boolean {
+    return (
+      this.attachSockets.has(sessionId) ||
+      this.attachLeases.get(sessionId) !== undefined
+    );
+  }
+
+  private async detachIfAttachIsStale(
+    state: AgentViewSessionStateFile,
+  ): Promise<AgentViewSessionStateFile> {
+    if (
+      state.attachState !== 'attached' ||
+      this.attachSockets.has(state.sessionId) ||
+      this.attachLeases.get(state.sessionId)
+    ) {
+      return state;
+    }
+    // Patch only the owned field through the queued mutation: re-asserting
+    // a whole stale snapshot here would erase a concurrent exit verdict.
+    // Keep the original updatedAt: clearing a stale attach flag is a
+    // reconciliation, not a lifecycle change — bumping it would reset the
+    // clock isStaleStartingState uses to recover a stuck starting session.
+    await patchAgentViewSessionState(
+      state.sessionId,
+      { attachState: 'detached' },
+      this.store,
+    );
+    this.notifyChanged();
+    return { ...state, attachState: 'detached' };
+  }
 }
 
 class WorkerRegistry {
   private readonly ptyHosts = new Map<string, AgentViewPtyHostHandle>();
+  private readonly hostSetupQueues = new Map<string, Promise<void>>();
   private readonly pendingWorkerReady = new Map<
     string,
     AgentViewWorkerReadyWaiter
   >();
+  private readonly bootGeneration = new Map<string, number>();
 
   constructor(
     private readonly options: AgentViewSupervisorProcessOptions,
     private readonly onChanged: () => void,
     private readonly onHostReleased: (sessionId: string) => void,
+    private readonly preserveQueuedInputControls: (sessionId: string) => void,
   ) {}
-
-  get size(): number {
-    return this.ptyHosts.size;
-  }
 
   private get store(): AgentViewStoreOptions {
     return storeOptions(this.options);
@@ -1194,23 +1647,35 @@ class WorkerRegistry {
   }
 
   set(sessionId: string, host: AgentViewPtyHostHandle): void {
+    const previous = this.ptyHosts.get(sessionId);
+    if (previous && previous !== host) {
+      previous.kill('SIGTERM');
+    }
     this.ptyHosts.set(sessionId, host);
     this.trackHostExit(sessionId, host);
   }
 
-  delete(sessionId: string): void {
-    if (this.ptyHosts.delete(sessionId)) {
-      this.onHostReleased(sessionId);
-    }
-  }
-
   async stopSession(sessionId: string, queueStop: () => void): Promise<void> {
     const host = await this.getOrReconnectSessionHost(sessionId);
+    const generation = this.bootGeneration.get(sessionId);
+    this.rejectPendingWorkerReady(
+      sessionId,
+      new AgentViewSessionStoppedError(sessionId, 'worker'),
+      generation,
+    );
     if (host) {
       queueStop();
-      await markStoppedSession(sessionId, this.store, 'alive');
       this.scheduleStopFallback(sessionId, host);
+      await markStoppedSession(sessionId, this.store, 'alive');
       return;
+    }
+    const storedWorker = await readAgentViewWorker(sessionId, this.store);
+    const storedPids = [storedWorker?.hostPid, storedWorker?.workerPid].filter(
+      (pid): pid is number => typeof pid === 'number',
+    );
+    if (storedPids.some((pid) => isPidRunning(pid))) {
+      queueStop();
+      this.scheduleStoredStopFallback(sessionId, storedPids);
     }
     await markStoppedSession(sessionId, this.store, 'exited');
   }
@@ -1220,9 +1685,19 @@ class WorkerRegistry {
     signal: NodeJS.Signals = 'SIGTERM',
   ): Promise<void> {
     const host = await this.getOrReconnectSessionHost(sessionId);
+    const generation = this.bootGeneration.get(sessionId);
     host?.kill(signal);
+    this.rejectPendingWorkerReady(
+      sessionId,
+      new AgentViewSessionStoppedError(sessionId, 'worker'),
+      generation,
+    );
+    this.bootGeneration.delete(sessionId);
     if (host && this.ptyHosts.get(sessionId) === host) {
       this.ptyHosts.delete(sessionId);
+      this.onHostReleased(sessionId);
+    } else if (!host) {
+      await this.killStoredWorkerPids(sessionId, signal);
       this.onHostReleased(sessionId);
     }
     await markStoppedSession(sessionId, this.store, 'exited');
@@ -1230,8 +1705,15 @@ class WorkerRegistry {
 
   terminateSession(sessionId: string, signal: NodeJS.Signals): void {
     const host = this.ptyHosts.get(sessionId);
+    const generation = this.bootGeneration.get(sessionId);
     host?.kill(signal);
     if (host) {
+      this.rejectPendingWorkerReady(
+        sessionId,
+        new AgentViewSessionStoppedError(sessionId, 'worker'),
+        generation,
+      );
+      this.bootGeneration.delete(sessionId);
       this.ptyHosts.delete(sessionId);
       this.onHostReleased(sessionId);
     }
@@ -1241,16 +1723,16 @@ class WorkerRegistry {
     sessionId: string,
     host: AgentViewPtyHostHandle,
   ): Promise<void> {
-    await shutdownPtyHost(host);
     if (this.ptyHosts.get(sessionId) === host) {
       this.ptyHosts.delete(sessionId);
       this.onHostReleased(sessionId);
     }
+    await shutdownPtyHost(host);
   }
 
   async shutdownAll(): Promise<number> {
     const entries = Array.from(this.ptyHosts.entries());
-    await Promise.all(
+    await Promise.allSettled(
       entries.map(async ([sessionId, host]) => {
         await this.shutdownHost(sessionId, host);
         await markStoppedSession(sessionId, this.store, 'exited');
@@ -1286,6 +1768,9 @@ class WorkerRegistry {
       new Error(`Agent View worker ${sessionId} was superseded before ready.`),
     );
 
+    const generation = (this.bootGeneration.get(sessionId) ?? 0) + 1;
+    this.bootGeneration.set(sessionId, generation);
+
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pendingWorkerReady.delete(sessionId);
@@ -1297,8 +1782,9 @@ class WorkerRegistry {
       }, this.options.workerReadyTimeoutMs ?? DEFAULT_WORKER_READY_TIMEOUT_MS);
       timeout.unref?.();
       this.pendingWorkerReady.set(sessionId, {
-        expectedCwd: path.resolve(expectedCwd),
+        expectedCwd: resolveSessionCwd(expectedCwd),
         timeout,
+        generation,
         resolve: () => {
           clearTimeout(timeout);
           resolve();
@@ -1317,7 +1803,7 @@ class WorkerRegistry {
     const waiter = this.pendingWorkerReady.get(event.sessionId);
     if (!waiter) return;
 
-    const actualCwd = path.resolve(event.cwd);
+    const actualCwd = resolveSessionCwd(event.cwd);
     if (actualCwd !== waiter.expectedCwd) {
       const error = new Error(
         `Agent View worker ${event.sessionId} reported cwd ${actualCwd}, expected ${waiter.expectedCwd}.`,
@@ -1335,14 +1821,35 @@ class WorkerRegistry {
     waiter.resolve();
   }
 
-  rejectPendingWorkerReady(sessionId: string, error: unknown): void {
+  rejectPendingWorkerReady(
+    sessionId: string,
+    error: unknown,
+    expectedGeneration?: number,
+  ): void {
     const waiter = this.pendingWorkerReady.get(sessionId);
     if (!waiter) return;
+    if (
+      expectedGeneration !== undefined &&
+      waiter.generation !== expectedGeneration
+    ) {
+      return;
+    }
     this.pendingWorkerReady.delete(sessionId);
     waiter.reject(error instanceof Error ? error : new Error(String(error)));
   }
 
   async reconnectSessionHost(sessionId: string): Promise<boolean> {
+    return this.withHostSetupLock(sessionId, () =>
+      this.reconnectSessionHostLocked(sessionId),
+    );
+  }
+
+  private async reconnectSessionHostLocked(
+    sessionId: string,
+  ): Promise<boolean> {
+    if (this.ptyHosts.has(sessionId)) {
+      return true;
+    }
     const [launch, worker] = await Promise.all([
       readAgentViewLaunch(sessionId, this.store),
       readAgentViewWorker(sessionId, this.store),
@@ -1358,22 +1865,27 @@ class WorkerRegistry {
         worker.hostAuthToken,
       );
       this.set(sessionId, host);
-      await writeAgentViewWorker(
-        sessionId,
-        {
-          schemaVersion: 1,
-          hostPid: host.pid,
-          workerPid: host.workerPid,
-          hostEndpoint: worker.hostEndpoint,
-          ...(worker.hostAuthToken
-            ? { hostAuthToken: worker.hostAuthToken }
-            : {}),
-          protocolVersion: AGENT_VIEW_PROTOCOL_VERSION,
-          platform: process.platform,
-          recentOutputBytes: worker.recentOutputBytes,
-        },
-        this.store,
-      );
+      try {
+        await writeAgentViewWorker(
+          sessionId,
+          {
+            schemaVersion: 1,
+            hostPid: host.pid,
+            workerPid: host.workerPid,
+            hostEndpoint: worker.hostEndpoint,
+            ...(worker.hostAuthToken
+              ? { hostAuthToken: worker.hostAuthToken }
+              : {}),
+            protocolVersion: AGENT_VIEW_PROTOCOL_VERSION,
+            platform: process.platform,
+            recentOutputBytes: worker.recentOutputBytes,
+          },
+          this.store,
+        );
+      } catch {
+        // The reconnected worker is already alive; do not kill it just because
+        // pid bookkeeping could not be refreshed.
+      }
       return true;
     } catch {
       return false;
@@ -1395,7 +1907,14 @@ class WorkerRegistry {
 
   async respawnSession(
     sessionId: string,
-    respawnOptions: { waitForReady?: boolean } = {},
+  ): Promise<{ sessionId: string; respawned: true }> {
+    return this.withHostSetupLock(sessionId, () =>
+      this.respawnSessionLocked(sessionId),
+    );
+  }
+
+  private async respawnSessionLocked(
+    sessionId: string,
   ): Promise<{ sessionId: string; respawned: true }> {
     const state = await readAgentViewSessionState(sessionId, this.store);
     if (!state) {
@@ -1404,7 +1923,9 @@ class WorkerRegistry {
     if (state.ownership !== 'managed') {
       throw new Error(`Agent View session ${sessionId} is not managed.`);
     }
-    const refreshedState = await this.refreshMissingWorkerState(state);
+    const refreshedState = await this.refreshMissingWorkerState(state, () =>
+      this.reconnectSessionHostLocked(sessionId),
+    );
     const activity = await readAgentViewActivity(sessionId, this.store);
     const blockReason = getRespawnBlockReason(refreshedState, activity);
     if (blockReason) {
@@ -1416,27 +1937,86 @@ class WorkerRegistry {
     if (!launch) {
       throw new Error(`No Agent View launch record found for ${sessionId}.`);
     }
-    const resumeLaunch = await writeResumeWorkerLaunch(launch, this.store);
-    this.ptyHosts.get(sessionId)?.kill('SIGTERM');
+    // Rotate the worker sideband token on respawn so the replaced worker's
+    // predecessor token can no longer authenticate worker-side calls.
+    const token = randomUUID();
+    const resumeLaunch = await writeResumeWorkerLaunch(
+      launch,
+      token,
+      this.store,
+    );
+    // The replacement worker must not inherit stop/redraw controls queued
+    // for its predecessor; prompt/answer controls are preserved.
+    this.preserveQueuedInputControls(sessionId);
+    const existingHost = this.ptyHosts.get(sessionId);
+    existingHost?.kill('SIGTERM');
+    if (!existingHost) {
+      // No in-memory host: a persisted worker process may still be running
+      // (e.g. a graceful-stop straggler after a supervisor restart), so
+      // signal it before launching its replacement.
+      await this.killStoredWorkerPids(sessionId, 'SIGTERM');
+    }
     let host: AgentViewPtyHostHandle | undefined;
     try {
+      // Persist the respawn bookkeeping before launch so any event the
+      // replacement worker emits right away authenticates against the
+      // rotated tokenDigest and passes the dead-worker guard (processState
+      // 'starting'); writing them after launch lets a fast ready die at
+      // the ready timeout.
+      const latestState =
+        (await readAgentViewSessionState(sessionId, this.store)) ?? state;
+      let preLaunchPatchApplied = false;
+      await patchAgentViewSessionStateIf(
+        sessionId,
+        (existing) => {
+          // Re-validate inside the queue: a concurrent stop verdict enqueued
+          // after the pre-launch read must not be overwritten by 'starting'.
+          if (
+            existing.sessionState === 'stopped' &&
+            (latestState.sessionState !== 'stopped' ||
+              existing.updatedAt !== latestState.updatedAt)
+          ) {
+            return undefined;
+          }
+          preLaunchPatchApplied = true;
+          return {
+            sessionState:
+              existing.processState === 'alive'
+                ? existing.sessionState
+                : 'starting',
+            processState:
+              existing.processState === 'alive' ? 'alive' : 'starting',
+            attachState: 'detached',
+            updatedAt: new Date().toISOString(),
+          };
+        },
+        this.store,
+      );
+      if (!preLaunchPatchApplied) {
+        throw new AgentViewSessionStoppedError(sessionId, 'session');
+      }
+      await writeAgentViewWorker(
+        sessionId,
+        {
+          schemaVersion: 1,
+          protocolVersion: AGENT_VIEW_PROTOCOL_VERSION,
+          platform: process.platform,
+          tokenDigest: digestAgentViewWorkerToken(token),
+          recentOutputBytes: 0,
+        },
+        this.store,
+      );
       const ready = this.waitForWorkerReadyIfNeeded(
         sessionId,
         resumeLaunch.activeCwd,
       );
       void ready.catch(() => {});
       host = await this.launchPtyHostForSupervisor(resumeLaunch, this.store);
+      await ensureSessionStillLaunchable(sessionId, this.store, host, {
+        allowStopped: refreshedState.sessionState === 'stopped',
+        stoppedUpdatedAt: refreshedState.updatedAt,
+      });
       this.set(sessionId, host);
-      await writeAgentViewSessionState(
-        {
-          ...state,
-          sessionState: 'starting',
-          processState: 'starting',
-          attachState: 'detached',
-          updatedAt: new Date().toISOString(),
-        },
-        this.store,
-      );
       await writeAgentViewWorker(
         sessionId,
         {
@@ -1451,19 +2031,72 @@ class WorkerRegistry {
         },
         this.store,
       );
-      if (respawnOptions.waitForReady ?? true) {
-        await ready;
-      }
+      await ready;
+      await ensureSessionStillLaunchable(sessionId, this.store);
     } catch (error) {
       this.rejectPendingWorkerReady(sessionId, error);
       host?.kill('SIGTERM');
-      if (this.ptyHosts.delete(sessionId)) {
-        this.onHostReleased(sessionId);
+      if (host && this.ptyHosts.get(sessionId) === host) {
+        // Only drop the registry entry — preserveQueuedInputControls already
+        // saved the pending prompt/answer controls for the next respawn.
+        this.ptyHosts.delete(sessionId);
       }
-      await markFailedSession(sessionId, error, this.store);
+      if (isStoppedError(error)) {
+        await markStoppedSession(sessionId, this.store, 'exited');
+      } else {
+        await markFailedSession(sessionId, error, this.store);
+      }
       throw error;
     }
     return { sessionId, respawned: true };
+  }
+
+  async withHostSetupLock<T>(
+    sessionId: string,
+    action: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.hostSetupQueues.get(sessionId) ?? Promise.resolve();
+    const current = previous.then(action, action);
+    const queued = current
+      .then(
+        () => undefined,
+        () => undefined,
+      )
+      .finally(() => {
+        if (this.hostSetupQueues.get(sessionId) === queued) {
+          this.hostSetupQueues.delete(sessionId);
+        }
+      });
+    this.hostSetupQueues.set(sessionId, queued);
+    return current;
+  }
+
+  private async killStoredWorkerPids(
+    sessionId: string,
+    signal: NodeJS.Signals,
+  ): Promise<void> {
+    const state = await readAgentViewSessionState(sessionId, this.store);
+    if (
+      state?.processState === 'exited' ||
+      state?.processState === 'hibernated'
+    ) {
+      // The worker is long dead and exit verdicts never clear worker.json
+      // pids; the pids may have been reused by unrelated processes, so
+      // never signal them.
+      return;
+    }
+    const worker = await readAgentViewWorker(sessionId, this.store);
+    for (const pid of [worker?.hostPid, worker?.workerPid]) {
+      if (!pid) continue;
+      // A concurrent respawn may have registered a new host with fresh
+      // pids since we decided there was none; its pids are authoritative.
+      if (this.ptyHosts.has(sessionId)) break;
+      try {
+        process.kill(pid, signal);
+      } catch {
+        // The persisted pid may already be gone or belong to an inaccessible process.
+      }
+    }
   }
 
   async respawnSessionForAttachIfInactive(sessionId: string): Promise<boolean> {
@@ -1475,9 +2108,28 @@ class WorkerRegistry {
       throw new Error(`Agent View session ${sessionId} is not managed.`);
     }
     if (
-      state.attachState === 'attached' ||
-      isStaleStartingState(state, this.options)
+      (state.processState === 'starting' ||
+        state.processState === 'restarting') &&
+      !isStaleStartingState(state, this.options)
     ) {
+      throw new Error(
+        `Agent View session ${sessionId} is still ${state.processState}.`,
+      );
+    }
+    const staleStarting = isStaleStartingState(state, this.options);
+    if (state.attachState === 'attached') {
+      state = {
+        ...state,
+        attachState: 'detached',
+        updatedAt: new Date().toISOString(),
+      };
+      await patchAgentViewSessionState(
+        sessionId,
+        { attachState: 'detached', updatedAt: state.updatedAt },
+        this.store,
+      );
+    }
+    if (staleStarting) {
       state = {
         ...state,
         sessionState: 'failed',
@@ -1485,7 +2137,16 @@ class WorkerRegistry {
         attachState: 'detached',
         updatedAt: new Date().toISOString(),
       };
-      await writeAgentViewSessionState(state, this.store);
+      await patchAgentViewSessionState(
+        sessionId,
+        {
+          sessionState: 'failed',
+          processState: 'exited',
+          attachState: 'detached',
+          updatedAt: state.updatedAt,
+        },
+        this.store,
+      );
     }
     if (state.sessionState === 'stopped') {
       state = {
@@ -1494,7 +2155,15 @@ class WorkerRegistry {
         attachState: 'detached',
         updatedAt: new Date().toISOString(),
       };
-      await writeAgentViewSessionState(state, this.store);
+      await patchAgentViewSessionState(
+        sessionId,
+        {
+          processState: 'exited',
+          attachState: 'detached',
+          updatedAt: state.updatedAt,
+        },
+        this.store,
+      );
     }
     state = await this.refreshMissingWorkerState(state);
     const blockReason = getRespawnBlockReason(
@@ -1505,59 +2174,88 @@ class WorkerRegistry {
       await this.respawnSession(sessionId);
       return true;
     }
-    await markFailedSession(
-      sessionId,
-      new Error(`stale PTY host while ${blockReason}`),
-      this.store,
-      'stale_host',
-    );
     return false;
   }
 
   async respawnStoppedOrFailedSessionIfNeeded(
     sessionId: string,
   ): Promise<boolean> {
-    const state = await readAgentViewSessionState(sessionId, this.store);
-    if (
-      !state ||
-      (state.sessionState !== 'stopped' && state.sessionState !== 'failed')
-    ) {
-      return false;
-    }
+    return this.withHostSetupLock(sessionId, async () => {
+      const state = await readAgentViewSessionState(sessionId, this.store);
+      if (
+        !state ||
+        (state.sessionState !== 'stopped' && state.sessionState !== 'failed')
+      ) {
+        return false;
+      }
 
-    this.ptyHosts.get(sessionId)?.kill('SIGTERM');
-    this.ptyHosts.delete(sessionId);
-    this.onHostReleased(sessionId);
-    await writeAgentViewSessionState(
-      {
-        ...state,
-        processState: 'exited',
-        attachState: 'detached',
-        updatedAt: new Date().toISOString(),
-      },
-      this.store,
-    );
-    await this.respawnSession(sessionId);
-    return true;
+      let host = this.ptyHosts.get(sessionId);
+      const refreshedState = host
+        ? state
+        : await this.refreshMissingWorkerState(state, () =>
+            this.reconnectSessionHostLocked(sessionId),
+          );
+      host ??= this.ptyHosts.get(sessionId);
+      // A live attach must block the respawn even when a host is still
+      // registered (e.g. draining inside the graceful-stop window); the
+      // surviving process itself is handled below, so only the attach check
+      // applies to the stopped/failed states this method revives.
+      if (refreshedState.attachState !== 'detached') {
+        throw new Error(
+          `Agent View session ${sessionId} cannot be respawned: it is currently attached.`,
+        );
+      }
+      host?.kill('SIGTERM');
+      if (host && this.ptyHosts.get(sessionId) === host) {
+        // Reviving releases only the registry entry: queued prompt/answer
+        // controls and the persisted marker belong to accepted user input
+        // the replacement worker must still deliver. respawnSessionLocked
+        // filters out superseded stop/redraw controls before launching.
+        this.ptyHosts.delete(sessionId);
+      } else if (!host) {
+        await this.killStoredWorkerPids(sessionId, 'SIGTERM');
+      }
+      await patchAgentViewSessionState(
+        sessionId,
+        {
+          processState: 'exited',
+          attachState: 'detached',
+          updatedAt: new Date().toISOString(),
+        },
+        this.store,
+      );
+      await this.respawnSessionLocked(sessionId);
+      return true;
+    });
   }
 
   private trackHostExit(sessionId: string, host: AgentViewPtyHostHandle): void {
     void host.exited
-      .then(async (exit) => {
-        if (this.ptyHosts.get(sessionId) !== host) {
-          return;
-        }
-        await updateExitedSession(sessionId, exit.exitCode, this.store);
-      })
-      .catch(() => {})
-      .finally(() => {
-        if (this.ptyHosts.get(sessionId) !== host) {
-          return;
-        }
-        this.ptyHosts.delete(sessionId);
-        this.onHostReleased(sessionId);
-        this.onChanged();
-      });
+      .then((exit) =>
+        // Serialize the exit verdict with respawn: a superseded host killed
+        // during respawnSessionLocked must not clobber the replacement's
+        // freshly written state once the registry has swapped.
+        this.withHostSetupLock(sessionId, async () => {
+          if (this.ptyHosts.get(sessionId) !== host) {
+            return;
+          }
+          try {
+            this.rejectPendingWorkerReady(
+              sessionId,
+              new Error(`Agent View worker ${sessionId} exited before ready.`),
+            );
+            await updateExitedSession(sessionId, exit.exitCode, this.store);
+          } finally {
+            // Reaching here means the host exited on its own: planned releases
+            // remove the registry entry first. Keep the queued prompt/answer
+            // controls and the persisted queue marker so a later respawn can
+            // still deliver accepted user input.
+            this.ptyHosts.delete(sessionId);
+            this.onChanged();
+          }
+        }),
+      )
+      .catch(() => {});
   }
 
   private scheduleStopFallback(
@@ -1571,8 +2269,53 @@ class WorkerRegistry {
       // Ctrl+X asks the worker to stop first; this is the timeout backstop.
       host.kill('SIGTERM');
       this.ptyHosts.delete(sessionId);
-      this.onHostReleased(sessionId);
+      // Preserve undelivered prompt/answer controls (and the persisted marker)
+      // for the replacement worker — matching scheduleStoredStopFallback.
+      this.preserveQueuedInputControls(sessionId);
       void markStoppedSession(sessionId, this.store, 'exited')
+        .catch(() => {})
+        .finally(() => {
+          this.onChanged();
+        });
+    }, DEFAULT_GRACEFUL_STOP_TIMEOUT_MS);
+    timeout.unref?.();
+  }
+
+  private scheduleStoredStopFallback(
+    sessionId: string,
+    storedPids: number[],
+  ): void {
+    const timeout = setTimeout(() => {
+      // Run inside the host-setup lock so the decision serializes with a
+      // concurrent respawn: mid-launch the worker record still carries the
+      // replaced worker's stale pids, which would misidentify the respawn
+      // as the dead worker this stop was scheduled for.
+      void this.withHostSetupLock(sessionId, async () => {
+        // Verify the record still points at the worker this fallback was
+        // scheduled for BEFORE signaling: the grace window may have hosted
+        // a respawn whose fresh pids must never be touched, and a stale
+        // stored pid may have been reused by an unrelated process.
+        const worker = await readAgentViewWorker(sessionId, this.store);
+        const recordIsCurrent =
+          worker !== undefined &&
+          [worker.hostPid, worker.workerPid].some(
+            (pid) => pid !== undefined && storedPids.includes(pid),
+          );
+        if (!recordIsCurrent) {
+          return;
+        }
+        for (const pid of storedPids) {
+          try {
+            process.kill(pid, 'SIGTERM');
+          } catch {
+            // The persisted pid may already be gone or belong to an inaccessible process.
+          }
+        }
+        // The worker this stop was meant for is gone; drop its queued
+        // stop control so a future replacement never receives it.
+        this.preserveQueuedInputControls(sessionId);
+        await markStoppedSession(sessionId, this.store, 'exited');
+      })
         .catch(() => {})
         .finally(() => {
           this.onChanged();
@@ -1583,19 +2326,60 @@ class WorkerRegistry {
 
   async refreshMissingWorkerState(
     state: AgentViewSessionStateFile,
+    reconnect: () => Promise<boolean> = () =>
+      this.reconnectSessionHost(state.sessionId),
   ): Promise<AgentViewSessionStateFile> {
+    if (state.processState === 'hibernating') {
+      if (this.ptyHosts.has(state.sessionId)) {
+        return state;
+      }
+      const worker = await readAgentViewWorker(state.sessionId, this.store);
+      if (isPidRunning(worker?.hostPid) || isPidRunning(worker?.workerPid)) {
+        await reconnect();
+        return state;
+      }
+      const patch = {
+        processState: 'hibernated' as const,
+        attachState: 'detached' as const,
+        updatedAt: new Date().toISOString(),
+      };
+      // Decide inside the queued mutation so a concurrent stop verdict
+      // that lands mid-heal is not overwritten.
+      let applied = false;
+      await patchAgentViewSessionStateIf(
+        state.sessionId,
+        (existing) => {
+          if (
+            existing.processState !== 'hibernating' ||
+            existing.sessionState === 'stopped'
+          ) {
+            return undefined;
+          }
+          applied = true;
+          return patch;
+        },
+        this.store,
+      );
+      return applied ? { ...state, ...patch } : state;
+    }
     if (
       state.processState !== 'alive' &&
       state.processState !== 'starting' &&
-      state.processState !== 'restarting' &&
-      state.processState !== 'hibernating'
+      state.processState !== 'restarting'
     ) {
       return state;
     }
     if (this.ptyHosts.has(state.sessionId)) {
       return state;
     }
-    if (await this.reconnectSessionHost(state.sessionId)) {
+    if (
+      (state.processState === 'starting' ||
+        state.processState === 'restarting') &&
+      !isStaleStartingState(state, this.options)
+    ) {
+      return state;
+    }
+    if (await reconnect()) {
       return state;
     }
 
@@ -1604,53 +2388,59 @@ class WorkerRegistry {
       return state;
     }
 
-    const nextSessionState =
-      state.sessionState === 'starting' ||
-      state.sessionState === 'working' ||
-      state.sessionState === 'needs_input'
-        ? 'failed'
-        : state.sessionState;
     const now = new Date().toISOString();
-    const nextState = {
-      ...state,
-      sessionState: nextSessionState,
-      processState: 'exited' as const,
-      attachState: 'detached' as const,
-      updatedAt: now,
-      ...(nextSessionState === 'failed'
-        ? {
-            lastError: {
-              code: 'stale_worker',
-              message: 'Agent View worker process is no longer running.',
-              at: now,
-            },
-          }
-        : {}),
-    };
-    await writeAgentViewSessionState(nextState, this.store);
-    return nextState;
+    // Decide the heal inside the queued mutation so a concurrent terminal
+    // verdict (stop/complete) that lands mid-heal is not overwritten.
+    let appliedPatch: Partial<AgentViewSessionStateFile> | undefined;
+    await patchAgentViewSessionStateIf(
+      state.sessionId,
+      (existing) => {
+        const nextSessionState =
+          existing.sessionState === 'starting' ||
+          existing.sessionState === 'working' ||
+          existing.sessionState === 'needs_input'
+            ? 'failed'
+            : existing.sessionState;
+        appliedPatch = {
+          sessionState: nextSessionState,
+          processState: 'exited' as const,
+          attachState: 'detached' as const,
+          updatedAt: now,
+          ...(nextSessionState === 'failed'
+            ? {
+                lastError: {
+                  code: 'stale_worker',
+                  message: 'Agent View worker process is no longer running.',
+                  at: now,
+                },
+              }
+            : {}),
+        };
+        return appliedPatch;
+      },
+      this.store,
+    );
+    return appliedPatch ? { ...state, ...appliedPatch } : state;
   }
 }
 
 class SessionSnapshotCache {
   private snapshots: AgentViewSessionSnapshot[] | undefined;
   private expiresAt = 0;
-  private dirty = true;
 
   markDirty(): void {
-    this.dirty = true;
+    this.snapshots = undefined;
   }
 
   async list(
     store: AgentViewStoreOptions,
     nowMs: number,
   ): Promise<AgentViewSessionSnapshot[]> {
-    if (!this.dirty && this.snapshots && nowMs < this.expiresAt) {
+    if (this.snapshots && nowMs < this.expiresAt) {
       return this.snapshots;
     }
     this.snapshots = await listAgentViewSessionSnapshots(store);
     this.expiresAt = nowMs + 1000;
-    this.dirty = false;
     return this.snapshots;
   }
 }
@@ -1661,6 +2451,42 @@ async function shutdownPtyHost(host: AgentViewPtyHostHandle): Promise<void> {
     return;
   }
   host.kill('SIGTERM');
+}
+
+async function ensureSessionStillLaunchable(
+  sessionId: string,
+  store: AgentViewStoreOptions,
+  host?: AgentViewPtyHostHandle,
+  options: { allowStopped?: boolean; stoppedUpdatedAt?: string } = {},
+): Promise<void> {
+  const state = await readAgentViewSessionState(sessionId, store);
+  const stoppedAfterLaunch =
+    state?.sessionState === 'stopped' &&
+    options.allowStopped &&
+    options.stoppedUpdatedAt !== undefined &&
+    state.updatedAt !== options.stoppedUpdatedAt;
+  if (!state) {
+    // Distinguish a transient state-read failure (EMFILE/EIO/EACCES —
+    // readAgentViewSessionState fail-softs and returns undefined) from a
+    // genuine deletion: if the state file still exists, the read failure is
+    // transient and the just-launched host must not be killed.
+    const paths = getAgentViewSessionPaths(sessionId, store);
+    try {
+      await fs.promises.access(paths.statePath);
+      return;
+    } catch {
+      host?.kill('SIGTERM');
+      throw new AgentViewSessionStoppedError(sessionId, 'session');
+    }
+  }
+  if (
+    (state.ownership !== 'managed' && state.ownership !== 'adopting') ||
+    (state.sessionState === 'stopped' && !options.allowStopped) ||
+    stoppedAfterLaunch
+  ) {
+    host?.kill('SIGTERM');
+    throw new AgentViewSessionStoppedError(sessionId, 'session');
+  }
 }
 
 function isAliveProcessState(
@@ -1685,43 +2511,56 @@ function canHibernateSession(
   }
   if (
     snapshot.state.processState === 'hibernated' ||
-    snapshot.state.processState === 'exited'
+    snapshot.state.processState === 'exited' ||
+    hasPendingPrompt(snapshot.activity)
   ) {
     return false;
   }
 
-  const activityAt =
-    Date.parse(snapshot.activity?.lastActivityAt ?? snapshot.state.updatedAt) ||
-    0;
+  const activityAt = Date.parse(
+    snapshot.activity?.lastActivityAt ?? snapshot.state.updatedAt,
+  );
+  if (!Number.isFinite(activityAt)) {
+    return false;
+  }
   return nowMs - activityAt >= idleMs;
 }
 
 async function markSessionHibernating(
   state: AgentViewSessionStateFile,
   options: { globalDir?: string },
-): Promise<void> {
-  await writeAgentViewSessionState(
-    {
-      ...state,
-      processState: 'hibernating',
-      updatedAt: new Date().toISOString(),
-    },
+): Promise<boolean> {
+  const latest = await readAgentViewSessionState(state.sessionId, options);
+  if (!latest || latest.ownership !== 'managed') return false;
+  if (latest.sessionState === 'stopped' || latest.processState !== 'alive') {
+    return false;
+  }
+  await patchAgentViewSessionState(
+    state.sessionId,
+    { processState: 'hibernating', updatedAt: new Date().toISOString() },
     options,
   );
+  return true;
 }
 
 async function markSessionHibernated(
   state: AgentViewSessionStateFile,
   options: { globalDir?: string },
-): Promise<void> {
-  await writeAgentViewSessionState(
-    {
-      ...state,
-      processState: 'hibernated',
-      updatedAt: new Date().toISOString(),
-    },
+): Promise<boolean> {
+  const latest = await readAgentViewSessionState(state.sessionId, options);
+  if (!latest || latest.ownership !== 'managed') return false;
+  if (
+    latest.sessionState === 'stopped' ||
+    latest.processState !== 'hibernating'
+  ) {
+    return false;
+  }
+  await patchAgentViewSessionState(
+    state.sessionId,
+    { processState: 'hibernated', updatedAt: new Date().toISOString() },
     options,
   );
+  return true;
 }
 
 function pruneClosedSockets(sockets: Set<Socket>): void {
@@ -1744,7 +2583,6 @@ function getHibernationPolicy(
   options: AgentViewSupervisorProcessOptions,
 ): Required<AgentViewSupervisorHibernationPolicy> {
   return {
-    enabled: options.hibernationPolicy?.enabled ?? true,
     idleMs: options.hibernationPolicy?.idleMs ?? DEFAULT_IDLE_HIBERNATION_MS,
     autoExit: options.hibernationPolicy?.autoExit ?? true,
     autoExitGraceMs:
@@ -1792,17 +2630,16 @@ async function writeAttachState(
   attachState: 'attached' | 'detached',
   options: { globalDir?: string },
 ): Promise<void> {
-  const state = await readAgentViewSessionState(sessionId, options);
-  if (!state) return;
-  await writeAgentViewSessionState(
-    {
-      ...state,
-      attachState,
-      updatedAt: new Date().toISOString(),
-    },
+  // Patch only the owned fields: re-asserting a whole stale snapshot here
+  // would erase a concurrent exit verdict from updateExitedSession.
+  await patchAgentViewSessionState(
+    sessionId,
+    { attachState, updatedAt: new Date().toISOString() },
     options,
   );
 }
+
+const MAX_QUEUED_PROMPT_PREVIEW_CHARS = 500;
 
 function getQueuedPromptActivityPatch(
   text: string,
@@ -1810,14 +2647,14 @@ function getQueuedPromptActivityPatch(
 ): Partial<AgentViewActivityFile> {
   return {
     queuedPromptCount: 1,
-    queuedPromptPreview: text,
+    // Preview only: the full text lives in the worker control queue and
+    // the launch record; activity.json is re-read on every list() poll.
+    queuedPromptPreview: text.slice(0, MAX_QUEUED_PROMPT_PREVIEW_CHARS),
     lastQueuedPromptAt: at,
   };
 }
 
-function getDequeuedPromptActivityPatch(
-  _activity: AgentViewActivityFile | undefined,
-): Partial<AgentViewActivityFile> {
+function getDequeuedPromptActivityPatch(): Partial<AgentViewActivityFile> {
   return {
     queuedPromptCount: undefined,
     queuedPromptPreview: undefined,
@@ -1921,7 +2758,18 @@ function isStaleStartingState(
   }
   const timeoutMs =
     options.workerReadyTimeoutMs ?? DEFAULT_WORKER_READY_TIMEOUT_MS;
-  return Date.now() - updatedAt > timeoutMs;
+  return (options.now?.() ?? new Date()).getTime() - updatedAt > timeoutMs;
+}
+
+class AgentViewSessionStoppedError extends Error {
+  constructor(sessionId: string, kind: 'worker' | 'session') {
+    super(`Agent View ${kind} ${sessionId} was stopped.`);
+    this.name = 'AgentViewSessionStoppedError';
+  }
+}
+
+function isStoppedError(error: unknown): boolean {
+  return error instanceof AgentViewSessionStoppedError;
 }
 
 async function markStoppedSession(
@@ -1934,12 +2782,12 @@ async function markStoppedSession(
   if (state.ownership !== 'managed') {
     return;
   }
-  if (state.sessionState === 'stopped' && state.processState === processState) {
-    return;
-  }
-  await writeAgentViewSessionState(
+  // Always write, even when the values are unchanged: the bumped updatedAt
+  // is what lets a concurrent respawn observe a repeated stop through
+  // ensureSessionStillLaunchable's stoppedAfterLaunch check.
+  await patchAgentViewSessionState(
+    sessionId,
     {
-      ...state,
       sessionState: 'stopped',
       processState,
       updatedAt: new Date().toISOString(),
@@ -1955,19 +2803,32 @@ async function updateExitedSession(
 ): Promise<void> {
   const state = await readAgentViewSessionState(sessionId, options);
   if (!state) return;
-  if (
-    state.ownership !== 'managed' ||
-    state.sessionState === 'stopped' ||
-    state.processState === 'hibernated'
-  ) {
+  if (state.ownership !== 'managed' || state.processState === 'hibernated') {
     return;
   }
-  await writeAgentViewSessionState(
-    {
-      ...state,
-      sessionState: exitCode === 0 ? 'completed' : 'failed',
-      processState: 'exited',
-      updatedAt: new Date().toISOString(),
+  await patchAgentViewSessionStateIf(
+    sessionId,
+    (existing) => {
+      // Re-validate inside the queue: a concurrent stop verdict enqueued
+      // after the read above must keep its terminal sessionState.
+      if (
+        existing.ownership !== 'managed' ||
+        existing.processState === 'hibernated'
+      ) {
+        return undefined;
+      }
+      return {
+        sessionState:
+          existing.sessionState === 'stopped' ||
+          existing.sessionState === 'failed' ||
+          existing.sessionState === 'completed'
+            ? existing.sessionState
+            : exitCode === 0 && existing.sessionState !== 'starting'
+              ? 'completed'
+              : 'failed',
+        processState: 'exited',
+        updatedAt: new Date().toISOString(),
+      };
     },
     options,
   );
@@ -1981,18 +2842,32 @@ async function markFailedSession(
 ): Promise<void> {
   const state = await readAgentViewSessionState(sessionId, options);
   if (!state) return;
+  if (state.ownership !== 'managed') return;
+  if (state.sessionState === 'stopped' || state.sessionState === 'completed') {
+    if (state.processState !== 'exited') {
+      await markStoppedSession(sessionId, options, 'exited');
+    }
+    return;
+  }
   const now = new Date().toISOString();
-  await writeAgentViewSessionState(
-    {
-      ...state,
-      sessionState: 'failed',
-      processState: 'exited',
-      updatedAt: now,
-      lastError: {
-        code,
-        message: error instanceof Error ? error.message : String(error),
-        at: now,
-      },
+  const message = error instanceof Error ? error.message : String(error);
+  await patchAgentViewSessionStateIf(
+    sessionId,
+    (existing) => {
+      // Re-validate inside the queued mutation: a concurrent stop verdict
+      // enqueued after the read above must keep its terminal sessionState.
+      if (
+        existing.sessionState === 'stopped' ||
+        existing.sessionState === 'completed'
+      ) {
+        return undefined;
+      }
+      return {
+        sessionState: 'failed',
+        processState: 'exited',
+        updatedAt: now,
+        lastError: { code, message, at: now },
+      };
     },
     options,
   );
@@ -2001,13 +2876,25 @@ async function markFailedSession(
 async function applyWorkerEvent(
   event: AgentViewWorkerEvent,
   options: { globalDir?: string },
-): Promise<void> {
+  hasPendingInputControl = false,
+): Promise<boolean> {
   const state = await readAgentViewSessionState(event.sessionId, options);
   if (!state) {
     throw new Error(`No Agent View session found for ${event.sessionId}.`);
   }
   if (state.ownership !== 'managed' && state.ownership !== 'adopting') {
     throw new Error(`Agent View session ${event.sessionId} is not managed.`);
+  }
+  if (
+    (state.sessionState === 'stopped' ||
+      state.processState === 'exited' ||
+      state.processState === 'hibernated') &&
+    (event.type === 'ready' || event.type === 'state')
+  ) {
+    // A buffered/in-flight event from a dead worker must not clobber the
+    // exit verdict. A legitimate replacement worker's ready arrives only
+    // after respawn writes processState 'starting'.
+    return false;
   }
 
   const now = event.at ?? new Date().toISOString();
@@ -2022,20 +2909,44 @@ async function applyWorkerEvent(
         ? event.sessionState
         : state.sessionState;
 
-  await writeAgentViewSessionState(
-    {
-      ...state,
-      sessionState,
-      processState: 'alive',
-      activeCwd,
-      updatedAt: now,
+  let statePatchApplied = false;
+  await patchAgentViewSessionStateIf(
+    event.sessionId,
+    (existing) => {
+      // Re-validate inside the queued mutation: an exit verdict enqueued
+      // after the guard read above must not be clobbered by this patch.
+      if (
+        (existing.sessionState === 'stopped' ||
+          existing.processState === 'exited' ||
+          existing.processState === 'hibernated') &&
+        (event.type === 'ready' || event.type === 'state')
+      ) {
+        return undefined;
+      }
+      statePatchApplied = true;
+      return {
+        sessionState,
+        processState: 'alive',
+        activeCwd,
+        updatedAt: now,
+        ...(event.type === 'ready' ? { lastError: undefined } : {}),
+      };
     },
     options,
   );
+  if (!statePatchApplied) {
+    return false;
+  }
 
   const existingActivity = await readAgentViewActivity(
     event.sessionId,
     options,
+  );
+  const dequeuePendingPrompt = shouldClearPendingPrompt(
+    event,
+    state,
+    existingActivity,
+    hasPendingInputControl,
   );
   const activityPatch =
     event.type === 'state' || event.type === 'ready'
@@ -2043,22 +2954,21 @@ async function applyWorkerEvent(
           ...(event.summary ? { summary: event.summary } : {}),
           ...(event.type === 'state'
             ? { waitingFor: event.waitingFor || undefined }
-            : {}),
+            : { waitingFor: undefined }),
           ...(event.type === 'state'
             ? {
                 inputKind:
                   event.inputKind ??
                   inferInputKind(event.sessionState, event.waitingFor),
               }
-            : {}),
+            : { inputKind: undefined }),
           ...(event.type === 'state' && event.lastResult
             ? { lastResult: event.lastResult }
-            : {}),
-          ...(shouldClearPendingPrompt(event)
-            ? getDequeuedPromptActivityPatch(existingActivity)
-            : {}),
+            : { lastResult: undefined }),
           capabilities:
-            event.type === 'ready' ? (event.capabilities ?? []) : [],
+            event.type === 'ready'
+              ? (event.capabilities ?? [])
+              : (existingActivity?.capabilities ?? []),
         }
       : { capabilities: [] };
   const lastActivityAt = shouldAdvanceActivityTime({
@@ -2079,6 +2989,21 @@ async function applyWorkerEvent(
     },
     options,
   );
+  if (dequeuePendingPrompt) {
+    // Route the dequeue through the queued mutation, re-validating the
+    // marker inside it: a concurrent kill/send may have replaced the
+    // marker after the activity read above, and erasing a fresh marker
+    // would drop the double-submit guard for the newly queued prompt.
+    const baselineMarker = existingActivity?.lastQueuedPromptAt;
+    await patchAgentViewActivityIf(
+      event.sessionId,
+      (latest) =>
+        hasPendingPrompt(latest) && latest.lastQueuedPromptAt === baselineMarker
+          ? getDequeuedPromptActivityPatch()
+          : undefined,
+      options,
+    );
+  }
   await writeAgentViewWorker(
     event.sessionId,
     {
@@ -2090,6 +3015,7 @@ async function applyWorkerEvent(
     },
     options,
   );
+  return true;
 }
 
 async function applyWorkerHeartbeatEvent(
@@ -2117,12 +3043,35 @@ async function applyWorkerHeartbeatEvent(
   );
 }
 
-function shouldClearPendingPrompt(event: AgentViewWorkerEvent): boolean {
+function shouldClearPendingPrompt(
+  event: AgentViewWorkerEvent,
+  previousState: AgentViewSessionStateFile,
+  activity: AgentViewActivityFile | undefined,
+  hasPendingInputControl = false,
+): boolean {
+  if (!hasPendingPrompt(activity)) {
+    return false;
+  }
+  // A prompt/answer control still queued for the worker means the persisted
+  // marker is the only durable record of an accepted prompt; a replacement
+  // worker's ready must not erase it until the control is consumed.
+  if (hasPendingInputControl) {
+    return false;
+  }
+  // A queued-prompt marker newer than this event belongs to a prompt the
+  // worker has not seen yet; a stale buffered event must not erase it.
+  const queuedAt = activity?.lastQueuedPromptAt;
+  if (queuedAt && event.at && event.at < queuedAt) {
+    return false;
+  }
   return (
-    event.type === 'state' &&
-    (event.sessionState === 'idle' ||
-      event.sessionState === 'completed' ||
-      (event.sessionState === 'needs_input' && event.waitingFor === 'response'))
+    event.type === 'ready' ||
+    (event.type === 'state' &&
+      (event.sessionState === 'idle' ||
+        event.sessionState === 'completed' ||
+        (event.sessionState === 'needs_input' &&
+          event.waitingFor === 'response' &&
+          previousState.sessionState !== 'needs_input')))
   );
 }
 
@@ -2173,7 +3122,7 @@ function shouldAdvanceActivityTime({
     return true;
   }
   return (
-    shouldClearPendingPrompt(event) &&
+    shouldClearPendingPrompt(event, previousState, existingActivity) &&
     getQueuedPromptCount(existingActivity) > 0
   );
 }
@@ -2192,16 +3141,97 @@ async function clearStalePendingPromptIfNeeded(
   state: AgentViewSessionStateFile,
   activity: AgentViewActivityFile | undefined,
   store: { globalDir?: string },
+  hasLiveInputControl: boolean,
+  hasLiveHost = false,
+  supervisorStartedAt?: string,
 ): Promise<AgentViewActivityFile | undefined> {
-  if (!shouldClearStalePendingPrompt(state, activity)) {
+  if (!hasPendingPrompt(activity)) {
     return activity;
   }
-  const nextActivity = {
-    ...activity,
-    ...getDequeuedPromptActivityPatch(activity),
-  };
-  await writeAgentViewActivity(state.sessionId, nextActivity, store);
-  return nextActivity;
+  if (hasLiveInputControl) {
+    // This daemon still holds the undelivered input control, so the
+    // persisted marker is provably not stale.
+    return activity;
+  }
+  // A marker with no live input control on a session that is not in
+  // flight is orphaned (e.g. the daemon restarted and lost its in-memory
+  // queue); leaving it would reject every subsequent send forever. With a
+  // live host registered and an uninterrupted daemon, 'marker present,
+  // control absent' instead means the worker already drained the control
+  // — clearing here would let a retry deliver the same prompt twice.
+  // A marker queued before this daemon started cannot have a live in-memory
+  // control (the queue is process-local), so it is orphaned even on a
+  // needs_input session whose worker survived the restart.
+  const markerPredatesDaemon =
+    supervisorStartedAt !== undefined &&
+    activity?.lastQueuedPromptAt !== undefined &&
+    Date.parse(activity.lastQueuedPromptAt) < Date.parse(supervisorStartedAt);
+  const orphaned =
+    markerPredatesDaemon ||
+    (!hasLiveHost &&
+      (state.sessionState === 'idle' ||
+        state.sessionState === 'completed' ||
+        state.sessionState === 'failed' ||
+        state.sessionState === 'stopped'));
+  if (!orphaned && !shouldClearStalePendingPrompt(state, activity)) {
+    return activity;
+  }
+  // Re-read immediately before writing so the dequeue does not re-assert
+  // stale lastActivityAt/capabilities over a concurrent worker update.
+  const baseline =
+    (await readAgentViewActivity(state.sessionId, store)) ?? activity;
+  if (!baseline) {
+    return activity;
+  }
+  // A concurrent send may have queued a new prompt (different
+  // lastQueuedPromptAt) or dequeued the stale one between the snapshot
+  // and the re-read; re-validate before writing to avoid erasing fresh
+  // input.
+  if (baseline.lastQueuedPromptAt !== activity?.lastQueuedPromptAt) {
+    return baseline;
+  }
+  if (!orphaned && !shouldClearStalePendingPrompt(state, baseline)) {
+    return baseline;
+  }
+  const patch = getDequeuedPromptActivityPatch();
+  await writeAgentViewActivity(
+    state.sessionId,
+    {
+      schemaVersion: 1,
+      lastActivityAt: baseline.lastActivityAt,
+      capabilities: baseline.capabilities,
+      ...patch,
+    },
+    store,
+  );
+  return { ...baseline, ...patch };
+}
+
+async function clearPersistedPromptQueue(
+  sessionId: string,
+  store: { globalDir?: string },
+): Promise<boolean> {
+  const activity = await readAgentViewActivity(sessionId, store);
+  if (!activity || !hasPendingPrompt(activity)) {
+    return false;
+  }
+  // Re-validate inside the queued mutation: a concurrent send may have
+  // replaced the marker after the read above, and erasing a fresh marker
+  // would drop the double-submit guard for the newly queued prompt.
+  const baselineMarker = activity.lastQueuedPromptAt;
+  return patchAgentViewActivityIf(
+    sessionId,
+    (latest) => {
+      if (
+        !hasPendingPrompt(latest) ||
+        latest.lastQueuedPromptAt !== baselineMarker
+      ) {
+        return undefined;
+      }
+      return getDequeuedPromptActivityPatch();
+    },
+    store,
+  );
 }
 
 function shouldClearStalePendingPrompt(
@@ -2260,10 +3290,14 @@ function parseAdoptParams(params: Record<string, unknown> | undefined): {
   sandbox?: string;
   terminal: { columns: number; rows: number };
 } {
-  const sessionId = requireSessionId(params);
   if (!params) {
     throw new Error('Agent View adoption params are required.');
   }
+  // Canonicalize at the RPC boundary: registry keys, control-queue keys,
+  // worker env values, and store-resolved ids must be one string; the
+  // store lowercases directory names, so a raw mixed-case id here would
+  // fork every lookup keyed on it.
+  const sessionId = sanitizeSessionId(requireSessionId(params));
   const projectCwd = stringParam(params, 'projectCwd', { required: true });
   const activeCwd = stringParam(params, 'activeCwd', { required: true });
   if (!projectCwd || !activeCwd) {
@@ -2333,21 +3367,13 @@ function parseWorkerEvent(
   }
   if (type === 'state') {
     const sessionState = params['sessionState'];
-    if (
-      sessionState !== 'starting' &&
-      sessionState !== 'working' &&
-      sessionState !== 'needs_input' &&
-      sessionState !== 'idle' &&
-      sessionState !== 'completed' &&
-      sessionState !== 'stopped' &&
-      sessionState !== 'failed'
-    ) {
+    if (!isAgentViewSessionState(sessionState)) {
       throw new Error('Agent View worker event state is invalid.');
     }
     const cwd = stringParam(params, 'cwd');
     const summary = stringParam(params, 'summary');
     const waitingFor = stringParam(params, 'waitingFor');
-    const inputKind = inputKindParam(params);
+    const inputKind = inputKindValue(params['inputKind']);
     const lastResult = stringParam(params, 'lastResult');
     const at = stringParam(params, 'at');
     return {
@@ -2365,13 +3391,6 @@ function parseWorkerEvent(
   throw new Error('Agent View worker event type is invalid.');
 }
 
-function inputKindParam(
-  params: Record<string, unknown>,
-): 'blocking' | 'soft' | undefined {
-  const value = params['inputKind'];
-  return value === 'blocking' || value === 'soft' ? value : undefined;
-}
-
 function stringParam(
   params: Record<string, unknown>,
   key: string,
@@ -2380,7 +3399,7 @@ function stringParam(
   const value = params[key];
   if (typeof value === 'string' && value.length > 0) return value;
   if (options.required) {
-    throw new Error(`Agent View worker event ${key} is required.`);
+    throw new Error(`Agent View ${key} is required.`);
   }
   return undefined;
 }
@@ -2401,19 +3420,24 @@ function buildResumeWorkerArgv(sessionId: string): string[] {
 
 function refreshResumeWorkerLaunch(
   launch: AgentViewLaunchFile,
+  token?: string,
 ): AgentViewLaunchFile {
   return {
     ...launch,
     entrypoint: getCurrentQwenCliEntrypoint(),
     argv: buildResumeWorkerArgv(launch.sessionId),
+    ...(token === undefined
+      ? {}
+      : { env: { ...launch.env, [QWEN_AGENT_VIEW_TOKEN]: token } }),
   };
 }
 
 async function writeResumeWorkerLaunch(
   launch: AgentViewLaunchFile,
+  token: string,
   store: { globalDir?: string },
 ): Promise<AgentViewLaunchFile> {
-  const resumeLaunch = refreshResumeWorkerLaunch(launch);
+  const resumeLaunch = refreshResumeWorkerLaunch(launch, token);
   await writeAgentViewLaunch(resumeLaunch, store);
   return resumeLaunch;
 }
@@ -2430,11 +3454,7 @@ function stringArraysEqual(left: string[], right: string[]): boolean {
   );
 }
 
-function digestToken(token: string): string {
-  return createHash('sha256').update(token).digest('hex');
-}
-
-async function requireValidWorkerToken(
+export async function requireValidWorkerToken(
   sessionId: string,
   params: Record<string, unknown> | undefined,
   options: { globalDir?: string },
@@ -2453,7 +3473,7 @@ async function requireValidWorkerToken(
 }
 
 function tokenDigestMatches(token: string, expectedDigest: string): boolean {
-  const actual = Buffer.from(digestToken(token), 'hex');
+  const actual = Buffer.from(digestAgentViewWorkerToken(token), 'hex');
   const expected = Buffer.from(expectedDigest, 'hex');
   return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
@@ -2486,13 +3506,14 @@ async function resolveManagedSessionId(
         `Agent View session ${requestedSessionId} is not managed.`,
       );
     }
-    return requestedSessionId;
+    return exact.sessionId;
   }
 
+  const requestedPrefix = requestedSessionId.toLowerCase();
   const matches = (await listAgentViewSessionStates(options)).filter(
     (state) =>
       state.ownership === 'managed' &&
-      state.sessionId.startsWith(requestedSessionId),
+      state.sessionId.toLowerCase().startsWith(requestedPrefix),
   );
   if (matches.length === 1) {
     return matches[0].sessionId;
@@ -2514,5 +3535,5 @@ function storeOptions(options: AgentViewSupervisorProcessOptions): {
 }
 
 function shortHash(value: string): string {
-  return createHash('sha256').update(value).digest('hex').slice(0, 16);
+  return createHash('sha256').update(value).digest('hex').slice(0, 12);
 }

@@ -5,6 +5,7 @@
  */
 
 import type { Argv, CommandModule } from 'yargs';
+import { AgentViewSupervisorClientError } from '../agent-view/supervisor-client.js';
 import { ensureAgentViewSupervisor } from '../agent-view/supervisor-runner.js';
 import { writeStderrLineSafe, writeStdoutLine } from '../utils/stdioHelpers.js';
 
@@ -35,6 +36,20 @@ function writeJsonResult(result: unknown): void {
   writeStdoutLine(JSON.stringify(result, null, 2));
 }
 
+// True when `respawn --all` produced results but respawned nothing, so
+// `respawn --all || alert` fires instead of silently succeeding.
+function isAllRespawnSkipped(result: unknown): boolean {
+  if (typeof result !== 'object' || result === null) return false;
+  const { results } = result as { results?: unknown };
+  if (!Array.isArray(results) || results.length === 0) return false;
+  return results.every(
+    (entry) =>
+      typeof entry === 'object' &&
+      entry !== null &&
+      (entry as { skipped?: unknown }).skipped === true,
+  );
+}
+
 function sessionCommand(
   command: string,
   describe: string,
@@ -45,6 +60,11 @@ function sessionCommand(
   return {
     command,
     describe,
+    // demandOption keeps the positional typed as `string` (without it yargs
+    // infers `string | undefined`, which breaks CommandBuilder typing) and
+    // matches the `<id>` command spelling.
+    builder: (yargs: Argv) =>
+      yargs.positional('id', { type: 'string', demandOption: true }),
     handler: async (argv) => {
       const supervisor = await getSessionSupervisor();
       writeStdoutLine(formatResult(await supervisor[method](argv['id'])));
@@ -67,9 +87,12 @@ function getLogsOutput(result: unknown): string {
 export const attachCommand: CommandModule<unknown, SessionArgs> = {
   command: 'attach <id>',
   describe: 'Attach to an Agent View session',
+  builder: (yargs: Argv) =>
+    yargs.positional('id', { type: 'string', demandOption: true }),
   handler: async (argv) => {
-    const supervisor = await getSessionSupervisor();
     try {
+      // Supervisor errors are reported like RPC failures below.
+      const supervisor = await getSessionSupervisor();
       await supervisor.attach(argv['id']);
     } catch (error) {
       writeStderrLineSafe(
@@ -104,23 +127,49 @@ export const respawnCommand: CommandModule<unknown, RespawnArgs> = {
   describe: 'Respawn Agent View session(s)',
   builder: (yargs: Argv) =>
     yargs
+      // Session short-ids can be all digits; keep them strings so the
+      // guards below (and the RPC layer) see them consistently.
+      .positional('id', { type: 'string' })
       .option('all', {
         type: 'boolean',
         default: false,
         description: 'Respawn all Agent View sessions',
       })
       .check((argv) => {
-        if (argv.all === true || typeof argv['id'] === 'string') return true;
-        return 'qwen respawn requires <id> or --all.';
+        const hasId = typeof argv['id'] === 'string' && argv['id'].length > 0;
+        if (argv.all === true && hasId) {
+          return 'qwen agents respawn accepts <id> or --all, not both.';
+        }
+        if (argv.all === true || hasId) return true;
+        return 'qwen agents respawn requires <id> or --all.';
       }),
   handler: async (argv) => {
     const supervisor = await getSessionSupervisor();
     if (argv.all === true) {
-      writeJsonResult(await supervisor.respawn());
+      try {
+        const result = await supervisor.respawn();
+        writeJsonResult(result);
+        if (isAllRespawnSkipped(result)) {
+          process.exitCode = 1;
+        }
+      } catch (error) {
+        // The server fulfills {all: true} as an unbounded sequential loop;
+        // a timeout means the respawn is still in flight, not that it failed.
+        if (
+          error instanceof AgentViewSupervisorClientError &&
+          error.code === 'timeout'
+        ) {
+          writeStderrLineSafe(
+            'Respawn is still running in the supervisor. Check `qwen agents` for session status.',
+          );
+          return;
+        }
+        throw error;
+      }
       return;
     }
-    if (typeof argv['id'] !== 'string') {
-      throw new Error('qwen respawn requires <id> or --all.');
+    if (typeof argv['id'] !== 'string' || argv['id'].length === 0) {
+      throw new Error('qwen agents respawn requires <id> or --all.');
     }
     writeJsonResult(await supervisor.respawn(argv['id']));
   },
@@ -129,6 +178,8 @@ export const respawnCommand: CommandModule<unknown, RespawnArgs> = {
 export const rmCommand: CommandModule<unknown, SessionArgs> = {
   command: 'rm <id>',
   describe: 'Remove an Agent View session',
+  builder: (yargs: Argv) =>
+    yargs.positional('id', { type: 'string', demandOption: true }),
   handler: async (argv) => {
     const supervisor = await getSessionSupervisor();
     writeJsonResult(await supervisor.remove(argv['id']));

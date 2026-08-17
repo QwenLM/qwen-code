@@ -24,7 +24,18 @@ import type { BridgeEvent, EventBus } from './eventBus.js';
 // SSE event type, the SDK validator + browser consumer — single sources of truth
 // so a rename can't silently break the protocol.
 import { MID_TURN_MESSAGE_INJECTED_EVENT } from './daemonEventTypes.js';
-import { MID_TURN_QUEUE_DRAIN_METHOD } from './bridgeTypes.js';
+import {
+  ACTIVE_WORK_HEARTBEAT_VERSION,
+  ACTIVE_WORK_HOLD_CATEGORIES,
+  ACTIVE_WORK_MAX_SESSION_HOLDS,
+  ACTIVE_WORK_MAX_SNAPSHOT_SESSIONS,
+  ACTIVE_WORK_NOTIFICATION_METHOD,
+  MID_TURN_RECONCILIATION_RING_SIZE,
+  MID_TURN_QUEUE_DRAIN_METHOD,
+  TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
+  type ActiveWorkHoldV1,
+  type ActiveWorkSnapshotV1,
+} from './bridgeTypes.js';
 import type {
   BridgeWorkspaceGenerationNotificationEvent,
   BridgeGenerationNotificationEvent,
@@ -33,6 +44,7 @@ import type {
   PendingPromptEntry,
 } from './bridgeTypes.js';
 import { SERVE_CONTROL_EXT_METHODS } from './status.js';
+import { isValidExternalToolGuardDenialReason } from './externalToolGuard.js';
 import type {
   ChannelDeliveryErrorCode,
   ChannelDeliveryHandler,
@@ -40,9 +52,16 @@ import type {
   ChannelDeliveryInfo,
   ClientMcpMessageSender,
   CreateSubSessionHandler,
+  ExternalToolGuardHandler,
+  LiveScreenContextCaptureHandler,
+  LiveSpeakToUserHandler,
+  LiveTaskToolRequestHandler,
 } from './bridgeOptions.js';
 import {
   CHANNEL_DELIVERY_ERROR_CODES,
+  LIVE_TASK_TOOL_NAMES,
+  MAX_LIVE_SCREEN_CONTEXT_TEXT_CHARS,
+  MAX_LIVE_SPEAK_TO_USER_MESSAGE_CHARS,
   MAX_SUB_SESSION_NAME_CHARS,
   MAX_SUB_SESSION_PROMPT_CHARS,
 } from './bridgeOptions.js';
@@ -64,6 +83,68 @@ import type {
   SessionArtifactInput,
   SessionArtifactStore,
 } from './sessionArtifacts.js';
+
+/**
+ * Validate a channel-wide active-work snapshot off the wire.
+ *
+ * Returns `undefined` for anything malformed so a bad report is ignored
+ * outright: the daemon's cached copy then simply ages, which its freshness
+ * grading already treats as untrustworthy. Partially applying a half-parsed
+ * snapshot would be worse than applying none, because full-snapshot semantics
+ * are what let a Session's absence mean "released".
+ */
+function parseActiveWorkSnapshot(
+  params: Record<string, unknown>,
+): ActiveWorkSnapshotV1 | undefined {
+  const seq = params['seq'];
+  const sessions = params['sessions'];
+  if (
+    params['v'] !== ACTIVE_WORK_HEARTBEAT_VERSION ||
+    typeof seq !== 'number' ||
+    !Number.isSafeInteger(seq) ||
+    seq <= 0 ||
+    !Array.isArray(sessions) ||
+    sessions.length > ACTIVE_WORK_MAX_SNAPSHOT_SESSIONS
+  ) {
+    return undefined;
+  }
+  const parsed: ActiveWorkSnapshotV1['sessions'] = [];
+  for (const raw of sessions) {
+    if (typeof raw !== 'object' || raw === null) return undefined;
+    const entry = raw as Record<string, unknown>;
+    const sessionId = entry['sessionId'];
+    const holds = entry['holds'];
+    if (
+      typeof sessionId !== 'string' ||
+      !Array.isArray(holds) ||
+      holds.length > ACTIVE_WORK_MAX_SESSION_HOLDS
+    ) {
+      return undefined;
+    }
+    const parsedHolds: ActiveWorkHoldV1[] = [];
+    for (const rawHold of holds) {
+      if (typeof rawHold !== 'object' || rawHold === null) return undefined;
+      const hold = rawHold as Record<string, unknown>;
+      const category = hold['category'];
+      const id = hold['id'];
+      if (
+        typeof id !== 'string' ||
+        typeof category !== 'string' ||
+        !ACTIVE_WORK_HOLD_CATEGORIES.includes(
+          category as ActiveWorkHoldV1['category'],
+        )
+      ) {
+        return undefined;
+      }
+      parsedHolds.push({
+        category: category as ActiveWorkHoldV1['category'],
+        id,
+      });
+    }
+    parsed.push({ sessionId, holds: parsedHolds });
+  }
+  return { v: ACTIVE_WORK_HEARTBEAT_VERSION, seq, sessions: parsed };
+}
 
 // Keep in sync with core `ToolNames.ARTIFACT`; acp-bridge avoids a runtime
 // import from core for this hot demux path.
@@ -103,6 +184,30 @@ function isFsErrorShape(err: unknown): err is FsErrorShape {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function normalizeExternalToolGuardResult(
+  value: unknown,
+): Record<string, unknown> {
+  if (!isRecord(value)) {
+    throw new Error('External tool guard handler returned an invalid result.');
+  }
+  const keys = Object.keys(value);
+  if (value['allowed'] === true && keys.length === 1 && keys[0] === 'allowed') {
+    return { allowed: true };
+  }
+  if (
+    value['allowed'] !== false ||
+    keys.some((key) => key !== 'allowed' && key !== 'reason')
+  ) {
+    throw new Error('External tool guard handler returned an invalid result.');
+  }
+  if (!Object.hasOwn(value, 'reason')) return { allowed: false };
+  const reason = value['reason'];
+  if (!isValidExternalToolGuardDenialReason(reason)) {
+    throw new Error('External tool guard handler returned an invalid result.');
+  }
+  return { allowed: false, reason };
 }
 
 function isBoundedChannelDeliveryString(value: unknown): value is string {
@@ -511,10 +616,17 @@ export interface BridgeClientSessionEntry {
    * `extMethod` can splice it. See `SessionEntry.midTurnMessageQueue`.
    */
   midTurnMessageQueue: MidTurnQueueEntry[];
+  /**
+   * Bounded ring of drained mid-turn message ids. Owned by the full
+   * `SessionEntry` in `bridge.ts`; surfaced on this narrowed view so the
+   * drain in `extMethod` can record what it handed to the child. See
+   * `SessionEntry.settledMidTurnMessageIds`.
+   */
+  settledMidTurnMessageIds: string[];
   /** Complete prompts waiting behind the currently running prompt. */
   pendingPromptList: PendingPromptEntry[];
-  /** The child reported that its Todo Stop Guard yielded to the FIFO. */
-  todoStopGuardAwaitingQueuedPrompt?: boolean;
+  /** Bridge prompt that owns the child Guard wait for this FIFO. */
+  todoStopGuardAwaitingQueuedPromptOwnerPromptId?: string;
   /** True while a prompt is executing for this session. */
   promptActive?: boolean;
   /** Admitted id for the prompt currently executing on this session. */
@@ -682,6 +794,23 @@ export class BridgeClient implements Client {
       event: BridgeWorkspaceGenerationNotificationEvent,
     ) => void,
     private readonly onChannelDelivery?: ChannelDeliveryHandler,
+    /** Permits pre-registration client-MCP discovery without trusting its id. */
+    private readonly hasSessionSpawnInFlight: () => boolean = () => false,
+    private readonly getLiveScreenContextCaptureHandler: () =>
+      | LiveScreenContextCaptureHandler
+      | undefined = () => undefined,
+    private readonly getLiveTaskToolRequestHandler: () =>
+      | LiveTaskToolRequestHandler
+      | undefined = () => undefined,
+    private readonly getLiveSpeakToUserHandler: () =>
+      | LiveSpeakToUserHandler
+      | undefined = () => undefined,
+    /**
+     * Managed tool guard hosted by the daemon. Kept after the Live handlers so
+     * existing direct BridgeClient constructors remain source-compatible.
+     */
+    private readonly externalToolGuard?: ExternalToolGuardHandler,
+    private readonly onActiveWork?: (snapshot: ActiveWorkSnapshotV1) => void,
   ) {}
 
   async requestPermission(
@@ -785,6 +914,9 @@ export class BridgeClient implements Client {
   }
 
   async sessionUpdate(params: SessionNotification): Promise<void> {
+    if (this.abandonedRestoreIds.has(params.sessionId)) {
+      return;
+    }
     if (
       !this.ownsSession(params.sessionId) &&
       !this.inFlightRestoreIds.has(params.sessionId)
@@ -1019,22 +1151,21 @@ export class BridgeClient implements Client {
    */
   private readonly tombstonedSessionIds = new Map<string, number>();
 
-  /**
-   * Allow-list of sessionIds currently being restored via
-   * `session/load` / `session/resume`. Bypasses the tombstone check
-   * in `bufferEarlyEvent` so restore-time events for a
-   * previously-closed id flow through to the future
-   * `createSessionEntry -> drainEarlyEvents` call.
-   *
-   * Without this, the tombstone set before a future `load` can clear
-   * it via `drainEarlyEvents` would silently drop legitimate
-   * restore-time events (e.g. MCP discovery budget events firing
-   * during the ACP call window).
-   *
-   * Bridge factory enters the set before awaiting the ACP restore
-   * call and exits on settle (success or failure).
-   */
+  /** Restore ownership for `sessionUpdate` and artifact demultiplexing. */
   private readonly inFlightRestoreIds = new Set<string>();
+
+  /**
+   * Registrations allowed to buffer early extended notifications through an
+   * ordinary close tombstone. This includes restores and caller-supplied-id
+   * spawns, and lasts only until their ACP registration attempt settles.
+   */
+  private readonly inFlightSessionRegistrationIds = new Set<string>();
+
+  /**
+   * Restore ids whose caller timed out while the non-cancellable ACP request
+   * continues.
+   */
+  private readonly abandonedRestoreIds = new Set<string>();
 
   /**
    * Handle child->bridge ACP `extMethod` requests (calls that expect a
@@ -1068,8 +1199,23 @@ export class BridgeClient implements Client {
     if (method === SERVE_CONTROL_EXT_METHODS.createSubSession) {
       return this.handleCreateSubSession(params);
     }
+    if (method === SERVE_CONTROL_EXT_METHODS.liveCaptureScreenContext) {
+      return this.handleLiveScreenContextCapture(params);
+    }
+    if (method === SERVE_CONTROL_EXT_METHODS.liveTaskTool) {
+      return this.handleLiveTaskTool(params);
+    }
+    if (method === SERVE_CONTROL_EXT_METHODS.liveSpeakToUser) {
+      return this.handleLiveSpeakToUser(params);
+    }
     if (method === SERVE_CONTROL_EXT_METHODS.channelDelivery) {
       return this.handleChannelDelivery(params);
+    }
+    if (method === SERVE_CONTROL_EXT_METHODS.externalToolGuardPrepare) {
+      return this.handleExternalToolGuardPrepare(params);
+    }
+    if (method === TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD) {
+      return this.handleTodoStopGuardContinuationClaim(params);
     }
     if (method !== MID_TURN_QUEUE_DRAIN_METHOD) {
       throw RequestError.methodNotFound(method);
@@ -1085,48 +1231,173 @@ export class BridgeClient implements Client {
     const entry = this.resolveEntry(sessionId);
     if (!entry) return { messages: [], hasQueuedPrompt: false };
     const drained = entry.midTurnMessageQueue.splice(0);
+    if (drained.length > 0) {
+      // Record the handoff so clients that lost their bookkeeping (page
+      // refresh) or missed the echo frame below can reconcile via
+      // `getMidTurnMessages` instead of resending an already-injected
+      // message as the next turn. Ring is bounded; oldest ids evicted.
+      for (const item of drained) {
+        entry.settledMidTurnMessageIds.push(item.messageId);
+      }
+      if (
+        entry.settledMidTurnMessageIds.length >
+        MID_TURN_RECONCILIATION_RING_SIZE
+      ) {
+        entry.settledMidTurnMessageIds.splice(
+          0,
+          entry.settledMidTurnMessageIds.length -
+            MID_TURN_RECONCILIATION_RING_SIZE,
+        );
+      }
+    }
+    // Queue-only entries are private coordinator steering, not UI transcript.
+    const echoed = drained.filter((item) => !item.queueOnly);
     const messages = drained.map((item) => item.text);
     const hasQueuedPrompt = entry.pendingPromptList.some(
       (prompt) =>
         prompt.state === 'queued' && !prompt.abortController.signal.aborted,
     );
-    if (params['todoStopGuardWatchQueuedPrompt'] === true) {
-      entry.todoStopGuardAwaitingQueuedPrompt = hasQueuedPrompt;
-    }
-    if (drained.length > 0) {
+    if (echoed.length > 0) {
       // `publish()` never throws — it returns `undefined` on a closed bus (see
       // EventBus.publish's never-throws contract: "Don't add try/catch wrappers
       // around publish()"). Capture the result instead. A dropped frame is
       // teardown-only: the child still gets the spliced messages below, but the
-      // browser won't receive the echo and would resend them next turn — so log
-      // it.
-      //
-      // Publish ONE frame per originator client. The frame is broadcast to every
-      // SSE subscriber on the session, so it carries `originatorClientId` for
-      // clients to filter on — a peer that didn't queue the message must not
-      // dedupe its own coincidentally-equal entry. A mixed-originator batch (two
-      // clients pushing in the same window) is rare but still routed correctly.
-      const byOriginator = new Map<string | undefined, string[]>();
-      for (const item of drained) {
-        const group = byOriginator.get(item.originatorClientId);
-        if (group) group.push(item.text);
-        else byOriginator.set(item.originatorClientId, [item.text]);
-      }
-      for (const [originatorClientId, texts] of byOriginator) {
-        const published = entry.events.publish({
-          type: MID_TURN_MESSAGE_INJECTED_EVENT,
-          ...(entry.activePromptId ? { promptId: entry.activePromptId } : {}),
-          data: { sessionId: entry.sessionId, messages: texts },
-          ...(originatorClientId ? { originatorClientId } : {}),
-        });
-        writeStderrLine(
-          published
-            ? `[mid-turn] session=${entry.sessionId} drained=${texts.length}${originatorClientId ? ` originator=${originatorClientId}` : ''} injected into running turn`
-            : `[mid-turn] session=${entry.sessionId} drained=${texts.length} echo frame dropped (bus closed); browser may resend next turn`,
-        );
-      }
+      // browser must recover the handoff from the reconciliation ring.
+      const published = entry.events.publish({
+        type: MID_TURN_MESSAGE_INJECTED_EVENT,
+        ...(entry.activePromptId ? { promptId: entry.activePromptId } : {}),
+        data: {
+          sessionId: entry.sessionId,
+          messages: echoed.map((item) => item.text),
+          messageIds: echoed.map((item) => item.messageId),
+        },
+      });
+      writeStderrLine(
+        published
+          ? `[mid-turn] session=${entry.sessionId} drained=${messages.length} echoed=${echoed.length} injected into running turn`
+          : `[mid-turn] session=${entry.sessionId} drained=${messages.length} echoed=${echoed.length} echo frame dropped (bus closed); reconciliation required`,
+      );
     }
     return { messages, hasQueuedPrompt };
+  }
+
+  private async handleExternalToolGuardPrepare(
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    if (!this.externalToolGuard) {
+      throw RequestError.methodNotFound(
+        SERVE_CONTROL_EXT_METHODS.externalToolGuardPrepare,
+      );
+    }
+    const sessionId = params['sessionId'];
+    const promptId = params['promptId'];
+    const toolCallId = params['toolCallId'];
+    const toolName = params['toolName'];
+    const args = params['arguments'];
+    if (
+      typeof sessionId !== 'string' ||
+      sessionId.length === 0 ||
+      typeof promptId !== 'string' ||
+      promptId.length === 0 ||
+      typeof toolCallId !== 'string' ||
+      toolCallId.length === 0 ||
+      typeof toolName !== 'string' ||
+      toolName.length === 0 ||
+      !isRecord(args)
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Invalid external tool guard request',
+      );
+    }
+    if (!this.ownsSession(sessionId)) {
+      throw RequestError.invalidParams(
+        undefined,
+        'External tool guard session is not owned by this connection',
+      );
+    }
+    const entry = this.resolveEntry(sessionId);
+    if (!entry || !entry.promptActive || entry.activePromptId !== promptId) {
+      throw RequestError.invalidParams(
+        undefined,
+        'External tool guard prompt is not the active prompt',
+      );
+    }
+    const decision: unknown = await this.externalToolGuard({
+      sessionId: entry.sessionId,
+      promptId: entry.activePromptId,
+      toolCallId,
+      toolName,
+      arguments: args,
+    });
+    const currentEntry = this.resolveEntry(sessionId);
+    if (
+      !this.ownsSession(sessionId) ||
+      currentEntry !== entry ||
+      !currentEntry.promptActive ||
+      currentEntry.activePromptId !== promptId
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        'External tool guard prompt is no longer active',
+      );
+    }
+    return normalizeExternalToolGuardResult(decision);
+  }
+
+  private handleTodoStopGuardContinuationClaim(
+    params: Record<string, unknown>,
+  ): Record<string, unknown> {
+    const sessionId =
+      typeof params['sessionId'] === 'string' && params['sessionId'].length > 0
+        ? params['sessionId']
+        : undefined;
+    if (!sessionId) return { claimed: false, hasQueuedPrompt: false };
+    if (!this.ownsSession(sessionId)) {
+      return { claimed: false, hasQueuedPrompt: false };
+    }
+    const entry = this.resolveEntry(sessionId);
+    if (!entry) return { claimed: false, hasQueuedPrompt: false };
+
+    const livePrompts = entry.pendingPromptList.filter(
+      (prompt) => !prompt.abortController.signal.aborted,
+    );
+    const promptId =
+      typeof params['promptId'] === 'string' && params['promptId'].length > 0
+        ? params['promptId']
+        : undefined;
+
+    if (promptId) {
+      const ownsRunningPrompt =
+        entry.activePromptId === promptId &&
+        livePrompts.some(
+          (prompt) =>
+            prompt.promptId === promptId && prompt.state === 'running',
+        );
+      const hasCompetingRunningPrompt = livePrompts.some(
+        (prompt) => prompt.promptId !== promptId && prompt.state === 'running',
+      );
+      if (!ownsRunningPrompt || hasCompetingRunningPrompt) {
+        return { claimed: false, hasQueuedPrompt: false };
+      }
+
+      const hasQueuedPrompt = livePrompts.some(
+        (prompt) => prompt.state === 'queued',
+      );
+      if (hasQueuedPrompt) {
+        entry.todoStopGuardAwaitingQueuedPromptOwnerPromptId = promptId;
+        return { claimed: false, hasQueuedPrompt: true };
+      }
+      if (entry.todoStopGuardAwaitingQueuedPromptOwnerPromptId === promptId) {
+        delete entry.todoStopGuardAwaitingQueuedPromptOwnerPromptId;
+      }
+      return { claimed: true, hasQueuedPrompt: false };
+    }
+
+    if (entry.promptActive || livePrompts.length > 0) {
+      return { claimed: false, hasQueuedPrompt: false };
+    }
+    return { claimed: true, hasQueuedPrompt: false };
   }
 
   private async handleChannelDelivery(
@@ -1300,7 +1571,37 @@ export class BridgeClient implements Client {
         `client-hosted MCP server '${server}' is not currently connected`,
       );
     }
-    const response = await send(payload);
+    const sessionId = params['sessionId'];
+    if (
+      sessionId !== undefined &&
+      (typeof sessionId !== 'string' || sessionId.length === 0)
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        '`sessionId` must be a non-empty string when provided',
+      );
+    }
+    const ownsSession =
+      typeof sessionId === 'string' && this.ownsSession(sessionId);
+    if (
+      typeof sessionId === 'string' &&
+      !ownsSession &&
+      !this.hasSessionSpawnInFlight()
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        `Session not owned by this channel: ${sessionId}`,
+      );
+    }
+    if (typeof sessionId === 'string' && !ownsSession) {
+      writeStderrLine(
+        `[demux] session=${sessionId} type=client_mcp_message action=forwarded_without_session reason=session_registration_pending`,
+      );
+    }
+    const response = await send(
+      payload,
+      typeof sessionId === 'string' && ownsSession ? { sessionId } : undefined,
+    );
     return { payload: response as Record<string, unknown> };
   }
 
@@ -1390,6 +1691,107 @@ export class BridgeClient implements Client {
     };
   }
 
+  private async handleLiveScreenContextCapture(
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const handler = this.getLiveScreenContextCaptureHandler();
+    if (!handler) {
+      throw RequestError.methodNotFound(
+        SERVE_CONTROL_EXT_METHODS.liveCaptureScreenContext,
+      );
+    }
+    const callerSessionId = params['callerSessionId'];
+    if (
+      typeof callerSessionId !== 'string' ||
+      callerSessionId.length === 0 ||
+      !this.ownsSession(callerSessionId)
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        '`callerSessionId` is required and must name a session owned by this connection',
+      );
+    }
+    const result = await handler({ callerSessionId });
+    if (
+      result.appName.length === 0 ||
+      result.appName.length > 512 ||
+      (result.windowTitle !== undefined && result.windowTitle.length > 2_048) ||
+      result.accessibilityText.length > MAX_LIVE_SCREEN_CONTEXT_TEXT_CHARS ||
+      result.screenshotPath.length === 0 ||
+      result.screenshotPath.length > 4_096
+    ) {
+      throw RequestError.internalError(undefined, 'Invalid Appshot result.');
+    }
+    return {
+      appName: result.appName,
+      ...(result.windowTitle ? { windowTitle: result.windowTitle } : {}),
+      accessibilityText: result.accessibilityText,
+      screenshotPath: result.screenshotPath,
+    };
+  }
+
+  private async handleLiveTaskTool(
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const handler = this.getLiveTaskToolRequestHandler();
+    if (!handler) {
+      throw RequestError.methodNotFound(SERVE_CONTROL_EXT_METHODS.liveTaskTool);
+    }
+    const callerSessionId = params['callerSessionId'];
+    const name = params['name'];
+    const args = params['arguments'];
+    if (
+      typeof callerSessionId !== 'string' ||
+      callerSessionId.length === 0 ||
+      !this.ownsSession(callerSessionId) ||
+      typeof name !== 'string' ||
+      !LIVE_TASK_TOOL_NAMES.includes(
+        name as (typeof LIVE_TASK_TOOL_NAMES)[number],
+      ) ||
+      typeof args !== 'object' ||
+      args === null ||
+      Array.isArray(args)
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Invalid Live task-tool request.',
+      );
+    }
+    return handler({
+      callerSessionId,
+      name: name as (typeof LIVE_TASK_TOOL_NAMES)[number],
+      arguments: args as Record<string, unknown>,
+    });
+  }
+
+  private async handleLiveSpeakToUser(
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const handler = this.getLiveSpeakToUserHandler();
+    if (!handler) {
+      throw RequestError.methodNotFound(
+        SERVE_CONTROL_EXT_METHODS.liveSpeakToUser,
+      );
+    }
+    const callerSessionId = params['callerSessionId'];
+    const message = params['message'];
+    if (
+      typeof callerSessionId !== 'string' ||
+      callerSessionId.length === 0 ||
+      !this.ownsSession(callerSessionId) ||
+      typeof message !== 'string' ||
+      message.trim().length === 0 ||
+      message.length > MAX_LIVE_SPEAK_TO_USER_MESSAGE_CHARS
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Invalid Live speak-to-user request.',
+      );
+    }
+    await handler({ callerSessionId, message });
+    return { accepted: true };
+  }
+
   /**
    * Handle child->bridge ACP `extNotification` calls. Recognized methods are
    * `qwen/notify/session/model-update`,
@@ -1399,6 +1801,7 @@ export class BridgeClient implements Client {
    * `qwen/notify/session/prompt-suggestion` (followup assist),
    * `qwen/notify/session/artifact-event` (hook artifacts),
    * `qwen/notify/session/terminal-sequence`, and
+   * `_qwencode/end_turn` (background-notification turns), and
    * `qwen/notify/session/mcp-budget-event` — each translated into a
    * session-scoped SSE frame. Unknown methods are dropped silently for
    * forward-compat.
@@ -1407,6 +1810,50 @@ export class BridgeClient implements Client {
     method: string,
     params: Record<string, unknown>,
   ): Promise<void> {
+    const notificationSessionId = params['sessionId'];
+    if (
+      typeof notificationSessionId === 'string' &&
+      this.abandonedRestoreIds.has(notificationSessionId)
+    ) {
+      return;
+    }
+    if (method === ACTIVE_WORK_NOTIFICATION_METHOD) {
+      const snapshot = parseActiveWorkSnapshot(params);
+      if (snapshot) {
+        // Sessions the child claims but this channel does not own are dropped
+        // rather than rejecting the whole snapshot: the rest of it is still
+        // usable, and a channel must never influence another channel's state.
+        this.onActiveWork?.({
+          v: ACTIVE_WORK_HEARTBEAT_VERSION,
+          seq: snapshot.seq,
+          sessions: snapshot.sessions.filter((session) =>
+            this.ownsSession(session.sessionId),
+          ),
+        });
+      }
+      return;
+    }
+    if (method === '_qwencode/end_turn') {
+      const sessionId = params['sessionId'];
+      const reason = params['reason'];
+      if (
+        typeof sessionId !== 'string' ||
+        sessionId.length === 0 ||
+        typeof reason !== 'string' ||
+        reason.length === 0 ||
+        reason.length > 128 ||
+        params['source'] !== 'background_notification'
+      ) {
+        return;
+      }
+      const entry = this.resolveEntry(sessionId);
+      if (!entry || !this.ownsSession(sessionId)) return;
+      entry.events.publish({
+        type: 'background_notification_turn_complete',
+        data: { sessionId, reason },
+      });
+      return;
+    }
     if (method === 'qwen/notify/session/generation/event') {
       const sessionId = params['sessionId'];
       const requestId = params['requestId'];
@@ -1748,6 +2195,9 @@ export class BridgeClient implements Client {
     data: Record<string, unknown>,
     turnScoped = false,
   ): void {
+    if (this.abandonedRestoreIds.has(sessionId)) {
+      return;
+    }
     const entry = this.resolveEntry(sessionId);
     const frame: Omit<BridgeEvent, 'id' | 'v'> = {
       type,
@@ -1963,20 +2413,22 @@ export class BridgeClient implements Client {
     sessionId: string,
     frame: Omit<BridgeEvent, 'id' | 'v'>,
   ): void {
+    if (this.abandonedRestoreIds.has(sessionId)) {
+      return;
+    }
     const now = Date.now();
     // Drop frames for ids the bridge has already marked closed/killed.
     // Sweep + check before any other work so a malicious / buggy child
     // can't keep appending post-mortem frames against an old id. Live
-    // ids that re-register (load/resume) clear their tombstone in
-    // `drainEarlyEvents`.
+    // ids that re-register (load/resume or a caller-supplied-id spawn) clear
+    // their tombstone in `drainEarlyEvents`.
     //
-    // Skip the tombstone check for ids currently being restored so a
-    // `close -> load same id` sequence within 60s doesn't lose
-    // restore-time early events.
+    // Skip the tombstone check for ids currently being registered so a
+    // legitimate owner can receive its ACP-call-time extended notifications.
     this.sweepExpiredTombstones(now);
     if (
       this.tombstonedSessionIds.has(sessionId) &&
-      !this.inFlightRestoreIds.has(sessionId)
+      !this.inFlightSessionRegistrationIds.has(sessionId)
     ) {
       writeStderrLine(
         `qwen serve: dropping early extNotification ` +
@@ -2058,7 +2510,32 @@ export class BridgeClient implements Client {
    * failed restore doesn't leave a dangling allow-list entry.
    */
   markRestoreInFlight(sessionId: string): void {
+    this.markSessionRegistrationInFlight(sessionId);
     this.inFlightRestoreIds.add(sessionId);
+  }
+
+  /**
+   * Transfer an id from closed/abandoned ownership to a new registration
+   * attempt before its ACP call starts. The in-flight allow-list is what lets
+   * legitimate early notifications bypass the ordinary close tombstone until
+   * `createSessionEntry` can drain them.
+   */
+  markSessionRegistrationInFlight(sessionId: string): void {
+    this.clearAbandonedRestoreFence(sessionId);
+    this.inFlightSessionRegistrationIds.add(sessionId);
+  }
+
+  /**
+   * Drop the abandoned-restore fence for `sessionId`.
+   *
+   * The fence has no TTL and suppresses session updates, guardrail events,
+   * and child notifications, so it must not outlive the abandoned attempt it
+   * was raised for. The bridge clears it whenever a legitimate owner takes
+   * the id — a new restore, or `createSessionEntry` registering a session
+   * from any other route.
+   */
+  clearAbandonedRestoreFence(sessionId: string): void {
+    this.abandonedRestoreIds.delete(sessionId);
   }
 
   /**
@@ -2069,6 +2546,18 @@ export class BridgeClient implements Client {
    */
   clearRestoreInFlight(sessionId: string): void {
     this.inFlightRestoreIds.delete(sessionId);
+    this.clearSessionRegistrationInFlight(sessionId);
+  }
+
+  clearSessionRegistrationInFlight(sessionId: string): void {
+    this.inFlightSessionRegistrationIds.delete(sessionId);
+  }
+
+  markRestoreAbandoned(sessionId: string): void {
+    this.inFlightRestoreIds.delete(sessionId);
+    this.inFlightSessionRegistrationIds.delete(sessionId);
+    this.abandonedRestoreIds.add(sessionId);
+    this.earlyEvents.delete(sessionId);
   }
 
   /**

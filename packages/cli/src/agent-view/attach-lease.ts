@@ -7,6 +7,7 @@
 import { randomUUID } from 'node:crypto';
 
 export const DEFAULT_AGENT_VIEW_ATTACH_LEASE_TTL_MS = 30_000;
+export const MAX_AGENT_VIEW_ATTACH_LEASE_TTL_MS = 3_600_000;
 
 export interface AgentViewAttachLease {
   sessionId: string;
@@ -17,12 +18,17 @@ export interface AgentViewAttachLease {
   expiresAt: string;
 }
 
+export type AgentViewAttachLeaseConflict = Omit<
+  AgentViewAttachLease,
+  'leaseId'
+>;
+
 export type AgentViewAttachLeaseAcquireResult =
   | { ok: true; lease: AgentViewAttachLease }
   | {
       ok: false;
       reason: 'already_attached';
-      lease: AgentViewAttachLease;
+      lease: AgentViewAttachLeaseConflict;
     };
 
 export interface AgentViewAttachLeaseAcquireOptions {
@@ -66,14 +72,14 @@ export class AgentViewAttachLeaseManager {
       return {
         ok: false,
         reason: 'already_attached',
-        lease: existing,
+        lease: redactLeaseId(existing),
       };
     }
 
     const acquiredAt = this.now();
     const lease: AgentViewAttachLease = {
       sessionId,
-      leaseId: options.leaseId ?? this.createLeaseId(),
+      leaseId: options.leaseId || this.createLeaseId(),
       ...(options.clientId ? { clientId: options.clientId } : {}),
       acquiredAt: acquiredAt.toISOString(),
       lastHeartbeatAt: acquiredAt.toISOString(),
@@ -144,6 +150,11 @@ export class AgentViewAttachLeaseManager {
     if (!Number.isFinite(resolvedTtlMs) || resolvedTtlMs <= 0) {
       throw new RangeError('Attach lease ttlMs must be positive.');
     }
+    if (resolvedTtlMs > MAX_AGENT_VIEW_ATTACH_LEASE_TTL_MS) {
+      throw new RangeError(
+        `Attach lease ttlMs must not exceed ${MAX_AGENT_VIEW_ATTACH_LEASE_TTL_MS}.`,
+      );
+    }
     return new Date(now.getTime() + resolvedTtlMs);
   }
 
@@ -152,4 +163,16 @@ export class AgentViewAttachLeaseManager {
       throw new Error('Agent View session id is required.');
     }
   }
+}
+
+function redactLeaseId(
+  lease: AgentViewAttachLease,
+): AgentViewAttachLeaseConflict {
+  return {
+    sessionId: lease.sessionId,
+    ...(lease.clientId ? { clientId: lease.clientId } : {}),
+    acquiredAt: lease.acquiredAt,
+    lastHeartbeatAt: lease.lastHeartbeatAt,
+    expiresAt: lease.expiresAt,
+  };
 }

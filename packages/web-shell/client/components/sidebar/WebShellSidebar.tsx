@@ -12,8 +12,8 @@ import {
 } from 'react';
 import {
   useActions,
+  useChannels,
   useConnection,
-  useSessions,
   useWorkspace,
   useWorkspaceActions,
 } from '@qwen-code/webui/daemon-react-sdk';
@@ -35,7 +35,8 @@ import {
   ChevronRightIcon,
   Columns2Icon,
   LayoutGridIcon,
-  InfoIcon,
+  ListTodoIcon,
+  MessageCircleIcon,
   EllipsisVerticalIcon,
   ArchiveIcon,
   ArchiveRestoreIcon,
@@ -50,6 +51,7 @@ import {
   PanelLeftCloseIcon,
   PanelLeftOpenIcon,
   PlusIcon,
+  RadioTowerIcon,
   SearchIcon,
   SettingsIcon,
   SquarePenIcon,
@@ -60,6 +62,7 @@ import { WebShellThemeId, type WebShellTheme } from '../../themeContext';
 import { useI18n } from '../../i18n';
 import { Input } from '../ui/input';
 import { Button } from '../ui/button';
+import { Tabs, TabsList, TabsTrigger } from '../ui/tabs';
 import { Field, FieldGroup, FieldLabel } from '../ui/field';
 import {
   Select,
@@ -74,15 +77,15 @@ import {
   DropdownMenuContent,
   DropdownMenuGroup,
   DropdownMenuItem,
-  DropdownMenuSub,
-  DropdownMenuSubContent,
-  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from '../ui/dropdown-menu';
 import { formatRelativeTime } from '../../utils/formatRelativeTime';
 import { DialogShell } from '../dialogs/DialogShell';
 import { WorkspaceSection } from './WorkspaceSection';
 import { SessionGroupSection } from './SessionGroupSection';
+import { SessionDetailsSubmenu } from './SessionDetailsSubmenu';
+import { groupSessionsByChannelType } from './channelSessionGroups';
+import { resolveSessionDetailsCollisionBoundary } from './sessionDetailsCollisionBoundary';
 import {
   isPrimaryCollapsedSectionId,
   readCollapsedSessionSectionIds,
@@ -93,6 +96,13 @@ import {
   SESSION_ORGANIZATION_FEATURE,
 } from '../../constants/sessions';
 import styles from './WebShellSidebar.module.css';
+import {
+  useSessionCatalogController,
+  useSessionCatalogPolling,
+  useSessionCatalogQueries,
+  useWebShellSessions,
+} from '../../session-catalog/session-catalog-hooks';
+import type { SessionCatalogQuery } from '../../session-catalog/session-catalog-store';
 
 const SIDEBAR_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-sidebar-width';
 const SIDEBAR_DEFAULT_WIDTH = 260;
@@ -113,6 +123,19 @@ const GROUP_MENU_WIDTH = 240;
 const GROUP_MENU_MARGIN = 8;
 const CUSTOM_GROUP_COLOR_OPTION = '__custom__';
 const DEFAULT_CUSTOM_GROUP_COLOR: DaemonSessionGroupHexColor = '#416ef5';
+
+type SidebarSessionSource = 'default' | 'channel';
+
+function matchesSessionSource(
+  session: DaemonSessionSummary,
+  source: SidebarSessionSource | undefined,
+): boolean {
+  if (source === 'channel') return session.sourceType === 'channel';
+  if (source === 'default') {
+    return session.sourceType === undefined || session.sourceType === 'default';
+  }
+  return true;
+}
 
 function getSessionIdentity(
   sessionId: string,
@@ -148,6 +171,7 @@ export interface WebShellSidebarLockedWorkspace {
 export type WebShellSidebarPrimaryNavItem =
   | 'newTask'
   | 'plugins'
+  | 'channels'
   | 'scheduledTasks'
   | 'goals';
 
@@ -178,6 +202,7 @@ const DEFAULT_FOOTER_ITEMS: readonly WebShellSidebarFooterItem[] = [
 const DEFAULT_PRIMARY_NAV_ITEMS: readonly WebShellSidebarPrimaryNavItem[] = [
   'newTask',
   'plugins',
+  'channels',
   'scheduledTasks',
   'goals',
 ];
@@ -270,6 +295,7 @@ interface WebShellSidebarProps {
   onCollapsedChange: (collapsed: boolean) => void;
   onOpenSettings: () => void;
   onOpenPlugins: () => void;
+  onOpenChannels: () => void;
   onOpenDaemonStatus: () => void;
   onOpenScheduledTasks: () => void;
   onOpenGoals: () => void;
@@ -289,11 +315,15 @@ interface WebShellSidebarProps {
     workspaceCwd?: string,
   ) => Promise<void> | void;
   onSelectCurrentSession?: () => void;
+  onSessionRenameConfirmed?: (
+    workspaceCwd: string,
+    sessionId: string,
+    displayName: string,
+  ) => void;
   onError: (error: unknown, fallback: string) => void;
   theme: WebShellTheme;
   onThemeChange: (theme: WebShellTheme) => void;
   mobileOpen?: boolean;
-  sessionListReloadToken?: number;
   /**
    * Phase 4: workspace cwd picked for the next new session (undefined =
    * primary). Only meaningful on multi-workspace daemons.
@@ -305,6 +335,7 @@ interface WebShellSidebarProps {
    * trusted workspace's folder header, where a live git chip fires it on click.
    */
   onOpenGitDiff?: (workspaceCwd: string) => void;
+  onOpenCommit?: (workspaceCwd: string) => void;
   /**
    * Opens the shared App-owned Add Workspace dialog. Omit this callback when
    * registration is unavailable; locked workspaces hide the action separately.
@@ -498,6 +529,7 @@ export function WebShellSidebar({
   onCollapsedChange,
   onOpenSettings,
   onOpenPlugins,
+  onOpenChannels,
   onOpenDaemonStatus,
   onOpenScheduledTasks,
   onOpenGoals,
@@ -508,14 +540,15 @@ export function WebShellSidebar({
   onNewSession,
   onLoadSession,
   onSelectCurrentSession,
+  onSessionRenameConfirmed,
   onError,
   theme,
   onThemeChange,
   mobileOpen,
-  sessionListReloadToken,
   selectedWorkspaceCwd,
   onSelectWorkspace,
   onOpenGitDiff,
+  onOpenCommit,
   onOpenAddWorkspace,
   workspaces: providedWorkspaces,
   lockedWorkspaceCwd,
@@ -531,6 +564,9 @@ export function WebShellSidebar({
   const actions = useActions();
   const workspaceActions = useWorkspaceActions();
   const workspace = useWorkspace();
+  const sessionCatalogController = useSessionCatalogController(
+    workspace.client,
+  );
   const footerItems = useMemo(
     () =>
       new Set(footer === false ? [] : (footer?.items ?? DEFAULT_FOOTER_ITEMS)),
@@ -556,6 +592,28 @@ export function WebShellSidebar({
   const organizationEnabled = Boolean(
     connection.capabilities?.features?.includes(SESSION_ORGANIZATION_FEATURE),
   );
+  const sourceMetadataEnabled = Boolean(
+    connection.capabilities?.features?.includes('session_source_metadata'),
+  );
+  const [sessionSource, setSessionSource] =
+    useState<SidebarSessionSource>('default');
+  const selectedSessionSource = sourceMetadataEnabled
+    ? sessionSource
+    : undefined;
+  const channelGroupingEnabled = Boolean(
+    selectedSessionSource === 'channel' &&
+      workspace.capabilities?.features.includes('channel_management'),
+  );
+  const {
+    data: channelCatalogData,
+    catalog: channelTypeCatalog,
+    channels: channelInstances,
+    reload: reloadChannelCatalog,
+    error: channelCatalogError,
+  } = useChannels({
+    autoLoad: channelGroupingEnabled,
+    enabled: channelGroupingEnabled,
+  });
   const sessionArchiveEnabled = Boolean(
     connection.capabilities?.features?.includes('session_archive'),
   );
@@ -592,17 +650,19 @@ export function WebShellSidebar({
     deleteSession,
     exportSession,
     archiveSession,
-  } = useSessions({
+    catalogQuery,
+  } = useWebShellSessions({
     autoLoad: true,
     enabled: includePrimaryWorkspaceSessions,
     pageSize: SESSION_LIST_PAGE_SIZE,
     archiveState: 'active',
+    ...(selectedSessionSource ? { sourceType: selectedSessionSource } : {}),
     ...(organizationEnabled
       ? { view: 'organized' as const, group: 'all' }
       : {}),
   });
-  // useDaemonResource starts with loading=false before autoLoad runs, so
-  // !loading is not “settled”. Treat the first data as the ready signal (empty
+  // The catalog starts with loading=false before its subscription requests
+  // data, so !loading is not “settled”. Treat the first data as the ready signal (empty
   // lists are still defined data) so the initial-catalog latch waits. Errors
   // must NOT settle it: a latch consumed against a failed request would treat
   // every section from the eventual successful reload as brand-new,
@@ -611,20 +671,34 @@ export function WebShellSidebar({
     !organizationEnabled ||
     !includePrimaryWorkspaceSessions ||
     sessionsPage !== undefined;
-  const { sessions: primaryPinnedSessions, reload: reloadPinnedSessions } =
-    useSessions({
-      autoLoad: organizationEnabled,
-      enabled: organizationEnabled && includePrimaryWorkspaceSessions,
-      pageSize: SESSION_LIST_PAGE_SIZE,
-      archiveState: 'active',
-      view: 'organized',
-      group: 'pinned',
-    });
+  // Which source the settled sessions page belongs to. Switching the source
+  // changes the catalog query key, whose entry starts without a page
+  // (undefined), so reconciliation must not run until a page fetched for the
+  // new source settles — otherwise the other source's sections would be
+  // consumed as the new source's initial catalog.
+  const lastSettledSessionsPageRef = useRef(sessionsPage);
+  const settledSessionsSourceRef = useRef<SidebarSessionSource>(sessionSource);
+  useEffect(() => {
+    // An undefined page is the empty pre-settle snapshot, not a settled fetch.
+    if (sessionsPage === undefined) return;
+    if (lastSettledSessionsPageRef.current !== sessionsPage) {
+      lastSettledSessionsPageRef.current = sessionsPage;
+      settledSessionsSourceRef.current = sessionSource;
+    }
+  }, [sessionsPage, sessionSource]);
+  const loadPinnedSessions =
+    organizationEnabled && selectedSessionSource !== 'channel';
+  const { sessions: primaryPinnedSessions } = useWebShellSessions({
+    autoLoad: loadPinnedSessions,
+    enabled: loadPinnedSessions && includePrimaryWorkspaceSessions,
+    pageSize: SESSION_LIST_PAGE_SIZE,
+    archiveState: 'active',
+    ...(selectedSessionSource ? { sourceType: selectedSessionSource } : {}),
+    view: 'organized',
+    group: 'pinned',
+  });
   const [archivedExpanded, setArchivedExpanded] = useState(false);
   const [pinnedExpanded, setPinnedExpanded] = useState(true);
-  const [secondaryPinnedSessions, setSecondaryPinnedSessions] = useState<
-    DaemonSessionSummary[]
-  >([]);
   const {
     sessions: archivedSessions,
     loading: archivedLoading,
@@ -632,7 +706,8 @@ export function WebShellSidebar({
     reload: reloadArchived,
     deleteSession: deleteArchivedSession,
     unarchiveSession,
-  } = useSessions({
+    catalogQuery: archivedCatalogQuery,
+  } = useWebShellSessions({
     autoLoad: true,
     enabled:
       sessionArchiveEnabled &&
@@ -640,18 +715,11 @@ export function WebShellSidebar({
       includePrimaryWorkspaceSessions,
     pageSize: SESSION_LIST_PAGE_SIZE,
     archiveState: 'archived',
+    ...(selectedSessionSource ? { sourceType: selectedSessionSource } : {}),
     ...(organizationEnabled
       ? { view: 'organized' as const, group: 'all' }
       : {}),
   });
-  const [secondaryArchivedSessions, setSecondaryArchivedSessions] = useState<
-    DaemonSessionSummary[]
-  >([]);
-  const [secondaryArchivedLoading, setSecondaryArchivedLoading] =
-    useState(false);
-  const [secondaryArchivedError, setSecondaryArchivedError] = useState(false);
-  const [secondaryArchivedReloadToken, setSecondaryArchivedReloadToken] =
-    useState(0);
   const [groups, setGroups] = useState<DaemonSessionGroup[]>([]);
   const [menuGroups, setMenuGroups] = useState<DaemonSessionGroup[]>([]);
   const [colorOptions, setColorOptions] = useState<
@@ -695,11 +763,16 @@ export function WebShellSidebar({
       ),
   );
   const knownSessionSectionIdsRef = useRef<Set<string>>(new Set());
-  // Dedicated first-sync latch. Cleared only after both groups catalog and
-  // sessions list have settled (including empty responses). Do not infer this
-  // from knownSessionSectionIdsRef.size — seeding that set early would make the
-  // first real sync look mid-session and auto-collapse restored expansions.
-  const awaitingInitialSessionCatalogRef = useRef(true);
+  // Dedicated first-sync latch, keyed by session source: each source's first
+  // settled catalog only registers section ids. Without per-source latches the
+  // Tasks settle consumes the shared latch and the first Channels visit treats
+  // every platform section as brand-new, auto-collapsing and persisting them.
+  // Do not infer this from knownSessionSectionIdsRef.size — seeding that set
+  // early would make the first real sync look mid-session and auto-collapse
+  // restored expansions.
+  const awaitingInitialSessionCatalogBySourceRef = useRef<
+    Record<SidebarSessionSource, boolean>
+  >({ default: true, channel: true });
   const [groupsCatalogReady, setGroupsCatalogReady] =
     useState(!organizationEnabled);
   // organizationEnabled can flip true mid-session (capabilities can land after
@@ -734,9 +807,8 @@ export function WebShellSidebar({
     id: string;
     key: string;
   } | null>(null);
-  // Bump the token WorkspaceSection instances watch, so the per-workspace
-  // session lists re-poll immediately after a mutation instead of waiting for
-  // their 10s interval. Stable identity — safe (and required) in consumer deps.
+  // Keep the token for WorkspaceSection's group and Git consumers. Session
+  // catalogs are invalidated directly through their owning workspace.
   const bumpWorkspaceReload = useCallback(() => {
     setWorkspaceSessionsReloadToken((v) => v + 1);
   }, []);
@@ -753,11 +825,14 @@ export function WebShellSidebar({
   const [completedUnreadIds, setCompletedUnreadIds] = useState<Set<string>>(
     () => new Set(),
   );
+  const sidebarRef = useRef<HTMLElement>(null);
   const groupMenuRef = useRef<HTMLDivElement>(null);
   const sessionMenuPointerDismissRef = useRef(false);
-  const previousRunningRef = useRef<Map<string, boolean> | null>(null);
+  const previousRunningBySourceRef = useRef<
+    Record<SidebarSessionSource, Map<string, boolean> | null>
+  >({ default: null, channel: null });
+  const lastTrackedSessionSourceRef = useRef(sessionSource);
   const autoOpenedContextRef = useRef<string | null>(null);
-  const pollInFlightRef = useRef(false);
   const resizeTeardownRef = useRef<((updateState: boolean) => void) | null>(
     null,
   );
@@ -798,12 +873,121 @@ export function WebShellSidebar({
       ? availableWorkspaces.filter((entry) => entry.cwd === lockedWorkspaceCwd)
       : availableWorkspaces;
   }, [connection.workspaceCwd, lockedWorkspaceCwd, projectName, workspaces]);
+  const secondaryWorkspaceCwds = useMemo(
+    () =>
+      displayedWorkspaces
+        .filter((entry) => !entry.primary && entry.trusted)
+        .map((entry) => entry.cwd),
+    [displayedWorkspaces],
+  );
+  const secondaryPinnedQueries = useMemo<SessionCatalogQuery[]>(
+    () =>
+      secondaryWorkspaceCwds.map((workspaceCwd) => ({
+        routeKind: 'qualified',
+        workspaceCwd,
+        options: {
+          pageSize: SESSION_LIST_PAGE_SIZE,
+          archiveState: 'active',
+          ...(selectedSessionSource
+            ? { sourceType: selectedSessionSource }
+            : {}),
+          view: 'organized',
+          group: 'pinned',
+        },
+      })),
+    [secondaryWorkspaceCwds, selectedSessionSource],
+  );
+  const secondaryPinnedSnapshots = useSessionCatalogQueries(
+    workspace.client,
+    secondaryPinnedQueries,
+    {
+      autoLoad: true,
+      enabled: organizationEnabled && selectedSessionSource !== 'channel',
+    },
+  );
+  const secondaryPinnedSessions = useMemo(
+    () =>
+      secondaryPinnedSnapshots.flatMap(
+        (snapshot) => snapshot.page?.sessions ?? [],
+      ),
+    [secondaryPinnedSnapshots],
+  );
+  const secondaryArchivedEnabled =
+    archivedExpanded &&
+    sessionArchiveEnabled &&
+    workspaceQualifiedRestCoreEnabled;
+  const secondaryArchivedQueries = useMemo<SessionCatalogQuery[]>(
+    () =>
+      secondaryWorkspaceCwds.map((workspaceCwd) => ({
+        routeKind: 'qualified',
+        workspaceCwd,
+        options: {
+          pageSize: SESSION_LIST_PAGE_SIZE,
+          archiveState: 'archived',
+          ...(selectedSessionSource
+            ? { sourceType: selectedSessionSource }
+            : {}),
+          ...(organizationEnabled
+            ? { view: 'organized' as const, group: 'all' }
+            : {}),
+        },
+      })),
+    [organizationEnabled, secondaryWorkspaceCwds, selectedSessionSource],
+  );
+  const secondaryArchivedSnapshots = useSessionCatalogQueries(
+    workspace.client,
+    secondaryArchivedQueries,
+    { autoLoad: true, enabled: secondaryArchivedEnabled },
+  );
+  const secondaryArchivedSessions = useMemo(
+    () =>
+      secondaryArchivedSnapshots.flatMap(
+        (snapshot) => snapshot.page?.sessions ?? [],
+      ),
+    [secondaryArchivedSnapshots],
+  );
+  const secondaryArchivedLoading = secondaryArchivedSnapshots.some(
+    (snapshot) => snapshot.loading,
+  );
+  const secondaryArchivedError = secondaryArchivedSnapshots.some(
+    (snapshot) => snapshot.error !== undefined,
+  );
+  const toggleArchived = useCallback(() => {
+    if (!archivedExpanded) {
+      const queries = [
+        ...(includePrimaryWorkspaceSessions && archivedCatalogQuery
+          ? [archivedCatalogQuery]
+          : []),
+        ...(workspaceQualifiedRestCoreEnabled ? secondaryArchivedQueries : []),
+      ];
+      if (queries.length > 0) {
+        sessionCatalogController.refreshQueries(queries);
+      }
+    }
+    setArchivedExpanded((expanded) => !expanded);
+  }, [
+    archivedCatalogQuery,
+    archivedExpanded,
+    includePrimaryWorkspaceSessions,
+    secondaryArchivedQueries,
+    sessionCatalogController,
+    workspaceQualifiedRestCoreEnabled,
+  ]);
+  const liveWorkspaces = useMemo(
+    () => displayedWorkspaces.filter((entry) => entry.kind === 'live'),
+    [displayedWorkspaces],
+  );
+  const projectWorkspaces = useMemo(
+    () => displayedWorkspaces.filter((entry) => entry.kind !== 'live'),
+    [displayedWorkspaces],
+  );
   const pinnedSessions = useMemo(() => {
     const byId = new Map<string, DaemonSessionSummary>();
     for (const session of [
       ...(includePrimaryWorkspaceSessions ? primaryPinnedSessions : []),
       ...secondaryPinnedSessions,
     ]) {
+      if (!matchesSessionSource(session, selectedSessionSource)) continue;
       byId.set(
         getSessionIdentity(
           session.sessionId,
@@ -817,6 +1001,7 @@ export function WebShellSidebar({
     includePrimaryWorkspaceSessions,
     primaryWorkspaceCwd,
     primaryPinnedSessions,
+    selectedSessionSource,
     secondaryPinnedSessions,
   ]);
   const resolveSessionWorkspaceScope = useCallback(
@@ -1030,53 +1215,13 @@ export function WebShellSidebar({
     [canMutateSessionArchive, sessionActionItems],
   );
 
-  useEffect(() => {
-    if (!organizationEnabled) {
-      setSecondaryPinnedSessions([]);
-      return;
-    }
-    const secondaryWorkspaces = displayedWorkspaces.filter(
-      (entry) => !entry.primary && entry.trusted,
-    );
-    let cancelled = false;
-    void Promise.allSettled(
-      secondaryWorkspaces.map(async (entry) => {
-        const result = await workspace.client
-          .workspaceByCwd(entry.cwd)
-          .listWorkspaceSessions({
-            pageSize: SESSION_LIST_PAGE_SIZE,
-            archiveState: 'active',
-            view: 'organized',
-            group: 'pinned',
-          });
-        return result.map((session) => ({
-          ...session,
-          workspaceCwd: entry.cwd,
-        }));
-      }),
-    ).then((results) => {
-      if (cancelled) return;
-      setSecondaryPinnedSessions(
-        results.flatMap((result) =>
-          result.status === 'fulfilled' ? result.value : [],
-        ),
-      );
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    displayedWorkspaces,
-    organizationEnabled,
-    workspace.client,
-    workspaceSessionsReloadToken,
-  ]);
   const allArchivedSessions = useMemo(() => {
     const byIdentity = new Map<string, DaemonSessionSummary>();
     for (const session of [
       ...(includePrimaryWorkspaceSessions ? archivedSessions : []),
       ...secondaryArchivedSessions,
     ]) {
+      if (!matchesSessionSource(session, selectedSessionSource)) continue;
       byIdentity.set(getIdentityForSession(session), session);
     }
     return [...byIdentity.values()];
@@ -1084,6 +1229,7 @@ export function WebShellSidebar({
     archivedSessions,
     getIdentityForSession,
     includePrimaryWorkspaceSessions,
+    selectedSessionSource,
     secondaryArchivedSessions,
   ]);
   const effectiveArchivedLoading =
@@ -1093,76 +1239,6 @@ export function WebShellSidebar({
     (includePrimaryWorkspaceSessions && Boolean(archivedError)) ||
     secondaryArchivedError;
 
-  useEffect(() => {
-    if (!archivedExpanded) return;
-    if (!sessionArchiveEnabled || !workspaceQualifiedRestCoreEnabled) {
-      setSecondaryArchivedSessions([]);
-      setSecondaryArchivedLoading(false);
-      setSecondaryArchivedError(false);
-      return;
-    }
-    const secondaryWorkspaces = displayedWorkspaces.filter(
-      (entry) => !entry.primary && entry.trusted,
-    );
-    if (secondaryWorkspaces.length === 0) {
-      setSecondaryArchivedSessions([]);
-      setSecondaryArchivedLoading(false);
-      setSecondaryArchivedError(false);
-      return;
-    }
-    let cancelled = false;
-    setSecondaryArchivedLoading(true);
-    void Promise.allSettled(
-      secondaryWorkspaces.map(async (entry) => {
-        const sessions = await workspace.client
-          .workspaceByCwd(entry.cwd)
-          .listWorkspaceSessions({
-            pageSize: SESSION_LIST_PAGE_SIZE,
-            archiveState: 'archived',
-            ...(organizationEnabled
-              ? { view: 'organized' as const, group: 'all' }
-              : {}),
-          });
-        return sessions.map((session) => ({
-          ...session,
-          workspaceCwd: entry.cwd,
-        }));
-      }),
-    )
-      .then((results) => {
-        if (cancelled) return;
-        const failures = results.filter(
-          (result) => result.status === 'rejected',
-        );
-        setSecondaryArchivedSessions(
-          results.flatMap((result) =>
-            result.status === 'fulfilled' ? result.value : [],
-          ),
-        );
-        setSecondaryArchivedError(failures.length > 0);
-        for (const failure of failures) {
-          console.warn(
-            '[WebShellSidebar] archived session load failed:',
-            failure.reason,
-          );
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setSecondaryArchivedLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    archivedExpanded,
-    displayedWorkspaces,
-    organizationEnabled,
-    secondaryArchivedReloadToken,
-    sessionArchiveEnabled,
-    workspace.client,
-    workspaceQualifiedRestCoreEnabled,
-    workspaceSessionsReloadToken,
-  ]);
   const qwenCodeVersion = connection.capabilities?.qwenCodeVersion || '';
   // Numeric releases render as "v1.2.3"; a non-semver fallback such as
   // "unknown" is shown as-is so we never produce a bogus "vunknown".
@@ -1378,48 +1454,64 @@ export function WebShellSidebar({
     () => sessions.some((session) => session.hasActivePrompt),
     [sessions],
   );
-
+  const sessionPollInterval =
+    projectExpanded || hasRunningSession || selectedSessionSource === 'channel'
+      ? (hasRunningSession || selectedSessionSource === 'channel') && !error
+        ? ACTIVE_SESSION_POLL_INTERVAL_MS
+        : IDLE_SESSION_POLL_INTERVAL_MS
+      : undefined;
+  useSessionCatalogPolling(
+    workspace.client,
+    includePrimaryWorkspaceSessions ? catalogQuery : undefined,
+    sessionPollInterval,
+  );
+  // Channel grouping rides the session poll cadence: instances added or
+  // removed while the channel source is active must reach the grouping logic
+  // without a source switch.
+  const channelCatalogPollInFlightRef = useRef(false);
   useEffect(() => {
-    if (!projectExpanded && !hasRunningSession) return;
+    if (!channelGroupingEnabled) return;
+    // Back off on the channels hook's OWN failures too — a persistently
+    // failing channels endpoint must not be re-requested every 2s.
     const pollInterval =
-      hasRunningSession && !error
+      !error && !channelCatalogError
         ? ACTIVE_SESSION_POLL_INTERVAL_MS
         : IDLE_SESSION_POLL_INTERVAL_MS;
     const intervalId = window.setInterval(() => {
-      if (document.hidden || pollInFlightRef.current) return;
-      pollInFlightRef.current = true;
-      void reload().finally(() => {
-        pollInFlightRef.current = false;
+      if (document.hidden || channelCatalogPollInFlightRef.current) return;
+      channelCatalogPollInFlightRef.current = true;
+      void reloadChannelCatalog().finally(() => {
+        channelCatalogPollInFlightRef.current = false;
       });
     }, pollInterval);
     return () => window.clearInterval(intervalId);
-  }, [error, hasRunningSession, projectExpanded, reload]);
+  }, [
+    channelCatalogError,
+    channelGroupingEnabled,
+    error,
+    reloadChannelCatalog,
+  ]);
 
-  const prevReloadTokenRef = useRef(sessionListReloadToken);
   useEffect(() => {
-    if (
-      sessionListReloadToken !== undefined &&
-      sessionListReloadToken !== prevReloadTokenRef.current &&
-      !document.hidden &&
-      !pollInFlightRef.current
-    ) {
-      prevReloadTokenRef.current = sessionListReloadToken;
-      pollInFlightRef.current = true;
-      void reload().finally(() => {
-        pollInFlightRef.current = false;
-      });
+    if (lastTrackedSessionSourceRef.current !== sessionSource) {
+      lastTrackedSessionSourceRef.current = sessionSource;
+      return;
     }
-  }, [sessionListReloadToken, reload]);
+    if (loading || error) return;
 
-  useEffect(() => {
     const runningBySessionId = new Map(
-      sessions.map((session) => [
-        getIdentityForSession(session),
-        Boolean(session.hasActivePrompt),
-      ]),
+      sessions
+        .filter((session) =>
+          matchesSessionSource(session, selectedSessionSource),
+        )
+        .map((session) => [
+          getIdentityForSession(session),
+          Boolean(session.hasActivePrompt),
+        ]),
     );
-    const previousRunningBySessionId = previousRunningRef.current;
-    previousRunningRef.current = runningBySessionId;
+    const previousRunningBySessionId =
+      previousRunningBySourceRef.current[sessionSource];
+    previousRunningBySourceRef.current[sessionSource] = runningBySessionId;
     if (previousRunningBySessionId === null) return;
 
     setCompletedUnreadIds((current) => {
@@ -1442,8 +1534,9 @@ export function WebShellSidebar({
       for (const sessionIdentity of next) {
         if (
           sessionIdentity === currentSessionIdentity ||
-          !runningBySessionId.has(sessionIdentity) ||
-          runningBySessionId.get(sessionIdentity)
+          (previousRunningBySessionId.has(sessionIdentity) &&
+            (!runningBySessionId.has(sessionIdentity) ||
+              runningBySessionId.get(sessionIdentity)))
         ) {
           next.delete(sessionIdentity);
           changed = true;
@@ -1452,7 +1545,15 @@ export function WebShellSidebar({
 
       return changed ? next : current;
     });
-  }, [currentSessionIdentity, getIdentityForSession, sessions]);
+  }, [
+    currentSessionIdentity,
+    error,
+    getIdentityForSession,
+    loading,
+    selectedSessionSource,
+    sessionSource,
+    sessions,
+  ]);
 
   const reconcileRemovedWorkspace = useCallback(
     async (removed: DaemonWorkspaceCapability) => {
@@ -1460,6 +1561,7 @@ export function WebShellSidebar({
       if (selectedWorkspaceCwd === removed.cwd) {
         onSelectWorkspace?.(undefined);
       }
+      sessionCatalogController.invalidateWorkspace(removed.cwd);
       setWorkspaceSessionsReloadToken((token) => token + 1);
       try {
         await workspace.refreshCapabilities?.();
@@ -1478,6 +1580,7 @@ export function WebShellSidebar({
       reload,
       reloadArchived,
       selectedWorkspaceCwd,
+      sessionCatalogController,
       workspace,
     ],
   );
@@ -1639,8 +1742,11 @@ export function WebShellSidebar({
         try {
           const created = await onNewSession(workspaceCwd);
           if (created) {
-            void reload().catch(() => undefined);
             bumpWorkspaceReload();
+            const ownerCwd = workspaceCwd ?? primaryWorkspaceCwd;
+            if (ownerCwd) {
+              sessionCatalogController.invalidateWorkspace(ownerCwd);
+            }
           }
         } catch (err) {
           if (!isAbortError(err)) {
@@ -1652,7 +1758,14 @@ export function WebShellSidebar({
         }
       })();
     },
-    [bumpWorkspaceReload, onError, onNewSession, reload, t],
+    [
+      bumpWorkspaceReload,
+      onError,
+      onNewSession,
+      primaryWorkspaceCwd,
+      sessionCatalogController,
+      t,
+    ],
   );
 
   const handleLoadSession = useCallback(
@@ -1749,16 +1862,25 @@ export function WebShellSidebar({
       return;
     }
     const sessionId = currentSessionId;
+    const workspaceCwd = connection.workspaceCwd;
     const sessionIdentity = currentSessionIdentity;
     if (!sessionIdentity || busySessionIdsRef.current.has(sessionIdentity)) {
       return;
     }
     setSessionBusy(sessionId, true, connection.workspaceCwd);
+    let renamed = false;
     actions
       .renameSession(nextName)
       .then(() => {
+        renamed = true;
+        if (workspaceCwd) {
+          if (onSessionRenameConfirmed) {
+            onSessionRenameConfirmed(workspaceCwd, sessionId, nextName);
+          } else {
+            sessionCatalogController.renamed(workspaceCwd, sessionId, nextName);
+          }
+        }
         cancelRename();
-        reload();
         bumpWorkspaceReload();
       })
       .catch((err: unknown) => {
@@ -1766,7 +1888,10 @@ export function WebShellSidebar({
         cancelRename();
       })
       .finally(() => {
-        setSessionBusy(sessionId, false, connection.workspaceCwd);
+        if (!renamed && workspaceCwd) {
+          sessionCatalogController.invalidateWorkspace(workspaceCwd);
+        }
+        setSessionBusy(sessionId, false, workspaceCwd);
       });
   }, [
     actions,
@@ -1778,8 +1903,9 @@ export function WebShellSidebar({
     currentSessionId,
     editingName,
     editingSessionIdentity,
+    onSessionRenameConfirmed,
     onError,
-    reload,
+    sessionCatalogController,
     setSessionBusy,
     t,
   ]);
@@ -1910,14 +2036,15 @@ export function WebShellSidebar({
     setSessionBusy(sessionId, true, deleteCandidate.workspaceCwd);
     removeSession(sessionId)
       .then(() => {
-        // A hard delete unlinks the transcript from BOTH the active and
-        // archived directories, so resync both lists regardless of origin.
-        void reload();
-        void reloadArchived();
         bumpWorkspaceReload();
       })
       .catch((err: unknown) => onError(err, t('sidebar.deleteFailed')))
       .finally(() => {
+        const workspaceCwd =
+          deleteCandidate.workspaceCwd ?? primaryWorkspaceCwd;
+        if (scope.kind !== 'primary' && workspaceCwd) {
+          sessionCatalogController.invalidateWorkspace(workspaceCwd);
+        }
         setSessionBusy(sessionId, false, deleteCandidate.workspaceCwd);
       });
   }, [
@@ -1928,9 +2055,9 @@ export function WebShellSidebar({
     deleteSession,
     getIdentityForSession,
     onError,
-    reload,
-    reloadArchived,
+    primaryWorkspaceCwd,
     resolveSessionWorkspaceScope,
+    sessionCatalogController,
     setSessionBusy,
     t,
     workspace.client,
@@ -2095,9 +2222,6 @@ export function WebShellSidebar({
                 // in the UI), matching assignSessionGroup.
                 { groupId: group.id, color: null },
               );
-              if (!groupEditor.workspaceCwd) {
-                void reload().catch(() => undefined);
-              }
               bumpWorkspaceReload();
             } catch (err) {
               reportCreatedGroupAssignmentFailure(err);
@@ -2120,6 +2244,10 @@ export function WebShellSidebar({
             : t('sidebar.groupUpdateFailed'),
         );
       } finally {
+        const workspaceCwd = groupEditor.workspaceCwd ?? primaryWorkspaceCwd;
+        if (workspaceCwd) {
+          sessionCatalogController.invalidateWorkspace(workspaceCwd);
+        }
         setGroupBusy(false);
       }
     })();
@@ -2133,9 +2261,10 @@ export function WebShellSidebar({
     canOrganizeWorkspace,
     closeGroupEditor,
     onError,
-    reload,
+    primaryWorkspaceCwd,
     reloadGroups,
     resolveWorkspaceScope,
+    sessionCatalogController,
     t,
     workspaceActions,
     workspace.client,
@@ -2171,8 +2300,9 @@ export function WebShellSidebar({
       .deleteSessionGroup(deleteGroupCandidate.group.id)
       .then(() => {
         setDeleteGroupCandidate(null);
-        if (deleteGroupCandidate.workspaceCwd) bumpWorkspaceReload();
-        else void reload().catch(() => undefined);
+        if (deleteGroupCandidate.workspaceCwd) {
+          bumpWorkspaceReload();
+        }
       })
       .catch((err: unknown) => onError(err, t('sidebar.groupDeleteFailed')))
       .then(() =>
@@ -2180,16 +2310,24 @@ export function WebShellSidebar({
           ? undefined
           : reloadGroups().catch(() => undefined),
       )
-      .finally(() => setGroupBusy(false));
+      .finally(() => {
+        const workspaceCwd =
+          deleteGroupCandidate.workspaceCwd ?? primaryWorkspaceCwd;
+        if (workspaceCwd) {
+          sessionCatalogController.invalidateWorkspace(workspaceCwd);
+        }
+        setGroupBusy(false);
+      });
   }, [
     deleteGroupCandidate,
     canOrganizeWorkspace,
     onError,
-    reload,
+    primaryWorkspaceCwd,
     reloadGroups,
     t,
     bumpWorkspaceReload,
     resolveWorkspaceScope,
+    sessionCatalogController,
     workspace.client,
     workspaceActions,
   ]);
@@ -2248,12 +2386,14 @@ export function WebShellSidebar({
           isPinned: !session.isPinned,
         })
         .then(() => {
-          void reload().catch(() => undefined);
-          void reloadPinnedSessions().catch(() => undefined);
           bumpWorkspaceReload();
         })
         .catch((err: unknown) => onError(err, t('sidebar.organizationFailed')))
         .finally(() => {
+          const workspaceCwd = session.workspaceCwd ?? primaryWorkspaceCwd;
+          if (workspaceCwd) {
+            sessionCatalogController.invalidateWorkspace(workspaceCwd);
+          }
           setSessionBusy(sessionId, false, session.workspaceCwd);
         });
     },
@@ -2262,9 +2402,9 @@ export function WebShellSidebar({
       getIdentityForSession,
       getSessionWorkspaceActions,
       onError,
+      primaryWorkspaceCwd,
       canOrganizeSession,
-      reload,
-      reloadPinnedSessions,
+      sessionCatalogController,
       setSessionBusy,
       t,
     ],
@@ -2278,10 +2418,10 @@ export function WebShellSidebar({
       // session off-limits, mirroring the delete guard.
       if (!canArchiveSession(session)) return;
       if (busySessionIdsRef.current.has(sessionIdentity)) return;
+      const scope = resolveSessionWorkspaceScope(session);
       setSessionBusy(sessionId, true, session.workspaceCwd);
       void (async () => {
         try {
-          const scope = resolveSessionWorkspaceScope(session);
           if (scope.kind === 'locked' || scope.kind === 'restricted') {
             const result = await workspace.client
               .workspaceByCwd(scope.cwd)
@@ -2300,9 +2440,11 @@ export function WebShellSidebar({
         } catch (err) {
           onError(err, t('sidebar.archiveFailed'));
         } finally {
-          void reload().catch(() => undefined);
-          void reloadArchived().catch(() => undefined);
           bumpWorkspaceReload();
+          const workspaceCwd = session.workspaceCwd ?? primaryWorkspaceCwd;
+          if (scope.kind !== 'primary' && workspaceCwd) {
+            sessionCatalogController.invalidateWorkspace(workspaceCwd);
+          }
           setSessionBusy(sessionId, false, session.workspaceCwd);
         }
       })();
@@ -2313,8 +2455,8 @@ export function WebShellSidebar({
       canArchiveSession,
       getIdentityForSession,
       onError,
-      reload,
-      reloadArchived,
+      primaryWorkspaceCwd,
+      sessionCatalogController,
       setSessionBusy,
       t,
       resolveSessionWorkspaceScope,
@@ -2328,10 +2470,10 @@ export function WebShellSidebar({
       const sessionIdentity = getIdentityForSession(session);
       if (!canUnarchiveSession(session)) return;
       if (busySessionIdsRef.current.has(sessionIdentity)) return;
+      const scope = resolveSessionWorkspaceScope(session);
       setSessionBusy(sessionId, true, session.workspaceCwd);
       void (async () => {
         try {
-          const scope = resolveSessionWorkspaceScope(session);
           if (scope.kind === 'locked' || scope.kind === 'restricted') {
             const result = await workspace.client
               .workspaceByCwd(scope.cwd)
@@ -2350,9 +2492,11 @@ export function WebShellSidebar({
         } catch (err) {
           onError(err, t('sidebar.unarchiveFailed'));
         } finally {
-          void reload().catch(() => undefined);
-          void reloadArchived().catch(() => undefined);
           bumpWorkspaceReload();
+          const workspaceCwd = session.workspaceCwd ?? primaryWorkspaceCwd;
+          if (scope.kind !== 'primary' && workspaceCwd) {
+            sessionCatalogController.invalidateWorkspace(workspaceCwd);
+          }
           setSessionBusy(sessionId, false, session.workspaceCwd);
         }
       })();
@@ -2362,8 +2506,8 @@ export function WebShellSidebar({
       canUnarchiveSession,
       getIdentityForSession,
       onError,
-      reload,
-      reloadArchived,
+      primaryWorkspaceCwd,
+      sessionCatalogController,
       setSessionBusy,
       t,
       unarchiveSession,
@@ -2445,11 +2589,14 @@ export function WebShellSidebar({
         // group (or "Ungrouped", groupId=null) clears any color tag.
         .updateSessionOrganization(sessionId, { groupId, color: null })
         .then(() => {
-          void reload().catch(() => undefined);
           bumpWorkspaceReload();
         })
         .catch((err: unknown) => onError(err, t('sidebar.organizationFailed')))
         .finally(() => {
+          const workspaceCwd = session.workspaceCwd ?? primaryWorkspaceCwd;
+          if (workspaceCwd) {
+            sessionCatalogController.invalidateWorkspace(workspaceCwd);
+          }
           setSessionBusy(sessionId, false, session.workspaceCwd);
         });
     },
@@ -2458,8 +2605,9 @@ export function WebShellSidebar({
       getIdentityForSession,
       getSessionWorkspaceActions,
       onError,
+      primaryWorkspaceCwd,
       canOrganizeSession,
-      reload,
+      sessionCatalogController,
       setSessionBusy,
       t,
     ],
@@ -2489,11 +2637,14 @@ export function WebShellSidebar({
         // Picking a color clears any named-group assignment (single choice).
         .updateSessionOrganization(sessionId, { color, groupId: null })
         .then(() => {
-          void reload().catch(() => undefined);
           bumpWorkspaceReload();
         })
         .catch((err: unknown) => onError(err, t('sidebar.organizationFailed')))
         .finally(() => {
+          const workspaceCwd = session.workspaceCwd ?? primaryWorkspaceCwd;
+          if (workspaceCwd) {
+            sessionCatalogController.invalidateWorkspace(workspaceCwd);
+          }
           setSessionBusy(sessionId, false, session.workspaceCwd);
         });
     },
@@ -2502,8 +2653,9 @@ export function WebShellSidebar({
       getIdentityForSession,
       getSessionWorkspaceActions,
       onError,
+      primaryWorkspaceCwd,
       canOrganizeSession,
-      reload,
+      sessionCatalogController,
       setSessionBusy,
       t,
     ],
@@ -2511,7 +2663,13 @@ export function WebShellSidebar({
 
   const filteredSessions = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
-    const unpinnedSessions = sessions.filter((session) => !session.isPinned);
+    const sourceScopedSessions = sessions.filter((session) =>
+      matchesSessionSource(session, selectedSessionSource),
+    );
+    const unpinnedSessions =
+      selectedSessionSource === 'channel'
+        ? sourceScopedSessions
+        : sourceScopedSessions.filter((session) => !session.isPinned);
     const nextSessions = query
       ? unpinnedSessions.filter((session) => {
           const label = getSessionLabel(session).toLowerCase();
@@ -2535,7 +2693,28 @@ export function WebShellSidebar({
         (createdTimeById.get(b.sessionId) ?? 0) -
         (createdTimeById.get(a.sessionId) ?? 0),
     );
-  }, [organizationEnabled, searchQuery, sessions]);
+  }, [organizationEnabled, searchQuery, selectedSessionSource, sessions]);
+
+  const channelCatalogLoaded = channelCatalogData !== undefined;
+  const channelSessionSections = useMemo(
+    () =>
+      selectedSessionSource === 'channel' && channelCatalogLoaded
+        ? groupSessionsByChannelType(
+            filteredSessions,
+            channelTypeCatalog,
+            channelInstances,
+            t('sidebar.channelType.other'),
+          )
+        : null,
+    [
+      channelCatalogLoaded,
+      channelInstances,
+      channelTypeCatalog,
+      filteredSessions,
+      selectedSessionSource,
+      t,
+    ],
+  );
 
   const sessionSections = useMemo<SessionSection[]>(() => {
     if (!organizationEnabled) return [];
@@ -2611,19 +2790,30 @@ export function WebShellSidebar({
   }, [filteredSessions, groups, organizationEnabled, searchQuery, t]);
 
   useEffect(() => {
-    if (!organizationEnabled) return;
-    // Wait for both independent catalog sources. Flipping the latch on the
-    // first non-empty derived sections would treat later initial recent/color
-    // ids as brand-new and auto-collapse them; leaving the latch set when the
-    // first ready catalog is empty would leave the first real section expanded.
-    if (!groupsCatalogReady || !sessionsCatalogReady) return;
-
-    const unseenIds = sessionSections
+    const activeSections = channelSessionSections ?? sessionSections;
+    if (selectedSessionSource === 'channel') {
+      if (!channelCatalogLoaded) return;
+      // The refetch for the new source retains the previous source's page
+      // until it settles; wait for a page fetched for the channel source.
+      if (settledSessionsSourceRef.current !== 'channel') return;
+    } else {
+      if (!organizationEnabled) return;
+      if (!groupsCatalogReady || !sessionsCatalogReady) return;
+    }
+    const unseenIds = activeSections
       .map((section) => section.id)
       .filter((id) => !knownSessionSectionIdsRef.current.has(id));
-    const isInitialCatalog = awaitingInitialSessionCatalogRef.current;
+    const isInitialCatalog =
+      awaitingInitialSessionCatalogBySourceRef.current[sessionSource];
     if (isInitialCatalog) {
-      awaitingInitialSessionCatalogRef.current = false;
+      // First-sync registration must reflect the full unfiltered catalog:
+      // sections hidden by an active search would never register and would
+      // later auto-collapse as mid-session additions. An empty first catalog
+      // keeps the latch so the first real sections still register as initial
+      // — channel sessions are externally driven and can arrive while the
+      // tab is open on an empty settle.
+      if (searchQuery.trim() || activeSections.length === 0) return;
+      awaitingInitialSessionCatalogBySourceRef.current[sessionSource] = false;
       for (const id of unseenIds) knownSessionSectionIdsRef.current.add(id);
       return;
     }
@@ -2637,8 +2827,13 @@ export function WebShellSidebar({
     });
   }, [
     groupsCatalogReady,
+    channelCatalogLoaded,
+    channelSessionSections,
     organizationEnabled,
+    searchQuery,
+    selectedSessionSource,
     sessionSections,
+    sessionSource,
     sessionsCatalogReady,
   ]);
 
@@ -2660,6 +2855,11 @@ export function WebShellSidebar({
       return next;
     });
   }, []);
+
+  const getSessionDetailsCollisionBoundary = useCallback(
+    () => resolveSessionDetailsCollisionBoundary(sidebarRef.current),
+    [],
+  );
 
   const handleResizePointerDown = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -2797,27 +2997,6 @@ export function WebShellSidebar({
       const exporting = exportingSessionIds.has(sessionIdentity);
       const completedUnread =
         !isCurrentSession(session) && completedUnreadIds.has(sessionIdentity);
-      const details = (
-        <div className={styles.tooltipContent}>
-          <div className={styles.tooltipTitle}>{label}</div>
-          <div className={styles.tooltipTags}>
-            {session.hasActivePrompt && (
-              <span className={cx(styles.tooltipTag, styles.tooltipTagRunning)}>
-                {t('sidebar.running')}
-              </span>
-            )}
-            {completedUnread && (
-              <span className={cx(styles.tooltipTag, styles.tooltipTagNew)}>
-                {t('sidebar.completedUnread')}
-              </span>
-            )}
-            <span className={styles.tooltipTag}>
-              {t('sidebar.clients', { count: session.clientCount ?? 0 })}
-            </span>
-          </div>
-          <div className={styles.tooltipMeta}>{session.sessionId}</div>
-        </div>
-      );
       if (isArchived) {
         const archivedExportWorkspaceCwd =
           getArchivedExportWorkspaceCwd(session);
@@ -2877,15 +3056,15 @@ export function WebShellSidebar({
                     >
                       <DropdownMenuGroup>
                         {showArchivedDetails && (
-                          <DropdownMenuSub>
-                            <DropdownMenuSubTrigger>
-                              <InfoIcon />
-                              {t('sidebar.details')}
-                            </DropdownMenuSubTrigger>
-                            <DropdownMenuSubContent className="min-w-64 p-3">
-                              {details}
-                            </DropdownMenuSubContent>
-                          </DropdownMenuSub>
+                          <SessionDetailsSubmenu
+                            session={session}
+                            label={label}
+                            completedUnread={completedUnread}
+                            onError={onError}
+                            getCollisionBoundary={
+                              getSessionDetailsCollisionBoundary
+                            }
+                          />
                         )}
                         {showArchivedExport && (
                           <DropdownMenuItem
@@ -2936,6 +3115,8 @@ export function WebShellSidebar({
       const showPin = canOrganizeSession(session, 'pin');
       const showArchive =
         sessionActionItems.has('archive') && canMutateSessionArchive(session);
+      const showReadOnlyArchive = readOnly && showArchive && !showPin;
+      const showSharedArchive = showArchive && !showReadOnlyArchive;
       const showRename = sessionActionItems.has('rename') && mutableScope;
       const activeExportScope = getActiveExportScope(session);
       const showExport =
@@ -3040,7 +3221,7 @@ export function WebShellSidebar({
                     ) : !attentionLabel ? (
                       <span className={styles.sessionTime}>{time}</span>
                     ) : null}
-                    {readOnly && showArchive && (
+                    {showReadOnlyArchive && (
                       <div
                         className={styles.sessionActions}
                         onClick={(event) => event.stopPropagation()}
@@ -3143,7 +3324,8 @@ export function WebShellSidebar({
                                 ? t('sidebar.archiveCurrentDisabled')
                                 : t('sidebar.archive'),
                               visible:
-                                showArchive && inlineActionItems.has('archive'),
+                                showSharedArchive &&
+                                inlineActionItems.has('archive'),
                               onClick: () => handleArchive(session),
                             },
                             {
@@ -3215,7 +3397,8 @@ export function WebShellSidebar({
                             ));
                         })()}
                         {(showPin && !inlineActionItems.has('pin')) ||
-                        (showArchive && !inlineActionItems.has('archive')) ||
+                        (showSharedArchive &&
+                          !inlineActionItems.has('archive')) ||
                         sessionActionItems.has('details') ||
                         (showRename && !inlineActionItems.has('rename')) ||
                         canOrganizeSession(session, 'group') ||
@@ -3257,7 +3440,7 @@ export function WebShellSidebar({
                                       : t('sidebar.pin')}
                                   </DropdownMenuItem>
                                 )}
-                                {showArchive &&
+                                {showSharedArchive &&
                                   !inlineActionItems.has('archive') && (
                                     <DropdownMenuItem
                                       disabled={busy || isCurrent}
@@ -3273,15 +3456,15 @@ export function WebShellSidebar({
                                     </DropdownMenuItem>
                                   )}
                                 {sessionActionItems.has('details') && (
-                                  <DropdownMenuSub>
-                                    <DropdownMenuSubTrigger>
-                                      <InfoIcon />
-                                      {t('sidebar.details')}
-                                    </DropdownMenuSubTrigger>
-                                    <DropdownMenuSubContent className="min-w-64 p-3">
-                                      {details}
-                                    </DropdownMenuSubContent>
-                                  </DropdownMenuSub>
+                                  <SessionDetailsSubmenu
+                                    session={session}
+                                    label={label}
+                                    completedUnread={completedUnread}
+                                    onError={onError}
+                                    getCollisionBoundary={
+                                      getSessionDetailsCollisionBoundary
+                                    }
+                                  />
                                 )}
                                 {showRename &&
                                   !inlineActionItems.has('rename') && (
@@ -3375,6 +3558,8 @@ export function WebShellSidebar({
       getArchivedExportWorkspaceCwd,
       getActiveExportScope,
       getIdentityForSession,
+      getSessionDetailsCollisionBoundary,
+      onError,
       handleArchive,
       handleDeleteSession,
       handleExportSession,
@@ -3394,12 +3579,15 @@ export function WebShellSidebar({
   );
 
   const body = useMemo(() => {
-    if (loading && sessions.length === 0) {
+    // Gate notices on the resource, not the filtered view: background
+    // refreshes set loading/error while retaining the settled page, so a
+    // filter-empty or empty-but-settled view must not flash or swap to retry.
+    if (loading && sessionsPage === undefined) {
       return (
         <div className={styles.notice}>{t('sidebar.loadingSessions')}</div>
       );
     }
-    if (error && sessions.length === 0) {
+    if (error && sessionsPage === undefined) {
       return (
         <button className={styles.retry} type="button" onClick={reload}>
           {t('sidebar.loadFailed')}
@@ -3408,11 +3596,30 @@ export function WebShellSidebar({
     }
     if (
       filteredSessions.length === 0 &&
-      (searchQuery.trim() ||
+      (selectedSessionSource === 'channel' ||
+        channelSessionSections !== null ||
+        searchQuery.trim() ||
         !organizationEnabled ||
         sessionSections.length === 0)
     ) {
       return <div className={styles.notice}>{t('sidebar.searchEmpty')}</div>;
+    }
+    if (channelSessionSections) {
+      return channelSessionSections.map((section) => (
+        <SessionGroupSection
+          key={section.id}
+          id={section.id}
+          label={section.label}
+          count={section.sessions.length}
+          expanded={!collapsedSessionSectionIds.has(section.id)}
+          onToggle={() => toggleSessionSection(section.id)}
+        >
+          {section.sessions.map((session) => renderSessionRow(session))}
+        </SessionGroupSection>
+      ));
+    }
+    if (selectedSessionSource === 'channel') {
+      return filteredSessions.map((session) => renderSessionRow(session));
     }
     if (!organizationEnabled) {
       return filteredSessions.map((session) => renderSessionRow(session));
@@ -3454,6 +3661,7 @@ export function WebShellSidebar({
   }, [
     collapsedSessionSectionIds,
     canOrganizeWorkspace,
+    channelSessionSections,
     error,
     filteredSessions,
     groupBusy,
@@ -3464,8 +3672,9 @@ export function WebShellSidebar({
     reload,
     renderSessionRow,
     searchQuery,
+    selectedSessionSource,
     sessionSections,
-    sessions.length,
+    sessionsPage,
     t,
     toggleSessionSection,
   ]);
@@ -3478,7 +3687,7 @@ export function WebShellSidebar({
         type="button"
         className={styles.archivedHeader}
         aria-expanded={archivedExpanded}
-        onClick={() => setArchivedExpanded((expanded) => !expanded)}
+        onClick={toggleArchived}
       >
         <span className={styles.archivedTitle} style={{ flex: '0 1 auto' }}>
           {t('sidebar.archivedTitle')}
@@ -3503,8 +3712,10 @@ export function WebShellSidebar({
         className={styles.retry}
         type="button"
         onClick={() => {
-          void reloadArchived();
-          setSecondaryArchivedReloadToken((token) => token + 1);
+          void reloadArchived().catch(() => undefined);
+          for (const workspaceCwd of secondaryWorkspaceCwds) {
+            sessionCatalogController.invalidateWorkspace(workspaceCwd);
+          }
         }}
       >
         {t('sidebar.loadFailed')}
@@ -3547,14 +3758,17 @@ export function WebShellSidebar({
     reloadArchived,
     renderSessionRow,
     searchQuery,
+    secondaryWorkspaceCwds,
+    sessionCatalogController,
     sessionArchiveEnabled,
-    setSecondaryArchivedReloadToken,
     t,
+    toggleArchived,
   ]);
 
   return (
     <>
       <aside
+        ref={sidebarRef}
         className={cx(
           styles.sidebar,
           collapsed && styles.collapsed,
@@ -4013,6 +4227,20 @@ export function WebShellSidebar({
               {!collapsed && <span>{t('sidebar.plugins')}</span>}
             </button>
           )}
+          {primaryNavItems.has('channels') && (
+            <button
+              className={styles.pluginButton}
+              type="button"
+              title={t('sidebar.channels')}
+              aria-label={t('sidebar.channels')}
+              onClick={onOpenChannels}
+            >
+              <span className={styles.navIcon}>
+                <RadioTowerIcon size={16} strokeWidth={1.2} />
+              </span>
+              {!collapsed && <span>{t('sidebar.channels')}</span>}
+            </button>
+          )}
           {primaryNavItems.has('scheduledTasks') && (
             <button
               className={styles.pluginButton}
@@ -4045,30 +4273,115 @@ export function WebShellSidebar({
         </div>
         <div className={styles.body}>
           <div className={styles.sessionList}>
-            {!collapsed && pinnedSessions.length > 0 && (
-              <>
-                <div className={styles.projectsHeader}>
-                  <button
-                    className={styles.projectsHeaderToggle}
-                    type="button"
-                    aria-expanded={pinnedExpanded}
-                    onClick={() => setPinnedExpanded((expanded) => !expanded)}
-                  >
-                    <span>{t('sidebar.pinnedSessions')}</span>
-                    <IconChevron expanded={pinnedExpanded} />
-                  </button>
-                </div>
-                {pinnedExpanded && (
-                  <div className={styles.pinnedSessionList}>
-                    {pinnedSessions.map((session) =>
-                      renderSessionRow(session, {
-                        readOnly: isActiveSessionReadOnly(session),
-                      }),
-                    )}
-                  </div>
-                )}
-              </>
+            {!collapsed && sourceMetadataEnabled && (
+              <Tabs
+                className="px-2 pb-2"
+                value={sessionSource}
+                onValueChange={(value) =>
+                  setSessionSource(value as SidebarSessionSource)
+                }
+              >
+                <TabsList
+                  className="w-full"
+                  aria-label={t('sidebar.sessionSource')}
+                >
+                  <TabsTrigger value="default">
+                    <ListTodoIcon />
+                    {t('sidebar.sessionSource.tasks')}
+                  </TabsTrigger>
+                  <TabsTrigger value="channel">
+                    <MessageCircleIcon />
+                    {t('sidebar.sessionSource.channels')}
+                  </TabsTrigger>
+                </TabsList>
+              </Tabs>
             )}
+            {!collapsed &&
+              selectedSessionSource !== 'channel' &&
+              pinnedSessions.length > 0 && (
+                <>
+                  <div className={styles.projectsHeader}>
+                    <button
+                      className={styles.projectsHeaderToggle}
+                      type="button"
+                      aria-expanded={pinnedExpanded}
+                      onClick={() => setPinnedExpanded((expanded) => !expanded)}
+                    >
+                      <span>{t('sidebar.pinnedSessions')}</span>
+                      <IconChevron expanded={pinnedExpanded} />
+                    </button>
+                  </div>
+                  {pinnedExpanded && (
+                    <div className={styles.pinnedSessionList}>
+                      {pinnedSessions.map((session) =>
+                        renderSessionRow(session, {
+                          readOnly: isActiveSessionReadOnly(session),
+                        }),
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
+            {!collapsed &&
+              liveWorkspaces.map((ws) => (
+                <WorkspaceSection
+                  key={ws.id}
+                  workspace={ws}
+                  renderHeader={(expanded) => (
+                    <>
+                      <RadioTowerIcon
+                        size={16}
+                        strokeWidth={1.2}
+                        aria-hidden="true"
+                      />
+                      <span className={styles.liveWorkspaceLabel}>
+                        {t('sidebar.live')}
+                      </span>
+                      {expanded ? (
+                        <ChevronDownIcon
+                          size={15}
+                          strokeWidth={1.8}
+                          aria-hidden="true"
+                        />
+                      ) : (
+                        <ChevronRightIcon
+                          size={15}
+                          strokeWidth={1.8}
+                          aria-hidden="true"
+                        />
+                      )}
+                    </>
+                  )}
+                  client={workspace.client}
+                  reloadToken={workspaceSessionsReloadToken}
+                  untrustedLabel={t('sidebar.workspaceUntrusted')}
+                  readOnlyLabel={t('sidebar.workspaceReadOnly')}
+                  trustToOpenLabel={t('sidebar.workspaceTrustToOpen')}
+                  noSessionsLabel={t('sidebar.noSessions')}
+                  loadErrorLabel={t('sidebar.loadFailed')}
+                  organizationEnabled={false}
+                  sourceType={selectedSessionSource}
+                  channelGroupingEnabled={channelGroupingEnabled}
+                  ungroupedLabel={t('sidebar.groupUngrouped')}
+                  formatTime={(iso) => formatRelativeTime(iso, t)}
+                  autoExpandKey={
+                    autoExpandWorkspace?.id === ws.id
+                      ? autoExpandWorkspace.key
+                      : undefined
+                  }
+                  renderSession={(session) =>
+                    renderSessionRow(
+                      { ...session, workspaceCwd: ws.cwd },
+                      {
+                        readOnly: isActiveSessionReadOnly({
+                          ...session,
+                          workspaceCwd: ws.cwd,
+                        }),
+                      },
+                    )
+                  }
+                />
+              ))}
             {!collapsed && !hideProjectHeader && (
               <div className={styles.projectsHeader}>
                 <button
@@ -4133,7 +4446,7 @@ export function WebShellSidebar({
                 {!collapsed && (
                   <div className={styles.workspacePicker}>
                     <div className={styles.workspaceList}>
-                      {displayedWorkspaces.map((ws) => (
+                      {projectWorkspaces.map((ws) => (
                         <Fragment key={ws.id}>
                           <WorkspaceSection
                             workspace={ws}
@@ -4154,6 +4467,8 @@ export function WebShellSidebar({
                             noSessionsLabel={t('sidebar.noSessions')}
                             loadErrorLabel={t('sidebar.loadFailed')}
                             organizationEnabled={organizationEnabled}
+                            sourceType={selectedSessionSource}
+                            channelGroupingEnabled={channelGroupingEnabled}
                             ungroupedLabel={t('sidebar.groupUngrouped')}
                             onRenameGroup={
                               canOrganizeWorkspace(ws.cwd)
@@ -4168,8 +4483,9 @@ export function WebShellSidebar({
                             renameGroupLabel={t('sidebar.groupRename')}
                             deleteGroupLabel={t('sidebar.groupDelete')}
                             groupActionsDisabled={groupBusy}
-                            excludePinned
+                            excludePinned={selectedSessionSource !== 'channel'}
                             onOpenGitDiff={onOpenGitDiff}
+                            onOpenCommit={onOpenCommit}
                             formatTime={(iso) => formatRelativeTime(iso, t)}
                             searchQuery={searchQuery}
                             expanded={ws.primary ? projectExpanded : undefined}

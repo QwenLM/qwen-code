@@ -6,7 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
-import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, open, rm, stat, writeFile } from 'node:fs/promises';
 import type { ConfigParameters, SandboxConfig } from './config.js';
 import {
   Config,
@@ -33,6 +33,8 @@ import {
   isTelemetrySdkInitialized,
   shutdownTelemetry,
   refreshSessionContext,
+  logStartSession,
+  logSessionEnd,
 } from '../telemetry/index.js';
 import type {
   ContentGenerator,
@@ -44,6 +46,7 @@ import {
   AuthType,
   createContentGenerator,
   createContentGeneratorConfig,
+  resetPreloadedContentGenerator,
   resolveContentGeneratorConfigWithSources,
 } from '../core/contentGenerator.js';
 import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
@@ -82,13 +85,24 @@ import { getTeamMemoryShareabilityWarning } from '../memory/team-memory-git-stat
 import * as runtimeStatus from '../utils/runtimeStatus.js';
 import { ExtensionManager } from '../extension/extensionManager.js';
 import { SkillManager } from '../skills/skill-manager.js';
+import { maybeRunAutoSkillCurator } from '../skills/skill-curator.js';
 import { HookSystem } from '../hooks/index.js';
 import { GOAL_HOOK_ID_OUTPUT_KEY } from '../goals/goalHook.js';
 import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
-import type { ChatRecordingFailureEvent } from '../services/chatRecordingService.js';
+import type {
+  ChatRecord,
+  ChatRecordingFailureEvent,
+} from '../services/chatRecordingService.js';
+import type { ResumedSessionData } from '../services/sessionService.js';
 import {
+  GoalPersistenceUnavailableError,
+  type GoalTurnHost,
+} from '../goals/goal-runtime.js';
+import {
+  getSessionWriterLockPath,
   SessionTranscriptChangedError,
   SessionWriterLease,
+  SessionWriterUnavailableError,
 } from '../services/session-writer-lease.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import { checkPriorRead } from '../tools/priorReadEnforcement.js';
@@ -193,6 +207,9 @@ vi.mock('../memory/team-memory-sync.js', () => ({
   syncTeamMemory: vi
     .fn()
     .mockResolvedValue({ committed: false, pulled: false, pushed: false }),
+}));
+vi.mock('../skills/skill-curator.js', () => ({
+  maybeRunAutoSkillCurator: vi.fn().mockResolvedValue({ status: 'not_due' }),
 }));
 vi.mock('../memory/team-memory-git-status.js', () => ({
   getTeamMemoryShareabilityWarning: vi.fn().mockReturnValue(null),
@@ -311,6 +328,8 @@ vi.mock('../telemetry/loggers.js', async (importOriginal) => {
   return {
     ...actual,
     logRipgrepFallback: vi.fn(),
+    logStartSession: vi.fn(actual.logStartSession),
+    logSessionEnd: vi.fn(actual.logSessionEnd),
   };
 });
 
@@ -611,6 +630,45 @@ describe('Server Config (config.ts)', () => {
           ...baseParams,
           memoryAgentTimeoutMinutes: -5,
         }).getMemoryAgentTimeoutMinutes(),
+      ).toBeUndefined();
+    });
+  });
+
+  describe('getMemoryAgentMaxTurns', () => {
+    it('returns undefined when unset', () => {
+      expect(new Config(baseParams).getMemoryAgentMaxTurns()).toBeUndefined();
+    });
+
+    it('passes through non-negative values, including 0', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          memoryAgentMaxTurns: 25,
+        }).getMemoryAgentMaxTurns(),
+      ).toBe(25);
+      expect(
+        new Config({
+          ...baseParams,
+          memoryAgentMaxTurns: 0,
+        }).getMemoryAgentMaxTurns(),
+      ).toBe(0);
+    });
+
+    it('treats negative values as unset', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          memoryAgentMaxTurns: -1,
+        }).getMemoryAgentMaxTurns(),
+      ).toBeUndefined();
+    });
+
+    it('treats fractional values as unset', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          memoryAgentMaxTurns: 2.5,
+        }).getMemoryAgentMaxTurns(),
       ).toBeUndefined();
     });
   });
@@ -1865,6 +1923,28 @@ describe('Server Config (config.ts)', () => {
       expect(Object.keys(result!)).not.toContain('playwright');
     });
 
+    it('getMcpServers does not stamp cwd — cwd binding happens in populateMcpServerCommand', () => {
+      const explicitCwd = path.resolve('/explicit/mcp');
+      const config = new Config({
+        ...baseParams,
+        targetDir: path.resolve('/session/worktree'),
+        mcpServers: {
+          implicit: { command: 'node', args: ['server.js'] },
+          explicit: { command: 'node', cwd: explicitCwd },
+          remote: { httpUrl: 'https://example.test/mcp' },
+          sdk: { type: 'sdk', command: 'placeholder' },
+          tcpWithCommand: { tcp: 'tcp://example.test:9000', command: 'node' },
+        },
+      });
+
+      const servers = config.getMcpServers()!;
+      expect(servers['implicit']?.cwd).toBeUndefined();
+      expect(servers['explicit']?.cwd).toBe(explicitCwd);
+      expect(servers['remote']?.cwd).toBeUndefined();
+      expect(servers['sdk']?.cwd).toBeUndefined();
+      expect(servers['tcpWithCommand']?.cwd).toBeUndefined();
+    });
+
     it('isMcpServerDisabled supports glob patterns in excludedMcpServers', () => {
       const config = new Config({
         ...baseParams,
@@ -2156,6 +2236,84 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('startNewSession', () => {
+    it('records no lifecycle transition when resuming the current session id', async () => {
+      const sessionId = 'same-session-id';
+      const config = new Config({ ...baseParams, sessionId });
+      await config.initialize({
+        skipGeminiInitialization: true,
+        skipHooks: true,
+        skipMcpDiscovery: true,
+        skipSkillManager: true,
+        skipFileCheckpointing: true,
+      });
+      vi.mocked(logSessionEnd).mockClear();
+      vi.mocked(logStartSession).mockClear();
+
+      config.startNewSession(sessionId, {
+        conversation: { messages: [] },
+      } as unknown as ResumedSessionData);
+
+      expect(logSessionEnd).not.toHaveBeenCalled();
+      expect(logStartSession).toHaveBeenCalledWith(
+        config,
+        expect.anything(),
+        undefined,
+      );
+    });
+
+    it('ends the outgoing session before starting a replacement without continuation', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize({
+        skipGeminiInitialization: true,
+        skipHooks: true,
+        skipMcpDiscovery: true,
+        skipSkillManager: true,
+        skipFileCheckpointing: true,
+      });
+      const outgoingSessionId = config.getSessionId();
+      const endedSessionIds: string[] = [];
+      vi.mocked(logSessionEnd).mockClear();
+      vi.mocked(logStartSession).mockClear();
+      vi.mocked(logSessionEnd).mockImplementationOnce((cfg: Config) => {
+        endedSessionIds.push(cfg.getSessionId());
+      });
+
+      config.startNewSession('replacement-session');
+
+      expect(endedSessionIds).toEqual([outgoingSessionId]);
+      expect(logStartSession).toHaveBeenCalledWith(
+        config,
+        expect.anything(),
+        undefined,
+      );
+      expect(vi.mocked(logSessionEnd).mock.invocationCallOrder[0]).toBeLessThan(
+        vi.mocked(logStartSession).mock.invocationCallOrder[0],
+      );
+    });
+
+    it('carries the outgoing session id when resuming a different persisted session', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize({
+        skipGeminiInitialization: true,
+        skipHooks: true,
+        skipMcpDiscovery: true,
+        skipSkillManager: true,
+        skipFileCheckpointing: true,
+      });
+      const outgoingSessionId = config.getSessionId();
+      vi.mocked(logStartSession).mockClear();
+
+      config.startNewSession('resumed-session-id', {
+        conversation: { messages: [] },
+      } as unknown as ResumedSessionData);
+
+      expect(logStartSession).toHaveBeenCalledWith(
+        config,
+        expect.anything(),
+        outgoingSessionId,
+      );
+    });
+
     it('rejects a session switch while the current recorder owns the writer lease', () => {
       const config = new Config({ ...baseParams, chatRecording: true });
       const originalSessionId = config.getSessionId();
@@ -2172,6 +2330,9 @@ describe('Server Config (config.ts)', () => {
         }
       ).chatRecordingService = recorder;
 
+      vi.mocked(logSessionEnd).mockClear();
+      vi.mocked(logStartSession).mockClear();
+
       expect(() => config.startNewSession('replacement-session')).toThrow(
         expect.objectContaining({
           name: 'SessionWriterUnavailableError',
@@ -2182,6 +2343,332 @@ describe('Server Config (config.ts)', () => {
       expect(config.getChatRecordingService()).toBe(recorder);
       expect(finalize).not.toHaveBeenCalled();
       expect(flush).not.toHaveBeenCalled();
+      // A rejected switch must leave the live session's lifecycle untouched.
+      expect(logSessionEnd).not.toHaveBeenCalled();
+      expect(logStartSession).not.toHaveBeenCalled();
+    });
+
+    const resumedGoalSession = (
+      status: 'active' | 'paused',
+    ): ResumedSessionData => {
+      const record: ChatRecord = {
+        uuid: `goal-${status}`,
+        parentUuid: null,
+        sessionId: 'resumed-session',
+        timestamp: new Date(0).toISOString(),
+        type: 'system',
+        subtype: 'goal_state',
+        provenance: 'goal_control',
+        cwd: '/tmp',
+        version: 'test',
+        systemPayload: {
+          v: 2,
+          cause: status === 'active' ? 'create' : 'pause',
+          snapshot: {
+            v: 2,
+            activity: 'idle',
+            goal: {
+              goalId: 'g-resumed',
+              revision: 1,
+              objective: 'resume me',
+              status,
+              evidenceCursor: { recordId: 'goal-active' },
+              turnCount: 1,
+              activeTimeMs: 10,
+              createdAt: 1,
+              updatedAt: 2,
+            },
+          },
+        },
+      };
+      return {
+        conversation: {
+          sessionId: 'resumed-session',
+          projectHash: 'test',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          messages: [record],
+        },
+        filePath: '/tmp/resumed-session.jsonl',
+        lastCompletedUuid: record.uuid,
+      };
+    };
+
+    // A pre-canonical transcript whose newest Goal record is a legacy
+    // `goal_status` card. Recovering it is the one restore path that has to
+    // *write*: it journals a migrated `goal_state` record.
+    const legacyGoalSession = (): ResumedSessionData => {
+      const record = {
+        uuid: 'legacy-goal',
+        parentUuid: null,
+        sessionId: 'resumed-session',
+        timestamp: new Date(0).toISOString(),
+        type: 'system',
+        subtype: 'slash_command',
+        provenance: 'goal_control',
+        cwd: '/tmp',
+        version: 'test',
+        systemPayload: {
+          phase: 'result',
+          outputHistoryItems: [
+            { type: 'goal_status', kind: 'set', condition: 'ship the thing' },
+          ],
+        },
+      } as unknown as ChatRecord;
+      return {
+        conversation: {
+          sessionId: 'resumed-session',
+          projectHash: 'test',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          messages: [record],
+        },
+        filePath: '/tmp/resumed-session.jsonl',
+        lastCompletedUuid: record.uuid,
+      };
+    };
+
+    // Under a writer lease the recorder is `inactive` until it is handed the
+    // lease, and rejects every write until then. Kicking the legacy
+    // migration off from the constructor drove that write into the guard,
+    // and `restore()` latches the failure as `recoveryError` permanently:
+    // the migrated goal was dropped and the whole resumed session lost goal
+    // persistence. Ordering is the deciding variable, so this asserts the
+    // deferred restore lands the goal rather than bricking the runtime.
+    it('waits for the session writer before migrating a legacy Goal', async () => {
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        experimentalZedIntegration: true,
+        sessionWriterLeaseEnabled: true,
+        sessionData: legacyGoalSession(),
+      });
+      const recorder = config.getChatRecordingService();
+      if (!recorder) throw new Error('expected a chat recording service');
+      expect(recorder.hasWriteOwnership()).toBe(false);
+
+      let settled = false;
+      const ready = config.getGoalRuntimeReady().then(
+        (runtime) => {
+          settled = true;
+          return runtime;
+        },
+        (error: unknown) => {
+          settled = true;
+          throw error;
+        },
+      );
+      // Flush microtasks: the pre-fix code had already rejected by here.
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(settled).toBe(false);
+
+      const recordGoalState = vi
+        .spyOn(recorder, 'recordGoalState')
+        .mockResolvedValue({} as ChatRecord);
+      // Stands in for `activateChatRecording()` handing over the lease.
+      vi.spyOn(recorder, 'hasWriteOwnership').mockReturnValue(true);
+      (
+        config as unknown as { startPendingGoalRestore(): void }
+      ).startPendingGoalRestore();
+
+      const runtime = await ready;
+      expect(recordGoalState).toHaveBeenCalledTimes(1);
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        objective: 'ship the thing',
+        status: 'paused',
+      });
+      // The runtime is usable, not latched on `recoveryError` — which is
+      // what `assertOperational()` would rethrow from every later
+      // beginTurn/dispatch/finishTurn.
+      expect(() => runtime.beginTurn('turn-1')).not.toThrow();
+    });
+
+    it('fails a deferred Goal restore instead of hanging when the writer never arrives', async () => {
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        experimentalZedIntegration: true,
+        sessionWriterLeaseEnabled: true,
+        sessionData: legacyGoalSession(),
+      });
+      const ready = config.getGoalRuntimeReady();
+      config.startNewSession('replacement-session');
+
+      await expect(ready).rejects.toBeInstanceOf(
+        GoalPersistenceUnavailableError,
+      );
+    });
+
+    it('restores the complete resumed-session Goal before exposing readiness', async () => {
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        sessionData: resumedGoalSession('paused'),
+      });
+
+      const initial = await config.getGoalRuntimeReady();
+      expect(initial.getSnapshot().goal).toMatchObject({
+        objective: 'resume me',
+        status: 'paused',
+      });
+
+      config.startNewSession(
+        'replacement-session',
+        resumedGoalSession('active'),
+      );
+      const replacement = await config.getGoalRuntimeReady();
+      expect(replacement).not.toBe(initial);
+      expect(replacement.getSnapshot().goal?.status).toBe('active');
+    });
+
+    it('holds selective Goal readiness and autonomous work until finalization', async () => {
+      const record = resumedGoalSession('active').conversation.messages[0]!;
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        sessionRestoreProjection: {
+          sessionId: 'resumed-session',
+          filePath: '/tmp/resumed-session.jsonl',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          runtime: {
+            apiHistory: [],
+            uiTelemetryEvents: [],
+            recording: {
+              lastCompletedUuid: record.uuid,
+              turnParentUuids: [],
+            },
+            goalRecords: [record],
+            initialTurn: 0,
+            backgroundNotificationTaskIds: [],
+          },
+        },
+      });
+      const started: string[] = [];
+      config.bindGoalTurnHost({
+        startGoalTurn: vi.fn(async ({ permit }) => {
+          started.push(permit.goalId);
+        }),
+        preemptGoalTurn: vi.fn(),
+      });
+      let ready = false;
+      void config.getGoalRuntimeReady().then(() => {
+        ready = true;
+      });
+
+      await Promise.resolve();
+      expect(ready).toBe(false);
+      expect(started).toEqual([]);
+
+      config.finalizeSessionRestore();
+
+      await expect(config.getGoalRuntimeReady()).resolves.toBe(
+        config.getGoalRuntime(),
+      );
+      await vi.waitFor(() => expect(started).toEqual(['g-resumed']));
+    });
+
+    it('rejects selective Goal readiness when restore is abandoned', async () => {
+      const record = resumedGoalSession('active').conversation.messages[0]!;
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        sessionRestoreProjection: {
+          sessionId: 'resumed-session',
+          filePath: '/tmp/resumed-session.jsonl',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          runtime: {
+            apiHistory: [],
+            uiTelemetryEvents: [],
+            recording: {
+              lastCompletedUuid: record.uuid,
+              turnParentUuids: [],
+            },
+            goalRecords: [record],
+            initialTurn: 0,
+            backgroundNotificationTaskIds: [],
+          },
+        },
+      });
+      const readiness = config.getGoalRuntimeReady();
+
+      config.startNewSession('replacement-session');
+
+      await expect(readiness).rejects.toThrow('Session restore was abandoned');
+    });
+
+    it('owns one durable Goal runtime per canonical session', async () => {
+      const config = new Config({ ...baseParams, chatRecording: true });
+      const first = config.getGoalRuntime();
+
+      expect(config.getGoalRuntime()).toBe(first);
+      config.startNewSession('replacement-session');
+      const replacement = config.getGoalRuntime();
+
+      expect(replacement).not.toBe(first);
+      await expect(
+        first.dispatch({ action: 'create', objective: 'stale' }),
+      ).rejects.toThrow('Goal runtime has been disposed');
+    });
+
+    it('rebinds the current Goal host to every replacement runtime', async () => {
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        sessionData: resumedGoalSession('active'),
+      });
+      const started: string[] = [];
+      const host: GoalTurnHost = {
+        startGoalTurn: vi.fn(async ({ permit }) => {
+          started.push(permit.goalId);
+        }),
+        preemptGoalTurn: vi.fn(),
+      };
+
+      config.bindGoalTurnHost(host);
+      await config.getGoalRuntimeReady();
+      await vi.waitFor(() => expect(started).toEqual(['g-resumed']));
+
+      config.startNewSession(
+        'replacement-session',
+        resumedGoalSession('active'),
+      );
+      await config.getGoalRuntimeReady();
+      await vi.waitFor(() =>
+        expect(started).toEqual(['g-resumed', 'g-resumed']),
+      );
+    });
+
+    it('does not expose volatile Goal state when chat recording is disabled', () => {
+      const config = new Config({ ...baseParams, chatRecording: false });
+
+      expect(() => config.getGoalRuntime()).toThrow(
+        GoalPersistenceUnavailableError,
+      );
+    });
+
+    it('does not leak the canonical Goal runtime through subagent prototypes', async () => {
+      const config = new Config({ ...baseParams, chatRecording: true });
+      const canonical = config.getGoalRuntime();
+      const child = Object.create(config) as Config;
+
+      expect(() => child.getGoalRuntime()).toThrow(
+        GoalPersistenceUnavailableError,
+      );
+      expect(() =>
+        child.bindGoalTurnHost({
+          startGoalTurn: vi.fn(),
+          preemptGoalTurn: vi.fn(),
+        }),
+      ).toThrow(GoalPersistenceUnavailableError);
+      await expect(
+        child.rebaseGoalRuntimeFromActiveTranscript(),
+      ).rejects.toThrow(GoalPersistenceUnavailableError);
+      await child.shutdown();
+      expect(() => canonical.getSnapshot()).not.toThrow();
+      expect(config.getGoalRuntime()).toBe(canonical);
     });
 
     it('clears the FileReadCache so a new session does not inherit prior reads', () => {
@@ -2333,6 +2820,7 @@ describe('Server Config (config.ts)', () => {
           chatRecordingService: {
             finalize: () => void;
             flush: () => Promise<void>;
+            beginClose: () => void;
             close: () => Promise<void>;
           };
         }
@@ -2342,6 +2830,7 @@ describe('Server Config (config.ts)', () => {
           chatRecordingService: {
             finalize: () => void;
             flush: () => Promise<void>;
+            beginClose: () => void;
             close: () => Promise<void>;
           };
         }
@@ -2350,6 +2839,7 @@ describe('Server Config (config.ts)', () => {
         flush: async () => {
           notify(config, event);
         },
+        beginClose: vi.fn(),
         close: async () => {},
       };
 
@@ -2620,12 +3110,205 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('initialize', () => {
+    it('accepts managed handoff only after certified takeover is configured', async () => {
+      const standalone = new Config(baseParams);
+      await standalone.closeSessionWriter({ handoff: true });
+      expect(
+        (
+          standalone as unknown as {
+            sessionWriterHandoffRequested: boolean;
+          }
+        ).sessionWriterHandoffRequested,
+      ).toBe(false);
+
+      const managed = new Config(baseParams);
+      managed.setSessionWriterTakeoverPolicy('certified');
+      await managed.closeSessionWriter({ handoff: true });
+      expect(
+        (
+          managed as unknown as {
+            sessionWriterHandoffRequested: boolean;
+          }
+        ).sessionWriterHandoffRequested,
+      ).toBe(true);
+    });
+
+    it.each([
+      [
+        'an ACP session without an opt-in',
+        { experimentalZedIntegration: true },
+      ],
+      [
+        'a non-ACP session with the setting enabled',
+        { sessionWriterLeaseEnabled: true },
+      ],
+      [
+        'an ACP session with an invalid truthy opt-in',
+        {
+          experimentalZedIntegration: true,
+          sessionWriterLeaseEnabled: 'true' as unknown as boolean,
+        },
+      ],
+    ])(
+      'uses the legacy recorder without acquiring a writer lease for %s',
+      async (_name, params) => {
+        const acquire = vi.spyOn(SessionWriterLease, 'acquire');
+        const config = new Config({
+          ...baseParams,
+          ...params,
+          chatRecording: true,
+        });
+
+        await (
+          config as unknown as { activateChatRecording(): Promise<void> }
+        ).activateChatRecording();
+
+        expect(acquire).not.toHaveBeenCalled();
+        expect(config.isSessionWriterLeaseEnabled()).toBe(false);
+        expect(config.hasSessionWriteOwnership()).toBe(false);
+        await expect(
+          config
+            .getChatRecordingService()
+            ?.runWithWriteBarrier(async () => 'legacy'),
+        ).resolves.toBe('legacy');
+        acquire.mockRestore();
+      },
+    );
+
+    it('releases a pending lease while a real baseline read is gated', async () => {
+      const root = await mkdtemp(path.join(os.tmpdir(), 'qwen-config-writer-'));
+      const runtimeBaseDir = path.join(root, 'runtime');
+      const projectDir = path.join(root, 'project');
+      await mkdir(projectDir, { recursive: true });
+      Storage.setRuntimeBaseDir(runtimeBaseDir);
+      const config = new Config({
+        ...baseParams,
+        sessionId: 'pending-baseline',
+        cwd: projectDir,
+        targetDir: projectDir,
+        chatRecording: true,
+        experimentalZedIntegration: true,
+        sessionWriterLeaseEnabled: true,
+      });
+      const transcriptPath = config.getTranscriptPath();
+      await mkdir(path.dirname(transcriptPath), { recursive: true });
+      const transcript = Buffer.alloc(2 * 1024 * 1024, 0x20);
+      transcript[transcript.byteLength - 1] = 0x0a;
+      await writeFile(transcriptPath, transcript);
+      const lockPath = getSessionWriterLockPath(
+        runtimeBaseDir,
+        'pending-baseline',
+      );
+      const probe = await open(transcriptPath, 'r');
+      const fileHandlePrototype = Object.getPrototypeOf(probe) as {
+        read: typeof probe.read;
+      };
+      await probe.close();
+      const originalRead = fileHandlePrototype.read;
+      let releaseRead!: () => void;
+      const readGate = new Promise<void>((resolve) => {
+        releaseRead = resolve;
+      });
+      let notifyReadStarted!: () => void;
+      const readStarted = new Promise<void>((resolve) => {
+        notifyReadStarted = resolve;
+      });
+      let gated = false;
+      const read = vi
+        .spyOn(fileHandlePrototype, 'read')
+        .mockImplementation(async function (
+          this: fs.promises.FileHandle,
+          ...args
+        ) {
+          const result = await originalRead.apply(this, args);
+          const values = args as readonly unknown[];
+          if (!gated && values[2] === 1024 * 1024) {
+            gated = true;
+            notifyReadStarted();
+            await readGate;
+          }
+          return result;
+        });
+
+      try {
+        const initialize = config.initialize();
+        await readStarted;
+        await expect(stat(lockPath)).resolves.toBeDefined();
+        const close = config.closeSessionWriter();
+
+        await vi.waitFor(
+          () =>
+            expect(stat(lockPath)).rejects.toMatchObject({
+              code: 'ENOENT',
+            }),
+          { timeout: 1_000 },
+        );
+        expect(gated).toBe(true);
+        releaseRead();
+        await expect(close).resolves.toBeUndefined();
+        await expect(initialize).rejects.toMatchObject({
+          name: 'SessionWriterUnavailableError',
+        });
+        expect(config.hasSessionWriteOwnership()).toBe(false);
+        expect(config.getChatRecordingService()?.hasWriteOwnership()).toBe(
+          false,
+        );
+      } finally {
+        releaseRead();
+        read.mockRestore();
+        Storage.setRuntimeBaseDir(null);
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    it('treats managed shutdown during writer acquisition as a clean terminal', async () => {
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        experimentalZedIntegration: true,
+        sessionWriterLeaseEnabled: true,
+      });
+      let resolveAcquire!: (lease: SessionWriterLease) => void;
+      const acquireGate = new Promise<SessionWriterLease>((resolve) => {
+        resolveAcquire = resolve;
+      });
+      let released = false;
+      const release = vi.fn().mockImplementation(async () => {
+        released = true;
+      });
+      const lease = {
+        transcriptExistedAtAcquire: false,
+        release,
+        get isReleased() {
+          return released;
+        },
+      } as unknown as SessionWriterLease;
+      const acquire = vi
+        .spyOn(SessionWriterLease, 'acquire')
+        .mockReturnValue(acquireGate);
+
+      const initialize = config.initialize();
+      await vi.waitFor(() => expect(acquire).toHaveBeenCalledOnce());
+      const close = config.closeSessionWriter();
+      resolveAcquire(lease);
+
+      await expect(close).resolves.toBeUndefined();
+      await expect(initialize).rejects.toMatchObject({
+        name: 'SessionWriterUnavailableError',
+      });
+      expect(release).toHaveBeenCalledOnce();
+      expect(config.hasSessionWriteOwnership()).toBe(false);
+      acquire.mockRestore();
+    });
+
     it('preserves activation and lease release failures', async () => {
       const config = new Config({
         ...baseParams,
         chatRecording: true,
         experimentalZedIntegration: true,
+        sessionWriterLeaseEnabled: true,
       });
+      expect(config.isSessionWriterLeaseEnabled()).toBe(true);
       const activationError = new SessionTranscriptChangedError();
       const releaseError = new Error('lease release failed');
       const release = vi.fn().mockRejectedValue(releaseError);
@@ -2640,11 +3323,7 @@ describe('Server Config (config.ts)', () => {
         'getSessionLocation',
       ).mockRejectedValue(activationError);
 
-      const result = await (
-        config as unknown as { activateChatRecording(): Promise<void> }
-      )
-        .activateChatRecording()
-        .catch((error: unknown) => error);
+      const result = await config.initialize().catch((error: unknown) => error);
 
       expect(result).toMatchObject({
         name: 'SessionWriterUnavailableError',
@@ -2660,6 +3339,67 @@ describe('Server Config (config.ts)', () => {
       acquire.mockRestore();
     });
 
+    it('does not report the same acquisition release failure twice', async () => {
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        experimentalZedIntegration: true,
+        sessionWriterLeaseEnabled: true,
+      });
+      const activationError = new SessionTranscriptChangedError();
+      const releaseError = new Error('lease release failed');
+      const acquisitionFailure = new SessionWriterUnavailableError({
+        cause: new AggregateError([activationError, releaseError]),
+      });
+      const release = vi.fn().mockRejectedValue(releaseError);
+      const lease = {
+        release,
+        isReleased: false,
+      } as unknown as SessionWriterLease;
+      const acquire = vi
+        .spyOn(SessionWriterLease, 'acquire')
+        .mockImplementation(async (options) => {
+          options.onOwnershipAcquired?.(lease);
+          throw acquisitionFailure;
+        });
+
+      const result = await config.initialize().catch((error: unknown) => error);
+
+      expect(result).toBe(acquisitionFailure);
+      expect(release).toHaveBeenCalledOnce();
+      acquire.mockRestore();
+    });
+
+    it('does not duplicate a concurrent activation and close failure', async () => {
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        experimentalZedIntegration: true,
+        sessionWriterLeaseEnabled: true,
+      });
+      const activationError = new SessionTranscriptChangedError();
+      let rejectAcquire!: (error: Error) => void;
+      const acquireGate = new Promise<SessionWriterLease>(
+        (_resolve, reject) => {
+          rejectAcquire = reject;
+        },
+      );
+      const acquire = vi
+        .spyOn(SessionWriterLease, 'acquire')
+        .mockReturnValue(acquireGate);
+
+      const initialize = config.initialize().catch((error: unknown) => error);
+      await vi.waitFor(() => expect(acquire).toHaveBeenCalledOnce());
+      const close = config
+        .closeSessionWriter()
+        .catch((error: unknown) => error);
+      rejectAcquire(activationError);
+
+      expect(await close).toBe(activationError);
+      expect(await initialize).toBe(activationError);
+      acquire.mockRestore();
+    });
+
     it('preserves initialization and recording close failures', async () => {
       const config = new Config(baseParams);
       const initializationError = new Error('initialization failed');
@@ -2672,9 +3412,13 @@ describe('Server Config (config.ts)', () => {
       ).mockRejectedValue(initializationError);
       (
         config as unknown as {
-          chatRecordingService: { close: () => Promise<void> };
+          chatRecordingService: {
+            beginClose: () => void;
+            close: () => Promise<void>;
+          };
         }
       ).chatRecordingService = {
+        beginClose: vi.fn(),
         close: vi.fn().mockRejectedValue(closeError),
       };
 
@@ -2687,6 +3431,404 @@ describe('Server Config (config.ts)', () => {
       expect(
         (result as Error & { cause: AggregateError }).cause.errors,
       ).toEqual([initializationError, closeError]);
+    });
+
+    it('runs due auto-skill curation before loading skills when enabled', async () => {
+      const config = new Config({ ...baseParams, enableAutoSkill: true });
+
+      await config.initialize();
+
+      expect(maybeRunAutoSkillCurator).toHaveBeenCalledWith(
+        path.resolve(TARGET_DIR),
+      );
+      expect(
+        vi.mocked(maybeRunAutoSkillCurator).mock.invocationCallOrder[0],
+      ).toBeLessThan(vi.mocked(SkillManager).mock.invocationCallOrder[0]);
+    });
+
+    it('does not run auto-skill curation when auto-skill is disabled', async () => {
+      await new Config({ ...baseParams, enableAutoSkill: false }).initialize();
+
+      expect(maybeRunAutoSkillCurator).not.toHaveBeenCalled();
+    });
+
+    it('does not run auto-skill curation in an untrusted folder', async () => {
+      await new Config({
+        ...baseParams,
+        enableAutoSkill: true,
+        trustedFolder: false,
+      }).initialize();
+
+      expect(maybeRunAutoSkillCurator).not.toHaveBeenCalled();
+    });
+
+    it('continues loading skills when auto-skill curation fails', async () => {
+      vi.mocked(maybeRunAutoSkillCurator).mockRejectedValueOnce(
+        new Error('corrupt curator state'),
+      );
+
+      const config = new Config({ ...baseParams, enableAutoSkill: true });
+
+      await expect(config.initialize()).resolves.toBeUndefined();
+      expect(SkillManager).toHaveBeenCalledTimes(1);
+    });
+
+    it('waits for in-flight initialization before cleaning late resources', async () => {
+      const config = new Config(baseParams);
+      let releaseInitialization!: () => void;
+      const initializationGate = new Promise<void>((resolve) => {
+        releaseInitialization = resolve;
+      });
+      const stop = vi.fn().mockResolvedValue(undefined);
+      const internal = config as unknown as {
+        initializeInternal: () => Promise<void>;
+        toolRegistry: ToolRegistry;
+      };
+      const initializeInternal = vi
+        .spyOn(internal, 'initializeInternal')
+        .mockImplementation(async () => {
+          await initializationGate;
+          internal.toolRegistry = { stop } as unknown as ToolRegistry;
+        });
+
+      const initialize = config.initialize();
+      await vi.waitFor(() => expect(initializeInternal).toHaveBeenCalledOnce());
+      let shutdownSettled = false;
+      const shutdown = config
+        .shutdown({
+          shutdownTelemetry: false,
+          skipSessionWriter: true,
+          strictResourceCleanup: true,
+        })
+        .then(() => {
+          shutdownSettled = true;
+        });
+
+      await new Promise<void>((resolve) => {
+        setImmediate(resolve);
+      });
+      expect(shutdownSettled).toBe(false);
+      expect(stop).not.toHaveBeenCalled();
+
+      releaseInitialization();
+      await expect(initialize).resolves.toBeUndefined();
+      await expect(shutdown).resolves.toBeUndefined();
+      expect(stop).toHaveBeenCalledOnce();
+    });
+
+    it('does not let incomplete initialization block best-effort shutdown', async () => {
+      const config = new Config(baseParams);
+      let releaseInitialization!: () => void;
+      const initializationGate = new Promise<void>((resolve) => {
+        releaseInitialization = resolve;
+      });
+      const stop = vi.fn().mockResolvedValue(undefined);
+      const internal = config as unknown as {
+        initializeInternal: () => Promise<void>;
+        toolRegistry: ToolRegistry;
+      };
+      const initializeInternal = vi
+        .spyOn(internal, 'initializeInternal')
+        .mockImplementation(async () => {
+          await initializationGate;
+          internal.toolRegistry = { stop } as unknown as ToolRegistry;
+        });
+
+      const initialize = config.initialize();
+      await vi.waitFor(() => expect(initializeInternal).toHaveBeenCalledOnce());
+
+      await expect(
+        config.shutdown({
+          shutdownTelemetry: false,
+          skipSessionWriter: true,
+        }),
+      ).resolves.toBeUndefined();
+      expect(stop).not.toHaveBeenCalled();
+
+      releaseInitialization();
+      await expect(initialize).resolves.toBeUndefined();
+      await vi.waitFor(() => expect(stop).toHaveBeenCalledOnce());
+    });
+
+    it('keeps strict shutdown waiting when best-effort shutdown starts first', async () => {
+      const config = new Config(baseParams);
+      let releaseInitialization!: () => void;
+      const initializationGate = new Promise<void>((resolve) => {
+        releaseInitialization = resolve;
+      });
+      const stop = vi.fn().mockResolvedValue(undefined);
+      const internal = config as unknown as {
+        initializeInternal: () => Promise<void>;
+        toolRegistry: ToolRegistry;
+      };
+      vi.spyOn(internal, 'initializeInternal').mockImplementation(async () => {
+        await initializationGate;
+        internal.toolRegistry = { stop } as unknown as ToolRegistry;
+      });
+
+      const initialize = config.initialize();
+      const bestEffortShutdown = config.shutdown({
+        shutdownTelemetry: false,
+        skipSessionWriter: true,
+      });
+      let strictShutdownSettled = false;
+      const strictShutdown = config
+        .shutdown({
+          shutdownTelemetry: false,
+          skipSessionWriter: true,
+          strictResourceCleanup: true,
+        })
+        .then(() => {
+          strictShutdownSettled = true;
+        });
+
+      await bestEffortShutdown;
+      await new Promise<void>((resolve) => {
+        setImmediate(resolve);
+      });
+      expect(strictShutdownSettled).toBe(false);
+
+      releaseInitialization();
+      await initialize;
+      await strictShutdown;
+      expect(stop).toHaveBeenCalledOnce();
+    });
+
+    it('runs resource cleanup once across concurrent shutdown calls', async () => {
+      const config = new Config(baseParams);
+      const stop = vi.fn().mockResolvedValue(undefined);
+      const internal = config as unknown as {
+        initializeInternal: () => Promise<void>;
+        toolRegistry: ToolRegistry;
+      };
+      vi.spyOn(internal, 'initializeInternal').mockImplementation(async () => {
+        internal.toolRegistry = { stop } as unknown as ToolRegistry;
+      });
+      await config.initialize();
+
+      await Promise.all([
+        config.shutdown({
+          shutdownTelemetry: false,
+          skipSessionWriter: true,
+        }),
+        config.shutdown({
+          shutdownTelemetry: false,
+          skipSessionWriter: true,
+        }),
+      ]);
+
+      expect(stop).toHaveBeenCalledOnce();
+    });
+
+    it('aborts active workflows during shutdown', async () => {
+      const config = new Config(baseParams);
+      const stop = vi.fn().mockResolvedValue(undefined);
+      const internal = config as unknown as {
+        initializeInternal: () => Promise<void>;
+        toolRegistry: ToolRegistry;
+      };
+      vi.spyOn(internal, 'initializeInternal').mockImplementation(async () => {
+        internal.toolRegistry = { stop } as unknown as ToolRegistry;
+      });
+      await config.initialize();
+      const abortController = new AbortController();
+      const registry = config.getWorkflowRunRegistry();
+      registry.register({
+        runId: 'wf_1234',
+        meta: null,
+        status: 'running',
+        startTime: Date.now(),
+        outputFile: '/tmp/wf_1234.jsonl',
+        abortController,
+      });
+
+      await config.shutdown({
+        shutdownTelemetry: false,
+        skipSessionWriter: true,
+        strictResourceCleanup: true,
+      });
+
+      expect(abortController.signal.aborted).toBe(true);
+      expect(registry.get('wf_1234')?.status).toBe('cancelled');
+    });
+
+    it('allows a later shutdown to retry incomplete resource cleanup', async () => {
+      const config = new Config(baseParams);
+      const stop = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('stop failed'))
+        .mockResolvedValue(undefined);
+      const internal = config as unknown as {
+        initializeInternal: () => Promise<void>;
+        toolRegistry: ToolRegistry;
+      };
+      vi.spyOn(internal, 'initializeInternal').mockImplementation(async () => {
+        internal.toolRegistry = { stop } as unknown as ToolRegistry;
+      });
+      await config.initialize();
+
+      await config.shutdown({
+        shutdownTelemetry: false,
+        skipSessionWriter: true,
+      });
+      await config.shutdown({
+        shutdownTelemetry: false,
+        skipSessionWriter: true,
+      });
+
+      expect(stop).toHaveBeenCalledTimes(2);
+    });
+
+    it('propagates resource cleanup failures in strict mode and allows retry', async () => {
+      const config = new Config(baseParams);
+      const stop = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('stop failed'))
+        .mockResolvedValue(undefined);
+      const internal = config as unknown as {
+        initializeInternal: () => Promise<void>;
+        toolRegistry: ToolRegistry;
+      };
+      vi.spyOn(internal, 'initializeInternal').mockImplementation(async () => {
+        internal.toolRegistry = { stop } as unknown as ToolRegistry;
+      });
+      await config.initialize();
+
+      await expect(
+        config.shutdown({
+          shutdownTelemetry: false,
+          skipSessionWriter: true,
+          strictResourceCleanup: true,
+        }),
+      ).rejects.toThrow('stop failed');
+      await expect(
+        config.shutdown({
+          shutdownTelemetry: false,
+          skipSessionWriter: true,
+          strictResourceCleanup: true,
+        }),
+      ).resolves.toBeUndefined();
+
+      expect(stop).toHaveBeenCalledTimes(2);
+    });
+
+    it('cleans partial resources after initialization fails', async () => {
+      const config = new Config(baseParams);
+      const initializationError = new Error('late initialization failure');
+      const stop = vi.fn().mockResolvedValue(undefined);
+      const internal = config as unknown as {
+        initializeInternal: () => Promise<void>;
+        toolRegistry: ToolRegistry;
+      };
+      vi.spyOn(internal, 'initializeInternal').mockImplementation(async () => {
+        internal.toolRegistry = { stop } as unknown as ToolRegistry;
+        throw initializationError;
+      });
+
+      const result = await config.initialize().catch((error: unknown) => error);
+      await config.shutdown({
+        shutdownTelemetry: false,
+        skipSessionWriter: true,
+      });
+
+      expect(result).toBe(initializationError);
+      expect(stop).toHaveBeenCalledOnce();
+    });
+
+    it('closes the writer before waiting for incomplete initialization', async () => {
+      const config = new Config(baseParams);
+      let releaseInitialization!: () => void;
+      const initializationGate = new Promise<void>((resolve) => {
+        releaseInitialization = resolve;
+      });
+      const initializeInternal = vi
+        .spyOn(
+          config as unknown as {
+            initializeInternal: () => Promise<void>;
+          },
+          'initializeInternal',
+        )
+        .mockImplementation(() => initializationGate);
+      const beginClose = vi.fn();
+      const close = vi.fn().mockResolvedValue(undefined);
+      const finalize = vi.fn();
+      const flush = vi.fn().mockResolvedValue(undefined);
+      (
+        config as unknown as {
+          chatRecordingService: {
+            beginClose: () => void;
+            close: () => Promise<void>;
+            finalize: () => void;
+            flush: () => Promise<void>;
+          };
+        }
+      ).chatRecordingService = {
+        beginClose,
+        close,
+        finalize,
+        flush,
+      };
+
+      const initialize = config.initialize();
+      await vi.waitFor(() => expect(initializeInternal).toHaveBeenCalledOnce());
+      const shutdown = config.shutdown({ shutdownTelemetry: false });
+
+      expect(beginClose).toHaveBeenCalledOnce();
+      expect(finalize).not.toHaveBeenCalled();
+      expect(flush).not.toHaveBeenCalled();
+      await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
+
+      releaseInitialization();
+      await expect(initialize).resolves.toBeUndefined();
+      await expect(shutdown).resolves.toBeUndefined();
+    });
+
+    it('rejects initialization after shutdown has started', async () => {
+      const config = new Config(baseParams);
+
+      await config.shutdown({
+        shutdownTelemetry: false,
+        skipSessionWriter: true,
+      });
+
+      await expect(config.initialize()).rejects.toThrow(
+        'Config is shutting down',
+      );
+    });
+
+    it('preserves graceful writer finalization after successful initialization', async () => {
+      const config = new Config(baseParams);
+      vi.spyOn(
+        config as unknown as {
+          initializeInternal: () => Promise<void>;
+        },
+        'initializeInternal',
+      ).mockResolvedValue(undefined);
+      await config.initialize();
+      const order: string[] = [];
+      (
+        config as unknown as {
+          chatRecordingService: {
+            beginClose: () => void;
+            close: () => Promise<void>;
+            finalize: () => void;
+            flush: () => Promise<void>;
+          };
+        }
+      ).chatRecordingService = {
+        beginClose: vi.fn(() => order.push('beginClose')),
+        close: vi.fn(async () => {
+          order.push('close');
+        }),
+        finalize: vi.fn(() => order.push('finalize')),
+        flush: vi.fn(async () => {
+          order.push('flush');
+        }),
+      };
+
+      await config.shutdown({ shutdownTelemetry: false });
+
+      expect(order).toEqual(['finalize', 'flush', 'beginClose', 'close']);
     });
 
     it('should throw an error if initialized more than once', async () => {
@@ -2726,6 +3868,8 @@ describe('Server Config (config.ts)', () => {
         ToolNames.EDIT,
         ToolNames.NOTEBOOK_EDIT,
         ToolNames.SHELL,
+        ToolNames.GET_GOAL,
+        ToolNames.UPDATE_GOAL,
       ]);
     });
 
@@ -3033,6 +4177,75 @@ describe('Server Config (config.ts)', () => {
       ).mock.calls.map((call) => call[0]);
       expect(registeredNames).toContain(ToolNames.ARTIFACT);
       expect(registeredNames).toContain(ToolNames.RECORD_ARTIFACT);
+    });
+
+    it('registers display_image only for the main interactive TUI', async () => {
+      const interactive = new Config({
+        ...baseParams,
+        interactive: true,
+        sdkMode: false,
+      });
+      await interactive.initialize();
+
+      const registerToolMock = ToolRegistry.prototype.registerFactory as Mock;
+      expect(registerToolMock.mock.calls.map((call) => call[0])).toContain(
+        ToolNames.DISPLAY_IMAGE,
+      );
+
+      for (const params of [
+        { interactive: false, sdkMode: false },
+        { interactive: true, sdkMode: true },
+        {
+          interactive: true,
+          sdkMode: false,
+          inputFormat: InputFormat.STREAM_JSON,
+        },
+        {
+          interactive: true,
+          sdkMode: false,
+          accessibility: { screenReader: true },
+        },
+      ]) {
+        registerToolMock.mockClear();
+        const config = new Config({ ...baseParams, ...params });
+        await config.initialize();
+        expect(
+          registerToolMock.mock.calls.map((call) => call[0]),
+        ).not.toContain(ToolNames.DISPLAY_IMAGE);
+      }
+
+      registerToolMock.mockClear();
+      await interactive.createToolRegistry(undefined, {
+        skipDiscovery: true,
+        forSubAgent: true,
+      });
+      expect(registerToolMock.mock.calls.map((call) => call[0])).not.toContain(
+        ToolNames.DISPLAY_IMAGE,
+      );
+    });
+
+    it('forwards terminal image renderer support to the display tool', async () => {
+      const provider = vi.fn().mockResolvedValue({
+        available: false,
+        reason: 'renderer unavailable',
+      });
+      const config = new Config({
+        ...baseParams,
+        terminalImageRenderSupportProvider: provider,
+      });
+
+      await expect(config.getTerminalImageRenderSupport()).resolves.toEqual({
+        available: false,
+        reason: 'renderer unavailable',
+      });
+      expect(provider).toHaveBeenCalledWith();
+
+      await expect(
+        new Config(baseParams).getTerminalImageRenderSupport(),
+      ).resolves.toEqual({
+        available: false,
+        reason: 'No terminal image renderer is configured.',
+      });
     });
 
     it('registers only record_artifact by default for daemon artifact metadata', async () => {
@@ -3357,6 +4570,149 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('reasoning effort override', () => {
+    it('reports a higher-priority DashScope knob that shadows reasoning effort', () => {
+      const config = new Config({
+        ...baseParams,
+      });
+      (
+        config as unknown as {
+          contentGeneratorConfig: ContentGeneratorConfig;
+        }
+      ).contentGeneratorConfig = {
+        model: 'qwen3.8-max',
+        authType: AuthType.QWEN_OAUTH,
+        reasoning: { effort: 'max' },
+        extra_body: { thinking_budget: 4096 },
+      };
+
+      expect(config.getReasoningEffortOverride()).toEqual({
+        source: 'extra_body',
+        field: 'thinking_budget',
+      });
+    });
+
+    it('does not report an identical static effort or a non-tiered model', () => {
+      const config = new Config({
+        ...baseParams,
+      });
+      (
+        config as unknown as {
+          contentGeneratorConfig: ContentGeneratorConfig;
+        }
+      ).contentGeneratorConfig = {
+        model: 'qwen3.8-max',
+        authType: AuthType.QWEN_OAUTH,
+        reasoning: { effort: 'max' },
+        extra_body: { reasoning_effort: 'max' },
+      };
+      expect(config.getReasoningEffortOverride()).toBeUndefined();
+
+      config.getContentGeneratorConfig().model = 'qwen3.7-max';
+      config.getContentGeneratorConfig().extra_body = {
+        thinking_budget: 4096,
+      };
+      expect(config.getReasoningEffortOverride()).toBeUndefined();
+    });
+
+    it.each([
+      {
+        name: 'extra_body enable_thinking disable',
+        extra_body: { enable_thinking: false },
+        expected: { source: 'extra_body', field: 'enable_thinking' },
+      },
+      {
+        name: 'different extra_body effort',
+        extra_body: { reasoning_effort: 'high' },
+        expected: { source: 'extra_body', field: 'reasoning_effort' },
+      },
+      {
+        name: 'samplingParams enable_thinking disable',
+        samplingParams: { enable_thinking: false },
+        expected: { source: 'samplingParams', field: 'enable_thinking' },
+      },
+      {
+        name: 'samplingParams budget',
+        samplingParams: { thinking_budget: 2048 },
+        expected: { source: 'samplingParams', field: 'thinking_budget' },
+      },
+      {
+        name: 'different samplingParams effort',
+        samplingParams: { reasoning_effort: 'high' },
+        expected: { source: 'samplingParams', field: 'reasoning_effort' },
+      },
+      {
+        name: 'identical samplingParams effort',
+        samplingParams: { reasoning_effort: 'max' },
+        expected: undefined,
+      },
+      {
+        name: 'extra_body enable_thinking on-switch',
+        extra_body: { enable_thinking: true },
+        expected: undefined,
+      },
+      {
+        name: 'extra_body enable_thinking on-switch over a samplingParams disable',
+        extra_body: { enable_thinking: true },
+        samplingParams: { enable_thinking: false },
+        expected: undefined,
+      },
+      {
+        name: 'samplingParams enable_thinking on-switch',
+        samplingParams: { enable_thinking: true },
+        expected: undefined,
+      },
+      {
+        name: 'samplingParams effort under an extra_body enable_thinking on-switch',
+        extra_body: { enable_thinking: true },
+        samplingParams: { reasoning_effort: 'high' },
+        expected: { source: 'samplingParams', field: 'reasoning_effort' },
+      },
+      {
+        name: 'samplingParams budget under an extra_body enable_thinking on-switch',
+        extra_body: { enable_thinking: true },
+        samplingParams: { thinking_budget: 2048 },
+        expected: { source: 'samplingParams', field: 'thinking_budget' },
+      },
+    ])('resolves $name', ({ extra_body, samplingParams, expected }) => {
+      const config = new Config({
+        ...baseParams,
+      });
+      (
+        config as unknown as {
+          contentGeneratorConfig: ContentGeneratorConfig;
+        }
+      ).contentGeneratorConfig = {
+        model: 'qwen3.8-max',
+        authType: AuthType.QWEN_OAUTH,
+        reasoning: { effort: 'max' },
+        extra_body,
+        samplingParams,
+      };
+
+      expect(config.getReasoningEffortOverride()).toEqual(expected);
+    });
+
+    it('does not report an override for a non-DashScope endpoint', () => {
+      const config = new Config({
+        ...baseParams,
+      });
+      (
+        config as unknown as {
+          contentGeneratorConfig: ContentGeneratorConfig;
+        }
+      ).contentGeneratorConfig = {
+        model: 'qwen3.8-max',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://api.openai.com/v1',
+        reasoning: { effort: 'max' },
+        samplingParams: { thinking_budget: 2048 },
+      };
+
+      expect(config.getReasoningEffortOverride()).toBeUndefined();
+    });
+  });
+
   describe('refreshAuth', () => {
     it('should refresh auth and update config', async () => {
       const config = new Config(baseParams);
@@ -3581,6 +4937,7 @@ describe('Server Config (config.ts)', () => {
 
       // Spy after initial refresh to ensure model switch does not re-trigger refreshAuth.
       const refreshSpy = vi.spyOn(config, 'refreshAuth');
+      vi.mocked(resetPreloadedContentGenerator).mockClear();
 
       await config.switchModel(AuthType.QWEN_OAUTH, 'coder-model');
 
@@ -3591,6 +4948,10 @@ describe('Server Config (config.ts)', () => {
         vi.mocked(resolveContentGeneratorConfigWithSources),
       ).toHaveBeenCalledTimes(2);
       expect(vi.mocked(createContentGenerator)).toHaveBeenCalledTimes(1);
+      expect(resetPreloadedContentGenerator).toHaveBeenCalledOnce();
+      expect(resetPreloadedContentGenerator).toHaveBeenCalledWith(
+        config.getContentGenerator(),
+      );
     });
 
     it('should preserve thoughts from history on model switch', async () => {
@@ -3937,6 +5298,224 @@ describe('Server Config (config.ts)', () => {
       });
 
       expect(config.getFastModel()).toBeUndefined();
+    });
+
+    describe('getCompactionModel', () => {
+      it('returns the compaction model when set', async () => {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'gpt-4',
+          compactionModel: 'compaction-model',
+          modelProvidersConfig: {
+            [AuthType.USE_OPENAI]: [
+              {
+                id: 'gpt-4',
+                name: 'GPT-4',
+                baseUrl: 'https://api.openai.com/v1',
+                envKey: 'OPENAI_API_KEY',
+              },
+              {
+                id: 'compaction-model',
+                name: 'Compaction Model',
+                baseUrl: 'https://api.openai.com/v1',
+                envKey: 'OPENAI_API_KEY',
+              },
+            ],
+          },
+        });
+
+        await config.refreshAuth(AuthType.USE_OPENAI);
+
+        expect(config.getCompactionModel()).toBe('compaction-model');
+      });
+
+      it('resolves an authType-qualified compaction model selector', async () => {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_ANTHROPIC,
+          model: 'claude-opus-4-7',
+          compactionModel: 'openai:compaction-model',
+          modelProvidersConfig: {
+            [AuthType.USE_OPENAI]: [
+              {
+                id: 'compaction-model',
+                name: 'Compaction Model',
+                baseUrl: 'https://api.openai.com/v1',
+                envKey: 'OPENAI_API_KEY',
+              },
+            ],
+            [AuthType.USE_ANTHROPIC]: [
+              {
+                id: 'claude-opus-4-7',
+                name: 'claude-opus-4-7',
+                baseUrl: 'https://idealab.alibaba-inc.com/api/anthropic',
+                envKey: 'IDEALAB_OPUS_API_KEY',
+              },
+            ],
+          },
+        });
+
+        await config.refreshAuth(AuthType.USE_ANTHROPIC);
+
+        expect(config.getCompactionModel()).toBe('openai:compaction-model');
+      });
+
+      it('falls back to the main model when compactionModel is not set', async () => {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'gpt-4',
+          fastModel: 'fast-model',
+          modelProvidersConfig: {
+            [AuthType.USE_OPENAI]: [
+              {
+                id: 'gpt-4',
+                name: 'GPT-4',
+                baseUrl: 'https://api.openai.com/v1',
+                envKey: 'OPENAI_API_KEY',
+              },
+              {
+                id: 'fast-model',
+                name: 'Fast Model',
+                baseUrl: 'https://api.openai.com/v1',
+                envKey: 'OPENAI_API_KEY',
+              },
+            ],
+          },
+        });
+
+        await config.refreshAuth(AuthType.USE_OPENAI);
+
+        // fastModel is intentionally ignored — compaction falls back to main
+        expect(config.getCompactionModel()).toBe('gpt-4');
+      });
+
+      it('falls back to main model when neither compactionModel nor fastModel is set', () => {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'gpt-4',
+          modelProvidersConfig: {
+            [AuthType.USE_OPENAI]: [
+              {
+                id: 'gpt-4',
+                name: 'GPT-4',
+                baseUrl: 'https://api.openai.com/v1',
+                envKey: 'OPENAI_API_KEY',
+              },
+            ],
+          },
+        });
+
+        expect(config.getCompactionModel()).toBe('gpt-4');
+      });
+
+      it('returns undefined when the compaction model is voiceOnly', async () => {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'gpt-4',
+          compactionModel: 'voice-model',
+          modelProvidersConfig: {
+            [AuthType.USE_OPENAI]: [
+              {
+                id: 'gpt-4',
+                name: 'GPT-4',
+                baseUrl: 'https://api.openai.com/v1',
+                envKey: 'OPENAI_API_KEY',
+              },
+              {
+                id: 'voice-model',
+                name: 'Voice Model',
+                voiceOnly: true,
+                baseUrl: 'https://api.openai.com/v1',
+                envKey: 'OPENAI_API_KEY',
+              },
+            ],
+          },
+        });
+
+        await config.refreshAuth(AuthType.USE_OPENAI);
+
+        expect(config.getCompactionModel()).toBeUndefined();
+      });
+
+      it('returns undefined when the compaction model is visionOnly', async () => {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'gpt-4',
+          compactionModel: 'vision-model',
+          modelProvidersConfig: {
+            [AuthType.USE_OPENAI]: [
+              {
+                id: 'gpt-4',
+                name: 'GPT-4',
+                baseUrl: 'https://api.openai.com/v1',
+                envKey: 'OPENAI_API_KEY',
+              },
+              {
+                id: 'vision-model',
+                name: 'Vision Model',
+                visionOnly: true,
+                baseUrl: 'https://api.openai.com/v1',
+                envKey: 'OPENAI_API_KEY',
+              },
+            ],
+          },
+        });
+
+        await config.refreshAuth(AuthType.USE_OPENAI);
+
+        expect(config.getCompactionModel()).toBeUndefined();
+      });
+
+      it('falls back to the main model when the compaction model selector is malformed', async () => {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_ANTHROPIC,
+          model: 'claude-opus-4-7',
+          compactionModel: 'openai:',
+          modelProvidersConfig: {
+            [AuthType.USE_OPENAI]: [
+              {
+                id: 'deepseek-v4-flash',
+                name: 'deepseek-v4-flash',
+                baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+                envKey: 'DASHSCOPE_API_KEY',
+              },
+            ],
+          },
+        });
+
+        await config.refreshAuth(AuthType.USE_ANTHROPIC);
+
+        expect(config.getCompactionModel()).toBe('claude-opus-4-7');
+      });
+
+      it('returns undefined when the compaction model is not configured for the current auth type', async () => {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_ANTHROPIC,
+          model: 'claude-opus-4-7',
+          compactionModel: 'missing-model',
+          modelProvidersConfig: {
+            [AuthType.USE_ANTHROPIC]: [
+              {
+                id: 'claude-opus-4-7',
+                name: 'Claude Opus 4',
+                baseUrl: 'https://idealab.alibaba-inc.com/api/anthropic',
+                envKey: 'IDEALAB_OPUS_API_KEY',
+              },
+            ],
+          },
+        });
+
+        await config.refreshAuth(AuthType.USE_ANTHROPIC);
+
+        expect(config.getCompactionModel()).toBeUndefined();
+      });
     });
 
     it('should refresh auth when switching to model with different envKey', async () => {
@@ -4534,6 +6113,12 @@ describe('Server Config (config.ts)', () => {
 
   it('relocateWorkingDirectory should preserve leased storage for an ACP cwd change', async () => {
     const config = new Config(baseParams);
+    const generator = {} as ContentGenerator;
+    (
+      config as unknown as {
+        contentGenerator: ContentGenerator;
+      }
+    ).contentGenerator = generator;
     const originalStorage = config.storage;
     const originalPersistenceRoot = originalStorage.getProjectRoot();
     const newDir = path.resolve('/path/to/other');
@@ -4551,6 +6136,7 @@ describe('Server Config (config.ts)', () => {
     ).resolves.toEqual({});
 
     expect(config.getTargetDir()).toBe(newDir);
+    expect(resetPreloadedContentGenerator).toHaveBeenCalledWith(generator);
     expect(config.storage).toBe(originalStorage);
     expect(config.getSessionService().getProjectRoot()).toBe(
       originalPersistenceRoot,
@@ -4574,6 +6160,64 @@ describe('Server Config (config.ts)', () => {
     await config.relocateWorkingDirectory(newDir);
 
     expect(config.getFileService()).not.toBe(fileServiceBefore);
+
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory should reconcile MCP servers with the new session cwd', async () => {
+    const config = new Config({
+      ...baseParams,
+      mcpServers: { local: { command: 'node', args: ['server.js'] } },
+    });
+    await config.initialize();
+    const manager = (
+      config.getToolRegistry() as unknown as {
+        __mcpManagerMock: { discoverAllMcpToolsIncremental: Mock };
+      }
+    ).__mcpManagerMock;
+    await config.waitForMcpReady();
+    manager.discoverAllMcpToolsIncremental.mockClear();
+    const newDir = path.resolve('/path/to/other');
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+
+    await expect(config.relocateWorkingDirectory(newDir)).resolves.toEqual({});
+
+    expect(manager.discoverAllMcpToolsIncremental).toHaveBeenCalledOnce();
+    expect(manager.discoverAllMcpToolsIncremental).toHaveBeenCalledWith(config);
+
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory should report MCP reconcile failures after moving', async () => {
+    const config = new Config({
+      ...baseParams,
+      mcpServers: { local: { command: 'node' } },
+    });
+    await config.initialize();
+    const manager = (
+      config.getToolRegistry() as unknown as {
+        __mcpManagerMock: { discoverAllMcpToolsIncremental: Mock };
+      }
+    ).__mcpManagerMock;
+    await config.waitForMcpReady();
+    manager.discoverAllMcpToolsIncremental.mockRejectedValueOnce(
+      new Error('MCP failed'),
+    );
+    const newDir = path.resolve('/path/to/other');
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+
+    const result = await config.relocateWorkingDirectory(newDir);
+
+    expect(config.getTargetDir()).toBe(newDir);
+    expect(result.mcpRefreshError).toEqual(new Error('MCP failed'));
 
     chdirSpy.mockRestore();
     cwdSpy.mockRestore();
@@ -4910,6 +6554,40 @@ describe('Server Config (config.ts)', () => {
     cwdSpy.mockRestore();
   });
 
+  it('relocateWorkingDirectory should report both memory and MCP refresh failures after moving', async () => {
+    const config = new Config({
+      ...baseParams,
+      mcpServers: { local: { command: 'node' } },
+    });
+    await config.initialize();
+    const manager = (
+      config.getToolRegistry() as unknown as {
+        __mcpManagerMock: { discoverAllMcpToolsIncremental: Mock };
+      }
+    ).__mcpManagerMock;
+    await config.waitForMcpReady();
+    manager.discoverAllMcpToolsIncremental.mockRejectedValueOnce(
+      new Error('MCP failed'),
+    );
+    vi.mocked(loadServerHierarchicalMemory).mockRejectedValueOnce(
+      new Error('memory failed'),
+    );
+    const newDir = path.resolve('/path/to/other');
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+
+    const result = await config.relocateWorkingDirectory(newDir);
+
+    expect(config.getTargetDir()).toBe(newDir);
+    expect(result.memoryRefreshError).toEqual(new Error('memory failed'));
+    expect(result.mcpRefreshError).toEqual(new Error('MCP failed'));
+
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
   it('refreshHierarchicalMemory should include empty memory prompt when no managed auto-memory index exists', async () => {
     const config = new Config(baseParams);
 
@@ -5189,6 +6867,24 @@ describe('Server Config (config.ts)', () => {
     delete paramsWithoutTelemetry.telemetry;
     const config = new Config(paramsWithoutTelemetry);
     expect(config.getTelemetryEnabled()).toBe(TELEMETRY_SETTINGS.enabled);
+  });
+
+  it('Config exposes the telemetry user ID', () => {
+    const config = new Config({
+      ...baseParams,
+      telemetry: { enabled: true, userId: '  user-079458  ' },
+    });
+
+    expect(config.getTelemetryUserId()).toBe('user-079458');
+  });
+
+  it('Config omits the telemetry user ID by default', () => {
+    const config = new Config({
+      ...baseParams,
+      telemetry: { enabled: true },
+    });
+
+    expect(config.getTelemetryUserId()).toBeUndefined();
   });
 
   it('should have a getFileService method that returns FileDiscoveryService', () => {
@@ -5644,6 +7340,25 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('createToolRegistry', () => {
+    it('registers zoom_image unconditionally so it survives model switches', async () => {
+      const config = new Config(baseParams);
+      // A first-run / text-only session reports no image modality, yet the tool
+      // must still register: the gate moved to execute time so a hot /model
+      // switch to an image model picks it up without re-running initialize().
+      vi.spyOn(config, 'getEffectiveInputModalities').mockReturnValue({});
+
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).toContain(ToolNames.ZOOM_IMAGE);
+    });
+
     it('should ignore coreTools overrides in bare mode', async () => {
       const config = new Config({
         ...baseParams,
@@ -5671,6 +7386,8 @@ describe('Server Config (config.ts)', () => {
         ToolNames.EDIT,
         ToolNames.NOTEBOOK_EDIT,
         ToolNames.SHELL,
+        ToolNames.GET_GOAL,
+        ToolNames.UPDATE_GOAL,
       ]);
     });
 
@@ -5701,6 +7418,8 @@ describe('Server Config (config.ts)', () => {
         ToolNames.EDIT,
         ToolNames.NOTEBOOK_EDIT,
         ToolNames.SHELL,
+        ToolNames.GET_GOAL,
+        ToolNames.UPDATE_GOAL,
         ToolNames.STRUCTURED_OUTPUT,
       ]);
     });
@@ -8099,6 +9818,79 @@ describe('Model Switching and Config Updates', () => {
     });
   });
 
+  describe('UserPromptSubmit dispatch through the hook execution bridge', () => {
+    it.each([
+      {
+        name: 'forwards a string submitted prompt',
+        submittedPrompt: 'submitted prompt',
+        expected: 'submitted prompt',
+      },
+      {
+        name: 'preserves surrounding whitespace on a non-empty prompt',
+        submittedPrompt: '  submitted prompt  ',
+        expected: '  submitted prompt  ',
+      },
+      {
+        name: 'drops an empty submitted prompt',
+        submittedPrompt: '',
+        expected: undefined,
+      },
+      {
+        name: 'drops a whitespace-only submitted prompt',
+        submittedPrompt: ' \t\n ',
+        expected: undefined,
+      },
+      {
+        name: 'drops a numeric submitted prompt',
+        submittedPrompt: 42,
+        expected: undefined,
+      },
+      {
+        name: 'drops an object submitted prompt',
+        submittedPrompt: { text: 'submitted prompt' },
+        expected: undefined,
+      },
+      {
+        name: 'drops a null submitted prompt',
+        submittedPrompt: null,
+        expected: undefined,
+      },
+      {
+        name: 'handles a missing submitted prompt',
+        submittedPrompt: undefined,
+        expected: undefined,
+      },
+    ])('$name', async ({ submittedPrompt, expected }) => {
+      const config = new Config({ ...baseParams });
+      await config.initialize();
+
+      const fireUserPromptSubmitEvent = vi.fn().mockResolvedValue(undefined);
+      // @ts-expect-error - accessing private for testing
+      config['hookSystem'] = { fireUserPromptSubmitEvent };
+
+      const response = await config
+        .getMessageBus()!
+        .request<HookExecutionRequest, HookExecutionResponse>(
+          {
+            type: MessageBusType.HOOK_EXECUTION_REQUEST,
+            eventName: 'UserPromptSubmit',
+            input: {
+              prompt: 'model prompt',
+              submitted_prompt: submittedPrompt,
+            },
+          },
+          MessageBusType.HOOK_EXECUTION_RESPONSE,
+        );
+
+      expect(fireUserPromptSubmitEvent).toHaveBeenCalledWith(
+        'model prompt',
+        undefined,
+        expected,
+      );
+      expect(response.success).toBe(true);
+    });
+  });
+
   describe('Stop dispatch through the hook execution bridge', () => {
     it.each([
       {
@@ -8241,5 +10033,134 @@ describe('Model Switching and Config Updates', () => {
       );
       expect(response.success).toBe(true);
     });
+  });
+
+  it('moves only the continued work chain Todo reminder', () => {
+    const config = Object.create(Config.prototype) as Config;
+    config.setActiveTodoReminder('prompt-user', 'unfinished user work');
+    config.setActiveTodoReminder('prompt-cron', 'unfinished cron work');
+
+    config.startActiveTodoWorkChain('prompt-retry', 'prompt-user');
+
+    expect(config.getActiveTodoReminder('prompt-retry')).toBe(
+      'unfinished user work',
+    );
+    expect(config.getActiveTodoReminder('prompt-user')).toBe(
+      'unfinished user work',
+    );
+    expect(config.getActiveTodoReminder('prompt-cron')).toBeUndefined();
+  });
+
+  it('clears stale Todo reminders when a new ordinary work chain starts', () => {
+    const config = Object.create(Config.prototype) as Config;
+    config.startActiveTodoWorkChain('prompt-old');
+    config.setActiveTodoReminder('prompt-old', 'old work');
+
+    config.startActiveTodoWorkChain('prompt-new');
+
+    expect(config.getActiveTodoReminder('prompt-new')).toBeUndefined();
+    expect(config.getActiveTodoReminder('prompt-old')).toBeUndefined();
+  });
+
+  it('re-issues the active Todo reminder only every third tool turn', () => {
+    const config = Object.create(Config.prototype) as Config;
+    config.startActiveTodoWorkChain('prompt-user');
+    config.setActiveTodoReminder('prompt-user', 'unfinished work');
+
+    expect(config.takeActiveTodoReminder('prompt-user')).toBeUndefined();
+    expect(config.takeActiveTodoReminder('prompt-user')).toBeUndefined();
+    expect(config.takeActiveTodoReminder('prompt-user')).toBe(
+      'unfinished work',
+    );
+    expect(config.takeActiveTodoReminder('prompt-user')).toBeUndefined();
+
+    expect(config.takeActiveTodoReminder('prompt-user', true)).toBe(
+      'unfinished work',
+    );
+    expect(config.takeActiveTodoReminder('prompt-user')).toBeUndefined();
+    expect(config.takeActiveTodoReminder('prompt-user')).toBeUndefined();
+    expect(config.takeActiveTodoReminder('prompt-user')).toBe(
+      'unfinished work',
+    );
+
+    config.setActiveTodoReminder('prompt-user', 'updated work');
+    expect(config.takeActiveTodoReminder('prompt-user')).toBeUndefined();
+  });
+
+  it('moves related automatic work without clearing unrelated reminders', () => {
+    const config = Object.create(Config.prototype) as Config;
+    config.startActiveTodoWorkChain('prompt-user');
+    config.setActiveTodoReminder('prompt-user', 'unfinished user work');
+    config.startAutomaticActiveTodoWorkChain('prompt-unrelated');
+    config.setActiveTodoReminder('prompt-unrelated', 'other work');
+
+    config.startAutomaticActiveTodoWorkChain('prompt-cron');
+    config.startAutomaticActiveTodoWorkChain(
+      'prompt-related-notification',
+      'prompt-user',
+    );
+
+    expect(config.getActiveTodoReminder('prompt-user')).toBe(
+      'unfinished user work',
+    );
+    expect(config.getActiveTodoReminder('prompt-cron')).toBeUndefined();
+    expect(config.getActiveTodoReminder('prompt-related-notification')).toBe(
+      'unfinished user work',
+    );
+    expect(
+      config.getActiveTodoWorkChainOwner(
+        'prompt-related-notification',
+        'stale-owner',
+      ),
+    ).toBe('prompt-user');
+    expect(
+      config.getActiveTodoWorkChainOwner('prompt-unmapped', 'inherited-owner'),
+    ).toBe('inherited-owner');
+    expect(config.getActiveTodoReminder('prompt-unrelated')).toBe('other work');
+
+    config.endAutomaticActiveTodoWorkChain('prompt-cron');
+    config.endAutomaticActiveTodoWorkChain('prompt-related-notification');
+
+    expect(config.getActiveTodoReminder('prompt-cron')).toBeUndefined();
+    expect(config.getActiveTodoReminder('prompt-user')).toBe(
+      'unfinished user work',
+    );
+
+    config.startAutomaticActiveTodoWorkChain(
+      'prompt-stale-notification',
+      'prompt-stale-owner',
+    );
+    config.setActiveTodoReminder(
+      'prompt-stale-notification',
+      'stale automatic work',
+    );
+    config.endAutomaticActiveTodoWorkChain('prompt-stale-notification');
+
+    expect(config.getActiveTodoReminder('prompt-stale-owner')).toBeUndefined();
+  });
+
+  it('isolates active Todo reminders inherited through child Configs', () => {
+    const parent = Object.create(Config.prototype) as Config;
+    const child = Object.create(parent) as Config;
+    parent.setActiveTodoReminder('parent-prompt', 'parent work');
+
+    child.setActiveTodoReminder('child-prompt', 'child work');
+    child.startActiveTodoWorkChain('child-retry', 'child-prompt');
+
+    expect(parent.getActiveTodoReminder('parent-prompt')).toBe('parent work');
+    expect(parent.getActiveTodoReminder('child-retry')).toBeUndefined();
+    expect(child.getActiveTodoReminder('parent-prompt')).toBeUndefined();
+    expect(child.getActiveTodoReminder('child-retry')).toBe('child work');
+  });
+
+  it('clears active Todo reminders for a new session', () => {
+    const config = new Config(baseParams);
+    config.setActiveTodoReminder('old-prompt', 'unfinished old work');
+    config.startActiveTodoWorkChain('old-retry', 'old-prompt');
+
+    config.startNewSession('new-session-id');
+
+    expect(config.getActiveTodoReminder('old-prompt')).toBeUndefined();
+    expect(config.getActiveTodoWorkChainOwner('old-retry')).toBe('old-retry');
   });
 });

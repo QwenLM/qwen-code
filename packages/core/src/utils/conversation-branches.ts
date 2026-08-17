@@ -5,6 +5,7 @@
  */
 
 import type { ChatRecord } from '../services/chatRecordingService.js';
+import { projectUserTranscriptForDisplay } from './transcript-records.js';
 
 const SUMMARY_TEXT_LIMIT = 200;
 const SYNTHETIC_USER_SUBTYPES = new Set([
@@ -437,7 +438,13 @@ function extractText(
         record.type === type &&
         (type !== 'user' || !isSyntheticUserRecord(record)),
     )
-    .flatMap((record) => record.message?.parts ?? [])
+    .flatMap((record) => {
+      if (type !== 'user') return record.message?.parts ?? [];
+      const projection = projectUserTranscriptForDisplay(record);
+      return projection.displayText !== undefined
+        ? [{ text: projection.displayText }]
+        : projection.parts;
+    })
     .map((part) => {
       const textPart = part as { text?: unknown; thought?: unknown };
       return typeof textPart.text === 'string' && textPart.thought !== true

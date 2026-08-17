@@ -11,9 +11,25 @@ import path from 'node:path';
 export default defineConfig({
   resolve: {
     alias: {
+      '@qwen-code/qwen-code-core/goalWire': path.resolve(
+        __dirname,
+        '../core/src/goals/goal-wire.ts',
+      ),
       '@qwen-code/qwen-code-core/transcriptRecords': path.resolve(
         __dirname,
         '../core/src/utils/transcript-records.ts',
+      ),
+      '@qwen-code/qwen-code-core/userPromptSubmitContext': path.resolve(
+        __dirname,
+        '../core/src/hooks/user-prompt-submit-context.ts',
+      ),
+      '@qwen-code/qwen-code-core/memoryScopes': path.resolve(
+        __dirname,
+        '../core/src/memory/scopes.ts',
+      ),
+      '@qwen-code/qwen-code-core/toolWriteOrigin': path.resolve(
+        __dirname,
+        '../core/src/services/tool-write-origin.ts',
       ),
       '@qwen-code/qwen-code-core': path.resolve(__dirname, '../core/index.ts'),
       // cli's daemon-status-provider.test.ts imports `FakeAgent` /
@@ -44,6 +60,14 @@ export default defineConfig({
       '@qwen-code/acp-bridge/spawnChannel': path.resolve(
         __dirname,
         '../acp-bridge/src/spawnChannel.ts',
+      ),
+      '@qwen-code/acp-bridge/processRegistry': path.resolve(
+        __dirname,
+        '../acp-bridge/src/process-registry.ts',
+      ),
+      '@qwen-code/acp-bridge/daemonMemoryBudget': path.resolve(
+        __dirname,
+        '../acp-bridge/src/daemon-memory-budget.ts',
       ),
       '@qwen-code/acp-bridge/ndJsonStream': path.resolve(
         __dirname,
@@ -88,6 +112,10 @@ export default defineConfig({
       '@qwen-code/acp-bridge/workspacePaths': path.resolve(
         __dirname,
         '../acp-bridge/src/workspacePaths.ts',
+      ),
+      '@qwen-code/acp-bridge/externalToolGuard': path.resolve(
+        __dirname,
+        '../acp-bridge/src/externalToolGuard.ts',
       ),
       '@qwen-code/audio-capture': path.resolve(
         __dirname,

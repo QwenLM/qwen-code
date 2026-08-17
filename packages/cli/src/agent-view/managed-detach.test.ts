@@ -32,8 +32,8 @@ describe('detachCurrentSessionToAgentView', () => {
     expect(result).toEqual({ sessionId });
     expect(adopt).toHaveBeenCalledWith({
       sessionId,
-      projectCwd: path.join(globalDir, 'project'),
-      activeCwd: path.join(globalDir, 'project', 'src'),
+      projectCwd: path.resolve(globalDir, 'project'),
+      activeCwd: path.resolve(globalDir, 'project', 'src'),
       approvalMode: 'default',
       sandbox: undefined,
       terminal: { columns: 100, rows: 40 },
@@ -58,6 +58,72 @@ describe('detachCurrentSessionToAgentView', () => {
     expect(adopt).toHaveBeenCalledWith(
       expect.objectContaining({
         approvalMode: undefined,
+      }),
+    );
+  });
+
+  it('passes a string sandbox mode through without JSON quoting', async () => {
+    const adopt = vi.fn(async () => ({ sessionId, adopted: true }));
+    const sessionId = '123e4567-e89b-12d3-a456-426614174000';
+    const config = {
+      getSessionId: () => sessionId,
+      getProjectRoot: () => '/project',
+      getTargetDir: () => '/project',
+      getApprovalMode: () => undefined,
+      getSandbox: () => 'linux',
+    };
+
+    await detachCurrentSessionToAgentView(config, {
+      ensureSupervisor: async () => ({ adopt }),
+    });
+
+    expect(adopt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sandbox: 'linux',
+      }),
+    );
+  });
+
+  it('does not stringify a null sandbox mode', async () => {
+    const adopt = vi.fn(async () => ({ sessionId, adopted: true }));
+    const sessionId = '123e4567-e89b-12d3-a456-426614174000';
+    const config = {
+      getSessionId: () => sessionId,
+      getProjectRoot: () => '/project',
+      getTargetDir: () => '/project',
+      getApprovalMode: () => undefined,
+      getSandbox: () => null,
+    };
+
+    await detachCurrentSessionToAgentView(config, {
+      ensureSupervisor: async () => ({ adopt }),
+    });
+
+    expect(adopt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sandbox: undefined,
+      }),
+    );
+  });
+
+  it('JSON-stringifies an object sandbox config', async () => {
+    const adopt = vi.fn(async () => ({ sessionId, adopted: true }));
+    const sessionId = '123e4567-e89b-12d3-a456-426614174000';
+    const config = {
+      getSessionId: () => sessionId,
+      getProjectRoot: () => '/project',
+      getTargetDir: () => '/project',
+      getApprovalMode: () => undefined,
+      getSandbox: () => ({ command: 'docker', image: 'qwen-sandbox' }),
+    };
+
+    await detachCurrentSessionToAgentView(config, {
+      ensureSupervisor: async () => ({ adopt }),
+    });
+
+    expect(adopt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sandbox: '{"command":"docker","image":"qwen-sandbox"}',
       }),
     );
   });

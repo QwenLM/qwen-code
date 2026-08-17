@@ -55,8 +55,15 @@ export function validateRequests(raw: unknown): AnchorRequest[] {
         );
       }
     }
-    if (o['line'] !== undefined && typeof o['line'] !== 'number') {
-      throw new Error(`Finding "${o['id']}" has a non-numeric "line".`);
+    // The same rule `findings`'s parseLocations applies: two validators in one
+    // pipeline must not disagree, or an entry passes here and hard-fails there.
+    if (
+      o['line'] !== undefined &&
+      (typeof o['line'] !== 'number' ||
+        !Number.isSafeInteger(o['line']) ||
+        o['line'] <= 0)
+    ) {
+      throw new Error(`Finding "${o['id']}" has an invalid "line".`);
     }
     return {
       id: o['id'] as string,

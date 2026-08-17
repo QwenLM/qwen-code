@@ -17,7 +17,11 @@ import { promises as fs } from 'node:fs';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { WorkflowMeta } from './runtime/workflow-sandbox.js';
-import type { WorkflowStatus, WorkflowTask } from './workflow-run-registry.js';
+import {
+  isTerminalWorkflowStatus,
+  type WorkflowTask,
+  type WorkflowTerminalStatus,
+} from './workflow-run-registry.js';
 
 const debugLogger = createDebugLogger('WORKFLOW_SNAPSHOT');
 
@@ -28,7 +32,7 @@ export const MAX_RETAINED_SNAPSHOTS = 30;
 export interface WorkflowSnapshot {
   runId: string;
   meta: WorkflowMeta | null;
-  status: WorkflowStatus;
+  status: WorkflowTerminalStatus;
   script: string;
   scriptPath?: string;
   phases: string[];
@@ -47,6 +51,9 @@ export interface WorkflowSnapshot {
 
 /** Project a (terminal) registry entry into a serializable snapshot. */
 export function toSnapshot(task: WorkflowTask): WorkflowSnapshot {
+  if (!isTerminalWorkflowStatus(task.status)) {
+    throw new Error(`Cannot snapshot active workflow ${task.runId}.`);
+  }
   return {
     runId: task.runId,
     meta: task.meta,
@@ -91,9 +98,13 @@ export async function writeWorkflowSnapshot(
   const storage = config.storage;
   if (!storage) return;
   try {
+    // Project BEFORE the first await: the caller captures this at
+    // settlement, but in-flight dispatches keep mutating the live
+    // entry across the fs awaits below — a post-await projection
+    // froze the snapshot at an fs-timing-dependent point mid-drain.
+    const snapshot = toSnapshot(task);
     const dir = storage.getWorkflowRunsDir();
     await fs.mkdir(dir, { recursive: true });
-    const snapshot = toSnapshot(task);
     await fs.writeFile(
       storage.getWorkflowRunSnapshotPath(task.runId),
       JSON.stringify(snapshot, null, 2),

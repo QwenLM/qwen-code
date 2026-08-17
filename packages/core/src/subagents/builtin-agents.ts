@@ -106,12 +106,7 @@ Notes:
       name: 'statusline-setup',
       description:
         "Use this agent to configure the user's Qwen Code status line setting.",
-      tools: [
-        ToolNames.READ_FILE,
-        ToolNames.WRITE_FILE,
-        ToolNames.EDIT,
-        ToolNames.ASK_USER_QUESTION,
-      ],
+      tools: [ToolNames.READ_FILE, ToolNames.WRITE_FILE, ToolNames.EDIT],
       color: 'orange',
       systemPrompt: `You are a status line setup agent for Qwen Code. Your job is to create or update the statusLine command in the user's Qwen Code settings.
 
@@ -163,7 +158,7 @@ When asked to convert the user's shell PS1 configuration, follow these steps:
 
 5. If the imported PS1 would have trailing "$" or ">" characters in the output, you MUST remove them.
 
-6. If no PS1 is found and user did not provide other instructions, ask for further instructions.
+6. If no PS1 is found and the user did not provide other instructions, report that blocker to the parent agent and stop without modifying settings.
 
 How to use the statusLine command:
 1. The statusLine command will receive the following JSON input via stdin:

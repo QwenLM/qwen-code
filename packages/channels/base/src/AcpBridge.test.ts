@@ -3,10 +3,16 @@ import type { RequestPermissionResponse } from '@agentclientprotocol/sdk';
 import {
   ACP_EVENT_LOOP_STALL_RESTART_MS,
   ACP_PERMISSION_RESPONSE_TIMEOUT_MS,
+  ACP_START_TIMEOUT_MS,
   AcpBridge,
 } from './AcpBridge.js';
 import { CHANNEL_LOOP_MCP_SERVER_NAME } from './ChannelLoopTools.js';
-import type { ChannelLoopToolHandler } from './ChannelAgentBridge.js';
+import {
+  ACP_PRIVATE_PARENT_CAPABILITY_ENV,
+  ACP_PRIVATE_PARENT_CAPABILITY_META_KEY,
+  CHANNEL_PROMPT_META_KEY,
+  type ChannelLoopToolHandler,
+} from './ChannelAgentBridge.js';
 
 const child = vi.hoisted(() => {
   class MockEmitter {
@@ -47,6 +53,7 @@ const child = vi.hoisted(() => {
     });
   }
 
+  let initializeImplementation: () => Promise<void> = () => Promise.resolve();
   return {
     instances: [] as MockChild[],
     clients: [] as Array<{
@@ -57,6 +64,13 @@ const child = vi.hoisted(() => {
       cancel: ReturnType<typeof vi.fn>;
     }>,
     MockChild,
+    initializeImplementation: () => initializeImplementation(),
+    resetInitializeImplementation: () => {
+      initializeImplementation = () => Promise.resolve();
+    },
+    setInitializeImplementation: (implementation: () => Promise<void>) => {
+      initializeImplementation = implementation;
+    },
     spawn: vi.fn(() => {
       const instance = new MockChild();
       child.instances.push(instance);
@@ -80,7 +94,7 @@ vi.mock('@agentclientprotocol/sdk', () => ({
   ClientSideConnection: vi.fn().mockImplementation((createClient) => {
     const client = createClient();
     const connection = {
-      initialize: vi.fn().mockResolvedValue(undefined),
+      initialize: vi.fn(() => child.initializeImplementation()),
       cancel: vi.fn().mockResolvedValue(undefined),
     };
     child.clients.push(client);
@@ -94,8 +108,12 @@ type TestableAcpBridge = AcpBridge & {
   connection: {
     extMethod: ReturnType<typeof vi.fn>;
     newSession?: ReturnType<typeof vi.fn>;
+    loadSession?: ReturnType<typeof vi.fn>;
+    unstable_resumeSession?: ReturnType<typeof vi.fn>;
     prompt?: ReturnType<typeof vi.fn>;
   };
+  knownSessionIds: Set<string>;
+  sessionBindingTokens: Map<string, object | undefined>;
   channelLoopMcpServer: unknown;
   channelLoopToolHandlers: ChannelLoopToolHandler[];
   channelLoopMcpRegistered: boolean;
@@ -128,6 +146,50 @@ describe('AcpBridge', () => {
     child.clients.length = 0;
     child.connections.length = 0;
     child.spawn.mockClear();
+    child.resetInitializeImplementation();
+  });
+
+  it('times out bridge initialization and stops the child', async () => {
+    vi.useFakeTimers();
+    try {
+      child.setInitializeImplementation(() => new Promise(() => {}));
+      const bridge = new AcpBridge({
+        cliEntryPath: '/tmp/qwen',
+        cwd: '/tmp',
+      });
+
+      const start = bridge.start();
+      const rejection = expect(start).rejects.toThrow(
+        `ACP initialization timed out after ${ACP_START_TIMEOUT_MS}ms`,
+      );
+      await vi.advanceTimersByTimeAsync(1000 + ACP_START_TIMEOUT_MS);
+
+      await rejection;
+      expect(child.instances[0]!.kill).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('performs the private-parent capability handshake with the spawned child', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    });
+
+    await bridge.start();
+
+    const spawnOptions = child.spawn.mock.calls[0]![2] as {
+      env?: Record<string, string | undefined>;
+    };
+    const capability = spawnOptions.env?.[ACP_PRIVATE_PARENT_CAPABILITY_ENV];
+    expect(typeof capability).toBe('string');
+    expect(capability!.length).toBeGreaterThan(0);
+    const initializeParams = child.connections[0]!.initialize.mock
+      .calls[0]![0] as { _meta?: Record<string, unknown> };
+    expect(
+      initializeParams._meta?.[ACP_PRIVATE_PARENT_CAPABILITY_META_KEY],
+    ).toBe(capability);
   });
 
   it('registers the channel loop MCP server once across concurrent calls', async () => {
@@ -258,7 +320,131 @@ describe('AcpBridge', () => {
       bridge.handleExtMethod('craft/drainMidTurnQueue', {
         sessionId: 's-1',
       }),
-    ).resolves.toStrictEqual({ messages: [] });
+    ).resolves.toStrictEqual({ messages: [], hasQueuedPrompt: false });
+  });
+
+  it('claims Guard continuations only for a session owned by this bridge', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn(),
+      newSession: vi.fn().mockResolvedValue({ sessionId: 's-1' }),
+    };
+
+    await expect(bridge.newSession('/tmp')).resolves.toBe('s-1');
+    await expect(
+      bridge.handleExtMethod('craft/claimTodoStopGuardContinuation', {
+        sessionId: 's-1',
+        promptId: 'bridge-owner',
+      }),
+    ).resolves.toStrictEqual({
+      claimed: true,
+      hasQueuedPrompt: false,
+    });
+    await expect(
+      bridge.handleExtMethod('craft/claimTodoStopGuardContinuation', {
+        sessionId: 'other-session',
+      }),
+    ).resolves.toStrictEqual({
+      claimed: false,
+      hasQueuedPrompt: false,
+    });
+  });
+
+  it('keeps a cancelled session claimable but rejects it after discard', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const cancel = vi.fn().mockResolvedValue(undefined);
+    const extMethod = vi.fn().mockResolvedValue({});
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      cancel,
+      extMethod,
+      newSession: vi.fn().mockResolvedValue({ sessionId: 's-1' }),
+    } as TestableAcpBridge['connection'];
+
+    await bridge.newSession('/tmp');
+    await bridge.cancelSession('s-1');
+    await expect(
+      bridge.handleExtMethod('craft/claimTodoStopGuardContinuation', {
+        sessionId: 's-1',
+      }),
+    ).resolves.toStrictEqual({
+      claimed: true,
+      hasQueuedPrompt: false,
+    });
+
+    await bridge.discardSession('s-1');
+    await expect(
+      bridge.handleExtMethod('craft/claimTodoStopGuardContinuation', {
+        sessionId: 's-1',
+      }),
+    ).resolves.toStrictEqual({
+      claimed: false,
+      hasQueuedPrompt: false,
+    });
+    expect(extMethod).toHaveBeenCalledWith('qwen/control/session/close', {
+      sessionId: 's-1',
+    });
+  });
+
+  it('does not discard a session rebound to a newer route operation', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const extMethod = vi.fn().mockResolvedValue({});
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod,
+      newSession: vi.fn().mockResolvedValue({ sessionId: 'shared-session' }),
+    } as TestableAcpBridge['connection'];
+    const firstToken = {};
+    const secondToken = {};
+
+    await bridge.newSession('/tmp', undefined, firstToken);
+    await bridge.newSession('/tmp', undefined, secondToken);
+    await bridge.discardSession('shared-session', firstToken);
+    expect(bridge.knownSessionIds.has('shared-session')).toBe(true);
+    expect(extMethod).not.toHaveBeenCalled();
+
+    await bridge.discardSession('shared-session', secondToken);
+    expect(bridge.knownSessionIds.has('shared-session')).toBe(false);
+    expect(bridge.sessionBindingTokens.has('shared-session')).toBe(false);
+    expect(extMethod).toHaveBeenCalledOnce();
+  });
+
+  it('restores channel sessions through resume without replaying history', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const resumeSession = vi.fn().mockResolvedValue({});
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn(),
+      unstable_resumeSession: resumeSession,
+    } as TestableAcpBridge['connection'];
+    const bindingToken = {};
+
+    await expect(
+      bridge.loadSession('restored-session', '/tmp', undefined, bindingToken),
+    ).resolves.toBe('restored-session');
+
+    expect(resumeSession).toHaveBeenCalledWith({
+      sessionId: 'restored-session',
+      cwd: '/tmp',
+      mcpServers: [],
+    });
+    expect(bridge.knownSessionIds.has('restored-session')).toBe(true);
+    expect(bridge.sessionBindingTokens.get('restored-session')).toBe(
+      bindingToken,
+    );
   });
 
   it('returns only the final turn text after tool calls', async () => {
@@ -299,6 +485,34 @@ describe('AcpBridge', () => {
     await expect(bridge.prompt('s-1', 'question')).resolves.toBe(
       'Final answer.',
     );
+    expect(bridge.connection.prompt).toHaveBeenCalledWith({
+      sessionId: 's-1',
+      prompt: [{ type: 'text', text: 'question' }],
+      _meta: { [CHANNEL_PROMPT_META_KEY]: true },
+    });
+  });
+
+  it('forwards the user-facing prompt projection to the daemon', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const prompt = vi.fn().mockResolvedValue({});
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = { extMethod: vi.fn(), prompt };
+
+    await bridge.prompt('s-1', 'hidden context\n\nhello', {
+      displayText: 'hello',
+    });
+
+    expect(prompt).toHaveBeenCalledWith({
+      sessionId: 's-1',
+      prompt: [{ type: 'text', text: 'hidden context\n\nhello' }],
+      _meta: {
+        [CHANNEL_PROMPT_META_KEY]: true,
+        'qwen.daemon.promptDisplayText': 'hello',
+      },
+    });
   });
 
   it('excludes nested subagent text from the final response', async () => {
@@ -998,9 +1212,11 @@ describe('AcpBridge', () => {
     const bridge = new AcpBridge({
       cliEntryPath: '/tmp/qwen',
       cwd: '/tmp',
-    });
+    }) as unknown as TestableAcpBridge;
 
     await bridge.start();
+    bridge.knownSessionIds.add('session-1');
+    bridge.sessionBindingTokens.set('session-1', {});
     const pending = child.clients[0]!.requestPermission({
       sessionId: 'session-1',
       toolCall: {
@@ -1017,5 +1233,7 @@ describe('AcpBridge', () => {
     await expect(pending).resolves.toEqual({
       outcome: { outcome: 'cancelled' },
     });
+    expect(bridge.knownSessionIds.size).toBe(0);
+    expect(bridge.sessionBindingTokens.size).toBe(0);
   });
 });

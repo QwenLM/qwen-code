@@ -10,6 +10,7 @@ let workspaceShouldThrow = false;
 const sessionProviderProps: Array<Record<string, unknown>> = [];
 const appProps: Array<Record<string, unknown>> = [];
 let workspaceCapabilities: {
+  features: string[];
   workspaceCwd?: string;
   workspaces?: Array<{
     id: string;
@@ -18,6 +19,7 @@ let workspaceCapabilities: {
     trusted?: boolean;
   }>;
 } = {
+  features: [],
   workspaceCwd: '/workspace',
   workspaces: [{ id: 'primary', cwd: '/workspace', primary: true }],
 };
@@ -44,6 +46,7 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', async () => {
       refreshCapabilities,
     }),
     useWorkspaceActions: () => ({ addWorkspace }),
+    useConnection: () => ({ status: 'idle' }),
   };
 });
 vi.mock('./App', async () => {
@@ -92,6 +95,7 @@ afterEach(() => {
   sessionProviderProps.length = 0;
   appProps.length = 0;
   workspaceCapabilities = {
+    features: [],
     workspaceCwd: '/workspace',
     workspaces: [{ id: 'primary', cwd: '/workspace', primary: true }],
   };
@@ -144,6 +148,7 @@ describe('WebShellWithProviders top-level boundary', () => {
 
   it('selects a registered workspace by path without locking the UI', () => {
     workspaceCapabilities = {
+      features: [],
       workspaces: [
         { id: 'primary', cwd: '/workspace', primary: true },
         { id: 'secondary', cwd: '/work/secondary', primary: false },
@@ -166,6 +171,7 @@ describe('WebShellWithProviders top-level boundary', () => {
 
   it('initializes an unlocked workspace selector from workspace id', () => {
     workspaceCapabilities = {
+      features: [],
       workspaces: [
         { id: 'primary', cwd: '/workspace', primary: true },
         { id: 'secondary', cwd: '/work/secondary', primary: false },
@@ -195,6 +201,7 @@ describe('WebShellWithProviders top-level boundary', () => {
 
   it('locks directly to an already registered workspace path', () => {
     workspaceCapabilities = {
+      features: [],
       workspaces: [
         { id: 'primary', cwd: '/workspace', primary: true },
         { id: 'secondary', cwd: '/work/secondary', primary: false },
@@ -225,7 +232,7 @@ describe('WebShellWithProviders top-level boundary', () => {
   });
 
   it('recognizes the primary path when single-workspace capabilities omit workspaces', () => {
-    workspaceCapabilities = { workspaceCwd: '/workspace' };
+    workspaceCapabilities = { features: [], workspaceCwd: '/workspace' };
 
     render(<WebShellWithProviders lockWorkspaceCwd="/workspace" />);
 
@@ -243,7 +250,7 @@ describe('WebShellWithProviders top-level boundary', () => {
   });
 
   it('selects the primary path without locking when workspaces are omitted', () => {
-    workspaceCapabilities = { workspaceCwd: '/workspace' };
+    workspaceCapabilities = { features: [], workspaceCwd: '/workspace' };
 
     render(<WebShellWithProviders workspaceCwd="/workspace" />);
 

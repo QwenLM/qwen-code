@@ -33,6 +33,21 @@ export const writeStderrLine = (message: string): void => {
 };
 
 /**
+ * `writeStdoutLine` that cannot throw.
+ *
+ * Same contract as `writeStderrLineSafe`: use it where the write is
+ * incidental to the work in hand — an informational block whose reader
+ * going away (`qwen … | head`) must not fail the command.
+ */
+export const writeStdoutLineSafe = (message: string): void => {
+  try {
+    writeStdoutLine(message);
+  } catch {
+    // stdout is gone. Whatever this line had to say, its reader left.
+  }
+};
+
+/**
  * `writeStderrLine` that cannot throw.
  *
  * `process.stderr.write` throws on EPIPE or a closed fd — reachable whenever
@@ -50,6 +65,43 @@ export const writeStderrLineSafe = (message: string): void => {
     // stderr is gone. There is, definitionally, nowhere to report that.
   }
 };
+
+/**
+ * Wait until any pending stdout/stderr writes have flushed.
+ *
+ * On POSIX pipes `process.stdout.write` flushes asynchronously, so a
+ * `process.exit()` right after writing silently discards buffered output
+ * (beyond the ~80KB pipe buffer). Call this before a deliberate early exit
+ * that follows user-facing writes (e.g. `qwen agents` subcommands, `--bg`).
+ *
+ * A pipe consumer that exits early (`qwen agents logs <id> | head`) turns
+ * the queued writes into EPIPE errors, and one that holds the pipe open
+ * without reading would block the drain forever — so errors settle the
+ * drain immediately and a timeout caps the wait.
+ */
+export const drainStdioBeforeExit = (timeoutMs = 5000): Promise<void> =>
+  new Promise((resolve) => {
+    let settled = false;
+    const settle = (): void => {
+      if (!settled) {
+        settled = true;
+        resolve();
+      }
+    };
+    const onError = (): void => settle();
+    process.stdout.once('error', onError);
+    process.stderr.once('error', onError);
+    const timer = setTimeout(settle, timeoutMs);
+    timer.unref?.();
+    process.stdout.write('', () => {
+      process.stderr.write('', () => {
+        clearTimeout(timer);
+        process.stdout.removeListener('error', onError);
+        process.stderr.removeListener('error', onError);
+        settle();
+      });
+    });
+  });
 
 /**
  * Clears the terminal screen.

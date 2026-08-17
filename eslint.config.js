@@ -34,6 +34,8 @@ export default tseslint.config(
       'docs-site/out/**',
       '.qwen/**',
       'packages/desktop/**',
+      'packages/desktop-shell/runtime/**',
+      'packages/desktop-shell/src-tauri/target/**',
       'packages/cua-driver/**', // vendored trycua/cua driver (Rust + scripts); not qwen-code TS
       'packages/mobile-mcp/**', // vendored mobile-next/mobile-mcp; has own eslint config
     ],
@@ -351,6 +353,15 @@ export default tseslint.config(
       },
     },
   },
+  {
+    files: ['packages/desktop-shell/bootstrap/**/*.js'],
+    languageOptions: {
+      globals: {
+        ...globals.browser,
+      },
+    },
+  },
+
   // ==================== no-console allowlist ====================
   // The following files/packages are allowed to use console.*
 

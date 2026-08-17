@@ -25,6 +25,24 @@ export function getStableClientId(
   }
 }
 
+/**
+ * Read the client id persisted for `sessionId` without generating one. Returns
+ * `undefined` when nothing is stored (SSR, private-mode quota failure, or a
+ * session this client never attached). Callers use this to act on behalf of a
+ * NON-current session, where `getStableClientId`'s generate-on-miss would mint
+ * an unrelated id that is not attached to the target session.
+ */
+export function getPersistedClientId(sessionId: string): string | undefined {
+  if (typeof window === 'undefined') return undefined;
+  try {
+    return (
+      window.sessionStorage.getItem(sessionClientIdKey(sessionId)) ?? undefined
+    );
+  } catch {
+    return undefined;
+  }
+}
+
 export function persistStableClientId(
   clientId: string | undefined,
   sessionId?: string,

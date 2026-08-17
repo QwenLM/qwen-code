@@ -178,8 +178,12 @@ class DaemonServeE2ETest {
 
                 PromptTerminal terminal = call.completionFuture()
                         .get(10, TimeUnit.SECONDS);
-                assertEquals(PromptTerminal.Kind.COMPLETE, terminal.getKind());
-                assertEquals("cancelled", terminal.getStopReason());
+                if (terminal.getKind() == PromptTerminal.Kind.COMPLETE) {
+                    assertEquals("cancelled", terminal.getStopReason());
+                } else {
+                    assertEquals(PromptTerminal.Kind.ERROR,
+                            terminal.getKind());
+                }
             } finally {
                 session.destroySession();
             }

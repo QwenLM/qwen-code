@@ -303,6 +303,24 @@ describe('getSlashCommandCompletionResult', () => {
       '/demo:ping',
     ]);
   });
+
+  it('limits the rendered command menu while keeping search available', () => {
+    const commands = Array.from({ length: 1_000 }, (_, index) => ({
+      name: `command-${index}`,
+      description: `Command ${index}`,
+      source: 'builtin-command' as const,
+    }));
+
+    const browsing = getSlashCommandCompletionResult('/', 1, commands);
+    const searching = getSlashCommandCompletionResult(
+      '/command-999',
+      12,
+      commands,
+    );
+
+    expect(browsing?.items).toHaveLength(50);
+    expect(searching?.items[0]?.label).toBe('/command-999');
+  });
 });
 
 describe('slashCompletionSource', () => {

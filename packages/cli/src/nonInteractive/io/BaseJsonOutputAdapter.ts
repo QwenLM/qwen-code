@@ -42,6 +42,7 @@ import type {
   Usage,
 } from '../types.js';
 import { functionResponsePartsToString } from '../../utils/nonInteractiveHelpers.js';
+import { projectHeadlessToolResultContent } from './headless-tool-result-text-projection.js';
 
 /**
  * Internal state for managing a single message context (main agent or subagent).
@@ -1059,7 +1060,7 @@ export abstract class BaseJsonOutputAdapter {
     };
     const content = toolResultContent(response);
     if (content !== undefined) {
-      block.content = content;
+      block.content = projectHeadlessToolResultContent(content);
     }
 
     const message: CLIUserMessage = {
@@ -1405,6 +1406,15 @@ function checkResponsePartsForError(
 export function toolResultContent(
   response: ToolCallResponseInfo,
 ): string | undefined {
+  if (response.visionBridgeNotice) {
+    const content = toolResultContent({
+      ...response,
+      visionBridgeNotice: undefined,
+    });
+    return content
+      ? `${response.visionBridgeNotice}\n${content}`
+      : response.visionBridgeNotice;
+  }
   if (isVisionBridgeNoticeDisplay(response.resultDisplay)) {
     const notice = formatVisionBridgeNoticeDisplay(response.resultDisplay);
     if (response.error) {

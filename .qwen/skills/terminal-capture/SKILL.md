@@ -17,8 +17,13 @@ Ensure the following dependencies are installed before running:
 
 ```bash
 npm install       # Install project dependencies.
-npx playwright install chromium   # Install Playwright browser
+npx playwright install chromium   # Install Playwright browser (skip in CI: see note below)
 ```
+
+> **CI / verify context:** when `QWEN_VERIFY_CHROMIUM=1` is set, the browser
+> is already installed and `PLAYWRIGHT_BROWSERS_PATH` points at it. Do **not**
+> run `playwright install` — it downloads ~170 MB and fails on system deps
+> the agent user cannot install.
 
 ## Architecture
 
@@ -227,7 +232,8 @@ This tool is commonly used for visual verification during PR reviews.
 
 - Playwright error `browser not found`
   Cause: browser not installed.
-  Solution: `npx playwright install chromium`.
+  Solution: `npx playwright install chromium` (local dev only — in CI verify
+  runs, this means the pre-install step failed; report it, do not install).
 - Blank screenshot
   Cause: process starts slowly or build failed.
   Solution: check build success and the spawn command.

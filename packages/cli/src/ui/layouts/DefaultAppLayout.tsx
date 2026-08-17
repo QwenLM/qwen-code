@@ -6,7 +6,7 @@
 
 import type React from 'react';
 import { useEffect, useRef } from 'react';
-import { Box } from 'ink';
+import { Box, type DOMElement } from 'ink';
 import { MainContent } from '../components/MainContent.js';
 import { UpdateNotification } from '../components/UpdateNotification.js';
 import { DialogManager } from '../components/DialogManager.js';
@@ -29,6 +29,7 @@ import { getDialogMaxHeight } from '../utils/layoutUtils.js';
 
 export const DefaultAppLayout: React.FC = () => {
   const uiState = useUIState();
+  const footerRef = useRef<DOMElement>(null);
   const { refreshStatic } = useUIActions();
   const { activeView, agents } = useAgentViewState();
   const { columns: terminalWidth } = useTerminalSize();
@@ -79,7 +80,7 @@ export const DefaultAppLayout: React.FC = () => {
       ) : (
         <>
           {/* Main view: conversation history + main composer / dialogs */}
-          <MainContent />
+          <MainContent footerRef={footerRef} />
           <Box flexDirection="column" ref={uiState.mainControlsRef}>
             {!uiState.dialogsVisible && uiState.updateInfo && (
               <UpdateNotification message={uiState.updateInfo.message} />
@@ -114,7 +115,7 @@ export const DefaultAppLayout: React.FC = () => {
                     />
                   </Box>
                 )}
-                <Composer />
+                <Composer footerRef={footerRef} />
               </>
             )}
             <ExitWarning />

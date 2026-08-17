@@ -1047,6 +1047,36 @@ describe('fastOnly and voiceOnly flags', () => {
     expect(models[0].fastOnly).toBe(true);
     expect(models[0].voiceOnly).toBe(true);
   });
+
+  it('should propagate visionOnly flag to AvailableModel', () => {
+    const config: ModelProvidersConfig = {
+      openai: [
+        { id: 'gpt-4o', name: 'GPT-4o' },
+        { id: 'vision-bridge', name: 'Vision Bridge', visionOnly: true },
+      ],
+    };
+    const registry = new ModelRegistry(config);
+    const models = registry.getModelsForAuthType(AuthType.USE_OPENAI);
+    expect(models.find((m) => m.id === 'gpt-4o')?.visionOnly).toBeUndefined();
+    expect(models.find((m) => m.id === 'vision-bridge')?.visionOnly).toBe(true);
+  });
+
+  it('should warn when visionOnly conflicts with another selector-only flag', () => {
+    const config: ModelProvidersConfig = {
+      openai: [
+        {
+          id: 'unreachable-vision',
+          visionOnly: true,
+          voiceOnly: true,
+        },
+      ],
+    };
+    const registry = new ModelRegistry(config);
+    const models = registry.getModelsForAuthType(AuthType.USE_OPENAI);
+    expect(models).toHaveLength(1);
+    expect(models[0].visionOnly).toBe(true);
+    expect(models[0].voiceOnly).toBe(true);
+  });
 });
 
 describe('malformed modelProviders tolerance', () => {
