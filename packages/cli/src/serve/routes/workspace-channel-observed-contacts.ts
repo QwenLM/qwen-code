@@ -12,10 +12,12 @@ import {
 } from '../../commands/channel/observed-contact-store.js';
 import {
   requireTrustedWorkspaceRuntime,
-  resolveWorkspaceRuntimeFromParam,
+  resolveWorkspaceRuntimeWithLiveCompatibilityFromParam,
+  sendConversationRuntimeUnavailable,
   sendGenerationClosedError,
   sendUntrustedWorkspaceResponse,
 } from '../workspace-route-runtime.js';
+import type { ConversationRuntimeActivityGate } from '../conversations/conversation-runtime-activity.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 
 interface RegisterWorkspaceChannelObservedContactRoutesDeps {
@@ -23,6 +25,7 @@ interface RegisterWorkspaceChannelObservedContactRoutesDeps {
   workspaceRegistry: WorkspaceRegistry;
   isWorkspaceTrusted?: () => boolean;
   captureGenerationAssertion?: () => (() => void) | undefined;
+  conversationRuntimeActivity?: ConversationRuntimeActivityGate;
 }
 
 const DEFAULT_FRESH_WITHIN_SECONDS = 7 * 24 * 60 * 60;
@@ -95,15 +98,49 @@ export function registerWorkspaceChannelObservedContactRoutes(
     );
   });
 
-  app.get('/workspaces/:workspace/channel/observed-contacts', (req, res) => {
-    const runtime = resolveWorkspaceRuntimeFromParam(
-      deps.workspaceRegistry,
-      req,
-      res,
-    );
-    if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
-    sendContacts(req, res, runtime.workspaceCwd, () =>
-      runtime.generationGuard?.assertOpen(),
-    );
-  });
+  app.get(
+    '/workspaces/:workspace/channel/observed-contacts',
+    async (req, res) => {
+      const runtime = resolveWorkspaceRuntimeWithLiveCompatibilityFromParam(
+        deps.workspaceRegistry,
+        req,
+        res,
+      );
+      if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+      if (
+        runtime.provenance === 'live-conversation' &&
+        !deps.conversationRuntimeActivity
+      ) {
+        sendConversationRuntimeUnavailable(res);
+        return;
+      }
+      const send = async () =>
+        sendContacts(req, res, runtime.workspaceCwd, () =>
+          runtime.generationGuard?.assertOpen(),
+        );
+      if (
+        runtime.provenance === 'live-conversation' &&
+        deps.conversationRuntimeActivity
+      ) {
+        try {
+          await deps.conversationRuntimeActivity.run(send);
+        } catch (error) {
+          if (
+            error &&
+            typeof error === 'object' &&
+            (error as { code?: unknown }).code === 'daemon_draining'
+          ) {
+            res.status(503).json({
+              error: 'The daemon is draining and no longer accepts work.',
+              code: 'daemon_draining',
+            });
+            return;
+          }
+          throw error;
+        }
+        return;
+      }
+      await send();
+    },
+  );
 }
