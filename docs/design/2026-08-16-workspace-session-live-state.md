@@ -612,9 +612,24 @@ the failure mode this protocol is intended to remove.
 
 ### Add the version or an ETag to the existing session-list response
 
-The server would still need to execute the expensive catalog path before it
-could compute or return the response. It also would not provide the current
-live-state snapshot needed by the client.
+The expensive catalog path runs anyway during a full reload, so carrying a
+version in that response costs nothing by itself — but where the stamp is
+read decides whether the response is safe. A stamp read after the scan can
+claim a mutation the scan never saw: a mutation landing mid-scan is marked
+on the clock yet absent from the files already read, which silently accepts
+an inconsistent bundle with no later signal. A stamp read before the scan
+is safe: any mid-scan mutation appears at the next live-state poll and
+forces at most one more reload, so the mismatch is bounded to one poll
+cycle and heals itself. That bounded single-request reconciliation is a
+legitimate client choice when a transiently stale row within one poll cycle
+is product-acceptable. The A/B handshake exists for clients that must never
+render a bundle that is not provably consistent with the version they
+accepted — for example a UI offering destructive actions against catalog
+rows — at the cost of exactly one extra cheap live-state read per reload,
+which this server already provides. The server contract supports both
+shapes; the Web Shell PR picks per its product tolerance. A version baked
+into the catalog response also would not provide the live-state snapshot
+this route exists to serve.
 
 ### Reuse the conditional live-only session-list fast path
 
