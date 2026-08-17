@@ -4,11 +4,54 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Argv, CommandModule } from 'yargs';
+
+const {
+  ghMock,
+  ghApiAllMock,
+  currentUserMock,
+  ensureAuthenticatedMock,
+  setGhHostMock,
+  writeFileSyncMock,
+  rmSyncMock,
+  mkdirSyncMock,
+} = vi.hoisted(() => ({
+  ghMock: vi.fn(),
+  ghApiAllMock: vi.fn(),
+  currentUserMock: vi.fn(),
+  ensureAuthenticatedMock: vi.fn(),
+  setGhHostMock: vi.fn(),
+  writeFileSyncMock: vi.fn(),
+  rmSyncMock: vi.fn(),
+  mkdirSyncMock: vi.fn(),
+}));
+
+vi.mock('./lib/gh.js', async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  return {
+    ...actual,
+    gh: ghMock,
+    ghApiAll: ghApiAllMock,
+    currentUser: currentUserMock,
+    ensureAuthenticated: ensureAuthenticatedMock,
+    setGhHost: setGhHostMock,
+  };
+});
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  const mock = {
+    ...actual,
+    mkdirSync: mkdirSyncMock,
+    writeFileSync: writeFileSyncMock,
+    rmSync: rmSyncMock,
+  };
+  return { ...mock, default: mock };
+});
 import {
   prContextCommand,
   isLegacySuggestionSummary,
@@ -23,7 +66,9 @@ import {
   fullCommentBody,
   type PrMetadata,
   type RawComment,
-  latestOwnLedger,
+  type RawReview,
+  latestLedger,
+  recoverLedger,
   renderLedgerSection,
 } from './pr-context.js';
 import { serializeLedger, type Ledger } from './lib/ledger.js';
@@ -169,7 +214,7 @@ describe('fullBody', () => {
     const long = 'x'.repeat(9000);
     const got = fullBody(long, 42);
     expect(got).toContain('truncated at 8000 chars');
-    expect(got).toContain('/reviews/42');
+    expect(got).toContain('comment-body 42 --kind review');
     expect(got).toContain('cannot tell');
   });
 });
@@ -178,7 +223,7 @@ describe('fullCommentBody', () => {
   it('caps long comment bodies and names the comment id for the tail', () => {
     const got = fullCommentBody('y'.repeat(9000), 314);
     expect(got).toContain('truncated at 8000 chars');
-    expect(got).toContain('pulls/comments/314');
+    expect(got).toContain('comment-body 314 --kind inline');
     expect(got).toContain('cannot tell');
   });
 });
@@ -311,7 +356,7 @@ describe('buildMarkdown — review bodies and replied Criticals', () => {
     expect(md).toContain('THE-TAIL-SURVIVES');
     expect(md).toContain('(comment 11)');
     // The reply snippet is cut, and the cut names the fetch for the rest.
-    expect(md).toContain('pulls/comments/12');
+    expect(md).toContain('comment-body 12 --kind inline');
   });
 });
 
@@ -353,8 +398,14 @@ describe('buildMarkdown — truncation refs are copy-runnable with real coordina
     );
     // A markerless blocker past the snippet cap is recoverable only through
     // the named fetch — and the emitted command must not need filling in.
-    expect(md).toContain('gh api repos/QwenLM/qwen-code/pulls/comments/21');
-    expect(md).toContain('gh api repos/QwenLM/qwen-code/issues/comments/31');
+    // The full prefix is pinned too: without `"${QWEN_CODE_CLI:-qwen}" review`
+    // the emitted text is an unrunnable bare subcommand name.
+    expect(md).toContain(
+      '"${QWEN_CODE_CLI:-qwen}" review comment-body 21 --kind inline --repo QwenLM/qwen-code',
+    );
+    expect(md).toContain(
+      'comment-body 31 --kind issue --repo QwenLM/qwen-code',
+    );
     expect(md).not.toContain('{owner}');
   });
 
@@ -374,7 +425,9 @@ describe('buildMarkdown — truncation refs are copy-runnable with real coordina
         },
       ],
     );
-    expect(md).toContain('gh api repos/QwenLM/qwen-code/pulls/6711/reviews/7');
+    expect(md).toContain(
+      'comment-body 7 --kind review --pr 6711 --repo QwenLM/qwen-code',
+    );
   });
 
   it('a settled replied thread cut past the snippet cap names both comment ids', () => {
@@ -394,8 +447,8 @@ describe('buildMarkdown — truncation refs are copy-runnable with real coordina
       },
     ];
     const md = buildMarkdown('1', 'o/r', meta, inline, [], []);
-    expect(md).toContain('gh api repos/o/r/pulls/comments/41');
-    expect(md).toContain('gh api repos/o/r/pulls/comments/42');
+    expect(md).toContain('comment-body 41 --kind inline --repo o/r');
+    expect(md).toContain('comment-body 42 --kind inline --repo o/r');
   });
 });
 
@@ -862,7 +915,7 @@ describe('blockerSection — both channels, and the budget', () => {
     }
     // The one past the budget is a snippet, and it names the exact fetch.
     expect(md).toContain('section budget spent');
-    expect(md).toContain('gh api repos/QwenLM/qwen-code/issues/comments/3');
+    expect(md).toContain('comment-body 3 --kind issue --repo QwenLM/qwen-code');
   });
 
   it('renders the bodies that fit in FULL and only degrades past the budget', () => {
@@ -997,7 +1050,7 @@ describe('prContextCommand builder', () => {
   });
 });
 
-describe('latestOwnLedger', () => {
+describe('latestLedger — the split trust surface', () => {
   const marker = (round: number) =>
     `LGTM <!-- qwen-review-ledger {"v":1,"round":${round},"findings":[{"id":"R${round}-1","sev":"C","file":"a.ts","title":"t"}]} -->`;
   const review = (login: string, at: string, body: string) => ({
@@ -1006,49 +1059,61 @@ describe('latestOwnLedger', () => {
     submitted_at: at,
     body,
   });
+  const anchored: Ledger = {
+    v: 1,
+    round: 2,
+    findings: [{ id: 'R2-1', sev: 'C', file: 'a.ts', title: 't' }],
+    sha: 'abc1234def567890',
+  };
 
-  it('takes the LATEST marker from the reviewing account only', () => {
-    const ledger = latestOwnLedger(
+  it('takes the LATEST marker whoever posted it', () => {
+    // Own-account-only shut the mechanism off exactly where it was designed
+    // to work: CI posts as a bot and the maintainer runs as themselves, so
+    // the accounts differ in the common case. Measured on PRs #9113 / #9094 —
+    // the bot's markers were on the PR and invisible to a local re-run, which
+    // then re-reviewed the full diff of a PR that had not changed a line.
+    const found = latestLedger(
       [
         review('bot', '2026-01-01T00:00:00Z', marker(1)),
         review('bot', '2026-01-03T00:00:00Z', marker(3)),
-        review('bot', '2026-01-02T00:00:00Z', marker(2)),
-        // Another account's marker is data about THEIR review — ignored.
         review('stranger', '2026-01-09T00:00:00Z', marker(9)),
       ],
       'bot',
     );
-    expect(ledger?.round).toBe(3);
+    expect(found?.ledger.round).toBe(9);
+    expect(found?.foreign).toBe(true);
+    expect(found?.author).toBe('stranger');
   });
 
-  it('breaks a submitted_at tie on the review id, not on array order', () => {
-    // Two rounds posted in the same second (or with the timestamp missing) are
-    // ordered only by id. Keeping the earlier one hands the next round the
-    // older work list — the one failure the whole recovery exists to prevent.
-    const at = '2026-01-01T00:00:00Z';
-    const ledger = latestOwnLedger(
-      [
-        { id: 2, user: { login: 'bot' }, submitted_at: at, body: marker(1) },
-        { id: 9, user: { login: 'bot' }, submitted_at: at, body: marker(4) },
-      ],
+  it('reports an own-account ledger as not foreign', () => {
+    const found = latestLedger(
+      [review('bot', '2026-01-03T00:00:00Z', marker(3))],
       'bot',
     );
-    expect(ledger?.round).toBe(4);
+    expect(found?.foreign).toBe(false);
+    expect(found?.author).toBe('bot');
   });
 
-  it('carries the anchor sha through the recovery seam intact', () => {
-    // The PR's payoff depends on this seam: posted marker → latestOwnLedger →
-    // the prev-ledger side file (a JSON.stringify of exactly this return).
-    // A future normalization that projects the return onto known fields
-    // would silently drop `sha` with every other test still green; this
-    // pins the recovered object, anchor included.
-    const anchored: Ledger = {
-      v: 1,
-      round: 2,
-      findings: [{ id: 'R2-1', sev: 'C', file: 'a.ts', title: 't' }],
-      sha: 'abc1234def567890',
-    };
-    const recovered = latestOwnLedger(
+  it('drops the anchor from ANOTHER account, keeping the work list', () => {
+    // The two halves are not the same claim. The findings are a work list
+    // Step 6 re-rules entry by entry against the code at HEAD; the sha scopes
+    // the next round's incremental diff, so a foreign one would let an
+    // untrusted body decide which lines this pipeline stops looking at.
+    const foreign = latestLedger(
+      [review('ci-bot', '2026-01-01T00:00:00Z', serializeLedger(anchored))],
+      'maintainer',
+    );
+    expect(foreign?.ledger.sha).toBeUndefined();
+    expect(foreign?.ledger.findings).toEqual(anchored.findings);
+    expect(foreign?.ledger.round).toBe(2);
+  });
+
+  it('carries the anchor through intact for the OWN account', () => {
+    // The seam the incremental range depends on: posted marker → latestLedger
+    // → the prev-ledger side file (a JSON.stringify of exactly this ledger).
+    // A future normalization that projects onto known fields would silently
+    // drop `sha` with every other test still green.
+    const own = latestLedger(
       [
         review(
           'bot',
@@ -1058,18 +1123,356 @@ describe('latestOwnLedger', () => {
       ],
       'bot',
     );
-    expect(recovered).toEqual(anchored);
+    expect(own?.ledger).toEqual(anchored);
   });
 
-  it('yields nothing with no login, no marker, or a malformed one', () => {
+  it("recovers the winning review's own commit_id as the age reference", () => {
+    // The reference must come from the SAME review the ledger came from — a
+    // recovery that took the newest ledger but another review's commit_id
+    // would date old code against the wrong head. The fixture must be able
+    // to refute that mutant: the account's NEWEST review is marker-less with
+    // a different commit_id (the bot's follow-up comment posted against a
+    // later head), so "take commitId from the latest review regardless of
+    // ledger" fails here instead of passing by coincidence. An invalid or
+    // missing commit_id yields null, never a truncated or garbage reference.
+    // 64 hex chars: COMMIT_SHA_RE's deliberate {40,64} breadth exists for
+    // SHA-256 heads — narrowing to {40} would silently drop the age
+    // reference on such repos.
+    const head = 'a'.repeat(64);
+    const { recovered } = recoverLedger(
+      [
+        {
+          ...review('bot', '2026-01-01T00:00:00Z', marker(1)),
+          commit_id: 'b'.repeat(40),
+        },
+        {
+          ...review('bot', '2026-01-02T00:00:00Z', marker(2)),
+          id: 77,
+          commit_id: head,
+        },
+        {
+          ...review('bot', '2026-01-03T00:00:00Z', 'marker-less follow-up'),
+          commit_id: 'c'.repeat(40),
+        },
+      ],
+      'bot',
+    );
+    expect(recovered?.ledger.round).toBe(2);
+    expect(recovered?.commitId).toBe(head);
+    // The winning review's own id rides along: Step 6's not-reviewed check
+    // must know WHICH body's disclosures bind the age rule.
+    expect(recovered?.reviewId).toBe(77);
+    const invalid = recoverLedger(
+      [
+        {
+          ...review('bot', '2026-01-01T00:00:00Z', marker(1)),
+          commit_id: 'abc123',
+        },
+      ],
+      'bot',
+    ).recovered;
+    expect(invalid?.ledger.round).toBe(1);
+    expect(invalid?.commitId).toBeNull();
+  });
+
+  it('distinguishes "no own review" from "own review without a parseable ledger"', () => {
+    // The deletion arm must read "recovery returned null although reviews
+    // were read" as proof of nothing: an own review whose marker fails to
+    // parse (edited or damaged bot body, marker-less follow-up) also yields
+    // null — a persistent state, not absence. Deleting the side file there
+    // stamped the next round "round 1" mid-PR and reset the posture clock.
+    const damaged = recoverLedger(
+      [review('bot', '2026-01-01T00:00:00Z', 'edited body, marker gone')],
+      'bot',
+    );
+    expect(damaged.recovered).toBeNull();
+    expect(damaged.sawOwnReview).toBe(true);
+    // A stranger's marker with no own review: under the split trust surface
+    // the WORK LIST still recovers (as foreign, anchor gone at the seam) —
+    // and precisely because it does, the deletion arm requires BOTH "no own
+    // review" AND "nothing recovered from anyone": a live foreign counter is
+    // not leftovers.
+    const foreignOnly = recoverLedger(
+      [review('stranger', '2026-01-01T00:00:00Z', marker(3))],
+      'bot',
+    );
+    expect(foreignOnly.sawOwnReview).toBe(false);
+    expect(foreignOnly.recovered?.foreign).toBe(true);
+    expect(foreignOnly.recovered?.ledger.round).toBe(3);
+    // Logins compare case-insensitively (GitHub's rule): a case mismatch
+    // would read an own marker as FOREIGN — stripping an anchor this account
+    // itself posted — and "own review exists" as "proven absence".
+    const cased = recoverLedger(
+      [review('Bot', '2026-01-01T00:00:00Z', marker(2))],
+      'bot',
+    );
+    expect(cased.sawOwnReview).toBe(true);
+    expect(cased.recovered?.foreign).toBe(false);
+    expect(cased.recovered?.ledger.round).toBe(2);
+    // A PENDING draft is not "seen" either — it is not a submitted review.
+    const draftOnly = recoverLedger(
+      [
+        {
+          ...review('bot', '2026-01-01T00:00:00Z', marker(1)),
+          state: 'PENDING',
+        },
+      ],
+      'bot',
+    );
+    expect(draftOnly.sawOwnReview).toBe(false);
+    expect(draftOnly.recovered).toBeNull();
+  });
+
+  it('never selects a PENDING draft — an unsubmitted review is not a previous round', () => {
+    // The API serves the caller's own drafts in the reviews list; a run that
+    // crashed between creating and submitting one must not hand the next
+    // round a round number, an age reference and a reviewId from state the
+    // PR never showed anyone.
+    const { recovered } = recoverLedger(
+      [
+        review('bot', '2026-01-01T00:00:00Z', marker(1)),
+        {
+          ...review('bot', '2026-01-02T00:00:00Z', marker(9)),
+          state: 'PENDING',
+          commit_id: 'd'.repeat(40),
+        },
+      ],
+      'bot',
+    );
+    expect(recovered?.ledger.round).toBe(1);
+  });
+
+  it('treats an unknown login as foreign — an anchor needs a proven owner', () => {
+    const found = latestLedger(
+      [review('bot', '2026-01-01T00:00:00Z', serializeLedger(anchored))],
+      null,
+    );
+    expect(found?.foreign).toBe(true);
+    expect(found?.ledger.sha).toBeUndefined();
+    expect(found?.ledger.findings).toHaveLength(1);
+  });
+
+  it("drops a finding that squats a FUTURE round's id prefix", () => {
+    // The trust split strips the sha, but ids are pipeline-owned namespace
+    // too: compose stamps this round's new findings `R<recovered + 1>-<n>`,
+    // so a round-N marker carrying `R<N+1>-*` ids pre-claims exactly that
+    // prefix — one claim ends up under two ids, and every genuinely new
+    // finding is renumbered past the squatted block. A legitimate marker
+    // cannot violate `id round <= marker round`: a round stamps its own ids
+    // and carries OLDER ones forward.
+    const squatting =
+      'LGTM <!-- qwen-review-ledger {"v":1,"round":3,"findings":[' +
+      '{"id":"R4-1","sev":"C","file":"a.ts","title":"squat"},' +
+      '{"id":"R3-1","sev":"C","file":"b.ts","title":"own"},' +
+      '{"id":"R1-2","sev":"S","file":"c.ts","title":"carried"},' +
+      '{"id":"f7","sev":"S","file":"d.ts","title":"non-pipeline id"}' +
+      ']} -->';
+    const found = latestLedger(
+      [review('stranger', '2026-01-09T00:00:00Z', squatting)],
+      'bot',
+    );
+    expect(found?.ledger.findings.map((f) => f.id)).toEqual([
+      'R3-1',
+      'R1-2',
+      'f7',
+    ]);
+  });
+
+  it('merges a foreign winner OVER the own findings — displacement is dead', () => {
+    // One comment used to suppress a certified entry: a drive-by marker at
+    // ownMax + 1 with empty findings won round-first selection, the own
+    // work list was displaced whole, and displaced entries owed no ruling —
+    // they exited the marker chain for every later round. The union keeps
+    // own entries in every recovery a foreign round wins.
+    const own =
+      'LGTM <!-- qwen-review-ledger {"v":1,"round":7,"findings":[' +
+      '{"id":"R7-1","sev":"C","file":"a.ts","title":"certified critical"}' +
+      ']} -->';
+    const emptyForeign =
+      'x <!-- qwen-review-ledger {"v":1,"round":8,"findings":[]} -->';
+    const wiped = recoverLedger(
+      [
+        review('maintainer', '2026-01-01T00:00:00Z', own),
+        review('stranger', '2026-01-09T00:00:00Z', emptyForeign),
+      ],
+      'maintainer',
+    ).recovered;
+    expect(wiped?.foreign).toBe(true);
+    expect(wiped?.ledger.round).toBe(8);
+    expect(wiped?.ledger.findings.map((f) => f.id)).toEqual(['R7-1']);
+
+    // The doctored variant — copy the own list minus the entry to suppress —
+    // fails the same way: the union restores it.
+    const doctored =
+      'x <!-- qwen-review-ledger {"v":1,"round":8,"findings":[' +
+      '{"id":"R7-2","sev":"S","file":"b.ts","title":"kept"}' +
+      ']} -->';
+    const restored = recoverLedger(
+      [
+        review('maintainer', '2026-01-01T00:00:00Z', own),
+        review('stranger', '2026-01-09T00:00:00Z', doctored),
+      ],
+      'maintainer',
+    ).recovered;
+    expect(restored?.ledger.findings.map((f) => f.id).sort()).toEqual([
+      'R7-1',
+      'R7-2',
+    ]);
+
+    // And an id collision cannot rewrite an own claim: the OWN entry is
+    // authoritative.
+    const tampered =
+      'x <!-- qwen-review-ledger {"v":1,"round":8,"findings":[' +
+      '{"id":"R7-1","sev":"S","file":"a.ts","title":"nothing to see"}' +
+      ']} -->';
+    const kept = recoverLedger(
+      [
+        review('maintainer', '2026-01-01T00:00:00Z', own),
+        review('stranger', '2026-01-09T00:00:00Z', tampered),
+      ],
+      'maintainer',
+    ).recovered;
+    const entry = kept?.ledger.findings.find((f) => f.id === 'R7-1');
+    expect(entry?.sev).toBe('C');
+    expect(entry?.title).toBe('certified critical');
+  });
+
+  it('does not adopt a foreign round implausibly far past our own', () => {
+    // Round-first selection made one hostile post a permanent win: a
+    // stranger's round-at-the-cap marker outranks every real round forever,
+    // the capped stamp pins the counter AT the cap, and every later round
+    // re-issues the same ids against different findings. A legitimate
+    // interleave sits a handful of rounds ahead at most, so a foreign round
+    // beyond our own plus the headroom is not a newer work list — it is not
+    // a work list at all.
+    const found = latestLedger(
+      [
+        review('maintainer', '2026-01-05T00:00:00Z', marker(8)),
+        review('stranger', '2026-01-09T00:00:00Z', marker(9999)),
+      ],
+      'maintainer',
+    );
+    expect(found?.ledger.round).toBe(8);
+    expect(found?.foreign).toBe(false);
+
+    // Inside the headroom a foreign round is an ordinary newer work list —
+    // the CI-bot interleave this recovery exists for.
+    const near = latestLedger(
+      [
+        review('maintainer', '2026-01-05T00:00:00Z', marker(8)),
+        review('ci-bot', '2026-01-09T00:00:00Z', marker(11)),
+      ],
+      'maintainer',
+    );
+    expect(near?.ledger.round).toBe(11);
+    expect(near?.foreign).toBe(true);
+  });
+
+  it('bounds foreign rounds from zero when this account never posted', () => {
+    // No own marker means no base: the bot's early rounds clear the headroom,
+    // a squatter's huge round does not.
+    const found = latestLedger(
+      [
+        review('ci-bot', '2026-01-02T00:00:00Z', marker(3)),
+        review('stranger', '2026-01-09T00:00:00Z', marker(500)),
+      ],
+      'maintainer',
+    );
+    expect(found?.ledger.round).toBe(3);
+  });
+
+  it('refuses an out-of-range round from any account', () => {
+    // The round IS the id space: compose stamps `R<round + 1>-<n>`. Round-first
+    // selection makes the highest round authoritative, so an unbounded one from
+    // any poster wins every recovery from then on — and at 2^53 the increment
+    // stops advancing, so every later round re-stamps the same ids against
+    // different findings. Fail-quiet, like every other malformation here.
+    const huge = `LGTM <!-- qwen-review-ledger {"v":1,"round":9007199254740991,"findings":[]} -->`;
     expect(
-      latestOwnLedger([review('bot', '2026-01-01', marker(1))], null),
+      latestLedger([review('stranger', '2026-01-09T00:00:00Z', huge)], 'bot'),
+    ).toBeNull();
+    // A real round still recovers from the same input set.
+    const found = latestLedger(
+      [
+        review('stranger', '2026-01-09T00:00:00Z', huge),
+        review('bot', '2026-01-01T00:00:00Z', marker(3)),
+      ],
+      'bot',
+    );
+    expect(found?.ledger.round).toBe(3);
+  });
+
+  it('never lets the recovered round run BACKWARD across accounts', () => {
+    // The round counter is an id space: compose stamps this round's findings
+    // `R<recovered + 1>-<n>`. Recovering a LOWER round re-issues ids the pull
+    // request already carries against different findings. The trigger is
+    // ordinary now that recovery crosses accounts — a bot whose own recovery
+    // failed transiently posts its Round 1 marker after the maintainer's
+    // Round 7 — and "latest by timestamp" would hand the next round a 2.
+    const found = latestLedger(
+      [
+        review('maintainer', '2026-01-01T00:00:00Z', marker(7)),
+        review('ci-bot', '2026-01-09T00:00:00Z', marker(1)),
+      ],
+      'maintainer',
+    );
+    expect(found?.ledger.round).toBe(7);
+    expect(found?.foreign).toBe(false);
+  });
+
+  it('still takes the newer round when it is the higher one', () => {
+    // The counter only ever advances, so preferring the highest round cannot
+    // lose a newer work list — it just makes the id space monotonic whoever
+    // posts into it.
+    const found = latestLedger(
+      [
+        review('maintainer', '2026-01-01T00:00:00Z', marker(2)),
+        review('ci-bot', '2026-01-09T00:00:00Z', marker(3)),
+      ],
+      'maintainer',
+    );
+    expect(found?.ledger.round).toBe(3);
+    expect(found?.foreign).toBe(true);
+  });
+
+  it('breaks a submitted_at tie on the review id, not on array order', () => {
+    // Two rounds posted in the same second (or with the timestamp missing) are
+    // ordered only by id. Keeping the earlier one hands the next round the
+    // older work list — the one failure the whole recovery exists to prevent.
+    const at = '2026-01-01T00:00:00Z';
+    const found = latestLedger(
+      [
+        { id: 2, user: { login: 'bot' }, submitted_at: at, body: marker(1) },
+        { id: 9, user: { login: 'bot' }, submitted_at: at, body: marker(4) },
+      ],
+      'bot',
+    );
+    expect(found?.ledger.round).toBe(4);
+  });
+
+  it('prefers the OWN review on a full tie — same claim, but it may be anchored', () => {
+    const at = '2026-01-01T00:00:00Z';
+    const found = latestLedger(
+      [
+        {
+          id: 7,
+          user: { login: 'stranger' },
+          submitted_at: at,
+          body: marker(5),
+        },
+        { id: 7, user: { login: 'bot' }, submitted_at: at, body: marker(5) },
+      ],
+      'bot',
+    );
+    expect(found?.foreign).toBe(false);
+  });
+
+  it('yields nothing with no marker, or a malformed one', () => {
+    expect(
+      latestLedger([review('bot', '2026-01-01', 'plain body')], 'bot'),
     ).toBeNull();
     expect(
-      latestOwnLedger([review('bot', '2026-01-01', 'plain body')], 'bot'),
-    ).toBeNull();
-    expect(
-      latestOwnLedger(
+      latestLedger(
         [review('bot', '2026-01-01', '<!-- qwen-review-ledger nope -->')],
         'bot',
       ),
@@ -1107,6 +1510,26 @@ describe('renderLedgerSection', () => {
     }
   });
 
+  it("names the other account when the ledger is not this one's", () => {
+    // A foreign work list must not read as this account's own certified
+    // round: the reader has to know whose claims these are, and that no
+    // incremental anchor came with them.
+    const ledger: Ledger = {
+      v: 1,
+      round: 2,
+      findings: [{ id: 'R2-1', sev: 'C', file: 'a.ts', title: 't' }],
+    };
+    const foreign = renderLedgerSection(ledger, 'qwen-code-ci-bot');
+    expect(foreign).toContain('**@qwen-code-ci-bot**');
+    expect(foreign).toContain('THEIR claims');
+    expect(foreign).toContain('no incremental anchor');
+
+    // The own-account rendering is unchanged, and says nothing about accounts.
+    const own = renderLedgerSection(ledger);
+    expect(own).toContain("this account's last posted review");
+    expect(own).not.toContain('THEIR claims');
+  });
+
   it('says so when the ledger is PARTIAL, and stays silent when it is not', () => {
     // The size cap can drop entries. A truncated list rendered under "every
     // entry below is owed a ruling" reads as complete, and the next round
@@ -1140,6 +1563,32 @@ describe('renderLedgerSection', () => {
       sha: 'abc1234def56789',
     });
     expect(anchored).toContain('reviewed at `abc1234def56789`');
+    // The routing instruction itself, not just the sha: reverting this tail
+    // to the pre-`--since` wording would render "hand-validate the anchor"
+    // into every ledger-carrying context file — the skippable hand check
+    // the CLI now owns — with no other test red.
+    expect(anchored).toContain('pass it as `--since <sha>`');
+    expect(anchored).toContain('never run git against an anchor yourself');
+    // The tail's other two load-bearing fragments, each deletable while this
+    // file stayed green: the antecedent that says WHAT to pass, and the
+    // statement that the CLI is what validates and scopes it. Without the
+    // first, `pass it as --since <sha>` refers to nothing.
+    expect(anchored).toContain('The reviewed-at sha is the incremental anchor');
+    expect(anchored).toContain('validates it against the fetched history');
+    // …and the two fragments the block's own comment claims but does not
+    // reach: the command that takes the flag, and what it does with it.
+    // Without the first, the tail names no command and the relative clause
+    // dangles.
+    expect(anchored).toContain('on a `fetch-pr` re-run');
+    expect(anchored).toContain('scopes the diff and plan');
+    // The CONDITION, not just the instruction. Dropping the clause leaves the
+    // tail telling the orchestrator, unconditionally and in imperative tone,
+    // to re-run with a sha that may already have been deterministically
+    // refused — `not-an-ancestor`, `hunks-outside-pr-diff`, `partition-failed`
+    // — which the recovered-anchor flow says must NOT be retried.
+    expect(anchored).toContain(
+      "when Step 1's recovered-anchor check rules a re-run admissible",
+    );
     expect(
       renderLedgerSection({
         v: 1,
@@ -1147,6 +1596,29 @@ describe('renderLedgerSection', () => {
         findings: [{ id: 'R2-1', sev: 'C', file: 'a.ts', title: 't' }],
       }),
     ).not.toContain('reviewed at');
+    // …and the routing tail goes with it: asserting only the space-form
+    // phrase let a mutant hoist the tail out of the ternary, since its own
+    // wording says "reviewed-at sha".
+    expect(
+      renderLedgerSection({
+        v: 1,
+        round: 2,
+        findings: [{ id: 'R2-1', sev: 'C', file: 'a.ts', title: 't' }],
+      }),
+    ).not.toContain('--since');
+    // Every sentence of the tail, not just the ones carrying `--since`. The
+    // first one is written "reviewed-at sha" — hyphenated — so it matches
+    // neither the space-form phrase nor `--since`, and could be hoisted out
+    // of the ternary with every assertion above still green: a sha-less
+    // ledger would then render a dangling reference to a reviewed-at sha the
+    // side file deliberately withholds.
+    expect(
+      renderLedgerSection({
+        v: 1,
+        round: 2,
+        findings: [{ id: 'R2-1', sev: 'C', file: 'a.ts', title: 't' }],
+      }),
+    ).not.toContain('reviewed-at sha');
   });
 
   it('renders a work-list table that names the ruling owed per entry', () => {
@@ -1219,5 +1691,276 @@ describe('renderLedgerSection escaping', () => {
     });
     const row = md.split('\n').find((l) => l.startsWith('| R1-1'))!;
     expect(row).toBe("| R1-1 | Suggestion | `a'.ts** bold **` | t |");
+  });
+});
+
+describe('buildMarkdown host baking', () => {
+  const meta = {
+    title: 't',
+    body: '',
+    author: { login: 'a' },
+    baseRefName: 'main',
+    headRefName: 'f',
+    headRefOid: 'abc',
+    additions: 1,
+    deletions: 0,
+    changedFiles: 1,
+    state: 'OPEN',
+  } as PrMetadata;
+
+  const longReview: RawReview = {
+    id: 7,
+    user: { login: 'r' },
+    state: 'COMMENTED',
+    submitted_at: '2026-08-01',
+    body: 'x'.repeat(9000),
+  };
+
+  it('bakes --host into the emitted refetch command when a host is set', () => {
+    const md = buildMarkdown(
+      '6711',
+      'o/r',
+      meta,
+      [],
+      [],
+      [longReview],
+      null,
+      null,
+      'ghe.example.com',
+    );
+    expect(md).toContain(
+      'comment-body 7 --kind review --pr 6711 --repo o/r --host ghe.example.com',
+    );
+  });
+
+  it('keeps the author and host slots apart — both are strings, tsc cannot', () => {
+    // The two trailing parameters landed in the same release from two
+    // branches, and both are string-typed, so a swapped call site type-checks
+    // clean while the context file claims the ledger was posted by
+    // "@ghe.example.com" and every refetch command loses its host. This is the
+    // one call shape that exercises both slots at once; if the order ever
+    // moves, one of these two assertions fails loudly.
+    const ledger: Ledger = {
+      v: 1,
+      round: 2,
+      findings: [{ id: 'R2-1', sev: 'C', file: 'a.ts', title: 't' }],
+    };
+    const md = buildMarkdown(
+      '6711',
+      'o/r',
+      meta,
+      [],
+      [],
+      [longReview],
+      ledger,
+      'qwen-code-ci-bot',
+      'ghe.example.com',
+    );
+    expect(md).toContain("**@qwen-code-ci-bot**'s last posted review");
+    expect(md).toContain(
+      'comment-body 7 --kind review --pr 6711 --repo o/r --host ghe.example.com',
+    );
+  });
+
+  it('emits no --host flag when no host is set', () => {
+    const md = buildMarkdown('6711', 'o/r', meta, [], [], [longReview]);
+    expect(md).toContain('comment-body 7 --kind review --pr 6711 --repo o/r');
+    expect(md).not.toContain('--host');
+  });
+
+  it('bakes --host for inline and issue kinds too, not just reviews', () => {
+    // The long-body surfaces are mostly inline/issue comments (snippet cuts,
+    // budget-degraded blockers) — a "kinds differ" refactor must not strand
+    // their refetch commands on the default host.
+    const inline = [
+      {
+        id: 21,
+        user: { login: 'r' },
+        body: `**[Critical]** ${'y'.repeat(9000)}`,
+        path: 'a.ts',
+        line: 1,
+      },
+    ];
+    const issue = [
+      {
+        id: 31,
+        user: { login: 'r' },
+        body: 'z'.repeat(9000),
+      },
+    ];
+    const md = buildMarkdown(
+      '6711',
+      'o/r',
+      meta,
+      inline,
+      issue,
+      [],
+      null,
+      null,
+      'ghe.example.com',
+    );
+    expect(md).toContain(
+      'comment-body 21 --kind inline --repo o/r --host ghe.example.com',
+    );
+    expect(md).toContain(
+      'comment-body 31 --kind issue --repo o/r --host ghe.example.com',
+    );
+  });
+});
+
+describe('runPrContext identity failure (handler level)', () => {
+  const metaJson = JSON.stringify({
+    title: 't',
+    body: '',
+    author: { login: 'a' },
+    baseRefName: 'main',
+    headRefName: 'f',
+    headRefOid: 'abc',
+    additions: 1,
+    deletions: 0,
+    changedFiles: 1,
+    state: 'OPEN',
+  });
+  // A marker-less review by SOMEONE: with the identity unknowable, the walk
+  // cannot say whose it is — and must not read that as proof of absence.
+  const strangerReview = {
+    id: 9,
+    user: { login: 'someone' },
+    state: 'COMMENTED',
+    submitted_at: '2026-08-01',
+    body: 'no marker here',
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    ensureAuthenticatedMock.mockReturnValue(undefined);
+    ghMock.mockReturnValue(metaJson);
+    ghApiAllMock.mockReset();
+    ghApiAllMock
+      .mockReturnValueOnce([]) // inline
+      .mockReturnValueOnce([]) // issue comments
+      .mockReturnValueOnce([strangerReview]); // reviews
+    process.exitCode = undefined;
+  });
+
+  it('never deletes the side file over a failed identity lookup', async () => {
+    // The pre-isolation code got this right by accident: the throw reached
+    // the outer catch and took the strip path. The isolated lookup turned a
+    // rate-limit blip into login=null, the walk recorded "no own review"
+    // about an identity it never knew, and the deletion arm reset the round
+    // counter — the id-space collision the recovery redesign exists to
+    // prevent. An unknown identity licenses nothing.
+    currentUserMock.mockImplementation(() => {
+      throw new Error('rate limited');
+    });
+    await (prContextCommand.handler as (a: unknown) => Promise<void>)({
+      _: [],
+      $0: 'qwen',
+      pr_number: '6711',
+      owner_repo: 'o/r',
+      out: '/tmp/ctx.md',
+    });
+    expect(rmSyncMock).not.toHaveBeenCalled();
+  });
+
+  it('never deletes the side file over an EMPTY login — exit 0 is not identity', async () => {
+    // A stubbed, proxied or GHES `gh` can answer `api user` with empty output
+    // and exit 0. `recoverLedger` already reads '' as unknown (its `me` is
+    // null, so `sawOwnReview` can never become true), and a flag that counted
+    // it as KNOWN deleted the side file — resetting the round counter — over
+    // an identity that was never proven. Same rule as the throw above: only a
+    // non-empty login licenses deletion.
+    currentUserMock.mockReturnValue('');
+    await (prContextCommand.handler as (a: unknown) => Promise<void>)({
+      _: [],
+      $0: 'qwen',
+      pr_number: '6711',
+      owner_repo: 'o/r',
+      out: '/tmp/ctx.md',
+    });
+    expect(rmSyncMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('runPrContext host baking (handler level)', () => {
+  const metaJson = JSON.stringify({
+    title: 't',
+    body: '',
+    author: { login: 'a' },
+    baseRefName: 'main',
+    headRefName: 'f',
+    headRefOid: 'abc',
+    additions: 1,
+    deletions: 0,
+    changedFiles: 1,
+    state: 'OPEN',
+  });
+  const longReview = {
+    id: 7,
+    user: { login: 'rev' },
+    state: 'COMMENTED',
+    submitted_at: '2026-08-01',
+    body: 'x'.repeat(9000),
+  };
+
+  let savedGhHost: string | undefined;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    ensureAuthenticatedMock.mockReturnValue(undefined);
+    currentUserMock.mockReturnValue('someone-else');
+    ghMock.mockReturnValue(metaJson);
+    ghApiAllMock.mockReset();
+    ghApiAllMock
+      .mockReturnValueOnce([]) // inline
+      .mockReturnValueOnce([]) // issue comments
+      .mockReturnValueOnce([longReview]); // reviews
+    process.exitCode = undefined;
+    savedGhHost = process.env['GH_HOST'];
+    delete process.env['GH_HOST'];
+  });
+
+  afterEach(() => {
+    if (savedGhHost === undefined) delete process.env['GH_HOST'];
+    else process.env['GH_HOST'] = savedGhHost;
+  });
+
+  async function runHandler(extra: Record<string, unknown>) {
+    await (prContextCommand.handler as (a: unknown) => Promise<void>)({
+      _: [],
+      $0: 'qwen',
+      pr_number: '6711',
+      owner_repo: 'o/r',
+      out: '/tmp/ctx.md',
+      ...extra,
+    });
+    return writeFileSyncMock.mock.calls[0][1] as string;
+  }
+
+  it('bakes --host into the emitted refetch commands when passed', async () => {
+    const written = await runHandler({ host: 'ghe.example.com' });
+    expect(written).toContain(
+      'comment-body 7 --kind review --pr 6711 --repo o/r --host ghe.example.com',
+    );
+    // The routing half is pinned alongside the baking half: pr-context's own
+    // gh calls must run at the flag's host, not github.com's same-named repo.
+    expect(setGhHostMock).toHaveBeenCalledWith('ghe.example.com');
+  });
+
+  it('bakes an operator-exported GH_HOST when no flag is passed', async () => {
+    process.env['GH_HOST'] = 'ghe.example.com';
+    const written = await runHandler({});
+    expect(written).toContain('--host ghe.example.com');
+    // No flag → setGhHost(undefined): the gh calls inherit the exported
+    // GH_HOST from the parent env rather than being pinned to github.com.
+    expect(setGhHostMock).toHaveBeenCalledWith(undefined);
+  });
+
+  it('does not bake a host gh tolerates but the refetch validator rejects', async () => {
+    // gh accepts underscore aliases; comment-body's setGhHost rejects them —
+    // baking one would strand every refetch on an exit-2 validation error.
+    process.env['GH_HOST'] = 'my_ghe';
+    const written = await runHandler({});
+    expect(written).not.toContain('--host');
   });
 });

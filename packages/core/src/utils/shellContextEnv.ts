@@ -23,7 +23,14 @@
  * capture the correct session/agent/prompt frame.
  */
 
-import { accessSync, closeSync, constants, openSync, readSync } from 'node:fs';
+import {
+  accessSync,
+  closeSync,
+  constants,
+  openSync,
+  readSync,
+  statSync,
+} from 'node:fs';
 import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
 import { promptIdContext } from './promptIdContext.js';
 import {
@@ -38,31 +45,53 @@ import {
 } from '../telemetry/trace-context.js';
 
 /**
- * A `.js`/`.mjs`/`.cjs` file a POSIX shell cannot exec directly: no `#!` in its
- * first bytes, or no execute permission. Both shapes exist in the wild — the
- * desktop tooling's vendored bundle has no shebang, and a shebang-bearing 0644
- * script passes the header check and then dies on EACCES. Only script files are
- * gated; a native binary needs neither. Cached per path: this runs on every
- * shell spawn, and the answer for a given entry does not change in-process.
+ * An entry a POSIX shell cannot exec directly. The gate demands POSITIVE
+ * evidence of executability rather than enumerating known-bad shapes: an
+ * enumeration answered "usable" for everything outside it, and two such
+ * shapes reached the stamp in the wild — a tsx dev launch whose argv[1] is a
+ * 0644 `index.ts`, and `node <pkg-dir>` whose argv[1] is the DIRECTORY, both
+ * of which a shell exec answers with exit 126 while `${QWEN_CODE_CLI:-qwen}`
+ * would have fallen back on empty.
+ *
+ * Usable means: a REGULAR file (a directory passes an X_OK probe — search
+ * permission — so executability alone cannot gate it out), with execute
+ * permission, that is either a `#!`-headed script (any extension) or a
+ * non-script file (a native binary needs no shebang). A known script
+ * extension without a shebang is unusable even when executable — the kernel
+ * would hand it to a shell as shell script. The desktop tooling's vendored
+ * bundle (no shebang) and a shebang-bearing 0644 script both stay filtered,
+ * exactly as before. Cached per path: this runs on every shell spawn, and
+ * the answer for a given entry does not change in-process.
+ *
+ * Exported because a producer of the stamp has to apply the same test the
+ * consumer here does: `qwen review run` stamps the entry it re-enters, and a
+ * stamp this function would blank is worse than no stamp — it names a path the
+ * skill's `"${QWEN_CODE_CLI:-qwen}"` cannot exec, instead of falling back.
  */
+const SCRIPT_ENTRY_RE = /\.(?:mjs|cjs|js|mts|cts|ts|tsx|jsx)$/i;
 const unusableCache = new Map<string, boolean>();
-function isUnusableScriptEntry(path: string): boolean {
-  if (!/\.(?:mjs|cjs|js)$/i.test(path)) return false;
+export function isUnusableScriptEntry(path: string): boolean {
   const cached = unusableCache.get(path);
   if (cached !== undefined) return cached;
   let unusable: boolean;
   try {
-    accessSync(path, constants.X_OK);
-    const fd = openSync(path, 'r');
-    try {
-      const head = Buffer.alloc(2);
-      const read = readSync(fd, head, 0, 2, 0);
-      unusable = !(read === 2 && head.toString('utf8') === '#!');
-    } finally {
-      closeSync(fd);
+    if (!statSync(path).isFile()) {
+      unusable = true;
+    } else {
+      accessSync(path, constants.X_OK);
+      const fd = openSync(path, 'r');
+      try {
+        const head = Buffer.alloc(2);
+        const read = readSync(fd, head, 0, 2, 0);
+        const shebang = read === 2 && head.toString('utf8') === '#!';
+        unusable = shebang ? false : SCRIPT_ENTRY_RE.test(path);
+      } finally {
+        closeSync(fd);
+      }
     }
   } catch {
-    // Unreadable or non-executable is unusable either way; fall back to `qwen`.
+    // Missing, unreadable or non-executable is unusable either way; fall back
+    // to `qwen`.
     unusable = true;
   }
   unusableCache.set(path, unusable);
@@ -114,9 +143,10 @@ export function getShellContextEnvVars(): Record<string, string> {
   // Passed down only when a shell could actually exec it. The variable predates
   // this mechanism with a SECOND meaning: the desktop app's tooling sets it to a
   // vendored `dist/cli.js` — a module path for `node <path>`, with no shebang —
-  // and a shell handed that would run the bundle as a shell script. Only script
-  // files are gated: a native binary needs no shebang, and this must not filter
-  // one.
+  // and a shell handed that would run the bundle as a shell script. The gate
+  // asks for positive evidence — a regular file with the execute bit, plus a
+  // `#!` header for script extensions; a native binary needs no shebang and
+  // still passes.
   //
   // Filtering means writing an EMPTY STRING, not omitting the key — the same
   // rule the agent/prompt IDs below already follow, and for the same reason:
