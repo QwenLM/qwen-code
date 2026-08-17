@@ -55,6 +55,64 @@ const createFileAndReadMessages = (): ChatMessageData[] => [
   },
 ];
 
+const LONG_SEARCH_OUTPUT = `${'s'.repeat(500)}SEARCH-TAIL-MARKER`;
+
+const LONG_FETCH_OUTPUT = `${'f'.repeat(400)} WEBFETCH-TAIL-MARKER`;
+
+const createSearchMessages = (): ChatMessageData[] => [
+  {
+    uuid: 'user-search',
+    timestamp: '2026-03-22T16:48:30.000Z',
+    type: 'user',
+    message: { role: 'user', parts: [{ text: 'find the thing' }] },
+  },
+  {
+    uuid: 'search-1',
+    timestamp: '2026-03-22T16:48:35.000Z',
+    type: 'tool_call',
+    toolCall: {
+      toolCallId: 'search-1-call',
+      kind: 'search',
+      title: 'Search "pattern"',
+      status: 'completed',
+      rawInput: { pattern: 'pattern' },
+      content: [
+        {
+          type: 'content',
+          content: { type: 'text', text: LONG_SEARCH_OUTPUT },
+        },
+      ],
+    },
+  },
+];
+
+const createWebFetchMessages = (): ChatMessageData[] => [
+  {
+    uuid: 'user-fetch',
+    timestamp: '2026-03-22T16:48:30.000Z',
+    type: 'user',
+    message: { role: 'user', parts: [{ text: 'fetch the page' }] },
+  },
+  {
+    uuid: 'fetch-1',
+    timestamp: '2026-03-22T16:48:35.000Z',
+    type: 'tool_call',
+    toolCall: {
+      toolCallId: 'fetch-1-call',
+      kind: 'web_fetch',
+      title: 'Fetch https://example.com',
+      status: 'completed',
+      rawInput: { url: 'https://example.com' },
+      content: [
+        {
+          type: 'content',
+          content: { type: 'text', text: LONG_FETCH_OUTPUT },
+        },
+      ],
+    },
+  },
+];
+
 const createMessages = (): ChatMessageData[] => [
   {
     uuid: 'user-1',
@@ -316,5 +374,63 @@ describe('ChatViewer global expand control', () => {
     // without another toolbar click.
     expect(container?.querySelectorAll('.thinking-content').length).toBe(2);
     expect(container?.textContent).toContain('LATE-THINKING-MARKER');
+  });
+
+  it('toggles SearchToolCall collapsible output via the global buttons', () => {
+    act(() => {
+      root?.render(
+        <ChatViewer
+          messages={createSearchMessages()}
+          autoScroll={false}
+          showExpandControl
+        />,
+      );
+    });
+
+    // Baseline: the search result body starts collapsed (its content is not
+    // rendered until expanded).
+    expect(container?.textContent).not.toContain('SEARCH-TAIL-MARKER');
+
+    clickButton('Expand all sections');
+    expect(container?.textContent).toContain('SEARCH-TAIL-MARKER');
+
+    clickButton('Collapse all sections');
+    expect(container?.textContent).not.toContain('SEARCH-TAIL-MARKER');
+  });
+
+  it('toggles WebFetchToolCall OutputCard via the global buttons', () => {
+    act(() => {
+      root?.render(
+        <ChatViewer
+          messages={createWebFetchMessages()}
+          autoScroll={false}
+          showExpandControl
+        />,
+      );
+    });
+
+    // Baseline: long content (> EXPAND_THRESHOLD) renders the toggle with
+    // aria wiring and a collapsed max-height.
+    const toggle = getOutputToggle();
+    expect(toggle).not.toBeNull();
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    const card = container?.querySelector(
+      '.break-words',
+    ) as HTMLDivElement | null;
+    expect(card?.style.maxHeight).toBe('120px');
+
+    clickButton('Expand all sections');
+    expect(getOutputToggle().getAttribute('aria-expanded')).toBe('true');
+    expect(
+      (container?.querySelector('.break-words') as HTMLDivElement).style
+        .maxHeight,
+    ).toBe('');
+
+    clickButton('Collapse all sections');
+    expect(getOutputToggle().getAttribute('aria-expanded')).toBe('false');
+    expect(
+      (container?.querySelector('.break-words') as HTMLDivElement).style
+        .maxHeight,
+    ).toBe('120px');
   });
 });
