@@ -110,6 +110,8 @@ export const githubReader: ReviewPlatformReader = {
       host: hostOfRepoUrl(view.url),
       owner: target.owner.login,
       repo: target.name,
+      // GitHub repos are always exactly two segments.
+      groupPath: `${target.owner.login}/${target.name}`.toLowerCase(),
     };
   },
 

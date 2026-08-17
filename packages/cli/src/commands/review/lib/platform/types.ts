@@ -22,6 +22,12 @@ export interface RepoIdentity {
   host: string;
   owner: string;
   repo: string;
+  /**
+   * The FULL path (`group/subgroup/project`) — the owner/repo collapse to
+   * the last two segments is non-injective on nested-group platforms, so
+   * identity gates compare full paths when both sides carry one.
+   */
+  groupPath: string;
 }
 
 /** A pull request's live identity facts. */

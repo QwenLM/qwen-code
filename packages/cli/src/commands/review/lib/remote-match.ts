@@ -173,15 +173,17 @@ export function matchRemotes(
     const identity = parseRemoteUrl(nameMatch[2]);
     if (identity === null) continue;
     if (!hostsEquivalent(identity.host, wantHost)) continue;
-    // Repository identity: compare EVERY path segment when both sides carry
-    // three or more — the last-two collapse is non-injective, and matching a
-    // different nested group's same-named repo is exactly the review-one-
-    // repo-post-to-another hazard this module exists to prevent. When
-    // either side has exactly two segments (GitHub remotes, targets without
-    // a nested path) the last-two rule stands.
+    // Repository identity: when the target carries its FULL group path,
+    // compare EVERY segment EXACTLY — in both directions. The last-two
+    // collapse is non-injective, and neither direction is safe: a
+    // three-or-more-segment target matched against a two-segment remote
+    // (or the reverse) is a DIFFERENT project that happens to share its
+    // tail — exactly the review-one-repo-post-to-another hazard this
+    // module exists to prevent. Only a target WITHOUT a path (GitHub
+    // URLs, bare numbers) keeps the last-two rule.
     const remotePath = identity.groupPath.split('/');
     const sameRepo =
-      wantPath !== undefined && wantPath.length >= 3 && remotePath.length >= 3
+      wantPath !== undefined
         ? wantPath.length === remotePath.length &&
           wantPath.every((seg, i) => seg === remotePath[i])
         : identity.owner === wantOwner && identity.repo === wantRepo;

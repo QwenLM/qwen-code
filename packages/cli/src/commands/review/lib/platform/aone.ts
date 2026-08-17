@@ -79,38 +79,32 @@ interface AoneWorkitem {
  * scheme is never swallowed by the scp branch.
  */
 export function parseRemoteUrl(url: string): RepoIdentity | null {
-  // Clean (order matters): strip any userinfo FIRST — it may itself contain
-  // `?` or `#` (`https://user:pa?ss@host/…`), and a query-first strip would
-  // truncate it mid-credential, making a parseable origin unparseable (and
-  // leaking the prefix through the refusal message). The userinfo
-  // consumption is GREEDY — up to the LAST `@` of the authority: token-
-  // bearing CI origins arrive with several `@` (`user:S1@S2@host`) or with
-  // `:` AND `/` inside the secret, and a single-chunk match would leave the
-  // residue to fold into the parsed host or echo unredacted into the
-  // refusal message. The URL form bounds the authority at the first `/`
-  // (userinfo cannot contain one); the scp form admits only a strip that
-  // leaves a `host:` shape behind (see the chain below). An `@` that
-  // survives into the host or a path segment fails closed in `take` rather
-  // than guessing. Then the query string / fragment: query-string
+  const trimmed = url.trim();
+  const schemeForm = /^[a-z+]+:\/\//i.test(trimmed);
+  // Clean, per form (order matters inside each):
+  //  - URL form: strip the userinfo FIRST, bounded to the authority — the
+  //    span between `//` and the first `/` (RFC 3986: userinfo cannot
+  //    contain `/`). Greedy within that span, so multi-`@` tokens
+  //    (`user:S1@S2@host`) and `?`/`#` inside the secret
+  //    (`https://user:pa?ss@host/…` — a query-first strip would truncate
+  //    mid-credential) are consumed whole. A `/`-bearing secret puts the
+  //    `@` in PATH territory: nothing is stripped, and the residue fails
+  //    closed in `take` — it must never fold into a fabricated host.
+  //  - scp form: the token may contain `:` AND `/`, so consume up to the
+  //    LAST `@` that leaves a `host:` shape behind (the lookahead); when
+  //    the only `@` cannot front a host (`host:path@x`, `user:tok@nohost`)
+  //    nothing is stripped and the residue fails closed in `take`.
+  //    (`[\s\S]*`, not `.*` — git re-emits newline-bearing URLs.)
+  // Then the query string / fragment on both forms: query-string
   // credentials (`?private_token=…`, a real CI pattern) would otherwise
-  // become part of the repo coordinate and echo unredacted into meta's
-  // stdout and the refusal messages. `[\s\S]*` (not `.`) eats newlines too:
-  // git stores and re-emits newline-bearing remote URLs, and a plain `.*$`
-  // stops at the first `\n`, letting `?private_token=SECRET\n` survive the
-  // strip and leak through the refusal message. Finally trailing slashes
-  // before `.git`, so two or more trailing slashes after `.git`
-  // (`…/p.git//`) cannot defeat the suffix strip. Git accepts all of these
-  // shapes.
-  const cleaned = url
-    .trim()
-    .replace(/\/\/[^/]*@/, '//')
-    // scp form: consume up to the LAST `@` of the authority — the token may
-    // itself contain `:` and `/`, so neither `[^@/]+` nor `[^/]+` can bound
-    // it. The lookahead admits only a stripping that leaves a `host:` shape
-    // behind (`[^:@/]+:`); when the only `@` sits in the PATH of a
-    // userinfo-less origin (`host:path@x`), nothing is stripped and the
-    // `@` residue fails closed in `take` instead of guessing.
-    .replace(/^(?:.*@)(?=[^:@/]+:)/, '')
+  // become part of the repo coordinate; `[\s\S]*` eats newlines too.
+  // Finally trailing slashes before `.git`, so `…/p.git//` cannot defeat
+  // the suffix strip. Git accepts all of these shapes.
+  const cleaned = (
+    schemeForm
+      ? trimmed.replace(/^([a-z+]+:\/\/)[^/]*@/i, '$1')
+      : trimmed.replace(/^(?:[\s\S]*@)(?=[^:@/]+:)/, '')
+  )
     .replace(/[?#][\s\S]*$/, '')
     .replace(/\/+$/, '')
     .replace(/\.git$/, '');
@@ -128,40 +122,48 @@ export function parseRemoteUrl(url: string): RepoIdentity | null {
       host: host.toLowerCase(),
       owner: parts[parts.length - 2],
       repo: parts[parts.length - 1],
+      // The FULL path — the owner/repo collapse is non-injective on
+      // nested-group platforms; the identity gates compare this when both
+      // sides carry one.
+      groupPath: parts.join('/').toLowerCase(),
     };
   };
-  // URL form first: scheme://[user@]host[:port]/group[/subgroup]/project.
-  // The port is matched explicitly and discarded — without `(?::\d+)?` the
-  // host capture stops at the port colon and the port number folds into the
-  // path segments (`https://h:8443/solo` would parse as owner `8443`).
-  let m = /^[a-z+]+:\/\/(?:[^@/]+@)?([^:/]+)(?::\d+)?[:/](.+)$/i.exec(cleaned);
-  if (m) return take(m[1], m[2]);
-  // scp-like: [user@]host:group[/subgroup]/project. `(?!\/\/)` keeps a
-  // scheme URL out of this branch; user@ is optional.
-  m = /^(?:[^@/]+@)?([^:/]+):(?!\/\/)(.+)$/.exec(cleaned);
-  if (m) return take(m[1], m[2]);
-  return null;
+  // URL form: scheme://[user@]host[:port]/group[/subgroup]/project. The
+  // port is matched explicitly and discarded — without `(?::\d+)?` the
+  // host capture stops at the port colon and the port number folds into
+  // the path segments (`https://h:8443/solo` would parse as owner `8443`).
+  // The path MUST start with `/`: a scheme input never falls through to
+  // the scp grammar — `https://user:pa/ss` (no `@`, no port) is malformed
+  // and fails closed instead of parsing host `user` from the userinfo
+  // position.
+  if (schemeForm) {
+    const m = /^[a-z+]+:\/\/(?:[^@/]+@)?([^:/]+)(?::\d+)?\/(.+)$/i.exec(
+      cleaned,
+    );
+    return m ? take(m[1], m[2]) : null;
+  }
+  // scp-like: [user@]host:group[/subgroup]/project. user@ was consumed in
+  // the cleaning chain (the residue check in `take` is the backstop).
+  const m = /^([^:/]+):(?!\/\/)(.+)$/.exec(cleaned);
+  return m ? take(m[1], m[2]) : null;
 }
 
 /** Redact a URL before putting it in a message — the raw secret must not
- *  reach stderr/logs/the transcript. ORDER MATTERS: the userinfo
- *  substitutions run BEFORE the query/fragment strip — a userinfo that
- *  itself contains `?` or `#` (`https://user:pa?ss@host/…`, which git
- *  stores and re-emits fine) would otherwise be truncated mid-credential,
- *  leaving no `@` for either regex, and the username + secret prefix would
- *  reach the message. The userinfo consumption is GREEDY — up to the last
- *  `@` of the authority (parseRemoteUrl's cleaning comment names why:
- *  multi-`@` and `:`/`/`-bearing token userinfo must be consumed whole, or
- *  the residue reaches the message in cleartext). Covers both the URL form
- *  (`//user:token@`) and the scp form (`user:token@host:…`, common for
- *  `insteadOf`/token-bearing origins), AND the query/fragment channel:
- *  `?private_token=…` origins carry no `@`, so a userinfo-only redaction
- *  would echo them. */
+ *  reach stderr/logs/the transcript. Fail closed BY CONSTRUCTION: replace
+ *  EVERYTHING before the last `@` with `<redacted>` — whatever the
+ *  userinfo contains (`/`, newlines, more `@`s). A regex-per-shape
+ *  redaction always misses the next shape (rounds 5–9 each found one);
+ *  the split at the last `@` leaks nothing in front of it by construction.
+ *  The query/fragment strip runs on the tail only, AFTER the split — a
+ *  userinfo can itself contain `?`/`#` (`https://user:pa?ss@host/…`), and
+ *  stripping first would truncate it mid-credential. An origin whose only
+ *  `@` sits in the path/query (no userinfo) is over-redacted — acceptable
+ *  for an error message, never a leak. */
 function redactUrl(url: string): string {
-  return url
-    .replace(/\/\/[^/]*@/, '//<redacted>@')
-    .replace(/^(?:.*@)(?=[^:@/]+:)/, '<redacted>@')
-    .replace(/[?#][\s\S]*$/, '');
+  const at = url.lastIndexOf('@');
+  if (at === -1) return url.replace(/[?#][\s\S]*$/, '');
+  const tail = url.slice(at + 1).replace(/[?#][\s\S]*$/, '');
+  return `<redacted>@${tail}`;
 }
 
 function mrView(
@@ -208,6 +210,18 @@ function isPlainBranchName(name: string): boolean {
     !name.includes('..') &&
     /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(name)
   );
+}
+
+/** The full repository path named by the MR's own detail URL
+ *  (`…/<group>[/subgroup…]/<project>/codereview/<id>`) — authoritative for
+ *  which repo the MR lives in. Lowercased to compare against the parsed
+ *  origin's groupPath. Undefined when absent or not the CR shape. */
+function mrRepoPath(detailUrl: string | undefined): string | undefined {
+  if (!detailUrl) return undefined;
+  const m = /^[a-z+]+:\/\/[^/]+\/(.+)\/codereview\/\d+(?:$|[/?#])/i.exec(
+    detailUrl.trim(),
+  );
+  return m?.[1]?.toLowerCase();
 }
 
 export const aoneReader: ReviewPlatformReader = {
@@ -319,15 +333,27 @@ export const aoneReader: ReviewPlatformReader = {
       originUrl = undefined;
     }
     const originIdentity = originUrl ? parseRemoteUrl(originUrl) : null;
+    // The MR view is consulted BEFORE the guard: its detailUrl names the
+    // repo the MR actually lives in — authoritative identity, where the
+    // seam's `ownerRepo` is only the collapsed last-two form. The collapse
+    // is non-injective on nested-group platforms, so a different group's
+    // same-tail clone would pass an owner/repo comparison and serve the
+    // ref-fetch; comparing FULL paths (origin's parsed groupPath against
+    // the detailUrl's path) closes it. Without a detailUrl the guard falls
+    // back to the collapsed comparison (plus the host check).
+    const view = mrView(prNumber, ownerRepo);
+    const mrPath = mrRepoPath(view.detailUrl);
     // The comparison carries the origin's HOST too — owner/repo equality
     // alone lets a same-named repo on a DIFFERENT platform pass the guard
     // and serve the ref-fetch; an Aone target's clone must sit on the Aone
     // host family (the web/git alias pair counts as one, per remote-match).
-    if (
-      originIdentity === null ||
-      !hostsEquivalent(originIdentity.host, 'gitlab.alibaba-inc.com') ||
-      `${originIdentity.owner}/${originIdentity.repo}` !== ownerRepo
-    ) {
+    const sameRepo =
+      originIdentity !== null &&
+      hostsEquivalent(originIdentity.host, 'gitlab.alibaba-inc.com') &&
+      (mrPath !== undefined
+        ? originIdentity.groupPath === mrPath
+        : `${originIdentity.owner}/${originIdentity.repo}` === ownerRepo);
+    if (!sameRepo) {
       throw new Error(
         `the cwd clone is ${
           originIdentity
@@ -338,7 +364,6 @@ export const aoneReader: ReviewPlatformReader = {
     }
     // Aone has no `gh pr diff`; the diff is git-local. Fetch the MR head into
     // a throwaway ref, merge-base it against the target branch, and diff.
-    const view = mrView(prNumber, ownerRepo);
     const target = view.targetBranch ?? 'master';
     // The target branch is SERVER-controlled metadata reaching git's argv.
     // Validate ALLOWLIST-style — accept only a plain branch name — because

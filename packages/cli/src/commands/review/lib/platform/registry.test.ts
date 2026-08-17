@@ -79,6 +79,43 @@ describe('detectPlatformKind', () => {
     });
     expect(detectPlatformKind({})).toBe('github');
   });
+
+  it('detects Aone through token-bearing userinfo (`:` and `/` in the secret)', () => {
+    // The userinfo group must consume up to the last `@` of the authority —
+    // a bounded capture parses the credential prefix as the host and
+    // silently misroutes detection to GitHub while the parse side says
+    // Aone. Both the scp and the URL shape carry the token class this
+    // PR's suite blesses as legitimate.
+    expect(
+      detectPlatformKind({
+        remoteUrl: 'git:S1/xx@gitlab.alibaba-inc.com:maxcompute/odps_src.git',
+      }),
+    ).toBe('aone');
+    expect(
+      detectPlatformKind({
+        remoteUrl: 'https://oauth2:abc/def@code.alibaba-inc.com/group/proj.git',
+      }),
+    ).toBe('aone');
+  });
+
+  it('an explicit --host outranks the remote-URL hint in BOTH directions', () => {
+    // fetch-pr threads both hints; a remoteUrl-first order let an Aone
+    // origin hijack an explicitly-GitHub invocation — and because MR ids
+    // are global, the hijack can succeed with an unrelated MR's head.
+    expect(
+      detectPlatformKind({
+        host: 'github.com',
+        remoteUrl: 'git@gitlab.alibaba-inc.com:maxcompute/odps_src.git',
+      }),
+    ).toBe('github');
+    // The mirror arm: an explicit Aone host beats a non-Aone remote.
+    expect(
+      detectPlatformKind({
+        host: 'gitlab.alibaba-inc.com',
+        remoteUrl: 'git@github.com:QwenLM/qwen-code.git',
+      }),
+    ).toBe('aone');
+  });
 });
 
 describe('parseRemoteUrl', () => {
@@ -89,6 +126,7 @@ describe('parseRemoteUrl', () => {
       host: 'gitlab.alibaba-inc.com',
       owner: 'maxcompute',
       repo: 'odps_src',
+      groupPath: 'maxcompute/odps_src',
     });
   });
 
@@ -99,6 +137,7 @@ describe('parseRemoteUrl', () => {
       host: 'gitlab.alibaba-inc.com',
       owner: 'maxcompute',
       repo: 'odps_src',
+      groupPath: 'maxcompute/odps_src',
     });
   });
 
@@ -109,6 +148,7 @@ describe('parseRemoteUrl', () => {
       host: 'gitlab.alibaba-inc.com',
       owner: 'maxcompute',
       repo: 'odps_src',
+      groupPath: 'maxcompute/odps_src',
     });
     expect(
       parseRemoteUrl('https://gitlab.alibaba-inc.com/maxcompute/odps_src'),
@@ -116,6 +156,7 @@ describe('parseRemoteUrl', () => {
       host: 'gitlab.alibaba-inc.com',
       owner: 'maxcompute',
       repo: 'odps_src',
+      groupPath: 'maxcompute/odps_src',
     });
   });
 
@@ -128,6 +169,7 @@ describe('parseRemoteUrl', () => {
       host: 'gitlab.alibaba-inc.com',
       owner: 'maxcompute',
       repo: 'odps_src',
+      groupPath: 'maxcompute/odps_src',
     });
   });
 
@@ -138,6 +180,7 @@ describe('parseRemoteUrl', () => {
       host: 'gitlab.alibaba-inc.com',
       owner: 'maxcompute',
       repo: 'odps_src',
+      groupPath: 'maxcompute/odps_src',
     });
   });
 
@@ -148,6 +191,7 @@ describe('parseRemoteUrl', () => {
       host: 'gitlab.alibaba-inc.com',
       owner: 'maxcompute',
       repo: 'odps_src',
+      groupPath: 'sub/maxcompute/odps_src',
     });
   });
 
@@ -158,6 +202,7 @@ describe('parseRemoteUrl', () => {
       host: 'gitlab.alibaba-inc.com',
       owner: 'maxcompute',
       repo: 'odps_src',
+      groupPath: 'maxcompute/odps_src',
     });
     expect(
       parseRemoteUrl('git@gitlab.alibaba-inc.com:maxcompute/odps_src/'),
@@ -165,6 +210,7 @@ describe('parseRemoteUrl', () => {
       host: 'gitlab.alibaba-inc.com',
       owner: 'maxcompute',
       repo: 'odps_src',
+      groupPath: 'maxcompute/odps_src',
     });
   });
 

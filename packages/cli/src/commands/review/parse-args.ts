@@ -275,15 +275,19 @@ function classifyToken(token: string): ReviewTarget | 'invalid-url' | null {
     const repo = segs[segs.length - 1];
     return {
       type: 'pr-url',
-      url: `${scheme.toLowerCase()}://${lowerHost}/${owner}/${repo}/codereview/${Number(num)}`,
+      // The canonicalized URL keeps the FULL path — a collapsed spelling
+      // would name a different (possibly nonexistent) repo to anything
+      // that re-reads it.
+      url: `${scheme.toLowerCase()}://${lowerHost}/${segs.join('/')}/codereview/${Number(num)}`,
       host: lowerHost,
       owner,
       repo,
-      // Nested-group targets carry the FULL path: owner/repo collapse is
-      // non-injective, and the remote-match gate compares every segment
-      // when both sides have one (a same-named repo in a different group
-      // must not match).
-      ...(segs.length >= 3 ? { groupPath: segs.join('/') } : {}),
+      // Aone targets carry the FULL path — even two-segment ones: the
+      // URL pins an exact repo, and the identity gates must compare it
+      // against nested-group remotes in BOTH directions (a two-segment
+      // target must not match a three-segment remote sharing its tail,
+      // nor the reverse).
+      groupPath: segs.join('/'),
       number: Number(num),
     };
   }
@@ -524,7 +528,11 @@ export function parseReviewArgs(
     if (shape === null || shape === 'invalid-url') return `raw:${token}`;
     if (shape.type === 'pr-number') return `pr:${shape.number}`;
     if (shape.type === 'pr-url')
-      return `pr:${shape.number}@${shape.host}/${shape.owner}/${shape.repo}`;
+      // The FULL group path, not the collapsed owner/repo: two nested-group
+      // CR URLs that share their last two segments and the global id
+      // (`groupA/sub/app` vs `groupB/sub/app`, same N) are DIFFERENT
+      // targets and must not dedupe into one.
+      return `pr:${shape.number}@${shape.host}/${shape.groupPath ?? `${shape.owner}/${shape.repo}`}`;
     return `raw:${token}`;
   };
   const prShapedKeys = [
@@ -534,9 +542,24 @@ export function parseReviewArgs(
         .map((k) => targetKey(k.token)),
     ),
   ];
-  // A bare number and a same-number URL name one PR when no other repo is
-  // in play: collapse `pr:N` into `pr:N@…` for the count.
-  const distinctPr = new Set(prShapedKeys.map((k) => k.replace(/@.*$/, '')));
+  // Distinct TARGETS. A bare number and a same-number URL name one PR when
+  // no other repo is in play (the bare entry merges into the URL's key),
+  // but two DIFFERENT repo-qualified keys with the same number name two
+  // PRs — the number-only collapse once silently deduped them.
+  const distinctPr = new Set<string>();
+  for (const k of prShapedKeys) {
+    const bare = k.split('@')[0];
+    if (k.includes('@')) {
+      // Repo-qualified keys are distinct PRs; one subsumes a bare
+      // same-number entry already in the set.
+      if (distinctPr.has(bare)) distinctPr.delete(bare);
+      distinctPr.add(k);
+    } else if (
+      ![...distinctPr].some((e) => e === bare || e.startsWith(`${bare}@`))
+    ) {
+      distinctPr.add(k);
+    }
+  }
   if (!hasValidCandidate && distinctPr.size > 1) {
     const shown = kept
       .filter((k) => k.invalidValueOf !== undefined && isPrShaped(k.token))

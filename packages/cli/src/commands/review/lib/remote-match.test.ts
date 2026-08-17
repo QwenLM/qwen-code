@@ -380,6 +380,35 @@ describe('matchRemotes', () => {
     });
     expect(matched).toEqual(['origin']);
   });
+
+  it('a nested-group target does NOT match a two-segment remote', () => {
+    // A two-segment remote can never BE the nested target's repo — the
+    // fallback must not lend it the match (reverse direction of the
+    // same-tail hazard).
+    const remoteV =
+      'origin\tgit@gitlab.alibaba-inc.com:frontend/app.git (fetch)\n';
+    const { matched } = matchRemotes(remoteV, {
+      owner: 'frontend',
+      repo: 'app',
+      host: 'code.alibaba-inc.com',
+      groupPath: 'groupA/frontend/app',
+    });
+    expect(matched).toEqual([]);
+  });
+
+  it('a two-segment target path does NOT match a nested remote', () => {
+    // The CR URL pins an exact two-segment repo; a nested remote sharing
+    // its tail is a different project.
+    const remoteV =
+      'origin\tgit@gitlab.alibaba-inc.com:groupB/frontend/app.git (fetch)\n';
+    const { matched } = matchRemotes(remoteV, {
+      owner: 'frontend',
+      repo: 'app',
+      host: 'code.alibaba-inc.com',
+      groupPath: 'frontend/app',
+    });
+    expect(matched).toEqual([]);
+  });
 });
 
 describe('hostsEquivalent', () => {

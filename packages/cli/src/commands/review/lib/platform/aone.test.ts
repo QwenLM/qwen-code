@@ -38,17 +38,19 @@ describe('parseRemoteUrl hardening', () => {
       host: 'gitlab.alibaba-inc.com',
       owner: 'g',
       repo: 'p',
+      groupPath: 'g/p',
     });
   });
 
   it('strips a query string / fragment (credential-bearing channel)', () => {
     expect(
       parseRemoteUrl('https://h.example/g/p?private_token=SECRET'),
-    ).toEqual({ host: 'h.example', owner: 'g', repo: 'p' });
+    ).toEqual({ host: 'h.example', owner: 'g', repo: 'p', groupPath: 'g/p' });
     expect(parseRemoteUrl('https://h.example/g/p.git#frag')).toEqual({
       host: 'h.example',
       owner: 'g',
       repo: 'p',
+      groupPath: 'g/p',
     });
   });
 
@@ -57,6 +59,7 @@ describe('parseRemoteUrl hardening', () => {
       host: 'h.example',
       owner: 'g',
       repo: 'p',
+      groupPath: 'g/p',
     });
   });
 
@@ -68,16 +71,31 @@ describe('parseRemoteUrl hardening', () => {
       parseRemoteUrl(
         'https://ci-user:SECRET1@SECRET2@code.alibaba-inc.com/g/p',
       ),
-    ).toEqual({ host: 'code.alibaba-inc.com', owner: 'g', repo: 'p' });
+    ).toEqual({
+      host: 'code.alibaba-inc.com',
+      owner: 'g',
+      repo: 'p',
+      groupPath: 'g/p',
+    });
     expect(
       parseRemoteUrl('https://ci-user:S1@S2@S3@code.alibaba-inc.com/g/p'),
-    ).toEqual({ host: 'code.alibaba-inc.com', owner: 'g', repo: 'p' });
+    ).toEqual({
+      host: 'code.alibaba-inc.com',
+      owner: 'g',
+      repo: 'p',
+      groupPath: 'g/p',
+    });
   });
 
   it('consumes a `/`-bearing scp userinfo whole', () => {
     expect(
       parseRemoteUrl('ci-user:/token-with-slash@code.alibaba-inc.com:g/p.git'),
-    ).toEqual({ host: 'code.alibaba-inc.com', owner: 'g', repo: 'p' });
+    ).toEqual({
+      host: 'code.alibaba-inc.com',
+      owner: 'g',
+      repo: 'p',
+      groupPath: 'g/p',
+    });
   });
 
   it('fails closed on a single-segment multi-@ origin without leaking', () => {
@@ -86,6 +104,43 @@ describe('parseRemoteUrl hardening', () => {
     expect(
       parseRemoteUrl(
         'https://ci-user:SECRET1@SECRET2@code.alibaba-inc.com/solo',
+      ),
+    ).toBeNull();
+  });
+
+  it('fails closed when a `/`-bearing secret leaves the @ in path territory', () => {
+    // URL userinfo cannot contain `/` — the `@` belongs to the path, and
+    // parsing it as host/owner would fabricate coordinates. The refusal
+    // message side is covered by the redaction tests below.
+    expect(
+      parseRemoteUrl('https://user:sec/ret@code.example.com/g/p'),
+    ).toBeNull();
+    expect(
+      parseRemoteUrl('https://user:S1/S2@host.example:8443/project'),
+    ).toBeNull();
+    expect(
+      parseRemoteUrl('https://gitlab.alibaba-inc.com/x//y@g/p'),
+    ).toBeNull();
+  });
+
+  it('keeps a query-borne @ from fabricating coordinates', () => {
+    // `?private_token=ab@cd:8443/x/y` — the strip removes the query before
+    // anything can parse `cd` as a host; the real path parses.
+    expect(
+      parseRemoteUrl(
+        'https://gitlab.alibaba-inc.com/group/proj?private_token=ab@cd:8443/x/y',
+      ),
+    ).toEqual({
+      host: 'gitlab.alibaba-inc.com',
+      owner: 'group',
+      repo: 'proj',
+      groupPath: 'group/proj',
+    });
+    // A junk path segment carrying `@` fails closed instead of folding
+    // into a host swap.
+    expect(
+      parseRemoteUrl(
+        'https://gitlab.alibaba-inc.com/junk@gitlab.alibaba-inc.com:g/p',
       ),
     ).toBeNull();
   });
@@ -143,6 +198,7 @@ describe('aoneReader.resolveRepo', () => {
       host: 'gitlab.alibaba-inc.com',
       owner: 'g',
       repo: 'p',
+      groupPath: 'g/p',
     });
   });
 
@@ -178,6 +234,7 @@ describe('aoneReader.resolveRepo', () => {
       host: 'gitlab.alibaba-inc.com',
       owner: 'g',
       repo: 'p',
+      groupPath: 'g/p',
     });
   });
 
@@ -215,6 +272,33 @@ describe('aoneReader.resolveRepo', () => {
     expect(message).toContain('cannot parse the origin remote');
     expect(message).not.toContain('token-with-slash');
     expect(message).not.toContain('ci-user');
+  });
+
+  it('redacts the shapes the per-regex redactions missed (round-9 class)', () => {
+    // (1) URL-form userinfo whose secret contains `/` — no regex shape
+    // matches, the split at the LAST `@` redacts by construction;
+    // (2) scp-form userinfo carrying a NEWLINE; (3) a residue with no
+    // `host:` shape at all. None may reach the message.
+    for (const [origin, secret, user] of [
+      ['https://user:sec/ret@code.example.com/solo', 'sec', 'user'],
+      ['ci-user:sec\nret@code.alibaba-inc.com:solo', 'sec', 'ci-user'],
+      ['user:token@weirdhost', 'token', 'user'],
+    ]) {
+      gitMock.mockImplementation((...args: string[]) => {
+        if (args[0] === 'remote') return origin;
+        return '';
+      });
+      let message = '';
+      try {
+        aoneReader.resolveRepo();
+        throw new Error(`expected ${JSON.stringify(origin)} to refuse`);
+      } catch (err) {
+        message = (err as Error).message;
+      }
+      expect(message).toContain('cannot parse the origin remote');
+      expect(message).not.toContain(secret);
+      expect(message).not.toContain(user);
+    }
   });
 });
 
@@ -474,5 +558,45 @@ describe('aoneReader.fetchDiff', () => {
     });
     gitRawMock.mockReturnValue(Buffer.from('d', 'latin1'));
     expect(() => aoneReader.fetchDiff(7, 'g/p')).not.toThrow();
+  });
+
+  it('refuses a different NESTED group via the MR detailUrl full path', () => {
+    // The seam's ownerRepo is the collapsed last-two form; the MR's own
+    // detailUrl carries the FULL path — a different group's same-tail
+    // clone must not pass the guard and serve the ref-fetch.
+    a1JsonMock.mockReturnValue({
+      mergeRequest: {
+        sourceBranch: 'sha',
+        targetBranch: 'master',
+        detailUrl: 'https://code.alibaba-inc.com/groupA/sub/app/codereview/7',
+      },
+    });
+    gitMock.mockImplementation((...args: string[]) => {
+      if (args[0] === 'remote')
+        return 'git@gitlab.alibaba-inc.com:groupB/sub/app.git';
+      return '';
+    });
+    expect(() => aoneReader.fetchDiff(7, 'sub/app')).toThrow(
+      /not sub\/app — run from inside a clone of the target repo/,
+    );
+    expect(gitRawMock).not.toHaveBeenCalled();
+  });
+
+  it('accepts the matching nested-group clone via the detailUrl full path', () => {
+    a1JsonMock.mockReturnValue({
+      mergeRequest: {
+        sourceBranch: 'sha',
+        targetBranch: 'master',
+        detailUrl: 'https://code.alibaba-inc.com/groupA/sub/app/codereview/7',
+      },
+    });
+    gitMock.mockImplementation((...args: string[]) => {
+      if (args[0] === 'merge-base') return 'base-sha';
+      if (args[0] === 'remote')
+        return 'git@gitlab.alibaba-inc.com:groupA/sub/app.git';
+      return '';
+    });
+    gitRawMock.mockReturnValue(Buffer.from('d', 'latin1'));
+    expect(() => aoneReader.fetchDiff(7, 'sub/app')).not.toThrow();
   });
 });

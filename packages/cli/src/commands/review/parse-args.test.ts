@@ -366,6 +366,26 @@ describe('parseReviewArgs', () => {
       owner: 'maxcompute',
       repo: 'odps_src',
       number: 123,
+      // The FULL path rides the target — the identity gates compare it
+      // against nested-group remotes (the collapse is non-injective).
+      groupPath: 'sub/maxcompute/odps_src',
+    });
+    // The canonicalized URL keeps the full path too — a collapsed spelling
+    // would name a different repo to anything that re-reads it.
+    expect((got.target as { url: string }).url).toBe(
+      'https://code.alibaba-inc.com/sub/maxcompute/odps_src/codereview/123',
+    );
+  });
+
+  it('a two-segment Aone codereview URL carries its exact path too', () => {
+    // The URL pins an exact repo: the gates must not match it against a
+    // nested remote sharing the tail (reverse direction of the hazard).
+    const got = parseReviewArgs(
+      'https://code.alibaba-inc.com/maxcompute/odps_src/codereview/5',
+    );
+    expect(got.target).toMatchObject({
+      type: 'pr-url',
+      groupPath: 'maxcompute/odps_src',
     });
   });
 
@@ -552,6 +572,19 @@ describe('parseReviewArgs — --severity-floor (the convergence posture knob)', 
         true,
       );
     }
+  });
+
+  it('same-id CR URLs from DIFFERENT nested groups are ambiguous', () => {
+    // The global MR id collides across repos; the rescue pool once deduped
+    // these on the collapsed owner/repo + number key (both collapse to
+    // `maxcompute/odps_src`… here: shared tail `sub/app`) and silently
+    // reviewed the first. The full group path keeps them distinct.
+    const got = parseReviewArgs(
+      '--severity-floor https://code.alibaba-inc.com/groupA/sub/app/codereview/7 ' +
+        '--effort https://code.alibaba-inc.com/groupB/sub/app/codereview/7',
+    );
+    expect(got.target).toEqual({ type: 'local' });
+    expect(got.warnings.some((w) => w.includes('Ambiguous target'))).toBe(true);
   });
 
   it('the equals form rescues a PR-shaped value exactly as the spaced form does', () => {
