@@ -14,6 +14,8 @@ import {
   MAX_STALL_ATTEMPTS,
   MAX_WORKFLOW_STALL_MS_ENV,
 } from './workflow-stall.js';
+import { DEFAULT_RETRY_OPTIONS } from '../../utils/retry.js';
+import { getRetryDelayMs } from '../../utils/retryPolicy.js';
 
 describe('resolveStallMs', () => {
   it('uses the per-call override when positive', () => {
@@ -56,17 +58,40 @@ describe('resolveStallMs', () => {
   //
   // Asserting the relationship rather than the literal keeps this meaningful if
   // either number is retuned later.
+  //
+  // The ladder is DERIVED from `DEFAULT_RETRY_OPTIONS`, not hand-copied: a
+  // local literal would keep this test green while a retune of the real
+  // options pushed the real ladder past the window — the exact false-stall
+  // regression this test exists to prevent. Mirrors retryWithBackoff's error
+  // path: `maxAttempts - 1` sleeps, `currentDelay` doubling from
+  // `initialDelayMs` under the `maxDelayMs` cap, each sleep run through
+  // `getRetryDelayMs` with the ±30% jitter that path applies.
+  const transportLadderMs = (random: () => number) => {
+    const { maxAttempts, initialDelayMs, maxDelayMs } = DEFAULT_RETRY_OPTIONS;
+    let currentDelay = initialDelayMs;
+    let total = 0;
+    for (let sleep = 1; sleep < maxAttempts; sleep++) {
+      total += getRetryDelayMs({
+        attempt: 1,
+        initialDelayMs: currentDelay,
+        maxDelayMs,
+        jitterRatio: 0.3,
+        random,
+      });
+      currentDelay = Math.min(maxDelayMs, currentDelay * 2);
+    }
+    return total;
+  };
+
   it('outlasts the transport retry ladder it has to survive', () => {
-    // TODO: derive from DEFAULT_RETRY_OPTIONS once it (or a worst-case backoff
-    // helper) is exported from utils/retry.ts. Until then this literal is a
-    // hand-copy and must be retuned together with it — `toBe(76_500)` below
-    // only pins this copy, so a retune there would leave this green while the
-    // real ladder overtook the window. Nominal sleeps: the normal path also
-    // applies ±30% jitter (~89.25s worst case after the 30s cap).
-    const RETRY_LADDER_MS = [1_500, 3_000, 6_000, 12_000, 24_000, 30_000];
-    const ladderTotal = RETRY_LADDER_MS.reduce((a, b) => a + b, 0);
-    expect(ladderTotal).toBe(76_500);
-    expect(DEFAULT_STALL_MS).toBeGreaterThan(ladderTotal);
+    const nominal = transportLadderMs(() => 0.5); // jitter cancels out
+    const worstCase = transportLadderMs(() => 1); // every sleep +30%, then capped
+    expect(nominal).toBe(76_500);
+    expect(worstCase).toBe(89_250);
+    // The window has to outlast the ladder on an UNLUCKY run, not just the
+    // nominal sum: a `DEFAULT_STALL_MS` retuned into the (76.5s, 89.25s] band
+    // would false-trip under jitter while a nominal-only assertion stayed green.
+    expect(DEFAULT_STALL_MS).toBeGreaterThan(worstCase);
   });
 });
 
@@ -78,7 +103,7 @@ describe('attachStallWatchdog', () => {
     vi.useRealTimers();
   });
 
-  it('fires after stallMs of no activity once the first response has arrived', () => {
+  it('fires after stallMs of silence once armed (ROUND_START)', () => {
     const emitter = new AgentEventEmitter();
     const controller = new AbortController();
     const wd = attachStallWatchdog(emitter, controller, 1000);
@@ -235,8 +260,9 @@ describe('runStallResilient', () => {
     ): Promise<string> => {
       calls += 1;
       if (calls < 2) {
-        // First attempt stalls: emit a first response event to arm the
-        // watchdog (#8), then go silent until it aborts.
+        // First attempt stalls: emit ROUND_START to arm the watchdog — in a
+        // real dispatch that fires before the request reaches the wire — then
+        // go silent until it aborts.
         emitter.emit(AgentEventType.ROUND_START, {} as never);
         await new Promise<void>((resolve) => {
           if (signal.aborted) return resolve();

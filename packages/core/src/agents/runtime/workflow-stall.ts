@@ -50,7 +50,10 @@ import { parsePositiveIntegerEnv } from '../../utils/env.js';
  * (`RATE_LIMIT_RETRY_OPTIONS` in geminiChat.ts — 60s/120s/240s/300s, so two
  * consecutive sleeps already reach 180s), a provider `Retry-After` honored
  * unclamped on the normal HTTP path, and unattended-mode persistent backoff
- * (up to 5 min per sleep) can all exceed this window and read as a stall on a
+ * (up to 5 min per exponential sleep — but a provider `Retry-After` on that
+ * path is capped only at `PERSISTENT_CAP_MS`/6h, not at the 5 min
+ * `PERSISTENT_MAX_BACKOFF_MS`, so one 429 carrying `Retry-After: 7200` sleeps
+ * two hours) can all exceed this window and read as a stall on a
  * request that is retrying exactly as designed. Making transport retries
  * visible to the watchdog is the follow-up; this window does not cover them.
  * `retryWithBackoff` sleeps 1.5s, 3s, 6s, 12s, 24s then
