@@ -231,6 +231,20 @@ export function releaseWorktree(worktreePath: string): WorktreeRelease {
  * `execFileSync`'s 1 MB `maxBuffer` default, so any diff past ~1 MB dies with
  * ENOBUFS rather than returning a short read. Diff capture uses this instead.
  */
+/**
+ * Like {@link gitRaw} but feeds `input` on stdin and returns raw stdout —
+ * no UTF-8 decode, no CRLF normalization. For byte-exact paths in and SHA
+ * bytes out (`hash-object --stdin-paths` over raw `ls-tree -z` paths).
+ */
+export function gitRawWithInput(input: Buffer, args: string[]): Buffer {
+  return execFileSync('git', args, {
+    ...gitOpts(),
+    maxBuffer: 512 * 1024 * 1024,
+    input,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+}
+
 export function gitRaw(...args: string[]): Buffer {
   return execFileSync('git', args, {
     ...gitOpts(),
@@ -316,12 +330,18 @@ export function untrustedLocalConfig(worktree: string): string[] | null {
   const found = new Set<string>();
   let sawAnyScope = false;
   for (const scope of ['--local', '--worktree'] as const) {
-    const listing = gitOpt('-C', worktree, 'config', scope, '--list');
+    // `--list -z` emits `key\nvalue\0` per entry: the key is everything up
+    // to the FIRST newline, so a subsection name containing `=`
+    // (`[diff "a=b"] command=…` → `diff.a=b.command`) parses whole. Splitting
+    // an `=`-joined `--list` line at the first `=` truncated such a key to a
+    // non-matching prefix and let the command-executing entry through.
+    const listing = gitOpt('-C', worktree, 'config', scope, '--list', '-z');
     if (listing === null) continue;
     sawAnyScope = true;
-    for (const line of listing.split('\n')) {
-      if (line === '') continue;
-      const key = line.slice(0, line.indexOf('=') >>> 0).toLowerCase();
+    for (const entry of listing.split('\0')) {
+      if (entry === '') continue;
+      const nl = entry.indexOf('\n');
+      const key = (nl < 0 ? entry : entry.slice(0, nl)).toLowerCase();
       if (RESUME_UNTRUSTED_CONFIG_PATTERNS.some((re) => re.test(key))) {
         found.add(key);
       }

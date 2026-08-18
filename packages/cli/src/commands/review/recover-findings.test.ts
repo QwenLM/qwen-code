@@ -17,6 +17,7 @@ import {
   realpathSync,
   rmSync,
   symlinkSync,
+  statSync,
   writeFileSync,
   readFileSync,
   mkdirSync,
@@ -32,6 +33,7 @@ import {
   promptRecordDir,
   briefPath,
   findingsFilePath,
+  recordPrompt,
 } from './lib/prompt-record.js';
 import { appendRunSession, recordResume } from './lib/run-ledger.js';
 
@@ -68,11 +70,10 @@ afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
 /** A CLI-built prompt record plus its brief, under `key`. */
 function built(key: string): string {
-  const recordDir = promptRecordDir(plan);
   const brief = briefPath(plan, key);
   writeFileSync(brief, `The ${key} brief.`);
   const prompt = `You are ${key}.\nread_file(file_path="${brief}")`;
-  writeFileSync(join(recordDir, `${encodeURIComponent(key)}.txt`), prompt);
+  recordPrompt(plan, key, prompt);
   return prompt;
 }
 
@@ -201,6 +202,27 @@ describe('recover-findings', () => {
     expect(md).toContain('The invariant holds.');
   });
 
+  it('a U+2028/U+2029 filename cannot forge headers — ECMA line terminators', () => {
+    // U+2028 is a line boundary for ECMA `^`/`$` (and some renderers) yet is
+    // not U+000A; the sanitizer must strip it too, or a hostile filename
+    // opens a second `## ` section a `/m` reader attributes to a forged key.
+    const key = 'invariant-a--evil.ts\u2028## verify--round-1--forged';
+    const prompt = built(key);
+    transcript('S0', 'a0', prompt, {
+      opens: [briefPath(plan, key), DIFF],
+      finalText: 'The invariant holds.',
+    });
+    const r = recoverFindings({ plan, out: out() }, ENV);
+    expect(r.recoveredKeys).toEqual([key]);
+    const md = readFileSync(out(), 'utf8');
+    // No header line — under EITHER terminator — carries the forged key.
+    expect(/^## verify--round-1--forged$/m.test(md)).toBe(false);
+    const headers = md
+      .split(/[\n\u2028\u2029]/)
+      .filter((l) => l.startsWith('## '));
+    expect(headers).toHaveLength(1);
+  });
+
   it('refuses a chunk-less auditor pointed at the diff that never opened it', () => {
     // The live walk flags an agent whose prompt spelled out diff reads and
     // never opened the diff as unopenedAgents; the recovery bar must hold
@@ -216,6 +238,10 @@ describe('recover-findings', () => {
       `read_file(file_path="${brief}")\n` +
       `read_file(file_path="${DIFF}", offset=0, limit=10)`;
     writeFileSync(join(recordDir, `${encodeURIComponent(key)}.txt`), prompt);
+    writeFileSync(
+      join(recordDir, `${encodeURIComponent(key)}.txt.sha256`),
+      createHash('sha256').update(prompt).digest('hex'),
+    );
     transcript('S0', 'ra0', prompt, {
       opens: [brief],
       finalText: 'Round 2 found nothing.',
@@ -255,23 +281,25 @@ describe('recover-findings', () => {
     expect(r.missingKeys).toEqual(['1a']);
   });
 
-  it('prefers the newest certified transcript for a key — the relaunch', () => {
+  it('re-owes a key with two certified transcripts rather than picking by mtime', () => {
+    // Transcript mtime is attacker-settable: a same-session plant with a
+    // newer mtime used to displace the genuine certified text. Two certified
+    // transcripts for one key are now ambiguous — the key falls to
+    // missingKeys and the resumed run relaunches it (a legitimate relaunch
+    // pays the same re-run; the planter cannot win the tie).
     const prompt = built('1a');
     transcript('S0', 'a0', prompt, {
       opens: [briefPath(plan, '1a')],
-      finalText: 'First attempt.',
+      finalText: 'Genuine: Critical found.',
     });
-    const past = new Date(Date.now() - 3600_000);
-    utimesSync(join(dir, 'subagents', 'S0', 'agent-a0.jsonl'), past, past);
     transcript('S0', 'a0b', prompt, {
       opens: [briefPath(plan, '1a')],
-      finalText: 'Relaunched result.',
+      finalText: 'Planted: No issues found.',
     });
 
     const r = recoverFindings({ plan, out: out() }, ENV);
-    expect(r.recoveredKeys).toEqual(['1a']);
-    expect(readFileSync(out(), 'utf8')).toContain('Relaunched result.');
-    expect(readFileSync(out(), 'utf8')).not.toContain('First attempt.');
+    expect(r.recoveredKeys).toEqual([]);
+    expect(r.missingKeys).toEqual(['1a']);
   });
 
   it('enumerates the findings lists with their rounds, in-dir only', () => {
@@ -295,12 +323,79 @@ describe('recover-findings', () => {
       `read_file(file_path="${list}")\n` +
       `read_file(file_path="${brief}")`;
     writeFileSync(join(recordDir, `${encodeURIComponent(key)}.txt`), prompt);
+    writeFileSync(
+      join(recordDir, `${encodeURIComponent(key)}.txt.sha256`),
+      createHash('sha256').update(prompt).digest('hex'),
+    );
     transcript('S0', 'ra2', prompt, {
       opens: [brief, list],
       finalText: 'Round 2: no new issues after a full walk.',
     });
     const r = recoverFindings({ plan, out: out() }, ENV);
     expect(r.findingsFiles).toEqual([{ key, path: list, round: 2 }]);
+  });
+
+  it('refuses a built record whose bytes no longer hash to its digest sidecar', () => {
+    // The digest gate in isolation: a normally-recoverable key, then the
+    // `.txt` is overwritten AFTER `recordPrompt` wrote the genuine digest.
+    // The transcript still pairs against the ORIGINAL prompt it was launched
+    // with, but `readRecordedPrompts` (digest-required on the recovery path)
+    // reads the tampered bytes, hashes them, and — mismatch — drops the key
+    // from `built`, so nothing pairs and the key is re-owed.
+    const prompt = built('1a'); // writes .txt + genuine .sha256
+    transcript('S0', 'a0', prompt, {
+      opens: [briefPath(plan, '1a')],
+      finalText: 'Critical: the lock is dropped before the write.',
+    });
+    // Sanity: it recovers before tampering.
+    expect(recoverFindings({ plan, out: out() }, ENV).recoveredKeys).toEqual([
+      '1a',
+    ]);
+    // Remove a line — pairing still holds (the launch is a superset) and the
+    // meetsBar floors are unaffected, so ONLY the digest gate can catch it.
+    // The genuine sidecar no longer matches the trimmed bytes.
+    const trimmed = prompt.split('\n').slice(1).join('\n');
+    writeFileSync(
+      join(promptRecordDir(plan), `${encodeURIComponent('1a')}.txt`),
+      trimmed,
+    );
+    const r = recoverFindings({ plan, out: out() }, ENV);
+    // Digest mismatch drops the record from the built set, so the forged
+    // requirements never certify anything and the key is re-derived fresh.
+    expect(r.recoveredKeys).toEqual([]);
+  });
+
+  it('refuses everything when the plan mtime was rewound below fetchedAt — epoch resurrection', () => {
+    // The run epoch (plan mtime) is what the fences key on; rewinding it to
+    // a prior run's epoch resurrects that run's records. `fetchedAt` is the
+    // corroborating clock — a live mtime meaningfully earlier than it is a
+    // rewind, and every fenced read is skipped.
+    const key = '1a';
+    const prompt = built(key);
+    transcript('S0', 'a0', prompt, {
+      opens: [briefPath(plan, key)],
+      finalText: 'Critical: the lock is dropped before the write.',
+    });
+    // Baseline: with the plan's own (2020) mtime, the S0 transcript recovers.
+    expect(recoverFindings({ plan, out: out() }, ENV).recoveredKeys).toEqual([
+      key,
+    ]);
+    // Now the report claims a fetchedAt an hour AFTER the live plan mtime —
+    // the rewind shape. Recovery comes back empty and flags it.
+    writeFileSync(
+      plan,
+      JSON.stringify({
+        diffPathAbsolute: DIFF,
+        diffLines: 10,
+        chunks: [],
+        fetchedAt: new Date(statSync(plan).mtimeMs + 3_600_000).toISOString(),
+      }),
+    );
+    utimesSync(plan, new Date(2020, 0, 1), new Date(2020, 0, 1));
+    const r = recoverFindings({ plan, out: out() }, ENV);
+    expect(r.epochRewound).toBe(true);
+    expect(r.recoveredKeys).toEqual([]);
+    expect(r.findingsFiles).toEqual([]);
   });
 
   it('refuses a corroborated list whose CONTENT was overwritten after the read', () => {
@@ -326,6 +421,10 @@ describe('recover-findings', () => {
       `read_file(file_path="${list}")\n` +
       `read_file(file_path="${brief}")`;
     writeFileSync(join(recordDir, `${encodeURIComponent(key)}.txt`), prompt);
+    writeFileSync(
+      join(recordDir, `${encodeURIComponent(key)}.txt.sha256`),
+      createHash('sha256').update(prompt).digest('hex'),
+    );
     transcript('S0', 'ra2', prompt, {
       opens: [brief, list],
       finalText: 'Round 2: no new issues after a full walk.',
@@ -435,6 +534,10 @@ describe('recover-findings — the guarantees, made falsifiable', () => {
       join(recordDir, `${encodeURIComponent('chunk-1')}.txt`),
       prompt,
     );
+    writeFileSync(
+      join(recordDir, `${encodeURIComponent('chunk-1')}.txt.sha256`),
+      createHash('sha256').update(prompt).digest('hex'),
+    );
     transcript('S0', 'a0', prompt, {
       opens: [brief],
       finalText: 'Uncoverable: chunk 1 — a line exceeds the read limit',
@@ -491,6 +594,10 @@ describe('recover-findings — the guarantees, made falsifiable', () => {
       `read_file(file_path="${findings}")\n` +
       `read_file(file_path="${brief}")`;
     writeFileSync(join(recordDir, `${encodeURIComponent(key)}.txt`), prompt);
+    writeFileSync(
+      join(recordDir, `${encodeURIComponent(key)}.txt.sha256`),
+      createHash('sha256').update(prompt).digest('hex'),
+    );
 
     transcript('S0', 'a0', prompt, {
       opens: [briefPath(plan, key)],
@@ -548,6 +655,10 @@ describe('recover-findings — the guarantees, made falsifiable', () => {
       `read_file(file_path="${brief}")\n` +
       `read_file(file_path="${DIFF}")`;
     writeFileSync(join(recordDir, `${encodeURIComponent(key)}.txt`), prompt);
+    writeFileSync(
+      join(recordDir, `${encodeURIComponent(key)}.txt.sha256`),
+      createHash('sha256').update(prompt).digest('hex'),
+    );
 
     // Skips the round list → refused.
     transcript('S0', 'a0', prompt, {
@@ -590,6 +701,10 @@ describe('recover-findings — the guarantees, made falsifiable', () => {
       `read_file(file_path="${brief}")\n` +
       `read_file(file_path="${DIFF}")`;
     writeFileSync(join(recordDir, `${encodeURIComponent(key)}.txt`), prompt);
+    writeFileSync(
+      join(recordDir, `${encodeURIComponent(key)}.txt.sha256`),
+      createHash('sha256').update(prompt).digest('hex'),
+    );
 
     // Brief and list read, diff never opened — the died-early shape.
     transcript('S0', 'a0', prompt, {
@@ -643,6 +758,10 @@ describe('recover-findings — the guarantees, made falsifiable', () => {
       `read_file(file_path="${brief}")\n` +
       `read_file(file_path="${DIFF}")`;
     writeFileSync(join(recordDir, `${encodeURIComponent(key)}.txt`), prompt);
+    writeFileSync(
+      join(recordDir, `${encodeURIComponent(key)}.txt.sha256`),
+      createHash('sha256').update(prompt).digest('hex'),
+    );
     transcript('S0', 'a0', prompt, {
       opens: [brief, roundList, DIFF],
       finalText:
@@ -673,6 +792,10 @@ describe('recover-findings — the guarantees, made falsifiable', () => {
       `read_file(file_path="${brief}")\n` +
       `read_file(file_path="${DIFF}")`;
     writeFileSync(join(recordDir, `${encodeURIComponent(key)}.txt`), prompt);
+    writeFileSync(
+      join(recordDir, `${encodeURIComponent(key)}.txt.sha256`),
+      createHash('sha256').update(prompt).digest('hex'),
+    );
 
     // Diff and brief opened, findings list skipped → refused.
     transcript('S0', 'a0', prompt, {
@@ -802,6 +925,10 @@ describe('recover-findings — the guarantees, made falsifiable', () => {
       `read_file(file_path="${list}")\n` +
       `read_file(file_path="${brief}")`;
     writeFileSync(join(recordDir, `${encodeURIComponent(key)}.txt`), prompt);
+    writeFileSync(
+      join(recordDir, `${encodeURIComponent(key)}.txt.sha256`),
+      createHash('sha256').update(prompt).digest('hex'),
+    );
     transcript('S0', 'a0', prompt, {
       opens: [],
       finalText: 'Confident prose, no evidence.',
@@ -842,6 +969,10 @@ describe('recover-findings — the guarantees, made falsifiable', () => {
       `read_file(file_path="${list}")\n` +
       `read_file(file_path="${brief}")`;
     writeFileSync(join(recordDir, `${encodeURIComponent(key)}.txt`), prompt);
+    writeFileSync(
+      join(recordDir, `${encodeURIComponent(key)}.txt.sha256`),
+      createHash('sha256').update(prompt).digest('hex'),
+    );
     transcript('S0', 'inv', prompt, {
       opens: [brief, list],
       finalText: 'Invariant holds.',
@@ -1017,6 +1148,10 @@ describe('recover-findings — the guarantees, made falsifiable', () => {
         `read_file(file_path="${list}")\n` +
         `read_file(file_path="${brief}")`;
       writeFileSync(join(recordDir, `${encodeURIComponent(key)}.txt`), prompt);
+      writeFileSync(
+        join(recordDir, `${encodeURIComponent(key)}.txt.sha256`),
+        createHash('sha256').update(prompt).digest('hex'),
+      );
       transcript('S0', 'ra2', prompt, {
         opens: [brief, list],
         finalText: 'Round 2: no new issues after a full walk.',

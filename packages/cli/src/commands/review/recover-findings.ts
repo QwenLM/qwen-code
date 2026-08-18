@@ -93,6 +93,20 @@ export interface RecoverFindingsResult {
    * this run cannot tell.
    */
   recordDirUnreadable: string | null;
+  /**
+   * True when the plan file's live mtime — the run epoch every fence below
+   * keys on — is meaningfully EARLIER than the report's own `fetchedAt`.
+   * The fences resurrect whichever prior run's records the epoch admits, so
+   * a rewound plan mtime (one `utimesSync` to a prior run's recorded epoch)
+   * would hand that run's coverage/findings to the resumed orchestrator as
+   * this attempt's own. `fetchedAt` is the corroborating clock — the writer
+   * stamps it moments before writing the file (`windowSound` binds the
+   * ruling to the same fact) — so a rewind that does not also rewrite it is
+   * refused here: every recovered field comes back empty. Rewriting BOTH is
+   * the same on-disk-forgery residual the ledger-trim and transcript-nonce
+   * follow-ups own, disclosed rather than pretended closed.
+   */
+  epochRewound: boolean;
 }
 
 const ROUND_IN_KEY_RE = /--round-(\d+)(?:--|$)/;
@@ -236,19 +250,37 @@ export function recoverFindings(
       ? plan.diffPathAbsolute
       : undefined;
   const sinceMs = statSync(planPath).mtimeMs;
+  // The run epoch (plan mtime) corroborated against the report's own
+  // `fetchedAt`: a rewind to a prior run's epoch resurrects that run's
+  // fenced records, and the writer stamps `fetchedAt` moments before the
+  // file exists, so a live mtime meaningfully earlier than `fetchedAt` is a
+  // rewind. Sixty seconds of slack covers the stamp-then-write gap; a
+  // backdated mtime only WIDENS the fence toward older records, which is
+  // the safe direction and not flagged. On a rewind every fenced read is
+  // skipped and the recovery comes back empty.
+  const fetchedAtMs =
+    typeof (plan as { fetchedAt?: unknown }).fetchedAt === 'string'
+      ? Date.parse((plan as { fetchedAt: string }).fetchedAt)
+      : NaN;
+  const epochRewound =
+    !Number.isNaN(fetchedAtMs) && sinceMs < fetchedAtMs - 60_000;
 
   // Fenced like the two sibling reads below: nothing clears the record dir,
   // and the CI retry re-runs the review at the SAME plan path, so an
   // unfenced read enumerates keys earlier attempts built — `missingKeys`
   // would name obligations this run does not owe, and a resumed orchestrator
   // relaunching them spins up agents whose prompts it cannot even build.
-  const built = readRecordedPrompts(planPath, sinceMs);
+  const built = epochRewound
+    ? new Map<string, string>()
+    : readRecordedPrompts(planPath, sinceMs, true);
   // The current session has launched nothing yet when this runs — that is
   // the point of running it — so its missing transcript dir is the expected
   // state, not the infrastructure failure it would be for check-coverage.
-  const records = readRunTranscripts(planPath, sinceMs, env, diffPath, {
-    currentDirOptional: true,
-  });
+  const records = epochRewound
+    ? []
+    : readRunTranscripts(planPath, sinceMs, env, diffPath, {
+        currentDirOptional: true,
+      });
 
   // Pair each transcript with the built prompts it delivered verbatim. The
   // injectivity rule is retirement's: a transcript that matches MORE THAN ONE
@@ -272,7 +304,16 @@ export function recoverFindings(
     matchesOf.set(rec, keys);
   }
 
-  const recovered = new Map<string, AgentRecord>();
+  // Certified transcripts PER KEY. A key with exactly one is recovered; a
+  // key with two or more is refused to `missingKeys` instead of resolved by
+  // mtime. The tie-break used to prefer the newest, but transcript mtime is
+  // attacker-settable — a same-session plant with a newer mtime displaced
+  // the genuine certified text ("No issues" over a real Critical). A
+  // legitimate relaunch also produces two certified transcripts, so this
+  // re-owes that key (the resumed run relaunches it) rather than trusting an
+  // mtime the planter controls — the injectivity spirit, on the transcript
+  // side.
+  const certifiedByKey = new Map<string, AgentRecord[]>();
   for (const [rec, keys] of matchesOf) {
     if (keys.length !== 1) continue; // unmatched, or the injectivity refusal
     const key = keys[0];
@@ -280,12 +321,15 @@ export function recoverFindings(
       continue;
     }
     if (rec.finalText.trim() === '') continue;
-    // Prefer the newest certified transcript per key — a relaunch supersedes
-    // the launch it repaired.
-    const existing = recovered.get(key);
-    if (existing === undefined || rec.mtimeMs > existing.mtimeMs) {
-      recovered.set(key, rec);
-    }
+    const list = certifiedByKey.get(key);
+    if (list === undefined) certifiedByKey.set(key, [rec]);
+    else list.push(rec);
+  }
+  const recovered = new Map<string, AgentRecord>();
+  for (const [key, recs] of certifiedByKey) {
+    if (recs.length === 1) recovered.set(key, recs[0]);
+    // recs.length > 1 → ambiguous; left out of `recovered`, so the key falls
+    // to `missingKeys` below and is re-owed.
   }
 
   const recoveredKeys = [...recovered.keys()].sort();
@@ -405,7 +449,7 @@ export function recoverFindings(
     // cannot forge structure.
     const header =
       // eslint-disable-next-line no-control-regex -- control chars are exactly what must not reach the markdown
-      key.replace(/[\u0000-\u001f\u007f]+/g, ' ');
+      key.replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, ' ');
     sections.push(`## ${header}`, '', rec.finalText.trim(), '');
   }
   // The sibling with the identical --plan/--out contract does this too. The
@@ -424,6 +468,7 @@ export function recoverFindings(
     latestReverseAuditRound,
     budgetStop: readBudgetStop(planPath),
     recordDirUnreadable,
+    epochRewound,
     priorSessions: priorSessionIds(planPath, env).length,
   };
 }

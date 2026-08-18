@@ -256,7 +256,20 @@ export function recordPrompt(
   try {
     const dir = promptRecordDir(planPath);
     mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, fileFor(key)), prompt);
+    const file = join(dir, fileFor(key));
+    writeFileSync(file, prompt);
+    // A content digest beside the record, same shape as `writeFindingsFile`.
+    // Recovery on a resumed run refuses a record whose bytes no longer hash
+    // to it: the pairing and the whole certification bar derive their
+    // requirements from these `.txt` bytes (a line-DELETION keeps pairing
+    // but vacates the findings-pointer and diff-read floors), and the record
+    // dir is attempt-1-writable between attempts. The sidecar shares the dir
+    // — a two-file rewrite is the disclosed residual — so this binds the
+    // trim-without-sidecar-rewrite shape, not the whole class.
+    writeFileSync(
+      `${file}.sha256`,
+      createHash('sha256').update(prompt).digest('hex'),
+    );
   } catch {
     // A read-only tmp dir must not stop a review from being *built*. The check
     // that reads these back reports "no prompt was recorded" and fails there,
@@ -281,6 +294,7 @@ export function recordPrompt(
 export function readRecordedPrompts(
   planPath: string,
   sinceMs?: number,
+  requireDigest = false,
 ): Map<string, string> {
   const out = new Map<string, string>();
   const dir = promptRecordDir(planPath);
@@ -309,7 +323,26 @@ export function readRecordedPrompts(
       }
       const file = join(dir, name);
       if (sinceMs !== undefined && statSync(file).mtimeMs < sinceMs) continue;
-      out.set(key, readFileSync(file, 'utf8'));
+      const body = readFileSync(file, 'utf8');
+      // On the recovery path the records are read as HISTORY across the
+      // attempt gap the reviewed PR's code can write in. A record whose
+      // sidecar is missing or whose bytes no longer hash to it cannot be
+      // trusted to define the certification bar — skip it, so its key falls
+      // to `missingKeys` and is re-owed rather than certified on trimmed
+      // requirements. The live pipeline (no attacker gap within a run)
+      // reads with `requireDigest` false and is unchanged.
+      if (requireDigest) {
+        let recorded: string;
+        try {
+          recorded = readFileSync(`${file}.sha256`, 'utf8').trim();
+        } catch {
+          continue;
+        }
+        if (createHash('sha256').update(body).digest('hex') !== recorded) {
+          continue;
+        }
+      }
+      out.set(key, body);
     } catch {
       /* raced with a cleanup */
     }

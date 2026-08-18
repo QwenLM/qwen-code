@@ -326,6 +326,14 @@ export interface ResumeProbes {
    */
   ledgerEntryCount: number;
   /**
+   * The resume marker FILE is absent (not merely empty). A same-session
+   * resume leaves no ledger entry, so the ledger backstop undercounts the
+   * cap by one when the marker is deleted; but any run that has resumed
+   * wrote the marker, and it persists, so an absent marker beside a ledger
+   * of two or more sessions is deletion — the cap fails closed.
+   */
+  markerFileAbsent: boolean;
+  /**
    * The report file's own mtime — the run epoch every fence keys on, and
    * the corroborating fact for `fetchedAt`: the writer stamps `fetchedAt`
    * moments before writing the file, so a recorded time far AFTER the
@@ -489,6 +497,12 @@ export function assessResume(
   // resume chain uncaps. fetch-pr appends the original session's entry in
   // the same breath that writes the report, so absence is not a fresh run.
   if (probes.ledgerEntryCount === 0) {
+    return { ok: false, reason: 'ledger-absent' };
+  }
+  // A multi-session run always wrote the resume marker; its absence beside a
+  // ledger of two or more sessions is the deleted-bookkeeping tamper the
+  // same-session-resume undercount would otherwise slip past.
+  if (probes.markerFileAbsent && probes.ledgerEntryCount >= 2) {
     return { ok: false, reason: 'ledger-absent' };
   }
   // The recorded hash and the disk file agree — but both live on a disk the

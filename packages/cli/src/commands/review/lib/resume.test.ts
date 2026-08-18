@@ -69,6 +69,7 @@ const probes = (over: Partial<ResumeProbes> = {}): ResumeProbes => ({
   shallowAbsent: true,
   repoConfigClean: true,
   ledgerEntryCount: 1,
+  markerFileAbsent: false,
   resumeCount: 0,
   requestedEffort: null,
   ...over,
@@ -409,6 +410,29 @@ describe('assessResume — every report field the pipeline consumes is compared'
       ok: false,
       reason: 'repo-config-untrusted',
     });
+  });
+
+  it('refuses an absent resume marker beside a ledger of two or more sessions', () => {
+    // A same-session resume appends no ledger entry, so the backstop's
+    // slice(1) undercounts the cap by one when the marker is deleted; any
+    // run that resumed wrote the marker, so its absence with 2+ ledger
+    // sessions is the deleted-bookkeeping tamper.
+    expect(
+      assessResume(
+        prev(),
+        probes({ markerFileAbsent: true, ledgerEntryCount: 2 }),
+      ),
+    ).toEqual({ ok: false, reason: 'ledger-absent' });
+  });
+
+  it('does NOT refuse an absent marker on a first resume (one ledger session)', () => {
+    // ledgerEntryCount 1 with no marker yet is the legitimate first resume.
+    expect(
+      assessResume(
+        prev(),
+        probes({ markerFileAbsent: true, ledgerEntryCount: 1 }),
+      ),
+    ).toEqual({ ok: true });
   });
 
   it('refuses a valid report beside an EMPTY session ledger', () => {

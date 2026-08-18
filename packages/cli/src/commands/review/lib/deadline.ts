@@ -150,6 +150,13 @@ interface RoundStamp {
 }
 
 const STAMPS_FILE = 'budget-rounds.json';
+// The highest round whose admission stamp a resume-hygiene wipe has already
+// cleared. A round-cap stop can outlive several resumes, but each resume's
+// `clearRoundStamps` deletes the stamps that corroborate it; without a
+// record of what was cleared, `stampsCorroborateRoundCap` on a LATER resume
+// sees only the rounds admitted AFTER the wipe and drops the genuine stop.
+// The watermark carries the cleared rounds forward.
+const STAMP_WATERMARK_FILE = 'budget-rounds-watermark.json';
 const STOP_FILE = 'budget-stop.json';
 
 // The run-epoch fence is shared with every other per-run artifact (the
@@ -727,9 +734,38 @@ export function clearBudgetStop(planPath: string): void {
  * constant — the failure direction is an early stop with a disclosure, never
  * a kill-before-compose. Errors are swallowed like `clearBudgetStop`'s.
  */
+function readStampWatermark(planPath: string): number {
+  try {
+    const raw = readFileSync(
+      join(promptRecordDir(planPath), STAMP_WATERMARK_FILE),
+      'utf8',
+    );
+    const v = (JSON.parse(raw) as { round?: unknown }).round;
+    return typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : 0;
+  } catch {
+    return 0;
+  }
+}
+
 export function clearRoundStamps(planPath: string): void {
   try {
-    rmSync(join(promptRecordDir(planPath), STAMPS_FILE), { force: true });
+    // Carry the cleared rounds forward before deleting them: the highest
+    // round stamped so far, folded into any prior watermark, so a round-cap
+    // stop that survives THIS resume can still be corroborated on the next
+    // one (whose stamps will only cover rounds admitted after this wipe).
+    const dir = promptRecordDir(planPath);
+    const maxStamped = readRoundStamps(planPath).reduce(
+      (m, st) => (typeof st.round === 'number' ? Math.max(m, st.round) : m),
+      readStampWatermark(planPath),
+    );
+    if (maxStamped > 0) {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, STAMP_WATERMARK_FILE),
+        JSON.stringify({ round: maxStamped }),
+      );
+    }
+    rmSync(join(dir, STAMPS_FILE), { force: true });
   } catch {
     // Best-effort: stale stamps only make the gate MORE conservative.
   }
@@ -765,8 +801,12 @@ export function stampsCorroborateRoundCap(
   const stamped = new Set<number | null>(
     readRoundStamps(planPath).map((s) => s.round),
   );
+  // Rounds already cleared by an earlier resume's hygiene are corroborated
+  // by the watermark — otherwise a stop that outlives one resume loses the
+  // stamps that vouch for its early rounds and is dropped on the next.
+  const watermark = readStampWatermark(planPath);
   for (let round = 1; round <= cap; round++) {
-    if (!stamped.has(round)) return false;
+    if (!stamped.has(round) && round > watermark) return false;
   }
   return true;
 }

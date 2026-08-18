@@ -960,6 +960,23 @@ describe('stampsCorroborateRoundCap — the round-cap marker is not self-proving
     expect(stampsCorroborateRoundCap(p, 2.5)).toBe(false);
   });
 
+  it('corroborates rounds an earlier resume already cleared — the watermark', () => {
+    // A stop can outlive several resumes; each resume's `clearRoundStamps`
+    // deletes the stamps that corroborate its early rounds. Without the
+    // watermark a later resume, seeing only the post-wipe stamps, drops the
+    // genuine stop. cap=3: rounds 1-2 stamped, then cleared (resume 1's
+    // hygiene), then round 3 stamped (the continuation) — corroboration must
+    // still hold on resume 2.
+    const p = plan();
+    stampRound(p, 1, NOW_MS - 3_000_000);
+    stampRound(p, 2, NOW_MS - 2_000_000);
+    clearRoundStamps(p); // resume 1: watermark := 2, stamps gone
+    stampRound(p, 3, NOW_MS - 1_000_000);
+    expect(stampsCorroborateRoundCap(p, 3)).toBe(true);
+    // And a plant still fails: no stamp and no watermark for round 4.
+    expect(stampsCorroborateRoundCap(p, 4)).toBe(false);
+  });
+
   it('reads stamps through the run-epoch fence like every other reader', () => {
     // A PREVIOUS run's stamps must not corroborate THIS run's cap: the
     // fence drops them, and the cap fails.

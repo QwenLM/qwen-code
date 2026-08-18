@@ -28,7 +28,13 @@
 import type { CommandModule } from 'yargs';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  readFileSync,
+  readlinkSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -46,7 +52,7 @@ import {
   gitOpt,
   gitProbe as gitExit,
   gitRaw,
-  gitWithInput,
+  gitRawWithInput,
   plantedHooks,
   refExists,
   releaseWorktree,
@@ -85,6 +91,7 @@ import { SHA_RE } from './lib/ledger.js';
 import {
   appendRunSession,
   ledgerResumeCount,
+  resumeMarkerPath,
   sessionEntryCount,
   readResumeMarker,
   recordResume,
@@ -608,7 +615,8 @@ function sectionsContained(
 const gitProbe: GitProbe = {
   fetch: (remote, ref) => gitOpt('fetch', remote, ref) !== null,
   refExists,
-  mergeBase: (a, b) => gitOpt('merge-base', a, b),
+  mergeBase: (a, b) =>
+    gitOpt('-c', 'core.commitGraph=false', 'merge-base', a, b),
 };
 
 function tryRemove(action: () => void): void {
@@ -700,36 +708,83 @@ function reportMtime(out: string): number | null {
  * tree records. False on any read/parse failure — an unverifiable tree is
  * not a verified one.
  */
-function worktreeMatchesHead(wt: string): boolean {
-  const listing = gitOpt('-C', wt, 'ls-tree', '-r', '-z', 'HEAD');
-  if (listing === null) return false;
-  const expected: Array<{ oid: string; path: string }> = [];
-  for (const entry of listing.split('\0')) {
-    if (entry === '') continue;
-    // `<mode> <type> <oid>\t<path>` — paths are raw under -z.
-    const tab = entry.indexOf('\t');
-    if (tab < 0) return false;
-    const [mode, type, oid] = entry.slice(0, tab).split(' ');
-    if (mode === undefined || type === undefined || oid === undefined) {
-      return false;
-    }
-    if (mode === '120000' || mode === '160000') continue;
-    if (type !== 'blob') return false;
-    expected.push({ oid, path: entry.slice(tab + 1) });
-  }
-  if (expected.length === 0) return true;
-  let hashed: string;
+export function worktreeMatchesHead(wt: string): boolean {
+  // Raw bytes end to end: the string wrappers UTF-8-decode and
+  // CRLF-normalize, so a non-UTF-8 or CRLF filename would lossy-round-trip
+  // and fail to re-open. `ls-tree -z` NUL-terminates entries and leaves the
+  // path raw; parse the Buffer directly.
+  let listing: Buffer;
   try {
-    hashed = gitWithInput(
-      Buffer.from(expected.map((e) => e.path).join('\0'), 'utf8'),
-      ['-C', wt, 'hash-object', '--stdin-paths', '-z'],
-    );
+    listing = gitRaw('-C', wt, 'ls-tree', '-r', '-z', 'HEAD');
   } catch {
     return false;
   }
-  const got = hashed === '' ? [] : hashed.split('\n');
-  if (got.length !== expected.length) return false;
-  return expected.every((e, i) => got[i] === e.oid);
+  const files: Array<{ oid: string; path: Buffer }> = [];
+  const symlinks: Array<{ oid: string; path: Buffer }> = [];
+  let start = 0;
+  for (let i = 0; i <= listing.length; i++) {
+    if (i < listing.length && listing[i] !== 0) continue;
+    if (i === start) {
+      start = i + 1;
+      continue;
+    }
+    const entry = listing.subarray(start, i);
+    start = i + 1;
+    const tab = entry.indexOf(0x09); // '\t' separates meta from the raw path
+    if (tab < 0) return false;
+    const meta = entry.subarray(0, tab).toString('latin1');
+    const [mode, type, oid] = meta.split(' ');
+    if (mode === undefined || type === undefined || oid === undefined) {
+      return false;
+    }
+    if (mode === '160000') continue; // gitlink: submodule probes own it
+    if (type !== 'blob') return false;
+    const path = entry.subarray(tab + 1);
+    // `--stdin-paths` reads NEWLINE-separated paths, so a path containing a
+    // newline byte cannot be fed to it — refuse closed rather than hash the
+    // wrong file.
+    if (path.includes(0x0a)) return false;
+    if (mode === '120000') symlinks.push({ oid, path });
+    else files.push({ oid, path });
+  }
+  // Symlinks: `hash-object` FOLLOWS the link to its target, so a retargeted
+  // link would hash whatever it now points at. Compare the recorded blob
+  // (the link's own target text) against `readlink` instead.
+  for (const link of symlinks) {
+    let recorded: Buffer;
+    try {
+      recorded = gitRaw('-C', wt, 'cat-file', 'blob', link.oid);
+    } catch {
+      return false;
+    }
+    let actual: Buffer;
+    try {
+      actual = Buffer.from(
+        readlinkSync(join(wt, link.path.toString('latin1')), 'buffer'),
+      );
+    } catch {
+      return false;
+    }
+    if (!recorded.equals(actual)) return false;
+  }
+  if (files.length === 0) return true;
+  // Newline-separated raw path bytes on stdin; the SHA output is ASCII, so
+  // decoding it as utf8 is lossless.
+  const stdin = Buffer.concat(
+    files.flatMap((f) => [f.path, Buffer.from('\n')]),
+  );
+  let hashed: Buffer;
+  try {
+    hashed = gitRawWithInput(stdin, ['-C', wt, 'hash-object', '--stdin-paths']);
+  } catch {
+    return false;
+  }
+  const got = hashed
+    .toString('latin1')
+    .split('\n')
+    .filter((l) => l !== '');
+  if (got.length !== files.length) return false;
+  return files.every((f, i) => got[i] === f.oid);
 }
 
 /**
@@ -941,11 +996,19 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
   // PR's code can write (local + worktree); global and system config are
   // the operator's, and that residual is disclosed rather than screened.
   const localConfig = untrustedLocalConfig(wt);
+  // The re-derivation and every fresh-path git run at the HOST cwd and
+  // consume the MAIN checkout's config, so it is screened too — a
+  // `core.worktree`/`core.hooksPath` planted there fires against the host's
+  // own ops. The worktree and the host share a git common dir (linked
+  // worktree), so one hooks probe covers both.
+  const hostConfig = untrustedLocalConfig(process.cwd());
   const hooks =
     commonDir !== null ? plantedHooks(join(commonDir, 'hooks')) : null;
   const repoConfigClean =
     localConfig !== null &&
     localConfig.length === 0 &&
+    hostConfig !== null &&
+    hostConfig.length === 0 &&
     hooks !== null &&
     hooks.length === 0;
   // A planted `info/grafts` redirects the merge-base the re-derivation diffs
@@ -959,13 +1022,30 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
   // collapses hunks to `Binary files differ`) and no pinned flag covers
   // attribute lookup, so a present file makes the re-derivation untrusted —
   // it stays null and the ruling refuses `diff-underivable`.
-  const hostAttributesStatus = repoConfigClean
+  // Untracked .gitattributes anywhere in the host checkout — UNexcluded, so a
+  // co-planted `.gitignore *` cannot hide it (`--exclude-standard` omitted).
+  const hostAttributesUntracked = repoConfigClean
+    ? gitOpt(
+        '-c',
+        'core.fsmonitor=false',
+        'ls-files',
+        '--others',
+        '--',
+        '.gitattributes',
+        ':(glob)**/.gitattributes',
+      )
+    : null;
+  // Tracked-but-modified .gitattributes — a dirty attribute file the capture
+  // did not run under. (A COMMITTED one is symmetric: the fresh capture ran
+  // under it too, so the recorded diff already reflects it — the residual
+  // where attempt-1 advances the HOST repo's committed history is the same
+  // out-of-tree class as the ledger/transcript anchors, disclosed in DESIGN.)
+  const hostAttributesModified = repoConfigClean
     ? gitOpt(
         '-c',
         'core.fsmonitor=false',
         'status',
         '--porcelain',
-        '--untracked-files=all',
         '--',
         '.gitattributes',
         ':(glob)**/.gitattributes',
@@ -978,15 +1058,10 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
     plantedFileActive(
       wtGitDir !== null ? join(wtGitDir, 'info', 'attributes') : null,
     ) ||
-    // The HOST repo's own `.gitattributes` chain: the re-derivation runs at
-    // host cwd, so an UNTRACKED or MODIFIED attributes file anywhere in the
-    // main checkout (part of no diff, checked by no other probe) shapes the
-    // bytes git derives — `target -diff` collapses the malicious hunks to
-    // `Binary files differ` under the exact pinned command. Committed
-    // attributes are symmetric (the capture ran under them too); dirty ones
-    // are a plant. Unanswerable reads as planted.
-    hostAttributesStatus === null ||
-    hostAttributesStatus.trim() !== '';
+    hostAttributesUntracked === null ||
+    hostAttributesUntracked.trim() !== '' ||
+    hostAttributesModified === null ||
+    hostAttributesModified.trim() !== '';
   // Re-derive the diff from git objects, keyed on the RECORDED head and the
   // recomputed merge-base against the FORGE's base ref — never the report's
   // own mergeBaseSha, which sits on the same attacker-writable disk as the
@@ -1027,7 +1102,13 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
     const baseObjPresent =
       gitOpt('cat-file', '-e', `${liveBaseRefOid}^{commit}`) !== null;
     const mbSha = baseObjPresent
-      ? gitOpt('merge-base', liveBaseRefOid, recordedSha)
+      ? gitOpt(
+          '-c',
+          'core.commitGraph=false',
+          'merge-base',
+          liveBaseRefOid,
+          recordedSha,
+        )
       : null;
     if (mbSha !== null && mbSha !== '') {
       rederivedMergeBase = mbSha;
@@ -1097,6 +1178,22 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
         })
       : null;
   const marker = readResumeMarker(out);
+  // The resume marker FILE, present-or-absent. A same-session resume (the
+  // original session retrying its own dead run) appends NO ledger entry —
+  // `appendRunSession`'s dedupe returns early — so the ledger backstop's
+  // `slice(1)` count is blind to it and undercounts the cap by one whenever
+  // the marker is deleted. But a run that has resumed at all wrote the
+  // marker (recordResume), and it persists across attempts, so an ABSENT
+  // marker beside a ledger that names two or more sessions is the
+  // deleted-bookkeeping tamper — the cap cannot be trusted, and the resume
+  // fails closed. (A first resume has ledgerEntryCount 1 and no marker yet:
+  // not refused.)
+  let markerFileAbsent = false;
+  try {
+    statSync(resumeMarkerPath(out));
+  } catch (err) {
+    markerFileAbsent = (err as NodeJS.ErrnoException).code === 'ENOENT';
+  }
   // The cap reads BOTH counters: the marker is the primary record, and the
   // session ledger cross-caps it — a deleted marker must not read as an
   // unspent cap while the ledger still names every session that ran. The
@@ -1190,14 +1287,37 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
   // review clone is never shallow (the fresh path full-fetches).
   const shallowAbsent =
     commonDir !== null && !shallowFilePresent(join(commonDir, 'shallow'));
-  // The authoritative untracked listing: `ls-files --others` WITHOUT
-  // `--exclude-standard` lists every untracked path regardless of any
-  // `.gitignore`/exclude/attribute game — a planted per-directory
-  // `.gitignore` containing `*` blanks the status probe, but nothing can
-  // hide a path from the unexcluded listing. A fresh checkout has zero
-  // untracked files, so ANY entry is residue.
-  const untrackedListing = repoConfigClean
-    ? gitOpt('-c', 'core.fsmonitor=false', '-C', wt, 'ls-files', '--others')
+  // Untracked residue, two listings. The reviewed PR's build/test agents
+  // create legitimately-ignored artifacts inside the worktree by design
+  // (node_modules, dist), so the residue probe respects `.gitignore` —
+  // `--exclude-standard` — and any NON-ignored untracked file is tamper.
+  // But a planted per-directory `.gitignore` (`*`) could hide real residue
+  // from that listing, so a SECOND listing, pathspec-limited to the ignore
+  // files themselves and UNexcluded, catches the plant without indicting
+  // node_modules. Either non-empty is dirty.
+  const untrackedResidue = repoConfigClean
+    ? gitOpt(
+        '-c',
+        'core.fsmonitor=false',
+        '-C',
+        wt,
+        'ls-files',
+        '--others',
+        '--exclude-standard',
+      )
+    : null;
+  const plantedIgnores = repoConfigClean
+    ? gitOpt(
+        '-c',
+        'core.fsmonitor=false',
+        '-C',
+        wt,
+        'ls-files',
+        '--others',
+        '--',
+        ':(glob)**/.gitignore',
+        '.gitignore',
+      )
     : null;
   // Tracked content anchored to the OBJECT STORE: hash every blob in the
   // worktree and compare against `ls-tree -r HEAD`. The status probe trusts
@@ -1222,8 +1342,10 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
         : status.trim() === '' &&
           !indexHidesFiles &&
           !excludesPlanted &&
-          untrackedListing !== null &&
-          untrackedListing.trim() === '' &&
+          untrackedResidue !== null &&
+          untrackedResidue.trim() === '' &&
+          plantedIgnores !== null &&
+          plantedIgnores.trim() === '' &&
           worktreeContentMatches === true,
     diffSha256OnDisk: sha256OfFile(tmpFile(`pr-${prNumber}`, 'diff.txt')),
     diffSha256Rederived,
@@ -1250,6 +1372,7 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
     shallowAbsent,
     repoConfigClean,
     ledgerEntryCount: sessionEntryCount(out),
+    markerFileAbsent,
     resumeCount: Math.max(markerResumes, ledgerResumes),
     requestedEffort: args.effort ?? null,
   });
@@ -1419,6 +1542,26 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     if (args.resume) {
       const outcome = tryResume(args, wt);
       if (outcome.resumed) return;
+      // A config/hook-screen refusal must NOT fall through in the same
+      // invocation: `cleanStale`'s `branch -D` (a ref transaction), the
+      // `fetch` (a ref update) and `worktree add` (a checkout) all fire the
+      // exact hooks the screen just detected — code execution with the
+      // reviewer's credentials, in the reviewer's own process, before any
+      // agent launches. The plant sits in the shared git common dir, so a
+      // fresh checkout does not escape it. Abort instead; the operator (or a
+      // fresh runner with a clean tree) can retry.
+      if (outcome.reason === 'repo-config-untrusted') {
+        writeStdoutLine(
+          JSON.stringify({ resumed: false, resumeRefused: outcome.reason }),
+        );
+        throw new Error(
+          `Refusing to review PR #${prNumber}: the review worktree's git ` +
+            `config or hooks carry command-executing entries (attempt-1 ` +
+            `state on a resumable run). No fresh fetch is attempted, because ` +
+            `the fall-through's git commands would execute the planted ` +
+            `hooks. Remove the planted config/hooks or run on a clean tree.`,
+        );
+      }
       resumeRefusal = outcome.reason;
       priorFetchedSha = outcome.priorFetchedSha;
       writeStdoutLine(

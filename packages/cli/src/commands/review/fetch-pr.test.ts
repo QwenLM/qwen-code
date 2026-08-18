@@ -332,6 +332,7 @@ vi.mock('./lib/git.js', () => ({
   },
   gitRaw: producerMocks.gitRaw,
   gitWithInput: vi.fn((): string => ''),
+  gitRawWithInput: vi.fn((): Buffer => Buffer.from('')),
   refExists: producerMocks.refExists,
   releaseWorktree: producerMocks.releaseWorktree,
   untrustedLocalConfig: vi.fn((): string[] => []),
@@ -3634,7 +3635,11 @@ describe('fetch-pr --resume', () => {
       sha: 'baseb45eb45e',
       baseFetchFailed: false,
     }));
-    vi.mocked(gitRaw).mockImplementation(() => Buffer.from(DIFF_BYTES));
+    vi.mocked(gitRaw).mockImplementation((...args: string[]) =>
+      args.includes('ls-tree') || args.includes('cat-file')
+        ? Buffer.from('')
+        : Buffer.from(DIFF_BYTES),
+    );
     // clearAllMocks resets call history but NOT implementations; re-assert
     // the ledger defaults so a mockReturnValue set by one test cannot leak
     // into the next — the same discipline the fs mock above follows.
@@ -4406,12 +4411,48 @@ describe('fetch-pr --resume', () => {
     ]);
   });
 
-  it('refuses untracked residue the exclude games cannot hide — the unexcluded listing', async () => {
-    // A planted per-directory `.gitignore` containing `*` blanks the status
-    // probe; `ls-files --others` without exclude flags lists it anyway.
+  it('does NOT refuse ordinary ignored build artifacts — node_modules is expected', async () => {
+    // The residue probe respects `.gitignore` (`--exclude-standard`): a
+    // resume after `npm install` left node_modules must not read as tamper.
     const { gitOpt } = await import('./lib/git.js');
     vi.mocked(gitOpt).mockImplementation((...args: string[]) => {
-      if (args.includes('--others')) return 'payload.sh';
+      // The unexcluded pathspec listing (planted .gitignore probe) and the
+      // exclude-standard residue listing both come back empty; node_modules
+      // is ignored, so exclude-standard omits it.
+      if (args.includes('--others')) return '';
+      if (args.includes('ls-tree')) return '';
+      if (args.includes('config')) return '';
+      if (args.includes('merge-base')) return 'baseb45eb45e';
+      if (args.includes('status')) return '';
+      if (args.includes('ls-files')) return 'H f.txt';
+      if (args.includes('--git-common-dir')) return '/repo/.git';
+      if (args.includes('--git-dir')) {
+        return '/repo/.git/worktrees/review-pr-42';
+      }
+      return 'f00df00df00d';
+    });
+    await run();
+    expect(reportWritten()).toBe(false);
+    expect(await stdoutJsonLines()).toEqual([
+      {
+        resumed: true,
+        resumeAttempt: 1,
+        restartsSpent: 0,
+        effort: 'high',
+        out: OUT,
+      },
+    ]);
+  });
+
+  it('refuses a planted .gitignore that hides residue from the status probe', async () => {
+    // The `*`-ignore blanks status AND exclude-standard; the pathspec-limited
+    // UNexcluded listing lists the planted ignore file itself.
+    const { gitOpt } = await import('./lib/git.js');
+    vi.mocked(gitOpt).mockImplementation((...args: string[]) => {
+      if (args.includes('--others') && args.includes(':(glob)**/.gitignore')) {
+        return 'sub/.gitignore';
+      }
+      if (args.includes('--others')) return '';
       if (args.includes('ls-tree')) return '';
       if (args.includes('config')) return '';
       if (args.includes('merge-base')) return 'baseb45eb45e';
@@ -4431,27 +4472,24 @@ describe('fetch-pr --resume', () => {
 
   it('refuses tracked content that does not hash to HEAD — the forged-index shape', async () => {
     // A forged per-worktree index with patched stat fields blanks status
-    // and ls-files -v; hash-object reads the bytes and the object store is
-    // content-addressed, so the comparison cannot be answered from forged
-    // metadata.
-    const { gitOpt, gitWithInput } = await import('./lib/git.js');
-    vi.mocked(gitOpt).mockImplementation((...args: string[]) => {
-      if (args.includes('--others')) return '';
+    // and ls-files -v; the object-store cross-check reads bytes, not index
+    // metadata. HEAD records blob aaaa… for f.txt; hash-object returns
+    // bbbb… — the worktree file was tampered. (The real-binary invocation
+    // is pinned separately in worktree-content.test.ts; this checks the
+    // ruling routes a mismatch to worktree-dirty.)
+    const { gitRaw, gitRawWithInput } = await import('./lib/git.js');
+    vi.mocked(gitRaw).mockImplementation((...args: string[]) => {
       if (args.includes('ls-tree')) {
-        return '100644 blob aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tf.txt';
+        return Buffer.from(
+          '100644 blob aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tf.txt\0',
+          'latin1',
+        );
       }
-      if (args.includes('config')) return '';
-      if (args.includes('merge-base')) return 'baseb45eb45e';
-      if (args.includes('status')) return '';
-      if (args.includes('ls-files')) return 'H f.txt';
-      if (args.includes('--git-common-dir')) return '/repo/.git';
-      if (args.includes('--git-dir')) {
-        return '/repo/.git/worktrees/review-pr-42';
-      }
-      return 'f00df00df00d';
+      if (args.includes('cat-file')) return Buffer.from('');
+      return Buffer.from(DIFF_BYTES);
     });
-    vi.mocked(gitWithInput).mockImplementation(
-      () => 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    vi.mocked(gitRawWithInput).mockImplementation(() =>
+      Buffer.from('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n'),
     );
     await run();
     expect(await stdoutJsonLines()).toEqual([
@@ -4459,24 +4497,26 @@ describe('fetch-pr --resume', () => {
     ]);
   });
 
-  it('refuses command-executing repo-local config', async () => {
+  it('refuses command-executing repo-local config — hard-fails, no fresh fetch', async () => {
     const { untrustedLocalConfig } = await import('./lib/git.js');
     vi.mocked(untrustedLocalConfig).mockImplementation(() => [
       'core.fsmonitor',
     ]);
-    await run();
+    await expect(run()).rejects.toThrow(/command-executing entries/);
     expect(await stdoutJsonLines()).toEqual([
       { resumed: false, resumeRefused: 'repo-config-untrusted' },
     ]);
+    expect(reportWritten()).toBe(false);
   });
 
-  it('refuses a live hook in the common hooks dir', async () => {
+  it('refuses a live hook in the common hooks dir — hard-fails, no fresh git', async () => {
     const { plantedHooks } = await import('./lib/git.js');
     vi.mocked(plantedHooks).mockImplementation(() => ['reference-transaction']);
-    await run();
+    await expect(run()).rejects.toThrow(/command-executing entries/);
     expect(await stdoutJsonLines()).toEqual([
       { resumed: false, resumeRefused: 'repo-config-untrusted' },
     ]);
+    expect(reportWritten()).toBe(false);
   });
 
   it('refuses a dirty host .gitattributes chain — the re-derivation runs at host cwd', async () => {
@@ -4515,10 +4555,15 @@ describe('fetch-pr --resume', () => {
     vi.mocked(untrustedLocalConfig).mockImplementation(() => [
       'filter.evil.clean',
     ]);
-    await run();
+    await expect(run()).rejects.toThrow(/command-executing entries/);
     const calls = vi.mocked(gitOpt).mock.calls;
     expect(calls.some((c) => c.includes('fetch'))).toBe(false);
     expect(calls.some((c) => c.includes('status') && c.includes('-C'))).toBe(
+      false,
+    );
+    // And no fresh-path git ran either — the hard-fail precedes cleanStale.
+    const { git } = await import('./lib/git.js');
+    expect(vi.mocked(git).mock.calls.some((c) => c.includes('fetch'))).toBe(
       false,
     );
     expect(await stdoutJsonLines()).toEqual([
@@ -4802,7 +4847,11 @@ describe('fetch-pr --resume bookkeeping is counted, not merely called', () => {
       baseFetchFailed: false,
     }));
     const { gitRaw } = await import('./lib/git.js');
-    vi.mocked(gitRaw).mockImplementation(() => Buffer.from(DIFF_BYTES));
+    vi.mocked(gitRaw).mockImplementation((...args: string[]) =>
+      args.includes('ls-tree') || args.includes('cat-file')
+        ? Buffer.from('')
+        : Buffer.from(DIFF_BYTES),
+    );
     producerMocks.buildDiffPlan.mockImplementation((...a: unknown[]) =>
       producerMocks.actualBuildDiffPlan(...a),
     );
