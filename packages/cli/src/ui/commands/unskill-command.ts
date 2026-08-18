@@ -130,9 +130,24 @@ export const unskillCommand: SlashCommand = {
       }
     }
 
-    const { cleared, tokensSaved } = geminiClient
+    const { cleared, tokensSaved, unresolvable } = geminiClient
       .getChat()
       .unloadSkillBody(skillName);
+    if (unresolvable) {
+      // History holds a skill body/dedup confirmation without a call id
+      // (id-less provider): it cannot be attributed to this skill, so
+      // keep the name tracked — un-tracking would disarm the dedup guard
+      // behind a possibly-resident body and let a duplicate injection
+      // through. Same refusal direction as the ambiguous-id case.
+      return {
+        type: 'message',
+        messageType: 'info',
+        content: t(
+          'Skill "{{name}}" could not be unloaded safely: a skill body in context has no call id and cannot be attributed. Tracking is kept to avoid a duplicate injection on reload.',
+          { name: skillName },
+        ),
+      };
+    }
     // Un-track even when no body was found in history (e.g. it was already
     // blanked by compaction) — leaving the name tracked would keep the
     // dedup guard blocking a reload.

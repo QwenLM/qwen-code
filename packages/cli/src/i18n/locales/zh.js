@@ -2630,6 +2630,8 @@ export default {
     '技能 "{{name}}" 未加载到上下文中。',
   'Skill "{{name}}" had no body left in context; tracking cleared so it can be reloaded.':
     '技能 "{{name}}" 在上下文中已无正文；已清除跟踪状态，可重新加载。',
+  'Skill "{{name}}" could not be unloaded safely: a skill body in context has no call id and cannot be attributed. Tracking is kept to avoid a duplicate injection on reload.':
+    '技能 "{{name}}" 无法安全卸载：上下文中存在不带调用 id 的技能正文，无法确定归属。已保留跟踪状态，避免重载时注入重复正文。',
   'Unloaded skill "{{name}}" (~{{tokens}} tokens freed). Invoke it again to reload.':
     '已卸载技能 "{{name}}"（释放约 {{tokens}} 个 token）。再次调用即可重新加载。',
   '"{{name}}" is not a skill (it may be a model-invocable command); /unskill only unloads skill bodies.':

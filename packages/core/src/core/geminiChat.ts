@@ -2168,15 +2168,45 @@ export class GeminiChat {
   }
 
   /**
+   * Whether history holds a live Skill body or dedup confirmation with no
+   * call id (id-less provider). Such a result cannot be attributed to any
+   * skill, so both helpers treat it as resident-but-unresolvable.
+   */
+  private hasIdLessSkillResult(): boolean {
+    return this.history.some(
+      (content) =>
+        content.role === 'user' &&
+        (content.parts ?? []).some((part) => {
+          const fr = part.functionResponse;
+          if (fr?.id || fr?.name !== ToolNames.SKILL) {
+            return false;
+          }
+          const output = (fr.response as { output?: unknown } | undefined)?.[
+            'output'
+          ];
+          return (
+            typeof output === 'string' &&
+            (isSkillBodyOutput(output) || isSkillDedupConfirmation(output))
+          );
+        }),
+    );
+  }
+
+  /**
    * Blank a loaded skill's tool results in history (`/unskill`). Replaces
    * the body (and any dedup confirmations) with a reload-hint placeholder,
    * then adjusts the tracked prompt token count by the estimated savings.
    * The caller is responsible for un-tracking the name on the Skill tool so
    * the dedup guard re-arms and the next invocation reloads the full body.
+   * Returns `unresolvable` when history holds a live Skill body or dedup
+   * confirmation with no call id (id-less provider): it cannot be
+   * attributed to this skill, so the caller must keep the name tracked
+   * rather than disarm the dedup guard behind a resident body.
    */
   unloadSkillBody(skillName: string): {
     cleared: boolean;
     tokensSaved: number;
+    unresolvable?: boolean;
   } {
     const callIdToSkillName = buildCallIdToSkillName(this.history);
     const targetIds = new Set<string>();
@@ -2184,6 +2214,9 @@ export class GeminiChat {
       if (names.includes(skillName)) targetIds.add(id);
     }
     if (targetIds.size === 0) {
+      if (this.hasIdLessSkillResult()) {
+        return { cleared: false, tokensSaved: 0, unresolvable: true };
+      }
       return { cleared: false, tokensSaved: 0 };
     }
     // An id mapped to several skill names cannot be addressed without
@@ -2261,7 +2294,10 @@ export class GeminiChat {
       if (names.includes(skillName)) targetIds.add(id);
     }
     if (targetIds.size === 0) {
-      return false;
+      // An id-less body may belong to this skill; unloadSkillBody reports
+      // it as unresolvable, so let the command proceed to that refusal
+      // instead of wrongly answering "not loaded".
+      return this.hasIdLessSkillResult();
     }
     return this.history.some(
       (content) =>

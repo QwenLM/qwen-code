@@ -541,12 +541,12 @@ export function reconcileLoadedSkillTracking(
  * unlike a blanket clear, resident bodies elsewhere keep their tracking.
  * A skill with ANOTHER resident body keeps its tracking too: un-tracking
  * it would disarm the dedup guard while a body is still resident, letting
- * a duplicate body through on the next invoke. When `entries` hold a body
- * whose call id cannot be resolved to a name, tracking is cleared
- * wholesale instead — the same policy as `syncSkillEvictions`: the body
- * IS gone, and over-clearing only costs one duplicated body on the next
- * invoke, while leaving the stripped body's skill tracked makes it
- * unreloadable behind the dedup guard.
+ * a duplicate body through on the next invoke. If ANY stripped body's call
+ * id cannot be resolved to a name — including when other bodies in the
+ * same batch DO resolve — tracking is cleared wholesale instead: the same
+ * policy as `syncSkillEvictions`. The body IS gone, and over-clearing only
+ * costs one duplicated body on the next invoke, while leaving the stripped
+ * body's skill tracked makes it unreloadable behind the dedup guard.
  */
 export function unloadSkillsFromEntries(
   entries: Content[],
@@ -554,31 +554,42 @@ export function unloadSkillsFromEntries(
   toolRegistry: ToolRegistry | undefined,
   logTag: string,
 ): void {
-  const dropped = resolveLoadedSkillNames(entries, history);
-  if (dropped.length === 0) {
+  const callIdToSkillName = buildCallIdToSkillName(history);
+  const dropped = new Set<string>();
+  let hasUnresolvableBody = false;
+  for (const entry of entries) {
+    for (const part of entry.parts ?? []) {
+      const fr = part.functionResponse;
+      if (
+        fr?.name !== ToolNames.SKILL ||
+        !isSkillBodyOutput(fr.response?.['output'])
+      ) {
+        continue;
+      }
+      const resolved = fr.id ? callIdToSkillName.get(fr.id) : undefined;
+      if (resolved?.length === 1) {
+        dropped.add(resolved[0]!);
+      } else {
+        hasUnresolvableBody = true;
+      }
+    }
+  }
+  if (hasUnresolvableBody) {
     // An unresolvable body still counts as a dropped body: its skill must
     // not stay tracked with no resident body (the deadlock direction).
-    const hasUnresolvableBody = entries.some((entry) =>
-      entry.parts?.some((part) => {
-        const fr = part.functionResponse;
-        return (
-          fr?.name === ToolNames.SKILL &&
-          isSkillBodyOutput(fr.response?.['output'])
-        );
-      }),
+    const tracker = getLoadedSkillTracker(toolRegistry);
+    tracker?.clearLoadedSkills();
+    debugLogger.debug(
+      `[SKILL_TRACKING] blanket-cleared loaded-skill tracking after ` +
+        `${logTag} (stripped body with unresolvable call id)`,
     );
-    if (hasUnresolvableBody) {
-      const tracker = getLoadedSkillTracker(toolRegistry);
-      tracker?.clearLoadedSkills();
-      debugLogger.debug(
-        `[SKILL_TRACKING] blanket-cleared loaded-skill tracking after ` +
-          `${logTag} (stripped body with unresolvable call id)`,
-      );
-    }
+    return;
+  }
+  if (dropped.size === 0) {
     return;
   }
   const resident = new Set(resolveLoadedSkillNames(history, history));
-  const names = dropped.filter((name) => !resident.has(name));
+  const names = [...dropped].filter((name) => !resident.has(name));
   if (names.length === 0) {
     return;
   }

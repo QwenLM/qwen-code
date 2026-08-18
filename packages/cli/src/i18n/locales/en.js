@@ -2849,6 +2849,8 @@ export default {
     'Skill "{{name}}" is not loaded in context.',
   'Skill "{{name}}" had no body left in context; tracking cleared so it can be reloaded.':
     'Skill "{{name}}" had no body left in context; tracking cleared so it can be reloaded.',
+  'Skill "{{name}}" could not be unloaded safely: a skill body in context has no call id and cannot be attributed. Tracking is kept to avoid a duplicate injection on reload.':
+    'Skill "{{name}}" could not be unloaded safely: a skill body in context has no call id and cannot be attributed. Tracking is kept to avoid a duplicate injection on reload.',
   'Unloaded skill "{{name}}" (~{{tokens}} tokens freed). Invoke it again to reload.':
     'Unloaded skill "{{name}}" (~{{tokens}} tokens freed). Invoke it again to reload.',
   '"{{name}}" is not a skill (it may be a model-invocable command); /unskill only unloads skill bodies.':

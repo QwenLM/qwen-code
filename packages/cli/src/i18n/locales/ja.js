@@ -2107,6 +2107,8 @@ export default {
     'スキル "{{name}}" はコンテキストに読み込まれていません。',
   'Skill "{{name}}" had no body left in context; tracking cleared so it can be reloaded.':
     'スキル "{{name}}" の本文はコンテキストに残っていません。追跡状態をクリアしたので再読み込みできます。',
+  'Skill "{{name}}" could not be unloaded safely: a skill body in context has no call id and cannot be attributed. Tracking is kept to avoid a duplicate injection on reload.':
+    'スキル "{{name}}" を安全にアンロードできませんでした：コンテキスト内のスキル本文に呼び出し id がなく、帰属を特定できません。再読み込み時の重複注入を避けるため追跡を保持します。',
   'Unloaded skill "{{name}}" (~{{tokens}} tokens freed). Invoke it again to reload.':
     'スキル "{{name}}" をアンロードしました（約 {{tokens}} トークンを解放）。再度呼び出すと再読み込みされます。',
   '"{{name}}" is not a skill (it may be a model-invocable command); /unskill only unloads skill bodies.':

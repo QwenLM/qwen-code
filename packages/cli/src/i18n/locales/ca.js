@@ -2860,6 +2860,8 @@ export default {
     'L’habilitat "{{name}}" no està carregada al context.',
   'Skill "{{name}}" had no body left in context; tracking cleared so it can be reloaded.':
     'L’habilitat "{{name}}" ja no tenia cos al context; s’ha esborrat el seguiment perquè es pugui recarregar.',
+  'Skill "{{name}}" could not be unloaded safely: a skill body in context has no call id and cannot be attributed. Tracking is kept to avoid a duplicate injection on reload.':
+    "L'habilitat \"{{name}}\" no s'ha pogut descarregar amb seguretat: un cos d'habilitat al context no té identificador de crida i no es pot atribuir. Es manté el seguiment per evitar una injecció duplicada en recarregar.",
   'Unloaded skill "{{name}}" (~{{tokens}} tokens freed). Invoke it again to reload.':
     'Habilitat "{{name}}" descarregada (~{{tokens}} tokens alliberats). Invoca-la de nou per recarregar-la.',
   '"{{name}}" is not a skill (it may be a model-invocable command); /unskill only unloads skill bodies.':

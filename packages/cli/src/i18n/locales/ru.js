@@ -2314,6 +2314,8 @@ export default {
     'Навык "{{name}}" не загружен в контекст.',
   'Skill "{{name}}" had no body left in context; tracking cleared so it can be reloaded.':
     'Тела навыка "{{name}}" больше нет в контексте; отслеживание сброшено, и его можно перезагрузить.',
+  'Skill "{{name}}" could not be unloaded safely: a skill body in context has no call id and cannot be attributed. Tracking is kept to avoid a duplicate injection on reload.':
+    'Навык "{{name}}" не удалось безопасно выгрузить: тело навыка в контексте не имеет идентификатора вызова и не может быть атрибутировано. Отслеживание сохранено, чтобы избежать дублирующей инъекции при перезагрузке.',
   'Unloaded skill "{{name}}" (~{{tokens}} tokens freed). Invoke it again to reload.':
     'Навык "{{name}}" выгружен (освобождено ~{{tokens}} токенов). Вызовите его снова для перезагрузки.',
   '"{{name}}" is not a skill (it may be a model-invocable command); /unskill only unloads skill bodies.':

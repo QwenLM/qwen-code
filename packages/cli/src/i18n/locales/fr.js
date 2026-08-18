@@ -2346,6 +2346,8 @@ export default {
     'La compétence "{{name}}" n’est pas chargée dans le contexte.',
   'Skill "{{name}}" had no body left in context; tracking cleared so it can be reloaded.':
     'La compétence "{{name}}" n’avait plus de corps dans le contexte ; le suivi a été réinitialisé pour permettre son rechargement.',
+  'Skill "{{name}}" could not be unloaded safely: a skill body in context has no call id and cannot be attributed. Tracking is kept to avoid a duplicate injection on reload.':
+    'La compétence "{{name}}" n’a pas pu être déchargée en toute sécurité : un corps de compétence dans le contexte n’a pas d’identifiant d’appel et ne peut pas être attribué. Le suivi est conservé pour éviter une injection en double au rechargement.',
   'Unloaded skill "{{name}}" (~{{tokens}} tokens freed). Invoke it again to reload.':
     'Compétence "{{name}}" déchargée (~{{tokens}} tokens libérés). Invoquez-la à nouveau pour la recharger.',
   '"{{name}}" is not a skill (it may be a model-invocable command); /unskill only unloads skill bodies.':
