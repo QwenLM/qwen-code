@@ -15811,6 +15811,82 @@ describe('createServeApp', () => {
       expect(clearRes.body.color).toBeNull();
     });
 
+    it('does not repeat an organized row whose live watermark leads its mtime', async () => {
+      // The page-1 cursor is encoded from merged activity keys. A later page
+      // that keyed the same row by persisted mtime alone would place the row
+      // behind the cursor boundary and return it a second time, displacing a
+      // genuinely new row.
+      const liveId = '550e8400-e29b-41d4-a716-446655450000';
+      await writeStoredSession({
+        sessionId: liveId,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T11:00:00.000Z',
+        prompt: 'live and persisted',
+        mtime: new Date('2026-05-17T12:00:00.000Z'),
+      });
+      for (let i = 0; i < 2; i++) {
+        await writeStoredSession({
+          sessionId: `550e8400-e29b-41d4-a716-44665545000${i + 1}`,
+          cwd: WS_BOUND,
+          timestamp: '2026-05-17T11:00:00.000Z',
+          prompt: `persisted ${i}`,
+          mtime: new Date(`2026-05-17T12:0${i + 1}:00.000Z`),
+        });
+      }
+      // The transcript flush is still queued, so the watermark leads the mtime.
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: liveId,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T11:00:00.000Z',
+            updatedAt: '2026-05-17T12:05:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+          },
+        ],
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, boundWorkspace: WS_BOUND },
+      );
+      const host = (req: request.Test): request.Test =>
+        req.set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      const page1 = await host(
+        request(app).get(
+          `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?view=organized&size=2`,
+        ),
+      );
+      expect(page1.status).toBe(200);
+      // The watermark sorts the live row to the top even though its mtime is
+      // the oldest of the three.
+      expect(
+        page1.body.sessions.map((s: { sessionId: string }) => s.sessionId),
+      ).toEqual([liveId, '550e8400-e29b-41d4-a716-446655450002']);
+
+      const page2 = await host(
+        request(app).get(
+          `/workspace/${encodeURIComponent(
+            WS_BOUND,
+          )}/sessions?view=organized&size=2&cursor=${encodeURIComponent(
+            page1.body.nextCursor as string,
+          )}`,
+        ),
+      );
+      expect(page2.status).toBe(200);
+      const allIds = [...page1.body.sessions, ...page2.body.sessions].map(
+        (session: { sessionId: string }) => session.sessionId,
+      );
+      expect(allIds).toEqual([
+        liveId,
+        '550e8400-e29b-41d4-a716-446655450002',
+        '550e8400-e29b-41d4-a716-446655450001',
+      ]);
+      expect(new Set(allIds).size).toBe(3);
+    });
+
     it('paginates organized sessions with opaque cursors', async () => {
       for (let i = 0; i < 4; i++) {
         await writeStoredSession({

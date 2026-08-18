@@ -670,17 +670,17 @@ async function listOrganizedWorkspaceSessionsForResponse(
     );
   }
 
-  if (
-    readOptions.mergeLive !== false &&
-    archiveState !== 'archived' &&
-    isFirstPage
-  ) {
+  if (readOptions.mergeLive !== false && archiveState !== 'archived') {
     try {
       const liveSessions = bridge.listWorkspaceSessions(workspaceCwd);
       for (const live of liveSessions) {
         const existing = bySessionId.get(live.sessionId);
         const organization = snapshot.sessions.get(live.sessionId);
         if (existing) {
+          // Merged on every page, not just the first: the page-1 cursor is
+          // encoded from merged activity keys, so a later page that keyed the
+          // same row by its persisted mtime alone would re-admit a row whose
+          // watermark leads storage and return it twice.
           bySessionId.set(
             live.sessionId,
             applyOrganization(
@@ -689,6 +689,9 @@ async function listOrganizedWorkspaceSessionsForResponse(
             ),
           );
         } else if (
+          // A live-only row has no persisted key to page by, so it stays a
+          // first-page-only insertion as before.
+          isFirstPage &&
           // `listAllPersistedSummaries` already scanned every persisted
           // session when the scan wasn't truncated, so a `sessionId` missing
           // from `bySessionId` is definitively new — no disk re-check
@@ -697,12 +700,12 @@ async function listOrganizedWorkspaceSessionsForResponse(
           // above and this point: `existing` stayed undefined but
           // `sessionExists` flipped to true, silently dropping the live
           // session from the response instead of merging it.
-          !persisted.truncated ||
-          !(await (readOptions.signal
-            ? sessionService.sessionExists(live.sessionId, {
-                signal: readOptions.signal,
-              })
-            : sessionService.sessionExists(live.sessionId)))
+          (!persisted.truncated ||
+            !(await (readOptions.signal
+              ? sessionService.sessionExists(live.sessionId, {
+                  signal: readOptions.signal,
+                })
+              : sessionService.sessionExists(live.sessionId))))
         ) {
           bySessionId.set(
             live.sessionId,
