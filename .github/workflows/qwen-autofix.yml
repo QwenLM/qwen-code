@@ -6259,8 +6259,11 @@ jobs:
             # load-bearing for the same reason: the scanner carries its flags
             # across pageInfo objects and breaks at the first one yielding
             # both, so alphabetizing to pageInfo{endCursor hasNextPage} makes
-            # it break on the outer endCursor with hasNextPage already true
-            # from the last inner page — the same silent stop after page one.
+            # it break on the outer endCursor while hasNextPage still carries
+            # the last INNER page's value (almost always false — thread comment
+            # pages rarely truncate, and the outer page's own hasNextPage is
+            # read only after the break) — gh then returns no cursor and the
+            # walk silently stops after page one.
             if [[ -s "${WORKDIR}/resolved-comments.txt" || -s "${WORKDIR}/comment-replies.json" ]]; then
               THREADS_FETCH_OK='true'
               THREADS_RAW="$(gh api graphql --paginate -f owner="${REPO%%/*}" -f name="${REPO##*/}" -F pr="${PR}" -f query='

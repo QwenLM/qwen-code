@@ -15777,9 +15777,11 @@ exit 1
     // Field order, not just presence: gh's cursor scanner carries its flags
     // across pageInfo objects and breaks at the first one yielding both
     // fields, so pageInfo{endCursor hasNextPage} would break on the outer
-    // endCursor with hasNextPage already true from the last inner page — gh
-    // then stops after page one with exit 0 and no warning, restoring the
-    // oldest-hundred bug silently. Do not "fix" this pin by reordering it.
+    // endCursor while hasNextPage still carries the last INNER page's value —
+    // almost always false, and the outer page's own hasNextPage is read only
+    // after the break. gh then returns no cursor and stops after page one with
+    // exit 0 and no warning, restoring the oldest-hundred bug silently. Do not
+    // "fix" this pin by reordering it.
     expect(block).toContain('pageInfo{hasNextPage endCursor}');
 
     const matching = runResolve();
