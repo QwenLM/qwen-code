@@ -91,15 +91,39 @@ jobs:
           # allowlist still hold), strip trailing slashes, refuse the known
           # roots, and refuse anything outside the runner workspace.
           WS="${GITHUB_WORKSPACE:?}"
+          # Prepare the allowlist root BEFORE the heal: the heal's containment
+          # match needs the same canonical, slash-free root the allowlist uses
+          # — an empty raw $RUNNER_WORKSPACE degenerates the pattern to the
+          # match-all "/*" (the heal would mutate an arbitrary path before
+          # ${RUNNER_WORKSPACE:?} aborts the step), a trailing-slashed one to
+          # "//*" (refusing a legitimate heal).
+          RWS="${RUNNER_WORKSPACE:?}"
+          RWS="$(realpath -m -- "$RWS" 2>/dev/null || printf '%s' "$RWS")"
+          while [ "${RWS%/}" != "$RWS" ]; do RWS="${RWS%/}"; done
+          if [ -z "$RWS" ]; then echo "::error::refusing to wipe: runner workspace resolved to /"; exit 1; fi
+          # Trailing slashes hide a symlink from the heal's predicates: both
+          # [ -L "$WS/" ] and [ ! -d "$WS/" ] resolve THROUGH the link and
+          # report its target, so the corruption stays invisible and the wedge
+          # survives.
+          while [ "${WS%/}" != "$WS" ]; do WS="${WS%/}"; done
           # Heal a workspace replaced by a symlink (or any non-directory)
           # BEFORE canonicalization: `realpath -m` resolves through the link,
           # the allowlist then refuses the target, and that refusal removes
           # nothing — every later job on the runner would die at this step.
           # On the raw path `rm -f` removes the link itself, never follows it.
           if [ -L "$WS" ] || [ ! -d "$WS" ]; then
+            # The heal matches the RAW path, so refuse the one spelling a raw
+            # match cannot judge: ".." components pass the pattern as a string
+            # while the kernel resolves them outside the matched root.
             case "$WS" in
-              "$RUNNER_WORKSPACE"/*) rm -f -- "$WS" && mkdir -- "$WS" ;;
-              *) echo "::error::refusing to wipe workspace outside the runner workspace: ${WS}"; exit 1 ;;
+              ..|../*|*/..|*/../*) echo "::error::refusing to heal non-canonical workspace path: ${WS}"; exit 1 ;;
+            esac
+            case "$WS" in
+              "$RWS"/*)
+                echo "::warning::healing workspace ${WS}: was a symlink or non-directory (target: $(readlink -- "$WS" 2>/dev/null || echo none))"
+                rm -f -- "$WS" && mkdir -- "$WS"
+                ;;
+              *) echo "::error::refusing to heal workspace outside the runner workspace: ${WS} (runner workspace: ${RWS})"; exit 1 ;;
             esac
           fi
           WS="$(realpath -m -- "$WS" 2>/dev/null || printf '%s' "$WS")"
@@ -107,13 +131,9 @@ jobs:
           case "$WS" in
             /|/home|/root|/usr*|/etc*|/var|"") echo "::error::refusing to wipe suspicious workspace path: ${WS}"; exit 1 ;;
           esac
-          RWS="${RUNNER_WORKSPACE:?}"
-          RWS="$(realpath -m -- "$RWS" 2>/dev/null || printf '%s' "$RWS")"
-          while [ "${RWS%/}" != "$RWS" ]; do RWS="${RWS%/}"; done
-          if [ -z "$RWS" ]; then echo "::error::refusing to wipe: runner workspace resolved to /"; exit 1; fi
           case "$WS" in
             "$RWS"/*) ;;
-            *) echo "::error::refusing to wipe workspace outside the runner workspace: ${WS}"; exit 1 ;;
+            *) echo "::error::refusing to wipe workspace outside the runner workspace: ${WS} (runner workspace: ${RWS})"; exit 1 ;;
           esac
           find "$WS" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
 
