@@ -2267,6 +2267,8 @@ Response:
 
 With `view=organized`, the daemon reads `<Storage.getProjectDir(cwd)>/session-organization.v1.json`, returns pinned sessions first, then activity time descending, and then `sessionId` for stable ties. The organized cursor is opaque base64url JSON and must not be reused with the legacy recent list. `pinned` is a virtual filter, not a group. `groupId: null` means ungrouped. Archived sessions keep their organization metadata, but `archiveState=archived&view=organized` still returns only archived sessions.
 
+Activity-ordered cursors — the organized view and the `parentSessionId` / `sourceType` filtered lists — are not snapshot-isolated, and a trusted active list orders rows by the later of the transcript mtime and the live activity watermark. A live watermark is in-memory only, so a session whose live entry retires between two page fetches falls back to its mtime and can be returned again on a later page. A caller that accumulates pages keys rows by `sessionId`; a caller that needs a coherent view reloads from the first page after an activity change.
+
 Additional fields may appear on each session when `view=organized`:
 
 ```json

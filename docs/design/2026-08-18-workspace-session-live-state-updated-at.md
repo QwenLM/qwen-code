@@ -313,6 +313,18 @@ live `updatedAt` makes that movement observable in activity-based ordering but
 does not introduce a stronger pagination guarantee. Clients that require a
 fresh first page reload it after an activity change.
 
+One movement mode is new. Before this change an activity key came from
+transcript mtime alone and could only advance, so a row could be skipped between
+pages but never repeated. A live watermark that leads mtime is not durable: when
+the live entry retires mid-pass the row's key falls back to mtime, so a page
+whose cursor was encoded from the higher watermark can admit that row again.
+Activity-cursor pages are therefore a multiset over a pass, and callers that
+accumulate pages key rows by `sessionId`. Holding the key stable across
+retirement requires the cursor to carry the key already emitted per identity,
+which changes the opaque cursor contract on every activity-cursor route; that is
+tracked in issue [#9419](https://github.com/QwenLM/qwen-code/issues/9419) rather
+than folded into this timestamp change.
+
 ## Bridge and Route Implementation
 
 The server implementation should make the smallest possible change:
