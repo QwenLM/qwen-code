@@ -139,14 +139,52 @@ export class DwsCommandError extends Error {
   }
 }
 
+/**
+ * The errno family `uv_spawn` reports when it fails BEFORE the child ever
+ * runs. Nothing was sent, so the caller can retry the whole task without
+ * risking a duplicate delivery. The resource errnos matter as much as the
+ * path ones: under fd or memory exhaustion the daemon never starts `dws`, and
+ * classifying that as `unknown` makes the reply paths in dws-channel.ts drop a
+ * user's answer permanently on one log line.
+ *
+ * Everything else the callback can report happened with a child already
+ * running — a non-zero exit (`code` is a number), a timeout kill (`code` is
+ * null), an abort (`ABORT_ERR`), a `maxBuffer` overrun
+ * (`ERR_CHILD_PROCESS_STDIO_MAXBUFFER`) — so whether the command sent
+ * anything is genuinely unknown and a retry could duplicate it.
+ */
 const DWS_NOT_SENT_ERROR_CODES = new Set([
   'E2BIG',
   'EACCES',
+  'EAGAIN',
+  'EBUSY',
+  'EFAULT',
+  'EIO',
+  'EISDIR',
   'ELOOP',
+  'EMFILE',
+  'ENAMETOOLONG',
+  'ENFILE',
   'ENOENT',
   'ENOEXEC',
+  'ENOMEM',
+  'ENOSYS',
   'ENOTDIR',
+  'EPERM',
+  'ETXTBSY',
 ]);
+
+/**
+ * Classify an `execFile` callback error by its `code`. Exported so the
+ * spawn-failure table can be driven directly: the resource errnos need fd or
+ * memory exhaustion to reproduce through a real spawn, which no unit test can
+ * stage safely.
+ */
+export function classifyDwsCommandFailure(code: unknown): DwsCommandOutcome {
+  return typeof code === 'string' && DWS_NOT_SENT_ERROR_CODES.has(code)
+    ? 'not_sent'
+    : 'unknown';
+}
 
 function runDwsProcess(
   executable: string,
@@ -169,10 +207,7 @@ function runDwsProcess(
         if (error) {
           const code = (error as NodeJS.ErrnoException & { code?: unknown })
             .code;
-          const outcome =
-            typeof code === 'string' && DWS_NOT_SENT_ERROR_CODES.has(code)
-              ? 'not_sent'
-              : 'unknown';
+          const outcome = classifyDwsCommandFailure(code);
           reject(
             new DwsCommandError(
               `DWS command failed${code === undefined ? '' : ` (${String(code)})`}.`,

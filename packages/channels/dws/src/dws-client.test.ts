@@ -6,6 +6,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import {
+  classifyDwsCommandFailure,
   DwsClient,
   DwsCommandError,
   parseDwsImEvent,
@@ -1149,6 +1150,51 @@ describe('DwsClient', () => {
 
     expect(error).toBeInstanceOf(DwsCommandError);
     expect(error).toMatchObject({ outcome: 'not_sent' });
+  });
+
+  it.each([
+    'E2BIG',
+    'EACCES',
+    'EAGAIN',
+    'EBUSY',
+    'EFAULT',
+    'EIO',
+    'EISDIR',
+    'ELOOP',
+    'EMFILE',
+    'ENAMETOOLONG',
+    'ENFILE',
+    'ENOENT',
+    'ENOEXEC',
+    'ENOMEM',
+    'ENOSYS',
+    'ENOTDIR',
+    'EPERM',
+    'ETXTBSY',
+  ])('classifies the spawn failure %s as not sent', (code) => {
+    // The resource errnos (EMFILE/ENFILE/ENOMEM/EAGAIN) are the ones that were
+    // missing: under fd or memory exhaustion `uv_spawn` fails before `dws`
+    // runs, so nothing was sent — but classified `unknown`, the todo and
+    // document reply paths in dws-channel.ts swallow the failure and the
+    // user's answer is dropped for good instead of being retried.
+    expect(classifyDwsCommandFailure(code)).toBe('not_sent');
+  });
+
+  it.each([
+    // A timeout kill: the child ran, `code` is null and `signal` carries SIGTERM.
+    [null, 'a timeout kill'],
+    // An abort through the AbortSignal.
+    ['ABORT_ERR', 'an abort'],
+    // stdout past maxBuffer — the command ran and may well have sent.
+    ['ERR_CHILD_PROCESS_STDIO_MAXBUFFER', 'a maxBuffer overrun'],
+    // A non-zero exit: execFile reports the exit status as a NUMBER.
+    [1, 'a non-zero exit'],
+    [127, 'a shell not-found exit'],
+    [undefined, 'a codeless error'],
+  ])('leaves %j (%s) unknown', (code) => {
+    // Each of these happened with a child already running, so a retry could
+    // duplicate a delivery the first attempt made.
+    expect(classifyDwsCommandFailure(code)).toBe('unknown');
   });
 
   it.each(['', 'not-json'])(
