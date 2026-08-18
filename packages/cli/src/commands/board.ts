@@ -34,6 +34,7 @@ import {
   raiseDecision,
   listDecisions,
   resolveDecision,
+  getBoardSection,
   type DecisionKind,
 } from '@qwen-code/qwen-code-core';
 import { resolveBoardName, resolveParticipantName } from './board/context.js';
@@ -76,6 +77,19 @@ async function run(fn: () => Promise<void>): Promise<void> {
   }
 }
 
+/**
+ * Narrow a snapshot to one participant. Decisions are deliberately kept: they
+ * are the human's, and a participant that hides them cannot tell the user what
+ * is blocking the board.
+ */
+function mine(snap: BoardSnapshot, who: string): BoardSnapshot {
+  return {
+    ...snap,
+    tasks: snap.tasks.filter((t) => t.owner === who),
+    asks: snap.asks.filter((a) => a.to === who || a.from === who),
+  };
+}
+
 async function snapshot(name: string): Promise<BoardSnapshot> {
   const [tasks, asks, decisions] = await Promise.all([
     listBoardTasks(name),
@@ -101,13 +115,40 @@ export const boardCommand: CommandModule = {
       .option('json', { type: 'boolean', describe: 'Emit JSON' })
 
       .command({
-        command: 'show',
-        describe: 'Print the board once',
+        command: 'protocol',
+        describe:
+          'Print instructions to paste into an agent that is not Qwen Code',
         handler: (argv) =>
           run(async () => {
-            const name = board(argv as CommonArgs);
+            const a = argv as CommonArgs;
+            const name = board(a);
+            const who = participant(a);
+            // `--with` sets QWEN_BOARD in a pane's environment, but a foreign
+            // agent never reads it. Nothing we control can inject into that
+            // agent's prompt, so the honest answer is to make the text trivial
+            // to hand over rather than pretend the env var is enough.
+            console.log(getBoardSection({ board: name, as: who }).trim());
+          }),
+      })
+
+      .command({
+        command: 'show',
+        describe: 'Print the board once',
+        builder: (y: Argv) =>
+          y.option('mine', {
+            type: 'boolean',
+            describe: 'Only what is addressed to or owned by this participant',
+          }),
+        handler: (argv) =>
+          run(async () => {
+            const a = argv as CommonArgs & { mine?: boolean };
+            const name = board(a);
             const snap = await snapshot(name);
-            emit(argv as CommonArgs, snap, renderBoard(snap));
+            emit(
+              a,
+              snap,
+              renderBoard(a.mine ? mine(snap, participant(a)) : snap),
+            );
           }),
       })
 

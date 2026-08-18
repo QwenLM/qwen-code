@@ -174,7 +174,18 @@ export const fleetCommand: CommandModule = {
           }
           a.with.forEach((cmd, i) => {
             const name = `ext-${i + 1}`;
-            specs.push({ name, command: paneCommand(board, name, cmd) });
+            // A foreign agent never reads QWEN_BOARD, and nothing we control
+            // can inject into its prompt. Printing the protocol into its pane
+            // first is the most we can do without pretending otherwise: the
+            // operator hands it over, and it is right there to copy.
+            specs.push({
+              name,
+              command: paneCommand(
+                board,
+                name,
+                `sh -c ${shellQuote(`qwen board protocol; exec ${cmd}`)}`,
+              ),
+            });
           });
 
           // No explicit sizes: an N-way split computed by hand hits `-l 100%`
