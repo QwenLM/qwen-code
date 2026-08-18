@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events';
 import {
   existsSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -2473,6 +2474,32 @@ describe('DingtalkChannel quoted media', () => {
     ).onMessage(downstream);
   }
 
+  function sendDirectMedia(
+    channel: DingtalkChannelInstance,
+    msgtype: string,
+    content: Record<string, unknown>,
+  ): void {
+    const downstream = {
+      data: JSON.stringify({
+        msgId: `direct-${msgtype}`,
+        conversationType: '1',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        chatbotUserId: 'bot-1',
+        msgtype,
+        content,
+      }),
+      headers: { messageId: `direct-${msgtype}` },
+    } as unknown as DWClientDownStream;
+
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+  }
+
   it('downloads a replied picture and attaches it to the prompt', async () => {
     const downloadCodes = mockMediaDownload(
       'image/png',
@@ -2599,6 +2626,121 @@ describe('DingtalkChannel quoted media', () => {
     },
   );
 
+  it('does not download a quoted message with an unmapped msgType even when it carries a downloadCode', async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockRejectedValue(new Error('unexpected download'));
+    const channel = createChannel();
+
+    replyToMedia(channel, 'richText', { downloadCode: 'quoted-rt-code' });
+
+    await vi.waitFor(() => {
+      expect(channel.handleInbound).toHaveBeenCalledOnce();
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(
+      vi.mocked(channel.handleInbound).mock.calls[0]![0],
+    ).not.toHaveProperty('attachments');
+  });
+
+  it('attaches both the own media and the quoted media of one message', async () => {
+    const downloadCodes = mockMediaDownload(
+      'image/png',
+      new Uint8Array([1, 2, 3]),
+    );
+    const channel = createChannel();
+
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'quoted-combo',
+        conversationType: '2',
+        conversationId: 'cid-quoted-media',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        chatbotUserId: 'bot-1',
+        isInAtList: true,
+        msgtype: 'picture',
+        content: { downloadCode: 'own-picture-code' },
+        text: {
+          content: '@DingTalkTest inspect both',
+          isReplyMsg: true,
+          repliedMsg: {
+            msgId: 'media-file',
+            msgType: 'file',
+            senderId: 'sender-1',
+            content: {
+              downloadCode: 'quoted-file-code',
+              fileName: 'report.pdf',
+            },
+          },
+        },
+      }),
+      headers: { messageId: 'quoted-combo' },
+    } as unknown as DWClientDownStream;
+
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+
+    await vi.waitFor(() => {
+      expect(channel.handleInbound).toHaveBeenCalledOnce();
+    });
+    expect(downloadCodes).toEqual(['own-picture-code', 'quoted-file-code']);
+    const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
+    expect(envelope.attachments).toHaveLength(2);
+    expect(envelope.attachments?.[0]).toEqual({
+      type: 'image',
+      data: Buffer.from([1, 2, 3]).toString('base64'),
+      mimeType: 'image/png',
+    });
+    expect(envelope.attachments?.[1]).toMatchObject({
+      type: 'file',
+      fileName: 'report.pdf',
+    });
+    const filePath = envelope.attachments?.[1]?.filePath;
+    if (filePath) tempDirs.add(dirname(filePath));
+  });
+
+  it('cleans the generated placeholder for a direct file message', async () => {
+    mockMediaDownload('application/octet-stream', new Uint8Array([7, 8, 9]));
+    const channel = createChannel();
+
+    sendDirectMedia(channel, 'file', {
+      downloadCode: 'direct-file-code',
+      fileName: 'notes.txt',
+    });
+
+    await vi.waitFor(() => {
+      expect(channel.handleInbound).toHaveBeenCalledOnce();
+    });
+    const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
+    const filePath = envelope.attachments?.[0]?.filePath;
+    if (filePath) tempDirs.add(dirname(filePath));
+    expect(envelope.text).toBe('');
+    expect(envelope.attachments).toMatchObject([
+      { type: 'file', fileName: 'notes.txt' },
+    ]);
+  });
+
+  it('cleans the generated placeholder for a direct audio message', async () => {
+    mockMediaDownload('audio/ogg', new Uint8Array([7, 8, 9]));
+    const channel = createChannel();
+
+    sendDirectMedia(channel, 'audio', { downloadCode: 'direct-audio-code' });
+
+    await vi.waitFor(() => {
+      expect(channel.handleInbound).toHaveBeenCalledOnce();
+    });
+    const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
+    const filePath = envelope.attachments?.[0]?.filePath;
+    if (filePath) tempDirs.add(dirname(filePath));
+    expect(envelope.text).toBe('');
+    expect(envelope.attachments?.[0]?.fileName).toMatch(/^dingtalk_audio_/);
+  });
+
   // R1-1: the placeholder cleanup was written for the DIRECT-media path,
   // where `extractContent` generates `(audio)` / `(file: name)` itself. On the
   // quoted path `envelope.text` is the user's own reply, so a reply reading
@@ -2634,28 +2776,52 @@ describe('DingtalkChannel quoted media', () => {
   // `processMessage`, whose catch sends the generic error reply and never
   // calls `handleInbound` — and the msgId is already deduped, so the retry is
   // dropped and the prompt is lost for good.
-  it.each([
-    ['an over-long file name', 'a'.repeat(300)],
-    ['a non-string file name', 12345 as unknown as string],
-  ])('still delivers the text when storing quoted media throws (%s)', async (
-    _label,
-    fileName,
-  ) => {
+  it('still delivers the text when an over-long quoted file name fails the store', async () => {
+    mockMediaDownload('application/octet-stream', new Uint8Array([1, 2, 3]));
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const channel = createChannel();
+    const channelFilesRoot = join(tmpdir(), 'channel-files');
+    const dirsBefore = new Set(
+      existsSync(channelFilesRoot) ? readdirSync(channelFilesRoot) : [],
+    );
+
+    replyToMedia(channel, 'file', {
+      downloadCode: 'quoted-file-code',
+      fileName: 'a'.repeat(300),
+    });
+
+    await vi.waitFor(() => {
+      expect(channel.handleInbound).toHaveBeenCalledOnce();
+    });
+    const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
+    expect(envelope.text).toBe('inspect this');
+    expect(envelope).not.toHaveProperty('attachments');
+    // The failed store must not leak its store directory into tmpdir.
+    const leaked = (
+      existsSync(channelFilesRoot) ? readdirSync(channelFilesRoot) : []
+    ).filter((entry) => !dirsBefore.has(entry));
+    expect(leaked).toEqual([]);
+  });
+
+  it('still delivers the text when the quoted file name is not a string', async () => {
     mockMediaDownload('application/octet-stream', new Uint8Array([1, 2, 3]));
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const channel = createChannel();
 
     replyToMedia(channel, 'file', {
       downloadCode: 'quoted-file-code',
-      fileName,
+      fileName: 12345,
     });
 
     await vi.waitFor(() => {
       expect(channel.handleInbound).toHaveBeenCalledOnce();
     });
-    expect(
-      vi.mocked(channel.handleInbound).mock.calls[0]![0].text,
-    ).toBe('inspect this');
+    const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
+    expect(envelope.text).toBe('inspect this');
+    // The attachment is still delivered, under a generated name.
+    expect(envelope.attachments?.[0]?.fileName).toMatch(/^dingtalk_file_/);
+    const filePath = envelope.attachments?.[0]?.filePath;
+    if (filePath) tempDirs.add(dirname(filePath));
   });
 
   it('keeps processing the prompt when a quoted-media download fails', async () => {

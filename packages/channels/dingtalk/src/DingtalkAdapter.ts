@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -1392,19 +1392,7 @@ export class DingtalkChannel extends ChannelBase {
       // (bot responses sent via webhook). Only user message quotes have text.
       const text = this.summarizeRepliedContent(replied);
       const downloadCode = replied.content?.downloadCode;
-      let mediaType: 'image' | 'file' | 'audio' | 'video' | undefined;
-      switch (replied.msgType) {
-        case 'picture':
-          mediaType = 'image';
-          break;
-        case 'file':
-        case 'audio':
-        case 'video':
-          mediaType = replied.msgType;
-          break;
-        default:
-          break;
-      }
+      const mediaType = this.mediaTypeFromMsgType(replied.msgType);
       return {
         referencedText: text || undefined,
         isReplyToBot,
@@ -1480,6 +1468,21 @@ export class DingtalkChannel extends ChannelBase {
   }
 
   /**
+   * Map a DingTalk message type to the media type used for downloads. Shared
+   * by the direct-media (`extractContent`) and quoted-media
+   * (`extractQuotedContext`) paths so the mapping cannot drift between them.
+   */
+  private mediaTypeFromMsgType(
+    msgType: string | undefined,
+  ): 'image' | 'file' | 'audio' | 'video' | undefined {
+    if (msgType === 'picture') return 'image';
+    if (msgType === 'file' || msgType === 'audio' || msgType === 'video') {
+      return msgType;
+    }
+    return undefined;
+  }
+
+  /**
    * Extract text and media download codes from an incoming DingTalk message.
    * Handles text, richText, picture, file, audio, and video message types.
    */
@@ -1488,6 +1491,7 @@ export class DingtalkChannel extends ChannelBase {
     downloadCodes: string[];
     mediaType?: 'image' | 'file' | 'audio' | 'video';
     fileName?: string;
+    placeholder?: string;
   } {
     const msgtype = data.msgtype || 'text';
 
@@ -1518,18 +1522,20 @@ export class DingtalkChannel extends ChannelBase {
       return {
         text: '(image)',
         downloadCodes: code ? [code] : [],
-        mediaType: 'image',
+        mediaType: this.mediaTypeFromMsgType(msgtype),
       };
     }
 
     if (msgtype === 'file') {
       const code = data.content?.downloadCode;
       const fileName = data.content?.fileName || undefined;
+      const placeholder = `(file: ${fileName || 'file'})`;
       return {
-        text: `(file: ${fileName || 'file'})`,
+        text: placeholder,
         downloadCodes: code ? [code] : [],
-        mediaType: 'file',
+        mediaType: this.mediaTypeFromMsgType(msgtype),
         fileName,
+        placeholder,
       };
     }
 
@@ -1539,7 +1545,8 @@ export class DingtalkChannel extends ChannelBase {
       return {
         text: recognition || '(audio)',
         downloadCodes: code ? [code] : [],
-        mediaType: 'audio',
+        mediaType: this.mediaTypeFromMsgType(msgtype),
+        placeholder: recognition ? undefined : '(audio)',
       };
     }
 
@@ -1548,7 +1555,8 @@ export class DingtalkChannel extends ChannelBase {
       return {
         text: '(video)',
         downloadCodes: code ? [code] : [],
-        mediaType: 'video',
+        mediaType: this.mediaTypeFromMsgType(msgtype),
+        placeholder: '(video)',
       };
     }
 
@@ -1559,18 +1567,13 @@ export class DingtalkChannel extends ChannelBase {
   /**
    * Download a media file and attach it to the envelope.
    * Images → base64 in envelope; files → saved to temp dir with path in text.
-   */
-  /**
-   * `cleanPlaceholderText` is the placeholder `extractContent` generated for
-   * THIS message's own media — `(audio)`, `(video)`, `(file: name)`. Only the
-   * direct-media call site has one, and only that call may erase it.
    *
-   * R1-1: the cleanup used to compare against reconstructed placeholders
-   * regardless of caller. On the quoted-media path `envelope.text` is the
-   * user's own reply, so a reply that happened to read exactly `(audio)` — or
-   * `(file: <the quoted file's name>)` — was silently blanked and the agent
-   * got an attachment with no prompt. A group `@Bot (audio)` reaches here as
-   * exactly `(audio)`, the mention having been stripped upstream.
+   * `cleanPlaceholderText` is the placeholder `extractContent` generated for
+   * this message's own media — `(audio)`, `(video)`, `(file: name)`. Only the
+   * direct-media call site has one, and only that call may erase it: on the
+   * quoted-media path `envelope.text` is the user's own reply, and a reply
+   * that happens to read exactly like a placeholder must survive (a group
+   * `@Bot (audio)` reaches here as exactly `(audio)` after mention removal).
    */
   private async attachMedia(
     envelope: Envelope,
@@ -1622,10 +1625,11 @@ export class DingtalkChannel extends ChannelBase {
       // `seenMessages`, so DingTalk's retry is deduped and the user's prompt
       // is lost for good. Degrade the way a failed download already does:
       // skip the attachment, keep the text.
+      let dir: string | undefined;
       let filePath: string;
       let safeName: string;
       try {
-        const dir = join(tmpdir(), 'channel-files', randomUUID());
+        dir = join(tmpdir(), 'channel-files', randomUUID());
         mkdirSync(dir, { recursive: true });
         safeName =
           basename(typeof fileName === 'string' ? fileName : '') ||
@@ -1633,6 +1637,15 @@ export class DingtalkChannel extends ChannelBase {
         filePath = join(dir, safeName);
         writeFileSync(filePath, media.buffer);
       } catch (error) {
+        // The store directory (and any partial file) is useless without the
+        // attachment — remove it so failed stores do not accumulate in tmpdir.
+        if (dir) {
+          try {
+            rmSync(dir, { recursive: true, force: true });
+          } catch {
+            // Best effort; the degraded delivery below is the contract.
+          }
+        }
         process.stderr.write(
           `[DingTalk:${this.name}] Cannot store media, delivering the text without it: ${sanitizeLogText(
             error instanceof Error ? error.message : String(error),
@@ -1810,9 +1823,7 @@ export class DingtalkChannel extends ChannelBase {
             content.downloadCodes[0]!,
             content.mediaType,
             content.fileName,
-            content.mediaType === 'file'
-              ? `(file: ${content.fileName || 'file'})`
-              : `(${content.mediaType})`,
+            content.placeholder,
           );
         }
         if (quoted.media) {
