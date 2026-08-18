@@ -340,6 +340,7 @@ interface ChatEditorRenderProps {
   tokenCount?: number;
   contextWindow?: number;
   onShowContextUsage?: () => void;
+  disabled?: boolean;
   atWorkspaceCwd?: string;
   sessionId?: string;
   customization?: WebShellCustomization;

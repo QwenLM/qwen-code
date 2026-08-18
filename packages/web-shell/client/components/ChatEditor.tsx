@@ -1906,6 +1906,10 @@ export const ChatEditor = memo(
       };
     }, [hasAtMenu, hasSlashMenu, closeAtMenu, closeSlashMenu]);
 
+    // editorViewRef is stable for the component's lifetime, so this effect
+    // runs once and the glow stays attached to the initial contentDOM; it
+    // re-attaches only if the view ref itself is replaced (CodeMirror
+    // recreates contentDOM on view swap, which is uncommon).
     useEffect(() => {
       const glowRoot = containerRef.current;
       const inputEl = editorViewRef.current?.contentDOM;
@@ -2538,6 +2542,9 @@ export const ChatEditor = memo(
           onDragOver={handleUploadDragOver}
           onDragLeave={handleUploadDragLeave}
           onDropCapture={handleUploadDrop}
+          // Legacy marker from the pre-#8098 glow implementation; no CSS or
+          // script consumes it today, kept as-is to stay faithful to the
+          // restored original.
           data-dac-glow
           onClick={() => {
             setModeDropdownOpen(false);
