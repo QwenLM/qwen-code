@@ -57,19 +57,23 @@ the ledger before opening the PR.
 The split is not taste. `packages/core/package.json` exports `"./src/*"` and
 `"./dist/*"`, and `packages/core/src/index.ts` carries ~179 `export * from`
 lines, so **every file under `packages/core/src` is reachable from outside
-this repo**. No grep inside this repo can prove such a symbol has no consumer.
+this repo**. The release workflow npm-publishes `@qwen-code/audio-capture`
+and the eight `@qwen-code/channel-*` packages with `--access public`, so a
+symbol re-exported by their package entry is reachable the same way. No grep
+inside this repo can prove such a symbol has no consumer.
 
-| Territory                                                                                                     | Outcome                                                                        |
-| ------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| `packages/cli/src` — the whole package (`generated/` stays under the Never-a-target row below)                | Landable                                                                       |
-| `scripts/`, `esbuild.config.js`, `eslint.legacy-filenames.mjs`, root manifests                                | Landable                                                                       |
-| Whole files or directories nothing imports, anywhere outside `packages/core/src`                              | Landable                                                                       |
-| Anything under `packages/core/src`                                                                            | **Report-only** — published                                                    |
-| Any key in `packages/cli/src/config/settingsSchema.ts`                                                        | **Report-only** — see below                                                    |
-| `packages/sdk-*`, `packages/acp-bridge`, protocol/wire shapes                                                 | **Report-only** — out-of-repo consumers                                        |
-| `package.json` dependencies                                                                                   | **Report-only** — bundlers and postinstall hide consumers                      |
-| Comments, JSDoc, commented-out code                                                                           | **Out of scope** — `AGENTS.md` says do not delete existing comments as cleanup |
-| `packages/desktop`, `packages/desktop-shell`, `packages/cua-driver`, `packages/mobile-mcp`, `**/generated/**` | Never a target; always searched as consumers                                   |
+| Territory                                                                                                                                                                                                  | Outcome                                                                        |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `packages/cli/src` — the whole package (`generated/` stays under the Never-a-target row below)                                                                                                             | Landable                                                                       |
+| `scripts/`, `esbuild.config.js`, `eslint.legacy-filenames.mjs`, root manifests                                                                                                                             | Landable                                                                       |
+| Whole files or directories nothing imports, anywhere outside `packages/core/src`, `packages/audio-capture`, `packages/channels`, `packages/sdk-*`, `packages/acp-bridge`, and the Never-a-target row below | Landable                                                                       |
+| Anything under `packages/core/src`                                                                                                                                                                         | **Report-only** — published                                                    |
+| `packages/audio-capture`, `packages/channels`                                                                                                                                                              | **Report-only** — npm-published (`--access public`)                            |
+| Any key in `packages/cli/src/config/settingsSchema.ts`                                                                                                                                                     | **Report-only** — see below                                                    |
+| `packages/sdk-*`, `packages/acp-bridge`, protocol/wire shapes                                                                                                                                              | **Report-only** — out-of-repo consumers                                        |
+| `package.json` dependencies                                                                                                                                                                                | **Report-only** — bundlers and postinstall hide consumers                      |
+| Comments, JSDoc, commented-out code                                                                                                                                                                        | **Out of scope** — `AGENTS.md` says do not delete existing comments as cleanup |
+| `packages/desktop`, `packages/desktop-shell`, `packages/cua-driver`, `packages/mobile-mcp`, `**/generated/**`                                                                                              | Never a target; always searched as consumers                                   |
 
 A settings key with zero read sites is still not cleanup. `settings.ts:261`
 warns `Unknown setting '<key>' will be ignored` for any key not in the
@@ -115,10 +119,14 @@ the first comes up empty. Rotation is what stops the third run from
 re-searching the same hot directories.
 
 ```bash
-git fetch origin
+git fetch origin || exit 1
 # Fetch only updates the ref, but every grep below reads the working tree —
-# survey fresh code, not a stale checkout, by moving to origin/main.
-git switch --detach origin/main
+# survey fresh code from a throwaway worktree at origin/main. Never switch
+# the user's checkout: the survey is read-only and must leave the checkout
+# exactly as it found it.
+SURVEY="$(mktemp -d)/main"
+git worktree add --detach "$SURVEY" origin/main || exit 1
+cd "$SURVEY"
 SLICE=$(( 10#$(date -u +%V) % 4 ))
 ```
 

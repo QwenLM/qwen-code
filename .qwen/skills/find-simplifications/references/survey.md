@@ -9,12 +9,18 @@ gone, that is a finding about this document, not about the repo.
 
 ## 0 — Before searching
 
-1. **Survey fresh code** — `git fetch origin`, then
-   `git switch --detach origin/main`: fetch only updates the ref, while every
-   grep in this phase reads the working tree, so "work against `origin/main`"
-   means actually being on it. A local checkout drifts hundreds of commits
-   behind; a stale base invents dead surface someone already deleted, and
-   misses what landed since.
+1. **Survey fresh code** — `git fetch origin || exit 1`, then survey from a
+   throwaway worktree, never by switching the user's checkout:
+   `SURVEY="$(mktemp -d)/main"`,
+   `git worktree add --detach "$SURVEY" origin/main || exit 1`, and run every
+   grep below from `$SURVEY`. This phase is read-only, and a detached HEAD
+   left sitting in the user's checkout belongs to no branch. Fetch only
+   updates the ref, while every grep in this phase reads the working tree,
+   so "work against `origin/main`" means actually being on it. A local
+   checkout drifts hundreds of commits behind; a stale base invents dead
+   surface someone already deleted, and misses what landed since. Both
+   guards matter: when the fetch fails, `git worktree add` still succeeds
+   against the stale cached ref, and no grep below can see the staleness.
 2. **Read the ledger** (SKILL.md § The ledger). Collect every tombstoned id.
 3. **Pick the slice** and note it — you will report which territory you swept.
 4. **Calibrate the search.** Grep a symbol you know exists and confirm a hit.
@@ -53,7 +59,8 @@ its owning feature — cite that SHA. Cap at ~25 keys; a 1,300-line locale diff
 gets rubber-stamped or closed, never reviewed. Landable.
 
 **5. Added-then-removed scaffolding.** A flag, constant, route, or helper
-whose feature left. `git log -S '<symbol>' --format='%ad %h %s' --date=short`
+whose feature left.
+`git log --pickaxe-regex -S '\b<symbol>\b' --format='%ad %h %s' --date=short`
 shows the arrival and the departure. Landable **only** outside report-only
 territory — a settings key or a `packages/core` symbol in this shape is a
 deprecation decision, not cleanup.
@@ -92,13 +99,16 @@ goes on the ledger and what stops the next run re-deriving it.
 # whole file or directory:
 git log --follow --diff-filter=A --format=%ad --date=short -- <path> | tail -1
 # a symbol, key, or export — the symbol's age, not its file's:
-git log --follow -S '<exact symbol>' --format='%ad %h' --date=short -- <path> | tail -1
+git log --follow --pickaxe-regex -S '\b<exact symbol>\b' --format='%ad %h' --date=short -- <path> | tail -1
 ```
 
 `--follow` dates a surface at its creation, not its last rename — without it,
 a path-limited `git log` records a rename as an addition, and the gate
 silently suppresses surfaces that only look young. It requires exactly one
-pathspec.
+pathspec. `--pickaxe-regex` with `\b` anchors matters the same way: plain
+`-S` matches substrings, so an older, longer identifier that merely contains
+the symbol dates it early, and `tail -1` then fails the gate open toward
+deletion.
 
 Younger than ~90 days → **drop silently**, do not even file it. It is a
 feature someone is still wiring up. (90 days is a heuristic, not a measured
@@ -107,8 +117,10 @@ that landed last week is the fastest way to lose a reviewer for good.
 
 **3 — Published-surface escape.** Is the symbol reachable from outside the
 repo? Everything under `packages/core/src` is, via that package's `"./src/*"`
-export plus ~179 `export * from` lines in its `index.ts`. Any hit → report-only,
-no matter how clean the consumer grep looks.
+export plus ~179 `export * from` lines in its `index.ts`; everything under
+`packages/audio-capture` and `packages/channels` is too — the release
+workflow npm-publishes all eight packages with `--access public`. Any hit →
+report-only, no matter how clean the consumer grep looks.
 
 **4 — Full-corpus grep.** § 4 below. Any production consumer → drop.
 
@@ -127,7 +139,12 @@ which ones you ran.
 that pins behavior a user depends on keeps its subject alive even when
 nothing else imports it; a test that exists only to cover a symbol nothing
 calls dies with it. Integration tests count as consumers and live outside the
-production corpus — grep `integration-tests/` explicitly.
+production corpus — step 4's grep strips `*.test.*` and `__snapshots__`
+everywhere, so run a second pass without those exclusions:
+
+```bash
+"$RG" -n '<Symbol>' integration-tests <the candidate's own directory>
+```
 
 **7 — If it was once wired, find out why it was unwired.**
 
@@ -166,7 +183,9 @@ unless you can beat the doc.
   `.qwen/*` ignore rule hides tracked content outside the re-included subdirs
   (`commands/`, `skills/`, `agents/`, `team-memory/`, `review-context.json`)
   even from a named search, so sweep its tracked files with
-  `git ls-files .qwen | xargs "$RG" …` instead. Do not substitute
+  `git ls-files -z .qwen | xargs -0 "$RG" …` instead — the `-z`/`-0` pair
+  keeps a tracked path containing whitespace a single argument. Do not
+  substitute
   `--no-ignore`: it surfaces `.qwen/tmp/` scratch copies of this repo, the
   same phantom-consumer class as `.claude/worktrees/` — **never name that
   one**, every hit there is a phantom consumer.
@@ -210,14 +229,19 @@ nowhere; every static signal calls it rot. Then:
 **Drop silently.** Do not file it, do not mention it — a "should we delete
 your new subsystem?" question costs more trust than the finding is worth.
 
-**3. The naive count is 5x wrong.** `eslint.legacy-filenames.mjs` lists 559
-bare basenames. Checking "does a file with this basename exist" flags **36**
-stale entries. But `eslint.config.js:258-261` expands each entry to
-`**/${name}.ts` **and** `**/${name}.*.ts`, so `acpAgent` also covers
-`acpAgent.worktree.test.ts`, and 29 of those 36 are live. The true count is
-**7**. Model the consumer's matching semantics before counting; a candidate
-list built from a naive detector is 80% noise, and shipping it once is enough
-to make a reviewer stop reading.
+**3. The naive count is wrong in both directions.**
+`eslint.legacy-filenames.mjs` lists 559 bare basenames. Checking "does a
+file with this basename exist" flags **37** stale entries — and 32 of those
+37 are live, because the kebab-case rule's `ignores`
+(`eslint.config.js:277-282`) expand each entry to `**/${name}.ts` **and**
+`**/${name}.*.ts`, so `acpAgent` also covers `acpAgent.worktree.test.ts`.
+The same detector misses the other way: `eventBus` and `inMemoryChannel`
+look live, but only because same-named files exist in `packages/acp-bridge`,
+outside the rule's `packages/core/src` and `packages/cli/src` reach. Under
+the rule's actual semantics the true count is **7**. Model the consumer's
+matching semantics before counting; a candidate list built from a naive
+detector is noise in both directions, and shipping it once is enough to make
+a reviewer stop reading.
 
 **4. A feature decision wearing a refactor's clothes.**
 `general.dynamicCommandTranslation` (`config/settingsSchema.ts:632`) has no
@@ -241,5 +265,7 @@ excellent evidence for an issue, not for a PR.
    (consumers named with certainty) × (lines removed) and file them all.
 5. Write the ledger comment per SKILL.md § Output: survivors with their
    evidence, plus one line per rejected id and the step that killed it.
-6. **STOP.** Do not create a branch, do not edit code, do not open a PR.
-   Landing requires an assent and `references/land.md`.
+6. **STOP.** Return to the user's checkout and remove the survey worktree
+   (`git worktree remove "$SURVEY"`), leaving the checkout as §0 found it.
+   Do not create a branch, do not edit code, do not open a PR. Landing
+   requires an assent and `references/land.md`.

@@ -33,9 +33,10 @@ thing you removed:
 - its entry in `eslint.legacy-filenames.mjs`, if the deleted file had one —
   otherwise you have created a stale allowlist row while removing another;
   but first check the stem exempts nothing else
-  (`rg --files -g '**/<name>.ts' -g '**/<name>.*.ts'`): each entry expands to
-  both globs repo-wide, so if a surviving file shares the stem, keep the row
-  and note that on the ledger;
+  (`"$RG" --files packages/core/src packages/cli/src -g '**/<name>.ts' -g '**/<name>.*.ts'`):
+  each entry expands to both globs, and the rule they serve reaches only
+  `packages/core/src` and `packages/cli/src`, so if a surviving file there
+  shares the stem, keep the row and note that on the ledger;
 - its locale keys across all 9 files in `packages/cli/src/i18n/locales/`;
 - its rows in `docs/**` (users and developers alike) when the surface was
   documented;
@@ -74,6 +75,7 @@ that imports the symbol, which a targeted run never executes:
 
 ```bash
 "$RG" -n '\b<Symbol>\b' packages integrations integration-tests scripts \
+  .github docs-site \
   -g '*.test.*' -g '*.spec.*' -g '**/__snapshots__/**'
 ```
 
