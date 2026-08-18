@@ -15,8 +15,19 @@ export interface GitProbe {
   fetch(remote: string, ref: string): boolean;
   /** Does this ref resolve locally? */
   refExists(ref: string): boolean;
-  /** Merge-base of two refs, or null when there is none. */
-  mergeBase(a: string, b: string): string | null;
+  /**
+   * Merge-base of two refs.
+   *
+   * `status` is what separates "these histories share no ancestor" from "the
+   * probe could not answer": git exits 1 for the first, and 128 — or nothing
+   * at all, on a kill or a spawn failure — for the second. Collapsing both to
+   * a null sha is how a transient failure came to be reported as a
+   * deterministic refusal the recovery flow then refused to retry.
+   */
+  mergeBase(
+    a: string,
+    b: string,
+  ): { sha: string | null; status: number | null };
 }
 
 export interface MergeBaseResult {
@@ -30,6 +41,17 @@ export interface MergeBaseResult {
    * and the review silently examines the wrong diff. The caller says so.
    */
   baseFetchFailed: boolean;
+  /**
+   * True when a candidate ref resolved but the merge-base probe itself could
+   * not answer — an exit above 1, or a kill (the 120s timeout a large
+   * long-lived PR under CI load reaches). Distinct from `sha: null` with this
+   * false, which is the definitive shape: the probe ran and the histories
+   * genuinely share no ancestor, which a re-run reproduces exactly.
+   *
+   * The caller keys the RETRY class on it: a probe that could not answer is
+   * infrastructure, and the component that failed is one a re-run repeats.
+   */
+  probeUnavailable: boolean;
 }
 
 /**
@@ -54,13 +76,21 @@ export function resolveMergeBase(
   git: GitProbe,
 ): MergeBaseResult {
   const baseFetchFailed = !git.fetch(remote, baseRefName);
+  // Sticky across candidates: the tracking ref may fail to probe while the
+  // local fallback answers a definitive "no ancestor", and a round that saw
+  // one unanswerable probe has not established the deterministic shape.
+  let probeUnavailable = false;
   for (const candidate of [
     `refs/remotes/${remote}/${baseRefName}`,
     baseRefName,
   ]) {
     if (!git.refExists(candidate)) continue;
     const mb = git.mergeBase(candidate, headRef);
-    if (mb) return { sha: mb, baseFetchFailed };
+    if (mb.sha) return { sha: mb.sha, baseFetchFailed, probeUnavailable };
+    // Exit 1 is the answer "no common ancestor". Anything else — 128, or no
+    // status at all from a kill or a spawn failure — is the probe failing to
+    // answer, which says nothing about the histories.
+    if (mb.status !== 1) probeUnavailable = true;
   }
-  return { sha: null, baseFetchFailed };
+  return { sha: null, baseFetchFailed, probeUnavailable };
 }
