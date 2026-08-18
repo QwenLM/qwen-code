@@ -68,9 +68,10 @@ through the existing summary and live-state surfaces.
 
 - Let a client refresh the recency of an already-loaded live session using only
   the memory-only live-state response.
-- Establish a causal guarantee: after a client observes the formal terminal
-  event, a subsequently started live-state request that still returns the same
-  entry in the same bridge generation sees the terminal's activity timestamp.
+- Establish a causal guarantee: after a client observes the formal terminal for
+  a prompt that reached the running state, a subsequently started live-state
+  request that still returns the same entry in the same bridge generation sees
+  the terminal's activity timestamp.
 - Advance once for every prompt that reached the running state and published its
   first formal terminal, including success, error, cancellation, and deadline.
 - Keep the value strictly increasing for a live session even when multiple
@@ -195,19 +196,19 @@ for a live entry with no observed terminal in the current generation.
 
 ## Transition Matrix
 
-| Event                                                                | `updatedAt` behavior                                    | Catalog version behavior               |
-| -------------------------------------------------------------------- | ------------------------------------------------------- | -------------------------------------- |
-| Running prompt completes successfully                                | Advance once                                            | No change                              |
-| Running prompt returns a structured or transport error               | Advance once                                            | No change                              |
-| Running prompt is cancelled                                          | Advance once                                            | No change                              |
-| Running prompt reaches the daemon deadline                           | Advance once                                            | No change                              |
-| Running prompt is flushed during close, kill, crash, or shutdown     | Advance once if the entry still owns its first terminal | Membership removal advances separately |
-| Queued prompt is removed, cancelled, or expires before dispatch      | No change                                               | No change                              |
-| A late result attempts to publish after an earlier deadline terminal | No change; duplicate latch wins                         | No change                              |
-| Prompt admission, queue wait, start, or streamed update              | No change                                               | No change                              |
-| Attach, detach, heartbeat, permission wait, or user-question wait    | No change                                               | No change                              |
-| Live session registration or restore before a new terminal           | Field absent                                            | Membership revision advances           |
-| Bridge or runtime replacement                                        | Field starts absent                                     | New generation                         |
+| Event                                                                | `updatedAt` behavior                                                  | Catalog version behavior               |
+| -------------------------------------------------------------------- | --------------------------------------------------------------------- | -------------------------------------- |
+| Running prompt completes successfully                                | Advance once                                                          | No change                              |
+| Running prompt returns a structured or transport error               | Advance once                                                          | No change                              |
+| Running prompt is cancelled                                          | Advance once                                                          | No change                              |
+| Running prompt reaches the daemon deadline                           | Advance once                                                          | No change                              |
+| Running prompt is flushed during close, kill, crash, or shutdown     | Advance once if that prompt's terminal latch has not already been won | Membership removal advances separately |
+| Queued prompt is removed, cancelled, or expires before dispatch      | No change                                                             | No change                              |
+| A late result attempts to publish after an earlier deadline terminal | No change; duplicate latch wins                                       | No change                              |
+| Prompt admission, queue wait, start, or streamed update              | No change                                                             | No change                              |
+| Attach, detach, heartbeat, permission wait, or user-question wait    | No change                                                             | No change                              |
+| Live session registration or restore before a new terminal           | Field absent                                                          | Membership revision advances           |
+| Bridge or runtime replacement                                        | Field starts absent                                                   | New generation                         |
 
 An error or deadline may advance live activity even when transcript persistence
 is degraded or the child did not finish normally. This is deliberate: the
@@ -347,7 +348,7 @@ intentional additive effect than projecting a route-local value.
 | Workspace live-state                             | Returns optional activity watermark for the intended client optimization                 |
 | Full workspace session lists                     | Live/persisted merge and activity ordering can reflect the latest running terminal       |
 | Live-only session list and cursor                | Live rows are ordered by the populated activity timestamp instead of creation time alone |
-| `GET /session/:id/status`                        | Adds an already-typed optional field to the JSON response                                |
+| `GET /session/:id/status`                        | Adds the already-typed bridge-local field directly, without a persisted merge            |
 | Live Task thread summaries and cursors           | A running terminal advances the live task's `updatedAt`/change cursor                    |
 | Goals routes                                     | Ignore the new field; behavior is unchanged                                              |
 | Session-owner resolution and admission           | Read identity/ownership fields only; behavior is unchanged                               |
@@ -356,6 +357,10 @@ intentional additive effect than projecting a route-local value.
 The implementation PR must update exact-object tests for the affected public
 summary surfaces while retaining tests that prove unrelated ownership and
 status decisions do not start depending on the timestamp.
+
+`GET /session/:id/status` returns the bridge summary directly. Its `updatedAt`
+may therefore be earlier than a merged list response that selected a later
+persisted mtime; equality across those response surfaces is not guaranteed.
 
 ## TypeScript SDK and Capability
 
@@ -397,7 +402,9 @@ The server PR does not change Web Shell behavior, but the protocol is designed
 for a follow-up consumer with the following rules:
 
 1. `turnCompleted` carries both workspace cwd and session id.
-2. The client records a per-session completion sequence.
+2. The client records a per-session completion sequence only for a turn known
+   to have reached the running state. A queued-only terminal requires no
+   recency reconciliation.
 3. A live-state request snapshots pending sequences when the request starts.
 4. Only a response from a request started after that sequence was recorded may
    satisfy it.
@@ -411,6 +418,10 @@ The sequence is required because a second turn can complete while a live-state
 request is in flight. A set of session ids would let that older response clear
 the newer completion.
 
+A consumer that cannot distinguish a queued-only terminal may retain the
+existing rate-limited catalog fallback conservatively, but the protocol does
+not require a fallback for an event that produced no activity watermark.
+
 The client should keep the later of its catalog and live timestamps, and should
 only reorder when the effective value changes. It must not insert an unknown
 live session into source-, group-, or archive-filtered pages because live-state
@@ -423,22 +434,28 @@ servers, pagination boundaries, and sessions missing from the current page.
 
 The route's HTTP failure semantics do not change.
 
-| Condition                                      | Result                                                            |
-| ---------------------------------------------- | ----------------------------------------------------------------- |
-| No running terminal in current live generation | Session item omits `updatedAt`                                    |
-| Wall clock does not advance between terminals  | Logical `+1ms` preserves strict monotonicity                      |
-| Wall clock moves backward                      | Per-entry monotonicity prevents a live timestamp regression       |
-| Recorder is degraded or later flush fails      | Watermark still represents terminal activity; no durability claim |
-| Duplicate or late terminal                     | Existing latch suppresses another timestamp advance               |
-| Queued prompt never runs                       | No timestamp advance                                              |
-| Session disappears after terminal              | Live row disappears; persisted catalog remains authoritative      |
-| Daemon/runtime replacement                     | New catalog generation and initially absent live watermark        |
-| Client receives an invalid or missing field    | Ignore it and retain existing fallback behavior                   |
+| Condition                                                                 | Result                                                                                    |
+| ------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| No running terminal in current live generation                            | Session item omits `updatedAt`                                                            |
+| Wall clock does not advance between terminals                             | Logical `+1ms` preserves strict monotonicity                                              |
+| Wall clock moves backward                                                 | Per-entry monotonicity prevents a live timestamp regression                               |
+| Wall clock jumps forward and is later corrected                           | The watermark may remain in the future until time catches up or the live entry disappears |
+| Recorder is degraded or later flush fails                                 | Watermark still represents terminal activity; no durability claim                         |
+| Duplicate or late terminal                                                | Existing latch suppresses another timestamp advance                                       |
+| Queued prompt never runs                                                  | No timestamp advance or required recency confirmation                                     |
+| Session disappears after terminal                                         | Live row disappears; persisted catalog remains authoritative                              |
+| Daemon/runtime replacement                                                | New catalog generation and initially absent live watermark                                |
+| Client awaiting running-turn recency receives an invalid or missing field | Ignore it and retain existing fallback behavior                                           |
 
 No new logging is required on the high-frequency route. Existing route latency
 and request-count telemetry is sufficient. The implementation may add no
 per-terminal success log; doing so would add high-cardinality noise to an
 ordinary lifecycle path.
+
+A forward clock jump is accepted bridge-local watermark behavior. Correcting
+the value downward would violate strict monotonicity; while the entry remains
+live, the later-valid merge may therefore keep the future watermark ahead of a
+correct persisted mtime. Entry removal or bridge replacement ends that scope.
 
 ## Implementation PR Boundaries
 
@@ -473,6 +490,8 @@ name the complete downstream consumer audit above in its risk section.
 - A duplicate natural result arriving after a deadline does not advance again.
 - Two running terminals under a fixed `Date.now()` produce strictly increasing
   values.
+- A forward clock jump followed by a correction never decreases the watermark;
+  the bridge-local value resets only with entry or bridge replacement.
 - Heartbeat, attach/detach, interaction waiting, and streamed updates do not
   change the value.
 - The summary already contains the new timestamp when a terminal subscriber is
@@ -533,9 +552,9 @@ an already-loaded row issue no additional full catalog requests.
 
 ## Acceptance Criteria
 
-- A terminal event observed by a client causally precedes the watermark in a
-  subsequently started live-state response whenever the same live entry remains
-  present in the same bridge generation.
+- A running-prompt terminal event observed by a client causally precedes the
+  watermark in a subsequently started live-state response whenever the same
+  live entry remains present in the same bridge generation.
 - The watermark advances exactly once per running prompt terminal and never for
   a queued-only terminal or heartbeat.
 - Multiple terminals in one wall-clock millisecond remain strictly ordered.
