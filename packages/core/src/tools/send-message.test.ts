@@ -125,15 +125,20 @@ describe('SendMessageTool — team mode', () => {
     expect(requestShutdown).toHaveBeenCalledWith('bob');
   });
 
-  it('rejects shutdown_request from a teammate (leader-only)', async () => {
-    // A teammate calling shutdown_request would impersonate the
-    // leader, since requestShutdown writes the mailbox entry with
-    // `from: LEADER_NAME` and arms shutdown_approved tracking.
+  it('delivers a teammate shutdown_request as an ordinary message (leader-only guard)', async () => {
+    // Only the leader may request shutdowns — requestShutdown writes
+    // the mailbox entry with `from: LEADER_NAME` and arms
+    // shutdown_approved tracking for the target. But the schema
+    // exposes the `type` enum to every caller, so teammates sometimes
+    // attach it to ordinary messages (#9276); erroring bounced their
+    // reports in a retry loop. Deliver the text normally and note the
+    // control part was ignored instead.
     const requestShutdown = vi.fn().mockResolvedValue(undefined);
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
     const tool = new SendMessageTool(
       makeTeamConfig({
         teamManager: {
-          sendMessage: vi.fn(),
+          sendMessage,
           broadcast: vi.fn(),
           requestShutdown,
         },
@@ -141,22 +146,62 @@ describe('SendMessageTool — team mode', () => {
     );
 
     const invocation = tool.build({
-      to: 'bob',
-      message: 'Please shut down.',
+      to: 'leader',
+      message: 'Task completed and verified',
       type: 'shutdown_request',
     });
     const result = await runWithTeammateIdentity(
       {
-        agentName: 'attacker',
+        agentName: 'worker',
         teamName: 'team',
-        agentId: 'attacker@team',
+        agentId: 'worker@team',
         isTeamLead: false,
       },
       () => invocation.execute(new AbortController().signal),
     );
-    expect(result.error).toBeDefined();
-    expect(result.llmContent).toContain('Only the team leader');
+    expect(result.error).toBeUndefined();
     expect(requestShutdown).not.toHaveBeenCalled();
+    expect(sendMessage).toHaveBeenCalledWith(
+      'leader',
+      'Task completed and verified',
+      'worker',
+      undefined,
+    );
+    expect(result.llmContent).toContain('leader-only');
+    expect(result.llmContent).toContain('ordinary message');
+  });
+
+  it('broadcasts a teammate message that carries the shutdown enum', async () => {
+    const requestShutdown = vi.fn().mockResolvedValue(undefined);
+    const broadcast = vi.fn().mockResolvedValue(undefined);
+    const tool = new SendMessageTool(
+      makeTeamConfig({
+        teamManager: {
+          sendMessage: vi.fn(),
+          broadcast,
+          requestShutdown,
+        },
+      }),
+    );
+
+    const invocation = tool.build({
+      to: '*',
+      message: 'status update',
+      type: 'shutdown_request',
+    });
+    const result = await runWithTeammateIdentity(
+      {
+        agentName: 'worker',
+        teamName: 'team',
+        agentId: 'worker@team',
+        isTeamLead: false,
+      },
+      () => invocation.execute(new AbortController().signal),
+    );
+    expect(result.error).toBeUndefined();
+    expect(requestShutdown).not.toHaveBeenCalled();
+    expect(broadcast).toHaveBeenCalledWith('status update', 'worker');
+    expect(result.llmContent).toContain('leader-only');
   });
 
   it('blocks plan-required teammates before leader approval', async () => {

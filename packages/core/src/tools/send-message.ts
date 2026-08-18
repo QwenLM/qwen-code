@@ -44,7 +44,12 @@ export interface SendMessageParams {
   message: string;
   /** Optional 5-10 word summary for UI display (team mode). */
   summary?: string;
-  /** Structured control message type (team mode). */
+  /**
+   * Structured control message type (team mode). Leader-only: honored
+   * solely for shutdown requests issued by the leader; for teammates
+   * the field is ignored and the text is delivered as an ordinary
+   * message.
+   */
   type?: 'shutdown_request';
 }
 
@@ -241,30 +246,33 @@ class SendMessageInvocation extends BaseToolInvocation<
     }
 
     try {
-      // Structured control messages route through mailbox.
-      if (this.params.type === 'shutdown_request') {
-        // Only the leader can request shutdowns. A teammate
-        // calling this would be impersonating the leader, since
-        // requestShutdown writes the mailbox entry with
-        // `from: LEADER_NAME` and arms shutdown_approved tracking
-        // for the target.
-        if (isTeammate()) {
-          const msg = 'Only the team leader can request shutdowns.';
-          return {
-            llmContent: msg,
-            returnDisplay: msg,
-            error: { message: msg },
-          };
-        }
+      const isShutdownRequest = this.params.type === 'shutdown_request';
+
+      // Structured control messages route through mailbox. Only the
+      // leader can request shutdowns: requestShutdown writes the
+      // mailbox entry with `from: LEADER_NAME` and arms
+      // shutdown_approved tracking for the target, so a teammate
+      // issuing one would be impersonating the leader.
+      if (isShutdownRequest && !isTeammate()) {
         await teamManager.requestShutdown(to);
         const msg = `Shutdown requested for "${to}".`;
         return { llmContent: msg, returnDisplay: msg };
       }
 
+      // The schema exposes the `type` enum to every caller, so models
+      // running as teammates sometimes attach `shutdown_request` to an
+      // ordinary message (see #9276). Erroring on that bounced their
+      // reports back in a retry loop and the leader never received
+      // them; instead drop the control semantics, deliver the text as
+      // an ordinary message, and tell the caller it was ignored.
+      const shutdownIgnoredNote = isShutdownRequest
+        ? ' Note: `type: "shutdown_request"` is leader-only and was ignored — the text was delivered as an ordinary message.'
+        : '';
+
       if (to === '*') {
         const sender = getAgentName() ?? LEADER_NAME;
         await teamManager.broadcast(this.params.message, sender);
-        const msg = 'Message broadcast to all teammates.';
+        const msg = `Message broadcast to all teammates.${shutdownIgnoredNote}`;
         return { llmContent: msg, returnDisplay: msg };
       }
 
@@ -274,7 +282,7 @@ class SendMessageInvocation extends BaseToolInvocation<
         getAgentName() ?? LEADER_NAME,
         this.params.summary,
       );
-      const msg = `Message sent to "${to}".`;
+      const msg = `Message sent to "${to}".${shutdownIgnoredNote}`;
       return { llmContent: msg, returnDisplay: msg };
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : String(error);
@@ -330,9 +338,8 @@ export class SendMessageTool extends BaseDeclarativeTool<
             type: 'string',
             enum: ['shutdown_request'],
             description:
-              'Structured message type for control flow. ' +
-              'When set, routes through the mailbox ' +
-              'instead of plain text delivery.',
+              'Leader-only control message type. Set it only when, as the team leader, you are requesting a teammate to shut down. ' +
+              'Never set it on ordinary messages; teammates cannot request shutdowns and the field is ignored for them.',
           },
         },
         required: ['message'],
