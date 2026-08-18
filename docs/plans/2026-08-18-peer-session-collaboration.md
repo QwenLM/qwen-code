@@ -41,7 +41,7 @@ already polls its own inbox, so teammate→leader messaging needs no socket for 
 | Decision            | Choice                                                                                                             | Rejected alternative and why                                                                                                 |
 | ------------------- | ------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------- |
 | **Topology**        | Peer. `leader` is a **role** — transferable, and validly empty                                                     | Owner-leader: makes an independently started session a second-class observer, which is the exact case this design exists for |
-| **Membership**      | Two entrances: `spawn` (existing) and `join` (new). Neither is privileged                                          | Spawn-only: the current `TeamManager.ts:312` constraint, and the reason no running session can ever participate              |
+| **Membership**      | Two entrances: `spawn` (existing) and `join` (new). Neither is privileged                                          | Spawn-only: the current `TeamManager.ts:325` constraint, and the reason no running session can ever participate              |
 | **Consent**         | Receiver-side gate with approval-mode parity, fail-closed ([#8730](https://github.com/QwenLM/qwen-code/pull/8730)) | Sender-side authorization: `from` is unauthenticatable on this transport (§2.5), so only the receiver can decide safely      |
 | **Write conflicts** | Out of scope by construction: peers collaborate **across** workspaces                                              | Path-claim protocol: a joined peer's permissions were fixed by whoever started it; no member can demote another              |
 | **Heterogeneity**   | Format stays vendor-neutral (it already is), but **v1 publishes no compatibility promise**                         | Either designing _for_ foreign agents (premature) or actively excluding them (costs work, buys nothing)                      |
@@ -79,7 +79,7 @@ All line references at `179c8f80fd`.
 
 ### 1.1 The coordination plane is already cross-process
 
-`tasks.ts` (1,050 LOC) and `mailbox.ts` (361 LOC) persist under `~/.qwen/` behind a
+`tasks.ts` (1,056 LOC) and `mailbox.ts` (361 LOC) persist under `~/.qwen/` behind a
 deliberate two-tier lock: an in-process `async-mutex` serializing local writers, wrapping
 a `proper-lockfile` **cross-process** file lock (`retries: 30`, randomized backoff
 5→100 ms, `stale: 5000`, `onCompromised` handler), over `atomicWriteJSON`.
@@ -98,22 +98,25 @@ holder's lock self-clears after the 5 s stale window, which also bounds recovery
 | Site                  | What it does                                        | Consequence                                        |
 | --------------------- | --------------------------------------------------- | -------------------------------------------------- |
 | `send-message.ts:221` | Route 2 requires `this.config.getTeamManager()`     | Teammate addressing needs an in-process object     |
-| `TeamManager.ts:312`  | `this.teamFile.members.push(member)` — inside spawn | **Membership is only obtainable by being spawned** |
+| `TeamManager.ts:325`  | `this.teamFile.members.push(member)` — inside spawn | **Membership is only obtainable by being spawned** |
 
 Route 1 (`task_id`, background tasks) already does _not_ go through `TeamManager`. The
 in-process binding is not architectural; it is two call sites.
 
-### 1.3 There is no discovery of any kind
+### 1.3 Discovery exists for liveness only — not for messaging
 
 - `list_agents` reads `config.getBackgroundTaskRegistry()` — process-local. Its own empty
   message says so: _"No background agents are available in **this session**."_
 - `SessionService.listSessions()` enumerates **persisted transcripts** (mtime cursors,
   pagination, JSONL), not live processes. It is deliberately never deleted, so its
   presence carries no liveness signal.
-- `qwen sessions` exists but is transcript management (`commands/sessions/list.ts`), not a
-  liveness index.
+- Since [#8969](https://github.com/QwenLM/qwen-code/pull/8969) (merged 2026-08-17),
+  `qwen sessions ps` answers "which Qwen sessions are running right now": the
+  live-session registry (`packages/core/src/services/session-registry.ts`) writes
+  `~/.qwen/sessions/<pid>.json` records, accepting only `<digits>.json` names.
 
-Nothing in the product can answer "which Qwen sessions are running right now."
+The registry is a liveness index only — nothing reads it to route a message, and it
+carries no inbound channel. That gap, not discovery itself, is what remains open.
 
 ### 1.4 Multi-process agent hosting already ships, twice
 
@@ -138,6 +141,7 @@ same machine message each other"_ — is **open**. Its implementation is not.
 | PR                                                     | Scope                                                                | Outcome                     |
 | ------------------------------------------------------ | -------------------------------------------------------------------- | --------------------------- |
 | [#8728](https://github.com/QwenLM/qwen-code/pull/8728) | Liveness registry `~/.qwen/sessions/<pid>.json` + `qwen sessions ps` | **Closed, not merged** 8/12 |
+| [#8969](https://github.com/QwenLM/qwen-code/pull/8969) | Same scope, re-landed: live-session registry + `qwen sessions ps`    | **Merged** 8/17             |
 | [#8730](https://github.com/QwenLM/qwen-code/pull/8730) | UDS inbox + inbound gate + `/peers` (+7,018/−74, 57 files)           | **Closed, not merged** 8/12 |
 | PR 3, PR 4                                             | Send side; broadcast removal                                         | Never submitted             |
 
@@ -151,9 +155,10 @@ Neither closure was a design rejection:
   those fixes added rather than in the original change. Patching further is not
   converging."_ The author stated it would return rebased at roughly its original size.
 
-The branch `feat/cross-session-inbox` still exists. None of this code is in the tree:
-`packages/core/src/ipc/`, `packages/cli/src/peerMessaging/`, `utils/process-liveness.ts`
-are all absent.
+The branch `feat/cross-session-inbox` still exists. The registry half of #8728 is now in
+the tree via #8969 (`session-registry.ts`, `sessions ps`, `utils/process-liveness.ts`);
+the messaging half is not — `packages/core/src/ipc/` and `packages/cli/src/peerMessaging/`
+remain absent.
 
 ### 1.6 A native supervisor and PTY layer is being built right now
 
@@ -397,7 +402,7 @@ Sized against demonstrated review capacity in this repository: #8804 merged at 7
 | Stage | Scope                                       | Est. prod LOC | Depends on | Independently valuable          |
 | ----- | ------------------------------------------- | ------------- | ---------- | ------------------------------- |
 | **0** | Cleanup and the #9276 fix                   | ~150          | —          | Yes — fixes a live blocker      |
-| **1** | Liveness registry + `sessions ps`           | ~400          | —          | Yes — `sessions ps` alone       |
+| **1** | Discovery — **shipped by #8969**; carry-forward hardening only | ~0–100 | — | Done — `sessions ps` ships |
 | **2** | Relocate authority to the file plane        | ~450          | —          | Yes — closes the §1.7 bug class |
 | **3** | `team_join` / `team_leave` / leader-as-role | ~350          | 1, 2       | Yes — the actual feature        |
 | **4** | Consent gate + UDS transport + `/peers`     | ~1,100        | 3          | Yes — completes it              |
@@ -425,18 +430,20 @@ Stages 1 and 2 are independent and may run in parallel.
 - Do **not** touch `packages/cli/src/agent-view/`. It is the base of the open #7800–#7803
   series (§1.6), and its disposition is a product question (§7.6), not cleanup.
 
-### Stage 1 — discovery
+### Stage 1 — discovery (largely done by #8969)
 
-Revive [#8728](https://github.com/QwenLM/qwen-code/pull/8728) at its original size. Carry
-forward the findings from its review round that were genuinely right: symlink-safe registry
-writes, Windows guards on POSIX-only assertions. `isPidAlive` moves from `teamHelpers` to
-`utils/process-liveness.ts` so the registry does not become a third copy.
+[#8969](https://github.com/QwenLM/qwen-code/pull/8969) (merged 2026-08-17) landed the
+core of the closed #8728: the live-session registry (`session-registry.ts`,
+`~/.qwen/sessions/<pid>.json`), `qwen sessions ps`, and `isPidAlive` already moved out of
+`teamHelpers` into `packages/core/src/utils/process-liveness.ts`. Do **not** revive #8728
+or rebuild any of this. What remains is carrying forward the #8728 review findings that
+were genuinely right and are not covered by #8969 — verify symlink-safe registry writes
+and Windows guards on POSIX-only assertions against the merged implementation, and file
+narrow follow-ups for any gap. Keep those follow-ups small: automated fixes tripled
+`session-registry.ts` and are the documented reason #8728 was abandoned — that failure
+mode is a process risk, not a code risk, and it will recur unless prevented.
 
-**Take `/takeover stop` on this PR from the start.** Automated fixes tripled
-`session-registry.ts` and are the documented reason it was abandoned. That failure mode is
-a process risk, not a code risk, and it will recur unless prevented.
-
-Changes no session behaviour. Nothing reads the registry yet.
+Changes no session behaviour. Nothing reads the registry for messaging yet.
 
 ### Stage 2 — relocate authority
 
@@ -477,13 +484,13 @@ and no promise attached.
 
 | Reused unchanged                                   | LOC    |
 | -------------------------------------------------- | ------ |
-| `tasks.ts` — claim, ownership, dependencies        | 1,050  |
+| `tasks.ts` — claim, ownership, dependencies        | 1,056  |
 | `mailbox.ts` — inboxes, locks                      | 361    |
-| `teamHelpers.ts` — path and liveness helpers       | 378    |
+| `teamHelpers.ts` — path and liveness helpers       | 365    |
 | `ui/components/agent-view/` — tabs, chat, composer | live   |
 | `agentHistoryAdapter.ts`                           | ~180   |
 | Daemon sub-session spawn + correlation             | ships  |
-| **Written but unmerged** (#8728 + #8730)           | ~7,000 |
+| **Written but unmerged** (#8730; #8728's registry half re-landed as #8969) | ~7,000 |
 
 Genuinely new: `team_join` / `team_leave`, the wake-path consolidation, correlation IDs,
 and the CLI/MCP surface.
@@ -497,7 +504,7 @@ and the CLI/MCP surface.
 | **Unauthenticated `from`**                              | Not solvable without a native addon. Stated in the module header; receiver-side authorization is built on it |
 | **Prompt injection via peer message**                   | Three agreeing defenses (§2.5); the "denied elsewhere" clause is tested explicitly                           |
 | **Peers writing the same checkout**                     | Out of scope by construction (§0.2). Cross-workspace is the supported shape                                  |
-| **Stage 2 touches `TeamManager` broadly**               | `coordination-harness.test.ts` (751 LOC) is the existing regression net                                      |
+| **Stage 2 touches `TeamManager` broadly**               | `coordination-harness.test.ts` (1,456 LOC) is the existing regression net                                    |
 | **Work stalls unclaimed**                               | Accepted. The board is durable and visible; no central scheduler is promised                                 |
 
 ## 7. Open questions
@@ -554,7 +561,8 @@ right shape of integration and is compatible with everything here.
 | Item                                                                            | Disposition                                                                                                                                                                                                                            |
 | ------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | #8724 (umbrella, open)                                                          | **Adopt as this design's tracking issue.** Extend scope from messaging to collaboration                                                                                                                                                |
-| #8728 / #8730                                                                   | Revive. Stages 1 and 4. Re-engage the author first                                                                                                                                                                                     |
+| #8728                                                                           | Superseded by #8969 (merged). Stage 1 reduces to carry-forward hardening of the merged registry                                                                                                                                        |
+| #8730                                                                           | Revive. Stage 4. Re-engage the author first                                                                                                                                                                                            |
 | #8718 (closed not-planned)                                                      | Leave closed. Post a correction: the recorded rationale rebuts a position the fleet plan never held (it ruled heterogeneous CLIs permanently out of scope), and the real reasons were sequencing, review capacity, and no measured win |
 | #8869 (Stage 1B draft)                                                          | Close. Superseded                                                                                                                                                                                                                      |
 | `agent-view/` (6,186 LOC)                                                       | **Leave in place.** Base of the open #7800–#7803 series; disposition depends on §7.6                                                                                                                                                   |
