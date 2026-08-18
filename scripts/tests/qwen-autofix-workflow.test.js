@@ -18050,17 +18050,19 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(nothing.status).toBe(1);
     expect(nothing.outputs).toContain('outcome=failed');
 
-    // Pins the guard's committed-side clause: with a round commit present,
-    // the handoff branch must NOT fire even though handoff.md exists — the
-    // round falls through to the address-summary gate instead. Deleting the
-    // `git diff --quiet` clause flips this to exit 0 / outcome=handoff,
-    // skipping every structural check on the committed diff.
+    // Pins the guard's committed-side clause: a round commit beside the
+    // handoff is the brake violation in committed shape — classified as a
+    // non-retryable dirty handoff BEFORE the structural checks. Letting it
+    // fall through there makes a rejection retryable by default, and the
+    // repair pass would delete handoff.md and may commit against the brake.
+    // Deleting the committed_rc clause restores that fall-through.
     const committedWithHandoff = runGate({
       agentCommit: true,
       workdirFiles: { 'handoff.md': 'needs a maintainer decision\n' },
     });
     expect(committedWithHandoff.status).toBe(1);
-    expect(committedWithHandoff.outputs).toContain('outcome=failed');
+    expect(committedWithHandoff.outputs).toContain('outcome=dirty_handoff');
+    expect(committedWithHandoff.outputs).not.toContain('retryable=true');
     expect(committedWithHandoff.outputs).not.toContain('outcome=handoff');
 
     // The handoff note is agent-written and lands in the privileged job's

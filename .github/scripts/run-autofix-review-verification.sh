@@ -79,15 +79,18 @@ fi
 # brake-violating partial patch (otherwise reported as a clean stop and
 # discarded silently with the runner), and untracked leftovers would trip
 # the NEXT round's dirty assert on the persistent pool. The ref-level
-# commit diff below is blind to both. Non-retryable like failure.md+dirty
-# above (a retryable rejection would engage the repair pass, which deletes
-# handoff.md and may commit against the brake), but under its OWN outcome:
-# outcome=failed would make the report step dress the rejection as a
-# failed FIX ("could not produce a passing fix", or a stale-base retry
-# promise) when no fix existed — the report step gives this shape its own
-# honest headline.
-if [[ -s "${WORKDIR}/handoff.md" && -n "$(git status --porcelain)" ]]; then
-  echo "❌ Agent wrote handoff.md after leaving a dirty workspace:"
+# commit diff below is blind to both. A round COMMIT beside the handoff is
+# the same violation in committed shape: without this clause it falls
+# through to the structural checks below, where a rejection is retryable by
+# default — the repair pass would then delete handoff.md and may commit
+# against the brake. Non-retryable like failure.md+dirty above, but under
+# its OWN outcome: outcome=failed would make the report step dress the
+# rejection as a failed FIX ("could not produce a passing fix", or a
+# stale-base retry promise) when no fix existed — the report step gives
+# this shape its own honest headline.
+if [[ -s "${WORKDIR}/handoff.md" ]] &&
+  { [[ -n "$(git status --porcelain)" ]] || [[ "${committed_rc:-0}" -eq 1 ]]; }; then
+  echo "❌ Agent wrote handoff.md beside uncommitted changes or a round commit:"
   git status --short
   sed 's/::/;;/g' "${WORKDIR}/handoff.md"
   echo "outcome=dirty_handoff" >> "${GITHUB_OUTPUT}"
