@@ -119,6 +119,7 @@ import {
   type BridgeDaemonStatusSnapshot,
   type BridgeRestoredSession,
   type BridgeClientRequestContext,
+  type BridgeTurnStatus,
   type BridgeRestoreSessionRequest,
   type BridgeSession,
   type BridgeSessionSummary,
@@ -534,6 +535,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_source_metadata',
   'session_side_task',
   'session_prompt',
+  'session_turn_status',
   'session_media',
   'session_mid_turn_message_mutation',
   'session_mid_turn_message_query',
@@ -814,6 +816,11 @@ interface FakeBridgeOpts {
     sessionId: string,
     promptId: string,
   ) => { removed: boolean };
+  getSessionTurnStatusImpl?: (
+    sessionId: string,
+    context: BridgeClientRequestContext | undefined,
+    promptId: string | undefined,
+  ) => Promise<BridgeTurnStatus | undefined>;
   spawnImpl?: (req: BridgeSpawnRequest) => Promise<BridgeSession>;
   changeSessionCwdImpl?: (
     sessionId: string,
@@ -1073,6 +1080,7 @@ interface FakeBridge extends AcpSessionBridge {
     NonNullable<AcpSessionBridge['setLiveSpeakToUserHandler']>
   >[0];
   calls: BridgeSpawnRequest[];
+  getSessionTurnStatusCalls: Array<{ sessionId: string; promptId?: string }>;
   loadCalls: BridgeRestoreSessionRequest[];
   resumeCalls: BridgeRestoreSessionRequest[];
   promptCalls: Array<{
@@ -1327,6 +1335,12 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   }> = [];
   const removePendingPromptImpl =
     opts.removePendingPromptImpl ?? (() => ({ removed: true }));
+  const getSessionTurnStatusCalls: Array<{
+    sessionId: string;
+    promptId?: string;
+  }> = [];
+  const getSessionTurnStatusImpl =
+    opts.getSessionTurnStatusImpl ?? (async () => undefined);
   const permissionVotes: FakeBridge['permissionVotes'] = [];
   const sessionPermissionVotes: FakeBridge['sessionPermissionVotes'] = [];
   const listCalls: string[] = [];
@@ -1908,6 +1922,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       liveSpeakToUserHandler = handler;
     },
     calls,
+    getSessionTurnStatusCalls,
     loadCalls,
     resumeCalls,
     promptCalls,
@@ -2359,6 +2374,13 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     removePendingPrompt(sessionId, promptId) {
       removePendingPromptCalls.push({ sessionId, promptId });
       return removePendingPromptImpl(sessionId, promptId);
+    },
+    async getSessionTurnStatus(sessionId, context, promptId) {
+      getSessionTurnStatusCalls.push({
+        sessionId,
+        ...(promptId !== undefined ? { promptId } : {}),
+      });
+      return getSessionTurnStatusImpl(sessionId, context, promptId);
     },
     async executeShellCommand(sessionId, command, signal, context) {
       shellCalls.push({
@@ -10042,6 +10064,106 @@ describe('createServeApp', () => {
       });
       const res = await request(removeApp(bridge))
         .delete('/session/s-1/pending-prompts/p-1')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'rogue');
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_client_id');
+    });
+  });
+
+  describe('GET /session/:id/turns', () => {
+    const turnsApp = (bridge: FakeBridge) =>
+      createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+    it('200 with the current turn status', async () => {
+      const bridge = fakeBridge({
+        getSessionTurnStatusImpl: async (sessionId) => ({
+          sessionId,
+          state: 'running',
+          promptId: 'p-1',
+          promptText: 'doing things',
+          queuedAt: 1000,
+          startedAt: 1100,
+        }),
+      });
+      const res = await request(turnsApp(bridge))
+        .get('/session/s-1/turns/current')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({
+        sessionId: 's-1',
+        state: 'running',
+        promptId: 'p-1',
+      });
+      expect(bridge.getSessionTurnStatusCalls).toEqual([{ sessionId: 's-1' }]);
+    });
+
+    it('200 with a settled turn status by promptId', async () => {
+      const bridge = fakeBridge({
+        getSessionTurnStatusImpl: async (sessionId, _context, promptId) => ({
+          sessionId,
+          state: 'completed',
+          promptId: promptId ?? 'p-1',
+          stopReason: 'end_turn',
+          resultText: 'done',
+          startedAt: 1000,
+          endedAt: 2000,
+        }),
+      });
+      const res = await request(turnsApp(bridge))
+        .get('/session/s-1/turns/p-1')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({
+        sessionId: 's-1',
+        state: 'completed',
+        promptId: 'p-1',
+        stopReason: 'end_turn',
+        resultText: 'done',
+      });
+    });
+
+    it('404 prompt_not_found when the bridge resolves nothing', async () => {
+      const bridge = fakeBridge({
+        getSessionTurnStatusImpl: async () => undefined,
+      });
+      const res = await request(turnsApp(bridge))
+        .get('/session/s-1/turns/nope')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+      expect(res.status).toBe(404);
+      expect(res.body.code).toBe('prompt_not_found');
+      expect(res.body.promptId).toBe('nope');
+    });
+
+    it('404 for unknown session', async () => {
+      const bridge = fakeBridge({
+        getSessionTurnStatusImpl: async () => {
+          throw new SessionNotFoundError('unknown');
+        },
+      });
+      const res = await request(turnsApp(bridge))
+        .get('/session/unknown/turns/current')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+      expect(res.status).toBe(404);
+    });
+
+    it('400 when bridge throws InvalidClientIdError', async () => {
+      const bridge = fakeBridge({
+        getSessionTurnStatusImpl: async () => {
+          throw new InvalidClientIdError('s-1', 'rogue');
+        },
+      });
+      const res = await request(turnsApp(bridge))
+        .get('/session/s-1/turns/current')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret')
         .set('X-Qwen-Client-Id', 'rogue');
