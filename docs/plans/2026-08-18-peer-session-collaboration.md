@@ -378,16 +378,16 @@ released after the 5 s lock stale window. No peer's death blocks any other peer.
 
 ## 4. Explicit non-goals
 
-| Not building                             | Because                                                                                    |
-| ---------------------------------------- | ------------------------------------------------------------------------------------------ |
-| PTY attach, terminal multiplexing, panes | herdr does this for 17+ CLIs, Apache-2.0. See §8                                           |
-| Hosting other vendors' processes         | That is becoming herdr. We publish a format; we host nothing                               |
-| A new roster UI                          | `ui/components/agent-view/` exists and is reused                                           |
-| Remote / SSH / cross-machine             | Same-uid filesystem permissions **are** the security model. Off-machine voids it           |
-| Broadcast (`to: "*"`)                    | #8724 removes it rather than extending it to N processes                                   |
-| Same-checkout multi-writer               | A joined peer's permissions were fixed by whoever started it; no member can demote another |
-| Central completion guarantee             | Peers decide what to claim. Unclaimed work stays visible on the board, not forced          |
-| Windows in the first cut                 | Follows #8724. The IPC path is abstracted so named pipes can be added                      |
+| Not building                             | Because                                                                                                                                                                        |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| PTY attach, terminal multiplexing, panes | herdr does this for 17+ CLIs, Apache-2.0. See §8                                                                                                                               |
+| Hosting other vendors' processes         | That is becoming herdr. We publish a format; we host nothing                                                                                                                   |
+| A new roster UI                          | This design reuses `ui/components/agent-view/`. But #7803 is building a second one at `ui/agent-view/`, so "already exists" is not a settled reason — disposition follows §7.6 |
+| Remote / SSH / cross-machine             | Same-uid filesystem permissions **are** the security model. Off-machine voids it                                                                                               |
+| Broadcast (`to: "*"`)                    | #8724 removes it rather than extending it to N processes                                                                                                                       |
+| Same-checkout multi-writer               | A joined peer's permissions were fixed by whoever started it; no member can demote another                                                                                     |
+| Central completion guarantee             | Peers decide what to claim. Unclaimed work stays visible on the board, not forced                                                                                              |
+| Windows in the first cut                 | Follows #8724. The IPC path is abstracted so named pipes can be added                                                                                                          |
 
 ## 5. Build plan
 
