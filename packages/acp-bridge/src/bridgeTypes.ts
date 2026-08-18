@@ -58,6 +58,45 @@ export interface RewindSnapshotInfo {
   diffStats: { filesChanged: number; insertions: number; deletions: number };
 }
 
+/**
+ * An ACP child's lifetime V8 old-generation high-water marks, self-reported
+ * through the `workspaceResource` extMethod.
+ *
+ * Observational. Nothing here sizes a child, refuses a spawn, or widens
+ * `limits.memory.enforced` — these exist so a future child-heap policy can be
+ * judged against real workloads instead of against a refusal count that cannot
+ * answer whether a child would survive a smaller ceiling.
+ *
+ * Every figure covers the **old generation**, the thing
+ * `--max-old-space-size` actually bounds, and not `old_space` alone: a child
+ * can OOM against its ceiling with `old_space` at 3 MB while
+ * `large_object_space` holds everything.
+ */
+export interface ChildHeapReport {
+  /** High-water committed old-generation bytes. Rises with the ceiling the
+   *  child was given, so read it as an upper bound on what the workload needs
+   *  rather than as its requirement. */
+  peakOldGenerationBytes: number;
+  /** High-water old-generation bytes still live after a major GC, i.e. what
+   *  the workload retains. Independent of the ceiling, which is what makes it
+   *  the figure able to say a child cannot fit one. An upper bound rather than
+   *  an exact live set: GC entries arrive asynchronously, so allocation
+   *  between the collection and the read is counted. 0 when no major GC has
+   *  been observed — not a measured zero. */
+  peakLiveSetBytes: number;
+  /** High-water `total_heap_size`. A cross-check needing no space name; it
+   *  includes the young generation, so it cannot localise a missing space. */
+  peakTotalHeapBytes: number;
+  /** Major collections over the child's lifetime. */
+  majorGcCount: number;
+  /** Total major-GC pause time in ms — the cost side of a smaller ceiling. */
+  majorGcMs: number;
+  /** Heap spaces the child could classify as neither old- nor young-
+   *  generation. Non-empty means the sums above are incomplete and must not be
+   *  read as a full measurement. */
+  unclassifiedSpaceNames: string[];
+}
+
 export type BridgePromptContentBlock = ContentBlock | SessionMediaReference;
 
 export type BridgePromptRequest = Omit<PromptRequest, 'prompt'> & {
@@ -2057,6 +2096,12 @@ export interface AcpSessionBridge {
          *  field — see {@link pendingPromptTotal} — so a caller aggregating
          *  several children must treat it as unknown rather than as fresh. */
         ageMs?: number;
+        /** The child's lifetime old-generation high-water marks. Absent when
+         *  the child does not report them — a child predating the fields, or
+         *  one spawned outside the daemon. Never substituted with zeros: a
+         *  measured zero and an unmeasured child are different claims, and
+         *  only the first may be read as "this child needed no heap". */
+        heap?: ChildHeapReport;
       }
     | undefined;
   /** Poll the live child's resource extMethod and refresh the cache that

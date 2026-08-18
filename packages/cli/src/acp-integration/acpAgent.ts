@@ -242,6 +242,11 @@ import { HistoryReplayer } from './session/history-replayer.js';
 import { renderPreparedGoalUpdate } from './session/recovered-goal-update.js';
 import { ActiveWorkReporter } from './active-work-reporter.js';
 import {
+  shouldProbeChildHeap,
+  startChildHeapProbe,
+  type ChildHeapProbe,
+} from './child-heap-probe.js';
+import {
   getModelConfiguration,
   type ModelReasoningConfiguration,
 } from './model-configuration.js';
@@ -3854,6 +3859,16 @@ class QwenAgent implements Agent {
     }
   })();
   private prevChildCpuAt = Date.now();
+  /**
+   * Lifetime old-generation high-water marks, for the daemon's
+   * `workspaceResource` poll. `undefined` outside a daemon-spawned child — see
+   * {@link shouldProbeChildHeap} for why the gate is where it is.
+   *
+   * Started at construction rather than on the first poll: the peaks that
+   * matter include the ones reached before anyone asks.
+   */
+  private readonly childHeapProbe: ChildHeapProbe | undefined =
+    shouldProbeChildHeap(process.env) ? startChildHeapProbe() : undefined;
 
   /**
    * Workspace-shared MCP transport pool. Eagerly constructed; lazy
@@ -8582,9 +8597,16 @@ class QwenAgent implements Agent {
         } catch {
           /* restricted container — report 0 rss */
         }
+        // Spread rather than always-present fields: a child without the probe
+        // (no daemon marker) omits them entirely, so the daemon can tell "not
+        // measured" from a measured zero. Reporting 0 here would read as "this
+        // child needs no heap", which is the one wrong answer.
         return {
           rssBytes,
           cpuPercent,
+          ...(this.childHeapProbe
+            ? { heap: this.childHeapProbe.snapshot() }
+            : {}),
         };
       }
       case SERVE_STATUS_EXT_METHODS.sessionContext: {

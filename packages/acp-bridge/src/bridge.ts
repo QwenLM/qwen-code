@@ -185,6 +185,7 @@ import type {
   BridgeWorkspaceGenerationStreamEvent,
   BridgePromptContentBlock,
   BridgePromptRequest,
+  ChildHeapReport,
   RuntimeMcpServerAddResult,
   RuntimeMcpServerRemoveResult,
 } from './bridgeTypes.js';
@@ -880,6 +881,13 @@ interface ChannelInfo {
   childRssBytes?: number;
   childCpuPercent?: number;
   childResourceAt?: number;
+  /**
+   * The child's lifetime old-generation high-water marks, when it reports
+   * them. Absent — never zeroed — for a child that predates the fields or was
+   * spawned without the daemon marker, so a reader can tell "not measured"
+   * from a measured zero.
+   */
+  childHeap?: ChildHeapReport;
   /**
    * MUST be set to `true` synchronously by any teardown path BEFORE
    * awaiting `channel.kill()`. `ensureChannel` treats a dying channel
@@ -5040,6 +5048,76 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     return response as unknown as T;
   };
 
+  /**
+   * Caps on the one variable-length field a child controls in its heap
+   * report. V8 exposes 11 spaces on Node 22 and 13 on Node 24, all named well
+   * under 64 characters, so a legitimate report never approaches either.
+   */
+  const MAX_CHILD_HEAP_UNCLASSIFIED_NAMES = 64;
+  const MAX_CHILD_HEAP_SPACE_NAME_LENGTH = 64;
+
+  /**
+   * Validate a child's self-reported heap block at the trust boundary.
+   *
+   * Returns `undefined` for anything malformed rather than a partially filled
+   * report: these figures exist to decide whether a child fits a heap ceiling,
+   * and a report with some fields defaulted would understate a peak while
+   * looking complete. Rejecting the whole block leaves the channel's last good
+   * report in place, which is the honest fallback.
+   *
+   * `Number.isFinite` and not just `typeof`, because `typeof NaN === 'number'`
+   * — the same reason the rss and cpu checks above are written this way.
+   */
+  const parseChildHeapReport = (
+    value: unknown,
+  ): ChildHeapReport | undefined => {
+    if (typeof value !== 'object' || value === null) return undefined;
+    const raw = value as Record<string, unknown>;
+    const counts: Array<keyof ChildHeapReport> = [
+      'peakOldGenerationBytes',
+      'peakLiveSetBytes',
+      'peakTotalHeapBytes',
+      'majorGcCount',
+      'majorGcMs',
+    ];
+    const parsed: Record<string, number> = {};
+    for (const key of counts) {
+      const n = raw[key];
+      // Negative bytes or pause times are not a degraded reading, they are a
+      // broken sender; treat them like any other malformed field.
+      if (typeof n !== 'number' || !Number.isFinite(n) || n < 0) {
+        return undefined;
+      }
+      parsed[key] = n;
+    }
+    // Bounded because the daemon caches this array on the channel for the
+    // child's lifetime, and the child chooses its contents. It is the one
+    // variable-length field in the report, and a workstream about bounding
+    // daemon memory should not add an unbounded retained container. Real
+    // values come from V8's heap-space list: around a dozen entries with
+    // short names, so these caps are far above anything legitimate.
+    const names = raw['unclassifiedSpaceNames'];
+    if (
+      !Array.isArray(names) ||
+      names.length > MAX_CHILD_HEAP_UNCLASSIFIED_NAMES ||
+      names.some(
+        (name) =>
+          typeof name !== 'string' ||
+          name.length > MAX_CHILD_HEAP_SPACE_NAME_LENGTH,
+      )
+    ) {
+      return undefined;
+    }
+    return {
+      peakOldGenerationBytes: parsed['peakOldGenerationBytes'],
+      peakLiveSetBytes: parsed['peakLiveSetBytes'],
+      peakTotalHeapBytes: parsed['peakTotalHeapBytes'],
+      majorGcCount: parsed['majorGcCount'],
+      majorGcMs: parsed['majorGcMs'],
+      unclassifiedSpaceNames: names as string[],
+    };
+  };
+
   // Daemon Status child-resource: poll the live child's `workspaceResource`
   // extMethod and cache rss/cpu on the channel. The daemon's metrics sampler
   // fires this fire-and-forget, then reads the cache synchronously — keeping the
@@ -5059,6 +5137,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const res = await requestWorkspaceStatus<{
         rssBytes?: unknown;
         cpuPercent?: unknown;
+        heap?: unknown;
       }>(SERVE_STATUS_EXT_METHODS.workspaceResource, () => ({}));
       // A channel swap during the await would otherwise stamp a dead channel;
       // only write if this is still the live one.
@@ -5077,6 +5156,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // only on the child's send side.
         info.childCpuPercent = Math.min(100, Math.max(0, res.cpuPercent));
       }
+      // Only overwrite on a well-formed report. A child that stops sending the
+      // block keeps its last good marks rather than having them cleared: these
+      // are lifetime high-water values, so dropping them would lose history the
+      // child cannot resend.
+      const heap = parseChildHeapReport(res.heap);
+      if (heap) info.childHeap = heap;
       info.childResourceAt = Date.now();
     } catch (err) {
       // Child unreachable / mid-swap — keep the last good cache (or nothing
@@ -5094,7 +5179,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     }
   };
   const getChildResourceSnapshot = ():
-    | { rssBytes: number; cpuPercent: number; ageMs: number }
+    | {
+        rssBytes: number;
+        cpuPercent: number;
+        ageMs: number;
+        heap?: ChildHeapReport;
+      }
     | undefined => {
     const info = liveChannelInfo();
     if (!info || info.childResourceAt === undefined) return undefined;
@@ -5108,6 +5198,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     return {
       rssBytes: info.childRssBytes ?? 0,
       cpuPercent: info.childCpuPercent ?? 0,
+      // Deliberately not defaulted. Unlike rss/cpu, where 0 is a plausible
+      // reading, a zeroed heap report would assert the child needed no old
+      // generation — the one conclusion that must never be manufactured.
+      heap: info.childHeap,
       // Bounded by the guard above, so a caller summing several children's
       // readings can say how far apart they were taken. Without it a sum of
       // readings up to `STALE_CHILD_RESOURCE_MS` apart looks instantaneous.
