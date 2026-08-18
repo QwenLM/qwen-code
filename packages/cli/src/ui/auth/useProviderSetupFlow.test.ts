@@ -143,6 +143,151 @@ describe('useProviderSetupFlow model discovery', () => {
     );
   });
 
+  /** Re-enters the model step with a (possibly different) api key. */
+  async function reenterModelStep(
+    result: { current: ReturnType<typeof useProviderSetupFlow> },
+    apiKey: string,
+  ) {
+    act(() => {
+      result.current.goBack();
+    });
+    await act(async () => {
+      result.current.submitApiKey(apiKey);
+    });
+    await waitFor(() => expect(result.current.state.step).toBe('models'));
+  }
+
+  it('abandons an in-flight lookup when a cached pair is restored', async () => {
+    fetchProviderModelIdsMock.mockResolvedValueOnce(
+      discovered([...SERVED_IDS, 'k1-only']),
+    );
+    let resolveSecond!: (value: ModelDiscoveryResult) => void;
+    fetchProviderModelIdsMock.mockReturnValueOnce(
+      new Promise<ModelDiscoveryResult>((resolve) => {
+        resolveSecond = resolve;
+      }),
+    );
+
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+    await advanceToModelStep(result);
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('success'),
+    );
+
+    // Second key: its lookup is still in flight when the user goes back.
+    await reenterModelStep(result, 'sk-sp-second-key');
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('loading'),
+    );
+
+    // Restoring the first key is a cache hit, which used to return without
+    // aborting the second lookup.
+    await reenterModelStep(result, 'sk-sp-test-key');
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('success'),
+    );
+    const secondSignal = fetchProviderModelIdsMock.mock.calls[1]![0]
+      .signal as AbortSignal;
+    expect(secondSignal.aborted).toBe(true);
+
+    // The abandoned lookup answers late; it must not land on the restored pair.
+    await act(async () => {
+      resolveSecond(discovered(['second-key-only']));
+    });
+
+    const ids = result.current.state.recommendedModels.map((m) => m.id);
+    expect(ids).toContain('k1-only');
+    expect(ids).not.toContain('second-key-only');
+    expect(result.current.state.discoveryStatus).toBe('success');
+  });
+
+  it('shows the built-ins, not the previous pair, while a new pair loads', async () => {
+    fetchProviderModelIdsMock.mockResolvedValueOnce(
+      discovered([...SERVED_IDS, 'k1-only']),
+    );
+    let resolveSecond!: (value: ModelDiscoveryResult) => void;
+    fetchProviderModelIdsMock.mockReturnValueOnce(
+      new Promise<ModelDiscoveryResult>((resolve) => {
+        resolveSecond = resolve;
+      }),
+    );
+
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+    await advanceToModelStep(result);
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('success'),
+    );
+    const revisionAfterSuccess = result.current.state.recommendedModelsRevision;
+
+    await reenterModelStep(result, 'sk-sp-second-key');
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('loading'),
+    );
+
+    // The "fetching…" notice must not sit above the first key's catalog.
+    expect(
+      result.current.state.recommendedModels.map((m) => m.id),
+    ).not.toContain('k1-only');
+    // And the mounted step must re-derive its checkbox state against it.
+    expect(result.current.state.recommendedModelsRevision).toBeGreaterThan(
+      revisionAfterSuccess,
+    );
+
+    await act(async () => {
+      resolveSecond({
+        ok: false,
+        reason: 'unauthorized',
+        message: '401 Unauthorized',
+      });
+    });
+
+    expect(result.current.state.discoveryStatus).toBe('failed');
+    expect(result.current.state.recommendedModels.map((m) => m.id)).toEqual(
+      BUILT_IN_IDS,
+    );
+  });
+
+  it('does not remount the model step when the list is unchanged', async () => {
+    fetchProviderModelIdsMock.mockResolvedValue({
+      ok: false,
+      reason: 'network',
+      message: 'ETIMEDOUT',
+    });
+
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+    await advanceToModelStep(result);
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('failed'),
+    );
+
+    // Nothing ever replaced the built-in list, so remounting the step would
+    // wipe an in-progress search and focus for no visible change.
+    expect(result.current.state.recommendedModelsRevision).toBe(0);
+  });
+
+  it('retries a failed lookup when the model step is re-entered', async () => {
+    fetchProviderModelIdsMock.mockResolvedValueOnce({
+      ok: false,
+      reason: 'network',
+      message: 'ETIMEDOUT',
+    });
+    fetchProviderModelIdsMock.mockResolvedValueOnce(discovered(SERVED_IDS));
+
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+    await advanceToModelStep(result);
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('failed'),
+    );
+
+    // A failure caches nothing, so the transient blip must not freeze the
+    // pair into "built-ins only" for the rest of the wizard session.
+    await reenterModelStep(result, 'sk-sp-test-key');
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('success'),
+    );
+    expect(fetchProviderModelIdsMock).toHaveBeenCalledTimes(2);
+  });
+
   it('does not re-request when the model step is re-entered', async () => {
     fetchProviderModelIdsMock.mockResolvedValue(discovered(SERVED_IDS));
 

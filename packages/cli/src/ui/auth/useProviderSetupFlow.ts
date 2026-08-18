@@ -155,6 +155,10 @@ export function useProviderSetupFlow(
   const discoveryCacheRef = useRef(new Map<string, ModelSpec[]>());
   const discoveryKeyRef = useRef<string | null>(null);
   const discoveryAbortRef = useRef<AbortController | null>(null);
+  // Mirrors `discoveredModels` so the discovery effect can tell whether the
+  // displayed list actually changes without taking the state as a dependency
+  // (which would re-run the effect on its own result).
+  const discoveredModelsRef = useRef<ModelSpec[] | null>(null);
 
   const currentStep = visibleSteps[stepIndex] ?? null;
 
@@ -164,8 +168,24 @@ export function useProviderSetupFlow(
     discoveryAbortRef.current?.abort();
     discoveryAbortRef.current = null;
     discoveryKeyRef.current = null;
+    discoveredModelsRef.current = null;
     setDiscoveredModels(null);
     setDiscoveryStatus('idle');
+  }, []);
+
+  /**
+   * Swap the recommendation list the model step renders. The revision bump is
+   * what remounts `ModelIdsStep` so its checkbox and custom-input state is
+   * re-derived; it is skipped when the list is unchanged, because a spurious
+   * remount would wipe the user's in-progress search and focus for nothing.
+   */
+  const replaceRecommendations = useCallback((models: ModelSpec[] | null) => {
+    const previous = discoveredModelsRef.current;
+    discoveredModelsRef.current = models;
+    setDiscoveredModels(models);
+    if (previous !== models) {
+      setRecommendedModelsRevision((revision) => revision + 1);
+    }
   }, []);
 
   // Abort an in-flight lookup when the dialog goes away — nothing is left to
@@ -174,9 +194,8 @@ export function useProviderSetupFlow(
 
   const applyDiscoveredModels = useCallback(
     (config: ProviderConfig, models: ModelSpec[]) => {
-      setDiscoveredModels(models);
+      replaceRecommendations(models);
       setDiscoveryStatus('success');
-      setRecommendedModelsRevision((revision) => revision + 1);
 
       // Drop built-in ids the endpoint no longer serves from the pending
       // selection — leaving them checked would install exactly the stale
@@ -194,7 +213,7 @@ export function useProviderSetupFlow(
         return kept.join(', ');
       });
     },
-    [],
+    [replaceRecommendations],
   );
 
   useEffect(() => {
@@ -209,15 +228,26 @@ export function useProviderSetupFlow(
     if (discoveryKeyRef.current === discoveryKey) return;
     discoveryKeyRef.current = discoveryKey;
 
+    // The pair changed, so any lookup still in flight is for a pair the user
+    // has moved off. Abort before either branch below: a cache hit that
+    // returned early used to leave it running, and it would then apply the
+    // abandoned pair's result over the current one.
+    discoveryAbortRef.current?.abort();
+    discoveryAbortRef.current = null;
+
     const cached = discoveryCacheRef.current.get(discoveryKey);
     if (cached) {
       applyDiscoveredModels(provider, cached);
       return;
     }
 
-    discoveryAbortRef.current?.abort();
     const controller = new AbortController();
     discoveryAbortRef.current = controller;
+    // Until this pair answers, the previous pair's list is not an answer for
+    // it — keep the notice ("fetching…") honest by falling back to the
+    // built-ins, and bump the revision so the mounted step re-derives its
+    // checkbox state against what is actually on screen.
+    replaceRecommendations(null);
     setDiscoveryStatus('loading');
 
     void (async () => {
@@ -226,19 +256,37 @@ export function useProviderSetupFlow(
         apiKey: resolvedApiKey,
         signal: controller.signal,
       });
+      // `aborted` covers unmount; the key check covers a pair change that
+      // raced this continuation — the abort above happens on the next effect
+      // run, which can land after this await resolved.
       if (controller.signal.aborted) return;
+      if (discoveryKeyRef.current !== discoveryKey) return;
       if (!result.ok) {
         // Every failure mode lands here on purpose: the built-in list is a
         // working answer, so the step stays usable and says so quietly.
-        setDiscoveredModels(null);
+        // The list on screen changes back to the built-ins, so the mounted
+        // step must re-derive rather than keep checkbox state pointing at ids
+        // the built-in list does not offer.
+        replaceRecommendations(null);
         setDiscoveryStatus('failed');
+        // A failure caches nothing, so releasing the pair key lets a later
+        // re-entry retry it. Claiming the key for the session would freeze a
+        // transient 429/timeout into "built-ins only" with no way back.
+        discoveryKeyRef.current = null;
         return;
       }
       const merged = mergeDiscoveredModels(provider.models, result.ids);
       discoveryCacheRef.current.set(discoveryKey, merged);
       applyDiscoveredModels(provider, merged);
     })();
-  }, [currentStep, provider, baseUrl, apiKey, applyDiscoveredModels]);
+  }, [
+    currentStep,
+    provider,
+    baseUrl,
+    apiKey,
+    applyDiscoveredModels,
+    replaceRecommendations,
+  ]);
 
   // -- Lifecycle ------------------------------------------------------------
 
