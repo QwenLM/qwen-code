@@ -328,6 +328,34 @@ describe('useProviderSetupFlow model discovery', () => {
     expect(result.current.state.discoveryStatus).toBe('success');
   });
 
+  it('restores the selection when a new pair falls back to the built-ins', async () => {
+    fetchProviderModelIdsMock.mockResolvedValueOnce(discovered(SERVED_IDS));
+    fetchProviderModelIdsMock.mockResolvedValueOnce({
+      ok: false,
+      reason: 'unauthorized',
+      message: '401 Unauthorized',
+    });
+
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+    await advanceToModelStep(result);
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('success'),
+    );
+    expect(result.current.state.modelIds).not.toContain(RETIRED_ID);
+
+    // The second pair never answers, so nothing re-derives the selection
+    // after the fact — the step shows the whole built-in list and the
+    // selection has to match it.
+    await reenterModelStep(result, 'sk-sp-second-key');
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('failed'),
+    );
+    expect(result.current.state.recommendedModels.map((m) => m.id)).toEqual(
+      BUILT_IN_IDS,
+    );
+    expect(result.current.state.modelIds).toContain(RETIRED_ID);
+  });
+
   it('does not carry the fallback pick into the next pair', async () => {
     // Both catalogs are disjoint from the built-in list, so each pair prunes
     // the selection empty and falls back to its own first live model.

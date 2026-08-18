@@ -275,6 +275,11 @@ export function useProviderSetupFlow(
     // built-ins, and bump the revision so the mounted step re-derives its
     // checkbox state against what is actually on screen.
     replaceRecommendations(null);
+    // The selection goes back with the list. Leaving the previous pair's
+    // prune in place would show the full built-in list over a selection
+    // missing ids from it — and if this pair's lookup fails, nothing else
+    // ever re-derives the selection.
+    setModelIds(authoredModelIdsRef.current);
     setDiscoveryStatus('loading');
 
     void (async () => {
