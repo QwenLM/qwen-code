@@ -577,7 +577,11 @@ function sectionsContained(
  * `ORIG_HEAD` to an arbitrary ancestor — both shape-legal, both silently
  * wrong. The match is CASE-INSENSITIVE: on case-insensitive filesystems
  * (macOS/Windows defaults) `.git/fetch_head` folds onto `.git/FETCH_HEAD`,
- * so the lowercase spellings reach the same pseudo-refs.
+ * so the lowercase spellings reach the same pseudo-refs. `refs/`-prefixed
+ * names ride the same rejection: they are legal branch names
+ * (`git check-ref-format --branch` accepts `refs/heads/x`), but as a
+ * fetch/merge-base argument they resolve QUALIFIED refs the server
+ * controls — a wrong base disclosed only by a misdescribing warning.
  */
 const GIT_PSEUDO_REFS =
   /^(FETCH|ORIG|MERGE|CHERRY_PICK|REVERT|REBASE|BISECT)_HEAD$/i;
@@ -587,6 +591,7 @@ function isPlainBranchName(name: string): boolean {
     name.toUpperCase() !== 'HEAD' &&
     !GIT_PSEUDO_REFS.test(name) &&
     !name.includes('..') &&
+    !/^refs\//i.test(name) &&
     /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(name)
   );
 }
@@ -603,14 +608,23 @@ const gitProbe: GitProbe = {
   // of a TAG exits 0 writing only FETCH_HEAD (`* tag v1.0 -> FETCH_HEAD`),
   // so the fetch "succeeds" yet no `origin/<ref>` exists — and the
   // bare-name fallback then merge-bases against the reviewer's LOCAL tag:
-  // a wrong-base diff with baseFetchFailed falsely false. The check is
-  // FULLY QUALIFIED (`refs/remotes/…`): an unqualified `origin/<ref>`
-  // resolves in refs/tags and refs/heads FIRST, so a tag or branch named
-  // `origin/<ref>` — a pushable, server-controlled refname a plain clone
-  // auto-carries — would satisfy the check with no tracking ref present.
+  // a wrong-base diff with baseFetchFailed falsely false. The fetch is an
+  // EXPLICIT BRANCH REFSPEC: the source is fully qualified (git dwims a
+  // bare name onto a same-named TAG and exits 0 without updating the
+  // tracking ref — a pushable, server-controlled shadow that passes the
+  // freshness guard it never refreshed), and the destination is the
+  // qualified tracking ref. The backstop check is FULLY QUALIFIED
+  // (`refs/remotes/…`): an unqualified `origin/<ref>` resolves in
+  // refs/tags and refs/heads FIRST, so a tag or branch named
+  // `origin/<ref>` — likewise pushable, auto-carried at clone time — would
+  // satisfy the check with no tracking ref present.
   fetch: (remote, ref) =>
-    gitOpt('fetch', remote, '--', ref) !== null &&
-    refExists(`refs/remotes/${remote}/${ref}`),
+    gitOpt(
+      'fetch',
+      remote,
+      '--',
+      `+refs/heads/${ref}:refs/remotes/${remote}/${ref}`,
+    ) !== null && refExists(`refs/remotes/${remote}/${ref}`),
   refExists,
   mergeBase: (a, b) => gitOpt('merge-base', a, b),
 };
@@ -755,7 +769,11 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         `Failed to fetch PR #${prNumber} from remote "${remote}": ${(err as Error).message}`,
       );
     }
-    const fetchedSha = git('rev-parse', ref);
+    // QUALIFIED: an unqualified `ref` resolves in refs/tags BEFORE
+    // refs/heads, so a planted tag with the throwaway branch's name (fully
+    // attacker-known, no pid here) would silently name the tag's commit as
+    // the fetched head while the worktree shows the real one.
+    const fetchedSha = git('rev-parse', `refs/heads/${ref}`);
 
     // 3. Fetch PR metadata via the platform. Cross-repo flag tells the LLM
     //    whether to switch into lightweight mode.
@@ -826,7 +844,9 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     const { sha: mergeBaseSha, baseFetchFailed } = resolveMergeBase(
       remote,
       meta.baseRefName,
-      ref,
+      // QUALIFIED — the head side is dwim-shadowable exactly like the
+      // fetchedSha read above.
+      `refs/heads/${ref}`,
       gitProbe,
     );
     if (baseFetchFailed) {

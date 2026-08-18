@@ -301,6 +301,23 @@ describe('aoneReader.resolveRepo', () => {
     expect(message).not.toContain('ci-user');
   });
 
+  it('refuses an origin OUTSIDE the Aone host family (round-12 witness)', () => {
+    // Detection can be steered onto this reader by an explicit `--host`
+    // while the cwd clone is a GitHub mirror (the common dual-remote
+    // Aone-migration setup). Without the guard the discovery branch emits
+    // {platform:'aone', host:'github.com'} and queries a1 with the
+    // mirror's coordinates — the same predicate fetchDiff's origin guard
+    // applies.
+    gitMock.mockImplementation((...args: string[]) => {
+      if (args[0] === 'remote')
+        return 'git@github.com:MirrorOwner/mirror-repo.git';
+      return '';
+    });
+    expect(() => aoneReader.resolveRepo()).toThrow(
+      /not the Aone host family — run from inside an Aone clone/,
+    );
+  });
+
   it('redacts the shapes the per-regex redactions missed (round-9 class)', () => {
     // (1) URL-form userinfo whose secret contains `/` — no regex shape
     // matches, the split at the LAST `@` redacts by construction;
@@ -448,7 +465,9 @@ describe('aoneReader.fetchDiff', () => {
       ...PINNED_DIFF_CONFIG,
       'diff',
       ...PINNED_DIFF_FLAGS,
-      expect.stringMatching(/^base-sha\.\.__qwen-review-diff-7-\d+$/),
+      expect.stringMatching(
+        /^base-sha\.\.refs\/heads\/__qwen-review-diff-7-\d+$/,
+      ),
     );
     expect(diff).toBe('diff --git a/x b/x\n');
     // The MR head is FORCE-fetched (a stale throwaway ref from an interrupted
@@ -461,9 +480,15 @@ describe('aoneReader.fetchDiff', () => {
         /^\+refs\/merge-requests\/7\/head:__qwen-review-diff-7-\d+$/,
       ),
     );
-    // `--` ends option parsing: the target branch is server-controlled MR
-    // metadata and must never reach git as an option.
-    expect(gitMock).toHaveBeenCalledWith('fetch', 'origin', '--', 'master');
+    // The target fetch is an EXPLICIT BRANCH REFSPEC: a bare-name fetch
+    // dwims onto a same-named tag (exit 0, tracking ref untouched — the
+    // silent stale-base state). The head side of every read is qualified
+    // (refs/heads/…) for the same shadow class.
+    expect(gitMock).toHaveBeenCalledWith(
+      'fetch',
+      'origin',
+      '+refs/heads/master:refs/remotes/origin/master',
+    );
     // The throwaway ref is cleaned up.
     expect(gitMock).toHaveBeenCalledWith(
       'branch',
@@ -552,7 +577,7 @@ describe('aoneReader.fetchDiff', () => {
       'diff',
       ...PINNED_DIFF_FLAGS,
       expect.stringMatching(
-        /^__qwen-review-diff-7-\d+~1\.\.__qwen-review-diff-7-\d+$/,
+        /^refs\/heads\/__qwen-review-diff-7-\d+~1\.\.refs\/heads\/__qwen-review-diff-7-\d+$/,
       ),
     );
     // The fallback is DISCLOSED: a multi-commit MR gets only its last
@@ -688,6 +713,12 @@ describe('aoneReader.fetchDiff', () => {
       'fetch_head',
       'orig_head',
       'head',
+      // refs/-prefixed names are LEGAL branch names (check-ref-format
+      // --branch accepts them), but as fetch/merge-base arguments they
+      // resolve qualified refs the server controls — refused like the
+      // pseudo-refs.
+      'refs/heads/master',
+      'refs/remotes/origin/HEAD',
     ]) {
       a1JsonMock.mockReturnValue({
         mergeRequest: { sourceBranch: 'sha', targetBranch: target },
@@ -718,7 +749,14 @@ describe('aoneReader.fetchDiff', () => {
     expect(gitMock).toHaveBeenCalledWith(
       'merge-base',
       'refs/remotes/origin/master',
-      expect.stringMatching(/^__qwen-review-diff-7-\d+$/),
+      expect.stringMatching(/^refs\/heads\/__qwen-review-diff-7-\d+$/),
+    );
+    // The target fetch never dwims onto a same-named tag: explicit branch
+    // refspec, both sides fully qualified.
+    expect(gitMock).toHaveBeenCalledWith(
+      'fetch',
+      'origin',
+      '+refs/heads/master:refs/remotes/origin/master',
     );
   });
 });

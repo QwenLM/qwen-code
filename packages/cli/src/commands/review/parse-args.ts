@@ -110,6 +110,10 @@ export interface ParsedReviewArgs {
    */
   severityFloor: ReviewSeverityFloor | 'auto';
   severityFloorSource: 'explicit' | 'configured' | 'default';
+  /** The `--host` flag's value, when present — recorded verbatim so the
+   *  write gate can bind a recorded bare-number target's platform (the
+   *  target itself carries no host in that spelling). */
+  host?: string;
   /** Non-flag tokens beyond the first target token, reported not guessed. */
   extraTokens: string[];
   /** Unrecognized `--flags`, reported not guessed. */
@@ -329,6 +333,7 @@ export function parseReviewArgs(
   let fixRequested = false;
   let explicitEffort: ReviewEffort | null = null;
   let explicitFloor: ReviewSeverityFloor | 'auto' | null = null;
+  let recordedHostFlag: string | undefined;
 
   // The configured default gets the same validation as an explicit flag:
   // settings loading performs no enum validation, so a hand-edited typo
@@ -398,6 +403,22 @@ export function parseReviewArgs(
 
     if (token === '--fix') {
       fixRequested = true;
+      continue;
+    }
+
+    if (token === '--host' || token.startsWith('--host=')) {
+      // Recorded verbatim for the write gate's platform binding; the value
+      // is consumed either way and never leaks into the target tokens.
+      if (token.includes('=')) {
+        const value = token.slice(token.indexOf('=') + 1);
+        if (value !== '') recordedHostFlag = value;
+        continue;
+      }
+      const next = i + 1 < tokens.length ? tokens[i + 1] : undefined;
+      if (next !== undefined && next !== '' && !isFlag(next)) {
+        recordedHostFlag = next;
+        i++;
+      }
       continue;
     }
 
@@ -509,8 +530,11 @@ export function parseReviewArgs(
   // wrong PR half the time, so both are refused, loudly, and the review
   // falls back to the local diff nothing contradicted.
   const soleCandidate = kept.length === 1;
-  const hasValidCandidate = kept.some((k) => k.invalidValueOf === undefined);
   const isPrShaped = isPrShapedToken;
+  const isPrUrlToken = (token: string): boolean => {
+    const c = classifyToken(token);
+    return c !== null && c !== 'invalid-url' && c.type === 'pr-url';
+  };
   // The pool counts BOTH spellings: an `=`-form invalid value never enters
   // `kept` (it was recorded as `invalid-eq` and consumed in place), but it
   // is the same typed PR number — `--severity-floor=6711 --effort 6712`
@@ -560,6 +584,38 @@ export function parseReviewArgs(
       distinctPr.add(k);
     }
   }
+  // VALID CANDIDATES, with the mixed-shape restatement carved out: when the
+  // rescue pool holds exactly one distinct PR and a URL spelling of it
+  // arrived as an invalid flag value, a POSITIONAL bare number of the same
+  // PR restates that PR — it is not a competing valid candidate. Letting it
+  // rank as one discarded the URL (the sole carrier of host/platform
+  // identity) and retargeted the run onto the cwd clone's same-number PR —
+  // `--effort <cr-url> 7` reviewed (and could POST to) the wrong platform
+  // (round-12 finding). A DIFFERENT number still outranks, as the user
+  // typed it outside any flag.
+  const poolKey = distinctPr.size === 1 ? [...distinctPr][0] : undefined;
+  const poolPrNumber =
+    poolKey !== undefined
+      ? Number(poolKey.split('@')[0].replace(/^pr:/, ''))
+      : undefined;
+  const poolHasUrlSpelling =
+    poolPrNumber !== undefined &&
+    kept.some((k) => k.invalidValueOf !== undefined && isPrUrlToken(k.token));
+  const hasValidCandidate = kept.some((k) => {
+    if (k.invalidValueOf !== undefined) return false;
+    if (poolHasUrlSpelling) {
+      const c = classifyToken(k.token);
+      if (
+        c !== null &&
+        c !== 'invalid-url' &&
+        c.type === 'pr-number' &&
+        c.number === poolPrNumber
+      ) {
+        return false;
+      }
+    }
+    return true;
+  });
   if (!hasValidCandidate && distinctPr.size > 1) {
     const shown = kept
       .filter((k) => k.invalidValueOf !== undefined && isPrShaped(k.token))
@@ -581,10 +637,6 @@ export function parseReviewArgs(
   // platform's — which spelling won depending on token order (round-10
   // finding: a loud refusal at the merge base degraded to a silent
   // wrong-platform retarget).
-  const isPrUrlToken = (token: string): boolean => {
-    const c = classifyToken(token);
-    return c !== null && c !== 'invalid-url' && c.type === 'pr-url';
-  };
   const preferredRescueToken =
     !hasValidCandidate && distinctPr.size === 1
       ? kept.find(
@@ -842,6 +894,7 @@ export function parseReviewArgs(
     fix: { requested: fixRequested, effective: fixEffective },
     severityFloor,
     severityFloorSource,
+    ...(recordedHostFlag !== undefined ? { host: recordedHostFlag } : {}),
     extraTokens,
     unknownFlags,
     warnings,

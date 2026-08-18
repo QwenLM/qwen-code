@@ -180,7 +180,12 @@ function normalizeInlineComments(
 function authorization(
   args: SubmitArgs,
   defaultComment: boolean,
-): { ok: boolean; why: string; recordedHost?: string } {
+): {
+  ok: boolean;
+  why: string;
+  recordedHost?: string;
+  recordedUnbound?: boolean;
+} {
   return reviewWriteAuthorization({
     userAuthorized: args.userAuthorized,
     defaultComment,
@@ -487,16 +492,24 @@ export function runSubmit(
   //  - Recorded non-Aone target (pr-url host binding) must NOT be vetoed
   //    by the cwd probe from an Aone-origin clone — the recorded binding
   //    is the explicit signal the registry's precedence documents.
-  //  - No recorded host (bare pr-number, `--user-authorized`): fall back
-  //    to the flag, then GH_HOST (ghEnv inherits the operator's export
-  //    when no module host is set, so an Aone-pointing GH_HOST must hit
-  //    this refusal, not an opaque gh failure), then the cwd clone.
+  //  - RECORDED but hostless (a bare-MR-number recording with no `--host`
+  //    flag — the canonical Aone invocation shape carries no URL): the
+  //    recording proves a review exists but not WHERE it lives, and the
+  //    runtime environment cannot prove it either. For a public,
+  //    irreversible write that is fail-CLOSED: refuse and name the remedy
+  //    (`--host`), instead of trusting the environment and posting the
+  //    review at github.com's same-named repo.
+  //  - No recording at all: fall back to the flag, then GH_HOST (ghEnv
+  //    inherits the operator's export when no module host is set, so an
+  //    Aone-pointing GH_HOST must hit this refusal, not an opaque gh
+  //    failure), then the cwd clone.
   // resolveGhHost trims, so a padded `--host` cannot slip past detection.
   // The findings are not lost: they are in the terminal output and the
   // saved report.
   const recordedHost = auth.recordedHost;
   const aoneWrite =
     isAoneHost(recordedHost) ||
+    auth.recordedUnbound === true ||
     (recordedHost === undefined &&
       (isAoneHost(resolveGhHost(args.host)) ||
         getPlatformReader({ host: args.host?.trim() || undefined }).kind ===
@@ -506,7 +519,11 @@ export function runSubmit(
       `REFUSED to post to ${args.repo}#${args.pr}: posting review comments ` +
         `to Aone Code is not supported yet (read-only phase). The findings ` +
         `are in the terminal output and the saved report; post them ` +
-        `manually or wait for the write phase.`,
+        `manually or wait for the write phase.` +
+        (auth.recordedUnbound === true && !isAoneHost(recordedHost)
+          ? ` (the recorded target names no platform — pass \`--host\` to ` +
+            `prove it is not an Aone MR)`
+          : ''),
     );
     writeStdoutLine(
       JSON.stringify(

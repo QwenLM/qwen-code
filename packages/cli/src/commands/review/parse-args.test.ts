@@ -622,6 +622,47 @@ describe('parseReviewArgs — --severity-floor (the convergence posture knob)', 
     }
   });
 
+  it('MIXED shapes: a positional bare number never outranks a flag-rescued same-number CR URL', () => {
+    // The round-12 witness: the invariant "the URL never loses to a
+    // same-number bare spelling" was gated on !hasValidCandidate, and a
+    // POSITIONAL bare number satisfied it — the URL (the only carrier of
+    // host/platform identity) was discarded as an effort typo and the run
+    // retargeted onto the cwd clone's same-number PR. A DIFFERENT number
+    // typed positionally still outranks (control at the end).
+    const url = 'https://code.alibaba-inc.com/maxcompute/odps_src/codereview/7';
+    for (const args of [
+      `--effort ${url} 7`,
+      `7 --effort ${url}`,
+      `--severity-floor=${url} 7`,
+    ]) {
+      const got = parseReviewArgs(args);
+      expect(got.target).toMatchObject({
+        type: 'pr-url',
+        host: 'code.alibaba-inc.com',
+        number: 7,
+      });
+    }
+    // Control: a DIFFERENT positional number outranks the rescued URL.
+    expect(parseReviewArgs(`--effort ${url} 8`).target).toMatchObject({
+      type: 'pr-number',
+      number: 8,
+    });
+  });
+
+  it('records the --host flag verbatim for the write gate', () => {
+    expect(parseReviewArgs('123 --host gitlab.alibaba-inc.com').host).toBe(
+      'gitlab.alibaba-inc.com',
+    );
+    expect(parseReviewArgs('123 --host=code.alibaba-inc.com').host).toBe(
+      'code.alibaba-inc.com',
+    );
+    expect(parseReviewArgs('123').host).toBeUndefined();
+    // The value is consumed — it never leaks into the target tokens.
+    const got = parseReviewArgs('123 --host gitlab.alibaba-inc.com');
+    expect(got.target).toMatchObject({ type: 'pr-number', number: 123 });
+    expect(got.extraTokens).toEqual([]);
+  });
+
   it('the equals form rescues a PR-shaped value exactly as the spaced form does', () => {
     // Round-8 probe: `--severity-floor=6711` reviewed the LOCAL tree while
     // `--severity-floor 6711` rescued PR 6711 — the guard's invariant

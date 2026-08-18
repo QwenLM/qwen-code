@@ -303,17 +303,32 @@ describe('authorization — URL-shaped host and repo binding at the submit call 
     // the recorded target's host: submit's platform binding keys on it, and
     // a fast path that binds none re-opens the leak — a recorded Aone
     // codereview review, user-authorised from a non-Aone cwd with no
-    // --host/GH_HOST, would post at github.com's same-named repo.
+    // --host/GH_HOST, would post at github.com's same-named repo. The
+    // binding carries the repo check: only a recording naming the SAME
+    // repo supplies the host (round-12 hardening).
     const auth = authFor(
       'https://code.alibaba-inc.com/g/p/codereview/123 --comment',
-      { userAuthorized: true },
+      { userAuthorized: true, repo: 'g/p' },
     );
     expect(auth.ok).toBe(true);
     expect(auth.recordedHost).toBe('code.alibaba-inc.com');
-    // A bare pr-number still binds no host — the environment fallback.
+    // A different-repo recording of the same number binds nothing.
     expect(
-      authFor('123 --comment', { userAuthorized: true }).recordedHost,
+      authFor('https://code.alibaba-inc.com/g/p/codereview/123 --comment', {
+        userAuthorized: true,
+      }).recordedHost,
     ).toBeUndefined();
+    // A bare pr-number binds the recorded --host flag when present, and
+    // nothing without it (the unbound fail-closed then rides the write
+    // gate).
+    expect(
+      authFor('123 --host code.alibaba-inc.com --comment', {
+        userAuthorized: true,
+      }).recordedHost,
+    ).toBe('code.alibaba-inc.com');
+    const bare = authFor('123 --comment', { userAuthorized: true });
+    expect(bare.recordedHost).toBeUndefined();
+    expect(bare.recordedUnbound).toBe(true);
     // A missing args file degrades to undefined without blocking the
     // user-authorised publish (best effort by design).
     expect(
@@ -416,6 +431,118 @@ describe('the user-authorized fast path binds the recorded host cross-session', 
     // ghWithInput is aliased onto ghMock in this file: the post reached the
     // wire (the write proceeded instead of refusing on a stale host).
     expect(ghMock).toHaveBeenCalled();
+  });
+
+  it('binds the repo too — a different-repo same-number recording supplies nothing', () => {
+    // The recording names PR 42 of ANOTHER repo; the write targets
+    // maxcompute/odps_src — the host must not cross the repo boundary.
+    writeFileSync(
+      siblingFile,
+      'https://code.alibaba-inc.com/other/repo/codereview/42 --comment\n',
+      'utf8',
+    );
+    expect(() =>
+      runSubmit(
+        args({ userAuthorized: true, pr: 42, repo: 'maxcompute/odps_src' }),
+        'unknown',
+        { defaultComment: false },
+      ),
+    ).not.toThrow();
+    expect(process.exitCode).toBeUndefined();
+    expect(ghMock).toHaveBeenCalled();
+  });
+
+  it('FAILS CLOSED on a bare-number recording with no host evidence', () => {
+    // The canonical Aone invocation shape (`/review <global-MR-id>`)
+    // records a bare number — no URL, no host. A cross-session publish of
+    // it cannot prove the target is NOT Aone, and the runtime environment
+    // (cwd pinned non-Aone here, no --host, no GH_HOST) cannot either:
+    // the write refuses and names the remedy instead of posting the
+    // review at github.com's same-named repo (the round-12 witness: this
+    // once exited 0 and POSTed).
+    writeFileSync(siblingFile, '42 --comment\n', 'utf8');
+    expect(() =>
+      runSubmit(
+        args({ userAuthorized: true, pr: 42, repo: 'maxcompute/odps_src' }),
+        'unknown',
+        { defaultComment: false },
+      ),
+    ).not.toThrow();
+    expect(process.exitCode).toBe(3);
+    const out = JSON.parse(
+      writeStdoutSpy.mock.calls.map((c) => String(c[0])).join(''),
+    ) as { posted?: boolean; reason?: string };
+    expect(out).toEqual({ posted: false, reason: 'aone-read-only-phase' });
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('a bare-number recording WITH a recorded --host binds the platform', () => {
+    // The remedy the refusal names: the host flag recorded beside the
+    // bare number is the platform evidence. A github-recorded host lets
+    // the write through; an Aone-recorded host refuses it.
+    writeFileSync(siblingFile, '42 --host github.com --comment\n', 'utf8');
+    expect(() =>
+      runSubmit(
+        args({ userAuthorized: true, pr: 42, repo: 'maxcompute/odps_src' }),
+        'unknown',
+        { defaultComment: false },
+      ),
+    ).not.toThrow();
+    expect(process.exitCode).toBeUndefined();
+    expect(ghMock).toHaveBeenCalled();
+
+    ghMock.mockClear();
+    writeStdoutSpy.mockClear();
+    writeFileSync(
+      siblingFile,
+      '42 --host gitlab.alibaba-inc.com --comment\n',
+      'utf8',
+    );
+    expect(() =>
+      runSubmit(
+        args({ userAuthorized: true, pr: 42, repo: 'maxcompute/odps_src' }),
+        'unknown',
+        { defaultComment: false },
+      ),
+    ).not.toThrow();
+    expect(process.exitCode).toBe(3);
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('never reads recordings planted OUTSIDE session dirs (worktree vector)', () => {
+    // `.qwen/tmp/` also holds review worktrees checked out from the PR's
+    // own tree — a malicious PR can plant a root-level args file that a
+    // review materializes at a scanned path. Only `s-*` session
+    // directories are scanned, so the planted host never reaches the
+    // binding.
+    const plantedDir = join('.qwen', 'tmp', 'review-pr-42');
+    mkdirSync(plantedDir, { recursive: true });
+    writeFileSync(
+      join(plantedDir, 'qwen-skill-args-review.txt'),
+      'https://code.alibaba-inc.com/maxcompute/odps_src/codereview/42 --comment\n',
+      'utf8',
+    );
+    // Remove the legit session recording so only the planted one names 42.
+    rmSync(siblingFile, { force: true });
+    try {
+      expect(() =>
+        runSubmit(
+          args({
+            userAuthorized: true,
+            pr: 42,
+            repo: 'maxcompute/odps_src',
+          }),
+          'unknown',
+          { defaultComment: false },
+        ),
+      ).not.toThrow();
+      // The planted Aone host did NOT bind: the write proceeds (cwd pinned
+      // non-Aone by the registry mock).
+      expect(process.exitCode).toBeUndefined();
+      expect(ghMock).toHaveBeenCalled();
+    } finally {
+      rmSync(plantedDir, { recursive: true, force: true });
+    }
   });
 });
 

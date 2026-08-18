@@ -528,6 +528,11 @@ describe('fetch-pr report assembly', () => {
       'fetch_head',
       'orig_head',
       'head',
+      // Legal branch names (check-ref-format --branch accepts them) that
+      // resolve qualified refs the server controls as fetch/merge-base
+      // arguments — refused like the pseudo-refs.
+      'refs/heads/main',
+      'refs/remotes/origin/HEAD',
     ]) {
       producerMocks.gh.mockReturnValue(
         JSON.stringify({
@@ -615,6 +620,44 @@ describe('fetch-pr report assembly', () => {
     await reportFor({});
     expect(checked).toContain('refs/remotes/origin/v1.0');
     expect(checked).not.toContain('origin/v1.0');
+  });
+
+  it('the base fetch is an EXPLICIT branch refspec (no tag dwim)', async () => {
+    // A bare-name fetch of a base that is also a tag name dwims onto the
+    // TAG: exit 0, FETCH_HEAD-only, tracking ref untouched — the stale-base
+    // state passing the freshness guard it never refreshed. The probe fetch
+    // must name the branch source and the qualified tracking-ref
+    // destination explicitly.
+    producerMocks.gh.mockReturnValue(
+      JSON.stringify({
+        headRefName: 'feat/x',
+        headRefOid: 'f00df00df00d',
+        baseRefName: 'v1.0',
+        additions: 1,
+        deletions: 0,
+        changedFiles: 1,
+        isCrossRepository: false,
+        body: '',
+      }),
+    );
+    const fetched: string[][] = [];
+    producerMocks.gitOpt.mockImplementation((...args: string[]) => {
+      if (args[0] === 'fetch') fetched.push(args.slice(1));
+      return args[0] === 'fetch' ? '' : null;
+    });
+    producerMocks.refExists.mockImplementation((...refs: unknown[]) => {
+      void refs;
+      return true;
+    });
+    producerMocks.resolveMergeBase.mockImplementation((...args: unknown[]) => {
+      const probe = args[3] as { fetch: (r: string, b: string) => boolean };
+      probe.fetch('origin', 'v1.0');
+      return { sha: 'mb1', baseFetchFailed: false };
+    });
+    await reportFor({});
+    expect(fetched).toEqual([
+      ['origin', '--', '+refs/heads/v1.0:refs/remotes/origin/v1.0'],
+    ]);
   });
 
   it('refuses a non-positive pr_number before any side effect', async () => {

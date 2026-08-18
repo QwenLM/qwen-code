@@ -230,7 +230,13 @@ function mrHeadRefSpec(prNumber: number): string {
  * immediately-preceding fetch wrote, so lowercase spellings reach the same
  * pseudo-refs. Fail closed: an unusual-but-legal name is refused with a
  * clear metadata-stage error rather than guessed at inside a git
- * invocation. fetch-pr's baseRefName guard carries the twin of this check.
+ * invocation. `refs/`-prefixed names ride the same rejection: they are
+ * legal branch names (`git check-ref-format --branch` accepts
+ * `refs/heads/x`), but as a fetch/merge-base argument they resolve
+ * QUALIFIED refs the server controls (`refs/remotes/origin/HEAD` is the
+ * clone's default-branch symref) — a wrong base disclosed only by a
+ * misdescribing warning. fetch-pr's baseRefName guard carries the twin of
+ * this check.
  */
 const GIT_PSEUDO_REFS =
   /^(FETCH|ORIG|MERGE|CHERRY_PICK|REVERT|REBASE|BISECT)_HEAD$/i;
@@ -240,6 +246,7 @@ function isPlainBranchName(name: string): boolean {
     name.toUpperCase() !== 'HEAD' &&
     !GIT_PSEUDO_REFS.test(name) &&
     !name.includes('..') &&
+    !/^refs\//i.test(name) &&
     /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(name)
   );
 }
@@ -290,6 +297,20 @@ export const aoneReader: ReviewPlatformReader = {
       // CI and the raw URL must not reach stderr/logs/the transcript.
       throw new Error(
         `cannot parse the origin remote ${JSON.stringify(redactUrl(url))} into group/project`,
+      );
+    }
+    // Detection can be steered onto this reader by an explicit `--host`
+    // while the cwd clone sits on a DIFFERENT platform (the common
+    // dual-remote Aone-migration setup: origin is a GitHub mirror). The
+    // fetchDiff origin guard applies this same predicate for the same
+    // reason; without it here the discovery branch emits a
+    // self-contradictory identity ({platform:'aone', host:'github.com'})
+    // and queries a1 with the mirror's coordinates.
+    if (!isAoneHostFamily(identity.host)) {
+      throw new Error(
+        `cannot resolve an Aone repository: this clone's origin is on ` +
+          `${JSON.stringify(identity.host)}, not the Aone host family — ` +
+          `run from inside an Aone clone`,
       );
     }
     return identity;
@@ -445,9 +466,17 @@ export const aoneReader: ReviewPlatformReader = {
       // fails (transient network, expired credential), DISCLOSE it: merge-base
       // then resolves against a possibly-stale local ref, and the diff may
       // carry every commit merged into the target since the clone. Mirrors
-      // fetch-pr's `baseFetchFailed` → WARNING.
+      // fetch-pr's `baseFetchFailed` → WARNING. The fetch is an EXPLICIT
+      // BRANCH REFSPEC: a bare `git fetch origin -- <target>` dwims onto a
+      // same-named TAG (exit 0, FETCH_HEAD-only, tracking ref untouched —
+      // the stale-base state above with no WARNING, since the "fetch
+      // succeeded").
       try {
-        git('fetch', 'origin', '--', target);
+        git(
+          'fetch',
+          'origin',
+          `+refs/heads/${target}:refs/remotes/origin/${target}`,
+        );
       } catch {
         process.stderr.write(
           `WARNING: could not fetch origin/${target} — the merge-base is ` +
@@ -463,7 +492,14 @@ export const aoneReader: ReviewPlatformReader = {
         // PUSHABLE refname any user with push access (e.g. the MR author)
         // can create, and a fresh clone auto-carries — would shadow the
         // just-fetched tracking ref and silently move the merge base.
-        base = git('merge-base', `refs/remotes/origin/${target}`, ref);
+        base = git(
+          'merge-base',
+          `refs/remotes/origin/${target}`,
+          // QUALIFIED head side: an unqualified throwaway-ref name resolves
+          // in refs/tags before refs/heads — same shadow class as the base
+          // arm, on the head.
+          `refs/heads/${ref}`,
+        );
       } catch {
         // Target branch not present locally — fall back to diffing the head
         // against its first parent (single-commit AGit-Flow CRs). DISCLOSE:
@@ -478,7 +514,7 @@ export const aoneReader: ReviewPlatformReader = {
             `against its first parent; a multi-commit MR's diff may be ` +
             `incomplete.\n`,
         );
-        base = `${ref}~1`;
+        base = `refs/heads/${ref}~1`;
       }
       // gitRaw, not git(): git() has no maxBuffer (1 MiB default → ENOBUFS on
       // a routine monorepo diff), rewrites \r\n→\n (altering every CRLF-file
@@ -491,7 +527,8 @@ export const aoneReader: ReviewPlatformReader = {
         ...PINNED_DIFF_CONFIG,
         'diff',
         ...PINNED_DIFF_FLAGS,
-        `${base}..${ref}`,
+        // Head side qualified — same shadow class as the merge-base reads.
+        `${base}..refs/heads/${ref}`,
       ).toString('latin1');
     } finally {
       try {
