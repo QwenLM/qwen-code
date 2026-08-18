@@ -391,8 +391,14 @@ function splitDeferralChannel(raw: unknown): {
  * restatements is the predicate-drift class `lib/inline-counts.ts`'s header
  * exists to prevent.
  */
-export function normalizeSeverityFloor(value: unknown): unknown {
-  return typeof value === 'string' ? value.trim().toLowerCase() : value;
+export function normalizeSeverityFloor(value: unknown): string | undefined {
+  // A non-string reads as no floor rather than riding through as itself:
+  // every consumer compares against the three literals, so a number or an
+  // object already matched nothing — returning `undefined` for them keeps
+  // that behaviour while letting the callers narrow from `string` instead
+  // of `unknown` (a consumer comparing `unknown` to a literal is a
+  // type-level trap this signature removes).
+  return typeof value === 'string' ? value.trim().toLowerCase() : undefined;
 }
 
 /**
@@ -432,9 +438,14 @@ export function floorEnforcedReroute(
   drafted: ReadonlyArray<{ path?: unknown; line?: unknown; body?: unknown }>,
 ): { indices: number[]; entries: DeferredEntry[] } {
   const floor = normalizeSeverityFloor(severityFloor);
+  // `prevRound` is the PREVIOUS posted round, so the review being composed
+  // is `prevRound + 1` — spelled out because the equivalent `prevRound >= 5`
+  // reads as a fencepost error against SKILL Step 6's "from round 6 it is
+  // critical".
+  const thisRound = prevRound + 1;
   const enforced =
     floor === 'critical' ||
-    (floor === 'auto' && !contextUnavailable && prevRound >= 5);
+    (floor === 'auto' && !contextUnavailable && thisRound >= 6);
   if (!enforced) return { indices: [], entries: [] };
   const indices: number[] = [];
   const entries: DeferredEntry[] = [];
