@@ -4847,6 +4847,45 @@ describe('the ledger marker reaches the POSTED body', () => {
     expect(parseLedger(agreed.body)?.model).toBe('model-a');
   });
 
+  it('a stamped round with NO runtime identity withholds, never falls back', () => {
+    // The deferred post run from a terminal outside a session shell: the
+    // plan proves the round STARTED under an identity, and the post-time
+    // channel says nothing. Skipping the check there let `certifying` fall
+    // back to the model-WRITTEN state field — the channel this PR retires —
+    // so the marker certified the sha to a typed id and a later round under
+    // a matching typed id scoped past code it never reviewed.
+    //
+    // The recovery side already rules an empty running identity a mismatch;
+    // this is the same rule on the certifying side.
+    const r = composeReview(
+      {
+        planPath: coveredPlan(['verify', 'reverse-audit'], {
+          prNumber: 8255,
+          fetchedSha: 'deadbeef00112233',
+          reviewModelId: 'model-a@aaaaaaaa',
+        }),
+        env: ENV,
+        modelId: 'typed-by-the-model',
+        criticalsInline: 0,
+        suggestionsInline: 0,
+        draftedComments: [
+          { path: 'src/a.ts', line: 3, body: '**[Suggestion]** untested' },
+        ],
+      },
+      'unknown',
+      true,
+      '',
+    );
+    const withheld = parseLedger(r.body)!;
+    expect(withheld.sha).toBeUndefined();
+    expect(withheld.model).toBeUndefined();
+    // The footer still names the model — attribution is a separate contract.
+    // What must not carry it is the MARKER, which is the anchor's certificate.
+    expect(JSON.stringify(withheld)).not.toContain('typed-by-the-model');
+    // The findings still ride.
+    expect(withheld.findings.length).toBeGreaterThan(0);
+  });
+
   it('a provider-qualified identity is what gets certified, verbatim', () => {
     // A bare model id is unique only inside one provider configuration; the
     // runtime publishes `<model>@<8-hex of authType+baseUrl>` so two
