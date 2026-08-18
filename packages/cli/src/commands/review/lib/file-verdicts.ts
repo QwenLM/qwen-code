@@ -125,19 +125,54 @@ export function blobsAt(
   return out;
 }
 
-/** The recorded pairs for `paths` across a base and a head. */
+/**
+ * The recorded pairs for `paths` across a base and a head.
+ *
+ * The `.gitattributes` that GOVERN those paths are recorded too, whether or
+ * not the round touched them. They decide how a blob is rendered — `binary`,
+ * `-diff`, `text` — and a round reviews the rendering, so a pair identity
+ * that cannot see them lets a clean verdict transfer over a diff nobody read.
+ * The consumer (`changedPairs`) rules on them; it can only rule on what the
+ * producer wrote, which is why they are added HERE and not left to a caller
+ * to remember. They carry `NO_BLOB` on a side where they do not exist, like
+ * any other path.
+ */
 export function blobPairs(
   repoRoot: string,
   baseSha: string,
   headSha: string,
   paths: readonly string[],
 ): FileVerdicts | null {
-  const base = blobsAt(repoRoot, baseSha, paths);
-  const head = blobsAt(repoRoot, headSha, paths);
+  const all = [...new Set([...paths, ...governingAttributePaths(paths)])];
+  const base = blobsAt(repoRoot, baseSha, all);
+  const head = blobsAt(repoRoot, headSha, all);
   if (base === null || head === null) return null;
   const out = nullProtoMap<BlobPair>();
-  for (const p of paths) out[p] = { base: base[p], head: head[p] };
+  for (const p of all) out[p] = { base: base[p], head: head[p] };
   return out;
+}
+
+/**
+ * Every `.gitattributes` that could apply to `paths`: the repository root's,
+ * and one in each ancestor directory of each path.
+ *
+ * Derived from the path strings rather than probed on disk — a file that does
+ * not exist records `NO_BLOB` on both sides and is inert, which costs one
+ * `ls-tree` entry and needs no filesystem walk. Git also reads
+ * `.git/info/attributes` and the user's global file; neither is in the tree,
+ * so neither travels with the PR, and a round cannot be made to disagree with
+ * itself through them.
+ */
+function governingAttributePaths(paths: readonly string[]): string[] {
+  const out = new Set<string>([GITATTRIBUTES]);
+  for (const p of paths) {
+    const parts = p.split('/');
+    // The last element is the filename, so stop before it.
+    for (let i = 1; i < parts.length; i++) {
+      out.add(`${parts.slice(0, i).join('/')}/${GITATTRIBUTES}`);
+    }
+  }
+  return [...out];
 }
 
 /**
@@ -160,6 +195,40 @@ export function readFileVerdicts(raw: unknown): FileVerdicts | null {
   return out;
 }
 
+/** Every `.gitattributes` path either side recorded, in one set. */
+function attributePaths(...sides: FileVerdicts[]): string[] {
+  const out = new Set<string>();
+  for (const side of sides) {
+    for (const p of Object.keys(side)) {
+      if (p === GITATTRIBUTES || p.endsWith(`/${GITATTRIBUTES}`)) out.add(p);
+    }
+  }
+  return [...out];
+}
+
+/**
+ * Did any `.gitattributes` this record covers move between the two states?
+ *
+ * Only files the record CARRIES are visible here — `blobPairs` is given the
+ * plan's file list — so an attributes file outside it cannot be ruled on. The
+ * producer is what has to include them; this is the consumer's half, and it
+ * fails safe on what it can see.
+ */
+function attributesMoved(
+  recorded: FileVerdicts,
+  current: FileVerdicts,
+): boolean {
+  return attributePaths(recorded, current).some((p) => {
+    const rec = Object.hasOwn(recorded, p) ? recorded[p] : undefined;
+    const cur = Object.hasOwn(current, p) ? current[p] : undefined;
+    // Present on one side only is a move: added, deleted, or newly in scope.
+    if (!rec || !cur) return true;
+    return rec.base !== cur.base || rec.head !== cur.head;
+  });
+}
+
+const GITATTRIBUTES = '.gitattributes';
+
 /**
  * The paths whose pair moved — plus every path the record never saw, which
  * has no verdict to transfer. `paths` is the CURRENT plan's file list: a file
@@ -180,6 +249,22 @@ export function changedPairs(
   current: FileVerdicts,
   paths: readonly string[],
 ): string[] {
+  // `.gitattributes` decides how a blob is RENDERED, and a round reviews the
+  // rendering, not the blob. `binary`, `-diff` and `text` all change what
+  // `git diff` emits for byte-identical content — one history shows
+  // "Binary files … differ" where the other shows hunks — and those files are
+  // in the tree, so a PR can change them. A pair identity built from
+  // `<mode> <oid>` cannot see it, and the verdict would transfer over a diff
+  // no round ever read, in either direction: hunks appearing where none were
+  // reviewed, or content vanishing behind a binary marker.
+  //
+  // Ruled here rather than folded into each pair, because the attributes are
+  // not per-file state: one `.gitattributes` governs a subtree, and the set
+  // that applies to a path is itself a function of the tree. Any move in any
+  // of them retires every transferable verdict for this round — coarse, and
+  // the fail-safe direction: a full review costs tokens, a transferred
+  // verdict over an unread rendering costs the review.
+  if (attributesMoved(recorded, current)) return [...paths];
   return paths.filter((p) => {
     const rec = Object.hasOwn(recorded, p) ? recorded[p] : undefined;
     const cur = Object.hasOwn(current, p) ? current[p] : undefined;

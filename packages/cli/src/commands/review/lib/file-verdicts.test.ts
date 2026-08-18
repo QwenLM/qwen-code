@@ -91,6 +91,53 @@ describe('blobsAt / blobPairs', () => {
     expect(changedPairs(recorded, current, ['run.sh'])).toEqual(['run.sh']);
   });
 
+  it('an attribute change retires the verdict, blobs byte-identical or not', () => {
+    // What a round REVIEWS is the rendering, and `.gitattributes` decides it:
+    // `binary` turns hunks into "Binary files … differ" for the same bytes.
+    // A `<mode> <oid>` identity cannot see that, so the clean verdict
+    // transferred over a diff no round ever read.
+    write('data.txt', 'line1\n');
+    write('.gitattributes', 'data.txt binary\n');
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'base');
+    const base = git('rev-parse', 'HEAD');
+    // The attribute goes away; `data.txt` itself is untouched.
+    write('.gitattributes', '\n');
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'attributes only');
+    const head = git('rev-parse', 'HEAD');
+
+    const recorded = blobPairs(repo, base, base, ['data.txt'])!;
+    const current = blobPairs(repo, base, head, ['data.txt'])!;
+    // The pair itself did NOT move — which is exactly the hole.
+    expect(recorded['data.txt']).toEqual(current['data.txt']);
+    // …and the attributes file was recorded even though the caller never
+    // named it, so the consumer can see the move.
+    expect(recorded['.gitattributes']).toBeDefined();
+    expect(changedPairs(recorded, current, ['data.txt'])).toEqual(['data.txt']);
+  });
+
+  it('records the governing .gitattributes of every directory on the path', () => {
+    // One `.gitattributes` governs a subtree, so the set that applies to a
+    // path is every ancestor's. Recording only the root's would let a nested
+    // one change unseen.
+    write('pkg/deep/a.ts', 'A\n');
+    write('pkg/.gitattributes', '*.ts text\n');
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'nested attributes');
+    const sha = git('rev-parse', 'HEAD');
+    const pairs = blobPairs(repo, sha, sha, ['pkg/deep/a.ts'])!;
+    expect(pairs['pkg/.gitattributes']).toBeDefined();
+    expect(pairs['pkg/.gitattributes'].base).not.toBe(NO_BLOB);
+    // The ones that do not exist are recorded inert rather than omitted, so
+    // their later APPEARANCE is a move the consumer sees.
+    expect(pairs['.gitattributes']).toEqual({ base: NO_BLOB, head: NO_BLOB });
+    expect(pairs['pkg/deep/.gitattributes']).toEqual({
+      base: NO_BLOB,
+      head: NO_BLOB,
+    });
+  });
+
   it('is cwd-independent: identical listings from the root and a subdirectory', () => {
     write('pkg/deep/a.ts', 'A\n');
     git('add', '-A');

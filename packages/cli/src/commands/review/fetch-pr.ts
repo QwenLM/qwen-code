@@ -210,8 +210,17 @@ type FetchPrResult = PlanReport & {
    * Where this round's content-verdict candidate landed — the per-file
    * `(base, head)` blob pairs of everything the plan covers, plus the commit
    * anchor. Step 8 promotes it into the review cache on a clean high-effort
-   * end (via `cache-commit`); `rescope --cache` reads the promoted copy to
-   * survive a rebase. Absent when the capture had no diff to describe.
+   * end (via `cache-commit`). Absent when the capture had no diff to
+   * describe.
+   *
+   * PRODUCER SIDE ONLY at this commit, and the distinction matters because
+   * the docs used to read as though the feature had shipped. Nothing reads
+   * `fileVerdicts` back yet: the transfer was to be `rescope --cache`, and
+   * `rescope` is gone — its scoping moved into `fetch-pr --since`. So a
+   * rebase still degrades to a full review today; what the pairs buy is that
+   * the record exists and is sound (mode-aware, `.gitattributes`-aware,
+   * refusing an added-file pair) when the consumer lands on the `--since`
+   * path. Until then this field is groundwork, not rebase survival.
    */
   cacheCandidatePath?: string;
   /**
@@ -1029,14 +1038,41 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         // below for the flows that continue anyway (a model change,
         // --comment).
         anchor.incremental.upToDate = true;
-      } else if (fullBytes === null || fullText === null) {
-        // No full range to slice: either no merge base resolved (base-free —
-        // there is no PR diff for the round to be a subset OF) or its capture
-        // threw (the 120s git timeout the large long-lived PR `--since` exists
-        // for). Both leave the same hole, and the honest name for it is that
-        // the scope could not be established, not that the anchor was bad.
+      } else if (
+        mergeBaseSha === null ||
+        fullBytes === null ||
+        fullText === null
+      ) {
+        // No full range to slice, and the reason must name WHICH cause,
+        // because the recovery flow retries one class and not the other.
+        //
+        // `base-untrusted` when the base FETCH failed: the anchor was never
+        // ruled invalid, and the component that failed is one the re-run
+        // repeats, so a flappy fetch must not cost this PR its incremental
+        // scope for ever. `capture-failed` when a base existed and reading
+        // the range threw (the 120s git timeout the large long-lived PR
+        // `--since` exists for) — also infrastructure, also retryable.
+        // `containment-unverified` only for the genuinely base-FREE case:
+        // `git merge-base` found no common ancestor at all (a cross-fork PR
+        // with unrelated history), which a re-run reproduces exactly.
+        //
+        // Collapsing the first into the last is how the split was lost once
+        // already: `containment-unverified` is filed under "deterministic for
+        // the same sha and must NOT be retried", so a CI checkout whose base
+        // fetch blips would pay a full review every round from then on, under
+        // a reason that also misnames the cause — the delta read fine.
+        //
+        // `mergeBaseSha === null` is also the load-bearing FIRST conjunct
+        // rather than a nested check: "fullBytes !== null implies a base" is
+        // true at runtime and invisible to the compiler, so without it the
+        // narrowing does not reach the else branch and the package does not
+        // build.
         demote(
-          mergeBaseSha === null ? 'containment-unverified' : 'capture-failed',
+          baseFetchFailed
+            ? 'base-untrusted'
+            : mergeBaseSha === null
+              ? 'containment-unverified'
+              : 'capture-failed',
         );
       } else if (parseDiff(delta).files.length === 0) {
         // Non-empty bytes that name no file: the capture returned something

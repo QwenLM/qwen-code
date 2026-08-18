@@ -24,6 +24,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { captureLocalCommand } from './capture-local.js';
+import { buildChunkAgentPrompt } from './agent-prompt.js';
 import { isolateHostGitConfig } from './lib/test-utils.js';
 import type { IncrementalScope } from './lib/report.js';
 
@@ -95,7 +96,7 @@ function seedDirtyTree(): void {
 type Plan = Record<string, unknown> & {
   chunks: Array<{ id: number }>;
   files: Array<{ path: string }>;
-  incremental?: IncrementalScope;
+  incremental?: { scope?: IncrementalScope };
   cacheCandidatePath: string;
   diffPath: string;
 };
@@ -149,11 +150,11 @@ describe('capture-local — incremental local rounds', () => {
     const plan = capture({ cache: cachePath, model: 'model-a' });
 
     expect(plan.incremental).toBeDefined();
-    expect(plan.incremental!.deltaFiles).toEqual([CHANGED]);
-    expect(plan.incremental!.interaction).toEqual([
+    expect(plan.incremental!.scope!.deltaFiles).toEqual([CHANGED]);
+    expect(plan.incremental!.scope!.interaction).toEqual([
       { path: CALLER, importsChanged: [CHANGED] },
     ]);
-    expect(plan.incremental!.contextFileCount).toBe(1);
+    expect(plan.incremental!.scope!.contextFileCount).toBe(1);
     expect(plan.files.map((f) => f.path).sort()).toEqual([CALLER, CHANGED]);
 
     const diff = readFileSync(join(repo, plan.diffPath), 'utf8');
@@ -161,16 +162,16 @@ describe('capture-local — incremental local rounds', () => {
     expect(diff).toContain('caller.ts');
     expect(diff).not.toContain('bystander');
     // The full capture is preserved beside the scoped one.
-    expect(readFileSync(plan.incremental!.fullDiffPath!, 'utf8')).toContain(
-      'bystander',
-    );
+    expect(
+      readFileSync(plan.incremental!.scope!.fullDiffPath!, 'utf8'),
+    ).toContain('bystander');
   });
 
   it('an identical state under the same model and HEAD yields 0 chunks and says so', () => {
     seedDirtyTree();
     const cachePath = promoteCandidate(capture(), 'model-a');
     const plan = capture({ cache: cachePath, model: 'model-a' });
-    expect(plan.incremental!.deltaFiles).toEqual([]);
+    expect(plan.incremental!.scope!.deltaFiles).toEqual([]);
     expect(plan.chunks).toEqual([]);
   });
 
@@ -210,12 +211,39 @@ describe('capture-local — incremental local rounds', () => {
     expect(capture({ cache: good }).incremental).toBeUndefined();
   });
 
+  it('the block the REAL brief renderer reads — not merely the shape', () => {
+    // The finding this pins: the local flow wrote the block flat while both
+    // consumers (`incrementalScopeOf` here, `incrementalInteractionPaths` in
+    // the roster) key on `incremental.scope`. Every shape assertion above
+    // stayed green, the diff WAS sliced, and the round looked incremental
+    // everywhere — while no chunk brief carried the frame, so each widened
+    // file was re-reviewed from scratch. Only driving the real renderer sees
+    // it, so this test does.
+    seedDirtyTree();
+    const cachePath = promoteCandidate(capture(), 'model-a');
+    write(CHANGED, 'export const v = 2;\n');
+    const plan = capture({ cache: cachePath, model: 'model-a' });
+    expect(plan.incremental!.scope!.deltaFiles).toEqual([CHANGED]);
+
+    const briefs = (plan.chunks as Array<{ id: number }>).map((c) =>
+      buildChunkAgentPrompt(plan as never, c.id),
+    );
+    expect(briefs.length).toBeGreaterThan(0);
+    expect(briefs.some((b) => b.includes('INCREMENTAL'))).toBe(true);
+    // …and the seam itself: the importer's brief must name what it imports
+    // that changed, or the agent has no reason to look at the interaction
+    // rather than re-read the file.
+    expect(briefs.some((b) => b.includes(CALLER))).toBe(true);
+  });
+
   it('a brand-new untracked file since the last round is delta, not skipped', () => {
     seedDirtyTree();
     const cachePath = promoteCandidate(capture(), 'model-a');
     write('src/new-untracked.ts', 'export const n = 1;\n');
     const plan = capture({ cache: cachePath, model: 'model-a' });
-    expect(plan.incremental!.deltaFiles).toEqual(['src/new-untracked.ts']);
+    expect(plan.incremental!.scope!.deltaFiles).toEqual([
+      'src/new-untracked.ts',
+    ]);
     const diff = readFileSync(join(repo, plan.diffPath), 'utf8');
     expect(diff).toContain('new-untracked');
     expect(diff).not.toContain('bystander');
@@ -230,7 +258,7 @@ describe('capture-local — identity soundness and refusal contract', () => {
       const cachePath = promoteCandidate(capture(), 'model-a');
       execFileSync('chmod', ['+x', join(repo, CHANGED)]);
       const plan = capture({ cache: cachePath, model: 'model-a' });
-      expect(plan.incremental!.deltaFiles).toEqual([CHANGED]);
+      expect(plan.incremental!.scope!.deltaFiles).toEqual([CHANGED]);
     },
   );
 
@@ -245,7 +273,7 @@ describe('capture-local — identity soundness and refusal contract', () => {
       rmSync(join(repo, 'src/link'));
       execFileSync('ln', ['-s', 't2.txt', join(repo, 'src/link')]);
       const plan = capture({ cache: cachePath, model: 'model-a' });
-      expect(plan.incremental!.deltaFiles).toContain('src/link');
+      expect(plan.incremental!.scope!.deltaFiles).toContain('src/link');
     },
   );
 
@@ -260,7 +288,7 @@ describe('capture-local — identity soundness and refusal contract', () => {
     const cachePath = promoteCandidate(round1, 'model-a');
     write('__proto__', 'p2\n');
     const plan = capture({ cache: cachePath, model: 'model-a' });
-    expect(plan.incremental!.deltaFiles).toEqual(['__proto__']);
+    expect(plan.incremental!.scope!.deltaFiles).toEqual(['__proto__']);
   });
 
   it('an untracked file DELETED since the cached round re-opens its importer', () => {
@@ -273,8 +301,8 @@ describe('capture-local — identity soundness and refusal contract', () => {
     // n.ts has no diff section left, but its disappearance is a change: the
     // importer re-enters through the widening, and the round must NOT stop
     // as "no changes".
-    expect(plan.incremental!.deltaFiles).toEqual([]);
-    expect(plan.incremental!.interaction.map((e) => e.path)).toContain(
+    expect(plan.incremental!.scope!.deltaFiles).toEqual([]);
+    expect(plan.incremental!.scope!.interaction.map((e) => e.path)).toContain(
       'src/c.ts',
     );
     expect(stderrLines.join('\n')).not.toContain('No changes since the last');
@@ -377,7 +405,7 @@ describe('capture-local — round-2 findings', () => {
       const cachePath = promoteCandidate(capture(), 'model-a');
       execFileSync('chmod', ['0655', join(repo, CHANGED)]);
       const plan = capture({ cache: cachePath, model: 'model-a' });
-      expect(plan.incremental!.deltaFiles).toEqual([CHANGED]);
+      expect(plan.incremental!.scope!.deltaFiles).toEqual([CHANGED]);
     },
   );
 
@@ -393,7 +421,7 @@ describe('capture-local — round-2 findings', () => {
     write(CHANGED, 'export const v = 2;\n');
     const plan = capture({ cache: cachePath, model: 'model-a' });
     expect(plan.incremental).toBeDefined();
-    expect(plan.incremental!.deltaFiles).toEqual([CHANGED]);
+    expect(plan.incremental!.scope!.deltaFiles).toEqual([CHANGED]);
   });
 
   it('a hostile lastModelId reaches stderr escaped, never raw', () => {
@@ -478,7 +506,7 @@ describe('capture-local — round-3 findings', () => {
       rmSync(linkPath);
       symlinkSync(Buffer.from([0xfe, 0x2e, 0x74]), linkPath);
       const plan = capture({ cache: cachePath, model: 'model-a' });
-      expect(plan.incremental!.deltaFiles).toContain('src/link');
+      expect(plan.incremental!.scope!.deltaFiles).toContain('src/link');
     },
   );
 
