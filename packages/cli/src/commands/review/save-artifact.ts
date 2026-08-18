@@ -233,6 +233,20 @@ function validateVerdict(value: unknown): PersistedVerdict {
       'Composed verdict.deferredCount must be a non-negative integer.',
     );
   }
+  // Same absence semantics as deferredCount, and for the same reason: a
+  // composed JSON persisted before floor enforcement existed carries no
+  // `floorEnforced`, and it names indices this artifact only re-displays.
+  const floorEnforced = verdict['floorEnforced'] ?? [];
+  if (
+    !Array.isArray(floorEnforced) ||
+    floorEnforced.some(
+      (i) => typeof i !== 'number' || !Number.isInteger(i) || i < 0,
+    )
+  ) {
+    throw new Error(
+      'Composed verdict.floorEnforced must be an array of non-negative integers.',
+    );
+  }
   // Absent reads as "no trim", the same absence semantics the sibling count
   // gets: a composed file written before the body budget shipped carries no
   // `bodyTrim`, and a mid-upgrade save must not fail over a record of
@@ -281,6 +295,7 @@ function validateVerdict(value: unknown): PersistedVerdict {
       'Composed verdict.remediation',
     ),
     deferredCount,
+    floorEnforced: floorEnforced as number[],
     lowSignal:
       lowSignal === null
         ? null
