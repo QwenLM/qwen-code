@@ -5230,6 +5230,39 @@ describe('composeReview — convergence-posture deferrals (typed channel; disclo
     expect(parseLedger(r.body)?.findings).toEqual([]);
   });
 
+  it('names the round AT the ledger cap — the clause and the marker agree', () => {
+    // `deferredRound` clamps exactly as the marker stamp does: `prevRound`
+    // can BE the cap (parseLedger accepts round == LEDGER_MAX_ROUND), and an
+    // unclamped +1 named round 10001 in the deferral clause beside a
+    // round-10000 marker — the two halves of one compose disagreeing about
+    // which round this is. The sibling test above pins the marker's
+    // round-trip at the cap; without THIS pin the Math.min mutation on the
+    // clause side ships green.
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      fetchedSha: 'deadbeef00112233',
+    });
+    writeFileSync(
+      join(dirname(planPath), 'qwen-review-pr-8255-prev-ledger.json'),
+      JSON.stringify({ v: 1, round: LEDGER_MAX_ROUND, findings: [] }),
+    );
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+      deferredSuggestions: [nit({ file: 'src/a.ts', line: 42 })],
+    });
+    expect(r.body).toContain(
+      `convergence posture (round ${LEDGER_MAX_ROUND}, not a blocker)`,
+    );
+    expect(r.body).not.toContain(`round ${LEDGER_MAX_ROUND + 1}`);
+    // The clause and the marker must name the SAME round — at the cap too.
+    expect(parseLedger(r.body)?.round).toBe(LEDGER_MAX_ROUND);
+  });
+
   it('renders the list on COMMENT and REQUEST_CHANGES alike — no event squeezes it out', () => {
     const comment = composeReview(
       base({

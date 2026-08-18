@@ -899,19 +899,24 @@ export function budgetGapDisclosures(finalText: string): string[] {
     // the #9094 incident shape this classifier exists to kill, surviving
     // in exactly the output language the ZH branch was added for. Only a
     // SYMMETRIC pair is unwrapped, so a mixed or unbalanced wrap stays
-    // whole and errs toward disclosure.
-    const unparenthesized =
+    // whole and errs toward disclosure. The inner text is trailing-stripped
+    // exactly as the bare form already was (`normalized` above): the EN tail
+    // classes are ASCII-only, so a wrapped `none。` kept its CJK tail and
+    // survived as a phantom while its identical bare twin dropped — one
+    // normalize, one judgment, bare and wrapped alike.
+    const unparenthesized = stripTrailingGapChars(
       (normalized.startsWith('(') && normalized.endsWith(')')) ||
-      (normalized.startsWith('（') && normalized.endsWith('）'))
+        (normalized.startsWith('（') && normalized.endsWith('）'))
         ? normalized.slice(1, -1).trim()
-        : normalized;
+        : normalized,
+    );
     if (normalized.length === 0 || PLACEHOLDER_GAP_RE.test(unparenthesized)) {
       continue;
     }
-    // Folded on the paren-stripped text with its OWN trailing punctuation
-    // gone, so one gap restated with and without parentheses — `(auth
-    // flow untested.)` and `auth flow untested` — discloses once.
-    const key = stripTrailingGapChars(unparenthesized).toLowerCase();
+    // Folded on the same normalized text the classifier judged, so one gap
+    // restated with and without parentheses — `(auth flow untested.)` and
+    // `auth flow untested` — discloses once.
+    const key = unparenthesized.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
     gaps.push(truncateGap(raw));
