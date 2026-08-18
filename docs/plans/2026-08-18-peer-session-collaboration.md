@@ -14,35 +14,43 @@ workers" — that exists and works. The missing capability is: two sessions star
 independently, by different people or at different times, in different working
 directories, discover each other and share work.
 
-The design rests on one relocation:
+The design rests on one inversion:
 
-> **The source of truth moves from `TeamManager`'s in-memory state to the files under
-> `~/.qwen/`. Sockets become an optimization, never a correctness requirement.**
+> **Pull is the contract. Push is an optimization available only to agents we wrote.**
 
-("Authority" is reserved throughout for the human plane (§0.1) — the files are
-_authoritative_ about state, but they decide nothing.)
+This follows from a physical limit rather than a preference: nothing can push into a process
+it did not launch and whose stdin it does not hold (§1.8). A Codex or any other vendor's CLI
+can therefore never be a delivery target — but it can run a command. So the operation every
+participant shares is _fetching_, and anything built on delivery excludes, by construction,
+every agent we did not write.
 
-Everything else follows. Once the durable board is authoritative rather than a mirror,
-cross-process participation is not a feature that must be built — it is what remains when
-the in-process bottleneck is removed. The file plane is already cross-process safe
-(§1.1); only two code paths currently pin it to one process (§1.2).
+Written the other way round — delivery first, fetching as the fallback for foreigners — the
+design acquires sockets, a receive-side gate, wake frames, and an assignment protocol that
+must decay when undelivered. Every one of those exists to make _push_ safe. Invert the
+baseline and they become optional, later, and Qwen-only.
 
-### 0.1 Four planes
+The second relocation still holds and is what makes the first possible: the source of truth
+moves from `TeamManager`'s in-memory state to the files under `~/.qwen/`. A board on disk is
+the one medium every participant can reach, whoever started it and whoever wrote it.
 
-| Plane            | Medium                         | Authority                | If it is unavailable                    |
-| ---------------- | ------------------------------ | ------------------------ | --------------------------------------- |
-| **Coordination** | Files + `proper-lockfile`      | **Authoritative**        | Collaboration stops                     |
-| **Discovery**    | `~/.qwen/sessions/<pid>.json`  | Advisory (liveness hint) | Peers must be named explicitly          |
-| **Transport**    | UNIX domain socket per session | **Optimization only**    | Delivery falls back to inbox polling    |
-| **Authority**    | The human                      | **Final**                | Work needing a decision stalls, visibly |
+### 0.1 Three layers, and one optimization
 
-The transport tier being non-load-bearing is the property that makes this design safe to
-ship incrementally, and it is inherited from a fact already true in the code: the leader
-already polls its own inbox, so teammate→leader messaging needs no socket for correctness.
+| Layer         | Medium                       | v1?          | Without it                          |
+| ------------- | ---------------------------- | ------------ | ----------------------------------- |
+| **Board**     | Files + `proper-lockfile`    | **Required** | Nothing is shared                   |
+| **Access**    | A CLI over the board         | **Required** | Only Qwen can participate           |
+| **Authority** | The human, via `decision`    | **Required** | Agents adjudicate each other        |
+| _Push_        | _UDS wake frame per session_ | _Later_      | _Slower; nothing becomes incorrect_ |
 
-The authority plane is not infrastructure — it is a person — but it is listed because the
-design routes to it explicitly (§2.4) and gives it a noun (`decision`, §2.2). Leaving it
-implicit is what produces a leader agent that must adjudicate, and therefore a bottleneck.
+The access layer is what admits heterogeneous agents, and it is required rather than
+optional precisely because of that: **a capability reachable only through Qwen's in-process
+tools does not exist for anything else.** Discovery
+([#8969](https://github.com/QwenLM/qwen-code/pull/8969), merged) is useful but not a layer —
+addressing works on names the board carries; liveness only makes staleness visible sooner.
+
+Push is listed to be explicit that it is _not_ v1. Its absence costs latency: an idle
+session learns about work when it next looks. It costs no correctness, which is the property
+that lets it be deferred.
 
 ### 0.2 Settled product decisions
 
@@ -56,9 +64,9 @@ implicit is what produces a leader agent that must adjudicate, and therefore a b
 
 Two consequences worth stating plainly:
 
-- The consent gate is **load-bearing, not polish**. Nothing may deliver a cross-session
-  item before it lands. This is [#8730](https://github.com/QwenLM/qwen-code/pull/8730)'s own
-  receive-before-send argument, adopted on the narrower surface §2.5 describes.
+- [#8730](https://github.com/QwenLM/qwen-code/pull/8730)'s receive-before-send argument is
+  adopted, not dropped: it says a gate must precede a push path. v1 has no push path, so the
+  gate arrives with one (§2.5). What must not happen is push landing first.
 - Because peers collaborate across workspaces, the single-writer invariant that
   `/coordinate` relies on is **not inherited**. Peer collaboration is advisory and
   read-heavy by construction. Same-checkout multi-writer stays unsupported (§4).
@@ -212,50 +220,77 @@ The in-memory `TeamManager` state is the redundant copy impersonating the author
 **Relocating authority to the file plane closes this class, and makes cross-session
 participation fall out for free. They are the same change.**
 
+### 1.8 Push requires stdin you do not have
+
+The constraint the design inverts around, stated once so nothing downstream re-derives it.
+
+To push into an agent you must either **hold its stdin** or have it **voluntarily open a
+door**. There is no third option; OS-level tty injection (`TIOCSTI`) is disabled on modern
+systems precisely because it was one.
+
+herdr holds stdin, which is why it can drive unmodified agents at all: it launched them into
+its panes and writes bytes as though a user were typing. The integration in
+[#9047](https://github.com/QwenLM/qwen-code/pull/9047) shows the mechanism from the other
+side — `HERDR_ENV`, `HERDR_PANE_ID`, `HERDR_BIN_PATH`, and `spawn(binary, args)`. No SDK, no
+protocol library, and no requirement on the hosted agent.
+
+That gives a 2×2 with one impossible cell:
+
+|                     | Qwen                                    | Foreign agent (Codex, …)   |
+| ------------------- | --------------------------------------- | -------------------------- |
+| **We launched it**  | push — semantic channel                 | push — write its stdin     |
+| **Already running** | push — it registered a door voluntarily | **impossible, for anyone** |
+
+The bottom-right cell is not a gap in our implementation. herdr cannot reach it either: a
+Codex already running in your own terminal is not in herdr's panes.
+
+Two consequences the rest of the document depends on. First, an already-running Qwen session
+is reachable only because it _chooses_ to register — voluntary registration is what replaces
+holding stdin. Second, and decisively for scope: **if heterogeneous participation is a
+requirement, the shared operation cannot be delivery.** It has to be fetching, because that is
+the only verb available in every cell of the table.
+
 ## 2. Target architecture
 
-### 2.1 The four planes
+### 2.1 The shape
 
 ```
                      ┌──────────────────────────────┐
-                     │            HUMAN             │   AUTHORITY
-                     │     resolves `decision`      │   final — no agent
-                     └──────────────▲───────────────┘   resolves one
-                                    │
-                    approval · acceptance · adjudication
+                     │            HUMAN             │   resolves `decision`
+                     └──────────────▲───────────────┘   no agent resolves one
                                     │
   ┌─────────────────────────────────┴─────────────────────────────────┐
-  │                   COORDINATION — source of truth                  │
-  │        ~/.qwen/     `task`: owner · status · dependencies         │
-  │             files + proper-lockfile + atomic write                │
-  └──▲───────────────▲─────────────────▲──────────────────▲───────────┘
-     │ claim/update  │                 │                  │  pull only
-  ┌──┴──────────┐ ┌──┴──────────┐ ┌────┴────────┐ ┌───────┴─────┐
-  │  session A  │ │  session B  │ │   daemon    │ │   foreign   │
-  │             │ │             │ │   session   │ │    agent    │
-  └──┬──────────┘ └──┬──────────┘ └─────────────┘ └──────▲──────┘
-     │  ask ──▶      │                                   │
-     │  ◀── answer   │                          qwen ask list --wait
-     └───────────────┘                          qwen task claim …
-
-     TRANSPORT — UDS wake frame           DISCOVERY — ~/.qwen/sessions/<pid>.json
-     optimization only; losing it         registered ⇒ addressable
-     costs latency, never an item
+  │                      BOARD — source of truth                      │
+  │      ~/.qwen/    `task` · `ask` · `decision`                      │
+  │            files + proper-lockfile + atomic write                 │
+  └───────────────────────────▲───────────────────────────────────────┘
+                              │
+                    ┌─────────┴──────────┐
+                    │   qwen <noun> <verb>│   ACCESS — the only contract
+                    └─────────▲──────────┘
+                              │  everyone fetches; nobody is delivered to
+      ┌──────────────┬────────┴───────┬────────────────┐
+      │              │                │                │
+ ┌────┴─────┐  ┌─────┴────┐    ┌──────┴─────┐   ┌──────┴──────┐
+ │ session A │  │ session B │    │   Codex    │   │  scheduled  │
+ │  (Qwen)   │  │  (Qwen)   │    │            │   │    agent    │
+ └───────────┘  └───────────┘    └────────────┘   └─────────────┘
+      └───── UDS wake ─────┘
+        push — later, Qwen-only, latency only
 ```
 
-Read it as three claims:
+Three claims the picture makes:
 
-1. **Only the human resolves a `decision`.** No arrow returns from an agent to that box.
-   That is what keeps a leader agent out of the routing path (§2.4).
-2. **Every participant reaches the board directly.** No one proxies for anyone, which is
-   why an independently started session is a full participant rather than an observer.
-3. **The right-hand column is the heterogeneity test.** A foreign agent has no inbound
-   arrow — nothing can push to it — but it reaches the board through the same commands.
-   Any capability that cannot be drawn as an arrow _from_ that box does not exist for it.
+1. **Every participant reaches the board the same way.** There is no privileged path, so a
+   Codex column and a Qwen column differ in convenience, never in capability. This is the
+   whole reason the access layer is a required layer rather than a late convenience.
+2. **Only the human resolves a `decision`.** No arrow returns from a participant to that box.
+3. **The push arrow spans only the two Qwen boxes, and only sideways.** It never crosses the
+   board, because it carries no truth — losing it costs latency and nothing else.
 
-A participant is anything that can (a) read and write the board under the lock protocol and
-(b) be woken. (b) is optional: polling is a correct, if slower, substitute — which is
-precisely how the foreign column participates.
+A participant is anything that can read and write the board under the lock protocol. That is
+the entire membership test (§2.2): not vendor, not who launched it, not whether it can be
+reached.
 
 ### 2.2 Vocabulary
 
@@ -355,55 +390,32 @@ first-class noun: the escalation path needs a destination that is not another ag
 Synthesis and acceptance remain real jobs — they are the human's, or a role a session takes
 on for one goal. Never an ownership lock over the board.
 
-### 2.5 Consent — adopt #8730, on a narrower surface
+### 2.5 Consent — required with push, not before it
 
-The receive-side gate is the security boundary. Its rule is **approval-mode parity**: a
-message auto-delivers only when acting on it cannot do more than the sender could already
-have done itself.
+[#8730](https://github.com/QwenLM/qwen-code/pull/8730) argued receive-before-send: a session
+must be able to refuse before anything can be sent to it. That argument is adopted in full.
+Its scope is what changed — it constrains a **push** path, and v1 has none.
 
-Scope note, since §2.2 narrowed what can arrive: the gate was designed against arbitrary
-inbound text. With no generic message, the only inbound items are an `ask` and a task
-assignment — a materially smaller surface, and one where the payload is a question rather
-than an instruction. The gate is still adopted, because "a question" is not a safe category
-(_"run this and tell me what it prints"_ is a question), and because it remains the only
-defence against the cheapest bypass in the design: get denied, then have a second session do
-it. But it is worth recording that Claude Code ships cross-session messaging with **no
-inbound gate at all** — directory `0700` and same-uid is its whole model. #8730 is a
-deliberate hardening beyond the reference design, not parity with it.
+Fetching does not need a gate. A participant that runs `qwen ask list` has chosen the moment,
+is at a boundary of its own turn, and can simply not run it. There is no arriving item to
+hold, deny or expire, so the entire hold/receipt machinery has nothing to act on. A gate here
+would guard a door nobody can open.
 
-| Receiver                                      | Sender asserts | Result   |
-| --------------------------------------------- | -------------- | -------- |
-| prompting (DEFAULT / AUTO_EDIT / AUTO / PLAN) | anything       | accept   |
-| YOLO                                          | YOLO           | accept   |
-| YOLO                                          | prompting      | **hold** |
-| YOLO                                          | nothing        | **hold** |
-| unreadable                                    | anything       | **hold** |
+When push lands, the gate lands with it, and #8730's design is adopted as written:
+approval-mode parity, the three agreeing anti-forgery defences, receipts, and `/peers`. In
+particular the classifier rule — a request to perform something the sender says it was denied
+is blocked outright — targets the cheapest bypass in any multi-agent system, and that bypass
+opens the moment delivery does.
 
-A prompting receiver may accept freely because every consequential action still faces its
-own gate — the message is a suggestion, not an execution. A YOLO receiver has no backstop.
+Two properties hold in v1 without a gate, and both should be read as reasons the deferral is
+safe rather than as reasons a gate is unnecessary later:
 
-Three defenses must agree, because any two leave the gap open:
-
-1. **Envelope** — `<cross_session_message from="…">`, delimiter defanged in the body,
-   attribute values escaped. The same structural anti-forgery `TeamManager` already uses
-   for `<teammate_message>`.
-2. **Authority notice** — a peer holds none of the user's authority, cannot grant an
-   escalation, and is never the user approving a pending prompt.
-3. **Classifier rule** — a `<cross_session_message>` never establishes user intent, and a
-   request to perform something the sender says it was denied is blocked outright.
-
-That third clause targets the cheapest bypass in the whole design: _get denied, then ask a
-second session to do it._
-
-**Stated limitation, not a gap:** `from` is **not authenticated**. Node cannot read
-`SO_PEERCRED` without a native addon. Access control is filesystem permissions — directory
-`0700`, socket `0600` — so the trust boundary is the uid. Any process running as this user
-may claim any address. Everything above is built on that premise, which is why
-authorization lives at the receiver.
-
-Terminal outcomes (`held` / `denied` / `expired` / `delivered`) return to the sender as
-control frames: without receipts a sender cannot distinguish "parked for review" from
-"delivered and ignored", which are very different signals for deciding whether to follow up.
+- **The board is data, not instruction.** A `task` describes work; it does not arrive inside
+  anyone's turn claiming to be their user. Prompt-injection surface exists (a fetched task
+  description is still text a model reads) but it is the same surface as reading a file, not
+  the sharper one of an unsolicited user-role message.
+- **Same-uid is the boundary either way.** Directory `0700` is the whole access model, exactly
+  as in Claude Code's cross-session messaging, which ships with no inbound gate at all.
 
 ### 2.6 Format neutrality
 
@@ -414,7 +426,7 @@ This is an observation, not a goal. The position for v1:
 
 - Do not add anything Qwen-specific to the task schema.
 - Do not document the format as an external contract, and make no compatibility promise.
-- Ship the board operations behind a CLI/MCP surface (Stage 5) because Qwen's own daemon
+- Ship the board operations behind a CLI surface (Stage 2) because Qwen's own daemon
   sessions and scheduled agents need a non-in-process way to touch the board anyway.
 
 Heterogeneous participation then costs nothing extra and requires no permission. The four
@@ -423,211 +435,156 @@ closure) all target **hosting other vendors' CLI processes and terminals** — b
 herdr. Publishing a format is not that: we host nothing, own no lifecycle, and grant no
 permissions.
 
-## 3. Communication flows
+## 3. Flows
 
-### 3.1 Discovery
+### 3.1 Joining the board
 
-Session writes `~/.qwen/sessions/<pid>.json` at startup, unlinks at exit. Directory `0700`.
-Filename matched strictly against `^\d+\.json$` — a lenient `parseInt` prefix match makes
-an unrelated `notes-2026.md` parse as PID 2026. Liveness = record present **and**
-`isPidAlive(pid)` **and** `procStart` matches, so a recycled PID is not a phantom peer.
+There is nothing to join (§2.2). A participant writes to the board and is a participant.
+Names are declared, not granted; collisions are the declarer's problem, and the board records
+who wrote what.
 
-`qwen sessions ps [--json] [--all]` reads it. `list_agents` gains live peers alongside
-background tasks.
+A Qwen session additionally registers itself (`~/.qwen/sessions/<pid>.json`, shipped by
+#8969). That is for liveness and for the later push path — it is not a precondition for
+participating.
 
-### 3.2 Addressing
+### 3.2 Work
 
-There is nothing to join (§2.2). A session registers at startup and is addressable from that
-moment. Addressing follows Claude Code's shape — one field, several schemes — so a new
-transport costs a prefix rather than a field plus a branch:
+Unchanged from today, and that is the point: `claimTask` already serialises across processes.
+A `task` is created with an optional owner and claimed by whoever takes it.
 
-```
-to: "researcher"                                 teammate by name
-to: "uds:/run/user/1000/qwen-socks/1234.sock"    another local session
-```
+Assignment is a **proposal**, and in a fetch-based world it needs no protocol to stay one.
+Nobody is delivered a task, so a task can never sit in the state that would require one —
+"assigned and silently undelivered". It is simply on the board with an owner named, and every
+participant can see both facts. **Visibility replaces delivery guarantees**, which is why the
+offer-and-decay mechanism an earlier revision proposed is not in this design: it existed to
+repair a failure mode that only push creates.
 
-Qwen's `send_message` currently splits this across `to` and `task_id` with a route branch per
-destination. That structure does not survive a third transport and should be collapsed
-before cross-session addressing is added — it is the smallest change here with the longest
-reach.
+If a named owner never picks the work up, that is visible rather than inferred. Compelling
+them is not something a peer can do — it needs authority, so it becomes a `decision` (§2.4).
 
-Envelopes are self-describing: an inbound `<cross_session_message from="…">` is answered by
-copying its `from` into your `to`. No address book, no lookup, no reply path that can go
-stale.
-
-A foreign agent that registers through a wrapper and polls `qwen ask list --wait` is
-addressable on equal terms — its inbox loop is manual rather than automatic, and `ask`'s
-`timeout` already models a peer that is not listening.
-
-### 3.3 Work
-
-Unchanged from today, and this is the point: `claimTask` already serializes across
-processes. Assignment is a board mutation; delivery is a **derived consequence** of that
-mutation. Exactly one function translates "board changed" into "someone is woken", and
-nothing else may enqueue work. That single-writer rule is what #9282 was missing.
-
-### 3.4 Delivery
+### 3.3 Questions
 
 ```
-sender ──▶ write the item (authoritative, under lock)
-       └─▶ if the target has ipcPath: send a wake frame (best effort)
-target ──▶ on wake OR on poll ──▶ drain ──▶ gate ──▶ deliver | hold | deny | expire
+A: qwen ask <name> "…"          → written to the board, state `open`
+B: qwen ask list                → sees it whenever B next looks
+B: qwen ask answer <id> "…"     → state `answered`; A sees the answer when A next looks
 ```
 
-Losing a wake signal costs latency, never an item. Held items are settled, never stranded:
-the buffer is bounded and evicts oldest as `expired`; shutdown expires the remainder; an
-item arriving during teardown is expired rather than parked where nothing could release it;
-and changing approval mode re-runs the backlog, so something held only on a mode mismatch is
-released without manual approval.
+`ask`'s three terminal states carry the whole value: `answered`, `declined`, and `timeout`
+for a participant that never looked. A sender always learns which, and can then wait, route
+elsewhere, or escalate. That is what a plain message cannot offer, and it works identically
+whether B is a Qwen session or a shell loop running the CLI.
 
-`/peers` lists held items with sender, preview and cause; `/peers accept|deny <id|all>`
-settles them. Held items are invisible to the model by design, so without a review surface
-holding and dropping are indistinguishable from outside.
+Deadlock is detectable for the same reason: A waiting on B while B waits on A is two `open`
+asks on the board, not two stalled intentions. No participant can see this about itself.
 
-What flows through this path is an `ask` or a task assignment — never a free-form message
-(§2.2). That matters here rather than only in the vocabulary: an `ask` already carries its
-own terminal states, so `timeout` and `declined` are answers the _sender_ receives, not
-merely dispositions the receiver records. A sender therefore learns the outcome of every
-`ask` it makes, which is what lets it choose between waiting, routing elsewhere, and raising
-a `decision`.
+### 3.4 Authority
 
-Receipts (`held` / `denied` / `expired` / `delivered`) return to the sender as control
-frames. Without them a sender cannot distinguish "parked for review" from "delivered and
-ignored" — very different signals for deciding whether to follow up.
+Anything needing authority is raised as a `decision` and resolved by the human (§2.4).
+Approval, acceptance of a result, and adjudication of conflicting results are one act with
+one destination. `qwen decision list` is the exception view — the thing worth putting on a
+screen, because it is the only category that stalls until a person acts.
 
 ### 3.5 Reporting
 
-Completion is **already** a board state transition, so nobody has to be told. What a task
-record cannot express splits by what it needs rather than collapsing into one channel: a
-question goes out as an `ask` (§2.2), and anything needing authority is raised as a
-`decision` (§2.4). Interim findings are notes on the task — they belong to the work, not to
-a conversation.
-
-This is what #9284 landed as prompt wording. Here it becomes the structure that makes the
-wording true: with no general-purpose message, "just report it" has nowhere to go except
-the right one.
+Completion is a board state transition, so nobody has to be told. What a task record cannot
+express splits by what it needs: a question is an `ask`, anything needing authority is a
+`decision`, and interim findings are notes on the task. With no general-purpose message,
+"just report it" has nowhere to go except the right place.
 
 ### 3.6 Departure and crash
 
-Clean exit: release owned tasks, unlink the registry record. There is nothing to leave —
-departure is deregistration (§2.2).
+Clean exit: release owned tasks, unlink the registry record.
 
-Crash: the registry record is stale → the liveness check fails → the session stops being
-addressable; owned tasks are released after the 5 s lock stale window, and any `ask`
-outstanding against it reaches `timeout` rather than hanging. No peer's death blocks
-another.
+Crash: the record goes stale and liveness fails, so the session stops appearing as live.
+Owned tasks release after the 5 s lock stale window. Any `ask` outstanding against it reaches
+`timeout` rather than hanging. Nothing else in the system waits on it, because nothing was
+ever delivered to it.
 
 ## 4. Explicit non-goals
 
 Scope: what **this design** does not build. Not a ruling on what the project should build —
 other work may cover any of these, and §1.6 records a series that covers the first two.
 
-| Not building                             | Because                                                                                  |
-| ---------------------------------------- | ---------------------------------------------------------------------------------------- |
-| PTY attach, terminal multiplexing, panes | herdr does this for 17+ CLIs, Apache-2.0, and measured faster (§8)                       |
-| Hosting other vendors' processes         | That is becoming herdr. We publish a format; we host nothing                             |
-| A new roster UI                          | This design reuses `ui/components/agent-view/`                                           |
-| Remote / SSH / cross-machine             | Same-uid filesystem permissions **are** the security model. Off-machine voids it         |
-| Broadcast (`to: "*"`)                    | #8724 removes it rather than extending it to N processes                                 |
-| Same-checkout multi-writer               | A peer's permissions were fixed by whoever started it; no participant can demote another |
-| Central completion guarantee             | Peers decide what to claim. Unclaimed work stays visible on the board, not forced        |
-| Windows in the first cut                 | Follows #8724. The IPC path is abstracted so named pipes can be added                    |
+| Not building                             | Because                                                                                                                                                    |
+| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| PTY attach, terminal multiplexing, panes | herdr does this for 17+ CLIs, Apache-2.0, and measured faster (§8)                                                                                         |
+| Hosting other vendors' processes         | That is becoming herdr. We publish a format; we host nothing                                                                                               |
+| A new roster UI                          | This design reuses `ui/components/agent-view/`                                                                                                             |
+| Push delivery in v1                      | Nothing can push to a foreign agent (§1.8), so a design built on delivery excludes them. Push arrives later, with #8730's gate, as a Qwen-only latency win |
+| Remote / SSH / cross-machine             | Same-uid filesystem permissions **are** the security model. Off-machine voids it                                                                           |
+| Broadcast (`to: "*"`)                    | #8724 removes it rather than extending it to N processes                                                                                                   |
+| Same-checkout multi-writer               | A peer's permissions were fixed by whoever started it; no participant can demote another                                                                   |
+| Central completion guarantee             | Peers decide what to claim. Unclaimed work stays visible on the board, not forced                                                                          |
+| Windows in the first cut                 | Follows #8724. The IPC path is abstracted so named pipes can be added                                                                                      |
 
 ## 5. Build plan
 
-Sized against demonstrated review capacity in this repository: #8804 merged at 775 lines;
-#8859 (~1,300) and #8869 (4,465) both died unreviewed.
+Sized against demonstrated review capacity here: #8804 merged at 775 lines; #8859 (~1,300)
+and #8869 (4,465) both died unreviewed.
 
-| Stage | Scope                                                          | Est. prod LOC | Depends on | Independently valuable          |
-| ----- | -------------------------------------------------------------- | ------------- | ---------- | ------------------------------- |
-| **0** | Cleanup and the #9276 fix                                      | ~150          | —          | Yes — fixes a live blocker      |
-| **1** | Discovery — **shipped by #8969**; carry-forward hardening only | ~0–100        | —          | Done — `sessions ps` ships      |
-| **2** | Relocate authority to the file plane                           | ~450          | —          | Yes — closes the §1.7 bug class |
-| **3** | `ask` + `decision` + scheme addressing                         | ~350          | 1, 2       | Yes — the actual feature        |
-| **4** | Consent gate + UDS transport + `/peers`                        | ~1,100        | 3          | Yes — completes it              |
-| **5** | CLI/MCP board surface                                          | ~300          | 2          | Yes — daemon/cron need it       |
+| Stage | Scope                                           | Est. prod LOC | Depends on | Delivers                               |
+| ----- | ----------------------------------------------- | ------------- | ---------- | -------------------------------------- |
+| **0** | Cleanup and the #9276 fix                       | ~150          | —          | Unblocks the only supported path today |
+| **1** | `ask` + `decision` as board items               | ~400          | —          | The vocabulary exists                  |
+| **2** | The CLI over the board                          | ~350          | 1          | **Heterogeneous participation**        |
+| **3** | Qwen-native surfaces mapped onto the same items | ~300          | 1          | Qwen agents stop shelling out          |
+| _4_   | _Push + #8730's gate_                           | _~1,100_      | _2, 3_     | _Latency only — deliberately last_     |
 
-Stages 1 and 2 are independent and may run in parallel.
+The ordering is the inversion made concrete. **Stage 2 is where the requirement is met**: the
+moment the board has a command-line surface, a Codex, a shell script, a scheduled job and a
+Qwen session are participants on identical terms. Everything after it is convenience for the
+subset we wrote.
+
+Stage 3 is not a prerequisite for anything — it exists so a Qwen agent uses a tool rather than
+a subprocess, with identical semantics. Building it _first_ would be the old mistake: the
+native path would set the contract, and the CLI would inherit whatever the tools happened to
+need.
+
+Stage 4 stays last on #8730's own argument (§2.5): a gate must precede a push path, so the
+cheapest way to keep that ordering is not to have a push path yet.
 
 ### Stage 0 — cleanup and unblock
 
-- **Fix [#9276](https://github.com/QwenLM/qwen-code/issues/9276) structurally.** Remove
-  `type` from the `send_message` schema; shutdown becomes a leader-only tool absent from a
-  teammate's tool list. The correct fix makes the illegal state **unrepresentable**, not
-  merely rejected — a single-value optional enum described as "structured message type for
-  control flow" is something a model will reasonably fill in.
-- Subordinate `coordinate/SKILL.md`'s teammate count to `agents.team.maxTeammates`
-  (default `MAX_TEAMMATES = 10`, `types.ts:180`). Not the §1.7 bug class — a hard ceiling
-  and a workflow recommendation are different kinds of statement, and recommending fewer
-  than the ceiling allows is legitimate. The defect is narrower: the skill stated its
-  number as a second absolute, so lowering the cap left it instructing a spawn that throws.
-- Close [#9287](https://github.com/QwenLM/qwen-code/pull/9287) /
-  [#9288](https://github.com/QwenLM/qwen-code/pull/9288) — superseded by merged #9284 / #9289.
-- Close [#8869](https://github.com/QwenLM/qwen-code/pull/8869) (done). Not because
-  independent sessions are rejected, but because that particular supervisor is a second
-  implementation of infrastructure the daemon already ships.
-- Do **not** touch `packages/cli/src/agent-view/`. It is the base of the open #7800–#7803
-  series (§1.6); it is that series' base, not cleanup.
+Unchanged and already underway: [#9401](https://github.com/QwenLM/qwen-code/pull/9401)
+(structural fix for #9276) and [#9403](https://github.com/QwenLM/qwen-code/pull/9403)
+(teammate cap subordinated to the configured limit). Independent of everything below.
 
-### Stage 1 — discovery (largely done by #8969)
+### Stage 1 — `ask` and `decision` as board items
 
-[#8969](https://github.com/QwenLM/qwen-code/pull/8969) (merged 2026-08-17) landed the
-core of the closed #8728: the live-session registry (`session-registry.ts`,
-`~/.qwen/sessions/<pid>.json`), `qwen sessions ps`, and `isPidAlive` already moved out of
-`teamHelpers` into `packages/core/src/utils/process-liveness.ts`. Do **not** revive #8728
-or rebuild any of this. What remains is carrying forward the #8728 review findings that
-were genuinely right and are not covered by #8969 — verify symlink-safe registry writes
-and Windows guards on POSIX-only assertions against the merged implementation, and file
-narrow follow-ups for any gap. Keep those follow-ups small: automated fixes tripled
-`session-registry.ts` and are the documented reason #8728 was abandoned — that failure
-mode is a process risk, not a code risk, and it will recur unless prevented.
+The board holds `task` today. Add the other two as peers of it, under the same lock and
+atomic-write discipline: `ask` with `open` / `answered` / `declined` / `timeout`, `decision`
+with `kind` ∈ approval | acceptance | adjudication and `open` / `approved` / `rejected`.
 
-Changes no session behaviour. Nothing reads the registry for messaging yet.
+No transport, no delivery, no gate. Items are written and read.
 
-### Stage 2 — relocate authority
+### Stage 2 — the CLI over the board
 
-The highest-value stage, and it stands alone.
+```
+qwen session  list
+qwen task     list | create | claim <id> | update <id> [--status …] [--note …]
+qwen ask      <name> "<q>" | list [--wait] | answer <id> "<a>"
+qwen decision list [--wait] | raise --kind … --about <task> | resolve <id> --approve|--reject
+```
 
-- `send-message.ts:221` Route 2 → file mailbox rather than `TeamManager`.
-- Exactly one board-mutation → wake path; nothing else enqueues work.
-- Identity resolvable without AsyncLocalStorage.
-- Correlation IDs on messages and task transitions — the fleet plan's best idea, and it
-  never required subprocesses. Without it a leader infers completion from `idle`, which is
-  half of [#8097](https://github.com/QwenLM/qwen-code/issues/8097).
+`--json` everywhere for machine consumption. `--wait` blocks by polling — no socket involved.
+Fail-open when there is no board, following #9047's herdr reporter: absent context is silence,
+not an error.
 
-`TeamManager` becomes a cache and a UI feed over the board, not the source of truth.
-`InProcessBackend` keeps working throughout.
+This is the stage that satisfies the requirement, and it is worth stating why it is only ~350
+lines: the board, the lock protocol and the claim semantics already exist (§1.1). What is new
+is a surface over them.
 
-### Stage 3 — the `ask` and `decision` surface
+### Stage 3 — Qwen-native surfaces
 
-The stage where the product capability becomes real, and the one most changed by §2.2:
-there is no `team_join` to build.
+`send_message` collapses to scheme-based addressing (§3.2); Qwen's tools read and write the
+same items the CLI does. Correlation IDs land here. Nothing a Qwen agent can do becomes
+unavailable to a CLI caller — that invariant is the standing check from §0.1.
 
-`ask` with its three terminal states; `decision` with `raise` / `list` / `resolve`; the
-exception view that lists pending decisions; and the pull-side commands (`ask list --wait`,
-`decision list --wait`) that every push must have an equivalent of. Collapse `send_message`'s
-`to` / `task_id` split into scheme-based addressing (§3.2) — small, and everything after it
-depends on the shape.
+### Stage 4 — push, and the gate that must precede it
 
-Deadlock detection lands here too, because it is free once `ask` is a first-class item: A
-waiting on B while B waits on A is visible state rather than two stalled intentions, and it
-is the one condition no single session can observe about itself.
-
-### Stage 4 — consent and transport
-
-Revive [#8730](https://github.com/QwenLM/qwen-code/pull/8730) — gate, envelope, authority
-notice, classifier rule, receipts, `/peers`, UDS. Behind `agents.crossSessionMessaging`,
-off by default.
-
-**The gate ships with or before the transport, never after.** A socket that injects text
-into a running session's input queue is not something to land "with the check next week".
-
-### Stage 5 — board surface
-
-Expose board operations as CLI + MCP. Motivated by Qwen's own needs — daemon sessions,
-scheduled agents, and channel workers all need a non-in-process way to touch the board.
-Heterogeneous participation becomes possible as a side effect, with no design concession
-and no promise attached.
+UDS wake frames, #8730's approval-mode parity gate, envelope defences, receipts, `/peers`.
+Deferred, not dropped. It buys latency for Qwen-to-Qwen traffic and nothing else.
 
 ### Reuse ledger
 
@@ -660,13 +617,13 @@ and the CLI/MCP surface.
 
 Recorded rather than deleted, so they are not relitigated.
 
-**1. Split storage roots — accept now, consolidate at Stage 5.**
+**1. Split storage roots — consolidate before the CLI ships (Stage 2).**
 Team config and inboxes live under `~/.qwen/teams/{team}/`, tasks under
 `~/.qwen/tasks/{team}/` (`teamHelpers.ts:69`): one board's state across two roots. Ugly, but
 consolidating is a data migration with no functional benefit while the layout is internal,
 and §2.6 makes no format promise in v1, so nothing outside can observe the split. The
 trigger is concrete rather than "someday": **consolidate before the board surface ships**
-(Stage 5), because that is the moment the layout becomes something a foreign agent reads.
+(Stage 2), because that is the moment the layout becomes something a foreign agent reads.
 The merged registry already carries `schemaVersion`, so versioned layout change is
 anticipated.
 
@@ -686,13 +643,15 @@ _spawn_ model this design is not about. Anyone who wants a resident participant 
 session, and serving exactly that case is the point of the design. Leaving this alone keeps
 the boundary sharp; it can be revisited daemon-side on its own merits.
 
-**4. Remote join — the question dissolved; the real one is assignment.**
-There is no join to make remote (§2.2). What survives is: may A give B work B did not ask
-for? Yes — A creates a `task` with an owner, which #9289 already dispatches. But
-**assignment is a proposal, not an obligation.** B claims it or leaves it, exactly as any
-peer decides what to claim. This is the same rule as §4's refusal of a central completion
-guarantee, and it is what stops a peer model from quietly becoming a hierarchy: the ability
-to name an owner is not the authority to compel one.
+**4. Remote join — dissolved twice over.**
+There is no join to make remote (§2.2), and the question underneath it — may A give B work B
+did not ask for? — stops being hard once nothing is delivered. A names an owner on a `task`;
+B claims it or does not; both facts are visible to everyone. An earlier revision answered this
+with an offer that expires, which was machinery invented to repair a failure mode only push
+creates: work that looks assigned because it was sent, while nobody knows it never arrived.
+**Fetching has no undelivered state**, so visibility does the whole job. Compelling B still
+needs authority, so it is a `decision` — naming an owner is not the power to compel one, and
+that is what keeps a peer model from quietly becoming a hierarchy.
 
 **5. Re-engagement over #8724 — withdrawn; it was never a design question.**
 It asked who should contact the author of the closed #8728/#8730. That is a process item,
