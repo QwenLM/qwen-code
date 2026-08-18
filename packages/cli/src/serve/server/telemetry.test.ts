@@ -9,8 +9,10 @@ import { EventEmitter } from 'node:events';
 import type { NextFunction, Request, Response } from 'express';
 
 const coreMocks = vi.hoisted(() => ({
+  emitDaemonLog: vi.fn(),
   extractDaemonHttpTraceContext: vi.fn((): unknown => undefined),
   hashDaemonWorkspace: vi.fn((workspace: string) => `hash:${workspace}`),
+  isTelemetrySdkInitialized: vi.fn(() => true),
   recordDaemonError: vi.fn(),
   recordDaemonHttpRequest: vi.fn(),
   recordDaemonHttpResponse: vi.fn(),
@@ -21,9 +23,11 @@ const coreMocks = vi.hoisted(() => ({
   ),
 }));
 
-// The middleware only touches these five core helpers; stub them so the test is
-// a pure unit on the `recordRequest` seam. `withDaemonRequestSpan` just runs the
-// wrapped fn (which registers the res listeners and calls next()).
+// The middleware only touches the core helpers stubbed below (the import
+// list of telemetry.ts); keep this mock surface in sync with that list so
+// the test stays a pure unit on the `recordRequest` seam.
+// `withDaemonRequestSpan` just runs the wrapped fn (which registers the res
+// listeners and calls next()).
 vi.mock('@qwen-code/qwen-code-core', () => ({
   ...coreMocks,
 }));
@@ -174,6 +178,89 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
     const options = coreMocks.withDaemonRequestSpan.mock
       .calls[0]?.[0] as Record<string, unknown>;
     expect('parentContext' in options).toBe(false);
+    expect(coreMocks.emitDaemonLog).not.toHaveBeenCalled();
+  });
+
+  it('skips extraction entirely when the telemetry SDK is not initialized', () => {
+    coreMocks.isTelemetrySdkInitialized.mockReturnValueOnce(false);
+    const res = mockRes(200);
+
+    daemonTelemetryMiddleware(() => '/ws')(
+      mockReq('GET', '/daemon/status', {
+        traceparent: `00-${'3'.repeat(32)}-${'4'.repeat(16)}-01`,
+      }),
+      res,
+      vi.fn() as unknown as NextFunction,
+    );
+    res.emit('finish');
+
+    expect(coreMocks.extractDaemonHttpTraceContext).not.toHaveBeenCalled();
+    const options = coreMocks.withDaemonRequestSpan.mock
+      .calls[0]?.[0] as Record<string, unknown>;
+    expect('parentContext' in options).toBe(false);
+    expect(coreMocks.emitDaemonLog).not.toHaveBeenCalled();
+  });
+
+  it('logs at debug severity when a present traceparent header is rejected', () => {
+    const res = mockRes(200);
+
+    daemonTelemetryMiddleware(() => '/ws')(
+      mockReq('GET', '/daemon/status', { traceparent: 'junk-header' }),
+      res,
+      vi.fn() as unknown as NextFunction,
+    );
+    res.emit('finish');
+
+    expect(coreMocks.extractDaemonHttpTraceContext).toHaveBeenCalledWith({
+      traceparent: 'junk-header',
+    });
+    expect(coreMocks.emitDaemonLog).toHaveBeenCalledWith(
+      'Rejected invalid inbound traceparent header.',
+      { 'http.route': 'GET /daemon/status' },
+      {
+        eventName: 'qwen-code.daemon.traceparent.invalid',
+        severityNumber: 5,
+      },
+    );
+    const options = coreMocks.withDaemonRequestSpan.mock
+      .calls[0]?.[0] as Record<string, unknown>;
+    expect('parentContext' in options).toBe(false);
+  });
+
+  it('does not log when extraction succeeds, no header, or an array header is sent', () => {
+    const parentContext = { __remoteParent: true };
+    coreMocks.extractDaemonHttpTraceContext.mockReturnValueOnce(parentContext);
+    const resA = mockRes(200);
+    daemonTelemetryMiddleware(() => '/ws')(
+      mockReq('GET', '/daemon/status', {
+        traceparent: `00-${'3'.repeat(32)}-${'4'.repeat(16)}-01`,
+      }),
+      resA,
+      vi.fn() as unknown as NextFunction,
+    );
+    resA.emit('finish');
+
+    const resB = mockRes(200);
+    daemonTelemetryMiddleware(() => '/ws')(
+      mockReq('GET', '/daemon/status', {}),
+      resB,
+      vi.fn() as unknown as NextFunction,
+    );
+    resB.emit('finish');
+
+    // Array header values stay fail-closed (rejected) but are not the
+    // "present-but-invalid string" breadcrumb case.
+    const resC = mockRes(200);
+    daemonTelemetryMiddleware(() => '/ws')(
+      mockReq('GET', '/daemon/status', {
+        traceparent: [`00-${'3'.repeat(32)}-${'4'.repeat(16)}-01`],
+      }),
+      resC,
+      vi.fn() as unknown as NextFunction,
+    );
+    resC.emit('finish');
+
+    expect(coreMocks.emitDaemonLog).not.toHaveBeenCalled();
   });
 
   it('fires exactly once even if both finish and close emit', () => {

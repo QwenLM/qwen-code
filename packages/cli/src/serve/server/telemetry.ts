@@ -5,8 +5,10 @@
  */
 
 import {
+  emitDaemonLog,
   extractDaemonHttpTraceContext,
   hashDaemonWorkspace,
+  isTelemetrySdkInitialized,
   recordDaemonError,
   recordDaemonHttpRequest,
   recordDaemonHttpResponse,
@@ -743,12 +745,34 @@ export function daemonTelemetryMiddleware(
         : undefined;
     const deferredRuntime = getDeferredRuntimeRequestTiming(req);
     const startMs = deferredRuntime?.startedAt.getTime() ?? Date.now();
+    // Skip extraction entirely when telemetry is off — withDaemonSpan would
+    // short-circuit anyway, so the header parse would be wasted hot-path work.
     let parentContext: ReturnType<typeof extractDaemonHttpTraceContext>;
-    try {
-      parentContext = extractDaemonHttpTraceContext(req.headers);
-    } catch {
-      // Telemetry must not affect request handling.
-      parentContext = undefined;
+    if (isTelemetrySdkInitialized()) {
+      try {
+        parentContext = extractDaemonHttpTraceContext(req.headers);
+      } catch {
+        // Telemetry must not affect request handling.
+        parentContext = undefined;
+      }
+      const inboundTraceparent = req.headers?.['traceparent'];
+      if (
+        !parentContext &&
+        typeof inboundTraceparent === 'string' &&
+        inboundTraceparent.length > 0
+      ) {
+        // Leave a breadcrumb when a present-but-invalid header is rejected,
+        // so a broken cross-service join is diagnosable from daemon logs
+        // alone instead of requiring a request replay.
+        emitDaemonLog(
+          'Rejected invalid inbound traceparent header.',
+          { 'http.route': route.route },
+          {
+            eventName: 'qwen-code.daemon.traceparent.invalid',
+            severityNumber: 5, // SeverityNumber.DEBUG
+          },
+        );
+      }
     }
     const telemetryRes = res as TelemetryResponse;
     if (route.attribution === 'handler_resolved') {

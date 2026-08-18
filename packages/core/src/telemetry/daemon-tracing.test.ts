@@ -12,6 +12,8 @@ import {
   ROOT_CONTEXT,
   SpanStatusCode,
   trace,
+  TraceFlags,
+  type Context,
   type Span,
   type Tracer,
 } from '@opentelemetry/api';
@@ -32,12 +34,21 @@ import {
   runWithDaemonTelemetryContext,
   withDaemonSpan,
   withDaemonRequestSpan,
+  type DaemonRequestSpanOptions,
 } from './daemon-tracing.js';
 import { getSessionIdFromContext } from './session-context.js';
+
+// vitest transpiles without type-checking: this compile-time assertion keeps
+// the optional parentContext field from silently disappearing (only `tsc`
+// would notice), while the runtime suite guards the behavior it enables.
+type DaemonRequestSpanOptionsExposesParentContext =
+  DaemonRequestSpanOptions extends { parentContext?: Context } ? true : false;
+const daemonRequestSpanOptionsExposesParentContext: DaemonRequestSpanOptionsExposesParentContext = true;
 
 describe('daemon-tracing', () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
   });
 
   it('injects traceparent from the active span without the global propagator', () => {
@@ -157,6 +168,9 @@ describe('daemon-tracing', () => {
     expect(extracted).toBeDefined();
     expect(trace.getSpanContext(extracted!)?.traceId).toBe(traceId);
     expect(trace.getSpanContext(extracted!)?.spanId).toBe(spanId);
+    expect(trace.getSpanContext(extracted!)?.traceState?.get('vendor')).toBe(
+      'value',
+    );
   });
 
   it('extracts trace context from inbound HTTP traceparent headers', () => {
@@ -188,6 +202,90 @@ describe('daemon-tracing', () => {
         traceparent: [`00-${'3'.repeat(32)}-${'4'.repeat(16)}-01`],
       }),
     ).toBeUndefined();
+  });
+
+  it('rejects traceparent headers the W3C propagator rejects', () => {
+    // version ff is reserved for future use and always invalid
+    expect(
+      extractDaemonHttpTraceContext({
+        traceparent: `ff-${'3'.repeat(32)}-${'4'.repeat(16)}-01`,
+      }),
+    ).toBeUndefined();
+    // version 00 must not carry the optional future-extension field
+    expect(
+      extractDaemonHttpTraceContext({
+        traceparent: `00-${'3'.repeat(32)}-${'4'.repeat(16)}-01-extra`,
+      }),
+    ).toBeUndefined();
+  });
+
+  it('accepts future traceparent versions like the registered W3C propagator', () => {
+    const traceId = '3'.repeat(32);
+    const spanId = '4'.repeat(16);
+    const extracted = extractDaemonHttpTraceContext({
+      traceparent: `01-${traceId}-${spanId}-01`,
+    });
+
+    expect(trace.getSpanContext(extracted!)?.traceId).toBe(traceId);
+    expect(trace.getSpanContext(extracted!)?.spanId).toBe(spanId);
+    expect(trace.getSpanContext(extracted!)?.isRemote).toBe(true);
+  });
+
+  it('preserves inbound tracestate on the extracted HTTP context', () => {
+    const extracted = extractDaemonHttpTraceContext({
+      traceparent: `00-${'3'.repeat(32)}-${'4'.repeat(16)}-01`,
+      tracestate: 'vendor=value',
+    });
+
+    expect(trace.getSpanContext(extracted!)?.traceState?.get('vendor')).toBe(
+      'value',
+    );
+  });
+
+  it('forces the sampled flag on inbound HTTP parents under the default sampler', () => {
+    vi.stubEnv('OTEL_TRACES_SAMPLER', '');
+    const forced = extractDaemonHttpTraceContext({
+      traceparent: `00-${'3'.repeat(32)}-${'4'.repeat(16)}-00`,
+    });
+    const forcedContext = trace.getSpanContext(forced!);
+    expect(forcedContext).toBeDefined();
+    expect((forcedContext?.traceFlags ?? 0) & TraceFlags.SAMPLED).toBe(
+      TraceFlags.SAMPLED,
+    );
+    expect(forcedContext?.isRemote).toBe(true);
+    // already-sampled parents keep their flags
+    const sampled = extractDaemonHttpTraceContext({
+      traceparent: `00-${'5'.repeat(32)}-${'6'.repeat(16)}-01`,
+    });
+    const sampledFlags = trace.getSpanContext(sampled!)?.traceFlags ?? 0;
+    expect(sampledFlags & TraceFlags.SAMPLED).toBe(TraceFlags.SAMPLED);
+  });
+
+  it('keeps the caller flags when the sampler config opts out of forcing', () => {
+    vi.stubEnv('OTEL_TRACES_SAMPLER', 'parentbased_always_off');
+    const alwaysOff = extractDaemonHttpTraceContext({
+      traceparent: `00-${'3'.repeat(32)}-${'4'.repeat(16)}-00`,
+    });
+    expect(trace.getSpanContext(alwaysOff!)?.traceFlags).toBe(0);
+
+    vi.stubEnv('OTEL_TRACES_SAMPLER', 'traceidratio');
+    const ratio = extractDaemonHttpTraceContext({
+      traceparent: `00-${'3'.repeat(32)}-${'4'.repeat(16)}-00`,
+    });
+    expect(trace.getSpanContext(ratio!)?.traceFlags).toBe(0);
+  });
+
+  it('keeps caller flags verbatim on the _meta extraction path', () => {
+    const extracted = extractDaemonTraceContext({
+      _meta: {
+        [DAEMON_TRACEPARENT_META_KEY]: `00-${'1'.repeat(32)}-${'2'.repeat(16)}-00`,
+      },
+    });
+    expect(trace.getSpanContext(extracted!)?.traceFlags).toBe(0);
+  });
+
+  it('keeps parentContext on DaemonRequestSpanOptions (type-level guard)', () => {
+    expect(daemonRequestSpanOptionsExposesParentContext).toBe(true);
   });
 
   it('starts a daemon span under an explicit remote parent context', async () => {
