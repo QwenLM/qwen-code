@@ -956,6 +956,14 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     /case "\$\{1:-\}" in[\s\S]*?--flake-clean-child\) ;;[\s\S]*?_flake_body="\$\(<"\$\{BASH_SOURCE\[0\]\}"\)"[\s\S]*?LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= exec \/usr\/bin\/env -i[\s\S]*?\/usr\/bin\/bash --noprofile --norc -e -o pipefail -c "\$_flake_body" \S+ --flake-clean-child/;
   const reExecMarkerRe = /case "\$\{1:-\}" in/;
   const pathChildRe = /"\$\{BASH_SOURCE\[0\]\}" --flake-clean-child/;
+  // R15-1: POSIX mode resolves special builtins before functions, so the
+  // re-exec's `exec` and every refusal's `exit` cannot be shadowed by a
+  // BASH_FUNC_* import the way bare builtins can (probe-verified on this
+  // pool's bash). `set` is itself shadowable, so the switch is verified
+  // with a reserved word, and the refusal ends in a slash-pathed kill of
+  // last resort for the case where `exit` is shadowed too.
+  const posixSwitchRe = /^\s*set -o posix\n\s*if \[\[ ! -o posix \]\]; then$/m;
+  const posixKillRe = /exit [01]\n\s*\/usr\/bin\/kill -9 \$\$\n\s*fi/;
 
   it('records the changed-test list BEFORE the workspace is handed to the build user', () => {
     assert.ok(recordStep, 'record step must exist');
@@ -1078,6 +1086,29 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
       recordStep.run,
       pathPinRe,
       'the record step must pin a root-only-writable PATH — its inherited one may be poisoned through the file-command backing files',
+    );
+    // R15-1: `exec` and `exit` are builtins and function lookup precedes
+    // builtins — a BASH_FUNC_exec%% import shadows the re-exec keyword and
+    // the poisoned parent falls through with every import alive
+    // (probe-verified on this pool's bash). POSIX mode resolves special
+    // builtins before functions, closing the class for `exec`, `exit` and
+    // every refusal; the switch must precede the first refusal it
+    // immunizes.
+    assert.match(
+      recordStep.run,
+      posixSwitchRe,
+      'the record step must enter POSIX mode so exec/exit cannot be shadowed by a BASH_FUNC import',
+    );
+    assert.match(
+      recordStep.run,
+      posixKillRe,
+      'the posix refusal must end in a slash-pathed kill — exit itself may be the shadowed builtin',
+    );
+    const recordPosix = recordStep.run.search(/^\s*set -o posix$/m);
+    const recordScrub = recordStep.run.search(scrubRefusalRe);
+    assert.ok(
+      recordPosix !== -1 && recordScrub !== -1 && recordPosix < recordScrub,
+      'the POSIX switch must precede the first refusal whose exit it immunizes',
     );
     // A grep ERROR (status 2 — e.g. ENOSPC opening the output) is
     // infrastructure: swallowing it narrows the gate to zero files and
@@ -1204,6 +1235,24 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
       flakeStep.run,
       scrubRefusalRe,
       'the gate scrub refusal must be reserved-word shaped — `[` is shadowable by a BASH_FUNC import',
+    );
+    // R15-1: same discipline as the record step — the gate's fail-open
+    // refusals ride the same exit channel.
+    assert.match(
+      flakeStep.run,
+      posixSwitchRe,
+      'the gate must enter POSIX mode so exec/exit cannot be shadowed by a BASH_FUNC import',
+    );
+    assert.match(
+      flakeStep.run,
+      posixKillRe,
+      'the posix refusal must end in a slash-pathed kill — exit itself may be the shadowed builtin',
+    );
+    const gatePosix = flakeStep.run.search(/^\s*set -o posix$/m);
+    const gateScrub = flakeStep.run.search(scrubRefusalRe);
+    assert.ok(
+      gatePosix !== -1 && gateScrub !== -1 && gatePosix < gateScrub,
+      'the POSIX switch must precede the first refusal whose exit it immunizes',
     );
     // R14-2/R12-2: the runner writes this script as a node-owned file
     // inside the uid-1000-writable $RUNNER_TEMP — a detached
@@ -1621,6 +1670,32 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
       /\/usr\/bin\/rm -rf -- "\$GATE_DIR"/,
       'a home that fails the re-check must be removed before the upload enumerates the path',
     );
+    // R15-1: the re-check has no env -i re-exec — it runs in the
+    // inherited job environment. POSIX mode immunizes set/export/exit;
+    // every remaining decision must stay a reserved word and every
+    // external absolute-pathed, so no shadowable command word stands
+    // between a poisoned env and the verdict (a bare cd/[/stat subshell
+    // or a bare echo verdict write would re-open exactly that surface).
+    assert.match(
+      recheckStep.run,
+      posixSwitchRe,
+      'the re-check must enter POSIX mode so set/export/exit cannot be shadowed by a BASH_FUNC import',
+    );
+    assert.match(
+      recheckStep.run,
+      posixKillRe,
+      'the posix refusal must end in a slash-pathed kill — exit itself may be the shadowed builtin',
+    );
+    assert.match(
+      recheckStep.run,
+      /\/usr\/bin\/printf 'upload_ok=%s\\n' "\$upload_ok" >> "\$GITHUB_OUTPUT"/,
+      'the verdict write must be slash-pathed — echo is shadowable by a BASH_FUNC import',
+    );
+    assert.doesNotMatch(
+      recheckStep.run,
+      /\(\s*cd /,
+      'the re-check must not run a cd-anchored subshell — bare cd/[/stat are shadowable command words',
+    );
     assert.match(
       uploadStep.with.name,
       /^verify-results-/,
@@ -1630,6 +1705,14 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
       uploadStep['continue-on-error'],
       true,
       'a missing/empty results dir must not fail the job and mask the original error',
+    );
+    // R16-2: the loader channel reaches the final consumer of the defense
+    // chain — this uses: step's node process inherits the job env the
+    // run: steps blank at their own blocks.
+    assert.deepEqual(
+      Object.keys(uploadStep.env).sort(),
+      ['LD_AUDIT', 'LD_LIBRARY_PATH', 'LD_PRELOAD'],
+      'the upload step must blank the LD_* loader channels like its run: siblings',
     );
     // Evidence-copying only, after the verdict outputs are written: a
     // staging failure (ENOSPC, hostile mount) must not flip the job red or
@@ -1841,6 +1924,17 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
       sr,
       scrubRefusalRe,
       'the staging scrub refusal must be reserved-word shaped — `[` is shadowable by a BASH_FUNC import',
+    );
+    // R15-1: same discipline as the record step.
+    assert.match(
+      sr,
+      posixSwitchRe,
+      'staging must enter POSIX mode so exec/exit cannot be shadowed by a BASH_FUNC import',
+    );
+    assert.match(
+      sr,
+      posixKillRe,
+      'the posix refusal must end in a slash-pathed kill — exit itself may be the shadowed builtin',
     );
     assert.doesNotMatch(
       sr,
@@ -3419,6 +3513,31 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
     );
   });
 
+  it('a BASH_FUNC_exec%% import cannot skip the env -i re-exec — the body runs exactly once', () => {
+    // `exec` is a builtin and function lookup precedes builtins: a
+    // BASH_FUNC_exec%% import shadows it, the re-exec line runs the
+    // function instead of replacing the shell, and the poisoned parent
+    // falls through into the body with every import alive
+    // (probe-verified on this pool's bash: the env-i child never runs).
+    // POSIX mode resolves special builtins before functions, so the
+    // transition is immune — observable as an honest `pass` and exactly
+    // one run of the rounds: against the pre-round code this scenario
+    // fell through into the poisoned parent and corrupted the verdict.
+    const { res, outputs, counts } = runGate({
+      layout: UNIT,
+      list: 'scripts/tests/a.test.js\n',
+      sequences: { 'a.test.js': 'PPPPP' },
+      env: { 'BASH_FUNC_exec%%': '() { return 0; }' },
+    });
+    assert.equal(res.status, 0, res.stderr);
+    assert.equal(outputs.flake_verdict, 'pass');
+    assert.equal(
+      counts('a.test.js'),
+      5,
+      'the re-exec must run exactly once — a shadowed exec falls through and re-runs the body',
+    );
+  });
+
   it('a same-stem sibling (X.test.tsx next to changed X.test.ts) runs in ONE merged group, never attributed separately', () => {
     // vitest's positional filters are lowercase SUBSTRING matches on
     // root-relative paths — verified against the installed vitest: one
@@ -3487,7 +3606,14 @@ describe('qwen-triage: flakiness gate staging/upload — behavioral, under the p
   );
 
   const stageRoot = mkdtempSync(join(tmpdir(), 'flake-staging-'));
-  after(() => rmSync(stageRoot, { recursive: true, force: true }));
+  after(() => {
+    // Same safeguard as the gate suite's hook: a scenario that leaves a
+    // mode-500 directory behind makes rmSync throw EACCES (force
+    // suppresses ENOENT only), marking the whole suite hookFailed and
+    // leaking the tree; restore owner permissions first.
+    spawnSync('chmod', ['-R', 'u+rwx', stageRoot]);
+    rmSync(stageRoot, { recursive: true, force: true });
+  });
 
   const makeHome = (rt, { runId = '777-1', files = {} } = {}) => {
     const home = join(rt, 'flake-gate');

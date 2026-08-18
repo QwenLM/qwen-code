@@ -2780,6 +2780,21 @@ jobs:
           LD_LIBRARY_PATH: ''
         run: |-
           set -euo pipefail
+          # Startup-channel scrub, part zero: POSIX mode resolves special
+          # builtins BEFORE functions, so the `exec` below — and every
+          # later `exit` — cannot be shadowed by a BASH_FUNC_* import the
+          # way bare builtins can. A shadowed `exec` would skip the env -i
+          # re-exec and let the poisoned parent continue with every import
+          # alive; a shadowed `exit` would let it fall through after.
+          # `set` itself is a builtin and shadowable, so verify with a
+          # reserved word that the mode took, and refuse if not (the kill
+          # is the stop of last resort when `exit` is shadowed too).
+          set -o posix
+          if [[ ! -o posix ]]; then
+            echo "::error::flake-gate record: startup-channel scrub unavailable — refusing to record in a poisoned environment"
+            exit 1
+            /usr/bin/kill -9 $$
+          fi
           # Startup-channel scrub, part two: BASH_FUNC_<name>%% env
           # entries are imported as shell functions BEFORE this body
           # runs, are invisible to ${!BASH_FUNC_@}/`set`, and shadow
@@ -3102,6 +3117,23 @@ jobs:
           # gate exists to classify (round-1 sandboxed verify, cells C/D).
           set -uo pipefail
           set +e
+          # Startup-channel scrub, part zero: POSIX mode resolves special
+          # builtins BEFORE functions, so the `exec` below — and every
+          # later `exit` — cannot be shadowed by a BASH_FUNC_* import the
+          # way bare builtins can (a shadowed `exec` would skip the env -i
+          # re-exec and let the poisoned parent continue with every import
+          # alive; a shadowed `exit` would let it fall through after).
+          # `set` itself is a builtin and shadowable, so verify with a
+          # reserved word that the mode took; the refusal keeps the gate's
+          # fail-open verdict shape, and the kill only fires when `exit`
+          # is shadowed too.
+          set -o posix
+          if [[ ! -o posix ]]; then
+            echo "flake_verdict=error" >> "$GITHUB_OUTPUT"
+            echo "flake_summary=the gate could not enter a scrub-safe shell mode — refusing to sample" >> "$GITHUB_OUTPUT"
+            exit 0
+            /usr/bin/kill -9 $$
+          fi
           # Startup-channel scrub, part one: if the step-env blanks
           # above lost to the poisoned job env, BASH_ENV's payload
           # already ran at startup and the LD_* channels are live — a
@@ -3183,6 +3215,12 @@ jobs:
             if [ -z "$GATE_DONE" ] && [ -n "${GITHUB_OUTPUT:-}" ]; then
               echo "flake_verdict=error" >> "$GITHUB_OUTPUT"
               echo "flake_summary=the gate aborted before reaching a verdict — see the step log" >> "$GITHUB_OUTPUT"
+              # Keep the two channels agreeing (finish() writes both): an
+              # abnormal abort otherwise leaves the step summary empty
+              # while the step output carries the verdict.
+              if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+                echo "Flakiness gate: error — the gate aborted before reaching a verdict — see the step log" >> "$GITHUB_STEP_SUMMARY"
+              fi
             fi
             exit 0
           }
@@ -4329,6 +4367,21 @@ jobs:
           LD_LIBRARY_PATH: ''
         run: |-
           set -euo pipefail
+          # Startup-channel scrub, part zero: POSIX mode resolves special
+          # builtins BEFORE functions, so the `exec` below — and every
+          # later `exit` — cannot be shadowed by a BASH_FUNC_* import the
+          # way bare builtins can. A shadowed `exec` would skip the env -i
+          # re-exec and let the poisoned parent continue with every import
+          # alive; a shadowed `exit` would let it fall through after.
+          # `set` itself is a builtin and shadowable, so verify with a
+          # reserved word that the mode took, and refuse if not (the kill
+          # is the stop of last resort when `exit` is shadowed too).
+          set -o posix
+          if [[ ! -o posix ]]; then
+            echo "::error::flake-gate staging: startup-channel scrub unavailable — refusing to stage evidence in a poisoned environment"
+            exit 1
+            /usr/bin/kill -9 $$
+          fi
           # Startup-channel scrub (same shape and rationale as the gate
           # step's): fail closed if the step-env blanks lost, then
           # re-exec once through an absolute-path env -i child to drop
@@ -4521,21 +4574,37 @@ jobs:
           LD_LIBRARY_PATH: ''
         run: |-
           set -uo pipefail
+          # Startup-channel scrub (see the record step): this step has no
+          # env -i re-exec — it runs in the inherited job environment.
+          # POSIX mode resolves special builtins before functions, so
+          # set/export/exit cannot be shadowed by a BASH_FUNC_* import;
+          # every remaining decision below is a reserved word and every
+          # external absolute-pathed, so no shadowable command word stands
+          # between the poisoned environment this step may inherit and the
+          # verdict it writes. Verify with a reserved word that the mode
+          # took, and refuse if not (the kill is the stop of last resort
+          # when `exit` is shadowed too).
+          set -o posix
+          if [[ ! -o posix ]]; then
+            echo "::error::flake-gate re-check: startup-channel scrub unavailable — refusing to validate in a poisoned environment"
+            exit 1
+            /usr/bin/kill -9 $$
+          fi
           if [[ ${EUID:-1} -eq 0 ]]; then
             export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
           fi
           upload_ok=false
           GATE_DIR=/flake-gate
+          # No cd-anchored subshell: the home sits directly under the
+          # root-only container root, where no PR-controlled process can
+          # rename the entry, so re-resolving $GATE_DIR cannot land
+          # anywhere else — and bare cd/[/stat would re-introduce exactly
+          # the shadowable command words this step must not run.
           if [[ ! -L $GATE_DIR ]] && [[ -d $GATE_DIR ]] && [[ -O $GATE_DIR ]] &&
              [[ $(/usr/bin/stat -c '%a' "$GATE_DIR" 2>/dev/null) == '700' ]] &&
-             [[ $(/usr/bin/cat "$GATE_DIR/run-id" 2>/dev/null) == "${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}" ]]; then
-            home_id="$(/usr/bin/stat -c '%d:%i' "$GATE_DIR" 2>/dev/null || true)"
-            if ( cd "$GATE_DIR" &&
-                 [ "$(stat -c '%d:%i' . 2>/dev/null)" = "$home_id" ] &&
-                 [ -O . ] && [ "$(stat -c '%a' . 2>/dev/null)" = '700' ] &&
-                 [ -d upload ] ); then
-              upload_ok=true
-            fi
+             [[ $(/usr/bin/cat "$GATE_DIR/run-id" 2>/dev/null) == "${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}" ]] &&
+             [[ -d $GATE_DIR/upload ]]; then
+            upload_ok=true
           fi
           if [[ $upload_ok != true ]]; then
             # Whatever occupies the entry now is not this run's
@@ -4543,13 +4612,22 @@ jobs:
             # enumerate a plant.
             /usr/bin/rm -rf -- "$GATE_DIR"
           fi
-          echo "upload_ok=$upload_ok" >> "$GITHUB_OUTPUT"
+          /usr/bin/printf 'upload_ok=%s\n' "$upload_ok" >> "$GITHUB_OUTPUT"
 
       - name: 'Upload verify results'
         if: "always() && steps.pr.outputs.decision == 'run' && steps.flake-upload-check.outputs.upload_ok == 'true'"
         # Don't let a missing/empty results dir (qwen crashed before writing
         # any) fail the job and mask the original error.
         continue-on-error: true
+        # Startup-channel scrub (see the gate step): the run: steps this PR
+        # adds blank the LD_* loader channels in their step env; this uses:
+        # step's node process inherits the same job env, and the loader
+        # channel reaches the final consumer of the chain — the enumeration
+        # of the staged tree — unless it is blanked here too.
+        env:
+          LD_PRELOAD: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
         uses: 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02' # v4.6.2
         with:
           name: 'verify-results-${{ steps.pr.outputs.pr_number }}-${{ github.run_id }}-${{ github.run_attempt }}'
