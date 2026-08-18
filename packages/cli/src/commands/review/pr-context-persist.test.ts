@@ -20,7 +20,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { persistRecoveredLedger } from './pr-context.js';
+import { persistedAnchorSha, persistRecoveredLedger } from './pr-context.js';
 import type { Ledger } from './lib/ledger.js';
 
 describe('persistRecoveredLedger', () => {
@@ -259,6 +259,74 @@ describe('persistRecoveredLedger', () => {
       expect(written.findings).toEqual(ledger.findings);
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('persistedAnchorSha', () => {
+  const dir = () => mkdtempSync(join(tmpdir(), 'persisted-anchor-'));
+
+  it('reads back what the never-lower-round guard actually KEPT', () => {
+    // The seam the section's verdict rules on. A run whose recovery walk came
+    // back short leaves a higher-round file in place; the verdict must be
+    // about THAT sha, because it is the one Step 1 passes. Inferring it from
+    // the recovered ledger — the shape before this read existed — is how a
+    // HOLDS about sha X got obeyed against sha Y.
+    const d = dir();
+    try {
+      const side = join(d, 'prev-ledger.json');
+      writeFileSync(
+        side,
+        JSON.stringify({
+          v: 1,
+          round: 6,
+          findings: [],
+          sha: 'ffff1111ffff1111',
+          reviewId: 99,
+        }),
+      );
+      persistRecoveredLedger(
+        side,
+        {
+          ledger: {
+            v: 1,
+            round: 5,
+            findings: [{ id: 'R5-1', sev: 'C', file: 'a.ts', title: 't' }],
+            sha: 'aaaa2222aaaa2222',
+          },
+          commitId: 'c',
+          reviewId: 1,
+          foreign: false,
+          author: null,
+        } as unknown as Parameters<typeof persistRecoveredLedger>[1],
+        false,
+        true,
+      );
+      // The guard kept round 6 — so the anchor on disk is round 6's, not the
+      // round-5 one this run recovered.
+      expect(persistedAnchorSha(side)).toBe('ffff1111ffff1111');
+    } finally {
+      rmSync(d, { recursive: true, force: true });
+    }
+  });
+
+  it('answers null for absent, unparseable, and anchor-less files', () => {
+    // Each leaves the ruling to the recovered ledger alone rather than
+    // inventing a disagreement out of a file that says nothing.
+    const d = dir();
+    try {
+      expect(persistedAnchorSha(join(d, 'nope.json'))).toBeNull();
+      const broken = join(d, 'broken.json');
+      writeFileSync(broken, '{"sha": "trunc');
+      expect(persistedAnchorSha(broken)).toBeNull();
+      const noSha = join(d, 'no-sha.json');
+      writeFileSync(noSha, JSON.stringify({ v: 1, round: 2, findings: [] }));
+      expect(persistedAnchorSha(noSha)).toBeNull();
+      const emptySha = join(d, 'empty-sha.json');
+      writeFileSync(emptySha, JSON.stringify({ v: 1, round: 2, sha: '' }));
+      expect(persistedAnchorSha(emptySha)).toBeNull();
+    } finally {
+      rmSync(d, { recursive: true, force: true });
     }
   });
 });

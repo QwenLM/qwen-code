@@ -1665,6 +1665,54 @@ describe('renderLedgerSection', () => {
     expect(noSha).not.toContain('reviewed-at sha');
   });
 
+  it('refuses when the side file holds a DIFFERENT anchor than the one recovered', () => {
+    // `persistRecoveredLedger` keeps a higher-round side file when the
+    // recovery walk comes back short (a concurrent lane, a paginated fetch
+    // that returned less than it should, a deleted latest review). The
+    // orchestrator then takes the sha from the file and the verdict from this
+    // section — so a HOLDS about the recovered sha would be obeyed against a
+    // different one, under whichever model certified THAT round. Compose's
+    // drift gate cannot catch it: the re-run re-stamps under the running
+    // model, so the stamp agrees with the runtime.
+    const recovered: Ledger = {
+      v: 1,
+      round: 5,
+      findings: [{ id: 'R5-1', sev: 'C', file: 'a.ts', title: 't' }],
+      sha: 'aaaa2222aaaa2222',
+      model: 'model-a@aaaaaaaa',
+    };
+    // Same model, so the gate itself would say HOLDS — the divergence is the
+    // only thing that can refuse here, which is what makes this test about it.
+    const diverged = renderLedgerSection(
+      recovered,
+      'model-a@aaaaaaaa',
+      null,
+      'ffff1111ffff1111',
+    );
+    expect(diverged).toContain('Do NOT pass any sha');
+    expect(diverged).not.toContain('the same-model contract HOLDS');
+    // Both shas are named: a round that silently declines is indistinguishable
+    // from one that had no anchor.
+    expect(diverged).toContain('`aaaa2222aaaa2222`');
+    expect(diverged).toContain('`ffff1111ffff1111`');
+    // The work list still carries.
+    expect(diverged).toContain('still owed their rulings');
+
+    // Agreement — the ordinary case — rules normally.
+    expect(
+      renderLedgerSection(
+        recovered,
+        'model-a@aaaaaaaa',
+        null,
+        'aaaa2222aaaa2222',
+      ),
+    ).toContain('the same-model contract HOLDS');
+    // …and so does a side file that holds no anchor to disagree with.
+    expect(
+      renderLedgerSection(recovered, 'model-a@aaaaaaaa', null, null),
+    ).toContain('the same-model contract HOLDS');
+  });
+
   it('RULES the same-model gate here instead of asking the model to compare', () => {
     // The two operands are not comparable in prompt text: the marker's
     // `model` is the provider-qualified identity the CLI wrote, while
