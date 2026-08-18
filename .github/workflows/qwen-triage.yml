@@ -2772,12 +2772,14 @@ jobs:
         # LD_* loader channels are consumed at shell/loader startup,
         # before any in-script defence — blank them where the step env
         # is assembled. BASH_FUNC_* imports are handled by the re-exec
-        # below.
+        # below; POSIXLY_CORRECT refuses the special-builtin-named ones
+        # at bash startup (see the gate step's env block).
         env:
           BASH_ENV: ''
           LD_PRELOAD: ''
           LD_AUDIT: ''
           LD_LIBRARY_PATH: ''
+          POSIXLY_CORRECT: '1'
         run: |-
           set -euo pipefail
           # Startup-channel scrub, part zero: POSIX mode resolves special
@@ -2791,7 +2793,7 @@ jobs:
           # is the stop of last resort when `exit` is shadowed too).
           set -o posix
           if [[ ! -o posix ]]; then
-            echo "::error::flake-gate record: startup-channel scrub unavailable — refusing to record in a poisoned environment"
+            /usr/bin/printf '::error::flake-gate record: startup-channel scrub unavailable — refusing to record in a poisoned environment\n'
             exit 1
             /usr/bin/kill -9 $$
           fi
@@ -2822,14 +2824,20 @@ jobs:
           # uid-1000-writable $RUNNER_TEMP, so a second open by the
           # child is a deterministic window a kill-race survivor can
           # rename-plant into.
-          if [[ ${EUID:-1} -eq 0 ]] && [[ -n ${BASH_ENV:-} || -n ${LD_PRELOAD:-} || -n ${LD_AUDIT:-} || -n ${LD_LIBRARY_PATH:-} ]]; then
-            echo "::error::flake-gate record: step-env scrub lost — refusing to run in a poisoned environment"
+          # Identity comes from the kernel (/usr/bin/id -u), never $EUID:
+          # bash imports EUID from the process environment, overriding
+          # the native readonly variable, so one planted EUID line could
+          # silently skip every root-gated defence below in this step and
+          # in every later step (probe-verified; the runner's set-env
+          # blocklist does not cover EUID).
+          if [[ $(/usr/bin/id -u) -eq 0 ]] && [[ -n ${BASH_ENV:-} || -n ${LD_PRELOAD:-} || -n ${LD_AUDIT:-} || -n ${LD_LIBRARY_PATH:-} ]]; then
+            /usr/bin/printf '::error::flake-gate record: step-env scrub lost — refusing to run in a poisoned environment\n'
             exit 1
           fi
           # Kill BEFORE the snapshot, liveness-verified (the gate
           # step's shape): a live node writer is all the snapshot race
           # needs, even at this pre-build point.
-          if [[ ${EUID:-1} -eq 0 ]]; then
+          if [[ $(/usr/bin/id -u) -eq 0 ]]; then
             /usr/bin/pkill -KILL -u node 2>/dev/null || true
             for _ in 1 2 3; do
               [[ -n $(/usr/bin/ps -o pid=,stat= -u node 2>/dev/null | /usr/bin/awk '$2 !~ /^Z/') ]] || break
@@ -2838,16 +2846,28 @@ jobs:
             done
             survivors="$(/usr/bin/ps -o pid=,stat= -u node 2>/dev/null | /usr/bin/awk '$2 !~ /^Z/')" || true
             if [[ -n $survivors ]]; then
-              echo "::error::flake-gate record: node-owned processes survived SIGKILL — refusing to record through a contested environment"
+              /usr/bin/printf '::error::flake-gate record: node-owned processes survived SIGKILL — refusing to record through a contested environment\n'
               exit 1
             fi
           fi
           case "${1:-}" in
             --flake-clean-child) ;;
             *)
-              [[ -x /usr/bin/env ]] || { echo "::error::flake-gate record: clean re-exec unavailable"; exit 1; }
+              [[ -x /usr/bin/env ]] || { /usr/bin/printf '::error::flake-gate record: clean re-exec unavailable\n'; exit 1; }
+              # Inode anchor: bash reads this script through fd 255, so
+              # the fd's identity IS the content bash is executing, while
+              # the snapshot below RE-OPENS the path — a swap that lands
+              # between bash's open and this point is filesystem state a
+              # kill cannot un-land. Require the path to still resolve to
+              # the opened inode; refuse otherwise.
+              _flake_self_id="$(/usr/bin/stat -L -c '%d:%i' "/proc/$$/fd/255" 2>/dev/null)" || _flake_self_id=''
               _flake_body="$(<"${BASH_SOURCE[0]}")"
-              [[ -n $_flake_body ]] || { echo "::error::flake-gate record: clean re-exec snapshot empty"; exit 1; }
+              [[ -n $_flake_body ]] || { /usr/bin/printf '::error::flake-gate record: clean re-exec snapshot empty\n'; exit 1; }
+              if [[ -z $_flake_self_id ]] ||
+                 [[ "$(/usr/bin/stat -L -c '%d:%i' "${BASH_SOURCE[0]}" 2>/dev/null)" != "$_flake_self_id" ]]; then
+                /usr/bin/printf '::error::flake-gate record: step script changed between open and re-exec snapshot — refusing to run\n'
+                exit 1
+              fi
               LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= exec /usr/bin/env -i \
                 PATH="$PATH" RUNNER_TEMP="${RUNNER_TEMP:-}" \
                 GITHUB_OUTPUT="${GITHUB_OUTPUT:-}" GITHUB_STEP_SUMMARY="${GITHUB_STEP_SUMMARY:-}" \
@@ -3100,10 +3120,20 @@ jobs:
           # step env is assembled. Step env outranks the poisoned job
           # env a PR step wrote to the uid-1000 file-command backing
           # files; all four are defensive blanks, never secrets.
+          # POSIXLY_CORRECT enters POSIX mode at INVOCATION, so a
+          # BASH_FUNC_* import named after a special builtin (set, exit,
+          # exec ...) is refused at import — bash aborts red (exit 2)
+          # before the body's first command — instead of the import
+          # running attacker code as root on the first shadowable `set`,
+          # one command before the in-script POSIX switch can take
+          # effect. A poisoned startup therefore fails the step red
+          # rather than landing the fail-open error verdict: the abort
+          # IS the refusal.
           BASH_ENV: ''
           LD_PRELOAD: ''
           LD_AUDIT: ''
           LD_LIBRARY_PATH: ''
+          POSIXLY_CORRECT: '1'
         run: |-
           # Fail OPEN by contract: the gate is advisory-and-demoting only, so
           # a bug in it must degrade to the fixed `error` verdict — never
@@ -3129,8 +3159,8 @@ jobs:
           # is shadowed too.
           set -o posix
           if [[ ! -o posix ]]; then
-            echo "flake_verdict=error" >> "$GITHUB_OUTPUT"
-            echo "flake_summary=the gate could not enter a scrub-safe shell mode — refusing to sample" >> "$GITHUB_OUTPUT"
+            /usr/bin/printf 'flake_verdict=%s\n' error >> "$GITHUB_OUTPUT"
+            /usr/bin/printf 'flake_summary=%s\n' 'the gate could not enter a scrub-safe shell mode — refusing to sample' >> "$GITHUB_OUTPUT"
             exit 0
             /usr/bin/kill -9 $$
           fi
@@ -3138,22 +3168,25 @@ jobs:
           # above lost to the poisoned job env, BASH_ENV's payload
           # already ran at startup and the LD_* channels are live — a
           # compromised root shell must not keep producing verdicts.
-          # EUID-gated so the test harness (which cannot apply this
-          # step's env block and runs non-root) stays out of it.
-          if [[ ${EUID:-1} -eq 0 ]] && [[ -n ${BASH_ENV:-} || -n ${LD_PRELOAD:-} || -n ${LD_AUDIT:-} || -n ${LD_LIBRARY_PATH:-} ]]; then
-            echo "flake_verdict=error" >> "$GITHUB_OUTPUT"
-            echo "flake_summary=the gate refused to sample in a poisoned environment — see the step log" >> "$GITHUB_OUTPUT"
+          # Root-gated via /usr/bin/id -u — never $EUID, which the
+          # poisoned file-command channel can import (the record step
+          # carries the rationale); the test harness runs non-root, so
+          # it stays out.
+          if [[ $(/usr/bin/id -u) -eq 0 ]] && [[ -n ${BASH_ENV:-} || -n ${LD_PRELOAD:-} || -n ${LD_AUDIT:-} || -n ${LD_LIBRARY_PATH:-} ]]; then
+            /usr/bin/printf 'flake_verdict=%s\n' error >> "$GITHUB_OUTPUT"
+            /usr/bin/printf 'flake_summary=%s\n' 'the gate refused to sample in a poisoned environment — see the step log' >> "$GITHUB_OUTPUT"
             exit 0
           fi
           # Kill BEFORE the re-exec snapshot; absolute-pathed (no PATH
           # pin applies this early, and a BASH_FUNC import shadows
-          # every bare word), EUID-gated (the harness keeps its
-          # stubs). The liveness refusal mirrors the agent step's
-          # guard: the budget loop alone is out-forked by a plant
-          # repopulating between sweeps, and the snapshot must not
-          # read this node-owned script through a contested
-          # environment (install/build ran PR lifecycle code).
-          if [[ ${EUID:-1} -eq 0 ]]; then
+          # every bare word), root-gated via /usr/bin/id -u ($EUID is
+          # importable; the harness keeps its stubs). The liveness
+          # refusal mirrors the agent step's guard: the budget loop
+          # alone is out-forked by a plant repopulating between sweeps,
+          # and the snapshot must not read this node-owned script
+          # through a contested environment (install/build ran PR
+          # lifecycle code).
+          if [[ $(/usr/bin/id -u) -eq 0 ]]; then
             /usr/bin/pkill -KILL -u node 2>/dev/null || true
             for _ in 1 2 3; do
               [[ -n $(/usr/bin/ps -o pid=,stat= -u node 2>/dev/null | /usr/bin/awk '$2 !~ /^Z/') ]] || break
@@ -3162,8 +3195,8 @@ jobs:
             done
             survivors="$(/usr/bin/ps -o pid=,stat= -u node 2>/dev/null | /usr/bin/awk '$2 !~ /^Z/')" || true
             if [[ -n $survivors ]]; then
-              echo "flake_verdict=error" >> "$GITHUB_OUTPUT"
-              echo "flake_summary=node-owned processes survived SIGKILL — the gate refused to sample" >> "$GITHUB_OUTPUT"
+              /usr/bin/printf 'flake_verdict=%s\n' error >> "$GITHUB_OUTPUT"
+              /usr/bin/printf 'flake_summary=%s\n' 'node-owned processes survived SIGKILL — the gate refused to sample' >> "$GITHUB_OUTPUT"
               exit 0
             fi
           fi
@@ -3178,14 +3211,24 @@ jobs:
             --flake-clean-child) ;;
             *)
               if [[ ! -x /usr/bin/env ]]; then
-                echo "flake_verdict=error" >> "$GITHUB_OUTPUT"
-                echo "flake_summary=the gate could not start a clean shell — refusing to sample" >> "$GITHUB_OUTPUT"
+                /usr/bin/printf 'flake_verdict=%s\n' error >> "$GITHUB_OUTPUT"
+                /usr/bin/printf 'flake_summary=%s\n' 'the gate could not start a clean shell — refusing to sample' >> "$GITHUB_OUTPUT"
                 exit 0
               fi
+              # Inode anchor (the record step carries the rationale):
+              # the snapshot re-opens the path, so it must still resolve
+              # to the inode bash is executing through fd 255.
+              _flake_self_id="$(/usr/bin/stat -L -c '%d:%i' "/proc/$$/fd/255" 2>/dev/null)" || _flake_self_id=''
               _flake_body="$(<"${BASH_SOURCE[0]}")"
               if [[ -z $_flake_body ]]; then
-                echo "flake_verdict=error" >> "$GITHUB_OUTPUT"
-                echo "flake_summary=the gate could not snapshot its own body — refusing to sample" >> "$GITHUB_OUTPUT"
+                /usr/bin/printf 'flake_verdict=%s\n' error >> "$GITHUB_OUTPUT"
+                /usr/bin/printf 'flake_summary=%s\n' 'the gate could not snapshot its own body — refusing to sample' >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              if [[ -z $_flake_self_id ]] ||
+                 [[ "$(/usr/bin/stat -L -c '%d:%i' "${BASH_SOURCE[0]}" 2>/dev/null)" != "$_flake_self_id" ]]; then
+                /usr/bin/printf 'flake_verdict=%s\n' error >> "$GITHUB_OUTPUT"
+                /usr/bin/printf 'flake_summary=%s\n' 'the gate step script changed between open and re-exec snapshot — refusing to sample' >> "$GITHUB_OUTPUT"
                 exit 0
               fi
               LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= exec /usr/bin/env -i \
@@ -4359,12 +4402,14 @@ jobs:
         # LD_* loader channels are consumed at shell/loader startup,
         # before any in-script defence — blank them where the step env
         # is assembled. BASH_FUNC_* imports are handled by the re-exec
-        # below.
+        # below; POSIXLY_CORRECT refuses the special-builtin-named ones
+        # at bash startup (see the gate step's env block).
         env:
           BASH_ENV: ''
           LD_PRELOAD: ''
           LD_AUDIT: ''
           LD_LIBRARY_PATH: ''
+          POSIXLY_CORRECT: '1'
         run: |-
           set -euo pipefail
           # Startup-channel scrub, part zero: POSIX mode resolves special
@@ -4378,7 +4423,7 @@ jobs:
           # is the stop of last resort when `exit` is shadowed too).
           set -o posix
           if [[ ! -o posix ]]; then
-            echo "::error::flake-gate staging: startup-channel scrub unavailable — refusing to stage evidence in a poisoned environment"
+            /usr/bin/printf '::error::flake-gate staging: startup-channel scrub unavailable — refusing to stage evidence in a poisoned environment\n'
             exit 1
             /usr/bin/kill -9 $$
           fi
@@ -4386,20 +4431,21 @@ jobs:
           # step's): fail closed if the step-env blanks lost, then
           # re-exec once through an absolute-path env -i child to drop
           # any BASH_FUNC_* imports before a bare binary resolves.
-          if [[ ${EUID:-1} -eq 0 ]] && [[ -n ${BASH_ENV:-} || -n ${LD_PRELOAD:-} || -n ${LD_AUDIT:-} || -n ${LD_LIBRARY_PATH:-} ]]; then
-            echo "::error::flake-gate staging: step-env scrub lost — refusing to stage evidence in a poisoned environment"
+          if [[ $(/usr/bin/id -u) -eq 0 ]] && [[ -n ${BASH_ENV:-} || -n ${LD_PRELOAD:-} || -n ${LD_AUDIT:-} || -n ${LD_LIBRARY_PATH:-} ]]; then
+            /usr/bin/printf '::error::flake-gate staging: step-env scrub lost — refusing to stage evidence in a poisoned environment\n'
             exit 1
           fi
           # Kill BEFORE the re-exec snapshot — unconditional, not gated
           # on the log existing: node can unlink the log, and that must
           # not skip the kill/rebuild for the report the agent wrote.
-          # Absolute-pathed, EUID-gated (the harness keeps its stubs).
-          # The liveness refusal mirrors the agent step's guard: the
-          # budget loop alone is out-forked by a plant repopulating
-          # between sweeps, and the snapshot must not read this
-          # node-owned script through a contested environment (the
-          # agent era just ran PR-controlled node code).
-          if [[ ${EUID:-1} -eq 0 ]]; then
+          # Absolute-pathed, root-gated via /usr/bin/id -u ($EUID is
+          # importable; the harness keeps its stubs). The liveness
+          # refusal mirrors the agent step's guard: the budget loop
+          # alone is out-forked by a plant repopulating between sweeps,
+          # and the snapshot must not read this node-owned script
+          # through a contested environment (the agent era just ran
+          # PR-controlled node code).
+          if [[ $(/usr/bin/id -u) -eq 0 ]]; then
             /usr/bin/pkill -KILL -u node 2>/dev/null || true
             for _ in 1 2 3; do
               [[ -n $(/usr/bin/ps -o pid=,stat= -u node 2>/dev/null | /usr/bin/awk '$2 !~ /^Z/') ]] || break
@@ -4408,7 +4454,7 @@ jobs:
             done
             survivors="$(/usr/bin/ps -o pid=,stat= -u node 2>/dev/null | /usr/bin/awk '$2 !~ /^Z/')" || true
             if [[ -n $survivors ]]; then
-              echo "::error::flake-gate staging: node-owned processes survived SIGKILL — refusing to stage evidence through a contested environment"
+              /usr/bin/printf '::error::flake-gate staging: node-owned processes survived SIGKILL — refusing to stage evidence through a contested environment\n'
               exit 1
             fi
           fi
@@ -4420,9 +4466,18 @@ jobs:
           case "${1:-}" in
             --flake-clean-child) ;;
             *)
-              [[ -x /usr/bin/env ]] || { echo "::error::flake-gate staging: clean re-exec unavailable"; exit 1; }
+              [[ -x /usr/bin/env ]] || { /usr/bin/printf '::error::flake-gate staging: clean re-exec unavailable\n'; exit 1; }
+              # Inode anchor (the record step carries the rationale):
+              # the snapshot re-opens the path, so it must still resolve
+              # to the inode bash is executing through fd 255.
+              _flake_self_id="$(/usr/bin/stat -L -c '%d:%i' "/proc/$$/fd/255" 2>/dev/null)" || _flake_self_id=''
               _flake_body="$(<"${BASH_SOURCE[0]}")"
-              [[ -n $_flake_body ]] || { echo "::error::flake-gate staging: clean re-exec snapshot empty"; exit 1; }
+              [[ -n $_flake_body ]] || { /usr/bin/printf '::error::flake-gate staging: clean re-exec snapshot empty\n'; exit 1; }
+              if [[ -z $_flake_self_id ]] ||
+                 [[ "$(/usr/bin/stat -L -c '%d:%i' "${BASH_SOURCE[0]}" 2>/dev/null)" != "$_flake_self_id" ]]; then
+                /usr/bin/printf '::error::flake-gate staging: step script changed between open and re-exec snapshot — refusing to stage\n'
+                exit 1
+              fi
               LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= exec /usr/bin/env -i \
                 PATH="$PATH" RUNNER_TEMP="${RUNNER_TEMP:-}" \
                 GITHUB_OUTPUT="${GITHUB_OUTPUT:-}" GITHUB_STEP_SUMMARY="${GITHUB_STEP_SUMMARY:-}" \
@@ -4572,6 +4627,7 @@ jobs:
           LD_PRELOAD: ''
           LD_AUDIT: ''
           LD_LIBRARY_PATH: ''
+          POSIXLY_CORRECT: '1'
         run: |-
           set -uo pipefail
           # Startup-channel scrub (see the record step): this step has no
@@ -4586,11 +4642,14 @@ jobs:
           # when `exit` is shadowed too).
           set -o posix
           if [[ ! -o posix ]]; then
-            echo "::error::flake-gate re-check: startup-channel scrub unavailable — refusing to validate in a poisoned environment"
+            /usr/bin/printf '::error::flake-gate re-check: startup-channel scrub unavailable — refusing to validate in a poisoned environment\n'
             exit 1
             /usr/bin/kill -9 $$
           fi
-          if [[ ${EUID:-1} -eq 0 ]]; then
+          # /usr/bin/id -u, never $EUID (the record step carries the
+          # rationale): this step has no env -i re-exec, so this gate
+          # runs in the inherited job environment.
+          if [[ $(/usr/bin/id -u) -eq 0 ]]; then
             export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
           fi
           upload_ok=false
@@ -5477,6 +5536,16 @@ jobs:
               consistent-fail|timeout|error)
                 FLAKE_LINE="Flakiness gate: ⚠️ ${FLAKE_VERDICT} — ${FLAKE_SUMMARY:-see flake-gate.log in the run artifacts}"
                 FLAKE_LINE_ZH="抖动门：⚠️ ${FLAKE_VERDICT} — ${FLAKE_SUMMARY:-see flake-gate.log in the run artifacts}"
+                ;;
+              *)
+                # This branch only runs after a successful prepare, when
+                # the gate step ran and owes a verdict: an empty or
+                # unrecognized value means the uid-1000-writable
+                # $GITHUB_OUTPUT backing channel corrupted it in transit.
+                # Fail visible, never silent — and never embed the raw
+                # value, which is attacker-influenced on this path.
+                FLAKE_LINE='Flakiness gate: ⚠️ error — the gate verdict was missing or unrecognized at publish time; treating the gate as errored'
+                FLAKE_LINE_ZH='抖动门：⚠️ error — 发布时门判定缺失或无法识别，按 error 处理'
                 ;;
             esac
             if [ -z "$REPORT" ]; then

@@ -950,8 +950,12 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
   // the parent snapshotted — the runner wrote the script node-owned in
   // the uid-1000-writable $RUNNER_TEMP, so a second open by the child is
   // a plant window.
+  // R18-4: the identity conjunct queries the kernel through an absolute
+  // path — bash imports $EUID from the process environment, overriding
+  // the native readonly variable, so an EUID line planted through the
+  // uid-1000 file-command channel would skip every root-gated defence.
   const scrubRefusalRe =
-    /^\s*if \[\[ \$\{EUID:-1\} -eq 0 \]\] && \[\[ -n \$\{BASH_ENV:-\} \|\| -n \$\{LD_PRELOAD:-\} \|\| -n \$\{LD_AUDIT:-\} \|\| -n \$\{LD_LIBRARY_PATH:-\} \]\]; then$/m;
+    /^\s*if \[\[ \$\(\/usr\/bin\/id -u\) -eq 0 \]\] && \[\[ -n \$\{BASH_ENV:-\} \|\| -n \$\{LD_PRELOAD:-\} \|\| -n \$\{LD_AUDIT:-\} \|\| -n \$\{LD_LIBRARY_PATH:-\} \]\]; then$/m;
   const reExecRe =
     /case "\$\{1:-\}" in[\s\S]*?--flake-clean-child\) ;;[\s\S]*?_flake_body="\$\(<"\$\{BASH_SOURCE\[0\]\}"\)"[\s\S]*?LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= exec \/usr\/bin\/env -i[\s\S]*?\/usr\/bin\/bash --noprofile --norc -e -o pipefail -c "\$_flake_body" \S+ --flake-clean-child/;
   const reExecMarkerRe = /case "\$\{1:-\}" in/;
@@ -1068,7 +1072,7 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     );
     assert.match(
       recordStep.run,
-      /survivors="\$\(\/usr\/bin\/ps -o pid=,stat= -u node 2>\/dev\/null \| \/usr\/bin\/awk '\$2 !~ \/\^Z\/'\)" \|\| true\n\s*if \[\[ -n \$survivors \]\]; then\n\s*echo "::error::flake-gate record:[\s\S]*?exit 1/,
+      /survivors="\$\(\/usr\/bin\/ps -o pid=,stat= -u node 2>\/dev\/null \| \/usr\/bin\/awk '\$2 !~ \/\^Z\/'\)" \|\| true\n\s*if \[\[ -n \$survivors \]\]; then\n\s*\/usr\/bin\/printf '::error::flake-gate record:[\s\S]*?\\n'\n\s*exit 1/,
       'the record step kill must be liveness-verified — the budget loop alone is out-forked between sweeps',
     );
     const recordKill = recordStep.run.search(/survivors="\$\(\/usr\/bin\/ps/);
@@ -1164,6 +1168,107 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     );
   });
 
+  it('round-19 startup hardening: kernel identity, POSIX-from-invocation, pathed refusal writes, inode-anchored snapshot', () => {
+    const stageStep = verifyJob.steps.find(
+      (s) => s.name === 'Stage flakiness gate log for upload',
+    );
+    const recheckStep = verifyJob.steps.find(
+      (s) => s.id === 'flake-upload-check',
+    );
+    const scrubbedSteps = [
+      ['record', recordStep],
+      ['gate', flakeStep],
+      ['staging', stageStep],
+      ['re-check', recheckStep],
+    ];
+    // R18-2: POSIXLY_CORRECT in the step env puts bash in POSIX mode at
+    // INVOCATION — a BASH_FUNC_* import named after a special builtin is
+    // refused at import (probe-verified: without it, a poisoned `set`
+    // runs attacker code on the body's first command and can even enable
+    // posix itself to slip past the reserved-word refusal).
+    for (const [label, step] of scrubbedSteps) {
+      assert.equal(
+        step.env.POSIXLY_CORRECT,
+        '1',
+        `${label}: POSIXLY_CORRECT must make bash POSIX-mode before the body's first shadowable command`,
+      );
+    }
+    // R18-4: parent-side identity comes from the kernel — $EUID is
+    // imported from the process environment (probe-verified: a planted
+    // EUID skips or fires the gate at will; blanking cannot restore it,
+    // set-but-empty reads as unset). The record/gate/staging PATH pins
+    // run INSIDE the env -i child where imports are wiped and EUID is
+    // the native readonly — only the parent-side gates are pinned here.
+    const preReExec = (run) => run.slice(0, run.search(reExecMarkerRe));
+    for (const [label, step] of [
+      ['record', recordStep],
+      ['gate', flakeStep],
+      ['staging', stageStep],
+    ]) {
+      assert.doesNotMatch(
+        preReExec(step.run),
+        /\$\{EUID/,
+        `${label}: parent-side identity must not read $EUID — the poisoned file-command channel can import it`,
+      );
+    }
+    assert.doesNotMatch(
+      recheckStep.run,
+      /\$\{EUID/,
+      're-check identity must not read $EUID — the step has no env -i re-exec, so it runs in the inherited job environment',
+    );
+    assert.match(
+      recheckStep.run,
+      /^\s*if \[\[ \$\(\/usr\/bin\/id -u\) -eq 0 \]\]; then\n\s*export PATH='/m,
+      'the re-check PATH pin must key on the kernel identity too',
+    );
+    // R18-3: every pre-re-exec refusal write goes through slash-pathed
+    // printf — echo is a REGULAR builtin, shadowable by a BASH_FUNC
+    // import even in POSIX mode (probe-verified; the mechanism pin lives
+    // in the behavioral suite), and the refusal path runs in exactly the
+    // poisoned environment the refusals detect.
+    for (const [label, section] of [
+      ['record', preReExec(recordStep.run)],
+      ['gate', preReExec(flakeStep.run)],
+      ['staging', preReExec(stageStep.run)],
+      ['re-check', recheckStep.run],
+    ]) {
+      assert.doesNotMatch(
+        section,
+        /^\s*echo /m,
+        `${label}: no bare echo before the env -i re-exec — BASH_FUNC_echo%% shadows it even in POSIX mode`,
+      );
+    }
+    // R18-1: the re-exec snapshot is anchored to the inode bash is
+    // executing (fd 255) — a swap that lands between bash's open of the
+    // runner-written step script and the snapshot is filesystem state a
+    // kill cannot un-land, and the path re-open would read the plant.
+    // Capture precedes the snapshot, the check precedes the exec.
+    const inodeAnchorRe =
+      /_flake_self_id="\$\(\/usr\/bin\/stat -L -c '%d:%i' "\/proc\/\$\$\/fd\/255" 2>\/dev\/null\)" \|\| _flake_self_id=''[\s\S]*?_flake_body="\$\(<"\$\{BASH_SOURCE\[0\]\}"\)"[\s\S]*?if \[\[ -z \$_flake_self_id \]\] \|\|\n\s*\[\[ "\$\(\/usr\/bin\/stat -L -c '%d:%i' "\$\{BASH_SOURCE\[0\]\}" 2>\/dev\/null\)" != "\$_flake_self_id" \]\]; then/;
+    for (const [label, step] of [
+      ['record', recordStep],
+      ['gate', flakeStep],
+      ['staging', stageStep],
+    ]) {
+      assert.match(
+        step.run,
+        inodeAnchorRe,
+        `${label}: the re-exec snapshot must be anchored to the inode bash is executing, re-verified after the snapshot, before the exec`,
+      );
+      const killAt = step.run.search(/\/usr\/bin\/pkill -KILL -u node/);
+      const reExecAt = step.run.search(reExecMarkerRe);
+      const anchorAt = step.run.search(/_flake_self_id="\$\(\/usr\/bin\/stat/);
+      assert.ok(
+        killAt !== -1 &&
+          reExecAt !== -1 &&
+          anchorAt !== -1 &&
+          killAt < reExecAt &&
+          reExecAt < anchorAt,
+        `${label}: the anchor sits inside the parent re-exec arm, after the kill`,
+      );
+    }
+  });
+
   it('runs PR test code as the build user with no tokens, and fails open', () => {
     assert.equal(flakeStep.env.GITHUB_TOKEN, '', 'no GitHub token in the gate');
     assert.equal(flakeStep.env.GH_TOKEN, '', 'no gh token in the gate');
@@ -1199,6 +1304,10 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     // decision. BASH_ENV/LD_PRELOAD/LD_AUDIT/LD_LIBRARY_PATH are the
     // defensive startup-channel blanks (consumed at shell/loader startup,
     // before any in-script defence) — blanks, never secrets.
+    // POSIXLY_CORRECT is the round-19 startup defence: POSIX mode at
+    // INVOCATION refuses BASH_FUNC_* imports named after special
+    // builtins, so a poisoned `set` cannot run on the body's first
+    // command (see the behavioral poison scenario below).
     assert.deepEqual(
       Object.keys(flakeStep.env).sort(),
       [
@@ -1209,6 +1318,7 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
         'LD_AUDIT',
         'LD_LIBRARY_PATH',
         'LD_PRELOAD',
+        'POSIXLY_CORRECT',
       ],
       'the gate env must stay tokens-blanked and secret-free',
     );
@@ -1265,7 +1375,7 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     // the budget loop alone is out-forked by a plant repopulating
     // between sweeps.
     const gatePreKill = flakeStep.run.search(
-      /^\s*if \[\[ \$\{EUID:-1\} -eq 0 \]\]; then\n\s*\/usr\/bin\/pkill -KILL -u node 2>\/dev\/null \|\| true\n\s*for _ in 1 2 3; do\n\s*\[\[ -n \$\(\/usr\/bin\/ps -o pid=,stat= -u node 2>\/dev\/null \| \/usr\/bin\/awk '\$2 !~ \/\^Z\/'\) \]\] \|\| break\n\s*\/usr\/bin\/sleep 1\n\s*\/usr\/bin\/pkill -KILL -u node 2>\/dev\/null \|\| true\n\s*done\n\s*survivors="\$\(\/usr\/bin\/ps -o pid=,stat= -u node 2>\/dev\/null \| \/usr\/bin\/awk '\$2 !~ \/\^Z\/'\)" \|\| true\n\s*if \[\[ -n \$survivors \]\]; then\n\s*echo "flake_verdict=error" >> "\$GITHUB_OUTPUT"\n\s*echo "flake_summary=node-owned processes survived SIGKILL — the gate refused to sample" >> "\$GITHUB_OUTPUT"\n\s*exit 0\n\s*fi\n\s*fi$/m,
+      /^\s*if \[\[ \$\(\/usr\/bin\/id -u\) -eq 0 \]\]; then\n\s*\/usr\/bin\/pkill -KILL -u node 2>\/dev\/null \|\| true\n\s*for _ in 1 2 3; do\n\s*\[\[ -n \$\(\/usr\/bin\/ps -o pid=,stat= -u node 2>\/dev\/null \| \/usr\/bin\/awk '\$2 !~ \/\^Z\/'\) \]\] \|\| break\n\s*\/usr\/bin\/sleep 1\n\s*\/usr\/bin\/pkill -KILL -u node 2>\/dev\/null \|\| true\n\s*done\n\s*survivors="\$\(\/usr\/bin\/ps -o pid=,stat= -u node 2>\/dev\/null \| \/usr\/bin\/awk '\$2 !~ \/\^Z\/'\)" \|\| true\n\s*if \[\[ -n \$survivors \]\]; then\n\s*\/usr\/bin\/printf 'flake_verdict=%s\\n' error >> "\$GITHUB_OUTPUT"\n\s*\/usr\/bin\/printf 'flake_summary=%s\\n' 'node-owned processes survived SIGKILL — the gate refused to sample' >> "\$GITHUB_OUTPUT"\n\s*exit 0\n\s*fi\n\s*fi$/m,
     );
     const gateReExec = flakeStep.run.search(reExecMarkerRe);
     assert.ok(
@@ -1574,7 +1684,8 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     // The message above is only true while both conditions stay identical:
     // if the agent's `if:` drifts wider, the agent publishes a verdict on
     // runs the gate never sampled, and the empty FLAKE_VERDICT leaves the
-    // headline untouched (the behavioral drive test proves '' is a no-op).
+    // headline untouched (the behavioral drive test proves '' can never
+    // touch it — the most it can produce is the visible gate-error line).
     assert.equal(
       agentStep.if,
       flakeStep.if,
@@ -2144,7 +2255,8 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
   // does NOT clear that inherited -e. That exact blind spot shipped the
   // round-1 blocker — the first failing test invocation killed the step —
   // so every scenario here runs under the wrapper, not under a bare bash.
-  const flakeRunVerbatim = verifyJob.steps.find((s) => s.id === 'flake').run;
+  const flakeStep = verifyJob.steps.find((s) => s.id === 'flake');
+  const flakeRunVerbatim = flakeStep.run;
   // The gate's home is a hard-coded container-root constant on purpose: an
   // env-overridable home would be a PR-reachable channel ($GITHUB_ENV is
   // uid-1000 writable and the record step rm -rf's whatever the home names).
@@ -2360,6 +2472,16 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
     writeFileSync(join(rt, 'github-summary'), '');
     const env = {
       ...process.env,
+      // The runner assembles the step's env: block around run:, which this
+      // harness used to skip — that dropped the POSIXLY_CORRECT startup
+      // defence out of every behavioral scenario. Apply its literal
+      // values (expression entries stay out — the harness owns those);
+      // harness keys win on collisions, scenarios can still override.
+      ...Object.fromEntries(
+        Object.entries(flakeStep.env).filter(
+          ([, v]) => typeof v === 'string' && !v.includes('${{'),
+        ),
+      ),
       // Hermetic PATH: the gate's env -i re-exec scrubs the environment
       // while the (non-root) harness skips the EUID-gated PATH pin, so
       // any env-dependent git wrapper in the ambient PATH (e.g. a shim
@@ -3173,6 +3295,159 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
     assert.equal(floored.outputs.flake_verdict, 'flaky');
   });
 
+  describe('round-19 startup-channel hardening (behavioral)', () => {
+    it('a BASH_FUNC_set%% import never runs — POSIXLY_CORRECT refuses it at bash startup', () => {
+      // R18-2: without POSIX mode at INVOCATION the import runs attacker
+      // code as root on the step's first command, and can even enable
+      // posix itself so the reserved-word refusal never fires
+      // (probe-verified). The harness applies the step env block, so the
+      // step's POSIXLY_CORRECT reaches bash exactly as in production.
+      const marker = join(scenarioRoot, 'set-poison-marker');
+      const { res, outputs } = runGate({
+        layout: UNIT,
+        list: 'scripts/tests/a.test.js\n',
+        env: {
+          'BASH_FUNC_set%%': `() { command touch "${marker}"; command set "$@"; command set -o posix; }`,
+        },
+      });
+      assert.notEqual(
+        res.status,
+        0,
+        'a poisoned startup must fail the step red at bash startup',
+      );
+      assert.ok(
+        !existsSync(marker),
+        'the poisoned set function must never execute — the import is refused before the body starts',
+      );
+      assert.equal(
+        outputs.flake_verdict,
+        undefined,
+        'bash aborts at import (exit 2), before the fail-open verdict path — the abort IS the refusal',
+      );
+    });
+
+    it('echo stays shadowable even in POSIX mode — refusal writes must stay slash-pathed', () => {
+      // R18-3 mechanism pin: function lookup precedes REGULAR builtins;
+      // only SPECIAL builtins outrank functions (probe-verified). This is
+      // why every pre-re-exec refusal writes through /usr/bin/printf.
+      const poisonEnv = {
+        ...process.env,
+        'BASH_FUNC_echo%%': '() { builtin printf "FORGED\\n"; }',
+      };
+      const shadowed = spawnSync(
+        'bash',
+        ['--noprofile', '--norc', '--posix', '-c', 'echo first; echo second'],
+        { env: poisonEnv, encoding: 'utf8' },
+      );
+      assert.equal(shadowed.stdout, 'FORGED\nFORGED\n');
+      const pathed = spawnSync(
+        'bash',
+        [
+          '--noprofile',
+          '--norc',
+          '--posix',
+          '-c',
+          '/usr/bin/printf "%s\\n" honest',
+        ],
+        { env: poisonEnv, encoding: 'utf8' },
+      );
+      assert.equal(pathed.stdout, 'honest\n');
+    });
+
+    it('a planted EUID cannot move the root identity gates (kernel-queried)', () => {
+      // R18-4: extract the gate's poisoned-env refusal condition verbatim
+      // and drive it under spoofed EUID values from a non-root process.
+      // The kernel query must ignore the spoof; the pre-round $EUID shape
+      // fired on a planted EUID=0 and skipped on a planted EUID=1000.
+      const cond = flakeRunVerbatim.match(
+        /^\s*if (\[\[ [^\n]*\/usr\/bin\/id -u[^\n]*\]\] && \[\[ -n \$\{BASH_ENV:-\}[^\n]*\]\]); then$/m,
+      );
+      assert.ok(
+        cond,
+        'the gate poisoned-env refusal must key its identity conjunct on /usr/bin/id -u',
+      );
+      const drive = (extra) =>
+        spawnSync(
+          'bash',
+          [
+            '--noprofile',
+            '--norc',
+            '-c',
+            `if ${cond[1]}; then printf FIRED; else printf SKIPPED; fi`,
+          ],
+          {
+            env: { ...process.env, BASH_ENV: '/dev/null', ...extra },
+            encoding: 'utf8',
+          },
+        );
+      assert.equal(
+        drive({ EUID: '0' }).stdout,
+        'SKIPPED',
+        'a planted EUID=0 must not fire a root-gated refusal for a non-root process',
+      );
+      assert.equal(
+        drive({ EUID: '1000' }).stdout,
+        'SKIPPED',
+        'a planted EUID=1000 changes nothing either — identity comes from the kernel',
+      );
+    });
+
+    it('a script swap between bash open and the re-exec snapshot is refused by the inode anchor', () => {
+      // R18-1: model the window deterministically by swapping the script
+      // from its own first line — fd 255 already holds the genuine inode
+      // when the swap lands, exactly the state an external watcher
+      // produces by racing the kill (a swap before bash opens is the one
+      // case no step-level defence can catch: bash would execute the
+      // plant directly). Pre-round, the snapshot re-open read the plant
+      // and the re-exec ran it.
+      const caseBlock = flakeRunVerbatim.match(
+        /^\s*case "\$\{1:-\}" in\n[\s\S]*?\n\s*esac$/m,
+      );
+      assert.ok(caseBlock, 'the gate re-exec case block must exist');
+      const root = mkdtempSync(join(scenarioRoot, 'anchor-'));
+      const script = join(root, 'gate-arm.sh');
+      const plantMarker = join(root, 'plant-marker');
+      const swapLines = [
+        'mv -- "$0" "$0.genuine"',
+        `printf '%s\\n' 'printf "PLANT-EXECUTED\\n" > "${plantMarker}"' > "$0"`,
+      ];
+      writeFileSync(script, `${swapLines.join('\n')}\n${caseBlock[0]}\n`);
+      const out = join(root, 'github-output');
+      writeFileSync(out, '');
+      const res = spawnSync(
+        'bash',
+        ['--noprofile', '--norc', '-e', '-o', 'pipefail', script],
+        {
+          cwd: root,
+          env: {
+            ...process.env,
+            GITHUB_OUTPUT: out,
+            RUNNER_TEMP: root,
+            GITHUB_STEP_SUMMARY: join(root, 'summary'),
+          },
+          encoding: 'utf8',
+          timeout: 30_000,
+        },
+      );
+      assert.equal(res.status, 0, `the gate refusal is fail-open: ${res.stderr}`);
+      const outputs = Object.fromEntries(
+        readFileSync(out, 'utf8')
+          .split('\n')
+          .filter((l) => l.includes('='))
+          .map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]),
+      );
+      assert.equal(outputs.flake_verdict, 'error');
+      assert.match(
+        outputs.flake_summary,
+        /step script changed between open and re-exec snapshot/,
+      );
+      assert.ok(
+        !existsSync(plantMarker),
+        'the swapped-in script body must never execute',
+      );
+    });
+  });
+
   it('publisher demotion executes one-way: only `flaky` demotes, and it MUST demote', () => {
     const block = publishRun.match(
       /^\s*case "\$\{FLAKE_VERDICT:-\}" in[\s\S]*?^\s*esac$/m,
@@ -3221,8 +3496,19 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
     // headline, the flaky lines must carry the ❌, and the Chinese line —
     // the one verdict a collapsed-details reader sees — must never drop
     // out while the English one keeps the suite green.
+    // R16-4 interim: this case block only executes on the full-report
+    // path, where the gate step ran and owes a verdict — an empty or
+    // unrecognized value means the uid-1000-writable $GITHUB_OUTPUT
+    // backing channel corrupted it in transit, and must render a visible
+    // fixed-text error line instead of dropping silently. The exact-equality
+    // assertion below also proves a planted value never lands in the body.
+    const CHANNEL_ERROR_LINE =
+      'Flakiness gate: ⚠️ error — the gate verdict was missing or unrecognized at publish time; treating the gate as errored';
+    const CHANNEL_ERROR_LINE_ZH =
+      '抖动门：⚠️ error — 发布时门判定缺失或无法识别，按 error 处理';
     for (const [v, line, zh] of [
-      ['', '', ''],
+      ['', CHANNEL_ERROR_LINE, CHANNEL_ERROR_LINE_ZH],
+      ['planted-garbage', CHANNEL_ERROR_LINE, CHANNEL_ERROR_LINE_ZH],
       [
         'pass',
         'Flakiness gate: ✅ 1 of 2 changed test file(s) diverged',
@@ -3489,53 +3775,61 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
     assert.match(log, /a\.test\.js: FP/);
   });
 
-  it('a BASH_FUNC_[%% import cannot flip the pre-exec decisions — a poisoned `[` still fails closed on a plant', () => {
-    // bash imports a BASH_FUNC_[%% env entry as a FUNCTION named `[` —
-    // function lookup precedes builtins, so a poisoned step environment
-    // flips every `[`-shaped guard, including the decision whether to
-    // take the env -i re-exec itself (probe-verified on this pool's
-    // bash: `type -t [` reports `function` under the poison, `[[`/
-    // `case` stay immune). The poison's first three calls defeat the
-    // scrub/re-exec/PATH-pin trio; every later call returns true so
-    // the hijacked home checks would pass the 0777 plant. Reserved-word
-    // decisions plus the immune re-exec must still fail closed.
-    const { res, outputs } = runGate({
+  it('a BASH_FUNC_[%% import never reaches the pre-exec decisions — POSIXLY_CORRECT kills it at startup', () => {
+    // Round 15 pinned the second layer: a poisoned `[` that survived
+    // import still failed closed on the reserved-word decisions. Round
+    // 19's POSIXLY_CORRECT closes the class one layer earlier: POSIX
+    // mode at INVOCATION refuses the `[` import (probe-verified), and
+    // under the runner wrapper's `-e` the step then dies red before its
+    // first command — the poison never runs, no round is sampled, no
+    // verdict is forged. The second layer is unreachable by construction
+    // while the step env carries POSIXLY_CORRECT (pinned above).
+    const { res, outputs, counts } = runGate({
       layout: UNIT,
       list: 'scripts/tests/a.test.js\n',
       gateHomeMode: 0o777,
       env: { 'BASH_FUNC_[%%': '() { ((_p_n=${_p_n:-0}+1)); (( _p_n > 3 )); }' },
     });
-    assert.equal(res.status, 0, res.stderr);
-    assert.equal(outputs.flake_verdict, 'error');
+    assert.notEqual(res.status, 0, 'a poisoned startup must fail the step red');
     assert.match(
-      outputs.flake_summary,
-      /not root-owned 0700|working directory/,
+      res.stderr,
+      /error importing function definition for `\['/,
+      'bash must refuse the `[` import at startup',
     );
+    assert.equal(
+      outputs.flake_verdict,
+      undefined,
+      'no verdict may be written on a poisoned startup',
+    );
+    assert.equal(counts('a.test.js'), 0, 'no round may run on a poisoned startup');
   });
 
-  it('a BASH_FUNC_exec%% import cannot skip the env -i re-exec — the body runs exactly once', () => {
-    // `exec` is a builtin and function lookup precedes builtins: a
-    // BASH_FUNC_exec%% import shadows it, the re-exec line runs the
-    // function instead of replacing the shell, and the poisoned parent
-    // falls through into the body with every import alive
-    // (probe-verified on this pool's bash: the env-i child never runs).
-    // POSIX mode resolves special builtins before functions, so the
-    // transition is immune — observable as an honest `pass` and exactly
-    // one run of the rounds: against the pre-round code this scenario
-    // fell through into the poisoned parent and corrupted the verdict.
+  it('a BASH_FUNC_exec%% import cannot skip the env -i re-exec — bash refuses it at startup', () => {
+    // Round 15 pinned the second layer: POSIX mode resolves the SPECIAL
+    // builtin `exec` before functions. Round 19's POSIXLY_CORRECT closes
+    // the class one layer earlier: `exec` being special, bash refuses
+    // the import outright at startup (probe-verified: exit 2, body never
+    // runs) — the poisoned parent fall-through is unreachable by
+    // construction while the step env carries POSIXLY_CORRECT (pinned
+    // above).
     const { res, outputs, counts } = runGate({
       layout: UNIT,
       list: 'scripts/tests/a.test.js\n',
       sequences: { 'a.test.js': 'PPPPP' },
       env: { 'BASH_FUNC_exec%%': '() { return 0; }' },
     });
-    assert.equal(res.status, 0, res.stderr);
-    assert.equal(outputs.flake_verdict, 'pass');
-    assert.equal(
-      counts('a.test.js'),
-      5,
-      'the re-exec must run exactly once — a shadowed exec falls through and re-runs the body',
+    assert.notEqual(res.status, 0, 'a poisoned startup must fail the step red');
+    assert.match(
+      res.stderr,
+      /`exec': is a special builtin/,
+      'bash must refuse the special-builtin import at startup',
     );
+    assert.equal(
+      outputs.flake_verdict,
+      undefined,
+      'no verdict may be written on a poisoned startup',
+    );
+    assert.equal(counts('a.test.js'), 0, 'the body must never run on a poisoned startup');
   });
 
   it('a same-stem sibling (X.test.tsx next to changed X.test.ts) runs in ONE merged group, never attributed separately', () => {
@@ -3647,6 +3941,13 @@ describe('qwen-triage: flakiness gate staging/upload — behavioral, under the p
       {
         env: {
           ...process.env,
+          // Step-env parity with the gate harness (POSIXLY_CORRECT
+          // startup defence included) — literal values only.
+          ...Object.fromEntries(
+            Object.entries(stageStep.env).filter(
+              ([, v]) => typeof v === 'string' && !v.includes('${{'),
+            ),
+          ),
           PATH: `${bin}:${process.env.PATH}`,
           RUNNER_TEMP: rt,
           GITHUB_OUTPUT: out,
@@ -3749,6 +4050,13 @@ describe('qwen-triage: flakiness gate staging/upload — behavioral, under the p
       {
         env: {
           ...process.env,
+          // Step-env parity with the gate harness (POSIXLY_CORRECT
+          // startup defence included) — literal values only.
+          ...Object.fromEntries(
+            Object.entries(recheckStep.env).filter(
+              ([, v]) => typeof v === 'string' && !v.includes('${{'),
+            ),
+          ),
           RUNNER_TEMP: rt,
           GITHUB_OUTPUT: out,
           GITHUB_RUN_ID: '777',
