@@ -58,6 +58,27 @@ const runWipe = (env, options = {}) =>
 const hasGnuRealpath =
   spawnSync('realpath', ['-m', '--', '/'], { stdio: 'ignore' }).status === 0;
 
+// The fail-closed heal fixture needs a host whose kernel refuses the running
+// user's unlink into a 0555 parent: root bypasses the mode bits, so probe
+// the capability and skip the fixture there instead of asserting a refusal
+// that cannot happen.
+const hasRefusableUnlink = (() => {
+  const probe = mkdtempSync(join(tmpdir(), 'serve-ab-wipe-perm-'));
+  try {
+    writeFileSync(join(probe, 'file'), 'x');
+    chmodSync(probe, 0o555);
+    try {
+      rmSync(join(probe, 'file'));
+      return false;
+    } catch {
+      return true;
+    }
+  } finally {
+    chmodSync(probe, 0o755);
+    rmSync(probe, { recursive: true, force: true });
+  }
+})();
+
 describe('serve-ab pre-checkout workspace wipe', () => {
   it('runs the wipe before both checkouts', () => {
     // Both checkouts clone into the wiped workspace; a wipe ordered after
@@ -94,7 +115,8 @@ describe('serve-ab pre-checkout workspace wipe', () => {
       'while [ "${WS%/}" != "$WS" ]',
       'while [ "${RWS%/}" != "$RWS" ]',
       '[ -L "$WS" ] || [ ! -d "$WS" ]',
-      'rm -f -- "$WS" && mkdir -- "$WS"',
+      'rm -f -- "$WS" || { echo "::error::refusing to heal: cannot remove ${WS}"; exit 1; }',
+      'mkdir -- "$WS"',
       '/|/home|/root|/usr*|/etc*|/var|""',
       '"$RWS"/*',
       'refusing to wipe suspicious workspace path',
@@ -576,6 +598,46 @@ describe('serve-ab pre-checkout workspace wipe', () => {
       } finally {
         rmSync(dir, { recursive: true, force: true });
         rmSync(outside, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!hasGnuRealpath || !hasRefusableUnlink)(
+    'fails closed when the heal cannot remove the wedge',
+    () => {
+      // A prior job that owns the runner workspace can chmod it read-only,
+      // making the heal's unlink fail. Under `bash -eo pipefail` errexit
+      // does not fire on a failure inside an && list, so the old
+      // `rm -f … && mkdir …` shape swallowed the EACCES, canonicalized
+      // THROUGH the surviving link, and emptied the sibling workspace with
+      // exit 0. This step has no success log of its own, so the refusal
+      // error is the fail-closed marker.
+      const dir = realpathSync(
+        mkdtempSync(join(tmpdir(), 'serve-ab-wipe-healperm-')),
+      );
+      const sibling = join(dir, 'sibling');
+      mkdirSync(sibling);
+      writeFileSync(join(sibling, 'canary'), 'x');
+      const ws = join(dir, 'workspace');
+      symlinkSync(sibling, ws);
+      try {
+        const calls = recordingRealRm(dir);
+        chmodSync(dir, 0o555);
+        const res = runHeal(dir, {
+          GITHUB_WORKSPACE: ws,
+          RUNNER_WORKSPACE: dir,
+        });
+        expect(res.status).not.toBe(0);
+        expect(res.stdout + res.stderr).toContain(
+          'refusing to heal: cannot remove',
+        );
+        expect(readFileSync(calls, 'utf8').trim()).toBe(`-f -- ${ws}`);
+        // The wedge survives and nothing at its target was touched.
+        expect(lstatSync(ws).isSymbolicLink()).toBe(true);
+        expect(readFileSync(join(sibling, 'canary'), 'utf8')).toBe('x');
+      } finally {
+        chmodSync(dir, 0o755);
+        rmSync(dir, { recursive: true, force: true });
       }
     },
   );

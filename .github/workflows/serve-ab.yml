@@ -130,7 +130,12 @@ jobs:
             case "$WS" in
               "$RWS"/*)
                 echo "::warning::healing workspace ${WS}: was a symlink or non-directory (target: $(readlink -- "$WS" 2>/dev/null || echo none))"
-                rm -f -- "$WS" && mkdir -- "$WS"
+                # Fail closed on a refused unlink: under the job's
+                # `bash -eo pipefail` errexit does not fire mid-&& list, so
+                # `rm … && mkdir …` swallowed the failure and the wipe went
+                # on with the wedge still in place.
+                rm -f -- "$WS" || { echo "::error::refusing to heal: cannot remove ${WS}"; exit 1; }
+                mkdir -- "$WS"
                 ;;
               *) echo "::error::refusing to heal workspace outside the runner workspace: ${WS} (runner workspace: ${RWS})"; exit 1 ;;
             esac

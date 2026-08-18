@@ -36,6 +36,27 @@ const verifySkill = readFileSync('.qwen/skills/verify-pr/SKILL.md', 'utf8');
 const hasGnuRealpath =
   spawnSync('realpath', ['-m', '--', '/'], { stdio: 'ignore' }).status === 0;
 
+// The fail-closed heal fixture needs a host whose kernel refuses the running
+// user's unlink into a 0555 parent: root bypasses the mode bits, so probe
+// the capability and skip the fixture there instead of asserting a refusal
+// that cannot happen.
+const hasRefusableUnlink = (() => {
+  const probe = mkdtempSync(join(tmpdir(), 'triage-wipe-perm-'));
+  try {
+    writeFileSync(join(probe, 'file'), 'x');
+    chmodSync(probe, 0o555);
+    try {
+      rmSync(join(probe, 'file'));
+      return false;
+    } catch {
+      return true;
+    }
+  } finally {
+    chmodSync(probe, 0o755);
+    rmSync(probe, { recursive: true, force: true });
+  }
+})();
+
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -6748,6 +6769,58 @@ describe('qwen-triage workspace wipe guards (#9265 port)', () => {
         },
       );
 
+      it.skipIf(!hasGnuRealpath || !hasRefusableUnlink)(
+        'fails closed when the heal cannot remove the wedge',
+        () => {
+          // A prior job that owns the runner workspace can chmod it
+          // read-only, making the heal's unlink fail. Under `bash -eo
+          // pipefail` errexit does not fire on a failure inside an &&
+          // list, so the old `rm -f … && mkdir …` shape swallowed the
+          // EACCES, canonicalized THROUGH the surviving link, emptied the
+          // sibling workspace, and logged the wipe as a success. The heal
+          // must refuse instead.
+          const wipe = runOf(stepName);
+          const dir = realpathSync(
+            mkdtempSync(join(tmpdir(), 'triage-wipe-healperm-')),
+          );
+          // Keep the summary outside the read-only root: the fixture pins
+          // the heal's refusal, and a success file the script cannot even
+          // create would fail the swallowed shape for the wrong reason.
+          const summaryDir = mkdtempSync(
+            join(tmpdir(), 'triage-wipe-healperm-sum-'),
+          );
+          const sibling = join(dir, 'sibling');
+          mkdirSync(sibling);
+          writeFileSync(join(sibling, 'canary'), 'x');
+          const ws = join(dir, 'workspace');
+          symlinkSync(sibling, ws);
+          try {
+            const calls = recordingRealRm(dir);
+            chmodSync(dir, 0o555);
+            const res = runGuard(wipe, dir, {
+              GITHUB_WORKSPACE: ws,
+              RUNNER_WORKSPACE: dir,
+              GITHUB_STEP_SUMMARY: join(summaryDir, 'summary'),
+            });
+            expect(res.status).not.toBe(0);
+            expect(res.stdout + res.stderr).toContain(
+              'refusing to heal: cannot remove',
+            );
+            expect(readFileSync(calls, 'utf8').trim()).toBe(`-f -- ${ws}`);
+            // The wedge survives and nothing at its target was touched.
+            expect(lstatSync(ws).isSymbolicLink()).toBe(true);
+            expect(readFileSync(join(sibling, 'canary'), 'utf8')).toBe('x');
+            // No heal-success log: the wipe-success summary line sits
+            // behind the guard, and a refused heal must never reach it.
+            expect(existsSync(join(summaryDir, 'summary'))).toBe(false);
+          } finally {
+            chmodSync(dir, 0o755);
+            rmSync(dir, { recursive: true, force: true });
+            rmSync(summaryDir, { recursive: true, force: true });
+          }
+        },
+      );
+
       it('refuses to heal before an empty runner workspace is validated', () => {
         // The heal matches a RAW path: an empty $RUNNER_WORKSPACE
         // degenerates the containment pattern to the match-all "/*", so the
@@ -7067,7 +7140,8 @@ describe('qwen-triage workspace wipe guards (#9265 port)', () => {
     // copies. Hardening one guard and forgetting its twin now fails here.
     const layers = [
       '[ -L "$WS" ] || [ ! -d "$WS" ]',
-      'rm -f -- "$WS" && mkdir -- "$WS"',
+      'rm -f -- "$WS" || { echo "::error::refusing to heal: cannot remove ${WS}"; exit 1; }',
+      'mkdir -- "$WS"',
       'realpath -m -- "$WS"',
       'while [ "${WS%/}" != "$WS" ]',
       '/|/home|/root|/usr*|/etc*|/var|""',
