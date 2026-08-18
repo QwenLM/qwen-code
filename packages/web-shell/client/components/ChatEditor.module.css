@@ -978,14 +978,14 @@
 
 .gitBranchIcon {
   display: inline-flex;
-  width: 16px;
-  height: 16px;
-  flex: 0 0 16px;
+  width: var(--git-branch-icon-size, 16px);
+  height: var(--git-branch-icon-size, 16px);
+  flex: 0 0 var(--git-branch-icon-size, 16px);
 }
 
 .gitBranchIcon svg {
-  width: 16px;
-  height: 16px;
+  width: var(--git-branch-icon-size, 16px);
+  height: var(--git-branch-icon-size, 16px);
 }
 
 .gitBranchText {
@@ -1006,17 +1006,17 @@
 .gitBranchIconWrap {
   position: relative;
   display: inline-flex;
-  flex: 0 0 16px;
+  flex: 0 0 var(--git-branch-icon-size, 16px);
 }
 
 /* Compact (icon-only) chip: a single severity dot on the branch icon so the
    working-tree state is still glanceable without the text + inline indicators. */
 .gitBranchBadgeDot {
   position: absolute;
-  top: -2px;
-  right: -3px;
-  width: 7px;
-  height: 7px;
+  top: var(--git-branch-badge-offset, -2px);
+  right: var(--git-branch-badge-offset, -3px);
+  width: var(--git-branch-badge-size, 7px);
+  height: var(--git-branch-badge-size, 7px);
   border-radius: 50%;
   background: var(--chat-editor-accent-color);
   box-shadow: 0 0 0 1.5px var(--chat-editor-bg-primary, transparent);

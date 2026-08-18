@@ -1237,22 +1237,9 @@ describe('ChatPane', () => {
     expect(sendPrompt).not.toHaveBeenCalled();
   });
 
-  it('does not submit while the pane is disconnected', () => {
+  it('submits while disconnected when a session exists', () => {
     connectionState.status = 'disconnected';
     render();
-    let returned: boolean | undefined;
-    act(() => {
-      returned = latestOnSubmit!('hi');
-    });
-    expect(returned).toBe(false);
-    expect(sendPrompt).not.toHaveBeenCalled();
-    expect(enqueuePrompt).not.toHaveBeenCalled();
-  });
-
-  it('submits while disconnected when prompt SSE restart is enabled', () => {
-    connectionState.status = 'disconnected';
-    render({ restartSseOnPrompt: true });
-
     act(() => {
       latestOnSubmit!('hi');
     });
@@ -1263,10 +1250,10 @@ describe('ChatPane', () => {
     );
   });
 
-  it('does not submit without a recoverable disconnected session', () => {
+  it('does not submit without a session while disconnected', () => {
     connectionState.status = 'disconnected';
     connectionState.sessionId = undefined;
-    render({ restartSseOnPrompt: true });
+    render();
 
     act(() => {
       latestOnSubmit!('hi');

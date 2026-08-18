@@ -213,6 +213,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'workspace_qualified_memory', 'extension_management_v2',
  'workspace_persisted_transcript',
  'workspace_session_export', 'workspace_archived_session_export',
+ 'workspace_session_live_state',
  'client_mcp_over_ws', 'cdp_tunnel_over_ws', 'browser_automation_mcp']
 ```
 
@@ -239,6 +240,8 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 `workspace_session_export` advertises `GET /workspaces/:workspace/session/:id/export`, a trusted-only full export of the selected workspace's active persisted session. It is independent of `session_export` and `workspace_qualified_rest_core`: released daemons can advertise both older tags without implementing the plural route, so clients must pre-flight this tag directly. The tag is unconditional because a trusted single-workspace primary can use the route by id or cwd. The export does not resolve a live owner, start ACP, attach a client, or fall back to another workspace.
 
 `workspace_archived_session_export` advertises `GET /workspaces/:workspace/session/:id/archive/export`, a trusted-only full export from the selected workspace's archived persisted storage. It is independent of `workspace_session_export` and `workspace_qualified_rest_core`; clients must pre-flight this tag directly. A distinct route prevents an older daemon from ignoring archive intent and returning an active transcript with the same id.
+
+`workspace_session_live_state` advertises `GET /workspaces/:workspace/sessions/live-state`, a trusted-only, memory-only snapshot of the selected workspace runtime's live sessions plus an in-memory catalog version that tells clients when a full persisted-catalog reload is warranted. It is independent of `workspace_qualified_rest_core`: released daemons can advertise the broader workspace REST capability without implementing this route, so clients must pre-flight this tag directly. The tag is unconditional because a trusted single-workspace primary can use the route by id or cwd; per-workspace trust checks still apply on every request, and the route does not extend the permissive untrusted-secondary persisted-catalog read policy to live bridge state.
 
 `slow_client_warning` covers SSE backpressure behavior: (a) the daemon emits a `slow_client_warning` synthetic event-stream frame when a subscriber's live frame backlog or live serialized-byte backlog crosses 75% full, once per overflow episode (rearmed after both measurements drain below 37.5%); (b) `GET /session/:id/events` accepts a `?maxQueued=N` query param (range `[16, 2048]`) to pre-size the per-subscriber frame backlog for cold reconnects against a large replay ring. The serialized-byte cap is daemon-owned (default **2 MiB** per subscriber), live-only, and intentionally has no query parameter. The daemon-wide ring size is controlled by `--event-ring-size` (default **8000**, per #3803 §02). Old daemons silently lack the warning/query behavior — pre-flight this tag before opting in.
 
@@ -1146,6 +1149,7 @@ Capability tags:
 - `workspace_persisted_transcript` → `GET /workspaces/:workspace/session/:id/transcript`
 - `workspace_session_export` → `GET /workspaces/:workspace/session/:id/export`
 - `workspace_archived_session_export` → `GET /workspaces/:workspace/session/:id/archive/export`
+- `workspace_session_live_state` → `GET /workspaces/:workspace/sessions/live-state`
 - `workspace_qualified_memory` → `POST /workspaces/:workspace/memory/{remember,forget,dream}` and `GET /workspaces/:workspace/memory/{remember,forget,dream}/:taskId`
 
 `workspace_acp_status` reports the primary workspace ACP channel's
@@ -2273,6 +2277,44 @@ Additional fields may appear on each session when `view=organized`:
 
 Trusted active lists include live daemon overlay fields such as `clientCount` and `hasActivePrompt`. Untrusted-secondary and archived lists are storage-only: live overlay fields remain absent or false, and archived entries set `isArchived` to `true`. Empty array (not 404) when no sessions exist — a session-picker UI shouldn't error just because the workspace is idle.
 
+### `GET /workspaces/:workspace/sessions/live-state`
+
+Return the selected workspace runtime's memory-only live-session snapshot plus an in-memory catalog version, so clients can stop polling the persisted catalog at `GET /workspaces/:workspace/sessions` for volatile state such as `hasActivePrompt`, waiting flags, and `clientCount`. Pre-flight `workspace_session_live_state`; the tag is independent of `workspace_qualified_rest_core`, so older daemons advertising the broader workspace REST capability do not implement this route. The selector resolves as exact workspace id first, then as a URL-encoded absolute cwd after canonicalization, matching the other plural session routes. The route is trusted-only for primary and secondary runtimes alike: it never falls back to the primary runtime, and it does not use the permissive persisted-catalog policy that grants an untrusted secondary bounded catalog reads. The endpoint has no query parameters and performs no session storage, settings, external command, or ACP round trips, so its cost is independent of persisted session count and JSONL size; the default live-session cap keeps the response bounded, and with the cap disabled cost stays proportional only to the number of live sessions.
+
+Response:
+
+```json
+{
+  "v": 1,
+  "catalogVersion": {
+    "generation": "7eca3164-bce1-4f50-94d8-c842c480f213",
+    "revision": 17
+  },
+  "sessions": [
+    {
+      "sessionId": "session-123",
+      "clientCount": 1,
+      "hasActivePrompt": true,
+      "isWaitingForPermission": false,
+      "isWaitingForUserQuestion": false
+    }
+  ]
+}
+```
+
+`v` is the response schema version. Every successful response includes `Cache-Control: no-store`. `sessions` is the complete, unpaginated, unordered set of sessions currently live in the selected runtime; an empty live runtime returns `200` with `sessions: []`. `clientCount`, `hasActivePrompt`, `isWaitingForPermission`, and `isWaitingForUserQuestion` are required wire fields, and missing optional bridge values project to `0` or `false`. Static catalog fields such as display name, timestamps, organization, and source metadata are deliberately excluded and remain owned by the full catalog. An absent live-state row only clears a known catalog row's volatile fields; it never deletes a persisted catalog row.
+
+`catalogVersion` is an equality token for daemon-observed catalog changes. `generation` is a random UUID created with each bridge instance and changes on daemon restart or workspace runtime replacement; `revision` starts at zero and increases monotonically within a generation. The only supported operation is equality over the whole pair: same generation and revision means no daemon-observed catalog change, and any difference means reload the full catalog. Clients must not perform revision arithmetic or compare revisions across generations, and conservative extra increments are allowed. The version covers catalog membership and static metadata changes observed by the daemon; ordinary turn activity, prompt lifecycle, attach/detach, and waiting-state transitions do not advance it because the live snapshot already carries the corresponding volatile fields. Two volatile overlay values are deliberately outside both signals: turn-error state (`hasTurnError`/`turnError`) and the pending-interaction count/content (`pendingInteractionCount`/`pendingInteractions`) neither advance the version nor appear in the snapshot, so a client that needs them must keep reading the per-session event stream or the full catalog rather than relying on this route; either field can be added wire-additively when a concrete consumer requires it. Mutations written directly by another daemon, a TUI, or an external process are not observed, so once a client stops periodic full-catalog polling those writes have no bounded discovery time and surface only after an explicit full reload, another observed catalog mutation, reconnect, or daemon/runtime replacement.
+
+Clients reconcile a catalog bundle with a two-read handshake: read live-state A, load the full session list (plus `GET /workspaces/:workspace/session-groups` when the client consumes `session_organization`), then read live-state B. Equal A and B versions accept the bundle; differing versions mark the catalog stale and coalesce at most one trailing reload rather than entering a tight retry loop. Every accepted catalog request must be initiated after A — a request or deduplicated promise that began before A cannot satisfy the reconciliation. Version-driven reloads are single-flight per workspace and obey a non-zero background minimum interval, so sustained catalog churn cannot drive one full catalog scan per live-state poll; explicit local mutations may still request an immediate refresh through the same single-flight operation.
+
+**Errors:**
+
+- `400` — existing selector-validation or `workspace_mismatch` behavior for an unknown, malformed, nested, or unregistered selector; the route never resolves an unknown selector to the primary runtime.
+- `403` — `untrusted_workspace` for any untrusted runtime, including an untrusted primary.
+- `503` — `workspace_runtime_unavailable` with `Retry-After` for a bootstrapping, transitioning, draining, blocked, or removed runtime, or a runtime generation that closes mid-request.
+- `500` — unexpected local errors use the existing bridge error mapping.
+
 ### `GET /workspace/:id/session-groups`
 
 List user-defined session groups for a workspace. The singular GET selector accepts any registered workspace id or URL-encoded canonical cwd. The plural GET alias is also available to an untrusted secondary and reads only the organization sidecar. Plural group mutations remain trust-gated, while singular group mutations retain their primary-only compatibility behavior. Pre-flight `caps.features.includes('session_organization')`.
@@ -2768,7 +2810,7 @@ Errors:
 - `404 {code: 'skill_not_found'}` — no loaded skill matches the name.
 - `409 {code: 'skill_not_toggleable', reason: 'not_user_invocable' | 'inactive_extension' | 'locked', lockedScope?: 'system' | 'user' | 'systemDefaults'}` — the CLI panel would not allow the target to be toggled. `lockedScope` is present only when `reason` is `locked`.
 
-The mutation reuses the workspace-scoped `settings_changed` event for each changed key (`skills.disabled` and/or `skills.enabled`); it does not add a new event type. Workspace skill status cells include optional `disabledReason: 'hard' | 'default' | 'inactive_extension'` and `lockedScope: 'system' | 'user' | 'systemDefaults'` fields.
+The mutation reuses the workspace-scoped `settings_changed` event for each changed key (`skills.disabled` and/or `skills.enabled`); it does not add a new event type. Each of those events includes the same `mutation` object: `{ id, kind: 'skill_toggle', skills: [{ name, enabled }], activation, sessionsRefreshed, sessionsFailed }`. `id` correlates every settings event produced by one toggle request. `skills` lists the canonical names and resulting enabled states of Skills that actually changed. Workspace skill status cells include optional `disabledReason: 'hard' | 'default' | 'inactive_extension'` and `lockedScope: 'system' | 'user' | 'systemDefaults'` fields.
 
 #### `POST /workspace/skills/enable`
 
@@ -2815,7 +2857,7 @@ Response (200):
 }
 ```
 
-Target errors use `skill_not_found`, `skill_not_toggleable`, or `skill_inactive_extension`. Malformed requests return HTTP 400 with `invalid_skill_names`, `invalid_skill_name`, or `invalid_enabled_flag`. Authentication, workspace trust, client identity, unexpected persistence failures, and runtime-generation failures fail the whole request through the standard route gates. Batch-level `activation`, `sessionsRefreshed`, and `sessionsFailed` describe the single live-session refresh shared by all changed results. `activation` reports the refresh attempt rather than the outcome: a batch in which no target changed (for example, every target errored) still answers `applied` when a session is live, matching the single-Skill no-op response, so derive what actually changed from each result's `changed` flag and the `errors` array.
+Target errors use `skill_not_found`, `skill_not_toggleable`, or `skill_inactive_extension`. Malformed requests return HTTP 400 with `invalid_skill_names`, `invalid_skill_name`, or `invalid_enabled_flag`. Authentication, workspace trust, client identity, unexpected persistence failures, and runtime-generation failures fail the whole request through the standard route gates. Batch-level `activation`, `sessionsRefreshed`, and `sessionsFailed` describe the single live-session refresh shared by all changed results. `activation` reports the refresh attempt rather than the outcome: a batch in which no target changed (for example, every target errored) still answers `applied` when a session is live, matching the single-Skill no-op response, so derive what actually changed from each result's `changed` flag and the `errors` array. When at least one target changes, the daemon emits the same `settings_changed` mutation metadata as the single-Skill route; every `skills.disabled` / `skills.enabled` event from that request shares one `mutation.id`.
 
 #### `POST /workspace/init`
 

@@ -507,6 +507,11 @@ export interface BudgetStop {
  * a reword of the entry moves its key along with it.
  */
 export const BUDGET_STOP_PHRASE = 'review time budget';
+/** The Chinese pair — the marker's zh entries carry it, and the body-side
+ *  dedup must read BOTH languages: a relayed Chinese stop entry that only the
+ *  English phrase was checked against survived the splice and was rendered
+ *  under the whiffed-agent cause beside the structural stop line. */
+export const BUDGET_STOP_PHRASE_ZH = '评审时间预算';
 
 /**
  * The disclosure as structural parts, both languages: compose-review renders
@@ -547,6 +552,8 @@ export function budgetStopEntryZh(round: number | undefined): string {
  * orchestrator's relayed copy against the marker's by shared text.
  */
 export const ROUND_CAP_PHRASE = 'reverse-audit round cap';
+/** The Chinese pair, for the same bilingual-dedup reason as the budget one. */
+export const ROUND_CAP_PHRASE_ZH = '反审轮数上限';
 
 /**
  * The round-cap disclosure as structural parts, both languages — the
