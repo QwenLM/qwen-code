@@ -74,9 +74,13 @@ describe('token plan provider', () => {
         ?.modalities,
     ).toEqual({ image: true, video: true });
     expect(
-      template.find((model) => model.id === 'qwen3.8-max')?.generationConfig
-        ?.modalities,
-    ).toEqual({ image: true, video: true });
+      template.find((model) => model.id === 'qwen3.8-max')?.generationConfig,
+    ).toEqual({
+      extra_body: { enable_thinking: true },
+      thinkingMandatory: true,
+      contextWindowSize: 1000000,
+      modalities: { image: true, video: true },
+    });
     expect(
       template.find((model) => model.id === 'qwen3.8-max-preview')
         ?.generationConfig?.modalities,
