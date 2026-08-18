@@ -21,7 +21,7 @@ import {
 import { Storage } from './storage.js';
 import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionService.js';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
+import os from 'node:os';
 import * as path from 'node:path';
 import { setGeminiMdFilename as mockSetGeminiMdFilename } from '../memory/const.js';
 import {
@@ -7098,8 +7098,20 @@ describe('Server Config (config.ts)', () => {
 
   describe('Config shutdown temp project cleanup (issue #7906)', () => {
     let rmSpy: MockInstance;
+    let tmpdirSpy: MockInstance | undefined;
 
     beforeEach(() => {
+      // Pin the temp root on POSIX: merge-queue legs export
+      // TMPDIR=$RUNNER_TEMP, which the distrust guard rejects and
+      // which would keep the shutdown gate closed here. /var/tmp, not
+      // /tmp: lstatSync is real in this file's fs mock while
+      // realpathSync is identity-mocked, so /tmp's macOS symlink would
+      // resolve the root to /private/tmp but never the fixture.
+      // Windows needs no pin: Node ignores TMPDIR there and the
+      // ambient %TEMP% (%LOCALAPPDATA%\Temp) is allowlisted.
+      if (process.platform !== 'win32') {
+        tmpdirSpy = vi.spyOn(os, 'tmpdir').mockReturnValue('/var/tmp');
+      }
       Storage.setRuntimeBaseDir(
         path.join(os.tmpdir(), 'qwen-shutdown-test-runtime'),
       );
@@ -7108,6 +7120,7 @@ describe('Server Config (config.ts)', () => {
 
     afterEach(() => {
       rmSpy.mockRestore();
+      tmpdirSpy?.mockRestore();
       Storage.setRuntimeBaseDir(null);
     });
 

@@ -575,13 +575,26 @@ export function isTempDirPath(p: string): boolean {
 /**
  * `os.tmpdir()` follows the user-settable TMPDIR/TEMP env vars; a user
  * who points them at a persistent directory (e.g. `$HOME/tmp`) must not
- * see real projects under that root classified as disposable. On POSIX,
- * trust only roots the OS itself owns; Windows keeps its well-known
- * per-user temp locations.
+ * see real projects under that root classified as disposable. Trust
+ * only roots the OS itself owns: on POSIX the canonical system temp
+ * bases, on Windows the well-known per-user temp locations.
  */
 function isSystemOwnedTempRoot(root: string): boolean {
-  if (process.platform === 'win32') return true;
   const real = realpathNearestExisting(root);
+  if (process.platform === 'win32') {
+    // %TEMP%/%TMP% are user-settable; accept only the OS's well-known
+    // temp locations (isSubpath compares case-insensitively on win32).
+    const bases: string[] = [];
+    const localAppData = process.env['LOCALAPPDATA'];
+    if (localAppData) {
+      bases.push(path.win32.join(localAppData, 'Temp'));
+    }
+    const systemRoot = process.env['SystemRoot'] ?? process.env['windir'];
+    if (systemRoot) {
+      bases.push(path.win32.join(systemRoot, 'Temp'));
+    }
+    return bases.some((base) => isSubpath(base, real));
+  }
   const systemBases = [
     '/tmp',
     '/private/tmp',
@@ -590,6 +603,7 @@ function isSystemOwnedTempRoot(root: string): boolean {
     '/var/folders',
     '/private/var/folders',
     '/run/user',
+    '/dev/shm',
   ];
   return systemBases.some((base) => isSubpath(base, real));
 }

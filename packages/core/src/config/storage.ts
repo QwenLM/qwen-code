@@ -620,10 +620,13 @@ export class Storage {
    * Collects every working directory recorded in an entry's artifacts.
    * Chat logs contribute the cwd of every record they hold (`/cd` hops
    * leave earlier cwds on earlier lines and move the file); runtime
-   * sidecars contribute `work_dir`. Subdirectories (`chats/archive/`)
-   * are scanned too. Scanning stops once a cwd is found that still
-   * exists outside temp roots: such a cwd vetoes removal for every
-   * caller, and transcripts can be large.
+   * sidecars contribute `work_dir`; worktree sidecars contribute
+   * `worktreePath` (a sidecar-only entry — a worktree session killed
+   * before its first record — must reach the marker flow, not the
+   * empty-entry branch it can never satisfy). Subdirectories
+   * (`chats/archive/`) are scanned too. Scanning stops once a cwd is
+   * found that still exists outside temp roots: such a cwd vetoes
+   * removal for every caller, and transcripts can be large.
    */
   static collectRecordedCwds(entryPath: string): string[] {
     const cwds = new Set<string>();
@@ -660,6 +663,14 @@ export class Storage {
         vetoed = Storage.scanFileForCwds(entryPath, cwds);
       } else if (dirent.name.endsWith('.runtime.json')) {
         const cwd = Storage.readJsonStringField(entryPath, 'work_dir');
+        if (cwd) {
+          cwds.add(cwd);
+          vetoed = Storage.isVetoCwd(cwd);
+        }
+      } else if (dirent.name.endsWith('.worktree.json')) {
+        // `worktreePath`, not `originalCwd`: the repo root stays alive
+        // after the worktree is removed and would veto cleanup forever.
+        const cwd = Storage.readJsonStringField(entryPath, 'worktreePath');
         if (cwd) {
           cwds.add(cwd);
           vetoed = Storage.isVetoCwd(cwd);

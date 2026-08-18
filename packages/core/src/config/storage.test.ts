@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import * as os from 'node:os';
+import os from 'node:os';
 import * as path from 'node:path';
 import { Storage } from './storage.js';
 
@@ -703,6 +703,7 @@ describe('Storage – cleanOrphanProjectDirs', () => {
   /** A non-temp cwd that never exists (baseDir sits under os.tmpdir(),
    * which would classify entries as all-temp instead of gone). */
   let goneCwd: string;
+  let tmpdirSpy: ReturnType<typeof vi.spyOn> | undefined;
 
   const STALE_AGE_MS = 2 * 24 * 60 * 60 * 1000;
   /** A long-dead pid: kill(pid, 0) fails with ESRCH/EINVAL, not EPERM. */
@@ -755,6 +756,16 @@ describe('Storage – cleanOrphanProjectDirs', () => {
   };
 
   beforeEach(() => {
+    // Pin the temp root on POSIX: merge-queue legs export
+    // TMPDIR=$RUNNER_TEMP, which the distrust guard rejects and which
+    // would flip every temp-classification fixture here. /var/tmp, not
+    // /tmp: macOS symlinks /tmp -> /private/tmp, and with the mocked
+    // identity realpathSync the root and fixture realpaths would
+    // diverge. Windows needs no pin: Node ignores TMPDIR there and the
+    // ambient %TEMP% (%LOCALAPPDATA%\Temp) is allowlisted.
+    if (process.platform !== 'win32') {
+      tmpdirSpy = vi.spyOn(os, 'tmpdir').mockReturnValue('/var/tmp');
+    }
     baseDir = actualFs.mkdtempSync(path.join(os.tmpdir(), 'storage-orphan-'));
     projectsDir = path.join(baseDir, 'projects');
     actualFs.mkdirSync(projectsDir, { recursive: true });
@@ -767,6 +778,7 @@ describe('Storage – cleanOrphanProjectDirs', () => {
   });
 
   afterEach(() => {
+    tmpdirSpy?.mockRestore();
     Storage.setRuntimeBaseDir(null);
     actualFs.rmSync(baseDir, { recursive: true, force: true });
     actualFs.rmSync(aliveCwd, { recursive: true, force: true });
@@ -962,17 +974,23 @@ describe('Storage – cleanOrphanProjectDirs', () => {
   });
 
   it('recovers a live cwd from a record straddling a chunk boundary (R4-5)', async () => {
-    // The second record starts just before the 64 KB read boundary and
-    // ends past it; broken chunk stitching would drop the live cwd and
-    // the entry would be marked for removal.
+    // The second record starts before the 64 KB read boundary and ends
+    // past it; broken chunk stitching would drop the live cwd and the
+    // entry would be marked for removal.
     const chats = path.join(projectsDir, '-boundary', 'chats');
     actualFs.mkdirSync(chats, { recursive: true });
+    const rec2 = JSON.stringify({ cwd: process.cwd() });
+    // Size rec1's pad from the real string lengths so rec2 genuinely
+    // straddles byte 65536 — the previous fixed pad left it entirely
+    // inside the second chunk.
+    const skeleton = JSON.stringify({ cwd: goneCwd, pad: '' });
+    const padLen = 65536 - (skeleton.length + 1) - Math.floor(rec2.length / 2);
+    const rec1 = JSON.stringify({ cwd: goneCwd, pad: 'x'.repeat(padLen) });
+    expect(rec1.length + 1).toBeLessThan(65536);
+    expect(rec1.length + 1 + rec2.length).toBeGreaterThan(65536);
     actualFs.writeFileSync(
       path.join(chats, 'session-1.jsonl'),
-      JSON.stringify({ cwd: goneCwd, pad: 'x'.repeat(65490) }) +
-        '\n' +
-        JSON.stringify({ cwd: process.cwd() }) +
-        '\n',
+      rec1 + '\n' + rec2 + '\n',
     );
     ageEntry('-boundary');
     await Storage.cleanOrphanProjectDirs('current');
@@ -982,6 +1000,24 @@ describe('Storage – cleanOrphanProjectDirs', () => {
         path.join(projectsDir, '-boundary', '.qwen-orphan-since'),
       ),
     ).toBe(false);
+  });
+
+  it('cleans entries whose only artifact is a sidecar pointing at a gone worktree (R5-1)', async () => {
+    // A worktree session killed before its first record leaves only
+    // the .worktree.json sidecar — the exact orphan shape from #7906.
+    // Without a worktreePath read such an entry never reaches the
+    // marker flow (the sidecar itself defeats the empty-entry branch).
+    const chats = path.join(projectsDir, '-sidecar-only', 'chats');
+    actualFs.mkdirSync(chats, { recursive: true });
+    actualFs.writeFileSync(
+      path.join(chats, 'session-1.worktree.json'),
+      JSON.stringify({ slug: 'feat-x', worktreePath: goneCwd }),
+    );
+    ageEntry('-sidecar-only');
+    await sweepPastMarkerGrace('-sidecar-only');
+    expect(actualFs.existsSync(path.join(projectsDir, '-sidecar-only'))).toBe(
+      false,
+    );
   });
 
   it('marks gone non-temp entries first and removes only once the marker ages (R2-2)', async () => {
@@ -1043,6 +1079,30 @@ describe('Storage – cleanOrphanProjectDirs', () => {
     };
     await sweepPastMarkerGrace('-raced', hook);
     expect(actualFs.existsSync(path.join(projectsDir, '-raced'))).toBe(true);
+  });
+
+  it('aborts removal when a gone cwd reappears during salvage (R4-1)', async () => {
+    // The salvage await also widens the window for a vanished cwd to
+    // come back (ejected media plugged in again); the cwd re-check
+    // before rmSync must abort and clear the marker.
+    writeSession('-cwd-back', goneCwd);
+    ageEntry('-cwd-back');
+    const hook = async () => {
+      actualFs.mkdirSync(goneCwd, { recursive: true });
+    };
+    try {
+      await sweepPastMarkerGrace('-cwd-back', hook);
+      expect(actualFs.existsSync(path.join(projectsDir, '-cwd-back'))).toBe(
+        true,
+      );
+      expect(
+        actualFs.existsSync(
+          path.join(projectsDir, '-cwd-back', '.qwen-orphan-since'),
+        ),
+      ).toBe(false);
+    } finally {
+      actualFs.rmSync(goneCwd, { recursive: true, force: true });
+    }
   });
 
   it('keeps stale entries with files but no readable cwd records', async () => {
