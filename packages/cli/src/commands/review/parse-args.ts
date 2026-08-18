@@ -26,6 +26,7 @@ import {
 import { tokenizeArgs } from '../../utils/shell-args.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
 import { bundleStalenessNotices } from './lib/stale-bundle.js';
+import { isAoneHost } from './lib/platform/registry.js';
 
 export type ReviewEffort = 'low' | 'medium' | 'high';
 
@@ -47,6 +48,16 @@ export type ReviewTarget =
       host: string;
       owner: string;
       repo: string;
+      /**
+       * The FULL group path (`group/subgroup/project`) when the URL grammar
+       * carries one — Aone nested-group repos. owner/repo collapse to the
+       * last two segments, which is non-injective: identity gates
+       * (match-remote, fetchDiff's origin guard) compare every segment when
+       * both sides carry a path, so a same-named repo in a different group
+       * can never pass as the target. Absent when the grammar holds exactly
+       * two segments (GitHub).
+       */
+      groupPath?: string;
       number: number;
     }
   | { type: 'file'; path: string }
@@ -100,6 +111,10 @@ export interface ParsedReviewArgs {
    */
   severityFloor: ReviewSeverityFloor | 'auto';
   severityFloorSource: 'explicit' | 'configured' | 'default';
+  /** The `--host` flag's value, when present — recorded verbatim so the
+   *  write gate can bind a recorded bare-number target's platform (the
+   *  target itself carries no host in that spelling). */
+  host?: string;
   /** Non-flag tokens beyond the first target token, reported not guessed. */
   extraTokens: string[];
   /** Unrecognized `--flags`, reported not guessed. */
@@ -131,6 +146,22 @@ export const SEVERITY_FLOORS: ReadonlySet<string> = new Set([
 // every derived value.
 const PR_URL_RE =
   /^(https?):\/\/([A-Za-z0-9.-]+(?::\d+)?)\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/pull\/(\d+)(?=$|[/?#])/i;
+
+// Aone Code CR URLs: `https://code.alibaba-inc.com/<group>[/subgroup…]/<project>/codereview/<global-id>`.
+// The trailing number is the global MR id (what the Aone refspec and `a1 mr
+// view` key on), carried as the target's `number` exactly like a GitHub PR
+// number; when this host is passed on to the subcommands as `--host`, it
+// decides the platform (the hint beats the cwd probe) — only WITHOUT a hint
+// does detection fall back to the clone's origin remote.
+// The group path may be nested (`group/subgroup/project`) — the repo identity
+// keeps the last two segments, mirroring aone.parseRemoteUrl. Unlike
+// `…/pull/<n>` (which any GHE host legitimately serves), the host is
+// constrained to a REAL Aone subdomain: `(?:[A-Za-z0-9-]+\.)+alibaba-inc.com`
+// requires a dot boundary, so lookalikes (`evilalibaba-inc.com`,
+// `notalibaba-inc.com`) hit the fail-closed invalid-url refusal instead of
+// becoming live targets — matching isAoneHost's dot-boundary semantics.
+const AONE_CR_URL_RE =
+  /^(https?):\/\/((?:[A-Za-z0-9-]+\.)+alibaba-inc\.com(?::\d+)?)\/((?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+)\/codereview\/(\d+)(?=$|[/?#])/i;
 
 /**
  * Case-insensitive: `--effort High` has exactly one plausible meaning, and
@@ -192,12 +223,45 @@ function classifyToken(token: string): ReviewTarget | 'invalid-url' | null {
   if (urlMatch) {
     const [, scheme, host, owner, repo, num] = urlMatch;
     const lowerHost = host.toLowerCase();
+    // Aone serves no `/pull/` pages — a `/pull/<n>` URL on an Aone host is a
+    // fabrication (the Aone CR grammar is `…/codereview/<id>`, keyed on the
+    // global MR id). Refuse it fail-closed, mirroring the Aone-only
+    // constraint on `/codereview/` (a non-Aone host there is refused too).
+    if (isAoneHost(lowerHost)) return 'invalid-url';
     return {
       type: 'pr-url',
       url: `${scheme.toLowerCase()}://${lowerHost}/${owner}/${repo}/pull/${Number(num)}`,
       host: lowerHost,
       owner,
       repo,
+      number: Number(num),
+    };
+  }
+  const aoneMatch = AONE_CR_URL_RE.exec(token);
+  if (aoneMatch) {
+    const [, scheme, host, groupPath, num] = aoneMatch;
+    const lowerHost = host.toLowerCase();
+    // Nested-group repos collapse to the last two segments (mirroring
+    // aone.parseRemoteUrl), so `…/sub/maxcompute/odps_src/codereview/N`
+    // yields owner `maxcompute`, repo `odps_src`.
+    const segs = groupPath.split('/').filter(Boolean);
+    const owner = segs[segs.length - 2];
+    const repo = segs[segs.length - 1];
+    return {
+      type: 'pr-url',
+      // The canonicalized URL keeps the FULL path — a collapsed spelling
+      // would name a different (possibly nonexistent) repo to anything
+      // that re-reads it.
+      url: `${scheme.toLowerCase()}://${lowerHost}/${segs.join('/')}/codereview/${Number(num)}`,
+      host: lowerHost,
+      owner,
+      repo,
+      // Aone targets carry the FULL path — even two-segment ones: the
+      // URL pins an exact repo, and the identity gates must compare it
+      // against nested-group remotes in BOTH directions (a two-segment
+      // target must not match a three-segment remote sharing its tail,
+      // nor the reverse).
+      groupPath: segs.join('/'),
       number: Number(num),
     };
   }
@@ -239,6 +303,7 @@ export function parseReviewArgs(
   let fixRequested = false;
   let explicitEffort: ReviewEffort | null = null;
   let explicitFloor: ReviewSeverityFloor | 'auto' | null = null;
+  let recordedHostFlag: string | undefined;
 
   // The configured default gets the same validation as an explicit flag:
   // settings loading performs no enum validation, so a hand-edited typo
@@ -308,6 +373,22 @@ export function parseReviewArgs(
 
     if (token === '--fix') {
       fixRequested = true;
+      continue;
+    }
+
+    if (token === '--host' || token.startsWith('--host=')) {
+      // Recorded verbatim for the write gate's platform binding; the value
+      // is consumed either way and never leaks into the target tokens.
+      if (token.includes('=')) {
+        const value = token.slice(token.indexOf('=') + 1);
+        if (value !== '') recordedHostFlag = value;
+        continue;
+      }
+      const next = i + 1 < tokens.length ? tokens[i + 1] : undefined;
+      if (next !== undefined && next !== '' && !isFlag(next)) {
+        recordedHostFlag = next;
+        i++;
+      }
       continue;
     }
 
@@ -419,8 +500,11 @@ export function parseReviewArgs(
   // wrong PR half the time, so both are refused, loudly, and the review
   // falls back to the local diff nothing contradicted.
   const soleCandidate = kept.length === 1;
-  const hasValidCandidate = kept.some((k) => k.invalidValueOf === undefined);
   const isPrShaped = isPrShapedToken;
+  const isPrUrlToken = (token: string): boolean => {
+    const c = classifyToken(token);
+    return c !== null && c !== 'invalid-url' && c.type === 'pr-url';
+  };
   // The pool counts BOTH spellings: an `=`-form invalid value never enters
   // `kept` (it was recorded as `invalid-eq` and consumed in place), but it
   // is the same typed PR number — `--severity-floor=6711 --effort 6712`
@@ -438,7 +522,11 @@ export function parseReviewArgs(
     if (shape === null || shape === 'invalid-url') return `raw:${token}`;
     if (shape.type === 'pr-number') return `pr:${shape.number}`;
     if (shape.type === 'pr-url')
-      return `pr:${shape.number}@${shape.host}/${shape.owner}/${shape.repo}`;
+      // The FULL group path, not the collapsed owner/repo: two nested-group
+      // CR URLs that share their last two segments and the global id
+      // (`groupA/sub/app` vs `groupB/sub/app`, same N) are DIFFERENT
+      // targets and must not dedupe into one.
+      return `pr:${shape.number}@${shape.host}/${shape.groupPath ?? `${shape.owner}/${shape.repo}`}`;
     return `raw:${token}`;
   };
   const prShapedKeys = [
@@ -448,9 +536,56 @@ export function parseReviewArgs(
         .map((k) => targetKey(k.token)),
     ),
   ];
-  // A bare number and a same-number URL name one PR when no other repo is
-  // in play: collapse `pr:N` into `pr:N@…` for the count.
-  const distinctPr = new Set(prShapedKeys.map((k) => k.replace(/@.*$/, '')));
+  // Distinct TARGETS. A bare number and a same-number URL name one PR when
+  // no other repo is in play (the bare entry merges into the URL's key),
+  // but two DIFFERENT repo-qualified keys with the same number name two
+  // PRs — the number-only collapse once silently deduped them.
+  const distinctPr = new Set<string>();
+  for (const k of prShapedKeys) {
+    const bare = k.split('@')[0];
+    if (k.includes('@')) {
+      // Repo-qualified keys are distinct PRs; one subsumes a bare
+      // same-number entry already in the set.
+      if (distinctPr.has(bare)) distinctPr.delete(bare);
+      distinctPr.add(k);
+    } else if (
+      ![...distinctPr].some((e) => e === bare || e.startsWith(`${bare}@`))
+    ) {
+      distinctPr.add(k);
+    }
+  }
+  // VALID CANDIDATES, with the mixed-shape restatement carved out: when the
+  // rescue pool holds exactly one distinct PR and a URL spelling of it
+  // arrived as an invalid flag value, a POSITIONAL bare number of the same
+  // PR restates that PR — it is not a competing valid candidate. Letting it
+  // rank as one discarded the URL (the sole carrier of host/platform
+  // identity) and retargeted the run onto the cwd clone's same-number PR —
+  // `--effort <cr-url> 7` reviewed (and could POST to) the wrong platform
+  // (round-12 finding). A DIFFERENT number still outranks, as the user
+  // typed it outside any flag.
+  const poolKey = distinctPr.size === 1 ? [...distinctPr][0] : undefined;
+  const poolPrNumber =
+    poolKey !== undefined
+      ? Number(poolKey.split('@')[0].replace(/^pr:/, ''))
+      : undefined;
+  const poolHasUrlSpelling =
+    poolPrNumber !== undefined &&
+    kept.some((k) => k.invalidValueOf !== undefined && isPrUrlToken(k.token));
+  const hasValidCandidate = kept.some((k) => {
+    if (k.invalidValueOf !== undefined) return false;
+    if (poolHasUrlSpelling) {
+      const c = classifyToken(k.token);
+      if (
+        c !== null &&
+        c !== 'invalid-url' &&
+        c.type === 'pr-number' &&
+        c.number === poolPrNumber
+      ) {
+        return false;
+      }
+    }
+    return true;
+  });
   if (!hasValidCandidate && distinctPr.size > 1) {
     const shown = kept
       .filter((k) => k.invalidValueOf !== undefined && isPrShaped(k.token))
@@ -464,6 +599,20 @@ export function parseReviewArgs(
   // target; the rest are the same intent restated, not extra arguments —
   // pushing them all left the operator told "Ignoring extra argument(s)"
   // on the very invocation the dedupe blesses (round-9 finding).
+  //
+  // The repo-qualified URL spelling OUTRANKS the bare number as the
+  // rescued target: it is the only carrier of host/platform identity. A
+  // bare-number target flips detection onto the cwd fallback, and the run
+  // silently reviews the cwd clone's same-number PR instead of the named
+  // platform's — which spelling won depending on token order (round-10
+  // finding: a loud refusal at the merge base degraded to a silent
+  // wrong-platform retarget).
+  const preferredRescueToken =
+    !hasValidCandidate && distinctPr.size === 1
+      ? kept.find(
+          (k) => k.invalidValueOf !== undefined && isPrUrlToken(k.token),
+        )?.token
+      : undefined;
   let rescuedPr = false;
   for (const k of kept) {
     const issues = k.invalidValueOf === '--effort' ? effortIssues : floorIssues;
@@ -477,11 +626,28 @@ export function parseReviewArgs(
       }
       if (isPrShaped(k.token)) {
         if (rescuedPr) continue; // same PR, restated — not an extra token
+        // A bare number may not become the rescued target while the
+        // same-PR URL spelling is present — the URL carries the identity.
+        if (
+          preferredRescueToken !== undefined &&
+          k.token !== preferredRescueToken &&
+          !isPrUrlToken(k.token)
+        ) {
+          continue;
+        }
         rescuedPr = true;
       }
       issues.push({ kind: 'kept-as-target', value: k.token });
     }
     targetTokens.push(k.token);
+  }
+  // Same preference for positional spellings: when the target tokens hold
+  // both a bare number and a same-number PR URL, the URL becomes the
+  // target regardless of arrival order.
+  const urlIdx = targetTokens.findIndex(isPrUrlToken);
+  if (urlIdx > 0) {
+    const [urlToken] = targetTokens.splice(urlIdx, 1);
+    targetTokens.unshift(urlToken);
   }
 
   // Pick the first classifiable target token. A token that looks like a URL
@@ -493,6 +659,19 @@ export function parseReviewArgs(
   const trailingExtras: string[] = [];
   for (const tok of targetTokens) {
     if (targetAssigned) {
+      // A bare number restating the assigned URL target's number is the
+      // same intent restated, not an extra argument (mirror of the
+      // rescue loop's restatement handling).
+      const classifiedRestate = classifyToken(tok);
+      if (
+        target.type === 'pr-url' &&
+        classifiedRestate !== null &&
+        classifiedRestate !== 'invalid-url' &&
+        classifiedRestate.type === 'pr-number' &&
+        classifiedRestate.number === target.number
+      ) {
+        continue;
+      }
       extraTokens.push(tok);
       trailingExtras.push(tok);
       continue;
@@ -500,7 +679,7 @@ export function parseReviewArgs(
     const classified = classifyToken(tok);
     if (classified === 'invalid-url') {
       warnings.push(
-        `Unrecognized URL ${JSON.stringify(tok)} — not a GitHub PR URL (expected …/pull/<number>); refusing to guess a target from it.`,
+        `Unrecognized URL ${JSON.stringify(tok)} — not a PR/CR URL (expected …/pull/<number> or …/codereview/<id>); refusing to guess a target from it.`,
       );
       extraTokens.push(tok);
       continue;
@@ -685,6 +864,7 @@ export function parseReviewArgs(
     fix: { requested: fixRequested, effective: fixEffective },
     severityFloor,
     severityFloorSource,
+    ...(recordedHostFlag !== undefined ? { host: recordedHostFlag } : {}),
     extraTokens,
     unknownFlags,
     warnings,
