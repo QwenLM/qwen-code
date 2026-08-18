@@ -589,16 +589,21 @@ export function runSubmit(
   // state's transcription of it. The state field is a model-written copy of
   // the operator's policy, and a copy that can drift must not decide
   // whether enforcement stands down. The recovery is the SHARED helper both
-  // posting boundaries call with the SAME identity source — the plan's,
-  // with this command's own target only as the plan-less fallback — so the
-  // archived compose and this post can never resolve different floors for
-  // one review. The recovered value wins whenever the recovery yields one
-  // that differs; when it yields nothing — no record, unreadable, no floor
-  // decision in it, another PR's or repo's record — the state's value
-  // stands, the same fail-open the enforcement itself applies. The note
-  // names the TRUE source (flag vs setting): "the record outranks the
-  // state" over a setting-sourced floor sent auditors hunting the record
-  // for a flag nobody typed.
+  // posting boundaries call with the SAME identity formula — this command's
+  // CLI-typed target first (`--pr`/`--repo`/the effective host, all
+  // mandatory-and-validated here), the plan filling only axes the caller
+  // did not supply — so the archived compose and this post cannot resolve
+  // different floors for one review. Caller-first because the plan's PATH
+  // arrives through that same model-written state: plan-first let a
+  // parseable-but-wrong plan choose which identity the operator's record
+  // was tested against and silently stand the recovery down. The recovered
+  // value wins whenever the recovery yields one that differs; when it
+  // yields nothing — no record, unreadable, no floor decision in it,
+  // another PR's or repo's record — the state's value stands, the same
+  // fail-open the enforcement itself applies. The note names the TRUE
+  // source (flag vs setting): "the record outranks the state" over a
+  // setting-sourced floor sent auditors hunting the record for a flag
+  // nobody typed.
   const recovered = recordedSeverityFloor({
     planPath:
       typeof payload.state?.planPath === 'string'
