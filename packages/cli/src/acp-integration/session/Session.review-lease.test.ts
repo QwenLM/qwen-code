@@ -131,6 +131,7 @@ describe('Session review-worktree lease sweep', () => {
       getToolRegistry: vi.fn().mockReturnValue({
         getTool: vi.fn(),
         ensureTool: vi.fn().mockResolvedValue(true),
+        registerTool: vi.fn(),
       }),
       getFileService: vi.fn().mockReturnValue({
         shouldGitIgnoreFile: vi.fn().mockReturnValue(false),

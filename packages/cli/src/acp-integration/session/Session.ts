@@ -86,6 +86,7 @@ import {
   Kind,
   ToolNames,
   ToolErrorType,
+  CreateSubSessionTool,
   fireNotificationHook,
   firePermissionRequestHook,
   firePreToolUseHook,
@@ -2842,8 +2843,10 @@ export class Session implements SessionContext {
   /**
    * Wire the sub-session spawner to the daemon over the ACP `extMethod` request
    * channel. The `create_sub_session` tool (model-initiated) is its caller. ONLY
-   * the ACP/daemon session wires it, so the tool is inert (reports daemon-only)
-   * in interactive TUI / headless, where no bridge exists.
+   * the ACP/daemon session wires it — and the tool itself is registered here as
+   * well, so in interactive TUI / headless, where no bridge exists, the tool
+   * is simply absent from the model's action space instead of being declared
+   * and forever unable to run.
    *
    * A tool-initiated request runs while the caller's turn is suspended in the
    * tool await — safe because the ACP channel supports concurrent bidirectional
@@ -2882,6 +2885,12 @@ export class Session implements SessionContext {
           : {}),
       };
     });
+    // Register the tool exactly where the spawner is wired: the registry is
+    // session-scoped, so every daemon session that can spawn sub-sessions
+    // declares the tool, and no non-daemon session ever does.
+    this.config
+      .getToolRegistry()
+      .registerTool(new CreateSubSessionTool(this.config));
   }
 
   async enableLiveScreenContext(): Promise<void> {

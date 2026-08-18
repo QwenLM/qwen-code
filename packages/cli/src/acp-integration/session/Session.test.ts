@@ -2013,7 +2013,11 @@ describe('Session', () => {
     await expect(session.enableLiveScreenContext()).rejects.toThrow(
       /reserved for the trusted Live Appshot channel/u,
     );
-    expect(mockToolRegistry.registerTool).not.toHaveBeenCalled();
+    // Scoped to the reserved tool: the constructor legitimately registers
+    // other tools (e.g. create_sub_session) before this call.
+    expect(mockToolRegistry.registerTool).not.toHaveBeenCalledWith(
+      expect.objectContaining({ name: CAPTURE_SCREEN_CONTEXT_TOOL_NAME }),
+    );
   });
 
   it('attributes a delayed title notification to the persisted record session', () => {
@@ -6727,6 +6731,14 @@ describe('Session', () => {
           taskId: 'worker-related',
           continuesTodoStopGuardWorkChain: true,
         }),
+      );
+    });
+
+    it('registers the create_sub_session tool alongside the spawner', () => {
+      // The tool is daemon-only: it must exist exactly where the spawner is
+      // wired so the model can call it, and nowhere else.
+      expect(mockToolRegistry.registerTool).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'create_sub_session' }),
       );
     });
 

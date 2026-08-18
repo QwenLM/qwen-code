@@ -7621,6 +7621,24 @@ describe('Server Config (config.ts)', () => {
       ).toContain(ToolNames.ZOOM_IMAGE);
     });
 
+    it('does not register create_sub_session (the daemon ACP session registers it)', async () => {
+      // The tool only works under `qwen serve`, where the ACP session wires a
+      // spawner and registers the tool itself. Declaring it in every session
+      // used to pollute the action space of interactive/headless runs with a
+      // tool that can never succeed there.
+      const config = new Config(baseParams);
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).not.toContain(ToolNames.CREATE_SUB_SESSION);
+    });
+
     it('should ignore coreTools overrides in bare mode', async () => {
       const config = new Config({
         ...baseParams,
