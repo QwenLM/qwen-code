@@ -383,6 +383,7 @@ export * from './agents/team/board-lock.js';
 export * from './agents/team/board-tasks.js';
 export * from './agents/team/asks.js';
 export * from './agents/team/decisions.js';
+export * from './agents/team/board-prompt.js';
 export * from './agents/backends/tmux-commands.js';
 export * from './agents/workflow-snapshot.js';
 export {

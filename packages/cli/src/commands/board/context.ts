@@ -22,8 +22,17 @@
 import * as path from 'node:path';
 import * as os from 'node:os';
 
-export const BOARD_ENV = 'QWEN_BOARD';
-export const PARTICIPANT_ENV = 'QWEN_BOARD_AS';
+// Re-exported rather than redeclared: the prompt section and the CLI must
+// agree on these names, and two copies of a constant is the same failure mode
+// the board design exists to avoid.
+export {
+  BOARD_ENV,
+  BOARD_PARTICIPANT_ENV as PARTICIPANT_ENV,
+} from '@qwen-code/qwen-code-core';
+import {
+  BOARD_ENV as BOARD_ENV_NAME,
+  BOARD_PARTICIPANT_ENV as PARTICIPANT_ENV_NAME,
+} from '@qwen-code/qwen-code-core';
 
 /**
  * Reduce an arbitrary directory name to something the board layout accepts:
@@ -46,7 +55,7 @@ export interface BoardContextOptions {
 
 export function resolveBoardName(opts: BoardContextOptions = {}): string {
   const env = opts.env ?? process.env;
-  const explicit = opts.board || env[BOARD_ENV];
+  const explicit = opts.board || env[BOARD_ENV_NAME];
   if (explicit) return explicit;
   return slugify(path.basename(opts.cwd ?? process.cwd()));
 }
@@ -58,7 +67,7 @@ export function resolveBoardName(opts: BoardContextOptions = {}): string {
  */
 export function resolveParticipantName(opts: BoardContextOptions = {}): string {
   const env = opts.env ?? process.env;
-  const explicit = opts.as || env[PARTICIPANT_ENV];
+  const explicit = opts.as || env[PARTICIPANT_ENV_NAME];
   if (explicit) return explicit;
   return slugify(`${os.userInfo().username}-${process.pid}`);
 }
