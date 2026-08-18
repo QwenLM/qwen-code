@@ -184,7 +184,7 @@ Or, after running `/review 123`, type `post comments` to publish findings withou
 - Where the fix is a single localized edit, a ` ```suggestion ` block you can apply in one click
 - For Approve/Request changes verdicts: a review summary with the verdict
 - For Comment verdict with all inline comments posted: no separate summary (inline comments are sufficient)
-- Model and CLI version attribution footer on each comment (e.g., _— qwen3-coder via Qwen Code /review (v0.21.2)_); set `review.attribution` to `false` in your user or system `settings.json` (the workspace `.qwen/settings.json` is ignored for `review.*` settings) to post without it
+- Model and CLI version attribution footer on each comment (e.g., _— qwen3-coder via Qwen Code /review (v0.21.2)_); set `review.attribution` to `false` in your user or system `settings.json` (the workspace `.qwen/settings.json` is ignored for `review.*` settings) to post without it — note this also withholds the model from the review's machine-ledger marker, so in fresh environments (no review cache) the recovered incremental anchor fails the same-model check and the re-review falls back to full-range
 
 **What stays terminal-only:**
 
@@ -344,6 +344,8 @@ If you switch models (via `/model`) and re-review the same PR, `/review` detects
 /review 123
 # → "Previous review used qwen3-coder. Running full review with gpt-4o for a second opinion."
 ```
+
+The model match also gates incremental scoping, not just the skip: "clean up to the cached commit" is the previous model's verdict, so when new commits have landed since the cached review, a model mismatch never scopes to `lastCommitSha..HEAD` — the range is the full diff, noting "Previous round was reviewed by qwen3-coder. Running full review with gpt-4o." — unless an anchor certified by the model now running is recovered from the last posted review (below), which scopes the range instead. The previous round's findings still carry over to be re-ruled; only the anchor does not. The same gate binds the anchor recovered from the last posted review's machine-ledger marker when the cache is absent or its anchor is unusable (CI, another clone): it scopes the incremental range only if the model now running certified it — a marker certified by a different model, or carrying no model (a review posted with `review.attribution` off, or one from before the field), falls back to the full diff.
 
 Cache is stored in `.qwen/review-cache/` and tracks both the commit SHA and model ID. Make sure this directory is in your `.gitignore` (a broader rule like `.qwen/*` also works). If the cached commit was rebased away, it falls back to a full review. Only high-effort reviews consult or write the cache — a `--effort low|medium` quick pass never counts as "already reviewed".
 

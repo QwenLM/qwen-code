@@ -684,9 +684,80 @@ const BUDGET_QUALIFIED =
   '(?:under|within|below|inside)\\s+(?:the\\s+)?(?:tool(?:[- ]call)?\\s+)?budget';
 const COMPLETION_TAIL = `(?:\\s+${BUDGET_QUALIFIED})?`;
 
+/**
+ * The same non-answer, written in Chinese.
+ *
+ * The line DETECTOR above has always been bilingual (`预算缺口` and the
+ * full-width colon are in `GAP_HINT_RE`), but this classifier was not — so
+ * under `general.outputLanguage: 中文` an agent's "nothing to disclose" became
+ * a real gap. Measured on a live review of PR #9094: a reverse-audit agent
+ * returned `Budget gap: 无 — 所有检查均完成，未触及工具预算上限。` ("none — all
+ * checks completed, the tool budget was NOT reached") and the composed body
+ * published `Not explored to full depth (tool budget reached)` quoting that
+ * very sentence — the disclosure asserted the opposite of its own evidence.
+ *
+ * **The completion clause is a CLOSED VOCABULARY, not a span with exclusions.**
+ * That is the whole design, and it is the second attempt: the first cut spelled
+ * the clause as bounded `.{0,40}` spans that merely refused to cross `但`/`除`,
+ * and two rounds of live review walked straight through it — a negation the
+ * one-character lookbehind could not see (`还没有完成`, `未能完成`, `难以完成`),
+ * a gap clause the span swallowed before the completion word
+ * (`3 项未运行，其余完成`) or after it (`安全检查完成，渗透测试未进行`), and a
+ * span that slid past a NEGATED completion to a later affirmed one. Every one
+ * of those is the unsafe direction: this module's header states the asymmetry —
+ * dropping a REAL gap certifies work that never happened, keeping a
+ * placeholder only over-discloses.
+ *
+ * A closed vocabulary cannot be walked through, because there is nothing to
+ * walk: the clause matches only if the ENTIRE text after the token is built
+ * from these pieces, so any sentence carrying an actual gap simply fails to
+ * match and is kept. Adding a phrase is a deliberate edit to this list, not a
+ * side effect of loosening a quantifier.
+ *
+ * Shapes:
+ *
+ *  - a bare token (`无`, `没有`, `不适用`), optionally with the noun the brief
+ *    uses (`无缺口`, `没有跳过的检查`);
+ *  - a token, one separator, then the closed completion clause
+ *    (`无 — 所有检查均完成`), optionally with one budget adverbial
+ *    (`，未触及工具预算上限`).
+ *
+ * The token needs an explicit boundary — Chinese has no `\b`. `无` is a prefix
+ * of `无法…` ("unable to…"), which is a REAL gap and must survive, so a token
+ * is only a token when what follows it is punctuation, whitespace, a
+ * separator, or the end of the text.
+ */
+// No bare `检查` in the noun group: `没有检查` reads "did not check" — a live
+// gap — and the module's rule for ambiguity is to KEEP. `无缺口` and
+// `没有跳过的检查` are the documented placeholder nouns and still drop.
+const ZH_TOKEN = '(?:无|没有|不适用|暂无)(?:缺口|跳过的?检查)?';
+/** One separator, in the forms a model actually writes (double em-dash too). */
+const ZH_SEPARATOR = '[-—–]{1,2}|[、,，:：]';
+/** "every planned check", spelled out — no free characters anywhere. */
+const ZH_ALL = '(?:所有|全部|一切|全都|统统)';
+const ZH_PLANNED = '(?:计划(?:内|中)?的?|预定的?|上述|以上|本轮)';
+const ZH_CHECKS = '(?:检查|检查项|项检查|测试|审查|工作)';
+const ZH_DONE = '(?:均|都|皆)?(?:已|均已|都已)?(?:完成|完毕|结束|做完)';
+/** The one adverbial allowed after the completion word. */
+const ZH_BUDGET_TAIL =
+  '(?:[，,、]?\\s*(?:未触及|未达到|未超出|未用尽|没有触及|在|不超过)' +
+  '(?:工具)?(?:调用)?预算(?:上限|限制|范围内)?)?';
+const ZH_TAIL = '[。．.!！…,，;；:：\\s]*$';
+// NO whitespace between the pieces. Four optional groups chained across `\s*`
+// is the overlapping-quantifier shape this module's header bans and its
+// 'stays linear on pathological inputs' test exists for — and Chinese does not
+// put spaces between these tokens anyway, so the quantifiers bought nothing
+// but the backtracking. Whitespace is allowed exactly once, after the
+// separator, where a model actually types it.
+const ZH_COMPLETION_CLAUSE = `${ZH_ALL}?${ZH_PLANNED}?${ZH_CHECKS}?${ZH_DONE}${ZH_BUDGET_TAIL}`;
+const ZH_PLACEHOLDER =
+  `${ZH_TOKEN}(?:${ZH_TAIL}` +
+  `|\\s*(?:${ZH_SEPARATOR})\\s*${ZH_COMPLETION_CLAUSE}${ZH_TAIL})`;
+
 const PLACEHOLDER_GAP_RE = new RegExp(
   '^(?:<[^>]*>$' +
     '|[-—*_~`]+$' +
+    `|${ZH_PLACEHOLDER}` +
     '|(?:none|n/a|nothing|no (?:gaps?|checks?))\\b(?:' +
     '[.!…,;:\\s]*$' +
     '|\\s+(?:skipped|found|to report)\\b[.!…,;:\\s]*$' +

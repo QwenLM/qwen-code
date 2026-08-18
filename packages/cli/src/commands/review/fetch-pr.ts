@@ -74,6 +74,7 @@ import { operatorReviewSettings } from './lib/review-settings.js';
 import { hasReviewDeadline } from './lib/deadline.js';
 import { appendRunSession } from './lib/run-ledger.js';
 import { SHA_RE } from './lib/ledger.js';
+import { certifierMatchesRound, roundModelIdFrom } from './lib/round-model.js';
 
 interface PrMetadata {
   headRefName: string;
@@ -102,6 +103,20 @@ interface FetchPrArgs {
    * array and the recovery flow can produce one; `runFetchPr` normalizes.
    */
   since?: string | string[];
+  /**
+   * WHO certified the `--since` anchor: the `lastModelId` beside it in the
+   * cache, or the `model` beside the marker's `sha`. Copied through verbatim
+   * — the orchestrator never compares it to anything, because a comparison
+   * stated in prompt text is one that can be skipped, and because the two
+   * sides are not even the same kind of string there (`{{model}}` is the bare
+   * `config.getModel()`; what the CLI writes is provider-qualified). The gate
+   * lives HERE, over `certifierMatchesRound`, which is the same function the
+   * marker-recovery ruling uses.
+   *
+   * Omitted for an anchor nobody certified — a cache written before the
+   * field. That is a mismatch, not a pass.
+   */
+  sinceModel?: string | string[];
 }
 
 type FetchPrResult = PlanReport & {
@@ -175,6 +190,27 @@ type FetchPrResult = PlanReport & {
    */
   prDescriptionHasHan: boolean;
   /**
+   * The model this ROUND started under — the runtime identity at capture
+   * time, stamped here because nothing else in the flow remembers it.
+   *
+   * `compose-review` certifies the posted anchor with the model that did the
+   * review, and its only other source is `QWEN_CODE_MODEL` read at compose
+   * or submit time. That env tracks the session's CURRENT model: the
+   * documented deferred-post flow — review under A, `/model` to B, "post
+   * comments" — then certified A's range as B, and the next round under B
+   * scoped `sha..HEAD` past code B never reviewed. A stamp taken when the
+   * diff was captured is the one value that cannot drift out from under the
+   * work it describes.
+   *
+   * Absent on a report written before this field. Compose keeps its previous
+   * behaviour there rather than withholding every anchor: a report is written
+   * at the start of the round and read at its end, so a missing stamp means
+   * the CLI was upgraded between the two — and on a runtime that publishes no
+   * model id at all, the runtime side of the comparison is empty too, so the
+   * pair is certified by the same declared fallback as before this field.
+   */
+  reviewModelId?: string;
+  /**
    * Present when `--since <sha>` was passed: the incremental-review scoping
    * decision, validated HERE so the orchestrator never hand-runs git against
    * an anchor. `effective: true` without `upToDate` means the diff and plan
@@ -218,6 +254,7 @@ export interface IncrementalDecision {
     | 'behind-merge-base'
     | 'hunks-outside-pr-diff'
     | 'containment-unverified'
+    | 'cross-model-anchor'
     | 'base-untrusted'
     | 'capture-failed'
     | 'partition-failed';
@@ -648,6 +685,8 @@ function cleanStale(prNumber: string): void {
 }
 
 async function runFetchPr(args: FetchPrArgs): Promise<void> {
+  // Sampled HERE, at the start of the round: see `reviewModelId`.
+  const roundModelId = roundModelIdFrom(process.env);
   const { pr_number: prNumber, owner_repo: ownerRepo, remote, out } = args;
 
   // The lease gate below only engages `pr-\d+` targets, but `cleanStale`
@@ -944,7 +983,45 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     // later, `since.slice(…)` — which crashed the command after the worktree
     // existed and before any report was written.
     const sinceArg = typeof rawSince === 'string' ? rawSince : undefined;
-    if (sinceArg !== undefined && sinceArg !== '') {
+    // WHO certified it, gated before the history is consulted at all: "clean
+    // up to this sha" is the recorded identity's verdict, and `fetch-pr`
+    // validates an anchor against the HISTORY, never against who certified
+    // it — so an anchor from another model is ancestrally perfect and still
+    // scopes this round past code it never reviewed.
+    //
+    // Ruled here rather than in the skill because every prompt-text version
+    // of this comparison has been wrong: `{{model}}` interpolates the BARE
+    // `config.getModel()` while every identity the CLI writes is
+    // provider-qualified, so the two sides were never the same kind of string
+    // and two providers exposing one model name passed each other's gate.
+    // With the check here there is no identity comparison left in prompt text
+    // at all — the orchestrator copies two fields and reads a decision.
+    const rawSinceModel = Array.isArray(args.sinceModel)
+      ? args.sinceModel[args.sinceModel.length - 1]
+      : args.sinceModel;
+    const sinceModel =
+      typeof rawSinceModel === 'string' ? rawSinceModel : undefined;
+    const crossModel =
+      sinceArg !== undefined &&
+      sinceArg !== '' &&
+      !certifierMatchesRound(sinceModel, roundModelIdFrom(process.env));
+    if (crossModel) {
+      anchor = {
+        incremental: {
+          since: sinceArg,
+          effective: false,
+          reason: 'cross-model-anchor',
+        },
+        diffBase: null,
+      };
+      writeStderrLine(
+        `Incremental anchor not used — it was certified by ` +
+          `${sinceModel ? `"${sinceModel}"` : 'no recorded identity'}, and ` +
+          `this review runs as ` +
+          `${roundModelIdFrom(process.env) || 'an unpublished identity'}. ` +
+          `Reviewing the full range.`,
+      );
+    } else if (sinceArg !== undefined && sinceArg !== '') {
       try {
         anchor = resolveIncrementalAnchor(
           sinceArg,
@@ -1400,6 +1477,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       diffPathAbsolute,
       diffSha256,
       prDescriptionHasHan: /\p{Script=Han}/u.test(meta.body ?? ''),
+      ...(roundModelId ? { reviewModelId: roundModelId } : {}),
       ...(anchor ? { incremental: anchor.incremental } : {}),
       ...buildPlanReport(plan, (path) => fileLineCount(fetchedSha, path), {
         operatorRoundCap: operatorReviewSettings().reverseAuditRounds,
@@ -1626,6 +1704,18 @@ export const fetchPrCommand: CommandModule = {
           'diff with the reason in the report; a valid one scopes the diff ' +
           "and the chunk plan to since..head. The decision is the report's " +
           '`incremental` field.',
+      })
+      .option('since-model', {
+        type: 'string',
+        describe:
+          'WHO certified the --since anchor: the `lastModelId` beside it in ' +
+          'the review cache, or the `model` beside the marker sha. Copy it ' +
+          'through verbatim — do NOT compare it to anything yourself. The ' +
+          'anchor is used only when it matches the identity running this ' +
+          'review; otherwise the report says `cross-model-anchor` and the ' +
+          'round reviews the full diff, because "clean up to this sha" is ' +
+          "the recorded identity's verdict and this command validates an " +
+          'anchor against the history, never against who certified it.',
       }),
   handler: async (argv) => {
     setGhHost((argv as { host?: string }).host);
