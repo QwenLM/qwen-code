@@ -11,6 +11,7 @@
 import { MouseButton } from '@opentui/core';
 import type { MouseEvent, ScrollBoxRenderable } from '@opentui/core';
 import { findUrlAtRow, readBufferRow } from './link-click.js';
+import { MultiClickSelectionController } from './multi-click-select.js';
 import { renderDiffBody, type DiffLine } from './diff-render.js';
 import { C, SYNTAX, applyThemeMode, applyOpenTuiTheme } from './theme.js';
 import { detectInitialThemeMode } from './theme-auto.js';
@@ -852,6 +853,19 @@ function App({
     setTimeout(() => setToast(null), 1500);
     renderer.clearSelection();
   });
+
+  // Double/triple-click word/line selection (ink parity): the framework's
+  // selection state machine is char-drag only; on the 2nd/3rd click this
+  // rewrites its just-started point selection to the word/line span, and
+  // release still copies through the handler above.
+  const multiClickSelection = useMemo(
+    () =>
+      new MultiClickSelectionController(
+        () => renderer.currentRenderBuffer,
+        renderer,
+      ),
+    [renderer],
+  );
 
   const applyEvent = useCallback((ev: OpenTuiStreamEvent) => {
     setItems((prev) => foldLiveEvent(prev, ev));
@@ -2327,6 +2341,7 @@ function App({
         stickyStart="bottom"
         verticalScrollbarOptions={{ visible: false }}
         onMouseUp={handleLinkClick}
+        onMouseDown={(e) => multiClickSelection.handleMouseDown(e)}
       >
         {banner}
         <box paddingLeft={1} paddingRight={1}>
