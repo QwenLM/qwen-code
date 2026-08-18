@@ -86,7 +86,14 @@ selector-failure fallback:
 - score only the body window that can be surfaced in the prompt;
 - require a title, description, or body lexical match before applying a type
   boost;
-- weight each title and description token match above a body token match.
+- weight each title and description token match above a body token match;
+- break score ties by recency, then by input order, never by document type.
+  An alphabetical type comparison orders `feedback` before `project` before
+  `reference` before `user`, and `MAX_FAST_RECALL_DOCS` takes only the top
+  two, so a type tie-break would systematically drop user-level memory from
+  the fast result — the exact case the fast path exists to serve. Input order
+  as the final key keeps the project-before-user precedence, because recall
+  concatenates project documents ahead of user ones.
 
 ## Non-goals
 
@@ -101,7 +108,7 @@ selector-failure fallback:
 ## Verification
 
 Recall quality is measured in `packages/core/src/memory/recall-eval.test.ts`
-against a 45-case labeled corpus, scored both by the shipped scorer and by a
+against a 48-case labeled corpus, scored both by the shipped scorer and by a
 frozen copy of the pre-change one so "no regression" is reproducible rather
 than asserted. Delivery is measured separately in `recall-delivery-eval.test.ts`,
 because a correct selection that never reaches the model is worth nothing.
@@ -114,7 +121,16 @@ because a correct selection that never reaches the model is worth nothing.
 - A fast result never crosses a query boundary.
 - No-result queries stay silent under both designs.
 - A labeled set covers Chinese, English, Japanese, Korean, mixed text,
-  NFKC normalization, body-only matches, and no-result queries.
+  NFKC normalization, body-only matches, no-result queries, and answerable
+  queries that share no token with their document.
+- Score ties are broken by recency rather than by document type, so a
+  user-typed document is not pushed out of the two-document fast result by a
+  tied feedback, project, or reference document.
+- A result whose every document the fast phase already delivered is recorded
+  as `already_delivered` wherever it is discarded, not only at the ToolResult
+  consume point. A tool-free turn that delivered everything must not be
+  counted in the `no_safe_delivery_point` bucket; a partial overlap still is,
+  because the documents outside the fast set genuinely had no delivery point.
 - Long CJK queries keep bounded scoring work and preserve both query ends.
 - Existing active-tool noise filtering remains unchanged on the deterministic
   candidate path. The model-selector failure fallback still triggers and
@@ -135,6 +151,15 @@ because a correct selection that never reaches the model is worth nothing.
 - Scoring is substring-based, so a query token can match inside a longer word
   ("owner" inside "ownership"). The evaluation corpus records one such case
   rather than hiding it.
+- The fast path closes the timing gap, not the matching gap. A query that
+  shares no token with its document produces no deterministic result, so a
+  tool-free turn asking it still ends with nothing delivered; only the model
+  selector can serve those, and on a tool-free turn it never lands. The
+  `semantic-no-lexical` slice of the corpus measures this directly — the
+  shipped scorer and the frozen pre-change scorer both score 0% Recall@5 on
+  it, so requiring a lexical match did not create the gap, but it does keep
+  the fast path silent there. This is why the headline tool-free delivery
+  figure is 92.3% and not 100%: the residual 7.7% is exactly that slice.
 - Recall can see older documents outside the shared 200-document scanner cap,
   but non-recall callers, including Forget, keep the existing capped scanner.
   A broader manageability pass is separate from this recall-only change.

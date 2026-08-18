@@ -222,12 +222,19 @@ export function selectRelevantAutoMemoryDocuments(
     return [];
   }
 
-  return docs
-    .map((doc) => ({ doc, score: scoreDocument(queryTokens, doc) }))
-    .filter(({ score }) => score > 0)
-    .sort((a, b) => b.score - a.score || a.doc.type.localeCompare(b.doc.type))
-    .slice(0, limit)
-    .map(({ doc }) => doc);
+  return (
+    docs
+      .map((doc) => ({ doc, score: scoreDocument(queryTokens, doc) }))
+      .filter(({ score }) => score > 0)
+      // Recency, then input order (stable sort), as the tie-breaks. NOT the
+      // document type: an alphabetical type comparison ranks `user` behind
+      // every other type, and MAX_FAST_RECALL_DOCS takes only the top two, so
+      // a type tie-break would systematically drop user-level memory from the
+      // fast result — the exact case the fast path exists to serve.
+      .sort((a, b) => b.score - a.score || b.doc.mtimeMs - a.doc.mtimeMs)
+      .slice(0, limit)
+      .map(({ doc }) => doc)
+  );
 }
 
 function selectModelCandidateDocuments(
@@ -371,8 +378,11 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
       return [];
     }),
   ]);
-  // Project-level docs come first as the stable tie-break when later ranking
-  // keys match.
+  // Project-level docs come first so that, once score and mtime have tied in
+  // `selectRelevantAutoMemoryDocuments`, the stable sort leaves project
+  // memory ahead of user memory — the "project shadows user" precedence. The
+  // model selector ranks by its own judgement, so this ordering is advisory
+  // there, not enforced.
   const docs = filterExcludedAutoMemoryDocuments(
     [...projectDocs, ...userDocs],
     options.excludedFilePaths,

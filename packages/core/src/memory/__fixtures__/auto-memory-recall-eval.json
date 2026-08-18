@@ -422,7 +422,7 @@
     },
     {
       "id": "no-result-knowledge-graph",
-      "category": "semantic-no-lexical",
+      "category": "no-result",
       "query": "knowledge graph embeddings",
       "relevantIds": []
     },
@@ -461,6 +461,24 @@
       "category": "no-result",
       "query": "go",
       "relevantIds": []
+    },
+    {
+      "id": "semantic-terse-replies",
+      "category": "semantic-no-lexical",
+      "query": "stop padding your replies with recaps",
+      "relevantIds": ["en-style"]
+    },
+    {
+      "id": "semantic-latency-chart",
+      "category": "semantic-no-lexical",
+      "query": "which chart shows p99 spikes",
+      "relevantIds": ["en-oncall"]
+    },
+    {
+      "id": "semantic-slow-first-paint",
+      "category": "semantic-no-lexical",
+      "query": "首屏加载太久了",
+      "relevantIds": ["zh-perf"]
     }
   ]
 }

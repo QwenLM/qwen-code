@@ -311,6 +311,17 @@ function evaluate(
 }
 
 const isEnglish = (testCase: EvalCase) => testCase.category === 'english';
+/**
+ * Answerable queries that share no token with their labeled document. The
+ * scorer requires a lexical match before it returns anything, so it cannot
+ * serve this slice by design — the model selector is the path that covers it.
+ * The slice exists to keep that cost measured and visible rather than absent
+ * from the corpus, and it is excluded from the quality floor below because a
+ * floor over cases the deterministic path is not meant to answer would only
+ * measure how many of them the corpus happens to contain.
+ */
+const isSemanticNoLexical = (testCase: EvalCase) =>
+  testCase.category === 'semantic-no-lexical';
 const isCjk = (testCase: EvalCase) =>
   testCase.category === 'chinese' ||
   testCase.category === 'japanese' ||
@@ -342,12 +353,44 @@ describe('auto-memory recall evaluation', () => {
    * scorer if that ordering is ever judged wrong; do not relabel the case.
    */
   it('holds the multilingual quality floor', () => {
-    const summary = evaluate(loadFixture(), selectRelevantAutoMemoryDocuments);
+    // Excludes the semantic-no-lexical slice: those cases are labeled
+    // answerable but are unreachable without a lexical match, so counting
+    // them here would turn a deliberate design boundary into a moving floor.
+    // Their cost is measured by the test below instead.
+    const summary = evaluate(
+      loadFixture(),
+      selectRelevantAutoMemoryDocuments,
+      (testCase) => !isSemanticNoLexical(testCase),
+    );
     expect(summary.recallAt5).toBeGreaterThanOrEqual(0.9);
     expect(summary.top1Accuracy).toBeGreaterThanOrEqual(0.85);
     expect(summary.noResultPrecision).toBe(1);
     expect(summary.noResultRecall).toBe(1);
     expect(summary.maxSelectedDocs).toBeLessThanOrEqual(RECALL_AT);
+  });
+
+  /**
+   * Records the price of "no lexical match, no score". These queries are
+   * genuinely answerable — a human, and the model selector, would pick the
+   * labeled document — and the deterministic scorer returns nothing for all
+   * of them. Two consequences follow that the headline numbers do not show:
+   * on a tool-free turn the fast path delivers nothing here, and the
+   * selector-failure fallback is silent here too.
+   *
+   * If a future scorer change starts answering part of this slice, this test
+   * fails. That is the intended signal: raise the number, do not delete the
+   * cases or move them to `no-result`.
+   */
+  it('records the deterministic path as silent on semantic-only queries', () => {
+    const summary = evaluate(
+      loadFixture(),
+      selectRelevantAutoMemoryDocuments,
+      isSemanticNoLexical,
+    );
+
+    expect(summary.recallCases).toBeGreaterThanOrEqual(3);
+    expect(summary.recallAt5).toBe(0);
+    expect(summary.maxSelectedDocs).toBe(0);
   });
 
   it('does not regress English Recall@5 against the pre-change scorer', () => {
@@ -391,6 +434,7 @@ describe('auto-memory recall evaluation', () => {
       ['english', isEnglish],
       ['cjk', isCjk],
       ['mixed', isMixed],
+      ['semantic-no-lexical', isSemanticNoLexical],
     ] as const;
 
     const lines = [

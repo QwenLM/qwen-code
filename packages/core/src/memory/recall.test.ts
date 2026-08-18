@@ -7,6 +7,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   buildRelevantAutoMemoryPrompt,
+  MAX_FAST_RECALL_DOCS,
   resolveRelevantAutoMemoryPromptForQuery,
   selectRelevantAutoMemoryDocuments,
 } from './recall.js';
@@ -325,7 +326,8 @@ describe('auto-memory relevant recall', () => {
 
     // Both docs tie on lexical score for 'cadence'; the 'preference' token
     // boosts only the user-typed doc, so it must win. Without the boost the
-    // alphabetical type tie-break would surface the project doc instead.
+    // docs would also tie on mtime and input order would surface the project
+    // doc instead.
     const selected = selectRelevantAutoMemoryDocuments('cadence preference', [
       projectDoc,
       userDoc,
@@ -336,6 +338,50 @@ describe('auto-memory relevant recall', () => {
     expect(selectRelevantAutoMemoryDocuments('preference', [userDoc])).toEqual(
       [],
     );
+  });
+
+  it('breaks score ties by recency, not by document type', () => {
+    // Every type carries the same title, so the only thing separating these
+    // documents is the tie-break. An alphabetical type comparison orders them
+    // feedback < project < reference < user, which pushes user memory out of
+    // the two-document fast result entirely.
+    const withMtime = (
+      doc: ScannedAutoMemoryDocument,
+      mtimeMs: number,
+    ): ScannedAutoMemoryDocument => ({ ...doc, mtimeMs });
+    const docs = [
+      withMtime(memoryDoc('fb.md', 'feedback', 'Deploy notes', '', ''), 10),
+      withMtime(memoryDoc('pr.md', 'project', 'Deploy notes', '', ''), 20),
+      withMtime(memoryDoc('rf.md', 'reference', 'Deploy notes', '', ''), 30),
+      withMtime(memoryDoc('us.md', 'user', 'Deploy notes', '', ''), 40),
+    ];
+
+    expect(
+      selectRelevantAutoMemoryDocuments('deploy', docs).map(
+        (doc) => doc.filename,
+      ),
+    ).toEqual(['us.md', 'rf.md', 'pr.md', 'fb.md']);
+
+    // The fast path takes only the first MAX_FAST_RECALL_DOCS, so the
+    // tie-break decides whether user memory reaches the model at all.
+    expect(
+      selectRelevantAutoMemoryDocuments('deploy', docs)
+        .slice(0, MAX_FAST_RECALL_DOCS)
+        .map((doc) => doc.type),
+    ).toContain('user');
+  });
+
+  it('falls back to input order when score and recency both tie', () => {
+    // Project-level documents are concatenated ahead of user-level ones in
+    // `resolveRelevantAutoMemoryPromptForQuery`; the stable sort is what
+    // preserves that precedence once every ranking key has tied.
+    const projectDoc = memoryDoc('p.md', 'project', 'Deploy notes', '', '');
+    const userDoc = memoryDoc('u.md', 'user', 'Deploy notes', '', '');
+
+    expect(
+      selectRelevantAutoMemoryDocuments('deploy', [projectDoc, userDoc])[0]
+        ?.filename,
+    ).toBe('p.md');
   });
 
   it('bounds long mixed queries while retaining their actual text edges', () => {

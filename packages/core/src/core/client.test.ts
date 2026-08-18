@@ -5394,6 +5394,116 @@ hello
       );
     });
 
+    /**
+     * Tool-free turn where the selector lands *after* the fast delivery but
+     * before the turn ends: the handle is discarded, so the reason it records
+     * is the only delivery signal this shape of turn produces.
+     */
+    const runFastDiscardTurn = async (
+      promptId: string,
+      fastDocs: Array<ReturnType<typeof fastDoc>>,
+      refinedDocs: Array<ReturnType<typeof fastDoc>>,
+    ) => {
+      let settleRecall:
+        | ((value: {
+            prompt: string;
+            selectedDocs: Array<ReturnType<typeof fastDoc>>;
+            strategy: 'model';
+          }) => void)
+        | undefined;
+      mockMemoryManager.recall.mockImplementation((_root, _query, options) => {
+        options.onFastResult?.({
+          prompt: '## Relevant memory\n\nFast deterministic result.',
+          selectedDocs: fastDocs,
+          strategy: 'heuristic',
+        });
+        return new Promise((resolve) => {
+          settleRecall = resolve;
+        });
+      });
+
+      // Held open so the selector can settle mid-turn; without it the turn
+      // ends first and the discard sees no result at all.
+      let releaseStream: (() => void) | undefined;
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          await new Promise<void>((resolve) => {
+            releaseStream = resolve;
+          });
+          yield { type: 'content', value: 'Hello' };
+        })(),
+      );
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+
+      const done = fromAsync(
+        client.sendMessageStream(
+          [{ text: 'What do you know about me?' }],
+          new AbortController().signal,
+          promptId,
+          { type: SendMessageType.UserQuery },
+        ),
+      );
+      await vi.advanceTimersByTimeAsync(100);
+      settleRecall!({
+        prompt: '## Relevant memory\n\nREFINED_MARKER',
+        selectedDocs: refinedDocs,
+        strategy: 'model',
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      releaseStream!();
+      await done;
+    };
+
+    it('reports a fully fast-delivered result as already-delivered, not as a lost one', async () => {
+      vi.useFakeTimers();
+      const overlapping = fastDoc('/m/overlap.md', '- overlapping');
+      await runFastDiscardTurn(
+        'prompt-id-fast-discard-already-delivered',
+        [overlapping],
+        [overlapping],
+      );
+
+      expect(logMemoryRecallDelivery).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          phase: 'refined',
+          delivery_point: 'discarded',
+          discard_reason: 'already_delivered',
+          docs_selected: 1,
+        }),
+      );
+      expect(logMemoryRecallDelivery).not.toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          discard_reason: 'no_safe_delivery_point',
+        }),
+      );
+    });
+
+    it('still reports a partly fast-delivered result as having no safe delivery point', async () => {
+      vi.useFakeTimers();
+      const overlapping = fastDoc('/m/overlap.md', '- overlapping');
+      // `/m/extra.md` never reached the model, so the turn really did lose it.
+      const undelivered = fastDoc('/m/extra.md', '- extra');
+      await runFastDiscardTurn(
+        'prompt-id-fast-discard-partial',
+        [overlapping],
+        [overlapping, undelivered],
+      );
+
+      expect(logMemoryRecallDelivery).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          phase: 'refined',
+          delivery_point: 'discarded',
+          discard_reason: 'no_safe_delivery_point',
+        }),
+      );
+    });
+
     it('delivers no fast result when the turn is cancelled inside the initial window', async () => {
       vi.useFakeTimers();
       const controller = new AbortController();

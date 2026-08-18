@@ -363,7 +363,7 @@ flowchart TD
     H -- "失败/异常" --> L[复用已计算的启发式排序]
     F -- 否 --> M[tokenize query\nNFKC + ASCII token + CJK bigram\n最多 64 个 token]
     M --> N[scoreDocument 打分\ntitle +4 / description +3 / body +1\n词法命中后类型加成最多 +2]
-    N --> O[过滤 score=0 的文档\n按分数降序排列，取 Top 5]
+    N --> O[过滤 score=0 的文档\n按分数降序、mtime 降序、输入顺序排列\n取 Top 5]
     L --> O
     O --> P{有得分文档?}
     P -- 是 --> Q[strategy: heuristic]
@@ -415,13 +415,15 @@ flowchart TD
     G --> H{本轮是否有\nToolResult?}
     H -- 是 --> I{Recall 是否已完成?}
     I -- 是 --> J[排除 Fast 已投递文档\n按剩余文档重建 Prompt]
-    I -- 否 --> M[丢弃\nno_safe_delivery_point]
+    I -- 否 --> M
     J --> J1{还有剩余文档?}
     J1 -- 是 --> K[注入 ToolResult\nphase: refined]
     J1 -- 否 --> L{Recall 选中了文档?}
     L -- 是 --> L1[丢弃\nalready_delivered]
     L -- 否 --> L2[丢弃\nno_relevant_results]
-    H -- 否 --> M
+    H -- 否 --> M{选中文档是否\n全部已被 Fast 投递?}
+    M -- 是 --> L1
+    M -- 否 --> M1[丢弃\nno_safe_delivery_point]
 ```
 
 **为什么需要 Fast 阶段**：当存在 Config 时 Recall 会等待 Model Selector，
@@ -430,8 +432,19 @@ flowchart TD
 用户级 Memory 最重要的场景。Fast 结果复用 `selectModelCandidateDocuments`
 为 Model Manifest 已经算好的候选，不产生额外扫描或 I/O。
 
+**Fast 阶段的边界**：Fast 结果就是确定性结果，因此它只能解决**时机**问题，
+解决不了**匹配**问题。与文档没有任何词面重叠的 Query 产生不了 Fast 结果，
+这类 Query 在无工具回合仍然拿不到 Memory——只有 Model Selector 能覆盖它们，
+而无工具回合等不到 Selector。语料中的 `semantic-no-lexical` 分片专门测量这一点。
+
 **去重**：两个阶段来自同一次扫描，Model Selector 并未把 Fast 文档视为已排除，
 因此 ToolResult 投递前必须过滤掉 Fast 已投递的 `filePath` 并重建 Prompt。
+
+**丢弃口径**：同一条规则也适用于取消路径。若最终选中的文档已被 Fast 阶段
+全部投递，无论本轮是因为无工具调用、New Query、Reset、Abort 还是 Shutdown
+结束，都记为 `already_delivered` 而不是对应的取消原因——否则「Memory 从未
+到达模型」这一桶会被实际已送达的回合灌水。只有部分重叠时仍记取消原因，
+因为不在 Fast 集合里的那些文档确实没有投递点。
 
 ---
 

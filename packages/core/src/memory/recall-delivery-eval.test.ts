@@ -246,10 +246,11 @@ function summarize(
   fixture: EvalFixture,
   simulate: typeof simulateSinglePath,
   selectorLatencyMs: number,
+  filter: (testCase: EvalCase) => boolean = () => true,
 ): DeliverySummary {
   const docs = toScannedDocs(fixture.docs);
   const answerable = fixture.cases.filter(
-    (testCase) => testCase.relevantIds.length > 0,
+    (testCase) => testCase.relevantIds.length > 0 && filter(testCase),
   );
 
   let firstTurnHits = 0;
@@ -342,6 +343,15 @@ function measureDeterministicLatencyMs(fixture: EvalFixture): {
   return { p50: percentile(samples, 50), p95: percentile(samples, 95) };
 }
 
+/**
+ * Answerable cases the deterministic scorer can actually reach. The
+ * `semantic-no-lexical` slice is labeled answerable but shares no token with
+ * its document, so no fast result exists for it; it is measured on its own
+ * rather than folded into the delivery guarantee.
+ */
+const isLexicallyAnswerable = (testCase: EvalCase) =>
+  testCase.category !== 'semantic-no-lexical';
+
 const formatPercent = (value: number) => `${(value * 100).toFixed(1)}%`;
 
 describe('auto-memory recall delivery evaluation', () => {
@@ -363,12 +373,44 @@ describe('auto-memory recall delivery evaluation', () => {
     }
   });
 
-  it('delivers on every tool-free turn under the fast path once the corpus is answerable', () => {
+  it('delivers on every tool-free turn whose query the deterministic path can match', () => {
     const fixture = loadFixture();
     for (const latency of SELECTOR_LATENCY_SCENARIOS_MS) {
-      const summary = summarize(fixture, simulateFastPath, latency);
+      const summary = summarize(
+        fixture,
+        simulateFastPath,
+        latency,
+        isLexicallyAnswerable,
+      );
+      expect(summary.answerableCases).toBeGreaterThan(0);
       expect(summary.toolFreeFirstTurnDeliveryRate).toBe(1);
       expect(summary.anyDeliveryRate).toBe(1);
+    }
+  });
+
+  /**
+   * The bound on the claim above. The fast result is the deterministic
+   * result, so a query with no lexical match produces no fast result, and a
+   * tool-free turn asking it still ends with nothing delivered. The fast path
+   * closes the *timing* gap, not the *matching* gap — only the model selector
+   * closes the latter, and on a tool-free turn it never lands.
+   *
+   * The table below reports the honest overall rate, which is this slice's
+   * share below 100%, rather than the lexically-answerable rate alone.
+   */
+  it('delivers nothing on a tool-free turn for semantic-only queries', () => {
+    const fixture = loadFixture();
+    for (const latency of SELECTOR_LATENCY_SCENARIOS_MS) {
+      if (latency <= INITIAL_BUDGET_MS) continue;
+      const summary = summarize(
+        fixture,
+        simulateFastPath,
+        latency,
+        (testCase) => !isLexicallyAnswerable(testCase),
+      );
+      expect(summary.answerableCases).toBeGreaterThan(0);
+      expect(summary.toolFreeFirstTurnDeliveryRate).toBe(0);
+      expect(summary.anyDeliveryRate).toBe(0);
     }
   });
 

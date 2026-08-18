@@ -859,11 +859,25 @@ export class GeminiClient {
     handle: MemoryPrefetchHandle,
     discardReason: MemoryRecallDiscardReason,
   ): void {
+    const result = handle.result ?? EMPTY_RELEVANT_AUTO_MEMORY_RESULT;
+    // A settled result whose every document the fast phase already injected
+    // was not lost, whatever ended the turn — most often a tool-free turn
+    // reaching `no_safe_delivery_point`. Reporting those under the
+    // cancellation reason would inflate the "memory never reached the model"
+    // bucket with turns that did get it, so apply the same rule the
+    // ToolResult consume point uses. A partial overlap still reports the
+    // cancellation reason: the documents outside `fastDeliveredPaths`
+    // genuinely had no delivery point.
+    const everyDocAlreadyDelivered =
+      result.selectedDocs.length > 0 &&
+      result.selectedDocs.every((doc) =>
+        handle.fastDeliveredPaths.has(doc.filePath),
+      );
     this.logMemoryPrefetchDelivery(
       handle,
       'discarded',
-      handle.result ?? EMPTY_RELEVANT_AUTO_MEMORY_RESULT,
-      discardReason,
+      result,
+      everyDocAlreadyDelivered ? 'already_delivered' : discardReason,
     );
   }
 
