@@ -317,13 +317,24 @@ One movement mode is new. Before this change an activity key came from
 transcript mtime alone and could only advance, so a row could be skipped between
 pages but never repeated. A live watermark that leads mtime is not durable: when
 the live entry retires mid-pass the row's key falls back to mtime, so a page
-whose cursor was encoded from the higher watermark can admit that row again.
-Activity-cursor pages are therefore a multiset over a pass, and callers that
-accumulate pages key rows by `sessionId`. Holding the key stable across
-retirement requires the cursor to carry the key already emitted per identity,
-which changes the opaque cursor contract on every activity-cursor route; that is
-tracked in issue [#9419](https://github.com/QwenLM/qwen-code/issues/9419) rather
-than folded into this timestamp change.
+whose cursor was encoded from the higher watermark would admit that row again.
+The same regression applies to a live-only row that persists mid-pass, because
+its emitted key was the watermark while its persisted key is the first flush's
+mtime.
+
+The activity cursor therefore carries the identities of rows already emitted at
+a live-derived key, and the after-cursor filter excludes them for the rest of
+the pass, so within one pass a session is returned at most once. The list stays
+bounded and self-pruning: an identity is dropped once its persisted key alone
+can no longer pass the strictly-older filter, or once the row leaves the
+filtered collection while not live. Past a 64-identity cap the identities with
+the highest persisted keys are dropped first — they leave the re-admission
+window soonest — and a dropped identity degrades to an at-most-once duplicate
+instead of failing the pass. Cursors minted before the field existed remain
+valid, and the field is omitted when empty, so the cursor shape is unchanged
+whenever no live-derived key was emitted. Cross-pass guarantees are unchanged:
+a new pass is a new snapshot, and clients that require a fresh view reload from
+the first page.
 
 ## Bridge and Route Implementation
 

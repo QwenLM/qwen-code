@@ -32,6 +32,7 @@ import {
   PromptDeadlineExceededError,
   resolvePromptDeadlineMs,
 } from './server.js';
+import { invalidateWorkspaceSessionListCache } from './server/session-list.js';
 import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
 import {
   ChannelWorkerControlError,
@@ -15887,6 +15888,277 @@ describe('createServeApp', () => {
       expect(new Set(allIds).size).toBe(3);
     });
 
+    it('does not repeat an organized row whose live entry retires between pages', async () => {
+      // The merged activity key regresses from the watermark to the persisted
+      // mtime when the live entry disappears between page fetches. The cursor
+      // carries the identities already emitted at a live-derived key, so the
+      // regressed row must not be re-admitted by the strictly-older filter.
+      const liveId = '550e8400-e29b-41d4-a716-446655460000';
+      await writeStoredSession({
+        sessionId: liveId,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T11:00:00.000Z',
+        prompt: 'retires mid-pass',
+        mtime: new Date('2026-05-17T12:00:00.000Z'),
+      });
+      await writeStoredSession({
+        sessionId: '550e8400-e29b-41d4-a716-446655460001',
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T11:00:00.000Z',
+        prompt: 'persisted 1',
+        mtime: new Date('2026-05-17T12:04:00.000Z'),
+      });
+      await writeStoredSession({
+        sessionId: '550e8400-e29b-41d4-a716-446655460002',
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T11:00:00.000Z',
+        prompt: 'persisted 2',
+        mtime: new Date('2026-05-17T12:03:00.000Z'),
+      });
+      let liveEntries = [
+        {
+          sessionId: liveId,
+          workspaceCwd: WS_BOUND,
+          createdAt: '2026-05-17T11:00:00.000Z',
+          updatedAt: '2026-05-17T12:05:00.000Z',
+          clientCount: 1,
+          hasActivePrompt: false,
+        },
+      ];
+      const bridge = fakeBridge({ listImpl: () => liveEntries });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, boundWorkspace: WS_BOUND },
+      );
+      const host = (req: request.Test): request.Test =>
+        req.set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      const page1 = await host(
+        request(app).get(
+          `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?view=organized&size=2`,
+        ),
+      );
+      expect(page1.status).toBe(200);
+      expect(
+        page1.body.sessions.map((s: { sessionId: string }) => s.sessionId),
+      ).toEqual([liveId, '550e8400-e29b-41d4-a716-446655460001']);
+
+      // The live entry retires before the next fetch; the row's key falls
+      // back to its mtime, which sorts behind the page-1 cursor boundary.
+      liveEntries = [];
+      const page2 = await host(
+        request(app).get(
+          `/workspace/${encodeURIComponent(
+            WS_BOUND,
+          )}/sessions?view=organized&size=2&cursor=${encodeURIComponent(
+            page1.body.nextCursor as string,
+          )}`,
+        ),
+      );
+      expect(page2.status).toBe(200);
+      expect(
+        page2.body.sessions.map((s: { sessionId: string }) => s.sessionId),
+      ).toEqual(['550e8400-e29b-41d4-a716-446655460002']);
+      expect(page2.body.nextCursor).toBeUndefined();
+      const allRetireIds = [...page1.body.sessions, ...page2.body.sessions].map(
+        (session: { sessionId: string }) => session.sessionId,
+      );
+      expect(new Set(allRetireIds).size).toBe(3);
+    });
+
+    it('does not repeat an organized live-only row that persists between pages', async () => {
+      // A live-only row is emitted keyed by its watermark. When it closes and
+      // its first flush lands with an mtime that still sorts after the page-1
+      // boundary, the persisted scan would re-emit it without the carried
+      // exclusion.
+      const liveOnlyId = '550e8400-e29b-41d4-a716-446655470000';
+      await writeStoredSession({
+        sessionId: '550e8400-e29b-41d4-a716-446655470001',
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T11:00:00.000Z',
+        prompt: 'persisted 1',
+        mtime: new Date('2026-05-17T12:04:00.000Z'),
+      });
+      await writeStoredSession({
+        sessionId: '550e8400-e29b-41d4-a716-446655470002',
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T11:00:00.000Z',
+        prompt: 'persisted 2',
+        mtime: new Date('2026-05-17T12:03:00.000Z'),
+      });
+      let liveEntries = [
+        {
+          sessionId: liveOnlyId,
+          workspaceCwd: WS_BOUND,
+          createdAt: '2026-05-17T11:59:00.000Z',
+          updatedAt: '2026-05-17T12:05:00.000Z',
+          clientCount: 1,
+          hasActivePrompt: false,
+        },
+      ];
+      const bridge = fakeBridge({ listImpl: () => liveEntries });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, boundWorkspace: WS_BOUND },
+      );
+      const host = (req: request.Test): request.Test =>
+        req.set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      const page1 = await host(
+        request(app).get(
+          `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?view=organized&size=2`,
+        ),
+      );
+      expect(page1.status).toBe(200);
+      expect(
+        page1.body.sessions.map((s: { sessionId: string }) => s.sessionId),
+      ).toEqual([liveOnlyId, '550e8400-e29b-41d4-a716-446655470001']);
+
+      liveEntries = [];
+      await writeStoredSession({
+        sessionId: liveOnlyId,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T11:59:00.000Z',
+        prompt: 'flushed after close',
+        mtime: new Date('2026-05-17T12:03:30.000Z'),
+      });
+      // The TTL cache would otherwise keep serving the pre-flush scan for the
+      // rest of this test; production reaches the same state once it expires.
+      invalidateWorkspaceSessionListCache({
+        runtimeBaseDir: new Storage(WS_BOUND).getRuntimeBaseDir(),
+        workspaceCwd: WS_BOUND,
+        archiveStates: ['active'],
+      });
+      const page2 = await host(
+        request(app).get(
+          `/workspace/${encodeURIComponent(
+            WS_BOUND,
+          )}/sessions?view=organized&size=2&cursor=${encodeURIComponent(
+            page1.body.nextCursor as string,
+          )}`,
+        ),
+      );
+      expect(page2.status).toBe(200);
+      expect(
+        page2.body.sessions.map((s: { sessionId: string }) => s.sessionId),
+      ).toEqual(['550e8400-e29b-41d4-a716-446655470002']);
+      expect(page2.body.nextCursor).toBeUndefined();
+    });
+
+    it('caps the carried emitted identities and degrades the overflow to at-most-once duplicates', async () => {
+      const rowId = (n: number) =>
+        `550e8400-e29b-41d4-a716-44665548${String(n).padStart(4, '0')}`;
+      const oldId = '550e8400-e29b-41d4-a716-446655499999';
+      const total = 70;
+      for (let i = 0; i < total; i++) {
+        await writeStoredSession({
+          sessionId: rowId(i),
+          cwd: WS_BOUND,
+          timestamp: '2026-05-17T11:00:00.000Z',
+          prompt: `watermarked ${i}`,
+          mtime: new Date(Date.UTC(2026, 4, 17, 12, 1, i)),
+        });
+      }
+      await writeStoredSession({
+        sessionId: oldId,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T10:00:00.000Z',
+        prompt: 'old anchor',
+        mtime: new Date(Date.UTC(2026, 4, 17, 11, 0, 0)),
+      });
+      let liveEntries = Array.from({ length: total }, (_, i) => ({
+        sessionId: rowId(i),
+        workspaceCwd: WS_BOUND,
+        createdAt: '2026-05-17T11:00:00.000Z',
+        updatedAt: new Date(Date.UTC(2026, 4, 17, 13, 0, i)).toISOString(),
+        clientCount: 1,
+        hasActivePrompt: false,
+      }));
+      const bridge = fakeBridge({ listImpl: () => liveEntries });
+
+      const page1 = await listWorkspaceSessionsForResponse(bridge, WS_BOUND, {
+        view: 'organized',
+        size: total,
+      });
+      expect(page1.sessions).toHaveLength(total);
+      expect(page1.nextCursor).toBeDefined();
+      const decoded = JSON.parse(
+        Buffer.from(page1.nextCursor!, 'base64url').toString('utf8'),
+      ) as { emitted?: string[] };
+      // 70 rows were emitted at watermark keys; the cursor keeps the 64 with
+      // the lowest persisted floors and drops the 6 that leave the
+      // re-admission window soonest.
+      expect(decoded.emitted).toHaveLength(64);
+      expect(decoded.emitted).toContain(rowId(0));
+      expect(decoded.emitted).not.toContain(rowId(69));
+
+      // Every watermark retires before page 2: the 64 carried identities stay
+      // excluded, the 6 dropped ones degrade to an at-most-once duplicate,
+      // and the anchor row still surfaces.
+      liveEntries = [];
+      const page2 = await listWorkspaceSessionsForResponse(bridge, WS_BOUND, {
+        view: 'organized',
+        size: total,
+        cursor: page1.nextCursor!,
+      });
+      expect(page2.sessions.map((s) => s.sessionId)).toEqual([
+        rowId(69),
+        rowId(68),
+        rowId(67),
+        rowId(66),
+        rowId(65),
+        rowId(64),
+        oldId,
+      ]);
+    });
+
+    it('rejects an organized cursor whose emitted list is malformed', async () => {
+      await writeStoredSession({
+        sessionId: '550e8400-e29b-41d4-a716-446655440000',
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'only session',
+        mtime: new Date('2026-05-17T12:00:00.000Z'),
+      });
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, boundWorkspace: WS_BOUND },
+      );
+      const host = (req: request.Test): request.Test =>
+        req.set('Host', `127.0.0.1:${baseOpts.port}`);
+      const forged = (emitted: unknown): string =>
+        Buffer.from(
+          JSON.stringify({
+            group: 'all',
+            archiveState: 'active',
+            last: {
+              isPinned: false,
+              activityTime: Date.parse('2026-05-17T12:00:00.000Z'),
+              sessionId: '550e8400-e29b-41d4-a716-446655440000',
+            },
+            emitted,
+          }),
+          'utf8',
+        ).toString('base64url');
+      for (const emitted of ['nope', [''], [42]]) {
+        const res = await host(
+          request(app).get(
+            `/workspace/${encodeURIComponent(
+              WS_BOUND,
+            )}/sessions?view=organized&cursor=${encodeURIComponent(
+              forged(emitted),
+            )}`,
+          ),
+        );
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('invalid_cursor');
+      }
+    });
+
     it('paginates organized sessions with opaque cursors', async () => {
       for (let i = 0; i < 4; i++) {
         await writeStoredSession({
@@ -16490,6 +16762,124 @@ describe('createServeApp', () => {
           Array.from({ length: matchCount }, (_, i) => childId(i)),
         );
         expect(new Set(seen)).toEqual(expected);
+      });
+
+      it('does not repeat a parent-filtered row whose live entry retires between pages', async () => {
+        // The child's bridge watermark leads its transcript mtime. When the
+        // live entry retires between fetches, the merged key regresses to the
+        // mtime and the strictly-older cursor filter would re-admit the row
+        // without the carried emitted-identity exclusion.
+        const watermarked = childId(21);
+        const older = childId(22);
+        await writeStoredSession({
+          sessionId: watermarked,
+          cwd: WS_BOUND,
+          timestamp: '2026-05-17T11:59:00.000Z',
+          prompt: 'watermarked child',
+          mtime: new Date('2026-05-17T12:00:05.000Z'),
+          parentSessionId: PARENT,
+        });
+        await writeStoredSession({
+          sessionId: older,
+          cwd: WS_BOUND,
+          timestamp: '2026-05-17T11:59:00.000Z',
+          prompt: 'older child',
+          mtime: new Date('2026-05-17T12:00:01.000Z'),
+          parentSessionId: PARENT,
+        });
+        let liveEntries = [
+          {
+            sessionId: watermarked,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T11:59:00.000Z',
+            updatedAt: '2026-05-17T12:00:09.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+          },
+        ];
+        const bridge = fakeBridge({ listImpl: () => liveEntries });
+
+        const page1 = await listWorkspaceSessionsForResponse(bridge, WS_BOUND, {
+          parentSessionId: PARENT,
+          size: 1,
+        });
+        expect(page1.sessions.map((row) => row.sessionId)).toEqual([
+          watermarked,
+        ]);
+        expect(page1.nextCursor).toBeDefined();
+
+        liveEntries = [];
+        const page2 = await listWorkspaceSessionsForResponse(bridge, WS_BOUND, {
+          parentSessionId: PARENT,
+          size: 1,
+          cursor: page1.nextCursor!,
+        });
+        expect(page2.sessions.map((row) => row.sessionId)).toEqual([older]);
+        expect(page2.nextCursor).toBeUndefined();
+      });
+
+      it('does not repeat a parent-filtered live-only row that persists between pages', async () => {
+        // The metadata path inserts live-only rows on every page, so once the
+        // row closes and flushes, the persisted scan re-emits it keyed by an
+        // mtime that can still sort after the page-1 boundary.
+        const persistedChild = childId(31);
+        const liveOnlyChild = childId(32);
+        await writeStoredSession({
+          sessionId: persistedChild,
+          cwd: WS_BOUND,
+          timestamp: '2026-05-17T11:59:00.000Z',
+          prompt: 'persisted child',
+          mtime: new Date('2026-05-17T12:02:00.000Z'),
+          parentSessionId: PARENT,
+        });
+        let liveEntries = [
+          {
+            sessionId: liveOnlyChild,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T11:59:00.000Z',
+            updatedAt: '2026-05-17T12:05:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+            parentSessionId: PARENT,
+          },
+        ];
+        const bridge = fakeBridge({ listImpl: () => liveEntries });
+
+        const page1 = await listWorkspaceSessionsForResponse(bridge, WS_BOUND, {
+          parentSessionId: PARENT,
+          size: 1,
+        });
+        expect(page1.sessions.map((row) => row.sessionId)).toEqual([
+          liveOnlyChild,
+        ]);
+        expect(page1.nextCursor).toBeDefined();
+
+        liveEntries = [];
+        await writeStoredSession({
+          sessionId: liveOnlyChild,
+          cwd: WS_BOUND,
+          timestamp: '2026-05-17T11:59:00.000Z',
+          prompt: 'flushed child',
+          mtime: new Date('2026-05-17T12:03:00.000Z'),
+          parentSessionId: PARENT,
+        });
+        // The TTL cache would otherwise keep serving the pre-flush scan for
+        // the rest of this test; production reaches the same state once it
+        // expires.
+        invalidateWorkspaceSessionListCache({
+          runtimeBaseDir: new Storage(WS_BOUND).getRuntimeBaseDir(),
+          workspaceCwd: WS_BOUND,
+          archiveStates: ['active'],
+        });
+        const page2 = await listWorkspaceSessionsForResponse(bridge, WS_BOUND, {
+          parentSessionId: PARENT,
+          size: 1,
+          cursor: page1.nextCursor!,
+        });
+        expect(page2.sessions.map((row) => row.sessionId)).toEqual([
+          persistedChild,
+        ]);
+        expect(page2.nextCursor).toBeUndefined();
       });
 
       // Seeds `count` children of `parent` and returns parent's first-page

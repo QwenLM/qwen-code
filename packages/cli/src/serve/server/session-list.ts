@@ -28,6 +28,9 @@ import { laterActivityTimestamp } from './activity-timestamp.js';
 const DEFAULT_SESSION_PAGE_SIZE = 20;
 const MAX_SESSION_PAGE_SIZE = 100;
 const MAX_ORGANIZED_SESSIONS = 50_000;
+// Bounds the emitted-identity list an activity cursor may carry; the cursor
+// travels as a query parameter, so it must stay well under URL/header limits.
+const MAX_EMITTED_CURSOR_SESSION_IDS = 64;
 const PERSISTED_SESSION_LIST_CACHE_TTL_MS = 2_000;
 const persistedSessionListCache = new PersistedSessionListCache(
   PERSISTED_SESSION_LIST_CACHE_TTL_MS,
@@ -146,6 +149,7 @@ interface OrganizedCursor {
   sourceType?: string;
   sourceId?: string;
   last: OrganizedCursorKey;
+  emitted?: string[];
 }
 
 interface OrganizedCursorKey {
@@ -159,6 +163,21 @@ interface LiveSessionCursorKey {
   sessionId: string;
 }
 
+/**
+ * `emitted` is optional so cursors minted before the field existed stay
+ * valid; absent means no identities are excluded.
+ */
+function parseEmittedSessionIds(value: unknown): readonly string[] | undefined {
+  if (value === undefined) return [];
+  if (
+    !Array.isArray(value) ||
+    value.some((id) => typeof id !== 'string' || id.length === 0)
+  ) {
+    return undefined;
+  }
+  return value as string[];
+}
+
 function parseOrganizedCursor(
   cursor: string,
   expected: {
@@ -167,7 +186,7 @@ function parseOrganizedCursor(
     sourceType?: string;
     sourceId?: string;
   },
-): OrganizedCursorKey | undefined {
+): { last: OrganizedCursorKey; emitted: readonly string[] } | undefined {
   if (cursor === '') return undefined;
   try {
     const decoded = Buffer.from(cursor, 'base64url').toString('utf8');
@@ -192,7 +211,11 @@ function parseOrganizedCursor(
     ) {
       throw new Error('invalid organized cursor');
     }
-    return last;
+    const emitted = parseEmittedSessionIds((parsed as OrganizedCursor).emitted);
+    if (emitted === undefined) {
+      throw new Error('invalid organized cursor');
+    }
+    return { last, emitted };
   } catch {
     throw new InvalidCursorError(cursor, 'organized');
   }
@@ -204,9 +227,17 @@ function encodeOrganizedCursor(
   archiveState: SessionArchiveState,
   sourceType?: string,
   sourceId?: string,
+  emitted: readonly string[] = [],
 ): string {
   return Buffer.from(
-    JSON.stringify({ group, archiveState, sourceType, sourceId, last }),
+    JSON.stringify({
+      group,
+      archiveState,
+      sourceType,
+      sourceId,
+      last,
+      ...(emitted.length > 0 ? { emitted } : {}),
+    }),
     'utf8',
   ).toString('base64url');
 }
@@ -266,7 +297,7 @@ function matchesSessionMetadataSource(
 function parseMetadataSessionCursor(
   cursor: string,
   expected: SessionMetadataFilter & { archiveState: SessionArchiveState },
-): LiveSessionCursorKey | undefined {
+): { last: LiveSessionCursorKey; emitted: readonly string[] } | undefined {
   if (cursor === '') return undefined;
   try {
     const parsed = JSON.parse(
@@ -293,7 +324,16 @@ function parseMetadataSessionCursor(
     ) {
       throw new Error('invalid metadata cursor');
     }
-    return { activityTime: last.activityTime, sessionId: last.sessionId };
+    const emitted = parseEmittedSessionIds(
+      (parsed as { emitted?: unknown }).emitted,
+    );
+    if (emitted === undefined) {
+      throw new Error('invalid metadata cursor');
+    }
+    return {
+      last: { activityTime: last.activityTime, sessionId: last.sessionId },
+      emitted,
+    };
   } catch {
     throw new InvalidCursorError(
       cursor,
@@ -306,9 +346,15 @@ function encodeMetadataSessionCursor(
   last: LiveSessionCursorKey,
   filter: SessionMetadataFilter,
   archiveState: SessionArchiveState,
+  emitted: readonly string[] = [],
 ): string {
   return Buffer.from(
-    JSON.stringify({ ...filter, archiveState, last }),
+    JSON.stringify({
+      ...filter,
+      archiveState,
+      last,
+      ...(emitted.length > 0 ? { emitted } : {}),
+    }),
     'utf8',
   ).toString('base64url');
 }
@@ -589,6 +635,73 @@ function compareOrganizedCursorKeys(
   return a.sessionId.localeCompare(b.sessionId);
 }
 
+/**
+ * Rebuilds the emitted-identity list an activity cursor carries across a
+ * pagination pass. A row's activity key is not stable: a live watermark that
+ * leads the transcript mtime evaporates when the live entry retires, and a
+ * live-only row gains a persisted key only after its first flush. Either
+ * transition can drop a row already emitted on an earlier page back behind
+ * the cursor boundary, where the strictly-older key filter would admit it a
+ * second time. The cursor therefore names the emitted rows whose keys were
+ * live-derived, and the after-cursor filter excludes them for the rest of the
+ * pass.
+ *
+ * The list stays bounded. An identity is dropped once its persisted key alone
+ * can no longer pass the key filter (`reenters`), or once the row left the
+ * filtered collection while not live. Past MAX_EMITTED_CURSOR_SESSION_IDS the
+ * identities with the highest persisted keys are dropped first — they leave
+ * the re-admission window soonest — and a dropped identity degrades to an
+ * at-most-once duplicate instead of failing the pass.
+ */
+function nextEmittedSessionIds(options: {
+  carried: ReadonlySet<string>;
+  page: readonly BridgeSessionSummary[];
+  liveSessionIds: ReadonlySet<string>;
+  liveListUnavailable: boolean;
+  listedById: ReadonlyMap<string, BridgeSessionSummary>;
+  persistedTimeById: ReadonlyMap<string, number>;
+  reenters: (row: BridgeSessionSummary, persistedTime: number) => boolean;
+}): string[] {
+  const candidates = new Set(options.carried);
+  for (const row of options.page) {
+    if (options.liveSessionIds.has(row.sessionId)) {
+      candidates.add(row.sessionId);
+    }
+  }
+  const kept: Array<{ sessionId: string; persistedTime: number }> = [];
+  for (const sessionId of candidates) {
+    const row = options.listedById.get(sessionId);
+    if (!row) {
+      // Absent from the filtered collection. A still-live row (organized
+      // live-only rows are first-page insertions) may persist into it later;
+      // when the live list is unavailable that cannot be ruled out either.
+      // Anything else cannot be emitted again within this pass.
+      if (
+        options.liveSessionIds.has(sessionId) ||
+        options.liveListUnavailable
+      ) {
+        kept.push({ sessionId, persistedTime: Number.NEGATIVE_INFINITY });
+      }
+      continue;
+    }
+    const persistedTime = options.persistedTimeById.get(sessionId);
+    if (persistedTime === undefined) {
+      // Live-only: no persisted floor yet, so it can land anywhere once it
+      // flushes.
+      kept.push({ sessionId, persistedTime: Number.NEGATIVE_INFINITY });
+      continue;
+    }
+    if (options.reenters(row, persistedTime)) {
+      kept.push({ sessionId, persistedTime });
+    }
+  }
+  if (kept.length > MAX_EMITTED_CURSOR_SESSION_IDS) {
+    kept.sort((a, b) => a.persistedTime - b.persistedTime);
+    kept.length = MAX_EMITTED_CURSOR_SESSION_IDS;
+  }
+  return kept.map((entry) => entry.sessionId);
+}
+
 function applyOrganization(
   session: BridgeSessionSummary,
   organization:
@@ -638,7 +751,7 @@ async function listOrganizedWorkspaceSessionsForResponse(
       'group',
     );
   }
-  const cursorKey =
+  const cursor =
     options.cursor !== undefined
       ? parseOrganizedCursor(options.cursor, {
           group,
@@ -647,6 +760,8 @@ async function listOrganizedWorkspaceSessionsForResponse(
           sourceId: options.sourceId,
         })
       : undefined;
+  const cursorKey = cursor?.last;
+  const emittedBeforePage = new Set(cursor?.emitted ?? []);
   const isFirstPage = cursorKey === undefined;
   let liveMergeFailed = false;
 
@@ -669,11 +784,20 @@ async function listOrganizedWorkspaceSessionsForResponse(
       ),
     );
   }
+  // Activity floors: the key a row falls back to once its live entry is gone.
+  const persistedTimeById = new Map(
+    persisted.sessions.map((session) => [
+      session.sessionId,
+      getSummaryActivityTime(session),
+    ]),
+  );
+  const liveSessionIds = new Set<string>();
 
   if (readOptions.mergeLive !== false && archiveState !== 'archived') {
     try {
       const liveSessions = bridge.listWorkspaceSessions(workspaceCwd);
       for (const live of liveSessions) {
+        liveSessionIds.add(live.sessionId);
         const existing = bySessionId.get(live.sessionId);
         const organization = snapshot.sessions.get(live.sessionId);
         if (existing) {
@@ -759,22 +883,47 @@ async function listOrganizedWorkspaceSessionsForResponse(
       ? filtered
       : filtered.filter(
           (session) =>
+            // A row already emitted at a live-derived key stays excluded even
+            // if its key regressed behind the cursor (live retirement, or a
+            // live-only row that persisted mid-pass).
+            !emittedBeforePage.has(session.sessionId) &&
             compareOrganizedCursorKeys(
               cursorKey,
               getOrganizedCursorKey(activityTimeById, session),
             ) < 0,
         );
   const page = afterCursor.slice(0, pageSize);
-  const nextCursor =
-    page.length < afterCursor.length
-      ? encodeOrganizedCursor(
-          getOrganizedCursorKey(activityTimeById, page[page.length - 1]!),
-          group,
-          archiveState,
-          options.sourceType,
-          options.sourceId,
-        )
-      : undefined;
+  let nextCursor: string | undefined;
+  if (page.length < afterCursor.length) {
+    const boundary = getOrganizedCursorKey(
+      activityTimeById,
+      page[page.length - 1]!,
+    );
+    const emitted = nextEmittedSessionIds({
+      carried: emittedBeforePage,
+      page,
+      liveSessionIds,
+      liveListUnavailable: liveMergeFailed,
+      listedById: new Map(
+        filtered.map((session) => [session.sessionId, session]),
+      ),
+      persistedTimeById,
+      reenters: (row, persistedTime) =>
+        compareOrganizedCursorKeys(boundary, {
+          isPinned: row.isPinned === true,
+          activityTime: persistedTime,
+          sessionId: row.sessionId,
+        }) < 0,
+    });
+    nextCursor = encodeOrganizedCursor(
+      boundary,
+      group,
+      archiveState,
+      options.sourceType,
+      options.sourceId,
+      emitted,
+    );
+  }
   return {
     sessions: page,
     ...(nextCursor !== undefined ? { nextCursor } : {}),
@@ -810,11 +959,20 @@ async function listWorkspaceSessionsByMetadataForResponse(
   for (const session of persisted.sessions) {
     bySessionId.set(session.sessionId, clonePersistedSummary(session));
   }
+  // Activity floors: the key a row falls back to once its live entry is gone.
+  const persistedTimeById = new Map(
+    persisted.sessions.map((session) => [
+      session.sessionId,
+      getSummaryActivityTime(session),
+    ]),
+  );
+  const liveSessionIds = new Set<string>();
 
   let liveMergeFailed = false;
   if (readOptions.mergeLive !== false && archiveState !== 'archived') {
     try {
       for (const live of bridge.listWorkspaceSessions(workspaceCwd)) {
+        liveSessionIds.add(live.sessionId);
         const existing = bySessionId.get(live.sessionId);
         if (existing) {
           bySessionId.set(
@@ -867,32 +1025,54 @@ async function listWorkspaceSessionsByMetadataForResponse(
       ),
     );
   readOptions.signal?.throwIfAborted();
-  const cursorKey =
+  const cursor =
     options.cursor !== undefined && options.cursor !== ''
       ? parseMetadataSessionCursor(options.cursor, {
           ...filter,
           archiveState,
         })
       : undefined;
+  const cursorKey = cursor?.last;
+  const emittedBeforePage = new Set(cursor?.emitted ?? []);
   const afterCursor =
     cursorKey === undefined
       ? matches
       : matches.filter(
           (session) =>
+            // See the organized path: exclude rows already emitted at a
+            // live-derived key whose key regressed behind the cursor.
+            !emittedBeforePage.has(session.sessionId) &&
             compareLiveSessionCursorKeys(
               cursorKey,
               getLiveSessionCursorKey(session),
             ) < 0,
         );
   const page = afterCursor.slice(0, pageSize);
-  const nextCursor =
-    page.length < afterCursor.length
-      ? encodeMetadataSessionCursor(
-          getLiveSessionCursorKey(page[page.length - 1]!),
-          filter,
-          archiveState,
-        )
-      : undefined;
+  let nextCursor: string | undefined;
+  if (page.length < afterCursor.length) {
+    const boundary = getLiveSessionCursorKey(page[page.length - 1]!);
+    const emitted = nextEmittedSessionIds({
+      carried: emittedBeforePage,
+      page,
+      liveSessionIds,
+      liveListUnavailable: liveMergeFailed,
+      listedById: new Map(
+        matches.map((session) => [session.sessionId, session]),
+      ),
+      persistedTimeById,
+      reenters: (row, persistedTime) =>
+        compareLiveSessionCursorKeys(boundary, {
+          activityTime: persistedTime,
+          sessionId: row.sessionId,
+        }) < 0,
+    });
+    nextCursor = encodeMetadataSessionCursor(
+      boundary,
+      filter,
+      archiveState,
+      emitted,
+    );
+  }
   return {
     sessions: page,
     ...(nextCursor !== undefined ? { nextCursor } : {}),
