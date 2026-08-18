@@ -6759,11 +6759,11 @@ jobs:
                 # lines can embed provider error text.
                 N_TIMEOUT="$(grep -c 'AutoFix ran out of time before finishing' <<< "${WIN_HEADS}" || true)"
                 # Both wordings of the gate-rejection handoff, past and
-                # present, plus the dirty-handoff rejection (a brake
-                # violation the gate rejects under its own outcome) — the
-                # census must not silently zero when the headline is
+                # present, plus both handoff brake violations, dirty and
+                # committed (the gate rejects each under its own outcome)
+                # — the census must not silently zero when the headline is
                 # reworded.
-                N_REJECTED="$(grep -cE 'Could not (address the latest feedback|produce a passing fix)|wrote a handoff but left a dirty workspace' <<< "${WIN_HEADS}" || true)"
+                N_REJECTED="$(grep -cE 'Could not (address the latest feedback|produce a passing fix)|wrote a handoff but (left a dirty workspace|the round HAS a commit)' <<< "${WIN_HEADS}" || true)"
                 # The brake's deliberate stop — its own bucket, not the
                 # residual crash bucket: it tells the maintainer a human
                 # decision is already waiting on this PR.

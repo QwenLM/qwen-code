@@ -10793,7 +10793,10 @@ exit 1
       /HEADLINE="(🤖 AutoFix deferred this item to a human under instruction[^"]*)"/,
     )?.[1];
     const emitDirtyHandoff = reviewAddressReportStep.match(
-      /HEADLINE="(🤖 AutoFix rejected this round[^"]*)"/,
+      /HEADLINE="(🤖 AutoFix rejected this round — the agent wrote a handoff but left a dirty workspace[^"]*)"/,
+    )?.[1];
+    const emitCommittedHandoff = reviewAddressReportStep.match(
+      /HEADLINE="(🤖 AutoFix rejected this round — the agent wrote a handoff but the round HAS a commit[^"]*)"/,
     )?.[1];
     expect(emitPush).toBeTruthy();
     expect(emitNoop).toBeTruthy();
@@ -10801,6 +10804,7 @@ exit 1
     expect(emitRejected).toBeTruthy();
     expect(emitHandoff).toBeTruthy();
     expect(emitDirtyHandoff).toBeTruthy();
+    expect(emitCommittedHandoff).toBeTruthy();
     const needlePushed = digestBlock.match(/N_PUSHED=.*grep -c '([^']*)'/)?.[1];
     const needleNoop = digestBlock.match(/N_NOOP=.*grep -c '([^']*)'/)?.[1];
     const needleTimeout = digestBlock.match(
@@ -10821,10 +10825,11 @@ exit 1
     expect(emitNoop).toContain(needleNoop);
     expect(`🤖 AutoFix ${emitTimeout}`).toContain(needleTimeout);
     expect(emitRejected).toMatch(new RegExp(needleRejected));
-    // The dirty-handoff rejection counts as a rejected round, not a
-    // residual crash — the needle is an alternation, so both emissions
-    // must match it.
+    // Both handoff brake violations count as rejected rounds, not
+    // residual crashes — the needle is an alternation, so every
+    // emission must match it.
     expect(emitDirtyHandoff).toMatch(new RegExp(needleRejected));
+    expect(emitCommittedHandoff).toMatch(new RegExp(needleRejected));
     expect(emitHandoff).toContain(needleHandoff);
     const HEADS = {
       push: '🤖 Addressed the latest review feedback (round 2/100). What changed…',
@@ -10842,6 +10847,8 @@ exit 1
         "🤖 AutoFix deferred this item to a human under instruction (round 3/100) — the agent's handoff note below names the decision and the options.",
       dirtyHandoff:
         "🤖 AutoFix rejected this round — the agent wrote a handoff but left a dirty workspace, violating the brake's commit-nothing stop (round 6/100). Nothing was committed.",
+      committedHandoff:
+        "🤖 AutoFix rejected this round — the agent wrote a handoff but the round HAS a commit, violating the brake's commit-nothing stop (round 7/100). The commit was NOT pushed.",
     };
     const K = '2026-07-01T00:00:00Z';
     const evalC = (head, win, at, login = 'qwen-code-dev-bot') => ({
@@ -10919,7 +10926,7 @@ exit 1
 
     // Mixed healthy history: counts land in the right buckets, an
     // old-window push and a HUMAN quoting a marker verbatim are excluded,
-    // both rejection wordings count, base updates window by timestamp.
+    // every rejection wording counts, base updates window by timestamp.
     const mixed = runDigest([
       evalC(HEADS.push, K, '2026-07-02T00:00:00Z'),
       evalC(HEADS.push, K, '2026-07-03T00:00:00Z'),
@@ -10932,13 +10939,14 @@ exit 1
       evalC(HEADS.rejectedNew, K, '2026-07-10T00:00:00Z'),
       evalC(HEADS.handoff, K, '2026-07-11T12:00:00Z'),
       evalC(HEADS.dirtyHandoff, K, '2026-07-11T13:00:00Z'),
+      evalC(HEADS.committedHandoff, K, '2026-07-11T14:00:00Z'),
       evalC(HEADS.push, '2026-05-01T00:00:00Z', '2026-06-01T00:00:00Z'),
       evalC(HEADS.push, K, '2026-07-11T00:00:00Z', 'some-human'),
       baseC('2026-07-12T00:00:00Z'),
       baseC('2026-05-02T00:00:00Z'),
     ]);
     expect(mixed.body).toContain(
-      '6 pushed fix(es), 1 no-change review(s), 1 timeout(s), 3 rejected attempt(s), 1 deliberate stop(s) under instruction (deferred to a human), 0 other round(s)',
+      '6 pushed fix(es), 1 no-change review(s), 1 timeout(s), 4 rejected attempt(s), 1 deliberate stop(s) under instruction (deferred to a human), 0 other round(s)',
     );
     expect(mixed.body).toContain('1 base update(s)');
     expect(mixed.body).toContain('round 10/100, in the current window');
