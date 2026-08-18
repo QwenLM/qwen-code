@@ -385,13 +385,14 @@ class AgentViewSupervisorProcessHandler
     }
 
     let readyCompleted = false;
+    let host: AgentViewPtyHostHandle | undefined;
     try {
       const ready = this.workers.waitForWorkerReadyIfNeeded(
         result.sessionId,
         launch.activeCwd,
       );
       void ready.catch(() => {});
-      const host = await this.workers.launchPtyHostForSupervisor(launch, store);
+      host = await this.workers.launchPtyHostForSupervisor(launch, store);
       // Persist the pids right after spawn, before any store I/O: a crash
       // before the ready wait must not leave an unsignalable orphan host
       // holding the deterministic session socket (mirrors adopt()).
@@ -437,6 +438,14 @@ class AgentViewSupervisorProcessHandler
       this.notifyChanged();
       return result;
     } catch (error) {
+      if (host && !this.workers.has(result.sessionId)) {
+        // The spawn succeeded but registration never completed (pid-write /
+        // launchability failure): terminateSession only sees registered
+        // hosts, so retire the orphan directly before it holds the
+        // deterministic session socket and fails every relaunch.
+        await shutdownPtyHost(host);
+        await host.exited.catch(() => {});
+      }
       if (!readyCompleted) {
         if (isStoppedError(error)) {
           // A deliberate stop during the ready wait must not be mislabeled
@@ -444,11 +453,13 @@ class AgentViewSupervisorProcessHandler
           // stored pid to signal, it queued no stop control, so nothing
           // graceful will ever reach the just-launched host —
           // terminate it. A pending stop control means a graceful stop is
-          // already in flight and must not be hard-killed.
+          // already in flight and must not be hard-killed — it also owns
+          // the verdict (its stopped+alive write; an 'exited' verdict here
+          // would disarm killStoredWorkerPids against the live straggler).
           if (!this.hasPendingWorkerStopControl(result.sessionId)) {
             this.workers.terminateSession(result.sessionId, 'SIGTERM');
+            await markStoppedSession(result.sessionId, store, 'exited');
           }
-          await markStoppedSession(result.sessionId, store, 'exited');
         } else {
           this.workers.rejectPendingWorkerReady(result.sessionId, error);
           this.workers.terminateSession(result.sessionId, 'SIGTERM');
@@ -491,8 +502,18 @@ class AgentViewSupervisorProcessHandler
             alreadyManaged: true,
           };
         }
-        // Stale 'adopting' left by a supervisor crash mid-adopt: no live host
-        // or worker process remains, so allow the session to be re-adopted.
+        // Stale 'adopting' left by a supervisor crash mid-adopt: allow the
+        // session to be re-adopted once the record is past the ready
+        // timeout even if its stored pids probe as live (recycled pids).
+        // Signal those pids first: a surviving leftover still holds the
+        // deterministic session socket and would fail the replacement
+        // launch with EADDRINUSE (mirrors respawnSessionLocked).
+        if (pidAlive) {
+          await this.workers.killStoredWorkerPids(
+            adoption.sessionId,
+            'SIGTERM',
+          );
+        }
       }
       if (this.workers.has(adoption.sessionId)) {
         throw new Error(
@@ -520,6 +541,7 @@ class AgentViewSupervisorProcessHandler
         worktree: { mode: 'none' as const },
       };
 
+      let host: AgentViewPtyHostHandle | undefined;
       try {
         await writeAgentViewSessionState(adoptingState, store);
         await writeAgentViewLaunch(
@@ -589,10 +611,7 @@ class AgentViewSupervisorProcessHandler
           activeCwd,
         );
         void ready.catch(() => {});
-        const host = await this.workers.launchPtyHostForSupervisor(
-          launch,
-          store,
-        );
+        host = await this.workers.launchPtyHostForSupervisor(launch, store);
         // Persist the pids immediately: a crash anywhere between spawn
         // and the ready wait must not leave an unsignalable orphan host
         // (every later adopt of this session would hit EADDRINUSE).
@@ -635,15 +654,22 @@ class AgentViewSupervisorProcessHandler
         this.notifyChanged();
         return { sessionId: adoption.sessionId, adopted: true };
       } catch (error) {
+        if (host && !this.workers.has(adoption.sessionId)) {
+          // The spawn succeeded but registration never completed: retire the
+          // orphan directly — terminateSession only sees registered hosts.
+          await shutdownPtyHost(host);
+          await host.exited.catch(() => {});
+        }
         if (isStoppedError(error)) {
           // A deliberate stop during the adopt ready wait must not be
           // mislabeled as an adoption failure — matching dispatch()'s
           // catch, including terminating the host a racing stop could not
-          // reach (no stop control was queued for it).
+          // reach (no stop control was queued for it). A pending stop
+          // control owns the verdict instead (see dispatch()).
           if (!this.hasPendingWorkerStopControl(adoption.sessionId)) {
             this.workers.terminateSession(adoption.sessionId, 'SIGTERM');
+            await markStoppedSession(adoption.sessionId, store, 'exited');
           }
-          await markStoppedSession(adoption.sessionId, store, 'exited');
         } else {
           this.workers.rejectPendingWorkerReady(adoption.sessionId, error);
           this.workers.terminateSession(adoption.sessionId, 'SIGTERM');
@@ -716,6 +742,8 @@ class AgentViewSupervisorProcessHandler
         event,
         this.store,
         this.hasPendingWorkerInputControl(event.sessionId),
+        this.workers.has(event.sessionId),
+        this.workers.hasPendingWorkerReady(event.sessionId),
       );
     } catch (error) {
       if (event.type === 'ready') {
@@ -1293,6 +1321,17 @@ class AgentViewSupervisorProcessHandler
         isStaleStartingState(state, this.options) ||
         !isAliveProcessState(state.processState)
       ) {
+        if (this.workers.has(state.sessionId)) {
+          // A concurrent refresh reconnected the adoption's live host
+          // between the listing and this reconciliation: it is a real
+          // adoption in flight now, not a ghost.
+          adoptingInFlight.push(state);
+          continue;
+        }
+        // Signal the stored pids before declaring the record failed: a
+        // surviving leftover keeps holding the deterministic session
+        // socket and would fail every future relaunch with EADDRINUSE.
+        await this.workers.killStoredWorkerPids(state.sessionId, 'SIGTERM');
         const failedAt = new Date().toISOString();
         // Gate on the exact stale record inside the queued mutation: a
         // live adoption that rewrites the record between the listing and
@@ -1901,6 +1940,10 @@ class WorkerRegistry {
     });
   }
 
+  hasPendingWorkerReady(sessionId: string): boolean {
+    return this.pendingWorkerReady.has(sessionId);
+  }
+
   validatePendingWorkerReady(
     event: Extract<AgentViewWorkerEvent, { type: 'ready' }>,
   ): void {
@@ -2150,7 +2193,12 @@ class WorkerRegistry {
         // would contradict the still-running host.
         throw error;
       }
-      host?.kill('SIGTERM');
+      if (host) {
+        // SIGTERM alone can leave a draining host holding the session
+        // socket lock, failing the next relaunch with EADDRINUSE: retire
+        // it fully (SIGKILL escalation + exit wait) before rethrowing.
+        await this.retirePredecessorHost(host);
+      }
       if (host && this.ptyHosts.get(sessionId) === host) {
         // Only drop the registry entry — preserveQueuedInputControls already
         // saved the pending prompt/answer controls for the next respawn.
@@ -2196,7 +2244,7 @@ class WorkerRegistry {
     await host.exited.catch(() => {});
   }
 
-  private async killStoredWorkerPids(
+  async killStoredWorkerPids(
     sessionId: string,
     signal: NodeJS.Signals,
   ): Promise<void> {
@@ -3069,17 +3117,66 @@ async function markFailedSession(
   );
 }
 
+// A store read that returns nothing can mean the file never existed or a
+// transient read failure (concurrent rewrite/rename). Only a missing file
+// proves absence; fail closed on the present-but-unread case instead of
+// reporting "not found", which would misroute the caller's verdict.
+async function readOrThrowIfAbsent<T>(
+  filePath: string,
+  read: () => Promise<T | undefined>,
+  missingMessage: string,
+): Promise<T> {
+  const filePresent = () =>
+    fs.promises
+      .access(filePath)
+      .then(() => true)
+      .catch(() => false);
+  let value = await read();
+  if (value) {
+    return value;
+  }
+  if (!(await filePresent())) {
+    throw new Error(missingMessage);
+  }
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 50 * attempt));
+    value = await read();
+    if (value) {
+      return value;
+    }
+    if (!(await filePresent())) {
+      throw new Error(missingMessage);
+    }
+  }
+  throw new Error(
+    `Agent View record at ${filePath} is temporarily unreadable. Retry the operation.`,
+  );
+}
+
 async function applyWorkerEvent(
   event: AgentViewWorkerEvent,
   options: { globalDir?: string },
   hasPendingInputControl = false,
+  hostRegistered = false,
+  readyWaiterPending = false,
 ): Promise<boolean> {
-  const state = await readAgentViewSessionState(event.sessionId, options);
-  if (!state) {
-    throw new Error(`No Agent View session found for ${event.sessionId}.`);
-  }
+  const state = await readOrThrowIfAbsent(
+    getAgentViewSessionPaths(event.sessionId, options).statePath,
+    () => readAgentViewSessionState(event.sessionId, options),
+    `No Agent View session found for ${event.sessionId}.`,
+  );
   if (state.ownership !== 'managed' && state.ownership !== 'adopting') {
     throw new Error(`Agent View session ${event.sessionId} is not managed.`);
+  }
+  if (
+    state.ownership === 'adopting' &&
+    !hostRegistered &&
+    !readyWaiterPending
+  ) {
+    // A ghost 'adopting' record left by a supervisor that died mid-adopt:
+    // with no registered host and no pending ready wait, no live adoption
+    // owns it, so its events must not advance it (toward 'managed').
+    return false;
   }
   if (
     (state.sessionState === 'stopped' ||
@@ -3123,6 +3220,12 @@ async function applyWorkerEvent(
       return {
         sessionState,
         processState: 'alive',
+        // The event authenticated against a registered host while the
+        // record still says 'adopting' (e.g. refresh reconnected the
+        // adoption's surviving host): finish the interrupted adoption.
+        ...(existing.ownership === 'adopting' && hostRegistered
+          ? { ownership: 'managed' }
+          : {}),
         activeCwd,
         updatedAt: now,
         ...(event.type === 'ready' ? { lastError: undefined } : {}),
@@ -3492,6 +3595,9 @@ function parseAdoptParams(params: Record<string, unknown> | undefined): {
   // fork every lookup keyed on it. The raw spelling is kept separately:
   // the native session store is case-sensitive, so --resume must use it.
   const rawSessionId = requireSessionId(params);
+  if (rawSessionId.startsWith('-')) {
+    throw new Error('Agent View sessionId must not start with "-".');
+  }
   const sessionId = sanitizeSessionId(rawSessionId);
   const projectCwd = stringParam(params, 'projectCwd', { required: true });
   const activeCwd = stringParam(params, 'activeCwd', { required: true });
@@ -3611,7 +3717,9 @@ function stringArrayParam(
 }
 
 function buildResumeWorkerArgv(sessionId: string): string[] {
-  return buildCurrentQwenCliArgv(['--resume', sessionId]);
+  // Attached form: the id stays one token even if it starts with '-', so
+  // the argument parser can never drop or reinterpret it as a flag.
+  return buildCurrentQwenCliArgv([`--resume=${sessionId}`]);
 }
 
 function refreshResumeWorkerLaunch(
@@ -3641,12 +3749,14 @@ async function writeResumeWorkerLaunch(
 }
 
 function isResumeWorkerLaunch(launch: AgentViewLaunchFile): boolean {
+  const expected = launch.resumeSessionId ?? launch.sessionId;
+  if (launch.argv.includes(`--resume=${expected}`)) {
+    return true;
+  }
+  // Legacy launches used the split form; keep accepting it so stored
+  // records still get refreshed to the attached form.
   const resumeIndex = launch.argv.indexOf('--resume');
-  return (
-    resumeIndex >= 0 &&
-    launch.argv[resumeIndex + 1] ===
-      (launch.resumeSessionId ?? launch.sessionId)
-  );
+  return resumeIndex >= 0 && launch.argv[resumeIndex + 1] === expected;
 }
 
 function stringArraysEqual(left: string[], right: string[]): boolean {
@@ -3665,8 +3775,12 @@ export async function requireValidWorkerToken(
   if (typeof token !== 'string' || token.length === 0) {
     throw new Error('Agent View worker token is required.');
   }
-  const worker = await readAgentViewWorker(sessionId, options);
-  if (!worker?.tokenDigest) {
+  const worker = await readOrThrowIfAbsent(
+    getAgentViewSessionPaths(sessionId, options).workerPath,
+    () => readAgentViewWorker(sessionId, options),
+    `No Agent View worker token found for ${sessionId}.`,
+  );
+  if (!worker.tokenDigest) {
     throw new Error(`No Agent View worker token found for ${sessionId}.`);
   }
   if (!tokenDigestMatches(token, worker.tokenDigest)) {
@@ -3725,13 +3839,40 @@ async function resolveManagedSessionId(
   }
 
   const requestedPrefix = requestedSessionId.toLowerCase();
-  const matches = (await listAgentViewSessionStates(options)).filter(
-    (state) =>
-      state.ownership === 'managed' &&
-      state.sessionId.toLowerCase().startsWith(requestedPrefix),
-  );
+  // Enumerate the session directories directly: listAgentViewSessionStates
+  // fail-softs unreadable entries, which would shrink the candidate set and
+  // could route this operation at the wrong session.
+  let candidates: string[];
+  try {
+    candidates = await fs.promises.readdir(
+      getAgentViewStorePaths(options).jobsDir,
+    );
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      candidates = [];
+    } else {
+      throw new Error(
+        `Agent View session ${requestedSessionId} is temporarily unreadable. Retry the operation.`,
+      );
+    }
+  }
+  const matches: string[] = [];
+  for (const candidate of candidates) {
+    if (!candidate.toLowerCase().startsWith(requestedPrefix)) {
+      continue;
+    }
+    const state = await readAgentViewSessionState(candidate, options);
+    if (!state) {
+      throw new Error(
+        `Agent View session ${candidate} is temporarily unreadable. Retry the operation.`,
+      );
+    }
+    if (state.ownership === 'managed') {
+      matches.push(state.sessionId);
+    }
+  }
   if (matches.length === 1) {
-    return matches[0].sessionId;
+    return matches[0];
   }
   if (matches.length > 1) {
     throw new Error(

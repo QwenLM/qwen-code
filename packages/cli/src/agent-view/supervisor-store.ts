@@ -125,7 +125,21 @@ export async function readAgentViewRosterStrict(
   if (!isRecord(parsed)) {
     throw new Error(`Agent View roster at ${rosterPath} is not a JSON object.`);
   }
-  return normalizeRoster(parsed);
+  // Failing open here would void the hibernation pin check: a missing
+  // sessions array or a dropped (structurally incomplete) entry reads as
+  // "no pins", hibernating a session its owner explicitly kept alive.
+  if (!Array.isArray(parsed['sessions'])) {
+    throw new Error(
+      `Agent View roster at ${rosterPath} has no sessions array.`,
+    );
+  }
+  const roster = normalizeRoster(parsed);
+  if (roster.sessions.length !== parsed['sessions'].length) {
+    throw new Error(
+      `Agent View roster at ${rosterPath} has incomplete session entries.`,
+    );
+  }
+  return roster;
 }
 
 export async function writeAgentViewRoster(

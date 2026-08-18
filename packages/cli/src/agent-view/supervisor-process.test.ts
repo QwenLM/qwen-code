@@ -473,8 +473,7 @@ describe('Agent View supervisor process helpers', () => {
     expect(launched).toEqual([
       process.execPath,
       process.argv[1],
-      '--resume',
-      sessionId,
+      `--resume=${sessionId}`,
     ]);
     await expect(
       readAgentViewSessionState(sessionId, { globalDir }),
@@ -1945,7 +1944,7 @@ describe('Agent View supervisor process helpers', () => {
     expect(hosts).toHaveLength(2);
     for (const argv of launchedArgv) {
       expect(argv).toEqual(
-        expect.arrayContaining(['--resume', result.sessionId]),
+        expect.arrayContaining([`--resume=${result.sessionId}`]),
       );
       expect(argv).not.toContain('--session-id');
       expect(argv).not.toContain('--prompt-interactive');
@@ -2655,13 +2654,13 @@ describe('Agent View supervisor process helpers', () => {
     expect(hosts).toHaveLength(2);
     expect(launches[1]).toMatchObject({
       entrypoint: process.argv[1],
-      argv: [process.execPath, process.argv[1], '--resume', result.sessionId],
+      argv: [process.execPath, process.argv[1], `--resume=${result.sessionId}`],
     });
     await expect(
       readAgentViewLaunch(result.sessionId, { globalDir }),
     ).resolves.toMatchObject({
       entrypoint: process.argv[1],
-      argv: [process.execPath, process.argv[1], '--resume', result.sessionId],
+      argv: [process.execPath, process.argv[1], `--resume=${result.sessionId}`],
     });
     await expect(
       readAgentViewWorker(result.sessionId, { globalDir }),

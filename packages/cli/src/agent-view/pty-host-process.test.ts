@@ -603,7 +603,7 @@ describe('Agent View PTY host process server', () => {
     expect(host.shutdowns).toBe(1);
   });
 
-  it('resolves connected host exit when the remote host is shut down', async () => {
+  it('delivers a connected host shutdown without forging its exit', async () => {
     const host = fakeHost();
     const socketPath = shortSocketPath();
     const server = createAgentViewPtyHostServer(host, socketPath);
@@ -618,7 +618,17 @@ describe('Agent View PTY host process server', () => {
     connected.shutdown?.();
 
     await waitFor(() => host.shutdowns === 1);
-    await expect(connected.exited).resolves.toEqual({ exitCode: 0 });
+    // A reconnected handle cannot observe the server-side drain itself and
+    // shutdown can be survived: exited must stay pending for the remote
+    // exit poller to report the real outcome (see the status-polling test).
+    await expect(
+      Promise.race([
+        connected.exited.then(() => true),
+        new Promise<boolean>((resolve) =>
+          setTimeout(() => resolve(false), 100),
+        ),
+      ]),
+    ).resolves.toBe(false);
   });
 
   it('resolves connected host exit when killed', async () => {

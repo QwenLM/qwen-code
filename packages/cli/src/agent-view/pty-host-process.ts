@@ -304,9 +304,10 @@ function createRemotePtyHostHandle({
         child?.kill('SIGTERM');
       });
       attachSocket?.destroy();
-      if (!child) {
-        exitTracker.resolve({ exitCode: 0 });
-      }
+      // No immediate exit verdict here: a reconnected handle cannot observe
+      // the server-side drain itself, and shutdown (unlike SIGKILL) can be
+      // survived. Resolving now would forge an exit for a still-running
+      // worker; the remote exit poller reports the real outcome.
     },
     dispose(): void {
       void callAgentViewPtyHost(socketPath, authToken, 'shutdown').catch(() => {
