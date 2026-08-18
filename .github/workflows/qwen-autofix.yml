@@ -6429,9 +6429,11 @@ jobs:
                 # lines can embed provider error text.
                 N_TIMEOUT="$(grep -c 'AutoFix ran out of time before finishing' <<< "${WIN_HEADS}" || true)"
                 # Both wordings of the gate-rejection handoff, past and
-                # present — the census must not silently zero when the
-                # headline is reworded.
-                N_REJECTED="$(grep -cE 'Could not (address the latest feedback|produce a passing fix)' <<< "${WIN_HEADS}" || true)"
+                # present, plus the dirty-handoff rejection (a brake
+                # violation the gate rejects under its own outcome) — the
+                # census must not silently zero when the headline is
+                # reworded.
+                N_REJECTED="$(grep -cE 'Could not (address the latest feedback|produce a passing fix)|wrote a handoff but left a dirty workspace' <<< "${WIN_HEADS}" || true)"
                 # The brake's deliberate stop — its own bucket, not the
                 # residual crash bucket: it tells the maintainer a human
                 # decision is already waiting on this PR.
@@ -6762,6 +6764,19 @@ jobs:
                   # reason, and this stop is transient (the loop stays
                   # engaged); the shepherd contract test pins the distinction.
                   HEADLINE="🤖 AutoFix deferred this item to a human under instruction (round ${MARK_ROUND}/${MAX_ROUNDS}) — the agent's handoff note below names the decision and the options. The loop stays engaged and still picks up new feedback and base conflicts, but will not retry this item on its own."
+                elif [[ "${OUTCOME:-}" == 'dirty_handoff' ]]; then
+                  # A brake VIOLATION, not a failed fix: the agent stopped
+                  # under instruction but left a dirty workspace, so the
+                  # gate rejected the round under its own outcome (never
+                  # retryable — a repair pass would commit against the
+                  # brake). No stale-base probe: there is no fix to
+                  # re-attempt, and the probe's update-branch would merge
+                  # main for a retry that must not happen. The watermark
+                  # still advances (the feedback WAS read), so the item
+                  # hands to a human without any automatic-retry promise.
+                  # Wording guard: no "🤖 AutoFix stopped" prefix, same
+                  # reason as the handoff branch above.
+                  HEADLINE="🤖 AutoFix rejected this round — the agent wrote a handoff but left a dirty workspace, violating the brake's commit-nothing stop (round ${MARK_ROUND}/${MAX_ROUNDS}). Nothing was committed; the uncommitted work was discarded with the runner. The handoff note below names what the agent stopped on, and the run log lists the dirty files. The loop stays engaged and still picks up new feedback and base conflicts, but will not retry this item on its own."
                 else
                 # The gate ran and rejected the agent's fix (a build/test
                 # failure). Before handing to a human, check whether the PR is
@@ -7169,10 +7184,11 @@ jobs:
           if [[ "${ROUND_DISPLAY}" =~ ^[0-9]+$ ]]; then
             ROUND_DISPLAY="$((ROUND_DISPLAY + 1))"
           fi
-          # 'fixed'/'noop'/'handoff' are the outcomes that published a round
-          # report — handoff posts its note + eval marker from the report
-          # step; anything else means the round stopped before publishing one.
-          if [[ "${OUTCOME:-}" == 'fixed' || "${OUTCOME:-}" == 'noop' || "${OUTCOME:-}" == 'handoff' ]]; then
+          # 'fixed'/'noop'/'handoff'/'dirty_handoff' are the outcomes that
+          # published a round report — handoff and the dirty-handoff
+          # rejection post their note + eval marker from the report step;
+          # anything else means the round stopped before publishing one.
+          if [[ "${OUTCOME:-}" == 'fixed' || "${OUTCOME:-}" == 'noop' || "${OUTCOME:-}" == 'handoff' || "${OUTCOME:-}" == 'dirty_handoff' ]]; then
             EN="$(printf '✅ **AutoFix round %s finished** — [view run](%s). See this round'"'"'s report below.' "${ROUND_DISPLAY}" "${RUN_URL}")"
             ZH="$(printf '✅ **AutoFix 第 %s 轮已完成** —— [查看运行](%s)。本轮报告见下方。' "${ROUND_DISPLAY}" "${RUN_URL}")"
           else

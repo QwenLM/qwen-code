@@ -79,14 +79,18 @@ fi
 # brake-violating partial patch (otherwise reported as a clean stop and
 # discarded silently with the runner), and untracked leftovers would trip
 # the NEXT round's dirty assert on the persistent pool. The ref-level
-# commit diff below is blind to both. Rejected the same non-retryable way
-# failure.md+dirty is above: a retryable rejection would engage the repair
-# pass, which deletes handoff.md and may commit against the brake.
+# commit diff below is blind to both. Non-retryable like failure.md+dirty
+# above (a retryable rejection would engage the repair pass, which deletes
+# handoff.md and may commit against the brake), but under its OWN outcome:
+# outcome=failed would make the report step dress the rejection as a
+# failed FIX ("could not produce a passing fix", or a stale-base retry
+# promise) when no fix existed — the report step gives this shape its own
+# honest headline.
 if [[ -s "${WORKDIR}/handoff.md" && -n "$(git status --porcelain)" ]]; then
   echo "❌ Agent wrote handoff.md after leaving a dirty workspace:"
   git status --short
   sed 's/::/;;/g' "${WORKDIR}/handoff.md"
-  echo "outcome=failed" >> "${GITHUB_OUTPUT}"
+  echo "outcome=dirty_handoff" >> "${GITHUB_OUTPUT}"
   exit 1
 fi
 
