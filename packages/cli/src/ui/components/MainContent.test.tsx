@@ -884,6 +884,38 @@ describe('<MainContent />', () => {
       expect(lastFrame()).toMatch(/VP_ITEM:1[\s\S]*VP_ITEM:2/);
     });
 
+    it('collapses a tool_group duplicated across history and pending (#9420)', () => {
+      scrollableListPropsSpy.mockClear();
+
+      const dupToolGroup = {
+        type: 'tool_group' as const,
+        tools: [
+          {
+            callId: 'dup-call',
+            name: 'read_file',
+            description: 'read dup',
+            status: ToolCallStatus.Executing,
+            resultDisplay: undefined,
+            confirmationDetails: undefined,
+          },
+        ],
+      };
+
+      const { lastFrame } = renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          history: [{ id: 1, ...dupToolGroup }],
+          pendingHistoryItems: [dupToolGroup],
+        }),
+      );
+
+      // The same in-flight tool batch must render once (the live pending copy,
+      // negative id), not twice (history id 1 + pending id -1).
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('VP_ITEM:-1');
+      expect(frame).not.toContain('VP_ITEM:1');
+    });
+
     it('requests a full-height measurement only for pending plain-text confirmations', () => {
       scrollableListPropsSpy.mockClear();
 

@@ -76,6 +76,23 @@ function addSourceBlockCounts(
   offsets.mathBlockCount += counts.mathBlockCount;
 }
 
+/**
+ * Stable identity of a tool_group for consecutive-duplicate collapsing
+ * (#9420): the sorted callIds of its tool calls. Two adjacent tool_group rows
+ * with the same signature are the same logical tool batch rendered twice
+ * (once from committed history, once from the live pending list), so only one
+ * should be shown.
+ */
+function toolGroupSignature(item: unknown): string | null {
+  const it = item as { type?: unknown; tools?: unknown } | null;
+  if (!it || it.type !== 'tool_group') return null;
+  const tools = Array.isArray(it.tools) ? it.tools : [];
+  return (tools as Array<{ callId?: unknown }>)
+    .map((tool) => String(tool?.callId ?? ''))
+    .sort()
+    .join(',');
+}
+
 // Issue #3899: Ink's <Static> renders all items synchronously on (re)mount.
 // For long histories that's O(N) blocking work — bad on Ctrl+O which clears
 // the terminal and forces a full remount. To keep input responsive, we
@@ -289,14 +306,29 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
   // Combine completed history + live pending items for the virtualized list.
   // The banner sentinel is prepended so it scrolls with content (not pinned).
   // Pending items get negative IDs (-(i+1)) so renderItem can tell them apart.
-  const allVirtualItems = useMemo(
-    (): VpItem[] => [
+  const allVirtualItems = useMemo((): VpItem[] => {
+    const combined: VpItem[] = [
       VP_BANNER_ITEM,
       ...visibleHistory,
       ...pendingHistoryItems.map((item, i) => ({ ...item, id: -(i + 1) })),
-    ],
-    [visibleHistory, pendingHistoryItems],
-  );
+    ];
+    // Collapse consecutive duplicate tool_group rows (#9420): the same
+    // in-flight tool batch can appear both in committed history and the live
+    // pending list (or twice within pending), rendering the latest tool call
+    // twice until the next call finalizes. Keep the LATER item so the live
+    // pending copy (which keeps updating) wins over the static history copy.
+    const deduped: VpItem[] = [];
+    for (const item of combined) {
+      const prev = deduped[deduped.length - 1];
+      const sig = toolGroupSignature(item);
+      if (prev && sig !== null && sig === toolGroupSignature(prev)) {
+        deduped[deduped.length - 1] = item;
+        continue;
+      }
+      deduped.push(item);
+    }
+    return deduped;
+  }, [visibleHistory, pendingHistoryItems]);
 
   // Source-copy index offsets propagation. The legacy <Static> path threads
   // per-item offsets so `/copy mermaid N` / `/copy latex N` hints under each
