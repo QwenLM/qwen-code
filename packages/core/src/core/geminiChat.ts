@@ -2168,26 +2168,34 @@ export class GeminiChat {
   }
 
   /**
-   * Whether history holds a live Skill body or dedup confirmation with no
-   * call id (id-less provider). Such a result cannot be attributed to any
-   * skill, so both helpers treat it as resident-but-unresolvable.
+   * Whether history holds a live Skill body or dedup confirmation that
+   * cannot be attributed to a skill name: either it carries no call id
+   * (id-less provider), or its id does not appear in `callIdToSkillName`
+   * (synthesized response id whose model call has none, or an orphan
+   * response whose paired call was rewritten away). Both helpers treat
+   * such a result as resident-but-unresolvable.
    */
-  private hasIdLessSkillResult(): boolean {
+  private hasUnresolvableSkillResult(
+    callIdToSkillName: Map<string, string[]>,
+  ): boolean {
     return this.history.some(
       (content) =>
         content.role === 'user' &&
         (content.parts ?? []).some((part) => {
           const fr = part.functionResponse;
-          if (fr?.id || fr?.name !== ToolNames.SKILL) {
+          if (fr?.name !== ToolNames.SKILL) {
             return false;
           }
           const output = (fr.response as { output?: unknown } | undefined)?.[
             'output'
           ];
-          return (
-            typeof output === 'string' &&
-            (isSkillBodyOutput(output) || isSkillDedupConfirmation(output))
-          );
+          if (
+            typeof output !== 'string' ||
+            (!isSkillBodyOutput(output) && !isSkillDedupConfirmation(output))
+          ) {
+            return false;
+          }
+          return !fr.id || !callIdToSkillName.has(fr.id);
         }),
     );
   }
@@ -2198,10 +2206,12 @@ export class GeminiChat {
    * then adjusts the tracked prompt token count by the estimated savings.
    * The caller is responsible for un-tracking the name on the Skill tool so
    * the dedup guard re-arms and the next invocation reloads the full body.
-   * Returns `unresolvable` when history holds a live Skill body or dedup
-   * confirmation with no call id (id-less provider): it cannot be
-   * attributed to this skill, so the caller must keep the name tracked
-   * rather than disarm the dedup guard behind a resident body.
+   * Returns `unresolvable` when history holds ANY resident Skill body or
+   * dedup confirmation that cannot be attributed to a skill name (no call
+   * id, synthesized/orphan id) — even when the queried skill also has
+   * resolvable entries — or when the skill's call ids are ambiguous: the
+   * caller must keep the name tracked rather than disarm the dedup guard
+   * behind a resident body.
    */
   unloadSkillBody(skillName: string): {
     cleared: boolean;
@@ -2209,25 +2219,29 @@ export class GeminiChat {
     unresolvable?: boolean;
   } {
     const callIdToSkillName = buildCallIdToSkillName(this.history);
+    // Consulted before the targetIds gate: a mixed history (resolvable
+    // entries for this skill plus an unattributable body) must refuse
+    // instead of blanking only the resolvable ones and un-tracking
+    // behind the resident body.
+    if (this.hasUnresolvableSkillResult(callIdToSkillName)) {
+      return { cleared: false, tokensSaved: 0, unresolvable: true };
+    }
     const targetIds = new Set<string>();
     for (const [id, names] of callIdToSkillName) {
       if (names.includes(skillName)) targetIds.add(id);
     }
     if (targetIds.size === 0) {
-      if (this.hasIdLessSkillResult()) {
-        return { cleared: false, tokensSaved: 0, unresolvable: true };
-      }
       return { cleared: false, tokensSaved: 0 };
     }
     // An id mapped to several skill names cannot be addressed without
-    // blanking a co-resident skill's body — refuse, matching the
-    // microcompaction path's over-clear direction.
+    // blanking a co-resident skill's body — refuse and keep the guard
+    // armed; the body stays resident either way.
     if (
       [...targetIds].some(
         (id) => (callIdToSkillName.get(id)?.length ?? 0) !== 1,
       )
     ) {
-      return { cleared: false, tokensSaved: 0 };
+      return { cleared: false, tokensSaved: 0, unresolvable: true };
     }
 
     const placeholder = skillUnloadedPlaceholder(skillName);
@@ -2289,15 +2303,18 @@ export class GeminiChat {
    */
   hasSkillBodyInHistory(skillName: string): boolean {
     const callIdToSkillName = buildCallIdToSkillName(this.history);
+    // An unattributable body may belong to this skill; unloadSkillBody
+    // reports it as unresolvable, so let the command proceed to that
+    // refusal instead of wrongly answering "not loaded".
+    if (this.hasUnresolvableSkillResult(callIdToSkillName)) {
+      return true;
+    }
     const targetIds = new Set<string>();
     for (const [id, names] of callIdToSkillName) {
       if (names.includes(skillName)) targetIds.add(id);
     }
     if (targetIds.size === 0) {
-      // An id-less body may belong to this skill; unloadSkillBody reports
-      // it as unresolvable, so let the command proceed to that refusal
-      // instead of wrongly answering "not loaded".
-      return this.hasIdLessSkillResult();
+      return false;
     }
     return this.history.some(
       (content) =>
