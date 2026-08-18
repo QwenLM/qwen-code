@@ -64,6 +64,13 @@ const verdict = {
   downgraded: true,
   downgradedFrom: 'Request changes',
   remediation: ['Run verification again.'],
+  // Non-zero on purpose: the copy test then proves passthrough, not just
+  // the validator's absent-means-zero default.
+  deferredCount: 2,
+  // Non-empty for the same reason — absent defaults to [].
+  floorEnforced: [1],
+  // Also non-default on purpose, for the same reason.
+  bodyTrim: { sections: 2, deferralList: true, fold: true, truncated: true },
   lowSignal: { agents: 4, srcDiffLines: 120 },
   verdictLine: 'Verdict: Comment — Request changes was downgraded',
 };
@@ -280,6 +287,167 @@ describe('saveReviewArtifact', () => {
     expect(existsSync(paths.out)).toBe(false);
   });
 
+  it.each(['two', -1, 1.5] as const)(
+    'refuses a present deferredCount of the wrong shape (%s)',
+    (bad) => {
+      // The absent-means-zero default must not swallow a PRESENT malformed
+      // value: a mutant deleting the refuse arm saved `deferredCount: -1`
+      // into the durable artifact with the suite fully green.
+      const paths = fixture();
+      writeJson(paths.composed, { ...verdict, deferredCount: bad });
+
+      expect(() =>
+        saveReviewArtifact({
+          ...paths,
+          target: 'local',
+          effort: 'medium',
+        }),
+      ).toThrow(/deferredCount/);
+      expect(existsSync(paths.out)).toBe(false);
+    },
+  );
+
+  it.each([
+    ['a string', 'junk'],
+    ['a negative index', [-1]],
+    ['a fraction', [1.5]],
+  ])(
+    'refuses a present floorEnforced of the wrong shape (%s)',
+    (_label, bad) => {
+      // Same discipline as deferredCount: the absence default must not
+      // swallow a PRESENT malformed value into the durable artifact.
+      const paths = fixture();
+      writeJson(paths.composed, { ...verdict, floorEnforced: bad });
+
+      expect(() =>
+        saveReviewArtifact({
+          ...paths,
+          target: 'local',
+          effort: 'medium',
+        }),
+      ).toThrow(/floorEnforced/);
+      expect(existsSync(paths.out)).toBe(false);
+    },
+  );
+
+  it.each([
+    ['not an object', 'trimmed'],
+    [
+      'a negative section count',
+      { sections: -1, deferralList: false, fold: false, truncated: false },
+    ],
+    [
+      'a fractional section count',
+      { sections: 1.5, deferralList: false, fold: false, truncated: false },
+    ],
+    [
+      'a non-boolean deferralList',
+      { sections: 1, deferralList: 'yes', fold: false, truncated: false },
+    ],
+    [
+      'a non-boolean truncated',
+      // `fold` present and valid: the validator checks sections,
+      // deferralList, fold, truncated in that order, and without it this
+      // case threw on the fold clause — leaving the truncated clause it
+      // exists to pin with zero deciding coverage.
+      { sections: 1, deferralList: false, fold: false, truncated: 1 },
+    ],
+    [
+      'a non-boolean fold',
+      { sections: 1, deferralList: false, fold: 'yes', truncated: false },
+    ],
+    ['a falsy non-null bodyTrim', false],
+  ] as const)('refuses a present bodyTrim carrying %s', (_label, bad) => {
+    // Same reasoning as deferredCount above: the absent-means-default arm
+    // exists for pre-budget composed files, and it must not become a
+    // laundering path for a present record that says nothing true.
+    const paths = fixture();
+    writeJson(paths.composed, { ...verdict, bodyTrim: bad });
+
+    expect(() =>
+      saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' }),
+    ).toThrow(/bodyTrim/);
+    expect(existsSync(paths.out)).toBe(false);
+  });
+
+  it.each(['sections', 'deferralList', 'fold', 'truncated'] as const)(
+    'refuses a present bodyTrim with no `%s` — that shape never shipped',
+    (key) => {
+      // The object-level default below covers a composed file from a CLI
+      // predating the budget. Within a PRESENT record there is no such
+      // history to be kind to: every build that writes `bodyTrim` writes
+      // all four fields, so a missing one is a malformed record — and the
+      // validator is strict about all four, not only `fold`.
+      const paths = fixture();
+      const bodyTrim = { ...(verdict.bodyTrim as Record<string, unknown>) };
+      delete bodyTrim[key];
+      writeJson(paths.composed, { ...verdict, bodyTrim });
+
+      expect(() =>
+        saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' }),
+      ).toThrow(/bodyTrim/);
+      expect(existsSync(paths.out)).toBe(false);
+    },
+  );
+
+  it('reads an absent or null floorEnforced as empty — a pre-enforcement composed file must still save', () => {
+    // Null rides the same absence semantics as the sibling deferredCount
+    // pair — an undefined-only check would refuse a composed file that
+    // wrote null, breaking the backward compatibility this field promises.
+    const paths = fixture();
+    const { floorEnforced: _absent, ...preEnforcement } = verdict;
+    for (const composed of [
+      preEnforcement,
+      { ...verdict, floorEnforced: null },
+    ]) {
+      writeJson(paths.composed, composed);
+      saveReviewArtifact({
+        ...paths,
+        target: 'local',
+        effort: 'medium',
+      });
+      const saved = JSON.parse(readFileSync(paths.out, 'utf8'));
+      expect(saved.verdict.floorEnforced).toEqual([]);
+      rmSync(paths.out, { force: true });
+    }
+  });
+
+  it('reads an absent or null bodyTrim as untrimmed — a pre-budget composed file must still save', () => {
+    const paths = fixture();
+    const { bodyTrim: _absent, ...preBudget } = verdict;
+    for (const composed of [preBudget, { ...verdict, bodyTrim: null }]) {
+      writeJson(paths.composed, composed);
+      saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' });
+      expect(
+        JSON.parse(readFileSync(paths.out, 'utf8')).verdict.bodyTrim,
+      ).toEqual({
+        sections: 0,
+        deferralList: false,
+        fold: false,
+        truncated: false,
+      });
+      rmSync(paths.out, { force: true });
+    }
+  });
+
+  it('reads an absent or null deferredCount as zero — a pre-posture composed file must still save', () => {
+    // Null rides the same absence semantics compose-review's own toCount
+    // boundary gives this field's siblings.
+    const paths = fixture();
+    const { deferredCount: _absent, ...prePosture } = verdict;
+    for (const composed of [prePosture, { ...verdict, deferredCount: null }]) {
+      writeJson(paths.composed, composed);
+      saveReviewArtifact({
+        ...paths,
+        target: 'local',
+        effort: 'medium',
+      });
+      expect(
+        JSON.parse(readFileSync(paths.out, 'utf8')).verdict.deferredCount,
+      ).toBe(0);
+    }
+  });
+
   it.each(['findings', 'composed', 'report'] as const)(
     'refuses to overwrite the %s input',
     (input) => {
@@ -306,6 +474,30 @@ describe('saveReviewArtifact', () => {
       expect(readFileSync(inputPath, 'utf8')).toBe(original);
     },
   );
+
+  it('refuses an absent output spelled through a symlink onto an absent input', () => {
+    // The hardened absent-side semantics: neither file is on disk yet, but
+    // the output is spelled through a symlinked directory component, so its
+    // canonical identity is the findings input's. A revert to the old local
+    // sameFile — false whenever a side is absent — passes green and lets
+    // saveReviewArtifact overwrite an input it is about to read.
+    const paths = fixture();
+    symlinkSync(join(root, '.qwen/tmp'), join(root, '.qwen/reviews/link'));
+    const absentInput = join(root, '.qwen/tmp/next.json');
+    const out = join(root, '.qwen/reviews/link/next.json');
+
+    expect(() =>
+      saveReviewArtifact({
+        ...paths,
+        findings: absentInput,
+        out,
+        target: 'local',
+        effort: 'medium',
+      }),
+    ).toThrow(/must not overwrite/);
+    expect(existsSync(out)).toBe(false);
+    expect(existsSync(absentInput)).toBe(false);
+  });
 
   it.skipIf(!caseInsensitiveFs)(
     'refuses a case-insensitive output alias of the Markdown report',
@@ -402,8 +594,8 @@ describe('saveReviewArtifact', () => {
     });
 
     expect(saved.path).toBe(join(root, '.qwen/reviews/review.json'));
-    // The registration value `record_artifact` wants, printed so the skill
-    // copies it verbatim.
+    // Canonical root-relative locator. record_artifact now prefers the
+    // absolute `path` as input and stores this form itself.
     expect(saved.workspacePath).toBe('.qwen/reviews/review.json');
     expect(JSON.parse(readFileSync(saved.path, 'utf8'))).toMatchObject({
       schemaVersion: 1,

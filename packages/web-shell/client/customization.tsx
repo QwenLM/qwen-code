@@ -168,6 +168,7 @@ export type ChatHeaderRenderer = (info: ChatHeaderRenderInfo) => ReactNode;
 export interface UserMessageContentRenderInfo {
   content: string;
   images?: readonly { data: string; mimeType: string }[];
+  files?: readonly { name: string; mimeType: string }[];
   inputAnnotations?: readonly DaemonInputAnnotation[];
 }
 
@@ -517,6 +518,16 @@ export interface WebShellCustomization {
    * trust / qualified-route safety checks) to be satisfied.
    */
   fileUploadEnabled?: boolean;
+  /**
+   * Directory that drag-and-dropped files upload into, **relative to the
+   * workspace root**. Use a relative path WITHOUT a leading `/` — e.g.
+   * `'uploads'`, `'uploads/images'`, or omit it to upload into the
+   * workspace root (the default). A leading-slash path like `'/uploads'`
+   * is rejected by the daemon as outside the workspace. The directory
+   * (including intermediate components) is created automatically on upload
+   * when it does not exist.
+   */
+  fileUploadDirectory?: string;
 }
 
 const WebShellCustomizationContext = createContext<WebShellCustomization>({});

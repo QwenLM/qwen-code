@@ -1014,11 +1014,11 @@ const EN: Messages = {
   'editor.shellPlaceholder': 'Enter terminal command',
   'editor.send': 'Send message',
   'editor.imagesSkipped': (v) =>
-    `${v?.count ?? 0} unsupported image file(s) were skipped.`,
+    `${v?.count ?? 0} unsupported file(s) were skipped.`,
   'editor.imagesReadFailed': (v) =>
-    `${v?.count ?? 0} image file(s) could not be read.`,
+    `${v?.count ?? 0} file(s) could not be read.`,
   'editor.imagesTooLarge': (v) =>
-    `${v?.count ?? 0} image file(s) exceeded the attachment size limit.`,
+    `${v?.count ?? 0} file(s) exceeded the attachment size limit.`,
   'editor.connectionDisconnected':
     'Connection interrupted. Please try again after it reconnects.',
   'editor.sessionLoading': 'Session is still loading. Try again in a moment.',
@@ -1225,6 +1225,11 @@ const EN: Messages = {
   'turnOutputs.fileCount': (v) => `${v?.count ?? 0} files`,
   'turnOutputs.openFileTree': 'Open file tree',
   'turnOutputs.closeFileTree': 'Close file tree',
+  'turnOutputs.artifactMissing': 'File not found in the workspace',
+  'turnOutputs.artifactUnavailable': (v) =>
+    v?.path
+      ? `File not found in the workspace · ${v.path}`
+      : 'File not found in the workspace',
   'sidebar.label': 'Workspace sidebar',
   'sidebar.toggleMenu': 'Toggle menu',
   'sidebar.newChat': 'New chat',
@@ -1240,7 +1245,6 @@ const EN: Messages = {
   'sidebar.project': 'Project',
   'sidebar.pinnedSessions': 'Pinned',
   'sidebar.workspaceSelectLabel': 'Workspace',
-  'sidebar.details': 'Details',
   'sidebar.copySessionId': 'Copy session ID',
   'sidebar.copySessionIdFailed': 'Failed to copy session ID',
   'sidebar.sessionIdCopied': 'Session ID copied',
@@ -1314,13 +1318,12 @@ const EN: Messages = {
   'sidebar.themeDark': 'Switch to dark theme',
   'sidebar.collapse': 'Collapse',
   'sidebar.expand': 'Expand',
+  'sidebar.showAllSessions': 'Show all',
   'sidebar.collapseProject': 'Collapse project',
   'sidebar.expandProject': 'Expand project',
   'sidebar.search': 'Search sessions',
   'sidebar.searchPlaceholder': 'Search sessions',
-  'sidebar.searchEmpty': 'No matching sessions.',
   'sidebar.rename': 'Rename',
-  'sidebar.renameCurrentOnly': 'Only the current session can be renamed',
   'sidebar.export': 'Export conversation record',
   'sidebar.exportFailed': 'Failed to export session',
   'sidebar.delete': 'Delete',
@@ -1400,14 +1403,11 @@ const EN: Messages = {
     'This restored queue summary cannot recover its original attachments.',
   'queue.admissionUnknown':
     'Delivery is uncertain. Check the session before trying again.',
-  'queue.mayCorrespond':
-    'The uncertain local copy and server queue entry may be the same prompt.',
   'queue.restoreUnknown': 'Restore local copy',
   'queue.discardUnknown': 'Discard local copy',
   'queue.continueEditing': 'Continue editing',
   'queue.continueEditingConfirm':
     'The prompt may already be running. Continue editing only if you accept the risk of sending it twice.',
-  'queue.localCopyDiscarded': 'Local copy discarded',
   'queue.commandBlocked':
     "Slash commands can't be queued while a turn is running.",
   'queue.shellQueued':
@@ -1424,8 +1424,8 @@ const EN: Messages = {
   'queue.footer':
     'Press ↑ to edit the latest queued message · Esc to clear queue',
   'queue.imageCount': (v) => `(+${v?.count ?? 0} images)`,
+  'queue.fileCount': (v) => `(+${v?.count ?? 0} files)`,
   'queue.more': (v) => `... (+${v?.count ?? 0} more)`,
-  'midTurn.inserted': (v) => `Inserted message: ${v?.message ?? ''}`,
   'help.builtIn': 'Built-in commands',
   'help.commandCount': (v) => `${v?.count ?? 0} commands`,
   'help.commandMeta.builtIn': 'built-in',
@@ -1494,6 +1494,12 @@ const EN: Messages = {
   'notification.agent.cancelled': (v) =>
     `Background agent "${v?.description ?? ''}" was cancelled.`,
   'branch.failed': 'Failed to branch session.',
+  'branch.stale':
+    'This response is no longer on the active history path. The transcript has been refreshed.',
+  'branch.staleRefreshFailed':
+    'This response is no longer on the active history path, and the transcript could not be refreshed. Please retry.',
+  'branch.staleUnsupported':
+    'This response is no longer on the active history path. Branching from this point is not supported by the current session.',
   'branch.success': (v) =>
     `Copied session. New session name: "${v?.name ?? ''}". Switched to the new session.`,
   'fork.empty': 'Please provide a directive. Usage: /fork <directive>',
@@ -2910,6 +2916,23 @@ const EN: Messages = {
   'settings.alsoModifiedIn': (v) => `(Also modified in ${v?.scope ?? ''})`,
   'settings.invalidNumber': 'Invalid number',
   'settings.requiresRestart': 'This change requires a restart to take effect.',
+  'settings.localControl.title': 'Local Control',
+  'settings.localControl.description':
+    'Continue this Qwen Code session from a phone on the same trusted network.',
+  'settings.localControl.on': 'On',
+  'settings.localControl.off': 'Off',
+  'settings.localControl.network': 'Local network',
+  'settings.localControl.selectNetwork': 'Choose a network',
+  'settings.localControl.qr': 'Local Control QR code',
+  'settings.localControl.enable': 'Turn on Local Control',
+  'settings.localControl.disable': 'Disconnect phone access',
+  'settings.localControl.encrypted': 'Encrypted',
+  'settings.localControl.unencrypted':
+    'Unencrypted — trusted networks only; re-enable after network changes',
+  'settings.localControl.awake': 'This Mac will stay awake',
+  'settings.localControl.maySleep': 'This Mac may sleep',
+  'settings.localControl.urlRedacted':
+    'The pairing URL is not shown here because this daemon has no bearer token. It was printed to the terminal where the daemon is running — pair from there.',
   'settings.models.title': 'Models',
   'settings.models.add': '+ Add Model',
   'settings.models.setCurrent': 'Set current',
@@ -3962,10 +3985,9 @@ const ZH: Messages = {
   'history.retry': '重试',
   'editor.shellPlaceholder': '请输入终端命令',
   'editor.send': '发送消息',
-  'editor.imagesSkipped': (v) => `已跳过 ${v?.count ?? 0} 个不支持的图片文件。`,
-  'editor.imagesReadFailed': (v) => `${v?.count ?? 0} 个图片文件读取失败。`,
-  'editor.imagesTooLarge': (v) =>
-    `${v?.count ?? 0} 个图片文件超过附件大小限制。`,
+  'editor.imagesSkipped': (v) => `已跳过 ${v?.count ?? 0} 个不支持的文件。`,
+  'editor.imagesReadFailed': (v) => `${v?.count ?? 0} 个文件读取失败。`,
+  'editor.imagesTooLarge': (v) => `${v?.count ?? 0} 个文件超过附件大小限制。`,
   'editor.connectionDisconnected': '连接已中断，请在恢复后重试。',
   'editor.sessionLoading': '会话正在加载，请稍后再发送。',
   'editor.processing': '处理中。新消息会进入队列。',
@@ -4162,6 +4184,9 @@ const ZH: Messages = {
   'turnOutputs.fileCount': (v) => `${v?.count ?? 0} 个文件`,
   'turnOutputs.openFileTree': '打开文件树',
   'turnOutputs.closeFileTree': '关闭文件树',
+  'turnOutputs.artifactMissing': '工作区中未找到该文件',
+  'turnOutputs.artifactUnavailable': (v) =>
+    v?.path ? `工作区中未找到该文件 · ${v.path}` : '工作区中未找到该文件',
   'sidebar.label': '工作区侧边栏',
   'sidebar.toggleMenu': '切换菜单',
   'sidebar.newChat': '新对话',
@@ -4177,7 +4202,6 @@ const ZH: Messages = {
   'sidebar.project': '项目',
   'sidebar.pinnedSessions': '置顶',
   'sidebar.workspaceSelectLabel': '工作区',
-  'sidebar.details': '详情',
   'sidebar.copySessionId': '复制会话 ID',
   'sidebar.copySessionIdFailed': '复制会话 ID 失败',
   'sidebar.sessionIdCopied': '会话 ID 已复制',
@@ -4245,13 +4269,12 @@ const ZH: Messages = {
   'sidebar.themeDark': '切换到深色主题',
   'sidebar.collapse': '收起',
   'sidebar.expand': '展开',
+  'sidebar.showAllSessions': '展开显示',
   'sidebar.collapseProject': '收起项目',
   'sidebar.expandProject': '展开项目',
   'sidebar.search': '搜索会话',
   'sidebar.searchPlaceholder': '搜索会话',
-  'sidebar.searchEmpty': '没有匹配的会话。',
   'sidebar.rename': '重命名',
-  'sidebar.renameCurrentOnly': '暂仅支持重命名当前会话',
   'sidebar.export': '导出对话记录',
   'sidebar.exportFailed': '导出会话失败',
   'sidebar.delete': '删除',
@@ -4328,14 +4351,11 @@ const ZH: Messages = {
   'queue.submittingDisabled': '排队消息正在提交中...',
   'queue.summaryEditDisabled': '恢复的队列摘要无法还原原始附件。',
   'queue.admissionUnknown': '消息是否送达尚不确定，请先检查会话再重试。',
-  'queue.mayCorrespond':
-    '送达不确定的本地副本与服务器队列项可能对应同一条消息。',
   'queue.restoreUnknown': '恢复本地副本',
   'queue.discardUnknown': '丢弃本地副本',
   'queue.continueEditing': '继续编辑',
   'queue.continueEditingConfirm':
     '这条消息可能已经在执行。只有在接受重复发送风险时才继续编辑。',
-  'queue.localCopyDiscarded': '本地副本已丢弃',
   'queue.commandBlocked': '当前回合运行时，Slash 命令不能进入排队。',
   'queue.shellQueued': 'Shell 命令已排队，将在当前回合结束后执行。',
   'queue.shellDropped': (v) =>
@@ -4345,8 +4365,8 @@ const ZH: Messages = {
   'queue.editFailed': '编辑排队消息失败',
   'queue.footer': '按 ↑ 编辑最后一条排队消息 · Esc 清空队列',
   'queue.imageCount': (v) => `（+${v?.count ?? 0} 张图片）`,
+  'queue.fileCount': (v) => `（+${v?.count ?? 0} 个文件）`,
   'queue.more': (v) => `...（还有 ${v?.count ?? 0} 条）`,
-  'midTurn.inserted': (v) => `已插入消息：${v?.message ?? ''}`,
   'help.builtIn': '内置命令',
   'help.commandCount': (v) => `${v?.count ?? 0} 个命令`,
   'help.commandMeta.builtIn': '内置',
@@ -4406,6 +4426,11 @@ const ZH: Messages = {
   'notification.agent.cancelled': (v) =>
     `后台智能体已取消：${v?.description ?? ''}`,
   'branch.failed': '分支会话失败。',
+  'branch.stale': '这条回复已不在当前活跃历史路径中，会话记录已刷新。',
+  'branch.staleRefreshFailed':
+    '这条回复已不在当前活跃历史路径中，且会话记录刷新失败，请重试。',
+  'branch.staleUnsupported':
+    '这条回复已不在当前活跃历史路径中，当前会话不支持从此处分支。',
   'branch.success': (v) =>
     `已复制会话，新会话名称为： "${v?.name ?? ''}"，当前已切换到新的会话。`,
   'fork.empty': '请提供任务指令。用法：/fork <指令>',
@@ -5720,6 +5745,23 @@ const ZH: Messages = {
   'settings.alsoModifiedIn': (v) => `（同时在${v?.scope ?? ''}中修改）`,
   'settings.invalidNumber': '无效数字',
   'settings.requiresRestart': '此更改需要重启后才能生效。',
+  'settings.localControl.title': '本地控制',
+  'settings.localControl.description':
+    '通过同一受信任网络中的手机继续当前 Qwen Code 会话。',
+  'settings.localControl.on': '已开启',
+  'settings.localControl.off': '关闭',
+  'settings.localControl.network': '本地网络',
+  'settings.localControl.selectNetwork': '选择网络',
+  'settings.localControl.qr': '本地控制二维码',
+  'settings.localControl.enable': '开启本地控制',
+  'settings.localControl.disable': '断开手机访问',
+  'settings.localControl.encrypted': '已加密',
+  'settings.localControl.unencrypted':
+    '未加密，仅限受信任网络；网络变化后请重新启用',
+  'settings.localControl.awake': '这台 Mac 将保持唤醒',
+  'settings.localControl.maySleep': '这台 Mac 可能进入睡眠',
+  'settings.localControl.urlRedacted':
+    '由于该守护进程未配置 bearer token，配对 URL 不在此显示。它已打印到运行守护进程的终端，请到该终端获取配对 URL 完成配对。',
   'settings.models.title': '模型',
   'settings.models.add': '+ 增加模型',
   'settings.models.setCurrent': '设为当前',

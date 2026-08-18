@@ -31,6 +31,7 @@ import {
 } from './findings.js';
 import { EFFORT_LEVELS, type ReviewEffort } from './parse-args.js';
 import { REVIEWS_DIR } from './lib/paths.js';
+import { isSameFile } from './lib/same-file.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 
 interface PersistedVerdict extends ComposeReviewResult {
@@ -52,9 +53,10 @@ export interface SavedReviewArtifact {
   /** Absolute path of the written document. */
   path: string;
   /**
-   * The same path relative to the workspace root — the exact value
-   * `record_artifact` wants as `workspacePath`, so the skill copies it
-   * verbatim instead of re-deriving it from the absolute path.
+   * The same path relative to the workspace root. `record_artifact` now
+   * accepts the absolute `path` and stores this canonical form itself;
+   * keep emitting it so older runtimes and display surfaces can still
+   * use the root-relative locator.
    */
   workspacePath: string;
 }
@@ -119,14 +121,6 @@ function rejectSymlinkPath(root: string, path: string, label: string): void {
       throw new Error(`${label} must not traverse a symbolic link.`);
     }
   }
-}
-
-function sameFile(left: string, right: string): boolean {
-  if (left === right) return true;
-  if (!existsSync(left) || !existsSync(right)) return false;
-  const leftStat = statSync(left);
-  const rightStat = statSync(right);
-  return leftStat.dev === rightStat.dev && leftStat.ino === rightStat.ino;
 }
 
 function readText(path: string, label: string): string {
@@ -223,7 +217,73 @@ function validateVerdict(value: unknown): PersistedVerdict {
       }
     }
   }
+  // Absent or null means zero, not malformed — the same absence semantics
+  // compose-review's own `toCount` boundary applies to this field's siblings:
+  // a composed JSON written by a build predating the convergence posture
+  // carries no deferredCount, and a mid-upgrade save must not fail over a
+  // count that only affects display. A PRESENT value of any other wrong
+  // shape is refused like every other field here.
+  const deferredCount = verdict['deferredCount'] ?? 0;
+  if (
+    typeof deferredCount !== 'number' ||
+    !Number.isInteger(deferredCount) ||
+    deferredCount < 0
+  ) {
+    throw new Error(
+      'Composed verdict.deferredCount must be a non-negative integer.',
+    );
+  }
+  // Same absence semantics as deferredCount, and for the same reason: a
+  // composed JSON persisted before floor enforcement existed carries no
+  // `floorEnforced`, and it names indices this artifact only re-displays.
+  const floorEnforced = verdict['floorEnforced'] ?? [];
+  if (
+    !Array.isArray(floorEnforced) ||
+    floorEnforced.some(
+      (i) => typeof i !== 'number' || !Number.isInteger(i) || i < 0,
+    )
+  ) {
+    throw new Error(
+      'Composed verdict.floorEnforced must be an array of non-negative integers.',
+    );
+  }
+  // Absent reads as "no trim", the same absence semantics the sibling count
+  // gets: a composed file written before the body budget shipped carries no
+  // `bodyTrim`, and a mid-upgrade save must not fail over a record of
+  // something that did not happen. A PRESENT value of the wrong shape is
+  // refused like every other field here.
+  const rawTrim = verdict['bodyTrim'] ?? {
+    sections: 0,
+    deferralList: false,
+    fold: false,
+    truncated: false,
+  };
+  const trim = object(rawTrim, 'Composed verdict.bodyTrim');
+  // No per-field tolerance for `fold`: every build that writes a `bodyTrim`
+  // at all writes all four fields (`git log -S bodyTrim` is this branch and
+  // nothing else), so a present record missing one is malformed, not old.
+  // The tolerance that IS owed lives above, on the object: a composed file
+  // from a CLI predating the budget carries no `bodyTrim`, and that absence
+  // is the truth rather than an error.
+  if (
+    typeof trim['sections'] !== 'number' ||
+    !Number.isInteger(trim['sections']) ||
+    trim['sections'] < 0 ||
+    typeof trim['deferralList'] !== 'boolean' ||
+    typeof trim['fold'] !== 'boolean' ||
+    typeof trim['truncated'] !== 'boolean'
+  ) {
+    throw new Error(
+      'Composed verdict.bodyTrim must carry a non-negative integer `sections` and boolean `deferralList` / `fold` / `truncated`.',
+    );
+  }
   return {
+    bodyTrim: {
+      sections: trim['sections'],
+      deferralList: trim['deferralList'],
+      fold: trim['fold'],
+      truncated: trim['truncated'],
+    },
     event: event(verdict['event'], 'Composed verdict.event'),
     body: string(verdict['body'], 'Composed verdict.body'),
     baseEvent: event(verdict['baseEvent'], 'Composed verdict.baseEvent'),
@@ -234,6 +294,8 @@ function validateVerdict(value: unknown): PersistedVerdict {
       verdict['remediation'],
       'Composed verdict.remediation',
     ),
+    deferredCount,
+    floorEnforced: floorEnforced as number[],
     lowSignal:
       lowSignal === null
         ? null
@@ -296,7 +358,7 @@ export function saveReviewArtifact(
     ['composed input', composedPath],
     ['Markdown report', reportPath],
   ] as const) {
-    if (sameFile(outputPath, inputPath)) {
+    if (isSameFile(outputPath, inputPath)) {
       throw new Error(`Output must not overwrite the ${label}.`);
     }
   }

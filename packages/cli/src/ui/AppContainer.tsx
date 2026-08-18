@@ -2600,12 +2600,12 @@ export const AppContainer = (props: AppContainerProps) => {
         isBtwCommand(submittedValue)
       ) {
         void Promise.resolve(
-          submitQuery(
-            submittedValue,
-            SendMessageType.UserQuery,
-            undefined,
-            submittedPrompt === undefined ? undefined : { submittedPrompt },
-          ),
+          submitQuery(submittedValue, SendMessageType.UserQuery, undefined, {
+            ...(submittedPrompt === undefined ? {} : { submittedPrompt }),
+            onAdmissionFailed: () => {
+              addMessage(submittedValue, true, submittedPrompt);
+            },
+          }),
         ).catch((error) => {
           debugLogger.warn('Failed to admit /btw submission', error);
         });
@@ -3153,7 +3153,13 @@ export const AppContainer = (props: AppContainerProps) => {
       // causes transient heap peaks that trigger OOM (#4624).
       const conversationHistory = geminiClient.getHistoryTail(40, true);
       generatePromptSuggestion(config, conversationHistory, ac.signal, {
-        enableCacheSharing: settings.merged.ui?.enableCacheSharing === true,
+        // On by default: the schema declares `default: true`, but
+        // `mergeSettings` doesn't apply schema defaults, so an unset value is
+        // `undefined` and a `=== true` gate left the cache-aware fork as dead
+        // code unless the flag was explicitly set (#9230). Same treatment as
+        // `enableFollowupSuggestions` above — only an explicit `false` opts
+        // out.
+        enableCacheSharing: settings.merged.ui?.enableCacheSharing !== false,
       })
         .then((result) => {
           if (ac.signal.aborted) return;

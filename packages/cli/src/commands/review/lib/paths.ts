@@ -9,7 +9,32 @@
 // when the command is invoked). Use `path.join` rather than string
 // concatenation so Windows backslashes are produced when needed.
 
+import { existsSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+
+/**
+ * Classify a `--out` target BEFORE the command fetches anything: an empty /
+ * whitespace-only path, or a path that resolves to an existing directory, is
+ * a usage error. A directory target otherwise survives to `writeFileSync`,
+ * dies EISDIR there — AFTER the fetches — and exit-codes as a runtime
+ * failure instead of the repairable-invocation class the caller keys on.
+ */
+export function assertWritableOutPath(out: string): void {
+  if (out.trim() === '') {
+    throw new TypeError('--out must name a file path');
+  }
+  // A trailing separator is the POSIX spelling of "this is a directory" —
+  // `resolve` normalizes it away, so check the RAW value: otherwise a
+  // not-yet-existing `--out /tmp/diffs/` slips past and gets written as a
+  // FILE after the fetches (every POSIX peer refuses that argument).
+  if (/[/\\]$/.test(out.trim())) {
+    throw new TypeError(`--out names a directory, not a file: ${out}`);
+  }
+  const resolved = resolve(out);
+  if (existsSync(resolved) && statSync(resolved).isDirectory()) {
+    throw new TypeError(`--out names a directory, not a file: ${out}`);
+  }
+}
 
 export const REVIEW_TMP_DIR = join('.qwen', 'tmp');
 export const REVIEWS_DIR = join('.qwen', 'reviews');
