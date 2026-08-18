@@ -72,8 +72,10 @@ function runScenario(scenario, { timeoutMinutes = 180, logPath } = {}) {
     const bin = join(dir, 'bin');
     const attemptFile = join(dir, 'attempts');
     const durationFile = join(dir, 'durations');
+    const promptFile = join(dir, 'prompts');
     writeFileSync(attemptFile, '');
     writeFileSync(durationFile, '');
+    writeFileSync(promptFile, '');
     const write = (name, body) => {
       const p = join(bin, name);
       writeFileSync(p, body);
@@ -105,6 +107,12 @@ function runScenario(scenario, { timeoutMinutes = 180, logPath } = {}) {
       [
         '#!/bin/bash',
         'n=$(( $(cat "$ATT" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$ATT"',
+        // The full argv, one line per attempt, with the boundaries INTACT:
+        // `$*` would join on spaces and render `--prompt "/review x --resume"`
+        // identically to `--prompt "/review x" --resume`, which are different
+        // wirings — the second reaches the root CLI's own session-resume flag
+        // and the skill never sees it.
+        'printf "%s\\n" "$(printf "<%s>" "$@")" >> "$PRM"',
         'r(){ printf \'{"type":"result","subtype":"%s","is_error":%s,"result":"%s"}\\n\' "$1" "$2" "$3"; }',
         'case "$SCENARIO" in',
         '  success) r success false "Reviewed — no blockers." ;;',
@@ -154,6 +162,7 @@ function runScenario(scenario, { timeoutMinutes = 180, logPath } = {}) {
           SCENARIO: scenario,
           ATT: attemptFile,
           DUR: durationFile,
+          PRM: promptFile,
         },
       });
     } catch (e) {
@@ -176,6 +185,7 @@ function runScenario(scenario, { timeoutMinutes = 180, logPath } = {}) {
       raw: stdout,
       attempts: Number(readFileSync(attemptFile, 'utf8').trim()),
       durations,
+      prompts: readFileSync(promptFile, 'utf8').split('\n').filter(Boolean),
     };
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -2606,6 +2616,31 @@ describe('review_requested burst coalescing (#8945)', () => {
     expect(cond).toContain(
       `github.event.requested_reviewer.login == '${botLogin}'`,
     );
+  });
+});
+
+describe('qwen pr review retry runs fresh (no --resume)', () => {
+  // `--resume` is a local convenience only. On CI each retry re-runs the whole
+  // review from scratch: the attempt runs no-sandbox and its worktree is
+  // deleted the moment it exits, so there is no interrupted state on disk for
+  // a next attempt to continue. Probe-verified: appending `--resume` on the
+  // retry (the earlier wiring) shipped green before this assertion existed.
+  it('every attempt gets the verbatim prompt, none carries --resume', () => {
+    const r = runScenario('transient_then_success');
+    expect(r.attempts).toBe(2);
+    expect(r.prompts).toHaveLength(2);
+    // One argv element per <>, so a stray `--resume` token — whether inside
+    // the prompt value or as its own argument after it — would be visible
+    // here rather than hidden by space-joining.
+    expect(r.prompts[0]).toContain('<--prompt></review x>');
+    expect(r.prompts[1]).toContain('<--prompt></review x>');
+    expect(r.prompts.join('\n')).not.toContain('--resume');
+  });
+
+  it('a single successful attempt never carries --resume', () => {
+    const r = runScenario('success');
+    expect(r.prompts).toHaveLength(1);
+    expect(r.prompts[0]).not.toContain('--resume');
   });
 });
 
