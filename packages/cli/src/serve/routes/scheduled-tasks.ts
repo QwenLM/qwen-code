@@ -875,6 +875,7 @@ function registerScheduledTaskCrudRoutes(
 
       let overCap = false;
       let alreadyBound = false;
+      let sessionGoneUnderLock = false;
       let rollbackBefore: DurableCronTask[] | undefined;
       let rollbackAfter: DurableCronTask[] | undefined;
       try {
@@ -882,21 +883,49 @@ function registerScheduledTaskCrudRoutes(
           updateCronTasks(
             workspaceCwd,
             (tasks) => {
+              // Same-lock duplicate-binding check in BOTH binding modes: the
+              // pre-check read above is best-effort, and a concurrent create
+              // may have bound the same session since. For a caller-provided
+              // session that's another reuse-create; for a just-minted one
+              // it's a reuse-create that committed while this request's mint
+              // was still in flight (the mint registers the session in the
+              // live map before THIS write commits, so the reuse path's
+              // validation can pass against it). Runs before the cap check so
+              // an over-cap loser never tears down a session another
+              // committed task already references.
+              if (
+                boundSessionId !== undefined &&
+                tasks.some((t) => t.sessionId === boundSessionId)
+              ) {
+                alreadyBound = true;
+                return tasks;
+              }
+              // Re-validate a caller-provided session UNDER the write lock:
+              // archiving/deleting tears the session out of the live map
+              // BEFORE its cron hook (disable/removeTasksForSessions) runs,
+              // and that hook only sees tasks already on disk — so a session
+              // that left the live map between the pre-lock validation and
+              // this cycle is being archived/deleted and its hook skipped
+              // this (not yet written) task. Committing anyway would bind a
+              // 201-returned task to an archived or gone session. Cron write
+              // cycles are serialized, so a hook that runs after THIS cycle
+              // sees the new task and disables/removes it correctly.
+              if (providedSessionId !== undefined && bridge) {
+                try {
+                  bridge.getSessionSummary(providedSessionId);
+                } catch (err) {
+                  if (err instanceof SessionNotFoundError) {
+                    sessionGoneUnderLock = true;
+                    return tasks; // no write
+                  }
+                  throw err;
+                }
+              }
               // Cap check under the write lock so two concurrent creates can't both
               // slip past a stale count. Returning the input unchanged is a no-op
               // (no write), which the flag below turns into a 409.
               if (tasks.length >= MAX_SCHEDULED_TASKS) {
                 overCap = true;
-                return tasks;
-              }
-              // Same-lock duplicate-binding check for a caller-provided
-              // session: the pre-check read above is best-effort, and a
-              // concurrent create may have bound the same session since.
-              if (
-                providedSessionId !== undefined &&
-                tasks.some((t) => t.sessionId === providedSessionId)
-              ) {
-                alreadyBound = true;
                 return tasks;
               }
               rollbackBefore = tasks;
@@ -942,8 +971,23 @@ function registerScheduledTaskCrudRoutes(
         });
         return;
       }
+      if (sessionGoneUnderLock) {
+        // Reuse mode only — a caller-provided session is never torn down
+        // here, so there is nothing to roll back. Retryable: the session's
+        // archive/delete completed between validation and commit.
+        res.status(409).json({
+          error:
+            'The requested session was archived or deleted while the task was being created; retry with a live session',
+          code: 'session_not_live',
+        });
+        return;
+      }
       if (alreadyBound) {
-        await rollbackSession();
+        // NO rollbackSession here: the in-lock check fires only when a
+        // COMMITTED task already references the bound session. For a
+        // just-minted session that means a concurrent reuse-create won the
+        // race and owns it — tearing it down would kill that task's session.
+        // (For a caller-provided session rollbackSession is a no-op anyway.)
         res.status(409).json({
           error:
             'The requested session is already bound to another scheduled task',
@@ -1352,12 +1396,35 @@ function registerScheduledTaskCrudRoutes(
       // task, may be the user's live working session, and must survive the
       // task's deletion (same invariant the create path's rollback honors).
       if (boundSessionId && sessionOwnedByTask && bridge) {
+        // Re-read just before teardown: between the removal commit above and
+        // this close, a concurrent reuse-create can bind THIS session (its
+        // in-lock duplicate check legitimately passes once the old task is
+        // gone) — from that task's perspective the session IS caller-provided
+        // and must survive. Closing on the stale capture would tear down the
+        // surviving task's live session mid-use. Best-effort: a rebind that
+        // commits between this re-read and the close still slips through;
+        // fully closing that window needs session-scoped serialization shared
+        // with the bind path (tracked as follow-up). A read failure falls
+        // back to the pre-recheck behavior (close).
+        let claimedBySurvivingTask = false;
         try {
-          await runWithScheduledTaskTarget(target, () =>
-            bridge.closeSession(boundSessionId!),
+          const currentTasks = await runWithScheduledTaskTarget(target, () =>
+            readCronTasks(workspaceCwd),
           );
-        } catch (error) {
-          if (sendActivityGateError(res, error)) return;
+          claimedBySurvivingTask = currentTasks.some(
+            (t) => t.sessionId === boundSessionId,
+          );
+        } catch {
+          // Read failure → keep the historical behavior (close the session).
+        }
+        if (!claimedBySurvivingTask) {
+          try {
+            await runWithScheduledTaskTarget(target, () =>
+              bridge.closeSession(boundSessionId!),
+            );
+          } catch (error) {
+            if (sendActivityGateError(res, error)) return;
+          }
         }
       }
       if (boundSessionId) {

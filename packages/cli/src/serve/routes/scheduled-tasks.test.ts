@@ -861,6 +861,83 @@ describe('scheduled-tasks routes', () => {
     expect(h.bridge.closed).toEqual([]);
   });
 
+  it('rejects a reuse create whose session is archived between validation and commit', async () => {
+    // The session passes the pre-lock validation (live, idle) but a
+    // concurrent archive/delete removes it from the live map before the cron
+    // write commits. The archive hook (disableTasksForSessions) only sees
+    // tasks already on disk, so it no-ops for this task — the under-write-lock
+    // re-validation is the only guard. Deleting it turns the 409 into a 201
+    // bound to an archived session.
+    h.bridge.liveSessions.set(CALLER_SESSION_ID, {
+      sessionId: CALLER_SESSION_ID,
+      workspaceCwd: h.workspace,
+      hasActivePrompt: false,
+    });
+    let summaryCalls = 0;
+    const originalGetSessionSummary = h.bridge.getSessionSummary.bind(h.bridge);
+    h.bridge.getSessionSummary = (sessionId: string) => {
+      summaryCalls += 1;
+      if (summaryCalls > 1) {
+        // Simulate the archive/delete landing after the first (pre-lock)
+        // validation: archiving removes a session from the live map first.
+        throw new SessionNotFoundError(sessionId);
+      }
+      return originalGetSessionSummary(sessionId);
+    };
+    const res = await create({
+      cron: '0 9 * * *',
+      prompt: 'p',
+      sessionId: CALLER_SESSION_ID,
+    });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('session_not_live');
+    expect(await readCronTasks(h.workspace)).toEqual([]);
+    // Caller-provided session — never torn down by this route.
+    expect(h.bridge.closed).toEqual([]);
+    expect(h.bridge.named).toEqual([]);
+  });
+
+  it('does not double-bind a just-minted session a concurrent reuse-create committed', async () => {
+    // Mint-vs-reuse race: a mint registers its session in the live map
+    // (doSpawn) BEFORE its cron write commits, so a concurrent reuse-create
+    // for that session passes every validation and commits first. The in-lock
+    // duplicate check must cover minted sessions too — deleting the check
+    // turns this create into a second 201 bound to the same session — and the
+    // rejected create must NOT tear down the session the winner now owns.
+    h.bridge.spawnOrAttach = async () => {
+      const sessionId = 'sess-contested-mint';
+      h.bridge.spawned.push(sessionId);
+      // Simulate the concurrent reuse-create committing while this mint's
+      // write is still pending.
+      await updateCronTasks(h.workspace, (tasks) => [
+        ...tasks,
+        {
+          id: 'reuse-task',
+          cron: '0 10 * * *',
+          prompt: 'q',
+          recurring: true,
+          createdAt: 1_700_000_000_000,
+          lastFiredAt: 1_700_000_000_000,
+          enabled: true,
+          sessionId,
+          sessionOwnedByTask: false,
+        },
+      ]);
+      return { sessionId };
+    };
+    const res = await create({ cron: '0 9 * * *', prompt: 'p' });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('session_already_bound');
+    // Exactly one task on disk — the reuse winner — still bound.
+    const tasks = await readCronTasks(h.workspace);
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]?.id).toBe('reuse-task');
+    expect(tasks[0]?.sessionId).toBe('sess-contested-mint');
+    // The loser must not kill the session the winner committed to.
+    expect(h.bridge.closed).toEqual([]);
+    expect(h.cleanupSession).not.toHaveBeenCalled();
+  });
+
   it('rejects an invalid sessionId field with 400 invalid_session_id', async () => {
     for (const bad of [
       123,
@@ -1320,6 +1397,49 @@ describe('scheduled-tasks routes', () => {
     const del = await request(h.app).delete('/scheduled-tasks/legacytask');
     expect(del.status).toBe(200);
     expect(h.bridge.closed).toEqual(['sess-legacy']);
+  });
+
+  it("does not close a deleted task's session when another committed task references it", async () => {
+    // DELETE captures the bound session under the lock, but a concurrent
+    // reuse-create can commit a binding to it right after the removal lands
+    // (its in-lock duplicate check legitimately passes once the old task is
+    // gone). The pre-close re-read must notice the surviving reference and
+    // skip the teardown — closing on the stale capture would kill the
+    // surviving task's live session. Deleting the recheck puts 'sess-shared'
+    // back in `closed`.
+    await updateCronTasks(h.workspace, (tasks) => [
+      ...tasks,
+      {
+        id: 'deleted-task',
+        cron: '0 9 * * *',
+        prompt: 'p',
+        recurring: true,
+        createdAt: 1_700_000_000_000,
+        lastFiredAt: 1_700_000_000_000,
+        enabled: true,
+        sessionId: 'sess-shared',
+        sessionOwnedByTask: true,
+      },
+      {
+        // The race winner: committed while DELETE's close was still pending.
+        id: 'surviving-task',
+        cron: '0 10 * * *',
+        prompt: 'q',
+        recurring: true,
+        createdAt: 1_700_000_000_000,
+        lastFiredAt: 1_700_000_000_000,
+        enabled: true,
+        sessionId: 'sess-shared',
+        sessionOwnedByTask: false,
+      },
+    ]);
+    const del = await request(h.app).delete('/scheduled-tasks/deleted-task');
+    expect(del.status).toBe(200);
+    expect(del.body).toEqual({ deleted: true, id: 'deleted-task' });
+    expect(h.bridge.closed).toEqual([]); // surviving task keeps its session
+    const tasks = await readCronTasks(h.workspace);
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]?.id).toBe('surviving-task');
   });
 
   it('returns 500 (not 404) when the persisted-session probe hits a filesystem failure', async () => {

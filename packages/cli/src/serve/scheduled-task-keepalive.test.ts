@@ -661,8 +661,12 @@ describe('scheduled-task keepalive', () => {
   });
 
   it('binds an unbound task to a dedicated session and writes sessionId to disk', async () => {
+    // Named fixture + exact-name assertion discriminate the MINT-site naming
+    // payload (`task.name ?? task.prompt`): mutating it to `task.prompt`
+    // yields '⏰ check build' and fails this test. The already-bound rename
+    // branch is covered separately below.
     await updateCronTasks(workspace, () => [
-      task({ id: 'unbound-1', prompt: 'check build' }),
+      task({ id: 'unbound-1', prompt: 'check build', name: 'Digest' }),
     ]);
     const spawns: unknown[] = [];
     const names: Array<[string, { displayName?: string }]> = [];
@@ -693,7 +697,7 @@ describe('scheduled-task keepalive', () => {
     });
     expect(names).toHaveLength(1);
     expect(names[0]![0]).toBe('new-sess-1');
-    expect(names[0]![1].displayName).toContain('⏰');
+    expect(names[0]![1].displayName).toBe('⏰ Digest');
     const tasks = await readCronTasks(workspace);
     expect(tasks[0]!.sessionId).toBe('new-sess-1');
     // The keepalive minted this session, so the task records ownership —
@@ -880,6 +884,59 @@ describe('scheduled-task keepalive', () => {
     // The other process's sessionId is preserved.
     const tasks = await readCronTasks(workspace);
     expect(tasks[0]!.sessionId).toBe('other-sess');
+    removeSpy.mockRestore();
+  });
+
+  it('rolls back when the just-minted session is already committed to another task', async () => {
+    // The scheduled-tasks reuse path can bind a session as soon as the spawn
+    // registers it in the live map — BEFORE this bind write commits. The
+    // in-lock check must notice the committed reference and leave the task
+    // unbound (the orphan spawn rolls back), not double-bind the session.
+    const closed: string[] = [];
+    const removeSpy = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const raceBridge = {
+      ...bridge,
+      spawnOrAttach: async () => {
+        // Simulate a concurrent caller-provided binding committing while our
+        // spawn is in flight.
+        await updateCronTasks(workspace, (list) => [
+          ...list,
+          task({
+            id: 'caller-task',
+            sessionId: 'contested-sess',
+            sessionOwnedByTask: false,
+          }),
+        ]);
+        return { sessionId: 'contested-sess' };
+      },
+      closeSession: async (id: string) => {
+        closed.push(id);
+      },
+      markSessionCatalogChanged: vi.fn(),
+      updateSessionMetadata: () => {},
+    };
+    await updateCronTasks(workspace, () => [
+      task({ id: 'tool-task', prompt: 'contested' }),
+    ]);
+    const ka = startScheduledTaskKeepalive({
+      bridge: raceBridge,
+      boundWorkspace: workspace,
+      intervalMs: 60_000,
+    });
+    await ka.tick();
+    ka.stop();
+    // The orphaned mint is rolled back...
+    expect(closed).toContain('contested-sess');
+    expect(raceBridge.markSessionCatalogChanged).toHaveBeenCalledTimes(1);
+    // ...and the session stays bound to exactly ONE task: the caller's.
+    const tasks = await readCronTasks(workspace);
+    expect(tasks).toHaveLength(2);
+    const toolTask = tasks.find((t) => t.id === 'tool-task');
+    const callerTask = tasks.find((t) => t.id === 'caller-task');
+    expect(toolTask?.sessionId).toBeUndefined(); // still unbound
+    expect(callerTask?.sessionId).toBe('contested-sess');
     removeSpy.mockRestore();
   });
 

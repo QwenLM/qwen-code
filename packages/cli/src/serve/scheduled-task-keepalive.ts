@@ -205,10 +205,20 @@ async function bindAndNameSessions(
         // read and this write-lock acquisition — only attach when the task is
         // still unbound and enabled. Otherwise return unchanged so the
         // orphan spawn is rolled back below.
+        //
+        // Also bail when ANY committed task already references the
+        // just-minted session: the scheduled-tasks reuse path can bind a
+        // session the moment the spawn above registers it in the live map,
+        // BEFORE this write commits — without this check the session would be
+        // bound to two tasks (same transcript, conflicting ⏰ renames), and a
+        // later delete of THIS task would close the session out from under
+        // the surviving one. The orphan rollback below then tears the
+        // unclaimed session back down.
         if (
           !list.some(
             (t) => t.id === task.id && !t.sessionId && t.enabled !== false,
-          )
+          ) ||
+          list.some((t) => t.sessionId === sessionId)
         ) {
           return list;
         }

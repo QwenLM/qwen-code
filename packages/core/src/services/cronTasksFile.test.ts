@@ -215,6 +215,27 @@ describe('cronTasksFile', () => {
       await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
     });
 
+    it('rejects a task whose sessionOwnedByTask is not a boolean', async () => {
+      // The marker decides whether DELETE tears the bound session down, so a
+      // hand-edited/corrupted file carrying garbage here must fail fast like
+      // every sibling optional field — not load silently. Deleting the
+      // validation branch keeps this test red.
+      await seedTasksFile(
+        tmpDir,
+        JSON.stringify([
+          { ...makeTask(), sessionId: 'sess-1', sessionOwnedByTask: 'yes' },
+        ]),
+      );
+      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
+    });
+
+    it('round-trips the optional sessionOwnedByTask field', async () => {
+      const task = makeTask({ sessionId: 'sess-1', sessionOwnedByTask: true });
+      await writeCronTasks(tmpDir, [task]);
+      const result = await readCronTasks(tmpDir);
+      expect(result).toEqual([task]);
+    });
+
     it('round-trips the optional runs history', async () => {
       const task = makeTask({
         lastFiredAt: 1718000300000,
