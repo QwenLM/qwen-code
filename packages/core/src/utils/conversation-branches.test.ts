@@ -187,6 +187,7 @@ describe('inspectConversationBranches', () => {
         'conversation-leaf',
         'session_artifact_snapshot',
       ),
+      system('turn-result', 'conversation-leaf', 'turn_result'),
     ];
 
     expect(
@@ -201,6 +202,7 @@ describe('inspectConversationBranches', () => {
       'custom_title',
       'session_artifact_event',
       'session_artifact_snapshot',
+      'turn_result',
     ] as const;
 
     for (const subtype of subtypes) {

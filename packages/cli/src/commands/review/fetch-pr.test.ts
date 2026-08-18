@@ -10,6 +10,7 @@ import { resolve } from 'node:path';
 import {
   fetchPrCommand,
   countDiffChangedLines,
+  computeDiffStats,
   isEmptyDiff,
   isCollapsedFromUpstream,
   resolveIncrementalAnchor,
@@ -24,8 +25,11 @@ import {
   reviewLeaseHeldByAnotherSession,
 } from '../../services/review-worktree-lease.js';
 import { classifyHeavy } from './lib/heavy.js';
+import { DEADLINE_ENV } from './lib/deadline.js';
+import type { MergeBaseResult } from './lib/merge-base.js';
 import { buildRoleBrief } from './agent-prompt.js';
 import { PARSE_ARGS_REPORT, worktreePath } from './lib/paths.js';
+import { makeDiff } from './lib/test-utils.js';
 
 describe('classifyHeavy', () => {
   it('flags a substantially rewritten existing file', () => {
@@ -233,12 +237,12 @@ const producerMocks = vi.hoisted(() => ({
   gh: vi.fn(),
   git: vi.fn(),
   execFileSync: vi.fn(),
-  refExists: vi.fn(() => false),
+  refExists: vi.fn((..._refs: unknown[]): boolean => false),
   releaseWorktree: vi.fn(() => ({ existed: false, freed: true })),
   gitOpt: vi.fn((..._args: string[]): string | null => null),
   gitRaw: vi.fn((..._args: string[]): Buffer => Buffer.from('')),
   resolveMergeBase: vi.fn(
-    (): { sha: string | null; baseFetchFailed: boolean } => ({
+    (..._args: unknown[]): MergeBaseResult => ({
       sha: null,
       baseFetchFailed: false,
     }),
@@ -294,11 +298,15 @@ vi.mock('../../services/review-worktree-lease.js', () => ({
     `${repositoryRoot}/.qwen/tmp/qwen-review-lease-${target}.json`,
 }));
 
-vi.mock('./lib/gh.js', () => ({
-  ensureAuthenticated: vi.fn(),
-  gh: producerMocks.gh,
-  setGhHost: vi.fn(),
-}));
+vi.mock('./lib/gh.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./lib/gh.js')>();
+  return {
+    ...actual,
+    ensureAuthenticated: vi.fn(),
+    gh: producerMocks.gh,
+    setGhHost: vi.fn(),
+  };
+});
 
 vi.mock('./lib/git.js', () => ({
   git: producerMocks.git,
@@ -339,10 +347,10 @@ describe('fetch-pr report assembly', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     // clearAllMocks resets call history but NOT implementations, so a
-    // mockReturnValue a prior test set on readFileSync would leak into a test
-    // that relies on the default. Re-assert the default (no prior report →
-    // ENOENT) here so every test starts from a known state regardless of
-    // order.
+    // mockReturnValue a prior test set would leak into a test that relies on
+    // the default. Re-assert the defaults (no prior report → ENOENT, no
+    // merge base → no diff) here so every test starts from a known state
+    // regardless of order.
     producerMocks.readFileSync.mockImplementation(() => {
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
     });
@@ -396,19 +404,43 @@ describe('fetch-pr report assembly', () => {
     }
   });
 
+  /**
+   * The identity these fixtures run as, on both sides of the same-model gate.
+   *
+   * A `--since` anchor is used only when `--since-model` matches the running
+   * identity, so a test about ancestry or scoping has to agree on WHO
+   * certified the anchor before it can be about anything else. Supplied by
+   * default here rather than repeated in thirty call sites; the tests that
+   * are ABOUT the gate pass their own `sinceModel` and set their own env.
+   */
+  const CERTIFIER = 'fixture-model@1a2b3c4d';
+
   async function reportFor(extraArgs: Record<string, unknown>) {
     const handler = fetchPrCommand.handler;
     if (!handler) throw new Error('fetch-pr handler missing');
-    await handler({
-      _: [],
-      $0: 'qwen',
-      pr_number: '42',
-      owner_repo: 'acme/widgets',
-      remote: 'origin',
-      out: '/tmp/fetch-report.json',
-      maxChunkLines: 400,
-      ...extraArgs,
-    } as unknown as Parameters<typeof handler>[0]);
+    const savedIdentity = process.env['QWEN_CODE_MODEL_IDENTITY'];
+    process.env['QWEN_CODE_MODEL_IDENTITY'] = CERTIFIER;
+    try {
+      await handler({
+        _: [],
+        $0: 'qwen',
+        pr_number: '42',
+        owner_repo: 'acme/widgets',
+        remote: 'origin',
+        out: '/tmp/fetch-report.json',
+        maxChunkLines: 400,
+        ...(extraArgs['since'] !== undefined && !('sinceModel' in extraArgs)
+          ? { sinceModel: CERTIFIER }
+          : {}),
+        ...extraArgs,
+      } as unknown as Parameters<typeof handler>[0]);
+    } finally {
+      if (savedIdentity === undefined) {
+        delete process.env['QWEN_CODE_MODEL_IDENTITY'];
+      } else {
+        process.env['QWEN_CODE_MODEL_IDENTITY'] = savedIdentity;
+      }
+    }
     // findLast, not find: a test that drives two rounds must read the report
     // the SECOND one wrote, or it asserts against the first round's state.
     const call = producerMocks.writeFileSync.mock.calls.findLast(
@@ -438,6 +470,260 @@ describe('fetch-pr report assembly', () => {
   it('carries --host into the report for the cleanup audit to reuse', async () => {
     const report = await reportFor({ host: 'ghe.example.com' });
     expect(report.host).toBe('ghe.example.com');
+  });
+
+  it('refuses a dash-leading baseRefName from the platform metadata', async () => {
+    // The base ref is server-controlled and reaches git's argv through the
+    // base fetch — a dash-leading name (`--upload-pack=<payload>` is
+    // creatable by full-refname push) must die here, never inside git.
+    producerMocks.gh.mockReturnValue(
+      JSON.stringify({
+        headRefName: 'feat/x',
+        headRefOid: 'f00df00df00d',
+        baseRefName: '--upload-pack=/tmp/evil',
+        additions: 1,
+        deletions: 0,
+        changedFiles: 1,
+        isCrossRepository: false,
+        body: '',
+      }),
+    );
+    await expect(reportFor({})).rejects.toThrow(
+      /refusing base ref "--upload-pack=\/tmp\/evil"/,
+    );
+    const reportCall = producerMocks.writeFileSync.mock.calls.find(
+      ([path]) => path === '/tmp/fetch-report.json',
+    );
+    expect(reportCall).toBeUndefined();
+  });
+
+  it('refuses the refspec channel on baseRefName too (+ and colon)', async () => {
+    // `--` ends option parsing, but a leading `+` or `src:dst` shape still
+    // parses as a (force) refspec after it — same channels as
+    // aone.fetchDiff's target guard.
+    for (const baseRefName of ['+main', '+main:victim', 'src:dst']) {
+      producerMocks.gh.mockReturnValue(
+        JSON.stringify({
+          headRefName: 'feat/x',
+          headRefOid: 'f00df00df00d',
+          baseRefName,
+          additions: 1,
+          deletions: 0,
+          changedFiles: 1,
+          isCrossRepository: false,
+          body: '',
+        }),
+      );
+      await expect(reportFor({})).rejects.toThrow(/not a plain branch name/);
+    }
+  });
+
+  it('refuses HEAD, rev-parse metasyntax, and the empty baseRefName', async () => {
+    // `HEAD` fetches silently and merge-bases through the stale clone-time
+    // symref; `main^` rev-parses to the WRONG base under a misdescribing
+    // warning; the empty string degrades to a garbled diff-less fallback.
+    for (const baseRefName of ['HEAD', 'main^', 'main~1', '']) {
+      producerMocks.gh.mockReturnValue(
+        JSON.stringify({
+          headRefName: 'feat/x',
+          headRefOid: 'f00df00df00d',
+          baseRefName,
+          additions: 1,
+          deletions: 0,
+          changedFiles: 1,
+          isCrossRepository: false,
+          body: '',
+        }),
+      );
+      await expect(reportFor({})).rejects.toThrow(/not a plain branch name/);
+    }
+  });
+
+  it('refuses git pseudo-refs as baseRefName (allowlist)', async () => {
+    // `FETCH_HEAD` resolves to the just-fetched PR head — merge-base(head,
+    // head) = an EMPTY diff beside full-range metadata; `ORIG_HEAD` to an
+    // arbitrary ancestor. Shape-legal, silently wrong — refused at the
+    // metadata stage. Case-insensitively: on case-insensitive filesystems
+    // (macOS/Windows defaults) `.git/fetch_head` folds onto the
+    // `.git/FETCH_HEAD` the immediately-preceding fetch wrote.
+    for (const baseRefName of [
+      'FETCH_HEAD',
+      'ORIG_HEAD',
+      'MERGE_HEAD',
+      'fetch_head',
+      'orig_head',
+      'head',
+      // Legal branch names (check-ref-format --branch accepts them) that
+      // resolve qualified refs the server controls as fetch/merge-base
+      // arguments — refused like the pseudo-refs.
+      'refs/heads/main',
+      'refs/remotes/origin/HEAD',
+    ]) {
+      producerMocks.gh.mockReturnValue(
+        JSON.stringify({
+          headRefName: 'feat/x',
+          headRefOid: 'f00df00df00d',
+          baseRefName,
+          additions: 1,
+          deletions: 0,
+          changedFiles: 1,
+          isCrossRepository: false,
+          body: '',
+        }),
+      );
+      await expect(reportFor({})).rejects.toThrow(/not a plain branch name/);
+    }
+  });
+
+  it('a TAG-only base ref degrades to the disclosed baseFetchFailed state', async () => {
+    // `git fetch origin -- v1.0` exits 0 writing only FETCH_HEAD when v1.0
+    // is tag-only on the remote — the fetch "succeeds" yet no tracking ref
+    // exists, and the bare-name fallback would merge-base against the
+    // reviewer's LOCAL tag: a wrong-base diff with baseFetchFailed falsely
+    // false. The probe requires the tracking ref, so the tag-only shape
+    // lands in the DISCLOSED state instead.
+    producerMocks.gh.mockReturnValue(
+      JSON.stringify({
+        headRefName: 'feat/x',
+        headRefOid: 'f00df00df00d',
+        baseRefName: 'v1.0',
+        additions: 1,
+        deletions: 0,
+        changedFiles: 1,
+        isCrossRepository: false,
+        body: '',
+      }),
+    );
+    // The fetch itself exits 0 (tag shape), but no `origin/v1.0` tracking
+    // ref exists afterwards.
+    producerMocks.gitOpt.mockImplementation((...args: string[]) =>
+      args[0] === 'fetch' ? '' : null,
+    );
+    producerMocks.refExists.mockReturnValue(false);
+    // Drive the seam the way the real resolveMergeBase does: the probe the
+    // command passes must report the fetch as FAILED for the tag shape.
+    producerMocks.resolveMergeBase.mockImplementation((...args: unknown[]) => {
+      const probe = args[3] as { fetch: (r: string, b: string) => boolean };
+      const ok = probe.fetch('origin', 'v1.0');
+      return { sha: null, baseFetchFailed: !ok };
+    });
+    const report = await reportFor({});
+    expect(report.baseFetchFailed).toBe(true);
+  });
+
+  it('the tracking-ref check is FULLY QUALIFIED (no origin/<name> shadow)', async () => {
+    // A local tag or branch literally named `origin/v1.0` (slash-bearing
+    // ref names are legal) satisfies an UNQUALIFIED refExists with no
+    // tracking ref present — and such a tag is SERVER-CONTROLLED: a remote
+    // carrying it auto-carries it into refs/tags/ at plain clone time. The
+    // probe must check `refs/remotes/origin/<ref>` so the shadow cannot
+    // satisfy it and silently move the base.
+    producerMocks.gh.mockReturnValue(
+      JSON.stringify({
+        headRefName: 'feat/x',
+        headRefOid: 'f00df00df00d',
+        baseRefName: 'v1.0',
+        additions: 1,
+        deletions: 0,
+        changedFiles: 1,
+        isCrossRepository: false,
+        body: '',
+      }),
+    );
+    producerMocks.gitOpt.mockImplementation((...args: string[]) =>
+      args[0] === 'fetch' ? '' : null,
+    );
+    const checked: string[] = [];
+    producerMocks.refExists.mockImplementation((...refs: unknown[]) => {
+      checked.push(String(refs[0]));
+      return false;
+    });
+    producerMocks.resolveMergeBase.mockImplementation((...args: unknown[]) => {
+      const probe = args[3] as { fetch: (r: string, b: string) => boolean };
+      return { sha: null, baseFetchFailed: !probe.fetch('origin', 'v1.0') };
+    });
+    await reportFor({});
+    expect(checked).toContain('refs/remotes/origin/v1.0');
+    expect(checked).not.toContain('origin/v1.0');
+  });
+
+  it('the base fetch is an EXPLICIT branch refspec (no tag dwim)', async () => {
+    // A bare-name fetch of a base that is also a tag name dwims onto the
+    // TAG: exit 0, FETCH_HEAD-only, tracking ref untouched — the stale-base
+    // state passing the freshness guard it never refreshed. The probe fetch
+    // must name the branch source and the qualified tracking-ref
+    // destination explicitly.
+    producerMocks.gh.mockReturnValue(
+      JSON.stringify({
+        headRefName: 'feat/x',
+        headRefOid: 'f00df00df00d',
+        baseRefName: 'v1.0',
+        additions: 1,
+        deletions: 0,
+        changedFiles: 1,
+        isCrossRepository: false,
+        body: '',
+      }),
+    );
+    const fetched: string[][] = [];
+    producerMocks.gitOpt.mockImplementation((...args: string[]) => {
+      if (args[0] === 'fetch') fetched.push(args.slice(1));
+      return args[0] === 'fetch' ? '' : null;
+    });
+    producerMocks.refExists.mockImplementation((...refs: unknown[]) => {
+      void refs;
+      return true;
+    });
+    producerMocks.resolveMergeBase.mockImplementation((...args: unknown[]) => {
+      const probe = args[3] as { fetch: (r: string, b: string) => boolean };
+      probe.fetch('origin', 'v1.0');
+      return { sha: 'mb1', baseFetchFailed: false };
+    });
+    await reportFor({});
+    expect(fetched).toEqual([
+      ['origin', '--', '+refs/heads/v1.0:refs/remotes/origin/v1.0'],
+    ]);
+  });
+
+  it('refuses a non-positive pr_number before any side effect', async () => {
+    // `/^\d+$/` once admitted '0'; the guard promises a POSITIVE integer
+    // and must reject before detection, auth, and the worktree lease.
+    await expect(reportFor({ pr_number: '0' })).rejects.toThrow(
+      /pr_number must be a positive integer, got "0"/,
+    );
+    expect(producerMocks.git).not.toHaveBeenCalled();
+  });
+  it('records the round cap its capture wiring writes — huge tier only with a clock (#9256)', async () => {
+    // plan-diff and capture-local pin this wiring in their own handlers; the
+    // fetch-pr side had no assertion because this harness steers the lightest
+    // real path (no merge base → no diff). Override the two mocks that steer
+    // it into a real diff instead: a resolvable merge base and a raw diff
+    // buffer. A handler that forgot the deadline read — or the capture-time
+    // tier call — would keep every budget unit test green and this one red.
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: 'beef0000',
+      baseFetchFailed: false,
+    });
+    producerMocks.gitRaw.mockReturnValue(
+      Buffer.from(makeDiff('src/huge.ts', 9000)),
+    );
+
+    const before = process.env[DEADLINE_ENV];
+    try {
+      delete process.env[DEADLINE_ENV];
+      producerMocks.writeFileSync.mockClear();
+      const noClock = await reportFor({});
+      expect(noClock.srcDiffLines).toBeGreaterThanOrEqual(3000);
+      expect(noClock.budget.reverseAuditRounds).toBe(5);
+
+      process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 7200);
+      producerMocks.writeFileSync.mockClear();
+      const withClock = await reportFor({});
+      expect(withClock.budget.reverseAuditRounds).toBe(3);
+    } finally {
+      if (before === undefined) delete process.env[DEADLINE_ENV];
+      else process.env[DEADLINE_ENV] = before;
+    }
   });
 
   // The lease is also a lock (#9205): a concurrent same-PR fetch-pr used to
@@ -908,6 +1194,61 @@ describe('fetch-pr report assembly', () => {
       BASE,
       ANCHOR,
     ]);
+  });
+
+  it('refuses an anchor another identity certified, before touching history', async () => {
+    // "Clean up to this sha" is the recorded identity's verdict, and this
+    // command validates an anchor against the HISTORY, never against who
+    // certified it — so a cross-model anchor is ancestrally perfect and
+    // still scopes the round past code it never reviewed.
+    //
+    // The gate lives here because every prompt-text version of it was wrong:
+    // `{{model}}` interpolates the BARE `config.getModel()` while every
+    // identity the CLI writes is provider-qualified, so two providers
+    // exposing one model name passed each other's gate.
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    servesBothRanges();
+
+    // Same model NAME, different provider — the case the digest exists for.
+    const other = await reportFor({
+      since: ANCHOR,
+      sinceModel: 'fixture-model@9f8e7d6c',
+    });
+    expect(other.incremental).toEqual({
+      since: ANCHOR,
+      effective: false,
+      reason: 'cross-model-anchor',
+    });
+    // Refused before the history was consulted at all: no probe ran for it.
+    expect(producerMocks.gitOpt.mock.calls).not.toContainEqual([
+      'cat-file',
+      '-e',
+      ANCHOR,
+    ]);
+    // The round still reviews — the full range.
+    expect(other.diffPath).not.toBeNull();
+
+    // An anchor nobody certified (a cache written before the field) is a
+    // mismatch, not a pass.
+    expect(
+      (await reportFor({ since: ANCHOR, sinceModel: undefined })).incremental,
+    ).toEqual({
+      since: ANCHOR,
+      effective: false,
+      reason: 'cross-model-anchor',
+    });
+
+    // …and the matching identity scopes, which is what makes the refusals
+    // above about the gate rather than about the anchor.
+    expect((await reportFor({ since: ANCHOR })).incremental).toEqual({
+      since: ANCHOR,
+      effective: true,
+      diffBase: ANCHOR,
+    });
   });
 
   it('takes the LAST value of a repeated --since, and expands an abbreviation', async () => {
@@ -3243,6 +3584,67 @@ describe('countDiffChangedLines', () => {
       '+q',
     ].join('\n');
     expect(countDiffChangedLines(d)).toBe(4);
+  });
+});
+
+describe('computeDiffStats', () => {
+  it('counts additions, deletions, and changed files off a unified diff', () => {
+    const d = [
+      'diff --git a/a.ts b/a.ts',
+      '--- a/a.ts',
+      '+++ b/a.ts',
+      '@@ -1,2 +1,3 @@',
+      '-gone',
+      '+added1',
+      '+added2',
+      ' ctx',
+      'diff --git a/b.ts b/b.ts',
+      '--- a/b.ts',
+      '+++ b/b.ts',
+      '@@ -1 +1 @@',
+      '-p',
+      '+q',
+    ].join('\n');
+    expect(computeDiffStats(d)).toEqual({
+      additions: 3,
+      deletions: 2,
+      changedFiles: 2,
+    });
+  });
+
+  it('returns zeros for an empty diff', () => {
+    expect(computeDiffStats('')).toEqual({
+      additions: 0,
+      deletions: 0,
+      changedFiles: 0,
+    });
+  });
+
+  it('counts changedFiles on `diff --git`, not on `---`/`+++` header lines', () => {
+    // A binary file contributes a `diff --git` but NO `---`/`+++` headers, so
+    // #diff--git (3) differs from #--- (2) — a mutation that counted `---`
+    // lines would report 2 and stay green without this fixture.
+    const d = [
+      'diff --git a/a.ts b/a.ts',
+      '--- a/a.ts',
+      '+++ b/a.ts',
+      '@@ -1 +1 @@',
+      '-x',
+      '+y',
+      'diff --git a/img.png b/img.png',
+      'Binary files a/img.png and b/img.png differ',
+      'diff --git a/b.ts b/b.ts',
+      '--- a/b.ts',
+      '+++ b/b.ts',
+      '@@ -1 +1 @@',
+      '-p',
+      '+q',
+    ].join('\n');
+    expect(computeDiffStats(d)).toEqual({
+      additions: 2,
+      deletions: 2,
+      changedFiles: 3,
+    });
   });
 });
 

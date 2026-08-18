@@ -723,6 +723,7 @@ export function createDaemonSessionActions({
       }
       let accepted: Awaited<ReturnType<typeof session.submitPrompt>>;
       try {
+        options?.onAdmissionStarted?.();
         accepted = await session.submitPrompt(
           promptRequest as Parameters<typeof session.submitPrompt>[0],
         );
@@ -1564,6 +1565,7 @@ export function createDaemonSessionActions({
         signal?: AbortSignal;
         messageId?: string;
         content?: PromptContentBlock[];
+        onAdmissionStarted?: () => void;
       },
     ): Promise<DaemonMidTurnMessageResult> {
       // Calls without an id are the old-daemon compatibility path and fall back
@@ -1573,7 +1575,12 @@ export function createDaemonSessionActions({
       const session = sessionRef.current;
       if (!session) return { accepted: false };
       try {
-        return await session.enqueueMidTurnMessage(message, opts);
+        const { onAdmissionStarted, ...requestOptions } = opts ?? {};
+        onAdmissionStarted?.();
+        return await session.enqueueMidTurnMessage(
+          message,
+          opts ? requestOptions : undefined,
+        );
       } catch (err) {
         if (opts?.messageId) throw err;
         // An abort is the designed settle-time cancel (the message stays in the

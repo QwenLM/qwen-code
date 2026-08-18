@@ -39,7 +39,8 @@ import {
   reviewLeasePath,
 } from '../../services/review-worktree-lease.js';
 import { sanitizedGitEnv } from './lib/worktree.js';
-import { ensureAuthenticated, gh, setGhHost } from './lib/gh.js';
+import { setGhHost } from './lib/gh.js';
+import { getPlatformReader } from './lib/platform/registry.js';
 import type { ReviewEffort } from './parse-args.js';
 import {
   git,
@@ -74,6 +75,7 @@ import { operatorReviewSettings } from './lib/review-settings.js';
 import { hasReviewDeadline } from './lib/deadline.js';
 import { appendRunSession } from './lib/run-ledger.js';
 import { SHA_RE } from './lib/ledger.js';
+import { certifierMatchesRound, roundModelIdFrom } from './lib/round-model.js';
 
 interface PrMetadata {
   headRefName: string;
@@ -102,6 +104,20 @@ interface FetchPrArgs {
    * array and the recovery flow can produce one; `runFetchPr` normalizes.
    */
   since?: string | string[];
+  /**
+   * WHO certified the `--since` anchor: the `lastModelId` beside it in the
+   * cache, or the `model` beside the marker's `sha`. Copied through verbatim
+   * — the orchestrator never compares it to anything, because a comparison
+   * stated in prompt text is one that can be skipped, and because the two
+   * sides are not even the same kind of string there (`{{model}}` is the bare
+   * `config.getModel()`; what the CLI writes is provider-qualified). The gate
+   * lives HERE, over `certifierMatchesRound`, which is the same function the
+   * marker-recovery ruling uses.
+   *
+   * Omitted for an anchor nobody certified — a cache written before the
+   * field. That is a mismatch, not a pass.
+   */
+  sinceModel?: string | string[];
 }
 
 type FetchPrResult = PlanReport & {
@@ -175,6 +191,27 @@ type FetchPrResult = PlanReport & {
    */
   prDescriptionHasHan: boolean;
   /**
+   * The model this ROUND started under — the runtime identity at capture
+   * time, stamped here because nothing else in the flow remembers it.
+   *
+   * `compose-review` certifies the posted anchor with the model that did the
+   * review, and its only other source is `QWEN_CODE_MODEL` read at compose
+   * or submit time. That env tracks the session's CURRENT model: the
+   * documented deferred-post flow — review under A, `/model` to B, "post
+   * comments" — then certified A's range as B, and the next round under B
+   * scoped `sha..HEAD` past code B never reviewed. A stamp taken when the
+   * diff was captured is the one value that cannot drift out from under the
+   * work it describes.
+   *
+   * Absent on a report written before this field. Compose keeps its previous
+   * behaviour there rather than withholding every anchor: a report is written
+   * at the start of the round and read at its end, so a missing stamp means
+   * the CLI was upgraded between the two — and on a runtime that publishes no
+   * model id at all, the runtime side of the comparison is empty too, so the
+   * pair is certified by the same declared fallback as before this field.
+   */
+  reviewModelId?: string;
+  /**
    * Present when `--since <sha>` was passed: the incremental-review scoping
    * decision, validated HERE so the orchestrator never hand-runs git against
    * an anchor. `effective: true` without `upToDate` means the diff and plan
@@ -218,6 +255,7 @@ export interface IncrementalDecision {
     | 'behind-merge-base'
     | 'hunks-outside-pr-diff'
     | 'containment-unverified'
+    | 'cross-model-anchor'
     | 'base-untrusted'
     | 'capture-failed'
     | 'partition-failed';
@@ -566,9 +604,65 @@ function sectionsContained(
   return true;
 }
 
+/**
+ * Allowlist shape for a server-controlled branch name reaching git's argv:
+ * a plain branch name and nothing else (twin of aone.ts's guard — see that
+ * comment for each admitted channel's wrong outcome). Fail closed: an
+ * unusual-but-legal name is refused with a clear metadata-stage error
+ * rather than guessed at inside a git invocation. The pseudo-ref set rides
+ * the same rejection: `FETCH_HEAD` resolves to the JUST-fetched PR head
+ * (merge-base(head, head) = empty diff beside full-range metadata), and
+ * `ORIG_HEAD` to an arbitrary ancestor — both shape-legal, both silently
+ * wrong. The match is CASE-INSENSITIVE: on case-insensitive filesystems
+ * (macOS/Windows defaults) `.git/fetch_head` folds onto `.git/FETCH_HEAD`,
+ * so the lowercase spellings reach the same pseudo-refs. `refs/`-prefixed
+ * names ride the same rejection: they are legal branch names
+ * (`git check-ref-format --branch` accepts `refs/heads/x`), but as a
+ * fetch/merge-base argument they resolve QUALIFIED refs the server
+ * controls — a wrong base disclosed only by a misdescribing warning.
+ */
+const GIT_PSEUDO_REFS =
+  /^(FETCH|ORIG|MERGE|CHERRY_PICK|REVERT|REBASE|BISECT)_HEAD$/i;
+
+function isPlainBranchName(name: string): boolean {
+  return (
+    name.toUpperCase() !== 'HEAD' &&
+    !GIT_PSEUDO_REFS.test(name) &&
+    !name.includes('..') &&
+    !/^refs\//i.test(name) &&
+    /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(name)
+  );
+}
+
 /** The real git surface `resolveMergeBase` runs against. */
 const gitProbe: GitProbe = {
-  fetch: (remote, ref) => gitOpt('fetch', remote, ref) !== null,
+  // `--` ends option parsing: the base ref is server-controlled platform
+  // metadata (GitHub `baseRefName`, Aone `targetBranch`), and a dash-leading
+  // value must never reach git as an option (`git fetch origin
+  // --upload-pack=<payload>` executes the attacker-named program on the
+  // remote host with the reviewer's credentials).
+  //
+  // The fetch must ALSO have produced the tracking ref: a bare-name fetch
+  // of a TAG exits 0 writing only FETCH_HEAD (`* tag v1.0 -> FETCH_HEAD`),
+  // so the fetch "succeeds" yet no `origin/<ref>` exists — and the
+  // bare-name fallback then merge-bases against the reviewer's LOCAL tag:
+  // a wrong-base diff with baseFetchFailed falsely false. The fetch is an
+  // EXPLICIT BRANCH REFSPEC: the source is fully qualified (git dwims a
+  // bare name onto a same-named TAG and exits 0 without updating the
+  // tracking ref — a pushable, server-controlled shadow that passes the
+  // freshness guard it never refreshed), and the destination is the
+  // qualified tracking ref. The backstop check is FULLY QUALIFIED
+  // (`refs/remotes/…`): an unqualified `origin/<ref>` resolves in
+  // refs/tags and refs/heads FIRST, so a tag or branch named
+  // `origin/<ref>` — likewise pushable, auto-carried at clone time — would
+  // satisfy the check with no tracking ref present.
+  fetch: (remote, ref) =>
+    gitOpt(
+      'fetch',
+      remote,
+      '--',
+      `+refs/heads/${ref}:refs/remotes/${remote}/${ref}`,
+    ) !== null && refExists(`refs/remotes/${remote}/${ref}`),
   refExists,
   mergeBase: (a, b) => gitOpt('merge-base', a, b),
 };
@@ -598,6 +692,8 @@ function cleanStale(prNumber: string): void {
 }
 
 async function runFetchPr(args: FetchPrArgs): Promise<void> {
+  // Sampled HERE, at the start of the round: see `reviewModelId`.
+  const roundModelId = roundModelIdFrom(process.env);
   const { pr_number: prNumber, owner_repo: ownerRepo, remote, out } = args;
 
   // The lease gate below only engages `pr-\d+` targets, but `cleanStale`
@@ -615,8 +711,18 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
   if (ownerRepo.indexOf('/') < 0) {
     throw new Error('owner_repo must look like "owner/repo"');
   }
-
-  ensureAuthenticated();
+  // Validate before coercing: Number('1e3') is 1000, so an unvalidated token
+  // would fetch a DIFFERENT PR's head while the ref/worktree/report all carry
+  // the caller's label. `[1-9]` also rejects `0` (no PR zero — the message
+  // promises a POSITIVE integer, and admitting it ran detection, auth, and a
+  // worktree lease before dying at the fetch) and leading zeros (the label
+  // would not round-trip through Number). The skill path is guarded by
+  // parse-args' digit grammar; this is the direct-CLI surface.
+  if (!/^[1-9]\d*$/.test(prNumber)) {
+    throw new Error(
+      `pr_number must be a positive integer, got ${JSON.stringify(prNumber)}`,
+    );
+  }
 
   const ref = reviewBranch(prNumber);
   const wt = worktreePath(prNumber);
@@ -658,7 +764,6 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         `re-run.`,
     );
   }
-
   // The lock above refuses any later session that finds another
   // session's lease, so one left behind by ANY failure after this point
   // would block every later review of this PR until deleted by hand.
@@ -677,33 +782,77 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       branch: ref,
     });
 
+    // Select the platform from the remote under review (falling back to the
+    // cwd clone's origin), so an Aone clone fetches the Aone ref via a1
+    // while a GitHub clone keeps `pull/<n>/head` via gh. Trim the host:
+    // isAoneHost does not trim, and a padded `--host` would silently drop
+    // to GitHub here. Runs INSIDE the lease gate: the refusal above must
+    // precede every call this command makes — the detection probe included
+    // — and a detection/auth failure rolls the lease back through the catch.
+    let remoteUrl: string | undefined;
+    try {
+      remoteUrl = git('remote', 'get-url', remote).trim();
+    } catch {
+      remoteUrl = undefined;
+    }
+    const platform = getPlatformReader({ remoteUrl, host: args.host?.trim() });
+    platform.ensureAuthenticated();
+
     // 1. Clean any stale worktree / branch from an earlier run.
     cleanStale(prNumber);
 
-    // 2. Fetch PR HEAD into a unique local ref.
+    // 2. Fetch PR HEAD into a unique local ref. The refspec source is
+    //    platform-specific: GitHub `pull/<n>/head`, Aone
+    //    `refs/merge-requests/<global-id>/head`.
     try {
-      git('fetch', remote, `pull/${prNumber}/head:${ref}`);
+      git(
+        'fetch',
+        remote,
+        `${platform.fetchHeadRefSpec(Number(prNumber))}:${ref}`,
+      );
     } catch (err) {
       throw new Error(
         `Failed to fetch PR #${prNumber} from remote "${remote}": ${(err as Error).message}`,
       );
     }
-    const fetchedSha = git('rev-parse', ref);
+    // QUALIFIED: an unqualified `ref` resolves in refs/tags BEFORE
+    // refs/heads, so a planted tag with the throwaway branch's name (fully
+    // attacker-known, no pid here) would silently name the tag's commit as
+    // the fetched head while the worktree shows the real one.
+    const fetchedSha = git('rev-parse', `refs/heads/${ref}`);
 
-    // 3. Fetch PR metadata via gh CLI. Cross-repo flag tells the LLM whether
-    //    to switch into lightweight mode.
+    // 3. Fetch PR metadata via the platform. Cross-repo flag tells the LLM
+    //    whether to switch into lightweight mode.
     let meta: PrMetadata;
     try {
-      const json = gh(
-        'pr',
-        'view',
-        prNumber,
-        '--repo',
-        ownerRepo,
-        '--json',
-        'headRefName,headRefOid,baseRefName,additions,deletions,changedFiles,isCrossRepository,body',
-      );
-      meta = JSON.parse(json) as PrMetadata;
+      const fetchMeta = platform.getFetchMeta(Number(prNumber), ownerRepo);
+      meta = {
+        headRefName: fetchMeta.headRefName ?? prNumber,
+        headRefOid: fetchMeta.headRefOid,
+        baseRefName: fetchMeta.baseRefName,
+        // Platforms without advertised stats (Aone) fill these from the
+        // captured diff after step 5.
+        additions: fetchMeta.additions ?? 0,
+        deletions: fetchMeta.deletions ?? 0,
+        changedFiles: fetchMeta.changedFiles ?? 0,
+        isCrossRepository: fetchMeta.isCrossRepository,
+        body: fetchMeta.body,
+      };
+      // The base ref is server-controlled metadata reaching git's argv through
+      // the base fetch below. The fetch probe passes `--`, but that only ends
+      // OPTION parsing — validate ALLOWLIST-style, accepting only a plain
+      // branch name (the twin of aone.fetchDiff's target guard, whose comment
+      // names each admitted channel's wrong outcome: option spellings, `+`
+      // force refspec, `src:dst` colon refspec, `HEAD`'s silent fetch + stale
+      // clone-time symref merge-base, rev-parse metasyntax, the empty
+      // string). A hostile platform value dies here with the metadata rolled
+      // back, not inside a git invocation.
+      if (!isPlainBranchName(meta.baseRefName)) {
+        throw new Error(
+          `refusing base ref ${JSON.stringify(meta.baseRefName)} from the ` +
+            `platform metadata — not a plain branch name`,
+        );
+      }
     } catch (err) {
       // Roll back the fetched ref so the next run starts clean.
       tryRemove(() =>
@@ -719,6 +868,9 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         `Failed to fetch PR #${prNumber} metadata: ${(err as Error).message}`,
       );
     }
+    // Aone does not advertise diff stats; compute them from the captured diff
+    // once it exists. Tracked so the recomputed numbers replace the zeros.
+    const needsLocalStats = platform.kind !== 'github';
 
     // 4. Create the ephemeral worktree.
     try {
@@ -750,7 +902,9 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     const { sha: mergeBaseSha, baseFetchFailed } = resolveMergeBase(
       remote,
       meta.baseRefName,
-      ref,
+      // QUALIFIED — the head side is dwim-shadowable exactly like the
+      // fetchedSha read above.
+      `refs/heads/${ref}`,
       gitProbe,
     );
     if (baseFetchFailed) {
@@ -848,7 +1002,45 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     // later, `since.slice(…)` — which crashed the command after the worktree
     // existed and before any report was written.
     const sinceArg = typeof rawSince === 'string' ? rawSince : undefined;
-    if (sinceArg !== undefined && sinceArg !== '') {
+    // WHO certified it, gated before the history is consulted at all: "clean
+    // up to this sha" is the recorded identity's verdict, and `fetch-pr`
+    // validates an anchor against the HISTORY, never against who certified
+    // it — so an anchor from another model is ancestrally perfect and still
+    // scopes this round past code it never reviewed.
+    //
+    // Ruled here rather than in the skill because every prompt-text version
+    // of this comparison has been wrong: `{{model}}` interpolates the BARE
+    // `config.getModel()` while every identity the CLI writes is
+    // provider-qualified, so the two sides were never the same kind of string
+    // and two providers exposing one model name passed each other's gate.
+    // With the check here there is no identity comparison left in prompt text
+    // at all — the orchestrator copies two fields and reads a decision.
+    const rawSinceModel = Array.isArray(args.sinceModel)
+      ? args.sinceModel[args.sinceModel.length - 1]
+      : args.sinceModel;
+    const sinceModel =
+      typeof rawSinceModel === 'string' ? rawSinceModel : undefined;
+    const crossModel =
+      sinceArg !== undefined &&
+      sinceArg !== '' &&
+      !certifierMatchesRound(sinceModel, roundModelIdFrom(process.env));
+    if (crossModel) {
+      anchor = {
+        incremental: {
+          since: sinceArg,
+          effective: false,
+          reason: 'cross-model-anchor',
+        },
+        diffBase: null,
+      };
+      writeStderrLine(
+        `Incremental anchor not used — it was certified by ` +
+          `${sinceModel ? `"${sinceModel}"` : 'no recorded identity'}, and ` +
+          `this review runs as ` +
+          `${roundModelIdFrom(process.env) || 'an unpublished identity'}. ` +
+          `Reviewing the full range.`,
+      );
+    } else if (sinceArg !== undefined && sinceArg !== '') {
       try {
         anchor = resolveIncrementalAnchor(
           sinceArg,
@@ -1143,6 +1335,20 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       );
     }
 
+    // Aone does not advertise diff stats — fill them from the captured diff
+    // so the report's diffStat and the stderr summary carry real numbers.
+    // Runs AFTER the plan/rescue above, where `diffText` is FINAL: the
+    // partition-rescue can republish the full range over a delta-scoped
+    // capture, and a backfill run before it would advertise the delta's
+    // numbers beside a diffPath pointing at the full merge-base diff. The
+    // numbers must describe the SAME diff the report points at.
+    if (needsLocalStats) {
+      const stats = computeDiffStats(diffText);
+      meta.additions = stats.additions;
+      meta.deletions = stats.deletions;
+      meta.changedFiles = stats.changedFiles;
+    }
+
     // 6. Emit the report. The window opening survives drift restarts: this
     // command overwrites its own report, and a reset boundary would hide any
     // bypass write made during the abandoned attempt from cleanup's audit.
@@ -1261,14 +1467,24 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       // advertised stat, so the collapse ratio would fire on every incremental
       // review — both flags are full-range facts, so both read `fullText` on
       // EVERY round, delta-scoped or not.
-      ...(isCollapsedFromUpstream({
-        diffText: fullText ?? '',
-        baseFetchFailed,
-        additions: meta.additions,
-        deletions: meta.deletions,
-      })
-        ? { collapsedFromUpstream: true }
-        : {}),
+      // The collapse disclosure needs TWO independent quantities: the
+      // platform-advertised full-PR stat and the recomputed full-range count.
+      // Off GitHub the advertised half is locally derived FROM THE SAME
+      // captured text — one source, not two — and on a delta-scoped round it
+      // is delta-scoped beside a full-range count (a churned delta passing
+      // containment would fire a false "overlapping merged PRs collapsed
+      // this PR"). Skip it when the stats are locally derived; a genuine
+      // upstream collapse cannot be disclosed without an independent fact.
+      ...(needsLocalStats
+        ? {}
+        : isCollapsedFromUpstream({
+              diffText: fullText ?? '',
+              baseFetchFailed,
+              additions: meta.additions,
+              deletions: meta.deletions,
+            })
+          ? { collapsedFromUpstream: true }
+          : {}),
       diffStat: {
         files: meta.changedFiles,
         additions: meta.additions,
@@ -1280,6 +1496,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       diffPathAbsolute,
       diffSha256,
       prDescriptionHasHan: /\p{Script=Han}/u.test(meta.body ?? ''),
+      ...(roundModelId ? { reviewModelId: roundModelId } : {}),
       ...(anchor ? { incremental: anchor.incremental } : {}),
       ...buildPlanReport(plan, (path) => fileLineCount(fetchedSha, path), {
         operatorRoundCap: operatorReviewSettings().reverseAuditRounds,
@@ -1394,34 +1611,59 @@ export function isCollapsedFromUpstream(i: {
   );
 }
 
-/** Changed (+/-) lines in a unified diff — headers excluded. */
+/**
+ * Changed (+/-) lines in a unified diff — headers excluded. Delegates to the
+ * single hunk-state walker in computeDiffStats so the two can never disagree
+ * (isCollapsedFromUpstream compares this against the advertised stats, and
+ * for Aone the advertised stats COME from computeDiffStats — one walker, or
+ * the ratio is load-bearing on two copies agreeing).
+ *
+ * POSITION, not prefix shape. Guessing by prefix (`^-(?!--)`) has to exclude
+ * every line starting `--`, and a DELETED line whose own content starts `--`
+ * arrives as `--- …`: markdown rules and YAML document markers, SQL and Lua
+ * comments, a `--flag` in a script. Each one silently dropped a real changed
+ * line, and every drop pushes the ratio toward a false `collapsedFromUpstream`
+ * (the disclosure fires when the recomputed count comes in LOW).
+ */
 export function countDiffChangedLines(diffText: string): number {
-  // POSITION, not prefix shape. Guessing by prefix (`^-(?!--)`) has to exclude
-  // every line starting `--`, and a DELETED line whose own content starts `--`
-  // arrives as `--- …`: markdown rules and YAML document markers, SQL and Lua
-  // comments, a `--flag` in a script. Each one silently dropped a real changed
-  // line, and every drop pushes the ratio toward a false `collapsedFromUpstream`
-  // (the disclosure fires when the recomputed count comes in LOW).
-  //
-  // Inside a hunk the position is unambiguous — `---`/`+++` cannot be file
-  // headers there — so track hunk state and count every `+`/`-` line in it.
-  let n = 0;
+  const { additions, deletions } = computeDiffStats(diffText);
+  return additions + deletions;
+}
+
+/**
+ * Additions / deletions / changed-files counted straight off a unified diff —
+ * the single hunk-state walker (see countDiffChangedLines). Used when the
+ * platform does not advertise diff stats (Aone); GitHub's `gh pr view`
+ * reports them, so GitHub keeps the advertised numbers. Inside a hunk the
+ * position is unambiguous — `---`/`+++` cannot be file headers there — so
+ * track hunk state and count every `+`/`-` line in it; `diff --git` opens
+ * the next file's header block and `\ No newline at end of file` is a marker,
+ * not content.
+ */
+export function computeDiffStats(diffText: string): {
+  additions: number;
+  deletions: number;
+  changedFiles: number;
+} {
+  let additions = 0;
+  let deletions = 0;
+  let changedFiles = 0;
   let inHunk = false;
   for (const line of diffText.split('\n')) {
+    if (line.startsWith('diff --git')) {
+      changedFiles++;
+      inHunk = false;
+      continue;
+    }
     if (line.startsWith('@@')) {
       inHunk = true;
       continue;
     }
-    // `diff --git` opens the next file's header block; `\ No newline at end of
-    // file` is a marker, not content, and git emits it inside the hunk.
-    if (line.startsWith('diff --git')) {
-      inHunk = false;
-      continue;
-    }
     if (!inHunk || line.startsWith('\\')) continue;
-    if (line.startsWith('+') || line.startsWith('-')) n++;
+    if (line.startsWith('+')) additions++;
+    else if (line.startsWith('-')) deletions++;
   }
-  return n;
+  return { additions, deletions, changedFiles };
 }
 
 export const fetchPrCommand: CommandModule = {
@@ -1454,7 +1696,7 @@ export const fetchPrCommand: CommandModule = {
       .option('host', {
         type: 'string',
         describe:
-          'GitHub host for this PR (GitHub Enterprise). Routes every gh call in this command via GH_HOST; omit for github.com.',
+          "The host the target lives on — it selects the platform, i.e. whether the fetch uses pull/<n>/head or refs/merge-requests/<id>/head. An Aone host (*.alibaba-inc.com) selects the Aone backend; omitted: detected from the remote under review, else the clone's origin, else GitHub.",
       })
       .option('max-chunk-lines', {
         type: 'number',
@@ -1481,6 +1723,18 @@ export const fetchPrCommand: CommandModule = {
           'diff with the reason in the report; a valid one scopes the diff ' +
           "and the chunk plan to since..head. The decision is the report's " +
           '`incremental` field.',
+      })
+      .option('since-model', {
+        type: 'string',
+        describe:
+          'WHO certified the --since anchor: the `lastModelId` beside it in ' +
+          'the review cache, or the `model` beside the marker sha. Copy it ' +
+          'through verbatim — do NOT compare it to anything yourself. The ' +
+          'anchor is used only when it matches the identity running this ' +
+          'review; otherwise the report says `cross-model-anchor` and the ' +
+          'round reviews the full diff, because "clean up to this sha" is ' +
+          "the recorded identity's verdict and this command validates an " +
+          'anchor against the history, never against who certified it.',
       }),
   handler: async (argv) => {
     setGhHost((argv as { host?: string }).host);
