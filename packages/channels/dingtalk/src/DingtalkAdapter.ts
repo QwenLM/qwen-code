@@ -14,6 +14,7 @@ import {
   ChannelBase,
   isTerminalTaskLifecycleType,
   sanitizeLogText,
+  sanitizePromptText,
   sanitizeSenderName,
 } from '@qwen-code/channel-base';
 import { normalizeDingTalkMarkdown, extractTitle } from './markdown.js';
@@ -135,6 +136,47 @@ function parseJsonArray(value: unknown): unknown[] | undefined {
   }
 }
 
+/**
+ * Neutralize a field lifted out of a forwarded chat record before it is joined
+ * into the prompt.
+ *
+ * Record content is multi-author third-party text: the forwarder is an allowed
+ * user, but the authors inside the record are not. `ChannelBase` applies
+ * `sanitizePromptText` only when `envelope.isGroup || sessionScope === 'single'`,
+ * and DingTalk declares no `defaultSessionScope` so the registry falls back to
+ * `'user'` — meaning in 1:1 DMs nothing downstream neutralizes this text. Doing
+ * it per field here keeps DM and group renderings identical and matches how
+ * `referencedText` is sanitized unconditionally on the reply path.
+ */
+function sanitizeChatRecordField(value: string): string {
+  return sanitizePromptText(value).trim();
+}
+
+/**
+ * The placeholder shown for a message whose body is not text. Shared by the
+ * record-entry and reply-quote paths so the two cannot drift — they already had
+ * (different `file` handling, different empty fallback), which described the
+ * same message type two ways to the model depending on how it arrived. Callers
+ * supply their own fallback for an absent/unknown msgType.
+ */
+function mediaTypePlaceholder(
+  msgType: string | undefined,
+  fileName?: unknown,
+): string | undefined {
+  switch (msgType) {
+    case 'picture':
+      return '[image]';
+    case 'file':
+      return `[file: ${nonEmptyString(fileName) || 'file'}]`;
+    case 'audio':
+      return '[audio]';
+    case 'video':
+      return '[video]';
+    default:
+      return undefined;
+  }
+}
+
 function formatChatRecordEntryBody(record: Record<string, unknown>): string {
   const rawContent = record['content'];
   const content =
@@ -147,31 +189,47 @@ function formatChatRecordEntryBody(record: Record<string, unknown>): string {
     nonEmptyString(content?.['text']) ||
     nonEmptyString(record['message']) ||
     nonEmptyString(record['body']);
-  if (body) return body;
+  if (body) return sanitizeChatRecordField(body) || '[message]';
 
   const msgType =
     nonEmptyString(record['msgType']) || nonEmptyString(record['msgtype']);
-  switch (msgType) {
-    case 'picture':
-      return '[image]';
-    case 'file':
-      return `[file: ${nonEmptyString(content?.['fileName']) || 'file'}]`;
-    case 'audio':
-      return '[audio]';
-    case 'video':
-      return '[video]';
-    default:
-      return msgType ? `[${msgType}]` : '[message]';
-  }
+  return (
+    mediaTypePlaceholder(msgType, content?.['fileName']) ??
+    // Record-specific fallback: name the type when DingTalk sends one we do
+    // not model, so the model sees *something* arrived rather than a gap.
+    (msgType ? `[${msgType}]` : '[message]')
+  );
+}
+
+/**
+ * The content keys that actually arrived on a chat-record payload, for the
+ * degraded-path diagnostic below. The payload shape is undocumented and
+ * varies — this file probes three entry field names and two encodings — so
+ * when DingTalk ships another variant the only thing that distinguishes "the
+ * bot cannot see forwarded messages" from a bug is knowing which keys were
+ * present.
+ */
+function describeChatRecordKeys(content?: DingTalkMessageContent): string {
+  if (!content || typeof content !== 'object') return 'none';
+  const keys = Object.keys(content as Record<string, unknown>);
+  return keys.length > 0 ? keys.join(',') : 'none';
 }
 
 function formatChatRecord(content?: DingTalkMessageContent): string {
   const title = nonEmptyString(content?.title);
   const rawSummary = nonEmptyString(content?.summary);
   const parsedSummary = parseJsonArray(rawSummary);
+  // Keep empty placeholder lines: `summaryLines` is positional and indexes
+  // into `entries` for sender recovery below, so filtering here would shift
+  // every later line onto the wrong entry — the exact misattribution the
+  // length guard exists to prevent. `summary` is the display copy and filters
+  // them; the two variables look redundant but are not.
   const summaryLines: string[] = parsedSummary
-    ? parsedSummary.map((item) => nonEmptyString(item) || '')
-    : rawSummary?.split('\n').map((line) => line.trim()) || [];
+    ? parsedSummary.map(
+        (item) => sanitizeChatRecordField(nonEmptyString(item) || '') || '',
+      )
+    : rawSummary?.split('\n').map((line) => sanitizeChatRecordField(line)) ||
+      [];
   const summary = summaryLines.filter(Boolean).join('\n');
   const entries = parseJsonArray(
     content?.chatRecord ?? content?.records ?? content?.messages,
@@ -181,7 +239,9 @@ function formatChatRecord(content?: DingTalkMessageContent): string {
     ? entries.flatMap((entry, index) => {
         if (typeof entry === 'string') {
           const body = nonEmptyString(entry);
-          return body ? [`Unknown: ${body}`] : [];
+          if (!body) return [];
+          const cleaned = sanitizeChatRecordField(body);
+          return cleaned ? [`Unknown: ${cleaned}`] : [];
         }
         if (!entry || typeof entry !== 'object') return [];
         const record = entry as Record<string, unknown>;
@@ -189,22 +249,24 @@ function formatChatRecord(content?: DingTalkMessageContent): string {
           summaryLines.length === entries.length
             ? nonEmptyString(summaryLines[index]?.match(/^([^:：]+)[:：]/)?.[1])
             : undefined;
-        const sender =
+        const rawSender =
           nonEmptyString(record['senderName']) ||
           nonEmptyString(record['senderNick']) ||
           nonEmptyString(record['sender']) ||
           summarySender ||
-          nonEmptyString(record['senderId']) ||
-          'Unknown';
+          nonEmptyString(record['senderId']);
+        const sender =
+          (rawSender && sanitizeChatRecordField(rawSender)) || 'Unknown';
         return [`${sender}: ${formatChatRecordEntryBody(record)}`];
       })
     : [];
 
+  const safeTitle = title ? sanitizeChatRecordField(title) : undefined;
   const parts: string[] = [];
   if (summary) {
-    parts.push(`[${title || 'Chat record'}] ${summary}`);
-  } else if (title) {
-    parts.push(`[${title}]`);
+    parts.push(`[${safeTitle || 'Chat record'}] ${summary}`);
+  } else if (safeTitle) {
+    parts.push(`[${safeTitle}]`);
   }
   if (recordLines.length > 0) {
     parts.push(`[Chat record messages]\n${recordLines.join('\n')}`);
@@ -1499,8 +1561,22 @@ export class DingtalkChannel extends ChannelBase {
   }
 
   /**
-   * Build a text summary from a repliedMsg, handling text, richText, and
-   * media message types with placeholders.
+   * Warn once when a chat-record payload yields nothing to show the model.
+   * Both chat-record paths degrade silently otherwise — `parseJsonArray`
+   * swallows JSON errors, the top-level path falls back to `(chat record)`
+   * and the replied path to an empty quote — matching this file's convention
+   * of logging degraded paths (`onDownStream`, `onMessage`).
+   */
+  private warnEmptyChatRecord(content?: DingTalkMessageContent): void {
+    process.stderr.write(
+      `[DingTalk:${this.name}] chat record had no readable content ` +
+        `(content keys: ${sanitizeLogText(describeChatRecordKeys(content), 200)})\n`,
+    );
+  }
+
+  /**
+   * Build a text summary from a repliedMsg, handling text, richText, chat
+   * records, and media message types with placeholders.
    */
   private summarizeRepliedContent(replied: DingTalkRepliedMsg): string {
     const msgType = replied.msgType;
@@ -1529,29 +1605,20 @@ export class DingtalkChannel extends ChannelBase {
     }
 
     if (msgType === 'chatRecord') {
-      return formatChatRecord(content);
+      const formatted = formatChatRecord(content);
+      if (!formatted) this.warnEmptyChatRecord(content);
+      return formatted;
     }
 
-    // Media type placeholders
-    switch (msgType) {
-      case 'picture':
-        return '[image]';
-      case 'file':
-        return `[file: ${content?.fileName || 'file'}]`;
-      case 'audio':
-        return '[audio]';
-      case 'video':
-        return '[video]';
-      default:
-        break;
-    }
-
-    return '';
+    // Media type placeholders. Shared with the chat-record entry formatter so
+    // the same message type is never described two ways to the model.
+    return mediaTypePlaceholder(msgType, content?.fileName) ?? '';
   }
 
   /**
    * Extract text and media download codes from an incoming DingTalk message.
-   * Handles text, richText, picture, file, audio, and video message types.
+   * Handles text, richText, chat records, picture, file, audio, and video
+   * message types.
    */
   private extractContent(data: DingTalkMessageData): {
     text: string;
@@ -1623,8 +1690,10 @@ export class DingtalkChannel extends ChannelBase {
     }
 
     if (msgtype === 'chatRecord') {
+      const formatted = formatChatRecord(data.content);
+      if (!formatted) this.warnEmptyChatRecord(data.content);
       return {
-        text: formatChatRecord(data.content) || '(chat record)',
+        text: formatted || '(chat record)',
         downloadCodes: [],
       };
     }
