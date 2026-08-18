@@ -2379,6 +2379,98 @@ describe('createChannelWorkerManager', () => {
     expect(group.reconcile).toHaveBeenCalledTimes(1);
   });
 
+  it('retains a terminal mode-all worker carried names on a sibling enable rebuild (R19-1)', async () => {
+    // Mode-all sibling of the R15-17 names-mode rebuild fix: a mode-`all`
+    // commitment carries no name list, and committedChannelNames() skips
+    // terminal-failed workers wholesale (the R8-18 start/recovery
+    // contract), so rebuilding a sibling enable from that filtered view
+    // commits names=[new] — silently dropping the dead worker's carried
+    // channels from the committed selection until a daemon restart
+    // (every later reload-op resolve omits them, breaking the mode-`all`
+    // restore contract). The rebuild must union the carried names back
+    // in; the filtered view itself stays unchanged (R19-1).
+    const group = fakeGroup();
+    const test = setup(group);
+    await test.manager.setSelection({ mode: 'all' });
+    vi.mocked(group.snapshots).mockReturnValue([
+      workerSnapshot({
+        state: 'failed',
+        channels: ['all'],
+        requestedChannels: undefined,
+        adapters: undefined,
+        lastConnectedChannels: ['telegram', 'feishu'],
+        lastRequestedChannels: ['telegram', 'feishu'],
+        error: 'Channel worker restart budget exhausted.',
+      }),
+    ]);
+
+    // The dead worker's names stay excluded from the filtered view.
+    expect(test.manager.committedChannelNames()).toEqual([]);
+
+    const result = await test.manager.setChannelEnabled(
+      { name: 'slack', workspaceCwd: PRIMARY },
+      true,
+    );
+
+    expect(result).toMatchObject({ changed: true });
+    expect(test.resolveGroups).toHaveBeenLastCalledWith(
+      { mode: 'names', names: ['telegram', 'feishu', 'slack'] },
+      'set',
+    );
+    expect(test.manager.state().selection).toEqual({
+      mode: 'names',
+      names: ['telegram', 'feishu', 'slack'],
+    });
+    expect(group.reconcile).toHaveBeenCalledTimes(1);
+  });
+
+  it('retains terminal mode-all carried names instead of collapsing to a whole-stop when the last live channel is disabled (R19-1)', async () => {
+    // Mode-all sibling of the R15-17 collapse pin: disabling the LAST
+    // live channel under a mode-`all` commitment must trim to the dead
+    // worker's carried names — not collapse to names=[] whose whole-stop
+    // capture intersects the terminal worker's carried connected set and
+    // persists the crashed (never user-stopped) channels as clean
+    // stopped records (crash laundering against R9-5) (R19-1).
+    const group = fakeGroup();
+    const test = setup(group);
+    await test.manager.setSelection({ mode: 'all' });
+    vi.mocked(group.snapshots).mockReturnValue([
+      workerSnapshot({
+        state: 'failed',
+        channels: ['all'],
+        requestedChannels: undefined,
+        adapters: undefined,
+        lastConnectedChannels: ['dead'],
+        lastRequestedChannels: ['dead'],
+        primary: false,
+        error: 'Channel worker restart budget exhausted.',
+      }),
+      workerSnapshot({
+        state: 'running',
+        channels: ['live'],
+        requestedChannels: ['live'],
+        primary: false,
+      }),
+    ]);
+
+    // The dead worker's names stay excluded from the filtered view.
+    expect(test.manager.committedChannelNames()).toEqual(['live']);
+
+    const result = await test.manager.setChannelEnabled(
+      { name: 'live', workspaceCwd: PRIMARY },
+      false,
+    );
+
+    // Trimmed to the carried dead name, not collapsed to a whole-stop:
+    // the lease stays reserved and the committed selection keeps `dead`.
+    expect(result).toMatchObject({ changed: true });
+    expect(test.releaseLease).not.toHaveBeenCalled();
+    expect(test.manager.state().selection).toEqual({
+      mode: 'names',
+      names: ['dead'],
+    });
+  });
+
   it('relaunches a terminal-failed mode-names worker on a per-channel start (#8975)', async () => {
     // Mode-names twin: the committed names come from the selection, not
     // the worker snapshot, so the dead worker's names must be subtracted

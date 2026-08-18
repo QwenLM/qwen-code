@@ -863,6 +863,37 @@ export function createChannelWorkerManager(
     return [...names];
   };
 
+  // The mode-`all` enable/disable rebuild source: a mode-`all` commitment
+  // carries no name list, so the rebuild must source names from the
+  // workers — but NOT through the filtered committedChannelNames() view:
+  // that view skips terminal-failed workers wholesale (the R8-18
+  // start/recovery contract), and rebuilding from it silently drops their
+  // carried names from the committed selection on every sibling
+  // enable/disable — ghosts that every later reload-op resolve
+  // (reload/reloadWorkspace/refreshWorkspaces) omits until a daemon
+  // restart, breaking the mode-`all` restore contract. The merge base's
+  // mode-all loop had no terminal skip, and the names-mode rebuild
+  // already sources from the unfiltered selection (R15-17); union the
+  // carried names back in for the mode-all sibling (R19-1).
+  const modeAllRebuildNames = (committedNames: string[]): string[] => {
+    if (committedSelection?.mode !== 'all') return committedNames;
+    const names = new Set(committedNames);
+    for (const worker of group?.snapshots() ?? []) {
+      if (!isTerminalFailedWorker(worker)) continue;
+      // The terminal snapshot drops `requestedChannels`; the carried sets
+      // ride `lastRequestedChannels` / `lastConnectedChannels` (R9-6).
+      for (const name of worker.lastRequestedChannels ??
+        worker.lastConnectedChannels ??
+        []) {
+        // The mode-`all` launch placeholder is not a real channel (same
+        // filter as the mode-all branch above).
+        if (isAllChannelSelectionName(name)) continue;
+        names.add(name);
+      }
+    }
+    return [...names];
+  };
+
   const assertCommittedOwner = (
     requiredOwner: ChannelWorkerRequiredOwner,
   ): void => {
@@ -999,11 +1030,13 @@ export function createChannelWorkerManager(
         // to names=[] when the last live sibling is disabled, whose
         // whole-stop capture launders the crash into a clean `stopped`
         // record (R15-17). Mode-`all` commitments carry no name list;
-        // their committed names come from live workers as before.
+        // their rebuild unions the live-worker names with terminal
+        // workers' carried names, so a sibling enable/disable cannot drop
+        // the dead worker's channels from the committed selection (R19-1).
         const selectionNames =
           committedSelection?.mode === 'names'
             ? committedSelection.names
-            : committedNames;
+            : modeAllRebuildNames(committedNames);
         if (enabled) {
           if (currentlyEnabled) {
             return {
