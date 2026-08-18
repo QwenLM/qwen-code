@@ -453,7 +453,7 @@ describe('bundled review skill', () => {
       '"${QWEN_CODE_CLI:-qwen}" review meta <n> --repo <owner>/<repo>',
     );
     expect(body).toMatch(
-      /meta <n> --repo <owner>\/<repo>` \(add `--host <host>` for Enterprise\)/,
+      /meta <n> --repo <owner>\/<repo>` \(with `--host <host>` for every PR target/,
     );
     // The drift ruling's load-bearing semantic — what `headSha` is compared
     // against — must stay pinned, or a rewrite truncating the comparison
@@ -476,10 +476,10 @@ describe('bundled review skill', () => {
     // same-named repo. Both lines must stay subcommand-shaped.
     const body = skillBody();
     expect(body).toContain(
-      'run `"${QWEN_CODE_CLI:-qwen}" review meta` (add `--host <host>` for Enterprise) and read its `ownerRepo`',
+      'run `"${QWEN_CODE_CLI:-qwen}" review meta` (with `--host <host>` for every PR target — see Step 1\'s host rule) and read its `ownerRepo`',
     );
     expect(body).toContain(
-      'review meta {pr_number} --repo {owner}/{repo}` (add `--host <host>` for Enterprise) and read its `headSha`',
+      "review meta {pr_number} --repo {owner}/{repo}` (with `--host <host>` for every PR target — see Step 1's host rule) and read its `headSha`",
     );
   });
 
@@ -490,10 +490,10 @@ describe('bundled review skill', () => {
     // a hand-restored gh call silently routes at github.com.
     const body = skillBody();
     expect(body).toContain(
-      'review fetch-diff <number> --repo <owner>/<repo> --out .qwen/tmp/qwen-review-pr-<number>-diff.txt` (add `--host <host>` for Enterprise)',
+      'review fetch-diff <number> --repo <owner>/<repo> --host <host> --out .qwen/tmp/qwen-review-pr-<number>-diff.txt',
     );
     expect(body).toContain(
-      '# GitHub Enterprise: add --host <host> — plan-diff records it',
+      '# add --host <host> (every PR target, including github.com) — plan-diff',
     );
     // Step 5 only plans the diff Step 1 already fetched — a second
     // fetch-diff would re-download it (and could race a head advance).

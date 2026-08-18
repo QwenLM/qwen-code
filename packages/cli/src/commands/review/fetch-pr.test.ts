@@ -10,6 +10,7 @@ import { resolve } from 'node:path';
 import {
   fetchPrCommand,
   countDiffChangedLines,
+  computeDiffStats,
   isEmptyDiff,
   isCollapsedFromUpstream,
   resolveIncrementalAnchor,
@@ -236,12 +237,12 @@ const producerMocks = vi.hoisted(() => ({
   gh: vi.fn(),
   git: vi.fn(),
   execFileSync: vi.fn(),
-  refExists: vi.fn(() => false),
+  refExists: vi.fn((..._refs: unknown[]): boolean => false),
   releaseWorktree: vi.fn(() => ({ existed: false, freed: true })),
   gitOpt: vi.fn((..._args: string[]): string | null => null),
   gitRaw: vi.fn((..._args: string[]): Buffer => Buffer.from('')),
   resolveMergeBase: vi.fn(
-    (): MergeBaseResult => ({
+    (..._args: unknown[]): MergeBaseResult => ({
       sha: null,
       baseFetchFailed: false,
     }),
@@ -297,11 +298,15 @@ vi.mock('../../services/review-worktree-lease.js', () => ({
     `${repositoryRoot}/.qwen/tmp/qwen-review-lease-${target}.json`,
 }));
 
-vi.mock('./lib/gh.js', () => ({
-  ensureAuthenticated: vi.fn(),
-  gh: producerMocks.gh,
-  setGhHost: vi.fn(),
-}));
+vi.mock('./lib/gh.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./lib/gh.js')>();
+  return {
+    ...actual,
+    ensureAuthenticated: vi.fn(),
+    gh: producerMocks.gh,
+    setGhHost: vi.fn(),
+  };
+});
 
 vi.mock('./lib/git.js', () => ({
   git: producerMocks.git,
@@ -501,6 +506,227 @@ describe('fetch-pr report assembly', () => {
     expect(report.host).toBe('ghe.example.com');
   });
 
+  it('refuses a dash-leading baseRefName from the platform metadata', async () => {
+    // The base ref is server-controlled and reaches git's argv through the
+    // base fetch — a dash-leading name (`--upload-pack=<payload>` is
+    // creatable by full-refname push) must die here, never inside git.
+    producerMocks.gh.mockReturnValue(
+      JSON.stringify({
+        headRefName: 'feat/x',
+        headRefOid: 'f00df00df00d',
+        baseRefName: '--upload-pack=/tmp/evil',
+        additions: 1,
+        deletions: 0,
+        changedFiles: 1,
+        isCrossRepository: false,
+        body: '',
+      }),
+    );
+    await expect(reportFor({})).rejects.toThrow(
+      /refusing base ref "--upload-pack=\/tmp\/evil"/,
+    );
+    const reportCall = producerMocks.writeFileSync.mock.calls.find(
+      ([path]) => path === '/tmp/fetch-report.json',
+    );
+    expect(reportCall).toBeUndefined();
+  });
+
+  it('refuses the refspec channel on baseRefName too (+ and colon)', async () => {
+    // `--` ends option parsing, but a leading `+` or `src:dst` shape still
+    // parses as a (force) refspec after it — same channels as
+    // aone.fetchDiff's target guard.
+    for (const baseRefName of ['+main', '+main:victim', 'src:dst']) {
+      producerMocks.gh.mockReturnValue(
+        JSON.stringify({
+          headRefName: 'feat/x',
+          headRefOid: 'f00df00df00d',
+          baseRefName,
+          additions: 1,
+          deletions: 0,
+          changedFiles: 1,
+          isCrossRepository: false,
+          body: '',
+        }),
+      );
+      await expect(reportFor({})).rejects.toThrow(/not a plain branch name/);
+    }
+  });
+
+  it('refuses HEAD, rev-parse metasyntax, and the empty baseRefName', async () => {
+    // `HEAD` fetches silently and merge-bases through the stale clone-time
+    // symref; `main^` rev-parses to the WRONG base under a misdescribing
+    // warning; the empty string degrades to a garbled diff-less fallback.
+    for (const baseRefName of ['HEAD', 'main^', 'main~1', '']) {
+      producerMocks.gh.mockReturnValue(
+        JSON.stringify({
+          headRefName: 'feat/x',
+          headRefOid: 'f00df00df00d',
+          baseRefName,
+          additions: 1,
+          deletions: 0,
+          changedFiles: 1,
+          isCrossRepository: false,
+          body: '',
+        }),
+      );
+      await expect(reportFor({})).rejects.toThrow(/not a plain branch name/);
+    }
+  });
+
+  it('refuses git pseudo-refs as baseRefName (allowlist)', async () => {
+    // `FETCH_HEAD` resolves to the just-fetched PR head — merge-base(head,
+    // head) = an EMPTY diff beside full-range metadata; `ORIG_HEAD` to an
+    // arbitrary ancestor. Shape-legal, silently wrong — refused at the
+    // metadata stage. Case-insensitively: on case-insensitive filesystems
+    // (macOS/Windows defaults) `.git/fetch_head` folds onto the
+    // `.git/FETCH_HEAD` the immediately-preceding fetch wrote.
+    for (const baseRefName of [
+      'FETCH_HEAD',
+      'ORIG_HEAD',
+      'MERGE_HEAD',
+      'fetch_head',
+      'orig_head',
+      'head',
+      // Legal branch names (check-ref-format --branch accepts them) that
+      // resolve qualified refs the server controls as fetch/merge-base
+      // arguments — refused like the pseudo-refs.
+      'refs/heads/main',
+      'refs/remotes/origin/HEAD',
+    ]) {
+      producerMocks.gh.mockReturnValue(
+        JSON.stringify({
+          headRefName: 'feat/x',
+          headRefOid: 'f00df00df00d',
+          baseRefName,
+          additions: 1,
+          deletions: 0,
+          changedFiles: 1,
+          isCrossRepository: false,
+          body: '',
+        }),
+      );
+      await expect(reportFor({})).rejects.toThrow(/not a plain branch name/);
+    }
+  });
+
+  it('a TAG-only base ref degrades to the disclosed baseFetchFailed state', async () => {
+    // `git fetch origin -- v1.0` exits 0 writing only FETCH_HEAD when v1.0
+    // is tag-only on the remote — the fetch "succeeds" yet no tracking ref
+    // exists, and the bare-name fallback would merge-base against the
+    // reviewer's LOCAL tag: a wrong-base diff with baseFetchFailed falsely
+    // false. The probe requires the tracking ref, so the tag-only shape
+    // lands in the DISCLOSED state instead.
+    producerMocks.gh.mockReturnValue(
+      JSON.stringify({
+        headRefName: 'feat/x',
+        headRefOid: 'f00df00df00d',
+        baseRefName: 'v1.0',
+        additions: 1,
+        deletions: 0,
+        changedFiles: 1,
+        isCrossRepository: false,
+        body: '',
+      }),
+    );
+    // The fetch itself exits 0 (tag shape), but no `origin/v1.0` tracking
+    // ref exists afterwards.
+    producerMocks.gitOpt.mockImplementation((...args: string[]) =>
+      args[0] === 'fetch' ? '' : null,
+    );
+    producerMocks.refExists.mockReturnValue(false);
+    // Drive the seam the way the real resolveMergeBase does: the probe the
+    // command passes must report the fetch as FAILED for the tag shape.
+    producerMocks.resolveMergeBase.mockImplementation((...args: unknown[]) => {
+      const probe = args[3] as { fetch: (r: string, b: string) => boolean };
+      const ok = probe.fetch('origin', 'v1.0');
+      return { sha: null, baseFetchFailed: !ok };
+    });
+    const report = await reportFor({});
+    expect(report.baseFetchFailed).toBe(true);
+  });
+
+  it('the tracking-ref check is FULLY QUALIFIED (no origin/<name> shadow)', async () => {
+    // A local tag or branch literally named `origin/v1.0` (slash-bearing
+    // ref names are legal) satisfies an UNQUALIFIED refExists with no
+    // tracking ref present — and such a tag is SERVER-CONTROLLED: a remote
+    // carrying it auto-carries it into refs/tags/ at plain clone time. The
+    // probe must check `refs/remotes/origin/<ref>` so the shadow cannot
+    // satisfy it and silently move the base.
+    producerMocks.gh.mockReturnValue(
+      JSON.stringify({
+        headRefName: 'feat/x',
+        headRefOid: 'f00df00df00d',
+        baseRefName: 'v1.0',
+        additions: 1,
+        deletions: 0,
+        changedFiles: 1,
+        isCrossRepository: false,
+        body: '',
+      }),
+    );
+    producerMocks.gitOpt.mockImplementation((...args: string[]) =>
+      args[0] === 'fetch' ? '' : null,
+    );
+    const checked: string[] = [];
+    producerMocks.refExists.mockImplementation((...refs: unknown[]) => {
+      checked.push(String(refs[0]));
+      return false;
+    });
+    producerMocks.resolveMergeBase.mockImplementation((...args: unknown[]) => {
+      const probe = args[3] as { fetch: (r: string, b: string) => boolean };
+      return { sha: null, baseFetchFailed: !probe.fetch('origin', 'v1.0') };
+    });
+    await reportFor({});
+    expect(checked).toContain('refs/remotes/origin/v1.0');
+    expect(checked).not.toContain('origin/v1.0');
+  });
+
+  it('the base fetch is an EXPLICIT branch refspec (no tag dwim)', async () => {
+    // A bare-name fetch of a base that is also a tag name dwims onto the
+    // TAG: exit 0, FETCH_HEAD-only, tracking ref untouched — the stale-base
+    // state passing the freshness guard it never refreshed. The probe fetch
+    // must name the branch source and the qualified tracking-ref
+    // destination explicitly.
+    producerMocks.gh.mockReturnValue(
+      JSON.stringify({
+        headRefName: 'feat/x',
+        headRefOid: 'f00df00df00d',
+        baseRefName: 'v1.0',
+        additions: 1,
+        deletions: 0,
+        changedFiles: 1,
+        isCrossRepository: false,
+        body: '',
+      }),
+    );
+    const fetched: string[][] = [];
+    producerMocks.gitOpt.mockImplementation((...args: string[]) => {
+      if (args[0] === 'fetch') fetched.push(args.slice(1));
+      return args[0] === 'fetch' ? '' : null;
+    });
+    producerMocks.refExists.mockImplementation((...refs: unknown[]) => {
+      void refs;
+      return true;
+    });
+    producerMocks.resolveMergeBase.mockImplementation((...args: unknown[]) => {
+      const probe = args[3] as { fetch: (r: string, b: string) => boolean };
+      probe.fetch('origin', 'v1.0');
+      return { sha: 'mb1', baseFetchFailed: false };
+    });
+    await reportFor({});
+    expect(fetched).toEqual([
+      ['origin', '--', '+refs/heads/v1.0:refs/remotes/origin/v1.0'],
+    ]);
+  });
+
+  it('refuses a non-positive pr_number before any side effect', async () => {
+    // `/^\d+$/` once admitted '0'; the guard promises a POSITIVE integer
+    // and must reject before detection, auth, and the worktree lease.
+    await expect(reportFor({ pr_number: '0' })).rejects.toThrow(
+      /pr_number must be a positive integer, got "0"/,
+    );
+    expect(producerMocks.git).not.toHaveBeenCalled();
+  });
   it('records the round cap its capture wiring writes — huge tier only with a clock (#9256)', async () => {
     // plan-diff and capture-local pin this wiring in their own handlers; the
     // fetch-pr side had no assertion because this harness steers the lightest
@@ -3623,6 +3849,67 @@ describe('countDiffChangedLines', () => {
       '+q',
     ].join('\n');
     expect(countDiffChangedLines(d)).toBe(4);
+  });
+});
+
+describe('computeDiffStats', () => {
+  it('counts additions, deletions, and changed files off a unified diff', () => {
+    const d = [
+      'diff --git a/a.ts b/a.ts',
+      '--- a/a.ts',
+      '+++ b/a.ts',
+      '@@ -1,2 +1,3 @@',
+      '-gone',
+      '+added1',
+      '+added2',
+      ' ctx',
+      'diff --git a/b.ts b/b.ts',
+      '--- a/b.ts',
+      '+++ b/b.ts',
+      '@@ -1 +1 @@',
+      '-p',
+      '+q',
+    ].join('\n');
+    expect(computeDiffStats(d)).toEqual({
+      additions: 3,
+      deletions: 2,
+      changedFiles: 2,
+    });
+  });
+
+  it('returns zeros for an empty diff', () => {
+    expect(computeDiffStats('')).toEqual({
+      additions: 0,
+      deletions: 0,
+      changedFiles: 0,
+    });
+  });
+
+  it('counts changedFiles on `diff --git`, not on `---`/`+++` header lines', () => {
+    // A binary file contributes a `diff --git` but NO `---`/`+++` headers, so
+    // #diff--git (3) differs from #--- (2) — a mutation that counted `---`
+    // lines would report 2 and stay green without this fixture.
+    const d = [
+      'diff --git a/a.ts b/a.ts',
+      '--- a/a.ts',
+      '+++ b/a.ts',
+      '@@ -1 +1 @@',
+      '-x',
+      '+y',
+      'diff --git a/img.png b/img.png',
+      'Binary files a/img.png and b/img.png differ',
+      'diff --git a/b.ts b/b.ts',
+      '--- a/b.ts',
+      '+++ b/b.ts',
+      '@@ -1 +1 @@',
+      '-p',
+      '+q',
+    ].join('\n');
+    expect(computeDiffStats(d)).toEqual({
+      additions: 2,
+      deletions: 2,
+      changedFiles: 3,
+    });
   });
 });
 
