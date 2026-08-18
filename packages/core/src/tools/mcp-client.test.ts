@@ -1668,6 +1668,75 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       ]);
     });
 
+    it('attaches listing-level app resource UI onto discovered tools', async () => {
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getProtocolEra: vi.fn().mockReturnValue('modern'),
+        getServerCapabilities: vi.fn().mockReturnValue({
+          tools: {},
+          resources: {},
+        }),
+        listTools: vi.fn().mockResolvedValue({
+          tools: [
+            {
+              name: 'show_dashboard',
+              _meta: { ui: { resourceUri: 'ui://demo/dash' } },
+            },
+          ],
+        }),
+        listResources: vi.fn().mockResolvedValue({
+          resources: [
+            {
+              uri: 'ui://demo/dash',
+              name: 'dash',
+              _meta: {
+                ui: {
+                  csp: { connectDomains: ['https://api.example.com'] },
+                  permissions: { clipboardWrite: {} },
+                },
+              },
+            },
+          ],
+        }),
+        listPrompts: vi.fn().mockResolvedValue({ prompts: [] }),
+        request: vi.fn().mockResolvedValue({ prompts: [] }),
+        getInstructions: vi.fn(),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        {} as SdkClientStdioLib.StdioClientTransport,
+      );
+      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+        tool: () =>
+          Promise.resolve({
+            functionDeclarations: [{ name: 'show_dashboard' }],
+          }),
+      } as unknown as GenAiLib.CallableTool);
+
+      const client = new McpClient(
+        'apps',
+        { command: 'test-command' },
+        { registerTool: vi.fn() } as unknown as ToolRegistry,
+        { registerPrompt: vi.fn() } as unknown as PromptRegistry,
+        {} as WorkspaceContext,
+        false,
+      );
+      await client.connect();
+      const snapshot = await client.discoverAndReturn(cfgWithResources(), {
+        applyConfigFilters: false,
+      });
+
+      expect(snapshot.tools[0]?.appResourceUri).toBe('ui://demo/dash');
+      expect(snapshot.tools[0]?.appResourceUi).toEqual({
+        csp: { connectDomains: ['https://api.example.com'] },
+        permissions: { clipboardWrite: {} },
+      });
+    });
+
     it('lists tools via request when a modern server omits the tools capability', async () => {
       const mockedClient = {
         getProtocolEra: vi.fn().mockReturnValue('modern'),

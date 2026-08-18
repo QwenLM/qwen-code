@@ -279,6 +279,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     private readonly annotations?: McpToolAnnotations,
     private readonly allowInvocationContext: boolean = false,
     private readonly appResourceUri?: string,
+    private readonly appResourceUi?: Record<string, unknown>,
     private readonly retryCount: number = 0,
   ) {
     super(params);
@@ -417,6 +418,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
           newTool.annotations,
           newTool['allowInvocationContext'] === true,
           newTool['appResourceUri'],
+          newTool.appResourceUi,
           this.retryCount + 1,
         );
         if (!newInvocation.canSafelyReplay()) {
@@ -692,7 +694,10 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
         throw new Error('resource HTML exceeds the 1 MiB host limit');
       }
 
-      const metadata = getMcpAppResourceMetadata(content._meta);
+      const metadata = getMcpAppResourceMetadata(
+        content._meta,
+        this.appResourceUi,
+      );
       return {
         type: 'mcp_app',
         serverName: this.serverName,
@@ -896,6 +901,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
     alwaysLoad = false,
     private readonly allowInvocationContext: boolean = false,
     readonly appResourceUri?: string,
+    readonly appResourceUi?: Record<string, unknown>,
   ) {
     super(
       nameOverride ??
@@ -932,6 +938,31 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.alwaysLoad,
       this.allowInvocationContext,
       this.appResourceUri,
+      this.appResourceUi,
+    );
+  }
+
+  withAppResourceUi(
+    appResourceUi: Record<string, unknown> | undefined,
+  ): DiscoveredMCPTool {
+    if (appResourceUi === this.appResourceUi) return this;
+    return new DiscoveredMCPTool(
+      this.mcpTool,
+      this.serverName,
+      this.serverToolName,
+      this.description,
+      this.parameterSchema,
+      this.trust,
+      this.name,
+      this.cliConfig,
+      this.mcpClient,
+      this.mcpTimeout,
+      this.mcpToolIdleTimeoutMs,
+      this.annotations,
+      this.alwaysLoad,
+      this.allowInvocationContext,
+      this.appResourceUri,
+      appResourceUi,
     );
   }
 
@@ -979,6 +1010,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       alwaysLoad,
       this.allowInvocationContext,
       this.appResourceUri,
+      this.appResourceUi,
     );
   }
 
@@ -1001,15 +1033,19 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.annotations,
       this.allowInvocationContext,
       this.appResourceUri,
+      this.appResourceUi,
     );
   }
 }
 
-function getMcpAppResourceMetadata(meta: Record<string, unknown> | undefined): {
+function getMcpAppResourceMetadata(
+  meta: Record<string, unknown> | undefined,
+  listingUi?: Record<string, unknown>,
+): {
   csp?: McpAppResourceCsp;
   permissions?: McpAppResourcePermissions;
 } {
-  const ui = getRecord(meta?.['ui']);
+  const ui = getRecord(meta?.['ui']) ?? listingUi;
   const rawCsp = getRecord(ui?.['csp']);
   const rawPermissions = getRecord(ui?.['permissions']);
   const csp = rawCsp

@@ -1151,7 +1151,10 @@ describe('DiscoveredMCPTool', () => {
   });
 
   describe('MCP Apps display', () => {
-    const createAppTool = (mcpClient: McpDirectClient) =>
+    const createAppTool = (
+      mcpClient: McpDirectClient,
+      appResourceUi?: Record<string, unknown>,
+    ) =>
       new DiscoveredMCPTool(
         mockCallableToolInstance,
         serverName,
@@ -1168,6 +1171,7 @@ describe('DiscoveredMCPTool', () => {
         false,
         false,
         'ui://demo/dashboard',
+        appResourceUi,
       );
 
     it('loads an MCP App resource without changing model-visible content', async () => {
@@ -1207,6 +1211,74 @@ describe('DiscoveredMCPTool', () => {
         csp: { connectDomains: ['https://api.example.com'] },
         permissions: { clipboardWrite: {} },
       });
+    });
+
+    it('uses listing-level app metadata when resources/read omits content _meta', async () => {
+      const mcpClient: McpDirectClient = {
+        callTool: vi.fn(async () => ({
+          content: [{ type: 'text', text: 'Dashboard ready' }],
+        })),
+        readResource: vi.fn(async () => ({
+          contents: [
+            {
+              uri: 'ui://demo/dashboard',
+              mimeType: 'text/html;profile=mcp-app',
+              text: '<main>Revenue</main>',
+            },
+          ],
+        })),
+      };
+
+      const result = await createAppTool(mcpClient, {
+        csp: { connectDomains: ['https://api.example.com'] },
+        permissions: { clipboardWrite: {} },
+      })
+        .build({ param: 'test' })
+        .execute(new AbortController().signal);
+
+      expect(result.returnDisplay).toMatchObject({
+        type: 'mcp_app',
+        html: '<main>Revenue</main>',
+        csp: { connectDomains: ['https://api.example.com'] },
+        permissions: { clipboardWrite: {} },
+      });
+    });
+
+    it('lets content-level app metadata win over listing-level defaults', async () => {
+      const mcpClient: McpDirectClient = {
+        callTool: vi.fn(async () => ({
+          content: [{ type: 'text', text: 'Dashboard ready' }],
+        })),
+        readResource: vi.fn(async () => ({
+          contents: [
+            {
+              uri: 'ui://demo/dashboard',
+              mimeType: 'text/html;profile=mcp-app',
+              text: '<main>Revenue</main>',
+              _meta: {
+                ui: {
+                  csp: { connectDomains: ['https://content.example.com'] },
+                },
+              },
+            },
+          ],
+        })),
+      };
+
+      const result = await createAppTool(mcpClient, {
+        csp: { connectDomains: ['https://listing.example.com'] },
+        permissions: { clipboardWrite: {} },
+      })
+        .build({ param: 'test' })
+        .execute(new AbortController().signal);
+
+      expect(result.returnDisplay).toMatchObject({
+        type: 'mcp_app',
+        csp: { connectDomains: ['https://content.example.com'] },
+      });
+      expect(
+        (result.returnDisplay as { permissions?: unknown }).permissions,
+      ).toBeUndefined();
     });
 
     it('falls back to the normal tool text when the app resource is invalid', async () => {

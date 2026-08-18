@@ -660,7 +660,7 @@ export class McpClient {
       // requests by JSON-RPC id) to save round-trips per server at startup.
       // Each helper retries transient errors internally, then swallows
       // permanent errors and returns [], so Promise.all never rejects here.
-      const [prompts, resources, tools] = await Promise.all([
+      const [prompts, resources, discoveredTools] = await Promise.all([
         listMcpPrompts(this.serverName, this.client),
         listMcpResources(this.serverName, this.client),
         discoverTools(
@@ -671,6 +671,7 @@ export class McpClient {
           { applyConfigFilters: opts?.applyConfigFilters ?? true },
         ),
       ]);
+      const tools = applyListingAppResourceUi(discoveredTools, resources);
 
       if (
         prompts.length === 0 &&
@@ -1355,11 +1356,9 @@ export async function connectAndDiscover(
       mcpClient,
       cliConfig.getResourceRegistry(),
     );
-    const tools = await discoverTools(
-      mcpServerName,
-      mcpServerConfig,
-      mcpClient,
-      cliConfig,
+    const tools = applyListingAppResourceUi(
+      await discoverTools(mcpServerName, mcpServerConfig, mcpClient, cliConfig),
+      resources,
     );
 
     // If we found no prompts, resources, or tools, it's a failed discovery
@@ -1401,6 +1400,28 @@ export async function connectAndDiscover(
  * @returns A promise that resolves to an array of discovered and enabled tools.
  * @throws An error if no enabled tools are found or if the server provides invalid function declarations.
  */
+function applyListingAppResourceUi(
+  tools: DiscoveredMCPTool[],
+  resources: readonly DiscoveredMCPResource[],
+): DiscoveredMCPTool[] {
+  if (tools.length === 0 || resources.length === 0) return tools;
+  const uiByUri = new Map<string, Record<string, unknown>>();
+  for (const resource of resources) {
+    const meta = resource._meta;
+    if (!meta || typeof meta !== 'object' || Array.isArray(meta)) continue;
+    const ui = meta['ui'];
+    if (!ui || typeof ui !== 'object' || Array.isArray(ui)) continue;
+    uiByUri.set(resource.uri, ui as Record<string, unknown>);
+  }
+  if (uiByUri.size === 0) return tools;
+  return tools.map((tool) => {
+    const listingUi = tool.appResourceUri
+      ? uiByUri.get(tool.appResourceUri)
+      : undefined;
+    return listingUi ? tool.withAppResourceUi(listingUi) : tool;
+  });
+}
+
 export async function discoverTools(
   mcpServerName: string,
   mcpServerConfig: MCPServerConfig,
