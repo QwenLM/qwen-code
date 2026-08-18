@@ -10,6 +10,7 @@ import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import {
   canonicalizeWorkspace,
   createWorkspaceFileSystemFactory,
+  type NewFileModePolicy,
   type WorkspaceFileSystemFactory,
 } from '../fs/index.js';
 import type { PathMutexRegistry } from '../fs/path-mutex-registry.js';
@@ -17,6 +18,40 @@ import type { WorkspaceGenerationGuard } from '../workspace-registry.js';
 import { isWithinRoot } from '../../config/path-comparison.js';
 
 const IDE_WORKSPACE_PATH_ENV_VAR = 'QWEN_CODE_IDE_WORKSPACE_PATH';
+const NEW_FILE_MODE_ENV_VAR = 'QWEN_SERVE_NEW_FILE_MODE';
+
+/**
+ * Parse `QWEN_SERVE_NEW_FILE_MODE` into the workspace filesystem's
+ * new-file mode policy.
+ *
+ * Accepted values (case-insensitive, surrounding whitespace ignored):
+ *   - unset / empty / `owner` / `0600` → `'owner'` — new files are
+ *     created owner-only `0600` regardless of the daemon umask (the
+ *     default, preserving the long-standing fail-closed posture).
+ *   - `system` → `'system'` — new files follow the standard POSIX
+ *     `0o666 & ~umask` handling, so agent-created files honor the
+ *     daemon process's umask (e.g. a systemd unit's `UMask=0002`)
+ *     like any other process on the machine.
+ *
+ * Any other value is rejected with a stderr warning and falls back to
+ * `'owner'` — a typo in a security-relevant knob must never silently
+ * widen file visibility. Mode preservation for existing files is
+ * unaffected by either policy.
+ */
+export function parseNewFileModePolicy(
+  env: NodeJS.ProcessEnv = process.env,
+): NewFileModePolicy {
+  const raw = env[NEW_FILE_MODE_ENV_VAR];
+  if (raw === undefined || raw.trim() === '') return 'owner';
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === 'system') return 'system';
+  if (normalized === 'owner' || normalized === '0600') return 'owner';
+  writeStderrLine(
+    `qwen serve: ignoring invalid ${NEW_FILE_MODE_ENV_VAR}=${raw} ` +
+      `(expected 'system' or 'owner'); new files keep the 0600 default`,
+  );
+  return 'owner';
+}
 
 /**
  * Build a no-op fs-audit emitter that logs a warning every
@@ -68,6 +103,11 @@ export function resolveBridgeFsFactory(input: {
   customIgnoreFiles?: string[];
   pathLocks?: PathMutexRegistry;
   generationGuard?: Pick<WorkspaceGenerationGuard, 'assertOpen'>;
+  /**
+   * New-file mode policy for the default factory. Undefined reads
+   * `QWEN_SERVE_NEW_FILE_MODE` (default `'owner'` = `0600`).
+   */
+  newFileMode?: NewFileModePolicy;
 }): WorkspaceFileSystemFactory {
   if (input.injected) return input.injected;
   return createWorkspaceFileSystemFactory({
@@ -76,6 +116,7 @@ export function resolveBridgeFsFactory(input: {
     emit: input.emit ?? createDefaultFsAuditEmit(),
     pathLocks: input.pathLocks,
     generationGuard: input.generationGuard,
+    newFileMode: input.newFileMode ?? parseNewFileModePolicy(),
     ...(input.customIgnoreFiles !== undefined
       ? { customIgnoreFiles: input.customIgnoreFiles }
       : {}),
