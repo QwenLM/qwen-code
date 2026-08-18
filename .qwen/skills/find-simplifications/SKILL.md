@@ -114,7 +114,7 @@ the first comes up empty. Rotation is what stops the third run from
 re-searching the same hot directories.
 
 ```bash
-git fetch upstream && git log --oneline -1 upstream/main   # survey fresh code, not a stale checkout
+git fetch origin && git log --oneline -1 origin/main   # survey fresh code, not a stale checkout
 SLICE=$(( 10#$(date -u +%V) % 4 ))
 ```
 
@@ -159,8 +159,10 @@ gh issue list --state all --search '"find-simplifications" ledger in:title'
   `filed`, `landed`, `declined`, `dropped-recency`, `dropped-consumers`.
 - An id on the ledger with status `declined`, or on a closed-unmerged
   `simplify/*` PR, is a **permanent tombstone. Never re-propose it**, however
-  good the new evidence looks. Search the marker, quoted — GitHub tokenizes on
-  hyphens, so `gh pr list --search 'enum-selector in:body'` returns unrelated
+  good the new evidence looks. Search with `--state all` — the default open
+  filter never returns the closed-unmerged PRs this rule targets — and quote
+  the marker: GitHub tokenizes on hyphens, so
+  `gh pr list --state all --search 'enum-selector in:body'` returns unrelated
   PRs, while `--search '"find-simplifications:id=enum-selector" in:body'` does
   not.
 - Append only. Never rewrite, reorder, prune, or summarize it. A maintainer
@@ -206,7 +208,8 @@ easy surface is gone — the remaining work is design, not sweeping).
   sweep:
 
   ```bash
-  RG="$(command -v rg || ls packages/core/vendor/ripgrep/*-linux/rg | head -1)"
+  RG="$(command -v rg || true)"
+  [ -f "$RG" ] || RG="packages/core/vendor/ripgrep/$([ "$(uname -m)" = aarch64 ] && echo arm64 || echo x64)-linux/rg"
   "$RG" --version || exit 1
   ```
 

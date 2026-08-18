@@ -9,8 +9,8 @@ gone, that is a finding about this document, not about the repo.
 
 ## 0 — Before searching
 
-1. **Survey fresh code** — `git fetch upstream`, then work against
-   `upstream/main`. A local checkout drifts hundreds of commits behind; a
+1. **Survey fresh code** — `git fetch origin`, then work against
+   `origin/main`. A local checkout drifts hundreds of commits behind; a
    stale base invents dead surface someone already deleted, and misses what
    landed since.
 2. **Read the ledger** (SKILL.md § The ledger). Collect every tombstoned id.
@@ -173,7 +173,7 @@ Run the rows that apply to the candidate's shape; record their ids.
 | `string-keys` | Grep the **literal string**, not the identifier: tool names, slash-command names, dotted settings paths, telemetry event names, daemon route paths, theme names, i18n keys                                                        |
 | `build-graph` | Is the file reached only by a build script? `esbuild.config.js`, `scripts/copy_bundle_assets.js`, `patches/`, and package `exports`/`files` entries reach code no import mentions                                                 |
 | `generated`   | Does a committed artifact mirror it? `packages/vscode-ide-companion/schemas/settings.schema.json` is generated from `settingsSchema.ts` and CI fails when it is stale — a failure invisible to build, typecheck, lint, and vitest |
-| `vi-mock`     | `rg -n '<Symbol>' -g '*.test.*'` — a `vi.mock` factory referencing a symbol is a consumer that breaks loudly and confusingly                                                                                                      |
+| `vi-mock`     | `"$RG" -n '<Symbol>' -g '*.test.*'` — a `vi.mock` factory referencing a symbol is a consumer that breaks loudly and confusingly                                                                                                   |
 | `mirrors`     | Do `packages/sdk-python`, `sdk-java`, `acp-bridge`, or the VS Code / Zed / Chrome extensions hand-mirror this shape? They consume over a protocol, not by import                                                                  |
 | `dyn-import`  | Dynamic `import()`, `Object.entries`-driven dispatch, glob-based discovery, resolver aliases in `vitest.config.ts` / `tsconfig.json`                                                                                              |
 | `cli-flags`   | `packages/cli/src/config/config.ts` calls `.strict()`, so deleting even an inert flag turns a silent no-op into a hard "Unknown argument" failure for anyone whose script still passes it                                         |
@@ -181,7 +181,7 @@ Run the rows that apply to the candidate's shape; record their ids.
 
 ## 6 — Worked examples
 
-**1. A clean kill.** `EnumSelector`: `rg -l EnumSelector` over the whole
+**1. A clean kill.** `EnumSelector`: `"$RG" -l EnumSelector` over the whole
 corpus returns three paths — the component, its test, its snapshot. No
 production consumer, nothing string-keyed (it is a React component, not a
 registry entry), not in `packages/core`, and `git log` puts it well past the

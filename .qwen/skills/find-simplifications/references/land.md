@@ -11,7 +11,7 @@ Stop and say why if any fails:
 - A maintainer has assented to this id on the ledger. No assent, no PR.
 - The id is not tombstoned.
 - The candidate is in landable territory (SKILL.md § Territory).
-- You are on a fresh branch off current `upstream/main`, named
+- You are on a fresh branch off current `origin/main`, named
   `simplify/<id>`, and no other `simplify/*` PR is open.
 
 ## 1 — Re-verify before touching anything
@@ -39,8 +39,12 @@ When cutting mechanically, do not trust brace matching to find a function's
 end: a multi-line return type such as `Record<string, { key: string }>` opens
 and closes a brace before the body starts, and a counter will truncate the
 function there. In this prettier-formatted repo a top-level declaration ends
-at the next line that is exactly `}`. Whatever rule you use, prove it after
-the cut — a pure deletion must show zero added lines in `git diff --numstat`.
+at the next line that is exactly `}` — or, for a `const`/`let`/`var` arrow or
+literal declaration, at the next line that is exactly `};`. Whatever rule you
+use, prove it after the cut — a pure deletion must show zero added lines in
+`git diff --numstat`, and the deleted line count must match the declaration's
+extent measured before cutting: zero added lines alone cannot catch
+over-deletion.
 
 Nothing else. No neighbouring cleanup, no rename, no reformat, no "while I
 was here". The diff must contain exactly one idea.
@@ -50,8 +54,8 @@ was here". The diff must contain exactly one idea.
 Always, in this order:
 
 ```bash
-npm run build && npm run typecheck
-cd packages/<pkg> && npx vitest run src/path/to/file.test.ts   # per AGENTS.md
+npm run build && npm run bundle && npm run typecheck # integration tests spawn dist/cli.js
+(cd packages/<pkg> && npx vitest run src/path/to/file.test.ts)   # per AGENTS.md
 npm run lint:ci
 ```
 
@@ -89,9 +93,10 @@ Green CI is weaker evidence than it looks for a deletion:
 - `ci.yml` classifies each PR into a CI profile; a diff that looks docs-only
   skips most steps. Deleting docs alongside code can quietly buy you less CI
   than you think.
-- The Prettier CI step (`ci.yml:379` → `scripts/lint.js:208`) runs
-  `prettier --write .`, not `--check`, so formatting never fails a build — and
-  a formatting-only diff carries zero signal.
+- The Prettier CI step (the `Run Prettier` step in `ci.yml` → `runPrettier()`
+  in `scripts/lint.js`) runs `prettier --write .`, not `--check`, so
+  formatting never fails a build — and a formatting-only diff carries zero
+  signal.
 - The pre-commit hook runs formatters over staged files. Re-read the diff
   after committing; if the hook reformatted lines you did not otherwise touch,
   restore them in a follow-up commit (history is additive here — never amend).
