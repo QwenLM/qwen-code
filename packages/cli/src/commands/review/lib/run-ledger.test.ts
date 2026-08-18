@@ -29,6 +29,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { promptRecordDir } from './prompt-record.js';
 import {
   appendRunSession,
   priorSessionEntries,
@@ -43,6 +44,8 @@ import {
   RESUME_MAX,
   currentSessionEntry,
   sessionLedgerRefused,
+  readResumeCapSnapshot,
+  resumeBookkeepingRefused,
   resumeBookkeepingRefused,
   resumeBookkeepingAnomaly,
 } from './run-ledger.js';
@@ -979,6 +982,32 @@ describe('the properties the threat model rests on', () => {
     );
   });
 
+  it('flags a multi-attempt ledger when the marker does not record this session (5th cell)', () => {
+    // Both files ok, ledger names 2+ attempts, but the marker authorizes a
+    // DIFFERENT session (this session's recordResume was swallowed on a
+    // transient fault). priorSessionEntries yields nothing while the ledger
+    // proves there was something — the cost ledger under-bills silently.
+    appendRunSession(plan, envOf('S0'));
+    appendRunSession(plan, envOf('S1'));
+    recordResume(plan, envOf('S0')); // marker authorizes S0, not S2
+    appendRunSession(plan, envOf('S2'));
+    expect(resumeBookkeepingAnomaly(plan, envOf('S2'))).toContain(
+      'not recorded as an authorized resume',
+    );
+  });
+
+  it('flags a session the marker authorizes but the ledger omits (6th cell)', () => {
+    // The mirror: the marker records this session, the ledger has no entry
+    // for it (appendRunSession swallowed while recordResume landed) — the
+    // cost floor falls back to the plan mtime and over-bills.
+    appendRunSession(plan, envOf('S0'));
+    recordResume(plan, envOf('S1')); // marker authorizes S1
+    // S1 has no ledger entry (its appendRunSession never landed).
+    expect(resumeBookkeepingAnomaly(plan, envOf('S1'))).toContain(
+      'missing from the session ledger',
+    );
+  });
+
   it('drops an entry older than the slack window', () => {
     const mtimeMs = statSync(plan).mtimeMs;
     appendRunSession(plan, envOf('S1'), Math.floor(mtimeMs) - 3000);
@@ -1048,6 +1077,38 @@ describe('plant shapes — heal what cannot be legitimate, preserve what can', (
     appendRunSession(plan, envOf('S1'));
     expect(lstatSync(runSessionsPath(plan)).isFile()).toBe(true);
     expect(sessionEntryCount(plan)).toBe(1);
+  });
+
+  it('heals a regular-file plant AT the record directory itself', () => {
+    // A plain file (not a symlink, not a directory) at `<plan>-prompts`
+    // fails the component walk as uncontained, but it is not a redirect —
+    // nothing lands outside the tree through it. Left refused it froze ALL
+    // bookkeeping for the life of the plan; it is removed and treated as
+    // absent, like the leaf plant one component down.
+    writeFileSync(promptRecordDir(plan), 'not a directory');
+    appendRunSession(plan, envOf('S1'));
+    expect(lstatSync(promptRecordDir(plan)).isDirectory()).toBe(true);
+    expect(sessionEntryCount(plan)).toBe(1);
+  });
+
+  it('keeps a SYMLINK at the record directory refused — it is a redirect', () => {
+    const elsewhere = join(root, 'evil-prompts');
+    mkdirSync(elsewhere, { recursive: true });
+    symlinkSync(elsewhere, promptRecordDir(plan));
+    expect(resumeBookkeepingRefused(plan)).toBe(true);
+    // The link is not healed away (unlike a plain file).
+    expect(lstatSync(promptRecordDir(plan)).isSymbolicLink()).toBe(true);
+  });
+
+  it('the cap snapshot reports refused from ONE read when a ledger is a link', () => {
+    // The single-snapshot cap: a refused bookkeeping file makes the whole
+    // decision refused, so the counters cannot separately degrade to zero.
+    mkdirSync(promptRecordDir(plan), { recursive: true });
+    const target = join(root, 'evil.json');
+    writeFileSync(target, '[]');
+    symlinkSync(target, runSessionsPath(plan));
+    const snap = readResumeCapSnapshot(plan, envOf('S1'));
+    expect(snap.refused).toBe(true);
   });
 
   it('heals both plant shapes at the resume marker too', () => {

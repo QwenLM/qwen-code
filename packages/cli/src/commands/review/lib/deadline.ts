@@ -44,6 +44,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parsePositiveIntegerEnv } from '@qwen-code/qwen-code-core';
 import { promptRecordDir, runEpochMs } from './prompt-record.js';
+import { readContainedFileOrNull, MAX_LEDGER_BYTES } from './contained-read.js';
 
 /** Unix seconds at which the review process will be killed. Set by CI. */
 export const DEADLINE_ENV = 'QWEN_REVIEW_DEADLINE_EPOCH';
@@ -670,11 +671,16 @@ export function writeBudgetStop(
  */
 export function readBudgetStopUnfenced(planPath: string): BudgetStop | null {
   try {
-    const raw = readFileSync(
+    // Contained: a FIFO planted at the predictable `budget-stop.json` path
+    // would block a bare `readFileSync` open forever — the hang this
+    // command's containment exists to abolish. `null` (absent, or any
+    // non-regular occupant) reads as "no stop", the safe direction.
+    const contained = readContainedFileOrNull(
       join(promptRecordDir(planPath), STOP_FILE),
-      'utf8',
+      MAX_LEDGER_BYTES,
     );
-    const parsed = JSON.parse(raw) as unknown;
+    if (contained === null) return null;
+    const parsed = JSON.parse(contained.content) as unknown;
     if (
       typeof parsed !== 'object' ||
       parsed === null ||

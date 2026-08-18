@@ -503,6 +503,7 @@ export function computeLedger(
   // summary would present a current-session-only figure as the whole review's
   // cost. It also drops the billing floor back to the plan's mtime, which
   // bills the session's pre-review turns.
+  let firstAnomaly: string | null = null;
   {
     // Any cell of the ledger×marker matrix that empties the prior iteration
     // while the other half proves there was something to iterate: a refused
@@ -517,8 +518,11 @@ export function computeLedger(
           `to the plan's own timestamp.`,
       );
     }
+    firstAnomaly = anomaly;
   }
+  let iterated = 0;
   for (const entry of priorSessionEntries(planPath, env)) {
+    iterated++;
     const paths = priorDirs.get(entry.sessionId);
     let contributed = 0;
     let events: UsageEvent[] = [];
@@ -625,6 +629,23 @@ export function computeLedger(
       for (const e of sessionEvents) priorEventSet.add(e);
     }
     if (contributed > 0) priorSessions++;
+  }
+  // The anomaly check and the iteration each read the bookkeeping afresh; a
+  // concurrent toggle (healthy when the check read, refused/absent when the
+  // iteration read) empties the loop with no disclosure. Re-check after the
+  // loop: if it iterated nothing yet a fresh read now finds an anomaly the
+  // first pass did not disclose, say so — the resumed review must not archive
+  // as a fresh single-session run just because the fault moved between reads.
+  if (iterated === 0) {
+    const postAnomaly = resumeBookkeepingAnomaly(planPath, env);
+    if (postAnomaly !== null && postAnomaly !== firstAnomaly) {
+      missingStreams++;
+      writeStderrLineSafe(
+        `WARNING: ${postAnomaly}; any earlier attempt of this review may be ` +
+          `missing from this ledger (the bookkeeping changed between the ` +
+          `anomaly check and the prior-session read).`,
+      );
+    }
   }
   agents.sort((a, b) => b.inputTokens - a.inputTokens);
 

@@ -259,6 +259,35 @@ export function readContainedFileOrNull(
 }
 
 /**
+ * The RAW bytes of a contained regular file, or null on any refusal. Same
+ * O_NOFOLLOW + fstat + descriptor read as {@link readContainedFile}, but the
+ * bytes are captured undecoded — for a sha256 of a diff whose contents may
+ * not be valid UTF-8 (a UTF-8 round trip changes the hash). A FIFO, link or
+ * directory refuses instead of hanging.
+ */
+export function readContainedBytesOrNull(
+  path: string,
+  maxBytes: number,
+): Buffer | null {
+  const chunks: Buffer[] = [];
+  try {
+    readContainedFile(path, maxBytes, {
+      read: (fd, buffer, offset, length, position) => {
+        const n = readSync(fd, buffer, offset, length, position);
+        if (n > 0) {
+          const view = buffer as unknown as Uint8Array;
+          chunks.push(Buffer.from(view.subarray(offset, offset + n)));
+        }
+        return n;
+      },
+    });
+  } catch {
+    return null;
+  }
+  return Buffer.concat(chunks);
+}
+
+/**
  * A path that is not inside the tree it must be inside — or that is reached
  * through a link.
  *

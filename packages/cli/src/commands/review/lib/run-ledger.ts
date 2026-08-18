@@ -214,9 +214,26 @@ function ledgerOccupant(planPath: string, path: string): LedgerOccupant {
     promptRecordDir(planPath),
   );
   if (!dirVerdict.ok) {
-    return dirVerdict.reason === 'missing'
-      ? { kind: 'absent' }
-      : { kind: 'refused' };
+    if (dirVerdict.reason === 'missing') return { kind: 'absent' };
+    // A regular file or FIFO planted AT `<plan>-prompts` (not a symlink, not
+    // a directory) fails the component walk as `uncontained`, but unlike a
+    // symlink it is NOT a redirect — nothing lands outside the tree through
+    // it, the writers' `mkdirSync` just throws EEXIST. Left refused it froze
+    // ALL bookkeeping for the life of the plan path (stable across CI
+    // retries), never healed. Remove it and proceed as absent — the same
+    // heal the leaf-level plant one component down already gets. A SYMLINK
+    // keeps the refused/fail-closed treatment (it redirects).
+    const recordDir = promptRecordDir(planPath);
+    try {
+      const st = lstatSync(recordDir);
+      if (!st.isSymbolicLink() && !st.isDirectory()) {
+        rmSync(recordDir, { force: true });
+        return { kind: 'absent' };
+      }
+    } catch {
+      // Raced away, or unreadable — fall through to refused.
+    }
+    return { kind: 'refused' };
   }
   // ONE `O_NOFOLLOW` open, `fstat` on that descriptor, bytes off the same
   // descriptor — the object validated is the object read, and the whole
@@ -369,6 +386,41 @@ export function resumeBookkeepingAnomaly(
     return (
       'the resume marker authorizes this session but the session ledger is ' +
       'missing'
+    );
+  }
+  // Fifth cell: both files read `ok`, the ledger names two or more attempts,
+  // but the marker does not record THIS session as an authorized resume.
+  // `priorSessionEntries` gates on `resumeAuthorized`, so it yields nothing
+  // while the ledger proves there was something to iterate — the cost ledger
+  // then bills only the current attempt and presents it as complete. Reached
+  // without an attacker: `recordResume` swallows its marker write on a
+  // transient fault, or a >2s clock step-back fences the entry out.
+  if (
+    sessions.kind === 'ok' &&
+    marker.kind === 'ok' &&
+    sessionEntryCount(planPath) >= 2 &&
+    !resumeAuthorized(planPath, env)
+  ) {
+    return (
+      'the session ledger records earlier attempts but this session is not ' +
+      'recorded as an authorized resume'
+    );
+  }
+  // Sixth cell (the mirror): both `ok`, the marker authorizes this session,
+  // but the ledger has no entry for it — `currentSessionEntry` null makes the
+  // cost floor fall back to the plan mtime (billing pre-review turns), and
+  // `priorSessionEntries` treats every entry as a prior with the newest
+  // unclamped. Reached when `appendRunSession`'s fault is swallowed while
+  // `recordResume` lands.
+  if (
+    sessions.kind === 'ok' &&
+    marker.kind === 'ok' &&
+    resumeAuthorized(planPath, env) &&
+    currentSessionEntry(planPath, env) === null
+  ) {
+    return (
+      'the resume marker authorizes this session but its entry is missing ' +
+      'from the session ledger'
     );
   }
   return null;
@@ -585,6 +637,74 @@ export function ledgerResumeCount(
   if (opts.excludeSessionId === undefined) return past.length;
   const key = sessionPathKey(opts.excludeSessionId);
   return past.filter((e) => sessionPathKey(e.sessionId) !== key).length;
+}
+
+/**
+ * The whole resume-cap decision from ONE read of each bookkeeping file.
+ *
+ * `resumeBookkeepingRefused` and the two counters each re-resolved the same
+ * two paths, so a concurrent relinker that kept the tree healthy across the
+ * guard's read and refused it before the counters read degraded both counts
+ * to zero — the ruling passed and the cap never fired (an unbounded chain).
+ * Here every value is derived from the same bytes: refusal and the counts
+ * cannot observe different states.
+ */
+export interface ResumeCapSnapshot {
+  /** Either bookkeeping file is present-but-unreadable (a redirect/fault). */
+  refused: boolean;
+  /** Total ledger entries (current session included). */
+  ledgerEntryCount: number;
+  /** Resume entries past the first, the resuming session excluded. */
+  ledgerResumes: number;
+  /** Recorded resumes in the marker, the resuming session excluded. */
+  markerResumes: number;
+  /** The marker's own resume count, for the post-write attempt number. */
+  marker: ResumeMarker;
+}
+
+export function readResumeCapSnapshot(
+  planPath: string,
+  env: NodeJS.ProcessEnv = process.env,
+): ResumeCapSnapshot {
+  const sessionsRead = readLedgerFileResult(
+    planPath,
+    runSessionsPath(planPath),
+  );
+  const markerRead = readLedgerFileResult(planPath, resumeMarkerPath(planPath));
+  if (sessionsRead.kind === 'refused' || markerRead.kind === 'refused') {
+    return {
+      refused: true,
+      ledgerEntryCount: 0,
+      ledgerResumes: 0,
+      markerResumes: 0,
+      marker: emptyMarker(),
+    };
+  }
+  const mtime = planMtimeMs(planPath);
+  const sessions = parseSessions(
+    sessionsRead.kind === 'ok' ? sessionsRead.text : null,
+    planPath,
+    mtime,
+  );
+  const marker = parseMarker(
+    markerRead.kind === 'ok' ? markerRead.text : null,
+    planPath,
+    mtime,
+  );
+  const currentKey = env['QWEN_CODE_SESSION_ID']?.trim()?.toLowerCase();
+  const ledgerResumes = sessions
+    .slice(1)
+    .filter((e) => sessionPathKey(e.sessionId) !== (currentKey ?? '')).length;
+  const markerResumes = marker.resumes.filter(
+    (r) => r.sessionId.toLowerCase() !== currentKey,
+  ).length;
+  return {
+    refused: false,
+    ledgerEntryCount: sessions.length,
+    ledgerResumes,
+    markerResumes,
+    marker,
+  };
 }
 
 /**

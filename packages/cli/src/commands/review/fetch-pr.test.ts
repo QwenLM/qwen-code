@@ -314,6 +314,36 @@ vi.mock('../../services/review-worktree-lease.js', () => ({
     `${repositoryRoot}/.qwen/tmp/qwen-review-lease-${target}.json`,
 }));
 
+vi.mock('./lib/contained-read.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./lib/contained-read.js')>();
+  return {
+    ...actual,
+    // The resume path reads the plan report and the diff through these; the
+    // fixtures serve both via the readFileSync mock, so delegate to it so a
+    // test's virtual files reach `tryResume`.
+    readContainedFileOrNull: (path: string) => {
+      try {
+        return {
+          content: String(producerMocks.readFileSync(path)),
+          mtimeMs: 0,
+          size: 0,
+        };
+      } catch {
+        return null;
+      }
+    },
+    readContainedBytesOrNull: (path: string) => {
+      try {
+        const v = producerMocks.readFileSync(path) as unknown;
+        return Buffer.isBuffer(v) ? v : Buffer.from(String(v));
+      } catch {
+        return null;
+      }
+    },
+  };
+});
+
 vi.mock('./lib/gh.js', () => ({
   ensureAuthenticated: vi.fn(),
   gh: producerMocks.gh,
@@ -350,18 +380,53 @@ vi.mock('./lib/run-ledger.js', async (importOriginal) => {
   // Take RESUME_MAX from the real module: hardcoding it here made the
   // production constant unfalsifiable — changing it shipped this suite green.
   const actual = await importOriginal<typeof import('./lib/run-ledger.js')>();
+  const sessionEntryCount = vi.fn((_p?: string) => 1);
+  const ledgerResumeCount = vi.fn(
+    (_p?: string, _o?: { excludeSessionId?: string }) => 0,
+  );
+  const resumeBookkeepingRefused = vi.fn((_p?: string) => false);
+  const readResumeMarker = vi.fn((_p?: string) => ({
+    schemaVersion: 1,
+    resumes: [] as Array<{ sessionId: string; atMs: number }>,
+    restarts: [],
+  }));
   return {
     ...actual,
     appendRunSession: vi.fn(),
     priorSessionIds: vi.fn(() => []),
-    sessionEntryCount: vi.fn(() => 1),
-    ledgerResumeCount: vi.fn(() => 0),
-    resumeBookkeepingRefused: vi.fn(() => false),
-    readResumeMarker: vi.fn(() => ({
-      schemaVersion: 1,
-      resumes: [],
-      restarts: [],
-    })),
+    sessionEntryCount,
+    ledgerResumeCount,
+    resumeBookkeepingRefused,
+    readResumeMarker,
+    // The cap now reads one snapshot; compose it from the per-function mocks
+    // so every existing per-test override (counts, marker, refused) still
+    // drives the ruling.
+    readResumeCapSnapshot: vi.fn(
+      (planPath: string, env?: NodeJS.ProcessEnv) => {
+        if (resumeBookkeepingRefused(planPath)) {
+          return {
+            refused: true,
+            ledgerEntryCount: 0,
+            ledgerResumes: 0,
+            markerResumes: 0,
+            marker: { schemaVersion: 1, resumes: [], restarts: [] },
+          };
+        }
+        const marker = readResumeMarker(planPath);
+        const cur = env?.['QWEN_CODE_SESSION_ID']?.trim()?.toLowerCase();
+        return {
+          refused: false,
+          ledgerEntryCount: sessionEntryCount(planPath),
+          ledgerResumes: ledgerResumeCount(planPath, {
+            excludeSessionId: env?.['QWEN_CODE_SESSION_ID']?.trim(),
+          }),
+          markerResumes: marker.resumes.filter(
+            (r: { sessionId: string }) => r.sessionId.toLowerCase() !== cur,
+          ).length,
+          marker,
+        };
+      },
+    ),
     recordResume: vi.fn(),
     recordRestart: vi.fn(),
   };

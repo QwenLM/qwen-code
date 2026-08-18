@@ -27,6 +27,7 @@ import {
   listContainedDir,
   readContainedFile,
   readContainedFileOrNull,
+  readContainedBytesOrNull,
 } from './contained-read.js';
 
 /**
@@ -35,6 +36,37 @@ import {
  * module says so in prose rather than pretending otherwise.
  */
 const isWindows = process.platform === 'win32';
+
+describe('readContainedBytesOrNull', () => {
+  let root: string;
+  beforeEach(() => {
+    root = realpathSync(mkdtempSync(join(tmpdir(), 'crb-')));
+  });
+  afterEach(() => rmSync(root, { recursive: true, force: true }));
+
+  it('returns raw bytes unchanged — no UTF-8 round trip', () => {
+    const p = join(root, 'diff.txt');
+    const bytes = Buffer.from([0xff, 0xfe, 0x00, 0x41, 0x0a]); // invalid UTF-8
+    writeFileSync(p, bytes);
+    const got = readContainedBytesOrNull(p, MAX_LEDGER_BYTES);
+    expect(got).not.toBeNull();
+    expect(Buffer.compare(got as Buffer, bytes)).toBe(0);
+  });
+
+  it.skipIf(isWindows)('refuses a FIFO without blocking', () => {
+    const fifo = join(root, 'diff.txt');
+    execFileSync('mkfifo', [fifo]);
+    const started = Date.now();
+    expect(readContainedBytesOrNull(fifo, MAX_LEDGER_BYTES)).toBeNull();
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+
+  it('returns null for an absent file', () => {
+    expect(
+      readContainedBytesOrNull(join(root, 'nope'), MAX_LEDGER_BYTES),
+    ).toBeNull();
+  });
+});
 
 describe('readContainedFile', () => {
   let root: string;

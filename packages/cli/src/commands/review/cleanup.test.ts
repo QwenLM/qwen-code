@@ -42,6 +42,27 @@ vi.mock('node:child_process', async (importOriginal) => {
   };
 });
 
+vi.mock('./lib/contained-read.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./lib/contained-read.js')>();
+  return {
+    ...actual,
+    // `readBudgetStopUnfenced` reads the marker through this now; the cleanup
+    // fixtures serve it via the readFileSync mock, so delegate.
+    readContainedFileOrNull: (path: string) => {
+      try {
+        return {
+          content: String(mocks.readFileSync(path)),
+          mtimeMs: 0,
+          size: 0,
+        };
+      } catch {
+        return null;
+      }
+    },
+  };
+});
+
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
   return {

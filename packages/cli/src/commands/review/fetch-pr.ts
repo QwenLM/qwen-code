@@ -89,15 +89,18 @@ import { deriveRepositoryContext } from './repo-context.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
 import { SHA_RE } from './lib/ledger.js';
 import {
+  readContainedFileOrNull,
+  readContainedBytesOrNull,
+  MAX_STREAM_BYTES,
+} from './lib/contained-read.js';
+import {
   appendRunSession,
-  ledgerResumeCount,
   resumeMarkerPath,
-  sessionEntryCount,
   readResumeMarker,
   recordResume,
   recordRestart,
   RESUME_MAX,
-  resumeBookkeepingRefused,
+  readResumeCapSnapshot,
 } from './lib/run-ledger.js';
 import {
   assessResume,
@@ -640,11 +643,13 @@ function cleanStale(prNumber: string): void {
 
 /** sha256 of a file's raw bytes, or null when it cannot be read. */
 function sha256OfFile(path: string): string | null {
-  try {
-    return createHash('sha256').update(readFileSync(path)).digest('hex');
-  } catch {
-    return null;
-  }
+  // Contained RAW bytes: a FIFO planted at the predictable diff path would
+  // block a bare `readFileSync` forever, and a UTF-8 round trip would change
+  // the hash of a non-UTF-8 diff. `null` (absent or non-regular) is the same
+  // "cannot corroborate" the ruling already refuses on.
+  const bytes = readContainedBytesOrNull(path, MAX_STREAM_BYTES);
+  if (bytes === null) return null;
+  return createHash('sha256').update(bytes).digest('hex');
 }
 
 type ResumeOutcome =
@@ -876,7 +881,16 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
   const { pr_number: prNumber, owner_repo: ownerRepo, out } = args;
   let prev: PreviousReport | null = null;
   try {
-    prev = JSON.parse(readFileSync(out, 'utf8')) as PreviousReport;
+    // Contained: a FIFO at the predictable plan path hangs a bare read
+    // before any guard can fire. Absent/non-regular → prev null → the
+    // ruling refuses `no-report`.
+    {
+      const contained = readContainedFileOrNull(out, MAX_STREAM_BYTES);
+      prev =
+        contained === null
+          ? null
+          : (JSON.parse(contained.content) as PreviousReport);
+    }
   } catch {
     prev = null;
   }
@@ -1184,7 +1198,13 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
   // clobber guard skips every marker write — the review resumes forever,
   // each attempt announcing "resume 1". Refuse outright and fall through to
   // the fresh path: the cap fails CLOSED.
-  if (resumeBookkeepingRefused(out)) {
+  // ONE snapshot of both bookkeeping files decides the cap AND the refusal,
+  // so a concurrent relinker cannot keep the tree healthy for the guard's
+  // read and refuse it for the counters' read (both would then degrade to
+  // zero and the cap would never fire). The refusal verdict and the two
+  // counts come from the same bytes.
+  const capSnapshot = readResumeCapSnapshot(out, process.env);
+  if (capSnapshot.refused) {
     return {
       resumed: false,
       reason: 'bookkeeping-unreadable',
@@ -1194,7 +1214,7 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
           : null,
     };
   }
-  const marker = readResumeMarker(out);
+  const marker = capSnapshot.marker;
   // The resume marker FILE, present-or-absent. A same-session resume (the
   // original session retrying its own dead run) appends NO ledger entry —
   // `appendRunSession`'s dedupe returns early — so the ledger backstop's
@@ -1235,18 +1255,8 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
   // fence, and counting it pushed a same-session retry of the LAST permitted
   // resume over the cap. The retry's fresh fall-through then force-removed
   // the very worktree being resumed.
-  const currentSessionId = process.env['QWEN_CODE_SESSION_ID']?.trim();
-  const ledgerResumes = ledgerResumeCount(out, {
-    excludeSessionId: currentSessionId,
-  });
-  // `recordResume` dedupes per session — a second `--resume` in the same
-  // session is the same resume — so counting this session's own marker entry
-  // refuses its retry as `resume-cap`. A retry of the last permitted resume
-  // must be that same resume, not one past the cap.
-  const currentKey = currentSessionId?.toLowerCase();
-  const markerResumes = marker.resumes.filter(
-    (r) => r.sessionId.toLowerCase() !== currentKey,
-  ).length;
+  const ledgerResumes = capSnapshot.ledgerResumes;
+  const markerResumes = capSnapshot.markerResumes;
   // `--porcelain` prints nothing on a clean tree. A null (the command could
   // not run at all) is treated as dirty by `assessResume`: an unverifiable
   // tree is not a clean one.
@@ -1388,7 +1398,7 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
     graftsAbsent,
     shallowAbsent,
     repoConfigClean,
-    ledgerEntryCount: sessionEntryCount(out),
+    ledgerEntryCount: capSnapshot.ledgerEntryCount,
     markerFileAbsent,
     resumeCount: Math.max(markerResumes, ledgerResumes),
     requestedEffort: args.effort ?? null,
