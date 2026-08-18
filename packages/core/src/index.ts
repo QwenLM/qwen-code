@@ -210,7 +210,9 @@ export {
   toCanonicalWorkspaceArtifactPath,
 } from './utils/workspace-artifact-path.js';
 export {
+  MAX_DIRECTORY_ARTIFACT_DEPTH,
   MAX_DIRECTORY_ARTIFACT_FILES,
+  OFFICE_DOCUMENT_EXTENSIONS,
   collectRecordableWorkspaceFiles,
   isOfficeDocumentExtension,
 } from './utils/workspace-artifact-directory.js';

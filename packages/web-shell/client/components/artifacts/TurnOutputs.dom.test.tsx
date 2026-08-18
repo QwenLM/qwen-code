@@ -151,6 +151,20 @@ describe('TurnOutputs artifact downloads', () => {
       Array.from(container.querySelectorAll('button')).filter(
         (button) => button.textContent?.trim() === 'Download',
       ),
+    ).toHaveLength(3);
+
+    const showMore = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('more artifacts'),
+    );
+    expect(showMore).toBeTruthy();
+    act(() => {
+      showMore?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(
+      Array.from(container.querySelectorAll('button')).filter(
+        (button) => button.textContent?.trim() === 'Download',
+      ),
     ).toHaveLength(kinds.length);
 
     act(() => root.unmount());

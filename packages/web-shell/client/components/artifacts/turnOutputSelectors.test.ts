@@ -48,6 +48,76 @@ describe('turnOutputSelectors', () => {
     );
   });
 
+  it('does not attach later artifacts under a previously recorded directory', () => {
+    const messages = [
+      userMessage('u1', 'export excel'),
+      toolGroup('tg1', [
+        {
+          callId: 'call-1',
+          toolName: 'record_artifact',
+          status: 'completed',
+          args: { workspacePath: 'reports' },
+        },
+      ]),
+      userMessage('u2', 'write summary'),
+      toolGroup('tg2', [
+        {
+          callId: 'call-2',
+          toolName: 'write_file',
+          status: 'completed',
+          args: { file_path: 'reports/summary.csv' },
+        },
+      ]),
+    ];
+    const expanded = {
+      id: 'artifact-1',
+      workspacePath: 'reports/day1.xlsx',
+      toolCallId: 'call-1',
+    };
+    const later = {
+      id: 'artifact-2',
+      workspacePath: 'reports/summary.csv',
+      toolCallId: 'call-2',
+    };
+    const artifacts = [expanded, later] as DaemonSessionArtifact[];
+
+    expect(getArtifactsByTurn(messages, artifacts).get('u1')).toEqual([
+      expanded,
+    ]);
+    expect(getArtifactsByTurn(messages, artifacts).get('u2')).toEqual([later]);
+  });
+
+  it('ignores a failed record_artifact when grouping by directory prefix', () => {
+    const messages = [
+      userMessage('u1', 'export excel'),
+      toolGroup('tg1', [
+        {
+          callId: 'call-1',
+          toolName: 'record_artifact',
+          status: 'failed',
+          args: { workspacePath: 'reports' },
+        },
+      ]),
+      userMessage('u2', 'write summary'),
+      toolGroup('tg2', [
+        {
+          callId: 'call-2',
+          toolName: 'write_file',
+          status: 'completed',
+          args: { file_path: 'reports/summary.csv' },
+        },
+      ]),
+    ];
+    const later = {
+      id: 'artifact-2',
+      workspacePath: 'reports/summary.csv',
+      toolCallId: 'call-2',
+    } as DaemonSessionArtifact;
+
+    expect(getArtifactsByTurn(messages, [later]).get('u1')).toBeUndefined();
+    expect(getArtifactsByTurn(messages, [later]).get('u2')).toEqual([later]);
+  });
+
   it('does not treat a sibling path as a recorded directory child', () => {
     const messages = [
       userMessage('u1', 'export excel'),

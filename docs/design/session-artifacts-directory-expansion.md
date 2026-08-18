@@ -28,7 +28,13 @@ expand/collapse control already used for edited files.
 - Expansion happens in the session artifact store so every ingest path
   (`record_artifact`, hooks, client POST) behaves the same.
 - Walk is recursive, skips hidden names, Excel lock files (`~$*`),
-  symlinks, and well-known junk directories. Cap is 100 files.
+  symlinks, and well-known junk directories. Cap is 100 files and 4
+  directory levels; either limit is disclosed to the model and store
+  warnings instead of silently dropping files.
+- Chat grouping uses a recorded directory path as a prefix only for
+  artifacts from that same `record_artifact` call (or artifacts with no
+  tool call id). Later files written under the same folder stay on their
+  own turn.
 - Each child uses its filename as the title, inherits tool/source
   metadata, and infers kind from its own extension.
 - A leftover directory path (empty, unlistable, or not expanded) is

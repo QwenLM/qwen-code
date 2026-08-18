@@ -46,6 +46,8 @@ export function artifactKindLabel(
   }
 }
 
+// Keep in sync with OFFICE_DOCUMENT_EXTENSIONS in
+// packages/core/src/utils/workspace-artifact-directory.ts
 const OFFICE_DOCUMENT_EXTENSIONS = new Set([
   '.doc',
   '.docx',
@@ -90,7 +92,8 @@ export function isDownloadOnlyWorkspaceArtifact(artifact: {
     artifact.kind === 'document' ||
     artifact.kind === 'pdf' ||
     artifact.kind === 'video' ||
-    artifact.kind === 'audio'
+    artifact.kind === 'audio' ||
+    isOfficeDocumentPath(artifact.workspacePath)
   ) {
     return true;
   }

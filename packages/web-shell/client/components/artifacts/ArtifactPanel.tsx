@@ -2522,7 +2522,15 @@ function DownloadableWorkspaceArtifact({
   const { t } = useI18n();
   const [error, setError] = useState<string | null>(null);
   const [downloading, setDownloading] = useState(false);
+  const mountedRef = useRef(true);
   const location = getArtifactLocation(artifact);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const download = async () => {
     if (!artifact.workspacePath) return;
@@ -2533,20 +2541,22 @@ function DownloadableWorkspaceArtifact({
         workspaceActions,
         artifact.workspacePath,
         artifact.mimeType,
+        () => !mountedRef.current,
       );
     } catch (err: unknown) {
+      if (!mountedRef.current) return;
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setDownloading(false);
+      if (mountedRef.current) {
+        setDownloading(false);
+      }
     }
   };
 
   return (
     <div className={styles.detail}>
       <div className={styles.section}>
-        <div className={styles.sectionTitle}>
-          {artifactKindLabel(artifact.kind, artifact.workspacePath)}
-        </div>
+        <div className={styles.sectionTitle}>{t('common.download')}</div>
         <div className={styles.fieldGrid}>
           <Field
             label="Type"

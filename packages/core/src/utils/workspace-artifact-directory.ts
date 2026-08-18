@@ -18,7 +18,7 @@ const SKIP_DIRECTORY_ARTIFACT_NAMES = new Set([
   '.qwen',
 ]);
 
-const OFFICE_DOCUMENT_EXTENSIONS = new Set([
+export const OFFICE_DOCUMENT_EXTENSIONS: ReadonlySet<string> = new Set([
   '.doc',
   '.docx',
   '.docm',
@@ -34,6 +34,12 @@ const OFFICE_DOCUMENT_EXTENSIONS = new Set([
   '.ods',
   '.odp',
 ]);
+
+export type RecordableWorkspaceWalkResult = {
+  files: string[];
+  truncated: boolean;
+  depthLimited: boolean;
+};
 
 export function isOfficeDocumentExtension(ext: string): boolean {
   return OFFICE_DOCUMENT_EXTENSIONS.has(ext);
@@ -51,16 +57,16 @@ export async function collectRecordableWorkspaceFiles(
   absoluteDir: string,
   relativeDir: string,
   realWorkspace: string,
-): Promise<{ files: string[]; truncated: boolean }> {
+): Promise<RecordableWorkspaceWalkResult> {
   const files: string[] = [];
-  const truncated = await walkRecordableWorkspaceFiles(
+  const walked = await walkRecordableWorkspaceFiles(
     absoluteDir,
     relativeDir,
     realWorkspace,
     files,
     0,
   );
-  return { files, truncated };
+  return { files, ...walked };
 }
 
 async function walkRecordableWorkspaceFiles(
@@ -69,18 +75,30 @@ async function walkRecordableWorkspaceFiles(
   realWorkspace: string,
   files: string[],
   depth: number,
-): Promise<boolean> {
+): Promise<{ truncated: boolean; depthLimited: boolean }> {
   if (files.length >= MAX_DIRECTORY_ARTIFACT_FILES) {
-    return true;
+    return { truncated: true, depthLimited: false };
   }
   if (depth > MAX_DIRECTORY_ARTIFACT_DEPTH) {
-    return false;
+    return { truncated: false, depthLimited: true };
   }
-  const entries = await fs.readdir(absoluteDir, { withFileTypes: true });
-  entries.sort((left, right) => left.name.localeCompare(right.name));
+  let entries;
+  try {
+    entries = await fs.readdir(absoluteDir, { withFileTypes: true });
+  } catch (error) {
+    if (depth === 0) {
+      throw error;
+    }
+    return { truncated: false, depthLimited: false };
+  }
+  entries.sort((left, right) =>
+    left.name < right.name ? -1 : left.name > right.name ? 1 : 0,
+  );
+  let truncated = false;
+  let depthLimited = false;
   for (const entry of entries) {
     if (files.length >= MAX_DIRECTORY_ARTIFACT_FILES) {
-      return true;
+      return { truncated: true, depthLimited };
     }
     if (shouldSkipDirectoryArtifactName(entry.name) || entry.isSymbolicLink()) {
       continue;
@@ -94,15 +112,17 @@ async function walkRecordableWorkspaceFiles(
       continue;
     }
     if (entry.isDirectory()) {
-      const truncated = await walkRecordableWorkspaceFiles(
+      const nested = await walkRecordableWorkspaceFiles(
         absolutePath,
         relativePath,
         realWorkspace,
         files,
         depth + 1,
       );
-      if (truncated) {
-        return true;
+      truncated ||= nested.truncated;
+      depthLimited ||= nested.depthLimited;
+      if (truncated && files.length >= MAX_DIRECTORY_ARTIFACT_FILES) {
+        return { truncated: true, depthLimited };
       }
       continue;
     }
@@ -110,7 +130,7 @@ async function walkRecordableWorkspaceFiles(
       files.push(relativePath);
     }
   }
-  return false;
+  return { truncated, depthLimited };
 }
 
 function isOutsidePath(relative: string): boolean {

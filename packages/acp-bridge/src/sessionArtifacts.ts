@@ -11,6 +11,7 @@ import path from 'node:path';
 import {
   collectRecordableWorkspaceFiles,
   isOfficeDocumentExtension,
+  MAX_DIRECTORY_ARTIFACT_DEPTH,
   isPrototypeMetadataKey,
   isReservedWorkspaceMetadataKey,
   MAX_DIRECTORY_ARTIFACT_FILES,
@@ -333,17 +334,33 @@ export class SessionArtifactStore {
       for (const input of inputs) {
         try {
           const expanded = await this.expandWorkspaceDirectoryInput(input);
-          if (expanded.warning) {
-            warnings.push(expanded.warning);
-          }
+          let recorded = 0;
           for (const item of expanded.inputs) {
-            normalizedResults.push(
-              await this.normalizeInput(
-                item,
-                ++this.receivedSeq,
-                options.trustedPublisher === true,
-              ),
-            );
+            try {
+              normalizedResults.push(
+                await this.normalizeInput(
+                  item,
+                  ++this.receivedSeq,
+                  options.trustedPublisher === true,
+                  item === input ? {} : { hashWorkspaceContent: false },
+                ),
+              );
+              recorded++;
+            } catch (error) {
+              if (validationStrict) {
+                throw error;
+              }
+              const message =
+                error instanceof Error ? error.message : String(error);
+              writeStderrLine(
+                `[artifacts] session=${this.sessionId} action=dropped reason=${JSON.stringify(
+                  message,
+                )}`,
+              );
+            }
+          }
+          if (expanded.warning && recorded > 0) {
+            warnings.push(expanded.warning);
           }
         } catch (error) {
           if (validationStrict) {
@@ -438,9 +455,17 @@ export class SessionArtifactStore {
             .filter((change) => change.action === 'created')
             .map((change) => change.artifactId),
         );
-        changes.push(
-          ...(await this.evictOverflow(createdIds, changes, persistenceStrict)),
+        const overflowRemoved = await this.evictOverflow(
+          createdIds,
+          changes,
+          persistenceStrict,
         );
+        changes.push(...overflowRemoved.removed);
+        if (overflowRemoved.droppedCreated > 0) {
+          warnings.push(
+            `dropped ${overflowRemoved.droppedCreated} newly created artifacts because the store is full`,
+          );
+        }
 
         const hasStrictDurableTransition = changes.some(
           shouldCommitBeforeDurablePersistence,
@@ -799,9 +824,9 @@ export class SessionArtifactStore {
         });
       }
       const evicted = await this.evictOverflow(new Set(), []);
-      if (evicted.length > 0) {
+      if (evicted.removed.length > 0) {
         warnings.push('restored artifact list pruned to live limit');
-        warnings.push(...(await this.persistChanges(evicted, false)));
+        warnings.push(...(await this.persistChanges(evicted.removed, false)));
       }
       this.setLastRestoreWarnings(warnings);
       return warnings;
@@ -1264,7 +1289,10 @@ export class SessionArtifactStore {
   private async expandWorkspaceDirectoryInput(
     input: SessionArtifactInput,
   ): Promise<{ inputs: SessionArtifactInput[]; warning?: string }> {
-    const workspacePath = input.workspacePath?.trim();
+    const workspacePath =
+      typeof input.workspacePath === 'string'
+        ? input.workspacePath.trim()
+        : undefined;
     if (!workspacePath) {
       return { inputs: [input] };
     }
@@ -1284,13 +1312,35 @@ export class SessionArtifactStore {
         'workspacePath',
       );
     }
-    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+    let walkDir = absolutePath;
+    let walkRelative = normalizedPath;
+    if (stat.isSymbolicLink()) {
+      let realPath: string;
+      try {
+        realPath = await fs.realpath(absolutePath);
+      } catch {
+        return { inputs: [input] };
+      }
+      const relative = path.relative(realWorkspace, realPath);
+      if (!relative || isOutsidePath(relative)) {
+        throw new SessionArtifactValidationError(
+          'workspacePath must stay inside the workspace',
+          'workspacePath',
+        );
+      }
+      const realStat = await fs.lstat(realPath);
+      if (!realStat.isDirectory()) {
+        return { inputs: [input] };
+      }
+      walkDir = realPath;
+      walkRelative = relative.split(path.sep).join('/');
+    } else if (!stat.isDirectory()) {
       return { inputs: [input] };
     }
 
     const collected = await collectRecordableWorkspaceFiles(
-      absolutePath,
-      normalizedPath,
+      walkDir,
+      walkRelative,
       realWorkspace,
     );
     if (collected.files.length === 0) {
@@ -1300,8 +1350,23 @@ export class SessionArtifactStore {
       );
     }
 
-    const parentTitle = input.title?.trim() ?? '';
-    const parentDescription = input.description?.trim();
+    const parentTitle =
+      typeof input.title === 'string' ? input.title.trim() : '';
+    const parentDescription =
+      typeof input.description === 'string'
+        ? input.description.trim()
+        : undefined;
+    const warnings: string[] = [];
+    if (collected.truncated) {
+      warnings.push(
+        `workspacePath "${normalizedPath}" contained more than ${MAX_DIRECTORY_ARTIFACT_FILES} files; recorded the first ${MAX_DIRECTORY_ARTIFACT_FILES}`,
+      );
+    }
+    if (collected.depthLimited) {
+      warnings.push(
+        `workspacePath "${normalizedPath}" exceeded ${MAX_DIRECTORY_ARTIFACT_DEPTH} directory levels; some files were not recorded`,
+      );
+    }
     return {
       inputs: collected.files.map((filePath) => {
         const title = path.posix.basename(filePath);
@@ -1315,14 +1380,14 @@ export class SessionArtifactStore {
           kind: undefined,
           mimeType: undefined,
           sizeBytes: undefined,
+          metadata: {
+            ...input.metadata,
+            expandedFromDirectory: true,
+          },
           ...(description ? { description } : { description: undefined }),
         };
       }),
-      ...(collected.truncated
-        ? {
-            warning: `workspacePath "${normalizedPath}" contained more than ${MAX_DIRECTORY_ARTIFACT_FILES} files; recorded the first ${MAX_DIRECTORY_ARTIFACT_FILES}`,
-          }
-        : {}),
+      ...(warnings.length > 0 ? { warning: warnings.join('; ') } : {}),
     };
   }
 
@@ -1616,10 +1681,10 @@ export class SessionArtifactStore {
     createdIds: Set<string>,
     changes: SessionArtifactChange[],
     strict = false,
-  ): Promise<SessionArtifactChange[]> {
+  ): Promise<{ removed: SessionArtifactChange[]; droppedCreated: number }> {
     const removed: SessionArtifactChange[] = [];
     if (this.artifacts.size <= this.maxArtifacts) {
-      return removed;
+      return { removed, droppedCreated: 0 };
     }
 
     const createdInThisBatch = new Set(createdIds);
@@ -1667,18 +1732,20 @@ export class SessionArtifactStore {
         'artifactId',
       );
     }
+    let droppedCreated = 0;
     for (const artifact of overflowCreated) {
       if (this.artifacts.size <= this.maxArtifacts) {
         break;
       }
       this.artifacts.delete(artifact.id);
+      droppedCreated++;
       writeStderrLine(
         `[artifacts] session=${this.sessionId} action=dropped reason="max artifacts exceeded" artifactId=${artifact.id}`,
       );
       removePriorChange(changes, artifact.id);
     }
 
-    return removed;
+    return { removed, droppedCreated };
   }
 }
 
@@ -1880,9 +1947,15 @@ function shouldRecordEphemeralUnpin(
 }
 
 function shouldRefreshWorkspaceDisplay(
-  incoming: Pick<NormalizedArtifact, 'toolName' | 'source' | 'hookEventName'>,
+  incoming: Pick<
+    NormalizedArtifact,
+    'toolName' | 'source' | 'hookEventName' | 'metadata'
+  >,
   existing: Pick<NormalizedArtifact, 'toolName' | 'source' | 'hookEventName'>,
 ): boolean {
+  if (incoming.metadata?.['expandedFromDirectory'] === true) {
+    return false;
+  }
   if (incoming.toolName === 'record_artifact' && incoming.source !== 'hook') {
     return true;
   }

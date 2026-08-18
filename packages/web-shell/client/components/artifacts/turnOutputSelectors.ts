@@ -18,6 +18,7 @@ function getToolCallIds(tool: ACPToolCall): string[] {
 
 interface RecordArtifactReference {
   turnId: string;
+  callId?: string;
   workspacePath?: string;
   managedId?: string;
   url?: string;
@@ -78,9 +79,13 @@ function collectRecordArtifactReferences(
   turnId: string,
   references: RecordArtifactReference[],
 ) {
-  if (tool.toolName.toLowerCase() === 'record_artifact') {
+  if (
+    tool.toolName.toLowerCase() === 'record_artifact' &&
+    (!tool.status || tool.status === 'completed')
+  ) {
     references.push({
       turnId,
+      callId: tool.callId,
       workspacePath: getStringField(tool.args, 'workspacePath'),
       managedId: getStringField(tool.args, 'managedId'),
       url: getStringField(tool.args, 'url'),
@@ -98,17 +103,28 @@ function getRecordArtifactTurnIds(
 ) {
   const turnIds = new Set<string>();
   for (const reference of references) {
-    if (
-      reference.workspacePath &&
-      artifact.workspacePath &&
-      isSameWorkspacePathOrChild(
-        reference.workspacePath,
-        artifact.workspacePath,
-        workspaceCwd,
-      )
-    ) {
-      turnIds.add(reference.turnId);
-      continue;
+    if (reference.workspacePath && artifact.workspacePath) {
+      if (
+        isSameWorkspacePath(
+          reference.workspacePath,
+          artifact.workspacePath,
+          workspaceCwd,
+        )
+      ) {
+        turnIds.add(reference.turnId);
+        continue;
+      }
+      if (
+        isSameWorkspacePathOrChild(
+          reference.workspacePath,
+          artifact.workspacePath,
+          workspaceCwd,
+        ) &&
+        (!artifact.toolCallId || artifact.toolCallId === reference.callId)
+      ) {
+        turnIds.add(reference.turnId);
+        continue;
+      }
     }
     if (reference.managedId && reference.managedId === artifact.managedId) {
       turnIds.add(reference.turnId);

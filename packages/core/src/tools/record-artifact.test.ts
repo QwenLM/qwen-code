@@ -495,6 +495,47 @@ describe('RecordArtifactTool', () => {
     ]);
   });
 
+  it('skips junk directories and lock files when expanding a directory', async () => {
+    const ws = await workspace();
+    await ws.write('reports/keep.xlsx', 'xlsx');
+    await ws.write('reports/node_modules/skip.txt', 'skip');
+    await ws.write('reports/~$lock.xlsx', 'lock');
+
+    const result = await ws.tool
+      .build({
+        title: 'Reports',
+        workspacePath: 'reports',
+      })
+      .execute(signal);
+
+    expect(result.error).toBeUndefined();
+    expect(result.artifacts).toMatchObject([
+      { workspacePath: 'reports/keep.xlsx' },
+    ]);
+    expect(String(result.llmContent)).not.toContain('node_modules');
+  });
+
+  it('warns when directory expansion hits the depth limit', async () => {
+    const ws = await workspace();
+    await ws.write('reports/a/b/c/d/e/too-deep.xlsx', 'deep');
+    await ws.write('reports/shallow.xlsx', 'xlsx');
+
+    const result = await ws.tool
+      .build({
+        title: 'Reports',
+        workspacePath: 'reports',
+      })
+      .execute(signal);
+
+    expect(result.error).toBeUndefined();
+    expect(result.artifacts).toMatchObject([
+      { workspacePath: 'reports/shallow.xlsx' },
+    ]);
+    expect(String(result.llmContent)).toMatch(
+      /deeper than 4 directory levels/i,
+    );
+  });
+
   it('rejects a workspace-relative path that escapes the execution directory', () => {
     const tool = makeTool();
 

@@ -1997,6 +1997,28 @@ describe('SessionArtifactStore', () => {
     ).toBe(false);
   });
 
+  it('does not mark a leftover directory workspacePath as available', async () => {
+    await fs.writeFile(path.join(workspace, 'report.xlsx'), 'xlsx');
+    const store = new SessionArtifactStore({
+      sessionId: 's-dir-leftover',
+      workspaceCwd: workspace,
+    });
+    await store.upsertMany(
+      [{ title: 'Report', workspacePath: 'report.xlsx' }],
+      { strict: true },
+    );
+    await fs.rm(path.join(workspace, 'report.xlsx'));
+    await fs.mkdir(path.join(workspace, 'report.xlsx'));
+    await fs.writeFile(path.join(workspace, 'report.xlsx', 'inner.xlsx'), 'y');
+
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.now() + 6_000);
+    const listed = await store.list();
+    expect(listed.artifacts).toHaveLength(1);
+    expect(listed.artifacts[0]?.status).not.toBe('available');
+    expect(listed.artifacts[0]?.workspacePath).toBe('report.xlsx');
+  });
+
   it('rejects an empty directory workspacePath', async () => {
     await fs.mkdir(path.join(workspace, 'empty-dir'));
     const store = new SessionArtifactStore({

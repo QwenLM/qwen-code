@@ -59,35 +59,25 @@ import {
   hasControlCharacter,
   hasUnsafeDisplayPayload,
 } from './record-artifact.js';
+import { OFFICE_DOCUMENT_EXTENSIONS } from '../utils/workspace-artifact-directory.js';
 import { toCanonicalWorkspaceArtifactPath } from '../utils/workspace-artifact-path.js';
 
 const debugLogger = createDebugLogger('WRITE_FILE');
 const ARTIFACT_KIND_BY_EXTENSION = new Map<string, ToolArtifactKind>([
   ['.csv', 'file'],
-  ['.doc', 'document'],
-  ['.docm', 'document'],
-  ['.docx', 'document'],
-  ['.dotx', 'document'],
   ['.htm', 'html'],
   ['.html', 'html'],
   ['.ipynb', 'notebook'],
   ['.jpeg', 'image'],
   ['.jpg', 'image'],
-  ['.odp', 'document'],
-  ['.ods', 'document'],
-  ['.odt', 'document'],
   ['.pdf', 'pdf'],
   ['.png', 'image'],
-  ['.ppt', 'document'],
-  ['.pptm', 'document'],
-  ['.pptx', 'document'],
   ['.svg', 'image'],
   ['.webp', 'image'],
-  ['.xls', 'document'],
-  ['.xlsb', 'document'],
-  ['.xlsm', 'document'],
-  ['.xlsx', 'document'],
 ]);
+for (const ext of OFFICE_DOCUMENT_EXTENSIONS) {
+  ARTIFACT_KIND_BY_EXTENSION.set(ext, 'document');
+}
 
 type WorkspaceToolArtifact = ToolArtifact & {
   storage: 'workspace';
