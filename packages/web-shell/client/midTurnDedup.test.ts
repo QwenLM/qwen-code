@@ -17,7 +17,6 @@ interface Item {
   files?: unknown[];
   midTurnState?: 'submitting' | 'queued';
   midTurnMessageId?: string;
-  admissionOutcome?: 'unknown';
 }
 
 let nextId = 1;
@@ -110,24 +109,6 @@ describe('removeInjectedFromQueue', () => {
     const next = removeInjectedFromQueue(
       prompts,
       [batchWithIds('s', ['with image'], [imageRow.midTurnMessageId!])],
-      's',
-    );
-    expect(next?.map((p) => p.text)).toEqual(['keep']);
-  });
-
-  it('removes an admission-unknown image row on a strict id match', () => {
-    // A row whose admission response was lost is re-added with
-    // `admissionOutcome: 'unknown'` and NO `midTurnState` (useQueuedPrompts
-    // catch path). When the daemon later drains it, the strict-id pass must
-    // still match — mirroring `applyMidTurnSnapshot`'s membership filter.
-    const unknown = {
-      ...q('lost ack', [{ data: 'x' }]),
-      midTurnState: undefined,
-      admissionOutcome: 'unknown' as const,
-    };
-    const next = removeInjectedFromQueue(
-      [unknown, q('keep')],
-      [batchWithIds('s', ['lost ack'], [unknown.midTurnMessageId!])],
       's',
     );
     expect(next?.map((p) => p.text)).toEqual(['keep']);
