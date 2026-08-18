@@ -8,7 +8,7 @@
 
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ChatViewer, type ChatMessageData } from './ChatViewer.js';
 
 const LONG_OUTPUT = `${'x'.repeat(600)}__SHELL_TAIL__`;
@@ -210,7 +210,7 @@ describe('ChatViewer global expand control', () => {
     expect(container?.querySelector('.chat-viewer-expand-control')).toBeNull();
   });
 
-  it('expands thinking blocks and long tool outputs via Expand all', () => {
+  it('expands thinking blocks and long tool outputs via Expand all', async () => {
     act(() => {
       root?.render(
         <ChatViewer
@@ -229,13 +229,18 @@ describe('ChatViewer global expand control', () => {
 
     clickButton('Expand all sections');
 
-    expect(isThinkingExpanded()).toBe(true);
-    expect(container?.textContent).toContain('THINKING-BODY-MARKER');
-    expect(getOutputToggle().getAttribute('aria-expanded')).toBe('true');
-    expect(getOutputContent().style.maxHeight).toBe('');
+    // Wait for the state instead of reading it synchronously so the
+    // assertions stay deterministic under degraded scheduling (cold-cache
+    // CI runs can defer the global signal flush past the click's act()).
+    await vi.waitFor(() => {
+      expect(isThinkingExpanded()).toBe(true);
+      expect(container?.textContent).toContain('THINKING-BODY-MARKER');
+      expect(getOutputToggle().getAttribute('aria-expanded')).toBe('true');
+      expect(getOutputContent().style.maxHeight).toBe('');
+    });
   });
 
-  it('collapses previously expanded sections via Collapse all', () => {
+  it('collapses previously expanded sections via Collapse all', async () => {
     act(() => {
       root?.render(
         <ChatViewer
@@ -247,16 +252,18 @@ describe('ChatViewer global expand control', () => {
     });
 
     clickButton('Expand all sections');
-    expect(isThinkingExpanded()).toBe(true);
+    await vi.waitFor(() => expect(isThinkingExpanded()).toBe(true));
 
     clickButton('Collapse all sections');
 
-    expect(isThinkingExpanded()).toBe(false);
-    expect(getOutputToggle().getAttribute('aria-expanded')).toBe('false');
-    expect(getOutputContent().style.maxHeight).toBe('60px');
+    await vi.waitFor(() => {
+      expect(isThinkingExpanded()).toBe(false);
+      expect(getOutputToggle().getAttribute('aria-expanded')).toBe('false');
+      expect(getOutputContent().style.maxHeight).toBe('60px');
+    });
   });
 
-  it('keeps individual toggles working after a global command', () => {
+  it('keeps individual toggles working after a global command', async () => {
     act(() => {
       root?.render(
         <ChatViewer
@@ -268,7 +275,7 @@ describe('ChatViewer global expand control', () => {
     });
 
     clickButton('Expand all sections');
-    expect(isThinkingExpanded()).toBe(true);
+    await vi.waitFor(() => expect(isThinkingExpanded()).toBe(true));
 
     // Manually collapse the thinking block again.
     const thinkingToggle = container?.querySelector(
@@ -286,7 +293,9 @@ describe('ChatViewer global expand control', () => {
 
     // A later global command reaches every section again.
     clickButton('Collapse all sections');
-    expect(getOutputToggle().getAttribute('aria-expanded')).toBe('false');
+    await vi.waitFor(() =>
+      expect(getOutputToggle().getAttribute('aria-expanded')).toBe('false'),
+    );
   });
 
   it('does not render the toolbar for an empty message list', () => {
@@ -299,7 +308,7 @@ describe('ChatViewer global expand control', () => {
     expect(container?.querySelector('.chat-viewer-expand-control')).toBeNull();
   });
 
-  it('expands file references and read outputs via the global buttons', () => {
+  it('expands file references and read outputs via the global buttons', async () => {
     act(() => {
       root?.render(
         <ChatViewer
@@ -330,18 +339,22 @@ describe('ChatViewer global expand control', () => {
 
     clickButton('Expand all sections');
 
-    expect(getFileRefToggle().getAttribute('aria-expanded')).toBe('true');
-    expect(container?.textContent).toContain('FILE-REF-BODY-LINE-1');
-    expect(getReadToggle()?.textContent).toContain('Collapse');
+    await vi.waitFor(() => {
+      expect(getFileRefToggle().getAttribute('aria-expanded')).toBe('true');
+      expect(container?.textContent).toContain('FILE-REF-BODY-LINE-1');
+      expect(getReadToggle()?.textContent).toContain('Collapse');
+    });
 
     clickButton('Collapse all sections');
 
-    expect(getFileRefToggle().getAttribute('aria-expanded')).toBe('false');
-    expect(container?.textContent).not.toContain('FILE-REF-BODY-LINE-1');
-    expect(getReadToggle()?.textContent).toContain('Show more');
+    await vi.waitFor(() => {
+      expect(getFileRefToggle().getAttribute('aria-expanded')).toBe('false');
+      expect(container?.textContent).not.toContain('FILE-REF-BODY-LINE-1');
+      expect(getReadToggle()?.textContent).toContain('Show more');
+    });
   });
 
-  it('mounts sections added after a global command in the target state', () => {
+  it('mounts sections added after a global command in the target state', async () => {
     act(() => {
       root?.render(
         <ChatViewer
@@ -353,7 +366,9 @@ describe('ChatViewer global expand control', () => {
     });
 
     clickButton('Expand all sections');
-    expect(container?.querySelectorAll('.thinking-content').length).toBe(1);
+    await vi.waitFor(() =>
+      expect(container?.querySelectorAll('.thinking-content').length).toBe(1),
+    );
 
     // A new thinking message arrives after the global command (streaming).
     const lateThinking: ChatMessageData = {
@@ -381,7 +396,7 @@ describe('ChatViewer global expand control', () => {
     expect(container?.textContent).toContain('LATE-THINKING-MARKER');
   });
 
-  it('toggles SearchToolCall collapsible output via the global buttons', () => {
+  it('toggles SearchToolCall collapsible output via the global buttons', async () => {
     act(() => {
       root?.render(
         <ChatViewer
@@ -397,13 +412,17 @@ describe('ChatViewer global expand control', () => {
     expect(container?.textContent).not.toContain('SEARCH-TAIL-MARKER');
 
     clickButton('Expand all sections');
-    expect(container?.textContent).toContain('SEARCH-TAIL-MARKER');
+    await vi.waitFor(() =>
+      expect(container?.textContent).toContain('SEARCH-TAIL-MARKER'),
+    );
 
     clickButton('Collapse all sections');
-    expect(container?.textContent).not.toContain('SEARCH-TAIL-MARKER');
+    await vi.waitFor(() =>
+      expect(container?.textContent).not.toContain('SEARCH-TAIL-MARKER'),
+    );
   });
 
-  it('toggles WebFetchToolCall OutputCard via the global buttons', () => {
+  it('toggles WebFetchToolCall OutputCard via the global buttons', async () => {
     act(() => {
       root?.render(
         <ChatViewer
@@ -422,11 +441,15 @@ describe('ChatViewer global expand control', () => {
     expect(getOutputCardContent()?.style.maxHeight).toBe('120px');
 
     clickButton('Expand all sections');
-    expect(getOutputToggle().getAttribute('aria-expanded')).toBe('true');
-    expect(getOutputCardContent()?.style.maxHeight).toBe('');
+    await vi.waitFor(() => {
+      expect(getOutputToggle().getAttribute('aria-expanded')).toBe('true');
+      expect(getOutputCardContent()?.style.maxHeight).toBe('');
+    });
 
     clickButton('Collapse all sections');
-    expect(getOutputToggle().getAttribute('aria-expanded')).toBe('false');
-    expect(getOutputCardContent()?.style.maxHeight).toBe('120px');
+    await vi.waitFor(() => {
+      expect(getOutputToggle().getAttribute('aria-expanded')).toBe('false');
+      expect(getOutputCardContent()?.style.maxHeight).toBe('120px');
+    });
   });
 });

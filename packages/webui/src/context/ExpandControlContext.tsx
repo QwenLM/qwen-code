@@ -7,7 +7,6 @@
 import {
   createContext,
   useContext,
-  useRef,
   useState,
   type Dispatch,
   type SetStateAction,
@@ -60,20 +59,26 @@ export function useControlledExpanded(
   defaultExpanded = false,
 ): [boolean, Dispatch<SetStateAction<boolean>>] {
   const control = useContext(ExpandControlContext);
+  const signal = control?.signal ?? 0;
   const [isExpanded, setIsExpanded] = useState(() =>
-    control && control.signal > 0 ? control.expanded : defaultExpanded,
+    control && signal > 0 ? control.expanded : defaultExpanded,
   );
-  const lastSignalRef = useRef(control?.signal ?? 0);
+  const [lastSignal, setLastSignal] = useState(signal);
 
   // Sync during render (React's "adjusting state while rendering" pattern)
   // instead of in an effect: an effect would let every consumer commit once
   // with its stale value before the sync fires, so each global command
   // would reconcile every collapsible section twice and land the visible
-  // change one commit late. The ref guard makes the update idempotent, so
-  // StrictMode's double render is safe.
-  if (control && control.signal !== lastSignalRef.current) {
-    lastSignalRef.current = control.signal;
-    setIsExpanded(control.expanded);
+  // change one commit late. The previous signal is tracked in state rather
+  // than a ref so the guard survives discarded render passes under
+  // concurrent scheduling: a ref mutation persists even when React throws
+  // the render away, permanently desyncing the consumer from the signal,
+  // while a render-phase state update is re-applied on the retried render.
+  if (signal !== lastSignal) {
+    setLastSignal(signal);
+    if (control && signal > 0) {
+      setIsExpanded(control.expanded);
+    }
   }
 
   return [isExpanded, setIsExpanded];
