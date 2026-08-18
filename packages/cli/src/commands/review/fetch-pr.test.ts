@@ -245,6 +245,7 @@ const producerMocks = vi.hoisted(() => ({
     (..._args: unknown[]): MergeBaseResult => ({
       sha: null,
       baseFetchFailed: false,
+      probeUnavailable: false,
     }),
   ),
   // Defaults to the REAL implementation (captured by the module mock below);
@@ -397,6 +398,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockImplementation(() => ({
       sha: null,
       baseFetchFailed: false,
+      probeUnavailable: false,
     }));
     producerMocks.buildDiffPlan.mockImplementation((...a: unknown[]) =>
       producerMocks.actualBuildDiffPlan(...a),
@@ -639,7 +641,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockImplementation((...args: unknown[]) => {
       const probe = args[3] as { fetch: (r: string, b: string) => boolean };
       const ok = probe.fetch('origin', 'v1.0');
-      return { sha: null, baseFetchFailed: !ok };
+      return { sha: null, baseFetchFailed: !ok, probeUnavailable: false };
     });
     const report = await reportFor({});
     expect(report.baseFetchFailed).toBe(true);
@@ -674,7 +676,11 @@ describe('fetch-pr report assembly', () => {
     });
     producerMocks.resolveMergeBase.mockImplementation((...args: unknown[]) => {
       const probe = args[3] as { fetch: (r: string, b: string) => boolean };
-      return { sha: null, baseFetchFailed: !probe.fetch('origin', 'v1.0') };
+      return {
+        sha: null,
+        baseFetchFailed: !probe.fetch('origin', 'v1.0'),
+        probeUnavailable: false,
+      };
     });
     await reportFor({});
     expect(checked).toContain('refs/remotes/origin/v1.0');
@@ -711,7 +717,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockImplementation((...args: unknown[]) => {
       const probe = args[3] as { fetch: (r: string, b: string) => boolean };
       probe.fetch('origin', 'v1.0');
-      return { sha: 'mb1', baseFetchFailed: false };
+      return { sha: 'mb1', baseFetchFailed: false, probeUnavailable: false };
     });
     await reportFor({});
     expect(fetched).toEqual([
@@ -737,6 +743,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: 'beef0000',
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     producerMocks.gitRaw.mockReturnValue(
       Buffer.from(makeDiff('src/huge.ts', 9000)),
@@ -1204,6 +1211,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     servesBothRanges();
     // Advertised stat large enough that an ungated collapse ratio WOULD fire
@@ -1290,6 +1298,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     servesBothRanges(FULL_TWO, DELTA_A);
     const report = await reportFor({ since: ANCHOR });
@@ -1323,6 +1332,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     servesBothRanges(FULL_TWO, DELTA_A);
     producerMocks.readFileSync.mockImplementation((path?: unknown) => {
@@ -1360,6 +1370,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     servesBothRanges(FULL_TWO, DELTA_A);
     producerMocks.readFileSync.mockImplementation((path?: unknown) => {
@@ -1396,6 +1407,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     servesBothRanges(FULL_TWO, DELTA_A);
     const report = await reportFor({ since: ANCHOR });
@@ -1421,6 +1433,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     servesBothRanges();
 
@@ -1479,6 +1492,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     servesBothRanges();
     const report = await reportFor({ since: ['0'.repeat(40), 'abc1234'] });
@@ -1515,6 +1529,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     servesBothRanges('');
     const report = await reportFor({ since: ANCHOR });
@@ -1529,6 +1544,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: true,
+      probeUnavailable: false,
     });
     expect((await reportFor({ since: ANCHOR })).emptyDiff).toBeUndefined();
   });
@@ -1551,6 +1567,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     const REVERT_DELTA = [
       'diff --git a/a.ts b/a.ts',
@@ -1590,6 +1607,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     producerMocks.gitRaw.mockImplementation((...args: string[]) => {
       if (args.includes(`${BASE}..f00df00df00d`)) throw new Error('timed out');
@@ -1622,6 +1640,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     // Not a diff at all — a capture that returned an error stream, say. The
     // delta is read for one fact, the list of changed files, and a stream
@@ -1649,6 +1668,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: true,
+      probeUnavailable: false,
     });
     servesBothRanges();
     const report = await reportFor({ since: ANCHOR });
@@ -1681,9 +1701,25 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: null,
       baseFetchFailed: true,
+      probeUnavailable: false,
     });
     const transient = await reportFor({ since: ANCHOR });
     expect(ruling(transient)).toEqual({
+      since: ANCHOR,
+      effective: false,
+      reason: 'base-untrusted',
+    });
+
+    // The base fetch worked and the merge-base PROBE could not answer — a
+    // 128, or the 120s timeout a large long-lived PR under CI load reaches.
+    // Nothing about the histories was established, so this is infrastructure
+    // like the fetch failure above, not the deterministic shape below.
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: null,
+      baseFetchFailed: false,
+      probeUnavailable: true,
+    });
+    expect(ruling(await reportFor({ since: ANCHOR }))).toEqual({
       since: ANCHOR,
       effective: false,
       reason: 'base-untrusted',
@@ -1695,6 +1731,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: null,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     const permanent = await reportFor({ since: ANCHOR });
     expect(ruling(permanent)).toEqual({
@@ -1720,6 +1757,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     // Empty delta → upToDate; the full range is what gets partitioned.
     servesBothRanges(FULL_DIFF, '');
@@ -1756,6 +1794,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     servesBothRanges();
     const report = await reportFor({ since: 'f00df00df00d' });
@@ -1792,6 +1831,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     servesBothRanges();
     const report = await reportFor({ since: BASE });
@@ -1816,6 +1856,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     servesBothRanges();
     // The fault must land on ANCESTRY: a blanket error makes `cat-file`
@@ -1911,6 +1952,7 @@ describe('fetch-pr report assembly', () => {
       producerMocks.resolveMergeBase.mockReturnValue({
         sha: BASE,
         baseFetchFailed: false,
+        probeUnavailable: false,
       });
       servesBothRanges();
       const spy = vi
@@ -1950,6 +1992,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     servesBothRanges();
     const report = await reportFor({ since: ANCHOR });
@@ -1981,6 +2024,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     servesBothRanges();
     // Advertised 900 against a full range of 4 changed lines: 4 × 4 ≤ 900,
@@ -2022,6 +2066,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     servesBothRanges();
     const report = await reportFor({ since: '' });
@@ -2044,6 +2089,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     producerMocks.gitRaw.mockImplementation((...args: string[]) => {
       if (args.includes(`${BASE}..f00df00df00d`)) throw new Error('timed out');
@@ -2069,6 +2115,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     servesBothRanges();
     producerMocks.buildDiffPlan.mockImplementation((text: unknown) => {
@@ -2094,6 +2141,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     servesBothRanges();
     producerMocks.writeFileSync.mockImplementation((path: unknown) => {
@@ -2126,6 +2174,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     servesBothRanges();
     for (const since of [false, 42, null]) {
@@ -2144,6 +2193,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     servesBothRanges();
     const report = await reportFor({ since: '0'.repeat(40) });
@@ -2162,6 +2212,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     producerMocks.gitRaw.mockImplementation((...args: string[]) =>
       args.includes(`${BASE}..f00df00df00d`)
@@ -2196,6 +2247,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     producerMocks.gitRaw.mockImplementation((...args: string[]) =>
       args.includes(`${BASE}..f00df00df00d`)
@@ -2219,6 +2271,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     // Two files, one in the delta, so the slice is a PROPER part of the full
     // range and "the partitioner refused the scoped diff" is a state that
@@ -2257,6 +2310,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     // Two files, one in the delta — see the sibling above for why the
     // one-file fixture cannot express a scoped-then-rescued round.
@@ -2312,6 +2366,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: null,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     servesBothRanges();
     producerMocks.buildDiffPlan.mockImplementation((text: unknown) => {
@@ -2349,6 +2404,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     servesBothRanges();
     producerMocks.buildDiffPlan.mockImplementation((text: unknown) => {
@@ -2378,6 +2434,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     servesBothRanges();
     // A large advertised stat, so the collapse ratio WOULD fire if the
@@ -2422,6 +2479,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     producerMocks.gitRaw.mockImplementation((...args: string[]) => {
       if (args.includes(`${ANCHOR}..f00df00df00d`)) {
@@ -2470,6 +2528,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     producerMocks.gitRaw.mockImplementation((...args: string[]) =>
       args.includes(`${BASE}..f00df00df00d`)
@@ -3985,6 +4044,7 @@ describe('fetch-pr diff identity (diffSha256)', () => {
     vi.mocked(resolveMergeBase).mockReturnValue({
       sha: 'base123',
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     vi.mocked(gitRaw).mockImplementation((...args: string[]) =>
       args.includes('diff') ? Buffer.from(diff) : Buffer.from(''),
@@ -4013,6 +4073,7 @@ describe('fetch-pr diff identity (diffSha256)', () => {
     vi.mocked(resolveMergeBase).mockReturnValue({
       sha: 'base123',
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     vi.mocked(gitRaw).mockImplementation((...args: string[]) =>
       args.includes('diff') ? (bytes as unknown as Buffer) : Buffer.from(''),
@@ -4034,6 +4095,7 @@ describe('fetch-pr diff identity (diffSha256)', () => {
     vi.mocked(resolveMergeBase).mockReturnValue({
       sha: null,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     const report = await reportFor();
     expect(report.diffSha256).toBeNull();
@@ -4062,6 +4124,7 @@ describe('fetch-pr run-session ledger wiring', () => {
     vi.mocked(resolveMergeBase).mockReturnValue({
       sha: null,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     vi.mocked(gitRaw).mockImplementation(() => Buffer.from(''));
     producerMocks.readFileSync.mockImplementation(() => {

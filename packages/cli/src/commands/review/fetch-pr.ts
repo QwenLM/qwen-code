@@ -675,7 +675,14 @@ const gitProbe: GitProbe = {
       `+refs/heads/${ref}:refs/remotes/${remote}/${ref}`,
     ) !== null && refExists(`refs/remotes/${remote}/${ref}`),
   refExists,
-  mergeBase: (a, b) => gitOpt('merge-base', a, b),
+  // `gitExit`, not `gitOpt`: the exit code is what tells "no common ancestor"
+  // (1) apart from "the probe could not answer" (128, or a kill — the 120s
+  // timeout a large long-lived PR under CI load reaches), and the two lead to
+  // opposite recovery flows.
+  mergeBase: (a, b) => {
+    const { out, status } = gitExit('merge-base', a, b);
+    return { sha: out, status };
+  },
 };
 
 function tryRemove(action: () => void): void {
@@ -925,7 +932,11 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     //    chunk agents read ranges out of it and `diffHashOf` hashes it. What
     //    the round trip does not do is normalise CRLF (that would rewrite
     //    every hunk of a CRLF file) or drop the trailing newline.
-    const { sha: mergeBaseSha, baseFetchFailed } = resolveMergeBase(
+    const {
+      sha: mergeBaseSha,
+      baseFetchFailed,
+      probeUnavailable: baseProbeUnavailable,
+    } = resolveMergeBase(
       remote,
       meta.baseRefName,
       // QUALIFIED — the head side is dwim-shadowable exactly like the
@@ -1217,7 +1228,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         // narrowing does not reach the else branch and the package does not
         // build.
         demote(
-          baseFetchFailed
+          baseFetchFailed || baseProbeUnavailable
             ? 'base-untrusted'
             : mergeBaseSha === null
               ? 'containment-unverified'
