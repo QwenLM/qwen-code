@@ -5,6 +5,7 @@
  */
 
 import {
+  extractDaemonHttpTraceContext,
   hashDaemonWorkspace,
   recordDaemonError,
   recordDaemonHttpRequest,
@@ -742,6 +743,13 @@ export function daemonTelemetryMiddleware(
         : undefined;
     const deferredRuntime = getDeferredRuntimeRequestTiming(req);
     const startMs = deferredRuntime?.startedAt.getTime() ?? Date.now();
+    let parentContext: ReturnType<typeof extractDaemonHttpTraceContext>;
+    try {
+      parentContext = extractDaemonHttpTraceContext(req.headers);
+    } catch {
+      // Telemetry must not affect request handling.
+      parentContext = undefined;
+    }
     const telemetryRes = res as TelemetryResponse;
     if (route.attribution === 'handler_resolved') {
       try {
@@ -760,6 +768,7 @@ export function daemonTelemetryMiddleware(
           ? { permissionRequestId: route.permissionRequestId }
           : {}),
         ...(clientId ? { clientId } : {}),
+        ...(parentContext ? { parentContext } : {}),
         ...(deferredRuntime?.waitMs !== undefined
           ? {
               startTime: deferredRuntime.startedAt,

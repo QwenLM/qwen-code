@@ -203,6 +203,7 @@ export {
   captureDaemonTelemetryContext,
   createDaemonBridgeTelemetry,
   emitDaemonLog,
+  extractDaemonHttpTraceContext,
   extractDaemonTraceContext,
   hashDaemonWorkspace,
   injectDaemonTraceContext,

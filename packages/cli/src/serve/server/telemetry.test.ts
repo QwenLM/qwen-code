@@ -9,6 +9,7 @@ import { EventEmitter } from 'node:events';
 import type { NextFunction, Request, Response } from 'express';
 
 const coreMocks = vi.hoisted(() => ({
+  extractDaemonHttpTraceContext: vi.fn((): unknown => undefined),
   hashDaemonWorkspace: vi.fn((workspace: string) => `hash:${workspace}`),
   recordDaemonError: vi.fn(),
   recordDaemonHttpRequest: vi.fn(),
@@ -39,8 +40,17 @@ import {
   setDeferredRuntimeRequestTiming,
 } from './request-helpers.js';
 
-function mockReq(method: string, path: string): Request {
-  return { method, path, get: () => undefined } as unknown as Request;
+function mockReq(
+  method: string,
+  path: string,
+  headers?: Record<string, unknown>,
+): Request {
+  return {
+    method,
+    path,
+    headers,
+    get: () => undefined,
+  } as unknown as Request;
 }
 
 function mockRes(statusCode: number): Response & EventEmitter {
@@ -125,6 +135,45 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
       200,
       'joined',
     );
+  });
+
+  it('links the request span to an inbound traceparent header when extraction succeeds', () => {
+    const parentContext = { __remoteParent: true };
+    coreMocks.extractDaemonHttpTraceContext.mockReturnValueOnce(parentContext);
+    const res = mockRes(200);
+
+    daemonTelemetryMiddleware(() => '/ws')(
+      mockReq('GET', '/daemon/status', {
+        traceparent: `00-${'3'.repeat(32)}-${'4'.repeat(16)}-01`,
+      }),
+      res,
+      vi.fn() as unknown as NextFunction,
+    );
+    res.emit('finish');
+
+    expect(coreMocks.extractDaemonHttpTraceContext).toHaveBeenCalledWith({
+      traceparent: `00-${'3'.repeat(32)}-${'4'.repeat(16)}-01`,
+    });
+    expect(coreMocks.withDaemonRequestSpan).toHaveBeenCalledWith(
+      expect.objectContaining({ parentContext }),
+      expect.any(Function),
+    );
+  });
+
+  it('omits the parent context when no valid traceparent header is present', () => {
+    const res = mockRes(200);
+
+    daemonTelemetryMiddleware(() => '/ws')(
+      mockReq('GET', '/daemon/status', {}),
+      res,
+      vi.fn() as unknown as NextFunction,
+    );
+    res.emit('finish');
+
+    expect(coreMocks.extractDaemonHttpTraceContext).toHaveBeenCalledWith({});
+    const options = coreMocks.withDaemonRequestSpan.mock
+      .calls[0]?.[0] as Record<string, unknown>;
+    expect('parentContext' in options).toBe(false);
   });
 
   it('fires exactly once even if both finish and close emit', () => {

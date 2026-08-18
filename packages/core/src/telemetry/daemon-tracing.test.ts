@@ -25,6 +25,7 @@ import {
   addDaemonRequestAttribute,
   captureDaemonTelemetryContext,
   createDaemonBridgeTelemetry,
+  extractDaemonHttpTraceContext,
   extractDaemonTraceContext,
   hashDaemonWorkspace,
   injectDaemonTraceContext,
@@ -158,6 +159,37 @@ describe('daemon-tracing', () => {
     expect(trace.getSpanContext(extracted!)?.spanId).toBe(spanId);
   });
 
+  it('extracts trace context from inbound HTTP traceparent headers', () => {
+    const traceId = '3'.repeat(32);
+    const spanId = '4'.repeat(16);
+    const extracted = extractDaemonHttpTraceContext({
+      traceparent: `00-${traceId}-${spanId}-01`,
+    });
+
+    expect(extracted).toBeDefined();
+    expect(trace.getSpanContext(extracted!)?.traceId).toBe(traceId);
+    expect(trace.getSpanContext(extracted!)?.spanId).toBe(spanId);
+    expect(trace.getSpanContext(extracted!)?.isRemote).toBe(true);
+  });
+
+  it('rejects invalid inbound HTTP traceparent headers', () => {
+    expect(extractDaemonHttpTraceContext(undefined)).toBeUndefined();
+    expect(extractDaemonHttpTraceContext({})).toBeUndefined();
+    expect(
+      extractDaemonHttpTraceContext({ traceparent: 'not-a-traceparent' }),
+    ).toBeUndefined();
+    expect(
+      extractDaemonHttpTraceContext({
+        traceparent: `00-${'0'.repeat(32)}-${'4'.repeat(16)}-01`,
+      }),
+    ).toBeUndefined();
+    expect(
+      extractDaemonHttpTraceContext({
+        traceparent: [`00-${'3'.repeat(32)}-${'4'.repeat(16)}-01`],
+      }),
+    ).toBeUndefined();
+  });
+
   it('starts a daemon span under an explicit remote parent context', async () => {
     const parentContext = extractDaemonTraceContext({
       _meta: {
@@ -192,6 +224,53 @@ describe('daemon-tracing', () => {
     expect(startActiveSpan).toHaveBeenCalledWith(
       'child',
       expect.objectContaining({ kind: expect.any(Number) }),
+      parentContext!,
+      expect.any(Function),
+    );
+    expect(span.end).toHaveBeenCalledOnce();
+  });
+
+  it('starts a daemon request span under an extracted HTTP parent context', async () => {
+    const parentContext = extractDaemonHttpTraceContext({
+      traceparent: `00-${'5'.repeat(32)}-${'6'.repeat(16)}-01`,
+    });
+    const span = {
+      setStatus: vi.fn(),
+      end: vi.fn(),
+      setAttribute: vi.fn(),
+      setAttributes: vi.fn(),
+      recordException: vi.fn(),
+    } as unknown as Span;
+    const startActiveSpan = vi.fn(
+      async (
+        _name: string,
+        _options: unknown,
+        _parent: unknown,
+        fn: (span: Span) => Promise<string>,
+      ) => await fn(span),
+    );
+    vi.spyOn(trace, 'getTracer').mockReturnValue({
+      startActiveSpan,
+    } as unknown as Tracer);
+
+    await expect(
+      withDaemonRequestSpan(
+        {
+          method: 'GET',
+          route: 'GET /daemon/status',
+          parentContext,
+        },
+        async () => 'ok',
+      ),
+    ).resolves.toBe('ok');
+
+    expect(startActiveSpan).toHaveBeenCalledWith(
+      'qwen-code.daemon.request',
+      expect.objectContaining({
+        attributes: expect.objectContaining({
+          'http.request.method': 'GET',
+        }),
+      }),
       parentContext!,
       expect.any(Function),
     );

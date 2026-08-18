@@ -48,6 +48,7 @@ export interface DaemonRequestSpanOptions {
   sessionId?: string;
   clientId?: string;
   permissionRequestId?: string;
+  parentContext?: Context;
 }
 
 function errorMessage(error: unknown): string {
@@ -164,7 +165,11 @@ export async function withDaemonRequestSpan<T>(
         : {}),
     },
     fn,
-    { autoOkOnSuccess: false, startTime: options.startTime },
+    {
+      autoOkOnSuccess: false,
+      startTime: options.startTime,
+      parentContext: options.parentContext,
+    },
   );
 }
 
@@ -291,26 +296,19 @@ export function injectDaemonTraceContext<T extends object>(request: T): T {
   };
 }
 
-export function extractDaemonTraceContext(
-  source: unknown,
+function contextFromTraceparentValues(
+  traceparent: string,
+  tracestate: unknown,
 ): Context | undefined {
-  const meta = (source as { _meta?: unknown } | undefined)?._meta;
-  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) {
-    return undefined;
-  }
-  const record = meta as Record<string, unknown>;
-  const traceparent = record[DAEMON_TRACEPARENT_META_KEY];
-  if (typeof traceparent !== 'string' || traceparent.length === 0) {
-    return undefined;
-  }
   const carrier: Record<string, string> = { traceparent };
-  const tracestate = record[DAEMON_TRACESTATE_META_KEY];
   if (typeof tracestate === 'string' && tracestate.length > 0) {
     carrier['tracestate'] = tracestate;
   }
   const extracted = propagation.extract(ROOT_CONTEXT, carrier);
   if (trace.getSpanContext(extracted)) return extracted;
 
+  // Manual fallback for when the global propagator is not registered, so
+  // extraction works the same with and without an initialized SDK.
   const parts = traceparent.split('-');
   const traceId = parts[1];
   const spanId = parts[2];
@@ -334,6 +332,34 @@ export function extractDaemonTraceContext(
       isRemote: true,
     }),
   );
+}
+
+export function extractDaemonTraceContext(
+  source: unknown,
+): Context | undefined {
+  const meta = (source as { _meta?: unknown } | undefined)?._meta;
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) {
+    return undefined;
+  }
+  const record = meta as Record<string, unknown>;
+  const traceparent = record[DAEMON_TRACEPARENT_META_KEY];
+  if (typeof traceparent !== 'string' || traceparent.length === 0) {
+    return undefined;
+  }
+  return contextFromTraceparentValues(
+    traceparent,
+    record[DAEMON_TRACESTATE_META_KEY],
+  );
+}
+
+export function extractDaemonHttpTraceContext(
+  headers: Record<string, unknown> | undefined,
+): Context | undefined {
+  const traceparent = headers?.['traceparent'];
+  if (typeof traceparent !== 'string' || traceparent.length === 0) {
+    return undefined;
+  }
+  return contextFromTraceparentValues(traceparent, headers?.['tracestate']);
 }
 
 export interface DaemonBridgeTelemetryMetrics {
