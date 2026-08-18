@@ -34,27 +34,39 @@ let stateTimer: NodeJS.Timeout | undefined;
 let quitting = false;
 
 const MACOS_TITLE_BAR_CSS = `
-  [data-web-shell-root] {
-    padding-top: calc(env(safe-area-inset-top) + 28px) !important;
+  [data-web-shell-root] [data-sidebar-shell] > aside {
+    padding-top: 40px !important;
   }
 
-  [data-web-shell-root]::before {
+  [data-web-shell-root] [data-sidebar-shell] > aside::before {
     app-region: drag;
-    align-items: center;
-    background: var(--sidebar-background, #0d0d0d);
-    color: color-mix(
-      in srgb,
-      var(--sidebar-foreground, #fafafa) 58%,
-      transparent
-    );
-    content: 'Qwen Code' / '';
-    display: flex;
-    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-    font-size: 11px;
-    font-weight: 600;
+    content: '';
     height: 28px;
     left: 0;
-    padding-left: 74px;
+    position: absolute;
+    right: 0;
+    top: 0;
+    user-select: none;
+    z-index: 1;
+  }
+
+  [data-web-shell-root] [data-testid='chat-context-header'] {
+    app-region: drag;
+    user-select: none;
+  }
+
+  [data-web-shell-root]
+    [data-testid='chat-context-header']
+    :where(button, a, input, select, textarea, [role='button']) {
+    app-region: no-drag;
+  }
+
+  [data-web-shell-root]
+    [data-testid='context-body']:has([data-web-shell-new-session-dot-field])::before {
+    app-region: drag;
+    content: '';
+    height: 28px;
+    left: 0;
     position: absolute;
     right: 0;
     top: 0;

@@ -86,8 +86,13 @@ function testSecurityBoundary() {
   assert.match(main, /setBackgroundColor/);
   assert.match(main, /titleBarStyle:.*'hidden'/);
   assert.match(main, /insertCSS\(MACOS_TITLE_BAR_CSS\)/);
-  assert.match(main, /var\(--sidebar-background/);
+  assert.match(main, /\[data-sidebar-shell\] > aside/);
+  assert.match(main, /padding-top: 40px/);
+  assert.match(main, /\[data-testid='chat-context-header'\]/);
+  assert.match(main, /\[data-web-shell-new-session-dot-field\]/);
   assert.match(main, /app-region: drag/);
+  assert.match(main, /app-region: no-drag/);
+  assert.doesNotMatch(main, /content: 'Qwen Code'/);
   assert.match(main, /button\[title\]\)::after/);
   assert.match(main, /github\.com\/electron\/electron\/issues\/49843/);
   assert.match(runtime, /--require-auth/);
