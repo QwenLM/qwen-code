@@ -13,6 +13,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import {
+  appendFileSync,
   chmodSync,
   existsSync,
   lstatSync,
@@ -49,6 +50,7 @@ describe('worktreeResidue', () => {
   // `isolateHostGitConfig` was written for). Every sibling real-git suite
   // isolates; these do too.
   let gitIsolation: ReturnType<typeof isolateHostGitConfig>;
+  const realPath = process.env['PATH'] ?? '';
 
   const gitRepo = (...args: string[]) =>
     execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
@@ -71,6 +73,7 @@ describe('worktreeResidue', () => {
   });
 
   afterEach(() => {
+    process.env['PATH'] = realPath;
     rmSync(repo, { recursive: true, force: true });
     gitIsolation.dispose();
   });
@@ -369,6 +372,103 @@ describe('worktreeResidue', () => {
     expect(got.total).toBe(1);
     expect(got.unmeasured).toBeUndefined();
   });
+
+  it('keeps the pipeline’s OWN build output out of the ignore-independent view', () => {
+    // Measured, not hypothesised: on a healthy review worktree of this repo,
+    // after the `npm ci` and build the pipeline itself runs there, `git status`
+    // reported NOTHING and the ignore-independent listing reported 3 957 paths
+    // — coverage HTML, `.tsbuildinfo`, husky's installed hooks. Every one of
+    // them reached every verifier as residue to `rm`, and real contamination
+    // would have been three lines inside that. The rule that separates them is
+    // WHO WROTE THE IGNORE RULE, not what it matches.
+    writeFileSync(
+      join(tree, '.gitignore'),
+      'node_modules\ndist\ncoverage/\n*.tsbuildinfo\n',
+    );
+    git('add', '.gitignore');
+    git('commit', '-qm', 'ordinary ignore rules');
+    mkdirSync(join(tree, 'coverage', 'lcov-report'), { recursive: true });
+    writeFileSync(
+      join(tree, 'coverage', 'lcov-report', 'index.html'),
+      '<html>',
+    );
+    writeFileSync(join(tree, 'tsconfig.tsbuildinfo'), '{}');
+    // husky's `prepare` hook, which `npm ci` runs: an untracked directory
+    // hidden by an untracked `.gitignore` of its own, so no rule the commit
+    // carries covers it and only the pipeline-footprint list can.
+    mkdirSync(join(tree, '.husky', '_'), { recursive: true });
+    writeFileSync(join(tree, '.husky', '_', '.gitignore'), '*\n');
+    writeFileSync(join(tree, '.husky', '_', 'pre-commit'), '#!/bin/sh\n');
+    // ...and one real leftover standing in the middle of all of it.
+    writeFileSync(join(tree, '__probe__.test.ts'), 'x');
+
+    const got = worktreeResidue(tree);
+
+    expect(got.paths).toEqual(['__probe__.test.ts']);
+    expect(got.total).toBe(1);
+    expect(got.unmeasured).toBeUndefined();
+  });
+
+  it('sees residue hidden by an ignore rule the COMMIT does not carry', () => {
+    // The other half of the same rule. A `.gitignore` written after the
+    // checkout, and a line appended to the common repo's `info/exclude`, are
+    // the two ways to hide a probe's leftovers from `status` without touching
+    // the commit — so neither is allowed to vouch for what it hides.
+    mkdirSync(join(tree, 'probe_dir'));
+    writeFileSync(join(tree, 'probe_dir', '.gitignore'), '*\n');
+    writeFileSync(join(tree, 'probe_dir', 'probe.test.ts'), 'x');
+    mkdirSync(join(repo, '.git', 'info'), { recursive: true });
+    appendFileSync(join(repo, '.git', 'info', 'exclude'), 'sneaked/\n');
+    mkdirSync(join(tree, 'sneaked'));
+    writeFileSync(join(tree, 'sneaked', 'leftover.txt'), 'x');
+
+    // The blindness this closes: `status` exits 0 with zero bytes.
+    expect(git('status', '--porcelain', '--untracked-files=all')).toBe('');
+
+    const got = worktreeResidue(tree);
+
+    expect(got.paths.sort()).toEqual([
+      'probe_dir/.gitignore',
+      'probe_dir/probe.test.ts',
+      'sneaked/leftover.txt',
+    ]);
+    expect(got.unmeasured).toBeUndefined();
+  });
+
+  // A `git` shim needs a shell script, which Windows cannot execute as a bare
+  // `git` on PATH; the behaviour it pins is platform-independent.
+  it.skipIf(process.platform === 'win32')(
+    'says UNMEASURED, not clean, when the index-bit oracle cannot run',
+    () => {
+      // The three oracles above return `unmeasured` when their git call fails;
+      // this one used to fall THROUGH to the clean return, because its guard
+      // asked for `status === 0` and read a failure as "no bits found". The
+      // tree it then certified pristine is the one whose index bits it could
+      // not read — precisely the tree that can be carrying a mutant `status`
+      // is unable to see. Only `ls-files -v` is broken here: the shim proves
+      // the earlier oracles still answered, so the verdict comes from this
+      // call and not from a repo the test broke wholesale.
+      const shim = mkdtempSync(join(tmpdir(), 'qwen-git-shim-'));
+      const realGit = execFileSync('sh', ['-c', 'command -v git'], {
+        encoding: 'utf8',
+      }).trim();
+      writeFileSync(
+        join(shim, 'git'),
+        `#!/bin/sh\nls=0; v=0\nfor a in "$@"; do\n  [ "$a" = ls-files ] && ls=1\n  [ "$a" = -v ] && v=1\ndone\n[ "$ls$v" = 11 ] && exit 128\nexec ${realGit} "$@"\n`,
+        { mode: 0o755 },
+      );
+      writeFileSync(join(tree, '__probe__.test.ts'), 'x');
+      process.env['PATH'] = `${shim}:${realPath}`;
+
+      const got = worktreeResidue(tree);
+
+      expect(got.unmeasured).toContain('ls-files exited 128');
+      // The paths measured before the failure are still handed over: an
+      // unmeasured verdict withholds the certificate, not the evidence.
+      expect(got.paths).toEqual(['__probe__.test.ts']);
+      expect(got.total).toBe(1);
+    },
+  );
 });
 
 describe('worktreeResidue — the blind sets', () => {

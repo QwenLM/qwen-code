@@ -56,6 +56,7 @@ import {
   rmSync,
   lstatSync,
   existsSync,
+  realpathSync,
 } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join, isAbsolute, sep } from 'node:path';
@@ -1469,6 +1470,70 @@ export function probeCleanupFailureDetail(
 }
 
 /**
+ * Put the probe tree's TRACKED files back to the commit, before a run.
+ *
+ * The tree is reused across the baseline, the control, every mutant and every
+ * hunk probe, and what runs in it between those phases is the PR's own test
+ * suite. {@link runProbeSuite} re-links `node_modules` for exactly this
+ * reason; tracked files are the other half of the same state, and the half
+ * that decides verdicts more directly. A suite that rewrites a probe file
+ * after vitest has collected it — so the run it was collected for still scores
+ * green — hands every later run a file of its choosing, and the verdict that
+ * buys is `killed`: "a test catches this", asserted for statements no test
+ * covers. The mirror direction plants a compile error and buys a blanket
+ * `inconclusive`.
+ *
+ * Returns null when the tree is as the commit left it, or a reason when it
+ * could not be put back. A directory that is not a checkout of its own is not
+ * a failure — there is no commit to restore FROM, and `git` would otherwise
+ * walk up and check the ENCLOSING repository out into it, which is the
+ * discovery hazard the residue probe's identity gate exists for.
+ */
+function restoreProbeTreeTracked(probeTree: string): string | null {
+  const top = spawnSync('git', ['rev-parse', '--show-toplevel'], {
+    cwd: probeTree,
+    encoding: 'utf8',
+    env: sanitizedGitEnv(),
+  });
+  try {
+    if (
+      top.error ||
+      top.status !== 0 ||
+      typeof top.stdout !== 'string' ||
+      realpathSync(top.stdout.trim()) !== realpathSync(probeTree)
+    ) {
+      return null;
+    }
+  } catch {
+    return null;
+  }
+  const r = spawnSync(
+    'git',
+    // A pathspec checkout runs no hook — but the config that decides that
+    // lives in a tree this code is defending against, so it is emptied here
+    // the way every other checkout in this pipeline empties it. `--` and a
+    // pathspec: this restores FILES and never moves HEAD.
+    [
+      '-c',
+      'core.hooksPath=/dev/null/no-hooks',
+      'checkout',
+      '--force',
+      'HEAD',
+      '--',
+      '.',
+    ],
+    { cwd: probeTree, encoding: 'utf8', env: sanitizedGitEnv() },
+  );
+  if (r.error) return r.error.message;
+  if (r.status !== 0) {
+    return (
+      (r.stderr ?? '').toString().trim() || `git checkout exited ${r.status}`
+    );
+  }
+  return null;
+}
+
+/**
  * One vitest run over the probe files, classified per file. Shared by the
  * baseline run, every mutant run, and the revert probe — the same suite, the
  * same runner, the same classifier. Throws when the run never produced output
@@ -1808,6 +1873,14 @@ export function runOneHunkProbe(
         'the probe target resolves through a symlink — the reverse patch and the restore would follow it out of the probe tree, so nothing was neutralised',
     };
   }
+  const stale = restoreProbeTreeTracked(probeTree);
+  if (stale !== null) {
+    return {
+      ...meta,
+      verdict: 'inconclusive',
+      detail: `the probe tree could not be put back to the commit before this run, so an earlier run's writes may still be standing: ${stale}`,
+    };
+  }
   let original: string;
   try {
     original = readFileSync(abs, 'utf8');
@@ -1931,6 +2004,10 @@ export function runControlMutant(
   // worktree for a link aimed at the predictable sibling path. The control
   // never ran, which is `null`, not a verdict.
   if (probeTargetEscapes(probeTree, probeFile)) return null;
+  // A control run on a tree an earlier run wrote into demonstrates that
+  // tree's behaviour, not the suite's — and this is the run every survivor
+  // verdict is conditioned on.
+  if (restoreProbeTreeTracked(probeTree) !== null) return null;
   let original: string;
   try {
     original = readFileSync(abs, 'utf8');
@@ -1991,6 +2068,14 @@ export function runOneMutant(
       verdict: 'inconclusive',
       detail:
         'the probe target resolves through a symlink — the mutation and the restore would follow it out of the probe tree, so nothing was mutated',
+    };
+  }
+  const stale = restoreProbeTreeTracked(probeTree);
+  if (stale !== null) {
+    return {
+      ...mutant,
+      verdict: 'inconclusive',
+      detail: `the probe tree could not be put back to the commit before this run, so an earlier run's writes may still be standing: ${stale}`,
     };
   }
   const original = readFileSync(abs, 'utf8');
@@ -2391,6 +2476,15 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
         // 600s tool ceiling (540s budget: at most 240s here + 300s revert).
         const mutantDeadline =
           startedAt + TOTAL_BUDGET_MS - PROBE_RUN_TIMEOUT_MS;
+        // The probe tree is reused ACROSS reviews too (#6832), so the baseline
+        // is not exempt: it can open on whatever the previous review's suite
+        // left in it.
+        const staleBaseline = restoreProbeTreeTracked(probeTree);
+        if (staleBaseline !== null) {
+          throw new Error(
+            `the probe tree could not be put back to the commit: ${staleBaseline}`,
+          );
+        }
         const baseline = runProbeSuite(
           probeTree,
           probes,

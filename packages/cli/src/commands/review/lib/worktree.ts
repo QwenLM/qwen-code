@@ -33,7 +33,7 @@ import {
   type Stats,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { readWorkspacePackages } from './workspaces.js';
 
 export type SweepResult = ReturnType<typeof spawnSync>;
@@ -332,6 +332,125 @@ function pipelineExcludeArgs(): string[] {
 }
 
 /**
+ * True for a path the pipeline itself produced in the tree it is measuring.
+ *
+ * These are the excludes the residue probe applies in CODE rather than through
+ * a rule file, because the ignore-independent listing honors no rule file at
+ * all and a contaminator can reach every one that exists. `node_modules/` and
+ * `dist/` are what the dependency farm and the build put there; `.husky/_/` is
+ * what `npm ci` puts there, through the `prepare` hook, on any repo using
+ * husky — an untracked directory hidden by an untracked `.gitignore` of its
+ * own, so it survives every rule-provenance test below and would otherwise be
+ * named as residue on every healthy run.
+ *
+ * The list is the pipeline's own footprint and nothing else. It is also, and
+ * this is the honest half, three more places a probe can hide: the same
+ * blindness `node_modules/` and `dist/` have always had here.
+ */
+function inPipelineFootprint(rec: string): boolean {
+  const parts = rec.split('/');
+  // Directory components only — a plain FILE named `dist` is not build output.
+  for (let i = 0; i < parts.length - 1; i++) {
+    if (parts[i] === 'node_modules' || parts[i] === 'dist') return true;
+    if (
+      parts[i] === '.husky' &&
+      parts[i + 1] === '_' &&
+      i + 1 < parts.length - 1
+    )
+      return true;
+  }
+  return false;
+}
+
+/** The ignore file that hid a path, and the pattern in it that matched. */
+interface IgnoreRule {
+  source: string;
+  pattern: string;
+}
+
+/**
+ * Which ignore rule hides each of these paths, asked of git rather than
+ * guessed. `null` when the question could not be put — the caller reports
+ * unmeasured rather than assuming either answer.
+ */
+function ignoreSourcesOf(
+  cwd: string,
+  paths: string[],
+): Map<string, IgnoreRule> | null {
+  const r = spawnSync(
+    'git',
+    [...pipelineExcludeArgs(), 'check-ignore', '-z', '-v', '--stdin'],
+    {
+      cwd,
+      input: `${paths.join('\0')}\0`,
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+      env: sanitizedGitEnv(),
+    },
+  );
+  // 0 = at least one path is ignored, 1 = none of them are. Both are answers;
+  // anything else is a failure to ask.
+  if (
+    r.error ||
+    (r.status !== 0 && r.status !== 1) ||
+    typeof r.stdout !== 'string'
+  ) {
+    return null;
+  }
+  // `<source>\0<line>\0<pattern>\0<path>\0` per record.
+  const fields = r.stdout.split('\0');
+  const rules = new Map<string, IgnoreRule>();
+  for (let i = 0; i + 3 < fields.length; i += 4) {
+    rules.set(fields[i + 3], { source: fields[i], pattern: fields[i + 2] });
+  }
+  return rules;
+}
+
+/**
+ * True for a pattern that hides EVERYTHING rather than naming something.
+ *
+ * This is the whitelist form — `*` at the top of a `.gitignore` with
+ * `!`-negations under it — and it is the one shape a committed ignore file can
+ * take that must not be trusted the way `coverage/` or `*.tsbuildinfo` are.
+ * Those name a build artifact; `*` names nothing and swallows a probe's
+ * leftovers along with everything else, which is #9207 with the tripwire
+ * blindfolded. A repo may legitimately be written that way, so this is not a
+ * finding about the repo — it is the reason its ignore rules cannot answer the
+ * question this probe is asking.
+ */
+function hidesEverything(pattern: string): boolean {
+  const core = pattern.replace(/^\//, '').replace(/\/$/, '');
+  return /^\*+(\/\*+)*$/.test(core);
+}
+
+/**
+ * The subset of those ignore sources that the commit under review carries.
+ *
+ * Anything else is a rule this checkout did not come with: `info/exclude` in
+ * the common dir, a `.gitignore` written after the checkout, an excludes file
+ * outside the tree. A source git names with an absolute path or one climbing
+ * out of the worktree is not asked about at all — `ls-files` would reject the
+ * pathspec, and unknown provenance is untrusted provenance.
+ */
+function trackedIgnoreSources(cwd: string, sources: Set<string>): Set<string> {
+  const inside = [...sources].filter(
+    (s) =>
+      s.length > 0 && !isAbsolute(s) && !s.split('/').some((p) => p === '..'),
+  );
+  if (inside.length === 0) return new Set();
+  const r = spawnSync('git', ['ls-files', '-z', '--', ...inside], {
+    cwd,
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+    env: sanitizedGitEnv(),
+  });
+  if (r.error || r.status !== 0 || typeof r.stdout !== 'string') {
+    return new Set();
+  }
+  return new Set(r.stdout.split('\0').filter((p) => p.length > 0));
+}
+
+/**
  * The paths a tree carries that its HEAD commit does not — probe residue, seen
  * from the reading side (#9207).
  *
@@ -499,14 +618,28 @@ export function worktreeResidue(cwd: string, cap = 12): WorktreeResidue {
     }
   }
   // `status` honors the ignore rules of the tree it measures, and those rules
-  // belong to the very actor this probe exists to catch: a committed
-  // whitelist-form `.gitignore` (`*` with `!`-negations), a line appended to
-  // the common repo's `info/exclude`, or a `.gitignore` planted at runtime
-  // each hide the contamination — and themselves — from `status`. Merge the
-  // ignore-INDEPENDENT untracked listing: `--others` without
-  // `--exclude-standard` honors no ignore rule at all. What the pipeline's
-  // excludes would have filtered is dropped in code below, where a
-  // contaminator cannot reach the filter.
+  // belong to the very actor this probe exists to catch: a line appended to
+  // the common repo's `info/exclude`, or a `.gitignore` planted at runtime,
+  // hides the contamination — and itself — from `status`. So the untracked
+  // side is listed a SECOND time under no ignore rule at all (`--others`
+  // without `--exclude-standard`), and the two listings are reconciled below.
+  //
+  // Reporting that raw listing as residue is the obvious reconciliation and it
+  // is wrong in the way a tripwire cannot afford. Measured on a healthy review
+  // worktree of this repo, after the `npm ci` and build the pipeline itself
+  // runs there: `git status` reported NOTHING and the raw listing reported
+  // 3 957 paths — coverage HTML, `.tsbuildinfo`, husky's installed hooks. A
+  // tripwire that fires on every healthy run stops being read, real
+  // contamination drowns in it, and every verifier is handed `git checkout` /
+  // `rm` recipes aimed at thousands of legitimate build artifacts.
+  //
+  // What separates the two is not the pattern, which is unbounded, but WHO
+  // WROTE THE RULE. An ignore file the commit under review carries is ordinary
+  // repo hygiene that every agent reading this tree sees identically; a rule
+  // from anywhere else — `info/exclude`, a `.gitignore` written after the
+  // checkout — is the plant. `check-ignore -v` names the source file for each
+  // path, so the reconciliation asks git that question instead of inferring it
+  // from the name.
   const others = spawnSync(
     'git',
     ['-c', 'core.fsmonitor=', 'ls-files', '--others', '-z'],
@@ -528,21 +661,41 @@ export function worktreeResidue(cwd: string, cap = 12): WorktreeResidue {
     return { paths: [], total: 0, unmeasured: why };
   }
   const seen = new Set(paths);
+  const extras: string[] = [];
   for (const rec of others.stdout.split('\0')) {
     if (rec.length === 0 || seen.has(rec)) continue;
-    // The excludes `status` applies are directory patterns (`node_modules/`,
-    // `dist/`): drop records UNDER such a directory the same way — a plain
-    // FILE named `dist` is not build output, and `status` would name it.
-    if (
-      rec
-        .split('/')
-        .slice(0, -1)
-        .some((part) => part === 'node_modules' || part === 'dist')
-    ) {
-      continue;
-    }
+    if (inPipelineFootprint(rec)) continue;
     seen.add(rec);
-    paths.push(rec);
+    extras.push(rec);
+  }
+  if (extras.length > 0) {
+    const hiddenBy = ignoreSourcesOf(cwd, extras);
+    if (hiddenBy === null) {
+      return {
+        paths: paths.slice(0, cap),
+        total: paths.length,
+        unmeasured:
+          "the ignore rules hiding this tree's untracked files could not be " +
+          'attributed, so `git status` cannot be trusted to have seen them',
+      };
+    }
+    const fromTheCommit = trackedIgnoreSources(
+      cwd,
+      new Set([...hiddenBy.values()].map((rule) => rule.source)),
+    );
+    for (const rec of extras) {
+      const rule = hiddenBy.get(rec);
+      // No rule at all means nothing hid it, so `status` should have named it
+      // and did not: unattributed goes to the reader, not to silence.
+      if (
+        rule !== undefined &&
+        fromTheCommit.has(rule.source) &&
+        !hidesEverything(rule.pattern)
+      ) {
+        continue;
+      }
+      paths.push(rec);
+    }
   }
   // `git status` never looks INSIDE a committed gitlink (mode 160000), and
   // untracked content there does not dirty the superproject — the raw oracle
@@ -606,17 +759,30 @@ export function worktreeResidue(cwd: string, cap = 12): WorktreeResidue {
   // make git ignore a TRACKED file's working copy, so an edited file answers
   // `status` as clean. A reader told "clean" about a tree carrying a mutant is
   // the #9207 failure with the tripwire's own signature on it.
-  const bits = spawnSync('git', ['-c', 'core.fsmonitor=', 'ls-files', '-v'], {
-    cwd,
-    encoding: 'utf8',
-    maxBuffer: 64 * 1024 * 1024,
-    env: sanitizedGitEnv(),
-  });
-  if (
-    typeof bits.stdout === 'string' &&
-    bits.status === 0 &&
-    bits.stdout.split('\n').some((line) => /^[a-zS]/.test(line))
-  ) {
+  //
+  // `-z` for the same reason the calls above carry it, and here it also bounds
+  // the output: without it `core.quotepath` octal-expands a non-ASCII name to
+  // four times its length, which is the one way this call can outgrow the
+  // buffer while its `-s -z` sibling fits. And it fails CLOSED like the
+  // siblings — a spawn that dies leaves `status` null, which the earlier form
+  // read as "no bits found" and fell through to a clean verdict.
+  const bits = spawnSync(
+    'git',
+    ['-c', 'core.fsmonitor=', 'ls-files', '-v', '-z'],
+    {
+      cwd,
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+      env: sanitizedGitEnv(),
+    },
+  );
+  if (bits.error || bits.status !== 0 || typeof bits.stdout !== 'string') {
+    const why = bits.error
+      ? ((bits.error as NodeJS.ErrnoException).code ?? bits.error.message)
+      : `git ls-files exited ${bits.status}`;
+    return { paths: paths.slice(0, cap), total: paths.length, unmeasured: why };
+  }
+  if (bits.stdout.split('\0').some((rec) => /^[a-zS]/.test(rec))) {
     return {
       paths: paths.slice(0, cap),
       total: paths.length,

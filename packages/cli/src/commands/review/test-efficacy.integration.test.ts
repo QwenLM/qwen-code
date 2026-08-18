@@ -1117,50 +1117,59 @@ process.stdout.write(JSON.stringify({
     ).toBe(true);
   });
 
-  it('a control that could not be SET UP leaves the window spendable', async () => {
-    // `null` is not `false`, and this is where the difference is observable.
-    // A control that never ran demonstrated nothing about the runner, so the
-    // mutants must still spend their window — reporting `false` here would
-    // discard the whole phase over an I/O error and stamp every survivor with
-    // "an injected always-failing test stayed green" about a run that never
-    // happened.
-    write('package.json', '{"private":true,"workspaces":["packages/*"]}\n');
-    write(
-      'packages/lib/src/f.ts',
-      'export const state = new Map<string, string>();\n',
-    );
-    const base = commitAll('base');
-    write(
-      'packages/lib/src/f.ts',
-      'export const state = new Map<string, string>();\n' +
-        'export function reset() {\n' +
-        '  state.clear();\n' +
-        '}\n',
-    );
-    write(
-      'packages/lib/src/f.test.ts',
-      'import { reset } from "./f.js"; import { it, expect } from "vitest"; it("t", () => expect(typeof reset).toBe("function"));\n',
-    );
-    commitAll('pr');
-    const wt = join(repo, 'wt');
-    git(repo, 'worktree', 'add', '-q', '--detach', wt, 'HEAD');
-    writeFileSync(
-      join(repo, 'report.json'),
-      JSON.stringify({
-        files: [
-          { path: 'packages/lib/src/f.ts', kind: 'source' },
-          { path: 'packages/lib/src/f.test.ts', kind: 'test' },
-        ],
-      }),
-    );
-    // Green, then it deletes the probe file it just reported on — a stand-in
-    // for the concurrent sweep / permissions failure that makes the control's
-    // own `readFileSync` throw. The runner itself stays honest, so nothing
-    // here is a claim about whether it can kill.
-    writeFileSync(
-      vitestScript(),
-      `#!/usr/bin/env node
+  // A symlink is the mechanism, and Windows needs a privilege to create one.
+  it.skipIf(process.platform === 'win32')(
+    'a control that could not be SET UP leaves the window spendable',
+    async () => {
+      // `null` is not `false`, and this is where the difference is observable.
+      // A control that never ran demonstrated nothing about the runner, so the
+      // mutants must still spend their window — reporting `false` here would
+      // discard the whole phase over an I/O error and stamp every survivor with
+      // "an injected always-failing test stayed green" about a run that never
+      // happened.
+      write('package.json', '{"private":true,"workspaces":["packages/*"]}\n');
+      write(
+        'packages/lib/src/f.ts',
+        'export const state = new Map<string, string>();\n',
+      );
+      const base = commitAll('base');
+      write(
+        'packages/lib/src/f.ts',
+        'export const state = new Map<string, string>();\n' +
+          'export function reset() {\n' +
+          '  state.clear();\n' +
+          '}\n',
+      );
+      write(
+        'packages/lib/src/f.test.ts',
+        'import { reset } from "./f.js"; import { it, expect } from "vitest"; it("t", () => expect(typeof reset).toBe("function"));\n',
+      );
+      commitAll('pr');
+      const wt = join(repo, 'wt');
+      git(repo, 'worktree', 'add', '-q', '--detach', wt, 'HEAD');
+      writeFileSync(
+        join(repo, 'report.json'),
+        JSON.stringify({
+          files: [
+            { path: 'packages/lib/src/f.ts', kind: 'source' },
+            { path: 'packages/lib/src/f.test.ts', kind: 'test' },
+          ],
+        }),
+      );
+      // Green, then it relinks the probe file it just reported on out of the
+      // tree — one of the ways the control finds nothing it may set up. It used
+      // to DELETE the file, and a delete stopped standing for anything: every
+      // run now begins by putting the tree back to its commit, so a deleted
+      // probe file comes straight back and the control runs. What this test is
+      // about is downstream of WHICH way the control failed — that the mutant
+      // window is still spent — and the read-failure path itself is pinned
+      // directly in the unit suite. The runner stays honest, so nothing here is
+      // a claim about whether it can kill.
+      writeFileSync(
+        vitestScript(),
+        `#!/usr/bin/env node
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
 const results = files.map((f) => ({
@@ -1172,25 +1181,28 @@ process.stdout.write(JSON.stringify({
   numFailedTests: 0,
   testResults: results,
 }));
-for (const f of files) { try { fs.unlinkSync(f); } catch {} }
+for (const f of files) {
+  try { fs.unlinkSync(f); fs.symlinkSync(os.tmpdir(), f); } catch {}
+}
 `,
-    );
+      );
 
-    await runHandler({
-      report: join(repo, 'report.json'),
-      worktree: wt,
-      base,
-      out: join(repo, 'out.json'),
-    });
+      await runHandler({
+        report: join(repo, 'report.json'),
+        worktree: wt,
+        base,
+        out: join(repo, 'out.json'),
+      });
 
-    const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
-    expect(out.harnessValidated).toBeNull();
-    expect(out.mutants.note).toContain('could not be set up');
-    expect(out.mutants.note).toContain('NOT validated');
-    // The window was NOT discarded — this is the whole difference from `false`.
-    expect(out.mutants.probed.length).toBeGreaterThan(0);
-    expect(out.mutants.skippedForControl).toBe(0);
-  });
+      const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+      expect(out.harnessValidated).toBeNull();
+      expect(out.mutants.note).toContain('could not be set up');
+      expect(out.mutants.note).toContain('NOT validated');
+      // The window was NOT discarded — this is the whole difference from `false`.
+      expect(out.mutants.probed.length).toBeGreaterThan(0);
+      expect(out.mutants.skippedForControl).toBe(0);
+    },
+  );
 
   it('reports mutants skipped for budget when time runs out mid-loop', async () => {
     // Three safety-verb candidates, but the budget expires after one: the
@@ -1641,7 +1653,12 @@ process.stdout.write(JSON.stringify({
     // this branch — but if the guard were dropped, a stale line number would
     // delete the WRONG statement and attribute the run's verdict (here the
     // fake runner's green — `survived`) to a statement that was never removed.
+    // Committed, not just written: every run now opens by putting the tree
+    // back to its commit, which is the production invariant this fixture has
+    // to share — a probe tree is a detached checkout, so a tracked file that
+    // disagrees with HEAD is contamination, not a starting condition.
     write('src/x.ts', 'alpha();\nbeta();\n');
+    commitAll('mismatched line');
     const before = readFileSync(join(repo, 'src/x.ts'), 'utf8');
 
     const got = runOneMutant(
@@ -1653,6 +1670,65 @@ process.stdout.write(JSON.stringify({
     expect(got.verdict).toBe('inconclusive');
     expect(got.detail).toContain('does not match the selected statement');
     expect(readFileSync(join(repo, 'src/x.ts'), 'utf8')).toBe(before);
+  });
+
+  it('puts tracked files back before each run — one run cannot decide the next', () => {
+    // The probe tree is reused across the baseline, the control, every mutant
+    // and every hunk probe, and what runs in it between those phases is the
+    // PR's own test suite. Re-linking `node_modules` covers half of what a run
+    // can leave behind; TRACKED files are the other half, and the more direct
+    // one — a suite that rewrites a probe file AFTER vitest has collected it
+    // stays green for the run it was collected in and hands every later run a
+    // file of its choosing. The verdict that buys is `killed`: "a test catches
+    // this", asserted for statements no test covers.
+    write('src/x.ts', 'gone.clear();\n');
+    write('src/other.ts', 'export const clean = true;\n');
+    commitAll('a second tracked file');
+    // Plants ONCE, so the second run's state is the restore's doing and not
+    // the runner's. The marker is untracked, which is what makes it survive
+    // the restore that the plant does not.
+    writeFileSync(
+      vitestScript(),
+      `#!/usr/bin/env node
+import fs from 'node:fs';
+import path from 'node:path';
+if (!fs.existsSync('planted.marker')) {
+  fs.writeFileSync('src/other.ts', 'export const clean = false; // planted\\n');
+  fs.writeFileSync('planted.marker', '1');
+}
+const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
+process.stdout.write(JSON.stringify({
+  numPassedTests: files.length,
+  numFailedTests: 0,
+  testResults: files.map((f) => ({
+    name: path.resolve(f),
+    assertionResults: [{ status: 'passed' }],
+  })),
+}));
+`,
+    );
+
+    runOneMutant(
+      repo,
+      { file: 'src/x.ts', line: 1, statement: 'gone.clear();' },
+      ['src/x.test.ts'],
+    );
+    // The plant is real, and it outlives the run that made it.
+    expect(readFileSync(join(repo, 'src/other.ts'), 'utf8')).toContain(
+      'planted',
+    );
+
+    const second = runOneMutant(
+      repo,
+      { file: 'src/x.ts', line: 1, statement: 'gone.clear();' },
+      ['src/x.test.ts'],
+    );
+
+    // ...and the next run does not open on it.
+    expect(readFileSync(join(repo, 'src/other.ts'), 'utf8')).toBe(
+      'export const clean = true;\n',
+    );
+    expect(second.verdict).toBe('survived');
   });
 
   it('runs tests with dependencies from the source worktree', () => {
