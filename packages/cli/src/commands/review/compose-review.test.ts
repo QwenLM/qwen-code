@@ -2236,6 +2236,28 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
     }
   });
 
+  it("refuses a foreign repo's URL record — the handler's --repo is the bar", async () => {
+    // The compose boundary is the one call shape where the identity repo
+    // can be unknown (--repo is optional, the plan may carry no
+    // ownerRepo), so it is where a last-writer-wins record of ANOTHER
+    // repo's PR 8255 could bind on number and host alone. Two arms: with
+    // --repo the bar refuses the foreign record; without it the unknown
+    // repo refuses it too (fail-closed), so dropping the handler's
+    // callerRepo leg cannot pass both.
+    for (const repo of ['QwenLM/qwen-code', undefined]) {
+      const { written, stderrHasOverride } = await composeWithRecordedFloor({
+        stateFloor: 'suggestion',
+        argsLine:
+          'https://github.com/other/repo/pull/8255 --severity-floor critical',
+        noPlan: true,
+        pr: 8255,
+        repo,
+      });
+      expect(written.floorEnforced).toEqual([]);
+      expect(stderrHasOverride).toBe(false);
+    }
+  });
+
   it('stays silent when the recovered floor equals the state — normalised', async () => {
     // The equality guard compares the normalised state floor: a
     // case-drifted transcription of the SAME floor is agreement, and an

@@ -238,6 +238,15 @@ describe('authorization — URL-shaped host and repo binding at the submit call 
         { callerRepo: 'o/r' },
       ),
     ).toBeUndefined();
+    // An UNKNOWN identity repo cannot check a URL record's repo bar, so it
+    // recovers nothing — skipping the comparison let another repo's record
+    // bind on number and host alone.
+    expect(
+      recoverFloor(
+        'https://github.com/other/repo/pull/123 --severity-floor critical',
+        {},
+      ),
+    ).toBeUndefined();
     expect(
       recoverFloor(
         'https://ghe.corp.example/o/r/pull/123 --severity-floor critical',

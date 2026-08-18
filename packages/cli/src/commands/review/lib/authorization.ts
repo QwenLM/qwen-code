@@ -302,8 +302,17 @@ export function recordedSeverityFloor(opts: {
       if (t.number !== pr) return undefined;
     } else if (t.type === 'pr-url') {
       if (t.number !== pr) return undefined;
+      // A URL-shaped record NAMES a repo, so the repo bar is part of its
+      // identity — and an unknown identity repo cannot check it. Skipping
+      // the comparison there (the gate's shape, whose only repo-less
+      // caller is publish-assets writing to a DESIGNATED assets repo) let
+      // another repo's record bind on number and host alone: the record is
+      // last-writer-wins, so a `/review other/repo#123` in the session
+      // could hand its floor to this repo's #123. Unknown repo therefore
+      // recovers nothing — the same direction every other doubt state
+      // takes here, leaving the state's floor standing.
       if (
-        repo !== undefined &&
+        repo === undefined ||
         `${t.owner}/${t.repo}`.toLowerCase() !== repo.toLowerCase()
       ) {
         return undefined;
