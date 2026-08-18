@@ -549,9 +549,9 @@ function normalizeOutputFormat(
   return OutputFormat.TEXT;
 }
 
-// Subcommands and listing flags of `qwen agents`; any other token after
-// `agents` means the input is a natural-language prompt, not the command.
-const AGENTS_COMMAND_TOKENS = new Set([
+// Subcommands of `qwen agents`; any other second positional token means the
+// input is a natural-language prompt, not the command.
+const AGENTS_SUBCOMMAND_TOKENS = new Set([
   'attach',
   'logs',
   'stop',
@@ -559,20 +559,20 @@ const AGENTS_COMMAND_TOKENS = new Set([
   'respawn',
   'rm',
   'daemon',
-  '--json',
-  '--all',
-  '--cwd',
-  '--help',
-  '-h',
-  '--version',
-  '-v',
 ]);
 
 function isAgentsPromptFallback(rawArgv: readonly string[]): boolean {
+  // Option tokens may precede the positional prompt, and natural-language
+  // prompts never start with '-', so key the decision on the first two
+  // non-option tokens only: `--debug agents fix` falls back, while
+  // `agents --yolo` stays on the command path and fails in strict mode
+  // instead of becoming a stray "agents" prompt.
+  const positionals = rawArgv.filter((token) => !token.startsWith('-'));
+  const [first, second] = positionals;
   return (
-    rawArgv.length >= 2 &&
-    rawArgv[0] === 'agents' &&
-    !AGENTS_COMMAND_TOKENS.has(rawArgv[1])
+    first === 'agents' &&
+    second !== undefined &&
+    !AGENTS_SUBCOMMAND_TOKENS.has(second)
   );
 }
 
@@ -590,9 +590,9 @@ export async function parseArguments(): Promise<CliArgs> {
   }
 
   // `qwen agents explain this project` must stay a positional prompt: when
-  // the second token is not a real `agents` subcommand, skip registering
-  // the command group so the tokens route to the default prompt command
-  // instead of dying in strict mode.
+  // the second positional token is not a real `agents` subcommand, skip
+  // registering the command group so the tokens route to the default prompt
+  // command instead of dying in strict mode.
   const agentsPromptFallback = isAgentsPromptFallback(rawArgv);
 
   const yargsInstance = yargs(rawArgv)

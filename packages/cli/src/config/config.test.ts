@@ -390,6 +390,7 @@ describe('parseArguments', () => {
     ['agents respawn <id>', ['agents', 'respawn', 'session-1']],
     ['agents respawn --all', ['agents', 'respawn', '--all']],
     ['agents rm <id>', ['agents', 'rm', 'session-1']],
+    ['agents --cwd=<dir>', ['agents', '--cwd=/tmp']],
   ])(
     'exits after `%s` instead of continuing to main CLI flow',
     async (_label, args) => {
@@ -445,6 +446,37 @@ describe('parseArguments', () => {
       expect(argv.query).toBe(args.join(' '));
     },
   );
+
+  it('routes `--debug agents <prompt>` as a positional prompt', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--debug',
+      'agents',
+      'fix',
+      'the',
+      'bug',
+    ];
+
+    const argv = await parseArguments();
+
+    expect(argv.query).toBe('agents fix the bug');
+  });
+
+  it('fails loudly on `agents --yolo` instead of prompting "agents"', async () => {
+    process.argv = ['node', 'script.js', 'agents', '--yolo'];
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+
+    try {
+      await expect(parseArguments()).rejects.toThrow(
+        'process.exit unexpectedly called with "1"',
+      );
+    } finally {
+      mockExit.mockRestore();
+    }
+  });
 
   it('propagates non-zero exitCode from the update handler', async () => {
     process.argv = ['node', 'script.js', 'update'];
