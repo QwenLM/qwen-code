@@ -1139,6 +1139,52 @@ describe('createChannelWorkerManager', () => {
       ]);
     });
 
+    it('re-runs the clear on a same-selection retry and re-reports its loss (R20-5)', async () => {
+      // The retry the set result's warning promises ("retry `qwen
+      // channel set` to re-clear") used to hit applySelection's
+      // sameSelection early return BEFORE clearRecordsForCommit ran: the
+      // surviving `stopped` record was never re-cleared, the retry
+      // reported success with no loss fields, and the next reload-op
+      // resolve filtered the name out and permanently trimmed the
+      // committed selection. The early-return branch must re-run the
+      // clear and re-report its loss — idempotent, no reconcile.
+      const group = fakeGroup();
+      const clearStoppedRecords = vi
+        .fn()
+        .mockReturnValueOnce([PRIMARY] as string[])
+        .mockReturnValueOnce([PRIMARY] as string[]);
+      const test = setupWithClear(clearStoppedRecords, group);
+      const selection: ServeChannelSelection = {
+        mode: 'names',
+        names: ['telegram'],
+      };
+
+      const first = await test.manager.setSelection(selection);
+      expect(first).toMatchObject({
+        changed: true,
+        statePersisted: false,
+        statePersistFailedWorkspaces: [PRIMARY],
+      });
+
+      const retry = await test.manager.setSelection(selection);
+
+      expect(clearStoppedRecords).toHaveBeenCalledTimes(2);
+      expect(retry).toMatchObject({
+        changed: false,
+        statePersisted: false,
+        statePersistFailedWorkspaces: [PRIMARY],
+      });
+      // Idempotent: the retry re-clears without reconciling.
+      expect(group.reconcile).not.toHaveBeenCalled();
+
+      // Once the clear succeeds, the retry reports no loss.
+      clearStoppedRecords.mockReturnValue([] as string[]);
+      const clean = await test.manager.setSelection(selection);
+      expect(clearStoppedRecords).toHaveBeenCalledTimes(3);
+      expect(clean).toMatchObject({ changed: false });
+      expect(clean).not.toHaveProperty('statePersisted');
+    });
+
     it('clears records on the initial start path (R15-58)', async () => {
       // Production reaches the hook via startInitial too (serve wiring);
       // a mutation skipping the clear when initial === true leaves
@@ -2469,6 +2515,142 @@ describe('createChannelWorkerManager', () => {
       mode: 'names',
       names: ['dead'],
     });
+  });
+
+  // The R19-1 rebuild pins above mock reconcile away (fakeGroup), so the
+  // relaunch side effect of resolving the dead worker's carried names is
+  // unobserved there. These pins watch the reconcile contract itself:
+  // the manager must hand reconcile preserveWorkspaceCwds for every
+  // terminal-failed worker that does not carry the toggled name, or the
+  // dead workspace is replaced with a fresh entry on a FRESH restart
+  // budget — resurrecting the crash-looping channel the budget exists to
+  // stop (R20-3).
+  const terminalSecondary = (): ChannelWorkerGroupSnapshot =>
+    workerSnapshot({
+      state: 'failed',
+      workspaceId: 'secondary',
+      workspaceCwd: SECONDARY,
+      primary: false,
+      channels: [],
+      requestedChannels: undefined,
+      adapters: undefined,
+      lastRequestedChannels: ['secondary-dead'],
+      lastConnectedChannels: ['secondary-dead'],
+      error: 'Channel worker restart budget exhausted.',
+    });
+
+  function setupDeadSibling() {
+    const group = fakeGroup();
+    const test = setup(group);
+    test.resolveGroups.mockImplementation(async (selection) =>
+      splitWorkspaceGroups(selection),
+    );
+    return { group, test };
+  }
+
+  it('preserves the terminal-failed workspace on a sibling disable rebuild (R20-3)', async () => {
+    const { group, test } = setupDeadSibling();
+    await test.manager.setSelection({
+      mode: 'names',
+      names: ['live', 'secondary-dead'],
+    });
+    vi.mocked(group.snapshots).mockReturnValue([
+      workerSnapshot({
+        channels: ['live'],
+        requestedChannels: ['live'],
+      }),
+      terminalSecondary(),
+    ]);
+
+    // The dead worker's names stay excluded from the filtered view.
+    expect(test.manager.committedChannelNames()).toEqual(['live']);
+
+    const result = await test.manager.setChannelEnabled(
+      { name: 'live', workspaceCwd: PRIMARY },
+      false,
+    );
+
+    // The committed selection keeps the dead name (the R19-1 contract)...
+    expect(result).toMatchObject({ changed: true });
+    expect(test.manager.state().selection).toEqual({
+      mode: 'names',
+      names: ['secondary-dead'],
+    });
+    // ...but the reconcile must not touch the dead workspace: its target
+    // (resolved from the carried name) rides preserveWorkspaceCwds, so no
+    // fresh entry relaunches `secondary-dead` on a fresh budget.
+    expect(group.reconcile).toHaveBeenCalledTimes(1);
+    const reconcileOptions = vi.mocked(group.reconcile).mock.calls[0]![1];
+    expect(reconcileOptions?.preserveWorkspaceCwds).toEqual(
+      new Set([SECONDARY]),
+    );
+  });
+
+  it('preserves the terminal-failed workspace on a sibling enable rebuild (R20-3)', async () => {
+    const { group, test } = setupDeadSibling();
+    await test.manager.setSelection({
+      mode: 'names',
+      names: ['live', 'secondary-dead'],
+    });
+    vi.mocked(group.snapshots).mockReturnValue([
+      workerSnapshot({
+        channels: ['live'],
+        requestedChannels: ['live'],
+      }),
+      terminalSecondary(),
+    ]);
+
+    const result = await test.manager.setChannelEnabled(
+      { name: 'new', workspaceCwd: PRIMARY },
+      true,
+    );
+
+    expect(result).toMatchObject({ changed: true });
+    expect(test.resolveGroups).toHaveBeenLastCalledWith(
+      { mode: 'names', names: ['live', 'secondary-dead', 'new'] },
+      'set',
+    );
+    expect(test.manager.state().selection).toEqual({
+      mode: 'names',
+      names: ['live', 'secondary-dead', 'new'],
+    });
+    const reconcileOptions = vi.mocked(group.reconcile).mock.calls[0]![1];
+    expect(reconcileOptions?.preserveWorkspaceCwds).toEqual(
+      new Set([SECONDARY]),
+    );
+  });
+
+  it('does not preserve the terminal workspace when disabling its own ghost name (R20-3)', async () => {
+    // The ghost-removal contract (R15-17) must survive the preserve fix:
+    // disabling a dead-committed name re-commits the trimmed selection,
+    // and the dead workspace's entry goes with it — preserving it here
+    // would leave a stale entry for a channel that no longer exists.
+    const { group, test } = setupDeadSibling();
+    await test.manager.setSelection({
+      mode: 'names',
+      names: ['live', 'secondary-dead'],
+    });
+    vi.mocked(group.snapshots).mockReturnValue([
+      workerSnapshot({
+        channels: ['live'],
+        requestedChannels: ['live'],
+      }),
+      terminalSecondary(),
+    ]);
+
+    const result = await test.manager.setChannelEnabled(
+      { name: 'secondary-dead', workspaceCwd: SECONDARY },
+      false,
+    );
+
+    expect(result).toMatchObject({ changed: true });
+    expect(test.manager.state().selection).toEqual({
+      mode: 'names',
+      names: ['live'],
+    });
+    expect(group.reconcile).toHaveBeenCalledTimes(1);
+    const reconcileOptions = vi.mocked(group.reconcile).mock.calls[0]![1];
+    expect(reconcileOptions?.preserveWorkspaceCwds).toBeUndefined();
   });
 
   it('relaunches a terminal-failed mode-names worker on a per-channel start (#8975)', async () => {

@@ -810,6 +810,60 @@ describe('adoptLegacyChannelState (#8975)', () => {
     });
   });
 
+  it('honors a re-stop whose entry was stamped after a partial epoch baseline armed (R20-1)', () => {
+    // The one-sided-baseline case the epoch tier dropped: a pre-epoch
+    // legacy file is adopted with NO epoch baseline; a workspace-less
+    // re-stop of ONE entry then arms a PARTIAL baseline (only the written
+    // entry gets an epoch — absence is never forged, R15-15) that the
+    // skip-write gate never heals. When the OTHER entry is later
+    // explicitly re-stopped, its current epoch exists while its adopted
+    // baseline is absent — with epochsUsable true the generation
+    // arithmetic is off file-wide, so the old comparison returned false
+    // and the explicit re-stop was silently dropped (the entry stayed
+    // `active`), while a fresh workspace adopting the same legacy file
+    // honored it. Treat a missing baseline with a present current epoch
+    // as a re-stop: fail-safe (an under-start is one explicit start
+    // away) and self-stabilizing — the detected rewrite forces a write
+    // that records the entry's epoch baseline, after which normal
+    // comparison resumes.
+    writeFileSync(
+      legacyPath,
+      JSON.stringify({
+        version: 1,
+        channels: { alpha: 'stopped', beta: 'stopped' },
+      }),
+      'utf-8',
+    );
+    adoptLegacyChannelState(workspace);
+    // A workspace-less re-stop of beta stamps ONLY beta (generation 0),
+    // arming the partial baseline {beta: 0} on the next sync.
+    new ChannelStateStore(legacyPath).set('beta', 'stopped');
+    adoptLegacyChannelState(workspace);
+    // An explicit restart recorded after adoption...
+    new ChannelStateStore(workspacePath).set('alpha', 'active');
+    // ...then alpha is explicitly re-stopped: the write names alpha and
+    // stamps its epoch, keeping beta's.
+    new ChannelStateStore(legacyPath).set('alpha', 'stopped');
+
+    adoptLegacyChannelState(workspace);
+
+    // The re-stop is honored over the explicit restart; beta is NOT
+    // re-stopped (its own epoch did not move past its baseline).
+    expect(new ChannelStateStore(workspacePath).readAll()).toEqual({
+      alpha: 'stopped',
+      beta: 'stopped',
+    });
+    // Self-stabilizing: the write completed the partial baseline, so the
+    // next sync compares normally.
+    const recorded = JSON.parse(readFileSync(workspacePath, 'utf-8')) as {
+      adoptedLegacyEntryEpochs?: Record<string, number>;
+    };
+    expect(recorded.adoptedLegacyEntryEpochs).toEqual({
+      alpha: 1,
+      beta: 0,
+    });
+  });
+
   it('treats a delete/recreate of the legacy file as a lineage break and re-stops (R16-8)', () => {
     // The generationRegressed tier: user cleanup or a backup restore
     // deletes the legacy global file, and a later stop recreates it with

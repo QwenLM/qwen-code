@@ -246,11 +246,25 @@ export interface CreateChannelManagementServiceOptions {
 }
 
 export class ChannelManagementError extends Error {
+  /**
+   * Set when a remove()'s settings write fails after its stop already
+   * computed a stop-record loss: the rethrown error must carry the loss,
+   * or the client gets a bare settings error with no retry handle and a
+   * retried remove can never re-record (R20-4). Same surface as
+   * ChannelWorkerControlError's loss fields (#8975).
+   */
+  statePersisted?: boolean;
+  /**
+   * Present alongside `statePersisted: false`: the workspaces whose
+   * stop-record write failed before the settings write threw (R20-4).
+   */
+  statePersistFailedWorkspaces?: string[];
   constructor(
     readonly code: string,
     message: string,
+    options?: { cause?: unknown },
   ) {
-    super(message);
+    super(message, options);
     this.name = 'ChannelManagementError';
   }
 }
@@ -729,6 +743,27 @@ export function createChannelManagementService(
       }
       assertWorkspaceConfig(current.channels[name]!);
       assertExpectedRevision(current, request.expectedRevision);
+      // Mirror stop()'s starting-window guard (R20-2): during a mode-`all`
+      // worker's pre-ready or crash-restart window the stop gate below
+      // finds nothing — committedChannelNames() skips the `['all']`
+      // placeholder and every workerFor clause misses a pre-ready snapshot
+      // — so the gate would skip stopChannel and the deletion would commit
+      // while the in-flight worker connects the removed channel: a live
+      // channel with no config, unmanageable (stop/remove throw
+      // channel_instance_not_found) until a global reconcile. stop() in the
+      // identical state rejects with 409 channel_worker_starting ("Report a
+      // failure rather than reporting a success that does not hold"); a
+      // name that IS committed still routes through the confirmable stop
+      // below, so only uncommitted names are rejected.
+      if (
+        workspaceWorkerStarting() &&
+        !workspaceCommittedNames().includes(name)
+      ) {
+        throw new ChannelManagementError(
+          'channel_worker_starting',
+          `Channel "${name}" cannot be removed while its workspace worker is still starting; retry once the worker reports ready.`,
+        );
+      }
       // Gate on the committed selection's source of truth, not only the
       // filtered view: a terminal-failed worker's names are excluded from
       // workspaceCommittedNames() (the start/recovery contract), but the
@@ -822,7 +857,32 @@ export function createChannelManagementService(
           throw error;
         }
       }
-      const persisted = await opts.store.remove(name, request);
+      // The settings write sits OUTSIDE the stop try/catch above, but the
+      // stop has already cleared the group and committed the trimmed
+      // selection: when this write throws, the computed loss must ride the
+      // rethrown error — a bare settings error leaves the client no retry
+      // handle, and a retried remove skips the whole stop block (nothing
+      // left to stop) and returns clean success, so the loss is never
+      // re-recordable and the next `--channel all` resurrects the sibling
+      // workspace's explicitly stopped channels (the #8975 regression).
+      // Mirror stopChannel's catch branches; wrapping with the persist
+      // failure code keeps the loss visible in the HTTP error body (R20-4).
+      let persisted: ChannelSettingsSnapshot;
+      try {
+        persisted = await opts.store.remove(name, request);
+      } catch (error) {
+        if (stopPersistFailedWorkspaces.length > 0) {
+          const wrapped = new ChannelManagementError(
+            'channel_state_persist_failed',
+            `Channel "${name}" removal stopped its workers but failed to persist the settings deletion: ${diagnostic(error)}`,
+            { cause: error },
+          );
+          wrapped.statePersisted = false;
+          wrapped.statePersistFailedWorkspaces = stopPersistFailedWorkspaces;
+          throw wrapped;
+        }
+        throw error;
+      }
       diagnostics.delete(name);
       return {
         ...(await resultFor(name, persisted)),

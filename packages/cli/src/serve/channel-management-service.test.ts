@@ -3105,6 +3105,120 @@ describe('createChannelManagementService', () => {
     expect(result.statePersistFailedWorkspaces).toEqual([WORKSPACE]);
   });
 
+  it('rejects remove() with channel_worker_starting during the workspace worker starting window (R20-2)', async () => {
+    const { service, store, manager } = setup({ committedNames: [] });
+    // A mode-`all` worker between launch and first ready owns no names
+    // the stop gate can see: committedChannelNames() skips the `['all']`
+    // placeholder and every workerFor clause misses a pre-ready snapshot
+    // (requestedChannels undefined). remove() used to skip stopChannel
+    // and commit the deletion while the in-flight worker connects the
+    // removed channel — a live channel with no config, unmanageable
+    // (stop/remove throw channel_instance_not_found) until a global
+    // reconcile. stop() rejects the identical shape with a 409; remove()
+    // must mirror it.
+    vi.mocked(manager.state).mockReturnValue({
+      enabled: true,
+      selection: { mode: 'all' },
+      transition: 'idle',
+      workers: [
+        {
+          enabled: true,
+          state: 'starting',
+          channels: ['all'],
+          requestedChannels: undefined,
+          workspaceId: 'primary',
+          workspaceCwd: WORKSPACE,
+          primary: true,
+        },
+      ],
+    });
+
+    await expect(
+      service.remove('bot', { expectedRevision: 'rev-1' }),
+    ).rejects.toMatchObject({ code: 'channel_worker_starting' });
+
+    // The deletion must not commit in the starting window.
+    expect(store.remove).not.toHaveBeenCalled();
+    expect(manager.setChannelEnabled).not.toHaveBeenCalled();
+  });
+
+  it('lets remove() stop a committed name during a crash-restart window (R20-2)', async () => {
+    const { service, store, manager } = setup({ committedNames: ['bot'] });
+    // The guard rejects only UNCOMMITTED names: a crash-restarting
+    // mode-`all` worker is "starting" (its relaunch may connect any
+    // configured channel), but a name it carries IS committed, so its
+    // confirmable stop still routes through the gate below the guard.
+    vi.mocked(manager.state).mockReturnValue({
+      enabled: true,
+      selection: { mode: 'all' },
+      transition: 'idle',
+      workers: [
+        {
+          enabled: true,
+          state: 'starting',
+          channels: ['all'],
+          requestedChannels: ['bot'],
+          lastRequestedChannels: ['bot'],
+          workspaceId: 'primary',
+          workspaceCwd: WORKSPACE,
+          primary: true,
+        },
+      ],
+    });
+
+    const result = await service.remove('bot', { expectedRevision: 'rev-1' });
+
+    expect(result.instance.name).toBe('bot');
+    expect(manager.setChannelEnabled).toHaveBeenCalledWith(
+      { name: 'bot', workspaceCwd: WORKSPACE },
+      false,
+    );
+    expect(store.remove).toHaveBeenCalledTimes(1);
+  });
+
+  it('carries the stop-record loss when the remove() settings write throws (R20-4)', async () => {
+    const { service, manager, store } = setup({ committedNames: ['bot'] });
+    // The stop succeeds but its `stopped` record fails to persist
+    // (degraded disk), and the settings deletion ALSO throws: remove()
+    // used to let the bare settings error propagate without the
+    // already-computed loss — the stop has already cleared the group and
+    // committed the trimmed selection, so a retried remove skips the
+    // whole stop block and returns clean success, the loss is never
+    // re-recordable, and the next `--channel all` resurrects the
+    // explicitly stopped channels (the #8975 regression). The rethrown
+    // error must carry the loss like stopChannel's catch branches do.
+    vi.mocked(manager.setChannelEnabled).mockResolvedValueOnce({
+      changed: true,
+    });
+    mockChannelStateStoreSet.mockImplementationOnce(() => {
+      throw new Error('ENOSPC: no space left on device');
+    });
+    const settingsError = new Error('ENOSPC: settings write failed');
+    vi.mocked(store.remove).mockRejectedValueOnce(settingsError);
+
+    await expect(
+      service.remove('bot', { expectedRevision: 'rev-1' }),
+    ).rejects.toMatchObject({
+      code: 'channel_state_persist_failed',
+      statePersisted: false,
+      statePersistFailedWorkspaces: [WORKSPACE],
+      cause: settingsError,
+    });
+  });
+
+  it('rethrows a bare settings error unchanged when no stop-record loss is pending (R20-4)', async () => {
+    const { service, store } = setup({ committedNames: ['bot'] });
+    // No pending loss (the stop record persisted fine): the original
+    // settings error keeps its identity — wrapping applies only to the
+    // loss-carrying shape.
+    const settingsError = new Error('ENOSPC: settings write failed');
+    vi.mocked(store.remove).mockRejectedValueOnce(settingsError);
+
+    await expect(
+      service.remove('bot', { expectedRevision: 'rev-1' }),
+    ).rejects.toBe(settingsError);
+  });
+
   it('persists the stop when remove() fails with a confirmed-dead disable (R17-6)', async () => {
     const { service, manager, store } = setup({ committedNames: ['bot'] });
     // The per-channel disable via applySelection stopped the worker

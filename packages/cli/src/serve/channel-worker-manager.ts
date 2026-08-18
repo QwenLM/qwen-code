@@ -646,22 +646,72 @@ export function createChannelWorkerManager(
     );
   };
 
+  // Committed-group bookkeeping for a preserve-scoped reconcile (R20-3):
+  // preserved workspaces' live entries stay untouched, so their committed
+  // groups must carry over as-is — committing the freshly resolved target
+  // group for them would desync committedGroups from the live entries
+  // (the same coherence contract reloadWorkspace's scoped commit keeps,
+  // R14/R17-3).
+  const committedGroupsForApply = (
+    targetGroups: readonly ChannelWorkspaceGroup[],
+    preserveWorkspaceCwds: ReadonlySet<string> | undefined,
+  ): ChannelWorkspaceGroup[] => {
+    if (!preserveWorkspaceCwds || preserveWorkspaceCwds.size === 0) {
+      return [...targetGroups];
+    }
+    const preserved = new Map(
+      committedGroups
+        .filter((committedGroup) =>
+          preserveWorkspaceCwds.has(committedGroup.workspaceCwd),
+        )
+        .map(
+          (committedGroup) =>
+            [committedGroup.workspaceCwd, committedGroup] as const,
+        ),
+    );
+    const seen = new Set<string>();
+    const merged = targetGroups.map((targetGroup) => {
+      seen.add(targetGroup.workspaceCwd);
+      return preserved.get(targetGroup.workspaceCwd) ?? targetGroup;
+    });
+    for (const [workspaceCwd, committedGroup] of preserved) {
+      if (!seen.has(workspaceCwd)) merged.push(committedGroup);
+    }
+    return merged;
+  };
+
   const applySelection = async (
     selection: ServeChannelSelection,
     initial: boolean,
     resolvedGroups?: readonly ChannelWorkspaceGroup[],
+    preserveWorkspaceCwds?: ReadonlySet<string>,
   ): Promise<ChannelWorkerSetResult> => {
     if (hardKilled) throw drainingError();
     const enabling = !snapshot().enabled;
     const replacing = committedSelection !== undefined;
     const sameSelection = selectionsEqual(committedSelection, selection);
     if (sameSelection && group?.isHealthy()) {
+      // A same-selection retry must re-run the stopped-record clear
+      // (R20-5): the original commit's clearStoppedRecords hook can fail
+      // to flip a pre-existing `stopped` record (transient lock/ENOSPC),
+      // the set result's warning then directs the user to re-run the
+      // identical command, and without this re-clear that retry returned
+      // before clearRecordsForCommit ran — the surviving record let the
+      // next reload-op filter drop the name and permanently trim the
+      // committed selection while reporting success. Idempotent: no
+      // reconcile, only the clear and its loss report (no-op for mode-`all`
+      // and when the hook is not wired).
+      const persistFailedWorkspaces = clearRecordsForCommit(
+        selection,
+        committedGroups,
+      );
       return {
         changed: false,
         replaced: false,
         partial: isPartial(group.snapshots()),
         state: snapshot(),
         created: false,
+        ...clearLossFields(persistFailedWorkspaces),
       };
     }
 
@@ -756,8 +806,14 @@ export function createChannelWorkerManager(
     try {
       const result = await group.reconcile(targetGroups, {
         onRollingBack: () => setTransition('rolling_back', selection),
+        ...(preserveWorkspaceCwds && preserveWorkspaceCwds.size > 0
+          ? { preserveWorkspaceCwds }
+          : {}),
       });
-      commit(selection, targetGroups);
+      commit(
+        selection,
+        committedGroupsForApply(targetGroups, preserveWorkspaceCwds),
+      );
       const persistFailedWorkspaces = clearRecordsForCommit(
         selection,
         targetGroups,
@@ -1037,6 +1093,31 @@ export function createChannelWorkerManager(
           committedSelection?.mode === 'names'
             ? committedSelection.names
             : modeAllRebuildNames(committedNames);
+        // Terminal-failed workers must survive the rebuild untouched
+        // (R20-3): the rebuilt selection still carries their names (the
+        // R19-1 union / R15-17 ghost contract), and resolving it yields a
+        // target group for the dead workspace — reconciling that target
+        // replaces the terminal entry with a fresh one on a FRESH restart
+        // budget, resurrecting the crash-looping channel the budget exists
+        // to stop and violating the R8-18 contract (an explicit start is
+        // the only path back up). Exception: when the toggled name itself
+        // rides a terminal-failed worker, that workspace reconciles
+        // normally — disabling its ghost name is exactly the re-commit
+        // that removes it (R15-17), and its entry must go with it.
+        const carriesName = (worker: ChannelWorkerGroupSnapshot): boolean =>
+          (worker.adapters?.some((adapter) => adapter.name === owner.name) ??
+            false) ||
+          (worker.requestedChannels?.includes(owner.name) ?? false) ||
+          (worker.lastRequestedChannels?.includes(owner.name) ?? false) ||
+          worker.channels.includes(owner.name);
+        const preserveWorkspaceCwds = new Set(
+          (group?.snapshots() ?? [])
+            .filter(
+              (worker) =>
+                isTerminalFailedWorker(worker) && !carriesName(worker),
+            )
+            .map((worker) => worker.workspaceCwd),
+        );
         if (enabled) {
           if (currentlyEnabled) {
             return {
@@ -1056,7 +1137,12 @@ export function createChannelWorkerManager(
           const targetGroups = await opts.resolveGroups(selection, 'set');
           assertRequiredOwner(targetGroups, owner);
           if (hardKilled) throw drainingError();
-          return applySelection(selection, false, targetGroups);
+          return applySelection(
+            selection,
+            false,
+            targetGroups,
+            preserveWorkspaceCwds,
+          );
         }
         // A dead-committed name (terminal-failed worker, excluded from
         // committedChannelNames) is still trimmed and re-committed: that
@@ -1068,7 +1154,12 @@ export function createChannelWorkerManager(
         const names = selectionNames.filter((name) => name !== owner.name);
         return names.length === 0
           ? stopSelectionNow()
-          : applySelection({ mode: 'names', names }, false);
+          : applySelection(
+              { mode: 'names', names },
+              false,
+              undefined,
+              preserveWorkspaceCwds,
+            );
       });
     },
     stopSelection() {

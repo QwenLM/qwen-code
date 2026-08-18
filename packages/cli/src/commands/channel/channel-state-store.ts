@@ -422,8 +422,15 @@ export function adoptLegacyChannelState(workspaceCwd: string): void {
       const adopted = snapshotEpochs?.[name];
       // No baseline on either side: unprovable — an inferred re-stop
       // must not override an explicit restart (the R9-3 direction).
+      // One-sided (current epoch present, adopted baseline absent): the
+      // entry was first stamped AFTER adoption, i.e. a post-adoption
+      // write named it — a re-asserted stop over any explicit restart
+      // recorded since. Honoring it is fail-safe (an under-start is one
+      // explicit start away) and self-stabilizing: the detected rewrite
+      // forces a write that records the entry's epoch baseline, after
+      // which normal comparison resumes (R20-1).
       return (
-        current !== undefined && adopted !== undefined && current > adopted
+        current !== undefined && (adopted === undefined || current > adopted)
       );
     }
     return legacyRewrittenByArithmetic;

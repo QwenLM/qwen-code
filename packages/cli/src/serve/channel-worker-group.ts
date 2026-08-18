@@ -90,6 +90,16 @@ export interface ChannelWorkerGroup {
     options?: {
       force?: boolean;
       forceWorkspaceCwd?: string;
+      /**
+       * Workspaces whose existing entry must be preserved exactly as-is:
+       * the entry is neither stopped nor replaced, and a target group for
+       * the workspace is ignored (no new entry is created). Used by the
+       * per-channel enable/disable rebuild to keep terminal-failed
+       * workers — relaunching their workspace on a fresh restart budget
+       * resurrects the crash-looping channel the budget exists to stop
+       * (R20-3).
+       */
+      preserveWorkspaceCwds?: ReadonlySet<string>;
       onRollingBack?: () => void;
     },
   ): Promise<ChannelWorkerGroupReconcileResult>;
@@ -593,6 +603,15 @@ export function createChannelWorkerGroup(
             }
           }
         }
+        // Preserved workspaces are untouched: drop their targets so no new
+        // entry is created for them (R20-3).
+        if (reconcileOptions?.preserveWorkspaceCwds) {
+          for (const workspaceCwd of targets.keys()) {
+            if (reconcileOptions.preserveWorkspaceCwds.has(workspaceCwd)) {
+              targets.delete(workspaceCwd);
+            }
+          }
+        }
         const unchanged = new Map<string, ChannelWorkerGroupEntry>();
         const oldAffected: ChannelWorkerGroupEntry[] = [];
         const newEntries: ChannelWorkerGroupEntry[] = [];
@@ -608,6 +627,15 @@ export function createChannelWorkerGroup(
           if (preserveOtherWorkspace) {
             unchanged.set(workspaceCwd, entry);
             targets.delete(workspaceCwd);
+            continue;
+          }
+          // A preserved entry (a terminal-failed worker under the
+          // enable/disable rebuild) stays exactly as-is: it is neither
+          // stopped as an affected old entry nor replaced by its target,
+          // or the workspace relaunches on a fresh restart budget and
+          // resurrects the crash-looping channel (R20-3).
+          if (reconcileOptions?.preserveWorkspaceCwds?.has(workspaceCwd)) {
+            unchanged.set(workspaceCwd, entry);
             continue;
           }
           if (
