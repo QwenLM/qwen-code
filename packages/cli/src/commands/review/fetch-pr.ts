@@ -57,6 +57,7 @@ import {
   PINNED_DIFF_FLAGS,
 } from './lib/diff-flags.js';
 import {
+  assertUnredirectedParent,
   REVIEW_TMP_DIR,
   reviewBranch,
   tmpFile,
@@ -1357,6 +1358,20 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
           cacheCandidatePath = tmpFile(
             `pr-${prNumber}`,
             'cache-candidate.json',
+          );
+          // `noFollow` below guards the final element only, and this path is
+          // deterministic and in-repo: `.qwen/tmp` committed as a symlink
+          // (gitignore does not stop `git add -f`) redirects the write
+          // through the chain — and the plan then advertises that
+          // attacker-chosen path as `cacheCandidatePath` for `cache-commit`
+          // to read back, so a swapped candidate promotes forged anchors into
+          // the review cache, where every validation is shape-based. The same
+          // guard `cache-commit` already applies to its own `--out`, for the
+          // same reason its header gives.
+          assertUnredirectedParent(
+            cacheCandidatePath,
+            'cache candidate',
+            'fetch-pr',
           );
           atomicWriteFileSync(
             cacheCandidatePath,

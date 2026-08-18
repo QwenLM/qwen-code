@@ -10,7 +10,8 @@
 // concatenation so Windows backslashes are produced when needed.
 
 import { existsSync, realpathSync, statSync } from 'node:fs';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { inertText } from './inert-text.js';
 
 /**
  * Classify a `--out` target BEFORE the command fetches anything: an empty /
@@ -195,4 +196,46 @@ export function repoRelativeOf(
   const escapes =
     rel === '' || rel === '..' || rel.startsWith('..' + sep) || isAbsolute(rel);
   return { rel, abs, escapes };
+}
+
+/**
+ * Refuse a write whose PARENT CHAIN is redirected.
+ *
+ * `noFollow` protects the final path element only, and the threat these
+ * commands police — a contributor branch committing a symlink at a
+ * deterministic in-repo path — is satisfied one layer up just as well: plant
+ * `.qwen/tmp` or `.qwen/review-cache` itself as a link (gitignore does not
+ * stop `git add -f`), and `mkdirSync(…, {recursive:true})` succeeds through
+ * it while the atomic tmp+rename lands the file in the attacker's directory,
+ * over whatever of that name lives there. Comparing the resolved parent
+ * against its lexical form catches a link ANYWHERE in the chain, which is
+ * what the final-element guard cannot do.
+ *
+ * Shared, because the three writers that need it are the three that write a
+ * deterministic in-repo path — the promoted cache and both candidate files —
+ * and the one that had it while the others did not is how a candidate whose
+ * path the plan then advertised became an attacker-chosen file.
+ */
+export function assertUnredirectedParent(
+  target: string,
+  what: string,
+  command: string,
+): void {
+  const parent = resolve(dirname(target));
+  let real: string;
+  try {
+    real = realpathSync(parent);
+  } catch (err) {
+    throw new Error(
+      `${command}: cannot resolve the ${what} directory ${inertText(parent)}: ` +
+        inertText((err as Error).message),
+    );
+  }
+  if (real !== parent) {
+    throw new Error(
+      `${command}: the ${what} directory ${inertText(parent)} resolves to ` +
+        `${inertText(real)} — a symlink in the path would redirect this ` +
+        `write outside the tree it names. Refusing.`,
+    );
+  }
 }

@@ -21,7 +21,11 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
-import { REVIEW_TMP_DIR, tmpFile } from './lib/paths.js';
+import {
+  assertUnredirectedParent,
+  REVIEW_TMP_DIR,
+  tmpFile,
+} from './lib/paths.js';
 import { planEffortField } from './lib/effort.js';
 import type { ReviewEffort } from './parse-args.js';
 import { captureLocalDiff, type SkippedFile } from './lib/local-diff.js';
@@ -247,6 +251,12 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   // promoting a stale candidate from an earlier round.
   let cacheCandidatePath: string | undefined;
   if (treeHeldStill) {
+    // The PARENT chain first: `noFollow` below guards only the final element,
+    // and `.qwen/tmp` committed as a symlink redirects the write just as
+    // well — the plan then advertises that path as `cacheCandidatePath` and
+    // `cache-commit` reads a candidate the attacker wrote. Same guard the
+    // promoted cache gets, for the same reason.
+    assertUnredirectedParent(candidatePath, 'cache candidate', 'capture-local');
     // noFollow: a planted symlink at this deterministic path would redirect
     // the candidate write onto its target (see cache-commit's note).
     atomicWriteFileSync(candidatePath, JSON.stringify(candidate, null, 2), {

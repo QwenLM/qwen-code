@@ -11,7 +11,15 @@
 // command that reports it stopped saying a file was skipped.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  rmSync,
+  readFileSync,
+  existsSync,
+  realpathSync,
+  symlinkSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { seedParseArgs } from './lib/test-utils.js';
@@ -65,7 +73,12 @@ function capture(over: Record<string, unknown> = {}) {
 }
 
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'capture-local-'));
+  // `realpathSync`: the candidate write now refuses a parent chain that
+  // traverses a symlink, and `tmpdir()` IS one on macOS
+  // (`/var/folders/…` → `/private/var/folders/…`). Without the wrap every
+  // test here would fail on a developer's Mac while CI stayed green on its
+  // real-path TMPDIR — the same trap this directory's sibling suites hit.
+  dir = realpathSync(mkdtempSync(join(tmpdir(), 'capture-local-')));
   cwd = process.cwd();
   process.chdir(dir);
   errs = [];
@@ -93,6 +106,32 @@ describe('capture-local (command boundary)', () => {
     expect(plan.untrackedFiles).toEqual(['src/pay.ts']);
     expect(existsSync(plan.diffPathAbsolute)).toBe(true);
     expect(readFileSync(plan.diffPathAbsolute, 'utf8')).toBe(DIFF);
+  });
+
+  it('refuses to write the candidate through a symlinked `.qwen/tmp`', () => {
+    // `noFollow` guards only the final element, and this path is
+    // deterministic and in-repo: a contributor branch can commit `.qwen/tmp`
+    // as a link (gitignore does not stop `git add -f`), and the atomic
+    // tmp+rename then lands the candidate wherever it points. That is worse
+    // than a clobbered file — the plan advertises the path as
+    // `cacheCandidatePath`, and `cache-commit` reads back a candidate the
+    // attacker wrote, promoting forged anchors past validation that is only
+    // shape-deep.
+    const elsewhere = realpathSync(mkdtempSync(join(tmpdir(), 'victim-')));
+    mkdirSync(join(dir, '.qwen'), { recursive: true });
+    symlinkSync(elsewhere, join(dir, '.qwen', 'tmp'));
+    try {
+      capture();
+      expect(() => run(join(dir, 'plan.json'))).toThrow(
+        /resolves to .*Refusing/s,
+      );
+      // Nothing was written through the link.
+      expect(
+        existsSync(join(elsewhere, 'qwen-review-local-cache-candidate.json')),
+      ).toBe(false);
+    } finally {
+      rmSync(elsewhere, { recursive: true, force: true });
+    }
   });
 
   it('creates the output directory the caller chose', () => {

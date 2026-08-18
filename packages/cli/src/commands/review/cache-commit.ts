@@ -29,11 +29,12 @@
 // stops being the model's call is the bytes.
 
 import type { CommandModule } from 'yargs';
-import { readFileSync, mkdirSync, realpathSync } from 'node:fs';
+import { readFileSync, mkdirSync } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
 import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { inertText } from './lib/inert-text.js';
+import { assertUnredirectedParent } from './lib/paths.js';
 
 interface CacheCommitArgs {
   candidate: string;
@@ -72,43 +73,18 @@ const CANDIDATE_FIELDS = [
   'headSha',
   'files',
   'stateId',
+  // The local flow's attribute-state digest. Omitting it did not merely lose
+  // a field: `anchorRefusalReason` treats an absent `attrId` as a mismatch —
+  // deliberately, so a cache written before the digest cannot be read as "no
+  // attribute state" — so every promoted local cache refused its own anchor
+  // for ever, under a message blaming a stale cache format. The allowlist is
+  // the ONE place that decides what survives promotion, which is exactly why
+  // a field added on the producer side has to be added here too.
+  'attrId',
   'lastCommitSha',
   'mergeBaseSha',
   'fileVerdicts',
 ] as const;
-
-/**
- * Refuse a write whose PARENT CHAIN is redirected.
- *
- * `noFollow` protects the final path element only. The threat this command
- * polices — a contributor branch committing a symlink at a deterministic
- * in-repo path — is satisfied one layer up just as well: plant
- * `.qwen/review-cache` itself as a link (gitignore does not stop `git add
- * -f`), and `mkdirSync(…, {recursive:true})` succeeds through it while the
- * atomic tmp+rename lands the merged cache in the attacker's directory,
- * over whatever file of that name lives there. Comparing the resolved
- * parent against its lexical form catches a link ANYWHERE in the chain,
- * which is what the final-element guard cannot do.
- */
-function assertUnredirectedParent(target: string, what: string): void {
-  const parent = resolve(dirname(target));
-  let real: string;
-  try {
-    real = realpathSync(parent);
-  } catch (err) {
-    throw new Error(
-      `cache-commit: cannot resolve the ${what} directory ${inertText(parent)}: ` +
-        inertText((err as Error).message),
-    );
-  }
-  if (real !== parent) {
-    throw new Error(
-      `cache-commit: the ${what} directory ${inertText(parent)} resolves to ` +
-        `${inertText(real)} — a symlink in the path would redirect this ` +
-        `write outside the tree it names. Refusing.`,
-    );
-  }
-}
 
 function runCacheCommit(args: CacheCommitArgs): void {
   const candidate = readJsonObject(args.candidate, 'the cache candidate');
@@ -183,7 +159,7 @@ function runCacheCommit(args: CacheCommitArgs): void {
   merged['lastReviewDate'] = new Date().toISOString();
 
   mkdirSync(dirname(resolve(args.out)), { recursive: true });
-  assertUnredirectedParent(args.out, 'cache');
+  assertUnredirectedParent(args.out, 'cache', 'cache-commit');
   // `noFollow`: the target path is deterministic and lives in the repo, so a
   // contributor branch can commit a SYMLINK there and a maintainer's review
   // would write merged-cache JSON onto the link's target — an arbitrary-file

@@ -110,6 +110,7 @@ describe('cache-commit', () => {
         headSha: 'h',
         files: { 'a.ts': 'x' },
         stateId: 's',
+        attrId: 'attr-digest',
       },
       { lastModelId: 'm1', round: 1, verdict: 'Comment', findings: [] },
     );
@@ -121,6 +122,15 @@ describe('cache-commit', () => {
     >;
     expect(cache['stateId']).toBe('s');
     expect(cache['lastModelId']).toBe('m1');
+    // The attribute-state digest has to SURVIVE promotion. It is allowlisted,
+    // and the allowlist is the one place that decides what a candidate may
+    // contribute — so a field added on the producer side and forgotten here
+    // is silently dropped. Losing this one is not a missing field: the next
+    // round's gate treats an absent `attrId` as a mismatch (deliberately, so
+    // a pre-digest cache cannot read as "no attribute state"), so every
+    // promoted local cache refused its own anchor for ever, blaming a stale
+    // cache format.
+    expect(cache['attrId']).toBe('attr-digest');
   });
 
   it('refuses a candidate whose target does not match --out', () => {
