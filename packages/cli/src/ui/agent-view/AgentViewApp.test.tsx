@@ -139,8 +139,9 @@ describe('AgentViewApp', () => {
     await settleInput();
 
     expect(dispatchPrompt).toHaveBeenCalledWith('ship it', false);
-    await flushInk();
-    expect(lastFrame()).toContain('ship it');
+    await waitForFrame(lastFrame, 'Timed out');
+    // The failure itself must be visible, not just the restored prompt.
+    expect(lastFrame()).toContain('Timed out waiting for Agent View');
   });
 
   it('keeps a successful dispatch when the row refresh fails', async () => {
@@ -450,8 +451,11 @@ describe('AgentViewApp', () => {
         />
       </KeypressProvider>,
     );
-    await settleInput();
+    await flushInk();
     expect(sendToSession).not.toHaveBeenCalled();
+    // The open peek must reflect the refreshed row, not stale panel data.
+    await waitForFrame(lastFrame, 'final question?');
+    expect(lastFrame()).toContain('final question?');
   }, 10_000);
 
   it('does not send a follow-up to a working session from an open peek', async () => {
@@ -465,6 +469,10 @@ describe('AgentViewApp', () => {
             state: 'working',
             stateLabel: 'Working',
             stateGroup: 'working',
+            actions: {
+              ...row('session-1').actions,
+              canReply: false,
+            },
           }),
         ]}
         actions={actions({
@@ -491,6 +499,15 @@ describe('AgentViewApp', () => {
     expect(sendToSession).not.toHaveBeenCalled();
     expect(dispatchPrompt).not.toHaveBeenCalled();
     expect(onAttachRequested).not.toHaveBeenCalled();
+
+    // Enter must not deliver the peek reply either: the session cannot
+    // accept replies while working (canReply: false), so it attaches
+    // instead of sending.
+    stdin.write('\r');
+    await settleInput();
+    expect(sendToSession).not.toHaveBeenCalled();
+    expect(dispatchPrompt).not.toHaveBeenCalled();
+    expect(onAttachRequested).toHaveBeenCalledWith('session-1');
   }, 10_000);
 
   it('pins the selected row with Ctrl+T', async () => {
@@ -713,7 +730,7 @@ describe('AgentViewApp', () => {
 
   it('keeps rows visible while typing a new-session prompt', async () => {
     const dispatchPrompt = vi.fn(async () => ({ sessionId: 'new-session' }));
-    const { stdin } = render(
+    const { stdin, lastFrame } = render(
       <AgentViewApp
         rows={[
           row('launch-session', { displayName: 'Launchpad' }),
@@ -728,6 +745,10 @@ describe('AgentViewApp', () => {
       stdin.write(char);
       await Promise.resolve();
     }
+    await flushInk();
+    // Rows must stay rendered while the prompt is being typed.
+    expect(lastFrame()).toContain('Launchpad');
+
     stdin.write('\r');
     await settleInput();
 
