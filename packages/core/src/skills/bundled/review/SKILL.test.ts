@@ -426,6 +426,68 @@ describe('bundled review skill', () => {
     );
   });
 
+  it('pins the composed body budget and its trim order', () => {
+    // A body over GitHub's limit is rejected whole — blockers included — so
+    // the trim ORDER is the policy: a later "simplify the prose" edit that
+    // drops it would leave the model free to shorten findings itself, which
+    // is the one thing this must never license.
+    const body = skillBody();
+    expect(body).toContain('rejected by the API **whole**');
+    expect(body).toContain('**the Chinese fold first**');
+    expect(body).toContain(
+      'then the deferral display, then the not-reviewed disclosures',
+    );
+    // The other half of the policy. A "simplify the prose" edit turning
+    // `never` into `last` would leave every prefix pin matching while the
+    // skill started licensing the one trim this budget exists to refuse.
+    expect(body).toContain(
+      '**the blockers, the undecided-blocker list and the sentences that qualify the verdict never**',
+    );
+    // The last-resort cut has its own order, and it is the opposite of the
+    // rung order above: there, the undecided list never yields; here, it is
+    // the first thing spent, because the author already has it.
+    expect(body).toContain(
+      "it spends the sentences the author already received in an earlier round — the undecided-blocker list — before this round's body Criticals",
+    );
+    // The placement rule is what keeps the last resort bounded: a notice
+    // below the cut has to survive whatever the cut left open, and three
+    // hand models of that shipped three classes of divergence.
+    expect(body).toContain(
+      '**that notice rides above the cut, with the others**',
+    );
+    expect(body).toContain('You do not shorten anything yourself to help it');
+    // Where a trimmed section can still be read is not uniform, and the
+    // generalized promise ("stays whole in the artifact") is false for the
+    // disclosures: the artifact persists findings, counts and the trimmed
+    // body. Pin the split, and the terminal-summary duty it creates.
+    expect(body).toContain(
+      '**a finding it trims stays whole in the findings artifact**',
+    );
+    expect(body).toContain(
+      '**A trimmed disclosure section is not a finding and has no other durable copy**',
+    );
+    expect(body).toContain(
+      '**say in your Step 6 terminal summary what was trimmed and what it said.**',
+    );
+    // Step 8 makes the same promise about the deferral list from the other
+    // end. It drifted once already — the budget can drop the whole list, not
+    // just the entries past its 20-line cap — so pin the qualification here
+    // rather than let the two paragraphs disagree about the same channel.
+    expect(body).toContain(
+      'Their durable record on the PR is the POSTED deferral list',
+    );
+    expect(body).toContain(
+      'it is **not guaranteed**: the list is the first section the body budget trims',
+    );
+    // The tails carry the load: without them the paragraph reads as a
+    // durability promise again, which is the drift this pin exists for.
+    expect(body).toContain('so an overflowing body can carry none of it');
+    expect(body).toContain('has no cross-round record on the PR at all');
+    expect(body).toContain(
+      "when the budget trims it, the terminal summary is where the author's copy comes from",
+    );
+  });
+
   it('routes both remote-resolution paths through match-remote', () => {
     // The pr-url path (Step 1) and the bare-PR-number path both resolve the
     // remote via the deterministic matcher. A later edit reverting either
