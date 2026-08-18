@@ -31,7 +31,10 @@ import {
   getSettingsSchema,
 } from './settingsSchema.js';
 import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
-import { setNestedPropertySafe } from '../utils/settingsUtils.js';
+import {
+  setNestedPropertySafe,
+  WORKSPACE_RESTRICTED_SETTINGS,
+} from '../utils/settingsUtils.js';
 import { customDeepMerge } from '../utils/deepMerge.js';
 import { updateSettingsFilePreservingFormat } from '../utils/jsonc-editor.js';
 import { runMigrations, needsMigration } from './migration/index.js';
@@ -360,32 +363,19 @@ export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
 
   // Settings restricted to trusted scopes are stripped from Workspace during
   // the merge; warn so the user knows their workspace setting has no effect.
+  // Driven by WORKSPACE_RESTRICTED_SETTINGS so the warning cannot drift from
+  // the strip that produces it.
   const workspaceFile = loadedSettings.forScope(SettingScope.Workspace);
-  if (
-    workspaceFile.rawJson !== undefined &&
-    workspaceFile.originalSettings.tools?.workflowsEnabled !== undefined
-  ) {
-    warningSet.add(
-      `Warning: tools.workflowsEnabled in workspace settings (${workspaceFile.path}) is ignored. This setting is only honored from User, System, or SystemDefaults scope settings.`,
-    );
-  }
-  if (
-    workspaceFile.rawJson !== undefined &&
-    workspaceFile.originalSettings.security?.allowPrivateNetworkHooks !==
-      undefined
-  ) {
-    warningSet.add(
-      `Warning: security.allowPrivateNetworkHooks in workspace settings (${workspaceFile.path}) is ignored. This setting is only honored from User, System, or SystemDefaults scope settings.`,
-    );
-  }
-  if (
-    workspaceFile.rawJson !== undefined &&
-    workspaceFile.originalSettings.security?.allowedInsecureVoiceBaseUrls !==
-      undefined
-  ) {
-    warningSet.add(
-      `Warning: security.allowedInsecureVoiceBaseUrls in workspace settings (${workspaceFile.path}) is ignored. This setting is only honored from User, System, or SystemDefaults scope settings.`,
-    );
+  if (workspaceFile.rawJson !== undefined) {
+    for (const { section, key } of WORKSPACE_RESTRICTED_SETTINGS) {
+      const sectionValue = workspaceFile.originalSettings[section] as
+        | Record<string, unknown>
+        | undefined;
+      if (sectionValue?.[key] === undefined) continue;
+      warningSet.add(
+        `Warning: ${section}.${key} in workspace settings (${workspaceFile.path}) is ignored. This setting is only honored from User, System, or SystemDefaults scope settings.`,
+      );
+    }
   }
 
   return [...warningSet];
@@ -416,38 +406,21 @@ function tagMcpServerScope(
 }
 
 /**
- * Settings that can grant sensitive or costly capabilities must never be
- * honored from Workspace scope. Strip them before merging so a repository
- * cannot opt the user into those capabilities. Returns a shallow copy.
+ * Strip the workspace-restricted settings before merging so a repository
+ * cannot opt the user into those capabilities. Returns a shallow copy, and
+ * the input unchanged when it carries none of them.
  */
 function stripWorkspaceRestrictedSettings(settings: Settings): Settings {
-  const tools = settings.tools;
-  let safeTools = tools;
-  if (tools?.workflowsEnabled !== undefined) {
-    const { workflowsEnabled: _workflowsEnabled, ...restTools } = tools;
-    safeTools = restTools;
+  let stripped: Settings | undefined;
+  for (const { section, key } of WORKSPACE_RESTRICTED_SETTINGS) {
+    const source = (stripped ?? settings)[section] as
+      | Record<string, unknown>
+      | undefined;
+    if (source?.[key] === undefined) continue;
+    const { [key]: _restricted, ...rest } = source;
+    stripped = { ...(stripped ?? settings), [section]: rest } as Settings;
   }
-  const security = settings.security;
-  let safeSecurity = security;
-  if (
-    security?.allowPrivateNetworkHooks !== undefined ||
-    security?.allowedInsecureVoiceBaseUrls !== undefined
-  ) {
-    const {
-      allowPrivateNetworkHooks: _privateHooks,
-      allowedInsecureVoiceBaseUrls: _insecureVoice,
-      ...restSecurity
-    } = security;
-    safeSecurity = restSecurity;
-  }
-  if (safeTools === tools && safeSecurity === security) {
-    return settings;
-  }
-  return {
-    ...settings,
-    ...(safeTools !== tools ? { tools: safeTools } : {}),
-    ...(safeSecurity !== security ? { security: safeSecurity } : {}),
-  };
+  return stripped ?? settings;
 }
 
 function mergeSettings(

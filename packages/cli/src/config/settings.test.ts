@@ -71,6 +71,10 @@ import {
   ENV_CORRUPTED_PATH,
   ENV_WAS_RECOVERED,
 } from './settings.js';
+import {
+  WORKSPACE_RESTRICTED_SETTINGS,
+  WORKSPACE_RESTRICTED_SETTING_KEYS,
+} from '../utils/settingsUtils.js';
 import { needsMigration } from './migration/index.js';
 import { QWEN_DIR } from '@qwen-code/qwen-code-core';
 
@@ -3438,6 +3442,54 @@ describe('Settings Loading and Merging', () => {
           warning.includes('tools.workflowsEnabled'),
         ),
       ).toBe(true);
+    });
+  });
+
+  describe('WORKSPACE_RESTRICTED_SETTINGS as the single source', () => {
+    // R4-3: the strip, the warning and the dialog filter all derive from this
+    // list. A key present here but unstripped would be honored from a repo's
+    // settings while the warning claimed it was ignored — the exact drift the
+    // hand-maintained trio allowed.
+    it('strips and warns for every listed key, driven by the list itself', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      const workspacePayload: Record<string, Record<string, unknown>> = {};
+      for (const { section, key } of WORKSPACE_RESTRICTED_SETTINGS) {
+        workspacePayload[section] ??= {};
+        workspacePayload[section][key] =
+          key === 'allowedInsecureVoiceBaseUrls'
+            ? ['http://voice.example/v1']
+            : true;
+      }
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify(workspacePayload);
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      const warnings = getSettingsWarnings(settings);
+      for (const { section, key } of WORKSPACE_RESTRICTED_SETTINGS) {
+        const merged = settings.merged[section] as
+          | Record<string, unknown>
+          | undefined;
+        expect(merged?.[key]).toBeUndefined();
+        expect(
+          warnings.some((warning) => warning.includes(`${section}.${key}`)),
+        ).toBe(true);
+      }
+    });
+
+    it('exposes every key in dotted form for the dialog filter', () => {
+      expect(WORKSPACE_RESTRICTED_SETTING_KEYS).toEqual(
+        WORKSPACE_RESTRICTED_SETTINGS.map(
+          ({ section, key }) => `${section}.${key}`,
+        ),
+      );
+      expect(WORKSPACE_RESTRICTED_SETTING_KEYS).toContain(
+        'tools.workflowsEnabled',
+      );
     });
   });
 
