@@ -40,8 +40,7 @@ const pickRunner = ciDoc.jobs.classify_pr.steps.find(
 // author_association.
 function simulateRunsOn({ ecsDisabled, sameRepo, assoc, mergeGroup }) {
   const trusted = TRUSTED.includes(assoc);
-  const ecs =
-    !ecsDisabled && (sameRepo || trusted || mergeGroup);
+  const ecs = !ecsDisabled && (sameRepo || trusted || mergeGroup);
   return ecs ? ECS : HOSTED;
 }
 
@@ -169,7 +168,10 @@ describe('ci.yml classify_pr runner routing', () => {
       classifyRunsOn,
       /contains\(fromJSON\('\["OWNER","MEMBER","COLLABORATOR"\]'\), github\.event\.pull_request\.author_association\)/,
     );
-    assert.match(classifyRunsOn, /vars\.MAINTAINER_ECS_RUNNER_DISABLED != 'true'/);
+    assert.match(
+      classifyRunsOn,
+      /vars\.MAINTAINER_ECS_RUNNER_DISABLED != 'true'/,
+    );
     assert.match(classifyRunsOn, /github\.event_name == 'merge_group'/);
   });
 });
@@ -194,6 +196,14 @@ describe('serve-ab.yml runner routing', () => {
     );
     assert.ok(wipe, 'self-hosted reuse must not bleed one PR into the next');
     assert.equal(wipe.if, "${{ runner.environment == 'self-hosted' }}");
-    assert.match(wipe.run, /find "\$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf/);
+    // The delete targets the GUARDED path, not the raw variable: #9265 put
+    // the heal chain's path guard in front of this wipe, so `$WS` is
+    // `$GITHUB_WORKSPACE` after canonicalization, trailing-slash stripping,
+    // the denylist and the runner-workspace allowlist. Asserting the raw
+    // variable here would now be asserting that the guard is bypassed.
+    assert.match(wipe.run, /WS="\$\{GITHUB_WORKSPACE:\?\}"/);
+    assert.match(wipe.run, /find "\$WS" -mindepth 1 -maxdepth 1 -exec rm -rf/);
+    // Contents, not the directory: the runner owns the mount point.
+    assert.match(wipe.run, /-mindepth 1 -maxdepth 1/);
   });
 });
