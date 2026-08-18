@@ -55,6 +55,7 @@ import { extractHttpStatus, isRecord } from './httpErrors.js';
 import { useOptionalDaemonWorkspace } from '../workspace/DaemonWorkspaceProvider.js';
 import {
   getCurrentMode,
+  getRestoredSessionTitle,
   getSessionDisplayName,
   getReplayTokenUsage,
   getTokenCountFromUsage,
@@ -1758,6 +1759,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             }
             setConnection((c) => ({ ...c, catchingUp: undefined }));
           }
+          // The create/load/resume response carries the session's persisted
+          // name and its source when the daemon knows them; seed the
+          // connection so a freshly mounted page can tell a manual name from
+          // an auto title without a live rename event (#8977). The switch
+          // reset already cleared any previous session's stamp, so a response
+          // without the fields (older daemon, brand-new session) leaves the
+          // source unset.
+          const restoredTitle = getRestoredSessionTitle(activeSession.session);
           setConnection((current) => ({
             ...current,
             status: 'connected',
@@ -1768,9 +1777,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             workspaceCwd: activeSession.workspaceCwd,
             displayName:
               getSessionDisplayName(activeSession.state) ??
+              restoredTitle.displayName ??
               (current.sessionId === activeSession.sessionId
                 ? current.displayName
                 : undefined),
+            titleSource: restoredTitle.titleSource ?? current.titleSource,
             tokenUsage:
               replayTokenUsage !== undefined
                 ? replayTokenUsage
@@ -1934,7 +1945,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   : current.reasoning,
               displayName:
                 getSessionDisplayName(activeSession.state) ??
+                restoredTitle.displayName ??
                 current.displayName,
+              titleSource: restoredTitle.titleSource ?? current.titleSource,
               contextWindow: configSnapshotCurrent
                 ? (sessionContextWindow ?? current.contextWindow)
                 : current.contextWindow,

@@ -643,6 +643,14 @@ export interface BridgeClientSessionEntry {
   modelRoundtripInFlight?: boolean;
   /** A2: mirrors `modelRoundtripInFlight` for approval-mode roundtrips. */
   approvalModeRoundtripInFlight?: boolean;
+  /**
+   * Session name cached on the full `SessionEntry` in `bridge.ts`. The
+   * child-side title demux keeps it in sync so attach/status responses
+   * stay authoritative for in-CLI renames and auto-titles (#8977).
+   */
+  displayName?: string;
+  /** Source of `displayName`; see `SessionEntry.titleSource` (#8977). */
+  titleSource?: 'manual' | 'auto';
 }
 
 interface PreparedSessionUpdateFrames {
@@ -2010,6 +2018,17 @@ export class BridgeClient implements Client {
         return;
       const entry = this.resolveEntry(sessionId);
       if (!entry) return;
+      // Keep the entry's cached name in sync with child-side renames
+      // (in-CLI `/rename`, auto-titles) so attach/status responses stay
+      // authoritative; the HTTP rename path updates the entry directly
+      // (#8977).
+      entry.displayName = title;
+      if (
+        params['titleSource'] === 'auto' ||
+        params['titleSource'] === 'manual'
+      ) {
+        entry.titleSource = params['titleSource'];
+      }
       try {
         entry.events.publish({
           type: 'session_metadata_updated',

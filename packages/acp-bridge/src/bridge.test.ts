@@ -22906,9 +22906,9 @@ describe('createAcpSessionBridge', () => {
       const metaEvent = events.find(
         (e) => e.type === 'session_metadata_updated',
       );
-      expect(
-        (metaEvent?.data as { titleSource?: string }).titleSource,
-      ).toBe('auto');
+      expect((metaEvent?.data as { titleSource?: string }).titleSource).toBe(
+        'auto',
+      );
 
       await bridge.closeSession(session.sessionId);
       await drain;
@@ -22982,6 +22982,59 @@ describe('createAcpSessionBridge', () => {
           displayName: 'test',
         }),
       ).toThrow(SessionNotFoundError);
+    });
+
+    it('carries the renamed title and source on later attach responses (#8977)', async () => {
+      // A freshly mounted client (page reload, second Web Shell tab) learns
+      // the session's manual name from the load/attach response itself — no
+      // live rename event exists to replay after a remount.
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      bridge.updateSessionMetadata(session.sessionId, {
+        displayName: 'Payments bug',
+      });
+
+      const reattached = await bridge.loadSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+      });
+      expect(reattached.attached).toBe(true);
+      expect(reattached.displayName).toBe('Payments bug');
+      expect(reattached.titleSource).toBe('manual');
+
+      await bridge.shutdown();
+    });
+
+    it('seeds a cold restore with the persisted title from the request (#8977)', async () => {
+      // The serve layer recovers the persisted title before restore; the
+      // bridge must seed the entry with it so the name (and its source)
+      // survives a daemon restart — for this attach and every later one.
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+
+      const restored = await bridge.loadSession({
+        sessionId: 'cold-restored-session',
+        workspaceCwd: WS_A,
+        displayName: 'Payments bug',
+        titleSource: 'manual',
+      });
+      expect(restored.attached).toBe(false);
+      expect(restored.displayName).toBe('Payments bug');
+      expect(restored.titleSource).toBe('manual');
+
+      const reattached = await bridge.loadSession({
+        sessionId: 'cold-restored-session',
+        workspaceCwd: WS_A,
+      });
+      expect(reattached.attached).toBe(true);
+      expect(reattached.displayName).toBe('Payments bug');
+      expect(reattached.titleSource).toBe('manual');
+
+      await bridge.shutdown();
     });
   });
 

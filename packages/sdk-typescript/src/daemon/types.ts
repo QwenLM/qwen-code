@@ -941,6 +941,19 @@ export interface DaemonSession {
   /** True while the live session has an in-flight prompt. */
   hasActivePrompt?: boolean;
   /**
+   * Session name the daemon knows about, when any (renamed sessions). Newer
+   * daemons stamp it on create/load/resume responses so a freshly mounted
+   * client learns the name without waiting for a live rename event; older
+   * daemons omit it (#8977).
+   */
+  displayName?: string;
+  /**
+   * How `displayName` was produced: `manual` = the user renamed the session,
+   * `auto` = daemon/model generated. Newer daemons stamp it alongside
+   * `displayName`; older daemons omit it (#8977).
+   */
+  titleSource?: 'manual' | 'auto';
+  /**
    * Epoch token of the session's event bus. Newer daemons stamp it on the
    * create/attach response; older daemons omit it and the first subscription
    * learns it from the `X-Qwen-Event-Epoch` response header.
@@ -1053,7 +1066,10 @@ export interface DaemonPersistedBranchedSession {
 
 export interface DaemonBranchedSession
   extends DaemonRestoredSession,
-    DaemonPersistedBranchedSession {}
+    DaemonPersistedBranchedSession {
+  /** A branch always reports the new session's name. */
+  displayName: string;
+}
 
 export type DaemonBranchSessionResult =
   | DaemonBranchedSession

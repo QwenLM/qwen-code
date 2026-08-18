@@ -2183,6 +2183,19 @@ export function registerSessionRoutes(
             if (metadata === undefined) {
               throw new SessionNotFoundError(sessionId);
             }
+            // Recover the persisted title (+ source) so the restored entry
+            // re-seeds it and the load/resume response carries it to freshly
+            // mounted clients — a manual name must survive a daemon restart
+            // (#8977). Best-effort like the lineage read above. Legacy
+            // records predate `titleSource`; their titles were always
+            // user-chosen, so they read as `manual`.
+            const titleInfo = sessionService.getSessionTitleInfo(sessionId);
+            const persistedTitle = titleInfo.title
+              ? {
+                  displayName: titleInfo.title,
+                  titleSource: titleInfo.source ?? ('manual' as const),
+                }
+              : undefined;
             let liveConversationCwd: string | undefined;
             if (runtime.provenance === 'live-conversation') {
               const materialize = deps.materializeLiveConversationDirectory;
@@ -2205,6 +2218,7 @@ export function registerSessionRoutes(
                     ...(clientId !== undefined ? { clientId } : {}),
                     ...(approvalMode !== undefined ? { approvalMode } : {}),
                     ...metadata,
+                    ...persistedTitle,
                   })
                 : await runtime.bridge.resumeSession({
                     sessionId,
@@ -2212,6 +2226,7 @@ export function registerSessionRoutes(
                     ...(clientId !== undefined ? { clientId } : {}),
                     ...(approvalMode !== undefined ? { approvalMode } : {}),
                     ...metadata,
+                    ...persistedTitle,
                   });
             // Every path that can register a Live entry relocates it before a
             // prompt can start. Re-queuing cd for an active entry would block

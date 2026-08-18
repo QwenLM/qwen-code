@@ -53,6 +53,11 @@ interface MockSession {
   workspaceCwd: string;
   clientId: string;
   state?: Record<string, unknown>;
+  /**
+   * Stand-in for `DaemonSessionClient.session` (the daemon's create/load/
+   * resume payload). Tests use it to stamp restored title fields (#8977).
+   */
+  session?: Record<string, unknown>;
   hasActivePrompt?: boolean;
   historyHasMore?: boolean;
   historyAnchorRecordId?: string;
@@ -12302,6 +12307,105 @@ describe('DaemonSessionProvider', () => {
     );
   });
 
+  it('seeds a manual title from the load response so it survives a page reload (#8977)', async () => {
+    // A fresh mount loading a session the user renamed before the reload:
+    // the daemon's load response carries the persisted name + source, and
+    // the connection must be hydrated from it (no live rename event exists
+    // to replay after a remount).
+    sdkMocks.sessions.push(
+      createMockSession({
+        sessionId: 'session-renamed',
+        session: {
+          sessionId: 'session-renamed',
+          workspaceCwd: '/mock-workspace',
+          attached: false,
+          displayName: 'Payments bug',
+          titleSource: 'manual',
+        },
+      }),
+    );
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: 'session-renamed',
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    expect(connection).toMatchObject({
+      status: 'connected',
+      sessionId: 'session-renamed',
+      displayName: 'Payments bug',
+      titleSource: 'manual',
+    });
+  });
+
+  it('does not misclassify a restored auto title as manual (#8977)', async () => {
+    sdkMocks.sessions.push(
+      createMockSession({
+        sessionId: 'session-auto',
+        session: {
+          sessionId: 'session-auto',
+          workspaceCwd: '/mock-workspace',
+          attached: false,
+          displayName: 'Fix the flaky build',
+          titleSource: 'auto',
+        },
+      }),
+    );
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: 'session-auto',
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    expect(connection).toMatchObject({
+      status: 'connected',
+      sessionId: 'session-auto',
+      displayName: 'Fix the flaky build',
+      titleSource: 'auto',
+    });
+  });
+
+  it('leaves the title source unset when the daemon response carries none (#8977)', async () => {
+    // Older daemons / brand-new sessions ship no title fields; the
+    // connection must stay untyped so the /clear carry-over gate cannot
+    // fire on a guess.
+    sdkMocks.sessions.push(
+      createMockSession({ sessionId: 'session-untitled' }),
+    );
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: 'session-untitled',
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    expect(connection?.status).toBe('connected');
+    expect(connection?.titleSource).toBeUndefined();
+  });
+
   async function renderWithProvider(
     children: ReactNode,
     props: Partial<DaemonSessionProviderProps> = {},
@@ -12371,6 +12475,7 @@ function createMockSession(opts: Partial<MockSession> = {}): MockSession {
     workspaceCwd: opts.workspaceCwd ?? '/mock-workspace',
     clientId: opts.clientId ?? 'client-1',
     state: opts.state ?? {},
+    session: opts.session,
     hasActivePrompt: opts.hasActivePrompt ?? false,
     historyHasMore: opts.historyHasMore ?? false,
     historyAnchorRecordId: opts.historyAnchorRecordId,

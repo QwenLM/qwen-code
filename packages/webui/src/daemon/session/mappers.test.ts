@@ -12,6 +12,7 @@ import type {
 import {
   getReplayTokenCount,
   getReplayTokenUsage,
+  getRestoredSessionTitle,
   mapWorkspaceSkills,
   updateConnectionFromDaemonEvent,
 } from './mappers.js';
@@ -403,5 +404,47 @@ describe('updateConnectionFromDaemonEvent', () => {
     });
     expect(unknown.displayName).toBe('Renamed again');
     expect(unknown.titleSource).toBe('manual');
+  });
+});
+
+describe('getRestoredSessionTitle', () => {
+  it('normalizes the title fields carried by a daemon load/attach response (#8977)', () => {
+    expect(
+      getRestoredSessionTitle({
+        sessionId: 's1',
+        displayName: 'Payments bug',
+        titleSource: 'manual',
+      }),
+    ).toEqual({ displayName: 'Payments bug', titleSource: 'manual' });
+
+    expect(
+      getRestoredSessionTitle({
+        sessionId: 's1',
+        displayName: 'Fix login bug',
+        titleSource: 'auto',
+      }),
+    ).toEqual({ displayName: 'Fix login bug', titleSource: 'auto' });
+  });
+
+  it('drops unknown sources and blank names instead of guessing (#8977)', () => {
+    // A source the client does not recognize must never pass the manual
+    // carry-over gate.
+    expect(
+      getRestoredSessionTitle({
+        sessionId: 's1',
+        displayName: 'Named',
+        titleSource: 'something-new',
+      }),
+    ).toEqual({ displayName: 'Named' });
+
+    expect(
+      getRestoredSessionTitle({ sessionId: 's1', displayName: '   ' }),
+    ).toEqual({});
+  });
+
+  it('returns nothing for older daemons and malformed payloads (#8977)', () => {
+    expect(getRestoredSessionTitle({ sessionId: 's1' })).toEqual({});
+    expect(getRestoredSessionTitle(undefined)).toEqual({});
+    expect(getRestoredSessionTitle('not-a-record')).toEqual({});
   });
 });

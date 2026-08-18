@@ -920,6 +920,12 @@ interface SessionEntry {
   effectiveCwd: string;
   createdAt: string;
   displayName?: string;
+  /**
+   * How `displayName` was produced. Seeded on cold restore from the persisted
+   * title and updated on every rename, so attach responses can carry it to
+   * freshly mounted clients (#8977).
+   */
+  titleSource?: 'manual' | 'auto';
   /** Id of the session that spawned this one (via `create_sub_session`).
    * Immutable — written once at creation, never on attach. Absent for a
    * top-level session. */
@@ -3114,6 +3120,19 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
     }
   };
+  const entryTitleFields = (
+    entry: SessionEntry,
+  ): {
+    displayName?: string;
+    titleSource?: 'manual' | 'auto';
+  } => ({
+    // The pair travels together: a name without a known source must not
+    // masquerade as manual, and a source without a name is meaningless
+    // (#8977).
+    ...(entry.displayName !== undefined && entry.titleSource !== undefined
+      ? { displayName: entry.displayName, titleSource: entry.titleSource }
+      : {}),
+  });
   const toSessionSummary = (entry: SessionEntry): BridgeSessionSummary => {
     let isWaitingForPermission = false;
     let isWaitingForUserQuestion = false;
@@ -5337,6 +5356,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       parentSessionId?: string;
       sourceType?: string;
       sourceId?: string;
+      displayName?: string;
+      titleSource?: 'manual' | 'auto';
       worktree?: { slug: string; path: string; branch: string };
       branch?: { name: string; baseBranch: string };
     } = {},
@@ -5351,6 +5372,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         : {}),
       ...(options.sourceType ? { sourceType: options.sourceType } : {}),
       ...(options.sourceId !== undefined ? { sourceId: options.sourceId } : {}),
+      ...(options.displayName !== undefined
+        ? { displayName: options.displayName }
+        : {}),
+      ...(options.titleSource !== undefined
+        ? { titleSource: options.titleSource }
+        : {}),
       ...(options.worktree ? { worktree: options.worktree } : {}),
       ...(options.branch ? { branch: options.branch } : {}),
       channel: ci.channel,
@@ -6031,6 +6058,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         ...(existing.sourceId !== undefined
           ? { sourceId: existing.sourceId }
           : {}),
+        ...entryTitleFields(existing),
         // Late attachers get the same ACP state the original restore
         // caller saw; spawn-only sessions don't carry a state payload.
         state: existing.restoreState ?? {},
@@ -6624,6 +6652,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           ...(racedEntry.sourceId !== undefined
             ? { sourceId: racedEntry.sourceId }
             : {}),
+          ...entryTitleFields(racedEntry),
           state: racedEntry.restoreState ?? {},
           hasActivePrompt: racedEntry.promptActive,
           ...replayFieldsFor(racedEntry, action, liveReplayMode),
@@ -6645,6 +6674,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             : {}),
           ...(req.sourceType ? { sourceType: req.sourceType } : {}),
           ...(req.sourceId !== undefined ? { sourceId: req.sourceId } : {}),
+          // Re-seed the persisted title (+ source) the caller recovered from
+          // the transcript, so a cold-restored session's name survives a
+          // daemon restart and attach responses can carry it (#8977).
+          ...(req.displayName !== undefined
+            ? { displayName: req.displayName }
+            : {}),
+          ...(req.titleSource !== undefined
+            ? { titleSource: req.titleSource }
+            : {}),
         },
       );
       releaseAdmissionOnce();
@@ -6721,6 +6759,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         createdAt: entry.createdAt,
         ...(entry.sourceType ? { sourceType: entry.sourceType } : {}),
         ...(entry.sourceId !== undefined ? { sourceId: entry.sourceId } : {}),
+        ...entryTitleFields(entry),
         state: publicState,
         ...(artifactRestoreWarnings.length > 0
           ? { artifactWarnings: artifactRestoreWarnings }
@@ -7333,6 +7372,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             ...(existing.sourceId !== undefined
               ? { sourceId: existing.sourceId }
               : {}),
+            ...entryTitleFields(existing),
             hasActivePrompt: existing.promptActive,
           };
         }
@@ -7409,6 +7449,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             ...session,
             attached: true,
             clientId,
+            ...entryTitleFields(attachedEntry),
             hasActivePrompt: attachedEntry.promptActive,
           };
         }
@@ -8825,6 +8866,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         const nextDisplayName = metadata.displayName || undefined;
         if (entry.displayName !== nextDisplayName) {
           entry.displayName = nextDisplayName;
+          // The source is session-scoped like the name itself: keep the
+          // pair in sync so attach responses never carry a stale source
+          // next to a newer name (or vice versa) (#8977).
+          entry.titleSource = nextDisplayName
+            ? (metadata.titleSource ?? 'manual')
+            : undefined;
           writeStderrLine(
             `qwen serve: updated session metadata ${JSON.stringify(sessionId)} ` +
               `displayName=${entry.displayName === undefined ? 'cleared' : 'set'}` +

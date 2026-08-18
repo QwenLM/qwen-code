@@ -134,6 +134,18 @@ export interface BridgeSession {
   /** True while the live session has an in-flight prompt. */
   hasActivePrompt?: boolean;
   /**
+   * Session name the daemon knows about, when any (renamed sessions).
+   * Present on attach/restore responses so a freshly mounted client learns
+   * the name without waiting for a live rename event (#8977).
+   */
+  displayName?: string;
+  /**
+   * How `displayName` was produced: `manual` = the user renamed the session,
+   * `auto` = daemon/model generated. Absent when no name is known or the
+   * source is unknown (#8977).
+   */
+  titleSource?: 'manual' | 'auto';
+  /**
    * Only present when this spawn carried a `parentSessionId`. `true` iff the
    * parent lineage was durably written to the child's transcript (survives a
    * daemon restart); `false` means the link is live-only and will disappear
@@ -182,6 +194,16 @@ export interface BridgeRestoreSessionRequest {
   sourceType?: string;
   /** Optional persisted identifier paired with `sourceType`. */
   sourceId?: string;
+  /**
+   * Persisted session title recovered from the transcript by the caller (the
+   * serve layer reads it before restore). Re-seeds the restored live entry so
+   * a cold-restored session's name and its source survive a daemon restart
+   * (#8977); ignored when attaching to an already-live entry, whose in-memory
+   * name is authoritative.
+   */
+  displayName?: string;
+  /** Source of the persisted `displayName`; see {@link BridgeSession}. */
+  titleSource?: 'manual' | 'auto';
 }
 
 export const LOAD_REPLAY_MODE_META_KEY = 'qwen.session.loadReplayMode';

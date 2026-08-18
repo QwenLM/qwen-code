@@ -369,6 +369,27 @@ export function getSessionDisplayName(
   return displayName?.trim() ? displayName : undefined;
 }
 
+/**
+ * Normalizes the title fields a daemon create/load/resume response carries
+ * about the session it returned (#8977). Older daemons omit both; unknown
+ * `titleSource` values are dropped rather than guessed, so a name whose
+ * source cannot be verified never passes the `manual` carry-over gate.
+ */
+export function getRestoredSessionTitle(session: unknown): {
+  displayName?: string;
+  titleSource?: 'manual' | 'auto';
+} {
+  const record = getRecord(session);
+  const displayName = getSessionDisplayName(record);
+  const titleSource = getString(record, 'titleSource');
+  return {
+    ...(displayName !== undefined ? { displayName } : {}),
+    ...(titleSource === 'manual' || titleSource === 'auto'
+      ? { titleSource }
+      : {}),
+  };
+}
+
 export function getCurrentMode(
   status: DaemonSessionContextStatus | undefined,
 ): string | undefined {
