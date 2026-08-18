@@ -33,7 +33,10 @@ export async function isManagedAgentViewResumeBlocked(
 ): Promise<boolean> {
   if (isSessionWorker(sessionId, env)) return false;
   const state = await readAgentViewSessionState(sessionId);
-  return state?.ownership === 'managed';
+  // Block during the 'adopting' window too: /background adopt writes
+  // 'adopting', spawns the --resume worker, and only patches 'managed'
+  // afterwards — a concurrent foreground resume would double-run the session.
+  return state?.ownership === 'managed' || state?.ownership === 'adopting';
 }
 
 /**
@@ -48,7 +51,10 @@ export async function isManagedAgentViewContinueBlocked(
 ): Promise<boolean> {
   if (isSessionWorker(sessionId, env)) return false;
   const state = await readAgentViewSessionState(sessionId);
-  return state?.ownership === 'managed' && state.processState !== 'exited';
+  return (
+    (state?.ownership === 'managed' && state.processState !== 'exited') ||
+    state?.ownership === 'adopting'
+  );
 }
 
 /**

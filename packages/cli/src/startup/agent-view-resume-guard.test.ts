@@ -116,6 +116,31 @@ describe('managed Agent View resume guards', () => {
     ).resolves.toBe(true);
   });
 
+  it('blocks --resume and --continue during the adopting window', async () => {
+    // /background adopt writes ownership 'adopting' and spawns the worker
+    // before patching 'managed'; both guards must already block.
+    mockReadAgentViewSessionState.mockResolvedValue(
+      state('adopting', 'starting'),
+    );
+
+    await expect(isManagedAgentViewResumeBlocked('session-1')).resolves.toBe(
+      true,
+    );
+    await expect(isManagedAgentViewContinueBlocked('session-1')).resolves.toBe(
+      true,
+    );
+  });
+
+  it('does not release ownership during the adopting window', async () => {
+    mockReadAgentViewSessionState.mockResolvedValue(
+      state('adopting', 'starting'),
+    );
+
+    await releaseExitedManagedSessionForContinue('session-1');
+
+    expect(mockPatchAgentViewSessionState).not.toHaveBeenCalled();
+  });
+
   it('releases an exited managed session for foreground --continue', async () => {
     mockReadAgentViewSessionState.mockResolvedValue(state('managed', 'exited'));
 

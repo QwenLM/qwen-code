@@ -481,6 +481,139 @@ describe('parseArguments', () => {
     expect(argv.query).toBe('agents fix the bug');
   });
 
+  it('does not treat an option value that names a command as command shadowing', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--model',
+      'review',
+      'agents',
+      'fix',
+      'the',
+      'bug',
+    ];
+
+    const argv = await parseArguments();
+
+    expect(argv.query).toBe('agents fix the bug');
+  });
+
+  it('never runs the update handler from the agents-fallback probe', async () => {
+    process.argv = ['node', 'script.js', '--model', 'agents', 'update'];
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+
+    try {
+      // The shape is ambiguous (`agents` is the --model value), so failing
+      // loudly is acceptable; running the update handler twice (probe +
+      // real parse) is not.
+      await expect(parseArguments()).rejects.toThrow();
+      expect(mockUpdateHandler.mock.calls.length).toBeLessThan(2);
+    } finally {
+      mockExit.mockRestore();
+    }
+  });
+
+  it('fails loudly instead of blocking on `-p agents serve`', async () => {
+    process.argv = ['node', 'script.js', '-p', 'agents', 'serve'];
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+
+    try {
+      await expect(parseArguments()).rejects.toThrow('process.exit called');
+      expect(mockExit).toHaveBeenCalledWith(1);
+    } finally {
+      mockExit.mockRestore();
+    }
+  });
+
+  it('fails loudly when agents list options mix with a natural-language prompt', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      'agents',
+      '--cwd',
+      '/tmp',
+      'explain',
+      'this',
+      'project',
+    ];
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+
+    try {
+      await expect(parseArguments()).rejects.toThrow('process.exit called');
+      expect(mockExit).toHaveBeenCalledWith(1);
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        expect.stringContaining('Cannot combine `qwen agents` list options'),
+      );
+    } finally {
+      mockExit.mockRestore();
+    }
+  });
+
+  it('does not silently exit on `-- agents stop <id>`', async () => {
+    process.argv = ['node', 'script.js', '--', 'agents', 'stop', 'session-1'];
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+
+    try {
+      // Tokens after `--` never dispatch commands; the invocation must fall
+      // through instead of exiting 0 with the command never run.
+      const argv = await parseArguments();
+      expect(argv.query).toBeUndefined();
+      expect(mockExit).not.toHaveBeenCalled();
+    } finally {
+      mockExit.mockRestore();
+    }
+  });
+
+  it('shows the agents attach help for `agents attach --help`', async () => {
+    process.argv = ['node', 'script.js', 'agents', 'attach', '--help'];
+    const chunks: string[] = [];
+    const outSpy = vi.spyOn(process.stdout, 'write').mockImplementation(((
+      chunk: unknown,
+    ) => {
+      chunks.push(String(chunk));
+      return true;
+    }) as never);
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(((
+      ...args: unknown[]
+    ) => {
+      chunks.push(args.map(String).join(' '));
+    }) as never);
+
+    try {
+      // yargs prints the subcommand help, then exits 0.
+      await expect(parseArguments()).rejects.toThrow(
+        'process.exit unexpectedly called with "0"',
+      );
+      expect(chunks.join('')).toContain('agents attach <id>');
+    } finally {
+      outSpy.mockRestore();
+      logSpy.mockRestore();
+    }
+  });
+
+  it('runs the agents surface for `agents --version` instead of the probe version', async () => {
+    process.argv = ['node', 'script.js', 'agents', '--version'];
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+
+    try {
+      await expect(parseArguments()).rejects.toThrow('process.exit called');
+      expect(mockExit).toHaveBeenCalledWith(0);
+      expect(mockEnsureAgentViewSupervisor).toHaveBeenCalled();
+    } finally {
+      mockExit.mockRestore();
+    }
+  });
+
   it('fails loudly on `agents --yolo` instead of prompting "agents"', async () => {
     process.argv = ['node', 'script.js', 'agents', '--yolo'];
     const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {

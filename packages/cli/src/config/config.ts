@@ -561,22 +561,23 @@ const AGENTS_SUBCOMMAND_TOKENS = new Set([
   'daemon',
 ]);
 
-// Top-level commands registered by buildCliParser that carry side-effecting
-// handlers; the agents-fallback oracle parse must never run when one of
-// these could match first (probe parsing executes command handlers).
-const TOP_LEVEL_COMMAND_TOKENS = new Set([
-  'mcp',
-  'extensions',
-  'auth',
-  'hooks',
-  'channel',
-  'review',
-  'serve',
-  'sessions',
-  'update',
-]);
+// `qwen agents` list-command options; when they appear alongside a
+// natural-language prompt tail the invocation cannot be routed, so fail
+// loudly instead of dying in strict mode with a confusing message.
+function hasAgentsListOption(rawArgv: readonly string[]): boolean {
+  return rawArgv.some(
+    (token) =>
+      token === '--json' ||
+      token === '--all' ||
+      token === '--cwd' ||
+      token.startsWith('--cwd='),
+  );
+}
 
-function buildCliParser(rawArgv: string[]): Argv {
+function buildCliParser(
+  rawArgv: string[],
+  options?: { oracle?: boolean },
+): Argv {
   const parser = yargs(rawArgv)
     .locale('en')
     .scriptName('qwen')
@@ -1221,24 +1222,30 @@ function buildCliParser(rawArgv: string[]): Argv {
           }
           return true;
         }),
-    )
-    // Register MCP subcommands
-    .command(mcpCommand)
-    // Register Extension subcommands
-    .command(extensionsCommand)
-    .command(authCommand)
-    // Register Hooks subcommands
-    .command(hooksCommand)
-    // Register Channel subcommands
-    .command(channelCommand)
-    // Register /review skill helpers (presubmit checks, cleanup)
-    .command(reviewCommand)
-    // Register `qwen serve` (Stage 1 daemon)
-    .command(serveCommand)
-    // Register sessions subcommands
-    .command(sessionsCommand)
-    // Register update command
-    .command(updateCommand);
+    );
+  // In oracle mode (the agents-fallback probe) register no subcommands:
+  // parse() executes matched command handlers, and the probe must be
+  // side-effect free.
+  if (!options?.oracle) {
+    parser
+      // Register MCP subcommands
+      .command(mcpCommand)
+      // Register Extension subcommands
+      .command(extensionsCommand)
+      .command(authCommand)
+      // Register Hooks subcommands
+      .command(hooksCommand)
+      // Register Channel subcommands
+      .command(channelCommand)
+      // Register /review skill helpers (presubmit checks, cleanup)
+      .command(reviewCommand)
+      // Register `qwen serve` (Stage 1 daemon)
+      .command(serveCommand)
+      // Register sessions subcommands
+      .command(sessionsCommand)
+      // Register update command
+      .command(updateCommand);
+  }
   return parser;
 }
 
@@ -1259,31 +1266,43 @@ export async function parseArguments(): Promise<CliArgs> {
   // the second positional token is not a real `agents` subcommand, skip
   // registering the command group so the tokens route to the default prompt
   // command instead of dying in strict mode. Decide with an oracle parse of
-  // the same option grammar (no strict, no agents group): hand-rolled token
-  // filtering cannot tell option values apart from positionals (`--model
-  // qwen3-max agents fix` or `agents --cwd /tmp`).
+  // the same option grammar (no strict, no help/version interception, no
+  // subcommand registrations): hand-rolled token filtering cannot tell
+  // option values apart from positionals (`--model qwen3-max agents fix`
+  // or `agents --cwd /tmp`).
   let agentsPromptFallback = false;
   const firstAgentsToken = rawArgv.indexOf('agents');
-  const shadowsOtherCommand = rawArgv
-    .slice(0, firstAgentsToken)
-    .some((token) => TOP_LEVEL_COMMAND_TOKENS.has(token));
   if (
     firstAgentsToken !== -1 &&
-    !shadowsOtherCommand &&
     (rawArgv[0] === 'agents' || rawArgv[0]?.startsWith('-'))
   ) {
-    const probe = await buildCliParser(rawArgv)
-      .option('cwd', { type: 'string' })
-      .parse();
-    const probedQuery = (probe as { query?: unknown }).query;
-    const positionals = Array.isArray(probedQuery)
-      ? probedQuery.map(String)
-      : probe._.map(String);
-    const [first, second] = positionals;
-    agentsPromptFallback =
-      first === 'agents' &&
-      second !== undefined &&
-      !AGENTS_SUBCOMMAND_TOKENS.has(second);
+    const dashDashIndex = rawArgv.indexOf('--');
+    if (dashDashIndex !== -1 && dashDashIndex < firstAgentsToken) {
+      // yargs never dispatches commands after `--`; force the prompt path
+      // instead of silently exiting with the command never run.
+      agentsPromptFallback = true;
+    } else {
+      const probe = await buildCliParser(rawArgv, { oracle: true })
+        .option('cwd', { type: 'string' })
+        .help(false)
+        .version(false)
+        .parse();
+      const probedQuery = (probe as { query?: unknown }).query;
+      const positionals = Array.isArray(probedQuery)
+        ? probedQuery.map(String)
+        : probe._.map(String);
+      const [first, second] = positionals;
+      agentsPromptFallback =
+        first === 'agents' &&
+        second !== undefined &&
+        !AGENTS_SUBCOMMAND_TOKENS.has(second);
+    }
+    if (agentsPromptFallback && hasAgentsListOption(rawArgv)) {
+      writeStderrLine(
+        'Cannot combine `qwen agents` list options (--cwd/--json/--all) with a natural-language prompt. Run `qwen agents` on its own, or drop the options.',
+      );
+      process.exit(1);
+    }
   }
 
   const yargsInstance = buildCliParser(rawArgv);

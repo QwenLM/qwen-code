@@ -500,11 +500,16 @@ async function readSupervisorAuthToken(
 
 function defaultSpawnSupervisor(args: readonly string[]): ChildProcess {
   const argv = buildCurrentQwenCliArgv(args);
+  // Invocation-scoped flags must not leak into the long-lived daemon: a
+  // `--bare` caller would otherwise contaminate every session the daemon
+  // later spawns (bare mode is env-driven via QWEN_CODE_SIMPLE).
+  const env = { ...process.env };
+  delete env['QWEN_CODE_SIMPLE'];
   return spawn(argv[0]!, argv.slice(1), {
     detached: true,
     stdio: 'ignore',
     env: {
-      ...process.env,
+      ...env,
       QWEN_CODE_NO_RELAUNCH: '1',
       [INTERNAL_AGENT_VIEW_SUPERVISOR_ENV]: '1',
     },
