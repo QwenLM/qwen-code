@@ -305,7 +305,11 @@ export function resolveBootstrapRoute(
   if (firstArg === 'serve') {
     return 'serve';
   }
-  if (firstArg === 'mcp') {
+  // Version-bearing mcp argv must reach the full parser: `runMcpFastPath`
+  // registers no version option and runs `.strict()`, so `mcp <sub> --version`
+  // would otherwise exit 1 instead of printing the version or running the
+  // subcommand. The full parser owns those argv shapes.
+  if (firstArg === 'mcp' && !hasFlag(argv, '--version', '-v')) {
     return 'mcp';
   }
 

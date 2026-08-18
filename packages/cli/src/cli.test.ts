@@ -108,7 +108,7 @@ describe('resolveBootstrapRoute', () => {
   it('routes top-level help, version, serve, and mcp correctly', async () => {
     expect(resolveBootstrapRoute(['--help'])).toBe('help');
     expect(resolveBootstrapRoute(['--version'])).toBe('version');
-    expect(resolveBootstrapRoute(['mcp', '--version'])).toBe('mcp');
+    expect(resolveBootstrapRoute(['mcp', '--version'])).toBe('default');
     expect(resolveBootstrapRoute(['serve', '--help'])).toBe('serve');
     expect(resolveBootstrapRoute(['mcp', '--help'])).toBe('mcp');
   });
@@ -217,7 +217,9 @@ describe('resolveBootstrapRoute', () => {
     expect(resolveBootstrapRoute(['-v', '--help'])).toBe('help');
     expect(resolveBootstrapRoute(['foo', '-v', '--help'])).toBe('default');
     expect(resolveBootstrapRoute(['serve', '-v', '--help'])).toBe('serve');
-    expect(resolveBootstrapRoute(['mcp', '-v', '--help'])).toBe('mcp');
+    // `mcp -v --help` carries a version token, so it demotes to the slow path
+    // (the full parser prints mcp help, matching the fast path's output).
+    expect(resolveBootstrapRoute(['mcp', '-v', '--help'])).toBe('default');
     // Version still wins when no help is requested.
     expect(resolveBootstrapRoute(['--model', '-v'])).toBe('version');
     expect(resolveBootstrapRoute(['-v'])).toBe('version');
@@ -258,9 +260,9 @@ describe('resolveBootstrapRoute', () => {
     // extensions, channel, review, auth, sessions), so an exact `-v` /
     // `--version` token after a command must stay on the slow path, which
     // owns those argv shapes.
-    expect(resolveBootstrapRoute(['mcp', '--version'])).toBe('mcp');
-    expect(resolveBootstrapRoute(['mcp', 'list', '--version'])).toBe('mcp');
-    expect(resolveBootstrapRoute(['mcp', '-v'])).toBe('mcp');
+    expect(resolveBootstrapRoute(['mcp', '--version'])).toBe('default');
+    expect(resolveBootstrapRoute(['mcp', 'list', '--version'])).toBe('default');
+    expect(resolveBootstrapRoute(['mcp', '-v'])).toBe('default');
     // Version still wins for top-level argv with no command prefix.
     expect(resolveBootstrapRoute(['--model', '-v'])).toBe('version');
     expect(resolveBootstrapRoute(['-v'])).toBe('version');
@@ -311,7 +313,7 @@ describe('resolveBootstrapRoute', () => {
     expect(resolveBootstrapRoute(['-v'])).toBe('version');
     expect(resolveBootstrapRoute(['--version'])).toBe('version');
     expect(resolveBootstrapRoute(['--model', 'x', '-v'])).toBe('version');
-    expect(resolveBootstrapRoute(['mcp', '--version'])).toBe('mcp');
+    expect(resolveBootstrapRoute(['mcp', '--version'])).toBe('default');
     expect(resolveBootstrapRoute([])).toBe('default');
   });
 });
