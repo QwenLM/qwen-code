@@ -885,18 +885,16 @@ describe('<MainContent />', () => {
     });
 
     // Shared fixtures for the #9420 collapse tests.
-    const toolGroupFixture = (callId: string) => ({
+    const toolGroupFixture = (...callIds: string[]) => ({
       type: 'tool_group' as const,
-      tools: [
-        {
-          callId,
-          name: 'read_file',
-          description: `read ${callId}`,
-          status: ToolCallStatus.Executing,
-          resultDisplay: undefined,
-          confirmationDetails: undefined,
-        },
-      ],
+      tools: callIds.map((callId) => ({
+        callId,
+        name: 'read_file',
+        description: `read ${callId}`,
+        status: ToolCallStatus.Executing,
+        resultDisplay: undefined,
+        confirmationDetails: undefined,
+      })),
     });
     const lastVpDataIds = () =>
       scrollableListPropsSpy.mock.calls
@@ -959,6 +957,25 @@ describe('<MainContent />', () => {
       expect(lastVpDataIds()).toEqual([Number.MIN_SAFE_INTEGER, -2]);
     });
 
+    it('collapses pending duplicates separated by other pending items (#9420)', () => {
+      scrollableListPropsSpy.mockClear();
+
+      renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          pendingHistoryItems: [
+            toolGroupFixture('dup-call'),
+            { type: 'gemini_thought' as const, text: 'between' },
+            toolGroupFixture('dup-call'),
+          ],
+        }),
+      );
+
+      // The later (more current) copy survives even though the copies are
+      // not adjacent; it keeps its original positional id (-3).
+      expect(lastVpDataIds()).toEqual([Number.MIN_SAFE_INTEGER, -2, -3]);
+    });
+
     it('keeps adjacent tool_groups with different signatures (#9420)', () => {
       scrollableListPropsSpy.mockClear();
 
@@ -994,6 +1011,64 @@ describe('<MainContent />', () => {
       );
 
       expect(lastVpDataIds()).toEqual([Number.MIN_SAFE_INTEGER, 1, 2, 3]);
+    });
+
+    it('keeps earlier committed batches whose callIds collide with the live pending batch (#9420)', () => {
+      scrollableListPropsSpy.mockClear();
+
+      renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          // callIds are not globally unique: after full core-history
+          // compaction the display history stays intact while deterministic
+          // ids (call_qwen_1, ...) are re-minted, and OpenAI-compatible
+          // providers can reuse wire ids across turns. The unrelated earlier
+          // batch (id 1) sharing the live batch's callIds must keep
+          // rendering; only the just-committed stale copy (id 3, the latest
+          // match) is collapsed against the pending copy.
+          history: [
+            { id: 1, ...toolGroupFixture('dup-call') },
+            { id: 2, type: 'gemini_thought' as const, text: 'between' },
+            { id: 3, ...toolGroupFixture('dup-call') },
+          ],
+          pendingHistoryItems: [toolGroupFixture('dup-call')],
+        }),
+      );
+
+      expect(lastVpDataIds()).toEqual([Number.MIN_SAFE_INTEGER, 1, 2, -1]);
+    });
+
+    it('collapses multi-tool groups regardless of callId order (#9420)', () => {
+      scrollableListPropsSpy.mockClear();
+
+      renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          // Same batch streamed with its tool calls in different orders:
+          // the signature must be order-insensitive (pins the .sort()).
+          history: [{ id: 1, ...toolGroupFixture('call-A', 'call-B') }],
+          pendingHistoryItems: [toolGroupFixture('call-B', 'call-A')],
+        }),
+      );
+
+      expect(lastVpDataIds()).toEqual([Number.MIN_SAFE_INTEGER, -1]);
+    });
+
+    it('keeps distinct batches whose callIds only collide through a comma join (#9420)', () => {
+      scrollableListPropsSpy.mockClear();
+
+      renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          // One batch with a single callId 'a,b' and another with two
+          // callIds 'a' and 'b' are different executions; an ambiguous
+          // join(',') signature would collapse the committed one.
+          history: [{ id: 1, ...toolGroupFixture('a,b') }],
+          pendingHistoryItems: [toolGroupFixture('a', 'b')],
+        }),
+      );
+
+      expect(lastVpDataIds()).toEqual([Number.MIN_SAFE_INTEGER, 1, -1]);
     });
 
     it('requests a full-height measurement only for pending plain-text confirmations', () => {

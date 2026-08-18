@@ -78,16 +78,32 @@ function addSourceBlockCounts(
 
 /**
  * Stable identity of a tool_group for duplicate collapsing (#9420): the
- * sorted callIds of its tool calls. The same in-flight batch can render
- * twice — from committed history and from the live pending list — and the
- * two copies share this signature.
+ * sorted callIds of its tool calls, JSON-encoded so multi-call signatures
+ * stay unambiguous even if a callId itself contains a comma. The same
+ * in-flight batch can render twice — from committed history and from the
+ * live pending list — and the two copies share this signature.
+ *
+ * Cached by item reference — history items are stable references, replaced
+ * (never mutated) when they change — because the consuming memo recomputes
+ * on every streaming tick and a long session can hold hundreds of committed
+ * tool_groups.
  */
-function toolGroupSignature(item: VpItem): string | null {
-  if (item.type !== 'tool_group') return null;
-  return item.tools
-    .map((tool) => tool.callId)
-    .sort()
-    .join(',');
+const toolGroupSignatures = new WeakMap<
+  HistoryItemWithoutId | VpBannerItem,
+  string | null
+>();
+function toolGroupSignature(
+  item: HistoryItemWithoutId | VpBannerItem,
+): string | null {
+  let signature = toolGroupSignatures.get(item);
+  if (signature === undefined) {
+    signature =
+      item.type === 'tool_group'
+        ? JSON.stringify(item.tools.map((tool) => tool.callId).sort())
+        : null;
+    toolGroupSignatures.set(item, signature);
+  }
+  return signature;
 }
 
 // Issue #3899: Ink's <Static> renders all items synchronously on (re)mount.
@@ -312,38 +328,44 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
     // Collapse duplicate tool_group rows (#9420): the same in-flight batch
     // renders from both committed history and the live pending list between
     // the onComplete commit and the scheduler clearing its display state.
-    // Continuation thought/content items can land between the two copies, so
-    // match by signature across the whole list — not by adjacency — and only
-    // drop committed copies that have a live pending counterpart (the pending
-    // copy keeps updating, so it wins). Committed rows without a live
-    // counterpart are never collapsed, so distinct batches whose signatures
-    // collide (e.g. synthetic speculation callIds) both survive.
+    // Continuation thought/content items can land between the copies, so
+    // match by signature across the whole list — never by adjacency — and
+    // only when a live pending counterpart exists (it keeps updating, so it
+    // wins). Committed rows without a live counterpart are never collapsed,
+    // so distinct batches whose signatures collide (e.g. synthetic
+    // speculation callIds) both survive.
+    //
+    // livePendingSigs comes straight from pendingHistoryItems so a tick
+    // without any pending tool_group skips the history-wide pass below.
     const livePendingSigs = new Set<string>();
-    for (const item of combined) {
-      if (item.id < 0) {
-        const sig = toolGroupSignature(item);
-        if (sig !== null) livePendingSigs.add(sig);
-      }
+    for (const item of pendingHistoryItems) {
+      const sig = toolGroupSignature(item);
+      if (sig !== null) livePendingSigs.add(sig);
     }
-    // Neither collapse branch can fire without a live pending tool_group.
-    // Skip the history-wide signature pass — this memo recomputes on every
-    // streaming tick.
     if (livePendingSigs.size === 0) return combined;
-    const deduped: VpItem[] = [];
+    const dropped = new Set<VpItem>();
+    // The stale committed copy of the live batch is the LATEST committed row
+    // matching its signature — onComplete just appended it at the tail of
+    // history. Earlier committed rows sharing the signature are distinct
+    // executions whose callIds merely collide (ids re-minted after core
+    // history compaction, provider wire-id reuse) and must keep rendering.
+    const latestCommittedBySig = new Map<string, VpItem>();
+    // Same batch twice within the pending list: keep the latest copy only.
+    const keptPendingBySig = new Map<string, VpItem>();
     for (const item of combined) {
       const sig = toolGroupSignature(item);
-      if (sig !== null) {
-        if (item.id > 0 && livePendingSigs.has(sig)) continue;
-        // Same batch twice within the pending list: keep the later copy.
-        const prev = deduped[deduped.length - 1];
-        if (item.id < 0 && prev && sig === toolGroupSignature(prev)) {
-          deduped[deduped.length - 1] = item;
-          continue;
-        }
+      if (sig === null || !livePendingSigs.has(sig)) continue;
+      if (item.id > 0) {
+        latestCommittedBySig.set(sig, item);
+      } else {
+        const kept = keptPendingBySig.get(sig);
+        if (kept) dropped.add(kept);
+        keptPendingBySig.set(sig, item);
       }
-      deduped.push(item);
     }
-    return deduped;
+    for (const item of latestCommittedBySig.values()) dropped.add(item);
+    if (dropped.size === 0) return combined;
+    return combined.filter((item) => !dropped.has(item));
   }, [visibleHistory, pendingHistoryItems]);
 
   // Source-copy index offsets propagation. The legacy <Static> path threads
