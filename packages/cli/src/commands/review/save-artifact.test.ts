@@ -69,6 +69,8 @@ const verdict = {
   deferredCount: 2,
   // Non-empty for the same reason — absent defaults to [].
   floorEnforced: [1],
+  // Non-zero for the same reason — absent defaults to 0.
+  postedInline: 3,
   // Also non-default on purpose, for the same reason.
   bodyTrim: { sections: 2, deferralList: true, fold: true, truncated: true },
   lowSignal: { agents: 4, srcDiffLines: 120 },

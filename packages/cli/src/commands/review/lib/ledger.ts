@@ -87,6 +87,33 @@ export interface Ledger {
    * model naming no range qualifies nothing.
    */
   model?: string;
+  /**
+   * How many inline comments this round posted — convergence telemetry, and
+   * the ONLY field here that decides nothing.
+   *
+   * Every other field gates something (`findings` is the next round's work
+   * list, `sha`/`model` scope its diff, `dropped` withholds that scoping),
+   * which is why they all fail closed. These two are read by no gate: they
+   * exist so a later round — or a caller applying its own policy — can see
+   * whether the loop's posting volume is shrinking, without asking the
+   * model or counting a comment list that cannot distinguish this account's
+   * rounds from anyone else's. A tampered or absent value costs a trend
+   * line and nothing else, so they fail OPEN (absent) rather than
+   * withholding anything.
+   *
+   * Kept across a truncated list on purpose, unlike the anchor pair: a
+   * `dropped` work list says the next round cannot scope from here, not
+   * that this round posted a different number of comments than it did.
+   */
+  posted?: number;
+  /**
+   * The PREVIOUS round's `posted`, carried forward so one marker holds a
+   * two-round window: a round reading this marker knows its predecessor's
+   * volume AND the one before that, which is the shortest window in which
+   * "still shrinking" is a statement rather than a single step. Same
+   * fail-open, decides-nothing contract as `posted`.
+   */
+  prevPosted?: number;
 }
 
 /**
@@ -177,6 +204,25 @@ export const LEDGER_MAX_ID = 24;
 export const LEDGER_MAX_ROUND = 10_000;
 
 /**
+ * The volume fields' ceiling. A round posting more than this many inline
+ * comments is past anything the API or a human review surface tolerates, and
+ * the cap exists for the same reason the round's does: the number is written
+ * from a count this module does not own, and an unbounded one spends the
+ * marker's byte budget on digits.
+ */
+export const LEDGER_MAX_VOLUME = 100_000;
+
+/**
+ * A usable volume: a non-negative whole number. Zero is meaningful and kept
+ * — "this round posted nothing" is exactly the observation a convergence
+ * trend is looking for, and dropping it would make a converged round
+ * indistinguishable from a round that never recorded one.
+ */
+function isVolume(n: unknown): n is number {
+  return typeof n === 'number' && Number.isInteger(n) && n >= 0;
+}
+
+/**
  * ...and a cap on the WHOLE marker, because the per-field ones do not bound it:
  * fifty findings at full width serialize to just under 17,000 characters.
  *
@@ -226,6 +272,17 @@ export function serializeLedger(ledger: Ledger): string {
       round: Math.min(ledger.round, LEDGER_MAX_ROUND),
       findings,
     };
+    // The volume telemetry rides before the anchor block and OUTSIDE its
+    // truncation rule: it qualifies no range, so a partial work list says
+    // nothing about it. Bounded like every other written field — a
+    // non-integer or negative count is not a volume, and the cap keeps a
+    // forged marker from spending the byte budget on digits.
+    if (isVolume(ledger.posted)) {
+      payload.posted = Math.min(ledger.posted, LEDGER_MAX_VOLUME);
+    }
+    if (isVolume(ledger.prevPosted)) {
+      payload.prevPosted = Math.min(ledger.prevPosted, LEDGER_MAX_VOLUME);
+    }
     if (dropped > 0) payload.dropped = dropped;
     // A truncated list must not certify a range: the dropped entries reference
     // code at or before the anchored head, and a next round scoped to
@@ -361,6 +418,18 @@ export function parseLedger(body: string | undefined): Ledger | null {
       sha && rawModel !== '' && rawModel.length <= LEDGER_MAX_MODEL
         ? rawModel
         : undefined;
+    // The volume fields are normalised on READ exactly as they are bounded
+    // on write, and independently of `dropped`: they qualify no range, so a
+    // truncated work list has no bearing on them. A shape the serializer
+    // would not have written (a float, a negative, a string) simply does not
+    // survive — the trend loses a point, which is the whole cost of a field
+    // no gate reads.
+    const posted = isVolume(raw.posted)
+      ? Math.min(raw.posted, LEDGER_MAX_VOLUME)
+      : undefined;
+    const prevPosted = isVolume(raw.prevPosted)
+      ? Math.min(raw.prevPosted, LEDGER_MAX_VOLUME)
+      : undefined;
     return {
       v: 1,
       round: raw.round,
@@ -368,6 +437,8 @@ export function parseLedger(body: string | undefined): Ledger | null {
       ...(dropped ? { dropped } : {}),
       ...(sha ? { sha } : {}),
       ...(model ? { model } : {}),
+      ...(posted === undefined ? {} : { posted }),
+      ...(prevPosted === undefined ? {} : { prevPosted }),
     };
   } catch {
     return null;

@@ -247,6 +247,20 @@ function validateVerdict(value: unknown): PersistedVerdict {
       'Composed verdict.floorEnforced must be an array of non-negative integers.',
     );
   }
+  // Absent reads as zero for the same reason its siblings do — a composed
+  // file from a CLI predating the volume telemetry recorded no count, and a
+  // mid-upgrade save must not fail over a number that only re-displays. A
+  // PRESENT value of the wrong shape is refused like every other field.
+  const postedInline = verdict['postedInline'] ?? 0;
+  if (
+    typeof postedInline !== 'number' ||
+    !Number.isInteger(postedInline) ||
+    postedInline < 0
+  ) {
+    throw new Error(
+      'Composed verdict.postedInline must be a non-negative integer.',
+    );
+  }
   // Absent reads as "no trim", the same absence semantics the sibling count
   // gets: a composed file written before the body budget shipped carries no
   // `bodyTrim`, and a mid-upgrade save must not fail over a record of
@@ -296,6 +310,7 @@ function validateVerdict(value: unknown): PersistedVerdict {
     ),
     deferredCount,
     floorEnforced: floorEnforced as number[],
+    postedInline,
     lowSignal:
       lowSignal === null
         ? null

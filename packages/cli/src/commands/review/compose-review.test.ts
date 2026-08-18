@@ -3746,6 +3746,7 @@ describe('verdictLine — the terminal verdict, and its dangling colon', () => {
       cappedBy: [],
       downgraded: false,
       floorEnforced: [],
+      postedInline: 0,
       downgradedFrom: null,
       remediation: [],
       deferredCount: 0,
@@ -8105,5 +8106,149 @@ describe('floor enforcement — the posture, as code', () => {
     expect(r.floorEnforced).toEqual([0]);
     expect(r.body).not.toContain('c.ts:2.5');
     expect(r.body).toContain('fractional line');
+  });
+});
+
+describe('convergence telemetry — volume, carried in the marker', () => {
+  // The fields decide nothing, so every test here is about one property:
+  // the number a round records is the number it actually posts, and it
+  // survives the trip to the next round intact. A trend built on a count
+  // that disagrees with the comment list is worse than no trend.
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'telemetry-'));
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  const plan = (over: Record<string, unknown> = {}) => {
+    const p = join(dir, 'plan.json');
+    writeFileSync(p, JSON.stringify({ prNumber: 8255, ...over }));
+    return p;
+  };
+  const sideFile = (prev: Record<string, unknown>) =>
+    writeFileSync(
+      join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+      JSON.stringify({ v: 1, findings: [], ...prev }),
+    );
+  const drafts = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({
+      path: `f${i}.ts`,
+      line: i + 1,
+      body: `**[Suggestion]** finding ${i}`,
+    }));
+
+  it('records the posting count in the marker and on the result', () => {
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 3,
+      draftedComments: drafts(3),
+    });
+    expect(r.postedInline).toBe(3);
+    expect(parseLedger(r.body)?.posted).toBe(3);
+  });
+
+  it('counts the POST-enforcement set — what submit actually sends', () => {
+    // The floor moves two of the three out of the posting set, so the
+    // recorded volume is one. Counting the drafts would record a number no
+    // comment list on the PR could corroborate.
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      severityFloor: 'critical',
+      criticalsInline: 1,
+      suggestionsInline: 2,
+      draftedComments: [
+        { path: 'a.ts', line: 1, body: '**[Critical]** boom' },
+        ...drafts(2),
+      ],
+    });
+    expect(r.floorEnforced).toHaveLength(2);
+    expect(r.postedInline).toBe(1);
+    expect(parseLedger(r.body)?.posted).toBe(1);
+  });
+
+  it('carries the previous round forward, giving one marker a two-round window', () => {
+    sideFile({ round: 4, posted: 7 });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 2,
+      draftedComments: drafts(2),
+    });
+    expect(r.prevPostedInline).toBe(7);
+    const l = parseLedger(r.body)!;
+    expect(l.round).toBe(5);
+    expect(l.posted).toBe(2);
+    expect(l.prevPosted).toBe(7);
+  });
+
+  it('records zero rather than dropping it — a converged round is the observation', () => {
+    sideFile({ round: 2, posted: 0 });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      draftedComments: [],
+    });
+    expect(r.postedInline).toBe(0);
+    expect(r.prevPostedInline).toBe(0);
+    const l = parseLedger(r.body)!;
+    expect(l.posted).toBe(0);
+    expect(l.prevPosted).toBe(0);
+  });
+
+  it('distinguishes "recorded nothing" from "posted nothing"', () => {
+    // Every round before the field shipped has no volume; reading that as
+    // zero would invent a trend point the predecessor never claimed.
+    sideFile({ round: 3 });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: drafts(1),
+    });
+    expect(r.prevPostedInline).toBeUndefined();
+    expect(parseLedger(r.body)?.prevPosted).toBeUndefined();
+    expect(parseLedger(r.body)?.posted).toBe(1);
+  });
+
+  it('refuses a side-file volume that is not one, without losing the round', () => {
+    // The side file is a JSON pr-context wrote, not a marker the parser
+    // already normalised — a malformed volume costs the trend point and
+    // must not cost the posture's round.
+    for (const bad of [-1, 2.5, 'seven', null]) {
+      sideFile({ round: 6, posted: bad });
+      const r = composeReview({
+        planPath: plan(),
+        modelId: 'm',
+        criticalsInline: 0,
+        suggestionsInline: 1,
+        draftedComments: drafts(1),
+      });
+      expect(r.prevPostedInline).toBeUndefined();
+      expect(parseLedger(r.body)?.round).toBe(7);
+    }
+  });
+
+  it('keeps the volume on a round whose anchor is withheld', () => {
+    // The anchor pair falls on a fail-closed round; the volume does not.
+    // A trend that goes blank exactly when a PR starts capping would be
+    // blind on the rounds it exists to describe.
+    const r = composeReview({
+      planPath: plan({ fetchedSha: 'deadbeef00112233' }),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 2,
+      draftedComments: drafts(2),
+      cannotTellCriticals: ['a.ts:1 — could not decide'],
+    });
+    const l = parseLedger(r.body)!;
+    expect(l.sha).toBeUndefined();
+    expect(l.posted).toBe(2);
   });
 });
