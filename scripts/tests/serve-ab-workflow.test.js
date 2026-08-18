@@ -671,6 +671,48 @@ describe('serve-ab pre-checkout workspace wipe', () => {
   );
 
   it.skipIf(!hasGnuRealpath)(
+    'refuses to heal a sibling symlink sharing the runner workspace prefix',
+    () => {
+      // The heal arm's own strict-containment slash: the sibling fixture
+      // above is a plain directory, so no heal fires there and only the
+      // allowlist's slash is pinned. Drop the slash from the heal's
+      // "$RWS"/* and this raw path matches — the heal then deletes the
+      // link and mkdirs OUTSIDE the runner workspace before the allowlist
+      // refuses the wipe, the exact "worse than a skipped wipe" case.
+      const dir = realpathSync(
+        mkdtempSync(join(tmpdir(), 'serve-ab-wipe-healsib-')),
+      );
+      const evil = `${dir}-evil`;
+      mkdirSync(join(dir, 'sibling'));
+      mkdirSync(evil);
+      const ws = join(evil, 'ws');
+      symlinkSync(join(dir, 'sibling'), ws);
+      try {
+        const calls = join(dir, 'rm-calls');
+        writeFileSync(calls, '');
+        writeFileSync(
+          join(dir, 'rm'),
+          `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\nexit 0\n`,
+          { mode: 0o755 },
+        );
+        const res = runHeal(dir, {
+          GITHUB_WORKSPACE: ws,
+          RUNNER_WORKSPACE: dir,
+        });
+        expect(res.status).not.toBe(0);
+        expect(res.stdout + res.stderr).toContain(
+          'outside the runner workspace',
+        );
+        expect(readFileSync(calls, 'utf8')).toBe('');
+        expect(lstatSync(ws).isSymbolicLink()).toBe(true);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+        rmSync(evil, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!hasGnuRealpath)(
     'refuses a symlinked workspace planted outside the runner workspace',
     () => {
       // The heal matches the RAW path: a symlink whose own location is

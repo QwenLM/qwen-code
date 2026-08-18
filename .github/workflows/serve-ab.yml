@@ -84,8 +84,10 @@ jobs:
           # This wipe used to run unguarded — `set -u` stopped an UNSET
           # workspace and nothing else, so an empty or mangled one reached
           # `rm -rf` unchallenged. The layers below are the guard back-ported
-          # from the review workflow's checkout heal (#9220, #9265, #9277),
-          # plus the heal for symlinked workspaces: canonicalize FAIL-CLOSED
+          # from the checkout-heal idiom (#9220, #9265, #9277) — these copies
+          # are the hardened variant; the review workflow's own copy stays
+          # fail-open by design, do not re-sync from it — plus the heal for
+          # symlinked workspaces: canonicalize FAIL-CLOSED
           # (a wipe pointed at the wrong path is far worse than a skipped
           # wipe; `-m` is GNU-only — a BSD realpath exits 1 on it, so off-GNU
           # the step refuses rather than matching a raw, possibly misleading

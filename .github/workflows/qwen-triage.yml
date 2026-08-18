@@ -2589,8 +2589,10 @@ jobs:
           # Refuse to run anywhere unexpected: a wipe pointed at the wrong
           # path by a mangled env is far worse than a skipped wipe, and
           # this job cannot proceed safely without it either way. The layers
-          # below are the guard from qwen-code-pr-review.yml's checkout heal
-          # (#9220, #9265, #9277), plus the heal for symlinked workspaces:
+          # below are the guard from the checkout-heal idiom (#9220, #9265,
+          # #9277) — these copies are the hardened variant; the review
+          # workflow's own copy stays fail-open by design, do not re-sync
+          # from it — plus the heal for symlinked workspaces:
           # measured on main, the bare denylist let non-canonical spellings
           # of the guarded roots through (/home/, /home/., //usr, /root/,
           # /var/ all reached the rm). Canonicalize FAIL-CLOSED before
