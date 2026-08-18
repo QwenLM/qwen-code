@@ -345,19 +345,24 @@ The omissions matter as much as the verbs:
 | `ask`      | broadcast — deciding _whom_ to ask is itself worth forcing           |
 | `decision` | get resolved by an agent; that would defeat the point of the noun    |
 
-Grammar is `<noun> <verb>`, matching herdr's shape (`herdr pane split-right`) without
-borrowing its words (§8). One verb is ceded deliberately: **`read` belongs to herdr**, where
-it means screen capture. We never scrape a screen, so we never use it.
+Verbs are flat under one `board` namespace rather than nested per noun — `board claim t-3`,
+not `board task claim t-3` — because **the id prefix already carries the noun**: `t-` task,
+`a-` ask, `d-` decision. Two levels instead of three is worth the shortening for a surface an
+agent types on every turn, and it is the reason §2.9 makes ids short and prefixed rather than
+UUIDs.
+
+One verb is ceded deliberately: **`read` belongs to herdr**, where it means screen capture.
+We never scrape a screen, so we never use it.
 
 ```
-qwen session  list
-qwen task     list | create | claim <id> | update <id> [--status …] [--note …]
-qwen ask      <session> "<q>" | list [--wait] | answer <id> "<a>"
-qwen decision list [--wait] | raise --kind … --about <task> | resolve <id> --approve|--reject
+qwen board show | watch [--interval …]
+qwen board task <subject> [--owner …] | claim <id> | done <id> [--note …]
+qwen board ask <name> "<q>" [--wait] | answer <id> "<a>" | decline <id> "<why>"
+qwen board raise "<what>" [--kind …] [--about <id>] | resolve <id> --approve|--reject
 ```
 
-Every push has a pull equivalent — `ask list --wait`, `task list --mine`,
-`decision list --wait`. That is the sole condition for heterogeneous participation (§2.6),
+Every push has a pull equivalent — `board ask … --wait`, `board show`, `board watch`. That is
+the sole condition for heterogeneous participation (§2.6),
 and it doubles as a standing design check: **a capability with no pull form permanently
 excludes every agent we did not write.**
 
@@ -396,7 +401,7 @@ on for one goal. Never an ownership lock over the board.
 must be able to refuse before anything can be sent to it. That argument is adopted in full.
 Its scope is what changed — it constrains a **push** path, and v1 has none.
 
-Fetching does not need a gate. A participant that runs `qwen ask list` has chosen the moment,
+Fetching does not need a gate. A participant that runs `qwen board show` has chosen the moment,
 is at a boundary of its own turn, and can simply not run it. There is no arriving item to
 hold, deny or expire, so the entire hold/receipt machinery has nothing to act on. A gate here
 would guard a door nobody can open.
@@ -563,7 +568,7 @@ them", which is the exact authority the design refuses to let anything but a hum
 layer.
 
 **IDs are short because humans type them.** `a-7`, `d-2`, `t-3` go into
-`qwen decision resolve d-2 --approve`. UUIDs would make the CLI unusable by hand, and the CLI
+`qwen board resolve d-2 --approve`. UUIDs would make the CLI unusable by hand, and the CLI
 is the contract (§0.1) — a surface that is painful for a person is a surface that will be
 wrapped, and the wrapper becomes the real contract.
 
@@ -597,9 +602,9 @@ them is not something a peer can do — it needs authority, so it becomes a `dec
 ### 3.3 Questions
 
 ```
-A: qwen ask <name> "…"          → written to the board, state `open`
-B: qwen ask list                → sees it whenever B next looks
-B: qwen ask answer <id> "…"     → state `answered`; A sees the answer when A next looks
+A: qwen board ask <name> "…"      → written to the board, state `open`
+B: qwen board show                → sees it whenever B next looks
+B: qwen board answer <id> "…"     → state `answered`; A sees it when A next looks
 ```
 
 `ask`'s three terminal states carry the whole value: `answered`, `declined`, and `timeout`
@@ -614,7 +619,7 @@ asks on the board, not two stalled intentions. No participant can see this about
 
 Anything needing authority is raised as a `decision` and resolved by the human (§2.4).
 Approval, acceptance of a result, and adjudication of conflicting results are one act with
-one destination. `qwen decision list` is the exception view — the thing worth putting on a
+one destination. `qwen board watch` is the exception view — the thing worth putting on a
 screen, because it is the only category that stalls until a person acts.
 
 ### 3.5 Reporting
@@ -693,10 +698,11 @@ No transport, no delivery, no gate. Items are written and read.
 ### Stage 2 — the CLI over the board
 
 ```
-qwen session  list
-qwen task     list | create | claim <id> | update <id> [--status …] [--note …]
-qwen ask      <name> "<q>" | list [--wait] | answer <id> "<a>"
-qwen decision list [--wait] | raise --kind … --about <task> | resolve <id> --approve|--reject
+qwen board show | watch [--interval …]
+qwen board task <subject> [--owner …] | claim <id> | done <id> [--note …]
+qwen board ask <name> "<q>" [--wait] | answer <id> "<a>" | decline <id> "<why>"
+qwen board raise "<what>" [--kind …] [--about <id>] | resolve <id> --approve|--reject
+qwen fleet up [goal] [--agents N] [--with <command>]
 ```
 
 `--json` everywhere for machine consumption. Fail-open when there is no board, following
@@ -709,9 +715,24 @@ branch without parsing. `fs.watch` is the obvious later optimisation and changes
 semantics; it is not v1 because its behaviour differs across platforms and network
 filesystems, and polling a directory this small is not the bottleneck.
 
-This is the stage that satisfies the requirement, and it is worth stating why it is only ~350
-lines: the board, the lock protocol and the claim semantics already exist (§1.1). What is new
-is a surface over them.
+`fleet up` writes no terminal code. tmux already provides panes, per-pane working
+directories, keyboard switching, zoom, detach, and a server that keeps processes alive when
+the client goes away — and `agents/backends/tmux-commands.ts` already wraps its CLI (503
+lines: `verifyTmux`, `tmuxNewSession`, `tmuxNewWindow`, `tmuxSplitWindow`, `tmuxSendKeys`,
+`tmuxSelectPane*`). The command sequences those calls and adds the one thing tmux cannot know
+about: a pane showing the board. Agents start via the `command` argument at split time rather
+than keys typed afterwards, so no keystroke can land before a shell is ready. `--with` runs
+any other binary in its own pane, which is how a foreign agent joins.
+
+This is the stage that satisfies the requirement.
+
+**Sizing correction.** An earlier revision put this at ~350 lines on the grounds that the
+board and lock protocol already exist. It landed at roughly three times that, because
+`agents/team/tasks.ts` could not be reused: it is Agent Team's in-session list, carrying
+dependency edges, reciprocal-update rules and an in-process change emitter its scheduler
+subscribes to, under a different storage root. Reusing it would have meant rewriting that
+scheduler; a separate `board-tasks.ts` on the board layout was the smaller change. The two
+converge later.
 
 ### Stage 3 — Qwen-native surfaces
 
