@@ -87,7 +87,7 @@ export type MountedDialog =
   | { dialog: 'hooks' }
   | { dialog: 'rewind' }
   | { dialog: 'diff' }
-  | { dialog: 'arena' }
+  | { dialog: 'arena'; mode: 'start' | 'select' | 'stop' | 'status' }
   | { dialog: 'subagent_create' }
   | { dialog: 'subagent_list' }
   | {
@@ -230,7 +230,10 @@ export function resolveDialogRequest(
     case 'diff':
       return { kind: 'mount', dialog: { dialog: 'diff' } };
     case 'arena':
-      return { kind: 'mount', dialog: { dialog: 'arena' } };
+      return {
+        kind: 'mount',
+        dialog: { dialog: 'arena', mode: request.mode },
+      };
     case 'subagent_create':
       return { kind: 'mount', dialog: { dialog: 'subagent_create' } };
     case 'subagent_list':

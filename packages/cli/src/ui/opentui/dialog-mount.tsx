@@ -71,10 +71,10 @@ import {
   OpenTuiHooksDialog,
   OpenTuiRewindDialog,
   OpenTuiDiffDialog,
-  OpenTuiArenaDialog,
   OpenTuiSubagentCreateDialog,
   OpenTuiSubagentListDialog,
 } from './dialogs-misc.js';
+import { OpenTuiArenaDialog } from './dialogs-arena.js';
 import {
   addPermissionRule,
   applyMcpServerAction,
@@ -121,6 +121,8 @@ export interface OpenTuiDialogMountProps {
   onResume?: (sessionId: string) => void;
   /** Rewind selector data (turns come from the backend transcript). */
   rewind?: OpenTuiRewindData;
+  /** Fill the composer without submitting (arena start model selection). */
+  onFillInput?: (text: string) => void;
 }
 
 function HelpDialogHost(props: {
@@ -249,9 +251,8 @@ function SettingsDialogHost(props: {
           return;
         }
         if (settingName === 'general.preferredEditor') {
-          props.notify(
-            "The 'editor' dialog is not yet available in the OpenTUI renderer.",
-          );
+          props.onNavigate({ dialog: 'editor' });
+          return;
         }
         props.onClose();
       }}
@@ -512,6 +513,7 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
           config={config}
           settings={settings}
           onClose={onClose}
+          notify={notify}
         />
       )}
       {dialog.dialog === 'auth' && (
@@ -587,8 +589,10 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
       {dialog.dialog === 'arena' && (
         <OpenTuiArenaDialog
           config={config}
-          settings={settings}
+          mode={dialog.mode}
           onClose={onClose}
+          notify={notify}
+          onFillInput={props.onFillInput}
         />
       )}
       {dialog.dialog === 'subagent_create' && (

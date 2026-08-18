@@ -14,10 +14,30 @@
  * editor) are compact here and get fidelity passes in M4.
  */
 
-import { useEffect, useLayoutEffect, useState, type ReactNode } from 'react';
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from 'react';
 import { useRenderer, useKeyboard } from '@opentui/react';
-import type { Config, SessionListItem } from '@qwen-code/qwen-code-core';
-import type { LoadedSettings } from '../../config/settings.js';
+import type {
+  Config,
+  EditorType,
+  SessionListItem,
+} from '@qwen-code/qwen-code-core';
+import {
+  allowEditorTypeInSandbox,
+  checkHasEditorType,
+  isEditorAvailable,
+} from '@qwen-code/qwen-code-core';
+import { SettingScope, type LoadedSettings } from '../../config/settings.js';
+import {
+  EDITOR_DISPLAY_NAMES,
+  editorSettingsManager,
+} from '../editors/editorSettingsManager.js';
+import { getScopeItems } from '../../utils/dialogScopeUtils.js';
 import { toOriginalKey } from './key-map.js';
 import { fireSessionDeleteHook } from '../../hooks/session-delete-hook.js';
 import { C } from './theme.js';
@@ -89,16 +109,198 @@ type P = {
   onSelect?: (sessionId: string) => void;
 };
 
-export function OpenTuiEditorDialog({ config, onClose }: P) {
+/**
+ * ink BaseSelectionList navigation parity: arrow keys clamp at the edges and
+ * skip disabled entries (keeps walking in the same direction; stays put when
+ * no enabled entry remains in that direction).
+ */
+export function nextEnabledIndex(
+  items: ReadonlyArray<{ disabled?: boolean }>,
+  current: number,
+  delta: 1 | -1,
+): number {
+  let next = current;
+  for (let i = 0; i < items.length; i++) {
+    next = Math.min(items.length - 1, Math.max(0, next + delta));
+    if (!items[next]?.disabled) return next;
+    if (next === 0 || next === items.length - 1) break;
+  }
+  return current;
+}
+
+/**
+ * ink EditorSettingsDialog parity: two-pane dialog — left a radio list of
+ * available editors (unavailable ones disabled, like RadioButtonSelect over
+ * editorSettingsManager displays), Tab switches to the User/Workspace scope
+ * list and back; right pane shows the merged preference. Enter persists via
+ * settings.setValue (useEditorSettings.handleEditorSelect guard included).
+ */
+export function OpenTuiEditorDialog({ settings, onClose, notify }: P) {
   useEsc(onClose);
-  const editor = (
-    config as { getPreferredEditor?: () => string }
-  )?.getPreferredEditor?.();
+  const editors = useMemo(
+    () => editorSettingsManager.getAvailableEditorDisplays(),
+    [],
+  );
+  const [mode, setMode] = useState<'editor' | 'scope'>('editor');
+  const [scope, setScope] = useState<SettingScope>(SettingScope.User);
+  const scopeIndexOf = (s: SettingScope) => {
+    const pref = settings.forScope(s).settings.general?.preferredEditor;
+    const idx = pref ? editors.findIndex((e) => e.type === pref) : 0;
+    return idx >= 0 ? idx : 0;
+  };
+  const [sel, setSel] = useState(() => scopeIndexOf(SettingScope.User));
+  const scopeItems = useMemo(() => getScopeItems(), []);
+  const [scopeSel, setScopeSel] = useState(0);
+
+  // ink: highlighting a scope previews that scope's current preference.
+  const highlightScope = (idx: number) => {
+    const item = scopeItems[idx];
+    if (!item) return;
+    setScope(item.value);
+  };
+  const applyScope = () => {
+    const item = scopeItems[scopeSel];
+    if (!item) return;
+    setScope(item.value);
+    setSel(scopeIndexOf(item.value));
+    setMode('editor');
+  };
+
+  const moveEditor = (d: 1 | -1) =>
+    setSel((s) => nextEnabledIndex(editors, s, d));
+
+  const pick = () => {
+    const item = editors[sel];
+    if (!item || item.disabled) return;
+    const editorType = item.type === 'not_set' ? undefined : item.type;
+    if (
+      editorType &&
+      (!checkHasEditorType(editorType) || !allowEditorTypeInSandbox(editorType))
+    ) {
+      return;
+    }
+    try {
+      settings.setValue(scope, 'general.preferredEditor', editorType);
+      notify?.(
+        `Editor preference ${editorType ? `set to "${editorType}"` : 'cleared'} in ${scope} settings.`,
+      );
+    } catch {
+      return;
+    }
+    onClose();
+  };
+
+  useKeyboard((key) => {
+    const o = toOriginalKey(key);
+    if (o.name === 'tab') {
+      setMode((m) => (m === 'editor' ? 'scope' : 'editor'));
+    } else if (o.name === 'up' || o.name === 'down') {
+      const d = o.name === 'up' ? -1 : 1;
+      if (mode === 'editor') {
+        moveEditor(d);
+      } else {
+        const next = Math.min(scopeItems.length - 1, Math.max(0, scopeSel + d));
+        setScopeSel(next);
+        highlightScope(next);
+      }
+    } else if (o.name === 'return') {
+      if (mode === 'editor') pick();
+      else applyScope();
+    }
+  });
+
+  const otherScope =
+    scope === SettingScope.User ? SettingScope.Workspace : SettingScope.User;
+  const otherModified =
+    settings.forScope(otherScope).settings.general?.preferredEditor !==
+    undefined;
+  const scopeMessage = otherModified
+    ? settings.forScope(scope).settings.general?.preferredEditor !== undefined
+      ? `(Also modified in ${otherScope})`
+      : `(Modified in ${otherScope})`
+    : '';
+
+  const merged = settings.merged.general?.preferredEditor;
+  const mergedName =
+    merged && isEditorAvailable(merged as EditorType)
+      ? EDITOR_DISPLAY_NAMES[merged as EditorType]
+      : 'None';
+
   return (
     <Shell title="Editor" onClose={onClose}>
-      <box flexDirection="column" marginTop={1}>
-        <Row label="Preferred editor:" value={editor ?? '(none)'} />
-        <text fg={C.dim}>{'Set via /settings or $EDITOR/$VISUAL.'}</text>
+      <box flexDirection="row" marginTop={1}>
+        <box flexDirection="column" width="45%" paddingRight={2}>
+          {mode === 'editor' ? (
+            <box flexDirection="column">
+              <box flexDirection="row">
+                <text fg={C.text} attributes={1}>
+                  {'> Select Editor '}
+                </text>
+                <text fg={C.dim}>{scopeMessage}</text>
+              </box>
+              <box flexDirection="column" marginTop={1}>
+                {editors.map((e, i) => (
+                  <box key={e.type} flexDirection="row">
+                    <text fg={i === sel ? C.accent : C.dim}>
+                      {i === sel ? '● ' : '○ '}
+                    </text>
+                    <text
+                      fg={e.disabled ? C.dim : i === sel ? C.text : C.dim}
+                      attributes={!e.disabled && i === sel ? 1 : 0}
+                    >
+                      {e.name}
+                    </text>
+                  </box>
+                ))}
+              </box>
+            </box>
+          ) : (
+            <box flexDirection="column">
+              <text fg={C.text} attributes={1}>
+                {'> Apply To'}
+              </text>
+              <box flexDirection="column" marginTop={1}>
+                {scopeItems.map((s, i) => (
+                  <box key={s.value} flexDirection="row">
+                    <text fg={i === scopeSel ? C.accent : C.dim}>
+                      {i === scopeSel ? '● ' : '○ '}
+                    </text>
+                    <text fg={i === scopeSel ? C.text : C.dim}>{s.label}</text>
+                  </box>
+                ))}
+              </box>
+            </box>
+          )}
+          <box marginTop={1}>
+            <text fg={C.dim}>
+              {mode === 'editor'
+                ? '(Use Enter to select, Tab to configure scope)'
+                : '(Use Enter to apply scope, Tab to go back)'}
+            </text>
+          </box>
+        </box>
+        <box flexDirection="column" width="55%" paddingLeft={2}>
+          <text fg={C.text} attributes={1}>
+            {'Editor Preference'}
+          </text>
+          <box marginTop={1} flexDirection="column">
+            <text fg={C.dim}>
+              {
+                'These editors are currently supported. Please note that some editors cannot be used in sandbox mode.'
+              }
+            </text>
+            <box flexDirection="row">
+              <text fg={C.dim}>{'Your preferred editor is: '}</text>
+              <text
+                fg={mergedName === 'None' ? C.red : C.accent}
+                attributes={1}
+              >
+                {mergedName}
+              </text>
+              <text fg={C.dim}>{'.'}</text>
+            </box>
+          </box>
+        </box>
       </box>
     </Shell>
   );
@@ -434,17 +636,6 @@ export function OpenTuiDiffDialog({ onClose }: P) {
           ))
         )}
       </scrollbox>
-    </Shell>
-  );
-}
-
-export function OpenTuiArenaDialog({ onClose }: P) {
-  useEsc(onClose);
-  return (
-    <Shell title="Arena" onClose={onClose}>
-      <box flexDirection="column" marginTop={1}>
-        <text fg={C.dim}>{'Multi-model arena sessions.'}</text>
-      </box>
     </Shell>
   );
 }

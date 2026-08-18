@@ -2646,6 +2646,7 @@ function App({
           onApprovalModeChanged={switchApprovalMode}
           onResume={(sessionId) => void host.handleResume(sessionId)}
           rewind={rewindData}
+          onFillInput={(text) => composerHandle.current?.setText(text)}
         />
       )}
     </box>
