@@ -44,6 +44,7 @@ import {
   type WebSearchSettings,
   MAX_SUBAGENT_DEPTH_LIMIT,
   addDaemonRequestAttribute,
+  SessionIdCaseConflictError,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
@@ -2068,12 +2069,23 @@ export async function loadCliConfig(
     sessionId = argv.sandboxSessionId;
   } else if (argv['sessionId']) {
     // Use provided session ID without session resumption
-    // Check if session ID is already in use
+    // Check if session ID is already in use — case-insensitively: a legacy
+    // mixed-case transcript still occupies the id, and creating a
+    // case-only twin would make both spellings permanently unrestorable.
     const sessionService = new SessionService(cwd);
-    const exists = await sessionService.sessionExistsInAnyState(
-      argv['sessionId'],
-    );
-    if (exists) {
+    let occupied: boolean;
+    try {
+      occupied =
+        (await sessionService.findSessionIdIgnoringCase(argv['sessionId'])) !==
+        undefined;
+    } catch (error) {
+      if (error instanceof SessionIdCaseConflictError) {
+        occupied = true;
+      } else {
+        throw error;
+      }
+    }
+    if (occupied) {
       const message = `Error: Session Id ${argv['sessionId']} already exists (active or archived). Delete or unarchive it first.`;
       if (throwOnSessionIdConflict) {
         throw new SessionIdConflictError(argv['sessionId'], message);
