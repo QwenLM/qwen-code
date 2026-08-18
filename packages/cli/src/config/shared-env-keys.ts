@@ -182,13 +182,14 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   'QWEN_CDP_MCP_COMMAND',
   'QWEN_DAEMON_URL',
   'QWEN_SERVE_CDP_TUNNEL_OVER_WS',
-  // QWEN_DAEMON_URL picks which daemon the shared-chrome-bridge boot path
-  // rewires the user's chrome-devtools MCP server at. A project `.env`
-  // fixing it points the reroute probe (and the spawned adapter's WS
-  // endpoint) at an attacker-controlled host — the same hijack class as
-  // QWEN_CLI_ENTRY; daemon-worker already rejects non-loopback values for
-  // this variable. Home-scoped `.env` stays exempt.
-  'QWEN_DAEMON_URL',
+  // QWEN_SERVE_NEW_FILE_MODE decides the creation mode of every agent-written
+  // NEW file (owner-only 0600 vs umask-derived). A project `.env` flipping it
+  // to `system` would silently widen file visibility daemon-wide — including
+  // files written for OTHER workspaces — with no warning, since `system` is a
+  // valid value. The fail-closed 0600 posture is an operator decision
+  // (documented as a per-daemon opt-in), so only the daemon's launch
+  // environment or a home `.env` may set it.
+  'QWEN_SERVE_NEW_FILE_MODE',
   // DEV gates the daemon's inherited-loader-env scrub (run-qwen-serve.ts);
   // only the dev harness (scripts/dev.js) stamps it into the launch env. A
   // project file setting it would silently keep loader vars in the base env
