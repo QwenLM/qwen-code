@@ -699,6 +699,13 @@ export function describeWorkerTlsTrustGaps(opts: {
   certPath: string;
   daemonUrl: string;
   operatorCaCertPath?: string;
+  /**
+   * Contents of `operatorCaCertPath`, when it was readable. A path alone says
+   * nothing — a typo'd, unrelated or unloadable NODE_EXTRA_CA_CERTS anchors
+   * exactly as little as no CA at all, and treating "the variable is set" as
+   * coverage is what silenced the warning in the cases it was written for.
+   */
+  operatorCaCert?: Buffer;
 }): string[] {
   // A serving file is routinely a fullchain (leaf + issuing CA in one PEM),
   // and the supervisor injects the whole file as the workers'
@@ -711,21 +718,55 @@ export function describeWorkerTlsTrustGaps(opts: {
     return [];
   }
   const gaps: string[] = [];
+  // Exactly what a worker gets: the serving file merged with the operator's
+  // CA file (see resolveWorkerCaCertPath in channel-worker-supervisor.ts).
+  const workerTrustStore = opts.operatorCaCert
+    ? [...chain, ...parseCertChain(opts.operatorCaCert)]
+    : chain;
   // A leaf in NODE_EXTRA_CA_CERTS is a usable trust anchor only when it signed
   // itself: chain verification has no PARTIAL_CHAIN flag here, so a CA-issued
   // leaf (what the `mkcert` flow this project documents produces) never
-  // terminates the chain. An operator-set NODE_EXTRA_CA_CERTS is merged into
-  // the worker bundle and may already carry the issuing root, so only flag the
-  // case where the leaf is all the worker gets.
-  if (!opts.operatorCaCertPath && !chainIsSelfAnchored(chain)) {
+  // terminates the chain — unless something else in the worker's bundle
+  // carries the issuer that does.
+  const anchorPath = walkWorkerAnchorPath(workerTrustStore);
+  if (!anchorPath.anchored) {
     gaps.push(
       `--tls-cert "${opts.certPath}" is issued by another CA ` +
-        `(${x509.issuer.replace(/\r?\n/g, ', ')}), not self-signed, so the ` +
-        `certificate alone cannot anchor the channel workers' trust — every ` +
-        `worker handshake to the daemon will fail ` +
-        `UNABLE_TO_VERIFY_LEAF_SIGNATURE. Point NODE_EXTRA_CA_CERTS at the ` +
+        `(${x509.issuer.replace(/\r?\n/g, ', ')}), not self-signed, and ` +
+        `${
+          opts.operatorCaCertPath
+            ? `NODE_EXTRA_CA_CERTS "${opts.operatorCaCertPath}" does not ` +
+              `carry a certificate that anchors it`
+            : `no NODE_EXTRA_CA_CERTS is set`
+        }, so nothing in the channel workers' bundle anchors their trust — ` +
+        `every worker handshake to the daemon will fail ` +
+        `UNABLE_TO_VERIFY_LEAF_SIGNATURE unless the issuing CA is already in ` +
+        `the workers' default trust store. Point NODE_EXTRA_CA_CERTS at the ` +
         `issuing CA (for mkcert: "$(mkcert -CAROOT)/rootCA.pem") and restart.`,
     );
+  }
+  // `X509Certificate.verify` checks signatures only and never consults dates,
+  // so an expired root or intermediate anchors "fine" here while every worker
+  // handshake fails CERT_HAS_EXPIRED. Boot validation covers the leaf alone.
+  const now = Date.now();
+  for (const member of anchorPath.path) {
+    if (member.fingerprint256 === x509.fingerprint256) continue;
+    const subject = member.subject.replace(/\r?\n/g, ', ');
+    if (new Date(member.validTo).getTime() < now) {
+      gaps.push(
+        `--tls-cert "${opts.certPath}" chains through "${subject}", which ` +
+          `expired on ${member.validTo} — every worker handshake to the ` +
+          `daemon will fail CERT_HAS_EXPIRED. Renew that chain member and ` +
+          `restart.`,
+      );
+    } else if (new Date(member.validFrom).getTime() > now) {
+      gaps.push(
+        `--tls-cert "${opts.certPath}" chains through "${subject}", which is ` +
+          `not yet valid (validFrom: ${member.validFrom}) — every worker ` +
+          `handshake to the daemon will fail CERT_NOT_YET_VALID. Check that ` +
+          `chain member's notBefore date or the system clock.`,
+      );
+    }
   }
   const host = workerDialHost(opts.daemonUrl);
   if (host && !certCoversHost(x509, host)) {
@@ -788,16 +829,24 @@ function certIssuedBy(cert: X509Certificate, issuer: X509Certificate): boolean {
 }
 
 /**
- * Whether the leaf's chain terminates inside the file itself. Workers get the
- * whole file as their trust store, so a fullchain that walks up to a
- * self-signed root anchors fine even though the leaf never could alone.
+ * Walks the leaf up through the certificates the workers actually hold, and
+ * reports both whether the walk terminated on a self-signed anchor and the
+ * certificates it relied on. Workers get the whole bundle as their trust
+ * store, so a fullchain that walks up to a self-signed root anchors fine even
+ * though the leaf never could alone — and every member the walk leaned on is
+ * a member whose own validity window the handshake will enforce.
  */
-function chainIsSelfAnchored(chain: readonly X509Certificate[]): boolean {
+function walkWorkerAnchorPath(chain: readonly X509Certificate[]): {
+  anchored: boolean;
+  path: readonly X509Certificate[];
+} {
   let next: X509Certificate | undefined = chain[0];
   const walked = new Set<string>();
+  const path: X509Certificate[] = [];
   while (next) {
     const current: X509Certificate = next;
-    if (isSelfSignedCert(current)) return true;
+    path.push(current);
+    if (isSelfSignedCert(current)) return { anchored: true, path };
     walked.add(current.fingerprint256);
     next = chain.find(
       (candidate) =>
@@ -805,7 +854,7 @@ function chainIsSelfAnchored(chain: readonly X509Certificate[]): boolean {
         certIssuedBy(current, candidate),
     );
   }
-  return false;
+  return { anchored: false, path };
 }
 
 /**
@@ -7275,13 +7324,22 @@ async function runQwenServeImpl(
             tlsOptions !== undefined,
           );
           if (tlsOptions && tlsCertPath) {
+            const operatorCaCertPath = process.env['NODE_EXTRA_CA_CERTS'];
+            let operatorCaCert: Buffer | undefined;
+            if (operatorCaCertPath) {
+              try {
+                operatorCaCert = fs.readFileSync(operatorCaCertPath);
+              } catch {
+                // Unreadable: it anchors nothing, which is what the gap check
+                // concludes from the missing contents.
+              }
+            }
             for (const gap of describeWorkerTlsTrustGaps({
               cert: tlsOptions.cert,
               certPath: tlsCertPath,
               daemonUrl: workerDaemonUrl,
-              ...(process.env['NODE_EXTRA_CA_CERTS']
-                ? { operatorCaCertPath: process.env['NODE_EXTRA_CA_CERTS'] }
-                : {}),
+              ...(operatorCaCertPath ? { operatorCaCertPath } : {}),
+              ...(operatorCaCert ? { operatorCaCert } : {}),
             })) {
               daemonLog.warn(gap);
             }

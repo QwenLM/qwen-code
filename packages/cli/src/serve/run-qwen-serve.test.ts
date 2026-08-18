@@ -1286,6 +1286,14 @@ B6U6dT+UdA==
 describe('describeWorkerTlsTrustGaps', () => {
   const daemonUrl = 'https://127.0.0.1:4170';
 
+  /** The issuing root of TEST_TLS_CERT_FULLCHAIN, on its own. */
+  const fullchainRootPem = (): string => {
+    const blocks = TEST_TLS_CERT_FULLCHAIN.match(
+      /-----BEGIN CERTIFICATE-----[^-]*-----END CERTIFICATE-----/g,
+    );
+    return `${blocks!.at(-1)}\n`;
+  };
+
   it('reports nothing for a self-signed cert covering the dialled host', () => {
     expect(
       describeWorkerTlsTrustGaps({
@@ -1307,13 +1315,116 @@ describe('describeWorkerTlsTrustGaps', () => {
     expect(gaps[0]).toContain('qwen test root CA');
   });
 
-  it('stays quiet about a CA-issued cert when the operator supplies a CA', () => {
+  it('stays quiet when the operator CA actually anchors the chain', () => {
+    // R2-3: BEHAVIOUR FLIP. A set `operatorCaCertPath` used to suppress this
+    // gap on its own. A typo'd, unrelated or unloadable NODE_EXTRA_CA_CERTS
+    // anchors exactly as little as no CA at all, so coverage is now judged on
+    // the file's contents — the certificates the workers really receive.
     expect(
       describeWorkerTlsTrustGaps({
-        cert: Buffer.from(TEST_TLS_CERT_CA_ISSUED),
+        cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_LEAF_ONLY),
         certPath: '/certs/daemon.pem',
         daemonUrl,
         operatorCaCertPath: '/certs/rootCA.pem',
+        operatorCaCert: Buffer.from(fullchainRootPem()),
+      }),
+    ).toEqual([]);
+  });
+
+  it('still names the gap when the operator CA does not anchor the chain', () => {
+    // R2-3(a): the merge in resolveWorkerCaCertPath cannot make an unrelated
+    // CA anchor this leaf, so the operator lands in exactly the boot-green /
+    // workers-looping mode this warning exists to name.
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_CA_ISSUED),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+      operatorCaCertPath: '/certs/unrelated.pem',
+      operatorCaCert: Buffer.from(fullchainRootPem()),
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('UNABLE_TO_VERIFY_LEAF_SIGNATURE');
+    expect(gaps[0]).toContain('/certs/unrelated.pem');
+  });
+
+  it('still names the gap when the operator CA path is unreadable', () => {
+    // R2-3(a): a set-but-unreadable path reaches the check with no contents.
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_CA_ISSUED),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+      operatorCaCertPath: '/certs/typo.pem',
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('UNABLE_TO_VERIFY_LEAF_SIGNATURE');
+    expect(gaps[0]).toContain('/certs/typo.pem');
+  });
+
+  it('softens the leaf-anchor gap for a CA already in the default trust store', () => {
+    // R2-3(c): the static model cannot see the workers' default trust store,
+    // so an issuer already anchored there makes this warning cry wolf. Say
+    // what the check actually knows instead of asserting a certain failure.
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_CA_ISSUED),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+    });
+    expect(gaps[0]).toContain(
+      "unless the issuing CA is already in the workers' default trust store",
+    );
+  });
+
+  it('names an expired chain member the signature-only walk accepts', () => {
+    // R2-3(b): `x509.verify` checks signatures and never consults dates, so an
+    // expired root anchors a fullchain "fine" here while every worker
+    // handshake fails CERT_HAS_EXPIRED. Boot validation covers the leaf alone,
+    // so nothing else would ever name it. The fixture root outlives its leaf
+    // by design, so the clock — not a second fullchain — is what moves.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2130-01-01T00:00:00Z'));
+    try {
+      const gaps = describeWorkerTlsTrustGaps({
+        cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN),
+        certPath: '/certs/fullchain.pem',
+        daemonUrl,
+      });
+      expect(gaps).toHaveLength(1);
+      expect(gaps[0]).toContain('CERT_HAS_EXPIRED');
+      expect(gaps[0]).toContain('qwen fullchain test root CA');
+      // The leaf's own dates are boot validation's job, not this warning's.
+      expect(gaps[0]).not.toContain('CN=localhost,');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('names a chain member whose validity window has not started', () => {
+    // Symmetric to the expiry branch: clock skew or a freshly minted root
+    // fails every handshake CERT_NOT_YET_VALID with the same silent boot.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2020-01-01T00:00:00Z'));
+    try {
+      const gaps = describeWorkerTlsTrustGaps({
+        cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN),
+        certPath: '/certs/fullchain.pem',
+        daemonUrl,
+      });
+      expect(gaps).toHaveLength(1);
+      expect(gaps[0]).toContain('CERT_NOT_YET_VALID');
+      expect(gaps[0]).toContain('qwen fullchain test root CA');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('says nothing about certificates outside the anchor path', () => {
+    // The bundle may carry unrelated CAs; only the members the leaf's walk
+    // leans on are members whose validity the handshake enforces.
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from(`${TEST_TLS_CERT}${TEST_TLS_CERT_EXPIRED}`),
+        certPath: '/certs/daemon.pem',
+        daemonUrl,
       }),
     ).toEqual([]);
   });
@@ -9210,6 +9321,75 @@ describe('runQwenServe channel worker supervisor', () => {
     } finally {
       await handle.close();
     }
+  });
+
+  async function bootTlsDaemonForTrustGapLog(
+    hostname: string,
+  ): Promise<string> {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-gap-')),
+    );
+    const certPath = path.join(tmpDir, 'cert.pem');
+    const keyPath = path.join(tmpDir, 'key.pem');
+    fs.writeFileSync(certPath, TEST_TLS_CERT);
+    fs.writeFileSync(keyPath, TEST_TLS_KEY);
+    const logBaseDir = path.join(tmpDir, 'debug');
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname,
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        tlsCert: certPath,
+        tlsKey: keyPath,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge: makeFakeBridge(),
+        channelWorkerSupervisorFactory: makeReadyWorkerFactory(worker),
+        channelServicePidfile: makePidfileDeps(),
+        daemonLogBaseDir: logBaseDir,
+      },
+    );
+    try {
+      await handle.runtimeReady;
+    } finally {
+      await handle.close();
+    }
+    return fs.readFileSync(
+      path.join(logBaseDir, 'daemon', 'daemon.log'),
+      'utf8',
+    );
+  }
+
+  it('writes a worker TLS trust gap to the daemon log at boot', async () => {
+    // R2-6: only the pure describeWorkerTlsTrustGaps was covered, so deleting
+    // this loop, inverting its `tlsOptions && tlsCertPath` guard or feeding it
+    // unresolved values all shipped green — and operators were back in the
+    // silent mode this diagnostic exists to end: daemon boots, /health green,
+    // every channel worker restart-looping with no log line saying why. The
+    // fixture cert covers 127.0.0.1 and localhost, so a ::1 bind is a real
+    // SAN gap on a cert that still pairs with its key and boots.
+    const log = await bootTlsDaemonForTrustGapLog('::1');
+
+    expect(log).toContain('ERR_TLS_CERT_ALTNAME_INVALID');
+    expect(log).toContain('::1');
+  });
+
+  it('keeps the daemon log quiet when the serving cert covers the dialled host', async () => {
+    // The other half of the wiring: a guard stuck on would bury real boot
+    // warnings under a gap every TLS daemon reports.
+    const log = await bootTlsDaemonForTrustGapLog('127.0.0.1');
+
+    expect(log).not.toContain('ERR_TLS_CERT_ALTNAME_INVALID');
+    expect(log).not.toContain('UNABLE_TO_VERIFY_LEAF_SIGNATURE');
   });
 
   it('forwards webhook tasks through the channel worker group', async () => {
