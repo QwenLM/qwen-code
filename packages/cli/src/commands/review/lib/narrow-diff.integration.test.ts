@@ -890,6 +890,61 @@ describe('narrowToDelta on real-git captures', () => {
     expect(everyLineIsDisplayed(narrowed!, full)).toBe(true);
   });
 
+  it('carries a divergent hunk whose bystander shares its changed text', () => {
+    // R9-1 entrance C: round 1 edits the line before the run AND deletes
+    // the R line standing after a separator; round 2 deletes one line OF
+    // the run. The full capture folds the run deletion into the
+    // front-of-run hunk; the delta places it at the run's back, where its
+    // new-side range overlaps the round-1 deletion hunk — a bystander
+    // carrying the SAME changed text (`-R`) at a different new-side
+    // junction. Corroboration keyed on bare text sees the bystander and
+    // stands down; the range join then carries the bystander alone and
+    // drops the front hunk that actually displays the deletion. The
+    // divergent hunk must still be carried.
+    const run = Array.from({ length: 20 }, () => 'R').join('\n') + '\n';
+    const front = 'F1\nF2\nF3\nF4\nF5\n';
+    const tail = 'T1\nT2\nT3\nT4\nT5\n';
+    const base = commit('shared-text base', {
+      'st-run.ts': front + 'B-LEAD\n' + run + 'SEP\nR\n' + tail,
+    });
+    const anchor = commit('shared-text round 1', {
+      'st-run.ts': front + 'B-LEAD-EDIT\n' + run + 'SEP\n' + tail,
+    });
+    commit('shared-text round 2', {
+      'st-run.ts':
+        front +
+        'B-LEAD-EDIT\n' +
+        Array.from({ length: 19 }, () => 'R').join('\n') +
+        '\n' +
+        'SEP\n' +
+        tail,
+    });
+
+    const full = capture(base, 'HEAD');
+    const deltaBytes = captureBytes(anchor, 'HEAD');
+    // The scenario's premise: the run deletion folded into the front hunk
+    // in full, the round-1 deletion as a tail hunk that shares the
+    // delta's changed text; the delta places the run deletion at the
+    // back, overlapping the bystander's range.
+    expect(full).toContain('@@ -3,8 +3,7 @@');
+    expect(full).toContain('@@ -25,7 +24,6 @@');
+    expect(full.match(/^-R$/gm)).toHaveLength(2);
+    expect(deltaBytes.toString('utf8')).toContain('@@ -23,7 +23,6 @@');
+    expect(deltaBytes.toString('utf8').match(/^-R$/gm)).toHaveLength(1);
+
+    const narrowed =
+      narrowToDelta(captureBytes(base, 'HEAD'), deltaBytes)?.toString('utf8') ??
+      null;
+    expect(narrowed).not.toBeNull();
+    // The front hunk — the only display of the round-2 deletion — is
+    // carried, and the bystander stays: the guard fails closed, so the
+    // whole section comes along. Over-inclusion is the chosen semantics.
+    expect(narrowed).toContain('@@ -3,8 +3,7 @@');
+    expect(narrowed).toContain('@@ -25,7 +24,6 @@');
+    expect(narrowed).toContain('+B-LEAD-EDIT');
+    expect(everyLineIsDisplayed(narrowed!, full)).toBe(true);
+  });
+
   it('accepts a delta whose deletion the PR diff performs too', () => {
     // The control for the deletion shape: head deletes lines that stood at
     // the base, so the delta's deletion hunk and the full capture's are the

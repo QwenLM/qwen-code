@@ -30,8 +30,9 @@
 //
 // The one judgment left — which of the full capture's hunks the delta's
 // ranges corroborate — fails closed the same way. A delta hunk no full hunk
-// corroborates (overlaps its new-side range AND shares a changed line with)
-// is a netted-out undo OR a Myers misplacement, and two alignment-dependent
+// corroborates (overlaps its new-side range AND shares a changed line with,
+// keyed by new-side junction) is a netted-out undo OR a Myers misplacement,
+// and two alignment-dependent
 // rendered diffs cannot tell those apart, so its section is emitted whole:
 // over-inclusion re-reviews lines GitHub displays, while a dropped change
 // would be certified unreviewed by the ledger.
@@ -155,12 +156,27 @@ export function narrowToDelta(
   // 1-based line numbers throughout, matching `parseDiff`'s own coordinates.
   const lines = fullText.split('\n');
 
-  /** A hunk's changed lines — its `+`/`-` records, context excluded. */
-  const changedLines = (textLines: string[], h: DiffHunk): string[] => {
+  /**
+   * A hunk's changed lines keyed by new-side junction — the `+`/`-` record
+   * joined to the new-side position it sits at. Both captures end at the
+   * same head commit, so a change both display sits at the same junction in
+   * both; a bystander that merely carries identical TEXT at a different
+   * junction does not corroborate. The walk advances the new-side cursor on
+   * ` `/`+` lines and not on `-`, the same cursor `parseDiff` keeps.
+   */
+  const changedLineKeys = (textLines: string[], h: DiffHunk): string[] => {
     const out: string[] = [];
+    let newLine = h.newStart;
     for (let n = h.diffStart + 1; n <= h.diffEnd; n++) {
       const l = textLines[n - 1];
-      if (l.startsWith('+') || l.startsWith('-')) out.push(l);
+      if (l.startsWith('+')) {
+        out.push(`${newLine}:${l}`);
+        newLine++;
+      } else if (l.startsWith('-')) {
+        out.push(`${newLine}:${l}`);
+      } else if (l === '' || l.startsWith(' ')) {
+        newLine++;
+      }
     }
     return out;
   };
@@ -187,8 +203,10 @@ export function narrowToDelta(
     // shape: it drops the full hunk displaying the change, and can publish
     // the bystander instead. A delta hunk is corroborated only by a full
     // hunk that BOTH overlaps its new-side range — so the join carries that
-    // full hunk — AND shares one of its changed lines — so the carried hunk
-    // displays the same change. A hunk no full hunk corroborates might be a
+    // full hunk — AND shares one of its changed lines at the same new-side
+    // junction — so the carried hunk displays the same change, and a
+    // bystander carrying identical text at a different junction cannot stand
+    // in for it. A hunk no full hunk corroborates might be a
     // netted-out undo, but it might equally be a misplacement the join is
     // about to drop, and the captures cannot tell the two apart — telling
     // them was the old oracle's shape, a heuristic proof over two
@@ -198,11 +216,11 @@ export function narrowToDelta(
     // by the ledger.
     if (
       (deltaHunks.get(file.path) ?? []).some((dh) => {
-        const dhChanged = new Set(changedLines(deltaLines, dh));
+        const dhChanged = new Set(changedLineKeys(deltaLines, dh));
         return !file.hunks.some(
           (fh) =>
             overlaps([fh.newStart, fh.newEnd], [dh.newStart, dh.newEnd]) &&
-            changedLines(lines, fh).some((l) => dhChanged.has(l)),
+            changedLineKeys(lines, fh).some((k) => dhChanged.has(k)),
         );
       })
     ) {
