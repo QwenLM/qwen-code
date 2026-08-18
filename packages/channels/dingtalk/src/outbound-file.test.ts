@@ -75,7 +75,8 @@ describe('outbound file markers', () => {
     expect(
       sanitizeStreamingFileMarkers('before [FILE: /Users/ben/private/report'),
     ).toBe('before ');
-    expect(stripPartialFileMarker('before [F')).toBe('before ');
+    // R3-9: a bare name prefix (`[F`) is prose, not residue.
+    expect(stripPartialFileMarker('before [F')).toBe('before [F');
     expect(stripPartialFileMarker('array[')).toBe('array[');
   });
 
@@ -319,7 +320,9 @@ describe('sanitizeFileMarkersToFixedPoint depth', () => {
   // display consumers then rendered with the absolute path.
   it.each([8, 9, 24])('reaches a fixed point at nesting depth %s', (depth) => {
     const text =
-      '[FI'.repeat(depth) + '[FILE: /etc/passwd]' + 'LE: /etc/passwd]'.repeat(depth);
+      '[FI'.repeat(depth) +
+      '[FILE: /etc/passwd]' +
+      'LE: /etc/passwd]'.repeat(depth);
     const sanitized = sanitizeFileMarkersToFixedPoint(text);
     expect(sanitized).not.toContain('[FILE:');
     expect(sanitized).not.toContain('/etc/passwd');

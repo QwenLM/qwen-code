@@ -91,7 +91,10 @@ describe('partial image markers', () => {
   });
 
   it('still strips partial IMAGE prefixes', () => {
-    expect(stripPartialImageMarker('see [I')).toBe('see [Image pending]');
+    // R3-9: residue opens only with the FULL marker name. A bare name prefix
+    // (`[I`) is prose — substituting it minted an `[Image pending]` claim the
+    // delivery path could never honour.
+    expect(stripPartialImageMarker('see [I')).toBe('see [I');
     expect(stripPartialImageMarker('see [IMAGE: /tmp/pic.png')).toBe(
       'see [Image pending]',
     );

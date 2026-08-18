@@ -4,6 +4,11 @@ import {
   stripPartialOutboundMediaMarker,
   truncateOutboundMediaText,
 } from './outbound-markers.js';
+import {
+  sanitizeFileMarkersToFixedPoint,
+  sanitizeStreamingFileMarkers,
+} from './outbound-file.js';
+import { sanitizeStreamingImageMarkers } from './outbound-image.js';
 
 const TRUNCATION_MARKER = '[Earlier output truncated]\n';
 
@@ -321,6 +326,9 @@ describe('R2 round-2 Critical regressions', () => {
     // limit chosen so the naive cut lands right after `[FILE: `.
     const truncated = truncateOutboundMediaText(text, 69, '…');
     expect(truncated).not.toContain('/etc/passwd');
+    // R3-8: the advance targets the span's balanced bracket extent, not
+    // end-of-line — the content after the bracketed marker must survive.
+    expect(truncated).toContain('y'.repeat(50));
   });
 
   it('keeps the raw cut for a prose bracket that merely prefix-matches', () => {
@@ -340,5 +348,218 @@ describe('R2 round-2 Critical regressions', () => {
     const text = '`'.repeat(200) + '\n' + 'a'.repeat(500);
     const truncated = truncateOutboundMediaText(text, 200, '…(truncated)');
     expect(truncated.length).toBeLessThanOrEqual(200);
+  });
+});
+
+describe('R3 round-3 Critical regressions', () => {
+  // R3-1: a bracketed path matches NO grammar layer — the finder's path class
+  // excludes brackets and the stripper used to skip every candidate with a
+  // same-line `]` — so a bracketed FILE/IMAGE marker shipped its absolute
+  // path on every display surface and was never delivered. After the replace
+  // pass every well-formed marker is gone, so any surviving opening that
+  // prefix-matches a marker name is ill-formed residue: strip it regardless
+  // of inner brackets. Prose brackets like `[note]` never prefix-match.
+  it('strips bracketed marker openings the finder cannot deliver', () => {
+    expect(
+      sanitizeFileMarkersToFixedPoint('[FILE: /workspace/report [draft].pdf]'),
+    ).toBe('');
+    expect(
+      sanitizeStreamingImageMarkers('[IMAGE: /workspace/Screenshot [1].png]'),
+    ).toBe('[Image pending]');
+    expect(
+      stripPartialOutboundMediaMarker(
+        'x [FILE: /etc/passwd [IMAGE: /tmp/a.png]',
+        'FILE',
+        '',
+      ),
+    ).not.toContain('/etc/passwd');
+    // A spaced opening matches no delivery grammar either.
+    expect(sanitizeFileMarkersToFixedPoint('[ FILE: /etc/passwd]')).toBe('');
+    // The delivery grammar is unchanged: bracketed paths are never delivered.
+    expect(
+      findOutboundMediaMarkers('[FILE: /workspace/report [draft].pdf]', 'FILE'),
+    ).toEqual([]);
+  });
+
+  it('still leaves a well-formed complete marker alone for the stripper', () => {
+    // Only ILL-FORMED openings are stripped fail-closed; a well-formed marker
+    // quoted in code keeps the pinned leave-alone behaviour.
+    const text = '```text\n[FILE: /Users/ben/fenced.pdf]\n```';
+    expect(stripPartialOutboundMediaMarker(text, 'FILE', '')).toBe(text);
+  });
+
+  // R3-4: the cross-line extension used to demand a whitespace-free next-line
+  // token and vetoed any `[` on the marker's OWN line, so a spaced path and a
+  // marker-line bracket both leaked the path line.
+  it('extends the strip to a spaced path on the next line', () => {
+    const stripped = stripPartialOutboundMediaMarker(
+      '[FILE:\n/workspace/quarterly report.pdf] done',
+      'FILE',
+      '',
+    );
+    expect(stripped).not.toContain('/workspace/quarterly report.pdf');
+    expect(stripped).toContain('done');
+  });
+
+  it('extends the strip past a bracketed fragment on the marker line', () => {
+    const stripped = stripPartialOutboundMediaMarker(
+      '[FILE: [draft\n/Users/ben/private/report.pdf]',
+      'FILE',
+      '',
+    );
+    expect(stripped).not.toContain('/Users/ben/private/report.pdf');
+  });
+
+  // R2-6: with no closing `]` anywhere, only the `[NAME:` line was replaced
+  // and the bare path line shipped. Cover the following bracket-free line.
+  it('covers the path line when the marker never closes', () => {
+    const stripped = stripPartialOutboundMediaMarker(
+      '[IMAGE:\n/Users/ben/x\nmore text',
+      'IMAGE',
+      '[Image pending]',
+    );
+    expect(stripped).not.toContain('/Users/ben/x');
+    expect(stripped).toContain('more text');
+  });
+
+  // R3-9: a bare name prefix is prose, not residue — the IMAGE caller minted
+  // an `[Image pending]` claim the delivery path could never honour.
+  it('keeps bare name prefixes as prose', () => {
+    expect(
+      stripPartialOutboundMediaMarker('array[i', 'IMAGE', '[Image pending]'),
+    ).toBe('array[i');
+    expect(
+      stripPartialOutboundMediaMarker('[i', 'IMAGE', '[Image pending]'),
+    ).toBe('[i');
+    expect(stripPartialOutboundMediaMarker('array[i', 'FILE', '')).toBe(
+      'array[i',
+    );
+    // A genuine opening still strips.
+    expect(
+      stripPartialOutboundMediaMarker(
+        'see [IMAGE: /tmp/pic.png',
+        'IMAGE',
+        '[Image pending]',
+      ),
+    ).toBe('see [Image pending]');
+  });
+
+  // R2-7: the guard advanced only to the marker's first line end for a
+  // cross-line marker, depositing a bare path line (or fragment) at the head
+  // of the retained tail that no sanitizer recognises.
+  it('advances the cut past a cross-line marker like the stripper', () => {
+    const text = `${'a'.repeat(30)}[FILE:\n/secret/deep/path.pdf] tail text here`;
+    const open = 30;
+    for (const offset of [3, 5, 8, 15, 22]) {
+      const limit = text.length - (open + offset) + TRUNCATION_MARKER.length;
+      const truncated = truncateOutboundMediaText(
+        text,
+        limit,
+        TRUNCATION_MARKER,
+      );
+      expect(truncated).not.toContain('/secret/deep/path.pdf');
+      expect(truncated).toContain('tail text here');
+    }
+  });
+
+  // R3-8: the R2-12 advance to end-of-line collapsed the ENTIRE retained
+  // window to the truncation marker when a bracketed marker sat on the final
+  // line — a ~20k answer became the 27-char marker.
+  it('keeps the retained window when a bracketed marker ends the text', () => {
+    const marker = '[FILE: /workspace/quarterly-report-final-version [v2].pdf]';
+    for (const total of [20_001, 20_015, 20_025]) {
+      const text = marker + 'a'.repeat(total - marker.length);
+      const truncated = truncateOutboundMediaText(
+        text,
+        20_000,
+        TRUNCATION_MARKER,
+      );
+      expect(truncated.length).toBeGreaterThan(TRUNCATION_MARKER.length + 1000);
+      expect(truncated).not.toContain(
+        '/workspace/quarterly-report-final-version',
+      );
+      expect(truncated.endsWith('a')).toBe(true);
+      expect(truncated.length).toBeLessThanOrEqual(20_000);
+    }
+  });
+
+  // R3-10: a cut dropping the prose prefix of a mid-line backtick run turns
+  // it into a line-start fence opener; every downstream sanitizer then masks
+  // the tail to end-of-text and real markers ship as literal text.
+  it('neutralizes a fence opener created by the cut', () => {
+    const path = '/workspace/secret-report.pdf';
+    const runLine = 'prose some ```draft notes here';
+    const markerLine = `[FILE: ${path}]`;
+    for (const drop of [10, 11]) {
+      const midLen =
+        20_000 -
+        TRUNCATION_MARKER.length +
+        drop -
+        runLine.length -
+        1 -
+        markerLine.length;
+      const text =
+        'a'.repeat(100) + runLine + 'b'.repeat(midLen) + '\n' + markerLine;
+      const truncated = truncateOutboundMediaText(
+        text,
+        20_000,
+        TRUNCATION_MARKER,
+      );
+      // The marker survives the tail and is still deliverable.
+      expect(findOutboundMediaMarkers(truncated, 'FILE')).toHaveLength(1);
+      const sanitized = sanitizeStreamingFileMarkers(truncated);
+      expect(sanitized).not.toContain(path);
+      expect(truncated.length).toBeLessThanOrEqual(20_000);
+    }
+  });
+
+  // R1-2: openFenceAt matched fences on the RAW line while maskCode strips
+  // blockquote prefixes first, so a cut inside a QUOTED fence emitted no
+  // re-opener and the tail's quoted closing fence masked every later marker.
+  it('re-opens a blockquoted fence the cut landed inside', () => {
+    const path = '/workspace/secret-report.pdf';
+    const lines: string[] = ['before prose', '> ```'];
+    for (let i = 0; i < 40; i++) lines.push(`> code line ${i}`);
+    lines.push('> ```', `after prose [FILE: ${path}]`);
+    const text = lines.join('\n') + 'a'.repeat(900);
+    const fenceLineStart = text.indexOf('> code line 5');
+    // A spread of cuts landing inside the quoted fence.
+    for (const offset of [0, 4, 9]) {
+      const start = fenceLineStart + offset;
+      const limit = text.length - start + TRUNCATION_MARKER.length;
+      const truncated = truncateOutboundMediaText(
+        text,
+        limit,
+        TRUNCATION_MARKER,
+      );
+      const sanitized = sanitizeStreamingFileMarkers(truncated);
+      // The marker after the block stays visible to the finder, so the
+      // sanitizer removes it instead of shipping it as literal text.
+      expect(sanitized).not.toContain(path);
+      expect(truncated).toContain(path);
+    }
+  });
+
+  it('keeps the limit when the cut is past a cross-line marker own line', () => {
+    // The residue stops at the marker's own line when it carries a path;
+    // the guard must not move the cut BACKWARDS to it — that would break the
+    // `<= limit` guarantee the budget arithmetic depends on.
+    const text = `${'a'.repeat(30)}[FILE: /secret/deep/path.pdf\nprose line two here${' tail'.repeat(20)}`;
+    const limit = text.length - 65 + TRUNCATION_MARKER.length;
+    const truncated = truncateOutboundMediaText(text, limit, TRUNCATION_MARKER);
+    expect(truncated.length).toBeLessThanOrEqual(limit);
+    expect(truncated).not.toContain('/secret/deep/path.pdf');
+    expect(truncated).toContain('line two here');
+  });
+
+  // The guard recognises spaced openings too: keeping the raw cut inside one
+  // can leave ` FILE: /abs/path]` — no leading bracket to sanitise.
+  it('skips a spaced opening the cut splits', () => {
+    const text = `${'a'.repeat(40)}[ FILE: /etc/passwd]${'y'.repeat(40)}`;
+    // limit lands the cut inside the spaced opening's name.
+    const limit = text.length - 42 + TRUNCATION_MARKER.length;
+    const truncated = truncateOutboundMediaText(text, limit, TRUNCATION_MARKER);
+    expect(truncated).not.toContain('/etc/passwd');
+    expect(truncated).toContain('y'.repeat(40));
   });
 });
