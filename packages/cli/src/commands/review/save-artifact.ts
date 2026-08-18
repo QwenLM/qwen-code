@@ -233,10 +233,10 @@ function validateVerdict(value: unknown): PersistedVerdict {
       if (
         typeof signal[key] !== 'number' ||
         !Number.isInteger(signal[key]) ||
-        (signal[key] as number) < 0
+        (signal[key] as number) <= 0
       ) {
         throw new Error(
-          `Composed verdict.approachSignal.${key} must be a non-negative integer.`,
+          `Composed verdict.approachSignal.${key} must be a positive integer.`,
         );
       }
     }

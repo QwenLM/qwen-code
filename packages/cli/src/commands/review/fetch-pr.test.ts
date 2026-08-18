@@ -788,6 +788,9 @@ describe('fetch-pr report assembly', () => {
    *   anchor [line, added, line2, tail]
    *   head   [line, added, line2, bulk × 200, tail]
    *
+   * The anchor also changed b.ts; that earlier change appears only in the
+   * full range, making its source-diff measurement larger than the delta's.
+   *
    * The old pair gave the same head commit two different trees — a 3-line
    * file here and a 204-line one in FULL_DIFF — which no capture can produce,
    * and which a later case extending either side would be written against.
@@ -820,6 +823,14 @@ describe('fetch-pr report assembly', () => {
     ' line2',
     ...Array.from({ length: 200 }, (_, i) => `+bulk ${i}`),
     ' tail',
+    'diff --git a/b.ts b/b.ts',
+    '--- a/b.ts',
+    '+++ b/b.ts',
+    '@@ -1 +1,4 @@',
+    ' line',
+    '+earlier 1',
+    '+earlier 2',
+    '+earlier 3',
     '',
   ].join('\n');
   /** Serve the delta for `ANCHOR..head` and the full range for `BASE..head`. */
@@ -881,9 +892,12 @@ describe('fetch-pr report assembly', () => {
     expect(writtenDiff()).toBe(DELTA_DIFF);
     expect(report.diffPathAbsolute).toBe(resolve(report.diffPath as string));
     // …and the PLAN is the delta's, not the full range's: a re-plan over
-    // fullText would pair a 200-line plan with an 8-line published diff.
+    // fullText would pair earlier-only hunks with the published delta.
     expect(report.diffLines).toBe(DELTA_DIFF.trimEnd().split('\n').length);
-    expect(report.fullSrcDiffLines).toBe(buildDiffPlan(FULL_DIFF).srcDiffLines);
+    const deltaSrcDiffLines = buildDiffPlan(DELTA_DIFF).srcDiffLines;
+    const fullSrcDiffLines = buildDiffPlan(FULL_DIFF).srcDiffLines;
+    expect(fullSrcDiffLines).toBeGreaterThan(deltaSrcDiffLines);
+    expect(report.fullSrcDiffLines).toBe(fullSrcDiffLines);
     expect(report.emptyDiff).toBeUndefined();
     expect(report.collapsedFromUpstream).toBeUndefined();
     // The probe wiring, pinned by invocation shape: a transposed

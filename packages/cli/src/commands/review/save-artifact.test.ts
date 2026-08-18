@@ -330,6 +330,26 @@ describe('saveReviewArtifact', () => {
     }
   });
 
+  it.each(['round', 'src0', 'srcDiffLines'] as const)(
+    'refuses a zero-valued approachSignal.%s',
+    (key) => {
+      const paths = fixture();
+      writeJson(paths.composed, {
+        ...verdict,
+        approachSignal: { ...verdict.approachSignal, [key]: 0 },
+      });
+
+      expect(() =>
+        saveReviewArtifact({
+          ...paths,
+          target: 'local',
+          effort: 'medium',
+        }),
+      ).toThrow(new RegExp(`approachSignal\\.${key}`));
+      expect(existsSync(paths.out)).toBe(false);
+    },
+  );
+
   it.each(['findings', 'composed', 'report'] as const)(
     'refuses to overwrite the %s input',
     (input) => {
