@@ -24,24 +24,29 @@ cross-process participation is not a feature that must be built — it is what r
 the in-process bottleneck is removed. The file plane is already cross-process safe
 (§1.1); only two code paths currently pin it to one process (§1.2).
 
-### 0.1 Three planes
+### 0.1 Four planes
 
-| Plane            | Medium                         | Authority                | If it is unavailable                 |
-| ---------------- | ------------------------------ | ------------------------ | ------------------------------------ |
-| **Coordination** | Files + `proper-lockfile`      | **Authoritative**        | Collaboration stops                  |
-| **Discovery**    | `~/.qwen/sessions/<pid>.json`  | Advisory (liveness hint) | Peers must be named explicitly       |
-| **Transport**    | UNIX domain socket per session | **Optimization only**    | Delivery falls back to inbox polling |
+| Plane            | Medium                         | Authority                | If it is unavailable                    |
+| ---------------- | ------------------------------ | ------------------------ | --------------------------------------- |
+| **Coordination** | Files + `proper-lockfile`      | **Authoritative**        | Collaboration stops                     |
+| **Discovery**    | `~/.qwen/sessions/<pid>.json`  | Advisory (liveness hint) | Peers must be named explicitly          |
+| **Transport**    | UNIX domain socket per session | **Optimization only**    | Delivery falls back to inbox polling    |
+| **Authority**    | The human                      | **Final**                | Work needing a decision stalls, visibly |
 
 The transport tier being non-load-bearing is the property that makes this design safe to
 ship incrementally, and it is inherited from a fact already true in the code: the leader
 already polls its own inbox, so teammate→leader messaging needs no socket for correctness.
+
+The authority plane is not infrastructure — it is a person — but it is listed because the
+design routes to it explicitly (§2.4) and gives it a noun (`decision`, §2.2). Leaving it
+implicit is what produces a leader agent that must adjudicate, and therefore a bottleneck.
 
 ### 0.2 Settled product decisions
 
 | Decision            | Choice                                                                                                             | Rejected alternative and why                                                                                                 |
 | ------------------- | ------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------- |
 | **Topology**        | Peer. `leader` is a **role** — transferable, and validly empty                                                     | Owner-leader: makes an independently started session a second-class observer, which is the exact case this design exists for |
-| **Membership**      | Two entrances: `spawn` (existing) and `join` (new). Neither is privileged                                          | Spawn-only: the current `TeamManager.ts:325` constraint, and the reason no running session can ever participate              |
+| **Membership**      | **None.** A session is addressable because it registered, not because it joined (§2.2)                             | Any join step: it makes an already-running session ask permission to be talked to, which is the case this design exists for  |
 | **Consent**         | Receiver-side gate with approval-mode parity, fail-closed ([#8730](https://github.com/QwenLM/qwen-code/pull/8730)) | Sender-side authorization: `from` is unauthenticatable on this transport (§2.5), so only the receiver can decide safely      |
 | **Write conflicts** | Out of scope by construction: peers collaborate **across** workspaces                                              | Path-claim protocol: a joined peer's permissions were fixed by whoever started it; no member can demote another              |
 | **Heterogeneity**   | Format stays vendor-neutral (it already is), but **v1 publishes no compatibility promise**                         | Either designing _for_ foreign agents (premature) or actively excluding them (costs work, buys nothing)                      |
@@ -223,26 +228,74 @@ participation fall out for free. They are the same change.**
 A participant is anything that can (a) read and write the board under the lock protocol
 and (b) be woken. (b) is optional: polling is a correct, if slower, substitute.
 
-### 2.2 Membership
+### 2.2 Vocabulary
 
-`TeamMember` already carries what a joined peer needs — `agentId`, `name`, `joinedAt`,
-`cwd`, `sessionId`, `subscriptions`. Its Qwen-specific fields (`agentType`, `model`,
-`prompt`, `backendType`, `tmuxPaneId`, `planModeRequired`) are **all spawn parameters** —
-how to start an agent — and all optional. `tmuxPaneId` is already degenerate ("empty
-string for in-process").
+Four nouns. Everything the system can express is one of them; anything that is none of them
+is out of scope by construction.
 
-Those fields exist because membership currently implies spawn. Removing that assumption
-makes them irrelevant rather than requiring a new type.
+| Noun       | Is                                           | Terminal states                   |
+| ---------- | -------------------------------------------- | --------------------------------- |
+| `session`  | A registered, addressable running instance   | registered / gone                 |
+| `task`     | A unit of work — owner, status, deps         | pending / in_progress / completed |
+| `ask`      | A question to a session, expecting an answer | **answered / timeout / declined** |
+| `decision` | An item awaiting human authority             | approved / rejected               |
 
-Two entrances, one member record:
+**There is no membership.** A session is addressable because it registered, not because it
+joined something. This removes `team_join`, the member record, and the `team` namespace: you
+do not enter a group in order to talk to a peer, you address it. The address space is
+whatever registered — vendor is not the criterion, registration is.
 
-| Entrance | Who writes the record | Identity source                 | Lifecycle owner |
-| -------- | --------------------- | ------------------------------- | --------------- |
-| `spawn`  | The spawning session  | Derived from the spawn (today)  | The spawner     |
-| `join`   | The joining session   | Registry record + declared name | **Itself**      |
+**`ask`, not `send`.** When B needs something from A, B is blocked; it should block on the
+answer rather than emit a message and guess. The three terminal states are the whole reason
+this is not `message`: a plain message has no failure mode, so a sender cannot distinguish
+"parked" from "ignored". Explicit terminal states also make deadlock _detectable_ — who
+waits on whom becomes state rather than intent — which is the one thing a cross-session view
+can see that no single session can.
 
-`team_leave` is required, and must release owned tasks — the existing
-`unassignTeammateTasks` / `releaseOwnedTask` already implement this.
+**`decision` is the noun this design was missing.** Approving a dangerous operation,
+accepting a finished result, and adjudicating two conflicting results are the same act: each
+needs _authority_, and no agent has more of it than another. Unifying them gives the default
+view something to show — the exception list is a `decision` list. Without this noun the
+design could not say what belongs on the first screen.
+
+**`ask` and `decision` stay separate**, though structurally alike — both are "I am blocked,
+I need an answer". Merging them behind a `kind: info | authority` field would reintroduce
+exactly the anti-pattern that
+[#9276](https://github.com/QwenLM/qwen-code/issues/9276) was: an optional discriminator on a
+shared surface, which models fill wrongly and which then routes the payload somewhere it was
+never meant to go.
+
+**No generic message.** `task` carries status and context, `ask` carries questions,
+`decision` carries authority. A general-purpose message is the path of least resistance and
+would cannibalise all three — Claude Code's prompt fights this after the fact (_"Don't send
+structured JSON status messages — use TaskUpdate"_). It is cheaper not to offer it. Context
+that must travel attaches to a **task**, never to a session: there is no agent-to-agent chat
+channel.
+
+The omissions matter as much as the verbs:
+
+| Noun       | Does not                                                             |
+| ---------- | -------------------------------------------------------------------- |
+| `session`  | read a screen, attach, or manage lifecycle — we never hold its stdin |
+| `task`     | carry conversation; a note explains work, it is not a chat log       |
+| `ask`      | broadcast — deciding _whom_ to ask is itself worth forcing           |
+| `decision` | get resolved by an agent; that would defeat the point of the noun    |
+
+Grammar is `<noun> <verb>`, matching herdr's shape (`herdr pane split-right`) without
+borrowing its words (§8). One verb is ceded deliberately: **`read` belongs to herdr**, where
+it means screen capture. We never scrape a screen, so we never use it.
+
+```
+qwen session  list
+qwen task     list | create | claim <id> | update <id> [--status …] [--note …]
+qwen ask      <session> "<q>" | list [--wait] | answer <id> "<a>"
+qwen decision list [--wait] | raise --kind … --about <task> | resolve <id> --approve|--reject
+```
+
+Every push has a pull equivalent — `ask list --wait`, `task list --mine`,
+`decision list --wait`. That is the sole condition for heterogeneous participation (§2.6),
+and it doubles as a standing design check: **a capability with no pull form permanently
+excludes every agent we did not write.**
 
 ### 2.3 Identity
 
@@ -253,20 +306,40 @@ registry record (pid, sessionId, cwd) + self-declared name, recorded at join.
 This is a **claim, not an authentication** — see §2.5. It is adequate because authorization
 is enforced at the receiver, never derived from the sender's assertion.
 
-### 2.4 Leader as a role
+### 2.4 No leader in the routing path
 
-`leader` becomes a field on the team config, not an ownership lock. It may be transferred,
-and may be absent — a board with no leader is a valid durable work queue. Nothing in the
-task or mailbox schema depends on a leader existing.
+The fleet plan's single-leader lock is rejected — and so is the softer version this document
+first proposed, a transferable `leader` field. Neither is needed once `decision` exists.
 
-This is the specific point where the fleet plan's single-leader lock is rejected rather
-than adapted.
+Routing splits by what an answer _requires_, not by rank:
 
-### 2.5 Consent — adopt #8730 unchanged
+| Need            | Goes to        | Why                                                            |
+| --------------- | -------------- | -------------------------------------------------------------- |
+| **Information** | A peer, direct | No authority implied; a wrong answer is correctable next turn  |
+| **Authority**   | The human      | Approval, acceptance, adjudication — no agent outranks another |
+
+A leader agent used as router is precisely what makes the leader a bottleneck and spends its
+context on coordination instead of work. Removing it is why `decision` had to become a
+first-class noun: the escalation path needs a destination that is not another agent.
+
+Synthesis and acceptance remain real jobs — they are the human's, or a role a session takes
+on for one goal. Never an ownership lock over the board.
+
+### 2.5 Consent — adopt #8730, on a narrower surface
 
 The receive-side gate is the security boundary. Its rule is **approval-mode parity**: a
 message auto-delivers only when acting on it cannot do more than the sender could already
 have done itself.
+
+Scope note, since §2.2 narrowed what can arrive: the gate was designed against arbitrary
+inbound text. With no generic message, the only inbound items are an `ask` and a task
+assignment — a materially smaller surface, and one where the payload is a question rather
+than an instruction. The gate is still adopted, because "a question" is not a safe category
+(_"run this and tell me what it prints"_ is a question), and because it remains the only
+defence against the cheapest bypass in the design: get denied, then have a second session do
+it. But it is worth recording that Claude Code ships cross-session messaging with **no
+inbound gate at all** — directory `0700` and same-uid is its whole model. #8730 is a
+deliberate hardening beyond the reference design, not parity with it.
 
 | Receiver                                      | Sender asserts | Result   |
 | --------------------------------------------- | -------------- | -------- |
@@ -332,14 +405,29 @@ an unrelated `notes-2026.md` parse as PID 2026. Liveness = record present **and*
 `qwen sessions ps [--json] [--all]` reads it. `list_agents` gains live peers alongside
 background tasks.
 
-### 3.2 Join
+### 3.2 Addressing
 
-`team_join(team, as)` → verify team exists → write member record → register in the board.
-No spawner involved. `team_leave` releases owned tasks.
+There is nothing to join (§2.2). A session registers at startup and is addressable from that
+moment. Addressing follows Claude Code's shape — one field, several schemes — so a new
+transport costs a prefix rather than a field plus a branch:
 
-Consent applies to _messages_, not to joining: joining is self-initiated, so there is no
-third party to authorize. What must be gated is a peer being able to _pull_ another
-session in — so v1 has **no remote-join**. A session joins itself, or a human joins it.
+```
+to: "researcher"                                 teammate by name
+to: "uds:/run/user/1000/qwen-socks/1234.sock"    another local session
+```
+
+Qwen's `send_message` currently splits this across `to` and `task_id` with a route branch per
+destination. That structure does not survive a third transport and should be collapsed
+before cross-session addressing is added — it is the smallest change here with the longest
+reach.
+
+Envelopes are self-describing: an inbound `<cross_session_message from="…">` is answered by
+copying its `from` into your `to`. No address book, no lookup, no reply path that can go
+stale.
+
+A foreign agent that registers through a wrapper and polls `qwen ask list --wait` is
+addressable on equal terms — its inbox loop is manual rather than automatic, and `ask`'s
+`timeout` already models a peer that is not listening.
 
 ### 3.3 Work
 
@@ -351,20 +439,31 @@ nothing else may enqueue work. That single-writer rule is what #9282 was missing
 ### 3.4 Delivery
 
 ```
-sender ──▶ write inbox file (authoritative, under lock)
-       └─▶ if peer has ipcPath: send wake frame (best effort)
-receiver ──▶ on wake OR on poll ──▶ drain inbox ──▶ gate ──▶ deliver | hold | deny | expire
+sender ──▶ write the item (authoritative, under lock)
+       └─▶ if the target has ipcPath: send a wake frame (best effort)
+target ──▶ on wake OR on poll ──▶ drain ──▶ gate ──▶ deliver | hold | deny | expire
 ```
 
-Losing the wake signal costs latency, never a message. Held messages are settled, never
-stranded: the buffer is bounded and evicts oldest as `expired`; shutdown expires the
-remainder; a message arriving during teardown is expired rather than parked where nothing
-can release it; and changing approval mode re-runs the backlog, so a message held only on
-a mismatch is released without manual approval.
+Losing a wake signal costs latency, never an item. Held items are settled, never stranded:
+the buffer is bounded and evicts oldest as `expired`; shutdown expires the remainder; an
+item arriving during teardown is expired rather than parked where nothing could release it;
+and changing approval mode re-runs the backlog, so something held only on a mode mismatch is
+released without manual approval.
 
-`/peers` lists held messages with sender, preview and cause; `/peers accept|deny <id|all>`
-settles them. Held messages are invisible to the model by design, so without a review
-surface holding and dropping are indistinguishable from outside.
+`/peers` lists held items with sender, preview and cause; `/peers accept|deny <id|all>`
+settles them. Held items are invisible to the model by design, so without a review surface
+holding and dropping are indistinguishable from outside.
+
+What flows through this path is an `ask` or a task assignment — never a free-form message
+(§2.2). That matters here rather than only in the vocabulary: an `ask` already carries its
+own terminal states, so `timeout` and `declined` are answers the _sender_ receives, not
+merely dispositions the receiver records. A sender therefore learns the outcome of every
+`ask` it makes, which is what lets it choose between waiting, routing elsewhere, and raising
+a `decision`.
+
+Receipts (`held` / `denied` / `expired` / `delivered`) return to the sender as control
+frames. Without them a sender cannot distinguish "parked for review" from "delivered and
+ignored" — very different signals for deciding whether to follow up.
 
 ### 3.5 Reporting
 
@@ -399,14 +498,14 @@ released after the 5 s lock stale window. No peer's death blocks any other peer.
 Sized against demonstrated review capacity in this repository: #8804 merged at 775 lines;
 #8859 (~1,300) and #8869 (4,465) both died unreviewed.
 
-| Stage | Scope                                       | Est. prod LOC | Depends on | Independently valuable          |
-| ----- | ------------------------------------------- | ------------- | ---------- | ------------------------------- |
-| **0** | Cleanup and the #9276 fix                   | ~150          | —          | Yes — fixes a live blocker      |
-| **1** | Discovery — **shipped by #8969**; carry-forward hardening only | ~0–100 | — | Done — `sessions ps` ships |
-| **2** | Relocate authority to the file plane        | ~450          | —          | Yes — closes the §1.7 bug class |
-| **3** | `team_join` / `team_leave` / leader-as-role | ~350          | 1, 2       | Yes — the actual feature        |
-| **4** | Consent gate + UDS transport + `/peers`     | ~1,100        | 3          | Yes — completes it              |
-| **5** | CLI/MCP board surface                       | ~300          | 2          | Yes — daemon/cron need it       |
+| Stage | Scope                                                          | Est. prod LOC | Depends on | Independently valuable          |
+| ----- | -------------------------------------------------------------- | ------------- | ---------- | ------------------------------- |
+| **0** | Cleanup and the #9276 fix                                      | ~150          | —          | Yes — fixes a live blocker      |
+| **1** | Discovery — **shipped by #8969**; carry-forward hardening only | ~0–100        | —          | Done — `sessions ps` ships      |
+| **2** | Relocate authority to the file plane                           | ~450          | —          | Yes — closes the §1.7 bug class |
+| **3** | `ask` + `decision` + scheme addressing                         | ~350          | 1, 2       | Yes — the actual feature        |
+| **4** | Consent gate + UDS transport + `/peers`                        | ~1,100        | 3          | Yes — completes it              |
+| **5** | CLI/MCP board surface                                          | ~300          | 2          | Yes — daemon/cron need it       |
 
 Stages 1 and 2 are independent and may run in parallel.
 
@@ -459,10 +558,20 @@ The highest-value stage, and it stands alone.
 `TeamManager` becomes a cache and a UI feed over the board, not the source of truth.
 `InProcessBackend` keeps working throughout.
 
-### Stage 3 — join
+### Stage 3 — the `ask` and `decision` surface
 
-`team_join` / `team_leave`; decouple `members.push` from the spawn path; leader as role.
-Self-join only. This is the stage where the product capability becomes real.
+The stage where the product capability becomes real, and the one most changed by §2.2:
+there is no `team_join` to build.
+
+`ask` with its three terminal states; `decision` with `raise` / `list` / `resolve`; the
+exception view that lists pending decisions; and the pull-side commands (`ask list --wait`,
+`decision list --wait`) that every push must have an equivalent of. Collapse `send_message`'s
+`to` / `task_id` split into scheme-based addressing (§3.2) — small, and everything after it
+depends on the shape.
+
+Deadlock detection lands here too, because it is free once `ask` is a first-class item: A
+waiting on B while B waits on A is visible state rather than two stalled intentions, and it
+is the one condition no single session can observe about itself.
 
 ### Stage 4 — consent and transport
 
@@ -482,17 +591,17 @@ and no promise attached.
 
 ### Reuse ledger
 
-| Reused unchanged                                   | LOC    |
-| -------------------------------------------------- | ------ |
-| `tasks.ts` — claim, ownership, dependencies        | 1,056  |
-| `mailbox.ts` — inboxes, locks                      | 361    |
-| `teamHelpers.ts` — path and liveness helpers       | 365    |
-| `ui/components/agent-view/` — tabs, chat, composer | live   |
-| `agentHistoryAdapter.ts`                           | ~180   |
-| Daemon sub-session spawn + correlation             | ships  |
+| Reused unchanged                                                           | LOC    |
+| -------------------------------------------------------------------------- | ------ |
+| `tasks.ts` — claim, ownership, dependencies                                | 1,056  |
+| `mailbox.ts` — inboxes, locks                                              | 361    |
+| `teamHelpers.ts` — path and liveness helpers                               | 365    |
+| `ui/components/agent-view/` — tabs, chat, composer                         | live   |
+| `agentHistoryAdapter.ts`                                                   | ~180   |
+| Daemon sub-session spawn + correlation                                     | ships  |
 | **Written but unmerged** (#8730; #8728's registry half re-landed as #8969) | ~7,000 |
 
-Genuinely new: `team_join` / `team_leave`, the wake-path consolidation, correlation IDs,
+Genuinely new: the `ask` and `decision` items, the wake-path consolidation, correlation IDs,
 and the CLI/MCP surface.
 
 ## 6. Risks
