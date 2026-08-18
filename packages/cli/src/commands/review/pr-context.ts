@@ -40,6 +40,7 @@ import {
   stripLedgerMarker,
   type Ledger,
 } from './lib/ledger.js';
+import { commentMarkerSeverity } from './lib/review-footer.js';
 
 /**
  * Marker embedded in the "suggestion summary" issue comment that /review used
@@ -388,7 +389,12 @@ const NEGATION = new RegExp(
 );
 
 export function carriesBlockerSignal(body: string | undefined): boolean {
-  const b = (body ?? '').toLowerCase();
+  // Only RENDERED text can promote through this ungated channel: GitHub
+  // renders an HTML comment as nothing, so a planted `<!-- [critical] -->`
+  // would otherwise become an invisible, irrefutable blocker — the exact
+  // harm `isBlockerBody`'s identity gate exists to prevent, reached around
+  // it. An unclosed comment swallows the rest of the body, as on GitHub.
+  const b = (body ?? '').replace(/<!--[\s\S]*?(?:-->|$)/g, '').toLowerCase();
   return BLOCKER_PATTERNS.some((re) => {
     // Preserve the pattern's own flags (a future `i`/`u` must not be silently
     // dropped) and add `g` for the scan; dedupe so `g` is never doubled.
@@ -487,12 +493,65 @@ export interface InlineThreads {
 }
 
 /**
+ * The one blocker test, shared by pr-context's re-check section and
+ * comment-status's report: semantic blocker prose (humans and attributed
+ * posts), plus an attribution-off Critical recognized by its invisible
+ * severity marker — gated on the reviewing account, because the marker
+ * string is public and plantable, and a planted "critical" marker on an
+ * otherwise empty comment would otherwise become a permanent, irrefutable
+ * blocker that caps every later round at COMMENT. With `me` empty the
+ * marker disjunct never fires: under-promotion loses a re-check, while
+ * over-promotion loses approvability, so empty fails toward the former.
+ */
+export function isBlockerBody(
+  body: string | undefined,
+  author: string | undefined,
+  me: string,
+): boolean {
+  if (carriesBlockerSignal(body)) return true;
+  return (
+    me !== '' &&
+    (author ?? '').toLowerCase() === me.toLowerCase() &&
+    commentMarkerSeverity(body ?? '') === 'critical'
+  );
+}
+
+/**
+ * Whether any posted ROOT comment carries the invisible CRITICAL marker —
+ * exactly the signal authorship unlocks (`isBlockerBody`'s marker disjunct
+ * reads root bodies only, and only `critical` promotes). When identity
+ * lookup fails while one is present, the context must fail closed instead
+ * of proceeding with an empty `me`: an unresolved attribution-off Critical
+ * would classify as ordinary discussion and disappear from the blocker set
+ * later rounds use, and "could not tell" must not read the same as "was
+ * not". Firing on anything WIDER — a reply's marker, a suggestion marker —
+ * would fail closed on a signal the identity decides nothing about, and the
+ * marker string is public: a planted reply would then convert every
+ * transient identity blip into a repeating hard refusal.
+ */
+export function anyRootCarriesCriticalMarker(
+  comments: ReadonlyArray<{
+    body?: string | undefined;
+    in_reply_to_id?: number | null;
+  }>,
+): boolean {
+  return comments.some(
+    (c) =>
+      (c.in_reply_to_id === undefined || c.in_reply_to_id === null) &&
+      commentMarkerSeverity(c.body ?? '') === 'critical',
+  );
+}
+
+/**
  * Group the flat inline-comment list into threads and classify each root.
  * The single copy of this walk: `buildMarkdown` renders from it and the
  * stdout summary counts from it, so the reported count can never diverge
  * from what the file contains.
  */
-export function classifyInlineThreads(inline: RawComment[]): InlineThreads {
+export function classifyInlineThreads(
+  inline: RawComment[],
+  me: string = '',
+): InlineThreads {
   // Build a map id → comment, and group replies by root id, so each
   // already-discussed thread can be rendered with the reviewer's original
   // concern + the chronological reply chain. This is what tells review
@@ -527,18 +586,25 @@ export function classifyInlineThreads(inline: RawComment[]): InlineThreads {
   //
   // (This used to key on the literal `[Critical]` marker, which only /review
   // emits — a human blocker phrased any other way settled into "do NOT
-  // re-report". `carriesBlockerSignal` is the semantic test.)
+  // re-report". `isBlockerBody` is the semantic test. Attribution-off posts
+  // carry no prefix at all; their severity rides the invisible comment
+  // marker, so a posted Critical re-promotes through it every round —
+  // including from round N+2, where the ledger no longer resurfaces a
+  // "cannot tell" ruling. The marker disjunct is gated on the reviewing
+  // account: the string is public and plantable.)
+  const isBlockerRoot = (c: RawComment): boolean =>
+    isBlockerBody(c.body, c.user?.login, me);
   const repliedBlockerRoots = roots.filter(
-    (c) => repliesByRoot.has(c.id) && carriesBlockerSignal(c.body),
+    (c) => repliesByRoot.has(c.id) && isBlockerRoot(c),
   );
   const openBlockerRoots = roots.filter(
-    (c) => !repliesByRoot.has(c.id) && carriesBlockerSignal(c.body),
+    (c) => !repliesByRoot.has(c.id) && isBlockerRoot(c),
   );
   const repliedRoots = roots.filter(
-    (c) => repliesByRoot.has(c.id) && !carriesBlockerSignal(c.body),
+    (c) => repliesByRoot.has(c.id) && !isBlockerRoot(c),
   );
   const openRoots = roots.filter(
-    (c) => !repliesByRoot.has(c.id) && !carriesBlockerSignal(c.body),
+    (c) => !repliesByRoot.has(c.id) && !isBlockerRoot(c),
   );
 
   return {
@@ -1331,6 +1397,7 @@ export function buildMarkdown(
   issue: RawComment[],
   reviews: RawReview[],
   prevLedger: Ledger | null = null,
+  me: string = '',
   /** Set only when the ledger came from another account — see the section. */
   prevLedgerAuthor: string | null = null,
   /** True when the ledger is the union of a foreign winner over own findings. */
@@ -1346,7 +1413,7 @@ export function buildMarkdown(
     repliedBlockerRoots,
     repliedRoots,
     repliesByRoot,
-  } = classifyInlineThreads(inline);
+  } = classifyInlineThreads(inline, me);
   // Both replied and un-replied blocker roots go to the re-check section,
   // rendered first and in full. Un-replied ones simply have no reply chain.
   const allBlockerRoots = [...repliedBlockerRoots, ...openBlockerRoots];
@@ -1583,6 +1650,51 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
     `repos/${owner}/${repo}/pulls/${prNumber}/reviews`,
   ) as RawReview[];
 
+  // The reviewing account gates two things here: the ledger recovery's
+  // own/foreign split and the comment marker's blocker promotion.
+  // `currentUser()` is a network round-trip; with no reviews and no inline
+  // comments there is nothing for its answer to match against, so it is not
+  // made. A failed lookup fails CLOSED when a posted root comment carries a
+  // critical marker: with `me` empty the marker disjunct of `isBlockerBody`
+  // never fires, and an unresolved attribution-off Critical would classify
+  // as ordinary discussion and disappear from the blocker set later rounds
+  // use — "could not tell" must not read the same as "was not". Ledger
+  // recovery no longer depends on the identity — an anonymous recovery
+  // still walks, with every marker foreign (see `recoverLedger`) — so a
+  // lookup failure costs the anchor, never the run. An empty login is
+  // exit-0-with-empty-output — a stubbed or proxied `gh` shape, not a
+  // confirmed identity — and counts as unknown exactly like a throw.
+  let me = '';
+  let identityKnown = false;
+  if (reviews.length || inline.length) {
+    let lookupError: unknown = null;
+    try {
+      const login = currentUser();
+      identityKnown = login !== '';
+      me = login;
+    } catch (err) {
+      lookupError = err;
+    }
+    // Both unknown shapes fail closed identically — a thrown lookup AND an
+    // empty login (exit-0-with-empty-output, the stubbed/proxied `gh`
+    // shape named above): the check used to live in the `catch` branch
+    // only, so the empty login proceeded with `me = ''` while the marker
+    // disjunct of `isBlockerBody` never fires — an unresolved
+    // attribution-off Critical would classify as ordinary discussion and
+    // disappear from the blocker set later rounds use.
+    if (!identityKnown && anyRootCarriesCriticalMarker(inline)) {
+      throw new Error(
+        `cannot determine the reviewing account (${
+          lookupError === null
+            ? 'empty login'
+            : lookupError instanceof Error
+              ? lookupError.message
+              : String(lookupError)
+        }) while a posted root comment carries a Qwen critical marker — ` +
+          'the blocker re-check depends on it; re-run',
+      );
+    }
+  }
   // Recover the previous round's machine ledger from the LATEST posted review
   // carrying one, whoever posted it, and persist it beside the context file:
   // compose-review reads the side file for the round number, and Step 6 owes
@@ -1595,44 +1707,9 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
   let prevRecovered: ReturnType<typeof recoverLedger>['recovered'] = null;
   let recoveryThrew = false;
   let sawOwnReview = false;
-  /**
-   * Proof-of-absence needs a proven identity. When the lookup fails,
-   * `sawOwnReview` stays false because the walk had no name to look for — an
-   * unknown identity recorded as "no own review exists" licensed deleting the
-   * side file and resetting the round counter over a rate-limit blip, the
-   * exact id-space collision the recovery redesign exists to prevent. The
-   * pre-isolation code got this right by accident: the throw reached the
-   * outer catch and took the strip path.
-   */
-  let identityKnown = false;
   try {
-    // With no reviews on the PR there is nothing to recover from, so neither
-    // network round-trip is made.
     if (reviews.length) {
-      // The identity lookup is isolated, and its failure must not cost the
-      // recovery. Without this the transient case degraded to "no ledger",
-      // which leaves the machine-local side file at whatever round this
-      // machine last wrote — and compose stamps `prevRound + 1` from it, so a
-      // machine that missed rounds K+1..K+m re-issues ids the PR already
-      // carries. A null login is the cheap honest fallback: the work list
-      // still recovers (bounded to the foreign-round headroom, since there is
-      // no own base to measure from), it recovers as FOREIGN, and no anchor
-      // rides on an identity this run could not confirm.
-      let login: string | null = null;
-      try {
-        login = currentUser();
-        // An empty login is exit-0-with-empty-output — a stubbed or proxied
-        // `gh` shape, not a confirmed identity. `recoverLedger` already treats
-        // '' as unknown (its `me` is null), so counting it as KNOWN here let
-        // the deletion flag below fire over an identity that was never proven
-        // (sawOwnReview cannot become true for a null me), deleting the side
-        // file and resetting the round counter. Same precedent as presubmit's
-        // own '' handling: empty is unknown.
-        identityKnown = login !== '';
-      } catch {
-        login = null;
-      }
-      const outcome = recoverLedger(reviews, login);
+      const outcome = recoverLedger(reviews, identityKnown ? me : null);
       prevRecovered = outcome.recovered;
       sawOwnReview = outcome.sawOwnReview;
     }
@@ -1699,6 +1776,7 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
     issue,
     reviews,
     prevLedger,
+    me,
     prevLedgerAuthor,
     prevLedgerMerged,
     bakeHost,
@@ -1712,7 +1790,7 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
   ).length;
   // Same walk buildMarkdown just rendered from — never a re-implementation,
   // so this count cannot silently diverge from the file's contents.
-  const threads = classifyInlineThreads(inline);
+  const threads = classifyInlineThreads(inline, me);
   const blockerCount =
     threads.repliedBlockerRoots.length +
     threads.openBlockerRoots.length +
