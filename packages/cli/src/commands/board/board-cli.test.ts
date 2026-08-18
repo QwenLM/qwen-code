@@ -1,0 +1,147 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { describe, it, expect } from 'vitest';
+import { resolveBoardName, resolveParticipantName } from './context.js';
+import { renderBoard, age, type BoardSnapshot } from './render.js';
+import type {
+  BoardTaskRecord,
+  AskRecord,
+  DecisionRecord,
+} from '@qwen-code/qwen-code-core';
+
+function task(over: Partial<BoardTaskRecord> = {}): BoardTaskRecord {
+  return {
+    schemaVersion: 1,
+    id: 't-1',
+    subject: 'investigate contract',
+    owner: 'api-worker',
+    status: 'in_progress',
+    createdAt: 0,
+    updatedAt: 0,
+    notes: [],
+    ...over,
+  };
+}
+
+function ask(over: Partial<AskRecord> = {}): AskRecord {
+  return {
+    schemaVersion: 1,
+    id: 'a-1',
+    from: 'api-worker',
+    to: 'web-worker',
+    question: 'is status a string?',
+    state: 'open',
+    createdAt: 0,
+    expiresAt: Number.MAX_SAFE_INTEGER,
+    answer: null,
+    reason: null,
+    settledAt: null,
+    ...over,
+  };
+}
+
+function decision(over: Partial<DecisionRecord> = {}): DecisionRecord {
+  return {
+    schemaVersion: 1,
+    id: 'd-1',
+    kind: 'approval',
+    raisedBy: 'web-worker',
+    question: 'may I write src/client.ts?',
+    state: 'open',
+    createdAt: 0,
+    resolvedAt: null,
+    note: null,
+    ...over,
+  };
+}
+
+describe('board context', () => {
+  it('derives a board name from the project directory', () => {
+    expect(resolveBoardName({ cwd: '/home/me/work/api', env: {} })).toBe('api');
+  });
+
+  it('sanitises a directory name the layout would reject', () => {
+    expect(resolveBoardName({ cwd: '/home/me/my project!', env: {} })).toBe(
+      'my-project-',
+    );
+  });
+
+  // An explicit board is what makes cross-workspace collaboration expressible:
+  // a board that were merely the directory could not span two repositories.
+  it('prefers an explicit board, then the environment', () => {
+    expect(resolveBoardName({ board: 'shared', cwd: '/x/api', env: {} })).toBe(
+      'shared',
+    );
+    expect(
+      resolveBoardName({ cwd: '/x/api', env: { QWEN_BOARD: 'from-env' } }),
+    ).toBe('from-env');
+  });
+
+  it('falls back to a usable participant name with no configuration', () => {
+    const name = resolveParticipantName({ env: {} });
+    expect(name).toMatch(/^[A-Za-z0-9][A-Za-z0-9._-]*$/);
+    expect(resolveParticipantName({ as: 'api-worker', env: {} })).toBe(
+      'api-worker',
+    );
+  });
+});
+
+describe('board rendering', () => {
+  const now = 10 * 60 * 1000;
+
+  it('leads with what needs a human, then what is blocked, then work', () => {
+    const snapshot: BoardSnapshot = {
+      board: 'demo',
+      tasks: [task()],
+      asks: [ask()],
+      decisions: [decision()],
+    };
+    const lines = renderBoard(snapshot, now).split('\n');
+    const decisionAt = lines.findIndex((l) => l.includes('d-1'));
+    const askAt = lines.findIndex((l) => l.includes('a-1'));
+    const taskAt = lines.findIndex((l) => l.includes('t-1'));
+
+    expect(decisionAt).toBeGreaterThan(-1);
+    expect(decisionAt).toBeLessThan(askAt);
+    expect(askAt).toBeLessThan(taskAt);
+  });
+
+  it('hides settled items — the panel is for what has not moved', () => {
+    const snapshot: BoardSnapshot = {
+      board: 'demo',
+      tasks: [task({ status: 'completed' })],
+      asks: [ask({ state: 'answered', answer: 'yes' })],
+      decisions: [decision({ state: 'approved' })],
+    };
+    const out = renderBoard(snapshot, now);
+    expect(out).not.toContain('a-1');
+    expect(out).not.toContain('d-1');
+    expect(out).toContain('1 done');
+  });
+
+  it('counts participants across tasks and asks', () => {
+    const out = renderBoard(
+      { board: 'demo', tasks: [task()], asks: [ask()], decisions: [] },
+      now,
+    );
+    // api-worker owns t-1 and raised a-1; web-worker is only its recipient.
+    expect(out).toContain('2 participants');
+  });
+
+  it('says so when there is nothing on the board', () => {
+    expect(
+      renderBoard({ board: 'demo', tasks: [], asks: [], decisions: [] }, now),
+    ).toContain('(empty)');
+  });
+
+  it('formats ages compactly enough for a narrow pane', () => {
+    expect(age(0, 30_000)).toBe('30s');
+    expect(age(0, 4 * 60_000)).toBe('4m');
+    expect(age(0, 3 * 3_600_000)).toBe('3h');
+    expect(age(0, 2 * 86_400_000)).toBe('2d');
+  });
+});

@@ -73,6 +73,8 @@ import { authCommand } from '../commands/auth.js';
 import { reviewCommand } from '../commands/review.js';
 import { serveCommand } from '../commands/serve.js';
 import { sessionsCommand } from '../commands/sessions.js';
+import { boardCommand } from '../commands/board.js';
+import { fleetCommand } from '../commands/fleet.js';
 import { updateCommand } from '../commands/update.js';
 import { isValidSessionId } from './session-id.js';
 
@@ -1087,6 +1089,8 @@ export async function parseArguments(): Promise<CliArgs> {
     .command(hooksCommand)
     // Register Channel subcommands
     .command(channelCommand)
+    .command(boardCommand)
+    .command(fleetCommand)
     // Register /review skill helpers (presubmit checks, cleanup)
     .command(reviewCommand)
     // Register `qwen serve` (Stage 1 daemon)
@@ -2158,9 +2162,8 @@ export async function loadCliConfig(
       bareMode || safeMode ? undefined : disabledSkillNamesProvider,
     terminalImageRenderSupportProvider: interactive
       ? async () => {
-          const { getTerminalImageRenderSupport } = await import(
-            '../ui/utils/terminal-image-renderer.js'
-          );
+          const { getTerminalImageRenderSupport } =
+            await import('../ui/utils/terminal-image-renderer.js');
           return getTerminalImageRenderSupport();
         }
       : undefined,
