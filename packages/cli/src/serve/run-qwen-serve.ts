@@ -8,6 +8,7 @@ import { X509Certificate, createHash, timingSafeEqual } from 'node:crypto';
 import * as fs from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import * as https from 'node:https';
+import { isIP } from 'node:net';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { monitorEventLoopDelay, performance } from 'node:perf_hooks';
@@ -683,6 +684,230 @@ export function formatChannelWorkerDaemonUrl(
     return `${scheme}://127.0.0.1:${port}`;
   }
   return `${scheme}://${formatHostForUrl(host)}:${port}`;
+}
+
+/**
+ * Two TLS misconfigurations boot green and break only the channel workers:
+ * a serving cert that is not its own trust anchor (workers fail
+ * `UNABLE_TO_VERIFY_LEAF_SIGNATURE`) and one whose SANs do not cover the
+ * loopback host workers dial (`ERR_TLS_CERT_ALTNAME_INVALID`). In both cases
+ * the daemon listens, browsers connect and `/health` stays green while every
+ * worker restart-loops, so name them at boot the way the expiry guard does.
+ */
+export function describeWorkerTlsTrustGaps(opts: {
+  cert: Buffer;
+  certPath: string;
+  daemonUrl: string;
+  operatorCaCertPath?: string;
+  /**
+   * Contents of `operatorCaCertPath`, when it was readable. A path alone says
+   * nothing — a typo'd, unrelated or unloadable NODE_EXTRA_CA_CERTS anchors
+   * exactly as little as no CA at all, and treating "the variable is set" as
+   * coverage is what silenced the warning in the cases it was written for.
+   */
+  operatorCaCert?: Buffer;
+}): string[] {
+  // A serving file is routinely a fullchain (leaf + issuing CA in one PEM),
+  // and the supervisor injects the whole file as the workers'
+  // NODE_EXTRA_CA_CERTS — so the trust question is about the file, not about
+  // its first block alone.
+  const chain = parseCertChain(opts.cert);
+  const x509 = chain[0];
+  if (!x509) {
+    // Boot validation already rejected unparseable certs with a better message.
+    return [];
+  }
+  const gaps: string[] = [];
+  // Exactly what a worker gets: the serving file merged with the operator's
+  // CA file (see resolveWorkerCaCertPath in channel-worker-supervisor.ts).
+  const workerTrustStore = opts.operatorCaCert
+    ? [...chain, ...parseCertChain(opts.operatorCaCert)]
+    : chain;
+  // A leaf in NODE_EXTRA_CA_CERTS is a usable trust anchor only when it signed
+  // itself: chain verification has no PARTIAL_CHAIN flag here, so a CA-issued
+  // leaf (what the `mkcert` flow this project documents produces) never
+  // terminates the chain — unless something else in the worker's bundle
+  // carries the issuer that does.
+  const anchorPath = walkWorkerAnchorPath(workerTrustStore);
+  if (anchorPath.nonCaTerminator) {
+    gaps.push(
+      `--tls-cert "${opts.certPath}" chains up to ` +
+        `"${anchorPath.nonCaTerminator.subject.replace(/\r?\n/g, ', ')}", ` +
+        `which is self-signed but carries basicConstraints CA:FALSE — ` +
+        `OpenSSL refuses to let it issue the certificates below it, so every ` +
+        `worker handshake to the daemon will fail INVALID_PURPOSE ` +
+        `("unsuitable certificate purpose"). Reissue that certificate with ` +
+        `CA:TRUE, or point NODE_EXTRA_CA_CERTS at a real CA that anchors the ` +
+        `chain, and restart.`,
+    );
+  } else if (!anchorPath.anchored) {
+    gaps.push(
+      `--tls-cert "${opts.certPath}" is issued by another CA ` +
+        `(${x509.issuer.replace(/\r?\n/g, ', ')}), not self-signed, and ` +
+        `${
+          opts.operatorCaCertPath
+            ? `NODE_EXTRA_CA_CERTS "${opts.operatorCaCertPath}" does not ` +
+              `carry a certificate that anchors it`
+            : `no NODE_EXTRA_CA_CERTS is set`
+        }, so nothing in the channel workers' bundle anchors their trust — ` +
+        `every worker handshake to the daemon will fail ` +
+        `UNABLE_TO_VERIFY_LEAF_SIGNATURE unless the issuing CA is already in ` +
+        `the workers' default trust store. Point NODE_EXTRA_CA_CERTS at the ` +
+        `issuing CA (for mkcert: "$(mkcert -CAROOT)/rootCA.pem") and restart.`,
+    );
+  }
+  // `X509Certificate.verify` checks signatures only and never consults dates,
+  // so an expired root or intermediate anchors "fine" here while every worker
+  // handshake fails CERT_HAS_EXPIRED. Boot validation covers the leaf alone.
+  const now = Date.now();
+  for (const member of anchorPath.path) {
+    if (member.fingerprint256 === x509.fingerprint256) continue;
+    const subject = member.subject.replace(/\r?\n/g, ', ');
+    if (new Date(member.validTo).getTime() < now) {
+      gaps.push(
+        `--tls-cert "${opts.certPath}" chains through "${subject}", which ` +
+          `expired on ${member.validTo} — every worker handshake to the ` +
+          `daemon will fail CERT_HAS_EXPIRED. Renew that chain member and ` +
+          `restart.`,
+      );
+    } else if (new Date(member.validFrom).getTime() > now) {
+      gaps.push(
+        `--tls-cert "${opts.certPath}" chains through "${subject}", which is ` +
+          `not yet valid (validFrom: ${member.validFrom}) — every worker ` +
+          `handshake to the daemon will fail CERT_NOT_YET_VALID. Check that ` +
+          `chain member's notBefore date or the system clock.`,
+      );
+    }
+  }
+  const host = workerDialHost(opts.daemonUrl);
+  if (host && !certCoversHost(x509, host)) {
+    gaps.push(
+      `--tls-cert "${opts.certPath}" has no subjectAltName covering ` +
+        `"${host}", the host channel workers dial — every worker handshake ` +
+        `will fail ERR_TLS_CERT_ALTNAME_INVALID. Reissue the certificate ` +
+        `with that host in its SANs and restart.`,
+    );
+  }
+  return gaps;
+}
+
+function isSelfSignedCert(x509: X509Certificate): boolean {
+  try {
+    return x509.verify(x509.publicKey);
+  } catch {
+    // Unsupported key type: assume self-signed rather than warn on a guess.
+    return true;
+  }
+}
+
+// Base64 never contains `-`, so the body match cannot run past its own
+// end marker and cannot backtrack.
+const PEM_CERTIFICATE_BLOCK =
+  /-----BEGIN CERTIFICATE-----[^-]*-----END CERTIFICATE-----/g;
+
+/**
+ * Every certificate in a PEM serving file, leaf first. `X509Certificate` reads
+ * only the first block of a bundle, so a fullchain file has to be split before
+ * any of it past the leaf can be reasoned about. A non-PEM (DER) buffer has no
+ * blocks to split and is handed over whole.
+ */
+function parseCertChain(cert: Buffer): X509Certificate[] {
+  const blocks = cert.toString('utf8').match(PEM_CERTIFICATE_BLOCK);
+  if (!blocks) {
+    try {
+      return [new X509Certificate(cert)];
+    } catch {
+      return [];
+    }
+  }
+  const chain: X509Certificate[] = [];
+  for (const block of blocks) {
+    try {
+      chain.push(new X509Certificate(block));
+    } catch {
+      // One malformed block does not make the rest of the file unusable.
+    }
+  }
+  return chain;
+}
+
+function certIssuedBy(cert: X509Certificate, issuer: X509Certificate): boolean {
+  try {
+    return cert.checkIssued(issuer) && cert.verify(issuer.publicKey);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Walks the leaf up through the certificates the workers actually hold, and
+ * reports both whether the walk terminated on a self-signed anchor and the
+ * certificates it relied on. Workers get the whole bundle as their trust
+ * store, so a fullchain that walks up to a self-signed root anchors fine even
+ * though the leaf never could alone — and every member the walk leaned on is
+ * a member whose own validity window the handshake will enforce.
+ */
+function walkWorkerAnchorPath(chain: readonly X509Certificate[]): {
+  anchored: boolean;
+  path: readonly X509Certificate[];
+  /** Set when the walk terminated on a self-signed cert that is not a CA. */
+  nonCaTerminator?: X509Certificate;
+} {
+  let next: X509Certificate | undefined = chain[0];
+  const walked = new Set<string>();
+  const path: X509Certificate[] = [];
+  while (next) {
+    const current: X509Certificate = next;
+    path.push(current);
+    if (isSelfSignedCert(current)) {
+      // OpenSSL applies `basicConstraints CA:TRUE` to certificates that sign
+      // OTHER certificates, not to a self-signed leaf trusted at depth 0.
+      // Measured on Node 22: a CA:FALSE self-signed leaf in its own trust
+      // store handshakes fine, while the same shape used as an issuer fails
+      // INVALID_PURPOSE — so the constraint binds only past the leaf.
+      if (path.length > 1 && !current.ca) {
+        return { anchored: false, path, nonCaTerminator: current };
+      }
+      return { anchored: true, path };
+    }
+    walked.add(current.fingerprint256);
+    next = chain.find(
+      (candidate) =>
+        !walked.has(candidate.fingerprint256) &&
+        certIssuedBy(current, candidate),
+    );
+  }
+  return { anchored: false, path };
+}
+
+/**
+ * WHATWG `URL.hostname` keeps the brackets on an IPv6 literal (`[::1]`), and
+ * `isIP` does not recognise the bracketed form — so an unstripped host falls
+ * through to the DNS-name branch of the SAN check, where it can never match
+ * the iPAddress SAN such a certificate actually carries.
+ */
+function workerDialHost(daemonUrl: string): string | undefined {
+  try {
+    const hostname = new URL(daemonUrl).hostname;
+    if (!hostname) return undefined;
+    return hostname.startsWith('[') && hostname.endsWith(']')
+      ? hostname.slice(1, -1)
+      : hostname;
+  } catch {
+    return undefined;
+  }
+}
+
+function certCoversHost(x509: X509Certificate, host: string): boolean {
+  try {
+    // IP literals need an iPAddress SAN — checkServerIdentity has no CN
+    // fallback for them — while names go through the normal host match.
+    return isIP(host)
+      ? Boolean(x509.checkIP(host))
+      : Boolean(x509.checkHost(host));
+  } catch {
+    return true;
+  }
 }
 
 /**
@@ -2417,6 +2642,7 @@ async function runQwenServeImpl(
   // downgrade would serve the web shell over an insecure transport they
   // believe is encrypted.
   let tlsOptions: { cert: Buffer; key: Buffer } | undefined;
+  let tlsCertPath: string | undefined;
   if ((opts.tlsCert && !opts.tlsKey) || (!opts.tlsCert && opts.tlsKey)) {
     throw new Error(
       `--tls-cert and --tls-key must be provided together (got only ` +
@@ -2475,6 +2701,10 @@ async function runQwenServeImpl(
       );
     }
     tlsOptions = { cert, key };
+    // Workers are forked with `cwd: opts.workspace`, so a relative --tls-cert
+    // would resolve against the worker's cwd instead of the daemon's and load
+    // nothing. Resolve once here, against the cwd the daemon just read it with.
+    tlsCertPath = path.resolve(opts.tlsCert);
   }
 
   if (!isLoopbackBind(opts.hostname) && !token) {
@@ -7111,6 +7341,32 @@ async function runQwenServeImpl(
             );
           }
           const workerRuntime = await ensureChannelRuntime();
+          const workerDaemonUrl = formatChannelWorkerDaemonUrl(
+            opts.hostname,
+            actualPort,
+            tlsOptions !== undefined,
+          );
+          if (tlsOptions && tlsCertPath) {
+            const operatorCaCertPath = process.env['NODE_EXTRA_CA_CERTS'];
+            let operatorCaCert: Buffer | undefined;
+            if (operatorCaCertPath) {
+              try {
+                operatorCaCert = fs.readFileSync(operatorCaCertPath);
+              } catch {
+                // Unreadable: it anchors nothing, which is what the gap check
+                // concludes from the missing contents.
+              }
+            }
+            for (const gap of describeWorkerTlsTrustGaps({
+              cert: tlsOptions.cert,
+              certPath: tlsCertPath,
+              daemonUrl: workerDaemonUrl,
+              ...(operatorCaCertPath ? { operatorCaCertPath } : {}),
+              ...(operatorCaCert ? { operatorCaCert } : {}),
+            })) {
+              daemonLog.warn(gap);
+            }
+          }
           const createSupervisor =
             deps.channelWorkerSupervisorFactory ??
             workerRuntime.createChannelWorkerSupervisor;
@@ -7121,13 +7377,9 @@ async function runQwenServeImpl(
               createSupervisor,
               shared: {
                 cliEntryPath: workerRuntime.findCliEntryPath(),
-                daemonUrl: formatChannelWorkerDaemonUrl(
-                  opts.hostname,
-                  actualPort,
-                  tlsOptions !== undefined,
-                ),
+                daemonUrl: workerDaemonUrl,
                 ...(token ? { daemonToken: token } : {}),
-                ...(tlsOptions ? { workerTlsCaCertPath: opts.tlsCert } : {}),
+                ...(tlsCertPath ? { workerTlsCaCertPath: tlsCertPath } : {}),
               },
               onReady: (snapshot) => {
                 if (runtimeStartupError !== undefined) return;

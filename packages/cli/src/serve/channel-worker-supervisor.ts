@@ -227,7 +227,17 @@ export interface CreateChannelWorkerSupervisorOptions {
   workerBaseEnv?: Readonly<NodeJS.ProcessEnv>;
   /**
    * PEM cert the worker must additionally trust when calling the daemon
-   * over a self-signed TLS listener. Injected via NODE_EXTRA_CA_CERTS.
+   * over a self-signed TLS listener, injected as their `NODE_EXTRA_CA_CERTS`.
+   *
+   * With no operator CA set this is handed over as a PATH, and Node re-reads
+   * it at every (re)spawn — while the daemon keeps serving the bytes it read
+   * at boot. Rotating this file in place without restarting the daemon
+   * therefore leaves respawned workers trusting the NEW contents against the
+   * OLD served cert, and they restart-loop until the daemon restarts. (With an
+   * operator CA set the merged bundle pins a snapshot instead, so the same
+   * rotation is invisible to workers until the daemon restarts.) Either way,
+   * rotating `--tls-cert` requires a daemon restart; see the HTTPS / TLS notes
+   * in docs/users/qwen-serve.md.
    */
   tlsCaCertPath?: string;
   startupTimeoutMs?: number;
@@ -382,25 +392,160 @@ function hasObservedExit(snapshot: ChannelWorkerSnapshot): boolean {
 
 const NODE_EXTRA_CA_CERTS_ENV = 'NODE_EXTRA_CA_CERTS';
 
+/**
+ * Merged bundles keyed by `${operatorCaPath}\0${daemonCertPath}`. Workers are
+ * respawned on every restart, so without this the daemon would mint a fresh
+ * bundle directory per spawn and leak all of them.
+ */
+const mergedWorkerCaBundles = new Map<string, MergedWorkerCaBundle>();
+
+interface MergedWorkerCaBundle {
+  bundlePath: string;
+  /** `${mtimeMs}:${size}` of each source file, in merge order. */
+  sourceStamps: readonly string[];
+}
+
+function sourceStamp(filePath: string): string {
+  const stat = fs.statSync(filePath);
+  return `${stat.mtimeMs}:${stat.size}`;
+}
+
+/**
+ * A PEM certificate block with every marker alone on its own line. Node's
+ * certificate loader is line-strict AND all-or-nothing: one fused
+ * `-----END CERTIFICATE----------BEGIN CERTIFICATE-----` (what
+ * `cat a.pem b.pem` produces when `a.pem` has no trailing newline) makes it
+ * discard the WHOLE bundle with `bad end line` — including the daemon cert
+ * appended after it, so the workers lose the trust the merge exists to give
+ * them. `tls.createSecureContext({ ca })` does not throw on that shape, so it
+ * cannot stand in as the validator. Base64 never contains `-`, so the body
+ * match cannot run past its own end marker or backtrack.
+ */
+const STRICT_PEM_CERTIFICATE_BLOCK =
+  /^-----BEGIN CERTIFICATE-----\n(?:[A-Za-z0-9+/=]+\n)+-----END CERTIFICATE-----$/gm;
+
+/**
+ * The certificate blocks of `contents`, or `undefined` when Node's loader
+ * would reject the file: no block at all, or a `BEGIN CERTIFICATE` marker
+ * that did not yield a well-formed block.
+ *
+ * Only certificate blocks come back. A combined cert+key serving PEM passes
+ * boot validation (which parses the first block alone), and copying its
+ * private key into a tmpdir bundle `NODE_EXTRA_CA_CERTS` never reads would
+ * leave key material behind a SIGKILLed daemon, where the `exit` cleanup
+ * cannot run.
+ */
+function extractCertificateBlocks(contents: string): string[] | undefined {
+  const normalized = contents.replace(/\r\n/g, '\n');
+  const blocks = normalized.match(STRICT_PEM_CERTIFICATE_BLOCK) ?? [];
+  const markers = normalized.match(/-----BEGIN CERTIFICATE-----/g) ?? [];
+  if (blocks.length === 0 || blocks.length !== markers.length) return undefined;
+  return blocks;
+}
+
+function warnWorkerCaMergeFallback(
+  operatorCaPath: string,
+  daemonCertPath: string,
+  reason: string,
+): void {
+  // Falling back to the daemon cert alone silently drops the operator CA
+  // the merge above exists to preserve, and Node says nothing when the
+  // remaining cert loads fine — so say it here.
+  process.emitWarning(
+    `qwen: failed to merge ${NODE_EXTRA_CA_CERTS_ENV} "${operatorCaPath}" ` +
+      `with the daemon cert "${daemonCertPath}": ${reason}; channel ` +
+      `workers will trust only the daemon cert`,
+  );
+}
+
+function writeMergedWorkerCaBundle(contents: string): string {
+  // mkdtempSync gives a 0700 directory with a random suffix, so the bundle
+  // path cannot be pre-planted the way a fixed `qwen-worker-ca-<pid>.pem` in
+  // the shared tmpdir can (CWE-377/CWE-59: a pre-planted symlink redirects
+  // the write, a pre-planted regular file keeps attacker ownership and mode
+  // while receiving the cert — the private key too, for a combined PEM).
+  // Same defence as standalone-update.ts's extract dir.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-worker-ca-'));
+  const bundlePath = path.join(dir, 'ca-bundle.pem');
+  fs.writeFileSync(bundlePath, contents, { mode: 0o600 });
+  // Nothing else references this directory, so the daemon owns its lifetime.
+  process.once('exit', () => {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // Best effort: the daemon is already exiting.
+    }
+  });
+  return bundlePath;
+}
+
 function resolveWorkerCaCertPath(
   daemonCertPath: string,
   existing: string | undefined,
 ): string {
   if (!existing || existing === daemonCertPath) return daemonCertPath;
+  const cacheKey = `${existing}\0${daemonCertPath}`;
+  const sources = [existing, daemonCertPath];
+  const cached = mergedWorkerCaBundles.get(cacheKey);
+  if (cached) {
+    try {
+      // Two ways a hit goes stale, both ending in workers that restart-loop
+      // while the daemon stays green: the operator rotates their CA file in
+      // place (before this bundle existed a respawned worker read that file
+      // live), and an external tmp cleaner ages out the bundle directory,
+      // leaving the cache pointing at a dead path. Re-stat both ends.
+      fs.statSync(cached.bundlePath);
+      if (
+        sources.every((src, i) => sourceStamp(src) === cached.sourceStamps[i])
+      ) {
+        return cached.bundlePath;
+      }
+    } catch {
+      // Unreadable source or vanished bundle: rebuild below.
+    }
+    mergedWorkerCaBundles.delete(cacheKey);
+  }
   try {
+    const sourceStamps = sources.map(sourceStamp);
     // NODE_EXTRA_CA_CERTS takes a single file; merge so an operator-set CA
-    // (e.g. corporate proxy) keeps working alongside the daemon cert.
-    const combined = [
-      fs.readFileSync(existing, 'utf8').trimEnd(),
-      fs.readFileSync(daemonCertPath, 'utf8').trimEnd(),
-    ].join('\n');
-    const combinedPath = path.join(
-      os.tmpdir(),
-      `qwen-worker-ca-${process.pid}.pem`,
+    // (e.g. corporate proxy) keeps working alongside the daemon cert. A
+    // merely *readable* operator file is not enough — one Node's loader
+    // rejects takes the daemon cert down with it, which is strictly worse
+    // than the fallback below.
+    const operatorBlocks = extractCertificateBlocks(
+      fs.readFileSync(existing, 'utf8'),
     );
-    fs.writeFileSync(combinedPath, `${combined}\n`, { mode: 0o600 });
-    return combinedPath;
-  } catch {
+    if (!operatorBlocks) {
+      warnWorkerCaMergeFallback(
+        existing,
+        daemonCertPath,
+        'it holds no PEM certificate block Node can load (every ' +
+          '-----BEGIN/END CERTIFICATE----- marker must sit alone on its line)',
+      );
+      return daemonCertPath;
+    }
+    const daemonBlocks = extractCertificateBlocks(
+      fs.readFileSync(daemonCertPath, 'utf8'),
+    );
+    if (!daemonBlocks) {
+      warnWorkerCaMergeFallback(
+        existing,
+        daemonCertPath,
+        'the daemon cert holds no PEM certificate block to merge into',
+      );
+      return daemonCertPath;
+    }
+    const bundlePath = writeMergedWorkerCaBundle(
+      `${[...operatorBlocks, ...daemonBlocks].join('\n')}\n`,
+    );
+    mergedWorkerCaBundles.set(cacheKey, { bundlePath, sourceStamps });
+    return bundlePath;
+  } catch (err) {
+    warnWorkerCaMergeFallback(
+      existing,
+      daemonCertPath,
+      err instanceof Error ? err.message : String(err),
+    );
     return daemonCertPath;
   }
 }

@@ -1370,6 +1370,31 @@ describe('runChannelDaemonWorker', () => {
     });
   });
 
+  it('accepts an IPv6 loopback daemon URL for a ::1-bound TLS daemon', async () => {
+    // R2-14: formatChannelWorkerDaemonUrl emits `https://[::1]:<port>` for a
+    // `::1` TLS bind, and this side accepts it only because `'[::1]'` sits in
+    // LOOPBACK_BINDS. Nothing else pins that entry, so dropping it as
+    // redundant keeps every test green while every ::1-bound TLS daemon's
+    // workers reject their own URL at boot and restart-loop — the exact
+    // failure this PR exists to remove, regressing on IPv6 alone.
+    const sdk = createSdk();
+    mockLoadChannelsConfig.mockReturnValueOnce({
+      telegram: { type: 'telegram' },
+    });
+    mockParseConfiguredChannels.mockResolvedValueOnce([parsedTelegram]);
+
+    await runChannelDaemonWorker({
+      daemonUrl: 'https://[::1]:4170',
+      workspace: '/workspace',
+      selection: { mode: 'all' },
+      loadDaemonSdk: async () => sdk,
+    });
+
+    expect(sdk.DaemonClient).toHaveBeenCalledWith({
+      baseUrl: 'https://[::1]:4170',
+    });
+  });
+
   it('fails fast when no channels are configured', async () => {
     const sdk = createSdk();
     mockLoadChannelsConfig.mockReturnValueOnce({});
