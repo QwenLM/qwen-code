@@ -899,6 +899,339 @@ describe('SessionArtifactStore', () => {
     }
   });
 
+  it('updates workspace title and description when the same path is recorded again', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's2-workspace-rerecord-title',
+      workspaceCwd: workspace,
+    });
+    await fs.mkdir(path.join(workspace, 'reports'), { recursive: true });
+    await fs.writeFile(path.join(workspace, 'reports/dashboard.html'), 'hello');
+
+    const created = await store.upsertMany(
+      [
+        {
+          title: 'Draft',
+          description: 'First pass',
+          workspacePath: 'reports/dashboard.html',
+        },
+      ],
+      { strict: true },
+    );
+    const artifactId = created.changes[0]?.artifactId;
+
+    const updated = await store.upsertMany(
+      [
+        {
+          title: 'Final dashboard',
+          description: 'Ready for review',
+          workspacePath: 'reports/dashboard.html',
+        },
+      ],
+      { strict: true },
+    );
+
+    expect(updated.changes).toHaveLength(1);
+    expect(updated.changes[0]).toMatchObject({
+      action: 'updated',
+      artifactId,
+      artifact: {
+        id: artifactId,
+        storage: 'workspace',
+        title: 'Final dashboard',
+        description: 'Ready for review',
+        workspacePath: 'reports/dashboard.html',
+      },
+    });
+    expect((await store.list()).artifacts).toMatchObject([
+      {
+        id: artifactId,
+        title: 'Final dashboard',
+        description: 'Ready for review',
+        workspacePath: 'reports/dashboard.html',
+      },
+    ]);
+  });
+
+  it('keeps a curated title when write_file re-records the same workspace path', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's2-workspace-rerecord-preserve-title',
+      workspaceCwd: workspace,
+    });
+    await fs.mkdir(path.join(workspace, 'reports'), { recursive: true });
+    await fs.writeFile(path.join(workspace, 'reports/sales.csv'), 'a,b\n');
+
+    const created = await store.upsertMany(
+      [
+        {
+          title: 'Quarterly sales report',
+          description: 'Curated',
+          workspacePath: 'reports/sales.csv',
+          toolName: 'record_artifact',
+        },
+      ],
+      { strict: true },
+    );
+    const artifactId = created.changes[0]?.artifactId;
+
+    await store.upsertMany(
+      [
+        {
+          title: 'sales.csv',
+          workspacePath: 'reports/sales.csv',
+          toolName: 'write_file',
+        },
+      ],
+      { strict: true },
+    );
+
+    expect((await store.list()).artifacts).toMatchObject([
+      {
+        id: artifactId,
+        title: 'Quarterly sales report',
+        description: 'Curated',
+        toolName: 'record_artifact',
+      },
+    ]);
+  });
+
+  it('keeps a curated title after write_file then record_artifact then write_file', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's2-workspace-rerecord-write-then-curate',
+      workspaceCwd: workspace,
+    });
+    await fs.writeFile(path.join(workspace, 'report.html'), '<html>ok</html>');
+
+    await store.upsertMany(
+      [
+        {
+          title: 'report.html',
+          workspacePath: 'report.html',
+          toolName: 'write_file',
+          toolCallId: 'call-write',
+        },
+      ],
+      { strict: true },
+    );
+    await store.upsertMany(
+      [
+        {
+          title: 'Q3 Report',
+          workspacePath: 'report.html',
+          toolName: 'record_artifact',
+          toolCallId: 'call-record',
+        },
+      ],
+      { strict: true },
+    );
+    await store.upsertMany(
+      [
+        {
+          title: 'report.html',
+          workspacePath: 'report.html',
+          toolName: 'write_file',
+        },
+      ],
+      { strict: true },
+    );
+
+    expect((await store.list()).artifacts).toMatchObject([
+      {
+        title: 'Q3 Report',
+        toolName: 'record_artifact',
+        toolCallId: 'call-record',
+      },
+    ]);
+  });
+
+  it('keeps a curated title when a record_artifact hook re-records the same path', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's2-workspace-rerecord-record-hook',
+      workspaceCwd: workspace,
+    });
+    await fs.writeFile(path.join(workspace, 'report.html'), '<html>ok</html>');
+
+    await store.upsertMany(
+      [
+        {
+          title: 'Q3 Report',
+          workspacePath: 'report.html',
+          source: 'tool',
+          toolName: 'record_artifact',
+        },
+      ],
+      { strict: true },
+    );
+    await store.upsertMany(
+      [
+        {
+          title: 'report.html',
+          workspacePath: 'report.html',
+          source: 'hook',
+          toolName: 'record_artifact',
+          hookEventName: 'PostToolUse',
+        },
+      ],
+      { strict: true },
+    );
+
+    expect((await store.list()).artifacts).toMatchObject([
+      {
+        title: 'Q3 Report',
+        source: 'tool',
+        toolName: 'record_artifact',
+      },
+    ]);
+  });
+
+  it('keeps a title curated without toolName when write_file later auto-records', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's2-workspace-rerecord-unattributed-title',
+      workspaceCwd: workspace,
+    });
+    await fs.writeFile(path.join(workspace, 'notes.html'), '<html>ok</html>');
+
+    await store.upsertMany(
+      [
+        {
+          title: 'notes.html',
+          workspacePath: 'notes.html',
+          toolName: 'write_file',
+        },
+      ],
+      { strict: true },
+    );
+    await store.upsertMany(
+      [
+        {
+          title: 'Release notes',
+          workspacePath: 'notes.html',
+        },
+      ],
+      { strict: true },
+    );
+    await store.upsertMany(
+      [
+        {
+          title: 'notes.html',
+          workspacePath: 'notes.html',
+          toolName: 'write_file',
+        },
+      ],
+      { strict: true },
+    );
+
+    expect((await store.list()).artifacts).toMatchObject([
+      {
+        title: 'Release notes',
+      },
+    ]);
+    expect((await store.list()).artifacts[0]?.toolName).toBeUndefined();
+  });
+
+  it('keeps a hook-curated title when write_file later auto-records the same path', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's2-workspace-rerecord-hook-title',
+      workspaceCwd: workspace,
+    });
+    await fs.writeFile(path.join(workspace, 'sales.csv'), 'a,b\n');
+
+    await store.upsertMany(
+      [
+        {
+          title: 'Quarterly sales report',
+          workspacePath: 'sales.csv',
+          source: 'hook',
+          toolName: 'write_file',
+          hookEventName: 'PostToolUse',
+        },
+      ],
+      { strict: true },
+    );
+    await store.upsertMany(
+      [
+        {
+          title: 'sales.csv',
+          workspacePath: 'sales.csv',
+          source: 'tool',
+          toolName: 'write_file',
+        },
+      ],
+      { strict: true },
+    );
+
+    expect((await store.list()).artifacts).toMatchObject([
+      {
+        title: 'Quarterly sales report',
+        source: 'hook',
+        toolName: 'write_file',
+      },
+    ]);
+  });
+
+  it('keeps the existing description when a re-record omits it', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's2-workspace-rerecord-keep-description',
+      workspaceCwd: workspace,
+    });
+    await fs.writeFile(path.join(workspace, 'notes.html'), '<html>ok</html>');
+
+    await store.upsertMany(
+      [
+        {
+          title: 'Draft',
+          description: 'Keep me',
+          workspacePath: 'notes.html',
+        },
+      ],
+      { strict: true },
+    );
+
+    const updated = await store.upsertMany(
+      [
+        {
+          title: 'Final notes',
+          workspacePath: 'notes.html',
+        },
+      ],
+      { strict: true },
+    );
+
+    expect(updated.changes[0]?.artifact).toMatchObject({
+      title: 'Final notes',
+      description: 'Keep me',
+    });
+  });
+
+  it('uses the later title when the same workspace path appears twice in one batch', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's2-workspace-batch-duplicate',
+      workspaceCwd: workspace,
+    });
+    await fs.writeFile(path.join(workspace, 'dup.html'), '<html>ok</html>');
+
+    const created = await store.upsertMany(
+      [
+        {
+          title: 'First',
+          description: 'Old',
+          workspacePath: 'dup.html',
+        },
+        {
+          title: 'Second',
+          description: 'New',
+          workspacePath: 'dup.html',
+        },
+      ],
+      { strict: true },
+    );
+
+    expect(created.changes).toHaveLength(1);
+    expect(created.changes[0]?.artifact).toMatchObject({
+      title: 'Second',
+      description: 'New',
+    });
+  });
+
   it('accepts trusted published file urls outside the workspace', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's2-published-file-url',
