@@ -1230,22 +1230,32 @@ describe('expandHomeDir', () => {
 describe('isTempDirPath', () => {
   let tmpdirSpy: ReturnType<typeof vi.spyOn>;
   let tmpRoot: string;
+  let pinned: string;
 
   beforeAll(() => {
     // Pin the temp root to an allowlisted location: merge-queue legs
-    // export TMPDIR=$RUNNER_TEMP, which the distrust guard rejects,
-    // and the fixtures below never need to exist on disk.
-    tmpdirSpy = vi
-      .spyOn(os, 'tmpdir')
-      .mockReturnValue(
-        process.platform === 'win32' ? 'C:\\Windows\\Temp' : '/tmp',
-      );
+    // export TMPDIR/$TEMP=$RUNNER_TEMP, which the distrust guard
+    // rejects, and the fixtures below never need to exist on disk.
+    pinned = process.platform === 'win32' ? 'C:\\Windows\\Temp' : '/tmp';
+    tmpdirSpy = vi.spyOn(os, 'tmpdir').mockReturnValue(pinned);
     tmpRoot = path.join(os.tmpdir(), 'is-temp-dir-test-fixture');
   });
 
   afterAll(() => {
     tmpdirSpy.mockRestore();
   });
+
+  // Swap the suite-level spy's value for one test. A second nested
+  // vi.spyOn would unwrap through tinyspy's getOriginal() and its
+  // restore would kill the beforeAll mock for every later test.
+  const withTmpdir = (value: string, fn: () => void) => {
+    tmpdirSpy.mockReturnValue(value);
+    try {
+      fn();
+    } finally {
+      tmpdirSpy.mockReturnValue(pinned);
+    }
+  };
 
   it('returns true for a path under os.tmpdir()', () => {
     expect(isTempDirPath(path.join(tmpRoot, 'sub'))).toBe(true);
@@ -1258,34 +1268,27 @@ describe('isTempDirPath', () => {
   it('returns false for a regular project path', () => {
     // Pin the temp root away from the home dir: merge-queue CI legs put
     // HOME under os.tmpdir(), which would flip this fixture to temp.
-    const tmpdirSpy = vi
-      .spyOn(os, 'tmpdir')
-      .mockReturnValue(
-        process.platform === 'win32'
-          ? 'C:\\Windows\\Temp'
-          : '/nonexistent-tmp-root',
-      );
-    try {
-      expect(isTempDirPath(path.join(os.homedir(), 'my-project'))).toBe(false);
-    } finally {
-      tmpdirSpy.mockRestore();
-    }
+    withTmpdir(
+      process.platform === 'win32'
+        ? 'C:\\Windows\\Temp'
+        : '/nonexistent-tmp-root',
+      () => {
+        expect(isTempDirPath(path.join(os.homedir(), 'my-project'))).toBe(
+          false,
+        );
+      },
+    );
   });
 
   it('does not trust a user-set TMPDIR pointing at a persistent dir', () => {
     // os.tmpdir() follows TMPDIR/TEMP on every platform; a persistent
     // user root (e.g. $HOME/tmp) must not classify real projects as
     // disposable.
-    const tmpdirSpy = vi
-      .spyOn(os, 'tmpdir')
-      .mockReturnValue(path.join(os.homedir(), 'tmp'));
-    try {
+    withTmpdir(path.join(os.homedir(), 'tmp'), () => {
       expect(isTempDirPath(path.join(os.homedir(), 'tmp', 'myproj'))).toBe(
         false,
       );
-    } finally {
-      tmpdirSpy.mockRestore();
-    }
+    });
   });
 
   it
@@ -1296,12 +1299,9 @@ describe('isTempDirPath', () => {
       // These bases have no ambient coverage on any CI leg; a typo or
       // removal would silently disable temp classification for the root
       // class they protect.
-      const tmpdirSpy = vi.spyOn(os, 'tmpdir').mockReturnValue(root);
-      try {
+      withTmpdir(root, () => {
         expect(isTempDirPath(path.join(root, 'qwen-sess-x'))).toBe(true);
-      } finally {
-        tmpdirSpy.mockRestore();
-      }
+      });
     },
   );
 
@@ -1319,14 +1319,9 @@ describe('isTempDirPath', () => {
   it.skipIf(process.platform === 'win32')(
     'covers literal /tmp on POSIX even when os.tmpdir() differs',
     () => {
-      const tmpdirSpy = vi
-        .spyOn(os, 'tmpdir')
-        .mockReturnValue('/var/folders/zz/aaaaaaaa/T');
-      try {
+      withTmpdir('/var/folders/zz/aaaaaaaa/T', () => {
         expect(isTempDirPath('/tmp/qwen-enter-sess-abc123')).toBe(true);
-      } finally {
-        tmpdirSpy.mockRestore();
-      }
+      });
     },
   );
 });

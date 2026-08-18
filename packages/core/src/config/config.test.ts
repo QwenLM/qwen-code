@@ -7101,17 +7101,20 @@ describe('Server Config (config.ts)', () => {
     let tmpdirSpy: MockInstance | undefined;
 
     beforeEach(() => {
-      // Pin the temp root on POSIX: merge-queue legs export
-      // TMPDIR=$RUNNER_TEMP, which the distrust guard rejects and
-      // which would keep the shutdown gate closed here. /var/tmp, not
-      // /tmp: lstatSync is real in this file's fs mock while
-      // realpathSync is identity-mocked, so /tmp's macOS symlink would
-      // resolve the root to /private/tmp but never the fixture.
-      // Windows needs no pin: Node ignores TMPDIR there and the
-      // ambient %TEMP% (%LOCALAPPDATA%\Temp) is allowlisted.
-      if (process.platform !== 'win32') {
-        tmpdirSpy = vi.spyOn(os, 'tmpdir').mockReturnValue('/var/tmp');
-      }
+      // Pin the temp root: the merge-queue legs put the ambient temp
+      // root outside the allowlist (POSIX exports TMPDIR=$RUNNER_TEMP;
+      // the Windows runner action overrides TEMP/TMP the same way),
+      // which would keep the shutdown gate closed here. POSIX pins
+      // /var/tmp, not /tmp: lstatSync is real in this file's fs mock
+      // while realpathSync is identity-mocked, so /tmp's macOS symlink
+      // would resolve the root to /private/tmp but never the fixture.
+      // Windows pins C:\Windows\Temp, an OS-known location the distrust
+      // guard accepts.
+      tmpdirSpy = vi
+        .spyOn(os, 'tmpdir')
+        .mockReturnValue(
+          process.platform === 'win32' ? 'C:\\Windows\\Temp' : '/var/tmp',
+        );
       Storage.setRuntimeBaseDir(
         path.join(os.tmpdir(), 'qwen-shutdown-test-runtime'),
       );

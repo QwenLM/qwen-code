@@ -756,16 +756,19 @@ describe('Storage – cleanOrphanProjectDirs', () => {
   };
 
   beforeEach(() => {
-    // Pin the temp root on POSIX: merge-queue legs export
-    // TMPDIR=$RUNNER_TEMP, which the distrust guard rejects and which
-    // would flip every temp-classification fixture here. /var/tmp, not
-    // /tmp: macOS symlinks /tmp -> /private/tmp, and with the mocked
+    // Pin the temp root: the merge-queue legs put the ambient temp root
+    // outside the allowlist (POSIX exports TMPDIR=$RUNNER_TEMP; the
+    // Windows runner action overrides TEMP/TMP the same way), which would
+    // flip every temp-classification fixture here. POSIX pins /var/tmp,
+    // not /tmp: macOS symlinks /tmp -> /private/tmp, and with the mocked
     // identity realpathSync the root and fixture realpaths would
-    // diverge. Windows needs no pin: Node ignores TMPDIR there and the
-    // ambient %TEMP% (%LOCALAPPDATA%\Temp) is allowlisted.
-    if (process.platform !== 'win32') {
-      tmpdirSpy = vi.spyOn(os, 'tmpdir').mockReturnValue('/var/tmp');
-    }
+    // diverge. Windows pins C:\Windows\Temp, an OS-known location the
+    // distrust guard accepts.
+    tmpdirSpy = vi
+      .spyOn(os, 'tmpdir')
+      .mockReturnValue(
+        process.platform === 'win32' ? 'C:\\Windows\\Temp' : '/var/tmp',
+      );
     baseDir = actualFs.mkdtempSync(path.join(os.tmpdir(), 'storage-orphan-'));
     projectsDir = path.join(baseDir, 'projects');
     actualFs.mkdirSync(projectsDir, { recursive: true });
