@@ -581,14 +581,10 @@ describe('SettingsSchema', () => {
 
       expect(format.type).toBe('enum');
       const values = format.options?.map((o: { value: string }) => o.value);
-      // Pin the full enum (sibling-test pattern) so an accidental removal of
-      // an existing value fails too, and bind it to the runtime's
-      // `OutputFormat` constants so the schema tracks core.
-      expect(values).toEqual([
-        OutputFormat.TEXT,
-        OutputFormat.JSON,
-        OutputFormat.STREAM_JSON,
-      ]);
+      // Pin the options to the full runtime enum, set-derived so both a
+      // removed value and a format added in core fail this test until the
+      // schema follows.
+      expect(values).toEqual(Object.values(OutputFormat));
     });
 
     it('should have loadFromIncludeDirectories setting in schema', () => {

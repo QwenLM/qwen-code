@@ -727,11 +727,15 @@ const SETTINGS_SCHEMA = {
         description:
           'The format of the CLI output. With `stream-json`, runs started ' +
           'with a prompt behave as non-interactive (headless), matching ' +
-          '`--output-format stream-json`.',
+          '`--output-format stream-json`. Flags validated at argv parse ' +
+          'time (`--include-partial-messages`, `--input-format ' +
+          'stream-json`) still require the explicit `--output-format ' +
+          'stream-json` flag.',
         showInDialog: false,
-        // Bind the values to the runtime's `OutputFormat` enum — the source
-        // `normalizeOutputFormat` accepts — so the schema cannot silently
-        // drift if core adds a format.
+        // The values are the runtime's `OutputFormat` enum members, and the
+        // settingsSchema test pins these options against
+        // `Object.values(OutputFormat)`, so a format added in core fails
+        // that test until this list and the regenerated JSON follow.
         options: [
           { value: OutputFormat.TEXT, label: 'Text' },
           { value: OutputFormat.JSON, label: 'JSON' },
