@@ -4627,6 +4627,7 @@ export function App({
       connection.sessionId !== loadedSkillsFallbackSessionId ||
       skillMutationOriginRef.current?.workspaceCwd !== connection.workspaceCwd
     ) {
+      handledSkillMutationIdRef.current = undefined;
       setLoadedSkillsFallbackSessionId(undefined);
       return;
     }
@@ -10819,6 +10820,7 @@ export function App({
   const useWorkspaceSkillSnapshot =
     loadedSkillsReady &&
     (!connection.sessionId ||
+      connection.skills === undefined ||
       loadedSkillsFallbackSessionId === connection.sessionId);
   const composerSkills = useMemo(
     () =>

@@ -10724,6 +10724,21 @@ describe('App session callbacks', () => {
     expect(testState.latestChatEditorProps?.commands).not.toEqual(
       expect.arrayContaining([expect.objectContaining({ name: 'review' })]),
     );
+
+    mockConnection.workspaceCwd = '/tmp/project';
+    mockConnection.sessionId = 'session-1';
+    mockConnection.commands = [
+      skillCommandFixture('web-search', 'Search the web'),
+    ];
+    mockConnection.skills = ['web-search'];
+    rerender();
+    await flush();
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.skills).toEqual([]);
+    });
+    expect(testState.latestChatEditorProps?.commands).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: 'web-search' })]),
+    );
   });
 
   it('keeps an earlier partial Skill toggle when a later mutation is already reflected', async () => {
@@ -10780,6 +10795,30 @@ describe('App session callbacks', () => {
     expect(testState.latestChatEditorProps?.commands).not.toEqual(
       expect.arrayContaining([expect.objectContaining({ name: 'web-search' })]),
     );
+  });
+
+  it('uses the workspace Skill snapshot while the session Skill list is unknown', async () => {
+    mockConnection.commands = [
+      skillCommandFixture('web-search', 'Search the web'),
+    ];
+    mockConnection.skills = undefined;
+    mockWorkspaceActions.loadSkillsStatus.mockResolvedValue({
+      skills: [
+        {
+          name: 'web-search',
+          description: 'Search the web',
+          status: 'ok',
+        },
+      ],
+    });
+
+    renderApp();
+    await flush();
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.skills).toEqual([
+        { name: 'web-search', description: 'Search the web' },
+      ]);
+    });
   });
 
   it('does not treat an unknown session Skill list as reflecting a disable', async () => {
