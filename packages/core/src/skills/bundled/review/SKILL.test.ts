@@ -105,7 +105,10 @@ describe('bundled review skill', () => {
     expect(body).toContain(
       'read `.qwen/review-cache/pr-<n>.json` **before** `fetch-pr`',
     );
-    expect(body).toContain('pass it to the fetch as `--since <lastCommitSha>`');
+    expect(body).toContain(
+      'pass BOTH fields to the fetch verbatim: `--since <lastCommitSha> ' +
+        '--since-model <lastModelId>`',
+    );
     expect(body).toContain(
       '**You never run `git` against an anchor yourself**',
     );
@@ -171,14 +174,22 @@ describe('bundled review skill', () => {
     // paraphrase of either clause must fail here; the unit suites pin the
     // identity's carriage, not these instructions.
     const body = skillBody();
-    // Cache path: the anchor is withheld from the flag, not judged after it.
-    expect(body).toContain('whose `lastModelId` equals `{{model}}`');
+    // Cache path: BOTH fields are copied to the command, and the gate is
+    // ruled there. Reverting to a hand-applied comparison is the bug, not the
+    // fix — `{{model}}` interpolates the bare id while every identity the CLI
+    // records is provider-qualified, so the two sides were never the same
+    // kind of string and two providers exposing one name compared equal.
     expect(body).toContain(
-      '**A cached anchor from another model is not passed at all**',
+      '--since <lastCommitSha> --since-model <lastModelId>',
     );
-    // …and the up-to-date outcomes still split on the model.
-    expect(body).toContain('`upToDate: true` **and** model matches');
-    expect(body).toContain('`upToDate: true` **but** model differs');
+    expect(body).toContain('**Copy them; do not compare them to anything.**');
+    expect(body).toContain('`cross-model-anchor`');
+    // No identity comparison may survive anywhere in the prompt: six review
+    // rounds closed one channel each and the next round found another, and
+    // this is what makes the class closed by construction rather than by
+    // another point fix.
+    expect(body).not.toMatch(/`lastModelId` equals/);
+    expect(body).not.toMatch(/model matches|model differs/);
     // Recovery path: the marker carries the certifying identity now, so the
     // "no `lastModelId` in the marker" premise main wrote against is gone.
     expect(body).toContain('the marker carries `model` beside its `sha`');
