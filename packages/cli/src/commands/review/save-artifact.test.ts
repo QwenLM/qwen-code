@@ -496,8 +496,8 @@ describe('saveReviewArtifact', () => {
     });
 
     expect(saved.path).toBe(join(root, '.qwen/reviews/review.json'));
-    // The registration value `record_artifact` wants, printed so the skill
-    // copies it verbatim.
+    // Canonical root-relative locator. record_artifact now prefers the
+    // absolute `path` as input and stores this form itself.
     expect(saved.workspacePath).toBe('.qwen/reviews/review.json');
     expect(JSON.parse(readFileSync(saved.path, 'utf8'))).toMatchObject({
       schemaVersion: 1,

@@ -400,19 +400,43 @@ describe('fetch-pr report assembly', () => {
     }
   });
 
+  /**
+   * The identity these fixtures run as, on both sides of the same-model gate.
+   *
+   * A `--since` anchor is used only when `--since-model` matches the running
+   * identity, so a test about ancestry or scoping has to agree on WHO
+   * certified the anchor before it can be about anything else. Supplied by
+   * default here rather than repeated in thirty call sites; the tests that
+   * are ABOUT the gate pass their own `sinceModel` and set their own env.
+   */
+  const CERTIFIER = 'fixture-model@1a2b3c4d';
+
   async function reportFor(extraArgs: Record<string, unknown>) {
     const handler = fetchPrCommand.handler;
     if (!handler) throw new Error('fetch-pr handler missing');
-    await handler({
-      _: [],
-      $0: 'qwen',
-      pr_number: '42',
-      owner_repo: 'acme/widgets',
-      remote: 'origin',
-      out: '/tmp/fetch-report.json',
-      maxChunkLines: 400,
-      ...extraArgs,
-    } as unknown as Parameters<typeof handler>[0]);
+    const savedIdentity = process.env['QWEN_CODE_MODEL_IDENTITY'];
+    process.env['QWEN_CODE_MODEL_IDENTITY'] = CERTIFIER;
+    try {
+      await handler({
+        _: [],
+        $0: 'qwen',
+        pr_number: '42',
+        owner_repo: 'acme/widgets',
+        remote: 'origin',
+        out: '/tmp/fetch-report.json',
+        maxChunkLines: 400,
+        ...(extraArgs['since'] !== undefined && !('sinceModel' in extraArgs)
+          ? { sinceModel: CERTIFIER }
+          : {}),
+        ...extraArgs,
+      } as unknown as Parameters<typeof handler>[0]);
+    } finally {
+      if (savedIdentity === undefined) {
+        delete process.env['QWEN_CODE_MODEL_IDENTITY'];
+      } else {
+        process.env['QWEN_CODE_MODEL_IDENTITY'] = savedIdentity;
+      }
+    }
     // findLast, not find: a test that drives two rounds must read the report
     // the SECOND one wrote, or it asserts against the first round's state.
     const call = producerMocks.writeFileSync.mock.calls.findLast(
@@ -958,6 +982,61 @@ describe('fetch-pr report assembly', () => {
       BASE,
       ANCHOR,
     ]);
+  });
+
+  it('refuses an anchor another identity certified, before touching history', async () => {
+    // "Clean up to this sha" is the recorded identity's verdict, and this
+    // command validates an anchor against the HISTORY, never against who
+    // certified it — so a cross-model anchor is ancestrally perfect and
+    // still scopes the round past code it never reviewed.
+    //
+    // The gate lives here because every prompt-text version of it was wrong:
+    // `{{model}}` interpolates the BARE `config.getModel()` while every
+    // identity the CLI writes is provider-qualified, so two providers
+    // exposing one model name passed each other's gate.
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    servesBothRanges();
+
+    // Same model NAME, different provider — the case the digest exists for.
+    const other = await reportFor({
+      since: ANCHOR,
+      sinceModel: 'fixture-model@9f8e7d6c',
+    });
+    expect(other.incremental).toEqual({
+      since: ANCHOR,
+      effective: false,
+      reason: 'cross-model-anchor',
+    });
+    // Refused before the history was consulted at all: no probe ran for it.
+    expect(producerMocks.gitOpt.mock.calls).not.toContainEqual([
+      'cat-file',
+      '-e',
+      ANCHOR,
+    ]);
+    // The round still reviews — the full range.
+    expect(other.diffPath).not.toBeNull();
+
+    // An anchor nobody certified (a cache written before the field) is a
+    // mismatch, not a pass.
+    expect(
+      (await reportFor({ since: ANCHOR, sinceModel: undefined })).incremental,
+    ).toEqual({
+      since: ANCHOR,
+      effective: false,
+      reason: 'cross-model-anchor',
+    });
+
+    // …and the matching identity scopes, which is what makes the refusals
+    // above about the gate rather than about the anchor.
+    expect((await reportFor({ since: ANCHOR })).incremental).toEqual({
+      since: ANCHOR,
+      effective: true,
+      diffBase: ANCHOR,
+    });
   });
 
   it('takes the LAST value of a repeated --since, and expands an abbreviation', async () => {

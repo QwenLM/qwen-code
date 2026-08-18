@@ -72,6 +72,22 @@ export interface Ledger {
    */
   sha?: string;
   /**
+   * The model that certified `sha` — incremental scoping is a SAME-MODEL
+   * contract. "Clean up to the anchor" is one model's verdict: the local
+   * cache has always paired its anchor with `lastModelId` and Step 1 refuses
+   * the same-SHA shortcut across models, but the marker carried its anchor
+   * bare, so a round that recovered it from the posted body would scope
+   * `sha..HEAD` past code the CURRENT model never reviewed — permanently,
+   * since each clean round re-anchors past the last. Rides and falls WITH
+   * the anchor: the serializer withholds it whenever it withholds `sha`
+   * (fail-closed or truncated rounds) — and withholds the PAIR when the
+   * model itself does not fit the cap, since a truncated id is a prefix and
+   * a prefix can equal another model's full id — and the parser drops it
+   * when the sha beside it did not survive (or it exceeds the cap) — a
+   * model naming no range qualifies nothing.
+   */
+  model?: string;
+  /**
    * Source-diff line count as of the FIRST round that recorded one, carried
    * forward unchanged. A baseline, never re-measured: growth is only legible
    * cumulatively. A change that arrives at 228 source lines and leaves at 920
@@ -148,6 +164,16 @@ export const LEDGER_MAX_FINDINGS = 50;
 export const LEDGER_MAX_TITLE = 80;
 export const LEDGER_MAX_FILE = 200;
 /**
+ * The longest model id the marker can carry — and it carries one WHOLE or
+ * not at all: a truncated id is a prefix, and a prefix can equal a DIFFERENT
+ * model's full id, which the same-model gate would then accept past code it
+ * never reviewed. An id over this cap takes the whole anchor pair with it,
+ * degrading recovery to the full diff — the fail-safe direction. Real ids run
+ * short even qualified by their provider (`qwen3.7-max@1a2b3c4d` — the model,
+ * `@`, and eight hex); the cap bounds the marker, not them.
+ */
+export const LEDGER_MAX_MODEL = 64;
+/**
  * The id, capped like every other field it travels with.
  *
  * It was the one field with no bound, which was survivable while only this
@@ -208,7 +234,11 @@ export function serializeLedger(ledger: Ledger): string {
     title: f.title.slice(0, LEDGER_MAX_TITLE),
     file: f.file.slice(0, LEDGER_MAX_FILE),
   }));
-  const render = (findings: LedgerFinding[], dropped: number): string => {
+  const render = (
+    findings: LedgerFinding[],
+    dropped: number,
+    anchor: boolean,
+  ): string => {
     const payload: Ledger = {
       v: 1,
       // Mirrored on the write side like every other cap: a serializer that can
@@ -223,7 +253,18 @@ export function serializeLedger(ledger: Ledger): string {
     // are IN the work list, so they would retire silently. A partial ledger
     // keeps its findings and loses its anchor, exactly as a fail-closed round
     // does.
-    else if (ledger.sha && SHA_RE.test(ledger.sha)) payload.sha = ledger.sha;
+    else if (anchor && ledger.sha && SHA_RE.test(ledger.sha)) {
+      // The same-model qualifier travels only beside the anchor it qualifies
+      // — and only WHOLE: a truncated id is a prefix, and a prefix can equal
+      // a DIFFERENT model's full id, which the gate would then accept past
+      // code it never reviewed. A model that does not fit takes the anchor
+      // pair with it; recovery degrades to the full diff.
+      const model = ledger.model?.trim();
+      if (model === undefined || model.length <= LEDGER_MAX_MODEL) {
+        payload.sha = ledger.sha;
+        if (model) payload.model = model;
+      }
+    }
     // Unconditional, unlike `sha` above: the ruling that withholds an anchor
     // from a partial list does not extend to a measurement of the diff. ~12
     // bytes against LEDGER_MAX_BYTES, and losing it would silently reset a
@@ -245,10 +286,19 @@ export function serializeLedger(ledger: Ledger): string {
   // 51 findings in, 24 kept, and it said 26 missing.
   const total = ledger.findings.length;
   let kept = capped.length;
-  let marker = render(capped, total - kept);
+  let marker = render(capped, total - kept, true);
+  if (marker.length > LEDGER_MAX_BYTES) {
+    // Shed the anchor PAIR before any finding: `dropped` withholds the pair
+    // the moment a finding goes anyway, so the old order paid a ruling from
+    // the work list for bytes the pair alone could have paid. The pair shed
+    // first keeps the whole work list — recovery degrades to the full diff,
+    // which the findings survive — and findings start going only when the
+    // anchorless form still exceeds the cap.
+    marker = render(capped, total - kept, false);
+  }
   while (marker.length > LEDGER_MAX_BYTES && kept > 0) {
     kept--;
-    marker = render(capped.slice(0, kept), total - kept);
+    marker = render(capped.slice(0, kept), total - kept, false);
   }
   return marker;
 }
@@ -328,6 +378,16 @@ export function parseLedger(body: string | undefined): Ledger | null {
       typeof raw.sha === 'string' && SHA_RE.test(raw.sha) && !dropped
         ? raw.sha
         : undefined;
+    const rawModel = typeof raw.model === 'string' ? raw.model.trim() : '';
+    const model =
+      // Anchored-only on READ as on WRITE: a model beside no surviving sha
+      // qualifies no range, and a hand-edited marker must not make it look
+      // as if it did. Whole or not at all here too: an over-cap model is one
+      // the serializer would never have written — drop it, and the gate
+      // reads the absence as a mismatch.
+      sha && rawModel !== '' && rawModel.length <= LEDGER_MAX_MODEL
+        ? rawModel
+        : undefined;
     // Survives truncation on read as it does on write — a partial list still
     // measured the same diff. Anything that is not a positive integer is
     // dropped, so a garbled baseline degrades to "unknown" (silence) rather
@@ -342,6 +402,7 @@ export function parseLedger(body: string | undefined): Ledger | null {
       findings,
       ...(dropped ? { dropped } : {}),
       ...(sha ? { sha } : {}),
+      ...(model ? { model } : {}),
       ...(src0 ? { src0 } : {}),
     };
   } catch {
