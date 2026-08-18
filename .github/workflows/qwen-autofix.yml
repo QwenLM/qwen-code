@@ -30,7 +30,10 @@ name: 'Qwen Autofix'
 #                             they are the bot's own generated work, trust-
 #                             equal to an in-repo bot PR; autofix/skip still
 #                             opts them out.
-#   • issue_comment         → '@qwen-code /takeover' (apply the label) and
+#   • issue_comment         → '@qwen-code /takeover' (apply the label),
+#                             '@qwen-code /takeover from N' (apply it and
+#                             seed this window's round counter at N, for a
+#                             PR that already spent N rounds in review), and
 #                             '@qwen-code /takeover stop' (remove it) — sugar
 #                             for people without label access: the PR author,
 #                             or write+ collaborators. Exact-match constants,
@@ -128,6 +131,19 @@ env:
   # only ever bound takeover PRs (the strict cap discards a plain PR at round
   # 10 before Critical-only could engage), so long-running managed PRs spent
   # ten rounds growing their diff on suggestions before the brake applied.
+  # Counted from the window's SEED, not always from zero: '@qwen-code
+  # /takeover from N' starts the window's counter at N so a PR taken over
+  # after N rounds of ordinary review reaches this threshold in the
+  # REMAINDER rather than a fresh five. Without a seed the counter starts at
+  # 0 exactly as before, so a PR that spent nine human rounds getting to
+  # "almost mergeable" no longer restarts the suggestion valve at full
+  # travel the moment it is managed. The seed is window-scoped like every
+  # other census: '@qwen-code /retry' or a bare re-takeover opens a window
+  # with no seed and the counter returns to 0 (that IS what re-arming
+  # means), so a late-stage PR is re-seeded by re-issuing the command with
+  # its number. It does NOT seed the GROWTH brake below, which anchors its
+  # baseline at the window's first measured round — a pre-takeover baseline
+  # is not recoverable, so growth is always measured from engagement.
   CRITICAL_ONLY_AFTER_ROUND: '5'
   # Per-author tail budget inside Critical-only mode. An account is an
   # ACCOUNTABILITY unit, not a throttle: a human login can host an automated
@@ -235,7 +251,12 @@ env:
   TAKEOVER_LABEL: 'autofix/takeover'
   SKIP_LABEL: 'autofix/skip'
   # Comment-command sugar over TAKEOVER_LABEL ('<cmd>' applies it, '<cmd>
-  # stop' removes it). Matched EXACTLY against the trimmed comment body.
+  # stop' removes it). Matched EXACTLY against the trimmed comment body —
+  # with ONE parameterized form, '<cmd> from N', which applies the label and
+  # additionally seeds this window's round counter at N (see
+  # CRITICAL_ONLY_AFTER_ROUND). The literal prefix still has to match this
+  # constant byte-for-byte; only a bounded 1-2 digit integer is read out of
+  # the body, and it reaches nothing but an integer comparison.
   TAKEOVER_COMMAND: '@qwen-code /takeover'
   # Escalation label: applied when the loop STOPS on a PR (round cap,
   # consecutive-failure or time-budget breaker) and a human must act —
@@ -360,6 +381,7 @@ jobs:
       ack_pr: '${{ steps.decide.outputs.ack_pr }}'
       ack_base: '${{ steps.decide.outputs.ack_base }}'
       takeover_cmd: '${{ steps.decide.outputs.takeover_cmd }}'
+      takeover_from: '${{ steps.decide.outputs.takeover_from }}'
       retry_pr: '${{ steps.decide.outputs.retry_pr }}'
       cmd_pr: '${{ steps.decide.outputs.cmd_pr }}'
       review_sender: '${{ github.event.review.user.login }}'
@@ -399,6 +421,10 @@ jobs:
           TAKEOVER_ACK=''
           ACK_BASE=''
           TAKEOVER_CMD=''
+          # Round-counter seed carried by '<cmd> from N' (see the command
+          # parser below). Empty on every other path, which reads as "start
+          # this window at round 0" — the pre-existing behaviour.
+          TAKEOVER_FROM=''
           CMD_PR=''
           RETRY_PR=''
           DRY_RUN="${DRY_RUN_INPUT:-false}"
@@ -519,6 +545,35 @@ jobs:
                 CMD=''
                 [[ "${BODY_TRIMMED}" == "${TAKEOVER_COMMAND}" ]] && CMD='add'
                 [[ "${BODY_TRIMMED}" == "${TAKEOVER_COMMAND} stop" ]] && CMD='remove'
+                # '<cmd> from N' — the ONE parameterized form, and the only
+                # place this workflow reads a value out of a comment body.
+                # Kept inside the constants discipline above: the literal
+                # prefix must still match TAKEOVER_COMMAND byte-for-byte, the
+                # tail is a bounded integer, and the captured value only ever
+                # reaches an integer comparison and a printf '%s' of a
+                # re-validated number — never an unquoted shell word, a jq
+                # program, or an API path. Seeds the round counter so a PR
+                # that already burned N review rounds before takeover reaches
+                # CRITICAL_ONLY_AFTER_ROUND after the remainder rather than a
+                # full fresh five. 1..99: a seed at or past the effective cap
+                # is clamped at the read sites, but rejecting 3-digit input
+                # here keeps the obvious typo out entirely.
+                if [[ "${BODY_TRIMMED}" =~ ^(.*)\ from\ ([0-9]{1,2})$ ]]; then
+                  # Two statements, not one `[[ ... && ... ]]`: BASH_REMATCH is
+                  # only guaranteed populated once the =~ test has completed,
+                  # and reading it from the right-hand operand of the same
+                  # conditional relies on evaluation order this must not bet on.
+                  if [[ "${BASH_REMATCH[1]}" == "${TAKEOVER_COMMAND}" ]]; then
+                    CMD='add'
+                    # 10# canonicalizes the capture to decimal: the value ends
+                    # up in bare-context bash arithmetic downstream (the
+                    # toggle's remainder, the read-site clamps' -ge), where a
+                    # zero-padded spelling is octal — '08'/'09' even error
+                    # outright and drop the seed note. '00' lands on '0', the
+                    # explicit no-seed spelling.
+                    TAKEOVER_FROM="$((10#${BASH_REMATCH[2]}))"
+                  fi
+                fi
                 # Re-arm shares the takeover command's authorization exactly:
                 # both summon bot activity on a managed PR, so inventing a
                 # second policy would only add surface.
@@ -724,6 +779,11 @@ jobs:
           echo "ack_pr=$(sanitize_number "${PR_NUMBER_EVENT}")" >> "${GITHUB_OUTPUT}"
           echo "ack_base=${ACK_BASE}" >> "${GITHUB_OUTPUT}"
           echo "takeover_cmd=${TAKEOVER_CMD}" >> "${GITHUB_OUTPUT}"
+          # Re-validated on the way out, not just on the way in: this value
+          # crosses a job boundary into a printf that writes a PR comment, and
+          # the only shape the marker reader accepts is a bare 1-2 digit
+          # integer. sanitize_number rejects (and warns about) anything else.
+          echo "takeover_from=$(sanitize_number "${TAKEOVER_FROM}")" >> "${GITHUB_OUTPUT}"
           echo "retry_pr=${RETRY_PR}" >> "${GITHUB_OUTPUT}"
           echo "cmd_pr=${CMD_PR}" >> "${GITHUB_OUTPUT}"
           echo "🧭 phase='${PHASE:-auto}' event='${EVENT_NAME}' issue='#${ISSUE_NUMBER:-n/a}' pr='#${PR_NUMBER_EVENT:-n/a}' schedule='${SCHEDULE:-n/a}' dry_run=${DRY_RUN} → issue=${DO_ISSUE} review=${DO_REVIEW}"
@@ -1864,6 +1924,7 @@ jobs:
     env:
       REPO: '${{ github.repository }}'
       CMD: '${{ needs.route.outputs.takeover_cmd }}'
+      CMD_FROM: '${{ needs.route.outputs.takeover_from }}'
       PR: '${{ needs.route.outputs.cmd_pr }}'
       GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
     steps:
@@ -1954,6 +2015,40 @@ jobs:
             esac
           fi
           HAS="$(jq -r --arg t "${TAKEOVER_LABEL}" '[.labels[].name] | index($t) != null' <<< "${PR_INFO}")"
+          # The round seed rides as its OWN marker on a separate line, NEVER as
+          # a field inside '<!-- takeover-ack engaged -->'. That literal is
+          # matched with jq `contains()` — closing '-->' included — at seven
+          # read sites: four here (the ack dedup, the scan's first-pickup
+          # dedup, and the two REARM_KEY window readers) and three in
+          # qwen-fleet-shepherd.yml (the paused/resume detector). Appending a
+          # field would silently break all seven: the window key would fall
+          # back to an OLDER engage ack, so the round counter would read a dead
+          # window, and the shepherd would stop seeing the engage as a resume
+          # signal and age out a PR that was just re-armed. Same reasoning, and
+          # the same shape, as the autofix-redcheck marker.
+          # Rendered EN/ZH too, because the ack otherwise reports
+          # "round 4/100" on its first managed round and reads like a bug.
+          FROM_MARKER=''
+          FROM_NOTE=''
+          FROM_NOTE_ZH=''
+          FROM_NOTE_REARM=''
+          FROM_NOTE_REARM_ZH=''
+          # A seeded RE-ARM must not keep the unseeded fresh-window clause:
+          # the seed makes the earlier rounds count toward the cap (they ARE
+          # the seed), and on a re-arm they were typically already-managed
+          # rounds, not pre-takeover review — both wordings flip below.
+          REARM_FRESH_CLAUSE=' (previous rounds no longer count toward the cap)'
+          REARM_FRESH_CLAUSE_ZH='（此前轮次不再计入上限）'
+          if [[ -n "${CMD_FROM}" && "${CMD_FROM}" =~ ^[0-9]{1,2}$ && "${CMD_FROM}" != '0' ]]; then
+            FROM_MARKER="$(printf '\n<!-- autofix-round-start %s -->' "${CMD_FROM}")"
+            REARM_FRESH_CLAUSE=' (earlier rounds count toward the cap only via this seed)'
+            REARM_FRESH_CLAUSE_ZH='（此前轮次仅通过该种子计入上限）'
+            FROM_REMAIN="$(( CRITICAL_ONLY_AFTER_ROUND > CMD_FROM ? CRITICAL_ONLY_AFTER_ROUND - CMD_FROM : 0 ))"
+            FROM_NOTE="$(printf ' This window'"'"'s round counter starts at %s (the rounds this PR spent in review before takeover), so the Critical-only brake engages after %s more change-producing round(s) instead of a full fresh %s.' "${CMD_FROM}" "${FROM_REMAIN}" "${CRITICAL_ONLY_AFTER_ROUND}")"
+            FROM_NOTE_ZH="$(printf '本窗口轮次计数从 %s 起算（即本 PR 托管前已进行的评审轮数），因此再经过 %s 个产生改动的轮次即进入 Critical-only，而非重新计满 %s 轮。' "${CMD_FROM}" "${FROM_REMAIN}" "${CRITICAL_ONLY_AFTER_ROUND}")"
+            FROM_NOTE_REARM="$(printf ' This window'"'"'s round counter restarts at %s (rounds already spent on this PR), so the Critical-only brake engages after %s more change-producing round(s) instead of a full fresh %s.' "${CMD_FROM}" "${FROM_REMAIN}" "${CRITICAL_ONLY_AFTER_ROUND}")"
+            FROM_NOTE_REARM_ZH="$(printf '本窗口轮次计数从 %s 重启（即本 PR 已消耗的轮次），因此再经过 %s 个产生改动的轮次即进入 Critical-only，而非重新计满 %s 轮。' "${CMD_FROM}" "${FROM_REMAIN}" "${CRITICAL_ONLY_AFTER_ROUND}")"
+          fi
           if [[ "${CMD}" == 'add' ]]; then
             if [[ "${HAS}" == 'true' ]]; then
               # Already managed: repeating the command is the ROUND-COUNTER
@@ -1962,7 +2057,18 @@ jobs:
               # a PR that exhausted its rounds continues under management —
               # no label churn needed. The watermark is untouched: feedback
               # already addressed is never replayed.
-              gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '🔄 Takeover re-armed: the round counter starts a fresh window (previous rounds no longer count toward the cap); management continues.\n\n<details>\n<summary>中文说明</summary>\n\n🔄 已重新武装：轮次计数开启新窗口（此前轮次不再计入上限），托管继续。\n\n</details>\n\n<!-- takeover-ack engaged -->')"
+              # Body built ONCE so the retry posts byte-identical text.
+              # Same one-retry shape as the engage post below — the seed
+              # marker's only copy rides in this body too — but the final
+              # fallback is LOUD: nothing heals a missing re-arm (the scan
+              # heals only engage-less PRs, and the pre-existing engage ack
+              # suppresses the dedup), and a 're-armed' claim plus the
+              # stale-escalation cleanup must not follow a window reset that
+              # never landed (R7-7).
+              REARM_BODY="$(printf '🔄 Takeover re-armed: the round counter starts a fresh window%s; management continues.%s\n\n<details>\n<summary>中文说明</summary>\n\n🔄 已重新武装：轮次计数开启新窗口%s，托管继续。%s\n\n</details>\n\n<!-- takeover-ack engaged -->%s' "${REARM_FRESH_CLAUSE}" "${FROM_NOTE_REARM}" "${REARM_FRESH_CLAUSE_ZH}" "${FROM_NOTE_REARM_ZH}" "${FROM_MARKER}")"
+              gh pr comment "${PR}" --repo "${REPO}" --body "${REARM_BODY}" \
+                || { sleep 5; gh pr comment "${PR}" --repo "${REPO}" --body "${REARM_BODY}"; } \
+                || { echo "::error::re-arm ack comment failed on #${PR} after one retry — the round window was NOT reset and no seed landed; re-run the command"; exit 1; }
               echo "🔄 re-armed ${TAKEOVER_LABEL} window on #${PR}"
               # Management resumed — the escalation label is stale. 404 is
               # the common case (the PR was never paused).
@@ -2004,7 +2110,14 @@ jobs:
                 FORK_NOTE=' This is a fork PR, so the first round comes from the next scheduled scan (usually within minutes).'
                 FORK_NOTE_ZH='本 PR 来自 fork，首轮处理将由下一次定时扫描执行（通常几分钟内）。'
               fi
-              gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '🤝 Takeover engaged: the autofix loop now manages this PR — it will address new review feedback and resolve base conflicts until the label is removed or the round cap is reached.%s Remove the `%s` label (or comment `%s stop`) to release.\n\n<details>\n<summary>中文说明</summary>\n\n🤝 已接管：autofix 循环现在管理此 PR —— 将持续处理新的评审反馈与 base 冲突，直到移除标签或达到轮次上限。%s移除 `%s` 标签（或评论 `%s stop`）即可释放。\n\n</details>\n\n<!-- takeover-ack engaged -->' "${FORK_NOTE}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${FORK_NOTE_ZH}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}")" \
+              # Body built ONCE so the retry posts byte-identical text.
+              # One retry before the heal-path warning: the seed marker's
+              # only copy lives in this body, and the heal ack has no slot
+              # to recover it — a transient 5xx must not silently un-seed
+              # the window.
+              ENGAGE_BODY="$(printf '🤝 Takeover engaged: the autofix loop now manages this PR — it will address new review feedback and resolve base conflicts until the label is removed or the round cap is reached.%s%s Remove the `%s` label (or comment `%s stop`) to release.\n\n<details>\n<summary>中文说明</summary>\n\n🤝 已接管：autofix 循环现在管理此 PR —— 将持续处理新的评审反馈与 base 冲突，直到移除标签或达到轮次上限。%s%s移除 `%s` 标签（或评论 `%s stop`）即可释放。\n\n</details>\n\n<!-- takeover-ack engaged -->%s' "${FORK_NOTE}" "${FROM_NOTE}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${FORK_NOTE_ZH}" "${FROM_NOTE_ZH}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${FROM_MARKER}")"
+              gh pr comment "${PR}" --repo "${REPO}" --body "${ENGAGE_BODY}" \
+                || { sleep 5; gh pr comment "${PR}" --repo "${REPO}" --body "${ENGAGE_BODY}"; } \
                 || echo "::warning::engage ack comment failed on #${PR}; the scan's first-pickup ack heals it"
               # Engaged (possibly re-engaging an auto-released PR) — the
               # escalation label is stale. 404 is the common case.
@@ -3240,7 +3353,39 @@ jobs:
                 | select(((.body // "") | contains("<!-- takeover-ack engaged -->"))
                     or ((.body // "") | contains("<!-- autofix-rearm -->")))
                 | .created_at ] | max // "none"' "${WORKDIR}/ic.json")"
-            ROUND="$(jq -r --arg key "${REARM_KEY}" 'map(select(.win == $key)) | map(.round) | max // 0' <<< "${MARKERS}")"
+            # Seed for THIS window, from the '<cmd> from N' marker carried by
+            # the comment that IS the window key — so it is window-scoped for
+            # free, exactly like the key itself: a later /retry or a bare
+            # /takeover opens a window whose anchor has no marker and the seed
+            # returns to 0. Read by created_at equality against REARM_KEY, so a
+            # seed from a SUPERSEDED window can never leak into the live one.
+            # `scan` (not `capture`, which errors when absent) and `last`
+            # (a hand-written marker further down a bot comment loses to the
+            # workflow's own, which is always the final line).
+            ROUND_START="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg key "${REARM_KEY}" '
+              [ .[] | select((.user.login // "") == $ab)
+                | select((.created_at // "") == $key)
+                | ((.body // "") | [ scan("<!-- autofix-round-start ([0-9]{1,2}) -->") ] | .[] | .[0]) ]
+              | last // "0"' "${WORKDIR}/ic.json" 2> /dev/null || echo '0')"
+            [[ "${ROUND_START}" =~ ^[0-9]{1,2}$ ]] || ROUND_START=0
+            # Clamp strictly below the effective cap. The seed must be able to
+            # bring the Critical-only brake forward; it must NEVER be able to
+            # park a PR at its round cap on the very round it is taken over
+            # (which would stop the loop instead of starting it), and a seed
+            # is honoured on any PR whose window anchor carries the marker —
+            # including one whose takeover label was later removed, dropping
+            # EFF_MAX_ROUNDS back to the strict 10.
+            if [[ "${EFF_MAX_ROUNDS:-0}" -gt 0 && "${ROUND_START}" -ge "${EFF_MAX_ROUNDS}" ]]; then
+              echo "🔢 #${PR}: round seed ${ROUND_START} clamped to $(( EFF_MAX_ROUNDS - 1 )) (effective cap ${EFF_MAX_ROUNDS})"
+              ROUND_START=$(( EFF_MAX_ROUNDS - 1 ))
+            fi
+            ROUND="$(jq -r --arg key "${REARM_KEY}" --argjson start "${ROUND_START}" 'map(select(.win == $key)) | map(.round) | max // $start' <<< "${MARKERS}")"
+            # No mention of the Critical-only threshold here, deliberately: the
+            # scan must stay ignorant of that brake. It keeps SELECTING fresh
+            # suggestions so a no-op report can still advance the watermark;
+            # only prepare hides them from the agent. A test pins the scan
+            # against the string.
+            [[ "${ROUND_START}" != '0' ]] && echo "🔢 #${PR}: window seeded at round ${ROUND_START} → effective round ${ROUND}/${EFF_MAX_ROUNDS}"
 
             # Effective watermark = what the agent has actually evaluated (its last
             # eval marker's newest-feedback timestamp), NOT the last push. A bot
@@ -4647,7 +4792,24 @@ jobs:
               | select(((.body // "") | contains("<!-- takeover-ack engaged -->"))
                     or ((.body // "") | contains("<!-- autofix-rearm -->")))
               | .created_at ] | max // "none"' "${WORKDIR}/ic.json")"
-          LIVE_MAX_ROUND="$(jq -r --arg key "${LIVE_REARM_KEY}" 'map(select(.win == $key)) | map(.round) | max // 0' <<< "${LIVE_MARKS}")"
+          # …and so does the round seed: same marker, same created_at-equality
+          # read against the live window key, same clamp. MAX_ROUNDS is the
+          # matrix-shadowed EFFECTIVE cap here (see the address job's env), so
+          # the clamp is against the same ceiling the scan used.
+          LIVE_ROUND_START="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg key "${LIVE_REARM_KEY}" '
+            [ .[] | select((.user.login // "") == $ab)
+              | select((.created_at // "") == $key)
+              | ((.body // "") | [ scan("<!-- autofix-round-start ([0-9]{1,2}) -->") ] | .[] | .[0]) ]
+            | last // "0"' "${WORKDIR}/ic.json" 2> /dev/null || echo '0')"
+          [[ "${LIVE_ROUND_START}" =~ ^[0-9]{1,2}$ ]] || LIVE_ROUND_START=0
+          # The PRE-clamp value is what the maintainer typed; the Critical-only
+          # audit clause cites it so a clamped seed never renders a command
+          # nobody sent while the engage ack still shows the original number.
+          LIVE_ROUND_START_RAW="${LIVE_ROUND_START}"
+          if [[ "${MAX_ROUNDS:-0}" -gt 0 && "${LIVE_ROUND_START}" -ge "${MAX_ROUNDS}" ]]; then
+            LIVE_ROUND_START=$(( MAX_ROUNDS - 1 ))
+          fi
+          LIVE_MAX_ROUND="$(jq -r --arg key "${LIVE_REARM_KEY}" --argjson start "${LIVE_ROUND_START}" 'map(select(.win == $key)) | map(.round) | max // $start' <<< "${LIVE_MARKS}")"
           # The head a sibling last judged, mirrored from the scan's RED_HEAD
           # parse. A no-op sibling records this marker while leaving BOTH ts and
           # round UNCHANGED — so the watermark/round triggers below never fire,
@@ -5053,6 +5215,7 @@ jobs:
           fi
           echo "stale=${STALE}" >> "${GITHUB_OUTPUT}"
           echo "effective_round=${ROUND}" >> "${GITHUB_OUTPUT}"
+          echo "round_start=${LIVE_ROUND_START}" >> "${GITHUB_OUTPUT}"
 
           rm -f "${WORKDIR}/deferred-feedback.md"
           if [[ "${CRITICAL_ONLY}" == "true" ]]; then
@@ -5065,8 +5228,29 @@ jobs:
             # the cause line reads like a misfire to exactly its audience.
             GROWTH_CLAUSE_EN="the PR's diff grew src ${GROWTH_SRC} / test ${GROWTH_TEST} net lines beyond this counting window's baseline (budgets: ${GROWTH_BUDGET_SRC_LINES}/${GROWTH_BUDGET_TEST_LINES})"
             GROWTH_CLAUSE_ZH="本计数窗口内 diff 净增长已达 源码 ${GROWTH_SRC} / 测试 ${GROWTH_TEST} 行（预算 ${GROWTH_BUDGET_SRC_LINES}/${GROWTH_BUDGET_TEST_LINES}）"
+            # Name the seed when there is one. Without this the audit record
+            # claims "5 change-producing rounds are complete" on a PR the loop
+            # has run twice — true of the counter, visibly false of the PR, and
+            # unfalsifiable for the maintainer reading it.
             ROUNDS_CLAUSE_EN="${CRITICAL_ONLY_AFTER_ROUND} change-producing rounds are complete"
             ROUNDS_CLAUSE_ZH="已完成 ${CRITICAL_ONLY_AFTER_ROUND} 个产生改动的轮次"
+            # :-0 is load-bearing, not defensive habit: an UNSET seed is not
+            # '0' under string comparison, so a bare `!= '0'` renders the
+            # seeded wording on every ordinary PR.
+            if [[ "${LIVE_ROUND_START:-0}" != '0' ]]; then
+              # Cite the seed as TYPED, not as clamped: when the read-site
+              # clamp fired, quoting the clamped value renders a command
+              # nobody sent while the engage ack still shows the original.
+              SEED_AS_TYPED="${LIVE_ROUND_START_RAW:-${LIVE_ROUND_START}}"
+              CLAMP_NOTE_EN=''
+              CLAMP_NOTE_ZH=''
+              if [[ "${SEED_AS_TYPED}" != "${LIVE_ROUND_START}" ]]; then
+                CLAMP_NOTE_EN=", clamped to ${LIVE_ROUND_START} under the effective cap ${MAX_ROUNDS}"
+                CLAMP_NOTE_ZH="，已按有效上限 ${MAX_ROUNDS} 收敛为 ${LIVE_ROUND_START}"
+              fi
+              ROUNDS_CLAUSE_EN="the round counter reached ${CRITICAL_ONLY_AFTER_ROUND} (this window was seeded at round ${SEED_AS_TYPED} by \`${TAKEOVER_COMMAND} from ${SEED_AS_TYPED}\`${CLAMP_NOTE_EN}, plus $(( ROUND - LIVE_ROUND_START )) change-producing round(s) since)"
+              ROUNDS_CLAUSE_ZH="轮次计数已达 ${CRITICAL_ONLY_AFTER_ROUND}（本窗口由 \`${TAKEOVER_COMMAND} from ${SEED_AS_TYPED}\` 从第 ${SEED_AS_TYPED} 轮起算${CLAMP_NOTE_ZH}，此后又完成 $(( ROUND - LIVE_ROUND_START )) 个产生改动的轮次）"
+            fi
             if [[ "${CRITICAL_ONLY_ROUNDS}" == 'true' && "${CRITICAL_ONLY_GROWTH}" == 'true' ]]; then
               CAUSE_EN="${ROUNDS_CLAUSE_EN} and ${GROWTH_CLAUSE_EN}"
               CAUSE_ZH="${ROUNDS_CLAUSE_ZH}，且${GROWTH_CLAUSE_ZH}"
@@ -5823,6 +6007,10 @@ jobs:
           CONFLICT: '${{ steps.prepare.outputs.conflict }}'
           NEWEST: '${{ steps.prepare.outputs.newest }}'
           EFFECTIVE_ROUND: '${{ steps.prepare.outputs.effective_round }}'
+          # The seed the window opened at (prepare's clamped read; 0 when
+          # unseeded): the milestone crossing trigger counts rounds
+          # accumulated in the window, not seed-inflated absolute ones.
+          ROUND_START: '${{ steps.prepare.outputs.round_start }}'
           # Surfaced in the report footer for diagnosis + attribution; a repo
           # variable (not a secret), already the agent's OPENAI_MODEL.
           MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
@@ -6403,12 +6591,16 @@ jobs:
             # would skip an exact %10 check forever — and a failure-heavy
             # PR is the very PR the digest exists for. Post on the first
             # PUSHED round once 10+ rounds have accumulated since the last
-            # digest in THIS window (or since the window opened).
-            MS_LAST="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg win "${WINDOW:-none}" '
+            # digest in THIS window (or since the window opened). The
+            # window opens at the round SEED, not at zero: a '/takeover
+            # from 60' counter starts at 60, so the no-digest-yet baseline
+            # is the seed — otherwise the seed-inflated counter digests on
+            # the window's first push with a 1-2 round census.
+            MS_LAST="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg win "${WINDOW:-none}" --argjson start "${ROUND_START:-0}" '
               [ .[] | select((.user.login // "") == $ab) | (.body // "")
                 | [ scan("<!-- autofix-milestone round=([0-9]+) win=([^ ]+) -->") ] | .[]
                 | select(.[1] == $win) | (.[0] | tonumber) ]
-              | max // 0' "${WORKDIR}/ic.json" 2> /dev/null || echo 0)"
+              | max // $start' "${WORKDIR}/ic.json" 2> /dev/null || echo "${ROUND_START:-0}")"
             if [[ "$(( NEXT_ROUND - MS_LAST ))" -ge 10 ]]; then
               WIN_HEADS="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg win "${WINDOW:-none}" '
                 [.[] | select((.user.login // "") == $ab)
