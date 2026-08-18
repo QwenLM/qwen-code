@@ -46,6 +46,22 @@ describe('resolveStallMs', () => {
   it('ignores a negative per-call value (falls through to default)', () => {
     expect(resolveStallMs(-5, {})).toBe(DEFAULT_STALL_MS);
   });
+
+  // The default is not an arbitrary round number: it has to outlast the
+  // transport's own silent retry ladder, or a request that is retrying exactly
+  // as designed reads as a stall. `DEFAULT_RETRY_OPTIONS` in utils/retry.ts
+  // sleeps 1.5s, 3s, 6s, 12s, 24s, 30s between attempts, and agent-core
+  // consumes each `retry` stream event without emitting anything the watchdog
+  // counts as progress — so the whole ladder is one silent stretch.
+  //
+  // Asserting the relationship rather than the literal keeps this meaningful if
+  // either number is retuned later.
+  it('outlasts the transport retry ladder it has to survive', () => {
+    const RETRY_LADDER_MS = [1_500, 3_000, 6_000, 12_000, 24_000, 30_000];
+    const ladderTotal = RETRY_LADDER_MS.reduce((a, b) => a + b, 0);
+    expect(ladderTotal).toBe(76_500);
+    expect(DEFAULT_STALL_MS).toBeGreaterThan(ladderTotal);
+  });
 });
 
 describe('attachStallWatchdog', () => {
@@ -75,15 +91,36 @@ describe('attachStallWatchdog', () => {
     wd.dispose();
   });
 
-  it('does NOT fire during the time-to-first-response window (#8)', () => {
+  // Replaces a test that asserted the watchdog does not fire during the
+  // time-to-first-response window. That test never emitted ROUND_START, so it
+  // only proved that a silent emitter does not trip a watchdog that was never
+  // armed — and it encoded a model of the transport that is not true. In a real
+  // dispatch ROUND_START has already fired by this point: `sendMessageStream`
+  // returns a lazily iterated generator, so the `await` on it resolves before
+  // the request reaches the wire, and agent-core emits ROUND_START on the very
+  // next line. These two tests pin what actually happens.
+  it('does not arm before the first progress event', () => {
     const emitter = new AgentEventEmitter();
     const controller = new AbortController();
     const wd = attachStallWatchdog(emitter, controller, 1000);
-    // A reasoning model thinking for a long time before the first token emits
-    // no events; that must not be treated as a stall.
+    // Nothing emitted: the timer was never armed, so nothing can elapse.
     vi.advanceTimersByTime(10_000);
     expect(wd.stalled()).toBe(false);
     expect(controller.signal.aborted).toBe(false);
+    wd.dispose();
+  });
+
+  it('DOES count the time-to-first-token window, because ROUND_START precedes the request', () => {
+    const emitter = new AgentEventEmitter();
+    const controller = new AbortController();
+    const wd = attachStallWatchdog(emitter, controller, 1000);
+    // Exactly what agent-core does: emit ROUND_START immediately after
+    // `await sendMessageStream(...)` resolves — i.e. before any bytes are sent.
+    emitter.emit(AgentEventType.ROUND_START, {} as never);
+    // The provider is still connecting/queueing/thinking; no deltas yet.
+    vi.advanceTimersByTime(1001);
+    expect(wd.stalled()).toBe(true);
+    expect(controller.signal.reason).toBe('stalled');
     wd.dispose();
   });
 
