@@ -510,6 +510,18 @@ describe('the volume fields — telemetry across the untrusted boundary', () => 
 
   it('clamps to the cap on write AND on read', () => {
     const over = LEDGER_MAX_VOLUME + 1;
+    // Assert the RAW serialized text, not only the round trip: the parser
+    // clamps independently, so a round-trip assertion alone passes even when
+    // the write side emits the uncapped digits — the byte-budget hazard the
+    // cap exists for would reach the posted marker unobserved.
+    const written = serializeLedger({
+      ...base,
+      posted: over,
+      prevPosted: over,
+    });
+    expect(written).toContain(`"posted":${LEDGER_MAX_VOLUME}`);
+    expect(written).toContain(`"prevPosted":${LEDGER_MAX_VOLUME}`);
+    expect(written).not.toContain(String(over));
     expect(
       parseLedger(serializeLedger({ ...base, posted: over }))?.posted,
     ).toBe(LEDGER_MAX_VOLUME);
@@ -528,12 +540,17 @@ describe('the volume fields — telemetry across the untrusted boundary', () => 
   });
 
   it('sheds itself before the anchor when the byte budget binds', () => {
-    // The reported window: a ledger that fits WITH its anchor, plus the ~27
+    // The reported window: a ledger that fits WITH its anchor, plus the
     // bytes of volume, crosses the cap — and the re-render must pay with the
     // telemetry, not with the anchor that scopes the next round's diff.
-    // Search the shape space for a marker sitting just under the budget with
-    // its anchor intact, then assert adding volume does not cost the anchor.
-    let windows = 0;
+    //
+    // The guard at the end counts PRESSURE windows, not comfortable ones.
+    // An earlier version counted every window whose anchor survived without
+    // volume, which a sweep can satisfy 100+ times while executing the shed
+    // cascade zero times — the assertions would then be vacuous exactly
+    // where they matter, and the sweep could drift off the narrow band
+    // without anything noticing.
+    let pressure = 0;
     for (let n = 24; n <= 32; n++) {
       for (let title = 20; title <= 40; title++) {
         const findings = Array.from({ length: n }, (_, i) => ({
@@ -552,21 +569,35 @@ describe('the volume fields — telemetry across the untrusted boundary', () => 
           sha: 'deadbeef00112233',
           model: 'qwen3.8-max',
         };
-        const withoutVolume = parseLedger(serializeLedger(bare));
-        // Only the windows where the anchor survives without volume can
-        // regress; anywhere else the anchor was already gone.
+        const bareMarker = serializeLedger(bare);
+        const withoutVolume = parseLedger(bareMarker);
+        // Only windows whose anchor survives WITHOUT volume can regress.
         if (!withoutVolume?.sha || withoutVolume.dropped) continue;
-        windows++;
         const withVolume = parseLedger(
           serializeLedger({ ...bare, posted: 12, prevPosted: 9 }),
         )!;
+        // The anchor and the work list never pay for telemetry.
         expect(withVolume.sha).toBe('deadbeef00112233');
         expect(withVolume.findings).toHaveLength(withoutVolume.findings.length);
+        // A window is under pressure when both volumes would not have fit.
+        if (
+          bareMarker.length + '"posted":12,"prevPosted":9,'.length >
+          LEDGER_MAX_BYTES
+        ) {
+          pressure++;
+          // The carried value sheds first, this round's own count second:
+          // `posted` is the next link in the chain the next round reads
+          // back, so it survives a rung longer whenever it still fits.
+          if (bareMarker.length + '"posted":12,'.length <= LEDGER_MAX_BYTES) {
+            expect(withVolume.posted).toBe(12);
+            expect(withVolume.prevPosted).toBeUndefined();
+          }
+        }
       }
     }
-    // The sweep must actually have found the pressure region, or the
-    // assertions above are vacuous.
-    expect(windows).toBeGreaterThan(0);
+    // The sweep must actually reach the band where the cascade runs, or
+    // every assertion above is about comfortable markers only.
+    expect(pressure).toBeGreaterThan(0);
   });
 
   it('survives a truncated work list, unlike the anchor pair', () => {

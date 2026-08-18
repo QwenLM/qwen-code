@@ -275,7 +275,7 @@ export function serializeLedger(ledger: Ledger): string {
     findings: LedgerFinding[],
     dropped: number,
     anchor: boolean,
-    volume: boolean,
+    volume: 'both' | 'posted' | 'none',
   ): string => {
     const payload: Ledger = {
       v: 1,
@@ -290,11 +290,13 @@ export function serializeLedger(ledger: Ledger): string {
     // cascade below). Bounded like every other written field: a non-integer
     // or negative count is not a volume, and the cap keeps a forged marker
     // from spending the byte budget on digits.
-    if (volume) {
+    if (volume !== 'none') {
       const postedOut = volumeOf(ledger.posted);
       if (postedOut !== undefined) payload.posted = postedOut;
-      const prevPostedOut = volumeOf(ledger.prevPosted);
-      if (prevPostedOut !== undefined) payload.prevPosted = prevPostedOut;
+      if (volume === 'both') {
+        const prevPostedOut = volumeOf(ledger.prevPosted);
+        if (prevPostedOut !== undefined) payload.prevPosted = prevPostedOut;
+      }
     }
     if (dropped > 0) payload.dropped = dropped;
     // A truncated list must not certify a range: the dropped entries reference
@@ -329,7 +331,17 @@ export function serializeLedger(ledger: Ledger): string {
   // 51 findings in, 24 kept, and it said 26 missing.
   const total = ledger.findings.length;
   let kept = capped.length;
-  let marker = render(capped, total - kept, true, true);
+  let marker = render(capped, total - kept, true, 'both');
+  if (marker.length > LEDGER_MAX_BYTES) {
+    // Between "both volumes" and "no volume" there is a rung worth having:
+    // the CARRIED value goes first, this round's own count second. The
+    // carried one only gives THIS marker a two-round window; `posted` is
+    // the next link in the chain — the value the next compose reads back
+    // and stamps as its own `prevPosted` — so shedding them as one unit
+    // dropped a count that still fitted, and broke the chain a round
+    // earlier than the budget required.
+    marker = render(capped, total - kept, true, 'posted');
+  }
   if (marker.length > LEDGER_MAX_BYTES) {
     // The VOLUME sheds first — it is the only thing here that decides
     // nothing, and its absence is a documented, free reading ("not
@@ -339,7 +351,7 @@ export function serializeLedger(ledger: Ledger): string {
     // marker that fit WITH its anchor over the cap and make the re-render
     // pay with the anchor instead — trading a full-diff re-review for a
     // trend line.
-    marker = render(capped, total - kept, true, false);
+    marker = render(capped, total - kept, true, 'none');
   }
   if (marker.length > LEDGER_MAX_BYTES) {
     // Shed the anchor PAIR before any finding: `dropped` withholds the pair
@@ -348,11 +360,11 @@ export function serializeLedger(ledger: Ledger): string {
     // first keeps the whole work list — recovery degrades to the full diff,
     // which the findings survive — and findings start going only when the
     // anchorless form still exceeds the cap.
-    marker = render(capped, total - kept, false, false);
+    marker = render(capped, total - kept, false, 'none');
   }
   while (marker.length > LEDGER_MAX_BYTES && kept > 0) {
     kept--;
-    marker = render(capped.slice(0, kept), total - kept, false, false);
+    marker = render(capped.slice(0, kept), total - kept, false, 'none');
   }
   return marker;
 }

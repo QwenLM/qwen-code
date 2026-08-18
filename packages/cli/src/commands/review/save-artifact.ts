@@ -35,13 +35,20 @@ import { isSameFile } from './lib/same-file.js';
 import { volumeOf } from './lib/ledger.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 
-interface PersistedVerdict extends Omit<ComposeReviewResult, 'postedInline'> {
+interface PersistedVerdict
+  extends Omit<ComposeReviewResult, 'postedInline' | 'prevPostedInline'> {
   verdictLine: string;
   /**
    * Optional HERE, required on the composed result it is otherwise a copy
    * of: a live compose always knows how many comments the round posts, but
    * an artifact read back from disk may have been written before the field
    * existed. Absence is preserved rather than defaulted — see the validator.
+   *
+   * `prevPostedInline` is omitted from this type entirely rather than
+   * inherited: the validator neither reads nor writes it, so carrying it
+   * here would advertise a field no artifact contains and license a
+   * consumer into an always-undefined branch. The two-round window stays
+   * recoverable from the marker chain inside `body`.
    */
   postedInline?: number;
 }
