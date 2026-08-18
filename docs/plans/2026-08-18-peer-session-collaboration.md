@@ -185,8 +185,12 @@ The consumers are in the pending PRs. A tree-only reachability check cannot see 
 concluding "unreferenced in `main`" means "abandoned" is a mistake this document made in
 its first revision.
 
-**This is a live conflict with §4, not a detail.** That series builds natively the terminal
-and supervisor layer §4 says to leave to herdr. Both positions cannot hold. See §7.6.
+That series builds a terminal and supervisor layer, which §4 lists as out of scope **for
+this design**. The two do not overlap: #7800, #7801 and #7803 touch no file under
+`packages/core`, #7802 touches three unrelated utilities, and none of the four touches
+`agents/team/`, `send-message.ts`, `tasks.ts` or `mailbox.ts` — the entire surface this
+design changes. Whether Qwen hosts terminals natively is orthogonal to whether two sessions
+can ask each other a question; both can be true.
 
 (Distinct from `packages/cli/src/ui/components/agent-view/` — `AgentTabBar`,
 `AgentChatView`, `AgentComposer` — which is live in `main` and is reused unchanged here.)
@@ -482,16 +486,19 @@ released after the 5 s lock stale window. No peer's death blocks any other peer.
 
 ## 4. Explicit non-goals
 
-| Not building                             | Because                                                                                                                                                                        |
-| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| PTY attach, terminal multiplexing, panes | herdr does this for 17+ CLIs, Apache-2.0, and measured faster (§8). This is a position, not a settled fact: #7800 is building PTY workers natively — contested in §7.6         |
-| Hosting other vendors' processes         | That is becoming herdr. We publish a format; we host nothing                                                                                                                   |
-| A new roster UI                          | This design reuses `ui/components/agent-view/`. But #7803 is building a second one at `ui/agent-view/`, so "already exists" is not a settled reason — disposition follows §7.6 |
-| Remote / SSH / cross-machine             | Same-uid filesystem permissions **are** the security model. Off-machine voids it                                                                                               |
-| Broadcast (`to: "*"`)                    | #8724 removes it rather than extending it to N processes                                                                                                                       |
-| Same-checkout multi-writer               | A joined peer's permissions were fixed by whoever started it; no member can demote another                                                                                     |
-| Central completion guarantee             | Peers decide what to claim. Unclaimed work stays visible on the board, not forced                                                                                              |
-| Windows in the first cut                 | Follows #8724. The IPC path is abstracted so named pipes can be added                                                                                                          |
+Scope: what **this design** does not build. Not a ruling on what the project should build —
+other work may cover any of these, and §1.6 records a series that covers the first two.
+
+| Not building                             | Because                                                                                    |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------ |
+| PTY attach, terminal multiplexing, panes | herdr does this for 17+ CLIs, Apache-2.0, and measured faster (§8)                         |
+| Hosting other vendors' processes         | That is becoming herdr. We publish a format; we host nothing                               |
+| A new roster UI                          | This design reuses `ui/components/agent-view/`                                             |
+| Remote / SSH / cross-machine             | Same-uid filesystem permissions **are** the security model. Off-machine voids it           |
+| Broadcast (`to: "*"`)                    | #8724 removes it rather than extending it to N processes                                   |
+| Same-checkout multi-writer               | A joined peer's permissions were fixed by whoever started it; no member can demote another |
+| Central completion guarantee             | Peers decide what to claim. Unclaimed work stays visible on the board, not forced          |
+| Windows in the first cut                 | Follows #8724. The IPC path is abstracted so named pipes can be added                      |
 
 ## 5. Build plan
 
@@ -527,7 +534,7 @@ Stages 1 and 2 are independent and may run in parallel.
   independent sessions are rejected, but because that particular supervisor is a second
   implementation of infrastructure the daemon already ships.
 - Do **not** touch `packages/cli/src/agent-view/`. It is the base of the open #7800–#7803
-  series (§1.6), and its disposition is a product question (§7.6), not cleanup.
+  series (§1.6); it is that series' base, not cleanup.
 
 ### Stage 1 — discovery (largely done by #8969)
 
@@ -630,15 +637,6 @@ and the CLI/MCP surface.
    practice, or does the workflow demand invitations — which would need an accept path?
 5. **Re-engagement.** #8724's author stated the work would return. The fastest path is to
    ask rather than to reimplement. Who reaches out?
-6. **The #7799–#7803 series versus §4.** This is the largest unresolved question here, and
-   it is a product decision rather than a technical one. That series is building a native
-   supervisor, PTY workers, session lifecycle and roster UI — precisely the terminal layer
-   §4 argues to leave to herdr, on the grounds that herdr already covers 17+ CLIs and
-   measured faster (§8). Four open PRs totalling roughly 24,000 additions are the strongest
-   evidence that the project does not actually hold §4's position. Either §4 is wrong and
-   this document should treat that series as the terminal plane it composes with, or the
-   series should be reconsidered against §8. Deciding by attrition — letting the PRs age
-   out — is the one outcome that costs the most and settles nothing.
 
 ## 8. Relationship to herdr
 
@@ -674,7 +672,7 @@ right shape of integration and is compatible with everything here.
 | #8730                                                                           | Revive. Stage 4. Re-engage the author first                                                                                                                                                                                            |
 | #8718 (closed not-planned)                                                      | Leave closed. Post a correction: the recorded rationale rebuts a position the fleet plan never held (it ruled heterogeneous CLIs permanently out of scope), and the real reasons were sequencing, review capacity, and no measured win |
 | #8869 (Stage 1B draft)                                                          | Close. Superseded                                                                                                                                                                                                                      |
-| `agent-view/` (6,186 LOC)                                                       | **Leave in place.** Base of the open #7800–#7803 series; disposition depends on §7.6                                                                                                                                                   |
+| `agent-view/` (6,186 LOC)                                                       | **Leave in place.** Base of the open #7800–#7803 series, which this design does not touch                                                                                                                                              |
 | #9276                                                                           | Fix in Stage 0. Blocks the only supported path today                                                                                                                                                                                   |
 | #9287 / #9288                                                                   | Close as superseded by #9284 / #9289                                                                                                                                                                                                   |
 | Fleet architecture doc ([#8719](https://github.com/QwenLM/qwen-code/pull/8719)) | Stays closed. Superseded by this document; it never landed in the repository                                                                                                                                                           |
