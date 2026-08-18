@@ -169,19 +169,32 @@ describe('useWorkspaceSessionLiveState', () => {
     expect(container.textContent).toBe('true:true:no-group');
   });
 
-  it('does not rescan the catalog for prompt admission or turn completion', async () => {
+  it('does not rescan the catalog for prompt admission, and coalesces turn completions', async () => {
     await renderProbe();
     const catalogRequests = listSessions.mock.calls.length;
 
+    act(() => controller.promptAdmitted('/work', 'session-a'));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SESSION_LIVE_STATE_POLL_MS);
+    });
+    expect(listSessions).toHaveBeenCalledTimes(catalogRequests);
+
+    // Turn completions refresh recency data (updatedAt) through the
+    // rate-limited invalidation path: one rescan per cooldown window.
     act(() => {
-      controller.promptAdmitted('/work', 'session-a');
+      controller.turnCompleted('/work');
       controller.turnCompleted('/work');
     });
     await act(async () => {
       await vi.advanceTimersByTimeAsync(SESSION_LIVE_STATE_POLL_MS);
     });
+    expect(listSessions).toHaveBeenCalledTimes(catalogRequests + 1);
 
-    expect(listSessions).toHaveBeenCalledTimes(catalogRequests);
+    act(() => controller.turnCompleted('/work'));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SESSION_LIVE_STATE_POLL_MS);
+    });
+    expect(listSessions).toHaveBeenCalledTimes(catalogRequests + 1);
   });
 
   it('does not schedule a second catalog scan after a local session creation', async () => {
@@ -443,6 +456,38 @@ describe('useWorkspaceSessionLiveState', () => {
     // indicator cannot wait for the next live-state poll.
     act(() => controller.promptAdmitted('/work', 'session-a'));
     expect(container.textContent).toBe('true:false:no-group');
+  });
+
+  it('does not hot-loop when a staged commit is persistently refused', async () => {
+    await renderProbe();
+    const initialCatalogRequests = listSessions.mock.calls.length;
+
+    // Every staged fetch bumps the revision mid-flight, so every commit
+    // misses its fence. The give-up path must clear the request flags —
+    // otherwise an interactive refresh spins a full reconcile every tick.
+    listSessions.mockImplementation(async () => {
+      controller.invalidateWorkspace('/work');
+      return sessionPage();
+    });
+    act(() => controller.refreshQueries([query]));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const callsAfterGiveUp = listSessions.mock.calls.length;
+    expect(callsAfterGiveUp).toBeGreaterThan(initialCatalogRequests);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SESSION_LIVE_STATE_POLL_MS * 4);
+    });
+    // One invalidation-gated retry per cooldown window at most — without
+    // the fix every 2s tick re-runs two catalog fetches.
+    expect(listSessions.mock.calls.length).toBeLessThanOrEqual(
+      callsAfterGiveUp + 2,
+    );
   });
 
   it('stays inert when disabled', async () => {

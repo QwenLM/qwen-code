@@ -833,6 +833,40 @@ describe('SessionCatalogStore', () => {
     releaseLiveState();
   });
 
+  it('does not let a trailing non-staged job settle staged-revision waiters', async () => {
+    const initial = deferred<DaemonSessionListPage>();
+    const trailing = deferred<DaemonSessionListPage>();
+    const stagedResponse = deferred<DaemonSessionListPage>();
+    legacy
+      .mockReturnValueOnce(initial.promise)
+      .mockReturnValueOnce(trailing.promise)
+      .mockReturnValueOnce(stagedResponse.promise);
+    const target = query('/work');
+    // A legacy background job is in flight when live-state takes over.
+    const unsubscribe = store.subscribe(target, vi.fn(), { autoLoad: true });
+    const releaseLiveState = store.retainWorkspaceLiveState('/work');
+
+    // Staging begins while the legacy job runs; the follower loadOnce arms
+    // a trailing non-staged job at the staging-target revision.
+    const stagedPromise = store.stageWorkspaceRefresh('/work');
+    const followUp = store.loadOnce(target);
+    initial.resolve(page('initial'));
+    await flushMicrotasks();
+
+    // The trailing job fails at the staged revision: it must not reject
+    // the waiters the staged commit is about to resolve.
+    trailing.reject(new Error('trailing blip'));
+    stagedResponse.resolve(page('staged'));
+    const staged = await stagedPromise;
+    expect(staged.complete).toBe(true);
+    expect(store.commitWorkspaceRefresh(staged)).toBe(true);
+    await expect(followUp).resolves.toEqual(page('staged'));
+    expect(store.getSnapshot(target).error).toBeUndefined();
+
+    unsubscribe();
+    releaseLiveState();
+  });
+
   it('uses the qualified client only for qualified queries', async () => {
     qualified.mockResolvedValue({
       sessions: [{ sessionId: 'qualified' }],

@@ -229,6 +229,11 @@ export class SessionCatalogStore {
     this.requestLiveStateRefresh(workspaceCwd, 'interactive');
   }
 
+  requestWorkspaceLiveStateInvalidation(workspaceCwd: string): void {
+    if (!this.isWorkspaceLiveStateEnabled(workspaceCwd)) return;
+    this.requestLiveStateRefresh(workspaceCwd, 'invalidated');
+  }
+
   private requestLiveStateRefresh(
     workspaceCwd: string,
     kind: 'interactive' | 'invalidated',
@@ -841,10 +846,18 @@ export class SessionCatalogStore {
           else staged.resolve(result!);
         });
     } else {
+      // A staged job at the same revision owns it: a trailing non-staged
+      // job materialized by finishJob for a staged-owned revision must not
+      // publish a page or settle waiters ahead of (or against) the staged
+      // commit.
+      const stagedOwnsRevision = (): boolean =>
+        entry.queuedJob?.staged?.revision === revision ||
+        (entry.runningStaged === true && entry.runningRevision === revision);
       completion = request
         .then(
           (page) => {
             if (entry.desiredRevision === revision) {
+              if (stagedOwnsRevision()) return;
               entry.acceptedRevision = revision;
               entry.invalidated = false;
               entry.retryAt = undefined;
@@ -859,6 +872,7 @@ export class SessionCatalogStore {
           },
           (error: unknown) => {
             if (entry.desiredRevision !== revision) return;
+            if (stagedOwnsRevision()) return;
             const normalized = normalizeError(error);
             entry.retryAt = Date.now() + SESSION_CATALOG_ERROR_RETRY_MS;
             this.setSnapshot(entry, {
@@ -920,6 +934,11 @@ export class SessionCatalogStore {
     revision: number,
   ): Promise<DaemonSessionListPage> {
     return new Promise((resolve, reject) => {
+      // A staged fetch supersedes a pending non-staged job for the same
+      // entry — its waiters settle via the fenced commit instead.
+      if (entry.queuedJob && !entry.queuedJob.staged) {
+        this.removeQueuedJob(entry);
+      }
       const job: QueueJob = {
         entry,
         priority: PRIORITY.interactive,

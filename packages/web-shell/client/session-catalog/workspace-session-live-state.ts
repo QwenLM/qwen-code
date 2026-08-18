@@ -218,7 +218,16 @@ export function useWorkspaceSessionLiveState(
       catalogStore.applyLiveState(state.workspaceCwd, liveB.sessions);
       if (versionsEqual(liveA.catalogVersion, liveB.catalogVersion)) {
         if (!catalogStore.commitWorkspaceRefresh(stagedCatalog)) {
-          if (allowTrailing) await reconcile(state, liveB, false);
+          if (allowTrailing) {
+            await reconcile(state, liveB, false);
+            return;
+          }
+          // A persistently refused commit (e.g. revision bumped mid-staging
+          // every time) must clear the request flags — otherwise they keep
+          // bypassing the cooldown and the loop re-runs a full reconcile on
+          // every 2s tick with no decay.
+          state.reconcileRequested = false;
+          state.invalidationRequested = false;
           return;
         }
         catalogStore.applyLiveState(state.workspaceCwd, liveB.sessions);
