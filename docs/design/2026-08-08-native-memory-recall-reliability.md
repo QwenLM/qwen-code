@@ -75,12 +75,31 @@ where a user holds tens of topics rather than hundreds — the fast result is in
 hand long before the ceiling. Spending the remainder waits for a model selector
 that this design already assumes will miss the budget, so it is close to pure
 added latency on every user turn. The wait therefore ends on the fast result.
-The preference order is unchanged: whatever ends the wait, a settled recall is
-still delivered in preference to the fast result.
 
-Second, past roughly a thousand topics the scan alone exceeds the ceiling. Such
-a turn spends the whole budget and still delivers nothing, which is worse than
-the zero-wait behaviour this design replaced. Ending the wait early does not fix
+This has a consequence the code does not make obvious, so state it directly:
+**on the initial turn, once the deterministic scorer matches anything, the fast
+result is what gets delivered — regardless of how fast the selector is.**
+`onFastResult` is published before recall issues the selector request at all,
+so the recall promise is necessarily unsettled when the wait ends on it, and
+the "prefer a settled recall" branch is reached only when no fast result
+exists: no `Config`, or nothing matched lexically.
+
+That is the intended trade, not an oversight. A model side query does not
+complete inside a 100 ms ceiling in production, so arbitrating between the two
+would spend the remainder of the budget on every turn to win a race that does
+not occur. Local verification against a loopback selector settling in 15 ms
+confirms the behaviour and its bound: the fast result is delivered and the
+model's picks are discarded — while the pre-change build delivered nothing at
+all on that same turn. The selector's judgement still reaches the model, at the
+ToolResult delivery point, with the fast documents excluded.
+
+Second, on a slow enough machine the scan alone exceeds the ceiling. The table
+above is the conservative measurement; an independent run on faster hardware
+recorded 9 ms / 21 ms / 46 ms for the same three sizes, all inside the ceiling.
+The crossover is therefore a property of the machine, not a fixed topic count —
+somewhere between roughly one thousand topics and never, depending on I/O
+speed. Past it, a turn spends the whole budget and still delivers nothing,
+which is worse than the zero-wait behaviour this design replaced. Ending the wait early does not fix
 that case; it bounds it and removes the cost everywhere else. A persistent
 catalog is the actual fix and remains out of scope, per
 `2026-08-09-bounded-memory-recall-candidates.md`.
@@ -234,10 +253,15 @@ flatters every design; the floor is what makes the headline readable.
   it, so requiring a lexical match did not create the gap, but it does keep
   the fast path silent there. This is why the headline tool-free delivery
   figure is 92.3% and not 100%: the residual 7.7% is exactly that slice.
-- Past roughly a thousand topics in one scope, the memory-tree scan alone
-  exceeds the initial ceiling, so the turn spends the whole budget and still
-  delivers nothing. Ending the wait on the fast result bounds this rather than
-  removing it; the real fix is a persistent catalog, which is out of scope.
+- On slow enough I/O the memory-tree scan exceeds the initial ceiling, and the
+  turn then spends the whole budget and still delivers nothing. The crossover
+  is machine-dependent: roughly a thousand topics on the slower of the two
+  machines measured, and not reached at all on the faster one. Ending the wait
+  on the fast result bounds this rather than removing it; the real fix is a
+  persistent catalog, which is out of scope.
+- On the initial turn the model selector's judgement is not used when the
+  deterministic scorer matched, whatever the selector's latency. See the
+  ceiling section above; it reaches the model at ToolResult instead.
 - Scripts written without word separators and outside the CJK set — Thai,
   Khmer, Lao — now produce a token where they previously produced none, but
   the token is the whole run. That is not segmentation, and such a query will

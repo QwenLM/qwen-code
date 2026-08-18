@@ -378,7 +378,9 @@ flowchart TD
 > recency reserve 选出最多 200 篇候选。因此效果分三档：总量 ≤200 时两者都不按
 > 数量丢弃（但新增了 25 KB manifest 上限，长 description 场景可能被截）；总量
 > 在 200–400 且单个 scope 不超 200 时，旧路径会把全部（最多 400 篇）送给
-> Selector，新路径只送 200 篇，**候选变少了**；只有单个 scope 超过 200 时，
+> Selector，新路径最多 200 篇，且实测中 25 KB 的 manifest 预算会先于数量上限
+> 生效——150+150 篇的实测里旧路径送 300 行、新路径只送 94 行，**候选变少的幅度
+> 比数量上限暗示的更大**；只有单个 scope 超过 200 时，
 > 才是这次真正要解决的场景——旧的 recency 上限会让老而相关的文档永久不可见。
 > 详见 `docs/design/2026-08-09-bounded-memory-recall-candidates.md`。
 

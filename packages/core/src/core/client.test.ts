@@ -5222,6 +5222,89 @@ hello
       await done;
     });
 
+    /**
+     * Pins the consequence of ending the wait on the fast result, which local
+     * verification on a real stack surfaced as broader than "slow selectors":
+     * once the deterministic scorer matches, the initial turn delivers the
+     * fast result whatever the selector's latency.
+     *
+     * `onFastResult` is published before recall issues the selector request,
+     * so the recall promise cannot be settled when the wait ends on it. This
+     * is the intended trade — a model side query does not return inside the
+     * ceiling in production, so arbitrating would cost every turn the rest of
+     * the budget to win a race that does not happen — and the selector's
+     * judgement still lands at ToolResult. Recorded as a decision so a future
+     * reader does not mistake it for an accident.
+     */
+    it('delivers the fast result even when the selector settles inside the budget', async () => {
+      vi.useFakeTimers();
+      const SCAN_MS = 10;
+      const SELECTOR_MS = 15;
+      mockMemoryManager.recall.mockImplementation((_root, _query, options) => {
+        setTimeout(() => {
+          if (options.abortSignal?.aborted) return;
+          options.onFastResult?.({
+            prompt: '## Relevant memory\n\nFast deterministic result.',
+            selectedDocs: [fastDoc('/m/fast.md', '- terse')],
+            strategy: 'heuristic',
+          });
+        }, SCAN_MS);
+        // Settles comfortably inside the 100 ms ceiling — and still loses.
+        return new Promise((resolve) => {
+          setTimeout(
+            () =>
+              resolve({
+                prompt: '## Relevant memory\n\nRefined model result.',
+                selectedDocs: [fastDoc('/m/refined.md', '- refined')],
+                strategy: 'model',
+              }),
+            SELECTOR_MS,
+          );
+        });
+      });
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'Hello' };
+        })(),
+      );
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+
+      const done = fromAsync(
+        client.sendMessageStream(
+          [{ text: 'What do you know about me?' }],
+          new AbortController().signal,
+          'prompt-id-fast-beats-quick-selector',
+          { type: SendMessageType.UserQuery },
+        ),
+      );
+      await vi.advanceTimersByTimeAsync(200);
+      await done;
+
+      const initialRequest = mockTurnRunFn.mock.calls[0]?.[1] as unknown[];
+      expect(initialRequest).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining('Fast deterministic result.'),
+        ]),
+      );
+      expect(initialRequest).not.toEqual(
+        expect.arrayContaining([
+          expect.stringContaining('Refined model result.'),
+        ]),
+      );
+      expect(logMemoryRecallDelivery).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          phase: 'fast',
+          delivery_point: 'initial',
+          strategy: 'heuristic',
+        }),
+      );
+    });
+
     it('still delivers the model-selected result at ToolResult after a fast initial delivery', async () => {
       vi.useFakeTimers();
       let settleRecall:

@@ -935,8 +935,19 @@ export class GeminiClient {
     // outcome that almost never arrives, and charges every user turn for it.
     // See `recall-scan-latency.test.ts` for the scan measurements.
     //
-    // The preference order is unchanged: whatever ends the wait, the code
-    // below still prefers a settled recall over the fast result.
+    // Consequence worth stating plainly, because the branch below reads as
+    // if it still arbitrated: on the initial turn, once the deterministic
+    // scorer matches anything, the fast result wins — the selector's speed is
+    // irrelevant. `onFastResult` is published before recall even issues the
+    // selector request, so `settledAt` is necessarily null when the wait ends
+    // on it. The settled-recall branch is reached at this point only when no
+    // fast result exists at all: no `Config`, or nothing matched
+    // lexically. That is deliberate, not incidental — a model side query does
+    // not complete inside this ceiling, so arbitrating between them would
+    // cost every turn the remainder of the budget to win a race that does not
+    // happen. The selector's judgement reaches the model at the ToolResult
+    // delivery point instead. Pinned by "delivers the fast result even when
+    // the selector settles inside the budget".
     if (
       handle.settledAt === null &&
       handle.fastResultRef.current === null &&
