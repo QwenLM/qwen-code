@@ -351,8 +351,10 @@ export enum CompressionStatus {
   NOOP,
 
   /**
-   * The compression call produced a summary, but the output hit
-   * COMPACT_MAX_OUTPUT_TOKENS, indicating likely truncation. The summary
+   * The compression call produced a summary, but the output reached the
+   * requested output budget — the fixed COMPACT_MAX_OUTPUT_TOKENS ceiling
+   * or the window-clamped budget below it (issue #7960) — indicating
+   * likely truncation. The summary
    * is dropped (newHistory=null) and the attempt is treated as a failure:
    * `isCompressionFailureStatus` returns true so it counts toward the
    * per-chat circuit breaker. Kept distinct from

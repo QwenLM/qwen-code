@@ -1085,6 +1085,141 @@ describe('--round — the CLI bakes the round into the identity line and the key
     }
   });
 
+  it('reads the same clock on the --chunk build gate (#9256)', () => {
+    // The clock argument is passed at every cap call site, but only the
+    // sibling paths were exercised: a mutation confined to the `--chunk`
+    // gate's call site survived. Same sized huge plan and both clock arms as
+    // the test above, driven through the per-chunk gate instead.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-clock-chunk-'));
+    try {
+      const findings = join(dir, 'f.md');
+      writeFileSync(findings, '- x');
+      const handler = agentPromptCommand.handler as (a: unknown) => void;
+      const before = process.env[DEADLINE_ENV];
+      const stderr = () =>
+        (writeStderrLine as unknown as Mock).mock.calls
+          .map((c) => c[0])
+          .join('\n');
+      // Separate plans per arm: a successful --chunk build stamps the round's
+      // admission, and a stamped round's --chunk rebuilds are exempt from the
+      // gate — the second arm must gate against an unstamped plan of its own.
+      const noClockPlan = join(dir, 'huge-noclock.json');
+      const withClockPlan = join(dir, 'huge-withclock.json');
+      const sizedPlan = JSON.stringify({
+        ...PLAN,
+        srcDiffLines: 5000,
+        diffLines: 5000,
+      });
+      writeFileSync(noClockPlan, sizedPlan);
+      writeFileSync(withClockPlan, sizedPlan);
+      try {
+        // No clock: the 3B tier stands and round 4 builds chunk 13.
+        delete process.env[DEADLINE_ENV];
+        process.exitCode = undefined;
+        (writeStderrLine as unknown as Mock).mockClear();
+        handler({
+          plan: noClockPlan,
+          role: 'reverse-audit',
+          findings,
+          round: 4,
+          chunk: 13,
+        });
+        expect(process.exitCode).toBeUndefined();
+        expect(readRecordedPrompts(noClockPlan).size).toBe(1);
+
+        // A clock: the same round refused at the reduced tier.
+        process.env[DEADLINE_ENV] = String(
+          Math.floor(Date.now() / 1000) + 7200,
+        );
+        process.exitCode = undefined;
+        (writeStderrLine as unknown as Mock).mockClear();
+        handler({
+          plan: withClockPlan,
+          role: 'reverse-audit',
+          findings,
+          round: 4,
+          chunk: 13,
+        });
+        expect(process.exitCode).toBe(4);
+        expect(stderr()).toContain('round cap is 3');
+        expect(readRecordedPrompts(withClockPlan).size).toBe(0);
+      } finally {
+        if (before === undefined) delete process.env[DEADLINE_ENV];
+        else process.env[DEADLINE_ENV] = before;
+      }
+    } finally {
+      process.exitCode = undefined;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reads the same clock on the --all-chunks round gate (#9256)', () => {
+    // The --chunk pin above closes the per-chunk build gate only; a 3B
+    // round's PRIMARY admission is --all-chunks, and its gate reads the same
+    // expression at its own call site. Same sized huge plan and both clock
+    // arms, driven through the round builder instead.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-clock-allchunks-'));
+    try {
+      const findings = join(dir, 'f.md');
+      writeFileSync(findings, '- x');
+      const handler = agentPromptCommand.handler as (a: unknown) => void;
+      const before = process.env[DEADLINE_ENV];
+      const stderr = () =>
+        (writeStderrLine as unknown as Mock).mock.calls
+          .map((c) => c[0])
+          .join('\n');
+      // Separate plans per arm: a successful build records the round's
+      // prompts, and the refused arm must show its own plan stayed empty.
+      const noClockPlan = join(dir, 'huge-noclock.json');
+      const withClockPlan = join(dir, 'huge-withclock.json');
+      const sizedPlan = JSON.stringify({
+        ...PLAN,
+        srcDiffLines: 5000,
+        diffLines: 5000,
+      });
+      writeFileSync(noClockPlan, sizedPlan);
+      writeFileSync(withClockPlan, sizedPlan);
+      try {
+        // No clock: the 3B tier stands and round 4 builds all three chunks.
+        delete process.env[DEADLINE_ENV];
+        process.exitCode = undefined;
+        (writeStderrLine as unknown as Mock).mockClear();
+        handler({
+          plan: noClockPlan,
+          role: 'reverse-audit',
+          findings,
+          round: 4,
+          'all-chunks': true,
+        });
+        expect(process.exitCode).toBeUndefined();
+        expect(readRecordedPrompts(noClockPlan).size).toBe(3);
+
+        // A clock: the same round refused at the reduced tier.
+        process.env[DEADLINE_ENV] = String(
+          Math.floor(Date.now() / 1000) + 7200,
+        );
+        process.exitCode = undefined;
+        (writeStderrLine as unknown as Mock).mockClear();
+        handler({
+          plan: withClockPlan,
+          role: 'reverse-audit',
+          findings,
+          round: 4,
+          'all-chunks': true,
+        });
+        expect(process.exitCode).toBe(4);
+        expect(stderr()).toContain('round cap is 3');
+        expect(readRecordedPrompts(withClockPlan).size).toBe(0);
+      } finally {
+        if (before === undefined) delete process.env[DEADLINE_ENV];
+        else process.env[DEADLINE_ENV] = before;
+      }
+    } finally {
+      process.exitCode = undefined;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('takes the round cap from the plan’s topology on the chunkless path', () => {
     // 3A is the topology that actually runs this path — one auditor a round,
     // the whole diff — and it is the one the tier raises. Both arms use the
@@ -4219,6 +4354,38 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     // the orchestrator a false cap on exactly the huge-diff runs this targets.
     expect(out).toContain('3-round cap leaves');
     expect(out).not.toContain('next cold check round 4');
+  });
+
+  it('huge cap: the retirement note reads the same clock as the gate', () => {
+    // The cap-3 retirement tests above STORE their cap, so the note's own
+    // clock read is mutation-invisible there. This plan carries no stored cap
+    // — the tier comes from the sized diff and the clock: without a deadline
+    // the huge tier is 5 and round 4's cold check fits; with one it is 3 and
+    // the certificate closes. Same history as the final-certificate test
+    // above, both clock arms.
+    writeFileSync(
+      plan,
+      JSON.stringify({ ...PLAN, srcDiffLines: 5000, diffLines: 5000 }),
+    );
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+    answerRound(1, { 13: DRY, 14: YIELD, 15: YIELD });
+    answerRound(2, { 13: DRY, 14: YIELD, 15: YIELD });
+
+    delete process.env[DEADLINE_ENV];
+    const out = runRound(3);
+    expect(process.exitCode).toBeUndefined();
+    expect(out).toContain('chunk 13 — retired: dry in rounds 1 and 2');
+    expect(out).toContain('next cold check round 4');
+    expect(out).not.toContain('certificate final');
+
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 7200);
+    const clocked = runRound(3);
+    expect(process.exitCode).toBeUndefined();
+    expect(clocked).toContain('chunk 13 — retired: dry in rounds 1 and 2');
+    expect(clocked).toContain('certificate final');
+    expect(clocked).toContain('3-round cap leaves');
+    expect(clocked).not.toContain('next cold check round 4');
   });
 
   it('huge cap: a non-converging loop is refused past the reduced 3-round cap', () => {
