@@ -15,6 +15,8 @@ import {
   FS_ACCESS_EVENT_TYPE,
   FS_DENIED_EVENT_TYPE,
   createWorkspaceFileSystemFactory,
+  resolveNewFileModeBits,
+  type NewFileModePolicy,
   type ResolvedPath,
   type WorkspaceFileSystem,
   type WorkspaceFileSystemFactory,
@@ -36,6 +38,7 @@ async function makeHarness(opts?: {
   ignore?: Ignore;
   includeRawPaths?: boolean;
   generationGuard?: { assertOpen(): void };
+  newFileMode?: NewFileModePolicy;
 }): Promise<Harness> {
   const scratch = await fsp.mkdtemp(
     path.join(os.tmpdir(), `qwen-wfs-${randomBytes(4).toString('hex')}-`),
@@ -51,6 +54,7 @@ async function makeHarness(opts?: {
     ignore: opts?.ignore,
     includeRawPaths: opts?.includeRawPaths,
     generationGuard: opts?.generationGuard,
+    newFileMode: opts?.newFileMode,
   });
   const fs = factory.forRequest({
     originatorClientId: 'client-x',
@@ -1706,6 +1710,126 @@ describe('WorkspaceFileSystem - write/edit', () => {
       .catch((e: unknown) => e);
     expect(isFsError(ambiguous)).toBe(true);
     expect((ambiguous as { kind: string }).kind).toBe('ambiguous_text_match');
+  });
+});
+
+// New-file mode policy (#9250): the daemon's text writers historically
+// created every NEW file at `0o600` regardless of the process umask.
+// `QWEN_SERVE_NEW_FILE_MODE=system` lets operators opt into the
+// standard `0o666 & ~umask` handling; the default stays owner-only.
+describe('WorkspaceFileSystem - new-file mode policy', () => {
+  const isPosix = process.platform !== 'win32';
+
+  it('resolveNewFileModeBits: owner policy ignores the umask', () => {
+    expect(resolveNewFileModeBits('owner', 0o000)).toBe(0o600);
+    expect(resolveNewFileModeBits('owner', 0o002)).toBe(0o600);
+    expect(resolveNewFileModeBits('owner', 0o077)).toBe(0o600);
+  });
+
+  it('resolveNewFileModeBits: system policy applies 0o666 & ~umask', () => {
+    expect(resolveNewFileModeBits('system', 0o000)).toBe(0o666);
+    expect(resolveNewFileModeBits('system', 0o002)).toBe(0o664);
+    expect(resolveNewFileModeBits('system', 0o022)).toBe(0o644);
+    expect(resolveNewFileModeBits('system', 0o077)).toBe(0o600);
+  });
+
+  it('default (owner) policy ignores a permissive umask', async () => {
+    if (!isPosix) return;
+    const h = await makeHarness();
+    const prev = process.umask(0o002);
+    try {
+      const r = await h.fs.resolve('owner-default.txt', 'write');
+      await h.fs.writeTextOverwrite(r, 'x');
+      const st = await fsp.lstat(r as string);
+      expect(st.mode & 0o7777).toBe(0o600);
+    } finally {
+      process.umask(prev);
+      await teardown(h);
+    }
+  });
+
+  it('system policy creates new files at 0o666 & ~umask', async () => {
+    if (!isPosix) return;
+    const h = await makeHarness({ newFileMode: 'system' });
+    const prev = process.umask(0o002);
+    try {
+      const r = await h.fs.resolve('system-new.txt', 'write');
+      const out = await h.fs.writeTextOverwrite(r, 'hello\n');
+      expect(out.created).toBe(true);
+      const st = await fsp.lstat(r as string);
+      expect(st.mode & 0o7777).toBe(0o664);
+    } finally {
+      process.umask(prev);
+      await teardown(h);
+    }
+  });
+
+  it('system policy still preserves an existing target mode', async () => {
+    if (!isPosix) return;
+    const h = await makeHarness({ newFileMode: 'system' });
+    const prev = process.umask(0o002);
+    try {
+      const target = path.join(h.workspace, 'system-secret.txt');
+      await fsp.writeFile(target, 'old', { mode: 0o600 });
+      await fsp.chmod(target, 0o600);
+      const r = await h.fs.resolve('system-secret.txt', 'write');
+      const out = await h.fs.writeTextOverwrite(r, 'new');
+      expect(out.created).toBe(false);
+      const st = await fsp.lstat(target);
+      expect(st.mode & 0o7777).toBe(0o600);
+    } finally {
+      process.umask(prev);
+      await teardown(h);
+    }
+  });
+
+  it('system policy applies to writeTextAtomic create', async () => {
+    if (!isPosix) return;
+    const h = await makeHarness({ newFileMode: 'system' });
+    const prev = process.umask(0o022);
+    try {
+      const r = await h.fs.resolve('system-atomic.txt', 'write');
+      await h.fs.writeTextAtomic(r, 'a\n', { mode: 'create' });
+      const st = await fsp.lstat(r as string);
+      expect(st.mode & 0o7777).toBe(0o644);
+    } finally {
+      process.umask(prev);
+      await teardown(h);
+    }
+  });
+
+  it('system policy applies to the same-host external tool write route', async () => {
+    if (!isPosix) return;
+    const h = await makeHarness({ newFileMode: 'system' });
+    const prev = process.umask(0o002);
+    try {
+      expect(h.factory.writeSameHostToolText).toBeTypeOf('function');
+      const external = path.join(h.scratch, 'external-tool-write.txt');
+      await h.factory.writeSameHostToolText?.(
+        { route: 'TEST same-host', sessionId: 'sess-1' },
+        { path: external, content: 'ext\n' },
+      );
+      const st = await fsp.lstat(external);
+      expect(st.mode & 0o7777).toBe(0o664);
+    } finally {
+      process.umask(prev);
+      await teardown(h);
+    }
+  });
+
+  it('writeBytesAtomic keeps 0o600 even under the system policy', async () => {
+    if (!isPosix) return;
+    const h = await makeHarness({ newFileMode: 'system' });
+    const prev = process.umask(0o002);
+    try {
+      const r = await h.fs.resolve('system-bytes.bin', 'write');
+      await h.fs.writeBytesAtomic(r, Buffer.from('bin'));
+      const st = await fsp.lstat(r as string);
+      expect(st.mode & 0o7777).toBe(0o600);
+    } finally {
+      process.umask(prev);
+      await teardown(h);
+    }
   });
 });
 

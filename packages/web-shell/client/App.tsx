@@ -104,7 +104,6 @@ import {
 } from './components/panels/EnvironmentPanel';
 import { ChatContextHeader } from './components/ChatContextHeader';
 import { WelcomeHeader } from './components/WelcomeHeader';
-import { NewSessionDotField } from './components/NewSessionDotField';
 import { ApprovalModeDialog } from './components/dialogs/ApprovalModeDialog';
 import { ResumeDialog } from './components/dialogs/ResumeDialog';
 import { DialogShell } from './components/dialogs/DialogShell';
@@ -11576,10 +11575,6 @@ export function App({
                 .filter(Boolean)
                 .join(' ')}
             >
-              {isChatEmptyState &&
-                !showMissingSessionState &&
-                !activePanel &&
-                mainView === 'chat' && <NewSessionDotField />}
               {sidebarOptions.enabled &&
                 sidebarOptions.showCompactToggle &&
                 (!chatHeaderEnabled || isChatEmptyState) &&
@@ -12071,8 +12066,9 @@ export function App({
                   hasWelcomeMiddle
                     ? styles.chatViewWithWelcomeMiddle
                     : undefined,
-                  // Marker class (no declarations): keeps the ':not(...)'
-                  // exclusion in App.module.css matching.
+                  // Positioning hook: completes the compound selector in
+                  // App.module.css that keeps this wrap relative so the
+                  // absolutely-positioned bottom panels keep their anchor.
                   CustomFooter ? styles.chatViewWithCustomFooter : undefined,
                   activePanel ||
                   mainView !== 'chat' ||
@@ -12627,7 +12623,6 @@ export function App({
                           composerInput={composerInput}
                           composerInputVersion={composerInputVersion}
                           placeholderText={composerPlaceholderText}
-                          animatePlaceholder={isChatEmptyState}
                         />
                         {CustomComposerFooter && (
                           <CustomComposerFooter
