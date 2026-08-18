@@ -472,6 +472,7 @@ export interface DaemonSessionActions {
       signal?: AbortSignal;
       messageId?: string;
       content?: PromptContentBlock[];
+      onAdmissionStarted?: () => void;
     },
   ): Promise<DaemonMidTurnMessageResult>;
   removeMidTurnMessage(
