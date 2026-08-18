@@ -7,7 +7,7 @@ Daemon HTTP file routes and ordinary delegated ACP `readTextFile` / `writeTextFi
 - **Path resolution** — canonicalize paths and reject anything escaping the bound workspace, including via symlinks.
 - **Trust gating** — refuse writes when the workspace is not trusted (`untrusted_workspace`).
 - **Size & content policy** — full-snapshot/output cap (`MAX_READ_BYTES = 256 KiB`), large-text windows bounded in both output and scan cost (`MAX_TEXT_SCAN_BYTES = 8 MiB`), write cap (`MAX_WRITE_BYTES = 5 MiB`), binary detection.
-- **Atomicity** — write-then-rename with target mode preservation and `0o600` default for new files.
+- **Atomicity** — write-then-rename with target mode preservation; new files default to `0o600`, or follow the process umask under the factory's `system` new-file mode policy (`QWEN_SERVE_NEW_FILE_MODE`).
 - **Audit** — every access / denial emits a structured event for `PermissionAuditRing` / monitoring.
 - **Typed errors** — closed `FsErrorKind` union mapped to HTTP statuses.
 
@@ -29,7 +29,7 @@ That text-read capability slice covers direct `read_file` plus the shared pre-re
 - Refuse full-snapshot reads above `MAX_READ_BYTES`, while allowing explicit windows with output capped at `MAX_READ_BYTES` and scan cost capped at `MAX_TEXT_SCAN_BYTES`; refuse writes above `MAX_WRITE_BYTES` and binary files (`binary_file`).
 - Refuse writes/edits when the workspace is untrusted (`untrusted_workspace`) — gated by `assertTrustedForIntent(trusted, intent)`.
 - Honor `.gitignore` / `.qwenignore` patterns via `shouldIgnore`.
-- Perform atomic write-then-rename with target mode preservation; default new file mode is `0o600`.
+- Perform atomic write-then-rename with target mode preservation; new files default to `0o600` (umask-derived `0o666 & ~umask` under the `system` new-file mode policy).
 - Emit `fs.access` / `fs.denied` audit events on every operation.
 - Map every failure to a `FsError` with kind and HTTP status; route handlers serialize them uniformly.
 
@@ -82,7 +82,7 @@ Two defensive properties the adapter MUST preserve (because the inline proxy is 
 1. **Reject non-regular files** — sockets / pipes / char devices / procfs / sysfs entries can stream unbounded data despite `stats.size === 0`. The inline path throws with `describeStatKind(stats)` in the message.
 2. **Avoid unbounded full-file buffering.** The inline fallback caps a buffered read at `READ_FILE_SIZE_CAP = 100 MiB`. The injected adapter instead applies the stricter WorkspaceFileSystem contract: full snapshots stop at 256 KiB, while larger UTF-8 files require a finite `limit` and are streamed from an inode-bound handle with at most 256 KiB returned. It must not read an entire 500 MB log merely to return `{ line: 1, limit: 10 }`.
 
-The adapter goes further: it uses `WorkspaceFileSystem.writeTextOverwrite` (PR 18 primitive) for workspace writes and a factory-owned equivalent for strictly marked external built-in-tool writes. Both use atomic temporary-file-and-rename writes with mode preservation, `0o600` default, and symlink rejection inside the shared canonical-path lock. This is a **divergence from the pre-F1 inline proxy** which resolved symlinks and wrote through to their target — agents that relied on writing through symlinked dotfiles now have to address the resolved path directly.
+The adapter goes further: it uses `WorkspaceFileSystem.writeTextOverwrite` (PR 18 primitive) for workspace writes and a factory-owned equivalent for strictly marked external built-in-tool writes. Both use atomic temporary-file-and-rename writes with mode preservation, new-file mode under the factory's `NewFileModePolicy` (`0o600` default; umask-following under `system`), and symlink rejection inside the shared canonical-path lock. This is a **divergence from the pre-F1 inline proxy** which resolved symlinks and wrote through to their target — agents that relied on writing through symlinked dotfiles now have to address the resolved path directly.
 
 ### FsError preservation over the ACP wire
 
@@ -250,7 +250,7 @@ flowchart LR
 
 - **Symlinks are rejected, not followed.** This is a divergence from the pre-F1 inline `BridgeClient.writeTextFile` proxy which resolved symlinks. Agents writing through symlinked dotfiles need to address the resolved path directly.
 - **`io_error` vs `permission_denied` are distinct.** Do not conflate them. Monitoring pipelines key on `errorKind` for alerting — folding ENOSPC into permission_denied would page security responders for `df -h` problems.
-- **New file mode defaults to `0o600`, not umask defaults.** The write syscall's `mode` arg bypasses umask. Agents writing public files should explicitly pass a mode override.
+- **New file mode defaults to `0o600`, not umask defaults.** The write syscall's `mode` arg bypasses umask. Agents cannot pass a per-write mode override. Operators who want agent-created files to follow the daemon's umask can opt in per daemon with `QWEN_SERVE_NEW_FILE_MODE=system` (existing files still preserve their mode); see [`17-configuration.md`](./17-configuration.md).
 - **`createServeApp` default `trusted: false`** silently rejects ACP writes with `untrusted_workspace` for embedders that do not inject a custom `fsFactory` or `bridge`. A one-time stderr warning fires the first time; further callers see no reminder. See [`02-serve-runtime.md`](./02-serve-runtime.md).
 - **Large text requires an explicit window argument**, any of `line` / `limit` / `maxBytes`. A read with none of them stays `file_too_large`, because a caller that believes it holds the whole file may write it back truncated. Windows stream from an inode-bound handle and never return more than `MAX_READ_BYTES`.
 - **`MAX_READ_BYTES` caps what a read returns; `MAX_TEXT_SCAN_BYTES` caps what it costs.** Line offsets are resolved by scanning from byte 0, so `{ line: 900_000_000, limit: 20 }` returns almost nothing and still walks the file. Past 8 MiB of scanning the read is refused with `file_too_large` pointing at `readBytes`, which reaches any offset in O(1).
