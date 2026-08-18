@@ -21,7 +21,10 @@ describe('list_directory', () => {
 
   it('should be able to list a directory', async () => {
     const rig = new TestRig();
-    await rig.setup('should be able to list a directory');
+    await rig.setup('should be able to list a directory', {
+      // list_directory is opt-in (disabled by default).
+      settings: { tools: { listDirectory: { enabled: true } } },
+    });
     rig.createFile('file1.txt', 'file 1 content');
     rig.mkdir('subdir');
 
@@ -100,6 +103,87 @@ describe('list_directory', () => {
       );
       expect(toolResultContent).toContain('file1.txt');
       expect(toolResultContent).toContain('subdir');
+    } finally {
+      await fakeServer.close();
+    }
+  });
+
+  it('should not register list_directory when it is not explicitly enabled', async () => {
+    const rig = new TestRig();
+    // No tools.listDirectory.enabled setting: the tool is opt-in.
+    await rig.setup(
+      'should not register list_directory when it is not explicitly enabled',
+    );
+    rig.createFile('file1.txt', 'file 1 content');
+
+    const noProxy = IS_CONTAINER_SANDBOX
+      ? CONTAINER_SANDBOX_NO_PROXY
+      : '127.0.0.1,localhost';
+
+    let streamingRequestIndex = 0;
+    const fakeServer = await startFakeOpenAIServer(({ body }) => {
+      if (body['stream'] !== true) {
+        return { content: '{"selected_memories":[]}' };
+      }
+      const requestIndex = streamingRequestIndex++;
+      if (requestIndex === 0) {
+        return {
+          toolCalls: [
+            fakeToolCall('list_directory', { path: rig.testDir! }, 'list-dir'),
+          ],
+        };
+      }
+      return { content: 'Done.' };
+    }, fakeServerHostOptions());
+
+    vi.stubEnv('OPENAI_API_KEY', 'fake-key');
+    vi.stubEnv('OPENAI_BASE_URL', fakeServer.baseUrl);
+    vi.stubEnv('OPENAI_MODEL', 'fake-model');
+    vi.stubEnv('QWEN_MODEL', 'fake-model');
+    vi.stubEnv('QWEN_HOME', join(rig.testDir!, '.qwen-home'));
+    vi.stubEnv('QWEN_RUNTIME_DIR', join(rig.testDir!, '.qwen-home'));
+    vi.stubEnv('NO_PROXY', noProxy);
+    vi.stubEnv('no_proxy', noProxy);
+
+    try {
+      await rig.run(
+        'Call the list_directory tool on the current directory.',
+        '--auth-type',
+        'openai',
+        '--model',
+        'fake-model',
+        '--openai-base-url',
+        fakeServer.baseUrl,
+        '--openai-api-key',
+        'fake-key',
+      );
+
+      const toolResultRequest = fakeServer.requests.find(({ body }) => {
+        const messages = body['messages'];
+        return (
+          Array.isArray(messages) &&
+          messages.some(
+            (message) =>
+              typeof message === 'object' &&
+              message !== null &&
+              'role' in message &&
+              message.role === 'tool',
+          )
+        );
+      });
+      expect(
+        toolResultRequest,
+        'Expected a model request containing the list_directory result',
+      ).toBeDefined();
+      const messages = toolResultRequest?.body['messages'] as
+        | Array<{ role?: string; content?: unknown }>
+        | undefined;
+      const toolResultContent = JSON.stringify(
+        messages?.find((message) => message.role === 'tool')?.content ?? '',
+      );
+      // The unregistered tool surfaces a not-found error instead of a listing.
+      expect(toolResultContent).toContain('not found in registry');
+      expect(toolResultContent).not.toContain('file1.txt');
     } finally {
       await fakeServer.close();
     }
