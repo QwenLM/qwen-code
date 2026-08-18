@@ -44,6 +44,7 @@
 // caller's.
 
 import type { CommandModule } from 'yargs';
+import { roundModelIdFrom } from './lib/round-model.js';
 import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -57,8 +58,16 @@ import {
 } from './lib/gh.js';
 import { REVIEW_TMP_DIR, tmpFile } from './lib/paths.js';
 import { parseReceiptIds } from './lib/receipt.js';
-import { composeReview, type ComposeReviewInput } from './compose-review.js';
-import { reviewWriteAuthorization } from './lib/authorization.js';
+import {
+  composeReview,
+  normalizeSeverityFloor,
+  type ComposeReviewInput,
+} from './compose-review.js';
+import {
+  recordedSeverityFloor,
+  reviewWriteAuthorization,
+} from './lib/authorization.js';
+import { getPlatformReader, isAoneHost } from './lib/platform/registry.js';
 import {
   CRITICAL_PREFIX,
   SUGGESTION_PREFIX,
@@ -179,7 +188,12 @@ function normalizeInlineComments(
 function authorization(
   args: SubmitArgs,
   defaultComment: boolean,
-): { ok: boolean; why: string } {
+): {
+  ok: boolean;
+  why: string;
+  recordedHost?: string;
+  recordedUnbound?: boolean;
+} {
   return reviewWriteAuthorization({
     userAuthorized: args.userAuthorized,
     defaultComment,
@@ -214,10 +228,18 @@ function compose(
   payload: ReviewPayload,
   cliVersion: string,
   attribution: boolean,
+  runtimeModelId: string | undefined,
 ): {
   event: string;
   body: string;
   cappedBy: string[];
+  /**
+   * Indices of drafted comments compose-review's floor enforcement moved
+   * into the body's deferral list — the caller removes exactly these from
+   * the posting set. Same array, same order: `draftedComments` below IS
+   * `payload.comments`, so the indices line up by construction.
+   */
+  floorEnforced: number[];
 } {
   const comments = payload.comments ?? [];
   const state = payload.state ?? ({} as ComposeReviewInput);
@@ -252,8 +274,14 @@ function compose(
     },
     cliVersion,
     attribution,
+    runtimeModelId,
   );
-  return { event: r.event, body: r.body, cappedBy: r.cappedBy };
+  return {
+    event: r.event,
+    body: r.body,
+    cappedBy: r.cappedBy,
+    floorEnforced: r.floorEnforced,
+  };
 }
 
 /** What the caller may not bring. Checked before the verdict is computed from it. */
@@ -396,6 +424,12 @@ export function runSubmit(
     attribution?: boolean;
     /** The standing `review.comment` setting, for the authorization gate. */
     defaultComment?: boolean;
+    /**
+     * The standing `review.severityFloor` setting, raw — handed to the
+     * authorization gate's args re-parse so the floor enforcement below can
+     * prefer the OPERATOR'S recorded floor over the state's transcription.
+     */
+    defaultSeverityFloor?: string;
   } = {},
 ): void {
   const { attribution = true, defaultComment = false } = opts;
@@ -464,6 +498,72 @@ export function runSubmit(
     return;
   }
 
+  // Posting is GitHub-only in this phase. On an Aone target the Create
+  // Review API does not exist — refuse with the SAME shape as an
+  // unauthorised refusal (stderr explanation, stdout `{"posted": false}`,
+  // exit 3): the skill's Step 7 treats that shape as a complete, correct
+  // outcome, and a throw instead would surface as a failed command an agent
+  // might retry or route around. The refusal sits BELOW the authorisation
+  // gate on purpose — an unauthorised Aone run takes the normal exit-3
+  // path above, and the command no longer dies with a throw before the gate
+  // can rule (an authorised Aone `--dry-run` lands on this same exit-3
+  // refusal: a payload that can never post has no posting-consistency to
+  // validate).
+  //
+  // The platform decision is bound in BOTH directions, because the
+  // runtime-effective host alone fails both ways:
+  //  - Recorded Aone target + non-Aone effective host (an ambient GH_HOST
+  //    export beside a bare-MR-number Aone review) must still refuse —
+  //    otherwise the read-only guarantee leaks and the review POSTs to the
+  //    wrong host's same-named repo. So a recorded Aone host always
+  //    refuses, whatever the environment resolves.
+  //  - Recorded non-Aone target (pr-url host binding) must NOT be vetoed
+  //    by the cwd probe from an Aone-origin clone — the recorded binding
+  //    is the explicit signal the registry's precedence documents.
+  //  - RECORDED but hostless (a bare-MR-number recording with no `--host`
+  //    flag — the canonical Aone invocation shape carries no URL): the
+  //    recording proves a review exists but not WHERE it lives, and the
+  //    runtime environment cannot prove it either. For a public,
+  //    irreversible write that is fail-CLOSED: refuse and name the remedy
+  //    (`--host`), instead of trusting the environment and posting the
+  //    review at github.com's same-named repo.
+  //  - No recording at all: fall back to the flag, then GH_HOST (ghEnv
+  //    inherits the operator's export when no module host is set, so an
+  //    Aone-pointing GH_HOST must hit this refusal, not an opaque gh
+  //    failure), then the cwd clone.
+  // resolveGhHost trims, so a padded `--host` cannot slip past detection.
+  // The findings are not lost: they are in the terminal output and the
+  // saved report.
+  const recordedHost = auth.recordedHost;
+  const aoneWrite =
+    isAoneHost(recordedHost) ||
+    auth.recordedUnbound === true ||
+    (recordedHost === undefined &&
+      (isAoneHost(resolveGhHost(args.host)) ||
+        getPlatformReader({ host: args.host?.trim() || undefined }).kind ===
+          'aone'));
+  if (aoneWrite) {
+    writeStderrLine(
+      `REFUSED to post to ${args.repo}#${args.pr}: posting review comments ` +
+        `to Aone Code is not supported yet (read-only phase). The findings ` +
+        `are in the terminal output and the saved report; post them ` +
+        `manually or wait for the write phase.` +
+        (auth.recordedUnbound === true && !isAoneHost(recordedHost)
+          ? ` (the recorded target names no platform — pass \`--host\` to ` +
+            `prove it is not an Aone MR)`
+          : ''),
+    );
+    writeStdoutLine(
+      JSON.stringify(
+        { posted: false, reason: 'aone-read-only-phase' },
+        null,
+        2,
+      ),
+    );
+    process.exitCode = 3;
+    return;
+  }
+
   // What the caller may not bring, checked before anything is computed from it: a
   // verdict of its own, or no state to compute one from. "Your state does not
   // compose" is a poor way to say "you gave me no state".
@@ -485,16 +585,103 @@ export function runSubmit(
     ),
   };
 
+  // The operator's floor, from the CLI's verbatim record — never only the
+  // state's transcription of it. The state field is a model-written copy of
+  // the operator's policy, and a copy that can drift must not decide
+  // whether enforcement stands down. The recovery is the SHARED helper both
+  // posting boundaries call with the SAME identity formula — this command's
+  // CLI-typed target first (`--pr`/`--repo`/the effective host, all
+  // mandatory-and-validated here), the plan filling only axes the caller
+  // did not supply — so the archived compose and this post cannot resolve
+  // different floors for one review. Caller-first because the plan's PATH
+  // arrives through that same model-written state: plan-first let a
+  // parseable-but-wrong plan choose which identity the operator's record
+  // was tested against and silently stand the recovery down. The recovered
+  // value wins whenever the recovery yields one that differs; when it
+  // yields nothing — no record, unreadable, no floor decision in it,
+  // another PR's or repo's record — the state's value stands, the same
+  // fail-open the enforcement itself applies. The note names the TRUE
+  // source (flag vs setting): "the record outranks the state" over a
+  // setting-sourced floor sent auditors hunting the record for a flag
+  // nobody typed.
+  const recovered = recordedSeverityFloor({
+    planPath:
+      typeof payload.state?.planPath === 'string'
+        ? payload.state.planPath
+        : undefined,
+    callerPr: args.pr,
+    callerRepo: args.repo,
+    callerHost: resolveGhHost(args.host),
+    defaultSeverityFloor: opts.defaultSeverityFloor,
+    skillArgs: args.skillArgs,
+  });
+  // The guard compares the NORMALISED state floor: a case- or
+  // whitespace-drifted transcription of the same floor is agreement, and
+  // announcing an override over it would put a false claim on the audit
+  // channel.
+  if (
+    recovered !== undefined &&
+    payload.state != null &&
+    normalizeSeverityFloor(payload.state.severityFloor) !== recovered.floor
+  ) {
+    writeStderrLine(
+      `Severity floor: using ${JSON.stringify(recovered.floor)} from ` +
+        (recovered.source === 'explicit'
+          ? 'the recorded `--severity-floor` flag'
+          : 'the `review.severityFloor` setting resolved against the recorded invocation') +
+        `, over the state's ` +
+        `${JSON.stringify(payload.state.severityFloor ?? null)} — the ` +
+        `CLI's verbatim record outranks the state JSON.`,
+    );
+    payload = {
+      ...payload,
+      state: { ...payload.state, severityFloor: recovered.floor },
+    };
+  }
+
   // The verdict, computed here. It was never in the payload.
   let event: string;
   let body: string;
   let cappedBy: string[];
+  let floorEnforced: number[];
   try {
-    ({ event, body, cappedBy } = compose(payload, cliVersion, attribution));
+    ({ event, body, cappedBy, floorEnforced } = compose(
+      payload,
+      cliVersion,
+      attribution,
+      // The anchor's certifying identity is the model the runtime published
+      // for this session — Config publishes it per session, the shell tool
+      // injects it into this subprocess. It supersedes the typed id, but the
+      // launching command can still override the env (and a hijacked
+      // orchestrator can forge the marker outright via the API) — the same
+      // forgeable posture DESIGN.md records for the cache path.
+      // The identity this round runs under — see lib/round-model.ts.
+      roundModelIdFrom(process.env),
+    ));
   } catch (err) {
     throw new Error(
       `The review state does not compose into a verdict; refusing to post:\n` +
         `  - ${(err as Error).message}`,
+    );
+  }
+
+  // The floor, enforced: compose-review already described the reduced set —
+  // the body's deferral list carries these findings and the ledger work
+  // list excludes them — so posting the full array would make the review
+  // disagree with its own body. The removal happens BEFORE the consistency
+  // gate: a rerouted comment is no longer posting, so it is no longer the
+  // gate's business (an unmarked comment is never rerouted and still
+  // refuses below).
+  if (floorEnforced.length > 0) {
+    const drop = new Set(floorEnforced);
+    payload = {
+      ...payload,
+      comments: (payload.comments ?? []).filter((_, i) => !drop.has(i)),
+    };
+    writeStderrLine(
+      `Floor enforcement: ${floorEnforced.length} Suggestion comment(s) ` +
+        `drafted past the resolved critical floor were moved into the ` +
+        `body's deferral list and will not post inline.`,
     );
   }
 
@@ -523,7 +710,14 @@ export function runSubmit(
     );
     writeStdoutLine(
       JSON.stringify(
-        { posted: false, wouldPost: true, target, event, cappedBy },
+        {
+          posted: false,
+          wouldPost: true,
+          target,
+          event,
+          cappedBy,
+          floorEnforced: floorEnforced.length,
+        },
         null,
         2,
       ),
@@ -599,6 +793,7 @@ export function runSubmit(
         event,
         cappedBy,
         inlineComments: post.comments.length,
+        floorEnforced: floorEnforced.length,
         ...(reviewUrl ? { url: reviewUrl } : {}),
       },
       null,
@@ -658,6 +853,7 @@ export const submitCommand: CommandModule = {
     runSubmit(argv as unknown as SubmitArgs, cliVersion, {
       attribution: review.attribution,
       defaultComment: review.comment,
+      defaultSeverityFloor: review.severityFloor,
     });
   },
 };

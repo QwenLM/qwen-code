@@ -502,6 +502,8 @@ Both events live in the per-session SSE replay ring (they carry an `id`) so a cl
 
 ## Routes
 
+Clients can feature-detect `session_turn_status` and poll `GET /session/:id/turns/current` or `GET /session/:id/turns/:promptId`. These routes require the live owning Session and never load or scan another workspace. Settled results are best-effort transcript records read from the active branch with a bounded scan; `prompt_not_found` means no result was found in the live queue, 64-entry terminal overlay, or bounded active window. `resultText` is the raw final parent-model answer after the last tool boundary, before optional message rewriting, and may be absent. Results over 32,768 UTF-16 code units include `resultTruncated: true` and `resultCode: "RESULT_TEXT_TRUNCATED"`.
+
 ### `GET /health`
 
 Liveness probe. Default form returns `200 {"status":"ok"}` if the listener is up — cheap, no bridge access, suitable for high-frequency k8s/Compose liveness probes.
@@ -2510,7 +2512,10 @@ If the HTTP client disconnects mid-prompt, the daemon sends an ACP `cancel` noti
 
 When `prompt_absolute_deadline` is advertised, `deadlineMs` may shorten the
 configured server deadline. Expiry emits a correlated `turn_error` with
-`errorKind: "prompt_deadline_exceeded"`.
+`errorKind: "prompt_deadline_exceeded"`. The deadline releases the caller
+without killing the agent; if the agent later settles, turn-status polls for
+that `promptId` return the settled transcript outcome instead of the deadline
+error.
 
 ### `POST /session/:id/cancel`
 
