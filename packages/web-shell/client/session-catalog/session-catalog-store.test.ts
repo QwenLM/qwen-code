@@ -496,6 +496,377 @@ describe('SessionCatalogStore', () => {
     );
   });
 
+  it('overlays live state and clears volatile fields for persisted-only sessions', async () => {
+    legacy.mockResolvedValue({
+      sessions: [
+        {
+          sessionId: 'live',
+          workspaceCwd: '/work',
+          displayName: 'Live session',
+          clientCount: 0,
+          hasActivePrompt: false,
+        },
+        {
+          sessionId: 'persisted',
+          workspaceCwd: '/work',
+          displayName: 'Persisted session',
+          clientCount: 2,
+          hasActivePrompt: true,
+          isWaitingForPermission: true,
+          isWaitingForUserQuestion: true,
+        },
+      ],
+    });
+    const target = query('/work');
+    await store.loadOnce(target, { fresh: true });
+
+    store.applyLiveState('/work', [
+      {
+        sessionId: 'live',
+        clientCount: 1,
+        hasActivePrompt: true,
+        isWaitingForPermission: true,
+        isWaitingForUserQuestion: false,
+      },
+    ]);
+
+    expect(store.getSnapshot(target).page?.sessions).toEqual([
+      expect.objectContaining({
+        sessionId: 'live',
+        displayName: 'Live session',
+        clientCount: 1,
+        hasActivePrompt: true,
+        isWaitingForPermission: true,
+        isWaitingForUserQuestion: false,
+      }),
+      expect.objectContaining({
+        sessionId: 'persisted',
+        displayName: 'Persisted session',
+        clientCount: 0,
+        hasActivePrompt: false,
+        isWaitingForPermission: false,
+        isWaitingForUserQuestion: false,
+      }),
+    ]);
+  });
+
+  it('stages active queries through their own route kind and stales retained pages', async () => {
+    legacy.mockImplementation(async (cwd: string) => page(cwd, cwd));
+    const active = query('/work');
+    const pinned = {
+      ...query('/work'),
+      options: { ...query('/work').options, view: 'organized' as const },
+    };
+    const other = query('/other');
+    await store.loadOnce(active, { fresh: true });
+    await store.loadOnce(pinned, { fresh: true });
+    await store.loadOnce(other, { fresh: true });
+    const unsubscribe = store.subscribe(active, vi.fn());
+    const activeBefore = store.getSnapshot(active).page;
+    const pinnedBefore = store.getSnapshot(pinned).page;
+    qualified.mockResolvedValue(page('fresh'));
+
+    const staged = await store.stageWorkspaceRefresh('/work');
+
+    expect(qualified).not.toHaveBeenCalled();
+    expect(legacy).toHaveBeenCalledTimes(4);
+    expect(store.getSnapshot(active).page).toBe(activeBefore);
+    expect(store.getSnapshot(pinned).page).toBe(pinnedBefore);
+    expect(store.getSnapshot(active).stale).toBe(true);
+    expect(store.commitWorkspaceRefresh(staged)).toBe(true);
+    expect(store.getSnapshot(active).stale).toBe(false);
+    expect(store.getSnapshot(pinned).stale).toBe(true);
+    expect(store.getSnapshot(other).stale).toBe(false);
+    expect(store.getSnapshot(active).page?.sessions[0]?.sessionId).toBe(
+      '/work',
+    );
+    unsubscribe();
+  });
+
+  it('routes live workspace invalidations and new queries through reconciliation', async () => {
+    legacy.mockResolvedValue(page('cached'));
+    const active = query('/work');
+    await store.loadOnce(active, { fresh: true });
+    const releaseLiveState = store.retainWorkspaceLiveState('/work');
+
+    store.invalidateWorkspace('/work');
+    const unsubscribeActive = store.subscribe(active, vi.fn(), {
+      autoLoad: true,
+    });
+
+    expect(legacy).toHaveBeenCalledTimes(1);
+    expect(qualified).not.toHaveBeenCalled();
+    expect(store.consumeWorkspaceLiveStateRefreshRequest('/work')).toBe(
+      'interactive',
+    );
+    expect(
+      store.consumeWorkspaceLiveStateRefreshRequest('/work'),
+    ).toBeUndefined();
+
+    Object.defineProperty(document, 'hidden', {
+      configurable: true,
+      value: true,
+    });
+    document.dispatchEvent(new Event('visibilitychange'));
+    Object.defineProperty(document, 'hidden', {
+      configurable: true,
+      value: false,
+    });
+    document.dispatchEvent(new Event('visibilitychange'));
+    await flushMicrotasks();
+    expect(legacy).toHaveBeenCalledTimes(1);
+
+    const channel = {
+      ...active,
+      options: { ...active.options, sourceType: 'channel' },
+    };
+    const unsubscribeChannel = store.subscribe(channel, vi.fn());
+
+    expect(legacy).toHaveBeenCalledTimes(1);
+    expect(qualified).not.toHaveBeenCalled();
+    expect(store.consumeWorkspaceLiveStateRefreshRequest('/work')).toBe(
+      'interactive',
+    );
+
+    unsubscribeChannel();
+    releaseLiveState();
+    unsubscribeActive();
+  });
+
+  it('resolves an explicit live-state refresh only from a staged commit', async () => {
+    legacy
+      .mockResolvedValueOnce(page('cached'))
+      .mockResolvedValueOnce(page('refreshed'));
+    const target = query('/work');
+    await store.loadOnce(target, { fresh: true });
+    const releaseLiveState = store.retainWorkspaceLiveState('/work');
+
+    const refresh = store.refresh(target);
+
+    expect(legacy).toHaveBeenCalledTimes(1);
+    expect(qualified).not.toHaveBeenCalled();
+    expect(store.consumeWorkspaceLiveStateRefreshRequest('/work')).toBe(
+      'interactive',
+    );
+
+    const staged = await store.stageWorkspaceRefresh('/work');
+    expect(legacy).toHaveBeenCalledTimes(2);
+    expect(qualified).not.toHaveBeenCalled();
+    expect(store.getSnapshot(target).page).toEqual(page('cached'));
+    expect(store.commitWorkspaceRefresh(staged)).toBe(true);
+    await expect(refresh).resolves.toEqual(page('refreshed'));
+
+    releaseLiveState();
+  });
+
+  it('resumes an explicit refresh when live-state ownership is released', async () => {
+    const stagedResponse = deferred<DaemonSessionListPage>();
+    legacy
+      .mockResolvedValueOnce(page('cached'))
+      .mockReturnValueOnce(stagedResponse.promise)
+      .mockResolvedValueOnce(page('legacy-refresh'));
+    const target = query('/work');
+    await store.loadOnce(target, { fresh: true });
+    const releaseLiveState = store.retainWorkspaceLiveState('/work');
+    const refresh = store.refresh(target);
+    const stagedPromise = store.stageWorkspaceRefresh('/work');
+    expect(legacy).toHaveBeenCalledTimes(2);
+    expect(qualified).not.toHaveBeenCalled();
+
+    releaseLiveState();
+    stagedResponse.resolve(page('staged'));
+    await stagedPromise;
+    await flushMicrotasks();
+
+    expect(legacy).toHaveBeenCalledTimes(3);
+    await expect(refresh).resolves.toEqual(page('legacy-refresh'));
+  });
+
+  it('does not publish an older request or a staged page before commit', async () => {
+    const initial = deferred<DaemonSessionListPage>();
+    const stagedResponse = deferred<DaemonSessionListPage>();
+    legacy
+      .mockReturnValueOnce(initial.promise)
+      .mockReturnValueOnce(stagedResponse.promise);
+    const target = query('/work');
+    const unsubscribe = store.subscribe(target, vi.fn(), { autoLoad: true });
+
+    const stagedPromise = store.stageWorkspaceRefresh('/work');
+    initial.resolve(page('superseded'));
+    await flushMicrotasks();
+    expect(legacy).toHaveBeenCalledTimes(2);
+    expect(qualified).not.toHaveBeenCalled();
+    expect(store.getSnapshot(target).page).toBeUndefined();
+
+    stagedResponse.resolve(page('staged'));
+    const staged = await stagedPromise;
+    expect(store.getSnapshot(target).page).toBeUndefined();
+    expect(store.commitWorkspaceRefresh(staged)).toBe(true);
+    expect(store.getSnapshot(target).page).toEqual(page('staged'));
+    unsubscribe();
+  });
+
+  it('queues an explicit refresh behind staging and rejects the stale commit', async () => {
+    legacy.mockResolvedValueOnce(page('cached'));
+    const target = query('/work');
+    await store.loadOnce(target, { fresh: true });
+    const unsubscribe = store.subscribe(target, vi.fn());
+    const stagedResponse = deferred<DaemonSessionListPage>();
+    const refreshedResponse = deferred<DaemonSessionListPage>();
+    legacy
+      .mockReturnValueOnce(stagedResponse.promise)
+      .mockReturnValueOnce(refreshedResponse.promise);
+
+    const stagedPromise = store.stageWorkspaceRefresh('/work');
+    const refreshPromise = store.refresh(target);
+    expect(legacy).toHaveBeenCalledTimes(2);
+    expect(qualified).not.toHaveBeenCalled();
+    stagedResponse.resolve(page('staged'));
+    const staged = await stagedPromise;
+
+    expect(store.commitWorkspaceRefresh(staged)).toBe(false);
+    expect(store.getSnapshot(target).page).toEqual(page('cached'));
+    expect(legacy).toHaveBeenCalledTimes(3);
+    refreshedResponse.resolve(page('refreshed'));
+    await expect(refreshPromise).resolves.toEqual(page('refreshed'));
+    unsubscribe();
+  });
+
+  it('does not supersede an explicit request that started before staging', async () => {
+    const response = deferred<DaemonSessionListPage>();
+    legacy.mockReturnValueOnce(response.promise);
+    const target = query('/work');
+    const request = store.loadOnce(target, { fresh: true });
+
+    const staged = await store.stageWorkspaceRefresh('/work');
+
+    expect(staged.complete).toBe(false);
+    expect(qualified).not.toHaveBeenCalled();
+    response.resolve(page('explicit'));
+    await expect(request).resolves.toEqual(page('explicit'));
+  });
+
+  it('resolves a non-coordinated waiter after a live-mode invalidation', async () => {
+    const initial = deferred<DaemonSessionListPage>();
+    legacy
+      .mockReturnValueOnce(initial.promise)
+      .mockResolvedValueOnce(page('rescued'));
+    const target = query('/work');
+    const request = store.loadOnce(target, { fresh: true });
+    const releaseLiveState = store.retainWorkspaceLiveState('/work');
+
+    store.invalidateWorkspace('/work');
+
+    initial.resolve(page('stale'));
+    await flushMicrotasks();
+    // The invalidation bumped the revision past the in-flight job; a real
+    // follow-up job must settle the pre-live waiter.
+    await expect(request).resolves.toEqual(page('rescued'));
+    expect(legacy).toHaveBeenCalledTimes(2);
+    releaseLiveState();
+  });
+
+  it('scopes a staged failure to the failing entry', async () => {
+    legacy.mockResolvedValue(page('cached'));
+    const active = query('/work');
+    const pinned = {
+      ...query('/work'),
+      options: { ...query('/work').options, view: 'organized' as const },
+    };
+    await store.loadOnce(active, { fresh: true });
+    await store.loadOnce(pinned, { fresh: true });
+    const unsubscribeActive = store.subscribe(active, vi.fn());
+    const unsubscribePinned = store.subscribe(pinned, vi.fn());
+    let calls = 0;
+    legacy.mockImplementation(async () => {
+      calls += 1;
+      if (calls === 2) throw new Error('pinned blip');
+      return page('fresh');
+    });
+
+    await expect(store.stageWorkspaceRefresh('/work')).rejects.toThrow(
+      'pinned blip',
+    );
+
+    expect(store.getSnapshot(active).error).toBeUndefined();
+    expect(store.getSnapshot(active).loading).toBe(false);
+    expect(store.getSnapshot(pinned).error?.message).toBe('pinned blip');
+    expect(store.getSnapshot(pinned).loading).toBe(false);
+    unsubscribeActive();
+    unsubscribePinned();
+  });
+
+  it('flags an interactive refresh when a live-mode subscriber maxAge expires', async () => {
+    legacy.mockResolvedValue(page('cached'));
+    const target = query('/work');
+    await store.loadOnce(target, { fresh: true });
+    const releaseLiveState = store.retainWorkspaceLiveState('/work');
+
+    vi.advanceTimersByTime(2_000);
+    const unsubscribe = store.subscribe(target, vi.fn(), {
+      autoLoad: true,
+      maxAgeMs: 1_000,
+    });
+
+    expect(store.consumeWorkspaceLiveStateRefreshRequest('/work')).toBe(
+      'interactive',
+    );
+    unsubscribe();
+    releaseLiveState();
+  });
+
+  it('wakes live-state listeners for interactive refreshes only', () => {
+    const wake = vi.fn();
+    const stopWake = store.onLiveStateWake(wake);
+    const releaseLiveState = store.retainWorkspaceLiveState('/work');
+    legacy.mockResolvedValue(page('cached'));
+
+    store.invalidateWorkspace('/work');
+    expect(wake).not.toHaveBeenCalled();
+
+    // The waiter settles via a later staged commit (not exercised here), so
+    // drop the promise; the wake fires synchronously inside refresh().
+    void store.refresh(query('/work')).catch(() => undefined);
+    expect(wake).toHaveBeenCalledWith('/work');
+
+    stopWake();
+    releaseLiveState();
+  });
+
+  it('does not let a trailing non-staged job settle staged-revision waiters', async () => {
+    const initial = deferred<DaemonSessionListPage>();
+    const trailing = deferred<DaemonSessionListPage>();
+    const stagedResponse = deferred<DaemonSessionListPage>();
+    legacy
+      .mockReturnValueOnce(initial.promise)
+      .mockReturnValueOnce(trailing.promise)
+      .mockReturnValueOnce(stagedResponse.promise);
+    const target = query('/work');
+    // A legacy background job is in flight when live-state takes over.
+    const unsubscribe = store.subscribe(target, vi.fn(), { autoLoad: true });
+    const releaseLiveState = store.retainWorkspaceLiveState('/work');
+
+    // Staging begins while the legacy job runs; the follower loadOnce arms
+    // a trailing non-staged job at the staging-target revision.
+    const stagedPromise = store.stageWorkspaceRefresh('/work');
+    const followUp = store.loadOnce(target);
+    initial.resolve(page('initial'));
+    await flushMicrotasks();
+
+    // The trailing job fails at the staged revision: it must not reject
+    // the waiters the staged commit is about to resolve.
+    trailing.reject(new Error('trailing blip'));
+    stagedResponse.resolve(page('staged'));
+    const staged = await stagedPromise;
+    expect(staged.complete).toBe(true);
+    expect(store.commitWorkspaceRefresh(staged)).toBe(true);
+    await expect(followUp).resolves.toEqual(page('staged'));
+    expect(store.getSnapshot(target).error).toBeUndefined();
+
+    unsubscribe();
+    releaseLiveState();
+  });
+
   it('uses the qualified client only for qualified queries', async () => {
     qualified.mockResolvedValue({
       sessions: [{ sessionId: 'qualified' }],
