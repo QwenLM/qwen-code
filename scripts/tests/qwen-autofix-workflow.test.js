@@ -18055,9 +18055,9 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     // the no-commit handoff branch must NOT fire — the round is a brake
     // VIOLATION (the brake says commit nothing), classified
     // outcome=committed_handoff before the structural checks. Falling
-    // through to them would reject retryable=true, and the repair pass
-    // deletes handoff.md and may commit again against the brake. Deleting
-    // the committed-side guard flips this to outcome=handoff, skipping every
+    // through to them would reject retryable, and the repair pass deletes
+    // handoff.md and may commit again against the brake. Deleting the
+    // committed-side guard flips this to outcome=handoff, skipping every
     // structural check on the committed diff; routing it through the checks
     // instead flips it to outcome=failed with retryable left unset ONLY if
     // the fixture trips nothing — the shape this pin exists to prevent.
