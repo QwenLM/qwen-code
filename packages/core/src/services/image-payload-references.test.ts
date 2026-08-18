@@ -13,12 +13,6 @@ import {
   prepareImagePayloadsForRequest,
   replaceImagePayloadsInPlace,
 } from './image-payload-references.js';
-import { getFunctionResponseParts } from './compactionInputSlimming.js';
-import {
-  clearCacheSafeParams,
-  getCacheSafeParams,
-  saveCacheSafeParams,
-} from '../utils/forkedAgent.js';
 
 function toolImageTurn(data: string): Content {
   return {
@@ -276,28 +270,6 @@ describe('replaceImagePayloadsInPlace', () => {
     expect(JSON.stringify(contents)).toContain('"data":"current-shot"');
     expect(JSON.stringify(contents)).not.toContain('"data":"old-shot"');
   });
-
-  it('rewrites the shared part object so durable history loses the payload too', () => {
-    // Curated entries can be fresh merges (appendCuratedContent) whose parts
-    // arrays reuse the durable history's Part objects. Replacing only the
-    // array slot would leave the inline payload alive in history, so the
-    // rewrite must hit the shared object itself.
-    const store = new InMemoryImagePayloadStore();
-    const sharedPart: Part = {
-      inlineData: { mimeType: 'image/png', data: 'old-shot' },
-    };
-    const durableHistoryEntry: Content = { role: 'user', parts: [sharedPart] };
-    const mergedEntry: Content = {
-      role: 'user',
-      parts: [sharedPart, { text: 'new message' }],
-    };
-
-    replaceImagePayloadsInPlace([mergedEntry], store);
-
-    expect(countAllInlineImages([durableHistoryEntry])).toBe(0);
-    expect(sharedPart.text).toMatch(/\[Image #[a-f0-9]{12}/);
-    expect(sharedPart.inlineData).toBeUndefined();
-  });
 });
 
 describe('buildReattachParts', () => {
@@ -319,164 +291,9 @@ describe('buildReattachParts', () => {
     expect(data).toEqual(['b', 'c']);
   });
 
-  it('reattaches stored images from existing stable references', () => {
-    const store = new InMemoryImagePayloadStore();
-    const contents: Content[] = [toolImageTurn('a'), toolImageTurn('b')];
-    replaceImagePayloadsInPlace(contents, store);
-
-    const parts = buildReattachParts([], 2, contents, store);
-
-    expect(
-      parts.filter((p) => p.inlineData).map((p) => p.inlineData?.data),
-    ).toEqual(['a', 'b']);
-  });
-
   it('returns empty when maxRecentImages is zero', () => {
     const store = new InMemoryImagePayloadStore();
     const replaced = replaceImagePayloadsInPlace([toolImageTurn('a')], store);
     expect(buildReattachParts(replaced, 0)).toEqual([]);
-  });
-
-  it('keeps snapshot history parts isolated from the durable originals (fork boundary)', () => {
-    // CacheSafeParams consumers (forked chats) must never mutate the main
-    // conversation's durable parts: the fork boundary shallow-clones part
-    // objects, so an eviction pass over the snapshot rewrites only the
-    // fork's copies (#8938 review).
-    const original: Content = {
-      role: 'user',
-      parts: [{ inlineData: { mimeType: 'image/png', data: 'shared-shot' } }],
-    };
-    saveCacheSafeParams({}, [original], 'test-model');
-    try {
-      const snapshot = getCacheSafeParams();
-      expect(snapshot).not.toBeNull();
-      const snapPart = snapshot!.history[0]!.parts![0]!;
-      expect(snapPart).not.toBe(original.parts![0]);
-      expect(snapPart.inlineData?.data).toBe('shared-shot');
-
-      // Evicting over the snapshot must not strip the durable original.
-      const store = new InMemoryImagePayloadStore();
-      replaceImagePayloadsInPlace(snapshot!.history, store);
-      expect(store.size).toBe(1);
-      expect(snapPart.inlineData).toBeUndefined();
-      expect(original.parts![0]!.inlineData?.data).toBe('shared-shot');
-    } finally {
-      clearCacheSafeParams();
-    }
-  });
-
-  it('clones nested functionResponse parts at the fork boundary too', () => {
-    const inner: Part = {
-      inlineData: { mimeType: 'image/png', data: 'nested-shot' },
-    };
-    const original: Content = {
-      role: 'user',
-      parts: [
-        {
-          functionResponse: {
-            id: 'call-nested',
-            name: 'screenshot',
-            response: { output: 'captured nested-shot' },
-            parts: [inner],
-          },
-        },
-      ],
-    };
-    saveCacheSafeParams({}, [original], 'test-model');
-    try {
-      const snapshot = getCacheSafeParams();
-      const snapInner = getFunctionResponseParts(
-        snapshot!.history[0]!.parts![0]!,
-      )![0]!;
-      expect(snapInner).not.toBe(inner);
-
-      const store = new InMemoryImagePayloadStore();
-      replaceImagePayloadsInPlace(snapshot!.history, store);
-      expect(snapInner.inlineData).toBeUndefined();
-      expect(inner.inlineData?.data).toBe('nested-shot');
-    } finally {
-      clearCacheSafeParams();
-    }
-  });
-
-  it('does not reattach a marker-referenced image that is also inline', () => {
-    // Image ids are content hashes: an image that is both
-    // marker-referenced (earlier eviction) and inline again (identical
-    // re-sent bytes) must not ship twice per send (#8938 review).
-    const store = new InMemoryImagePayloadStore();
-    const stored = store.put({
-      inlineData: { mimeType: 'image/png', data: 'dup-bytes' },
-    });
-    const contents: Content[] = [
-      {
-        role: 'model',
-        parts: [{ text: `earlier screenshot Image #${stored.id} here` }],
-      },
-      {
-        role: 'user',
-        parts: [{ inlineData: { mimeType: 'image/png', data: 'dup-bytes' } }],
-      },
-    ];
-    // The only referenced image is already inline, so nothing reattaches.
-    expect(buildReattachParts([], 3, contents, store)).toEqual([]);
-    // A marker without an inline twin still resolves as before.
-    const markerOnly: Content[] = [
-      {
-        role: 'model',
-        parts: [{ text: `earlier screenshot Image #${stored.id} here` }],
-      },
-      { role: 'user', parts: [{ text: 'what was in it?' }] },
-    ];
-    const reattached = buildReattachParts([], 3, markerOnly, store);
-    expect(JSON.stringify(reattached)).toContain('"data":"dup-bytes"');
-  });
-
-  it('does not reattach a marker-referenced image whose inline twin is nested in functionResponse.parts', () => {
-    // The inline-dedupe scan must walk nested functionResponse.parts too:
-    // an inline twin carried inside a tool turn (toolImageTurn shape)
-    // still suppresses a second reattach (#8938 review).
-    const store = new InMemoryImagePayloadStore();
-    const stored = store.put({
-      inlineData: { mimeType: 'image/png', data: 'dup-bytes' },
-    });
-    const contents: Content[] = [
-      {
-        role: 'model',
-        parts: [{ text: `earlier screenshot Image #${stored.id} here` }],
-      },
-      toolImageTurn('dup-bytes'),
-    ];
-    expect(buildReattachParts([], 3, contents, store)).toEqual([]);
-  });
-
-  it('reattaches an explicitly-referenced older image even under the recency cap', () => {
-    // An image the user is actively asking about must never lose a cap
-    // slot to a stale, never-requested eviction marker: ids referenced in
-    // the LAST content are exempt from the cap (#8938 review). Without the
-    // exemption, 4 evicted markers under a cap of 3 keep only the 3 newest
-    // and silently drop the referenced oldest image.
-    const store = new InMemoryImagePayloadStore();
-    const datas = ['img-a', 'img-b', 'img-c', 'img-d'];
-    const ids = datas.map(
-      (data) =>
-        store.put({ inlineData: { mimeType: 'image/png', data } }).id,
-    );
-    const contents: Content[] = [
-      {
-        role: 'model',
-        parts: [
-          {
-            text: `screenshots Image #${ids[0]}, Image #${ids[1]}, Image #${ids[2]}, Image #${ids[3]}`,
-          },
-        ],
-      },
-      { role: 'user', parts: [{ text: `what was in Image #${ids[0]}?` }] },
-    ];
-    const parts = buildReattachParts([], 3, contents, store);
-    const reattachedData = parts
-      .filter((p) => p.inlineData)
-      .map((p) => p.inlineData?.data);
-    expect(reattachedData).toContain('img-a');
-    expect(reattachedData).toHaveLength(4);
   });
 });

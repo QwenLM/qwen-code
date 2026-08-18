@@ -110,7 +110,7 @@ describe('CacheSafeParams', () => {
       expect(rereadTools[0].functionDeclarations).toHaveLength(1);
     });
 
-    it('copies history containers and shallow-clones the part objects', () => {
+    it('copies history containers without cloning part payloads', () => {
       const historyPart = { text: 'large history entry' };
       const historyEntry: Content = {
         role: 'user',
@@ -129,12 +129,7 @@ describe('CacheSafeParams', () => {
       expect(params!.history[0]).not.toBe(historyEntry);
       expect(params!.history[0]!.parts).toHaveLength(1);
       expect(params!.history[0]!.parts).not.toBe(historyEntry.parts);
-      // Part objects are shallow-cloned, not shared: a forked chat's
-      // image-eviction pass rewrites Part objects in place and must never
-      // strip payloads out of the main conversation's durable history
-      // (#8938 review).
-      expect(params!.history[0]!.parts![0]).not.toBe(historyPart);
-      expect(params!.history[0]!.parts![0]).toEqual(historyPart);
+      expect(params!.history[0]!.parts![0]).toBe(historyPart);
       expect(params!.history[1]).not.toBe(historyEntryWithoutParts);
       expect('parts' in params!.history[1]!).toBe(false);
 

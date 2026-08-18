@@ -83,7 +83,6 @@ import {
 } from '../services/compactionInputSlimming.js';
 import {
   InMemoryImagePayloadStore,
-  appendReattachParts,
   buildReattachParts,
   countAllInlineImages,
   replaceImagePayloadsInPlace,
@@ -1162,18 +1161,8 @@ function isValidContentPart(part: Part): boolean {
   return !isInvalid;
 }
 
-// Upstream endpoints occasionally fail fast with an HTTP 200 whose entire
-// body is a placeholder. Such turns look valid (finish reason + non-empty
-// text) but carry no model output, so they must not be persisted as real
-// replies or replayed into subsequent requests. Exact match only — a
-// substring check would false-positive on legitimate mentions.
 const UPSTREAM_DEGRADED_PLACEHOLDER = '(request timeout)';
 
-// Single construction site for the placeholder InvalidStreamError: four
-// call sites convert/throw this error (send-loop catch-convert, the
-// stream-error completed-placeholder discard, and the two post-stream
-// gates). A shared factory keeps the message and type strings from
-// drifting between sites (#8938 review).
 function degradedPlaceholderError(): InvalidStreamError {
   return new InvalidStreamError(
     'Model response is an upstream fail-fast placeholder.',
@@ -1181,74 +1170,75 @@ function degradedPlaceholderError(): InvalidStreamError {
   );
 }
 
-// Non-thought text of a part list, trimmed. Both placeholder gates — the
-// per-chunk hold during iteration and the completed-placeholder drop on the
-// stream-error path — must agree on what counts as the turn's text, so they
-// share this exact computation.
-function nonThoughtText(parts: Part[]): string {
-  return nonThoughtTextUntrimmed(parts).trim();
-}
-
-/**
- * The same join WITHOUT the trim: comparisons that merge a delivered
- * prefix with the attempt's remainder (persistence merge, placeholder
- * discard) must see a remainder opening with whitespace verbatim —
- * trimming first fuses words across the boundary ("(request" +
- * "timeout)" -> "(requesttimeout)") and the merge disagrees with the
- * raw-text persistence path by exactly one leading space (#8938 review).
- */
-function nonThoughtTextUntrimmed(parts: Part[]): string {
-  return parts
-    .filter((part) => !part.thought && part.text)
-    .map((part) => part.text)
-    .join('');
-}
-
-function isDegradedPlaceholderPrefix(text: string): boolean {
-  const trimmed = text.trim();
+function isDegradedPlaceholderTurn(content: Content): boolean {
+  const parts = content.parts ?? [];
   return (
-    trimmed.length > 0 && UPSTREAM_DEGRADED_PLACEHOLDER.startsWith(trimmed)
+    parts.length > 0 &&
+    parts.every(
+      (part) =>
+        part.functionCall === undefined &&
+        (part.thought || part.text !== undefined),
+    ) &&
+    parts
+      .filter((part) => !part.thought)
+      .map((part) => part.text ?? '')
+      .join('')
+      .trim() === UPSTREAM_DEGRADED_PLACEHOLDER
   );
 }
 
-/**
- * Copy of `chunk` whose candidate content parts are fresh objects. History
- * consolidation merges adjacent text parts in place (`lastPart.text +=
- * part.text`), rewriting part objects shared with chunks still owed to the
- * consumer; chunks flushed after consolidation must carry detached parts or
- * the consumer sees rewritten, duplicated text.
- */
-function detachChunkParts(
-  chunk: GenerateContentResponse,
-): GenerateContentResponse {
-  const copy = {
-    ...chunk,
-    candidates: chunk.candidates?.map((candidate) => ({
-      ...candidate,
-      content: candidate.content
-        ? {
-            ...candidate.content,
-            parts: candidate.content.parts?.map((part) => ({ ...part })),
-          }
-        : candidate.content,
-    })),
-  } as GenerateContentResponse;
-  const preparations = getToolCallPreparations(chunk);
-  if (preparations.length > 0) {
-    setToolCallPreparations(copy, preparations);
-  }
-  return copy;
-}
+async function* rejectDegradedPlaceholderResponse(
+  stream: AsyncGenerator<GenerateContentResponse>,
+): AsyncGenerator<GenerateContentResponse> {
+  const pending: GenerateContentResponse[] = [];
+  let text = '';
+  let passthrough = false;
 
-function isDegradedPlaceholderTurn(content: Content): boolean {
-  const parts = content.parts ?? [];
-  if (parts.length === 0) return false;
-  if (parts.some((part) => part.functionCall !== undefined)) return false;
-  const text = parts
-    .map((part) => part.text ?? '')
-    .join('')
-    .trim();
-  return text === UPSTREAM_DEGRADED_PLACEHOLDER;
+  for await (const chunk of stream) {
+    if (passthrough) {
+      yield chunk;
+      continue;
+    }
+
+    const parts = chunk.candidates?.[0]?.content?.parts ?? [];
+    if (
+      parts.some(
+        (part) =>
+          part.functionCall !== undefined ||
+          (!part.thought && part.text === undefined),
+      )
+    ) {
+      yield* pending;
+      pending.length = 0;
+      yield chunk;
+      passthrough = true;
+      continue;
+    }
+
+    const chunkText = parts
+      .filter((part) => !part.thought)
+      .map((part) => part.text ?? '')
+      .join('');
+    if (pending.length === 0 && chunkText === '') {
+      yield chunk;
+      continue;
+    }
+
+    pending.push(chunk);
+    text += chunkText;
+    const trimmed = text.trim();
+    if (trimmed && !UPSTREAM_DEGRADED_PLACEHOLDER.startsWith(trimmed)) {
+      yield* pending;
+      pending.length = 0;
+      passthrough = true;
+    }
+  }
+
+  if (passthrough) return;
+  if (text.trim() === UPSTREAM_DEGRADED_PLACEHOLDER) {
+    throw degradedPlaceholderError();
+  }
+  yield* pending;
 }
 
 /**
@@ -1286,36 +1276,19 @@ function extractCuratedHistory(comprehensiveHistory: Content[]): Content[] {
       i++;
     } else {
       const modelOutput: Content[] = [];
-      let hasInvalidContent = false;
-      let hasPlaceholder = false;
+      let isValid = true;
       while (i < length && comprehensiveHistory[i].role === 'model') {
-        const turn = comprehensiveHistory[i];
-        modelOutput.push(turn);
-        if (!isValidContent(turn)) {
-          hasInvalidContent = true;
-        } else if (isDegradedPlaceholderTurn(turn)) {
-          hasPlaceholder = true;
+        modelOutput.push(comprehensiveHistory[i]);
+        if (isValid && !isValidContent(comprehensiveHistory[i])) {
+          isValid = false;
         }
         i++;
       }
-      if (hasInvalidContent) {
-        // Pre-existing semantics: an invalid (empty/safety-filtered) turn
-        // invalidates the whole consecutive model run.
-        continue;
-      }
-      if (hasPlaceholder) {
-        // A degraded placeholder invalidates only ITSELF, not the run:
-        // dropping the whole run would also drop sibling turns carrying a
-        // functionCall while the following user(functionResponse) turn
-        // survives — shipping an orphaned functionResponse, exactly the
-        // invalid pairing the continuation gate and the MAX_TOKENS
-        // hasFunctionCall check exist to avoid (R16-1, #8938 review).
+      if (isValid) {
         curatedHistory.push(
           ...modelOutput.filter((turn) => !isDegradedPlaceholderTurn(turn)),
         );
-        continue;
       }
-      curatedHistory.push(...modelOutput);
     }
   }
   return curatedHistory;
@@ -1584,12 +1557,6 @@ interface ScanResult {
   expected: Map<string, string>;
   matched: Map<string, FrLocation[]>;
   scanEnd: number;
-  /**
-   * Index of the first turn after `modelIdx` that is not a degraded
-   * placeholder model turn — the turn an fr must sit in to count as
-   * adjacent. Placeholders are dropped by curation, so they must not
-   * split the pairing adjacency here either (R16-1, #8938 review).
-   */
   adjacentIdx: number;
 }
 
@@ -1618,9 +1585,6 @@ function scanModelTurn(history: Content[], modelIdx: number): ScanResult {
 
   const matched = new Map<string, FrLocation[]>();
   let scanIdx = modelIdx + 1;
-  // Degraded placeholder turns cannot split the pairing adjacency: they
-  // are dropped by curation, so an fr landing right after a placeholder
-  // sibling still answers the call (R16-1, #8938 review).
   while (
     scanIdx < history.length &&
     history[scanIdx]?.role === 'model' &&
@@ -2004,51 +1968,32 @@ export class GeminiChat {
       this.config.getChatCompression(),
     );
     if (countAllInlineImages(curatedHistory) >= imagePayloadThreshold) {
-      // skipParts is the load-bearing protection for the current message's
-      // images: when placeholder curation merges adjacent user turns, the
-      // curated entry is a fresh object, so the identity find below misses
-      // and only skipParts keeps the current image out of the eviction pass.
       const skipEntry = currentUserContent
-        ? curatedHistory.find((c) => c === currentUserContent)
+        ? curatedHistory.find(
+            (c) =>
+              c === currentUserContent ||
+              (c.role === 'user' &&
+                currentUserContent.parts?.some((p) => c.parts?.includes(p))),
+          )
         : undefined;
       const replaced = replaceImagePayloadsInPlace(
         curatedHistory,
         this.imagePayloadStore,
         skipEntry,
-        currentUserContent?.parts
-          ? new Set(currentUserContent.parts)
-          : undefined,
       );
       const requestHistory = curatedHistory.map(copyContentContainer);
-      const reattachParts = buildReattachParts(
-        replaced,
-        maxRecentImages,
-        requestHistory,
-        this.imagePayloadStore,
-      );
-      appendReattachParts(requestHistory, reattachParts);
+      const reattachParts = buildReattachParts(replaced, maxRecentImages);
+      if (reattachParts.length > 0) {
+        const last = requestHistory.at(-1);
+        if (last?.role === 'user') {
+          last.parts = [...(last.parts ?? []), ...reattachParts];
+        } else {
+          requestHistory.push({ role: 'user', parts: reattachParts });
+        }
+      }
       return requestHistory;
     }
-    const requestHistory = curatedHistory.map(copyContentContainer);
-    // A previous pass may have evicted durable image payloads IN PLACE,
-    // leaving `Image #<id>` markers without pixels. Below the eviction
-    // threshold this pass would not reattach anything, so a fallback or
-    // recovery rebuild would carry marker text alone. Resolve any present
-    // references from the store regardless of the threshold. An EMPTY
-    // store can resolve nothing, so skip the O(history-text) reference
-    // scan entirely — the common steady state is below threshold with no
-    // stored payloads (#8938 review).
-    const reattachParts =
-      this.imagePayloadStore.size > 0
-        ? buildReattachParts(
-            [],
-            maxRecentImages,
-            requestHistory,
-            this.imagePayloadStore,
-          )
-        : [];
-    appendReattachParts(requestHistory, reattachParts);
-    return requestHistory;
+    return curatedHistory.map(copyContentContainer);
   }
 
   private getRequestHistoryForRoute(
@@ -3152,38 +3097,8 @@ export class GeminiChat {
             // produces a sequence providers reject (the same constraint the
             // MAX_TOKENS recovery loop enforces via its `hasFunctionCall`
             // check), and the scheduler's repair path already covers it.
-            let convertedPlaceholderError: InvalidStreamError | undefined;
-            if (
-              isRetryableStreamTransportError &&
-              // A delivered functionCall is the point of no return (same
-              // invariant the continuation gate below and every
-              // processStreamResponse throw site enforce): converting here
-              // would schedule a fresh retry after the consumer already
-              // received the tool call, orphaning its tool_result pairing.
-              !streamYieldedFunctionCall &&
-              transportContinuationText.trim() === UPSTREAM_DEGRADED_PLACEHOLDER
-            ) {
-              // The delivered text completed the fail-fast placeholder
-              // across attempts (prefix before the cut, remainder after).
-              // Continuing from it would persist gateway garbage into
-              // history/JSONL and replay it into every later request.
-              // Convert the error instead of throwing: a throw from
-              // inside this catch would escape the for(;;) loop and skip
-              // the invalid-stream budget handler below, failing the turn
-              // with zero retries; the converted error falls through to
-              // the isInvalidStreamError branch, which retries fresh with
-              // the continuation reset (the loop prelude's
-              // resetTransportContinuation) like every other placeholder
-              // shape raised from inside the try.
-              convertedPlaceholderError = degradedPlaceholderError();
-              lastError = convertedPlaceholderError;
-            }
             const canContinueAfterTransportCut =
               isRetryableStreamTransportError &&
-              // The converted placeholder error above must take the
-              // invalid-stream budget path, not a continuation resuming
-              // from the garbage prefix.
-              convertedPlaceholderError === undefined &&
               !streamYieldedFunctionCall &&
               transportContinuationText.trim().length > 0 &&
               transportContinuationCount <
@@ -3380,17 +3295,13 @@ export class GeminiChat {
 
             // Invalid stream responses use INVALID_STREAM_RETRY_CONFIG, which
             // is independent from HTTP retries handled by retryWithBackoff.
-            // The converted placeholder error takes precedence over the
-            // raw transport error it replaced.
-            const budgetError = convertedPlaceholderError ?? error;
-            const isInvalidStreamError =
-              budgetError instanceof InvalidStreamError;
+            const isInvalidStreamError = error instanceof InvalidStreamError;
             const maxInvalidStreamRetries =
-              isInvalidStreamError && budgetError.type === 'PROTOCOL_TAG_LEAK'
+              isInvalidStreamError && error.type === 'PROTOCOL_TAG_LEAK'
                 ? INVALID_STREAM_RETRY_CONFIG.protocolTagLeakMaxRetries
                 : INVALID_STREAM_RETRY_CONFIG.transientMaxRetries;
             const invalidStreamRetryCount =
-              isInvalidStreamError && budgetError.type === 'PROTOCOL_TAG_LEAK'
+              isInvalidStreamError && error.type === 'PROTOCOL_TAG_LEAK'
                 ? protocolTagLeakRetryCount
                 : transientInvalidStreamRetryCount;
             if (
@@ -3399,7 +3310,7 @@ export class GeminiChat {
             ) {
               self.popPendingPartialAssistantTurn();
               const nextInvalidStreamRetryCount = invalidStreamRetryCount + 1;
-              if (budgetError.type === 'PROTOCOL_TAG_LEAK') {
+              if (error.type === 'PROTOCOL_TAG_LEAK') {
                 protocolTagLeakRetryCount = nextInvalidStreamRetryCount;
               } else {
                 transientInvalidStreamRetryCount = nextInvalidStreamRetryCount;
@@ -3408,7 +3319,7 @@ export class GeminiChat {
                 INVALID_STREAM_RETRY_CONFIG.initialDelayMs *
                 nextInvalidStreamRetryCount;
               debugLogger.warn(
-                `Invalid stream [${budgetError.type}] ` +
+                `Invalid stream [${(error as InvalidStreamError).type}] ` +
                   `(retry ${nextInvalidStreamRetryCount}/${maxInvalidStreamRetries}). ` +
                   `Waiting ${delayMs / 1000}s before retrying...`,
               );
@@ -3416,7 +3327,7 @@ export class GeminiChat {
                 self.config,
                 new ContentRetryEvent(
                   nextInvalidStreamRetryCount - 1,
-                  budgetError.type,
+                  (error as InvalidStreamError).type,
                   delayMs,
                   model,
                 ),
@@ -4152,7 +4063,7 @@ export class GeminiChat {
 
     return this.processStreamResponse(
       model,
-      streamResponse,
+      rejectDegradedPlaceholderResponse(streamResponse),
       goalContext,
       transportContinuationPrefix,
     );
@@ -4682,12 +4593,7 @@ export class GeminiChat {
     // the post-loop block for why this is needed to keep tool_use/tool_result
     // pairing intact across the failure.
     let streamError: unknown = null;
-    let yieldedAnyChunk = false;
-    // Chunks withheld before the first inline yield, in ARRIVAL order: the
-    // finishReason-bearing chunk deferred so post-stream validation can
-    // reject it before consumers commit a Finished state, and
-    // placeholder-prefix chunks held for the same reason.
-    let pendingPreValidationChunks: GenerateContentResponse[] = [];
+
     try {
       for await (const chunk of streamResponse) {
         const preparations = getToolCallPreparations(chunk);
@@ -4863,133 +4769,28 @@ export class GeminiChat {
           }
         }
 
-        let deferredNow = false;
         if (isToolResultContinuation) {
           // Do not let consumers commit Finished before post-stream validation
           // can reject a semantically empty continuation.
           for (const candidate of chunk.candidates ?? []) {
             if (candidate.finishReason) {
-              if (!yieldedAnyChunk && !deferredNow) {
-                deferredNow = true;
-                pendingPreValidationChunks.push(chunk);
-              }
               deferredFinishReason ??= candidate.finishReason;
               delete candidate.finishReason;
             }
           }
-        } else if (!yieldedAnyChunk) {
-          // Defer the chunk that carries a finishReason so post-stream
-          // validation (placeholder check, empty-text check, etc.) can reject
-          // it before the content reaches consumers. Without this deferral a
-          // single-chunk fail-fast placeholder (text + finishReason: 'STOP')
-          // is yielded to the TUI / headless adapter before the throw fires,
-          // and neither consumer rolls back the committed output.
-          for (const candidate of chunk.candidates ?? []) {
-            if (candidate.finishReason) {
-              deferredNow = true;
-              pendingPreValidationChunks.push(chunk);
-              break;
-            }
-          }
         }
 
-        const pendingPlaceholderText = nonThoughtText(allModelParts);
-        // When a continuation prefix is in flight the placeholder can
-        // complete ACROSS the cut — compare the merged delivered text,
-        // or a remainder that finishes the placeholder over several
-        // chunks is yielded inline before the post-stream gate throws
-        // (display-only leak; persistence stays covered by the throw)
-        // (#8938 review).
-        const holdCandidateText =
-          transportContinuationPrefix !== undefined
-            ? mergeDeliveredPrefix(
-                transportContinuationPrefix,
-                nonThoughtTextUntrimmed(allModelParts),
-              )
-            : pendingPlaceholderText;
-        const shouldHoldDegradedPlaceholder =
-          !hasToolCall && isDegradedPlaceholderPrefix(holdCandidateText);
-
-        if (!deferredNow) {
-          if (
-            !chunk.candidates?.length ||
-            preparations.length > 0 ||
-            !protocolTextWasSuppressed ||
-            !protocolTagDetector.blockingOutput
-          ) {
-            if (shouldHoldDegradedPlaceholder) {
-              pendingPreValidationChunks.push(chunk);
-            } else {
-              yieldedAnyChunk = true;
-              // Arrival order: everything pending predates this chunk.
-              // Yield detached copies: post-stream consolidation merges
-              // adjacent text parts IN PLACE and would otherwise rewrite
-              // the part objects these already-delivered chunks carry.
-              for (const pendingChunk of pendingPreValidationChunks) {
-                yield detachChunkParts(pendingChunk);
-              }
-              pendingPreValidationChunks = [];
-              yield chunk;
-            }
-          }
+        if (
+          !chunk.candidates?.length ||
+          preparations.length > 0 ||
+          !protocolTextWasSuppressed ||
+          !protocolTagDetector.blockingOutput
+        ) {
+          yield chunk;
         }
       }
     } catch (e) {
       streamError = e;
-    }
-    // Snapshot the pending chunks BEFORE history consolidation merges adjacent
-    // text parts in place (the pending chunks share those part objects via
-    // allModelParts); a flush after consolidation would otherwise deliver the
-    // rewritten, duplicated text instead of what actually arrived.
-    pendingPreValidationChunks =
-      pendingPreValidationChunks.map(detachChunkParts);
-    if (streamError !== null) {
-      // A COMPLETED placeholder is gateway garbage with nothing honest to
-      // resume from: drop it silently and let the recovery replay fresh.
-      // Any other partial delivery — held placeholder-prefix chunks and/or
-      // the deferred chunk — is yielded in arrival order instead: the send
-      // loop mirrors every yielded chunk into the continuation buffer, so
-      // what the consumer saw and what a continuation resumes from stay
-      // aligned. (Staging the never-delivered text into the buffer instead
-      // let a diverged continuation persist an invisible prefix into
-      // history/JSONL, and a stale stage could leak into a later turn.)
-      const accumulatedText = nonThoughtText(allModelParts);
-      // Cross-attempt: a placeholder can complete ACROSS a transport cut
-      // (prefix delivered and folded before the cut, remainder delivered
-      // then errored in the continuation attempt). Compare the merged text
-      // too, or the completed placeholder escapes the discard.
-      const completedPlaceholder =
-        !hasToolCall &&
-        (accumulatedText === UPSTREAM_DEGRADED_PLACEHOLDER ||
-          (transportContinuationPrefix !== undefined &&
-            mergeDeliveredPrefix(
-              transportContinuationPrefix,
-              // Untrimmed attempt text, trimmed only after the merge —
-              // mirrors the persistence merge, so a remainder opening
-              // with whitespace cannot slip past the discard here while
-              // the success path would still catch it.
-              nonThoughtTextUntrimmed(allModelParts),
-            ).trim() === UPSTREAM_DEGRADED_PLACEHOLDER));
-      if (completedPlaceholder) {
-        // Trace the deliberate discard: without it, a benign transport-cut
-        // recovery is indistinguishable from lost output after the fact.
-        debugLogger.warn(
-          `[UPSTREAM_DEGRADED] stream error completed the fail-fast placeholder; discarding ${pendingPreValidationChunks.length} withheld chunk(s) and replaying fresh`,
-        );
-        // Replace the raw error with the invalid-stream one BEFORE the
-        // rethrow below: if the raw transport error escaped, the send loop
-        // would schedule another continuation resuming from the garbage
-        // prefix (the folded buffer still starts with the placeholder)
-        // until that budget exhausted. The invalid-stream error takes the
-        // budget handler, which retries fresh with the continuation reset
-        // (#8938 review).
-        streamError = degradedPlaceholderError();
-      } else {
-        for (const pendingChunk of pendingPreValidationChunks) {
-          yield pendingChunk;
-        }
-      }
-      pendingPreValidationChunks = [];
     }
 
     if (
@@ -5111,38 +4912,6 @@ export class GeminiChat {
           .join('')
           .trim();
         contentParts = consolidatedHistoryParts;
-        // Align the withheld pre-validation chunks with the rewritten turn:
-        // they were snapshotted before this recovery stripped the XML
-        // markup, so their text still carries the raw `<invoke>` content
-        // while history persists the recovered shape. Rewrite their plain
-        // text to the stripped remainder so delivery matches history.
-        let remainingForPending = recovery.remainingText;
-        pendingPreValidationChunks = pendingPreValidationChunks.map(
-          (chunk) => {
-            const aligned = detachChunkParts(chunk);
-            for (const candidate of aligned.candidates ?? []) {
-              const parts = candidate.content?.parts;
-              if (!parts) continue;
-              const rewritten: Part[] = [];
-              let inserted = false;
-              for (const part of parts) {
-                if (part.text !== undefined && !part.thought) {
-                  if (!inserted) {
-                    if (remainingForPending) {
-                      rewritten.push({ text: remainingForPending });
-                    }
-                    remainingForPending = '';
-                    inserted = true;
-                  }
-                  continue;
-                }
-                rewritten.push(part);
-              }
-              candidate.content!.parts = rewritten;
-            }
-            return aligned;
-          },
-        );
         // Build a synthetic chunk so the agent loop (turn.ts) actually
         // executes the recovered tool calls; yielded after the throw sites.
         const syntheticChunk = {
@@ -5206,6 +4975,10 @@ export class GeminiChat {
       );
     }
 
+    if (recoveredChunk) {
+      yield recoveredChunk;
+    }
+
     // Record assistant turn with raw Content and metadata. Gate matches
     // the in-memory `this.history.push` decision below so chat-recording
     // JSONL never carries a partial turn we deliberately dropped from
@@ -5218,13 +4991,6 @@ export class GeminiChat {
       streamError === null ||
       (hasToolCall &&
         (thoughtContentPart || consolidatedHistoryParts.length > 0));
-    if (
-      streamError === null &&
-      !hasToolCall &&
-      contentText === UPSTREAM_DEGRADED_PLACEHOLDER
-    ) {
-      throw degradedPlaceholderError();
-    }
     // Transport-continuation merge (issue #8094). `allModelParts` is
     // per-attempt, so a continuation's parts carry the resumed remainder only.
     // Fold the already-delivered prefix back in HERE — into the parts
@@ -5280,22 +5046,6 @@ export class GeminiChat {
         .map((part) => part.text)
         .join('')
         .trim();
-    }
-    if (
-      streamError === null &&
-      !hasToolCall &&
-      contentText === UPSTREAM_DEGRADED_PLACEHOLDER
-    ) {
-      throw degradedPlaceholderError();
-    }
-    // Arrival order: everything pending predates any yielded chunk. Yield
-    // detached copies — the consolidation above merged adjacent text parts
-    // IN PLACE and rewrote the shared part objects these chunks carry.
-    for (const pendingChunk of pendingPreValidationChunks) {
-      yield pendingChunk;
-    }
-    if (recoveredChunk) {
-      yield recoveredChunk;
     }
     if (
       willPersistToHistory &&

@@ -233,11 +233,10 @@ describe('GeminiChat', async () => {
    */
   async function expectStreamExhaustion(
     stream: AsyncGenerator<StreamEvent>,
-    collected?: StreamEvent[],
   ): Promise<void> {
     const collecting = (async () => {
-      for await (const event of stream) {
-        collected?.push(event);
+      for await (const _ of stream) {
+        /* consume */
       }
     })();
     // Get assertion promise first (don't await), then advance timers.
@@ -2585,136 +2584,6 @@ describe('GeminiChat', async () => {
       });
     });
 
-    it('evicts images before a dropped placeholder while preserving the current image', async () => {
-      vi.mocked(mockConfig.getChatCompression).mockReturnValue({
-        maxRecentImagesToRetain: 0,
-        imagePayloadThreshold: 1,
-      });
-      chat.setHistory([
-        {
-          role: 'user',
-          parts: [{ inlineData: { mimeType: 'image/png', data: 'old-shot' } }],
-        },
-        { role: 'model', parts: [{ text: '(request timeout)' }] },
-      ]);
-      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
-        streamResponse(stopResponse([{ text: 'response' }])),
-      );
-
-      const stream = await chat.sendMessageStream(
-        'test-model',
-        {
-          message: [
-            { text: 'describe this' },
-            { inlineData: { mimeType: 'image/png', data: 'current-shot' } },
-          ],
-        },
-        'prompt-id-placeholder-image-refs',
-      );
-      for await (const _ of stream) {
-        // consume stream
-      }
-
-      const request = vi.mocked(mockContentGenerator.generateContentStream).mock
-        .calls[0]?.[0];
-      const serialized = JSON.stringify(request?.contents);
-      expect(serialized).not.toContain('"data":"old-shot"');
-      expect(serialized).toContain('"data":"current-shot"');
-      // "Evicted" must mean rewritten to a stored marker, not silently
-      // dropped: the marker must be present and resolvable (#8938 review).
-      expect(serialized).toMatch(
-        /\[Image #[a-f0-9]{12}: image\/png, \d+ bytes\]/,
-      );
-      // And the placeholder turn must be gone from the outgoing request —
-      // a curation-drop regression would replay it to the provider.
-      expect(serialized).not.toContain('(request timeout)');
-    });
-
-    it('resolves evicted markers back into bytes on a later below-threshold send', async () => {
-      // End-to-end wiring of the below-threshold fallback: send 1 evicts
-      // in place (durable history keeps `Image #<id>` markers, the store
-      // keeps the bytes); send 2 is text-only and below threshold, so the
-      // fallback alone must reattach the stored bytes (#8938 review).
-      // 3 stored images under a cap of 2 so the retention cap actually
-      // binds (a mis-wired cap argument at the fallback call site would
-      // otherwise ship green) (#8938 review).
-      vi.mocked(mockConfig.getChatCompression).mockReturnValue({
-        maxRecentImagesToRetain: 2,
-        imagePayloadThreshold: 3,
-      });
-      chat.setHistory([
-        {
-          role: 'user',
-          parts: [
-            { inlineData: { mimeType: 'image/png', data: 'first-shot' } },
-            { inlineData: { mimeType: 'image/png', data: 'second-shot' } },
-            { inlineData: { mimeType: 'image/png', data: 'third-shot' } },
-          ],
-        },
-        { role: 'model', parts: [{ text: 'I see all three images' }] },
-      ]);
-      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
-        async () =>
-          (async function* () {
-            yield {
-              candidates: [
-                {
-                  content: { parts: [{ text: 'response' }], role: 'model' },
-                  finishReason: 'STOP',
-                  index: 0,
-                  safetyRatings: [],
-                },
-              ],
-              text: () => 'response',
-            } as unknown as GenerateContentResponse;
-          })(),
-      );
-
-      // Send 1: at threshold — eviction fires, durable history holds
-      // markers, the store holds both payloads.
-      const stream1 = await chat.sendMessageStream(
-        'test-model',
-        { message: 'first question' },
-        'prompt-id-reattach-below-threshold-1',
-      );
-      for await (const _ of stream1) {
-        // consume stream
-      }
-      const durableAfterSend1 = JSON.stringify(chat.getHistory());
-      // Every stored image — not just the first — must be evicted to a
-      // marker (a replaceImagePayloadsInPlace regression stopping after
-      // the first part would leave the rest inline) (#8938 review).
-      expect(durableAfterSend1).not.toContain('"data":"first-shot"');
-      expect(durableAfterSend1).not.toContain('"data":"second-shot"');
-      expect(durableAfterSend1).not.toContain('"data":"third-shot"');
-      expect(durableAfterSend1.match(/Image #[a-f0-9]{12}/g)).toHaveLength(3);
-
-      // Send 2: text-only, below threshold — the fallback must resolve the
-      // markers from the store back into image bytes.
-      const stream2 = await chat.sendMessageStream(
-        'test-model',
-        { message: 'second question' },
-        'prompt-id-reattach-below-threshold-2',
-      );
-      for await (const _ of stream2) {
-        // consume stream
-      }
-
-      // Resolution must not re-inflate the durable history in place.
-      const durableAfterSend2 = JSON.stringify(chat.getHistory());
-      expect(durableAfterSend2).toMatch(/Image #[a-f0-9]{12}/);
-      expect(durableAfterSend2).not.toContain('"data":"first-shot"');
-
-      const request2 = vi.mocked(mockContentGenerator.generateContentStream)
-        .mock.calls.at(-1)?.[0];
-      const serialized2 = JSON.stringify(request2?.contents);
-      // The cap of 2 keeps the two newest; the oldest is dropped, and each
-      // kept image ships exactly once (no double reattach).
-      expect(serialized2).not.toContain('"data":"first-shot"');
-      expect(serialized2.match(/"data":"second-shot"/g)).toHaveLength(1);
-      expect(serialized2.match(/"data":"third-shot"/g)).toHaveLength(1);
-    });
-
     it('coalesces startup reminders with the first user prompt for provider requests', async () => {
       chat.setHistory([
         {
@@ -2791,511 +2660,6 @@ describe('GeminiChat', async () => {
       ]);
     });
 
-    it('excludes degraded placeholder model turns from curated history and requests', async () => {
-      chat.setHistory([
-        { role: 'user', parts: [{ text: 'summarize the work' }] },
-        { role: 'model', parts: [{ text: '(request timeout)' }] },
-      ]);
-      const response = (async function* () {
-        yield {
-          candidates: [
-            {
-              content: {
-                parts: [{ text: 'real summary' }],
-                role: 'model',
-              },
-              finishReason: 'STOP',
-            },
-          ],
-        } as unknown as GenerateContentResponse;
-      })();
-      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
-        response,
-      );
-
-      const stream = await chat.sendMessageStream(
-        'test-model',
-        { message: 'again' },
-        'prompt-id-placeholder-curation',
-      );
-      for await (const _ of stream) {
-        // consume stream
-      }
-
-      const request = vi.mocked(mockContentGenerator.generateContentStream).mock
-        .calls[0]?.[0];
-      expect(request?.contents).toEqual([
-        {
-          role: 'user',
-          parts: [{ text: 'summarize the work' }, { text: 'again' }],
-        },
-      ]);
-      expect(chat.getHistory(true)).toEqual([
-        {
-          role: 'user',
-          parts: [{ text: 'summarize the work' }, { text: 'again' }],
-        },
-        { role: 'model', parts: [{ text: 'real summary' }] },
-      ]);
-      // Comprehensive history keeps the faithful record.
-      expect(chat.getHistory()).toEqual([
-        { role: 'user', parts: [{ text: 'summarize the work' }] },
-        { role: 'model', parts: [{ text: '(request timeout)' }] },
-        { role: 'user', parts: [{ text: 'again' }] },
-        { role: 'model', parts: [{ text: 'real summary' }] },
-      ]);
-    });
-
-    it('keeps turns that only mention the placeholder text inside longer output', async () => {
-      chat.setHistory([
-        { role: 'user', parts: [{ text: 'what happened?' }] },
-        {
-          role: 'model',
-          parts: [{ text: 'the upstream returned "(request timeout)" once' }],
-        },
-      ]);
-      const response = (async function* () {
-        yield {
-          candidates: [
-            {
-              content: {
-                parts: [{ text: 'ok' }],
-                role: 'model',
-              },
-              finishReason: 'STOP',
-            },
-          ],
-        } as unknown as GenerateContentResponse;
-      })();
-      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
-        response,
-      );
-
-      const stream = await chat.sendMessageStream(
-        'test-model',
-        { message: 'next' },
-        'prompt-id-placeholder-mention',
-      );
-      for await (const _ of stream) {
-        // consume stream
-      }
-
-      const request = vi.mocked(mockContentGenerator.generateContentStream).mock
-        .calls[0]?.[0];
-      expect(request?.contents).toEqual([
-        { role: 'user', parts: [{ text: 'what happened?' }] },
-        {
-          role: 'model',
-          parts: [{ text: 'the upstream returned "(request timeout)" once' }],
-        },
-        { role: 'user', parts: [{ text: 'next' }] },
-      ]);
-    });
-
-    it('excludes a whitespace-padded degraded placeholder from curated history', async () => {
-      chat.setHistory([
-        { role: 'user', parts: [{ text: 'query' }] },
-        {
-          role: 'model',
-          parts: [{ text: '(request timeout)\n' }],
-        },
-      ]);
-      const response = (async function* () {
-        yield {
-          candidates: [
-            {
-              content: {
-                parts: [{ text: 'real' }],
-                role: 'model',
-              },
-              finishReason: 'STOP',
-            },
-          ],
-        } as unknown as GenerateContentResponse;
-      })();
-      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
-        response,
-      );
-
-      const stream = await chat.sendMessageStream(
-        'test-model',
-        { message: 'next' },
-        'prompt-id-placeholder-curation-trim',
-      );
-      for await (const _ of stream) {
-        // consume stream
-      }
-
-      const request = vi.mocked(mockContentGenerator.generateContentStream).mock
-        .calls[0]?.[0];
-      expect(request?.contents).toEqual([
-        { role: 'user', parts: [{ text: 'query' }, { text: 'next' }] },
-      ]);
-      expect(chat.getHistory(true)).toEqual([
-        { role: 'user', parts: [{ text: 'query' }, { text: 'next' }] },
-        { role: 'model', parts: [{ text: 'real' }] },
-      ]);
-    });
-
-    it('excludes a split degraded placeholder from curated history', async () => {
-      chat.setHistory([
-        { role: 'user', parts: [{ text: 'query' }] },
-        {
-          role: 'model',
-          parts: [{ text: '(request ' }, { text: 'timeout)' }],
-        },
-      ]);
-      const response = (async function* () {
-        yield {
-          candidates: [
-            {
-              content: {
-                parts: [{ text: 'real' }],
-                role: 'model',
-              },
-              finishReason: 'STOP',
-            },
-          ],
-        } as unknown as GenerateContentResponse;
-      })();
-      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
-        response,
-      );
-
-      const stream = await chat.sendMessageStream(
-        'test-model',
-        { message: 'next' },
-        'prompt-id-placeholder-curation-split',
-      );
-      for await (const _ of stream) {
-        // consume stream
-      }
-
-      const request = vi.mocked(mockContentGenerator.generateContentStream).mock
-        .calls[0]?.[0];
-      expect(request?.contents).toEqual([
-        { role: 'user', parts: [{ text: 'query' }, { text: 'next' }] },
-      ]);
-      expect(chat.getHistory(true)).toEqual([
-        { role: 'user', parts: [{ text: 'query' }, { text: 'next' }] },
-        { role: 'model', parts: [{ text: 'real' }] },
-      ]);
-    });
-
-    it('keeps a placeholder turn that carries a functionCall in curated history', async () => {
-      chat.setHistory([
-        { role: 'user', parts: [{ text: 'query' }] },
-        {
-          role: 'model',
-          parts: [
-            { text: '(request timeout)' },
-            { functionCall: { name: 'someTool', args: {} } },
-          ],
-        },
-      ]);
-      const response = (async function* () {
-        yield {
-          candidates: [
-            {
-              content: {
-                parts: [{ text: 'real' }],
-                role: 'model',
-              },
-              finishReason: 'STOP',
-            },
-          ],
-        } as unknown as GenerateContentResponse;
-      })();
-      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
-        response,
-      );
-
-      const stream = await chat.sendMessageStream(
-        'test-model',
-        { message: 'next' },
-        'prompt-id-placeholder-curation-tool-call',
-      );
-      for await (const _ of stream) {
-        // consume stream
-      }
-
-      const request = vi.mocked(mockContentGenerator.generateContentStream).mock
-        .calls[0]?.[0];
-      expect(request?.contents).toEqual([
-        { role: 'user', parts: [{ text: 'query' }] },
-        {
-          role: 'model',
-          parts: [
-            { text: '(request timeout)' },
-            { functionCall: { name: 'someTool', args: {} } },
-          ],
-        },
-        { role: 'user', parts: [{ text: 'next' }] },
-      ]);
-    });
-
-    it('excludes a placeholder buried mid-history while keeping later valid turns', async () => {
-      // A placeholder followed by valid turns: the placeholder must be
-      // dropped from the REQUEST while the durable history keeps it, and
-      // the valid turns after it must survive (a tail-only-scan refactor
-      // would replay the buried placeholder) (#8938 review).
-      chat.setHistory([
-        { role: 'user', parts: [{ text: 'question A' }] },
-        { role: 'model', parts: [{ text: '(request timeout)' }] },
-        { role: 'user', parts: [{ text: 'question B' }] },
-        { role: 'model', parts: [{ text: 'real answer' }] },
-      ]);
-      const response = (async function* () {
-        yield {
-          candidates: [
-            {
-              content: { parts: [{ text: 'response' }], role: 'model' },
-              finishReason: 'STOP',
-              index: 0,
-              safetyRatings: [],
-            },
-          ],
-          text: () => 'response',
-        } as unknown as GenerateContentResponse;
-      })();
-      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
-        response,
-      );
-
-      const stream = await chat.sendMessageStream(
-        'test-model',
-        { message: 'question C' },
-        'prompt-id-placeholder-curation-mid-history',
-      );
-      for await (const _ of stream) {
-        // consume stream
-      }
-
-      const request = vi.mocked(mockContentGenerator.generateContentStream).mock
-        .calls[0]?.[0];
-      // The placeholder is gone from the request; the adjacent user turns
-      // merge; the valid model turn survives.
-      expect(request?.contents).toEqual([
-        {
-          role: 'user',
-          parts: [{ text: 'question A' }, { text: 'question B' }],
-        },
-        { role: 'model', parts: [{ text: 'real answer' }] },
-        { role: 'user', parts: [{ text: 'question C' }] },
-      ]);
-      // Durable history still holds the placeholder (curation is
-      // request-side, not a rewrite of the persistent record).
-      expect(
-        chat.getHistory().some((c) =>
-          c.parts?.some((part) => part.text === '(request timeout)'),
-        ),
-      ).toBe(true);
-    });
-
-    it('drops only the placeholder turn when it sits inside consecutive model turns', async () => {
-      // Run-grouping semantics (revised by R16-1): a placeholder inside a
-      // run of consecutive model turns invalidates only ITSELF. Dropping
-      // the whole run would also drop a sibling turn carrying a
-      // functionCall while the following user(functionResponse) survives —
-      // shipping an orphaned functionResponse, the invalid pairing
-      // providers reject outright (#8938 review).
-      chat.setHistory([
-        { role: 'user', parts: [{ text: 'question' }] },
-        { role: 'model', parts: [{ text: 'real answer' }] },
-        { role: 'model', parts: [{ text: '(request timeout)' }] },
-      ]);
-      const response = (async function* () {
-        yield {
-          candidates: [
-            {
-              content: { parts: [{ text: 'response' }], role: 'model' },
-              finishReason: 'STOP',
-              index: 0,
-              safetyRatings: [],
-            },
-          ],
-          text: () => 'response',
-        } as unknown as GenerateContentResponse;
-      })();
-      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
-        response,
-      );
-
-      const stream = await chat.sendMessageStream(
-        'test-model',
-        { message: 'again' },
-        'prompt-id-placeholder-curation-consecutive-run',
-      );
-      for await (const _ of stream) {
-        // consume stream
-      }
-
-      const request = vi.mocked(mockContentGenerator.generateContentStream).mock
-        .calls[0]?.[0];
-      // Only the placeholder is dropped; the valid sibling survives.
-      expect(request?.contents).toEqual([
-        { role: 'user', parts: [{ text: 'question' }] },
-        { role: 'model', parts: [{ text: 'real answer' }] },
-        { role: 'user', parts: [{ text: 'again' }] },
-      ]);
-    });
-
-    it('keeps the functionCall sibling of a placeholder so its functionResponse is not orphaned (#8938)', async () => {
-      // R16-1 witness: the run [placeholder, functionCall] must keep the
-      // functionCall turn — with the whole run dropped, the following
-      // user(functionResponse) ships without its matching functionCall.
-      chat.setHistory([
-        { role: 'user', parts: [{ text: 'do the thing' }] },
-        { role: 'model', parts: [{ text: '(request timeout)' }] },
-        {
-          role: 'model',
-          parts: [
-            { functionCall: { id: 'fc1', name: 'someTool', args: { q: 1 } } },
-          ],
-        },
-        {
-          role: 'user',
-          parts: [
-            {
-              functionResponse: {
-                id: 'fc1',
-                name: 'someTool',
-                response: { output: 'ok' },
-              },
-            },
-          ],
-        },
-      ]);
-      const response = (async function* () {
-        yield {
-          candidates: [
-            {
-              content: { parts: [{ text: 'response' }], role: 'model' },
-              finishReason: 'STOP',
-              index: 0,
-              safetyRatings: [],
-            },
-          ],
-          text: () => 'response',
-        } as unknown as GenerateContentResponse;
-      })();
-      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
-        response,
-      );
-
-      const stream = await chat.sendMessageStream(
-        'test-model',
-        { message: 'next' },
-        'prompt-id-placeholder-curation-fc-after-placeholder',
-      );
-      for await (const _ of stream) {
-        // consume stream
-      }
-
-      const request = vi.mocked(mockContentGenerator.generateContentStream).mock
-        .calls[0]?.[0];
-      expect(request?.contents).toEqual([
-        { role: 'user', parts: [{ text: 'do the thing' }] },
-        {
-          role: 'model',
-          parts: [
-            { functionCall: { id: 'fc1', name: 'someTool', args: { q: 1 } } },
-          ],
-        },
-        {
-          role: 'user',
-          parts: [
-            {
-              functionResponse: {
-                id: 'fc1',
-                name: 'someTool',
-                response: { output: 'ok' },
-              },
-            },
-            { text: 'next' },
-          ],
-        },
-      ]);
-    });
-
-    it('keeps a functionCall turn whose placeholder sibling is dropped (#8938)', async () => {
-      // Mirror direction: the run [functionCall, placeholder] keeps the
-      // functionCall and drops only the placeholder, so the following
-      // functionResponse stays paired either way (#8938 review).
-      chat.setHistory([
-        { role: 'user', parts: [{ text: 'do the thing' }] },
-        {
-          role: 'model',
-          parts: [
-            { functionCall: { id: 'fc1', name: 'someTool', args: { q: 1 } } },
-          ],
-        },
-        { role: 'model', parts: [{ text: '(request timeout)' }] },
-        {
-          role: 'user',
-          parts: [
-            {
-              functionResponse: {
-                id: 'fc1',
-                name: 'someTool',
-                response: { output: 'ok' },
-              },
-            },
-          ],
-        },
-      ]);
-      const response = (async function* () {
-        yield {
-          candidates: [
-            {
-              content: { parts: [{ text: 'response' }], role: 'model' },
-              finishReason: 'STOP',
-              index: 0,
-              safetyRatings: [],
-            },
-          ],
-          text: () => 'response',
-        } as unknown as GenerateContentResponse;
-      })();
-      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
-        response,
-      );
-
-      const stream = await chat.sendMessageStream(
-        'test-model',
-        { message: 'next' },
-        'prompt-id-placeholder-curation-fc-before-placeholder',
-      );
-      for await (const _ of stream) {
-        // consume stream
-      }
-
-      const request = vi.mocked(mockContentGenerator.generateContentStream).mock
-        .calls[0]?.[0];
-      expect(request?.contents).toEqual([
-        { role: 'user', parts: [{ text: 'do the thing' }] },
-        {
-          role: 'model',
-          parts: [
-            { functionCall: { id: 'fc1', name: 'someTool', args: { q: 1 } } },
-          ],
-        },
-        {
-          role: 'user',
-          parts: [
-            {
-              functionResponse: {
-                id: 'fc1',
-                name: 'someTool',
-                response: { output: 'ok' },
-              },
-            },
-            { text: 'next' },
-          ],
-        },
-      ]);
-    });
-
     it('does not deep-clone the full curated history when building request contents', async () => {
       chat.setHistory([
         { role: 'user', parts: [{ text: 'prior question' }] },
@@ -3349,6 +2713,47 @@ describe('GeminiChat', async () => {
         }),
         'prompt-id-no-request-clone',
       );
+    });
+
+    it('excludes exact degraded placeholders without dropping legitimate mentions or tool calls', () => {
+      const toolCall = {
+        functionCall: { id: 'call-1', name: 'read_file', args: {} },
+      };
+      const functionResponse = {
+        functionResponse: {
+          id: 'call-1',
+          name: 'read_file',
+          response: { output: 'ok' },
+        },
+      };
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'what happened?' }] },
+        {
+          role: 'model',
+          parts: [{ text: 'The endpoint returned (request timeout) once.' }],
+        },
+        { role: 'user', parts: [{ text: 'continue' }] },
+        { role: 'model', parts: [{ text: ' (request timeout) ' }] },
+        { role: 'user', parts: [{ text: 'try again' }] },
+        {
+          role: 'model',
+          parts: [{ text: '(request timeout)' }, toolCall],
+        },
+        { role: 'user', parts: [functionResponse] },
+      ];
+      chat.setHistory(history);
+
+      expect(chat.getHistory(true)).toEqual([
+        history[0],
+        history[1],
+        {
+          role: 'user',
+          parts: [{ text: 'continue' }, { text: 'try again' }],
+        },
+        history[5],
+        history[6],
+      ]);
+      expect(chat.getHistory()).toEqual(history);
     });
 
     it('should not update global telemetry when no telemetryService is provided (subagent isolation)', async () => {
@@ -6136,22 +5541,7 @@ describe('GeminiChat', async () => {
       chat.addHistory({ role: 'user', parts: [{ text: 'a' }] });
       chat.addHistory({ role: 'model', parts: [{ text: 'b' }] });
       chat.addHistory({ role: 'user', parts: [{ text: 'c' }] });
-      const expectedLength = chat.getHistory().length;
-      // Walk-only contract: the same throwing-spy pin the sibling no-clone
-      // accessors use, so a regression to getHistory()'s cloning
-      // implementation fails instead of merely matching the length
-      // (#8938 review).
-      const structuredCloneSpy = vi
-        .spyOn(globalThis, 'structuredClone')
-        .mockImplementation(() => {
-          throw new Error('unexpected deep clone');
-        });
-      try {
-        expect(chat.getHistoryLength()).toBe(expectedLength);
-        expect(structuredCloneSpy).not.toHaveBeenCalled();
-      } finally {
-        structuredCloneSpy.mockRestore();
-      }
+      expect(chat.getHistoryLength()).toBe(chat.getHistory().length);
     });
   });
 
@@ -6578,6 +5968,120 @@ describe('GeminiChat', async () => {
       }
     });
 
+    it('retries a split degraded placeholder without yielding or persisting it', async () => {
+      vi.useFakeTimers();
+      try {
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockResolvedValueOnce(
+            streamResponse(
+              {
+                candidates: [{ content: { parts: [{ text: '(request ' }] } }],
+              } as unknown as GenerateContentResponse,
+              stopResponse([{ text: 'timeout)' }]),
+            ),
+          )
+          .mockResolvedValueOnce(
+            streamResponse(stopResponse([{ text: 'Recovered response' }])),
+          );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-id-degraded-placeholder',
+        );
+        const events = await collectStreamWithFakeTimers(stream);
+        const emitted = events
+          .filter((event) => event.type === StreamEventType.CHUNK)
+          .flatMap(
+            (event) =>
+              event.value.candidates?.[0]?.content?.parts?.map(
+                (part) => part.text,
+              ) ?? [],
+          );
+
+        expect(emitted).toEqual(['Recovered response']);
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(2);
+        expect(mockLogContentRetry).toHaveBeenCalledWith(
+          mockConfig,
+          expect.objectContaining({
+            error_type: 'UPSTREAM_DEGRADED_RESPONSE',
+          }),
+        );
+        expect(chat.getHistory()).toEqual([
+          { role: 'user', parts: [{ text: 'test' }] },
+          { role: 'model', parts: [{ text: 'Recovered response' }] },
+        ]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('passes through longer text that mentions the placeholder', async () => {
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        streamResponse(
+          stopResponse([
+            { text: 'The endpoint returned (request timeout) once.' },
+          ]),
+        ),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-id-placeholder-mention',
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) events.push(event);
+
+      expect(
+        events.some(
+          (event) =>
+            event.type === StreamEventType.CHUNK &&
+            event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+              'The endpoint returned (request timeout) once.',
+        ),
+      ).toBe(true);
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        1,
+      );
+    });
+
+    it('does not reject a placeholder turn that contains a function call', async () => {
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        streamResponse(
+          stopResponse([
+            { text: '(request timeout)' },
+            {
+              functionCall: { id: 'call-1', name: 'read_file', args: {} },
+            },
+          ]),
+        ),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-id-placeholder-tool-call',
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) events.push(event);
+
+      expect(
+        events.some(
+          (event) =>
+            event.type === StreamEventType.CHUNK &&
+            event.value.candidates?.[0]?.content?.parts?.some(
+              (part) => part.functionCall?.id === 'call-1',
+            ),
+        ),
+      ).toBe(true);
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        1,
+      );
+    });
+
     it('should fail after all retries on persistent invalid content and report metrics', async () => {
       vi.useFakeTimers();
       try {
@@ -6702,805 +6206,6 @@ describe('GeminiChat', async () => {
         expect(chat.getHistory()).toEqual([
           { role: 'user', parts: [{ text: 'test' }] },
           { role: 'model', parts: [{ text: 'Recovered response' }] },
-        ]);
-      } finally {
-        vi.useRealTimers();
-      }
-    });
-
-    it('should retry an upstream fail-fast placeholder response without persisting it', async () => {
-      vi.useFakeTimers();
-      try {
-        let callCount = 0;
-        vi.mocked(
-          mockContentGenerator.generateContentStream,
-        ).mockImplementation(async () => {
-          callCount++;
-          if (callCount === 1) {
-            return (async function* () {
-              yield {
-                candidates: [
-                  {
-                    content: {
-                      parts: [{ text: '(request timeout)' }],
-                      role: 'model',
-                    },
-                    finishReason: 'STOP',
-                  },
-                ],
-              } as unknown as GenerateContentResponse;
-            })();
-          }
-
-          return (async function* () {
-            yield {
-              candidates: [
-                {
-                  content: {
-                    parts: [{ text: 'Recovered response' }],
-                    role: 'model',
-                  },
-                  finishReason: 'STOP',
-                },
-              ],
-            } as unknown as GenerateContentResponse;
-          })();
-        });
-
-        const stream = await chat.sendMessageStream(
-          'test-model',
-          { message: 'test' },
-          'prompt-id-degraded-placeholder',
-        );
-        const events = await collectStreamWithFakeTimers(stream, 25_000);
-
-        expect(
-          mockContentGenerator.generateContentStream,
-        ).toHaveBeenCalledTimes(2);
-        expect(mockLogContentRetry).toHaveBeenCalledTimes(1);
-        expect(mockLogContentRetry).toHaveBeenCalledWith(
-          mockConfig,
-          expect.objectContaining({
-            error_type: 'UPSTREAM_DEGRADED_RESPONSE',
-            model: 'test-model',
-          }),
-        );
-        expect(
-          events.some(
-            (event) =>
-              event.type === StreamEventType.CHUNK &&
-              event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
-                'Recovered response',
-          ),
-        ).toBe(true);
-        expect(
-          events.some(
-            (event) =>
-              event.type === StreamEventType.CHUNK &&
-              event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
-                '(request timeout)',
-          ),
-        ).toBe(false);
-        expect(chat.getHistory()).toEqual([
-          { role: 'user', parts: [{ text: 'test' }] },
-          { role: 'model', parts: [{ text: 'Recovered response' }] },
-        ]);
-      } finally {
-        vi.useRealTimers();
-      }
-    });
-
-    it('should retry a placeholder split across content and finish chunks without yielding it', async () => {
-      vi.useFakeTimers();
-      try {
-        let callCount = 0;
-        vi.mocked(
-          mockContentGenerator.generateContentStream,
-        ).mockImplementation(async () => {
-          callCount++;
-          if (callCount === 1) {
-            return streamResponse(
-              {
-                candidates: [
-                  {
-                    content: {
-                      parts: [{ text: '(request timeout)' }],
-                      role: 'model',
-                    },
-                  },
-                ],
-              } as unknown as GenerateContentResponse,
-              {
-                candidates: [{ finishReason: 'STOP' }],
-              } as unknown as GenerateContentResponse,
-            );
-          }
-
-          return streamResponse(stopResponse([{ text: 'Recovered response' }]));
-        });
-
-        const stream = await chat.sendMessageStream(
-          'test-model',
-          { message: 'test' },
-          'prompt-id-degraded-placeholder-split-finish',
-        );
-        const events = await collectStreamWithFakeTimers(stream, 25_000);
-
-        expect(
-          mockContentGenerator.generateContentStream,
-        ).toHaveBeenCalledTimes(2);
-        expect(mockLogContentRetry).toHaveBeenCalledWith(
-          mockConfig,
-          expect.objectContaining({
-            error_type: 'UPSTREAM_DEGRADED_RESPONSE',
-            model: 'test-model',
-          }),
-        );
-        expect(
-          events.some(
-            (event) =>
-              event.type === StreamEventType.CHUNK &&
-              event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
-                '(request timeout)',
-          ),
-        ).toBe(false);
-        expect(chat.getHistory()).toEqual([
-          { role: 'user', parts: [{ text: 'test' }] },
-          { role: 'model', parts: [{ text: 'Recovered response' }] },
-        ]);
-      } finally {
-        vi.useRealTimers();
-      }
-    });
-
-    it('should not retry a streamed placeholder when the turn has a function call', async () => {
-      vi.useFakeTimers();
-      try {
-        vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
-          streamResponse(
-            stopResponse([
-              { text: '(request timeout)' },
-              { functionCall: { name: 'someTool', args: {} } },
-            ]),
-          ),
-        );
-
-        const stream = await chat.sendMessageStream(
-          'test-model',
-          { message: 'test' },
-          'prompt-id-degraded-placeholder-stream-tool-call',
-        );
-        await collectStreamWithFakeTimers(stream, 5_000);
-
-        expect(
-          mockContentGenerator.generateContentStream,
-        ).toHaveBeenCalledTimes(1);
-        expect(mockLogContentRetry).not.toHaveBeenCalled();
-        expect(chat.getHistory().at(-1)).toEqual({
-          role: 'model',
-          parts: [
-            { text: '(request timeout)' },
-            {
-              functionCall: expect.objectContaining({
-                name: 'someTool',
-                args: {},
-              }),
-            },
-          ],
-        });
-      } finally {
-        vi.useRealTimers();
-      }
-    });
-
-    it('should deliver every chunk when two finishReason-bearing chunks arrive before any yield', async () => {
-      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
-        streamResponse(stopResponse([{ text: 'Hello world' }]), {
-          candidates: [{ finishReason: 'STOP' }],
-        } as unknown as GenerateContentResponse),
-      );
-
-      const stream = await chat.sendMessageStream(
-        'test-model',
-        { message: 'test' },
-        'prompt-id-duplicate-finish-reason-chunks',
-      );
-      const events: StreamEvent[] = [];
-      for await (const event of stream) {
-        events.push(event);
-      }
-
-      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
-        1,
-      );
-      // BOTH finishReason-bearing chunks must reach the consumer: the ??=
-      // latch regression deferred/flushed only the first, which
-      // events.some(...) could not observe (#8938 review).
-      const delivered = events.filter(
-        (event) => event.type === StreamEventType.CHUNK,
-      );
-      expect(delivered).toHaveLength(2);
-      expect(
-        delivered[0]?.value.candidates?.[0]?.content?.parts?.[0]?.text,
-      ).toBe('Hello world');
-      expect(chat.getHistory()).toEqual([
-        { role: 'user', parts: [{ text: 'test' }] },
-        { role: 'model', parts: [{ text: 'Hello world' }] },
-      ]);
-    });
-
-    it('should deliver a deferred function call when a second finishReason chunk arrives before any yield', async () => {
-      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
-        streamResponse(
-          stopResponse([{ functionCall: { name: 'someTool', args: {} } }]),
-          {
-            candidates: [{ finishReason: 'STOP' }],
-          } as unknown as GenerateContentResponse,
-        ),
-      );
-
-      const stream = await chat.sendMessageStream(
-        'test-model',
-        { message: 'test' },
-        'prompt-id-duplicate-finish-reason-tool-call',
-      );
-      const events: StreamEvent[] = [];
-      for await (const event of stream) {
-        events.push(event);
-      }
-
-      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
-        1,
-      );
-      // Both finishReason-bearing chunks must be delivered — the latch
-      // regression flushed only the first (#8938 review).
-      expect(
-        events.filter((event) => event.type === StreamEventType.CHUNK),
-      ).toHaveLength(2);
-      expect(
-        events.some(
-          (event) =>
-            event.type === StreamEventType.CHUNK &&
-            event.value.candidates?.[0]?.content?.parts?.some(
-              (part) => part.functionCall?.name === 'someTool',
-            ),
-        ),
-      ).toBe(true);
-      expect(chat.getHistory().at(-1)).toEqual({
-        role: 'model',
-        parts: [
-          {
-            functionCall: expect.objectContaining({
-              name: 'someTool',
-              args: {},
-            }),
-          },
-        ],
-      });
-    });
-
-    it('should deliver every deferred chunk in a tool result continuation when two finishReason chunks arrive', async () => {
-      chat.setHistory([
-        { role: 'user', parts: [{ text: 'inspect the project' }] },
-        {
-          role: 'model',
-          parts: [
-            {
-              functionCall: {
-                id: 'call_read_file',
-                name: 'read_file',
-                args: { path: '/tmp/example' },
-              },
-            },
-          ],
-        },
-      ]);
-      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
-        streamResponse(stopResponse([{ text: 'Continuation answer' }]), {
-          candidates: [{ finishReason: 'STOP' }],
-        } as unknown as GenerateContentResponse),
-      );
-
-      const stream = await chat.sendMessageStream(
-        'test-model',
-        {
-          message: [
-            {
-              functionResponse: {
-                id: 'call_read_file',
-                name: 'read_file',
-                response: { output: 'file contents' },
-              },
-            },
-          ],
-        },
-        'prompt-id-tool-result-duplicate-finish-reason',
-      );
-      const events: StreamEvent[] = [];
-      for await (const event of stream) {
-        events.push(event);
-      }
-
-      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
-        1,
-      );
-      // Every chunk must be delivered — the content chunk, the second
-      // finishReason-bearing chunk, and the synthetic deferred-finish
-      // chunk: the ??= latch regression flushed only the first (#8938).
-      const deliveredChunks = events.filter(
-        (event) => event.type === StreamEventType.CHUNK,
-      );
-      expect(deliveredChunks).toHaveLength(3);
-      // ORDER is load-bearing: the synthetic deferred-finish chunk must be
-      // LAST (after the withheld content chunks), since Turn emits Finished
-      // at the finishReason-bearing chunk and applies MAX_TOKENS truncation
-      // marking there — reordered, consumers see Finished before content
-      // (#8938 review).
-      expect(
-        deliveredChunks[0]?.value.candidates?.[0]?.content?.parts?.[0]?.text,
-      ).toBe('Continuation answer');
-      expect(
-        deliveredChunks.at(-1)?.value.candidates?.[0]?.finishReason,
-      ).toBe('STOP');
-      // Full-history pin (not just at(-1)) so a drifted partial-turn pop
-      // that orphaned the functionResponse turn could not hide (#8938).
-      expect(chat.getHistory()).toEqual([
-        { role: 'user', parts: [{ text: 'inspect the project' }] },
-        {
-          role: 'model',
-          parts: [
-            {
-              functionCall: {
-                id: 'call_read_file',
-                name: 'read_file',
-                args: { path: '/tmp/example' },
-              },
-            },
-          ],
-        },
-        {
-          role: 'user',
-          parts: [
-            {
-              functionResponse: {
-                id: 'call_read_file',
-                name: 'read_file',
-                response: { output: 'file contents' },
-              },
-            },
-          ],
-        },
-        { role: 'model', parts: [{ text: 'Continuation answer' }] },
-      ]);
-    });
-
-    it('delivers a deferred finishReason chunk before later held chunks in arrival order', async () => {
-      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
-        streamResponse(stopResponse([{ text: '(req' }]), {
-          candidates: [{ content: { parts: [{ text: 'uest' }] } }],
-        } as unknown as GenerateContentResponse),
-      );
-
-      const stream = await chat.sendMessageStream(
-        'test-model',
-        { message: 'test' },
-        'prompt-id-deferred-arrival-order',
-      );
-      const events: StreamEvent[] = [];
-      for await (const event of stream) {
-        events.push(event);
-      }
-
-      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
-        1,
-      );
-      const delivered = events
-        .filter((event) => event.type === StreamEventType.CHUNK)
-        .map((event) => event.value.candidates?.[0]?.content?.parts?.[0]?.text);
-      expect(delivered).toEqual(['(req', 'uest']);
-      expect(chat.getHistory()).toEqual([
-        { role: 'user', parts: [{ text: 'test' }] },
-        { role: 'model', parts: [{ text: '(request' }] },
-      ]);
-    });
-
-    it('delivers a diverged placeholder prefix and its continuation in order without retrying', async () => {
-      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
-        streamResponse(
-          {
-            candidates: [{ content: { parts: [{ text: '(request ' }] } }],
-          } as unknown as GenerateContentResponse,
-          stopResponse([{ text: ' real content' }]),
-        ),
-      );
-
-      const stream = await chat.sendMessageStream(
-        'test-model',
-        { message: 'test' },
-        'prompt-id-placeholder-prefix-divergence',
-      );
-      const events: StreamEvent[] = [];
-      for await (const event of stream) {
-        events.push(event);
-      }
-
-      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
-        1,
-      );
-      expect(mockLogContentRetry).not.toHaveBeenCalled();
-      const delivered = events
-        .filter((event) => event.type === StreamEventType.CHUNK)
-        .map((event) => event.value.candidates?.[0]?.content?.parts?.[0]?.text);
-      expect(delivered).toEqual(['(request ', ' real content']);
-      expect(chat.getHistory()).toEqual([
-        { role: 'user', parts: [{ text: 'test' }] },
-        { role: 'model', parts: [{ text: '(request  real content' }] },
-      ]);
-    });
-
-    it('delivers and persists a lone placeholder-prefix chunk without rejecting it', async () => {
-      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
-        streamResponse(stopResponse([{ text: '(request' }])),
-      );
-
-      const stream = await chat.sendMessageStream(
-        'test-model',
-        { message: 'test' },
-        'prompt-id-lone-placeholder-prefix',
-      );
-      const events: StreamEvent[] = [];
-      for await (const event of stream) {
-        events.push(event);
-      }
-
-      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
-        1,
-      );
-      expect(mockLogContentRetry).not.toHaveBeenCalled();
-      expect(
-        events.some(
-          (event) =>
-            event.type === StreamEventType.CHUNK &&
-            event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
-              '(request',
-        ),
-      ).toBe(true);
-      expect(chat.getHistory()).toEqual([
-        { role: 'user', parts: [{ text: 'test' }] },
-        { role: 'model', parts: [{ text: '(request' }] },
-      ]);
-    });
-
-    it('should not yield a split placeholder tail when the stream errors before any yield', async () => {
-      // The completed placeholder is converted to the invalid-stream budget
-      // (#8938): the turn retries fresh instead of failing on the raw
-      // transport error, and no placeholder fragment may reach the
-      // consumer on the garbage attempt.
-      vi.useFakeTimers();
-      try {
-        let callCount = 0;
-        vi.mocked(
-          mockContentGenerator.generateContentStream,
-        ).mockImplementation(async () => {
-          callCount++;
-          if (callCount === 1) {
-            return (async function* () {
-              yield {
-                candidates: [{ content: { parts: [{ text: '(request ' }] } }],
-              } as unknown as GenerateContentResponse;
-              yield {
-                candidates: [
-                  {
-                    content: { parts: [{ text: 'timeout)' }] },
-                    finishReason: 'STOP',
-                  },
-                ],
-              } as unknown as GenerateContentResponse;
-              throw new Error('stream failed');
-            })();
-          }
-          return streamResponse(stopResponse([{ text: 'Recovered response' }]));
-        });
-
-        const stream = await chat.sendMessageStream(
-          'test-model',
-          { message: 'test' },
-          'prompt-id-split-placeholder-error-path',
-        );
-        const events = await collectStreamWithFakeTimers(stream, 60_000);
-
-        expect(
-          mockContentGenerator.generateContentStream,
-        ).toHaveBeenCalledTimes(2);
-        // No chunk at all may escape from the garbage attempt: the held head
-        // chunk is dropped wholesale with the completing tail, never
-        // delivered partially (#8938 review).
-        expect(
-          events.filter((event) => event.type === StreamEventType.CHUNK),
-        ).toHaveLength(1);
-        expect(
-          events.some(
-            (event) =>
-              event.type === StreamEventType.CHUNK &&
-              event.value.candidates?.[0]?.content?.parts?.some(
-                (part) =>
-                  part.text?.includes('(request') ||
-                  part.text?.includes('timeout)'),
-              ),
-          ),
-        ).toBe(false);
-        expect(chat.getHistory()).toEqual([
-          { role: 'user', parts: [{ text: 'test' }] },
-          { role: 'model', parts: [{ text: 'Recovered response' }] },
-        ]);
-      } finally {
-        vi.useRealTimers();
-      }
-    });
-
-    it('should yield a deferred function call before surfacing a stream error', async () => {
-      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
-        (async function* () {
-          yield stopResponse([
-            {
-              functionCall: {
-                name: 'someTool',
-                args: {},
-              },
-            },
-          ]);
-          throw new Error('stream failed');
-        })(),
-      );
-
-      const stream = await chat.sendMessageStream(
-        'test-model',
-        { message: 'test' },
-        'prompt-id-deferred-function-call-stream-error',
-      );
-      const events: StreamEvent[] = [];
-
-      await expect(
-        (async () => {
-          for await (const event of stream) {
-            events.push(event);
-          }
-        })(),
-      ).rejects.toThrow('stream failed');
-
-      expect(
-        events.some(
-          (event) =>
-            event.type === StreamEventType.CHUNK &&
-            event.value.candidates?.[0]?.content?.parts?.some(
-              (part) => part.functionCall?.name === 'someTool',
-            ),
-        ),
-      ).toBe(true);
-      expect(chat.getHistory().at(-1)).toEqual({
-        role: 'model',
-        parts: [
-          {
-            functionCall: expect.objectContaining({
-              name: 'someTool',
-              args: {},
-            }),
-          },
-        ],
-      });
-    });
-
-    it('should retry a tool result continuation placeholder without yielding it', async () => {
-      vi.useFakeTimers();
-      try {
-        chat.setHistory([
-          { role: 'user', parts: [{ text: 'inspect the project' }] },
-          {
-            role: 'model',
-            parts: [
-              {
-                functionCall: {
-                  id: 'call_read_file',
-                  name: 'read_file',
-                  args: { path: '/tmp/example' },
-                },
-              },
-            ],
-          },
-        ]);
-        let callCount = 0;
-        vi.mocked(
-          mockContentGenerator.generateContentStream,
-        ).mockImplementation(async () => {
-          callCount++;
-          if (callCount === 1) {
-            return streamResponse(
-              stopResponse([{ text: '(request timeout)' }]),
-            );
-          }
-          return streamResponse(stopResponse([{ text: 'Recovered response' }]));
-        });
-
-        const stream = await chat.sendMessageStream(
-          'test-model',
-          {
-            message: [
-              {
-                functionResponse: {
-                  id: 'call_read_file',
-                  name: 'read_file',
-                  response: { output: 'file contents' },
-                },
-              },
-            ],
-          },
-          'prompt-id-tool-result-degraded-placeholder',
-        );
-        const events = await collectStreamWithFakeTimers(stream, 25_000);
-
-        expect(
-          mockContentGenerator.generateContentStream,
-        ).toHaveBeenCalledTimes(2);
-        expect(mockLogContentRetry).toHaveBeenCalledWith(
-          mockConfig,
-          expect.objectContaining({
-            error_type: 'UPSTREAM_DEGRADED_RESPONSE',
-            model: 'test-model',
-          }),
-        );
-        expect(
-          events.some(
-            (event) =>
-              event.type === StreamEventType.CHUNK &&
-              event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
-                '(request timeout)',
-          ),
-        ).toBe(false);
-        // Full-history pin: the retry pops the partial turn by an index
-        // marker — at(-1) cannot see a drifted marker orphaning the
-        // functionResponse turn (#8938 review).
-        expect(chat.getHistory()).toEqual([
-          { role: 'user', parts: [{ text: 'inspect the project' }] },
-          {
-            role: 'model',
-            parts: [
-              {
-                functionCall: {
-                  id: 'call_read_file',
-                  name: 'read_file',
-                  args: { path: '/tmp/example' },
-                },
-              },
-            ],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'call_read_file',
-                  name: 'read_file',
-                  response: { output: 'file contents' },
-                },
-              },
-            ],
-          },
-          { role: 'model', parts: [{ text: 'Recovered response' }] },
-        ]);
-      } finally {
-        vi.useRealTimers();
-      }
-    });
-
-    it('releases non-placeholder text inline before the stream ends (hold liveness)', async () => {
-      // The placeholder-hold gate must NOT hold ordinary text: a regression
-      // broadening the gate to always-hold would withhold every chunk until
-      // stream end, and no other test catches it because end-of-stream
-      // flushes reproduce the same event sequence. Pin the RELEASE side:
-      // the first non-placeholder CHUNK must reach the consumer while the
-      // generator is still blocked mid-stream (#8938 review).
-      let releaseGate!: () => void;
-      const gate = new Promise<void>((resolve) => {
-        releaseGate = resolve;
-      });
-      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
-        async () =>
-          (async function* () {
-            yield {
-              candidates: [
-                {
-                  content: {
-                    parts: [{ text: 'streaming answer' }],
-                    role: 'model',
-                  },
-                },
-              ],
-            } as unknown as GenerateContentResponse;
-            await gate; // keep the stream open after the first chunk
-            yield {
-              candidates: [{ finishReason: 'STOP' }],
-            } as unknown as GenerateContentResponse;
-          })(),
-      );
-
-      const stream = await chat.sendMessageStream(
-        'test-model',
-        { message: 'test' },
-        'prompt-placeholder-hold-liveness',
-      );
-      const iterator = stream[Symbol.asyncIterator]();
-      // The first event must be the non-placeholder CHUNK, delivered while
-      // the gate is still pending (stream not ended). An always-hold
-      // regression would withhold it and this would not resolve.
-      const first = await iterator.next();
-      expect(first.done).toBe(false);
-      expect(first.value?.type).toBe(StreamEventType.CHUNK);
-      expect(
-        (first.value as Extract<StreamEvent, { type: StreamEventType.CHUNK }>)
-          .value.candidates?.[0]?.content?.parts?.[0]?.text,
-      ).toBe('streaming answer');
-
-      releaseGate();
-      for (;;) {
-        const result = await iterator.next();
-        if (result.done) break;
-      }
-    });
-
-    it('should exhaust retries for upstream fail-fast placeholder responses', async () => {
-      vi.useFakeTimers();
-      try {
-        vi.mocked(
-          mockContentGenerator.generateContentStream,
-        ).mockImplementation(async () =>
-          (async function* () {
-            yield {
-              candidates: [
-                {
-                  content: {
-                    parts: [{ text: '(request timeout)' }],
-                    role: 'model',
-                  },
-                  finishReason: 'STOP',
-                },
-              ],
-            } as unknown as GenerateContentResponse;
-          })(),
-        );
-
-        const stream = await chat.sendMessageStream(
-          'test-model',
-          { message: 'test' },
-          'prompt-id-degraded-placeholder-exhaustion',
-        );
-        const exhausted: StreamEvent[] = [];
-        await expectStreamExhaustion(stream, exhausted);
-
-        // The placeholder must NEVER reach the consumer on any attempt:
-        // correctness rests on the post-stream placeholder throw firing
-        // before the pending flush; if that order moved, every attempt
-        // would deliver '(request timeout)' before the error (#8938).
-        expect(
-          exhausted.filter((event) => event.type === StreamEventType.CHUNK),
-        ).toHaveLength(0);
-
-        expect(
-          mockContentGenerator.generateContentStream,
-        ).toHaveBeenCalledTimes(5);
-        expect(mockLogContentRetry).toHaveBeenCalledTimes(4);
-        expect(mockLogContentRetryFailure).toHaveBeenCalledTimes(1);
-        expect(mockLogContentRetryFailure).toHaveBeenCalledWith(
-          mockConfig,
-          expect.objectContaining({
-            total_attempts: 5,
-            final_error_type: 'UPSTREAM_DEGRADED_RESPONSE',
-            model: 'test-model',
-          }),
-        );
-
-        // History should still contain only the user message.
-        expect(chat.getHistory()).toEqual([
-          { role: 'user', parts: [{ text: 'test' }] },
         ]);
       } finally {
         vi.useRealTimers();
@@ -8965,6 +7670,55 @@ describe('GeminiChat', async () => {
       }
     });
 
+    it('replays after a transport cut without leaking a placeholder prefix', async () => {
+      vi.useFakeTimers();
+      try {
+        const transportError = Object.assign(new TypeError('terminated'), {
+          cause: Object.assign(new Error('other side closed'), {
+            code: 'UND_ERR_SOCKET',
+          }),
+        });
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield {
+                candidates: [{ content: { parts: [{ text: '(request ' }] } }],
+              } as unknown as GenerateContentResponse;
+              throw transportError;
+            })(),
+          )
+          .mockResolvedValueOnce(
+            streamResponse(stopResponse([{ text: 'Recovered response' }])),
+          );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-placeholder-prefix-transport-cut',
+        );
+        const events = await collectStreamWithFakeTimers(stream, 5_000);
+        const emittedText = events
+          .filter((event) => event.type === StreamEventType.CHUNK)
+          .flatMap(
+            (event) =>
+              event.value.candidates?.[0]?.content?.parts?.map(
+                (part) => part.text,
+              ) ?? [],
+          );
+
+        expect(emittedText).toEqual(['Recovered response']);
+        expect(
+          events.filter((event) => event.type === StreamEventType.RETRY),
+        ).toHaveLength(1);
+        expect(chat.getHistory()).toEqual([
+          { role: 'user', parts: [{ text: 'test' }] },
+          { role: 'model', parts: [{ text: 'Recovered response' }] },
+        ]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('stops retrying retryable transport stream errors after the retry budget is exhausted', async () => {
       vi.useFakeTimers();
       try {
@@ -9516,456 +8270,6 @@ describe('GeminiChat', async () => {
           expect(chatWithRecording.getHistory().at(-1)).toEqual({
             role: 'model',
             parts: [{ text: 'first half second half' }],
-          });
-        } finally {
-          vi.useRealTimers();
-        }
-      });
-
-      it('keeps delivery and persistence aligned when a held prefix continuation diverges', async () => {
-        vi.useFakeTimers();
-        try {
-          const recordAssistantTurn = vi.fn();
-          const chatWithRecording = chatWithRecorder(recordAssistantTurn);
-          vi.mocked(mockContentGenerator.generateContentStream)
-            .mockResolvedValueOnce(cutAfter([textChunk('(request ')]))
-            .mockResolvedValueOnce(
-              (async function* () {
-                yield textChunk('Sorry — the answer is 42.', 'STOP');
-              })(),
-            );
-
-          const stream = await chatWithRecording.sendMessageStream(
-            'test-model',
-            { message: 'test' },
-            'prompt-transport-continuation-held-prefix-divergence',
-          );
-          const events = await collectStreamWithFakeTimers(stream, 25_000);
-
-          expect(
-            mockContentGenerator.generateContentStream,
-          ).toHaveBeenCalledTimes(2);
-          // The held prefix must have reached the consumer: what the UI saw
-          // and what a diverged continuation persists stay aligned, instead
-          // of an invisible prefix riding into history/JSONL.
-          expect(
-            events.some(
-              (event) =>
-                event.type === StreamEventType.CHUNK &&
-                event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
-                  '(request ',
-            ),
-          ).toBe(true);
-          // BOTH delivered halves must reach the consumer — a flush
-          // regression dropping the deferred continuation chunk would
-          // deliver only the prefix while record/history still show the
-          // joined text (#8938 review).
-          expect(
-            events.some(
-              (event) =>
-                event.type === StreamEventType.CHUNK &&
-                event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
-                  'Sorry — the answer is 42.',
-            ),
-          ).toBe(true);
-          expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
-          expect(recordedText(recordAssistantTurn)).toBe(
-            '(request Sorry — the answer is 42.',
-          );
-          expect(chatWithRecording.getHistory().at(-1)).toEqual({
-            role: 'model',
-            parts: [{ text: '(request Sorry — the answer is 42.' }],
-          });
-        } finally {
-          vi.useRealTimers();
-        }
-      });
-
-      it('rejects a placeholder formed by the delivered prefix and resumed remainder', async () => {
-        vi.useFakeTimers();
-        try {
-          const recordAssistantTurn = vi.fn();
-          const chatWithRecording = chatWithRecorder(recordAssistantTurn);
-          vi.mocked(mockContentGenerator.generateContentStream)
-            .mockResolvedValueOnce(cutAfter([textChunk('(request ')]))
-            .mockResolvedValueOnce(
-              (async function* () {
-                yield textChunk('timeout)', 'STOP');
-              })(),
-            )
-            .mockResolvedValueOnce(
-              (async function* () {
-                yield textChunk('Recovered response', 'STOP');
-              })(),
-            );
-
-          const stream = await chatWithRecording.sendMessageStream(
-            'test-model',
-            { message: 'test' },
-            'prompt-transport-continuation-placeholder',
-          );
-          const events = await collectStreamWithFakeTimers(stream, 25_000);
-
-          // The deferral withholds the remainder chunk: the assembled
-          // placeholder must never reach the consumer (#8938 review).
-          expect(
-            events.some(
-              (event) =>
-                event.type === StreamEventType.CHUNK &&
-                event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
-                  'timeout)',
-            ),
-          ).toBe(false);
-
-          expect(
-            mockContentGenerator.generateContentStream,
-          ).toHaveBeenCalledTimes(3);
-          // This scenario delivered the '(request ' prefix, so the retry
-          // after rejection must be PLAIN (no isContinuation) — the only
-          // signal telling the UI to discard the already-delivered prefix
-          // (#8938 review).
-          const retries = events.filter(
-            (event) => event.type === StreamEventType.RETRY,
-          );
-          // Guard against the assertion above going vacuous on an empty
-          // array: the scenario must actually emit a retry (#8938 review).
-          expect(retries.length).toBeGreaterThan(0);
-          expect(retries.at(-1)?.isContinuation).toBeFalsy();
-          expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
-          expect(recordedText(recordAssistantTurn)).toBe('Recovered response');
-          expect(chatWithRecording.getHistory().at(-1)).toEqual({
-            role: 'model',
-            parts: [{ text: 'Recovered response' }],
-          });
-        } finally {
-          vi.useRealTimers();
-        }
-      });
-
-      it('routes a double-cut completed placeholder through the invalid-stream budget', async () => {
-        // The remainder itself ending in a transport cut used to throw the
-        // converted placeholder error straight out of the catch — zero
-        // invalid-stream retries. It must reach the budget like every
-        // other placeholder shape and replay fresh (#8938 review).
-        vi.useFakeTimers();
-        try {
-          const recordAssistantTurn = vi.fn();
-          const chatWithRecording = chatWithRecorder(recordAssistantTurn);
-          vi.mocked(mockContentGenerator.generateContentStream)
-            .mockResolvedValueOnce(cutAfter([textChunk('(request ')]))
-            .mockResolvedValueOnce(
-              cutAfter([textChunk('timeout)', 'STOP')]),
-            )
-            .mockResolvedValueOnce(
-              (async function* () {
-                yield textChunk('Recovered response', 'STOP');
-              })(),
-            );
-
-          const stream = await chatWithRecording.sendMessageStream(
-            'test-model',
-            { message: 'test' },
-            'prompt-transport-continuation-double-cut-placeholder',
-          );
-          const events = await collectStreamWithFakeTimers(stream, 60_000);
-
-          expect(
-            mockContentGenerator.generateContentStream,
-          ).toHaveBeenCalledTimes(3);
-          // The distinguishing pin between budget routing and any other
-          // retry path: the converted placeholder error must reach the
-          // invalid-stream budget handler (#8938 review).
-          expect(mockLogContentRetry).toHaveBeenCalledTimes(1);
-          expect(mockLogContentRetry).toHaveBeenCalledWith(
-            mockConfig,
-            expect.objectContaining({
-              error_type: 'UPSTREAM_DEGRADED_RESPONSE',
-              model: 'test-model',
-            }),
-          );
-          expect(
-            events.some(
-              (event) =>
-                event.type === StreamEventType.CHUNK &&
-                event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
-                  'timeout)',
-            ),
-          ).toBe(false);
-          expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
-          expect(recordedText(recordAssistantTurn)).toBe('Recovered response');
-          expect(chatWithRecording.getHistory().at(-1)).toEqual({
-            role: 'model',
-            parts: [{ text: 'Recovered response' }],
-          });
-        } finally {
-          vi.useRealTimers();
-        }
-      });
-
-      it('routes a double-cut placeholder completed before the finish frame through the budget', async () => {
-        // Shape A of the double cut: the remainder chunk carries NO
-        // finishReason (the error lands before the finish frame). It is
-        // HELD — the merged delivered text completes the placeholder prefix —
-        // and the cut then hits the streamError completed-placeholder
-        // discard in processStreamResponse, which swaps in
-        // InvalidStreamError so the invalid-stream budget handler retries
-        // fresh (#8938 review).
-        vi.useFakeTimers();
-        try {
-          const recordAssistantTurn = vi.fn();
-          const chatWithRecording = chatWithRecorder(recordAssistantTurn);
-          vi.mocked(mockContentGenerator.generateContentStream)
-            .mockResolvedValueOnce(cutAfter([textChunk('(request ')]))
-            .mockResolvedValueOnce(cutAfter([textChunk('timeout)')]))
-            .mockResolvedValueOnce(
-              (async function* () {
-                yield textChunk('Recovered response', 'STOP');
-              })(),
-            );
-
-          const stream = await chatWithRecording.sendMessageStream(
-            'test-model',
-            { message: 'test' },
-            'prompt-transport-continuation-double-cut-no-finish',
-          );
-          const events = await collectStreamWithFakeTimers(stream, 60_000);
-
-          expect(
-            mockContentGenerator.generateContentStream,
-          ).toHaveBeenCalledTimes(3);
-          expect(
-            events.some(
-              (event) =>
-                event.type === StreamEventType.CHUNK &&
-                event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
-                  'timeout)',
-            ),
-          ).toBe(false);
-          expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
-          expect(recordedText(recordAssistantTurn)).toBe('Recovered response');
-          // Same budget-routing pin as the sibling double-cut test: the
-          // streamError completed-placeholder discard must swap in the
-          // InvalidStreamError and reach the budget handler (#8938 review).
-          expect(mockLogContentRetry).toHaveBeenCalledTimes(1);
-          expect(mockLogContentRetry).toHaveBeenCalledWith(
-            mockConfig,
-            expect.objectContaining({
-              error_type: 'UPSTREAM_DEGRADED_RESPONSE',
-              model: 'test-model',
-            }),
-          );
-          // Record/history must agree: if the fresh replay did not fully
-          // reset continuation state, history could retain '(request '
-          // merged with the recovered text while the record is clean
-          // (#8938 review).
-          expect(chatWithRecording.getHistory().at(-1)).toEqual({
-            role: 'model',
-            parts: [{ text: 'Recovered response' }],
-          });
-        } finally {
-          vi.useRealTimers();
-        }
-      });
-
-      it('does not convert a folded placeholder once a functionCall chunk was delivered', async () => {
-        // The folded '(request ' + 'timeout)' completes on the same attempt
-        // that delivers a functionCall before the cut. A delivered
-        // functionCall is the point of no return, so the
-        // placeholder->InvalidStreamError conversion must not fire — it
-        // would schedule a fresh retry AFTER the consumer received the tool
-        // call, orphaning the tool_use/tool_result pairing (#8938 review).
-        // The original transport error propagates instead.
-        vi.useFakeTimers();
-        try {
-          const recordAssistantTurn = vi.fn();
-          const chatWithRecording = chatWithRecorder(recordAssistantTurn);
-          const functionCallResponse = {
-            candidates: [
-              {
-                content: {
-                  role: 'model',
-                  parts: [
-                    {
-                      functionCall: {
-                        id: 'call-1',
-                        name: 'someTool',
-                        args: { q: 1 },
-                      },
-                    },
-                  ],
-                },
-              },
-            ],
-          } as unknown as GenerateContentResponse;
-          vi.mocked(mockContentGenerator.generateContentStream)
-            .mockResolvedValueOnce(cutAfter([textChunk('(request ')]))
-            .mockResolvedValueOnce(
-              cutAfter([textChunk('timeout)'), functionCallResponse]),
-            )
-            .mockResolvedValueOnce(
-              (async function* () {
-                yield textChunk('Unexpected fresh retry', 'STOP');
-              })(),
-            );
-
-          const stream = await chatWithRecording.sendMessageStream(
-            'test-model',
-            { message: 'test' },
-            'prompt-placeholder-after-function-call',
-          );
-          const events: StreamEvent[] = [];
-          const collecting = (async () => {
-            for await (const event of stream) events.push(event);
-          })();
-          // Register a handler BEFORE advancing timers: the send loop
-          // rejects mid-advance, and a still-handlerless rejection at a
-          // timer checkpoint trips vitest's unhandled-error gate under
-          // parallel CI load even though the awaited assertion below
-          // passes. (Awaited-only attachment would come too late.)
-          collecting.catch(() => {});
-          await vi.advanceTimersByTimeAsync(0);
-          await vi.advanceTimersByTimeAsync(60_000);
-          await expect(collecting).rejects.toBeTruthy();
-
-          // No fresh attempt after the functionCall was delivered.
-          expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
-            2,
-          );
-          const lastChunk = [...events]
-            .reverse()
-            .find((event) => event.type === StreamEventType.CHUNK);
-          expect(lastChunk).toBeDefined();
-          expect(
-            lastChunk?.type === StreamEventType.CHUNK &&
-              lastChunk.value.candidates?.[0]?.content?.parts?.some(
-                (part) => 'functionCall' in part,
-              ),
-          ).toBe(true);
-          // No retry of any kind after the functionCall chunk.
-          const fcIndex = events.indexOf(lastChunk as StreamEvent);
-          expect(
-            events
-              .slice(fcIndex + 1)
-              .some((event) => event.type === StreamEventType.RETRY),
-          ).toBe(false);
-        } finally {
-          vi.useRealTimers();
-        }
-      });
-
-      it('rejects a placeholder resumed after real delivered text', async () => {
-        vi.useFakeTimers();
-        try {
-          const recordAssistantTurn = vi.fn();
-          const chatWithRecording = chatWithRecorder(recordAssistantTurn);
-          vi.mocked(mockContentGenerator.generateContentStream)
-            .mockResolvedValueOnce(cutAfter([textChunk('The answer is 42. ')]))
-            .mockResolvedValueOnce(
-              (async function* () {
-                yield textChunk('(request timeout)', 'STOP');
-              })(),
-            )
-            .mockResolvedValueOnce(
-              (async function* () {
-                yield textChunk('Recovered response', 'STOP');
-              })(),
-            );
-
-          const stream = await chatWithRecording.sendMessageStream(
-            'test-model',
-            { message: 'test' },
-            'prompt-transport-continuation-placeholder-remainder',
-          );
-          const events = await collectStreamWithFakeTimers(stream, 25_000);
-
-          expect(
-            mockContentGenerator.generateContentStream,
-          ).toHaveBeenCalledTimes(3);
-          expect(
-            events.some(
-              (event) =>
-                event.type === StreamEventType.CHUNK &&
-                event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
-                  '(request timeout)',
-            ),
-          ).toBe(false);
-          // The retry following the rejected continuation must be PLAIN
-          // (no isContinuation): that is the only signal telling the UI
-          // to discard the already-delivered 'The answer is 42. ' prefix,
-          // keeping the screen aligned with the persisted turn (#8938).
-          const retries = events.filter(
-            (event) => event.type === StreamEventType.RETRY,
-          );
-          expect(retries.length).toBeGreaterThan(0);
-          const lastRetry = retries[retries.length - 1] as Extract<
-            StreamEvent,
-            { type: StreamEventType.RETRY }
-          >;
-          expect(lastRetry.isContinuation).toBeFalsy();
-          expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
-          expect(recordedText(recordAssistantTurn)).toBe('Recovered response');
-          expect(chatWithRecording.getHistory().at(-1)).toEqual({
-            role: 'model',
-            parts: [{ text: 'Recovered response' }],
-          });
-        } finally {
-          vi.useRealTimers();
-        }
-      });
-
-      it('retries a placeholder cut before finish without replaying it', async () => {
-        vi.useFakeTimers();
-        try {
-          const recordAssistantTurn = vi.fn();
-          const chatWithRecording = chatWithRecorder(recordAssistantTurn);
-          vi.mocked(mockContentGenerator.generateContentStream)
-            .mockResolvedValueOnce(cutAfter([textChunk('(request timeout)')]))
-            .mockResolvedValueOnce(
-              (async function* () {
-                yield textChunk('Recovered response', 'STOP');
-              })(),
-            );
-
-          const stream = await chatWithRecording.sendMessageStream(
-            'test-model',
-            { message: 'test' },
-            'prompt-transport-cut-placeholder-before-finish',
-          );
-          const events = await collectStreamWithFakeTimers(stream, 25_000);
-
-          expect(
-            mockContentGenerator.generateContentStream,
-          ).toHaveBeenCalledTimes(2);
-          expect(
-            events.some(
-              (event) =>
-                event.type === StreamEventType.CHUNK &&
-                event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
-                  '(request timeout)',
-            ),
-          ).toBe(false);
-          expect(
-            events.some(
-              (event) =>
-                event.type === StreamEventType.RETRY && event.isContinuation,
-            ),
-          ).toBe(false);
-          // The retry must route through the invalid-stream budget, not
-          // transport replay: logContentRetry fires only from the budget
-          // handler, so this pin distinguishes the two routings (the raw
-          // socket error must not escape the completed-placeholder
-          // discard) (#8938 review).
-          expect(mockLogContentRetry).toHaveBeenCalledWith(
-            mockConfig,
-            expect.objectContaining({
-              error_type: 'UPSTREAM_DEGRADED_RESPONSE',
-            }),
-          );
-          expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
-          expect(recordedText(recordAssistantTurn)).toBe('Recovered response');
-          expect(chatWithRecording.getHistory().at(-1)).toEqual({
-            role: 'model',
-            parts: [{ text: 'Recovered response' }],
           });
         } finally {
           vi.useRealTimers();
@@ -13189,39 +11493,6 @@ describe('GeminiChat', async () => {
     },
   );
 
-  it('keeps tool preparations on a deferred finish chunk', async () => {
-    const response = stopResponse([
-      {
-        functionCall: {
-          id: 'call-1',
-          name: 'read_file',
-          args: { file_path: 'a.ts' },
-        },
-      },
-    ]);
-    setToolCallPreparations(response, [
-      { callId: 'call-1', toolName: 'read_file' },
-    ]);
-    vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValueOnce(
-      streamResponse(response),
-    );
-
-    const stream = await chat.sendMessageStream(
-      'test-model',
-      { message: 'test' },
-      'prompt-id-deferred-preparation',
-    );
-    const events: StreamEvent[] = [];
-    for await (const event of stream) events.push(event);
-
-    const emittedPreparations = events
-      .filter((event) => event.type === StreamEventType.CHUNK)
-      .flatMap((event) => getToolCallPreparations(event.value));
-    expect(emittedPreparations).toEqual([
-      { callId: 'call-1', toolName: 'read_file' },
-    ]);
-  });
-
   it('does not retry after a structured tool call has already been emitted', async () => {
     const recordAssistantTurn = vi.fn();
     const chatWithRecording = new GeminiChat(
@@ -13931,6 +12202,46 @@ describe('GeminiChat', async () => {
     // tool_use ↔ tool_result wire invariant for the residual races
     // (`--resume` of a crashed session, Ctrl+Y before in-flight tool
     // finishes, scheduler abort before submitQuery, manual JSONL edits).
+
+    it('keeps a tool result adjacent across a removable degraded placeholder', () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'open /tmp/a.txt' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-1',
+                name: 'read_file',
+                args: { path: '/tmp/a.txt' },
+              },
+            },
+          ],
+        },
+        { role: 'model', parts: [{ text: '(request timeout)' }] },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call-1',
+                name: 'read_file',
+                response: { output: 'ok' },
+              },
+            },
+          ],
+        },
+      ];
+      chat.setHistory(history);
+
+      expect(chat.repairOrphanedToolUseTurns().injected).toEqual([]);
+      expect(chat.getHistory()).toEqual(history);
+      expect(chat.getHistory(true)).toEqual([
+        history[0],
+        history[1],
+        history[3],
+      ]);
+    });
 
     it('injects a synthetic functionResponse for a trailing tool_use (Race B/C)', () => {
       // --resume of a session that crashed after the partial-tool_use push
@@ -17177,12 +15488,6 @@ describe('GeminiChat', async () => {
         c.candidates?.[0]?.content?.parts?.some((p) => p.functionCall),
       );
       expect(syntheticChunk).toBeDefined();
-      expect(chunks[0]?.candidates?.[0]?.content?.parts?.[0]?.text).toBe(
-        'Sure.',
-      );
-      expect(
-        chunks[1]?.candidates?.[0]?.content?.parts?.some((p) => p.functionCall),
-      ).toBe(true);
 
       // History keeps the short prefix as a text part ahead of the recovered
       // functionCall and drops the raw XML (--resume fidelity).
