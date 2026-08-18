@@ -592,10 +592,29 @@ describe('POST /file/upload', () => {
     expect(await fsp.readFile(outside, 'utf-8')).toBe('external');
   });
 
-  it('rejects a missing parent directory before buffering', async () => {
+  it('creates a missing parent directory and uploads into it', async () => {
     const res = await upload('no/such/dir/a.txt').send(Buffer.from('x'));
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({
+      kind: 'file_upload',
+      path: 'no/such/dir/a.txt',
+    });
+    expect(
+      await fsp.readFile(path.join(h.workspace, 'no/such/dir/a.txt'), 'utf8'),
+    ).toBe('x');
+  });
+
+  it('rejects a directory path deeper than the creation cap', async () => {
+    // 65 components exceeds MAX_UPLOAD_DIR_DEPTH; the request must fail
+    // before any directory tree is materialized.
+    const deep = `${Array.from({ length: 65 }, (_, i) => `d${i}`).join('/')}/f.txt`;
+    const res = await upload(deep).send(Buffer.from('x'));
     expect(res.status).toBe(400);
     expect(res.body.errorKind).toBe('parse_error');
+    expect(res.body.error).toContain('64 components');
+    await expect(fsp.stat(path.join(h.workspace, 'd0'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
   });
 
   it('rejects a non-directory parent before buffering', async () => {
