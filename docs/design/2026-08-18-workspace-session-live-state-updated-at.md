@@ -226,16 +226,23 @@ lastTurnEndedAtMs?: number;
 The first accepted running terminal advances it with:
 
 ```ts
-const next = Math.max(
-  Date.now(),
-  (entry.lastTurnEndedAtMs ?? Number.NEGATIVE_INFINITY) + 1,
-);
+const createdAtMs = Date.parse(entry.createdAt);
+const floor = Number.isFinite(createdAtMs)
+  ? createdAtMs
+  : Number.NEGATIVE_INFINITY;
+const next = Math.max(Date.now(), (entry.lastTurnEndedAtMs ?? floor) + 1);
 entry.lastTurnEndedAtMs = next;
 ```
 
 The exact implementation may avoid `Number.NEGATIVE_INFINITY` for readability,
 but must preserve the same behavior. The additional millisecond is a logical
 tie-breaker when wall time has not advanced; it is not a duration measurement.
+The `createdAt` floor on the first advance matters because rows without a
+watermark are keyed by `createdAt` and the live-only cursor carries no
+emitted-identity list: a first watermark behind `createdAt` — a wall-clock
+rollback between creation and the first terminal — would move an
+already-emitted row's key backward mid-pass and let the strictly-older filter
+return it twice.
 
 `publishPromptTerminal` must determine whether the pending prompt was running,
 pass the duplicate latch, advance the watermark, remember the terminal status,
