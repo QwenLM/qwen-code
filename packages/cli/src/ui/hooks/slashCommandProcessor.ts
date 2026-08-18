@@ -74,6 +74,7 @@ import {
 import {
   hasSlashCommandPathSeparator,
   isBtwCommand,
+  SLASH_COMMANDS_SKIP_RECORDING,
 } from '../utils/commandUtils.js';
 import { clearScreen } from '../../utils/stdioHelpers.js';
 import { useKeypress } from './useKeypress.js';
@@ -109,18 +110,6 @@ function serializeHistoryItemForRecording(
   return clone;
 }
 
-const SLASH_COMMANDS_SKIP_RECORDING = new Set([
-  'quit',
-  'exit',
-  'clear',
-  'reset',
-  'new',
-  'resume',
-  'delete',
-  'branch',
-  'btw',
-  'history',
-]);
 const SLASH_COMMAND_ROOTS_HIDE_INVOCATION = new Set([
   'auth',
   'diff',
@@ -1538,8 +1527,15 @@ export const useSlashCommandProcessor = (
             resolvedCommandPath[0] ||
             trimmed.replace(/^[/?]/, '').split(/\s+/u)[0] ||
             trimmed;
+          // The built-in /advisor is skipped by identity (kind + name) so a
+          // user-defined command shadowing the name is still recorded like
+          // any other custom command.
+          const isBuiltInAdvisor =
+            primaryCommand === 'advisor' &&
+            commandToExecute?.kind === CommandKind.BUILT_IN;
           const shouldRecord =
             !delegatedToRecursiveInvocation &&
+            !isBuiltInAdvisor &&
             !SLASH_COMMANDS_SKIP_RECORDING.has(primaryCommand);
           try {
             if (shouldRecord) {

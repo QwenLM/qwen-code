@@ -9,8 +9,9 @@
 // The iterative reverse audit (Step 5) is the one stage of a review whose cost
 // is open-ended: each round is a fan-out (one auditor per chunk on a 3B plan),
 // each round's findings go back through verification, and the loop runs until
-// two consecutive dry rounds or the plan's round cap (5, or 3 for a huge
-// diff). On a PR where every round
+// two consecutive dry rounds or the plan's round cap (one value per topology:
+// 10 on a 3A diff, 5 on a 3B one, and 3 when huge — but only where a deadline
+// exists, since that reduction answers a ceiling; 5 when huge without one). On a PR where every round
 // finds something, that is the whole budget. Measured on a real CI run
 // (#8368, +1699 lines): the audit loop ran to the 5-round cap, consumed 3.5 of
 // the job's 4 budgeted hours, and the outer GNU-timeout kill arrived while
@@ -39,16 +40,10 @@
 // still bounds the run, and a broken environment variable must degrade to
 // today's behaviour, not wedge every budgeted review at round 1.
 
-import {
-  mkdirSync,
-  readFileSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parsePositiveIntegerEnv } from '@qwen-code/qwen-code-core';
-import { promptRecordDir } from './prompt-record.js';
+import { promptRecordDir, runEpochMs } from './prompt-record.js';
 
 /** Unix seconds at which the review process will be killed. Set by CI. */
 export const DEADLINE_ENV = 'QWEN_REVIEW_DEADLINE_EPOCH';
@@ -157,36 +152,11 @@ interface RoundStamp {
 const STAMPS_FILE = 'budget-rounds.json';
 const STOP_FILE = 'budget-stop.json';
 
-/**
- * Slack for the run-epoch fence below: absorbs the sub-millisecond skew
- * between a file mtime (fractional) and `Date.now()` (integral) when a
- * record is written moments after the plan. Real cross-run gaps are minutes
- * to hours; two seconds is noise against them.
- */
-const RUN_EPOCH_SLACK_MS = 2000;
-
-/**
- * The run's epoch: records older than this predate the run and are ignored.
- *
- * The stamps and the stop marker key on the plan path, which is stable per
- * PR — but every run rewrites the plan at its Step 1 capture (`fetch-pr` /
- * `plan-diff` / `capture-local`), so the plan's own mtime dates the run. A
- * budgeted run killed by the outer deadline leaves its records behind (the
- * Step 9 cleanup never ran, and the workflow's start-of-run sweep removes
- * worktrees, not these files); without the fence the next review of the
- * same PR would price its rounds off the previous run's stamps (an
- * hours-old stamp reads as an hours-long round and refuses round 1 of a
- * fresh budget) and cap its verdict on a stop that did not happen in this
- * run. An unstatable plan disables the fence — fail open, like every other
- * malformed input this module reads.
- */
-function runEpochMs(planPath: string): number {
-  try {
-    return statSync(planPath).mtimeMs - RUN_EPOCH_SLACK_MS;
-  } catch {
-    return Number.NEGATIVE_INFINITY;
-  }
-}
+// The run-epoch fence is shared with every other per-run artifact (the
+// prompt records, the transcripts, the session ledger) — one definition in
+// `prompt-record.ts`, so a change to it cannot apply to some readers and not
+// others. The stamps and the stop marker key on the plan path, which is
+// stable per PR; its mtime dates the run.
 
 /**
  * The admission stamps written so far THIS RUN, oldest first. Unreadable →
@@ -371,6 +341,25 @@ function readDeadlineSeconds(env: NodeJS.ProcessEnv): number | null {
 }
 
 /**
+ * Does this run have a clock at all?
+ *
+ * The budget's huge-diff round reduction is a *finishability* ruling — five
+ * ~90-minute rounds do not fit a six-hour CI ceiling — and a ruling about
+ * fitting inside a wall is meaningless where there is no wall. This is how the
+ * capture commands ask, and it deliberately reuses the same parse both gates
+ * read from, so "has a deadline" and "the gate will enforce a deadline" cannot
+ * come apart: a malformed value leaves the review ungated here exactly as it
+ * leaves it ungated there.
+ *
+ * The env, not `process.env`, for the reason every other function in this file
+ * takes it: a test must be able to ask the question without editing the
+ * process it runs in.
+ */
+export function hasReviewDeadline(env: NodeJS.ProcessEnv): boolean {
+  return readDeadlineSeconds(env) !== null;
+}
+
+/**
  * A non-negative seconds override from `env[key]`, or `fallback`. `>= 0`
  * (not `> 0`) is deliberate: 0 is a documented escape hatch on both gates.
  * A missing or malformed value falls back — never a silent zero.
@@ -518,6 +507,11 @@ export interface BudgetStop {
  * a reword of the entry moves its key along with it.
  */
 export const BUDGET_STOP_PHRASE = 'review time budget';
+/** The Chinese pair — the marker's zh entries carry it, and the body-side
+ *  dedup must read BOTH languages: a relayed Chinese stop entry that only the
+ *  English phrase was checked against survived the splice and was rendered
+ *  under the whiffed-agent cause beside the structural stop line. */
+export const BUDGET_STOP_PHRASE_ZH = '评审时间预算';
 
 /**
  * The disclosure as structural parts, both languages: compose-review renders
@@ -558,6 +552,8 @@ export function budgetStopEntryZh(round: number | undefined): string {
  * orchestrator's relayed copy against the marker's by shared text.
  */
 export const ROUND_CAP_PHRASE = 'reverse-audit round cap';
+/** The Chinese pair, for the same bilingual-dedup reason as the budget one. */
+export const ROUND_CAP_PHRASE_ZH = '反审轮数上限';
 
 /**
  * The round-cap disclosure as structural parts, both languages — the
@@ -662,14 +658,17 @@ export function writeBudgetStop(
 }
 
 /**
- * The budget-stop marker, if THIS RUN wrote one. Unreadable → null; so is a
- * marker older than the plan's own capture — a previous run's refusal, left
- * behind by a kill before cleanup, must not cap a verdict on a stop that
- * did not happen in this run (see `runEpochMs`). A marker without a numeric
- * `atMs` cannot prove which run it belongs to and is treated the same way —
- * only this module writes markers, and it always dates them.
+ * The budget-stop marker on disk, whichever run wrote it — shape-checked,
+ * never fenced. A marker without a string `entry` and numeric `atMs` cannot
+ * prove what it is and reads as none; only this module writes markers, and
+ * it always dates them.
+ *
+ * The verdict consumers read through the fenced `readBudgetStop` below;
+ * this unfenced read exists for the one consumer whose purpose is the
+ * OPPOSITE of the fence — cleanup's retention, where a previous run's
+ * marker is exactly the evidence to keep (#9213 on #9206).
  */
-export function readBudgetStop(planPath: string): BudgetStop | null {
+export function readBudgetStopUnfenced(planPath: string): BudgetStop | null {
   try {
     const raw = readFileSync(
       join(promptRecordDir(planPath), STOP_FILE),
@@ -680,8 +679,7 @@ export function readBudgetStop(planPath: string): BudgetStop | null {
       typeof parsed !== 'object' ||
       parsed === null ||
       typeof (parsed as BudgetStop).entry !== 'string' ||
-      typeof (parsed as BudgetStop).atMs !== 'number' ||
-      (parsed as BudgetStop).atMs < runEpochMs(planPath)
+      typeof (parsed as BudgetStop).atMs !== 'number'
     ) {
       return null;
     }
@@ -692,15 +690,34 @@ export function readBudgetStop(planPath: string): BudgetStop | null {
 }
 
 /**
- * Remove any stop marker beside the prompt records. Called when the loop
- * reaches a clean end that outranks an earlier same-run refusal — a
+ * The budget-stop marker, if THIS RUN wrote one. Unreadable → null; so is a
+ * marker older than the plan's own capture — a previous run's refusal, left
+ * behind by a kill before cleanup, must not cap a verdict on a stop that
+ * did not happen in this run (see `runEpochMs`).
+ */
+export function readBudgetStop(planPath: string): BudgetStop | null {
+  const stop = readBudgetStopUnfenced(planPath);
+  if (stop === null || stop.atMs < runEpochMs(planPath)) return null;
+  return stop;
+}
+
+/**
+ * Remove THIS RUN's stop marker beside the prompt records. Called when the
+ * loop reaches a clean end that outranks an earlier same-run refusal — a
  * CONVERGED exit after an over-cap round was refused: the marker would
  * otherwise survive (nothing else unlinks it) and cap a verdict the audit
- * legitimately converged. Missing file and unlink errors are swallowed —
- * the file was the thing to be rid of.
+ * legitimately converged. A marker a PREVIOUS run wrote is left alone: a
+ * converged RE-REVIEW must not unlink the very evidence the next cleanup
+ * keys its retention on (#9213 on #9206) — the verdict side is already
+ * safe from it (the fenced reader drops it), so keeping it costs nothing.
+ * An undateable marker cannot prove it belongs to this run and stays too.
+ * Missing file and unlink errors are swallowed — the file was the thing to
+ * be rid of.
  */
 export function clearBudgetStop(planPath: string): void {
   try {
+    const stop = readBudgetStopUnfenced(planPath);
+    if (stop === null || stop.atMs < runEpochMs(planPath)) return;
     rmSync(join(promptRecordDir(planPath), STOP_FILE), { force: true });
   } catch {
     // Best-effort: a marker we could not remove still only caps a verdict,

@@ -81,6 +81,11 @@ function renderToolLine(
 function renderToolGroup(
   tools: ACPToolCall[],
   customization = {},
+  thoughts?: Array<{
+    content: string;
+    isStreaming?: boolean;
+    beforeToolCallId?: string;
+  }>,
 ): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
@@ -89,7 +94,7 @@ function renderToolGroup(
     root.render(
       <I18nProvider language="en">
         <WebShellCustomizationProvider value={customization}>
-          <ToolGroup tools={tools} />
+          <ToolGroup tools={tools} thoughts={thoughts} />
         </WebShellCustomizationProvider>
       </I18nProvider>,
     );
@@ -1516,6 +1521,115 @@ describe('tool row rendering', () => {
 
     expect(summary?.textContent).toContain('Running');
     expect(summary?.textContent).toContain('Updated task list');
+  });
+});
+
+describe('thinking rows in the compact summary', () => {
+  it('shows a running summary while a thought is streaming', () => {
+    const container = renderToolGroup(
+      [
+        makeTool({
+          callId: 'tool-1',
+          toolName: 'ReadFile',
+          status: 'completed',
+        }),
+      ],
+      {},
+      [{ content: 'thinking about it', isStreaming: true }],
+    );
+
+    expect(container.querySelector('button')?.textContent).toContain(
+      'Thinking',
+    );
+  });
+
+  it('renders a completed thought line that expands its content on click', () => {
+    const container = renderToolGroup(
+      [
+        makeTool({
+          callId: 'tool-1',
+          toolName: 'ReadFile',
+          status: 'completed',
+        }),
+      ],
+      {},
+      [{ content: 'private chain of thought' }],
+    );
+
+    act(() => {
+      container.querySelector('button')?.click();
+    });
+    const thoughtHeader = Array.from(
+      container.querySelectorAll('[role="button"]'),
+    ).find((el) =>
+      (el as HTMLElement).textContent?.includes('Done thinking'),
+    ) as HTMLElement;
+    expect(thoughtHeader).toBeTruthy();
+    // Collapsed by default; content appears on click.
+    expect(container.textContent).not.toContain('private chain of thought');
+    act(() => thoughtHeader.click());
+    expect(container.textContent).toContain('private chain of thought');
+  });
+
+  it('keeps the single tool compact when thinking is folded in', () => {
+    const container = renderToolGroup(
+      [
+        makeTool({
+          callId: 'tool-1',
+          toolName: 'ReadFile',
+          status: 'completed',
+          content: [
+            {
+              type: 'content',
+              content: { type: 'text', text: 'DUMPED CONTENT' },
+            },
+          ],
+        }),
+      ],
+      {},
+      [{ content: 'thinking' }],
+    );
+
+    act(() => {
+      container.querySelector('button')?.click();
+    });
+    // The single tool renders as a compact line, not a force-expanded dump.
+    expect(container.textContent).not.toContain('DUMPED CONTENT');
+  });
+
+  it('renders thoughts interleaved with their tools in original order', () => {
+    const container = renderToolGroup(
+      [
+        makeTool({
+          callId: 'tool-1',
+          toolName: 'ReadFile',
+          status: 'completed',
+        }),
+        makeTool({ callId: 'tool-2', toolName: 'Glob', status: 'completed' }),
+      ],
+      {},
+      [
+        { content: 'first thought', beforeToolCallId: 'tool-1' },
+        { content: 'second thought', beforeToolCallId: 'tool-2' },
+      ],
+    );
+
+    act(() => {
+      container.querySelector('button')?.click();
+      for (const header of container.querySelectorAll('[role="button"]')) {
+        (header as HTMLElement).click();
+      }
+    });
+    const text = container.textContent ?? '';
+    const positions = [
+      'first thought',
+      'ReadFile',
+      'second thought',
+      'Glob',
+    ].map((marker) => text.indexOf(marker));
+    expect(
+      positions.every((v, i) => v >= 0 && (i === 0 || v > positions[i - 1]!)),
+    ).toBe(true);
   });
 });
 

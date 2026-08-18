@@ -17,6 +17,14 @@ Search V1 contract for existing knowledge or RAG services. Only Mem0 has an
 optional write path. There is no generic ingestion protocol, personal memory,
 trusted user identity, per-document ACL, or tamper-resistant audit.
 
+Provider teams that need a separately owned and released integration should
+implement the
+[External Context Provider Extension Profile v1](../../docs/design/external-context-provider-extensions.md).
+Modern services can publish a Remote MCP Extension; services with an existing
+REST API can copy the local adapter example under
+`examples/provider-extension-local/`. These provider-owned extensions do not
+add cases to this workspace's private Provider factory.
+
 Use the governed Gateway/Orchestrator Profile described in #7449 when those
 controls are required.
 
