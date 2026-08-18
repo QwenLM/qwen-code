@@ -1247,14 +1247,14 @@ After the Markdown report exists, create and register the structured review arti
 
 `save-artifact` resolves relative paths and its containment root against `--workspace-root` — **pass the main project directory explicitly, as the block above does**; without the flag it falls back to its own working directory. The flag is not decoration: the root anchors the containment checks (`isWithin` and the symlink walk), and an ambient-cwd root is only as trustworthy as wherever the command happened to run — from inside the untrusted PR worktree it would be the PR's own tree, the exact threat `comment-status`'s run-from-the-main-checkout rule exists to prevent. It used to prefer `QWEN_CODE_PROJECT_DIR`, which does not name the main checkout in any environment — the harness exports it as the session-storage directory under the runtime base — and every measured CI run burned minutes rediscovering that before improvising a workaround (measured; DESIGN.md — The artifact root that pointed at qwen-home).
 
-For PR worktree mode, the findings and composed inputs were created inside `worktreePath`, while the durable report and output belong to the main project directory. Pass absolute paths for all four: resolve `--findings` and `--composed` against `worktreePath`, and resolve `--report` and `--out` against the main project directory. The worktree lives under the main project's `.qwen/tmp/`, so all four remain inside the session workspace accepted by the helper. `save-artifact` prints one JSON object on stdout — `{"path": "<absolute path>", "workspacePath": "<path relative to the main project directory>"}`. Then call `record_artifact` in the current session with exactly this registration shape, copying `workspacePath` from that stdout object verbatim (do not re-derive it from the absolute path):
+For PR worktree mode, the findings and composed inputs were created inside `worktreePath`, while the durable report and output belong to the main project directory. Pass absolute paths for all four: resolve `--findings` and `--composed` against `worktreePath`, and resolve `--report` and `--out` against the main project directory. The worktree lives under the main project's `.qwen/tmp/`, so all four remain inside the session workspace accepted by the helper. `save-artifact` prints one JSON object on stdout — `{"path": "<absolute path>", "workspacePath": "<path relative to the main project directory>"}`. Then call `record_artifact` in the current session with exactly this registration shape, copying the absolute `path` into `workspacePath`. The tool verifies the file and stores the canonical workspace-root-relative form. Do not invent a different relative path, and do not use the old `path` tool parameter:
 
 ```json
 {
   "title": "Code review result",
   "kind": "other",
   "storage": "workspace",
-  "workspacePath": ".qwen/reviews/<report>.json",
+  "workspacePath": "<absolute path from save-artifact.path>",
   "mimeType": "application/vnd.qwen.code-review+json",
   "metadata": {
     "artifactType": "code_review",

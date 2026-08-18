@@ -8681,7 +8681,7 @@ export class Config {
         const { RecordArtifactTool } = await import(
           '../tools/record-artifact.js'
         );
-        return new RecordArtifactTool();
+        return new RecordArtifactTool(this);
       });
     }
     if (this.isLspEnabled() && this.getLspClient()) {
