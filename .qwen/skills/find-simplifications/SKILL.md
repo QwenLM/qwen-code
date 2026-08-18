@@ -37,19 +37,20 @@ unrequested batch of deletions is the shape that gets closed. It also makes
 the ledger free: the issue that carries the proposals is the same object the
 next run reads to avoid re-proposing them.
 
-Open a PR without an assent only when a human in this session asks for one.
+A maintainer asking for a PR in this session counts as assent — record it on
+the ledger before opening the PR.
 
 ## Boundaries
 
-| Skill                                         | Owns                                                                                                 | Why not this one                                    |
-| --------------------------------------------- | ---------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
-| bundled `/simplify`                           | The diff you just wrote; stops when there is no diff                                                 | Cannot see surface accumulated across releases      |
-| `/repo-hygiene`                               | **Wrong** code — a defect provable by evidence; bans "cleaner / more modern / more consistent" edits | Its six angles are all defect classes               |
-| bundled `/review`                             | Judging a change that exists                                                                         | Your change does not exist yet                      |
-| `/create-issue`                               | Filing an issue well                                                                                 | Use it for the ledger comment; do not reinvent it   |
-| `/prepare-pr`                                 | `pr-title.txt` / `pr-body.md` from the repo template                                                 | Call it in the land phase; do not reinvent PR rules |
-| `/verify-pr`                                  | Behavioral A/B evidence for a PR                                                                     | A deletion has no behavior to demo                  |
-| `/bugfix`, `/feat-dev`, `/deflake`, `/docs-*` | A defect, a feature, a flaky test, prose                                                             | None of them remove surface                         |
+| Skill                                         | Owns                                                                                                 | Why not this one                                                                                              |
+| --------------------------------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| bundled `/simplify`                           | The diff you just wrote; stops when there is no diff                                                 | Cannot see surface accumulated across releases                                                                |
+| `/repo-hygiene`                               | **Wrong** code — a defect provable by evidence; bans "cleaner / more modern / more consistent" edits | Its six angles are all defect classes                                                                         |
+| bundled `/review`                             | Judging a change that exists                                                                         | Your change does not exist yet                                                                                |
+| `/create-issue`                               | Filing an issue well                                                                                 | Use it to create the ledger issue when missing — it cannot comment; post run comments with `gh issue comment` |
+| `/prepare-pr`                                 | `pr-title.txt` / `pr-body.md` from the repo template                                                 | Call it in the land phase; do not reinvent PR rules                                                           |
+| `/verify-pr`                                  | Behavioral A/B evidence for a PR                                                                     | A deletion has no behavior to demo                                                                            |
+| `/bugfix`, `/feat-dev`, `/deflake`, `/docs-*` | A defect, a feature, a flaky test, prose                                                             | None of them remove surface                                                                                   |
 
 ## Territory
 
@@ -60,7 +61,7 @@ this repo**. No grep inside this repo can prove such a symbol has no consumer.
 
 | Territory                                                                                                     | Outcome                                                                        |
 | ------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| `packages/cli/src` — `ui/`, `commands/`, `utils/`, `i18n/`, `serve/`, `services/`                             | Landable                                                                       |
+| `packages/cli/src` — the whole package (`generated/` stays under the Never-a-target row below)                | Landable                                                                       |
 | `scripts/`, `esbuild.config.js`, `eslint.legacy-filenames.mjs`, root manifests                                | Landable                                                                       |
 | Whole files or directories nothing imports, anywhere outside `packages/core/src`                              | Landable                                                                       |
 | Anything under `packages/core/src`                                                                            | **Report-only** — published                                                    |
@@ -91,7 +92,7 @@ the issue comment.
 | Path or symbol younger than ~90 days                             | Drop **silently** — unwired new feature, not rot           |
 | A never-called migrator, validator, guard, or dropped wire-up    | Not cleanup. It may be a defect → `/bugfix` or `/review`   |
 | Any consumer cannot be named                                     | Drop                                                       |
-| Correct but tiny (one dead import, a typo)                       | `/repo-hygiene`                                            |
+| Correct but tiny (one dead import, a typo)                       | Reject on the ledger: below both skills' intake bar        |
 | Branch would remove 500+ production logic lines under core paths | Stop. `docs/design/yyyy-mm-dd-topic.md`, then a maintainer |
 
 `AGENTS.md` § Core Infrastructure Is Maintainer-Only governs
@@ -114,16 +115,19 @@ the first comes up empty. Rotation is what stops the third run from
 re-searching the same hot directories.
 
 ```bash
-git fetch origin && git log --oneline -1 origin/main   # survey fresh code, not a stale checkout
+git fetch origin
+# Fetch only updates the ref, but every grep below reads the working tree —
+# survey fresh code, not a stale checkout, by moving to origin/main.
+git switch --detach origin/main
 SLICE=$(( 10#$(date -u +%V) % 4 ))
 ```
 
-| Slice | Territory                                                                                                        |
-| ----- | ---------------------------------------------------------------------------------------------------------------- |
-| 0     | `packages/cli/src/ui/components`, `ui/hooks`, `ui/contexts`                                                      |
-| 1     | `packages/cli/src/ui/commands`, `packages/cli/src/commands`                                                      |
-| 2     | `packages/cli/src/utils`, `packages/cli/src/i18n`, `packages/cli/src/services`                                   |
-| 3     | `scripts/`, `esbuild.config.js`, `eslint.legacy-filenames.mjs`, root manifests, plus whole-file orphans anywhere |
+| Slice | Territory                                                                                                                              |
+| ----- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| 0     | `packages/cli/src/ui/components`, `ui/hooks`, `ui/contexts`                                                                            |
+| 1     | `packages/cli/src/ui/commands`, `packages/cli/src/commands`                                                                            |
+| 2     | `packages/cli/src/utils`, `packages/cli/src/i18n`, `packages/cli/src/services`                                                         |
+| 3     | `scripts/`, `esbuild.config.js`, `eslint.legacy-filenames.mjs`, root manifests, plus whole-file orphans anywhere in landable territory |
 
 Skip a slice the ledger shows was surveyed in the last three runs. Survey a
 report-only territory only when a human asks for it by name.
@@ -146,10 +150,15 @@ ledger`, and nowhere else. Do not commit a state file: a ledger in the repo
 turns "found nothing" into a diff, conflicts across bot branches, and is
 deleted by the autofix branch sweep.
 
-Read it before surveying, append to it after:
+Read it before surveying, append to it after. If the search returns no issue,
+create it first through `/create-issue`, with exactly the title
+`[find-simplifications] candidate ledger` — a first run has nowhere else to
+post, and an improvised title splits the state this section keeps in one
+issue:
 
 ```bash
 gh issue list --state all --search '"find-simplifications" ledger in:title'
+gh issue comment <number> --body-file <comment>.md
 ```
 
 - Each candidate gets an `id` derived from the **surface**, never from prose:
@@ -180,9 +189,10 @@ site, a `file:line`, a `git log` result.
 
 **Finding nothing is a successful run**, and in a repo this skill has already
 swept it is the expected outcome most of the time. Do not lower the evidence
-bar to produce output. On an empty run: post nothing, open nothing, leave
+bar to produce output. On an empty run: open nothing, leave
 `git status --short` clean, and say in one line which slice was searched and
-that it was clean.
+that it was clean — posting only the rejection-only ledger comment of Output
+rule 1 when candidates were rejected.
 
 ### Cadence and stop-loss
 
@@ -209,7 +219,13 @@ easy surface is gone — the remaining work is design, not sweeping).
 
   ```bash
   RG="$(command -v rg || true)"
-  [ -f "$RG" ] || RG="packages/core/vendor/ripgrep/$([ "$(uname -m)" = aarch64 ] && echo arm64 || echo x64)-linux/rg"
+  if [ ! -f "$RG" ]; then
+    OS=linux
+    [ "$(uname -s)" = Darwin ] && OS=darwin
+    M="$(uname -m)"
+    { [ "$M" = aarch64 ] || [ "$M" = arm64 ]; } && A=arm64 || A=x64
+    RG="packages/core/vendor/ripgrep/$A-$OS/rg"
+  fi
   "$RG" --version || exit 1
   ```
 
@@ -233,8 +249,10 @@ easy surface is gone — the remaining work is design, not sweeping).
 
 A run produces, in this order:
 
-1. **Nothing at all**, if nothing survived the proof protocol. Say which slice
-   was searched. Stop.
+1. **Nothing at all**, if nothing survived the proof protocol — except a
+   rejection-only ledger comment (the slice searched, plus each rejected id
+   and its kill-step) when the run rejected candidates: that record is what
+   stops the next run re-deriving them. Say which slice was searched. Stop.
 2. **One ledger comment** listing each surviving candidate: id, territory,
    class, the surface, every consumer found and its kind (test / snapshot /
    docs / none), the minimal deletion, and whether it is landable or

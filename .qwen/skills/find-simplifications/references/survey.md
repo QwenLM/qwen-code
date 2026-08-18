@@ -9,10 +9,12 @@ gone, that is a finding about this document, not about the repo.
 
 ## 0 — Before searching
 
-1. **Survey fresh code** — `git fetch origin`, then work against
-   `origin/main`. A local checkout drifts hundreds of commits behind; a
-   stale base invents dead surface someone already deleted, and misses what
-   landed since.
+1. **Survey fresh code** — `git fetch origin`, then
+   `git switch --detach origin/main`: fetch only updates the ref, while every
+   grep in this phase reads the working tree, so "work against `origin/main`"
+   means actually being on it. A local checkout drifts hundreds of commits
+   behind; a stale base invents dead surface someone already deleted, and
+   misses what landed since.
 2. **Read the ledger** (SKILL.md § The ledger). Collect every tombstoned id.
 3. **Pick the slice** and note it — you will report which territory you swept.
 4. **Calibrate the search.** Grep a symbol you know exists and confirm a hit.
@@ -64,7 +66,8 @@ the symbol. Smaller diff, same surface reduction, no behavior change at all.
 
 Measured at `8fd0162c68`, denominators refreshed at `5c56b67182` — the
 "nothing here" verdicts were not re-derived. Do not re-search these every run;
-if you doubt one, recompute that row and update it.
+if you doubt one, recompute it and record the corrected measurement in the
+run's ledger comment — this phase edits no file, including this one.
 
 | Class                           | Measurement                                                                                                                                                                                                                                                                  |
 | ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -87,10 +90,15 @@ goes on the ledger and what stops the next run re-deriving it.
 
 ```bash
 # whole file or directory:
-git log --diff-filter=A --format=%ad --date=short -- <path> | tail -1
+git log --follow --diff-filter=A --format=%ad --date=short -- <path> | tail -1
 # a symbol, key, or export — the symbol's age, not its file's:
-git log -S '<exact symbol>' --format='%ad %h' --date=short -- <path> | tail -1
+git log --follow -S '<exact symbol>' --format='%ad %h' --date=short -- <path> | tail -1
 ```
+
+`--follow` dates a surface at its creation, not its last rename — without it,
+a path-limited `git log` records a rename as an addition, and the gate
+silently suppresses surfaces that only look young. It requires exactly one
+pathspec.
 
 Younger than ~90 days → **drop silently**, do not even file it. It is a
 feature someone is still wiring up. (90 days is a heuristic, not a measured
@@ -154,8 +162,14 @@ unless you can beat the doc.
   `esbuild.config.js`, `eslint.legacy-filenames.mjs`, or a `scripts/` entry,
   and a `packages`-only search will not see it.
 - ripgrep skips dot-directories, so `.github`, `.qwen`, and `.husky` are
-  searched only when named. **Never name `.claude/worktrees/`** — it holds
-  full copies of this repo and every hit there is a phantom consumer.
+  searched only when named — but naming `.qwen` is still not enough: the
+  `.qwen/*` ignore rule hides tracked content outside the re-included subdirs
+  (`commands/`, `skills/`, `agents/`, `team-memory/`, `review-context.json`)
+  even from a named search, so sweep its tracked files with
+  `git ls-files .qwen | xargs "$RG" …` instead. Do not substitute
+  `--no-ignore`: it surfaces `.qwen/tmp/` scratch copies of this repo, the
+  same phantom-consumer class as `.claude/worktrees/` — **never name that
+  one**, every hit there is a phantom consumer.
 - `packages/desktop` and `packages/desktop-shell` are negated out of the root
   `workspaces` list but are still shipped code; `packages/mobile-mcp` and
   `packages/cua-driver` are vendored. None is a target; all four are
@@ -191,7 +205,7 @@ one commit. This is what a filed candidate should look like.
 **2. Everything says dead; `git` says five days old.** `packages/cli/src/agent-view`
 is ~6,000 lines whose entry flag is passed to a spawned process but parsed
 nowhere; every static signal calls it rot. Then:
-`git log --diff-filter=A --format=%ad --date=short -- packages/cli/src/agent-view
+`git log --follow --diff-filter=A --format=%ad --date=short -- packages/cli/src/agent-view
 | tail -1` → `2026-08-01`, five days before HEAD. It is a feature mid-wiring.
 **Drop silently.** Do not file it, do not mention it — a "should we delete
 your new subsystem?" question costs more trust than the finding is worth.

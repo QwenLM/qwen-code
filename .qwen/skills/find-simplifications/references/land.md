@@ -8,7 +8,9 @@ squash message that cannot honestly describe either.
 
 Stop and say why if any fails:
 
-- A maintainer has assented to this id on the ledger. No assent, no PR.
+- A maintainer has assented to this id — on the ledger, or in this session;
+  record an in-session assent on the ledger before opening the PR. No assent,
+  no PR.
 - The id is not tombstoned.
 - The candidate is in landable territory (SKILL.md § Territory).
 - You are on a fresh branch off current `origin/main`, named
@@ -30,21 +32,28 @@ thing you removed:
 - its test file and any `__snapshots__` entry;
 - its entry in `eslint.legacy-filenames.mjs`, if the deleted file had one —
   otherwise you have created a stale allowlist row while removing another;
+  but first check the stem exempts nothing else
+  (`rg --files -g '**/<name>.ts' -g '**/<name>.*.ts'`): each entry expands to
+  both globs repo-wide, so if a surviving file shares the stem, keep the row
+  and note that on the ledger;
 - its locale keys across all 9 files in `packages/cli/src/i18n/locales/`;
-- its row in `docs/users/**` when the surface was user-visible;
+- its rows in `docs/**` (users and developers alike) when the surface was
+  documented;
 - the doc comment attached to it. That is the one comment deletion this skill
   allows, and only in the same commit as the symbol.
 
 When cutting mechanically, do not trust brace matching to find a function's
 end: a multi-line return type such as `Record<string, { key: string }>` opens
 and closes a brace before the body starts, and a counter will truncate the
-function there. In this prettier-formatted repo a top-level declaration ends
-at the next line that is exactly `}` — or, for a `const`/`let`/`var` arrow or
-literal declaration, at the next line that is exactly `};`. Whatever rule you
+function there. In this prettier-formatted repo everything nested is
+indented, so a top-level declaration ends at the next column-0 line that is
+exactly `}`, `};`, `});`, `];`, or `);` — a `const` holding a call or array
+literal closes with its paren or bracket, not a bare `};`. Whatever rule you
 use, prove it after the cut — a pure deletion must show zero added lines in
 `git diff --numstat`, and the deleted line count must match the declaration's
-extent measured before cutting: zero added lines alone cannot catch
-over-deletion.
+extent as you established it by reading the declaration before cutting:
+re-measuring with the cut rule itself is circular, and zero added lines alone
+cannot catch over-deletion.
 
 Nothing else. No neighbouring cleanup, no rename, no reformat, no "while I
 was here". The diff must contain exactly one idea.
@@ -64,7 +73,7 @@ run every file it hits — a deletion's characteristic failure is a distant test
 that imports the symbol, which a targeted run never executes:
 
 ```bash
-"$RG" -n '\b<Symbol>\b' packages integrations integration-tests \
+"$RG" -n '\b<Symbol>\b' packages integrations integration-tests scripts \
   -g '*.test.*' -g '*.spec.*' -g '**/__snapshots__/**'
 ```
 
@@ -112,11 +121,13 @@ than it looked and belongs back on the ledger.
 
 ## 6 — Commit and PR
 
-- Commit subject: Conventional Commits, ending in `[<id>]` so the ledger can
-  be correlated — e.g.
-  `refactor(cli): remove unused EnumSelector component [enum-selector]`.
-- **PR title carries no bracketed id.** It becomes the squash message on main
-  and must look like every other commit there.
+- Commit subject: plain Conventional Commits — e.g.
+  `refactor(cli): remove unused EnumSelector component`. This repo squashes
+  with `COMMIT_OR_PR_TITLE`: a single-commit branch lands the commit subject
+  on main, and any follow-up commit (§4's restore) flips the squash source to
+  the PR title. Keep the id out of both titles so main always looks like
+  every other commit there; ledger correlation rides on the `simplify/<id>`
+  branch name, the body marker below, and §7's ledger line.
 - Body: call `/prepare-pr`. The repo template verbatim, prose-first;
   `AGENTS.md` says explain motivation and changes in prose and avoid naming
   files and functions there. Do not hard-wrap the body.
