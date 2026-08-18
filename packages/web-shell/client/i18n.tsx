@@ -4189,9 +4189,7 @@ const ZH: Messages = {
   'turnOutputs.closeFileTree': '关闭文件树',
   'turnOutputs.artifactMissing': '工作区中未找到该文件',
   'turnOutputs.artifactUnavailable': (v) =>
-    v?.path
-      ? `工作区中未找到该文件 · ${v.path}`
-      : '工作区中未找到该文件',
+    v?.path ? `工作区中未找到该文件 · ${v.path}` : '工作区中未找到该文件',
   'sidebar.label': '工作区侧边栏',
   'sidebar.toggleMenu': '切换菜单',
   'sidebar.newChat': '新对话',

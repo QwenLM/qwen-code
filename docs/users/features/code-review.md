@@ -366,6 +366,8 @@ The deterministic halves of the pipeline — argument parsing (`qwen review pars
 
 **GitHub Enterprise:** reviewing a PR URL on a non-`github.com` host routes every GitHub call at that host — the review subcommands (`match-remote`, `meta`, `fetch-pr`, `pr-context`, `comment-status`, `issue-context`, `fetch-diff`, `comment-body`, `plan-diff`, `test-plan`, `presubmit`, `compose-review`, `submit`, `publish-assets`) accept `--host` and set it in code, so a forgotten host cannot silently retarget the review at `github.com`.
 
+**Aone Code:** for a clone whose origin is on `gitlab.alibaba-inc.com`, run `/review` from inside that clone — the platform is detected from the remote and the read subcommands work, backed by the `a1` CLI — the target number is the global MR id. `fetch-pr` fetches `refs/merge-requests/<id>/head` and builds the worktree + diff, so the agent review of the worktree is unchanged. In this phase every Aone run is context-unavailable and several flows are skipped (rather than hitting github.com's same-named repo): `pr-context`/`comment-status`/`presubmit` have no Aone backing (verdict caps at `COMMENT`), `test-plan` is unbacked, Agent 0 is skipped, and the `publish-assets` write is skipped — with `--comment` also refused, an Aone run is read-only toward the platform in this phase; findings land in the terminal output and the saved report. See `docs/design/2026-08-15-review-aone-provider.md`.
+
 Every run ends with one machine-readable line (`Review complete: <target> — <disposition>`), so scripts and CI wrappers can detect completion and outcome with a single `^Review complete: ` match.
 
 ## Headless runs (`qwen review run`)
