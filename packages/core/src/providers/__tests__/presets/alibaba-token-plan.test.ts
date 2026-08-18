@@ -38,6 +38,7 @@ describe('token plan provider', () => {
       'qwen3.7-plus',
       'qwen3.6-plus',
       'qwen3.7-max',
+      'qwen3.8-max',
       'qwen3.8-max-preview',
       'qwen3.6-flash',
       'deepseek-v4-pro',
@@ -70,6 +71,10 @@ describe('token plan provider', () => {
     // Plus/2.5 variants are genuinely multimodal and stay that way.
     expect(
       template.find((model) => model.id === 'qwen3.6-plus')?.generationConfig
+        ?.modalities,
+    ).toEqual({ image: true, video: true });
+    expect(
+      template.find((model) => model.id === 'qwen3.8-max')?.generationConfig
         ?.modalities,
     ).toEqual({ image: true, video: true });
     expect(
