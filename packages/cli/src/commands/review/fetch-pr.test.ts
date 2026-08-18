@@ -1319,34 +1319,56 @@ describe('fetch-pr report assembly', () => {
     expect(report.diffPath).not.toBeNull();
   });
 
-  it('refuses to scope when NO base resolved — nothing to be contained in', async () => {
+  it('splits a base-free round by WHY there is no base — retryable or not', async () => {
     // This used to scope, on the reasoning that the delta range needs no base
     // and so a deleted or renamed base branch should not cost a valid anchor
     // its scope. The capture reasoning is right; the SCOPE reasoning is not.
-    // With no base there is no PR diff to check the delta against, and "no
-    // diff to check against" is the absence of proof, not proof — it was the
-    // one arm where an uncontained delta shipped by design, and the shape it
-    // ships is the same "undo per feedback" revert every sibling arm refuses.
-    // `base-untrusted` still means a base that cannot be TRUSTED; this is a
-    // base that does not exist, and the reason says the oracle could not rule.
+    // With no base there is nothing for the slice to come FROM, so the round
+    // reviews the full range — but WHICH reason it reports decides whether
+    // the recovery flow ever retries the anchor, and the two causes are not
+    // the same class.
     anchorIsValid();
+    servesBothRanges();
+
+    // The fetch FAILED: the anchor was never ruled invalid, and a re-run
+    // repeats exactly the component that failed. `base-untrusted` is the
+    // infrastructure-retryable name; reporting `containment-unverified` here
+    // files a transient blip under "deterministic for the same sha and must
+    // NOT be retried", so a CI checkout with a flappy base fetch pays a full
+    // review every round from then on — and the reason misnames the cause,
+    // because the delta read fine.
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: null,
       baseFetchFailed: true,
     });
-    servesBothRanges();
-    const report = await reportFor({ since: ANCHOR });
-    expect(ruling(report)).toEqual({
+    const transient = await reportFor({ since: ANCHOR });
+    expect(ruling(transient)).toEqual({
+      since: ANCHOR,
+      effective: false,
+      reason: 'base-untrusted',
+    });
+
+    // The fetch SUCCEEDED and `git merge-base` found no common ancestor at
+    // all — a cross-fork PR with unrelated history. A re-run reproduces that
+    // exactly, so it is the deterministic class and must not be retried.
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: null,
+      baseFetchFailed: false,
+    });
+    const permanent = await reportFor({ since: ANCHOR });
+    expect(ruling(permanent)).toEqual({
       since: ANCHOR,
       effective: false,
       reason: 'containment-unverified',
     });
-    // Nothing is published, which is what a base-free round does ANYWAY: with
-    // no merge base there is no full range either, and the command already
-    // tells agents to fall back to running `git diff` themselves. So this
-    // costs no review that existed — it removes the one arm that shipped a
-    // scope no containment check had ever seen.
-    expect(report.diffPath).toBeNull();
+
+    // Either way nothing is published, which is what a base-free round does
+    // ANYWAY: with no merge base there is no full range either, and the
+    // command already tells agents to fall back to running `git diff`
+    // themselves. So this costs no review that existed — it removes the one
+    // arm that shipped a scope no containment check had ever seen.
+    expect(transient.diffPath).toBeNull();
+    expect(permanent.diffPath).toBeNull();
   });
 
   it('keeps upToDate through a partition failure — the stop flow needs no plan', async () => {

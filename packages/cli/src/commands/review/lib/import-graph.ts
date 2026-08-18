@@ -100,11 +100,24 @@ const EXT_MAP: ReadonlyArray<[RegExp, string]> = [
 const EXT_WALK = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs'];
 
 function candidatesFor(base: string): string[] {
-  const out: string[] = [];
+  // The LITERAL specifier first, then the extension remaps. `resolveSpecifier`
+  // takes the first membership hit, so order is precedence — and an `import
+  // './util.js'` in a mixed JS/TS directory where BOTH `util.js` and
+  // `util.ts` changed used to resolve to `util.ts`, the file the caller does
+  // not import. That is not one extra widened file (the cost this module's
+  // header budgets for a wrong edge); it DISPLACES the true edge, so the seam
+  // brief points the agent at a pairing that does not exist while the real
+  // one — caller × util.js — is named nowhere and retires unreviewed under a
+  // `scope.interaction` entry claiming the caller was covered.
+  //
+  // The remaps still matter, and are still tried: `./x.js` in a TS project
+  // usually names `x.ts`, because that is what the emit convention means. It
+  // is only when the literal file EXISTS in the membership that it wins, and
+  // there the literal is not a guess at all.
+  const out: string[] = [base];
   for (const [re, ts] of EXT_MAP) {
     if (re.test(base)) out.push(base.replace(re, ts));
   }
-  out.push(base);
   if (!/\.[a-z]+$/i.test(base)) {
     for (const ext of EXT_WALK) out.push(`${base}${ext}`);
     for (const ext of EXT_WALK) out.push(`${base}/index${ext}`);
@@ -165,7 +178,12 @@ export function resolveSpecifier(
       // git-normalised membership path can equal, silently dropping the edge.
       const subRaw = spec.slice(pkg.name.length + 1);
       const subNorm = nodePath.posix.normalize(subRaw);
-      if (subNorm.startsWith('..')) return null;
+      // Segment-exact, exactly as `repoJoin` above is and for the same
+      // reason: `..config/mod.js` normalises to itself, is a legal directory
+      // name, and `startsWith('..')` called it an escape — dropping the
+      // widening edge for that path and disabling the seam check this feature
+      // exists to perform. The relative branch got the fix; this one did not.
+      if (subNorm === '..' || subNorm.startsWith('../')) return null;
       const sub = subNorm;
       const base = pkg.dir === '' ? sub : `${pkg.dir}/${sub}`;
       for (const c of candidatesFor(base)) if (membership.has(c)) return c;

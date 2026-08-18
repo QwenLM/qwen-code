@@ -75,6 +75,57 @@ describe('resolveSpecifier', () => {
     );
   });
 
+  it('prefers the LITERAL file over its extension remap when both exist', () => {
+    // A mixed JS/TS directory where both siblings changed. Every other test
+    // here uses a single-element membership, so nothing distinguished
+    // precedence — and the remap ran first, resolving `./util.js` to
+    // `util.ts`: a file the caller does not import. That does not cost one
+    // extra widened file, it DISPLACES the true edge, so the seam brief names
+    // a pairing that does not exist while caller × util.js is named nowhere
+    // and retires unreviewed.
+    const mixed = new Set([
+      'packages/cli/src/util.js',
+      'packages/cli/src/util.ts',
+    ]);
+    expect(resolveSpecifier('packages/cli/src/z.ts', './util.js', mixed)).toBe(
+      'packages/cli/src/util.js',
+    );
+    // …and the remap still resolves when the literal is NOT in the
+    // membership, which is the ordinary TS-project case it exists for.
+    expect(
+      resolveSpecifier(
+        'packages/cli/src/z.ts',
+        './util.js',
+        new Set(['packages/cli/src/util.ts']),
+      ),
+    ).toBe('packages/cli/src/util.ts');
+  });
+
+  it('accepts a package subpath whose directory merely BEGINS with dots', () => {
+    // The twin of `repoJoin`'s segment-exact check, which the relative branch
+    // already had. `..config/mod.js` normalises to itself and is a legal
+    // directory name; read as an escape, the edge is dropped and the seam
+    // check is silently disabled for that path.
+    const dotted = new Set(['packages/core/..config/mod.ts']);
+    expect(
+      resolveSpecifier(
+        'packages/cli/src/z.ts',
+        '@qwen/core/..config/mod.js',
+        dotted,
+        pkgs,
+      ),
+    ).toBe('packages/core/..config/mod.ts');
+    // A genuine escape is still refused.
+    expect(
+      resolveSpecifier(
+        'packages/cli/src/z.ts',
+        '@qwen/core/../outside.js',
+        new Set(['packages/outside.ts', 'outside.ts']),
+        pkgs,
+      ),
+    ).toBeNull();
+  });
+
   it('walks extensions and index forms for extensionless specifiers', () => {
     expect(resolveSpecifier('packages/cli/src/z.ts', './a', files)).toBe(
       'packages/cli/src/a.ts',
