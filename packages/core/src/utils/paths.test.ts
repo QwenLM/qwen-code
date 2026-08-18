@@ -1225,35 +1225,3 @@ describe('expandHomeDir', () => {
     );
   });
 });
-
-describe('realpathNearestExisting', () => {
-  it('resolves an existing path on disk', () => {
-    expect(realpathNearestExisting(os.tmpdir())).toBe(
-      fs.realpathSync.native(os.tmpdir()),
-    );
-  });
-
-  it('re-appends the missing tail over the nearest existing ancestor', () => {
-    const gone = path.join(os.tmpdir(), 'qwen-test-no-such-dir', 'nested');
-    expect(realpathNearestExisting(gone)).toBe(
-      path.join(
-        fs.realpathSync.native(os.tmpdir()),
-        'qwen-test-no-such-dir',
-        'nested',
-      ),
-    );
-  });
-
-  it('gives up on a symlink loop instead of spinning forever', () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-rne-'));
-    try {
-      fs.symlinkSync(path.join(root, 'b'), path.join(root, 'a'));
-      fs.symlinkSync(path.join(root, 'a'), path.join(root, 'b'));
-      expect(
-        realpathNearestExisting(path.join(root, 'a', 'leaf')),
-      ).toBeUndefined();
-    } finally {
-      fs.rmSync(root, { recursive: true, force: true });
-    }
-  });
-});

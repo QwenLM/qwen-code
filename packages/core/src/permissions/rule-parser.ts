@@ -5,6 +5,7 @@
  */
 
 import path from 'node:path';
+import fs from 'node:fs';
 import os from 'node:os';
 import picomatch from 'picomatch';
 import { parse } from 'shell-quote';
@@ -13,7 +14,7 @@ import {
   normalizeMcpToolName,
   sanitizeToolNameForProvider,
 } from '../utils/tool-name-utils.js';
-import { realpathNearestExisting } from '../utils/paths.js';
+import { isNodeError } from '../utils/errors.js';
 
 const debugLogger = createDebugLogger('PERMISSIONS');
 
@@ -1202,6 +1203,53 @@ function resolveWithoutNormalizing(base: string, filePath: string): string {
   return path.isAbsolute(filePath)
     ? filePath
     : `${base}${/[\\/]$/.test(base) ? '' : path.sep}${filePath}`;
+}
+
+function realpathNearestExisting(filePath: string): string | undefined {
+  let current = filePath;
+  const missingSegments: string[] = [];
+  let symlinkHops = 0;
+  const maxSymlinkHops = 40;
+
+  while (true) {
+    try {
+      // Joining deliberately normalizes traversal in the unresolved suffix.
+      return path.join(fs.realpathSync.native(current), ...missingSegments);
+    } catch (error: unknown) {
+      if (
+        !isNodeError(error) ||
+        (error.code !== 'ENOENT' && error.code !== 'ENOTDIR')
+      ) {
+        return undefined;
+      }
+    }
+
+    try {
+      if (fs.lstatSync(current).isSymbolicLink()) {
+        if (symlinkHops++ >= maxSymlinkHops) {
+          return undefined;
+        }
+        const target = fs.readlinkSync(current);
+        const parent = fs.realpathSync.native(path.dirname(current));
+        current = resolveWithoutNormalizing(parent, target);
+        continue;
+      }
+    } catch (error: unknown) {
+      if (
+        !isNodeError(error) ||
+        (error.code !== 'ENOENT' && error.code !== 'ENOTDIR')
+      ) {
+        return undefined;
+      }
+    }
+
+    const parent = path.dirname(current);
+    if (parent === current) {
+      return undefined;
+    }
+    missingSegments.unshift(path.basename(current));
+    current = parent;
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

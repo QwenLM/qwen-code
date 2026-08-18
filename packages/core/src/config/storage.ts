@@ -54,10 +54,11 @@ function isResolvedPathWithinDirectory(childPath: string, parentPath: string) {
 // gone by definition: realpathNearestExisting walks up to the nearest existing
 // ancestor and re-appends the missing tail, so a deleted worktree still
 // resolves to its real location (on macOS /var/folders vs /private/var/folders
-// otherwise never matches). Unresolvable paths fall back to the raw candidate,
-// which simply fails the tmpdir containment check below and keeps the bucket.
+// otherwise never matches). The helper never throws: an unresolvable candidate
+// comes back in lexical form, which fails the tmpdir containment check below
+// and keeps the bucket.
 function resolveSweepCandidate(candidate: string): string {
-  return realpathNearestExisting(candidate) ?? candidate;
+  return realpathNearestExisting(candidate);
 }
 
 // The repo-existence conjunct needs positive proof: only a clean stat counts
