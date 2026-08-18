@@ -189,11 +189,15 @@ function runEmitWorkflow(args: EmitWorkflowArgs): void {
 
   const agents = buildFanOutRoster(report, args.plan, rules);
   const temporaryPath = `${scriptPath}.${randomUUID()}.tmp`;
-  writeFileSync(temporaryPath, buildReviewWorkflowScript(agents), {
-    encoding: 'utf8',
-    flag: 'wx',
-  });
+  // The write is inside the cleanup too: a failure mid-write (ENOSPC, EIO)
+  // throws AFTER the temp file exists, and a finally that only covers the
+  // rename would leave that half-written shape in the saved-workflow dir
+  // forever — cleanup removes only the exact script paths.
   try {
+    writeFileSync(temporaryPath, buildReviewWorkflowScript(agents), {
+      encoding: 'utf8',
+      flag: 'wx',
+    });
     renameSync(temporaryPath, scriptPath);
   } finally {
     rmSync(temporaryPath, { force: true });

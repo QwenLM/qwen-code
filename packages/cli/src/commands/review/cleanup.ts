@@ -22,7 +22,7 @@ import {
   rmSync,
   statSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   clearReviewWorktreeLease,
@@ -643,6 +643,40 @@ export function runCleanup(target: string): void {
       } catch (err) {
         writeStderrLine(
           `Failed to remove ${workflowPath}: ${(err as Error).message}`,
+        );
+        failedAny = true;
+      }
+    }
+
+    // A run killed between the temp-file write and the rename leaves
+    // `<script>.<uuid>.tmp` beside the script, and nothing else removes it.
+    // The rename target is deterministic per target, so its temp prefix is
+    // too: only this target's orphans match, never another review's files.
+    let workflowEntries: string[] = [];
+    try {
+      workflowEntries = readdirSync(REVIEW_WORKFLOWS_DIR);
+    } catch (err) {
+      writeStderrLine(
+        `Failed to inspect ${REVIEW_WORKFLOWS_DIR}: ${(err as Error).message}`,
+      );
+      failedAny = true;
+    }
+    const tmpPrefixes = workflowPaths.map((path) => `${basename(path)}.`);
+    for (const entry of workflowEntries) {
+      if (
+        !entry.endsWith('.tmp') ||
+        !tmpPrefixes.some((prefix) => entry.startsWith(prefix))
+      ) {
+        continue;
+      }
+      const orphanPath = join(REVIEW_WORKFLOWS_DIR, entry);
+      try {
+        rmSync(orphanPath, { force: true });
+        writeStdoutLine(`Removed generated workflow temp file: ${orphanPath}`);
+        removedAny = true;
+      } catch (err) {
+        writeStderrLine(
+          `Failed to remove ${orphanPath}: ${(err as Error).message}`,
         );
         failedAny = true;
       }

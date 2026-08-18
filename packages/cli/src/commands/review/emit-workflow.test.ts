@@ -16,7 +16,17 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+
+const mocks = vi.hoisted(() => ({
+  writeStdoutLine: vi.fn(),
+  writeStderrLine: vi.fn(),
+}));
+
+vi.mock('../../utils/stdioHelpers.js', () => ({
+  writeStdoutLine: mocks.writeStdoutLine,
+  writeStderrLine: mocks.writeStderrLine,
+}));
 import {
   buildFanOutRoster,
   emitWorkflowCommand,
@@ -28,6 +38,11 @@ import { readRecordedPrompts } from './lib/prompt-record.js';
 import { requiredAgents, type RosterPlan } from './lib/roster.js';
 import { reviewWorkflowScriptPath } from './lib/paths.js';
 import type { PlanReport } from './lib/report.js';
+
+beforeEach(() => {
+  mocks.writeStdoutLine.mockClear();
+  mocks.writeStderrLine.mockClear();
+});
 
 /**
  * A small local review: uncommitted changes, no PR, no worktree, under both
@@ -202,15 +217,27 @@ describe('emit-workflow — the workflows gate', () => {
   // nothing — a review reported as covered by agents that do not exist.
   it('routes to legacy without writing anything when workflows are disabled', () => {
     const dir = mkdtempSync(join(tmpdir(), 'emit-wf-'));
+    const cwd = process.cwd();
     const priorExit = process.exitCode;
+    vi.stubEnv('QWEN_CODE_ENABLE_WORKFLOWS', '0');
+    vi.stubEnv('QWEN_REVIEW_WORKFLOW', '0');
+    vi.stubEnv('QWEN_CODE_DISABLE_WORKFLOWS', '0');
     try {
+      // The script path is cwd-relative, so stand where a routing flip would
+      // write: a stray generated script must land in the tmpdir, never the repo.
+      process.chdir(dir);
       const plan = join(dir, 'plan.json');
       writeFileSync(plan, JSON.stringify(localPlan()), 'utf8');
       (emitWorkflowCommand.handler as (a: unknown) => void)({ plan });
       expect(process.exitCode).toBe(EXIT_LEGACY_ORCHESTRATION);
+      // SKILL.md branches on the literal 6; asserting only the constant would
+      // move both sides of the pin together if it were ever renumbered.
+      expect(EXIT_LEGACY_ORCHESTRATION).toBe(6);
       expect(readRecordedPrompts(plan).size).toBe(0);
     } finally {
+      process.chdir(cwd);
       process.exitCode = priorExit;
+      vi.unstubAllEnvs();
       rmSync(dir, { recursive: true, force: true });
     }
   });
@@ -220,15 +247,20 @@ describe('emit-workflow — the workflows gate', () => {
   // reviews in — and rolling reviews back does not take the runtime with it.
   it('still routes to legacy when the runtime is on but /review is not opted in', () => {
     const dir = mkdtempSync(join(tmpdir(), 'emit-wf-'));
+    const cwd = process.cwd();
     const priorExit = process.exitCode;
     vi.stubEnv('QWEN_CODE_ENABLE_WORKFLOWS', '1');
+    vi.stubEnv('QWEN_REVIEW_WORKFLOW', '0');
+    vi.stubEnv('QWEN_CODE_DISABLE_WORKFLOWS', '0');
     try {
+      process.chdir(dir);
       const plan = join(dir, 'plan.json');
       writeFileSync(plan, JSON.stringify(localPlan()), 'utf8');
       (emitWorkflowCommand.handler as (a: unknown) => void)({ plan });
       expect(process.exitCode).toBe(EXIT_LEGACY_ORCHESTRATION);
       expect(readRecordedPrompts(plan).size).toBe(0);
     } finally {
+      process.chdir(cwd);
       process.exitCode = priorExit;
       vi.unstubAllEnvs();
       rmSync(dir, { recursive: true, force: true });
@@ -243,6 +275,10 @@ describe('emit-workflow — what it writes', () => {
   beforeEach(() => {
     vi.stubEnv('QWEN_CODE_ENABLE_WORKFLOWS', '1');
     vi.stubEnv('QWEN_REVIEW_WORKFLOW', '1');
+    // The kill switch is checked first and is not stubbed back by
+    // unstubAllEnvs unless it was stubbed: an ambient '1' would route every
+    // test below to legacy and fail the write assertions spuriously.
+    vi.stubEnv('QWEN_CODE_DISABLE_WORKFLOWS', '0');
     dir = mkdtempSync(join(tmpdir(), 'emit-wf-'));
     cwd = process.cwd();
     // The script path is repo-relative, like every other review path, so the
@@ -263,7 +299,20 @@ describe('emit-workflow — what it writes', () => {
   it('writes the script where the Workflow loader will accept it', () => {
     const plan = join(dir, 'plan.json');
     writeFileSync(plan, JSON.stringify(localPlan()), 'utf8');
+    const priorExit = process.exitCode;
     (emitWorkflowCommand.handler as (a: unknown) => void)({ plan });
+    try {
+      // The routing contract: a written script means exit 0, not the legacy
+      // verdict — SKILL.md branches on it before reading anything else.
+      expect(process.exitCode ?? 0).toBe(0);
+    } finally {
+      process.exitCode = priorExit;
+    }
+    // The one line the skill parses to build its single Workflow call; it
+    // must carry the absolute path, or the dispatch has nothing to load.
+    expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+      `scriptPath: ${resolve(reviewWorkflowScriptPath(plan))}`,
+    );
 
     const scriptPath = reviewWorkflowScriptPath(plan);
     expect(scriptPath.startsWith(join('.qwen', 'workflows'))).toBe(true);

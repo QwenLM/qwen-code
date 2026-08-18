@@ -81,6 +81,26 @@ describe('resolveOrchestration — the gates', () => {
     );
     expect(verdict.reason).toMatch(/workflows are not enabled/);
   });
+
+  // The gates opening must not demote a plan the script cannot express: the
+  // routing verdict and the roster builder both read `structuralBlocker`, so
+  // an ineligible plan falls back to the hand-launched roster instead of
+  // reaching the builder's own refusal as a hard error.
+  it('routes a structurally blocked plan to legacy even with both gates open', () => {
+    const territory = resolveOrchestration(
+      localPlan({ srcDiffLines: 2000, diffLines: 6000 }),
+      ON,
+    );
+    expect(territory.mode).toBe('legacy');
+    expect(territory.reason).toMatch(/territory fan-out \(Step 3B\)/);
+
+    const worktree = resolveOrchestration(
+      localPlan({ worktreePath: '.qwen/tmp/review-pr-42', prNumber: 42 }),
+      ON,
+    );
+    expect(worktree.mode).toBe('legacy');
+    expect(worktree.reason).toMatch(/takes no working directory/);
+  });
 });
 
 describe('structuralBlocker — what a plan itself forecloses', () => {

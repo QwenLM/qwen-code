@@ -199,6 +199,13 @@ describe('runCleanup', () => {
         p === '/repo/.qwen/workflows/qwen-review-pr-123-fetch.js') as never,
     );
     mocks.lstatSync.mockReturnValue({ isSymbolicLink: () => false });
+    // The foreign entries sit in the listing an enumeration would read, so a
+    // future sweep that over-deletes past this target's exact paths turns
+    // the negative assertions below red instead of seeing an empty dir.
+    mocks.readdirSync.mockImplementation(((path: string) =>
+      path === '/repo/.qwen/workflows'
+        ? ['qwen-review-a749ec7145.js', 'qwen-review-checklist.js']
+        : []) as never);
 
     runCleanup('pr-123');
 
@@ -229,6 +236,16 @@ describe('runCleanup', () => {
         p === '/repo/.qwen/workflows/qwen-review-pr-123-plan.js' ||
         p === '/repo/.qwen/workflows/qwen-review-pr-123-fetch.js') as never,
     );
+    mocks.lstatSync.mockImplementation((path: string) => {
+      if (
+        path === '/repo/.qwen/workflows' ||
+        path === '/repo/.qwen/workflows/qwen-review-pr-123-plan.js' ||
+        path === '/repo/.qwen/workflows/qwen-review-pr-123-fetch.js'
+      ) {
+        return { isSymbolicLink: () => false };
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
     mocks.findSymlinkedReviewWorkflowPath.mockReturnValue(
       '/repo/.qwen/workflows',
     );
@@ -309,6 +326,42 @@ describe('runCleanup', () => {
 
     expect(mocks.rmSync).toHaveBeenCalledWith(planPath, { force: true });
     expect(mocks.rmSync).not.toHaveBeenCalledWith(fetchPath, expect.anything());
+  });
+
+  it('sweeps this target killed-run temp files, and nothing else', () => {
+    const planOrphan =
+      'qwen-review-pr-123-plan.js.8095c532-aaaa-4bbb-8ccc-1234567890ab.tmp';
+    const fetchOrphan =
+      'qwen-review-pr-123-fetch.js.91a6d643-bbbb-4ccc-9ddd-234567890abc.tmp';
+    const foreignOrphan =
+      'qwen-review-pr-456-plan.js.02b7e754-cccc-4ddd-8eee-34567890abcd.tmp';
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    mocks.existsSync.mockImplementation(
+      ((p: string) => p === '/repo/.qwen/workflows') as never,
+    );
+    mocks.readdirSync.mockImplementation(((path: string) =>
+      path === '/repo/.qwen/workflows'
+        ? [planOrphan, fetchOrphan, foreignOrphan, 'qwen-review-checklist.js']
+        : []) as never);
+
+    runCleanup('pr-123');
+
+    expect(mocks.rmSync).toHaveBeenCalledWith(
+      `/repo/.qwen/workflows/${planOrphan}`,
+      { force: true },
+    );
+    expect(mocks.rmSync).toHaveBeenCalledWith(
+      `/repo/.qwen/workflows/${fetchOrphan}`,
+      { force: true },
+    );
+    expect(mocks.rmSync).not.toHaveBeenCalledWith(
+      `/repo/.qwen/workflows/${foreignOrphan}`,
+      expect.anything(),
+    );
+    expect(mocks.rmSync).not.toHaveBeenCalledWith(
+      '/repo/.qwen/workflows/qwen-review-checklist.js',
+      expect.anything(),
+    );
   });
 
   it('does not claim nothing when generated-workflow inspection fails', () => {
