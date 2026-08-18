@@ -21,7 +21,12 @@ import {
   ensureAuthenticated,
   setGhHost,
 } from './lib/gh.js';
-import { carriedClaimLine, severityOf } from './lib/inline-counts.js';
+import {
+  LEADING_INVISIBLE_RE,
+  carriedClaimLine,
+  severityOf,
+} from './lib/inline-counts.js';
+import { carriesCommentMarker } from './lib/review-footer.js';
 import { LEDGER_ID_READBACK, LEDGER_ID_TOKEN } from './lib/ledger.js';
 
 interface FindingAnchor {
@@ -69,8 +74,21 @@ interface CommentSummary {
 const LEDGER_ID_SHAPE = new RegExp(`^${LEDGER_ID_TOKEN}$`);
 /** The carried id this comment's claim line leads with, if any. */
 function extractCarriedIds(body: string): string[] {
-  const line = carriedClaimLine(body) ?? '';
-  const carried = LEDGER_ID_READBACK.exec(line);
+  let line = carriedClaimLine(body);
+  if (line === null && carriesCommentMarker(body)) {
+    // The attribution-off POSTED shape: `submit` strips the severity
+    // prefix before posting, so the marker-less body carries the claim on
+    // its first line and the severity in the trailing invisible marker.
+    // Without reading the id back off that line, a carried re-post lands
+    // as a plain overlap and is dedup-dropped from round 3 onward, while
+    // the surviving id token bars the id-less fallback.
+    line = body
+      .trimStart()
+      .split(/\r\n?|\n/)[0]
+      .replace(LEADING_INVISIBLE_RE, '')
+      .trim();
+  }
+  const carried = LEDGER_ID_READBACK.exec(line ?? '');
   return carried ? [carried[1]] : [];
 }
 
@@ -702,27 +720,33 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
   const allComments = ghApiAll(
     `repos/${owner}/${repo}/pulls/${prNumber}/comments`,
   ) as RawComment[];
-  // Footer match first — and NOT the only match: with `review.attribution`
-  // off, posted comments carry no footer, and a filter keyed on the footer
-  // alone goes blind to every earlier attribution-off post — the overlap and
-  // stale classification (and the `blockOnExistingComments` gate that exists
-  // to stop duplicate posting) silently stop seeing them. Fall back to
-  // authorship for the reviewing account's own top-level comments, gated on
-  // the finding shape through `severityOf` — the same trimmed predicate
-  // `submit` posts through (a body that leaves with leading whitespace must
-  // still be recognized here), while a hand-written comment by the same
-  // account is not a posted finding — admitting one lets a same-line hand
-  // comment trip the overlap gate into silently dropping a genuinely new
-  // finding. Replies stay excluded either way. Attribution-off posts from
-  // OTHER accounts still escape detection — no footer, no authorship signal
-  // — and the setting's description says so.
+  // Recognize a posted finding by any of the three signals it carries, at
+  // different trust levels. The visible footer is qwen's own provenance
+  // string — long, model- and version-stamped, not something a hand comment
+  // carries — so it matches regardless of account, even when the login is
+  // unknown (#9212 pins exactly this). The invisible marker and the finding
+  // shape are short and plantable, so they match only for the reviewing
+  // account's own top-level comments: an ungated match on either lets anyone
+  // plant one on the line they expect a blocker on and have the next round
+  // silently withhold that blocker as a duplicate — provenance the commenter
+  // cannot fake is the account, not the string. The marker disjunct catches
+  // attribution-off posts in the exact shape `submit` posts (marker trailing
+  // the body); the `severityOf` disjunct remains for this account's posts
+  // made before the marker existed, gated on the finding shape — the same
+  // trimmed predicate `submit` posts through (a body that leaves with leading
+  // whitespace must still be recognized here) — while a hand-written comment
+  // by the same account is not a posted finding: admitting one lets a
+  // same-line hand comment trip the overlap gate into silently dropping a
+  // genuinely new finding. Replies stay excluded either way. Attribution-off
+  // posts from OTHER accounts still escape detection — no footer, no
+  // authorship signal — and the setting's description says so.
   const qwenComments = allComments.filter(
     (c) =>
       /via Qwen Code \/review/.test(c.body ?? '') ||
       (!c.in_reply_to_id &&
         me !== '' &&
         (c.user?.login ?? '').toLowerCase() === me.toLowerCase() &&
-        severityOf(c) !== null),
+        (carriesCommentMarker(c.body ?? '') || severityOf(c) !== null)),
   );
 
   const repliedToIds = new Set<number>();
