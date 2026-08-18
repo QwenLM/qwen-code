@@ -12586,7 +12586,7 @@ describe('DaemonSessionProvider', () => {
     expect(notices.at(-1)).toBeUndefined();
   });
 
-  it('trims an oversized initial replay to the block cap and stops older pagination', async () => {
+  it('trims an oversized initial replay to the block cap and re-anchors older pagination', async () => {
     sdkMocks.capabilities.mockResolvedValue({
       workspaceCwd: '/mock-workspace',
       features: ['session_transcript_pagination'],
@@ -12604,7 +12604,10 @@ describe('DaemonSessionProvider', () => {
         update: {
           sessionUpdate: kind,
           content: { type: 'text', text },
-          _meta: { 'qwen.session.recordId': recordId },
+          _meta: {
+            'qwen.session.recordId': recordId,
+            qwenTranscript: { sourceRecordIds: [recordId] },
+          },
         },
       },
     });
@@ -12620,6 +12623,12 @@ describe('DaemonSessionProvider', () => {
       },
     });
     sdkMocks.sessions.push(session);
+    sdkMocks.getSessionTranscriptPage.mockResolvedValue({
+      v: 1,
+      sessionId: session.sessionId,
+      events: [],
+      hasMore: false,
+    });
     let history: ReturnType<typeof useDaemonTranscriptHistory> | undefined;
     let blocks: readonly DaemonTranscriptBlock[] = [];
 
@@ -12637,16 +12646,381 @@ describe('DaemonSessionProvider', () => {
 
     // The rebuild keeps the most recent blocks within the cap instead of
     // ratcheting the cap up to the replay size (which retained unbounded
-    // history and exhausted renderer memory on busy sessions).
+    // history and exhausted renderer memory on busy sessions). The trim is
+    // surfaced via capacityReached, and the anchor re-bases to the oldest
+    // RETAINED record: the pre-trim anchor (record-1) was evicted, and an
+    // exclusive anchor pointing at it could never re-fetch the trimmed
+    // stretch.
     expect(blocks).toMatchObject([
       { kind: 'assistant', text: 'recent answer' },
+    ]);
+    expect(history).toMatchObject({
+      hasMore: true,
+      loading: false,
+      capacityReached: true,
+    });
+    expect(sdkMocks.getSessionTranscriptPage).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await history?.loadMore();
+      await flushPromises();
+    });
+    expect(sdkMocks.getSessionTranscriptPage).toHaveBeenCalledWith(
+      session.sessionId,
+      {
+        beforeRecordId: 'record-2',
+        limit: 25,
+        clientId: session.clientId,
+      },
+    );
+  });
+
+  it('surfaces capacity and re-anchors pagination when the rebuild count-trims a live session', async () => {
+    // Count corner: live (non-restored) sessions report historyHasMore=false,
+    // so the capacity latch must not be gated on it — the trimmed stretch is
+    // persisted daemon-side and fetchable through pagination. Pre-fix the
+    // trim stayed silent (no indicator, no load-older affordance) and the
+    // anchor pointed inside the trimmed span.
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_transcript_pagination'],
+    });
+    const event = (
+      id: number,
+      kind: 'user_message_chunk' | 'agent_message_chunk',
+      text: string,
+      recordId: string,
+    ): DaemonEvent => ({
+      id,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: kind,
+          content: { type: 'text', text },
+          _meta: {
+            'qwen.session.recordId': recordId,
+            qwenTranscript: { sourceRecordIds: [recordId] },
+          },
+        },
+      },
+    });
+    const session = createMockSession({
+      sessionId: 'session-rebuild-count-trim',
+      // historyHasMore stays at its false default: live session shape.
+      replaySnapshot: {
+        compactedReplay: [
+          event(1, 'user_message_chunk', 'turn one prompt', 'record-1'),
+          event(2, 'agent_message_chunk', 'turn one answer', 'record-2'),
+          event(3, 'user_message_chunk', 'turn two prompt', 'record-3'),
+          event(4, 'agent_message_chunk', 'turn two answer', 'record-4'),
+        ],
+        liveJournal: [],
+      },
+    });
+    sdkMocks.sessions.push(session);
+    sdkMocks.getSessionTranscriptPage.mockResolvedValue({
+      v: 1,
+      sessionId: session.sessionId,
+      events: [event(0, 'user_message_chunk', 'older prompt', 'record-0')],
+      hasMore: false,
+    });
+    let history: ReturnType<typeof useDaemonTranscriptHistory> | undefined;
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+
+    function Harness() {
+      history = useDaemonTranscriptHistory();
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      historyPageSize: 25,
+      maxBlocks: 2,
+    });
+
+    expect(blocks).toMatchObject([
+      { kind: 'user', text: 'turn two prompt' },
+      { kind: 'assistant', text: 'turn two answer' },
+    ]);
+    expect(history).toMatchObject({
+      hasMore: true,
+      loading: false,
+      capacityReached: true,
+    });
+
+    await act(async () => {
+      await history?.loadMore();
+      await flushPromises();
+    });
+    // Anchored at the oldest RETAINED record, not the evicted pre-trim one
+    // (record-1): pagination is exclusive of the anchor. The page does not
+    // fit the saturated window, so the atomic rejection re-latches.
+    expect(sdkMocks.getSessionTranscriptPage).toHaveBeenCalledWith(
+      session.sessionId,
+      {
+        beforeRecordId: 'record-3',
+        limit: 25,
+        clientId: session.clientId,
+      },
+    );
+    expect(history).toMatchObject({
+      hasMore: false,
+      loading: false,
+      capacityReached: true,
+    });
+  });
+
+  it('surfaces capacity and re-anchors when the rebuild trims on the byte budget', async () => {
+    // Byte corner: the rebuild store runs under the default 128 MiB budget.
+    // Two heavy replay blocks cross it INSIDE the block cap, so a
+    // count-only saturation check never fires; the eviction is observable
+    // only through the truncation listener.
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_transcript_pagination'],
+    });
+    // ~90 MB estimated per block; the second crosses the 128 MiB budget.
+    const heavyToolEvent = (id: number, recordId: string): DaemonEvent => ({
+      id,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'tool_call',
+          toolCallId: recordId,
+          title: `Heavy ${recordId}`,
+          status: 'completed',
+          rawInput: { payload: 'A'.repeat(45_000_000) },
+          _meta: {
+            'qwen.session.recordId': recordId,
+            qwenTranscript: { sourceRecordIds: [recordId] },
+          },
+        },
+      },
+    });
+    const session = createMockSession({
+      sessionId: 'session-rebuild-byte-trim',
+      replaySnapshot: {
+        compactedReplay: [
+          heavyToolEvent(1, 'record-heavy-0'),
+          heavyToolEvent(2, 'record-heavy-1'),
+          {
+            id: 3,
+            v: 1,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'recent prompt' },
+                _meta: { 'qwen.session.recordId': 'record-recent' },
+              },
+            },
+          },
+        ],
+        liveJournal: [],
+      },
+    });
+    sdkMocks.sessions.push(session);
+    sdkMocks.getSessionTranscriptPage.mockResolvedValue({
+      v: 1,
+      sessionId: session.sessionId,
+      events: [],
+      hasMore: false,
+    });
+    let history: ReturnType<typeof useDaemonTranscriptHistory> | undefined;
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+
+    function Harness() {
+      history = useDaemonTranscriptHistory();
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      historyPageSize: 25,
+    });
+
+    // The oldest heavy block was evicted mid-rebuild while the block count
+    // stayed far below the cap...
+    expect(blocks.filter((block) => block.kind === 'tool')).toHaveLength(1);
+    expect(blocks).toMatchObject([
+      { kind: 'tool' },
+      { kind: 'user', text: 'recent prompt' },
+    ]);
+    // ...and the trim surfaced with the anchor re-based to the oldest
+    // retained record.
+    expect(history).toMatchObject({
+      hasMore: true,
+      loading: false,
+      capacityReached: true,
+    });
+
+    await act(async () => {
+      await history?.loadMore();
+      await flushPromises();
+    });
+    expect(sdkMocks.getSessionTranscriptPage).toHaveBeenCalledWith(
+      session.sessionId,
+      {
+        beforeRecordId: 'record-heavy-1',
+        limit: 25,
+        clientId: session.clientId,
+      },
+    );
+  });
+
+  it('re-anchors pagination and releases the capacity latch when live growth evicts paginated-in blocks', async () => {
+    // An admitted page prepends its blocks; live growth then trims
+    // oldest-first and evicts the page — including the exclusive anchor.
+    // The provider must re-anchor to the oldest retained record and re-open
+    // the load-older affordance once eviction frees capacity, or the stretch
+    // between the anchor and the window head is lost silently.
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_transcript_pagination'],
+    });
+    const replayEvent = (
+      id: number,
+      kind: 'user_message_chunk' | 'agent_message_chunk',
+      text: string,
+      recordId: string,
+    ): DaemonEvent => ({
+      id,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: kind,
+          content: { type: 'text', text },
+          _meta: {
+            'qwen.session.recordId': recordId,
+            qwenTranscript: { sourceRecordIds: [recordId] },
+          },
+        },
+      },
+    });
+    const liveGate = createDeferred<void>();
+    const session = createMockSession({
+      sessionId: 'session-live-trim-anchor',
+      historyHasMore: true,
+      replaySnapshot: {
+        compactedReplay: [
+          replayEvent(1, 'user_message_chunk', 'replay prompt', 'record-1'),
+          replayEvent(2, 'agent_message_chunk', 'replay answer', 'record-2'),
+        ],
+        liveJournal: [],
+      },
+      events: async function* liveEventsAfterGate(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        await Promise.race([
+          liveGate.promise,
+          new Promise<void>((resolve) => {
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            });
+          }),
+        ]);
+        if (opts.signal?.aborted) return;
+        yield replayEvent(3, 'user_message_chunk', 'live one', 'record-live-1');
+        yield replayEvent(
+          4,
+          'agent_message_chunk',
+          'live two',
+          'record-live-2',
+        );
+        await new Promise<void>((resolve) => {
+          if (opts.signal?.aborted) {
+            resolve();
+            return;
+          }
+          opts.signal?.addEventListener('abort', () => resolve(), {
+            once: true,
+          });
+        });
+        yield* [];
+      },
+    });
+    sdkMocks.sessions.push(session);
+    sdkMocks.getSessionTranscriptPage
+      .mockResolvedValueOnce({
+        v: 1,
+        sessionId: session.sessionId,
+        events: [
+          replayEvent(10, 'user_message_chunk', 'older prompt', 'record-a'),
+          replayEvent(11, 'agent_message_chunk', 'older answer', 'record-b'),
+        ],
+        hasMore: true,
+      })
+      .mockResolvedValueOnce({
+        v: 1,
+        sessionId: session.sessionId,
+        events: [],
+        hasMore: false,
+      });
+    let history: ReturnType<typeof useDaemonTranscriptHistory> | undefined;
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+
+    function Harness() {
+      history = useDaemonTranscriptHistory();
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      historyPageSize: 25,
+      maxBlocks: 4,
+    });
+
+    // Merge the older page: the window is now exactly full (4 of 4
+    // blocks), latching the capacity indicator.
+    await act(async () => {
+      await history?.loadMore();
+      await flushPromises();
+    });
+    expect(blocks.map((block) => block.sourceRecordIds?.[0])).toEqual([
+      'record-a',
+      'record-b',
+      'record-1',
+      'record-2',
     ]);
     expect(history).toMatchObject({
       hasMore: false,
       loading: false,
       capacityReached: true,
     });
-    expect(sdkMocks.getSessionTranscriptPage).not.toHaveBeenCalled();
+
+    // Live growth evicts the freshly prepended page blocks (oldest-first),
+    // including the anchor record...
+    await act(async () => {
+      liveGate.resolve();
+      await flushTranscriptDispatch();
+    });
+    // ...which releases the latch and re-anchors to the oldest retained
+    // record.
+    expect(history).toMatchObject({
+      hasMore: true,
+      loading: false,
+      capacityReached: false,
+    });
+
+    await act(async () => {
+      await history?.loadMore();
+      await flushPromises();
+    });
+    expect(sdkMocks.getSessionTranscriptPage).toHaveBeenNthCalledWith(
+      2,
+      session.sessionId,
+      {
+        beforeRecordId: 'record-1',
+        limit: 25,
+        clientId: session.clientId,
+      },
+    );
   });
 
   it('releases the replay snapshot after injection and never raises the block cap', async () => {

@@ -1493,7 +1493,6 @@ function trimTranscriptState(
   // rebuild. Firing `kind: 'blocks'` with zero removals records a false
   // truncation and churns snapshot identity on every dispatch.
   if (removeCount === 0) return state;
-  truncationCallbacks.get(state)?.({ kind: 'blocks' });
   state.retainedBytes = Math.max(0, bytes);
   const blocks = state.blocks.slice(removeCount);
   const keptIds = new Set(blocks.map((block) => block.id));
@@ -1563,6 +1562,16 @@ function trimTranscriptState(
       delete state.activeThoughtBlockByParent[parentId];
     }
   }
+  // Fired after the mutation completes so listeners observe the post-trim
+  // window (e.g. re-anchoring an exclusive pagination anchor to the oldest
+  // retained record — the evicted anchor can never be re-fetched).
+  const oldestRetainedBlock = state.blocks.find(
+    (block) => (block.sourceRecordIds?.length ?? 0) > 0,
+  );
+  truncationCallbacks.get(state)?.({
+    kind: 'blocks',
+    oldestRetainedRecordId: oldestRetainedBlock?.sourceRecordIds?.[0],
+  });
   return state;
 }
 

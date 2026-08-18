@@ -1315,6 +1315,41 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(store.getSnapshot().maxRetainedBytes).toBe(5_000_000);
   });
 
+  it('keeps a seeded truncation listener across dispatches and resets', () => {
+    // Store consumers (e.g. the session provider reconciling its pagination
+    // anchor with eviction) register onTruncation through the seed; the
+    // listener must fire on evictions and survive reset(), which replaces
+    // the state wholesale.
+    const onTruncation = vi.fn();
+    const store = createDaemonTranscriptStore({ maxBlocks: 2, onTruncation });
+    const toolEvent = (index: number) => ({
+      type: 'tool.update' as const,
+      toolCallId: `tool-${index}`,
+      title: `Tool ${index}`,
+      status: 'completed' as const,
+      sourceRecordIds: [`record-${index}`],
+    });
+    store.dispatch([toolEvent(0), toolEvent(1)]);
+    expect(onTruncation).not.toHaveBeenCalled();
+    store.dispatch(toolEvent(2));
+    expect(onTruncation).toHaveBeenCalledTimes(1);
+    expect(onTruncation).toHaveBeenCalledWith({
+      kind: 'blocks',
+      oldestRetainedRecordId: 'record-1',
+    });
+
+    onTruncation.mockClear();
+    store.reset({ maxBlocks: 2 });
+    store.dispatch([toolEvent(3), toolEvent(4)]);
+    expect(onTruncation).not.toHaveBeenCalled();
+    store.dispatch(toolEvent(5));
+    expect(onTruncation).toHaveBeenCalledTimes(1);
+    expect(onTruncation).toHaveBeenCalledWith({
+      kind: 'blocks',
+      oldestRetainedRecordId: 'record-4',
+    });
+  });
+
   it('counts every image merged into a user block against the retention budget', () => {
     const data = 'I'.repeat(100_000);
     let state = createDaemonTranscriptState({

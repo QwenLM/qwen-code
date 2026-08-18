@@ -590,14 +590,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     activeWorkspaceCwdRef.current = resolvedWorkspaceCwd;
   }
 
-  const store = useMemo(
-    () =>
-      createDaemonTranscriptStore({
-        maxBlocks,
-        retainSubagentBlocks: subagentTranscriptMode === 'full',
-      }),
-    [maxBlocks, subagentTranscriptMode],
-  );
   const sessionRef = useRef<DaemonSessionClient | undefined>(undefined);
   const sessionConfigGenerationRef = useRef(
     new WeakMap<DaemonSessionClient, number>(),
@@ -622,6 +614,41 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     capacityReached: false,
     paginationError: false,
   });
+  const store = useMemo(
+    () =>
+      createDaemonTranscriptStore({
+        maxBlocks,
+        retainSubagentBlocks: subagentTranscriptMode === 'full',
+        onTruncation: (detail) => {
+          if (detail.kind !== 'blocks') return;
+          const history = transcriptHistoryRef.current;
+          const activeSession = sessionRef.current;
+          if (!activeSession || history.sessionId !== activeSession.sessionId) {
+            return;
+          }
+          // Trimming evicts oldest-first, so it can remove the very record
+          // the exclusive `beforeRecordId` anchor points at; the daemon
+          // never returns the anchor itself, so the evicted stretch would
+          // become unreachable. Re-anchor to the oldest retained record.
+          if (detail.oldestRetainedRecordId !== undefined) {
+            history.beforeRecordId = detail.oldestRetainedRecordId;
+          }
+          if (history.capacityReached) {
+            // Eviction freed retention capacity, so the page rejected at the
+            // latch may fit now — re-open the load-older affordance.
+            history.hasMore = true;
+            history.capacityReached = false;
+            setTranscriptHistoryState({
+              hasMore: true,
+              loading: false,
+              capacityReached: false,
+              paginationError: history.paginationError,
+            });
+          }
+        },
+      }),
+    [maxBlocks, subagentTranscriptMode],
+  );
   const eventStreamRef = useRef<
     | {
         sessionId: string;
@@ -1679,6 +1706,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               (group) => group.transcript,
             );
             let replayExceededCapacity = false;
+            let replayTrimmedAnchor: string | undefined;
             const rebuildReplay =
               repairingEpisode !== undefined ||
               replayTarget !== undefined ||
@@ -1695,6 +1723,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 repairingEpisode && markerStillVisible
                   ? repairingEpisode.checkpoint.maxBlocks
                   : maxBlocks;
+              let replayTrimmed = false;
               const replayStore = createDaemonTranscriptStore(
                 repairingEpisode && markerStillVisible
                   ? {
@@ -1705,6 +1734,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                       maxBlocks: replayMaxBlocks,
                       retainSubagentBlocks:
                         subagentTranscriptModeRef.current === 'full',
+                      // The count cap and the default byte budget can both
+                      // evict mid-rebuild; observe either so the pagination
+                      // anchor and capacity indicator reconcile below.
+                      onTruncation: (detail) => {
+                        if (detail.kind === 'blocks') replayTrimmed = true;
+                      },
                     },
               );
               let nextCheckpoint: DaemonTranscriptState | undefined;
@@ -1721,12 +1756,20 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 }
               }
               const replayState = replayStore.getSnapshot();
-              // A saturated rebuild means older blocks were trimmed away
-              // (or the window is exactly full), so there is no in-store
-              // room for pagination either way — surface capacityReached.
+              // A rebuild trim (count cap or byte budget) evicted older
+              // blocks; a merely saturated window leaves no in-store room
+              // for pagination either way — surface capacityReached for both.
               replayExceededCapacity =
                 repairingEpisode === undefined &&
-                replayState.blocks.length >= maxBlocks;
+                (replayTrimmed || replayState.blocks.length >= maxBlocks);
+              if (replayExceededCapacity) {
+                // The pre-trim anchor can sit inside the trimmed stretch;
+                // re-anchor below to the oldest RETAINED record so
+                // pagination fetches exactly the dropped records.
+                replayTrimmedAnchor = replayState.blocks.find(
+                  (block) => (block.sourceRecordIds?.length ?? 0) > 0,
+                )?.sourceRecordIds?.[0];
+              }
               // Replay must never ratchet the retention window above the
               // configured cap: the committed cap is what bounds every
               // later dispatch, and an escalation here turned one large
@@ -1786,11 +1829,25 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 setWorkspaceEventSignals,
               );
             }
-            if (replayExceededCapacity && historyHasMore) {
-              transcriptHistoryRef.current.hasMore = false;
+            if (replayExceededCapacity) {
+              if (replayTrimmedAnchor !== undefined) {
+                transcriptHistoryRef.current.beforeRecordId =
+                  replayTrimmedAnchor;
+              }
+              // Trimmed replay content stays persisted daemon-side and is
+              // fetchable through pagination (for live sessions too), so
+              // keep the load-older affordance instead of dropping the
+              // content silently.
+              const olderHistoryReachable =
+                Array.isArray(capabilities?.features) &&
+                capabilities.features.includes(
+                  SESSION_TRANSCRIPT_PAGINATION_FEATURE,
+                ) &&
+                transcriptHistoryRef.current.beforeRecordId !== undefined;
+              transcriptHistoryRef.current.hasMore = olderHistoryReachable;
               transcriptHistoryRef.current.capacityReached = true;
               setTranscriptHistoryState({
-                hasMore: false,
+                hasMore: olderHistoryReachable,
                 loading: false,
                 capacityReached: true,
                 paginationError: false,

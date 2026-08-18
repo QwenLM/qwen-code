@@ -1076,6 +1076,13 @@ export interface DaemonTranscriptTruncationDetail {
   kind: 'blocks' | 'text';
   blockId?: string;
   sourceRecordIds?: readonly string[];
+  /**
+   * Set for `kind: 'blocks'`: the oldest recordId still retained after the
+   * eviction, from the oldest retained block that carries one. Undefined when
+   * no retained block carries a recordId. Lets consumers reconcile exclusive
+   * pagination anchors with retention trimming.
+   */
+  oldestRetainedRecordId?: string;
 }
 
 export interface DaemonTranscriptStore {

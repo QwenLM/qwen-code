@@ -6,6 +6,7 @@
 
 import type {
   DaemonTextDeltaMeta,
+  DaemonTranscriptReducerOptions,
   DaemonTranscriptState,
   DaemonTranscriptStore,
   DaemonUiEvent,
@@ -19,9 +20,16 @@ import {
 } from './transcript.js';
 
 export function createDaemonTranscriptStore(
-  seed: Partial<DaemonTranscriptState> = {},
+  seed: Partial<DaemonTranscriptState> &
+    Pick<DaemonTranscriptReducerOptions, 'onTruncation'> = {},
 ): DaemonTranscriptStore {
-  let state = createState(seed);
+  // Held in the closure (not on the state object) so `reset()` keeps the
+  // listener registered across wholesale state replacements.
+  const { onTruncation, ...stateSeed } = seed;
+  const reducerOptions: DaemonTranscriptReducerOptions = onTruncation
+    ? { onTruncation }
+    : {};
+  let state = createState(stateSeed);
   const listeners = new Set<() => void>();
   let notifyScheduled = false;
 
@@ -56,7 +64,7 @@ export function createDaemonTranscriptStore(
     dispatch(event: DaemonUiEvent | DaemonUiEvent[]) {
       const events = Array.isArray(event) ? event : [event];
       if (events.length === 0) return;
-      state = reduceDaemonTranscriptEvents(state, events);
+      state = reduceDaemonTranscriptEvents(state, events, reducerOptions);
       scheduleNotify();
     },
     appendLocalUserMessage(
@@ -69,6 +77,7 @@ export function createDaemonTranscriptStore(
         images,
         meta,
         files,
+        ...reducerOptions,
       });
       scheduleNotify();
     },
