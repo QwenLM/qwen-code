@@ -1,0 +1,22 @@
+{
+  "overall": "fail",
+  "selectedVscodePath": null,
+  "candidates": {
+    "directDaemon": {
+      "status": "fail",
+      "stableUnderPartialPrepend": false,
+      "unstableBlockKinds": ["thought", "assistant", "tool", "permission"],
+      "missingNativeTextIdentity": ["user", "thought", "assistant"]
+    },
+    "acp": {
+      "status": "fail",
+      "stableUnderPartialPrepend": false,
+      "unstableBlockKinds": ["thought", "assistant", "tool"],
+      "missingNativeTextIdentity": ["user", "thought", "assistant"]
+    }
+  },
+  "blockers": [
+    "direct-daemon uses reducer ordinal block IDs that change when history is prepended",
+    "ACP text updates do not carry a stable source identity and inherit the same ordinal block IDs"
+  ]
+}
