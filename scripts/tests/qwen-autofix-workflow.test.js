@@ -188,6 +188,18 @@ const nodeSetupSteps =
   workflow.match(/- name: 'Set up Node.js'[\s\S]*?(?=\n[ ]{6}- name: ')/g) ??
   [];
 
+// The gate script's bite check reads NUL-separated diff lists through
+// `mapfile -d ''`, a bash >= 4.4 builtin: on a host whose `bash` is older
+// (macOS ships 3.2) every spawn of the real script or the extracted block
+// dies with `mapfile: command not found` before the semantics under test
+// can run. The gate only executes on Linux runners, so the defect cannot
+// exist in production; probe the host, not the platform — a Mac with a
+// newer bash fronting PATH keeps the coverage (same shape as
+// hasGnuRealpath in qwen-pr-review-workflow.test.js).
+const hasBashMapfile =
+  spawnSync('bash', ['-c', 'mapfile -d "" -t x <<< y'], { stdio: 'ignore' })
+    .status === 0;
+
 // GitHub Actions expressions return operand VALUES from &&/||, not
 // booleans: && yields the first falsy operand (else the last operand), ||
 // the first truthy (else the last), '' is falsy, and && binds tighter
@@ -13242,414 +13254,421 @@ exit 1
     expect(forgedErr.out).not.toContain('::error::forged');
   });
 
-  it('bite check: rejects a round whose changed tests pass on the pre-round tree', () => {
-    const block = reviewVerificationRunner.match(
-      /(# Bite check:[\s\S]*?)\nassert_verification_tree\necho "verified_head/,
-    )?.[1];
-    expect(block).toBeTruthy();
-    const run = (
-      build,
-      { runnerExit, runnerScript, resolverLines, workdir, prelude = '' },
-    ) => {
-      const { dir, git } = validityFixture(build);
-      const tools = mkdtempSync(join(tmpdir(), 'autofix-validity-tools-'));
-      // Stub owning-package resolver and bite runner — the block treats the
-      // runner as an opaque command. A fixed exit code drives the semantic
-      // cases; a runnerScript drives the tree-state-proving cases.
-      writeFileSync(
-        join(tools, 'resolve-owning-packages.sh'),
-        `printf '%s\\n' ${resolverLines.map((l) => `'${l}'`).join(' ')}\n`,
-      );
-      writeFileSync(
-        join(tools, 'bite-runner'),
-        runnerScript ??
-          `#!/usr/bin/env bash\necho "bite-runner: $*" >&2\nexit ${runnerExit}\n`,
-      );
-      chmodSync(join(tools, 'bite-runner'), 0o755);
-      // WORKDIR fixtures: resolved-comments.txt + rc.json/rv.json make the
-      // round a DEFECT-CLAIM round (it resolves a Critical / CR finding).
-      for (const [name, content] of Object.entries(workdir ?? {})) {
-        writeFileSync(join(tools, name), content);
-      }
-      const res = spawnSync(
-        'bash',
-        [
-          '-c',
-          [
-            'set -eo pipefail',
-            'cd "$1"',
-            'BRANCH=feat',
-            'WORKDIR="$2"',
-            'RUNNER_TEMP="$2"',
-            'GATE_LOG="$2/gate.log"',
-            ': > "$GATE_LOG"',
-            'ROUND_RANGE="origin/feat...feat"',
-            freightHelper(),
-            prelude,
-            'BITE_RUNNER="$2/bite-runner"',
-            'reject_fix() { echo "REJECT:${1}"; exit 1; }',
-            block,
-            'echo SURVIVED',
-          ].join('\n'),
-          'bash',
-          dir,
-          tools,
-        ],
-        { encoding: 'utf8', env: isolatedGitEnv },
-      );
-      expect(res.error).toBeUndefined();
-      const status = git('status', '--porcelain');
-      const head = git('rev-parse', '--abbrev-ref', 'HEAD').trim();
-      const advisoryPath = join(tools, 'gate-advisories.md');
-      const advisory = existsSync(advisoryPath)
-        ? readFileSync(advisoryPath, 'utf8')
-        : '';
-      const rejectionPath = join(tools, 'gate-rejection.md');
-      const rejection = existsSync(rejectionPath)
-        ? readFileSync(rejectionPath, 'utf8')
-        : '';
-      rmSync(dir, { recursive: true, force: true });
-      rmSync(tools, { recursive: true, force: true });
-      return {
-        out: `${res.stdout}\n${res.stderr}\n[spawn status=${res.status}]`,
-        status,
-        head,
-        advisory,
-        rejection,
-      };
-    };
-    const srcAndTest = {
-      base: ({ write }) => {
-        // The bite runner guard reads the workspace's test script and the
-        // self-import guard reads its name (absent from the test files).
-        write(
-          'packages/cli/package.json',
-          '{"name":"@fixture/cli","scripts":{"test":"vitest run"}}\n',
+  it.skipIf(!hasBashMapfile)(
+    'bite check: rejects a round whose changed tests pass on the pre-round tree',
+    () => {
+      const block = reviewVerificationRunner.match(
+        /(# Bite check:[\s\S]*?)\nassert_verification_tree\necho "verified_head/,
+      )?.[1];
+      expect(block).toBeTruthy();
+      const run = (
+        build,
+        { runnerExit, runnerScript, resolverLines, workdir, prelude = '' },
+      ) => {
+        const { dir, git } = validityFixture(build);
+        const tools = mkdtempSync(join(tmpdir(), 'autofix-validity-tools-'));
+        // Stub owning-package resolver and bite runner — the block treats the
+        // runner as an opaque command. A fixed exit code drives the semantic
+        // cases; a runnerScript drives the tree-state-proving cases.
+        writeFileSync(
+          join(tools, 'resolve-owning-packages.sh'),
+          `printf '%s\\n' ${resolverLines.map((l) => `'${l}'`).join(' ')}\n`,
         );
-        write('packages/cli/src/a.ts', 'a\n');
-        write('packages/cli/src/a.test.ts', 't\n');
-      },
-      pr: ({ write }) => write('packages/cli/src/a.ts', 'b\n'),
-      round: ({ write }) => {
-        write('packages/cli/src/a.ts', 'c\n');
-        write('packages/cli/src/a.test.ts', 't2\n');
-      },
-    };
-    // Artifacts that mark the round as resolving a Critical finding.
-    const criticalClaim = {
-      // rc: prefix + CRLF, exactly as SKILL tells the agent to write the
-      // handle and as the other consumers tolerate.
-      'resolved-comments.txt': 'rc:101\r\n',
-      'rc.json': JSON.stringify([
-        { id: 101, body: '**[Critical]** stale owner routes writes' },
-      ]),
-      'rv.json': JSON.stringify([]),
-    };
-    // Defect-claim round + all changed tests green on the pre-round tree =>
-    // the claimed defect does not reproduce => non-retryable rejection.
-    const rejected = run(srcAndTest, {
-      runnerExit: 0,
-      resolverLines: ['packages/cli'],
-      workdir: criticalClaim,
-    });
-    expect(rejected.out).toContain('REJECT:bite check');
-    // The SAME all-green result WITHOUT a defect claim (a refactor pinning
-    // existing behavior, an optional cleanup) is an advisory, not a
-    // rejection — and the tree still comes back clean on the branch.
-    const advisory = run(srcAndTest, {
-      runnerExit: 0,
-      resolverLines: ['packages/cli'],
-    });
-    expect(advisory.out).toContain('SURVIVED');
-    expect(advisory.out).not.toContain('REJECT:');
-    expect(advisory.advisory).toContain('pass on the pre-round tree');
-    expect(advisory.status).toBe('');
-    expect(advisory.head).toBe('feat');
-    // Enforcement needs a RESOLVED Critical: resolving only a Suggestion,
-    // or merely having an unresolved Critical present in rc.json, stays
-    // advisory-grade.
-    for (const workdir of [
-      {
-        'resolved-comments.txt': '303\n',
-        'rc.json': JSON.stringify([
-          { id: 303, body: '**[Suggestion]** rename this helper' },
-          { id: 101, body: '**[Critical]** stale owner routes writes' },
-        ]),
-        'rv.json': JSON.stringify([]),
-      },
-      {
-        'resolved-comments.txt': '999\n',
-        'rc.json': JSON.stringify([
-          { id: 101, body: '**[Critical]** stale owner routes writes' },
-        ]),
-        'rv.json': JSON.stringify([]),
-      },
-    ]) {
-      const soft = run(srcAndTest, {
-        runnerExit: 0,
-        resolverLines: ['packages/cli'],
-        workdir,
-      });
-      expect(soft.out).toContain('SURVIVED');
-      expect(soft.out).not.toContain('REJECT:');
-      expect(soft.advisory).toContain('pass on the pre-round tree');
-    }
-    // A reply resolved inside a Critical-rooted thread is a defect claim,
-    // matching how the feedback renderers classify replies.
-    expect(
-      run(srcAndTest, {
-        runnerExit: 0,
-        resolverLines: ['packages/cli'],
-        workdir: {
-          'resolved-comments.txt': '404\n',
-          'rc.json': JSON.stringify([
-            { id: 101, body: '**[Critical]** stale owner routes writes' },
-            { id: 404, body: 'fixed here', in_reply_to_id: 101 },
-          ]),
-          'rv.json': JSON.stringify([]),
-        },
-      }).out,
-    ).toContain('REJECT:bite check');
-    // A Critical anchored ON a test file is a test-side claim: all-green is
-    // its expected shape, so it demotes to the advisory arm...
-    const testSide = run(srcAndTest, {
-      runnerExit: 0,
-      resolverLines: ['packages/cli'],
-      workdir: {
-        'resolved-comments.txt': 'rc:101\n',
-        'rc.json': JSON.stringify([
-          {
-            id: 101,
-            path: 'packages/cli/src/a.test.ts',
-            body: '**[Critical]** this test asserts the wrong behavior',
-          },
-        ]),
-        'rv.json': JSON.stringify([]),
-      },
-    });
-    expect(testSide.out).toContain('SURVIVED');
-    expect(testSide.out).not.toContain('REJECT:');
-    expect(testSide.advisory).toContain('test-side defect claim');
-    // ...but only RESOLVED CRITICAL threads vote: a source-file Suggestion
-    // resolved alongside must not break the demotion.
-    expect(
-      run(srcAndTest, {
-        runnerExit: 0,
-        resolverLines: ['packages/cli'],
-        workdir: {
-          'resolved-comments.txt': '101\n303\n',
-          'rc.json': JSON.stringify([
-            {
-              id: 101,
-              path: 'packages/cli/src/a.test.ts',
-              body: '**[Critical]** this test asserts the wrong behavior',
-            },
-            {
-              id: 303,
-              path: 'packages/cli/src/a.ts',
-              body: '**[Suggestion]** rename this helper',
-            },
-          ]),
-          'rv.json': JSON.stringify([]),
-        },
-      }).out,
-    ).not.toContain('REJECT:');
-    // A Critical anchored on SOURCE keeps full enforcement even when a
-    // test-side Critical is resolved in the same round.
-    expect(
-      run(srcAndTest, {
-        runnerExit: 0,
-        resolverLines: ['packages/cli'],
-        workdir: {
-          'resolved-comments.txt': '101\n102\n',
-          'rc.json': JSON.stringify([
-            {
-              id: 101,
-              path: 'packages/cli/src/a.test.ts',
-              body: '**[Critical]** this test asserts the wrong behavior',
-            },
-            {
-              id: 102,
-              path: 'packages/cli/src/a.ts',
-              body: '**[Critical]** stale owner routes writes',
-            },
-          ]),
-          'rv.json': JSON.stringify([]),
-        },
-      }).out,
-    ).toContain('REJECT:bite check');
-    // TESTSIDE demotion honors the review-STATE arm too: a CR-attached
-    // comment on a test path demotes like a body-tagged Critical does.
-    const crTestSide = run(srcAndTest, {
-      runnerExit: 0,
-      resolverLines: ['packages/cli'],
-      workdir: {
-        'resolved-comments.txt': '505\n',
-        'rc.json': JSON.stringify([
-          {
-            id: 505,
-            path: 'packages/cli/src/a.test.ts',
-            body: 'this test asserts the wrong behavior',
-            pull_request_review_id: 9,
-          },
-        ]),
-        'rv.json': JSON.stringify([{ id: 9, state: 'CHANGES_REQUESTED' }]),
-      },
-    });
-    expect(crTestSide.out).not.toContain('REJECT:');
-    expect(crTestSide.advisory).toContain('test-side defect claim');
-    // Resolving a comment attached to a CHANGES_REQUESTED review enforces
-    // the same way a Critical tag does.
-    expect(
-      run(srcAndTest, {
-        runnerExit: 0,
-        resolverLines: ['packages/cli'],
-        workdir: {
-          'resolved-comments.txt': '202\n',
-          'rc.json': JSON.stringify([
-            { id: 202, body: 'null branch crashes', pull_request_review_id: 9 },
-          ]),
-          'rv.json': JSON.stringify([{ id: 9, state: 'CHANGES_REQUESTED' }]),
-        },
-      }).out,
-    ).toContain('REJECT:bite check');
-    // Any failure on the pre-round tree = the tests bite => round proceeds,
-    // and the verification tree is restored to the branch, clean.
-    const bit = run(srcAndTest, {
-      runnerExit: 1,
-      resolverLines: ['packages/cli'],
-      workdir: criticalClaim,
-    });
-    expect(bit.out).toContain('bite confirmed');
-    expect(bit.out).toContain('SURVIVED');
-    expect(bit.status).toBe('');
-    expect(bit.head).toBe('feat');
-    // Tree-state proof: the runner inspects the ACTUAL checkout instead of
-    // returning a fixed code. It fails (bites) only when it sees PRE-ROUND
-    // source ('b') alongside the ROUND's test ('t2') — passing proves the
-    // detach reverted the source AND the overlay delivered the round's test.
-    const treeProof = run(srcAndTest, {
-      runnerScript: [
-        '#!/usr/bin/env bash',
-        'grep -qx b packages/cli/src/a.ts || exit 0',
-        'grep -qx t2 packages/cli/src/a.test.ts || exit 0',
-        'exit 1',
-      ].join('\n'),
-      resolverLines: ['packages/cli'],
-      workdir: criticalClaim,
-    });
-    expect(treeProof.out).toContain('bite confirmed');
-    // Negative control: a runner that bites only on ROUND source ('c')
-    // never sees it on the detached tree — all-green, so the defect-claim
-    // round is rejected, proving the detach actually reverted the source.
-    const roundLeak = run(srcAndTest, {
-      runnerScript: [
-        '#!/usr/bin/env bash',
-        'grep -qx c packages/cli/src/a.ts && exit 1',
-        'exit 0',
-      ].join('\n'),
-      resolverLines: ['packages/cli'],
-      workdir: criticalClaim,
-    });
-    expect(roundLeak.out).toContain('REJECT:bite check');
-    // A cross-package round skips (dist confound), it never rejects.
-    const skipped = run(srcAndTest, {
-      runnerExit: 0,
-      resolverLines: ['packages/cli', 'packages/core'],
-      workdir: criticalClaim,
-    });
-    expect(skipped.out).toContain('bite check skipped');
-    expect(skipped.out).toContain('SURVIVED');
-    // A test-only round (no source change) is coverage addition, not a
-    // defect claim — no bite requirement.
-    const coverageOnly = run(
-      {
+        writeFileSync(
+          join(tools, 'bite-runner'),
+          runnerScript ??
+            `#!/usr/bin/env bash\necho "bite-runner: $*" >&2\nexit ${runnerExit}\n`,
+        );
+        chmodSync(join(tools, 'bite-runner'), 0o755);
+        // WORKDIR fixtures: resolved-comments.txt + rc.json/rv.json make the
+        // round a DEFECT-CLAIM round (it resolves a Critical / CR finding).
+        for (const [name, content] of Object.entries(workdir ?? {})) {
+          writeFileSync(join(tools, name), content);
+        }
+        const res = spawnSync(
+          'bash',
+          [
+            '-c',
+            [
+              'set -eo pipefail',
+              'cd "$1"',
+              'BRANCH=feat',
+              'WORKDIR="$2"',
+              'RUNNER_TEMP="$2"',
+              'GATE_LOG="$2/gate.log"',
+              ': > "$GATE_LOG"',
+              'ROUND_RANGE="origin/feat...feat"',
+              freightHelper(),
+              prelude,
+              'BITE_RUNNER="$2/bite-runner"',
+              'reject_fix() { echo "REJECT:${1}"; exit 1; }',
+              block,
+              'echo SURVIVED',
+            ].join('\n'),
+            'bash',
+            dir,
+            tools,
+          ],
+          { encoding: 'utf8', env: isolatedGitEnv },
+        );
+        expect(res.error).toBeUndefined();
+        const status = git('status', '--porcelain');
+        const head = git('rev-parse', '--abbrev-ref', 'HEAD').trim();
+        const advisoryPath = join(tools, 'gate-advisories.md');
+        const advisory = existsSync(advisoryPath)
+          ? readFileSync(advisoryPath, 'utf8')
+          : '';
+        const rejectionPath = join(tools, 'gate-rejection.md');
+        const rejection = existsSync(rejectionPath)
+          ? readFileSync(rejectionPath, 'utf8')
+          : '';
+        rmSync(dir, { recursive: true, force: true });
+        rmSync(tools, { recursive: true, force: true });
+        return {
+          out: `${res.stdout}\n${res.stderr}\n[spawn status=${res.status}]`,
+          status,
+          head,
+          advisory,
+          rejection,
+        };
+      };
+      const srcAndTest = {
         base: ({ write }) => {
-          write('packages/cli/src/a.ts', 'a\n');
-          write('packages/cli/src/a.test.ts', 't\n');
-        },
-        pr: () => {},
-        round: ({ write }) => write('packages/cli/src/a.test.ts', 't-more\n'),
-      },
-      {
-        runnerExit: 0,
-        resolverLines: ['packages/cli'],
-        workdir: criticalClaim,
-      },
-    );
-    expect(coverageOnly.out).toContain('SURVIVED');
-    expect(coverageOnly.out).not.toContain('REJECT:');
-    expect(coverageOnly.advisory).toContain('test-only changes');
-
-    // Restore-failure crash contract: when the tree cannot come back to
-    // the branch, the gate crashes VERDICT-LESS — rejection document
-    // written, exit 1, and reject_fix (which would advance the watermark)
-    // never runs.
-    const crash = run(srcAndTest, {
-      runnerScript: [
-        '#!/usr/bin/env bash',
-        'git update-ref -d refs/heads/feat',
-        'exit 0',
-      ].join('\n'),
-      resolverLines: ['packages/cli'],
-      workdir: criticalClaim,
-    });
-    expect(crash.out).toContain(
-      'could not restore the verification tree after the bite check',
-    );
-    expect(crash.out).toContain('[spawn status=1]');
-    expect(crash.out).not.toContain('REJECT:');
-    expect(crash.rejection).toContain('could not restore');
-
-    // Append order: a shrink advisory (truncating write) followed by the
-    // bite advisory (append) must leave BOTH in the report file.
-    const advisoryBlock2 = reviewVerificationRunner.match(
-      /(TEST_PATHSPEC=\(':\(glob\)[\s\S]*?advisory written for the report' \| tee -a "\$\{GATE_LOG\}"\nfi)/,
-    )?.[1];
-    expect(advisoryBlock2).toBeTruthy();
-    const combined = run(
-      {
-        base: ({ write }) => {
+          // The bite runner guard reads the workspace's test script and the
+          // self-import guard reads its name (absent from the test files).
           write(
             'packages/cli/package.json',
             '{"name":"@fixture/cli","scripts":{"test":"vitest run"}}\n',
           );
           write('packages/cli/src/a.ts', 'a\n');
           write('packages/cli/src/a.test.ts', 't\n');
-          write(
-            'packages/cli/src/big.test.ts',
-            `${Array.from({ length: 40 }, (_, i) => `b${i}`).join('\n')}\n`,
-          );
         },
         pr: ({ write }) => write('packages/cli/src/a.ts', 'b\n'),
-        round: ({ write, dir }) => {
+        round: ({ write }) => {
           write('packages/cli/src/a.ts', 'c\n');
           write('packages/cli/src/a.test.ts', 't2\n');
-          rmSync(join(dir, 'packages/cli/src/big.test.ts'));
         },
-      },
-      {
+      };
+      // Artifacts that mark the round as resolving a Critical finding.
+      const criticalClaim = {
+        // rc: prefix + CRLF, exactly as SKILL tells the agent to write the
+        // handle and as the other consumers tolerate.
+        'resolved-comments.txt': 'rc:101\r\n',
+        'rc.json': JSON.stringify([
+          { id: 101, body: '**[Critical]** stale owner routes writes' },
+        ]),
+        'rv.json': JSON.stringify([]),
+      };
+      // Defect-claim round + all changed tests green on the pre-round tree =>
+      // the claimed defect does not reproduce => non-retryable rejection.
+      const rejected = run(srcAndTest, {
         runnerExit: 0,
         resolverLines: ['packages/cli'],
-        prelude: advisoryBlock2,
-      },
-    );
-    expect(combined.advisory).toContain('test coverage shrank');
-    expect(combined.advisory).toContain('pass on the pre-round tree');
+        workdir: criticalClaim,
+      });
+      expect(rejected.out).toContain('REJECT:bite check');
+      // The SAME all-green result WITHOUT a defect claim (a refactor pinning
+      // existing behavior, an optional cleanup) is an advisory, not a
+      // rejection — and the tree still comes back clean on the branch.
+      const advisory = run(srcAndTest, {
+        runnerExit: 0,
+        resolverLines: ['packages/cli'],
+      });
+      expect(advisory.out).toContain('SURVIVED');
+      expect(advisory.out).not.toContain('REJECT:');
+      expect(advisory.advisory).toContain('pass on the pre-round tree');
+      expect(advisory.status).toBe('');
+      expect(advisory.head).toBe('feat');
+      // Enforcement needs a RESOLVED Critical: resolving only a Suggestion,
+      // or merely having an unresolved Critical present in rc.json, stays
+      // advisory-grade.
+      for (const workdir of [
+        {
+          'resolved-comments.txt': '303\n',
+          'rc.json': JSON.stringify([
+            { id: 303, body: '**[Suggestion]** rename this helper' },
+            { id: 101, body: '**[Critical]** stale owner routes writes' },
+          ]),
+          'rv.json': JSON.stringify([]),
+        },
+        {
+          'resolved-comments.txt': '999\n',
+          'rc.json': JSON.stringify([
+            { id: 101, body: '**[Critical]** stale owner routes writes' },
+          ]),
+          'rv.json': JSON.stringify([]),
+        },
+      ]) {
+        const soft = run(srcAndTest, {
+          runnerExit: 0,
+          resolverLines: ['packages/cli'],
+          workdir,
+        });
+        expect(soft.out).toContain('SURVIVED');
+        expect(soft.out).not.toContain('REJECT:');
+        expect(soft.advisory).toContain('pass on the pre-round tree');
+      }
+      // A reply resolved inside a Critical-rooted thread is a defect claim,
+      // matching how the feedback renderers classify replies.
+      expect(
+        run(srcAndTest, {
+          runnerExit: 0,
+          resolverLines: ['packages/cli'],
+          workdir: {
+            'resolved-comments.txt': '404\n',
+            'rc.json': JSON.stringify([
+              { id: 101, body: '**[Critical]** stale owner routes writes' },
+              { id: 404, body: 'fixed here', in_reply_to_id: 101 },
+            ]),
+            'rv.json': JSON.stringify([]),
+          },
+        }).out,
+      ).toContain('REJECT:bite check');
+      // A Critical anchored ON a test file is a test-side claim: all-green is
+      // its expected shape, so it demotes to the advisory arm...
+      const testSide = run(srcAndTest, {
+        runnerExit: 0,
+        resolverLines: ['packages/cli'],
+        workdir: {
+          'resolved-comments.txt': 'rc:101\n',
+          'rc.json': JSON.stringify([
+            {
+              id: 101,
+              path: 'packages/cli/src/a.test.ts',
+              body: '**[Critical]** this test asserts the wrong behavior',
+            },
+          ]),
+          'rv.json': JSON.stringify([]),
+        },
+      });
+      expect(testSide.out).toContain('SURVIVED');
+      expect(testSide.out).not.toContain('REJECT:');
+      expect(testSide.advisory).toContain('test-side defect claim');
+      // ...but only RESOLVED CRITICAL threads vote: a source-file Suggestion
+      // resolved alongside must not break the demotion.
+      expect(
+        run(srcAndTest, {
+          runnerExit: 0,
+          resolverLines: ['packages/cli'],
+          workdir: {
+            'resolved-comments.txt': '101\n303\n',
+            'rc.json': JSON.stringify([
+              {
+                id: 101,
+                path: 'packages/cli/src/a.test.ts',
+                body: '**[Critical]** this test asserts the wrong behavior',
+              },
+              {
+                id: 303,
+                path: 'packages/cli/src/a.ts',
+                body: '**[Suggestion]** rename this helper',
+              },
+            ]),
+            'rv.json': JSON.stringify([]),
+          },
+        }).out,
+      ).not.toContain('REJECT:');
+      // A Critical anchored on SOURCE keeps full enforcement even when a
+      // test-side Critical is resolved in the same round.
+      expect(
+        run(srcAndTest, {
+          runnerExit: 0,
+          resolverLines: ['packages/cli'],
+          workdir: {
+            'resolved-comments.txt': '101\n102\n',
+            'rc.json': JSON.stringify([
+              {
+                id: 101,
+                path: 'packages/cli/src/a.test.ts',
+                body: '**[Critical]** this test asserts the wrong behavior',
+              },
+              {
+                id: 102,
+                path: 'packages/cli/src/a.ts',
+                body: '**[Critical]** stale owner routes writes',
+              },
+            ]),
+            'rv.json': JSON.stringify([]),
+          },
+        }).out,
+      ).toContain('REJECT:bite check');
+      // TESTSIDE demotion honors the review-STATE arm too: a CR-attached
+      // comment on a test path demotes like a body-tagged Critical does.
+      const crTestSide = run(srcAndTest, {
+        runnerExit: 0,
+        resolverLines: ['packages/cli'],
+        workdir: {
+          'resolved-comments.txt': '505\n',
+          'rc.json': JSON.stringify([
+            {
+              id: 505,
+              path: 'packages/cli/src/a.test.ts',
+              body: 'this test asserts the wrong behavior',
+              pull_request_review_id: 9,
+            },
+          ]),
+          'rv.json': JSON.stringify([{ id: 9, state: 'CHANGES_REQUESTED' }]),
+        },
+      });
+      expect(crTestSide.out).not.toContain('REJECT:');
+      expect(crTestSide.advisory).toContain('test-side defect claim');
+      // Resolving a comment attached to a CHANGES_REQUESTED review enforces
+      // the same way a Critical tag does.
+      expect(
+        run(srcAndTest, {
+          runnerExit: 0,
+          resolverLines: ['packages/cli'],
+          workdir: {
+            'resolved-comments.txt': '202\n',
+            'rc.json': JSON.stringify([
+              {
+                id: 202,
+                body: 'null branch crashes',
+                pull_request_review_id: 9,
+              },
+            ]),
+            'rv.json': JSON.stringify([{ id: 9, state: 'CHANGES_REQUESTED' }]),
+          },
+        }).out,
+      ).toContain('REJECT:bite check');
+      // Any failure on the pre-round tree = the tests bite => round proceeds,
+      // and the verification tree is restored to the branch, clean.
+      const bit = run(srcAndTest, {
+        runnerExit: 1,
+        resolverLines: ['packages/cli'],
+        workdir: criticalClaim,
+      });
+      expect(bit.out).toContain('bite confirmed');
+      expect(bit.out).toContain('SURVIVED');
+      expect(bit.status).toBe('');
+      expect(bit.head).toBe('feat');
+      // Tree-state proof: the runner inspects the ACTUAL checkout instead of
+      // returning a fixed code. It fails (bites) only when it sees PRE-ROUND
+      // source ('b') alongside the ROUND's test ('t2') — passing proves the
+      // detach reverted the source AND the overlay delivered the round's test.
+      const treeProof = run(srcAndTest, {
+        runnerScript: [
+          '#!/usr/bin/env bash',
+          'grep -qx b packages/cli/src/a.ts || exit 0',
+          'grep -qx t2 packages/cli/src/a.test.ts || exit 0',
+          'exit 1',
+        ].join('\n'),
+        resolverLines: ['packages/cli'],
+        workdir: criticalClaim,
+      });
+      expect(treeProof.out).toContain('bite confirmed');
+      // Negative control: a runner that bites only on ROUND source ('c')
+      // never sees it on the detached tree — all-green, so the defect-claim
+      // round is rejected, proving the detach actually reverted the source.
+      const roundLeak = run(srcAndTest, {
+        runnerScript: [
+          '#!/usr/bin/env bash',
+          'grep -qx c packages/cli/src/a.ts && exit 1',
+          'exit 0',
+        ].join('\n'),
+        resolverLines: ['packages/cli'],
+        workdir: criticalClaim,
+      });
+      expect(roundLeak.out).toContain('REJECT:bite check');
+      // A cross-package round skips (dist confound), it never rejects.
+      const skipped = run(srcAndTest, {
+        runnerExit: 0,
+        resolverLines: ['packages/cli', 'packages/core'],
+        workdir: criticalClaim,
+      });
+      expect(skipped.out).toContain('bite check skipped');
+      expect(skipped.out).toContain('SURVIVED');
+      // A test-only round (no source change) is coverage addition, not a
+      // defect claim — no bite requirement.
+      const coverageOnly = run(
+        {
+          base: ({ write }) => {
+            write('packages/cli/src/a.ts', 'a\n');
+            write('packages/cli/src/a.test.ts', 't\n');
+          },
+          pr: () => {},
+          round: ({ write }) => write('packages/cli/src/a.test.ts', 't-more\n'),
+        },
+        {
+          runnerExit: 0,
+          resolverLines: ['packages/cli'],
+          workdir: criticalClaim,
+        },
+      );
+      expect(coverageOnly.out).toContain('SURVIVED');
+      expect(coverageOnly.out).not.toContain('REJECT:');
+      expect(coverageOnly.advisory).toContain('test-only changes');
 
-    // Contract pins: the rejection is non-retryable (a repair pass cannot
-    // make a nonexistent defect reproduce), and the report step embeds the
-    // gate-authored advisory file, which is also uploaded as an artifact.
-    expect(reviewVerificationRunner).toContain(
-      "reject_fix 'bite check: changed tests pass on the pre-round tree (claimed defect does not reproduce)' 'false' 'false'",
-    );
-    expect(pushAndReportStep).toContain('gate-advisories.md');
-    expect(reviewAddressJob).toContain('gate-advisories.md agent-api-error');
-    const skill = readFileSync('.qwen/skills/autofix/SKILL.md', 'utf8');
-    expect(skill).toContain('Verification is SOURCE-BLIND');
-    expect(skill).toContain('changed tests against the pre-round branch');
-    expect(skill).toContain("outside the PR's own");
-  });
+      // Restore-failure crash contract: when the tree cannot come back to
+      // the branch, the gate crashes VERDICT-LESS — rejection document
+      // written, exit 1, and reject_fix (which would advance the watermark)
+      // never runs.
+      const crash = run(srcAndTest, {
+        runnerScript: [
+          '#!/usr/bin/env bash',
+          'git update-ref -d refs/heads/feat',
+          'exit 0',
+        ].join('\n'),
+        resolverLines: ['packages/cli'],
+        workdir: criticalClaim,
+      });
+      expect(crash.out).toContain(
+        'could not restore the verification tree after the bite check',
+      );
+      expect(crash.out).toContain('[spawn status=1]');
+      expect(crash.out).not.toContain('REJECT:');
+      expect(crash.rejection).toContain('could not restore');
+
+      // Append order: a shrink advisory (truncating write) followed by the
+      // bite advisory (append) must leave BOTH in the report file.
+      const advisoryBlock2 = reviewVerificationRunner.match(
+        /(TEST_PATHSPEC=\(':\(glob\)[\s\S]*?advisory written for the report' \| tee -a "\$\{GATE_LOG\}"\nfi)/,
+      )?.[1];
+      expect(advisoryBlock2).toBeTruthy();
+      const combined = run(
+        {
+          base: ({ write }) => {
+            write(
+              'packages/cli/package.json',
+              '{"name":"@fixture/cli","scripts":{"test":"vitest run"}}\n',
+            );
+            write('packages/cli/src/a.ts', 'a\n');
+            write('packages/cli/src/a.test.ts', 't\n');
+            write(
+              'packages/cli/src/big.test.ts',
+              `${Array.from({ length: 40 }, (_, i) => `b${i}`).join('\n')}\n`,
+            );
+          },
+          pr: ({ write }) => write('packages/cli/src/a.ts', 'b\n'),
+          round: ({ write, dir }) => {
+            write('packages/cli/src/a.ts', 'c\n');
+            write('packages/cli/src/a.test.ts', 't2\n');
+            rmSync(join(dir, 'packages/cli/src/big.test.ts'));
+          },
+        },
+        {
+          runnerExit: 0,
+          resolverLines: ['packages/cli'],
+          prelude: advisoryBlock2,
+        },
+      );
+      expect(combined.advisory).toContain('test coverage shrank');
+      expect(combined.advisory).toContain('pass on the pre-round tree');
+
+      // Contract pins: the rejection is non-retryable (a repair pass cannot
+      // make a nonexistent defect reproduce), and the report step embeds the
+      // gate-authored advisory file, which is also uploaded as an artifact.
+      expect(reviewVerificationRunner).toContain(
+        "reject_fix 'bite check: changed tests pass on the pre-round tree (claimed defect does not reproduce)' 'false' 'false'",
+      );
+      expect(pushAndReportStep).toContain('gate-advisories.md');
+      expect(reviewAddressJob).toContain('gate-advisories.md agent-api-error');
+      const skill = readFileSync('.qwen/skills/autofix/SKILL.md', 'utf8');
+      expect(skill).toContain('Verification is SOURCE-BLIND');
+      expect(skill).toContain('changed tests against the pre-round branch');
+      expect(skill).toContain("outside the PR's own");
+    },
+  );
 
   it('still runs review verification reporting when the agent step fails', () => {
     expect(verificationGateSteps).toHaveLength(2);
@@ -17738,7 +17757,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(r.headAfter).toBe('feature');
   });
 
-  it('keeps the green path intact', () => {
+  it.skipIf(!hasBashMapfile)('keeps the green path intact', () => {
     const r = runGate({ failAt: [] });
     expect(r.status).toBe(0);
     expect(r.outputs).toContain('outcome=fixed');
