@@ -175,6 +175,35 @@ describe('buildMarkdown section order', () => {
     line: 2,
   };
 
+  it('feeds buildMarkdown\u2019s ledger section the RUNNING identity', () => {
+    // The wiring, not the renderer. `renderLedgerSection` rules the
+    // same-model gate from the identity it is handed, and the only place that
+    // identity is read from the environment is this call — hard-coding `''`
+    // there, or dropping the argument, leaves every recovered anchor refused
+    // with the renderer's own tests still green.
+    const ledger: Ledger = {
+      v: 1,
+      round: 2,
+      findings: [{ id: 'R2-1', sev: 'C', file: 'a.ts', title: 't' }],
+      sha: 'abc1234def567890',
+      model: 'wired-model@1a2b3c4d',
+    };
+    const prev = process.env['QWEN_CODE_MODEL_IDENTITY'];
+    process.env['QWEN_CODE_MODEL_IDENTITY'] = 'wired-model@1a2b3c4d';
+    try {
+      expect(buildMarkdown('1', 'o/r', meta, [], [], [], ledger)).toContain(
+        'the same-model contract HOLDS',
+      );
+      process.env['QWEN_CODE_MODEL_IDENTITY'] = 'other-model@9f8e7d6c';
+      expect(buildMarkdown('1', 'o/r', meta, [], [], [], ledger)).toContain(
+        'Do NOT pass the reviewed-at sha',
+      );
+    } finally {
+      if (prev === undefined) delete process.env['QWEN_CODE_MODEL_IDENTITY'];
+      else process.env['QWEN_CODE_MODEL_IDENTITY'] = prev;
+    }
+  });
+
   it('puts the open comments before the already-discussed ones', () => {
     const md = buildMarkdown('1', 'o/r', meta, [root, reply, open], [], []);
     const openAt = md.indexOf('## Open inline comments');
@@ -1069,6 +1098,10 @@ describe('latestLedger — the split trust surface', () => {
     round: 2,
     findings: [{ id: 'R2-1', sev: 'C', file: 'a.ts', title: 't' }],
     sha: 'abc1234def567890',
+    // The anchor's certifying identity rides beside it, so the seam below
+    // covers both halves of the pair: they are written together, recovered
+    // together, and withheld together.
+    model: 'qwen3.7-max@1a2b3c4d',
   };
 
   it('takes the LATEST marker whoever posted it', () => {
@@ -1109,6 +1142,11 @@ describe('latestLedger — the split trust surface', () => {
       'maintainer',
     );
     expect(foreign?.ledger.sha).toBeUndefined();
+    // The certifying identity goes with it. Left behind, `model` says a
+    // foreign round was certified by someone while the range it certified is
+    // gone — and every reader of this object would then have to know to
+    // ignore it.
+    expect(foreign?.ledger.model).toBeUndefined();
     expect(foreign?.ledger.findings).toEqual(anchored.findings);
     expect(foreign?.ledger.round).toBe(2);
     // Pure-foreign (no own base): nothing was merged, so the renderer's
@@ -1120,7 +1158,8 @@ describe('latestLedger — the split trust surface', () => {
     // The seam the incremental range depends on: posted marker → latestLedger
     // → the prev-ledger side file (a JSON.stringify of exactly this ledger).
     // A future normalization that projects onto known fields would silently
-    // drop `sha` with every other test still green.
+    // drop `sha` — or `model`, which the same-model gate reads off the very
+    // same object — with every other test still green.
     const own = latestLedger(
       [
         review(
@@ -1666,11 +1705,14 @@ describe('renderLedgerSection', () => {
     // backslash followed by a LIVE separator — the forged row the escaping
     // exists to prevent, produced by the escaping.
     for (const title of ['plain', 'a | b', 'back\\| slash', 'trail\\']) {
-      const row = renderLedgerSection({
-        v: 1,
-        round: 1,
-        findings: [{ id: 'R1-1', sev: 'C', file: 'a.ts', line: 2, title }],
-      })
+      const row = renderLedgerSection(
+        {
+          v: 1,
+          round: 1,
+          findings: [{ id: 'R1-1', sev: 'C', file: 'a.ts', line: 2, title }],
+        },
+        'm',
+      )
         .split('\n')
         .find((l) => l.startsWith('| R1-1'))!;
       expect(liveSeparators(row)).toBe(5);
@@ -1686,13 +1728,13 @@ describe('renderLedgerSection', () => {
       round: 2,
       findings: [{ id: 'R2-1', sev: 'C', file: 'a.ts', title: 't' }],
     };
-    const foreign = renderLedgerSection(ledger, 'qwen-code-ci-bot');
+    const foreign = renderLedgerSection(ledger, 'm', 'qwen-code-ci-bot');
     expect(foreign).toContain('**@qwen-code-ci-bot**');
     expect(foreign).toContain('THEIR claims');
     expect(foreign).toContain('no incremental anchor');
 
     // The own-account rendering is unchanged, and says nothing about accounts.
-    const own = renderLedgerSection(ledger);
+    const own = renderLedgerSection(ledger, 'm');
     expect(own).toContain("this account's last posted review");
     expect(own).not.toContain('THEIR claims');
   });
@@ -1716,6 +1758,7 @@ describe('renderLedgerSection', () => {
         ],
         dropped: 2,
       },
+      'm',
       'qwen-code-ci-bot',
       true,
     );
@@ -1741,34 +1784,46 @@ describe('renderLedgerSection', () => {
     // The size cap can drop entries. A truncated list rendered under "every
     // entry below is owed a ruling" reads as complete, and the next round
     // retires what it cannot see.
-    const partial = renderLedgerSection({
-      v: 1,
-      round: 3,
-      findings: [{ id: 'R3-1', sev: 'C', file: 'a.ts', title: 't' }],
-      dropped: 7,
-    });
+    const partial = renderLedgerSection(
+      {
+        v: 1,
+        round: 3,
+        findings: [{ id: 'R3-1', sev: 'C', file: 'a.ts', title: 't' }],
+        dropped: 7,
+      },
+      'm',
+    );
     expect(partial).toContain('PARTIAL');
     expect(partial).toContain('7 further finding(s)');
     expect(partial).toMatch(/Absence below is not evidence/);
     expect(
-      renderLedgerSection({
-        v: 1,
-        round: 3,
-        findings: [{ id: 'R3-1', sev: 'C', file: 'a.ts', title: 't' }],
-      }),
+      renderLedgerSection(
+        {
+          v: 1,
+          round: 3,
+          findings: [{ id: 'R3-1', sev: 'C', file: 'a.ts', title: 't' }],
+        },
+        'm',
+      ),
     ).not.toContain('PARTIAL');
   });
 
   it('names the reviewed-at sha when the ledger carries one, and stays silent when not', () => {
     // The sha is the incremental anchor Step 1's recovered-anchor check reads
     // from the side file; the rendered section names it so the orchestrator
-    // sees the anchor exists without opening the JSON.
-    const anchored = renderLedgerSection({
-      v: 1,
-      round: 2,
-      findings: [{ id: 'R2-1', sev: 'C', file: 'a.ts', title: 't' }],
-      sha: 'abc1234def56789',
-    });
+    // sees the anchor exists without opening the JSON. The routing sentences
+    // ride the ADMISSIBLE branch — a matching certifier — because an anchor
+    // this round may not use must not render "pass it as `--since`" at all.
+    const anchored = renderLedgerSection(
+      {
+        v: 1,
+        round: 2,
+        findings: [{ id: 'R2-1', sev: 'C', file: 'a.ts', title: 't' }],
+        sha: 'abc1234def56789',
+        model: 'm@1a2b3c4d',
+      },
+      'm@1a2b3c4d',
+    );
     expect(anchored).toContain('reviewed at `abc1234def56789`');
     // The routing instruction itself, not just the sha: reverting this tail
     // to the pre-`--since` wording would render "hand-validate the anchor"
@@ -1796,47 +1851,150 @@ describe('renderLedgerSection', () => {
     expect(anchored).toContain(
       "when Step 1's recovered-anchor check rules a re-run admissible",
     );
-    expect(
-      renderLedgerSection({
+    const noSha = renderLedgerSection(
+      {
         v: 1,
         round: 2,
         findings: [{ id: 'R2-1', sev: 'C', file: 'a.ts', title: 't' }],
-      }),
-    ).not.toContain('reviewed at');
+      },
+      'm@1a2b3c4d',
+    );
+    expect(noSha).not.toContain('reviewed at');
     // …and the routing tail goes with it: asserting only the space-form
     // phrase let a mutant hoist the tail out of the ternary, since its own
     // wording says "reviewed-at sha".
-    expect(
-      renderLedgerSection({
-        v: 1,
-        round: 2,
-        findings: [{ id: 'R2-1', sev: 'C', file: 'a.ts', title: 't' }],
-      }),
-    ).not.toContain('--since');
+    expect(noSha).not.toContain('--since');
     // Every sentence of the tail, not just the ones carrying `--since`. The
     // first one is written "reviewed-at sha" — hyphenated — so it matches
     // neither the space-form phrase nor `--since`, and could be hoisted out
     // of the ternary with every assertion above still green: a sha-less
     // ledger would then render a dangling reference to a reviewed-at sha the
     // side file deliberately withholds.
+    expect(noSha).not.toContain('reviewed-at sha');
+  });
+
+  it('refuses when the side file holds a DIFFERENT anchor than the one recovered', () => {
+    // `persistRecoveredLedger` keeps a higher-round side file when the
+    // recovery walk comes back short (a concurrent lane, a paginated fetch
+    // that returned less than it should, a deleted latest review). The
+    // orchestrator then takes the sha from the file and the verdict from this
+    // section — so a HOLDS about the recovered sha would be obeyed against a
+    // different one, under whichever model certified THAT round. Compose's
+    // drift gate cannot catch it: the re-run re-stamps under the running
+    // model, so the stamp agrees with the runtime.
+    const recovered: Ledger = {
+      v: 1,
+      round: 5,
+      findings: [{ id: 'R5-1', sev: 'C', file: 'a.ts', title: 't' }],
+      sha: 'aaaa2222aaaa2222',
+      model: 'model-a@aaaaaaaa',
+    };
+    // Same model, so the gate itself would say HOLDS — the divergence is the
+    // only thing that can refuse here, which is what makes this test about it.
+    const diverged = renderLedgerSection(
+      recovered,
+      'model-a@aaaaaaaa',
+      null,
+      false,
+      'ffff1111ffff1111',
+    );
+    expect(diverged).toContain('Do NOT pass any sha');
+    expect(diverged).not.toContain('the same-model contract HOLDS');
+    // Both shas are named: a round that silently declines is indistinguishable
+    // from one that had no anchor.
+    expect(diverged).toContain('`aaaa2222aaaa2222`');
+    expect(diverged).toContain('`ffff1111ffff1111`');
+    // The work list still carries.
+    expect(diverged).toContain('still owed their rulings');
+
+    // Agreement — the ordinary case — rules normally.
     expect(
-      renderLedgerSection({
-        v: 1,
-        round: 2,
-        findings: [{ id: 'R2-1', sev: 'C', file: 'a.ts', title: 't' }],
-      }),
-    ).not.toContain('reviewed-at sha');
+      renderLedgerSection(
+        recovered,
+        'model-a@aaaaaaaa',
+        null,
+        false,
+        'aaaa2222aaaa2222',
+      ),
+    ).toContain('the same-model contract HOLDS');
+    // …and so does a side file that holds no anchor to disagree with.
+    expect(
+      renderLedgerSection(recovered, 'model-a@aaaaaaaa', null, false, null),
+    ).toContain('the same-model contract HOLDS');
+  });
+
+  it('RULES the same-model gate here instead of asking the model to compare', () => {
+    // The two operands are not comparable in prompt text: the marker's
+    // `model` is the provider-qualified identity the CLI wrote, while
+    // `{{model}}` — the only model value a skill body can interpolate —
+    // is the BARE `config.getModel()`. Told to compare them, an orchestrator
+    // either never matches (the recovery path this feature exists for silently
+    // never engages) or matches loosely, which accepts another provider's
+    // same-named model. So the verdict is computed in the process holding
+    // both values, and what reaches the model is the result.
+    const ledger = (model?: string) => ({
+      v: 1 as const,
+      round: 2,
+      findings: [{ id: 'R2-1', sev: 'C' as const, file: 'a.ts', title: 't' }],
+      sha: 'abc1234def56789',
+      ...(model === undefined ? {} : { model }),
+    });
+
+    const held = renderLedgerSection(ledger('m@1a2b3c4d'), 'm@1a2b3c4d');
+    expect(held).toContain('reviewed at `abc1234def56789` by `m@1a2b3c4d`');
+    expect(held).toContain('the same-model contract HOLDS');
+    expect(held).not.toContain('Do NOT pass');
+
+    // A DIFFERENT provider's digest under the same model name is the case the
+    // qualifier exists for, and a loose comparison would accept it.
+    const otherProvider = renderLedgerSection(
+      ledger('m@9f8e7d6c'),
+      'm@1a2b3c4d',
+    );
+    expect(otherProvider).toContain('Do NOT pass the reviewed-at sha');
+    expect(otherProvider).toContain('Review the FULL range');
+    expect(otherProvider).not.toContain('--since <sha>');
+    // It names both sides, so a maintainer asking "why the full diff again?"
+    // can see the answer rather than infer it from silence.
+    expect(otherProvider).toContain('certified by `m@9f8e7d6c`');
+    expect(otherProvider).toContain('runs as `m@1a2b3c4d`');
+    // The findings still carry — only the anchor does not.
+    expect(otherProvider).toContain('still owed their rulings');
+
+    // The bare id must not match its own qualified form either way round:
+    // that prefix relation is exactly what the digest disambiguates.
+    expect(renderLedgerSection(ledger('m'), 'm@1a2b3c4d')).toContain(
+      'Do NOT pass',
+    );
+    expect(renderLedgerSection(ledger('m@1a2b3c4d'), 'm')).toContain(
+      'Do NOT pass',
+    );
+
+    // A marker from before the field, and a runtime that published no
+    // identity at all: both are "unknown", and unknown is a mismatch.
+    const preField = renderLedgerSection(ledger(), 'm@1a2b3c4d');
+    expect(preField).not.toContain(' by `');
+    expect(preField).toContain('the marker predates the field');
+    expect(preField).toContain('Do NOT pass');
+    const noRuntime = renderLedgerSection(ledger('m@1a2b3c4d'), '');
+    expect(noRuntime).toContain('an unpublished identity');
+    expect(noRuntime).toContain('Do NOT pass');
+    // Two unknowns are not agreement.
+    expect(renderLedgerSection(ledger(), '')).toContain('Do NOT pass');
   });
 
   it('renders a work-list table that names the ruling owed per entry', () => {
-    const md = renderLedgerSection({
-      v: 1,
-      round: 2,
-      findings: [
-        { id: 'R2-1', sev: 'C', file: 'src/a.ts', line: 7, title: 'leak' },
-        { id: 'R2-2', sev: 'S', file: 'src/b.ts', title: 'gap' },
-      ],
-    });
+    const md = renderLedgerSection(
+      {
+        v: 1,
+        round: 2,
+        findings: [
+          { id: 'R2-1', sev: 'C', file: 'src/a.ts', line: 7, title: 'leak' },
+          { id: 'R2-2', sev: 'S', file: 'src/b.ts', title: 'gap' },
+        ],
+      },
+      'm',
+    );
     expect(md).toContain('## Previous /review round (machine ledger)');
     expect(md).toContain('| R2-1 | Critical | `src/a.ts:7` | leak |');
     expect(md).toContain('| R2-2 | Suggestion | `src/b.ts` | gap |');
@@ -1871,18 +2029,21 @@ describe('ledger marker vs the canonical-LGTM filter', () => {
 
 describe('renderLedgerSection escaping', () => {
   it('neutralises a pipe or newline in untrusted cell content', () => {
-    const md = renderLedgerSection({
-      v: 1,
-      round: 1,
-      findings: [
-        {
-          id: 'R1-1',
-          sev: 'C',
-          file: 'a.ts',
-          title: 'boom | forged | row\nsecond line',
-        },
-      ],
-    });
+    const md = renderLedgerSection(
+      {
+        v: 1,
+        round: 1,
+        findings: [
+          {
+            id: 'R1-1',
+            sev: 'C',
+            file: 'a.ts',
+            title: 'boom | forged | row\nsecond line',
+          },
+        ],
+      },
+      'm',
+    );
     const rows = md.split('\n').filter((l) => l.startsWith('| R1-1'));
     expect(rows).toHaveLength(1); // one row, not three
     expect(rows[0]).toContain('\\|');
@@ -1891,11 +2052,16 @@ describe('renderLedgerSection escaping', () => {
   it('keeps a backtick in the location inside its code span', () => {
     // The location is rendered as `path` — a backtick in the path closes the
     // span and lets the rest render as markdown instead of as a path.
-    const md = renderLedgerSection({
-      v: 1,
-      round: 1,
-      findings: [{ id: 'R1-1', sev: 'S', file: 'a`.ts** bold **', title: 't' }],
-    });
+    const md = renderLedgerSection(
+      {
+        v: 1,
+        round: 1,
+        findings: [
+          { id: 'R1-1', sev: 'S', file: 'a`.ts** bold **', title: 't' },
+        ],
+      },
+      'm',
+    );
     const row = md.split('\n').find((l) => l.startsWith('| R1-1'))!;
     expect(row).toBe("| R1-1 | Suggestion | `a'.ts** bold **` | t |");
   });

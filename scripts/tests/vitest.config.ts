@@ -19,7 +19,10 @@ export default defineConfig({
         ? [
             ...configDefaults.exclude,
             'scripts/tests/pr-self-report-label.test.js',
+            // Bash-driven workflow suites cannot run on Windows; pure
+            // YAML-parse workflow suites still do.
             'scripts/tests/qwen-*-workflow.test.js',
+            'scripts/tests/serve-ab-workflow.test.js',
           ]
         : [...configDefaults.exclude],
     setupFiles: ['scripts/tests/test-setup.ts'],

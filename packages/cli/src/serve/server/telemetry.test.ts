@@ -176,6 +176,14 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
     );
   });
 
+  it('maps the workspace live-state route to its own low-cardinality label', () => {
+    expect(
+      resolveDaemonTelemetryRoute(
+        mockReq('GET', '/workspaces/ws-secondary/sessions/live-state'),
+      ),
+    ).toEqual({ route: 'GET /workspaces/:workspace/sessions/live-state' });
+  });
+
   it('attributes workspace transcript reads to the target workspace and session', () => {
     const mw = daemonTelemetryMiddleware(() => '/workspace/secondary');
     const res = mockRes(200);
@@ -812,17 +820,17 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
 });
 
 describe('legacy session telemetry route catalog', () => {
-  it('contains 54 unique routes with the audited 52/2 attribution split', () => {
+  it('contains 59 unique routes with the audited 57/2 attribution split', () => {
     const keys = legacySessionTelemetryRoutes.map(
       ({ method, path }) => `${method} ${path}`,
     );
-    expect(keys).toHaveLength(54);
-    expect(new Set(keys).size).toBe(54);
+    expect(keys).toHaveLength(59);
+    expect(new Set(keys).size).toBe(59);
     expect(
       legacySessionTelemetryRoutes.filter(
         ({ attribution }) => attribution === 'handler_resolved',
       ),
-    ).toHaveLength(52);
+    ).toHaveLength(57);
     expect(
       legacySessionTelemetryRoutes.filter(
         ({ attribution }) => attribution === 'pre_resolved',
