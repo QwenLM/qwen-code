@@ -395,8 +395,11 @@ Stages 1 and 2 are independent and may run in parallel.
   teammate's tool list. The correct fix makes the illegal state **unrepresentable**, not
   merely rejected — a single-value optional enum described as "structured message type for
   control flow" is something a model will reasonably fill in.
-- Reconcile `MAX_TEAMMATES = 10` (`types.ts:180`) with `coordinate/SKILL.md`'s "one to
-  three". Two sources, same bug class as §1.7.
+- Subordinate `coordinate/SKILL.md`'s teammate count to `agents.team.maxTeammates`
+  (default `MAX_TEAMMATES = 10`, `types.ts:180`). Not the §1.7 bug class — a hard ceiling
+  and a workflow recommendation are different kinds of statement, and recommending fewer
+  than the ceiling allows is legitimate. The defect is narrower: the skill stated its
+  number as a second absolute, so lowering the cap left it instructing a spawn that throws.
 - Close [#9287](https://github.com/QwenLM/qwen-code/pull/9287) /
   [#9288](https://github.com/QwenLM/qwen-code/pull/9288) — superseded by merged #9284 / #9289.
 - Delete `packages/cli/src/agent-view/` (§1.6) and close
