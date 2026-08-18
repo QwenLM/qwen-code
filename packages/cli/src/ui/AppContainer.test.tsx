@@ -6522,6 +6522,12 @@ describe('AppContainer State Management', () => {
     });
 
     it('re-arms the latch when sessionStats.sessionId changes (startNewSession)', () => {
+      // Scoped stub: React's double-mount re-runs the mount init effect and
+      // the second initialize() throws inside an un-awaited IIFE, surfacing
+      // as an unhandled rejection when this test runs in isolation (-t
+      // filtered, watch mode, or sharded runs exit 1 because of it).
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+
       mockedUseSessionStats.mockReturnValue({
         stats: { sessionId: 'session-a' },
         seedPromptCount: vi.fn(),
