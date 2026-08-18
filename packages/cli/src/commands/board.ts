@@ -28,6 +28,7 @@ import {
   updateBoardTask,
   createAsk,
   listAsks,
+  getAsk,
   answerAsk,
   declineAsk,
   raiseDecision,
@@ -191,6 +192,7 @@ export const boardCommand: CommandModule = {
             const task = await updateBoardTask(board(a), a.id, {
               status: 'completed',
               note: a.note,
+              by: participant(a),
             });
             emit(a, task, `${task.id} done`);
           }),
@@ -212,6 +214,12 @@ export const boardCommand: CommandModule = {
               type: 'number',
               default: 30,
               describe: 'Seconds to block when --wait is set',
+            })
+            .option('ttl', {
+              type: 'number',
+              describe:
+                'Minutes before the ask lapses to timeout. Raise it when the ' +
+                'recipient only looks between long turns',
             }),
         handler: (argv) =>
           run(async () => {
@@ -221,6 +229,7 @@ export const boardCommand: CommandModule = {
               about?: string;
               wait?: boolean;
               timeout: number;
+              ttl?: number;
             };
             const name = board(a);
             const ask = await createAsk({
@@ -229,6 +238,7 @@ export const boardCommand: CommandModule = {
               to: a.to,
               question: a.question,
               aboutTask: a.about,
+              ...(a.ttl ? { ttlMs: a.ttl * 60_000 } : {}),
             });
             if (!a.wait) {
               emit(a, ask, `${ask.id} → ${ask.to}`);
@@ -238,10 +248,11 @@ export const boardCommand: CommandModule = {
             // own turn, so an unbounded wait would hang it.
             const deadline = Date.now() + a.timeout * 1000;
             for (;;) {
-              const [current] = await listAsks(name, {
-                states: ['answered', 'declined', 'timeout'],
-              }).then((all) => all.filter((x) => x.id === ask.id));
-              if (current) {
+              // Read the one item rather than listing the board: this runs
+              // every 500ms and a board with many asks would pay a readdir
+              // plus a read per item on every tick.
+              const current = await getAsk(name, ask.id);
+              if (current && current.state !== 'open') {
                 emit(
                   a,
                   current,

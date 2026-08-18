@@ -64,10 +64,18 @@ export function resolveBoardName(opts: BoardContextOptions = {}): string {
  * The name this process writes as. Not an identity claim that anything
  * verifies — the board records who wrote what, and the trust boundary is the
  * uid that owns the directory, not the string in this field.
+ *
+ * The fallback deliberately excludes the pid. Every `qwen board …` is a fresh
+ * process, so a pid-based default would make `claim` and `done` on the same
+ * task come from two different participants, and an ask addressed to the name
+ * a peer used last time could never be found. A stable per-user default keeps
+ * a single agent coherent across invocations; two agents sharing an account
+ * collide visibly on the board and are separated with `--as`, which
+ * `fleet up` always sets.
  */
 export function resolveParticipantName(opts: BoardContextOptions = {}): string {
   const env = opts.env ?? process.env;
   const explicit = opts.as || env[PARTICIPANT_ENV_NAME];
   if (explicit) return explicit;
-  return slugify(`${os.userInfo().username}-${process.pid}`);
+  return slugify(os.userInfo().username);
 }

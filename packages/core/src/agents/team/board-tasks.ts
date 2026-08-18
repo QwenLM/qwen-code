@@ -203,6 +203,24 @@ async function mutate(
   );
 }
 
+export class TaskCompletedError extends Error {
+  constructor(id: string) {
+    super(`Task "${id}" is already completed. Reopen it before claiming.`);
+    this.name = 'TaskCompletedError';
+  }
+}
+
+export class TaskNotOwnedError extends Error {
+  constructor(id: string, owner: string | null, by: string) {
+    super(
+      owner
+        ? `Task "${id}" belongs to "${owner}", not "${by}".`
+        : `Task "${id}" is unclaimed — claim it before completing it.`,
+    );
+    this.name = 'TaskNotOwnedError';
+  }
+}
+
 export class TaskClaimedError extends Error {
   constructor(id: string, owner: string) {
     super(`Task "${id}" is already claimed by "${owner}".`);
@@ -222,6 +240,12 @@ export function claimBoardTask(
 ): Promise<BoardTaskRecord> {
   assertSafeName('participant name', by);
   return mutate(board, id, (task) => {
+    // Completed work is not up for grabs. Ids are short and typeable by
+    // design, so a mistyped one is likely — and silently reopening finished
+    // work while reassigning it is the worst way to surface that.
+    if (task.status === 'completed') {
+      throw new TaskCompletedError(id);
+    }
     if (task.owner && task.owner !== by && task.status === 'in_progress') {
       throw new TaskClaimedError(id, task.owner);
     }
@@ -232,16 +256,33 @@ export function claimBoardTask(
 export function updateBoardTask(
   board: string,
   id: string,
-  patch: { status?: BoardTaskStatus; note?: string; owner?: string | null },
+  patch: {
+    status?: BoardTaskStatus;
+    note?: string;
+    owner?: string | null;
+    /**
+     * When set, the update is refused unless this participant owns the task.
+     * Completing work someone else is mid-way through is the case this
+     * guards; a note or a re-owner is deliberately left open, since those are
+     * how a board gets unstuck.
+     */
+    by?: string;
+  },
 ): Promise<BoardTaskRecord> {
   if (patch.note !== undefined) assertText('note', patch.note);
   if (patch.owner) assertSafeName('participant name', patch.owner);
-  return mutate(board, id, (task) => ({
-    ...task,
-    ...(patch.status ? { status: patch.status } : {}),
-    ...(patch.owner !== undefined ? { owner: patch.owner } : {}),
-    ...(patch.note ? { notes: [...task.notes, patch.note] } : {}),
-  }));
+  if (patch.by) assertSafeName('participant name', patch.by);
+  return mutate(board, id, (task) => {
+    if (patch.by && patch.status === 'completed' && task.owner !== patch.by) {
+      throw new TaskNotOwnedError(id, task.owner, patch.by);
+    }
+    return {
+      ...task,
+      ...(patch.status ? { status: patch.status } : {}),
+      ...(patch.owner !== undefined ? { owner: patch.owner } : {}),
+      ...(patch.note ? { notes: [...task.notes, patch.note] } : {}),
+    };
+  });
 }
 
 /** Release ownership without completing — the task returns to the pool. */

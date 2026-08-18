@@ -19,11 +19,15 @@
  * board, which is what lets an agent we did not write take part on equal
  * terms: fetching is the one verb available to every participant.
  *
- * Timeout is settled lazily. `expiresAt` is written at creation, and any
- * reader that sees an `open` ask past its deadline reports `timeout` — no
- * sweeper process walks the directory, because a fetch-based system has no
- * daemon guaranteed to be running. The file is rewritten when someone next
- * touches it; until then every reader computes the same answer.
+ * Timeout is **computed, never stored**. `expiresAt` is written at creation and
+ * any reader past that deadline reports `timeout`; the record on disk stays
+ * `open` forever. No sweeper walks the directory — a fetch-based system has no
+ * daemon guaranteed to be running, and persisting the transition would mean a
+ * read path that writes, so `board show` would mutate the board.
+ *
+ * The deadline is what every participant agrees on, so they all reach the same
+ * answer without coordinating. `answerAsk` re-checks it under the lock, since
+ * answering a lapsed ask would otherwise resurrect it.
  */
 
 import * as fs from 'node:fs/promises';

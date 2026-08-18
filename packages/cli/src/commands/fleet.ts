@@ -31,7 +31,13 @@ import {
   tmuxSplitWindow,
   tmuxSelectPane,
   tmuxSelectPaneTitle,
+  tmuxSelectLayout,
+  tmuxSetOption,
+  tmuxRespawnPane,
+  tmuxListPanes,
+  parseTmuxListPanes,
   tmuxCurrentWindowTarget,
+  tmuxCurrentSession,
 } from '@qwen-code/qwen-code-core';
 import {
   resolveBoardName,
@@ -40,8 +46,8 @@ import {
 } from './board/context.js';
 
 const DEFAULT_SESSION = 'qwen-fleet';
-/** Width of the board pane. Narrow enough to leave the agents readable. */
-const BOARD_PERCENT = 30;
+/** Columns given to the board pane. Narrow enough to leave the agents readable. */
+const BOARD_WIDTH_COLUMNS = 46;
 
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
@@ -129,7 +135,11 @@ export const fleetCommand: CommandModule = {
           const inside = Boolean(process.env['TMUX']);
           let target: string;
           if (inside) {
-            await tmuxNewWindow(a.session, board);
+            // Add the window to the session the user is actually in. Using the
+            // configured name here fails outright when their current session is
+            // called anything else, which is the common case.
+            const current = await tmuxCurrentSession();
+            await tmuxNewWindow(current, board);
             target = await tmuxCurrentWindowTarget();
           } else {
             if (!(await tmuxHasSession(a.session))) {
@@ -138,16 +148,24 @@ export const fleetCommand: CommandModule = {
             target = `${a.session}:`;
           }
 
-          // The first pane shows the board; everything else splits off it.
-          const boardPane = await tmuxSplitWindow(target, {
-            horizontal: true,
-            percent: 100 - BOARD_PERCENT,
-            command: paneCommand(
+          // The window's existing pane becomes the board, respawned rather
+          // than typed into: send-keys would race a shell that may not be
+          // ready, and respawn-pane makes the command the pane's process.
+          const existing = parseTmuxListPanes(await tmuxListPanes(target));
+          const boardPane = existing[0]?.paneId;
+          if (!boardPane) {
+            console.error('Could not find a pane to host the board.');
+            process.exitCode = 1;
+            return;
+          }
+          await tmuxRespawnPane(
+            boardPane,
+            paneCommand(
               board,
               undefined,
               `qwen board watch --board ${shellQuote(board)}`,
             ),
-          });
+          );
 
           const specs: Array<{ name: string; command: string }> = [];
           for (let i = 1; i <= Math.max(0, a.agents); i++) {
@@ -159,16 +177,24 @@ export const fleetCommand: CommandModule = {
             specs.push({ name, command: paneCommand(board, name, cmd) });
           });
 
-          let previous = target;
-          for (let i = 0; i < specs.length; i++) {
-            const spec = specs[i];
-            const remaining = specs.length - i;
-            const pane = await tmuxSplitWindow(previous, {
-              percent: Math.max(20, Math.floor(100 / remaining)),
+          // No explicit sizes: an N-way split computed by hand hits `-l 100%`
+          // on the last pane, which tmux rejects. Create the panes, then let
+          // `main-vertical` do the arithmetic — it puts the first pane on the
+          // left and stacks the rest on the right, which is the layout.
+          for (const spec of specs) {
+            const pane = await tmuxSplitWindow(boardPane, {
               command: spec.command,
             });
             await tmuxSelectPaneTitle(pane, spec.name);
-            previous = pane;
+          }
+
+          if (specs.length > 0) {
+            await tmuxSetOption(
+              target,
+              'main-pane-width',
+              String(BOARD_WIDTH_COLUMNS),
+            );
+            await tmuxSelectLayout(target, 'main-vertical');
           }
 
           await tmuxSelectPane(boardPane);
