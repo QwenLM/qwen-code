@@ -989,6 +989,70 @@ exit 0
   );
 
   it.skipIf(process.platform === 'win32')(
+    'a stage replaced by a directory during the render does not mask the capture result',
+    async () => {
+      // The stage-removal rmSync pair in the render finally was the only
+      // unguarded fs operation in runCaptureTui: an actor with write access
+      // to the --out directory (the class the clear phase and collision
+      // gate exist for) replacing a stage with a directory mid-render made
+      // the finally throw EISDIR out of the function — exit 1, a stack
+      // trace, no contract JSON, and drainSignalsThenRelease never ran.
+      // Litter is cosmetic; the capture's result is not.
+      probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+      const realFreezeProbe = probes.freeze;
+      probes.freeze = () => ({ status: 'ok', out: '' }) as const;
+      const dir = mkdtempSync(join(tmpdir(), 'capture-tui-stagedir-'));
+      writeFakeTmux(dir, '    :');
+      const freezeBin = join(dir, 'fakebin', 'freeze');
+      writeFileSync(
+        freezeBin,
+        `#!/bin/sh
+rm -f "$3" && mkdir "$3"
+printf 'x' > "$5"
+exit 0
+`,
+        { mode: 0o755 },
+      );
+      const realPath = process.env['PATH'];
+      const realBin = freezeRender.bin;
+      process.env['PATH'] = `${join(dir, 'fakebin')}:${realPath ?? ''}`;
+      freezeRender.bin = freezeBin;
+      try {
+        const { stdout } = await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: dir,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: 'MARK',
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 10_000,
+          } as never),
+        );
+        expect(process.exitCode).toBeUndefined();
+        const manifest = JSON.parse(
+          readFileSync(join(dir, 'cap.json'), 'utf8'),
+        );
+        expect(manifest.evidence).toBe('png');
+        expect(JSON.parse(stdout)).toMatchObject({ captured: true });
+        // The planted directory is another actor's — left in place, never
+        // recursively deleted, and the run still completed its contract.
+        const litter = readdirSync(dir).filter((f) => f.includes('.render-'));
+        expect(litter).toHaveLength(1);
+        expect(lstatSync(join(dir, litter[0])).isDirectory()).toBe(true);
+      } finally {
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+        freezeRender.bin = realBin;
+        probes.freeze = realFreezeProbe;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
     'records the -T caveat — erased cells still capture as trailing spaces',
     async () => {
       // -T trims only positions that never held a character; cells written
@@ -1311,6 +1375,94 @@ exit 0
         expect(killCalls).toContain('/tmp');
         expect(stderr).toContain('WARNING');
         expect(stderr).toContain('kill-server failed twice');
+      } finally {
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+        if (realTmuxTmpdir === undefined) delete process.env['TMUX_TMPDIR'];
+        else process.env['TMUX_TMPDIR'] = realTmuxTmpdir;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'credits the create-directory verdict when start itself failed before binding a socket',
+    async () => {
+      // The third arm of the create-directory exclusion: the base passes
+      // the start-time W_OK|X_OK gate, but tmux's mkdir of tmux-<uid>
+      // persistently fails there (ENOSPC on that filesystem, EROFS under
+      // root, NFS root-squash). Start throws, no server ever existed, and
+      // both kills answer the same persistent wording — yet the exclusion,
+      // unconditional on the stamp (which never ran either), vetoed credit
+      // and the reap printed a false orphan WARNING next to the refusal.
+      // The discriminating signal is whether the start call threw.
+      probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+      const dir = mkdtempSync(join('/tmp', 'capture-tui-reapns-'));
+      const envBase = join(dir, 'scratch');
+      mkdirSync(envBase);
+      const stateDir = join(dir, 'state');
+      mkdirSync(stateDir);
+      const binDir = join(dir, 'fakebin');
+      mkdirSync(binDir, { recursive: true });
+      writeFileSync(
+        join(binDir, 'tmux'),
+        `#!/bin/sh
+[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }
+for a in "$@"; do
+  if [ "$a" = "new-session" ]; then
+    echo "couldn't create directory $TMUX_TMPDIR/tmux-$(id -u) (No space left on device)" >&2
+    exit 1
+  fi
+  if [ "$a" = "kill-server" ]; then
+    printf '%s\\n' "\${TMUX_TMPDIR:-}" >> "${stateDir}/kill-calls"
+    if [ "$TMUX_TMPDIR" = '${envBase}' ]; then
+      echo "couldn't create directory $TMUX_TMPDIR/tmux-$(id -u) (No space left on device)" >&2
+      exit 1
+    fi
+    SRV=""; prev=""
+    for x in "$@"; do [ "$prev" = "-L" ] && SRV="$x"; prev="$x"; done
+    echo "no server running on \${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/$SRV" >&2
+    exit 1
+  fi
+done
+printf 'MARK\\n'
+exit 0
+`,
+        { mode: 0o755 },
+      );
+      const realPath = process.env['PATH'];
+      const realTmuxTmpdir = process.env['TMUX_TMPDIR'];
+      process.env['PATH'] = `${binDir}:${realPath ?? ''}`;
+      process.env['TMUX_TMPDIR'] = envBase;
+      try {
+        const { stdout, stderr } = await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: dir,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: 'MARK',
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 10_000,
+          } as never),
+        );
+        expect(process.exitCode).toBe(3);
+        expect(stderr).toContain('refused');
+        expect(stderr).toContain("couldn't create directory");
+        // Both candidate bases were tried...
+        const killCalls = readFileSync(join(stateDir, 'kill-calls'), 'utf8')
+          .trim()
+          .split('\n');
+        expect(killCalls).toContain(envBase);
+        expect(killCalls).toContain('/tmp');
+        // ...but a start that threw never bound a socket, so the server
+        // never existed: the persistent create failure on the start base
+        // IS the goal state there, and no orphan WARNING may print.
+        expect(stderr).not.toContain('WARNING');
+        expect(JSON.parse(stdout)).toMatchObject({ captured: false });
+        expect(existsSync(join(dir, 'cap.json'))).toBe(false);
       } finally {
         if (realPath === undefined) delete process.env['PATH'];
         else process.env['PATH'] = realPath;

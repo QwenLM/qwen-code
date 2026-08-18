@@ -1230,6 +1230,12 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   // produced one: the reap trusts goal-state kill verdicts about that base
   // only while this identity survives (see the reap below).
   let socketStampIno: number | undefined;
+  // Whether the start call itself threw: the reap admits the
+  // socket-directory-never-created wording on the start base only under
+  // this flag (see the reap below) — the stamp cannot carry the
+  // distinction, since it is also absent when stamping fails after a
+  // successful start.
+  let startThrew = false;
   let reaped = false;
   const reap = (): void => {
     // serverStarted is set BEFORE the start call: the call forks the
@@ -1340,7 +1346,10 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
           // destroyed mid-window — the client never looked, and the
           // server may still be alive. The same wording stays honest
           // where the server started under the OTHER base: that base
-          // never held it.
+          // never held it — nor did one whose start THREW before binding
+          // a socket: there the directory never existed, so the wording
+          // is admitted on the start base under that flag (without it a
+          // false orphan WARNING printed for a server that never existed).
           //
           // The ENOENT class establishes death only where start never bound
           // a socket: once stamped, it means the stamped socket was removed
@@ -1357,7 +1366,11 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
               (isSocketPathAbsent(stderrText) &&
                 socketStampIno === undefined)) &&
             verdictExaminedBase(stderrText, base) &&
-            !(isSocketDirNeverCreated(stderrText) && onStartBase) &&
+            !(
+              isSocketDirNeverCreated(stderrText) &&
+              onStartBase &&
+              !startThrew
+            ) &&
             !(
               onStartBase &&
               socketStampIno !== undefined &&
@@ -1483,7 +1496,12 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // runners). kill-server against a server that never came up answers
     // the goal state, so the early flag adds no false warnings.
     serverStarted = true;
-    tmux(plan.start);
+    try {
+      tmux(plan.start);
+    } catch (e) {
+      startThrew = true;
+      throw e;
+    }
     {
       const uidAtStart = process.getuid?.();
       if (uidAtStart !== undefined) {
@@ -1943,9 +1961,17 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
           }
         }
       } finally {
-        rmSync(ansStage, { force: true });
+        try {
+          rmSync(ansStage, { force: true });
+        } catch {
+          // Litter is cosmetic; never let cleanup mask the capture's result.
+        }
         // Gone already when the rename landed it.
-        rmSync(pngStage, { force: true });
+        try {
+          rmSync(pngStage, { force: true });
+        } catch {
+          // Same.
+        }
       }
     }
   }
