@@ -57,6 +57,12 @@ describe('resolveStallMs', () => {
   // Asserting the relationship rather than the literal keeps this meaningful if
   // either number is retuned later.
   it('outlasts the transport retry ladder it has to survive', () => {
+    // TODO: derive from DEFAULT_RETRY_OPTIONS once it (or a worst-case backoff
+    // helper) is exported from utils/retry.ts. Until then this literal is a
+    // hand-copy and must be retuned together with it — `toBe(76_500)` below
+    // only pins this copy, so a retune there would leave this green while the
+    // real ladder overtook the window. Nominal sleeps: the normal path also
+    // applies ±30% jitter (~89.25s worst case after the 30s cap).
     const RETRY_LADDER_MS = [1_500, 3_000, 6_000, 12_000, 24_000, 30_000];
     const ladderTotal = RETRY_LADDER_MS.reduce((a, b) => a + b, 0);
     expect(ladderTotal).toBe(76_500);
@@ -76,11 +82,15 @@ describe('attachStallWatchdog', () => {
     const emitter = new AgentEventEmitter();
     const controller = new AbortController();
     const wd = attachStallWatchdog(emitter, controller, 1000);
-    // #8: not armed until the first progress event (the time-to-first-response
-    // window is not a stall) — so advancing past stallMs here does nothing.
+    // Not armed until the first progress event — so advancing past stallMs
+    // here does nothing. In a real dispatch that event is ROUND_START, which
+    // fires before the request reaches the wire (see the doc comment on
+    // `attachStallWatchdog`), so this pre-arm silence is only round 1's
+    // pre-generator work, NOT the time-to-first-token window — that window is
+    // watched, and is pinned by the test below.
     vi.advanceTimersByTime(2000);
     expect(wd.stalled()).toBe(false);
-    // First response arrives → watchdog arms; then silence trips it.
+    // ROUND_START arrives → watchdog arms; then silence trips it.
     emitter.emit(AgentEventType.ROUND_START, {} as never);
     vi.advanceTimersByTime(999);
     expect(wd.stalled()).toBe(false);
@@ -194,8 +204,9 @@ describe('runStallResilient', () => {
       emitter: AgentEventEmitter,
     ): Promise<string> => {
       calls += 1;
-      // Emit a first response event so the watchdog arms (#8: the time-to-
-      // first-response window is not a stall), then go silent → it trips.
+      // Emit ROUND_START so the watchdog arms — in a real dispatch that fires
+      // before the request reaches the wire, so the time-to-first-token window
+      // IS watched — then go silent → it trips.
       emitter.emit(AgentEventType.ROUND_START, {} as never);
       await new Promise<void>((resolve) => {
         if (signal.aborted) return resolve();

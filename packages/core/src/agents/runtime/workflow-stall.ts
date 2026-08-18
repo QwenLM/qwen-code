@@ -44,8 +44,16 @@ import { parsePositiveIntegerEnv } from '../../utils/env.js';
  * Default stall timeout: no progress (with no tool in flight) for this long
  * ends the attempt.
  *
- * Sized against the transport's own silent retry ladder rather than against a
- * guess at model latency. `retryWithBackoff` sleeps 1.5s, 3s, 6s, 12s, 24s then
+ * Sized against the `retryWithBackoff` silent retry ladder rather than against
+ * a guess at model latency. That ladder is the binding case, not the only
+ * watchdog-invisible wait: stream-side rate-limit sleeps
+ * (`RATE_LIMIT_RETRY_OPTIONS` in geminiChat.ts — 60s/120s/240s/300s, so two
+ * consecutive sleeps already reach 180s), a provider `Retry-After` honored
+ * unclamped on the normal HTTP path, and unattended-mode persistent backoff
+ * (up to 5 min per sleep) can all exceed this window and read as a stall on a
+ * request that is retrying exactly as designed. Making transport retries
+ * visible to the watchdog is the follow-up; this window does not cover them.
+ * `retryWithBackoff` sleeps 1.5s, 3s, 6s, 12s, 24s then
  * 30s between attempts (`DEFAULT_RETRY_OPTIONS` in utils/retry.ts), and
  * `agent-core` consumes each `retry` stream event without emitting anything the
  * watchdog counts as progress. A plain 429/5xx ladder is therefore 76.5s of
@@ -112,8 +120,10 @@ export interface StallWatchdogHandle {
  * all elapse with the timer already running.
  *
  * So `stallMs` must be wide enough to cover a healthy first response, not just a
- * mid-stream gap. The binding case is the transport's silent retry ladder — see
- * `DEFAULT_STALL_MS`. Once the provider streams anything at all, including
+ * mid-stream gap. The binding case this window is sized against is the
+ * `retryWithBackoff` silent retry ladder — see `DEFAULT_STALL_MS`, which also
+ * names the longer waits (stream-side rate-limit sleeps, an unclamped
+ * `Retry-After`, unattended backoff) that remain invisible to it. Once the provider streams anything at all, including
  * thought deltas, `STREAM_TEXT` resets the timer.
  *
  * A `stallMs` of 0 means "no watchdog" — this returns an inert handle.
