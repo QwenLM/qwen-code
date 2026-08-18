@@ -590,6 +590,7 @@ describe('qwen-autofix workflow', () => {
             ...process.env,
             PENDING_CUTOFF: '2026-07-21T00:00:00Z',
             NON_BLOCKING_CHECKS: JSON.stringify(nonBlocking),
+            DISPATCH_STATUS_CONTEXT: 'qwen-autofix/dispatch-pending',
           },
           encoding: 'utf8',
         },
@@ -2115,6 +2116,119 @@ describe('qwen-autofix workflow', () => {
     expect(failed.log).toContain('metadata fetch failed (API error)');
   });
 
+  it('releases the dispatch-pending marker when the recheck discards a target', () => {
+    // The discard exits BEFORE checkout, where the leg-side release lives, so
+    // a discarded same-repo head would otherwise keep being skipped as
+    // dispatch-pending for the full TTL with no leg coming — against the
+    // re-emit promise its own comment makes. Replay the recheck block
+    // VERBATIM with a recording gh stub: the release must fire on same-repo
+    // discards and never where it cannot (fork heads were never stamped;
+    // dry runs stamp nothing; a missing head sha has nothing to stamp).
+    const recheck = prepareBranchAndFeedbackStep.match(
+      /(PR_LIVE="\$\(gh pr view[\s\S]*?exit 0\n {10}fi)/,
+    )?.[1];
+    expect(recheck).toBeTruthy();
+    // The live fetch carries the head sha the release stamps.
+    expect(recheck).toContain(',headRefOid');
+    expect(recheck).toContain(
+      'LIVE_HEAD_OID="$(jq -r \'.headRefOid // ""\' <<< "${PR_LIVE}")"',
+    );
+    expect(recheck).toContain(
+      'if [[ "${DRY_RUN}" != "true" && "${LIVE_XREPO}" == "false" && -n "${LIVE_HEAD_OID}" ]]; then',
+    );
+    const runReleaseRecheck = (prJson, { dryRun = 'false' } = {}) => {
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-release-'));
+      try {
+        writeFileSync(
+          join(dir, 'gh'),
+          [
+            '#!/bin/bash',
+            `if [[ "$*" == *"/collaborators/"* ]]; then printf '%s' 'write';`,
+            `elif [[ "$1" == "api" && "$2" == repos/*/statuses/* ]]; then echo "API $*" >> '${join(dir, 'writes.log')}';`,
+            `else printf '%s' '${JSON.stringify(prJson)}'; fi`,
+          ].join('\n'),
+        );
+        chmodSync(join(dir, 'gh'), 0o755);
+        writeFileSync(join(dir, 'writes.log'), '');
+        const out = join(dir, 'out.txt');
+        writeFileSync(out, '');
+        const stdout = execFileSync(
+          'bash',
+          ['-c', `${recheck.replace(/\n {10}/g, '\n')}\nprintf 'PASSED'`],
+          {
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              PR: '7163',
+              REPO: 'QwenLM/qwen-code',
+              BRANCH: 'ci/some-branch',
+              HEAD_REPO: 'QwenLM/qwen-code',
+              WATERMARK: '2026-07-18T08:00:00Z',
+              ROUND: '2',
+              AUTOFIX_BOT: 'qwen-code-dev-bot',
+              TAKEOVER_LABEL: 'autofix/takeover',
+              SKIP_LABEL: 'autofix/skip',
+              DISPATCH_STATUS_CONTEXT: 'qwen-autofix/dispatch-pending',
+              DRY_RUN: dryRun,
+              GITHUB_OUTPUT: out,
+              GITHUB_TOKEN: 'x',
+            },
+            encoding: 'utf8',
+          },
+        );
+        return {
+          passed: stdout.endsWith('PASSED'),
+          out: readFileSync(out, 'utf8'),
+          writes: readFileSync(join(dir, 'writes.log'), 'utf8'),
+        };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    const pr = (over = {}) => ({
+      state: 'OPEN',
+      author: { login: 'qwen-code-dev-bot' },
+      isCrossRepository: false,
+      baseRefName: 'main',
+      headRefName: 'ci/some-branch',
+      headRefOid: 'deadbeefcafe',
+      labels: [],
+      ...over,
+    });
+    // Same-repo discard → the marker is released on the live head.
+    const closed = runReleaseRecheck(pr({ state: 'CLOSED' }));
+    expect(closed.passed).toBe(false);
+    expect(closed.out).toContain('stale=true');
+    expect(closed.writes).toContain(
+      'API api repos/QwenLM/qwen-code/statuses/deadbeefcafe -X POST',
+    );
+    expect(closed.writes).toContain('state=success');
+    expect(closed.writes).toContain('context=qwen-autofix/dispatch-pending');
+    // A skip-label discard releases too (same-repo).
+    expect(
+      runReleaseRecheck(pr({ labels: [{ name: 'autofix/skip' }] })).writes,
+    ).toContain('statuses/deadbeefcafe');
+    // Fork discard → no release: fork heads were never stamped.
+    expect(
+      runReleaseRecheck(
+        pr({ isCrossRepository: true, author: { login: 'human' } }),
+      ).writes,
+    ).toBe('');
+    // Dry run → no release: no stamp was ever written.
+    expect(
+      runReleaseRecheck(pr({ state: 'CLOSED' }), { dryRun: 'true' }).writes,
+    ).toBe('');
+    // Missing head sha → nothing to stamp.
+    expect(
+      runReleaseRecheck(pr({ state: 'CLOSED', headRefOid: '' })).writes,
+    ).toBe('');
+    // Healthy target passes through WITHOUT a release here — the
+    // checkout-path release owns that stamp.
+    const ok = runReleaseRecheck(pr());
+    expect(ok.passed).toBe(true);
+    expect(ok.writes).toBe('');
+  });
+
   it('falls back to existing issue backlog only when review has no target', () => {
     expect(issueAutofixJob).toContain("needs: ['route', 'review-scan']");
     // Anchor the job `if` opening: a bare toContain('always()') is also
@@ -2124,7 +2238,7 @@ describe('qwen-autofix workflow', () => {
     );
     expect(issueAutofixJob).toContain("needs.review-scan.result == 'success'");
     expect(issueAutofixJob).toContain(
-      "github.event_name != 'schedule' || (needs.review-scan.result == 'success' && needs.review-scan.outputs.has_targets != 'true')",
+      "github.event_name != 'schedule' || (needs.review-scan.result == 'success' && needs.review-scan.outputs.has_targets != 'true' && needs.review-scan.outputs.enum_failed != 'true')",
     );
     expect(findCandidateIssuesStep).toContain('OPEN_AUTOFIX_PR_COUNT');
     expect(findCandidateIssuesStep).toContain('MAX_OPEN_AUTOFIX_PRS');
@@ -2283,7 +2397,7 @@ describe('qwen-autofix workflow', () => {
     // run-unique suffix appended as a continuation line would also become
     // part of the group value while a trailing-newline anchor stayed green.
     expect(issueAutofixJob).toContain(
-      "group: >-\n        ${{ needs.route.outputs.do_issue == 'true' && needs.route.outputs.dry_run != 'true' && (github.event_name != 'schedule' || (needs.review-scan.result == 'success' && needs.review-scan.outputs.has_targets != 'true')) && format('qwen-autofix-issue-{0}', needs.route.outputs.issue_number || github.event.issue.number || 'scheduled') || format('qwen-autofix-issue-run-{0}', github.run_id) }}\n      cancel-in-progress: false",
+      "group: >-\n        ${{ needs.route.outputs.do_issue == 'true' && needs.route.outputs.dry_run != 'true' && (github.event_name != 'schedule' || (needs.review-scan.result == 'success' && needs.review-scan.outputs.has_targets != 'true' && needs.review-scan.outputs.enum_failed != 'true')) && format('qwen-autofix-issue-{0}', needs.route.outputs.issue_number || github.event.issue.number || 'scheduled') || format('qwen-autofix-issue-run-{0}', github.run_id) }}\n      cancel-in-progress: false",
     );
     expect(issueAutofixJob).not.toContain('|| github.run_id }}');
     // The group identity and the scan step's FORCED_ISSUE env are
@@ -3748,6 +3862,321 @@ describe('qwen-autofix workflow', () => {
     // papered over by an absolute invariant.
     expect(reviewScanJob).toContain('base conflict');
     expect(reviewScanJob).toContain('still-red checks');
+  });
+
+  it('fails closed on busy-enumeration failure, keeps explicit dispatches, and signals the issue phase', () => {
+    // Measured 2026-08-16 (#9296): a swallowed enumeration failure
+    // re-dispatched PRs with live legs. The fail-closed block must (a) empty
+    // the candidate set, (b) keep ONLY explicit workflow_dispatch dispatches
+    // (FORCED_PR is also set for trusted pull_request_review scans — those
+    // stay fail-closed), (c) emit enum_failed so the scheduled issue phase
+    // cannot flip ON over an emptied set (the scan exits 0, so has_targets
+    // alone would read exactly like "no PR needs work"), and (d) carry the
+    // underlying error tail — transient API instability and PAT decay need
+    // different oncall responses. Replay the block VERBATIM with a stubbed
+    // gh: the string pins alone would stay green on a flipped carve-out or a
+    // dropped enum_failed echo.
+    expect(reviewScanJob).toContain('BUSY_ENUM_OK=1');
+    expect(reviewScanJob).toContain(
+      "enum_failed: '${{ steps.scan.outputs.enum_failed }}'",
+    );
+    const enumBlock = reviewScanJob.match(
+      /BUSY_PRS=' '\n[\s\S]*?rm -f "\$\{BUSY_ENUM_ERR\}"/,
+    )?.[0];
+    expect(enumBlock).toBeTruthy();
+    // The carve-out is bounded to explicit dispatches (the cap-refused gate
+    // splits on EVENT_NAME the same way).
+    expect(enumBlock).toContain(
+      'if [[ -z "${FORCED_PR}" || "${EVENT_NAME}" != \'workflow_dispatch\' ]]; then',
+    );
+    // The warning and the fleet row carry the captured error tail.
+    expect(enumBlock).toContain(
+      'failing closed: no scan targets dispatched this pass${BUSY_ENUM_ERR_TAIL:+ — last error: ${BUSY_ENUM_ERR_TAIL}}',
+    );
+    const runEnum = ({
+      listAnswer = '',
+      listError = '',
+      viewAnswer = '',
+      viewError = '',
+      forcedPr = '',
+      eventName = 'schedule',
+    }) => {
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-enum-'));
+      try {
+        writeFileSync(
+          join(dir, 'gh'),
+          [
+            '#!/bin/bash',
+            '# Emulate the gh CLI contract: answer with the fixture payload,',
+            '# applying the --jq filter when one is passed (like real gh).',
+            "jq_filter=''",
+            'positional=()',
+            'while [[ $# -gt 0 ]]; do',
+            '  case "$1" in',
+            '    --jq) jq_filter="$2"; shift 2 ;;',
+            '    *) positional+=("$1"); shift ;;',
+            '  esac',
+            'done',
+            'set -- "${positional[@]}"',
+            'if [[ "$1" == "run" && "$2" == "list" ]]; then',
+            '  if [[ -n "${ENUM_LIST_ERROR}" ]]; then printf \'%s\' "${ENUM_LIST_ERROR}" >&2; exit 1; fi',
+            '  payload="${ENUM_LIST_ANSWER}"',
+            'elif [[ "$1" == "run" && "$2" == "view" ]]; then',
+            '  if [[ -n "${ENUM_VIEW_ERROR}" ]]; then printf \'%s\' "${ENUM_VIEW_ERROR}" >&2; exit 1; fi',
+            '  payload="${ENUM_VIEW_ANSWER}"',
+            'else',
+            '  exit 0',
+            'fi',
+            'if [[ -n "$jq_filter" ]]; then printf \'%s\' "$payload" | jq -r "$jq_filter"; else printf \'%s\' "$payload"; fi',
+          ].join('\n'),
+        );
+        chmodSync(join(dir, 'gh'), 0o755);
+        const outFile = join(dir, 'out.txt');
+        const fleetFile = join(dir, 'fleet.tsv');
+        writeFileSync(outFile, '');
+        writeFileSync(fleetFile, '');
+        const stdout = execFileSync(
+          'bash',
+          [
+            '-c',
+            [
+              'set -uo pipefail',
+              `FLEET_FILE='${fleetFile}'`,
+              'fleet_row() { printf \'%s\\t%s\\t%s\\n\' "$1" "$2" "$3" >> "${FLEET_FILE}"; }',
+              "CANDIDATES='101 102'",
+              enumBlock.replace(/\n {10}/g, '\n'),
+              'printf \'CANDIDATES=[%s]|BUSY=[%s]\' "${CANDIDATES}" "${BUSY_PRS}"',
+            ].join('\n'),
+          ],
+          {
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              FORCED_PR: forcedPr,
+              EVENT_NAME: eventName,
+              REPO: 'QwenLM/qwen-code',
+              GITHUB_OUTPUT: outFile,
+              ENUM_LIST_ANSWER: listAnswer,
+              ENUM_LIST_ERROR: listError,
+              ENUM_VIEW_ANSWER: viewAnswer,
+              ENUM_VIEW_ERROR: viewError,
+            },
+            encoding: 'utf8',
+          },
+        );
+        return {
+          candidates: stdout.match(/CANDIDATES=\[(.*)\]\|/)?.[1],
+          busy: stdout.match(/BUSY=\[(.*)\]/)?.[1],
+          out: readFileSync(outFile, 'utf8'),
+          fleet: readFileSync(fleetFile, 'utf8'),
+        };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    // A run-list failure empties the candidates on a scheduled scan and
+    // emits the issue-phase signal with the error tail attached.
+    const listFailed = runEnum({ listError: 'HTTP 502: bad gateway' });
+    expect(listFailed.candidates).toBe('');
+    expect(listFailed.out).toContain('enum_failed=true');
+    expect(listFailed.fleet).toContain('fail-closed');
+    expect(listFailed.fleet).toContain('HTTP 502: bad gateway');
+    // A jobs-view failure mid-enumeration fails closed the same way.
+    const viewFailed = runEnum({
+      listAnswer: JSON.stringify([{ databaseId: 101 }]),
+      viewError: 'HTTP 500',
+    });
+    expect(viewFailed.candidates).toBe('');
+    expect(viewFailed.out).toContain('enum_failed=true');
+    expect(viewFailed.fleet).toContain('HTTP 500');
+    // A healthy enumeration accumulates the busy set and keeps candidates.
+    const ok = runEnum({
+      listAnswer: JSON.stringify([{ databaseId: 101 }]),
+      viewAnswer: JSON.stringify({
+        jobs: [
+          { name: 'review-address (101, round 2)', status: 'in_progress' },
+        ],
+      }),
+    });
+    expect(ok.candidates).toBe('101 102');
+    expect(ok.busy).toBe(' 101 ');
+    expect(ok.out).not.toContain('enum_failed');
+    expect(ok.fleet).not.toContain('fail-closed');
+    // ONLY an explicit workflow_dispatch dispatch keeps its candidates
+    // through an enumeration failure...
+    const explicit = runEnum({
+      listError: 'x',
+      forcedPr: '77',
+      eventName: 'workflow_dispatch',
+    });
+    expect(explicit.candidates).toBe('101 102');
+    expect(explicit.out).toContain('enum_failed=true');
+    // ...a trusted pull_request_review scan ALSO carries FORCED_PR but is
+    // not an explicit dispatch and stays fail-closed.
+    const reviewEvent = runEnum({
+      listError: 'x',
+      forcedPr: '77',
+      eventName: 'pull_request_review',
+    });
+    expect(reviewEvent.candidates).toBe('');
+  });
+
+  it('pins the dispatch-pending marker lifecycle across its check, stamp, and release sites', () => {
+    // The marker closes the dispatch→leg visibility window (#9296). Its
+    // reader and writers live in three different steps; a context mismatch
+    // between them leaves the marker permanently unread, and a flipped TTL
+    // comparison re-opens the duplicate window — pin both behaviorally, and
+    // pin the HAS_PENDING_CHECKS exemption that keeps a stranded marker from
+    // blocking past its TTL.
+    expect(workflow).toContain(
+      "DISPATCH_STATUS_CONTEXT: 'qwen-autofix/dispatch-pending'",
+    );
+    expect(workflow).toContain("DISPATCH_STATUS_TTL_MINUTES: '30'");
+    expect(reviewScanJob).toContain(
+      'DISPATCH_CUTOFF="$(date -u -d "${DISPATCH_STATUS_TTL_MINUTES} minutes ago"',
+    );
+    // The freshness predicate's comparison direction: flipped, fresh markers
+    // would pass and stale markers block.
+    expect(reviewScanJob).toContain('select((.startedAt // "") > $cut)');
+    // Behavioral replay of the scan-side skip predicate over fixture
+    // rollups.
+    const markerCheck = reviewScanJob.match(
+      /if jq -e --arg ctx "\$\{DISPATCH_STATUS_CONTEXT\}" --arg cut "\$\{DISPATCH_CUTOFF\}" '[\s\S]*?' <<< "\$\{PR_META\}" > \/dev\/null; then/,
+    )?.[0];
+    expect(markerCheck).toBeTruthy();
+    const runMarkerCheck = (rollup) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `${markerCheck.replace(/\n {12}/g, '\n')} printf skip; else printf pass; fi`,
+        ],
+        {
+          env: {
+            ...process.env,
+            DISPATCH_STATUS_CONTEXT: 'qwen-autofix/dispatch-pending',
+            DISPATCH_CUTOFF: '2026-08-17T06:00:00Z',
+            PR_META: JSON.stringify({ statusCheckRollup: rollup }),
+          },
+          encoding: 'utf8',
+        },
+      );
+    const marker = (
+      state,
+      startedAt,
+      context = 'qwen-autofix/dispatch-pending',
+    ) => ({
+      __typename: 'StatusContext',
+      context,
+      state,
+      startedAt,
+    });
+    // Fresh PENDING marker → busy.
+    expect(runMarkerCheck([marker('PENDING', '2026-08-17T06:30:00Z')])).toBe(
+      'skip',
+    );
+    // Stale PENDING marker (past the TTL) → dispatchable again.
+    expect(runMarkerCheck([marker('PENDING', '2026-08-17T05:00:00Z')])).toBe(
+      'pass',
+    );
+    // The leg materialized (SUCCESS re-stamp) → dispatchable.
+    expect(runMarkerCheck([marker('SUCCESS', '2026-08-17T06:30:00Z')])).toBe(
+      'pass',
+    );
+    // A foreign status context → dispatchable (the marker is keyed exactly).
+    expect(
+      runMarkerCheck([marker('PENDING', '2026-08-17T06:30:00Z', 'other-ci')]),
+    ).toBe('pass');
+    // No rollup entries → dispatchable.
+    expect(runMarkerCheck([])).toBe('pass');
+
+    // A stranded marker must NOT keep blocking through the 330-minute
+    // HAS_PENDING_CHECKS gate after its TTL expired: replay the gate's jq
+    // over fixture rollups.
+    const pendingGate = reviewScanJob.match(
+      /HAS_PENDING_CHECKS="\$\(jq -r --arg cut "\$\{PENDING_CUTOFF\}" \\[\s\S]*?' <<< "\$\{CHECKS_JSON\}"\)"/,
+    )?.[0];
+    expect(pendingGate).toBeTruthy();
+    expect(pendingGate).toContain('--arg ctx "${DISPATCH_STATUS_CONTEXT}"');
+    expect(pendingGate).toContain('select((.context // "") != $ctx)');
+    const runPendingGate = (checks) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `${pendingGate.replace(/\n {12}/g, '\n')}\nprintf '%s' "$HAS_PENDING_CHECKS"`,
+        ],
+        {
+          env: {
+            ...process.env,
+            PENDING_CUTOFF: '2026-08-17T02:30:00Z',
+            NON_BLOCKING_CHECKS: '["review-pr"]',
+            DISPATCH_STATUS_CONTEXT: 'qwen-autofix/dispatch-pending',
+            CHECKS_JSON: JSON.stringify(checks),
+          },
+          encoding: 'utf8',
+        },
+      );
+    const checkRun = (name, status, startedAt) => ({
+      name,
+      workflowName: 'CI',
+      status,
+      startedAt,
+    });
+    // A stranded marker ALONE blocks nobody...
+    expect(runPendingGate([marker('PENDING', '2026-08-17T07:00:00Z')])).toBe(
+      'false',
+    );
+    // ...a genuine in-flight check still blocks...
+    expect(
+      runPendingGate([
+        checkRun('build', 'IN_PROGRESS', '2026-08-17T07:50:00Z'),
+      ]),
+    ).toBe('true');
+    // ...including alongside the marker...
+    expect(
+      runPendingGate([
+        marker('PENDING', '2026-08-17T07:00:00Z'),
+        checkRun('build', 'IN_PROGRESS', '2026-08-17T07:50:00Z'),
+      ]),
+    ).toBe('true');
+    // ...a check stuck past the 330-minute horizon is aged out...
+    expect(
+      runPendingGate([
+        checkRun('build', 'IN_PROGRESS', '2026-08-17T01:00:00Z'),
+      ]),
+    ).toBe('false');
+    // ...and a foreign PENDING status context still blocks (the exemption is
+    // exactly the marker's own context).
+    expect(
+      runPendingGate([marker('PENDING', '2026-08-17T07:50:00Z', 'other-ci')]),
+    ).toBe('true');
+
+    // Writer/reader identity: all three status writes and both readers bind
+    // the SAME context variable — a mismatch on any site leaves the marker
+    // permanently unread (the fork-bridge tests pin their cross-site signal
+    // the same way).
+    const stampSites =
+      workflow.match(
+        /gh api "repos\/\$\{REPO\}\/statuses\/[^"]+" -X POST \\\n\s*-f state="\w+" -f context="\$\{DISPATCH_STATUS_CONTEXT\}"/g,
+      ) ?? [];
+    expect(stampSites).toHaveLength(3);
+    expect(
+      (reviewScanJob.match(/--arg ctx "\$\{DISPATCH_STATUS_CONTEXT\}"/g) ?? [])
+        .length,
+    ).toBe(2);
+    // Every write site is guarded same-repo and dry-run: fork head shas are
+    // absent from this repo's object store, and a dry run must leave no
+    // real, PR-visible status behind.
+    expect(reviewScanJob).toContain(
+      'if [[ "${DRY_RUN}" != "true" && "${HEAD_REPO_FULL}" == "${REPO}" ]]; then',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'if [[ "${DRY_RUN}" != "true" && "${HEAD_REPO:-${REPO}}" == "${REPO}" ]]; then',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      "DRY_RUN: '${{ needs.route.outputs.dry_run }}'",
+    );
   });
 
   it('behaviorally replays the takeover-command toggle across all four paths', () => {
@@ -15998,6 +16427,9 @@ exit 1
           '--argjson',
           'nonblocking',
           '[]',
+          '--arg',
+          'ctx',
+          'qwen-autofix/dispatch-pending',
           jqFilter,
         ],
         { input: JSON.stringify(checks), encoding: 'utf8' },
