@@ -12,11 +12,25 @@ import {
 } from './speculation.js';
 import type { Content } from '@google/genai';
 import { ApprovalMode, type Config } from '../config/config.js';
+import type { ToolResultBoundaryObservation } from '../utils/tool-result-boundary-diagnostics.js';
 
 const forkedAgentMocks = vi.hoisted(() => ({
   runForkedAgent: vi.fn(),
   sendMessageStream: vi.fn(),
 }));
+const boundaryMocks = vi.hoisted(() => ({
+  observe: vi.fn((_observation: ToolResultBoundaryObservation) => false),
+}));
+
+vi.mock(
+  '../utils/tool-result-boundary-diagnostics.js',
+  async (importOriginal) => ({
+    ...(await importOriginal<
+      typeof import('../utils/tool-result-boundary-diagnostics.js')
+    >()),
+    observeToolResultBoundary: boundaryMocks.observe,
+  }),
+);
 
 vi.mock('../utils/forkedAgent.js', () => ({
   getCacheSafeParams: vi.fn(() => ({
@@ -61,6 +75,8 @@ describe('startSpeculation', () => {
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       getCwd: vi.fn().mockReturnValue(process.cwd()),
       getFastModel: vi.fn().mockReturnValue(undefined),
+      getSessionId: vi.fn().mockReturnValue('spec-session'),
+      getTargetDir: vi.fn().mockReturnValue('/spec/cwd'),
       getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
       getToolInvocationGuard: vi.fn().mockReturnValue(guard),
     } as unknown as Config;
@@ -101,6 +117,8 @@ describe('startSpeculation', () => {
       toolName: 'read_file',
       args: { path: '/normalized/a.ts' },
       signal: expect.any(AbortSignal),
+      sessionId: 'spec-session',
+      cwd: '/spec/cwd',
     });
     expect(execute).not.toHaveBeenCalled();
 
@@ -125,6 +143,8 @@ describe('startSpeculation', () => {
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       getCwd: vi.fn().mockReturnValue(process.cwd()),
       getFastModel: vi.fn().mockReturnValue(undefined),
+      getSessionId: vi.fn().mockReturnValue('spec-session'),
+      getTargetDir: vi.fn().mockReturnValue('/spec/cwd'),
       getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
       getToolInvocationGuard: vi.fn().mockReturnValue(guard),
     } as unknown as Config;
@@ -165,8 +185,160 @@ describe('startSpeculation', () => {
       toolName: 'read_file',
       args: { path: '/normalized/a.ts' },
       signal: expect.any(AbortSignal),
+      sessionId: 'spec-session',
+      cwd: '/spec/cwd',
     });
     expect(execute).toHaveBeenCalledOnce();
+    expect(boundaryMocks.observe).toHaveBeenCalledWith(
+      expect.objectContaining({
+        stage: 'producer',
+        toolCallId: 'call-speculation-guard-allow',
+        toolName: 'read_file',
+        values: expect.any(Function),
+      }),
+    );
+
+    await abortSpeculation(state);
+  });
+
+  it('observes rejected speculative executions as terminal producers', async () => {
+    const execute = vi.fn().mockRejectedValue(new Error('execution failed'));
+    const toolRegistry = {
+      ensureTool: vi.fn().mockResolvedValue({
+        build: vi.fn().mockReturnValue({ execute }),
+      }),
+    };
+    const config = {
+      getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+      getCwd: vi.fn().mockReturnValue(process.cwd()),
+      getFastModel: vi.fn().mockReturnValue(undefined),
+      getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
+    } as unknown as Config;
+
+    forkedAgentMocks.runForkedAgent.mockResolvedValue({
+      jsonResult: { suggestion: '' },
+    });
+    forkedAgentMocks.sendMessageStream.mockImplementation(async function* () {
+      if (forkedAgentMocks.sendMessageStream.mock.calls.length === 1) {
+        yield {
+          type: 'chunk',
+          value: {
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    {
+                      functionCall: {
+                        id: 'call-speculation-reject',
+                        name: 'read_file',
+                        args: { path: 'a.ts' },
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        };
+      }
+    });
+
+    const state = await startSpeculation(config, 'read a.ts');
+    await vi.waitFor(() => expect(state.status).toBe('completed'));
+
+    const producerObservations = boundaryMocks.observe.mock.calls
+      .map(([observation]) => observation)
+      .filter(
+        (observation) =>
+          observation.stage === 'producer' &&
+          observation.toolCallId === 'call-speculation-reject',
+      );
+    expect(producerObservations).toHaveLength(1);
+    expect(producerObservations[0]).toEqual(
+      expect.objectContaining({
+        artifacts: [{ state: 'none', kinds: [] }],
+      }),
+    );
+    expect(state.messages[2].parts?.[0].functionResponse?.response).toEqual({
+      error: 'execution failed',
+    });
+
+    await abortSpeculation(state);
+  });
+
+  it('ignores throwing optional metadata on a speculative result', async () => {
+    const result = { llmContent: 'file contents' } as {
+      llmContent: string;
+      artifacts?: never;
+      persistedOutputFiles?: never;
+    };
+    Object.defineProperties(result, {
+      artifacts: {
+        get: () => {
+          throw new Error('artifacts unavailable');
+        },
+      },
+      persistedOutputFiles: {
+        get: () => {
+          throw new Error('persisted output unavailable');
+        },
+      },
+    });
+    const toolRegistry = {
+      ensureTool: vi.fn().mockResolvedValue({
+        build: vi.fn().mockReturnValue({
+          execute: vi.fn().mockResolvedValue(result),
+        }),
+      }),
+    };
+    const config = {
+      getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+      getCwd: vi.fn().mockReturnValue(process.cwd()),
+      getFastModel: vi.fn().mockReturnValue(undefined),
+      getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
+    } as unknown as Config;
+
+    forkedAgentMocks.runForkedAgent.mockResolvedValue({
+      jsonResult: { suggestion: '' },
+    });
+    forkedAgentMocks.sendMessageStream.mockImplementation(async function* () {
+      if (forkedAgentMocks.sendMessageStream.mock.calls.length === 1) {
+        yield {
+          type: 'chunk',
+          value: {
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    {
+                      functionCall: {
+                        id: 'call-speculation-metadata',
+                        name: 'read_file',
+                        args: { path: 'a.ts' },
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        };
+      }
+    });
+
+    const state = await startSpeculation(config, 'read a.ts');
+    await vi.waitFor(() => expect(state.status).toBe('completed'));
+
+    expect(state.messages[2].parts?.[0].functionResponse?.response).toEqual({
+      output: 'file contents',
+    });
+    expect(boundaryMocks.observe).toHaveBeenCalledWith(
+      expect.objectContaining({
+        stage: 'producer',
+        toolCallId: 'call-speculation-metadata',
+        artifacts: [{ state: 'undecided', kinds: [] }],
+      }),
+    );
 
     await abortSpeculation(state);
   });

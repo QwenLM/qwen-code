@@ -2524,6 +2524,17 @@ export default {
     'Save a durable memory to the memory system.',
   'Ask a quick side question without affecting the main conversation':
     'Ask a quick side question without affecting the main conversation',
+  'Get a second opinion on the current conversation from a reviewer model':
+    'Get a second opinion on the current conversation from a reviewer model',
+  'Consulting advisor...': 'Consulting advisor...',
+  'Advisor review failed: {{error}}': 'Advisor review failed: {{error}}',
+  'No conversation context available for /advisor':
+    'No conversation context available for /advisor',
+  'Focus too long (max {{max}} chars)': 'Focus too long (max {{max}} chars)',
+  'Another operation is in progress, wait for it to complete before running /advisor':
+    'Another operation is in progress, wait for it to complete before running /advisor',
+  'No response received.': 'No response received.',
+  'No model configured.': 'No model configured.',
   'Manage Arena sessions': 'Manage Arena sessions',
   'Start an Arena session with multiple models competing on the same task':
     'Start an Arena session with multiple models competing on the same task',

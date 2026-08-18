@@ -6,8 +6,10 @@
 
 import { describe, it, expect } from 'vitest';
 import {
+  NOTIFICATION_LABEL_MAX_LENGTH,
   stripDisplayControlChars,
   stripTerminalControlSequences,
+  truncateNotificationLabel,
 } from './terminalSafe.js';
 
 describe('stripDisplayControlChars', () => {
@@ -87,5 +89,40 @@ describe('stripTerminalControlSequences', () => {
     expect(out).toContain('a');
     expect(out).toContain('b');
     expect(out).toContain('c');
+  });
+});
+
+describe('truncateNotificationLabel', () => {
+  it('strips controls, collapses whitespace, and trims', () => {
+    expect(truncateNotificationLabel('a\u202eb\tc\n d ')).toBe('ab c d');
+  });
+
+  it('truncates ASCII over the cap to exactly the cap, ending in "..."', () => {
+    const out = truncateNotificationLabel('x'.repeat(90));
+    expect(out).toBe('x'.repeat(NOTIFICATION_LABEL_MAX_LENGTH - 3) + '...');
+    expect(out.length).toBe(NOTIFICATION_LABEL_MAX_LENGTH);
+  });
+
+  it('returns an exactly-at-cap label unchanged (inclusive boundary)', () => {
+    expect(truncateNotificationLabel('x'.repeat(80))).toBe('x'.repeat(80));
+  });
+
+  it('measures the cap in code points, not UTF-16 code units', () => {
+    // 60 emoji = 60 code points but 120 UTF-16 units; 80 emoji = 160
+    // units. Both are within the code-point cap and must pass through
+    // unchanged — a code-unit gate would "truncate" them into something
+    // longer than the input with a bogus ellipsis.
+    expect(truncateNotificationLabel('\u{1F600}'.repeat(60))).toBe(
+      '\u{1F600}'.repeat(60),
+    );
+    expect(truncateNotificationLabel('\u{1F600}'.repeat(80))).toBe(
+      '\u{1F600}'.repeat(80),
+    );
+  });
+
+  it('cuts astral labels on a code-point boundary without splitting a surrogate pair', () => {
+    const out = truncateNotificationLabel('\u{1F600}'.repeat(90));
+    expect(out).toBe('\u{1F600}'.repeat(77) + '...');
+    expect([...out]).toHaveLength(80);
   });
 });

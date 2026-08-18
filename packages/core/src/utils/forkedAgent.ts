@@ -297,6 +297,8 @@ export interface ForkedQueryResult {
     outputTokens: number;
     cacheHitTokens: number;
   };
+  /** Resolved model id used for the query (after selector/alias resolution). */
+  model: string;
 }
 
 function extractQueryUsage(
@@ -336,6 +338,8 @@ export interface CachePathParams {
   model?: string;
   /** External cancellation signal. */
   abortSignal?: AbortSignal;
+  /** Do not route the query through configured model fallbacks. */
+  disableModelFallbacks?: boolean;
   /**
    * When true, keep the parent's tools in the per-request config so the
    * Anthropic prompt-cache key (system + tools) matches the main agent's.
@@ -468,6 +472,7 @@ export async function runForkedAgent(
       jsonSchema,
       abortSignal,
       preserveTools,
+      disableModelFallbacks,
     } = params;
     const modelSelector = params.model ?? cacheSafeParams.model;
     const modelRuntime = await buildForkedModelRuntime(
@@ -488,11 +493,19 @@ export async function runForkedAgent(
         requestConfig.responseJsonSchema = jsonSchema;
       }
 
-      const stream = await chat.sendMessageStream(
-        model,
-        { message: [{ text: userMessage }], config: requestConfig },
-        'forked_query',
-      );
+      const sendParams = {
+        message: [{ text: userMessage }],
+        config: requestConfig,
+      };
+      const stream = disableModelFallbacks
+        ? await chat.sendMessageStream(
+            model,
+            sendParams,
+            'forked_query',
+            undefined,
+            { disableModelFallbacks: true },
+          )
+        : await chat.sendMessageStream(model, sendParams, 'forked_query');
 
       let fullText = '';
       let usage: ForkedQueryResult['usage'] = {
@@ -537,7 +550,7 @@ export async function runForkedAgent(
         }
       }
 
-      return { text: trimmed, jsonResult, usage };
+      return { text: trimmed, jsonResult, usage, model };
     });
   }
 

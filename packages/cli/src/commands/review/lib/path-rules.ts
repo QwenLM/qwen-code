@@ -33,19 +33,36 @@
 // pays a cost: the checklist rides in the brief of every matching agent, so a rule
 // that does not earn its tokens on the median matching diff is not a rule.
 
+import { pathTool } from '../script-lint.js';
+
 export interface PathRule {
   /** Named in the brief, so an agent can say which rule it applied. */
   title: string;
   /** Does this rule govern `path`? */
   matches(path: string): boolean;
+  /**
+   * Paths the rule's own checklist scopes out. `describePaths` lists them
+   * after the rest so a capped heading spends its names on the paths the
+   * checklist is written for; a rule without one keeps diff order.
+   */
+  outOfScope?(path: string): boolean;
   /** The checklist, agent-facing. */
   checklist: string;
 }
 
 const GITHUB_ACTIONS: PathRule = {
   title: 'GitHub Actions workflows',
+  // Scripts under the two workflow-helper conventions — `.github/scripts/**`
+  // and `.github/actions/*/**` — are included, with one script-extension
+  // class for both so a README or data file there is not governed. That is
+  // deliberately narrower than "the scripts the workflow calls": the full
+  // class is content-defined (this repository's own workflows call root
+  // `scripts/*.js`), and a path matcher that cannot see `run:` lines must
+  // not approximate it further than the conventions.
   matches: (p) =>
-    /^\.github\/(workflows\/.+\.ya?ml|actions\/.+\/action\.ya?ml)$/i.test(p),
+    /^\.github\/(workflows\/.+\.ya?ml|actions\/.+\/action\.ya?ml|(?:actions\/(?:[^/]+\/)+|scripts\/(?:[^/]+\/)*)[^/]+\.(?:[cm]?[jt]sx?|py|sh|bash|zsh|ksh|dash|ps1|bat|cmd|rb|pl))$/i.test(
+      p,
+    ),
   checklist: `A workflow is not configuration. It is code that runs on the project's own runners, with the repository's credentials, and some of its inputs come from strangers. The classes below are invisible to a reader looking for "bugs" in YAML.
 
 **You are reviewing this diff, not auditing this file.** A weakness the workflow already had, on a line this change does not touch, is out of scope — the same rule as everywhere else. What is in scope: a line this diff **adds or changes**, and a guard this diff **removes**.
@@ -70,9 +87,56 @@ const GITHUB_ACTIONS: PathRule = {
 **Favour precision over recall here.** A false alarm on a workflow costs more reviewer trust than a missed minor nit, because a YAML finding is the easiest kind for an author to dismiss. Every finding needs the concrete trigger and the concrete outcome, like any other.`,
 };
 
+const SHELL_LANES: PathRule = {
+  title: 'Shell and CI scripts — the lanes that run them',
+  // Composes pathTool's executable-script detectors and
+  // GITHUB_ACTIONS.matches instead of re-spelling them: a workflow diff
+  // must stack both checklists, and composing keeps that invariant
+  // structural rather than literals kept identical by hand. Precondition:
+  // every path class GITHUB_ACTIONS governs runs on CI lanes and is owed
+  // the lane syllabus too — only add such classes there. The zsh/PowerShell
+  // extensions stay a deliberate superset of pathTool: shellcheck refuses
+  // zsh, but the lanes that run these files are what this syllabus exists
+  // for. The hadolint arm drops pathTool's basename-prefix over-match on
+  // documents and stray artifacts (`dockerfile.rst`, `Dockerfile.swp`,
+  // `Dockerfile.lock`): prose about a Dockerfile has no lanes.
+  // The scripts arm is spelled as end-anchored suffix checks plus a
+  // directory check, not one leading-anchored regex: PR paths are
+  // attacker-controlled, and a `(?:^|\/)scripts\/` anchor followed by a
+  // backtracking `.+` suffix is quadratic on `scripts/scripts/…` paths.
+  matches: (p) => {
+    const tool = pathTool(p);
+    return (
+      tool === 'shellcheck' ||
+      (tool === 'hadolint' &&
+        !/\.(?:md|rst|adoc|html?|org|txt|ya?ml|json|lock|swp)$/i.test(p)) ||
+      /\.(zsh|ps1|bat|cmd)$/i.test(p) ||
+      GITHUB_ACTIONS.matches(p) ||
+      /(?:^|\/)scripts\/tests\/vitest\.config\.[cm]?[jt]sx?$/i.test(p) ||
+      (/(?:^|\/)scripts\//i.test(p) &&
+        /(?:^|\/)[^/]+\.(?:test|spec)\.[cm]?[jt]sx?$/i.test(p))
+    );
+  },
+  checklist: `A shell script's behaviour is a property of the **host** that runs it, and a test's greenness is a property of the **lanes** that run it. Neither is in the diff, and neither is in your own shell: you are one host, and this pull request's checks are a subset of the lanes. No dimension asks which lanes exist, so a change that is green everywhere you can see it lands red where nobody looked.
+
+**You are reviewing this diff, not auditing this file.** A portability weakness on a line this change does not touch is out of scope — the same rule as everywhere else. What is in scope: a line this diff **adds or changes**, and a lane this diff **newly reaches**.
+
+**Blockers (Critical):**
+
+- **A test that will be red on a lane this pull request does not run.** Before you accept a new or changed test that shells out, drives a CLI, or touches the filesystem, answer *which lanes execute this file*: the runner's own \`exclude\`/skip list (a suite gated off Windows is **not** gated off macOS — the gate names the platform it was written for, not the platform it is safe on), and the CI matrix, including jobs gated on \`merge_group\`, \`schedule\`, \`push\`, or a label. Those are required checks whose result the pull request page reports as **skipped**, so a green pull request is not evidence about them, and the first red is a merge-queue failure — which ejects the entry and stalls the queue for every pull request batched with it, not just this one. Name the lane, the job's test command, and the assertion in the finding. (A "Tested on" table that ticks a platform whose lane never ran is the same defect, stated by the author.)
+- **GNU-only tooling on a lane without a GNU userland.** macOS ships BSD tools and Alpine ships busybox: \`realpath -m\`, \`readlink -f\`, \`sed -i\` (BSD requires an argument), \`date -d\`, \`stat -c\`, \`find -printf\`, \`grep -P\`, \`xargs -r\`, \`base64 -w\`, \`cp --parents\`, \`sort -h\`, \`mktemp -p\`, and \`timeout\`/\`nproc\`/\`sha256sum\` (absent outright) fail or mean something else there. Two different findings fall out of this, and they are not the same severity: the **script** needs the flag on a lane that lacks it — a real bug — or the script is legitimately single-platform but a **test** asserts the flag's effect, which is a red lane for a defect that cannot exist there. Watch what a fallback does to both: \`x="$(realpath -m -- "$x" 2>/dev/null || printf '%s' "$x")"\` does not fail off-GNU, it silently skips the canonicalization — so every guard downstream is matching the raw string, and the test that was written to pin the canonicalization is the only thing that goes red.
+- **Two spellings of one path, compared as strings.** \`os.tmpdir()\` on macOS is \`/var/folders/…\` whose real path is \`/private/var/folders/…\`; a container's \`/tmp\` is often a symlink; Windows has 8.3 short names. A fixture that resolves one side (\`fs.realpathSync\`) and leaves the other raw passes only where the two spellings coincide, and if the code under test reconciles them by shelling out to a tool, that reconciliation has to exist on every lane too. The fix is to spell both sides the same way, not to resolve one more.
+- **Privilege and environment assumed from the reviewer's own shell.** root ignores a \`chmod 0o500\` fixture (\`CAP_DAC_OVERRIDE\`) so the permission failure the test needs never happens; CI containers commonly run as root; Windows has no POSIX mode bits at all; \`sudo\` may be absent or password-gated; \`$HOME\`, \`$TMPDIR\`, and \`$PATH\` are lane properties. A test that needs a real failure has to skip where it cannot get one — and a test that *passes* because the environment made the assertion vacuous is worse than one that fails.
+
+**The fix to suggest: probe the capability, not the platform.** \`skipIf(process.platform === 'darwin')\` is wrong in both directions — it skips a Mac that has coreutils on \`PATH\`, and stays green on a busybox lane that lacks the flag too. \`spawnSync('realpath', ['-m', '--', '/'], { stdio: 'ignore' }).status === 0\` gates on the thing that actually decides the outcome and keeps the coverage wherever the capability exists. Where the production code is genuinely single-platform, say so in the finding: the fix is to gate the **test**, not to weaken the script.
+
+**A finding here needs the lane and the mechanism.** "This may not work on macOS" is a worry; "\`test_macos\` is \`merge_group\`-only and runs \`npm run test:ci\` → \`test:scripts\`, Darwin's \`realpath(1)\` exits 1 on \`-m\`, so the \`|| printf\` fallback keeps the path raw and the assertion at line 2902 fails" is a finding. If you cannot name the lane, you do not have one. **Favour precision over recall here** — a portability guess is the easiest kind for an author to dismiss, and one dismissal teaches them to skip the rest of the review.`,
+};
+
 const JAVA: PathRule = {
   title: 'Java / JVM performance',
   matches: (p) => /\.java$/i.test(p),
+  outOfScope: isOutOfScope,
   checklist: `A Java change's most expensive regressions are decided by the JVM, not by anything a reader can see in the source: HotSpot chooses what to inline, what to scalar-replace, and what to compile at all — and a one-line change can flip each of those on a hot path. The general performance lens (N+1, repeated work, data structures) sees none of it.
 
 **You are reviewing this diff, not auditing this file.** A JVM-cost weakness the code already had, on a line this change does not touch, is out of scope — the same rule as everywhere else. What is in scope: a line this diff **adds or changes**, and a cheap path this diff **makes hot** (a new caller in a request loop, a call moved inside a loop). Test sources (\`src/test/**\`), \`package-info\`/\`module-info\`, and generated sources are out of scope for the hot-path items — nothing there is hot.
@@ -124,7 +188,7 @@ A finding that a method "can no longer be inlined" needs the **dynamic** tier �
 };
 
 /** Every rule, in the order their checklists are appended. */
-export const PATH_RULES: PathRule[] = [GITHUB_ACTIONS, JAVA];
+export const PATH_RULES: PathRule[] = [GITHUB_ACTIONS, SHELL_LANES, JAVA];
 
 function isOutOfScope(p: string): boolean {
   return (
@@ -146,14 +210,16 @@ function isOutOfScope(p: string): boolean {
  * few and a count; the checklist, not the path list, is what the heading is
  * for.
  */
-function describePaths(which: readonly string[]): string {
+function describePaths(rule: PathRule, which: readonly string[]): string {
   const CAP = 10;
-  // Production paths before out-of-scope paths: the hot-path items this heading
-  // exists to introduce do not apply to test, generated, or info-only sources,
-  // so a PR that is mostly such files must not fill the heading with paths the
-  // rule explicitly scopes out.
-  const prod = which.filter((p) => !isOutOfScope(p));
-  const rest = which.filter((p) => isOutOfScope(p));
+  // Paths a rule's own checklist scopes out (the JAVA rule's test, generated,
+  // and info-only sources) go after the paths the checklist is written for, so
+  // a PR that is mostly such files must not fill the capped heading with them.
+  // A rule without such a scoping keeps diff order — the lane rule's test
+  // scripts are its primary subject, not noise to demote.
+  const demoted = rule.outOfScope ?? (() => false);
+  const prod = which.filter((p) => !demoted(p));
+  const rest = which.filter((p) => demoted(p));
   const ordered = [...prod, ...rest];
   if (ordered.length <= CAP) {
     return ordered.join(', ');
@@ -174,7 +240,12 @@ export function pathRulesFor(paths: readonly string[]): string {
   const parts = ['## Rules for the files in front of you', ''];
   for (const r of hit) {
     const which = paths.filter((p) => r.matches(p));
-    parts.push(`### ${r.title} — ${describePaths(which)}`, '', r.checklist, '');
+    parts.push(
+      `### ${r.title} — ${describePaths(r, which)}`,
+      '',
+      r.checklist,
+      '',
+    );
   }
   return parts.join('\n').trimEnd();
 }

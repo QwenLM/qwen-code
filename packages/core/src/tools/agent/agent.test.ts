@@ -5265,6 +5265,7 @@ describe('AgentTool', () => {
           name: 'read_file',
           success: true,
           responseParts,
+          boundaryArtifact: { state: 'reusable', kinds: ['file'] },
           timestamp: Date.now(),
         } satisfies AgentToolResultEvent);
       });
@@ -5284,6 +5285,10 @@ describe('AgentTool', () => {
       );
       expect(toolCall?.args).toEqual({ path: '/test.ts' });
       expect(toolCall?.responseParts).toBe(responseParts);
+      expect(toolCall?.boundaryArtifact).toEqual({
+        state: 'reusable',
+        kinds: ['file'],
+      });
     });
 
     it('omits subagent protocol payloads from interactive display state', async () => {
@@ -5310,6 +5315,7 @@ describe('AgentTool', () => {
           success: true,
           responseParts,
           resultDisplay: 'Rendered result',
+          boundaryArtifact: { state: 'reusable', kinds: ['file'] },
           timestamp: Date.now(),
         } satisfies AgentToolResultEvent);
       });
@@ -5331,6 +5337,7 @@ describe('AgentTool', () => {
       expect(toolCall?.resultDisplay).toBe('Rendered result');
       expect(toolCall).not.toHaveProperty('args');
       expect(toolCall).not.toHaveProperty('responseParts');
+      expect(toolCall).not.toHaveProperty('boundaryArtifact');
     });
 
     it('should clear pendingConfirmation when TOOL_RESULT arrives for the pending tool (IDE accept path)', async () => {
@@ -5666,6 +5673,7 @@ describe('AgentTool', () => {
 
     it('should run in background when agent definition has background: true', async () => {
       const writeMetaSpy = vi.spyOn(transcript, 'writeAgentMeta');
+      const attachSpy = vi.spyOn(transcript, 'attachJsonlTranscriptWriter');
       const params: AgentParams = {
         description: 'Start monitor',
         prompt: 'Watch for changes',
@@ -5724,7 +5732,15 @@ describe('AgentTool', () => {
         }),
       );
       expect(mockSubagentManager.createAgentHeadless).toHaveBeenCalledTimes(1);
+      // Pin the launch-metadata extras at the background attach site too —
+      // the mutation probe in review showed both sites could drop
+      // initialUserPrompt while the suite stayed green.
+      expect(attachSpy.mock.calls[0]?.[2]).toMatchObject({
+        initialUserPrompt: 'Watch for changes',
+        agentName: 'monitor',
+      });
       writeMetaSpy.mockRestore();
+      attachSpy.mockRestore();
     });
 
     it('uses the resolved model grade for background slot selection and launch', async () => {
@@ -6700,6 +6716,13 @@ describe('AgentTool', () => {
       // Writer attached to the AgentTool's emitter so foreground tool
       // calls / round text get recorded into the JSONL.
       expect(attachSpy).toHaveBeenCalled();
+      // Pin the launch-metadata extras at this attach site — dropping
+      // initialUserPrompt here silently loses the launch `user` record
+      // that transcript readers recover the prompt from.
+      expect(attachSpy.mock.calls[0]?.[2]).toMatchObject({
+        initialUserPrompt: 'Find all TypeScript files',
+        agentName: 'file-search',
+      });
       // Meta sidecar is seeded eagerly at register time so resume
       // discovery can surface paused foreground runs.
       expect(writeMetaSpy).toHaveBeenCalledWith(

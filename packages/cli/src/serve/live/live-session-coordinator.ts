@@ -42,10 +42,10 @@ import type { LiveProviderCredential } from './provider-credentials.js';
 import {
   isCompatibleLiveSessionSource,
   LIVE_SESSION_SOURCE_PREFIX,
-} from './session-source.js';
+} from '../conversations/session-source.js';
 import type { LiveProviderReadiness, LiveSessionLocator } from './types.js';
 
-export { LIVE_SESSION_SOURCE_PREFIX } from './session-source.js';
+export { LIVE_SESSION_SOURCE_PREFIX } from '../conversations/session-source.js';
 
 const MAX_COORDINATOR_REQUEST_CHARS = 32_000;
 const MAX_COORDINATOR_RESULT_CHARS = 48_000;
@@ -1562,9 +1562,10 @@ export class LiveSessionCoordinator {
     if (!sessionClosed) return;
     if (removeFreshTranscript) {
       try {
-        await new SessionService(runtime.workspaceCwd).removeSession(
-          session.sessionId,
-        );
+        const transcriptRemoved = await new SessionService(
+          runtime.workspaceCwd,
+        ).removeSession(session.sessionId);
+        if (transcriptRemoved) bridge.markSessionCatalogChanged();
       } catch {
         /* preserve the original setup failure */
       }

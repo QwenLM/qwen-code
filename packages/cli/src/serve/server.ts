@@ -6,6 +6,7 @@
 
 import express from 'express';
 import type { Application } from 'express';
+import * as path from 'node:path';
 import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
 import {
   hashDaemonWorkspace,
@@ -33,10 +34,16 @@ import {
   allowOriginCors,
   bearerAuth,
   createMutationGate,
-  denyBrowserOriginCors,
   hostAllowlist,
+  MutableOriginAllowlist,
   parseAllowOriginPatterns,
 } from './auth.js';
+import {
+  CredentialStore,
+  listenerIdentityOf,
+  LocalControlService,
+} from './local-control/index.js';
+import { registerWorkspaceLocalControlRoutes } from './routes/workspace-local-control.js';
 import type {
   DeviceFlowProvider,
   DeviceFlowRegistry,
@@ -98,8 +105,11 @@ import {
   registerWorkspaceQualifiedFileReadRoutes,
 } from './routes/workspace-file-read.js';
 import {
+  createUploadConcurrencyGate,
   registerWorkspaceFileWriteRoutes,
+  registerWorkspaceFileUploadRoutes,
   registerWorkspaceQualifiedFileWriteRoutes,
+  registerWorkspaceQualifiedFileUploadRoutes,
 } from './routes/workspace-file-write.js';
 import { registerWorkspaceSetupGithubRoutes } from './routes/workspace-setup-github.js';
 import {
@@ -193,6 +203,7 @@ import {
   type WorkspaceRuntime,
   type WorkspaceRuntimeEnvMetadata,
 } from './workspace-registry.js';
+import { isInternalWorkspaceRuntime } from './workspace-runtime-visibility.js';
 import {
   createWorkspaceRuntimeSessionService,
   runWithWorkspaceRuntimeStorage,
@@ -273,7 +284,19 @@ import { LiveHostInstaller } from './live/live-host-installer.js';
 import { LiveSessionCoordinator } from './live/live-session-coordinator.js';
 import { LiveSetupController } from './live/live-setup-controller.js';
 import { LiveTaskService } from './live/live-task-service.js';
-import type { LiveConversationWorkspace } from './live/conversation-workspace.js';
+import type { ConversationWorkspace } from './conversations/conversation-workspace.js';
+import { ConversationRuntimeActivityGate } from './conversations/conversation-runtime-activity.js';
+import { conversationRootCompromisedError } from './conversations/conversation-runtime-errors.js';
+import { ConversationRuntimeManager } from './conversations/conversation-runtime-manager.js';
+import {
+  createConversationRuntimeOwnership,
+  type ConversationRuntimeOwnership,
+} from './conversations/conversation-runtime-ownership.js';
+import { getStableLiveDiscoveryBaseDir } from './live/discovery.js';
+import {
+  installServeAppLifecycle,
+  type ServeAppLifecycleController,
+} from './serve-app-lifecycle.js';
 import {
   LiveProviderConfigError,
   readLiveVoiceConfiguration,
@@ -582,7 +605,14 @@ export interface ServeAppDeps {
   liveCoordinator?: LiveHostCoordinator;
   liveHostInstaller?: LiveHostInstaller;
   liveSessionCoordinator?: LiveSessionCoordinator;
-  liveConversationWorkspace?: LiveConversationWorkspace;
+  liveConversationWorkspace?: ConversationWorkspace;
+  liveDiscoveryStableBaseDir?: string;
+  conversationRuntimeOwnershipFactory?: (
+    pid: number,
+    instanceNonce: string,
+    stableBaseDir: string,
+  ) => ConversationRuntimeOwnership;
+  serveAppLifecycle?: ServeAppLifecycleController;
   validateLiveProviderCredential?: (
     credential: LiveProviderCredential,
   ) => Promise<void>;
@@ -702,6 +732,10 @@ export function createServeApp(
     );
   }
   const app = express();
+  const serveAppLifecycle = installServeAppLifecycle(
+    app,
+    deps.serveAppLifecycle,
+  );
   // Forward `maxSessions` into the default-constructed bridge so
   // direct callers of `createServeApp` (tests, embeds) get the same
   // cap they configured via `ServeOptions`. Previously the default
@@ -873,7 +907,7 @@ export function createServeApp(
       sessionArtifactsPersistenceAvailable:
         deps.sessionArtifactsPersistenceAvailable !== false,
       sessionGenerationAvailable: () => {
-        const runtimes = workspaceRegistry.list();
+        const runtimes = workspaceRegistry.listAll();
         return (
           runtimes.length > 0 &&
           runtimes.every(
@@ -927,6 +961,7 @@ export function createServeApp(
         deps.workspaceRuntimeRemoval !== undefined &&
         workspaceRegistry
           .listManaged()
+          .filter((runtime) => !isInternalWorkspaceRuntime(runtime))
           .every((runtime) =>
             isScratchRootCompatible(
               runtime.workspaceCwd,
@@ -1021,11 +1056,21 @@ export function createServeApp(
     defaultBridgeForAdmission = bridge;
   }
   const archiveCoordinator = new SessionArchiveCoordinator();
+  const conversationRuntimeActivity = deps.liveConversationWorkspace
+    ? new ConversationRuntimeActivityGate()
+    : undefined;
   (
     app.locals as {
       sessionArchiveCoordinator?: SessionArchiveCoordinator;
     }
   ).sessionArchiveCoordinator = archiveCoordinator;
+  if (conversationRuntimeActivity) {
+    (
+      app.locals as {
+        conversationRuntimeActivity?: ConversationRuntimeActivityGate;
+      }
+    ).conversationRuntimeActivity = conversationRuntimeActivity;
+  }
 
   const cleanupSession = (runtime: WorkspaceRuntime, sessionId: string) =>
     runWithWorkspaceRuntimeStorage(runtime, () =>
@@ -1064,7 +1109,7 @@ export function createServeApp(
           .workspaceRegistry;
         if (!reg) return [bridge];
         return reg
-          .list()
+          .listAll()
           .filter((rt) => rt.trusted)
           .map((rt) => rt.bridge);
       },
@@ -1179,7 +1224,7 @@ export function createServeApp(
       })),
     getBridgeWorkspaceId: (bridge) =>
       workspaceRegistry
-        .listEntries()
+        .listAllEntries()
         .find((entry) => entry.current?.runtime.bridge === bridge)?.workspaceId,
   });
   primaryTrustRegistry = workspaceRegistry;
@@ -1271,6 +1316,25 @@ export function createServeApp(
         }
       },
     });
+  const conversationRuntimeOwnership = deps.liveConversationWorkspace
+    ? (deps.conversationRuntimeOwnershipFactory?.(
+        process.pid,
+        liveCoordinator.daemonInstanceNonce,
+        path.resolve(
+          deps.liveDiscoveryStableBaseDir ?? getStableLiveDiscoveryBaseDir(),
+        ),
+      ) ??
+      createConversationRuntimeOwnership({
+        pid: process.pid,
+        instanceNonce: liveCoordinator.daemonInstanceNonce,
+        stableBaseDir: path.resolve(
+          deps.liveDiscoveryStableBaseDir ?? getStableLiveDiscoveryBaseDir(),
+        ),
+      }))
+    : undefined;
+  if (conversationRuntimeOwnership) {
+    serveAppLifecycle.setOwnership(conversationRuntimeOwnership);
+  }
   liveCoordinator.setAppshotReadiness(
     liveVoiceEnabled && deps.liveConversationWorkspace
       ? {
@@ -1282,111 +1346,140 @@ export function createServeApp(
           message: 'The Live Appshot channel is unavailable.',
         },
   );
-  let liveRuntime: WorkspaceRuntime | undefined;
-  let liveRuntimePromise: Promise<WorkspaceRuntime> | undefined;
+  const conversationRuntimeManager = deps.liveConversationWorkspace
+    ? new ConversationRuntimeManager({
+        ownership: conversationRuntimeOwnership!,
+        workspace: deps.liveConversationWorkspace,
+        registry: workspaceRegistry,
+        publishRuntime: async (canonicalRoot, validate) => {
+          const runtime = await workspaceManagementHandle.publishOwnedRuntime(
+            canonicalRoot,
+            'live-conversation',
+            async (candidate) => {
+              await validate(candidate);
+              try {
+                await deps.liveConversationWorkspace!.revalidate();
+              } catch (error) {
+                throw conversationRootCompromisedError(error);
+              }
+            },
+          );
+          invalidateServeFeaturesCache();
+          return runtime;
+        },
+      })
+    : undefined;
+  let liveBoundRuntime: WorkspaceRuntime | undefined;
+  let liveBindingPromise: Promise<WorkspaceRuntime> | undefined;
   let liveRuntimeBootPromise: Promise<void> | undefined;
+  let liveRuntimeBootResult: WorkspaceRuntime | undefined;
   let liveAppshotChannelPromise: Promise<void> | undefined;
   let liveCoordinatorSealed = false;
-  const bindLiveAppshotHandler = (runtime: WorkspaceRuntime): void => {
+  const clearLiveRuntimeHandlers = (runtime: WorkspaceRuntime): void => {
+    const handlers: Array<((handler: undefined) => void) | undefined> = [
+      runtime.bridge.setLiveScreenContextCaptureHandler,
+      runtime.bridge.setLiveTaskToolRequestHandler,
+      runtime.bridge.setLiveSpeakToUserHandler,
+    ];
+    for (const clear of handlers) {
+      try {
+        clear?.call(runtime.bridge, undefined);
+      } catch {
+        continue;
+      }
+    }
+  };
+  const bindLiveRuntimeHandlers = (runtime: WorkspaceRuntime): void => {
     if (liveCoordinatorSealed) {
       throw new Error('Live Voice is shutting down.');
     }
-    const setHandler = runtime.bridge.setLiveScreenContextCaptureHandler;
-    if (!setHandler) {
+    const setScreenHandler = runtime.bridge.setLiveScreenContextCaptureHandler;
+    const setTaskHandler = runtime.bridge.setLiveTaskToolRequestHandler;
+    const setSpeakHandler = runtime.bridge.setLiveSpeakToUserHandler;
+    if (!setScreenHandler) {
       throw new Error('Live conversation runtime has no Appshot channel.');
     }
-    setHandler.call(runtime.bridge, ({ callerSessionId }) =>
-      liveCoordinator.captureScreenContext(callerSessionId),
-    );
-    const setTaskHandler = runtime.bridge.setLiveTaskToolRequestHandler;
     if (!setTaskHandler) {
       throw new Error('Live conversation runtime has no task-tool channel.');
     }
-    setTaskHandler.call(runtime.bridge, (info) => liveTaskService.handle(info));
-    const setSpeakHandler = runtime.bridge.setLiveSpeakToUserHandler;
     if (!setSpeakHandler) {
       throw new Error('Live conversation runtime has no speech channel.');
     }
-    setSpeakHandler.call(runtime.bridge, ({ callerSessionId, message }) =>
-      liveSessionCoordinator.speakToUser(callerSessionId, message),
-    );
+    liveBoundRuntime = runtime;
+    try {
+      setScreenHandler.call(runtime.bridge, ({ callerSessionId }) =>
+        liveCoordinator.captureScreenContext(callerSessionId),
+      );
+      setTaskHandler.call(runtime.bridge, (info) =>
+        liveTaskService.handle(info),
+      );
+      setSpeakHandler.call(runtime.bridge, ({ callerSessionId, message }) =>
+        liveSessionCoordinator.speakToUser(callerSessionId, message),
+      );
+    } catch (error) {
+      clearLiveRuntimeHandlers(runtime);
+      throw error;
+    }
   };
   const ensureLiveConversationRuntime = (): Promise<WorkspaceRuntime> => {
     if (liveCoordinatorSealed) {
       return Promise.reject(new Error('Live Voice is shutting down.'));
     }
-    if (liveRuntimePromise) return liveRuntimePromise;
+    if (liveBindingPromise) return liveBindingPromise;
     const pending = (async (): Promise<WorkspaceRuntime> => {
-      const conversationWorkspace = deps.liveConversationWorkspace;
-      const runtimePublisher = workspaceManagementHandle;
-      if (!conversationWorkspace || !runtimePublisher) {
+      await serveAppLifecycle.awaitBootAdmission();
+      if (!conversationRuntimeManager) {
         throw new Error('Live conversation runtime is unavailable.');
       }
-      const root = await conversationWorkspace.revalidate();
-      if (liveRuntime) {
-        await conversationWorkspace.assertExactRoot(liveRuntime.workspaceCwd);
-        const entry = workspaceRegistry.getEntryByWorkspaceCwd(
-          root.canonicalRoot,
-        );
-        if (
-          entry?.state !== 'active' ||
-          entry.current?.runtime !== liveRuntime ||
-          liveRuntime.provenance !== 'live-conversation' ||
-          !liveRuntime.trusted ||
-          liveRuntime.removable !== false
-        ) {
-          throw new Error(
-            'Live conversation runtime is no longer an active owned runtime.',
-          );
-        }
-        bindLiveAppshotHandler(liveRuntime);
-        return liveRuntime;
+      const runtime = await conversationRuntimeManager.ensure();
+      if (liveCoordinatorSealed) {
+        throw new Error('Live Voice is shutting down.');
       }
-      const existing = workspaceRegistry.getByWorkspaceCwd(root.canonicalRoot);
-      if (existing) {
-        if (
-          existing.provenance !== 'live-conversation' ||
-          !existing.trusted ||
-          existing.removable !== false
-        ) {
-          throw new Error(
-            'Live conversation root is already registered without Live provenance.',
-          );
+      bindLiveRuntimeHandlers(runtime);
+      const notifyRuntimeReady = (
+        app.locals as {
+          onConversationRuntimeReady?: () => void;
         }
-        await conversationWorkspace.assertExactRoot(existing.workspaceCwd);
-        liveRuntime = existing;
-        bindLiveAppshotHandler(existing);
-        return existing;
+      ).onConversationRuntimeReady;
+      if (notifyRuntimeReady) {
+        void Promise.resolve()
+          .then(notifyRuntimeReady)
+          .catch(() => undefined);
       }
-      const created = await runtimePublisher.publishOwnedRuntime(
-        root.canonicalRoot,
-        'live-conversation',
-        async (candidate) => {
-          await conversationWorkspace.assertExactRoot(candidate.workspaceCwd);
-          if (
-            candidate.provenance !== 'live-conversation' ||
-            !candidate.trusted ||
-            candidate.removable !== false
-          ) {
-            throw new Error(
-              'Live conversation runtime failed its ownership gate.',
-            );
-          }
-        },
-      );
-      liveRuntime = created;
-      bindLiveAppshotHandler(created);
-      invalidateServeFeaturesCache();
-      return created;
+      return runtime;
     })().finally(() => {
-      if (liveRuntimePromise === pending) liveRuntimePromise = undefined;
+      if (liveBindingPromise === pending) liveBindingPromise = undefined;
     });
-    liveRuntimePromise = pending;
+    liveBindingPromise = pending;
     return pending;
+  };
+  const startConversationRuntimeBoot = (): Promise<void> => {
+    if (liveRuntimeBootPromise) return liveRuntimeBootPromise;
+    const pending = ensureLiveConversationRuntime()
+      .then((runtime) => {
+        liveRuntimeBootResult = runtime;
+      })
+      .finally(() => {
+        if (liveRuntimeBootPromise === pending) {
+          liveRuntimeBootPromise = undefined;
+        }
+      });
+    liveRuntimeBootPromise = pending;
+    return pending;
+  };
+  if (liveVoiceEnabled) {
+    serveAppLifecycle.setBootStarter(startConversationRuntimeBoot);
+  }
+  const ensureConversationRuntimeWithLifecycle = async () => {
+    await serveAppLifecycle.startBoot(startConversationRuntimeBoot);
+    if (!liveRuntimeBootResult) {
+      throw new Error('Live conversation runtime is unavailable.');
+    }
+    return liveRuntimeBootResult;
   };
   const verifyLiveAppshotChannel = (): Promise<void> => {
     if (liveAppshotChannelPromise) return liveAppshotChannelPromise;
-    const pending = ensureLiveConversationRuntime()
+    const pending = ensureConversationRuntimeWithLifecycle()
       .then(() => {
         if (!liveCoordinatorSealed) {
           liveCoordinator.setAppshotReadiness({ state: 'ready' });
@@ -1410,7 +1503,7 @@ export function createServeApp(
   };
   const liveTaskService = new LiveTaskService({
     workspaceRegistry,
-    ensureConversationRuntime: ensureLiveConversationRuntime,
+    ensureConversationRuntime: ensureConversationRuntimeWithLifecycle,
     materializeConversationDirectory: async (sessionId) => {
       const conversationWorkspace = deps.liveConversationWorkspace;
       if (!conversationWorkspace) {
@@ -1428,7 +1521,7 @@ export function createServeApp(
     deps.liveSessionCoordinator ??
     new LiveSessionCoordinator({
       host: liveCoordinator,
-      ensureConversationRuntime: ensureLiveConversationRuntime,
+      ensureConversationRuntime: ensureConversationRuntimeWithLifecycle,
       workspaceRegistry,
       getProviderCredential: resolveLiveCredential,
       materializeConversationDirectory: async (sessionId) => {
@@ -1480,7 +1573,7 @@ export function createServeApp(
     }
     if (enabled === liveVoiceEnabled) return;
     if (enabled) {
-      await ensureLiveConversationRuntime();
+      await ensureConversationRuntimeWithLifecycle();
       liveVoiceEnabled = true;
       (app.locals as { liveVoiceEnabled?: boolean }).liveVoiceEnabled = true;
       liveCoordinator.setAppshotReadiness({
@@ -1535,9 +1628,7 @@ export function createServeApp(
     liveCoordinatorSealed = true;
     if (liveCoordinatorStopped) return;
     liveCoordinatorStopped = true;
-    liveRuntime?.bridge.setLiveScreenContextCaptureHandler?.(undefined);
-    liveRuntime?.bridge.setLiveTaskToolRequestHandler?.(undefined);
-    liveRuntime?.bridge.setLiveSpeakToUserHandler?.(undefined);
+    if (liveBoundRuntime) clearLiveRuntimeHandlers(liveBoundRuntime);
     liveSessionCoordinator.dispose();
     liveCoordinator.dispose();
   };
@@ -1553,7 +1644,7 @@ export function createServeApp(
   ).sealAndWaitLiveCoordinator = async () => {
     stopLiveCoordinator();
     await Promise.all([
-      liveRuntimePromise?.catch(() => undefined),
+      liveBindingPromise?.catch(() => undefined),
       liveAppshotChannelPromise?.catch(() => undefined),
     ]);
   };
@@ -1577,29 +1668,36 @@ export function createServeApp(
   // gets a full 10MB `JSON.parse` before the 401 fires — a trivially
   // amplified CPU/memory cost from any wrong-token client.
   //
-  // When `--allow-origin` is configured, install the
-  // allowlist middleware instead of the deny-wall. The allowlist owns
-  // both halves of the policy (matched → CORS headers + pass-through or
-  // 204 preflight; unmatched → 403 with the same error envelope as the
-  // wall). When `--allow-origin` is empty/undefined, the deny-wall stays
-  // installed. Pattern parsing happens in `run-qwen-serve.ts` for validation;
-  // here we still keep the wildcard/no-token invariant for embedded
-  // callers that construct the app directly.
-  if (opts.allowOrigins && opts.allowOrigins.length > 0) {
-    const parsedAllowOrigins = parseAllowOriginPatterns(opts.allowOrigins);
-    if (parsedAllowOrigins.allowAny && !opts.token) {
-      throw new Error(
-        `Refusing to start with --allow-origin '*' but no bearer token ` +
-          `configured. '*' admits any cross-origin browser to the API; ` +
-          `without a token, any local page can drive the daemon. Set a ` +
-          `token or list specific origins instead of '*'.`,
-      );
-    }
-    app.use(allowOriginCors(parsedAllowOrigins));
-  } else {
-    app.use(denyBrowserOriginCors);
+  // The allowlist middleware owns both halves of the policy (matched → CORS
+  // headers + pass-through or 204 preflight; unmatched → 403). It is now
+  // installed unconditionally: with an empty allowlist every Origin-bearing
+  // request gets the same 403 envelope the `denyBrowserOriginCors` wall
+  // returned, so the no-`--allow-origin` posture is unchanged, and there is
+  // one middleware to reason about instead of two interchangeable ones.
+  // Pattern parsing happens in `run-qwen-serve.ts` for validation; here we
+  // still keep the wildcard/no-token invariant for embedded callers that
+  // construct the app directly.
+  const parsedAllowOrigins = parseAllowOriginPatterns(opts.allowOrigins ?? []);
+  if (parsedAllowOrigins.allowAny && !opts.token) {
+    throw new Error(
+      `Refusing to start with --allow-origin '*' but no bearer token ` +
+        `configured. '*' admits any cross-origin browser to the API; ` +
+        `without a token, any local page can drive the daemon. Set a ` +
+        `token or list specific origins instead of '*'.`,
+    );
   }
+  // One CORS middleware for both deployments, over a set that can change.
+  // With no `--allow-origin` the behavior is byte-for-byte the
+  // `denyBrowserOriginCors` wall this replaces — every Origin-bearing request
+  // gets the same `Vary: Origin` + 403 body — but the set behind it can now
+  // gain the LAN origin while Local Control is on and lose it again on
+  // disable. Re-registering middleware at that point is not an option:
+  // Express fixes middleware order when the app is built.
+  const originAllowlist = new MutableOriginAllowlist(parsedAllowOrigins);
+  app.use(allowOriginCors(originAllowlist));
   app.use(hostAllowlist(opts.hostname, getPort));
+  const credentials = new CredentialStore(opts.token);
+  const authenticate = bearerAuth(credentials);
   const rateLimiter = installRateLimiter(app, opts, daemonLog, {
     mount: false,
     workspaceQualifiedAcpEnabled,
@@ -1612,6 +1710,13 @@ export function createServeApp(
     getRateLimiter: () => rateLimiter,
   });
   if (healthRoutes.exposeHealthPreAuth) {
+    app.use('/health', (req, res, next) => {
+      if (listenerIdentityOf(req).kind === 'local-control') {
+        authenticate(req, res, next);
+        return;
+      }
+      next();
+    });
     healthRoutes.register(app);
   }
 
@@ -1693,7 +1798,11 @@ export function createServeApp(
     });
   }
 
-  app.use(bearerAuth(opts.token));
+  // Credentials are a listener-scoped set, not one token: while Local Control
+  // is on, the LAN listener accepts a revocable pairing token and rejects the
+  // runtime token, and the primary listener does the reverse. With no Local
+  // Control session this behaves exactly as `bearerAuth(opts.token)` did.
+  app.use(authenticate);
 
   // Rate limiter: after auth (only count authenticated requests), except
   // webhook routes which use their own shared-secret auth before bearerAuth.
@@ -1720,8 +1829,11 @@ export function createServeApp(
 
   app.use(
     daemonTelemetryMiddleware((req) => {
-      const match = req.path.match(/^\/workspaces\/([^/]+)/);
-      const rawSelector = match?.[1];
+      const pluralMatch = req.path.match(/^\/workspaces\/([^/]+)/);
+      const singularCatalogMatch = req.path.match(
+        /^\/workspace\/([^/]+)\/(?:sessions|session-info)(?:\/|$)/,
+      );
+      const rawSelector = pluralMatch?.[1] ?? singularCatalogMatch?.[1];
       if (rawSelector) {
         try {
           const selector = decodeURIComponent(rawSelector);
@@ -1735,8 +1847,9 @@ export function createServeApp(
             if (runtime) return runtime.workspaceCwd;
           }
         } catch {
-          return primaryBoundWorkspace;
+          return undefined;
         }
+        return undefined;
       }
       return primaryBoundWorkspace;
     }, deps.recordDaemonRequest),
@@ -1781,9 +1894,17 @@ export function createServeApp(
     getChildHeapPolicySnapshot: deps.getChildHeapPolicySnapshot,
   });
 
-  if (liveVoiceEnabled) {
+  if (conversationRuntimeManager) {
     app.use('/capabilities', (_req, _res, next) => {
-      void (liveRuntimeBootPromise ?? Promise.resolve()).then(() => next());
+      const boot = serveAppLifecycle.getBootPromise();
+      if (!boot) {
+        next();
+        return;
+      }
+      void boot.then(
+        () => next(),
+        () => next(),
+      );
     });
   }
   registerCapabilitiesRoutes(app, {
@@ -1803,6 +1924,10 @@ export function createServeApp(
   if (liveVoiceSurfaceAvailable) {
     registerLiveRoutes(app, {
       coordinator: liveCoordinator,
+      ensureRuntimeReady: async () => {
+        await ensureConversationRuntimeWithLifecycle();
+        await publishLiveVoiceEnabled(true);
+      },
       mutate,
       ...(deps.persistSetting
         ? {
@@ -2050,6 +2175,7 @@ export function createServeApp(
     safeBody,
     sendBridgeError,
     workspaceRegistry,
+    conversationRuntimeActivity,
     ...(primaryRuntimeTrustAuthoritative
       ? { isWorkspaceTrusted: isPrimaryWorkspaceTrusted }
       : {}),
@@ -2078,6 +2204,27 @@ export function createServeApp(
     mutate,
     parseClientId: parseClientIdHeader,
     safeBody,
+    workspaceRegistry,
+  });
+  // One shared four-slot gate bounds upload-body buffering across both the
+  // legacy and workspace-qualified upload routes.
+  const uploadGate = createUploadConcurrencyGate();
+  registerWorkspaceFileUploadRoutes(app, {
+    bridge: primaryBridge,
+    mutate,
+    parseClientId: parseClientIdHeader,
+    safeBody,
+    uploadGate,
+    ...(primaryRuntimeTrustAuthoritative
+      ? { isWorkspaceTrusted: isPrimaryWorkspaceTrusted }
+      : {}),
+  });
+  registerWorkspaceQualifiedFileUploadRoutes(app, {
+    bridge: primaryBridge,
+    mutate,
+    parseClientId: parseClientIdHeader,
+    safeBody,
+    uploadGate,
     workspaceRegistry,
   });
   registerWorkspaceSetupGithubRoutes(app, {
@@ -2134,19 +2281,13 @@ export function createServeApp(
     workspaceRegistrationStore: deps.workspaceRegistrationStore,
     getAcpHandle: () => acpHandleRef.current,
     runtimeRemoval: deps.workspaceRuntimeRemoval,
+    ...(deps.liveConversationWorkspace
+      ? { reservedWorkspaceRoots: [deps.liveConversationWorkspace.rootPath] }
+      : {}),
   });
   (
     app.locals as { workspaceManagementHandle?: WorkspaceManagementHandle }
   ).workspaceManagementHandle = workspaceManagementHandle;
-  if (liveVoiceEnabled) {
-    // Publish the daemon-owned runtime at boot so persisted Live sessions are
-    // visible in the Web Shell even before the native Host connects. Runtime
-    // construction is lazy with respect to ACP/Appshot/provider initialization;
-    // Host readiness remains the only path that starts those probes.
-    liveRuntimeBootPromise = ensureLiveConversationRuntime()
-      .then(() => undefined)
-      .catch(() => undefined);
-  }
   (
     app.locals as {
       workspaceRuntimeRemoval?: WorkspaceRuntimeRemovalController;
@@ -2306,6 +2447,9 @@ export function createServeApp(
       liveCoordinator.isActiveSession(sessionId),
     ...(liveConversationWorkspaceForRoutes
       ? {
+          ensureConversationRuntime: ensureConversationRuntimeWithLifecycle,
+          liveConversationRootPath: liveConversationWorkspaceForRoutes.rootPath,
+          conversationRuntimeActivity: conversationRuntimeActivity!,
           materializeLiveConversationDirectory: (sessionId: string) =>
             liveConversationWorkspaceForRoutes.materializeConversationDirectory(
               sessionId,
@@ -2387,6 +2531,7 @@ export function createServeApp(
       safeBody,
       parseAndValidateClientId: (req, res, runtime) =>
         parseAndValidateWorkspaceClientId(req, res, runtime.bridge),
+      conversationRuntimeActivity,
     });
   }
   registerWorkspaceChannelObservedContactRoutes(app, {
@@ -2394,6 +2539,7 @@ export function createServeApp(
     workspaceRegistry,
     isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
     captureGenerationAssertion: capturePrimaryGenerationAssertion,
+    conversationRuntimeActivity,
   });
   registerWorkspaceLifecycleRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
@@ -2491,6 +2637,7 @@ export function createServeApp(
     manageScheduledTaskSessions: deps.manageScheduledTaskSessions === true,
     channelDeliveryAuthorizations: deps.channelDeliveryAuthorizations,
     cleanupSession,
+    conversationRuntimeActivity,
   });
 
   // Read-only token-usage dashboard (Daemon Status "统计" tab). Aggregate local
@@ -2656,6 +2803,10 @@ export function createServeApp(
     fsFactory: primaryRouteFileSystemFactory,
     deviceFlowRegistry,
     token: opts.token,
+    // The WS upgrade bypasses Express middleware, so it needs the same
+    // listener-scoped credentials the REST gate uses — otherwise the
+    // `qwen-bearer.*` subprotocol would be a way around the scoping.
+    credentials,
     // Mirror the REST CORS allowlist onto the WS CSRF wall so an
     // explicitly permitted origin (e.g. the extension's
     // `chrome-extension://<id>`) can open the reverse tool channel.
@@ -2741,6 +2892,36 @@ export function createServeApp(
     app.locals['acpHandle'] = acpHandleRef.current;
   }
 
+  // Local Control: the LAN listener serves THIS app, so the service is built
+  // here where the credential store and the CORS allowlist it has to mutate
+  // both live. Published on `app.locals` alongside `acpHandle` — the same
+  // channel `runQwenServe` already uses to reach into the constructed app for
+  // lifecycle work (drain, dispose).
+  const localControlService = new LocalControlService({
+    app,
+    credentials,
+    originAllowlist,
+    // Resolved through the ref on each call rather than captured so Local
+    // Control cannot attach to a stale ACP mount.
+    attachWebSocket: (server) => acpHandleRef.current?.attachServer(server),
+    detachWebSocket: (server) => acpHandleRef.current?.detachServer(server),
+    getPort,
+    tlsPaths:
+      opts.tlsCert && opts.tlsKey
+        ? { cert: opts.tlsCert, key: opts.tlsKey }
+        : undefined,
+  });
+  app.locals['localControlService'] = localControlService;
+
+  registerWorkspaceLocalControlRoutes(app, {
+    service: localControlService,
+    mutate,
+    safeBody,
+    isDaemonDraining: deps.isChannelControlDraining,
+    webShellAvailable: Boolean(webShellDir),
+    primaryBindHostname: opts.hostname,
+  });
+
   // Web Shell SPA deep-link fallback — registered AFTER every API route (and
   // just before the error handler) so real routes, including their bearerAuth
   // 401s, always win; only genuine 404 misses fall through to the shell. This
@@ -2755,6 +2936,61 @@ export function createServeApp(
   if (rateLimiter) {
     setRateLimiter(app, rateLimiter);
   }
+
+  let appDrainComplete = false;
+  if (!deps.serveAppLifecycle)
+    serveAppLifecycle.setAppDrain(async () => {
+      if (appDrainComplete) return;
+      const pendingDrains = [
+        workspaceManagementHandle.sealAndWait(),
+        (
+          app.locals as {
+            sealAndWaitLiveCoordinator?: () => Promise<void>;
+          }
+        ).sealAndWaitLiveCoordinator?.() ?? Promise.resolve(),
+        archiveCoordinator.sealMaintenanceAndWait(),
+        conversationRuntimeActivity?.sealAndWait() ?? Promise.resolve(),
+      ];
+      const cleanupErrors: unknown[] = [];
+      const stopAppResource = (stop: (() => void) | undefined) => {
+        try {
+          stop?.();
+        } catch (error) {
+          cleanupErrors.push(error);
+        }
+      };
+      const locals = app.locals as {
+        stopScheduledTaskKeepalive?: () => void;
+        stopWorkspaceGitState?: () => void;
+        stopExtensionGenerationReconciler?: () => void;
+      };
+      stopAppResource(locals.stopScheduledTaskKeepalive);
+      stopAppResource(locals.stopWorkspaceGitState);
+      stopAppResource(locals.stopExtensionGenerationReconciler);
+      stopAppResource(() => deviceFlowRegistry.dispose());
+      stopAppResource(() => rateLimiter?.setDraining(true));
+      stopAppResource(() => rateLimiter?.dispose());
+      const drains = await Promise.allSettled(pendingDrains);
+      stopAppResource(() => acpHandleRef.current?.dispose());
+      const bridgeDrains = await Promise.allSettled(
+        workspaceRegistry
+          .listManaged()
+          .map((runtime) => runtime.bridge.shutdown()),
+      );
+      const errors = [
+        ...cleanupErrors,
+        ...[...drains, ...bridgeDrains]
+          .filter(
+            (result): result is PromiseRejectedResult =>
+              result.status === 'rejected',
+          )
+          .map((result) => result.reason as unknown),
+      ];
+      if (errors.length > 0) {
+        throw new AggregateError(errors, 'Serve app drain is incomplete.');
+      }
+      appDrainComplete = true;
+    });
 
   return app;
 }

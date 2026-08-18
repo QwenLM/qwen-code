@@ -246,6 +246,7 @@ export {
   type ResolvedSlimmingConfig,
 } from './services/compactionInputSlimming.js';
 export * from './services/chatRecordingService.js';
+export * from './services/branch-points.js';
 export * from './services/cronScheduler.js';
 export type {
   CronTaskDelivery,
@@ -294,7 +295,12 @@ export * from './services/visionBridge/image-capability.js';
 export * from './services/sessionRecap.js';
 export * from './services/session-artifact-persistence.js';
 export * from './services/session-reference-service.js';
+export * from './services/session-registry.js';
 export * from './services/sessionService.js';
+export {
+  collectSessionTurnState,
+  computeInitialTurnFromHistory,
+} from './services/session-turn-state.js';
 export * from './services/session-writer-lease.js';
 export {
   decodeSessionTranscriptCursor,
@@ -315,6 +321,12 @@ export {
   SessionTranscriptTooLargeError,
 } from './services/session-transcript-reader.js';
 export type {
+  SelectiveSessionRestoreOptions,
+  SessionLiveRestoreProjection,
+  SessionRestoreProjection,
+  SessionRestoreReplayPage,
+  SessionRestoreReplaySelection,
+  SessionRuntimeResumeState,
   SessionTranscriptCursorState,
   SessionTranscriptReadPageOptions,
   SessionTranscriptRecordPage,
@@ -348,9 +360,12 @@ export type {
 export * from './services/worktreeSessionService.js';
 export {
   stripTerminalControlSequences,
+  stripDisplayControlChars,
+  truncateNotificationLabel,
   TERMINAL_OSC_REGEX,
   TERMINAL_CSI_REGEX,
   TERMINAL_SHIFT_DCS_REGEX,
+  NOTIFICATION_LABEL_MAX_LENGTH,
 } from './utils/terminalSafe.js';
 export { escapeXml } from './utils/xml.js';
 export * from './services/shellExecutionService.js';
@@ -376,6 +391,7 @@ export * from './services/usage-dashboard-service.js';
 export * from './utils/bareMode.js';
 export * from './utils/safe-mode.js';
 export * from './utils/sanitize-child-env.js';
+export { isUnusableScriptEntry } from './utils/shellContextEnv.js';
 export * from './utils/toolResultDisplayCompaction.js';
 
 // ============================================================================
@@ -573,6 +589,7 @@ export * from './utils/pathReader.js';
 export * from './utils/paths.js';
 export * from './utils/projectSummary.js';
 export * from './utils/promptIdContext.js';
+export * from './utils/tool-result-boundary-diagnostics.js';
 export * from './utils/proxyUtils.js';
 export * from './utils/quotaErrorDetection.js';
 export * from './utils/rateLimit.js';
@@ -588,6 +605,7 @@ export {
   preloadRuntimeFetchModule,
   redactProxyCredentials,
 } from './utils/runtimeFetchOptions.js';
+export * from './utils/process-liveness.js';
 export * from './utils/runtimeStatus.js';
 export * from './utils/schemaValidator.js';
 export * from './utils/sessionIdContext.js';
