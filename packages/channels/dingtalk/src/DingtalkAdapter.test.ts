@@ -2704,6 +2704,82 @@ describe('DingtalkChannel quoted media', () => {
     if (filePath) tempDirs.add(dirname(filePath));
   });
 
+  // R4-1: ChannelBase resolves a single inline image per envelope (the first
+  // data-only image attachment fills imageBase64) and silently drops every
+  // later data-only attachment, so the quoted image must be file-backed when
+  // the message's own image already occupies the slot.
+  it('file-backs a quoted image when the message already carries its own image', async () => {
+    const downloadCodes = mockMediaDownload(
+      'image/png',
+      new Uint8Array([1, 2, 3]),
+    );
+    const channel = createChannel();
+
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'quoted-two-images',
+        conversationType: '2',
+        conversationId: 'cid-quoted-media',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        chatbotUserId: 'bot-1',
+        isInAtList: true,
+        msgtype: 'picture',
+        content: { downloadCode: 'own-picture-code' },
+        text: {
+          content: '@DingTalkTest inspect both',
+          isReplyMsg: true,
+          repliedMsg: {
+            msgId: 'media-picture',
+            msgType: 'picture',
+            senderId: 'sender-1',
+            content: { downloadCode: 'quoted-picture-code' },
+          },
+        },
+      }),
+      headers: { messageId: 'quoted-two-images' },
+    } as unknown as DWClientDownStream;
+
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+
+    await vi.waitFor(() => {
+      expect(channel.handleInbound).toHaveBeenCalledOnce();
+    });
+    expect(downloadCodes).toEqual(['own-picture-code', 'quoted-picture-code']);
+    const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
+    // extractContent yields the '(image)' placeholder for a picture msgtype.
+    expect(envelope).toMatchObject({
+      text: '(image)',
+      referencedText: '[image]',
+    });
+    expect(envelope.attachments).toHaveLength(2);
+    // The own image keeps the single inline slot ChannelBase resolves.
+    expect(envelope.attachments?.[0]).toEqual({
+      type: 'image',
+      data: Buffer.from([1, 2, 3]).toString('base64'),
+      mimeType: 'image/png',
+    });
+    // The quoted image must not be a second data-only attachment — that shape
+    // is silently dropped by ChannelBase's single-image resolution.
+    const quotedAttachment = envelope.attachments?.[1];
+    expect(quotedAttachment).toMatchObject({
+      type: 'image',
+      mimeType: 'image/png',
+    });
+    expect(quotedAttachment).not.toHaveProperty('data');
+    const filePath = quotedAttachment?.filePath;
+    if (filePath) tempDirs.add(dirname(filePath));
+    expect(filePath).toBeTruthy();
+    expect(existsSync(filePath!)).toBe(true);
+    expect(readFileSync(filePath!)).toEqual(Buffer.from([1, 2, 3]));
+    expect(quotedAttachment?.fileName).toMatch(/^dingtalk_image_/);
+  });
+
   it('cleans the generated placeholder for a direct file message', async () => {
     mockMediaDownload('application/octet-stream', new Uint8Array([7, 8, 9]));
     const channel = createChannel();
@@ -2739,6 +2815,23 @@ describe('DingtalkChannel quoted media', () => {
     if (filePath) tempDirs.add(dirname(filePath));
     expect(envelope.text).toBe('');
     expect(envelope.attachments?.[0]?.fileName).toMatch(/^dingtalk_audio_/);
+  });
+
+  it('cleans the generated placeholder for a direct video message', async () => {
+    mockMediaDownload('video/mp4', new Uint8Array([7, 8, 9]));
+    const channel = createChannel();
+
+    sendDirectMedia(channel, 'video', { downloadCode: 'direct-video-code' });
+
+    await vi.waitFor(() => {
+      expect(channel.handleInbound).toHaveBeenCalledOnce();
+    });
+    const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
+    const filePath = envelope.attachments?.[0]?.filePath;
+    if (filePath) tempDirs.add(dirname(filePath));
+    expect(envelope.text).toBe('');
+    expect(envelope.attachments).toMatchObject([{ type: 'video' }]);
+    expect(envelope.attachments?.[0]?.fileName).toMatch(/^dingtalk_video_/);
   });
 
   // R1-1: the placeholder cleanup was written for the DIRECT-media path,

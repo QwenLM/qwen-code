@@ -1602,7 +1602,16 @@ export class DingtalkChannel extends ChannelBase {
     const media = await downloadMedia(downloadCode, robotCode, token);
     if (!media) return;
 
-    if (mediaType === 'image') {
+    // ChannelBase fills a single imageBase64 slot from the FIRST data-only
+    // image attachment and silently drops every later one, so an image
+    // arriving after the slot is taken (e.g. a quoted picture alongside the
+    // message's own picture) falls through to the file-backed path — the
+    // `saved to:` prompt line is what keeps it reachable for the agent.
+    const inlineImageSlotFree = !(envelope.attachments || []).some(
+      (attachment) => attachment.type === 'image' && attachment.data,
+    );
+
+    if (mediaType === 'image' && inlineImageSlotFree) {
       const mimeType = media.mimeType.startsWith('image/')
         ? media.mimeType
         : 'image/jpeg';
@@ -1615,7 +1624,7 @@ export class DingtalkChannel extends ChannelBase {
         },
       ];
     } else {
-      // Save non-image files to temp dir so the agent can read them.
+      // Save the media to temp dir so the agent can read it.
       //
       // R1-2: these are synchronous throw sites — ENOSPC on a write of up to
       // 50 MB, ENAMETOOLONG from a quoted fileName over 255 bytes (`basename`
