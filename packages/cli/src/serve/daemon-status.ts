@@ -458,8 +458,8 @@ interface DaemonStatusRuntimeMemory {
      * Lifetime V8 old-generation high-water marks across the sampled children,
      * as a **maximum, not a sum**. A heap ceiling applies per child, and the
      * peaks were reached at different times, so a total answers no question
-     * anybody has; the maximum names the single worst-off child, which is what
-     * a per-child ceiling has to be judged against.
+     * anybody has; each field is an independent maximum, not a portrait of
+     * one child. A per-child ceiling is judged against each axis on its own.
      *
      * `null` — never a zeroed object — when no sampled child reported. The
      * gating on `childRssCoverage` makes this the common case rather than an

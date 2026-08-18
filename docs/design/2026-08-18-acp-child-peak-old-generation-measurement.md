@@ -213,16 +213,23 @@ runs _after_ the collection, so it can only see the committed high-water if V8
 releases committed pages lazily rather than at the end of the GC that freed
 them. That is V8's documented behavior and matches evidence 2, where the
 committed peak survived to be read — but evidence 2 also sampled inline from
-the workload, so it does not isolate the observer. The PR pins this with a test
-that grows the heap, forces a major GC, and asserts the observer-only
-accumulator still reports the pre-GC high-water. If it does not hold, the
-interval stops being a floor and becomes the primary trigger, at a cadence
-tight enough to matter.
+the workload, so it does not isolate the observer. The PR pins the callback
+wiring with an injected observer: a delivered major-GC entry must move the
+live-set and GC figures and a minor entry must not, so a wrong `kind` check
+or a callback that never runs cannot stay green. The lazy-release assumption
+itself is accepted as V8's documented behavior; forcing a real major GC on
+demand needs flags the test runner does not guarantee. If it does not hold,
+the interval stops being a floor and becomes the primary trigger, at a
+cadence tight enough to matter.
 
 Both sampling paths are best-effort. `getHeapSpaceStatistics()` is wrapped the
 way `workspaceResource` already wraps `memoryUsage()` and `cpuUsage()`: a throw
 in a restricted container leaves the accumulators at their last good values
-rather than failing the handler.
+rather than failing the handler. A child whose every read throws reports no
+`heap` at all — the field stays absent until the first successful sample, so
+the absent-not-zeroed rule below holds at the child layer too, and an empty
+`unclassifiedSpaceNames` always means coverage was checked, never that nothing
+was measured.
 
 ### What is accumulated
 
@@ -313,8 +320,9 @@ Every figure is a **maximum across sampled children, not a sum** — including
 the GC counters. The ceiling is per child, and the peaks were reached at
 different times, so a sum answers a question nobody asked. For the counters the
 argument is the same in a different direction: summed GC counts measure
-daemon-wide GC activity, while the max names the single worst-off child, which
-is what a per-child ceiling is decided against.
+daemon-wide GC activity. Each field is an independent maximum, not a portrait
+of one child — the committed peak and the live peak may come from different
+children, and a per-child ceiling is judged against each axis on its own.
 
 `null`, never `0`, when no child reported — matching `oldestReadingAgeMs`,
 which already distinguishes these. A daemon with children that predate the

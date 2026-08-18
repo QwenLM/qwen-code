@@ -117,7 +117,16 @@ export interface ChildHeapProbeSnapshot {
 }
 
 export interface ChildHeapProbe {
-  snapshot(): ChildHeapProbeSnapshot;
+  /**
+   * The lifetime marks, or `undefined` until at least one space read has
+   * succeeded. A child whose every `getHeapSpaceStatistics()` call throws —
+   * the restricted-container case the `catch` in `sample` exists for — must
+   * not report a zeroed object with `unclassifiedSpaceNames: []`: downstream
+   * that reads as measured, needs-nothing, and coverage-complete, the
+   * manufactured zero the bridge and status layers refuse to emit. Omitting
+   * the report matches what a child without the probe already sends.
+   */
+  snapshot(): ChildHeapProbeSnapshot | undefined;
   stop(): void;
 }
 
@@ -145,6 +154,13 @@ interface ChildHeapProbeOptions {
   heapSpaceStatistics?: () => v8.HeapSpaceInfo[];
   heapStatistics?: () => v8.HeapInfo;
   intervalMs?: number;
+  /**
+   * Injectable for tests; defaults to a `PerformanceObserver` on `gc`
+   * entries. Throws where the runtime has no such entry type.
+   */
+  gcObserver?: (callback: (entries: PerformanceEntry[]) => void) => {
+    disconnect(): void;
+  };
 }
 
 /**
@@ -175,6 +191,7 @@ export function startChildHeapProbe(
   let peakTotalHeapBytes = 0;
   let majorGcCount = 0;
   let majorGcMs = 0;
+  let sampled = false;
   const unclassified = new Set<string>();
 
   // Best-effort throughout, mirroring how the `workspaceResource` handler
@@ -200,6 +217,10 @@ export function startChildHeapProbe(
       // uncollected garbage, which would reintroduce exactly the
       // limit-dependence that makes this the refusal figure.
       if (afterMajorGc && live > peakLiveSetBytes) peakLiveSetBytes = live;
+      // Gated on the space read specifically: it is what feeds the old-gen
+      // figures and `unclassifiedSpaceNames`, so its success is what makes a
+      // report worth publishing at all.
+      sampled = true;
     } catch {
       /* restricted container — keep the last good values */
     }
@@ -213,10 +234,19 @@ export function startChildHeapProbe(
 
   sample(false);
 
-  let observer: PerformanceObserver | undefined;
+  let observer: { disconnect(): void } | undefined;
   try {
-    observer = new PerformanceObserver((list) => {
-      for (const entry of list.getEntries()) {
+    const observe =
+      options.gcObserver ??
+      ((callback: (entries: PerformanceEntry[]) => void) => {
+        const performanceObserver = new PerformanceObserver((list) =>
+          callback(list.getEntries()),
+        );
+        performanceObserver.observe({ entryTypes: ['gc'] });
+        return performanceObserver;
+      });
+    observer = observe((entries) => {
+      for (const entry of entries) {
         const isMajor =
           (entry as { detail?: { kind?: number } }).detail?.kind ===
           perfConstants.NODE_PERFORMANCE_GC_MAJOR;
@@ -227,7 +257,6 @@ export function startChildHeapProbe(
         sample(isMajor);
       }
     });
-    observer.observe({ entryTypes: ['gc'] });
   } catch {
     // No GC entries on this runtime. The interval below still produces
     // committed and total marks; `peakLiveSetBytes` stays 0, which reads as
@@ -247,6 +276,8 @@ export function startChildHeapProbe(
       // Refresh the committed and total marks so a caller polling an idle
       // child is not told a value older than the interval.
       sample(false);
+      // Nothing successfully measured yet — report absence, not zeros.
+      if (!sampled) return undefined;
       return {
         peakOldGenerationBytes,
         peakLiveSetBytes,

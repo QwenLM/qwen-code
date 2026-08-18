@@ -8600,13 +8600,15 @@ class QwenAgent implements Agent {
         // Spread rather than always-present fields: a child without the probe
         // (no daemon marker) omits them entirely, so the daemon can tell "not
         // measured" from a measured zero. Reporting 0 here would read as "this
-        // child needs no heap", which is the one wrong answer.
+        // child needs no heap", which is the one wrong answer. The probe
+        // itself returns undefined until its first successful read, so a child
+        // whose every V8 call throws (restricted container) omits heap the
+        // same way instead of publishing a zeroed, coverage-complete report.
+        const childHeap = this.childHeapProbe?.snapshot();
         return {
           rssBytes,
           cpuPercent,
-          ...(this.childHeapProbe
-            ? { heap: this.childHeapProbe.snapshot() }
-            : {}),
+          ...(childHeap ? { heap: childHeap } : {}),
         };
       }
       case SERVE_STATUS_EXT_METHODS.sessionContext: {
