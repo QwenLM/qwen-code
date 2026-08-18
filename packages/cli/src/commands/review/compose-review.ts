@@ -21,6 +21,7 @@
 // real); this owns only the bookkeeping that follows from the counts.
 
 import type { CommandModule } from 'yargs';
+import { roundModelIdFrom } from './lib/round-model.js';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -73,6 +74,7 @@ import { diffHashOf, type ScriptLintReport } from './script-lint.js';
 import type { TestPlanReport } from './test-plan.js';
 import {
   LEDGER_ID_READBACK,
+  LEDGER_MAX_BYTES,
   LEDGER_MAX_ROUND,
   serializeLedger,
   type Ledger,
@@ -90,6 +92,7 @@ import {
   type DraftedComment,
 } from './lib/inline-counts.js';
 import {
+  MODEL_ID_MAX_CHARS,
   footerVersion,
   isFooterSafeModelId,
   rendersAsNothing,
@@ -114,6 +117,49 @@ export type ReviewEvent = 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT';
  * well before "big".
  */
 export const LOW_SIGNAL_SRC_DIFF_LINES = 100;
+
+/**
+ * GitHub's hard limit on a review body. A POST over it is rejected whole —
+ * the review's blockers included — which is the worst failure this module
+ * has: a run that found the bug and could not say it.
+ *
+ * Every individually-bounded contributor already respects a budget (the
+ * ledger marker's 8 KiB, the deferral list's 20 × 240). The rest —
+ * the unresolved-blocker list, the disclosure sentences, the body
+ * Criticals — is model-written prose with no upstream cap, so the FINAL
+ * body needs its own budget: measured once, trimmed in a fixed order, and
+ * disclosed. A probe composed 67,039 characters on a real shape.
+ */
+const BODY_MAX_CHARS = 65536;
+
+/**
+ * Room held back for the ledger marker (appended after the body composes)
+ * plus its separator, and a margin for the trim notice itself. Reserved
+ * only when the plan names a PR, because only then can a marker ride.
+ */
+const MARKER_RESERVE = LEDGER_MAX_BYTES + 2;
+const BODY_SAFETY_MARGIN = 512;
+
+/**
+ * Does this plan name a pull request? The budget and the marker must not
+ * disagree about whether a marker will ride, so both ask here.
+ */
+function planNamesPr(planPath: string | undefined): boolean {
+  try {
+    if (!planPath) return false;
+    const plan = JSON.parse(readFileSync(planPath, 'utf8')) as {
+      prNumber?: unknown;
+    };
+    // The module's ONE predicate for this, shared with every other consumer
+    // (`planPrIdentity`, the report names, the round count): a second copy
+    // drifts, and a hand-rolled one already did — it accepted the string
+    // `'0'` this one rejects, so the budget reserved marker room on a plan
+    // the anchor consumers read as PR-less.
+    return isPositivePrNumber(plan?.prNumber);
+  } catch {
+    return false;
+  }
+}
 
 /**
  * The deferred-suggestions list's rendered bounds, shared by the
@@ -491,7 +537,12 @@ export interface ComposeReviewInput {
    * handler strips it, as it does `env` and `prBodyFetcher`).
    */
   draftedComments?: Array<{ path?: unknown; line?: unknown; body?: unknown }>;
-  /** Model id for the footer, e.g. `qwen3.7-max`. */
+  /**
+   * Model id for the footer, e.g. `qwen3.7-max`. The marker's anchor takes
+   * the session-published identity instead when the CLI boundary injects one
+   * (`composeReview`'s `runtimeModelId`); this field is its fallback for runs
+   * no session published, and what the visible footer names either way.
+   */
   modelId: string;
 }
 
@@ -530,6 +581,27 @@ export interface ComposeReviewResult {
    * sentence's premise is "zero findings", and a deferral is a finding.
    */
   deferredCount: number;
+  /**
+   * What the body budget had to give up to fit GitHub's limit, when it did.
+   * On the result because `verdictLine` — printed to stderr, persisted in
+   * the composed JSON, copied into the archived report — otherwise keeps
+   * claiming the deferral list is "listed in the body" over a body that
+   * lists none: the stronger form of the false record this module already
+   * refuses for the line cap.
+   */
+  bodyTrim: {
+    /** Disclosure sections dropped whole, counted in the body. */
+    sections: number;
+    /** The deferral display was one of them. */
+    deferralList: boolean;
+    /**
+     * The bilingual fold was dropped — the first rung, and the only one that
+     * costs no content: the English above it says the same thing.
+     */
+    fold: boolean;
+    /** The un-trimmable remainder still overflowed and was cut. */
+    truncated: boolean;
+  };
   /**
    * Set on an APPROVE composed from zero findings over a non-trivial source
    * diff (the plan's `srcDiffLines` above `LOW_SIGNAL_SRC_DIFF_LINES`).
@@ -873,6 +945,14 @@ export function composeReview(
   input: ComposeReviewInput,
   cliVersion = 'unknown',
   attribution = true,
+  /**
+   * The model identity the RUNTIME publishes as active — `QWEN_CODE_MODEL`,
+   * injected by the two CLI boundaries from the environment the session
+   * exports. The marker's anchor certifies with THIS, never with the
+   * model-written state field alone; `input.modelId` is the fallback for
+   * runs no session published. Undefined in tests that call this directly.
+   */
+  runtimeModelId?: string,
 ): ComposeReviewResult {
   // One read, one round: the deferred-suggestions clause and the ledger
   // marker both name this round, and each reading the side file for itself
@@ -893,6 +973,8 @@ export function composeReview(
     result.cappedBy,
     result.scopeUnproven ?? true,
     result.dimensionGapsAreDepthOnly ?? false,
+    attribution,
+    runtimeModelId,
     prevRound,
   );
   return marker ? { ...result, body: `${result.body}\n\n${marker}` } : result;
@@ -913,10 +995,7 @@ function prevRoundFor(planPath: string | undefined): number {
       prNumber?: unknown;
     };
     const pr = plan?.prNumber;
-    const isPr =
-      (typeof pr === 'number' && Number.isInteger(pr) && pr > 0) ||
-      (typeof pr === 'string' && /^\d+$/.test(pr));
-    if (!isPr) return 0;
+    if (!isPositivePrNumber(pr)) return 0;
     const prev = JSON.parse(
       readFileSync(
         join(dirname(planPath), `qwen-review-pr-${pr}-prev-ledger.json`),
@@ -939,19 +1018,17 @@ function ledgerMarkerFor(
   cappedBy: string[],
   scopeUnproven: boolean,
   dimensionGapsAreDepthOnly: boolean,
+  attribution: boolean,
+  runtimeModelId: string | undefined,
   prevRound: number,
 ): string | null {
   try {
     if (!input.planPath) return null;
+    if (!planNamesPr(input.planPath)) return null;
     const plan = JSON.parse(readFileSync(input.planPath, 'utf8')) as {
-      prNumber?: unknown;
       fetchedSha?: unknown;
+      reviewModelId?: unknown;
     };
-    const pr = plan?.prNumber;
-    const isPr =
-      (typeof pr === 'number' && Number.isInteger(pr) && pr > 0) ||
-      (typeof pr === 'string' && /^\d+$/.test(pr));
-    if (!isPr) return null;
     // The anchor rides only when this round's SCOPE was clean. An anchor
     // written past unreviewed scope scopes the NEXT round's incremental diff
     // past it, and no later round ever re-covers the gap — so every cap that
@@ -985,9 +1062,62 @@ function ledgerMarkerFor(
       scopeUnproven ||
       !dimensionGapsAreDepthOnly ||
       cappedBy.some((cap) => cap !== 'unreviewed-dimension');
-    const sha =
+    const shaCandidate =
       !failClosed && typeof plan.fetchedSha === 'string'
         ? plan.fetchedSha
+        : undefined;
+    // The anchor's same-model qualifier: "clean up to `sha`" is THIS model's
+    // verdict, and Step 1's recovered-anchor gate refuses to scope another
+    // model's round to it. The identity is the one the RUNTIME published —
+    // the boundaries inject it, and it supersedes the typed id — with the
+    // model-written field only as the fallback for runs no session published
+    // (and boundary-validated then whenever attribution is on): a review
+    // running under one model could otherwise type another's id and certify
+    // the range to a model that never reviewed it. Withheld entirely when
+    // attribution is off: the setting's contract is "whether the posted
+    // review names its model", the marker rides the posted body, and a
+    // suppression the footer honours must reach the invisible half too — the
+    // anchor then degrades to the skill's absent-model fail-safe. The
+    // serializer writes it only beside a sha.
+    const runtime =
+      typeof runtimeModelId === 'string' ? runtimeModelId.trim() : '';
+    const declared =
+      typeof input.modelId === 'string' ? input.modelId.trim() : '';
+    const certifying = runtime !== '' ? runtime : declared;
+    // WHO reviewed, not who is posting. The runtime id above tracks the
+    // session's CURRENT model, and the documented deferred-post flow —
+    // review under A, `/model` to B, "post comments" — sampled B and
+    // certified A's range to it, so the next round under B scoped past code
+    // B never reviewed. `fetch-pr` stamps the identity the round STARTED
+    // under into the plan; when the two disagree, this round cannot say who
+    // reviewed the range and certifies nobody: the anchor pair is withheld
+    // and the next round re-reviews in full. An absent stamp (a plan written
+    // before the field) reads as unknown, not as agreement — but it also
+    // cannot prove disagreement, so it keeps today's behaviour rather than
+    // withholding every anchor on an older plan.
+    const roundStart =
+      typeof plan.reviewModelId === 'string' ? plan.reviewModelId.trim() : '';
+    // A blank runtime is a MISMATCH once the round carries a stamp, not a
+    // reason to skip the check. The recovery side already rules it that way
+    // (`certifierMatchesRound` refuses an empty `running` outright), and the
+    // asymmetry was load-bearing in the wrong direction: with the runtime
+    // channel empty — a deferred `qwen review submit` run from a terminal
+    // outside a session shell, which `round-model.ts` documents as reachable
+    // in normal operation — `certifying` falls back to `input.modelId`, the
+    // model-WRITTEN field these docstrings retire. The marker then certifies
+    // the sha to a typed id, and a later round under a matching typed id
+    // scopes past code it never reviewed: the regression this PR exists to
+    // close, arriving through the one channel left open.
+    //
+    // A stamped round whose poster cannot be identified is exactly "this
+    // round cannot say who reviewed the range", which is what withholding
+    // means. An UNSTAMPED round still keeps today's behaviour — see above:
+    // it cannot prove disagreement either.
+    const identityDrifted =
+      roundStart !== '' && (runtime === '' || roundStart !== runtime);
+    const model =
+      attribution && certifying !== '' && !identityDrifted
+        ? certifying
         : undefined;
     return serializeLedger({
       ...buildLedger(
@@ -1012,7 +1142,10 @@ function ledgerMarkerFor(
           ...splitDeferralChannel(input.deferredSuggestions).relocated,
         ],
       ),
-      ...(sha ? { sha } : {}),
+      // The pair falls together: a sha with no model reads to the next
+      // round as a pre-field marker rather than as "nobody certified this".
+      ...(shaCandidate && !identityDrifted ? { sha: shaCandidate } : {}),
+      ...(model ? { model } : {}),
     });
   } catch {
     // A carry-forward convenience, never worth failing the verdict over.
@@ -1777,6 +1910,20 @@ function composeReviewBody(
       );
     }
     footer = reviewFooter(modelId, cliVersion);
+    if (modelId.length > MODEL_ID_MAX_CHARS) {
+      remediation.push(
+        `body budget: modelId was ${modelId.length} characters and was ` +
+          `clamped to the footer's ${MODEL_ID_MAX_CHARS}-character cap — ` +
+          `the posted attribution is truncated`,
+      );
+    }
+    if (cliVersion.length > MODEL_ID_MAX_CHARS) {
+      remediation.push(
+        `body budget: cliVersion was ${cliVersion.length} characters and ` +
+          `was clamped to the footer's ${MODEL_ID_MAX_CHARS}-character ` +
+          `cap — the posted version stamp is truncated`,
+      );
+    }
   }
 
   // `C` counts every Critical the review posts anywhere — inline or body.
@@ -1983,7 +2130,7 @@ function composeReviewBody(
   // stays outside the fold, once. A `zh === en` body has nothing translated, so
   // no empty fold is published.
   const bilingual = bilingualFromPlan(input.planPath, input.prBodyFetcher);
-  const render = (parts: Bi[], sep: string): string => {
+  const assemble = (parts: Bi[], sep: string): string => {
     const en = parts.map((p) => p.en).join(sep);
     if (en === '') return '';
     const zh = parts.map((p) => p.zh).join(sep);
@@ -1992,6 +2139,298 @@ function composeReviewBody(
         ? `${en}\n\n<details>\n<summary>中文说明</summary>\n\n${zh}\n\n</details>`
         : en;
     return footer === '' ? text : `${text}\n\n${footer}`;
+  };
+
+  // What the body may occupy: GitHub's limit, less the room a ledger marker
+  // takes when one rides (it is appended after this composes) and a margin
+  // for the trim notice itself.
+  const bodyBudget =
+    BODY_MAX_CHARS -
+    BODY_SAFETY_MARGIN -
+    (planNamesPr(input.planPath) ? MARKER_RESERVE : 0);
+
+  /** What a rank drops, in the author's words — the note names it. */
+  const RANK_NAMES: Record<number, { en: string; zh: string }> = {
+    1: { en: 'the deferred-findings list', zh: '延后发现清单' },
+    2: {
+      en: 'the not-reviewed and non-blocking disclosures',
+      zh: '未审查范围与非阻断披露',
+    },
+  };
+
+  /**
+   * The trim notice. It rides FIRST in the body, not last: the sentences it
+   * corrects — "Partially reviewed — gaps disclosed", "They are listed
+   * below", the deferral header — sit at the top, and a correction 60,000
+   * characters below the claim it corrects is not a correction. It names
+   * WHICH kinds went, so a reader can tell a trimmed disclosure from a
+   * disclosure that never existed.
+   */
+  const trimNote = (ranks: number[], sections: number, cut: boolean): Bi => {
+    const named = ranks.map((r) => RANK_NAMES[r]).filter(Boolean);
+    const en = named.map((n) => n.en).join(' and ');
+    const zh = named.map((n) => n.zh).join('与');
+    // "Nothing blocking was trimmed" is true of the RANKS — both are
+    // non-blocking by construction. It is not true of the tail cut below,
+    // which can reach blocker text, so the claim is dropped exactly when a
+    // cut happened and the truncation notice takes over the subject.
+    const safe = cut
+      ? {
+          en: '',
+          zh: '',
+        }
+      : {
+          en: ' Nothing blocking was trimmed.',
+          zh: '被裁剪的均非阻断内容。',
+        };
+    // The artifact pointer is about the deferral list, so it rides only when
+    // that list is what went. Rank 2 can drop alone — it does, on any run
+    // with disclosures and no posture deferrals — and the unconditional
+    // pointer then sent the author to read a list that does not exist.
+    const artifact = ranks.includes(1)
+      ? {
+          en: `, and deferred findings in this run's findings artifact`,
+          zh: '，延后发现另见本次运行的 findings 工件',
+        }
+      : { en: '', zh: '' };
+    return {
+      keep: 1,
+      en: `⚠️ This body was trimmed to fit GitHub's ${BODY_MAX_CHARS}-character review limit: ${en} did not fit (${sections} section(s)). Sentences below that refer to them still hold — read them in the terminal report${artifact.en}.${safe.en}`,
+      zh: `⚠️ 为适配 GitHub ${BODY_MAX_CHARS} 字符的评审正文上限，本正文已裁剪：${zh}未能放入（共 ${sections} 个段落）。下方引用它们的句子依然成立——请在终端报告中查看${artifact.zh}。${safe.zh}`,
+    };
+  };
+
+  /**
+   * The body, within budget, and what that cost — recorded on `bodyTrim` so
+   * the verdict line can turn with it instead of describing a body that no
+   * longer exists.
+   *
+   * A POST over GitHub's limit is rejected whole, so an over-long body must
+   * degrade, and the ORDER of the degradation is the policy: the bilingual
+   * fold yields FIRST (it is a translation of the English above it, so it
+   * costs the author nothing the body does not still say), then parts by
+   * ascending `trim` rank (the deferral display before the not-reviewed
+   * disclosures), the blockers and the caps never, and every drop is
+   * disclosed with its count and its kind — a list silently shortened reads
+   * as a list that was complete.
+   *
+   * The fold going first is what keeps the loss minimal: measured against a
+   * bilingual body, a mild overflow spent the whole deferral list while
+   * 24,000 characters of headroom sat behind a fold that says nothing new.
+   */
+  const bodyTrim = {
+    sections: 0,
+    deferralList: false,
+    fold: false,
+    truncated: false,
+  };
+  /**
+   * Name what a trim dropped, and say where it can still be read.
+   *
+   * Every exit of `render` that dropped a rank owes this line — the
+   * last-resort path drops ranks AND cuts, and a stderr record naming only
+   * the cut leaves the kinds it dropped disclosed nowhere but the body.
+   * Only rank 1 has a second durable copy (each deferral is a
+   * `D<round>-<n>` entry in the findings artifact); a trimmed disclosure
+   * section survives nowhere but the terminal summary, so ask for it there
+   * rather than pointing at an artifact that does not carry it.
+   */
+  const noteTrimmedRanks = (droppedRanks: number[]): void => {
+    if (droppedRanks.length === 0) return;
+    remediation.push(
+      `body budget: ${droppedRanks
+        .map((r) => RANK_NAMES[r]?.en ?? `rank ${r}`)
+        .join(' and ')} did not fit GitHub's ${BODY_MAX_CHARS}-character ` +
+        `review limit and ${droppedRanks.length === 1 ? 'was' : 'were'} ` +
+        `trimmed from the posted body — ` +
+        (droppedRanks.includes(1)
+          ? `the deferred findings are in the findings artifact; `
+          : '') +
+        `repeat the trimmed sections in your terminal summary, which is ` +
+        `their only other copy`,
+    );
+  };
+  const render = (parts: Bi[], sep: string): string => {
+    const full = assemble(parts, sep);
+    if (full === '' || full.length <= bodyBudget) return full;
+    const footerTail = footer === '' ? '' : `\n\n${footer}`;
+    /** The English-only body: no fold, so nothing here is duplicated. */
+    const enOnly = (ps: Bi[]): string =>
+      `${ps.map((p) => p.en).join(sep)}${footerTail}`;
+    // A monolingual body (attribution off, or a translation identical to its
+    // English) has no fold to drop. Every rung below still measures the same
+    // string — `enOnly` and `assemble` agree when there is no fold — but
+    // nothing may CLAIM a translation was dropped, in the body or on stderr:
+    // that is the false-record class this budget exists to refuse.
+    const hadFold = full !== enOnly(parts);
+    /**
+     * What the body says about the fold it dropped — a notice at the TOP,
+     * beside the trim notice and above the text it describes. Appended at
+     * the bottom it was 64,000 characters below the body it qualifies, and
+     * the skill's promise that every trim is disclosed at the top of the
+     * body was false for this one.
+     */
+    const foldNote = (sections: number, cut: boolean): Bi[] =>
+      !hadFold
+        ? []
+        : [
+            {
+              keep: 1,
+              en:
+                `⚠️ The Chinese translation of this body was dropped to fit ` +
+                `GitHub's ${BODY_MAX_CHARS}-character review limit; the ` +
+                `English text below is ${
+                  cut
+                    ? 'truncated as well — see the notice above'
+                    : `complete${
+                        sections > 0
+                          ? ' apart from the sections the notice below names'
+                          : ''
+                      }`
+                }.`,
+              // Never rendered — this notice exists only on paths that have
+              // already dropped the fold — but a `Bi` without it is a lie
+              // about the shape, and the next edit would find no zh to keep.
+              zh:
+                `⚠️ 为适配 GitHub ${BODY_MAX_CHARS} 字符的评审正文上限，` +
+                `本正文的中文翻译已被丢弃。`,
+            },
+          ];
+    const noteFoldDropped = (sections: number, cut: boolean): void => {
+      if (!hadFold) return;
+      bodyTrim.fold = true;
+      remediation.push(
+        `body budget: the bilingual fold was dropped to fit GitHub's ` +
+          `${BODY_MAX_CHARS}-character review limit — the English body is ` +
+          (cut
+            ? `truncated as well; read the complete text in the terminal report`
+            : `complete${sections > 0 ? ' apart from the trimmed sections' : ''}`),
+      );
+    };
+
+    // Rung 1 — the fold. It is a translation of text that survives above it,
+    // so dropping it costs the author no content at all, where every rung
+    // below costs a finding or a disclosure. With no fold, `foldOnly` IS the
+    // body that just overflowed, so this rung cannot fire.
+    const foldOnly = enOnly([...foldNote(0, false), ...parts]);
+    if (hadFold && foldOnly.length <= bodyBudget) {
+      noteFoldDropped(0, false);
+      return foldOnly;
+    }
+
+    // Rung 2 — disclosure sections, by ascending trim rank, measured on the
+    // body that has already lost its fold.
+    const ranks = [
+      ...new Set(
+        parts
+          .map((p) => p.trim)
+          .filter((rank): rank is number => rank !== undefined),
+      ),
+    ].sort((a, b) => a - b);
+    let survivors = parts;
+    const droppedRanks: number[] = [];
+    // Sections, not ranks: one rank can carry four `Not reviewed:`
+    // paragraphs, and a note reading "(2 section(s))" over five dropped
+    // ones is the same miscount the deferral line was fixed for.
+    let droppedSections = 0;
+    for (const rank of ranks) {
+      const going = survivors.filter((p) => p.trim === rank).length;
+      if (going === 0) continue;
+      survivors = survivors.filter((p) => p.trim !== rank);
+      droppedRanks.push(rank);
+      droppedSections += going;
+      const trimmed = enOnly([
+        ...foldNote(droppedSections, false),
+        trimNote(droppedRanks, droppedSections, false),
+        ...survivors,
+      ]);
+      if (trimmed.length <= bodyBudget) {
+        bodyTrim.sections = droppedSections;
+        bodyTrim.deferralList = droppedRanks.includes(1);
+        noteTrimmedRanks(droppedRanks);
+        noteFoldDropped(droppedSections, false);
+        return trimmed;
+      }
+    }
+    bodyTrim.sections = droppedSections;
+    bodyTrim.deferralList = droppedRanks.includes(1);
+    // The fold is gone here too — this rung renders English only — but the
+    // body it produces is CUT, so neither the notice nor the stderr line may
+    // call the English text complete.
+    noteFoldDropped(droppedSections, true);
+    // Rung 3 — a real cut. What remains is un-trimmable by policy: the
+    // blockers, the undecided blockers, the sentences that qualify the
+    // verdict. Order it by `keep` so the cut spends prose the author already
+    // has before it spends this round's only-copy blockers.
+    //
+    // The truncation notice rides at the TOP, with the fold and trim
+    // notices — not after the cut. That placement is what makes this rung
+    // bounded: a notice BELOW the cut has to survive whatever markdown or
+    // raw HTML the cut left open, and deciding that means modelling the
+    // page the author will read. Three hand models were tried and each
+    // shipped a new class of divergence (fence parity, container nesting,
+    // then the HTML5 swallow states) — an unbounded surface, re-reported as
+    // one finding across five review rounds. Above the cut nothing can
+    // swallow it, and the only thing an open construct can still absorb is
+    // the footer's attribution line, which says nothing the review needs.
+    // The ledger marker is read from raw text and never rendered, so it is
+    // unaffected either way.
+    const hardNote: Bi = {
+      keep: 1,
+      en:
+        `⚠️ This review body was TRUNCATED to fit GitHub's ` +
+        `${BODY_MAX_CHARS}-character review limit: the content that may not ` +
+        `be trimmed does not fit the room this body has. Read the complete ` +
+        `text in the terminal report and this run's findings artifact.`,
+      // Never rendered — this rung composes English only.
+      zh:
+        `⚠️ 为适配 GitHub ${BODY_MAX_CHARS} 字符的评审正文上限，本正文已被截断。` +
+        `完整内容见终端报告与本次运行的 findings 工件。`,
+    };
+    const head = [
+      hardNote,
+      ...foldNote(droppedSections, true),
+      ...(droppedRanks.length > 0
+        ? [trimNote(droppedRanks, droppedSections, true)]
+        : []),
+      ...survivors,
+    ]
+      .sort((a, b) => (a.keep ?? 3) - (b.keep ?? 3))
+      .map((p) => p.en)
+      .join(sep);
+    // The tail is the footer, and it is a BOUNDED contributor: the footer
+    // caps both its interpolations — `modelId` and the CLI version — at
+    // `MODEL_ID_MAX_CHARS`, so this subtraction can never empty the cut.
+    // It was unbounded once — caller text interpolated whole — and an
+    // oversized name emptied the cut and posted tail-only, past the limit,
+    // losing every blocker. The cap is where that is fixed;
+    // repeating the defence here would be a branch for a state that can no
+    // longer occur.
+    let cut = head.slice(0, Math.max(0, bodyBudget - footerTail.length));
+    // A loop, not one pass: the cut can only orphan a HIGH surrogate (it
+    // takes a prefix, so no low half is ever separated from a high that
+    // precedes it in the same string), but text the model quoted may
+    // already carry unpaired highs of its own — `…x\uD800\u{20000}` cut
+    // inside the pair leaves `…x\uD800\uD800`, and removing one still
+    // posts a lone half. Text with an unpaired LOW is left as the author
+    // wrote it: that half was already unpaired before this budget touched
+    // anything.
+    while (
+      cut.length > 0 &&
+      /[\uD800-\uDBFF]/.test(cut.charAt(cut.length - 1))
+    ) {
+      cut = cut.slice(0, -1);
+    }
+
+    bodyTrim.truncated = true;
+    noteTrimmedRanks(droppedRanks);
+    remediation.push(
+      `body budget: read the complete blockers in the terminal report and the ` +
+        `findings artifact — the un-trimmable content does not fit the room ` +
+        `left by GitHub's ${BODY_MAX_CHARS}-character review limit, so the ` +
+        `posted body is truncated`,
+    );
+    return `${cut}${footerTail}`;
   };
 
   // Clause 6 — scope nobody reviewed. Legal on COMMENT and (alongside body
@@ -2245,7 +2684,22 @@ function composeReviewBody(
   const cannotTellBlock: Bi[] =
     cannotTell.length === 0
       ? []
-      : [formatCannotTell(cannotTell, pr, attribution)];
+      : [
+          // Deliberately untagged (rank 3, spent first by the last-resort
+          // cut). These entries are open blockers the review could not
+          // clear — and every one of them was DELIVERED to the author in
+          // the round that raised it, where this round's body Criticals are
+          // the only copy that exists. So when the cut has to choose, it
+          // spends the copy the author can still scroll up to.
+          //
+          // Tagging it `keep: 2` (tied with the body Criticals, and earlier
+          // in the parts array, so the stable sort protected it) inverted
+          // that and made this round's blockers the first thing spent. What
+          // was wrong in the shape that prompted the tag was the trim
+          // notice claiming "Nothing blocking was trimmed" over a cut —
+          // fixed where the claim is made, not by reordering the loss.
+          formatCannotTell(cannotTell, pr, attribution),
+        ];
 
   // Model-written blockers: quoted as-is in both halves. The marker is the
   // attributed template's severity signal; an unattributed post quotes the
@@ -2254,7 +2708,7 @@ function composeReviewBody(
   // a surviving forged one would be the post's only attribution).
   const bodyCriticalBlock: Bi[] = bodyCriticals
     .map((l) => (attribution ? withMarker(l) : stripForUnattributedPost(l)))
-    .map((l) => ({ en: l, zh: l }));
+    .map((l) => ({ keep: 2, en: l, zh: l }));
 
   // Confirmed-but-duplicate Suggestions — dropped from the payload by the
   // overlap rules (already on the PR), NOT by anchor failure. The verdict
@@ -2295,6 +2749,7 @@ function composeReviewBody(
         ];
 
   const contextUnavailableClause: Bi = {
+    keep: 1,
     en: 'Reviewed diff-only — the PR’s existing discussion could not be fetched, so this is not an approval and not a no-blockers claim.',
     zh: '仅审查了 diff——无法获取 PR 已有的讨论，因此这不构成批准，也不构成"无阻断问题"的结论。',
   };
@@ -2314,11 +2769,13 @@ function composeReviewBody(
     uncoverable.length > 0;
   const coverageOpener: Bi | undefined = nothingCertified
     ? {
+        keep: 1,
         en: '⚠️ This run could not certify that any of this diff was reviewed.',
         zh: '⚠️ 本次运行无法证明这个 diff 的任何部分经过了审查。',
       }
     : hasCoverageGaps
       ? {
+          keep: 1,
           en: 'Partially reviewed — gaps disclosed.',
           zh: '仅完成部分审查，审查缺口已披露。',
         }
@@ -2331,6 +2788,7 @@ function composeReviewBody(
   const deferredBlock: Bi[] = gateDisclosed.length
     ? [
         {
+          trim: 2,
           en: `Not linted (tool limitation, not a blocker): ${gateDisclosed.join('; ')}.`,
           zh: `未检查（工具限制，非阻断）：${gateDisclosed.join('; ')}。`,
         },
@@ -2343,6 +2801,7 @@ function composeReviewBody(
   const testPlanBlock: Bi[] = testPlanNotes.length
     ? [
         {
+          trim: 2,
           en: `Test Plan (not a blocker): ${testPlanNotes.join('; ')}.`,
           zh: `Test Plan（非阻断）：${testPlanNotes.join('; ')}。`,
         },
@@ -2358,12 +2817,14 @@ function composeReviewBody(
     : findingsFileUnreadable
       ? [
           {
+            keep: 1,
             en: '⚠️ The reverse-audit findings file could not be read at compose time, so this run cannot show its findings were verified.',
             zh: '⚠️ 组合评审时无法读取反向审计发现文件，本次运行无法证明其发现已经过验证。',
           },
         ]
       : [
           {
+            keep: 1,
             en: `⚠️ ${unverifiedTagCount} finding(s) still carried the \`— [unverified]\` tag when the loop ended — the verifier never ruled on them, and they are not confirmed.`,
             zh: `⚠️ 循环结束时仍有 ${unverifiedTagCount} 条发现带着 \`— [unverified]\` 标记——验证者从未对它们作出裁决，它们不算已确认。`,
           },
@@ -2372,6 +2833,7 @@ function composeReviewBody(
   const repositoryContextBlock: Bi[] = repositoryContextNotes.length
     ? [
         {
+          trim: 2,
           en: `Repository proof boundary (not a blocker): ${repositoryContextNotes.join('; ')}.`,
           zh: `仓库验证边界（非阻断）：${repositoryContextNotes.join('; ')}。`,
         },
@@ -2408,13 +2870,18 @@ function composeReviewBody(
       ? []
       : [
           {
-            en: `⚠️ ${deferredSuggestions.length} finding(s) were deferred without a posture licence — ${unlicensedDeferral}. They are listed below, but this verdict is capped: findings may be under-posted this round.`,
-            zh: `⚠️ ${deferredSuggestions.length} 条发现在姿态未授权的情况下被延后——${unlicensedDeferral}。清单见下，但本判定已被限制：本轮发现可能未被完整发布。`,
+            keep: 1,
+            en: `⚠️ ${deferredSuggestions.length} finding(s) were deferred without a posture licence — ${unlicensedDeferral}. They are listed in this body when it has room for them, and always in the terminal report and this run's findings artifact; this verdict is capped either way: findings may be under-posted this round.`,
+            zh: `⚠️ ${deferredSuggestions.length} 条发现在姿态未授权的情况下被延后——${unlicensedDeferral}。正文空间允许时会列出清单，完整内容始终在终端报告与本次运行的 findings 工件中；无论如何本判定已被限制：本轮发现可能未被完整发布。`,
           },
         ];
   const deferredSuggestionsBlock: Bi[] = deferredSuggestions.length
     ? [
         {
+          // Rank 1: the display of findings the review deliberately did NOT
+          // request is the first thing to yield when the body overflows —
+          // the artifact and the terminal report keep every entry whole.
+          trim: 1,
           en: `Deferred under the convergence posture (round ${deferredRound}, not a blocker) — recorded, not requested in this round:\n\n${deferredShown
             .map((entry) => `- ${mdField(entry)}`)
             .join(
@@ -2424,6 +2891,16 @@ function composeReviewBody(
         },
       ]
     : [];
+
+  // The not-reviewed disclosures yield after the deferral display and before
+  // nothing else: they say what the review could not certify, which the
+  // verdict's own cap already carries, so trimming them costs detail rather
+  // than the claim. (`notReviewedParts` itself stays untagged — the length
+  // checks below ask about presence, not about rank.)
+  const notReviewedForBody: Bi[] = notReviewedParts.map((p) => ({
+    ...p,
+    trim: 2,
+  }));
 
   // The resumed-run continuity note: the run reused certified work from an
   // interrupted earlier attempt. Disclosed on every verdict — Approve
@@ -2448,7 +2925,7 @@ function composeReviewBody(
       ...(contextUnavailable ? [contextUnavailableClause] : []),
       ...duplicatesBlock,
       ...cannotTellBlock,
-      ...notReviewedParts,
+      ...notReviewedForBody,
       ...unverifiedTagsBlock,
       ...deferredBlock,
       ...testPlanBlock,
@@ -2458,15 +2935,19 @@ function composeReviewBody(
       ...continuityBlock,
       ...bodyCriticalBlock,
     ];
+    // The body composes first: `render` settles `bodyTrim`, and the fields
+    // below report what it cost.
+    const body = render(parts, '\n\n');
     return {
       event,
-      body: render(parts, '\n\n'),
+      body,
       baseEvent,
       cappedBy,
       downgraded,
       downgradedFrom,
       remediation,
       deferredCount: deferredSuggestions.length,
+      bodyTrim,
       lowSignal,
       scopeUnproven,
       dimensionGapsAreDepthOnly,
@@ -2483,36 +2964,46 @@ function composeReviewBody(
     // With posture-deferred Suggestions on record, "No issues found" would be
     // a lie the deferral list two lines down contradicts: the review DID find
     // them — it recorded them and chose, per the posture, not to request them.
+    const body = render(
+      [
+        deferredSuggestionsBlock.length
+          ? {
+              keep: 1,
+              en: 'No blocking issues. LGTM! ✅',
+              zh: '无阻断问题。LGTM！✅',
+            }
+          : {
+              keep: 1,
+              en: 'No issues found. LGTM! ✅',
+              zh: '未发现问题。LGTM！✅',
+            },
+        ...notReviewedForBody,
+        ...deferredBlock,
+        ...testPlanBlock,
+        ...repositoryContextBlock,
+        ...unlicensedDeferralBlock,
+        ...deferredSuggestionsBlock,
+        ...continuityBlock,
+      ],
+      notReviewedParts.length ||
+        deferredBlock.length ||
+        testPlanBlock.length ||
+        repositoryContextBlock.length ||
+        deferredSuggestionsBlock.length ||
+        continuityBlock.length
+        ? '\n\n'
+        : ' ',
+    );
     return {
       event,
-      body: render(
-        [
-          deferredSuggestionsBlock.length
-            ? { en: 'No blocking issues. LGTM! ✅', zh: '无阻断问题。LGTM！✅' }
-            : { en: 'No issues found. LGTM! ✅', zh: '未发现问题。LGTM！✅' },
-          ...notReviewedParts,
-          ...deferredBlock,
-          ...testPlanBlock,
-          ...repositoryContextBlock,
-          ...unlicensedDeferralBlock,
-          ...deferredSuggestionsBlock,
-          ...continuityBlock,
-        ],
-        notReviewedParts.length ||
-          deferredBlock.length ||
-          testPlanBlock.length ||
-          repositoryContextBlock.length ||
-          deferredSuggestionsBlock.length ||
-          continuityBlock.length
-          ? '\n\n'
-          : ' ',
-      ),
+      body,
       baseEvent,
       cappedBy,
       downgraded,
       downgradedFrom,
       remediation,
       deferredCount: deferredSuggestions.length,
+      bodyTrim,
       lowSignal,
       scopeUnproven,
       dimensionGapsAreDepthOnly,
@@ -2528,6 +3019,7 @@ function composeReviewBody(
     const reasons = downgradeReasons.join('; ');
     const fromZh = downgradedFrom === 'Approve' ? '批准' : '请求修改';
     clauses.push({
+      keep: 1,
       en: `⚠️ Downgraded from ${downgradedFrom} to Comment${reasons ? `: ${reasons}` : ''}.`,
       zh: `⚠️ 已从${fromZh}降级为评论${reasons ? `：${reasons}` : ''}。`,
     });
@@ -2582,21 +3074,33 @@ function composeReviewBody(
     // follow, the opener says the review is PARTIAL instead, so the pair
     // reads in one direction; the certifying and the zero-certified openers
     // above keep their exact wording.
+    // Every one of these is a sentence that qualifies the verdict, so each
+    // carries `keep: 1`. The COMMENT path merges this clause into one
+    // paragraph with its neighbours and takes the strongest tag among them —
+    // untagged, a merge of only these defaulted to the weakest, and the tail
+    // cut spent "Review incomplete — unverified findings disclosed." before
+    // it spent a single blocker.
     clauses.push(
       coverageOpener ??
         (canCertify
-          ? { en: 'Reviewed — no blockers.', zh: '已审查——无阻断问题。' }
+          ? {
+              keep: 1,
+              en: 'Reviewed — no blockers.',
+              zh: '已审查——无阻断问题。',
+            }
           : findingsFileUnreadable
             ? {
+                keep: 1,
                 en: 'Review incomplete — findings unavailable.',
                 zh: '审查未完成——发现不可用。',
               }
             : findingsUnverifiedAtCompose
               ? {
+                  keep: 1,
                   en: 'Review incomplete — unverified findings disclosed.',
                   zh: '审查未完成——未验证的发现已披露。',
                 }
-              : { en: 'Reviewed.', zh: '已审查。' }),
+              : { keep: 1, en: 'Reviewed.', zh: '已审查。' }),
     );
   }
 
@@ -2606,7 +3110,11 @@ function composeReviewBody(
   //    this module exists to kill. (`s` stays right for the event — see
   //    above.)
   if (suggestionsInline > 0) {
-    clauses.push({ en: 'Suggestions are inline.', zh: '建议见行内评论。' });
+    clauses.push({
+      keep: 1,
+      en: 'Suggestions are inline.',
+      zh: '建议见行内评论。',
+    });
   }
   if (suggestionsDiscarded > 0) {
     // Self-contained: this lands in the posted body, and "see the terminal
@@ -2614,6 +3122,7 @@ function composeReviewBody(
     // eight hours of real bot reviews carried that dead reference on five
     // different pull requests.
     clauses.push({
+      keep: 1,
       en:
         `${suggestionsDiscarded} Suggestion-level finding(s) could not be ` +
         `anchored to a changed line and were dropped; nothing further to act ` +
@@ -2639,7 +3148,7 @@ function composeReviewBody(
   clauses.push(...cannotTellBlock);
 
   // 6. Not-reviewed disclosure.
-  clauses.push(...notReviewedParts);
+  clauses.push(...notReviewedForBody);
 
   // 6a. Verification outstanding at loop end — the findings file's surviving
   //     `— [unverified]` tags, machine-read.
@@ -2678,6 +3187,17 @@ function composeReviewBody(
     ...(openerParts.length > 0
       ? [
           {
+            // The merge is a rendering detail; it must not launder away the
+            // retention the merged clauses carry. Take the strongest (the
+            // lowest `keep`) — a downgrade disclosure merged into an opener
+            // is still a sentence that qualifies the verdict, and defaulting
+            // it to 3 made it the FIRST thing the tail cut spent. No `trim`
+            // rank rides here: an opener clause never carries one, and
+            // inheriting one would drop untagged text with it.
+            keep: openerParts.reduce(
+              (lowest, c) => Math.min(lowest, c.keep ?? 3),
+              3,
+            ),
             en: openerParts.map((c) => c.en).join(' '),
             zh: openerParts.map((c) => c.zh).join(' '),
           },
@@ -2685,15 +3205,17 @@ function composeReviewBody(
       : []),
     ...clauses.slice(openerCount),
   ];
+  const body = render(paragraphs, '\n\n');
   return {
     event,
-    body: render(paragraphs, '\n\n'),
+    body,
     baseEvent,
     cappedBy,
     downgraded,
     downgradedFrom,
     remediation,
     deferredCount: deferredSuggestions.length,
+    bodyTrim,
     lowSignal,
     scopeUnproven,
     dimensionGapsAreDepthOnly,
@@ -2795,6 +3317,28 @@ export function describeChunkGap(
 interface Bi {
   en: string;
   zh: string;
+  /**
+   * Where this part sits when the LAST-RESORT truncation runs — lower is
+   * earlier in the concatenation, and the cut takes the tail, so lower is
+   * protected. Untagged is last (3). The order is a policy too: the short
+   * sentences that qualify the verdict (1), then this round's body
+   * Criticals — the only copy of an unanchorable blocker (2), then
+   * everything else un-trimmable, which is prose the author already
+   * received in an earlier round. Positional order alone encoded the
+   * inverse: body Criticals are spread last on both composing paths, so
+   * they were the first content the cut spent.
+   */
+  keep?: number;
+  /**
+   * How readily this part yields when the composed body would exceed
+   * GitHub's limit — LOWER goes first, absent never goes. The order is a
+   * policy, not a convenience: a body that cannot post loses its blockers,
+   * so the display of findings the review deliberately did NOT request
+   * (the deferral list, rank 1) yields before the disclosures of what went
+   * unreviewed (rank 2), and the blockers, the caps, and the sentences that
+   * qualify the verdict never yield at all.
+   */
+  trim?: number;
 }
 
 /** The production reader: one `gh pr view` for the description body. */
@@ -2989,10 +3533,7 @@ function mdField(s: unknown): string {
  * `agent-prompt` convention so a mid-flight upgrade finds the same file).
  */
 function scriptLintReportName(pr: unknown): string {
-  const positive =
-    (typeof pr === 'number' && Number.isInteger(pr) && pr > 0) ||
-    (typeof pr === 'string' && /^\d+$/.test(pr) && Number(pr) > 0);
-  return positive
+  return isPositivePrNumber(pr)
     ? `qwen-review-pr-${pr}-script-lint.json`
     : 'qwen-review-script-lint.json';
 }
@@ -3029,10 +3570,7 @@ export function testPlanGate(planPath: string): { notes: string[] } {
   }
   // A local review has no PR body, so there is no Test Plan to have checked.
   const pr = plan.prNumber;
-  const isPr =
-    (typeof pr === 'number' && Number.isInteger(pr) && pr > 0) ||
-    (typeof pr === 'string' && /^\d+$/.test(pr) && Number(pr) > 0);
-  if (!isPr) return { notes };
+  if (!isPositivePrNumber(pr)) return { notes };
 
   let report: TestPlanReport;
   try {
@@ -3274,6 +3812,14 @@ export const composeReviewCommand: CommandModule = {
       footerVersion(process.env['QWEN_CODE_STARTUP_VERSION']) ??
         (await getCliVersion()),
       operatorReviewSettings().attribution,
+      // The anchor's certifying identity is the model the runtime published
+      // for this session — Config publishes it per session, the shell tool
+      // injects it into this subprocess. It supersedes the typed id, but the
+      // launching command can still override the env (and a hijacked
+      // orchestrator can forge the marker outright via the API) — the same
+      // forgeable posture DESIGN.md records for the cache path.
+      // The identity this round runs under — see lib/round-model.ts.
+      roundModelIdFrom(process.env),
     );
     // The exact terminal verdict, persisted beside the fields it is computed
     // from. `event` + `cappedBy` alone cannot reconstruct it — a presubmit
@@ -3507,11 +4053,19 @@ export function verdictLine(r: ComposeReviewResult): string {
   // cap: a verdict counting 21 over a body listing 20 is a false record,
   // persisted into the composed JSON and the archived report.
   if (r.deferredCount > 0) {
-    line += ` — ${r.deferredCount} non-Critical finding(s) deferred under the convergence posture (listed in the body${
-      r.deferredCount > MAX_DEFERRED_SUGGESTION_LINES
-        ? ', truncated — the rest are counted in the run report'
-        : ''
-    })`;
+    // Where they are must follow what the body actually carries: the budget
+    // can drop the list whole, and "listed in the body" over a body listing
+    // none is the same false record the line cap already refuses — stronger,
+    // because it is N over zero. This line rides stderr, the composed JSON
+    // and the archived report.
+    const where = r.bodyTrim.deferralList
+      ? 'trimmed from the body to fit GitHub’s limit — whole in the findings artifact'
+      : `listed in the body${
+          r.deferredCount > MAX_DEFERRED_SUGGESTION_LINES
+            ? ', truncated — the rest are counted in the run report'
+            : ''
+        }`;
+    line += ` — ${r.deferredCount} non-Critical finding(s) deferred under the convergence posture (${where})`;
   }
   return line;
 }

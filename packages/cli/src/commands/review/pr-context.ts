@@ -14,6 +14,7 @@
 // comments, and issue comments.
 
 import type { CommandModule } from 'yargs';
+import { certifierMatchesRound, roundModelIdFrom } from './lib/round-model.js';
 import {
   mkdirSync,
   readFileSync,
@@ -981,6 +982,31 @@ export function latestLedger(
 }
 
 /**
+ * The anchor sha the prev-ledger side file HOLDS, read back off disk.
+ *
+ * Not what this run recovered, and the difference is the point: the persist
+ * guard keeps a HIGHER-round side file when the recovery walk comes back
+ * short (a concurrent lane, a paginated fetch that returned less than it
+ * should, a latest review deleted or edited). Step 1 passes the file's sha,
+ * so the file's sha is what the section's verdict must rule on — see
+ * `anchorRuling`. Read rather than inferred, because the guard's decision is
+ * exactly the thing a caller would get wrong by reasoning about it.
+ *
+ * Null on an unreadable or shapeless file, which leaves the ruling to the
+ * recovered ledger alone — the behaviour before this read existed.
+ */
+export function persistedAnchorSha(sideFilePath: string): string | null {
+  try {
+    const raw = JSON.parse(readFileSync(sideFilePath, 'utf8')) as {
+      sha?: unknown;
+    };
+    return typeof raw.sha === 'string' && raw.sha !== '' ? raw.sha : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Persist (or degrade) the prev-ledger side file for this run's recovery.
  * Three outcomes, each honest about what this run learned:
  *
@@ -1152,24 +1178,135 @@ export function persistRecoveredLedger(
   }
 }
 
-/** The same ledger with its incremental anchor removed. */
+/**
+ * The same ledger with its incremental anchor removed.
+ *
+ * The PAIR, not just the sha. `model` is the identity that certified that sha
+ * and has no meaning without it: left behind it says a foreign round was
+ * certified by someone while the range it certified is gone, and every reader
+ * of this object — the side file, the rendered section's `by \`model\`` clause
+ * — would have to know to ignore it. They fall together everywhere else (the
+ * serializer writes `model` only beside a `sha`, and `compose-review` withholds
+ * both or neither), so they fall together here.
+ */
 function stripAnchor(ledger: Ledger): Ledger {
-  if (ledger.sha === undefined) return ledger;
-  const { sha: _dropped, ...rest } = ledger;
+  if (ledger.sha === undefined && ledger.model === undefined) return ledger;
+  const { sha: _sha, model: _model, ...rest } = ledger;
   return rest;
+}
+
+/**
+ * Whether the recovered anchor may scope this round, and the routing that
+ * follows from it — computed here, for the reason `renderLedgerSection`
+ * records.
+ *
+ * The ADMISSIBLE branch keeps the routing wording verbatim: every clause in it
+ * is one a mutation check found deletable while the suite stayed green (the
+ * antecedent that says what to pass, the command that takes the flag, what
+ * that command does with it, and the pre-condition that stops a
+ * deterministically-refused anchor being retried). The gate clause is the only
+ * part that changed — from an instruction to compare, into the comparison's
+ * result.
+ *
+ * Both branches name the identities involved, because a round that silently
+ * declines an anchor is indistinguishable from one that never had it, and the
+ * difference is what a maintainer asking "why is it still reviewing the full
+ * diff?" needs to see.
+ */
+function anchorRuling(
+  ledger: Ledger,
+  running: string,
+  code: (v: string) => string,
+  persistedSha: string | null,
+): string {
+  // The verdict must rule on the sha the orchestrator will actually PASS,
+  // and that comes out of the side file, not out of this ledger. They are
+  // normally the same object — this run recovered a round and persisted it —
+  // but `persistRecoveredLedger` deliberately keeps a HIGHER-round side file
+  // when the recovery walk comes back short (a concurrent lane, a paginated
+  // fetch that returned less than it should, a latest review deleted or
+  // edited). In that state a HOLDS verdict about the recovered sha would be
+  // obeyed against a different sha the file still holds — under another
+  // model, since alternating models is this feature's core scenario — and
+  // the round would scope past the range only that model reviewed. Compose's
+  // drift gate cannot catch it: the re-run re-stamps under the running
+  // model, so the stamp agrees with the runtime and nothing looks wrong.
+  //
+  // Divergence is therefore a NO-VERDICT state, ruled here so the
+  // orchestrator has nothing to reconcile.
+  if (persistedSha !== null && persistedSha !== ledger.sha) {
+    return (
+      `**Do NOT pass any sha as \`--since\`, and do not run git against ` +
+      `one yourself.** The anchor this round recovered ` +
+      `(\`${code(ledger.sha!)}\`) is not the one the side file holds ` +
+      `(\`${code(persistedSha)}\`): a higher-numbered round was persisted ` +
+      `by a run this one could not see, so nothing here can say who ` +
+      `reviewed the range you would be scoping past. Review the FULL range. ` +
+      `The findings below are still owed their rulings — the work list ` +
+      `carries, only the anchor does not.`
+    );
+  }
+  if (certifierMatchesRound(ledger.model, running)) {
+    return (
+      `The reviewed-at sha is the incremental anchor Step 1's ` +
+      `recovered-anchor check reads from the side file, and the \`model\` ` +
+      `beside it IS the identity running this review ` +
+      `(\`${code(running)}\`) — the same-model contract HOLDS, ruled here ` +
+      `rather than left for you to compare. So: when Step 1's ` +
+      `recovered-anchor check rules a re-run admissible, pass it as ` +
+      `\`--since <sha>\` on a \`fetch-pr\` re-run, which validates it ` +
+      `against the fetched history and scopes the diff and plan; never run ` +
+      `git against an anchor yourself.`
+    );
+  }
+  const certifier = ledger.model?.trim()
+    ? `\`${code(ledger.model.trim())}\``
+    : 'nothing — the marker predates the field, which counts as a mismatch';
+  const runner =
+    running !== '' ? `\`${code(running)}\`` : 'an unpublished identity';
+  return (
+    `**Do NOT pass the reviewed-at sha as \`--since\`, and do not run git ` +
+    `against it yourself.** It was certified by ${certifier}, and this ` +
+    `review runs as ${runner}: "clean up to that sha" is the recorded ` +
+    `identity's verdict, so scoping to it would carry this round past code ` +
+    `the current one never reviewed. Review the FULL range. The findings ` +
+    `below are still owed their rulings — the work list carries across ` +
+    `models, only the anchor does not.`
+  );
 }
 
 /**
  * Render the previous round's ledger for the context file.
  *
+ * `running` is the identity THIS round runs under (`roundModelIdFrom`). The
+ * same-model gate is ruled HERE rather than described for the orchestrator to
+ * apply, because the two strings are not comparable in prompt text: the
+ * marker's `model` is the provider-qualified identity the CLI wrote, while
+ * `{{model}}` — the only model value a skill body can interpolate — is
+ * `config.getModel()`, the bare id. Told to compare them, an orchestrator
+ * either finds them never equal (the recovery path silently never engages,
+ * which is this feature's whole payoff lost) or matches them loosely, which
+ * accepts another provider's same-named model and re-opens the scope-skip the
+ * digest exists to close. So the comparison happens in the process that holds
+ * both values, and what reaches the model is a verdict, not two operands.
+ *
  * `author` is set only when the marker came from ANOTHER account (the CI bot,
  * typically). The section then says whose claims these are and that no anchor
  * travelled with them, because a reader — human or model — must not read a
- * foreign work list as this account's own certified round.
+ * foreign work list as this account's own certified round. Such a ledger
+ * reaches here already stripped of its `sha`, so the gate above never rules
+ * on one: a foreign anchor is not withheld by comparison, it is absent.
  */
 export function renderLedgerSection(
   ledger: Ledger,
+  running: string,
   author: string | null = null,
+  /**
+   * The `sha` the prev-ledger side file holds after this run's persist
+   * decision — what Step 1 will actually pass. Null when the file holds none
+   * or could not be read, which leaves the ruling to this ledger alone.
+   */
+  persistedSha: string | null = null,
 ): string {
   // Cell contents come from a marker in a PR body — untrusted text. A `|` or a
   // newline would break the table structure (and could forge rows), so both are
@@ -1193,7 +1330,7 @@ export function renderLedgerSection(
   return [
     '## Previous /review round (machine ledger)',
     '',
-    `Round ${ledger.round}${ledger.sha ? `, reviewed at \`${code(ledger.sha)}\`` : ''}, recovered from the marker ${author ? `**@${cell(author)}**'s last posted review carried — another account, so these are THEIR claims and no incremental anchor travelled with them (the sha never crosses accounts; this round is full-range unless a local cache supplies one)` : `this account's last posted review carried`}. **Every entry below is owed a this-round ruling** (fixed / still stands / cannot tell / superseded by <class-id>) under Step 6's previous-round rules — the ledger is a work list, not a verdict; re-assert each claim against the code before repeating or retiring it.${ledger.sha ? ` The reviewed-at sha is the incremental anchor Step 1's recovered-anchor check reads from the side file — when Step 1's recovered-anchor check rules a re-run admissible, pass it as \`--since <sha>\` on a \`fetch-pr\` re-run, which validates it against the fetched history and scopes the diff and plan; never run git against an anchor yourself.` : ''}`,
+    `Round ${ledger.round}${ledger.sha ? `, reviewed at \`${code(ledger.sha)}\`${ledger.model ? ` by \`${code(ledger.model)}\`` : ''}` : ''}, recovered from the marker ${author ? `**@${cell(author)}**'s last posted review carried — another account, so these are THEIR claims and no incremental anchor travelled with them (the sha never crosses accounts; this round is full-range unless a local cache supplies one)` : `this account's last posted review carried`}. **Every entry below is owed a this-round ruling** (fixed / still stands / cannot tell / superseded by <class-id>) under Step 6's previous-round rules — the ledger is a work list, not a verdict; re-assert each claim against the code before repeating or retiring it.${ledger.sha ? ` ${anchorRuling(ledger, running, code, persistedSha)}` : ''}`,
     // A truncated ledger must not read like a complete one. `dropped` exists
     // to draw that line, and this is the only place a reader sees the list.
     ...(ledger.dropped
@@ -1223,6 +1360,8 @@ export function buildMarkdown(
   prevLedgerAuthor: string | null = null,
   /** The PR host (GitHub Enterprise); baked into the emitted refetch commands. */
   host?: string,
+  /** See `renderLedgerSection` — the anchor that survives on disk. */
+  persistedSha: string | null = null,
 ): string {
   const {
     openRoots,
@@ -1297,7 +1436,14 @@ export function buildMarkdown(
   // applicable to the current diff"). Empty bodies and "LGTM" templates are
   // filtered to keep the section signal-rich.
   if (prevLedger) {
-    parts.push(renderLedgerSection(prevLedger, prevLedgerAuthor));
+    parts.push(
+      renderLedgerSection(
+        prevLedger,
+        roundModelIdFrom(process.env),
+        prevLedgerAuthor,
+        persistedSha,
+      ),
+    );
   }
 
   const meaningfulReviews = reviews
@@ -1556,6 +1702,10 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
     identityKnown,
   );
 
+  const persistedSha = persistedAnchorSha(
+    join(dirname(out), `qwen-review-pr-${prNumber}-prev-ledger.json`),
+  );
+
   // The effective host (explicit --host, else an operator-exported
   // GH_HOST) goes into the emitted refetch commands — but only if it is a
   // hostname the refetch command's own setGhHost would accept: gh tolerates
@@ -1577,6 +1727,7 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
     me,
     prevLedgerAuthor,
     bakeHost,
+    persistedSha,
   );
 
   mkdirSync(dirname(out), { recursive: true });

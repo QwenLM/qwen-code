@@ -52,6 +52,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_source_metadata: { since: 'v1' },
   session_side_task: { since: 'v1' },
   session_prompt: { since: 'v1' },
+  session_turn_status: { since: 'v1' },
   // Prompts and mid-turn messages support session-scoped media uploaded once
   // and referenced by `mediaId`. The bridge resolves bytes only when ACP input
   // is dispatched, keeping base64 out of JSON and SSE payloads.

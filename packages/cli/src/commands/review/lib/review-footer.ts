@@ -104,7 +104,10 @@ export function stripCommentMarkerLines(body: string): string {
  * its closing paren is optional — together they cover the looping-model
  * truncation (most mid-character cuts land inside the version parens — the
  * footer's final characters) without letting a cut inside the parens
- * swallow the prose after the span.
+ * swallow the prose after the span. The trailing `…` is likewise optional:
+ * `reviewFooter` caps an interpolation past MODEL_ID_MAX_CHARS at the cap
+ * plus that ellipsis, so the canonical capped footer must strip like any
+ * forged one.
  *
  * Two branches, tried in order: a span CLOSED by its `_` lets the middle
  * run past an earlier marker phrase, so a doubled-marker span strips whole
@@ -113,7 +116,7 @@ export function stripCommentMarkerLines(body: string): string {
  * after it. In both, the middle cannot cross another span's `_— ` opener.
  */
 const FOOTER_SPAN_RE =
-  /_— (?:(?:(?!_— )[^\n]){0,400}? via Qwen Code \/review(?: \(v[A-Za-z0-9._+-]{0,200}\)?)?_|(?:(?! via Qwen Code \/review)[^\n]){0,400}? via Qwen Code \/review(?: \(v[A-Za-z0-9._+-]{0,200}\)?)?_?)[ \t]*/g;
+  /_— (?:(?:(?!_— )[^\n]){0,400}? via Qwen Code \/review(?: \(v[A-Za-z0-9._+-]{0,200}…?\)?)?_|(?:(?! via Qwen Code \/review)[^\n]){0,400}? via Qwen Code \/review(?: \(v[A-Za-z0-9._+-]{0,200}…?\)?)?_?)[ \t]*/g;
 
 /**
  * The named HTML5 entities decoding to characters the footer's literal
@@ -343,9 +346,27 @@ function stripSplitFooterSpans(text: string): string {
   return changed ? out.join('\n') : text;
 }
 
+/**
+ * The widest string either footer interpolation carries — the modelId and
+ * the CLI version both. The footer rides the body's last-resort tail,
+ * which the body budget can only hold as a BOUNDED contributor: an
+ * unbounded interpolation emptied the rung-3 cut — and past the budget
+ * composed a body GitHub rejects whole, blockers included. Real model
+ * names and version stamps are a few dozen characters.
+ */
+export const MODEL_ID_MAX_CHARS = 200;
+
 /** The footer naming the reviewing model and the CLI version it ran under. */
 export function reviewFooter(modelId: string, cliVersion: string): string {
-  return `_— ${modelId} ${FOOTER_MARKER} (v${cliVersion})_`;
+  const name =
+    modelId.length <= MODEL_ID_MAX_CHARS
+      ? modelId
+      : `${modelId.slice(0, MODEL_ID_MAX_CHARS - 1)}…`;
+  const version =
+    cliVersion.length <= MODEL_ID_MAX_CHARS
+      ? cliVersion
+      : `${cliVersion.slice(0, MODEL_ID_MAX_CHARS - 1)}…`;
+  return `_— ${name} ${FOOTER_MARKER} (v${version})_`;
 }
 
 /**
@@ -375,10 +396,12 @@ export function reviewFooter(modelId: string, cliVersion: string): string {
  * succeeded, and enumerate exponential whitespace partitions when it
  * failed: the version span both swallowed subsequent footers on a line and
  * split trailing whitespace with the `\s*` after it, so a refusing footer
- * run no longer parsed exactly one way.
+ * run no longer parsed exactly one way. The capped trailing `…`
+ * `reviewFooter` writes for an interpolation past MODEL_ID_MAX_CHARS is
+ * admitted — the canonical capped footer must strip like any forged one.
  */
 export const REVIEW_FOOTER_RE =
-  /\s*(?:_— (?:(?! via Qwen Code \/review)[^\n])* via Qwen Code \/review(?: \(v[A-Za-z0-9._+-]{0,200}\)?)?_?\s*)+$/;
+  /\s*(?:_— (?:(?! via Qwen Code \/review)[^\n])* via Qwen Code \/review(?: \(v[A-Za-z0-9._+-]{0,200}…?\)?)?_?\s*)+$/;
 
 /** The widest slice `stripReviewFooter` runs the strip regex over. */
 const STRIP_TAIL_LIMIT = 8192;
