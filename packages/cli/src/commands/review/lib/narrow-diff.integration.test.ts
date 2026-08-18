@@ -686,6 +686,93 @@ describe('narrowToDelta on real-git captures', () => {
     expect(narrowToDelta(captureBytes(base, 'HEAD'), deltaBytes)).toBeNull();
   });
 
+  it('carries a change the captures position disjointly in an identical run', () => {
+    // Round 1 edits the line before a run of 20 identical lines; round 2
+    // deletes one line OF the run and edits a sibling file. Myers aligns a
+    // change inside an identical-line run against whatever surrounds it,
+    // and the two captures' old sides differ: `base..head` folds the
+    // deletion into the round-1 edit's hunk at the FRONT of the run, while
+    // `anchor..head` places the same deletion at the BACK. The ranges are
+    // disjoint for a change both captures display, and the ledger certifies
+    // head — a dropped change here would never re-enter any later scope.
+    const run = Array.from({ length: 20 }, () => 'R').join('\n') + '\n';
+    const base = commit('disjoint base', {
+      'dj-run.ts': 'E\n' + run,
+      'dj-sib.ts': 'S1\nS2\nS3\n',
+    });
+    const anchor = commit('disjoint round 1', {
+      'dj-run.ts': 'E-EDIT\n' + run,
+      'dj-sib.ts': 'S1\nS2\nS3\n',
+    });
+    commit('disjoint round 2', {
+      'dj-run.ts':
+        'E-EDIT\n' + Array.from({ length: 19 }, () => 'R').join('\n') + '\n',
+      'dj-sib.ts': 'S1\nS2-EDIT\nS3\n',
+    });
+
+    const full = capture(base, 'HEAD');
+    const deltaBytes = captureBytes(anchor, 'HEAD');
+    // The scenario's premise: the SAME deletion, displayed by BOTH
+    // captures, positioned disjointly on the head side.
+    expect(full).toContain('@@ -1,5 +1,4 @@');
+    expect(deltaBytes.toString('utf8')).toContain('@@ -18,4 +18,3 @@');
+
+    const narrowed =
+      narrowToDelta(captureBytes(base, 'HEAD'), deltaBytes)?.toString('utf8') ??
+      null;
+    expect(narrowed).not.toBeNull();
+    // The divergent section is carried whole — over-inclusion is the
+    // chosen semantics — while the clean sibling still narrows.
+    expect(narrowed).toContain('dj-run.ts');
+    expect(narrowed).toContain('-R\n');
+    expect(narrowed).toContain('+S2-EDIT');
+    expect(everyLineIsDisplayed(narrowed!, full)).toBe(true);
+  });
+
+  it('carries the divergent hunk when a sibling hunk of the section matches', () => {
+    // The partial-miss shape of the disjoint-run mechanism: round 1 edits
+    // the line before the run; round 2 deletes one line of the run AND
+    // edits F20 far away. The full capture folds the deletion into the
+    // front-of-run hunk, the delta places it at the back, and the F20 hunk
+    // aligns identically in both captures. One delta hunk matches, one
+    // misses disjointly — a per-section emission of header + matched hunks
+    // would drop the deletion while the file stays visible.
+    const run = Array.from({ length: 20 }, () => 'R').join('\n') + '\n';
+    const front = 'F1\nF2\nF3\nF4\nF5\n';
+    const tail =
+      Array.from({ length: 15 }, (_, i) => `F${i + 6}`).join('\n') + '\n';
+    const base = commit('partial-miss base', {
+      'pm.ts': front + 'B-LEAD\n' + run + tail,
+    });
+    const anchor = commit('partial-miss round 1', {
+      'pm.ts': front + 'B-LEAD-EDIT\n' + run + tail,
+    });
+    commit('partial-miss round 2', {
+      'pm.ts':
+        front +
+        'B-LEAD-EDIT\n' +
+        Array.from({ length: 19 }, () => 'R').join('\n') +
+        '\n' +
+        tail.replace('F20\n', 'F20-EDIT\n'),
+    });
+
+    const full = capture(base, 'HEAD');
+    const deltaBytes = captureBytes(anchor, 'HEAD');
+    // The scenario's premise: the deletion folded into the front hunk in
+    // full, positioned at the back in the delta; the F20 hunk matches.
+    expect(full).toContain('@@ -3,8 +3,7 @@');
+    expect(deltaBytes.toString('utf8')).toContain('@@ -23,7 +23,6 @@');
+
+    const narrowed =
+      narrowToDelta(captureBytes(base, 'HEAD'), deltaBytes)?.toString('utf8') ??
+      null;
+    expect(narrowed).not.toBeNull();
+    expect(narrowed).toContain('+F20-EDIT'); // the matched hunk stays
+    expect(narrowed).toContain('-R\n'); // the divergent hunk is carried
+    expect(narrowed).toContain('+B-LEAD-EDIT'); // whole section: over-inclusion
+    expect(everyLineIsDisplayed(narrowed!, full)).toBe(true);
+  });
+
   it('accepts a delta whose deletion the PR diff performs too', () => {
     // The control for the deletion shape: head deletes lines that stood at
     // the base, so the delta's deletion hunk and the full capture's are the

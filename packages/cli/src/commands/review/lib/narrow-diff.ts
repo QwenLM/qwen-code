@@ -32,7 +32,7 @@
 // the same head commit. That is the only cross-capture fact this needs, and it
 // is the one fact that was never in doubt.
 
-import { parseDiff } from './diff-plan.js';
+import { parseDiff, type DiffHunk } from './diff-plan.js';
 
 /** Do two inclusive ranges share a line? */
 function overlaps(
@@ -96,6 +96,8 @@ export function narrowToDelta(
 
   /** path -> the post-image ranges the delta touched. */
   const touched = new Map<string, Array<[number, number]>>();
+  /** path -> the delta's hunks, read by the position-divergence guard. */
+  const deltaHunks = new Map<string, DiffHunk[]>();
   /**
    * Paths whose delta section carries a header-level change — a rename or a
    * mode flip. The change lives in the full section's header, so it keeps
@@ -106,12 +108,17 @@ export function narrowToDelta(
   const deltaLines = deltaText.split('\n');
   for (const f of delta.files) {
     const ranges = touched.get(f.path) ?? [];
+    const hunks = deltaHunks.get(f.path) ?? [];
     // A section with no hunks — a mode change, a pure rename, a binary
     // replacement — touches the path without naming a range. It enters as an
     // EMPTY range list, which the emission loop reads as "the change lives in
     // the full section's header; emit the section whole".
-    for (const h of f.hunks) ranges.push([h.newStart, h.newEnd]);
+    for (const h of f.hunks) {
+      ranges.push([h.newStart, h.newEnd]);
+      hunks.push(h);
+    }
     touched.set(f.path, ranges);
+    deltaHunks.set(f.path, hunks);
     if (
       f.renameFrom !== undefined ||
       deltaLines
@@ -155,6 +162,16 @@ export function narrowToDelta(
   // 1-based line numbers throughout, matching `parseDiff`'s own coordinates.
   const lines = fullText.split('\n');
 
+  /** A hunk's changed lines — its `+`/`-` records, context excluded. */
+  const changedLines = (textLines: string[], h: DiffHunk): string[] => {
+    const out: string[] = [];
+    for (let n = h.diffStart + 1; n <= h.diffEnd; n++) {
+      const l = textLines[n - 1];
+      if (l.startsWith('+') || l.startsWith('-')) out.push(l);
+    }
+    return out;
+  };
+
   /** [from, to] line ranges of the full capture the output carries, in order. */
   const selected: Array<[number, number]> = [];
   for (const file of full.files) {
@@ -165,6 +182,32 @@ export function narrowToDelta(
       // Hunk-less delta touch (mode change, pure rename, binary replacement):
       // the change lives in the full section's header, so emit the section
       // whole.
+      selected.push([file.diffStart, file.diffEnd]);
+      continue;
+    }
+
+    // Position divergence: Myers aligns a change inside a run of identical
+    // lines against whatever surrounds it, and the two captures' old sides
+    // differ — so the SAME post-anchor change can sit at disjoint head-side
+    // ranges in the two captures. The range join cannot see it; a missed
+    // delta hunk whose changed lines the full section also changed IS it.
+    // The path and rename guards fail closed for KEY divergence; this fails
+    // closed for POSITION divergence, emitting the section whole — every
+    // line of it is displayed, and a dropped change here is certified
+    // unreviewed by the ledger. A netted-out undo contributes no line the
+    // full section displays, so the deliberate section drop below is
+    // untouched.
+    const fullChanged = new Set(
+      file.hunks.flatMap((fh) => changedLines(lines, fh)),
+    );
+    if (
+      (deltaHunks.get(file.path) ?? []).some(
+        (dh) =>
+          !file.hunks.some((fh) =>
+            overlaps([fh.newStart, fh.newEnd], [dh.newStart, dh.newEnd]),
+          ) && changedLines(deltaLines, dh).some((l) => fullChanged.has(l)),
+      )
+    ) {
       selected.push([file.diffStart, file.diffEnd]);
       continue;
     }
