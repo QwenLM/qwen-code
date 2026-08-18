@@ -571,7 +571,7 @@ jobs:
             echo "::error::workspace is not a plain directory: $WS"
             exit 1
           fi
-          if find "$WS" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || sudo -n find "$WS" -mindepth 1 -maxdepth 1 -exec rm -rf {} +; then
+          if find "$WS" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || sudo -n find "$WS" -mindepth 1 -maxdepth 1 -exec rm -rf {} +; then
             echo "::warning::first checkout failed; wiped the workspace for a clean retry"
           else
             echo "::warning::could not wipe the workspace; the retry checkout may fail again"

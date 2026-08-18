@@ -2748,7 +2748,8 @@ describe('checkout self-heal', () => {
       // the survivors left in place — the retry runs against them, and a
       // double checkout failure is what turns the job red. The stubbed sudo
       // makes the else branch reachable even on lanes with passwordless
-      // sudo, and the survivor warning must name them so oncall can tell
+      // sudo, and both else-branch signals must fire: the wipe-failed
+      // warning, and the survivor warning naming them so oncall can tell
       // what poisoned the workspace.
       const fixture = lockFixture();
       const bin = stubSudo(1);
@@ -2758,6 +2759,7 @@ describe('checkout self-heal', () => {
           PATH: `${bin}:${process.env.PATH}`,
         }); // must not throw
         expect(readdirSync(fixture.dir)).toContain('leftover');
+        expect(out).toContain('could not wipe the workspace');
         expect(out).toContain('workspace wipe left survivors');
         expect(out).toContain('leftover');
       } finally {
@@ -2844,6 +2846,18 @@ describe('checkout self-heal', () => {
     }
   });
 
+  it('refuses a nonexistent workspace instead of exiting 0 unwiped', () => {
+    // A missing path takes the same `[ ! -d ]` disjunct as a plain file,
+    // but a guard mutated to `[ -f ]` would still refuse the file while
+    // letting the missing path through: both wipe legs then fail on the
+    // absent start point and the step exits 0 into a retry that fails
+    // again — the refusal must stay loud for this shape too.
+    const missing = join(tmpdir(), 'checkout-heal-missing', 'workspace');
+    expect(() =>
+      runWipe({ GITHUB_WORKSPACE: missing }, { stdio: 'pipe' }),
+    ).toThrow();
+  });
+
   it('seals every override channel into the wipe step', () => {
     // With the allowlist gone, the runner-set GITHUB_WORKSPACE is the
     // wipe's only path input and the `find … -exec rm -rf` is unguarded,
@@ -2852,21 +2866,29 @@ describe('checkout self-heal', () => {
     // entries at workflow, job, and wipe-step scope (step-local blocks on
     // earlier steps die with their step), matched by dangerous name class
     // because a named list can never enumerate the surface; `$GITHUB_PATH`
-    // and `$GITHUB_ENV` writes in pre-wipe run blocks, in both the bare
-    // and the braced spelling; and the pre-wipe action set, because a
-    // `uses:` step's runtime core.addPath / core.exportVariable writes
-    // have no run text to scan. `export` in a run block dies at the step
-    // boundary, and `$GITHUB_ENV` writes of runtime-context names (e.g.
-    // GITHUB_WORKSPACE) are overwritten when the runner re-applies its
-    // runtime environment at step setup, so neither is checked here.
+    // and `$GITHUB_ENV` writes in pre-wipe run blocks — bare and braced
+    // spellings, plus the legacy `::set-env::` / `::add-path::` forms that
+    // ACTIONS_ALLOW_UNSECURE_COMMANDS re-enables; the pre-wipe action set,
+    // because a `uses:` step's runtime core.addPath / core.exportVariable
+    // writes have no run text to scan; and the shell selection, because a
+    // wipe-step `shell:` or a workflow/job `defaults:` wrapper re-targets
+    // the step's environment at exec time. `export` in a run block dies at
+    // the step boundary, and `$GITHUB_ENV` writes of runtime-context names
+    // (e.g. GITHUB_WORKSPACE) are overwritten when the runner re-applies
+    // its runtime environment at step setup, so neither is checked here.
     const doc = parse(workflow);
     const dangerousEnv = (name) =>
-      /^(GITHUB_WORKSPACE|PATH|BASH_ENV|CDPATH|ENV)$/.test(name) ||
+      /^(GITHUB_WORKSPACE|PATH|BASH_ENV|CDPATH|ENV|SHELLOPTS|ACTIONS_ALLOW_UNSECURE_COMMANDS)$/.test(
+        name,
+      ) ||
       name.startsWith('LD_') ||
       name.startsWith('BASH_FUNC_');
     for (const scope of [doc.env, doc.jobs['review-pr'].env, wipe.env]) {
       expect(Object.keys(scope ?? {}).filter(dangerousEnv)).toEqual([]);
     }
+    expect(wipe.shell).toBeUndefined();
+    expect(doc.defaults?.run?.shell).toBeUndefined();
+    expect(doc.jobs['review-pr'].defaults?.run?.shell).toBeUndefined();
     for (const step of steps.slice(0, nameIndex(WIPE))) {
       if (step.uses !== undefined) {
         expect(step.uses).toBe(
@@ -2874,6 +2896,7 @@ describe('checkout self-heal', () => {
         );
       }
       expect(step.run ?? '').not.toMatch(/\$\{?GITHUB_(ENV|PATH)\b/);
+      expect(step.run ?? '').not.toMatch(/::(set-env|add-path)::/);
     }
   });
 });
