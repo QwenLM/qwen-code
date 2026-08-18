@@ -21,6 +21,7 @@
 // real); this owns only the bookkeeping that follows from the counts.
 
 import type { CommandModule } from 'yargs';
+import { roundModelIdFrom } from './lib/round-model.js';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -593,7 +594,12 @@ export interface ComposeReviewInput {
    * handler strips it, as it does `env` and `prBodyFetcher`).
    */
   draftedComments?: Array<{ path?: unknown; line?: unknown; body?: unknown }>;
-  /** Model id for the footer, e.g. `qwen3.7-max`. */
+  /**
+   * Model id for the footer, e.g. `qwen3.7-max`. The marker's anchor takes
+   * the session-published identity instead when the CLI boundary injects one
+   * (`composeReview`'s `runtimeModelId`); this field is its fallback for runs
+   * no session published, and what the visible footer names either way.
+   */
   modelId: string;
 }
 
@@ -969,6 +975,14 @@ export function composeReview(
   input: ComposeReviewInput,
   cliVersion = 'unknown',
   attribution = true,
+  /**
+   * The model identity the RUNTIME publishes as active — `QWEN_CODE_MODEL`,
+   * injected by the two CLI boundaries from the environment the session
+   * exports. The marker's anchor certifies with THIS, never with the
+   * model-written state field alone; `input.modelId` is the fallback for
+   * runs no session published. Undefined in tests that call this directly.
+   */
+  runtimeModelId?: string,
 ): ComposeReviewResult {
   // One read, one round: the deferred-suggestions clause and the ledger
   // marker both name this round, and each reading the side file for itself
@@ -1042,6 +1056,8 @@ export function composeReview(
     result.cappedBy,
     result.scopeUnproven ?? true,
     result.dimensionGapsAreDepthOnly ?? false,
+    attribution,
+    runtimeModelId,
     prevRound,
   );
   return marker ? { ...result, body: `${result.body}\n\n${marker}` } : result;
@@ -1088,6 +1104,8 @@ function ledgerMarkerFor(
   cappedBy: string[],
   scopeUnproven: boolean,
   dimensionGapsAreDepthOnly: boolean,
+  attribution: boolean,
+  runtimeModelId: string | undefined,
   prevRound: number,
 ): string | null {
   try {
@@ -1095,6 +1113,7 @@ function ledgerMarkerFor(
     const plan = JSON.parse(readFileSync(input.planPath, 'utf8')) as {
       prNumber?: unknown;
       fetchedSha?: unknown;
+      reviewModelId?: unknown;
     };
     const pr = plan?.prNumber;
     const isPr =
@@ -1136,9 +1155,62 @@ function ledgerMarkerFor(
       scopeUnproven ||
       !dimensionGapsAreDepthOnly ||
       cappedBy.some((cap) => cap !== 'unreviewed-dimension');
-    const sha =
+    const shaCandidate =
       !failClosed && typeof plan.fetchedSha === 'string'
         ? plan.fetchedSha
+        : undefined;
+    // The anchor's same-model qualifier: "clean up to `sha`" is THIS model's
+    // verdict, and Step 1's recovered-anchor gate refuses to scope another
+    // model's round to it. The identity is the one the RUNTIME published —
+    // the boundaries inject it, and it supersedes the typed id — with the
+    // model-written field only as the fallback for runs no session published
+    // (and boundary-validated then whenever attribution is on): a review
+    // running under one model could otherwise type another's id and certify
+    // the range to a model that never reviewed it. Withheld entirely when
+    // attribution is off: the setting's contract is "whether the posted
+    // review names its model", the marker rides the posted body, and a
+    // suppression the footer honours must reach the invisible half too — the
+    // anchor then degrades to the skill's absent-model fail-safe. The
+    // serializer writes it only beside a sha.
+    const runtime =
+      typeof runtimeModelId === 'string' ? runtimeModelId.trim() : '';
+    const declared =
+      typeof input.modelId === 'string' ? input.modelId.trim() : '';
+    const certifying = runtime !== '' ? runtime : declared;
+    // WHO reviewed, not who is posting. The runtime id above tracks the
+    // session's CURRENT model, and the documented deferred-post flow —
+    // review under A, `/model` to B, "post comments" — sampled B and
+    // certified A's range to it, so the next round under B scoped past code
+    // B never reviewed. `fetch-pr` stamps the identity the round STARTED
+    // under into the plan; when the two disagree, this round cannot say who
+    // reviewed the range and certifies nobody: the anchor pair is withheld
+    // and the next round re-reviews in full. An absent stamp (a plan written
+    // before the field) reads as unknown, not as agreement — but it also
+    // cannot prove disagreement, so it keeps today's behaviour rather than
+    // withholding every anchor on an older plan.
+    const roundStart =
+      typeof plan.reviewModelId === 'string' ? plan.reviewModelId.trim() : '';
+    // A blank runtime is a MISMATCH once the round carries a stamp, not a
+    // reason to skip the check. The recovery side already rules it that way
+    // (`certifierMatchesRound` refuses an empty `running` outright), and the
+    // asymmetry was load-bearing in the wrong direction: with the runtime
+    // channel empty — a deferred `qwen review submit` run from a terminal
+    // outside a session shell, which `round-model.ts` documents as reachable
+    // in normal operation — `certifying` falls back to `input.modelId`, the
+    // model-WRITTEN field these docstrings retire. The marker then certifies
+    // the sha to a typed id, and a later round under a matching typed id
+    // scopes past code it never reviewed: the regression this PR exists to
+    // close, arriving through the one channel left open.
+    //
+    // A stamped round whose poster cannot be identified is exactly "this
+    // round cannot say who reviewed the range", which is what withholding
+    // means. An UNSTAMPED round still keeps today's behaviour — see above:
+    // it cannot prove disagreement either.
+    const identityDrifted =
+      roundStart !== '' && (runtime === '' || roundStart !== runtime);
+    const model =
+      attribution && certifying !== '' && !identityDrifted
+        ? certifying
         : undefined;
     return serializeLedger({
       ...buildLedger(
@@ -1163,7 +1235,10 @@ function ledgerMarkerFor(
           ...splitDeferralChannel(input.deferredSuggestions).relocated,
         ],
       ),
-      ...(sha ? { sha } : {}),
+      // The pair falls together: a sha with no model reads to the next
+      // round as a pre-field marker rather than as "nobody certified this".
+      ...(shaCandidate && !identityDrifted ? { sha: shaCandidate } : {}),
+      ...(model ? { model } : {}),
     });
   } catch {
     // A carry-forward convenience, never worth failing the verdict over.
@@ -3450,6 +3525,14 @@ export const composeReviewCommand: CommandModule = {
       footerVersion(process.env['QWEN_CODE_STARTUP_VERSION']) ??
         (await getCliVersion()),
       operatorReviewSettings().attribution,
+      // The anchor's certifying identity is the model the runtime published
+      // for this session — Config publishes it per session, the shell tool
+      // injects it into this subprocess. It supersedes the typed id, but the
+      // launching command can still override the env (and a hijacked
+      // orchestrator can forge the marker outright via the API) — the same
+      // forgeable posture DESIGN.md records for the cache path.
+      // The identity this round runs under — see lib/round-model.ts.
+      roundModelIdFrom(process.env),
     );
     // The exact terminal verdict, persisted beside the fields it is computed
     // from. `event` + `cappedBy` alone cannot reconstruct it — a presubmit

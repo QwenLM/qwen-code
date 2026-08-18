@@ -719,14 +719,8 @@
    the wrapper must shrink to its content instead of filling the pane — the same
    thing `.content` already does in this state. */
 .appChatEmpty .chatViewWrap {
-  position: relative;
-  z-index: 1;
   flex: 0 0 auto;
   overflow: visible;
-}
-
-.appChatEmpty .chatPane {
-  position: relative;
 }
 
 .footer {
@@ -934,18 +928,12 @@
     overflow: hidden;
   }
 
-  /* Override chatViewWrap's relative positioning so the absolute footer
-     anchors to chatPane. The wrap remains a flex item, so the z-index: 1 it
-     gets from `.appChatEmpty .chatViewWrap` still applies under static
-     positioning and keeps the welcome content and composer above the dot
-     field. The welcome-middle + custom-footer variant keeps the positioned
-     wrap: `.footerWithCustomFooter` renders `display: contents` there, so
-     the wrap must remain the containing block for `.bottomPanels`. */
+  /* The custom-footer variant renders the composer footer `display: contents`,
+     so this wrap stays the containing block for the absolutely-positioned
+     bottom panels (status panel) anchored above it. */
   .appChatEmpty
-    .chatViewWithMobileComposerBottom:not(
-      .chatViewWithWelcomeMiddle.chatViewWithCustomFooter
-    ) {
-    position: static;
+    .chatViewWithMobileComposerBottom.chatViewWithWelcomeMiddle.chatViewWithCustomFooter {
+    position: relative;
   }
 
   .appChatEmpty .chatViewWithMobileComposerBottom .footer {

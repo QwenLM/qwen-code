@@ -53,9 +53,10 @@ export interface SavedReviewArtifact {
   /** Absolute path of the written document. */
   path: string;
   /**
-   * The same path relative to the workspace root — the exact value
-   * `record_artifact` wants as `workspacePath`, so the skill copies it
-   * verbatim instead of re-deriving it from the absolute path.
+   * The same path relative to the workspace root. `record_artifact` now
+   * accepts the absolute `path` and stores this canonical form itself;
+   * keep emitting it so older runtimes and display surfaces can still
+   * use the root-relative locator.
    */
   workspacePath: string;
 }

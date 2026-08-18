@@ -105,7 +105,10 @@ describe('bundled review skill', () => {
     expect(body).toContain(
       'read `.qwen/review-cache/pr-<n>.json` **before** `fetch-pr`',
     );
-    expect(body).toContain('pass it to the fetch as `--since <lastCommitSha>`');
+    expect(body).toContain(
+      'pass BOTH fields to the fetch verbatim: `--since <lastCommitSha> ' +
+        '--since-model <lastModelId>`',
+    );
     expect(body).toContain(
       '**You never run `git` against an anchor yourself**',
     );
@@ -159,6 +162,62 @@ describe('bundled review skill', () => {
       '`incremental.diffBase` on a delta-scoped round (`incremental.effective` and no `upToDate`)',
     );
     expect(skillBody()).toContain('`mergeBaseSha` on every other');
+  });
+
+  it('pins the same-model gate on both incremental-anchor paths', () => {
+    // The gate is prompt-level, and it survived main's move of the scoping
+    // into `fetch-pr --since` (#9100) with its wording rewritten: the cache
+    // path must not PASS a cross-model anchor at all — `fetch-pr` validates
+    // an anchor against the history, never against who certified it, so a
+    // gate applied after the call is no gate — and the recovery path gates
+    // on the marker's own `model`, which this PR is what adds. A revert or
+    // paraphrase of either clause must fail here; the unit suites pin the
+    // identity's carriage, not these instructions.
+    const body = skillBody();
+    // Cache path: BOTH fields are copied to the command, and the gate is
+    // ruled there. Reverting to a hand-applied comparison is the bug, not the
+    // fix — `{{model}}` interpolates the bare id while every identity the CLI
+    // records is provider-qualified, so the two sides were never the same
+    // kind of string and two providers exposing one name compared equal.
+    expect(body).toContain(
+      '--since <lastCommitSha> --since-model <lastModelId>',
+    );
+    expect(body).toContain('**Copy them; do not compare them to anything.**');
+    expect(body).toContain('`cross-model-anchor`');
+    // No identity comparison may survive anywhere in the prompt: six review
+    // rounds closed one channel each and the next round found another, and
+    // this is what makes the class closed by construction rather than by
+    // another point fix.
+    expect(body).not.toMatch(/`lastModelId` equals/);
+    expect(body).not.toMatch(/model matches|model differs/);
+    // Recovery path: the marker carries the certifying identity now, so the
+    // "no `lastModelId` in the marker" premise main wrote against is gone.
+    expect(body).toContain('the marker carries `model` beside its `sha`');
+    expect(body).not.toContain('there is no `lastModelId` in the marker');
+    // …and, unlike the cache path, its gate is RULED BY THE CLI. The two
+    // identities are not comparable in prompt text — the marker's is
+    // provider-qualified, `{{model}}` is the bare id — so an instruction to
+    // compare them by hand is the bug, not the fix. Reverting to one must
+    // fail here.
+    expect(body).toContain(
+      '**the same-model gate on this path is RULED FOR YOU',
+    );
+    expect(body).toContain('do not compare the two identities yourself');
+    expect(body).not.toMatch(
+      /side file's anchor is passed as `--since` only when that `model` equals/,
+    );
+    // A section with no verdict at all is a mismatch, not a pass: the side
+    // file can outlive the round that vouched for it.
+    expect(body).toContain('A ledger section that states no verdict');
+    // …and the recovery path is reached from a cache-path WITHHOLD too, not
+    // only from an absent or refused anchor. Without that clause a round
+    // whose cache held another model's anchor stops at the cache and never
+    // looks at the marker — which may hold one this model certified.
+    expect(body).toContain(
+      'including the case where it HELD one that the cache-path gate withheld',
+    );
+    // The work list crosses models even when the anchor does not.
+    expect(body).toContain('the work list carries across models');
   });
 
   it('launches the 3B convergence pair in the same response', () => {
@@ -394,7 +453,7 @@ describe('bundled review skill', () => {
       '"${QWEN_CODE_CLI:-qwen}" review meta <n> --repo <owner>/<repo>',
     );
     expect(body).toMatch(
-      /meta <n> --repo <owner>\/<repo>` \(add `--host <host>` for Enterprise\)/,
+      /meta <n> --repo <owner>\/<repo>` \(with `--host <host>` for every PR target/,
     );
     // The drift ruling's load-bearing semantic — what `headSha` is compared
     // against — must stay pinned, or a rewrite truncating the comparison
@@ -417,10 +476,10 @@ describe('bundled review skill', () => {
     // same-named repo. Both lines must stay subcommand-shaped.
     const body = skillBody();
     expect(body).toContain(
-      'run `"${QWEN_CODE_CLI:-qwen}" review meta` (add `--host <host>` for Enterprise) and read its `ownerRepo`',
+      'run `"${QWEN_CODE_CLI:-qwen}" review meta` (with `--host <host>` for every PR target — see Step 1\'s host rule) and read its `ownerRepo`',
     );
     expect(body).toContain(
-      'review meta {pr_number} --repo {owner}/{repo}` (add `--host <host>` for Enterprise) and read its `headSha`',
+      "review meta {pr_number} --repo {owner}/{repo}` (with `--host <host>` for every PR target — see Step 1's host rule) and read its `headSha`",
     );
   });
 
@@ -431,10 +490,10 @@ describe('bundled review skill', () => {
     // a hand-restored gh call silently routes at github.com.
     const body = skillBody();
     expect(body).toContain(
-      'review fetch-diff <number> --repo <owner>/<repo> --out .qwen/tmp/qwen-review-pr-<number>-diff.txt` (add `--host <host>` for Enterprise)',
+      'review fetch-diff <number> --repo <owner>/<repo> --host <host> --out .qwen/tmp/qwen-review-pr-<number>-diff.txt',
     );
     expect(body).toContain(
-      '# GitHub Enterprise: add --host <host> — plan-diff records it',
+      '# add --host <host> (every PR target, including github.com) — plan-diff',
     );
     // Step 5 only plans the diff Step 1 already fetched — a second
     // fetch-diff would re-download it (and could race a head advance).
