@@ -478,6 +478,17 @@ function blindPlan(): string {
   return plan();
 }
 
+function findingsFile(content: string): string {
+  const f = join(dir, 'qwen-review-findings.md');
+  writeFileSync(f, content);
+  return f;
+}
+
+const TAGGED =
+  '- **File:** src/pay.ts:42\n' +
+  '- **Issue:** off-by-one in the retry cap\n' +
+  '- **Severity:** Critical — [unverified]\n';
+
 const FOOTER = `_— ${MODEL} via Qwen Code /review (vunknown)_`;
 
 function base(overrides: Partial<ComposeReviewInput>): ComposeReviewInput {
@@ -3548,6 +3559,32 @@ describe('the Step 4/5 gate — verify and reverse audit must have run (high eff
     expect(verdictLine(r)).toContain('its blockers were never verified');
   });
 
+  it('keeps the presubmit downgrade reasons when the findings-tag cap also holds', () => {
+    // The tag cap softens the event while setting NEITHER legacy flag, so the
+    // recovery arm's enumeration missed it: the presubmit reasons vanished
+    // from the body — the silent loss the arm's own comment forbids. Verdict
+    // keeps the tag sentence; the body's downgrade clause carries the reasons.
+    const r = composeReview({
+      criticalsInline: 1,
+      planPath: coveredPlan(['verify', 'reverse-audit']),
+      env: ENV,
+      findingsPath: findingsFile(TAGGED),
+      presubmit: {
+        downgradeRequestChanges: true,
+        downgradeReasons: ['self-PR'],
+      },
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('findings-unverified-at-compose');
+    expect(r.body).toContain(
+      'Downgraded from Request changes to Comment: self-PR',
+    );
+    expect(verdictLine(r)).toContain(
+      'findings were still unverified when the loop ended',
+    );
+  });
+
   it('verify on record with the reverse audit absent still blocks — softening gates on verify alone', () => {
     const r = composeReview({
       criticalsInline: 1,
@@ -3581,13 +3618,6 @@ describe('the Step 4/5 gate — verify and reverse audit must have run (high eff
     // findings file still carrying `— [unverified]` at compose time. The
     // posted body was 239 characters of opener and disclosure with the
     // blocker — its only copy — nowhere in it.
-    const findings = join(dir, 'qwen-review-findings-tag.md');
-    writeFileSync(
-      findings,
-      '- **File:** src/pay.ts:42\n' +
-        '- **Issue:** off-by-one in the retry cap\n' +
-        '- **Severity:** Critical — [unverified]\n',
-    );
     const r = composeReview({
       planPath: coveredPlan(['verify', 'reverse-audit']),
       env: ENV,
@@ -3595,13 +3625,14 @@ describe('the Step 4/5 gate — verify and reverse audit must have run (high eff
       criticalsInline: 0,
       suggestionsInline: 0,
       bodyCriticals: ['whole-PR blocker X'],
-      findingsPath: findings,
+      findingsPath: findingsFile(TAGGED),
     });
     expect(r.baseEvent).toBe('REQUEST_CHANGES');
     expect(r.event).toBe('COMMENT');
     // Neither flag the old condition listed is set on this path.
     expect(r.downgradedFrom).toBeNull();
     expect(r.cappedBy).toContain('findings-unverified-at-compose');
+    expect(r.cappedBy).not.toContain('criticals-unverified');
     expect(r.body).toContain('**[Critical]** whole-PR blocker X');
   });
 
@@ -6732,9 +6763,9 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     // that qualify the verdict before it spent a single blocker.
     //
     // The cap here is the absent verifier, which still POSTS the blockers
-    // (clause 7 rides on `criticalsUnverified`); the findings-file tag route
-    // caps without that flag, so its body carries no blocker and cannot
-    // reach the cut at all.
+    // (clause 7 rides on the softened RC→COMMENT transition); the
+    // findings-file tag route softens the same way, so its body carries the
+    // blocker too and can reach the cut.
     const r = composeReview({
       planPath: coveredPlan(['reverse-audit']),
       env: ENV,
@@ -6990,16 +7021,6 @@ describe('composeReview — the findings file tag check', () => {
   // round's findings digest — so compose-review reads the cumulative
   // findings file itself and caps on any surviving tag.
 
-  function findingsFile(content: string): string {
-    const f = join(dir, 'qwen-review-findings.md');
-    writeFileSync(f, content);
-    return f;
-  }
-
-  const TAGGED =
-    '- **File:** src/pay.ts:42\n' +
-    '- **Issue:** off-by-one in the retry cap\n' +
-    '- **Severity:** Critical — [unverified]\n';
   const CLEAN =
     '- **File:** src/pay.ts:42\n' +
     '- **Issue:** off-by-one in the retry cap\n' +

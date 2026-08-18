@@ -2153,10 +2153,10 @@ function composeReviewBody(
     downgradedFrom = 'Approve';
   } else if (
     (event === 'REQUEST_CHANGES' ||
-      (baseEvent === 'REQUEST_CHANGES' && criticalsUnverified)) &&
+      (baseEvent === 'REQUEST_CHANGES' && event === 'COMMENT')) &&
     downgradeRequestChanges
   ) {
-    // The unverified-blockers cap softened the event first, but the presubmit
+    // A softening cap moved the event first, but the presubmit
     // still ruled: without this arm its reasons (self-PR, failing CI) would
     // silently vanish from the body whenever both held. The verdict line
     // keeps the unverified sentence — the more fundamental defect — and the
