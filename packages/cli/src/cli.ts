@@ -92,18 +92,73 @@ const VALUE_FLAGS = new Set(
 // becomes the first positional and defeats a later --help/--version fast path.
 VALUE_FLAGS.add('--sandbox-session-id');
 
+// Every flag spelling the exact-token scanner is allowed to recognize: the
+// full option/alias surface from the shared top-level definitions (same
+// derivation pattern as VALUE_FLAGS) plus the help/version flags registered
+// inline in the parser builder and the hidden sandbox-session-id option.
+// Anything outside this set can carry flag state the scanner cannot model.
+const KNOWN_FAST_PATH_FLAGS = new Set(
+  TOP_LEVEL_HELP_OPTIONS.flatMap(([option, config]) =>
+    optionFlagNames(option, config),
+  ),
+);
+for (const flag of ['--help', '-h', '--version', '-v']) {
+  KNOWN_FAST_PATH_FLAGS.add(flag);
+}
+KNOWN_FAST_PATH_FLAGS.add('--sandbox-session-id');
+
 function isValueToken(arg: string | undefined): arg is string {
   return arg !== undefined && arg !== '--' && !arg.startsWith('-');
 }
 
-// Known scanner limitations (all direction-safe — they demote the fast path
-// to the slow path, never misfire it): short-option clusters are matched as
-// whole tokens, so `-vh`/`-sh` and clusters ending in a value-taking short
-// (e.g. `-sm gpt-4`) are not recognized and boot the full CLI graph; and
-// value-taking options consume at most ONE following token (none for the
-// `--flag=value` form), so multi-value array invocations such as
-// `--extensions a b --help` demote to the slow path, which prints the same
-// top-level options plus the full parser's command/positional sections.
+// Structural fast-path gate. The exact-token scanner cannot model yargs'
+// last-wins, order-dependent flag state, and every prior misfire class came
+// from approximating it token-by-token (`--help --no-help`, `--version=false`,
+// `---help`, ...). So instead of enumerating entrance classes, close the
+// grammar: the help/version fast paths fire ONLY when every argv token is
+// known-safe — an exact registered flag, a value consumed by a value-taking
+// flag, or `--` (everything after it is positional data). Any other token
+// demotes to the slow path (the full parser itself — direction-safe by
+// construction, it prints exactly what it would have printed anyway).
+// Demotion triggers: `=`-form tokens (boolean flags reset via
+// `--version=false` / `-h=true`), `--no-` negations (`--help --no-help`),
+// single-dash clusters longer than one letter (`-dh` — yargs-parser expands
+// them letter-by-letter), three-plus leading dashes (`---help` — yargs-parser
+// strips them into the bare flag), any flag outside KNOWN_FAST_PATH_FLAGS,
+// and any unconsumed positional. Residual conservatism is intentional:
+// value-taking options still consume at most ONE following token, so
+// multi-value array invocations such as `--extensions a b --help` also demote
+// to the slow path, which prints the same top-level options plus the full
+// parser's command/positional sections.
+function argvSafeForFastPath(argv: readonly string[]): boolean {
+  for (let i = 0; i < argv.length; i++) {
+    const token = argv[i]!;
+    if (token === '--') {
+      return true; // the rest is positional data and cannot set flags
+    }
+    if (!token.startsWith('-')) {
+      return false; // a positional breaks the flag-only fast-path grammar
+    }
+    if (token.startsWith('---')) {
+      return false;
+    }
+    if (token.includes('=')) {
+      return false;
+    }
+    if (token.startsWith('--no-')) {
+      return false;
+    }
+    if (!token.startsWith('--') && token.length > 2) {
+      return false; // short-option cluster, expanded letter-by-letter
+    }
+    if (!KNOWN_FAST_PATH_FLAGS.has(token)) {
+      return false;
+    }
+    i = skipOptionValues(argv, i);
+  }
+  return true;
+}
+
 function skipOptionValues(argv: readonly string[], index: number): number {
   const raw = argv[index]!;
   const eq = raw.indexOf('=');
@@ -215,11 +270,20 @@ export function resolveBootstrapRoute(
 ): BootstrapRoute {
   const argv = normalizeServeFastPathArgv(rawArgv);
 
+  // Structural gate: unless every token is inside the known-safe grammar,
+  // both fast paths demote to the slow path (see argvSafeForFastPath). The
+  // per-condition guards below stay in place as belt and suspenders.
+  const fastPathSafe = argvSafeForFastPath(argv);
+
   // Help before version — yargs' precedence: `qwen --model -v --help` (a
   // dash-token exposed in a value slot by the scanner) prints help on the
   // full parser in every ordering, so the fast path must match.
   const firstPositional = firstPositionalArg(argv);
-  if (hasFlag(argv, '--help', '-h') && firstPositional === undefined) {
+  if (
+    fastPathSafe &&
+    hasFlag(argv, '--help', '-h') &&
+    firstPositional === undefined
+  ) {
     return 'help';
   }
 
@@ -228,6 +292,7 @@ export function resolveBootstrapRoute(
   // sessions), so `qwen mcp --version` must not hit the version fast path —
   // the full parser owns those argv shapes.
   if (
+    fastPathSafe &&
     firstPositional === undefined &&
     !hasFlag(argv, '--help', '-h') &&
     !helpStatePossible(argv) &&

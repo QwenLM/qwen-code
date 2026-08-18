@@ -278,6 +278,42 @@ describe('resolveBootstrapRoute', () => {
     expect(resolveBootstrapRoute(['--', '--version'])).toBe('default');
     expect(resolveBootstrapRoute(['mcp', '--', '--version'])).toBe('mcp');
   });
+
+  it('demotes every argv shape outside the known-safe fast-path grammar', () => {
+    // Structural close (not per-entrance patches): yargs' flag state is
+    // last-wins and order-dependent, which exact-token scanning cannot
+    // model. Each shape below was witnessed misfiring a fast path at some
+    // point; all of them carry tokens outside the safe grammar (`=`-forms,
+    // `--no-` negations, short clusters, 3+ leading dashes) and must demote
+    // to the slow path, which owns the final flag state.
+    const misfires: readonly string[][] = [
+      ['--help', '--no-help'],
+      ['-v', '--no-version'],
+      ['--version', '--no-version'],
+      ['-v', '--version=false'],
+      ['--version=0'],
+      ['--version=no'],
+      ['--help', '--help=false'],
+      ['-h', '-h=false'],
+      ['--v=false'],
+      ['--h=false'],
+      ['---help', '-v'],
+      ['-v', '---help'],
+    ];
+    for (const argv of misfires) {
+      const route = resolveBootstrapRoute(argv);
+      expect(route, `argv=${JSON.stringify(argv)}`).not.toBe('help');
+      expect(route, `argv=${JSON.stringify(argv)}`).not.toBe('version');
+    }
+    // Controls: the plain grammar stays on the fast paths.
+    expect(resolveBootstrapRoute(['--help'])).toBe('help');
+    expect(resolveBootstrapRoute(['-h'])).toBe('help');
+    expect(resolveBootstrapRoute(['-v'])).toBe('version');
+    expect(resolveBootstrapRoute(['--version'])).toBe('version');
+    expect(resolveBootstrapRoute(['--model', 'x', '-v'])).toBe('version');
+    expect(resolveBootstrapRoute(['mcp', '--version'])).toBe('mcp');
+    expect(resolveBootstrapRoute([])).toBe('default');
+  });
 });
 
 describe('runCliEntry', () => {
