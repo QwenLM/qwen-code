@@ -745,17 +745,10 @@ function removeUnownedNodeModules(
       // both a `Node_Modules` a probe created resolves exactly like the real
       // one while an exact-match sweep walks past it.
       if (entry.name.toLowerCase() === 'node_modules') {
-        // The owned set mixes spellings: the root path is held as the caller
-        // spelled the tree, a member path as `containedIn` resolved it — on
-        // macOS those disagree (`/var/...` vs `/private/var/...`), so compare
-        // both the readdir spelling and the resolved one.
-        let real = full;
-        try {
-          real = realpathSync(full);
-        } catch {
-          // It was just read: keep the readdir spelling.
-        }
-        if (!owned.has(full) && !owned.has(real)) {
+        // `isOwned` asks both spellings: the set holds the root as the caller
+        // spelled the tree and each member as `containedIn` resolved it, and on
+        // macOS those disagree (`/var/…` vs `/private/var/…`).
+        if (!isOwned(owned, full)) {
           try {
             rmSync(full, { recursive: true, force: true });
           } catch {
@@ -800,8 +793,26 @@ function removeUnownedNodeModules(
   // survives every rebuild, and the caller says so rather than the tree hiding
   // it. Owned farms are the ones this call just re-linked.
   for (const real of inTreeLinks) {
-    if (owned.has(real)) continue;
+    if (isOwned(owned, real)) continue;
     if (holdsNodeModules(real, owned)) done.failed++;
+  }
+}
+
+/**
+ * Is this path one of the farms the current call built?
+ *
+ * `owned` mixes spellings by construction — the tree root as the caller spelled
+ * it, each member as `containedIn` resolved it — and a path reached through a
+ * symlink arrives in a third. Comparing one spelling was how the disclosure
+ * below counted a failure for a farm the same call had just re-linked, so both
+ * the given path and its resolved form are asked.
+ */
+function isOwned(owned: Set<string>, path: string): boolean {
+  if (owned.has(path)) return true;
+  try {
+    return owned.has(realpathSync(path));
+  } catch {
+    return false;
   }
 }
 
@@ -825,7 +836,7 @@ function holdsNodeModules(dir: string, owned: Set<string>): boolean {
     // A farm this call owns is not hidden dependency state — it is the
     // dependency state, re-linked moments ago.
     if (entry.name.toLowerCase() === 'node_modules') {
-      if (!owned.has(full)) return true;
+      if (!isOwned(owned, full)) return true;
       continue;
     }
     if (entry.isSymbolicLink() || !entry.isDirectory()) continue;

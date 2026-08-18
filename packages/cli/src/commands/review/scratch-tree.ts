@@ -344,12 +344,18 @@ function resetScratchTree(
 }
 
 export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
+  // Every refusal that fires before the residue is measured says so, rather
+  // than answering with the empty list a MEASURED-clean tree produces: a
+  // consumer reading `sharedTreeResidue: []` cannot otherwise tell "the tree is
+  // clean" from "this call never looked".
   const unavailable = (note: string): ScratchTreeReport => ({
     available: false,
     reused: false,
     dependencies: null,
     sharedTreeResidue: [],
     sharedTreeResidueTotal: 0,
+    sharedTreeUnmeasured:
+      'the command refused before it measured the shared worktree',
     note,
   });
 
@@ -395,7 +401,7 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
     }
   } catch (err) {
     return unavailable(
-      `cannot read HEAD in ${worktree}: ${(err as Error).message}`,
+      `cannot read HEAD in ${worktree}: ${inertPath((err as Error).message)}`,
     );
   }
 
@@ -404,7 +410,7 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
     headSha = gitOut(worktree, 'rev-parse', 'HEAD');
   } catch (err) {
     return unavailable(
-      `cannot read HEAD in ${worktree}: ${(err as Error).message}`,
+      `cannot read HEAD in ${worktree}: ${inertPath((err as Error).message)}`,
     );
   }
 
@@ -413,7 +419,9 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
   const filters = localFilterCommands(worktree);
   if (filters.length > 0) {
     return unavailable(
-      `the repository's local config defines content filter(s) ${filters.join(', ')} — ` +
+      `the repository's local config defines content filter(s) ${filters
+        .map(inertPath)
+        .join(', ')} — ` +
         'the checkouts this command runs would EXECUTE them (hooks are disabled, ' +
         'filters are config-driven), and two plain writes into the common dir are ' +
         'enough to plant both the filter and the attributes that select it. Remove ' +
@@ -509,7 +517,7 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
       sharedTreeResidueTotal: residue.total,
       sharedTreeUnmeasured: residue.unmeasured,
       note:
-        `${worktreeCreateFailureDetail('scratch', e, String(sweep?.stderr ?? ''))}. ` +
+        `${inertPath(worktreeCreateFailureDetail('scratch', e, String(sweep?.stderr ?? '')))}. ` +
         'Do NOT fall back to probing in the review worktree — other agents are ' +
         'reading it. A probe you cannot isolate is inconclusive, and the ' +
         'finding keeps the reading-based verdict and its low-confidence floor.' +

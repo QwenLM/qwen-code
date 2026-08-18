@@ -2369,7 +2369,11 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
       }
     }
 
-    if (created && (candidates.length > 0 || hunkCandidates.length > 0)) {
+    if (
+      created &&
+      probes.length > 0 &&
+      (candidates.length > 0 || hunkCandidates.length > 0)
+    ) {
       // The mutation phase runs BEFORE the revert: it needs the probe tree at
       // the unmodified PR head, and the revert below rewrites that tree to
       // base. The two cannot contaminate each other — every mutated file is in
@@ -2589,7 +2593,11 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
       }
     }
 
-    if (created) {
+    // `probes.length > 0` for the same reason as the mutation gate above: a
+    // `runProbeSuite` with no files runs vitest with no filter, which collects
+    // whatever the repo holds — minutes of unrelated suite, scored as this
+    // probe's evidence.
+    if (created && probes.length > 0) {
       try {
         // The tree must still BE the tree. The mutation phase above can end by
         // detecting that the probe tree was relinked mid-run — and this phase
