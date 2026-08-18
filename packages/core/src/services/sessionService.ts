@@ -607,6 +607,15 @@ export class SessionService {
     return this.getWorktreeSessionPathForState(sessionId, 'active');
   }
 
+  /**
+   * Returns the absolute path to the per-session prompt terminal ledger
+   * (append-only sidecar JSONL next to the transcript). The file may not
+   * exist yet — consumers must treat ENOENT as "no ledger evidence".
+   */
+  getPromptLedgerPath(sessionId: string): string {
+    return path.join(this.getChatsDir(), `${sessionId}.ledger.jsonl`);
+  }
+
   getWorktreeSessionPathForArchiveState(
     sessionId: string,
     state: SessionArchiveState,
@@ -1831,6 +1840,11 @@ export class SessionService {
           sessionId,
           'archived',
         );
+        const activeLedger = this.getPromptLedgerPath(sessionId);
+        const archivedLedger = path.join(
+          this.getArchiveChatsDir(),
+          `${sessionId}.ledger.jsonl`,
+        );
         try {
           fs.renameSync(sourcePath, targetPath);
         } catch (error) {
@@ -1841,6 +1855,13 @@ export class SessionService {
         } catch (sidecarError) {
           this.warn(
             `archiveSessions: failed to move worktree sidecar for ${sessionId} from ${activeSidecar} to ${archivedSidecar}: ${sidecarError}`,
+          );
+        }
+        try {
+          this.moveOptionalFile(activeLedger, archivedLedger);
+        } catch (ledgerError) {
+          this.warn(
+            `archiveSessions: failed to move prompt ledger for ${sessionId} from ${activeLedger} to ${archivedLedger}: ${ledgerError}`,
           );
         }
         archived.push(sessionId);
@@ -1906,6 +1927,16 @@ export class SessionService {
         } catch (sidecarError) {
           this.warn(
             `unarchiveSessions: failed to move worktree sidecar for ${sessionId} from ${archivedSidecar} to ${activeSidecar}: ${sidecarError}`,
+          );
+        }
+        try {
+          this.moveOptionalFile(
+            path.join(this.getArchiveChatsDir(), `${sessionId}.ledger.jsonl`),
+            this.getPromptLedgerPath(sessionId),
+          );
+        } catch (ledgerError) {
+          this.warn(
+            `unarchiveSessions: failed to move prompt ledger for ${sessionId}: ${ledgerError}`,
           );
         }
         unarchived.push(sessionId);

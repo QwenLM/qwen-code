@@ -22,6 +22,7 @@ import type { PermissionAuditPublisher } from './permissionMediator.js';
 import type { ServePreflightCell, ServeWorkspaceEnvStatus } from './status.js';
 import type { BridgeFileSystem } from './bridgeFileSystem.js';
 import type { JournalGrowthSessionLimit } from './replayWindowLimits.js';
+import type { PromptLedgerRecord } from './prompt-ledger.js';
 
 /**
  * Sink for serve-level diagnostic lines (set by the cli daemon logger).
@@ -34,6 +35,18 @@ export type DiagnosticLineSink = (
   line: string,
   level?: 'info' | 'warn' | 'error',
 ) => void;
+
+/**
+ * Append-only sink for the per-session prompt terminal ledger. The bridge
+ * owns only the writes (best-effort, synchronous so the daemon-shutdown
+ * flush lands before process exit); path resolution, reads, and cold-load
+ * reconciliation live in the serve layer, which knows the session storage
+ * layout. Keeping this a bare callable seam means the bridge needs no
+ * filesystem layout knowledge and no core dependency for ledger paths.
+ */
+export interface PromptLedgerSink {
+  appendSync(sessionId: string, record: PromptLedgerRecord): void;
+}
 
 export interface BridgeFreshSessionAdmissionContext {
   readonly operation: 'spawn' | 'load' | 'resume' | 'branch';
@@ -440,6 +453,17 @@ export interface BridgeOptions {
   statusProvider?: DaemonStatusProvider;
   /** Optional daemon telemetry seam. Omitted callers get no-op spans/logs. */
   telemetry?: BridgeTelemetry;
+  /**
+   * Optional prompt terminal ledger sink. When provided, the bridge appends
+   * an `in_flight` record when a prompt is admitted and a terminal record at
+   * the single `publishPromptTerminal` exit (including the close/kill/
+   * channel-crash/daemon-shutdown flushes), so a restarted daemon can
+   * reconcile dangling prompts on cold session load. Writes are best-effort:
+   * failures are logged to stderr and never block prompt execution or
+   * teardown. Omitted callers keep the pre-existing behavior (no
+   * persistence, cold loads answer "unknown" for pre-restart prompts).
+   */
+  promptLedger?: PromptLedgerSink;
 
   /**
    * Whether ACP text reads are delegated to the client filesystem service.

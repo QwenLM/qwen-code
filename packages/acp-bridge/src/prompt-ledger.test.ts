@@ -1,0 +1,188 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import * as path from 'node:path';
+import { afterAll, describe, expect, it } from 'vitest';
+import {
+  appendPromptLedgerRecord,
+  danglingInFlightPromptIds,
+  isPromptLedgerTerminalRecord,
+  readPromptLedgerRecords,
+  recentPromptTerminalRecords,
+  type PromptLedgerRecord,
+} from './prompt-ledger.js';
+
+const tmpRoot = mkdtempSync(path.join(tmpdir(), 'prompt-ledger-test-'));
+afterAll(() => {
+  rmSync(tmpRoot, { recursive: true, force: true });
+});
+
+function ledgerPath(name: string): string {
+  return path.join(tmpRoot, `${name}.ledger.jsonl`);
+}
+
+describe('appendPromptLedgerRecord + readPromptLedgerRecords', () => {
+  it('round-trips in_flight and terminal records in order', () => {
+    const filePath = ledgerPath('roundtrip');
+    appendPromptLedgerRecord(filePath, {
+      v: 1,
+      promptId: 'p1',
+      state: 'in_flight',
+      at: 1,
+    });
+    appendPromptLedgerRecord(filePath, {
+      v: 1,
+      promptId: 'p1',
+      terminal: 'completed',
+      stopReason: 'end_turn',
+      at: 2,
+    });
+    appendPromptLedgerRecord(filePath, {
+      v: 1,
+      promptId: 'p2',
+      terminal: 'error',
+      code: 'daemon_shutdown',
+      at: 3,
+    });
+    expect(readPromptLedgerRecords(filePath)).toEqual([
+      { v: 1, promptId: 'p1', state: 'in_flight', at: 1 },
+      {
+        v: 1,
+        promptId: 'p1',
+        terminal: 'completed',
+        stopReason: 'end_turn',
+        at: 2,
+      },
+      {
+        v: 1,
+        promptId: 'p2',
+        terminal: 'error',
+        code: 'daemon_shutdown',
+        at: 3,
+      },
+    ]);
+  });
+
+  it('creates the parent directory on first append', () => {
+    const filePath = path.join(
+      tmpRoot,
+      'nested',
+      'dir',
+      'created',
+      'session.ledger.jsonl',
+    );
+    appendPromptLedgerRecord(filePath, {
+      v: 1,
+      promptId: 'p1',
+      state: 'in_flight',
+      at: 1,
+    });
+    expect(readPromptLedgerRecords(filePath)).toHaveLength(1);
+  });
+
+  it('treats a missing file as an empty ledger', () => {
+    expect(readPromptLedgerRecords(ledgerPath('missing'))).toEqual([]);
+  });
+
+  it('drops a torn tail and malformed lines, keeps valid ones', () => {
+    const filePath = ledgerPath('torn-tail');
+    writeFileSync(
+      filePath,
+      [
+        JSON.stringify({ v: 1, promptId: 'p1', state: 'in_flight', at: 1 }),
+        '{"v":1,"promptId":"p2","state":"in_fli', // torn mid-append
+        JSON.stringify({
+          v: 1,
+          promptId: 'p2',
+          terminal: 'completed',
+          at: 2,
+        }),
+        'not json at all',
+        JSON.stringify({ v: 2, promptId: 'p3', at: 3 }), // unknown version
+        JSON.stringify({
+          v: 1,
+          promptId: 'p4',
+          terminal: 'bogus',
+          at: 4,
+        }), // unknown terminal state
+        JSON.stringify({ v: 1, promptId: 42, state: 'in_flight', at: 5 }), // bad id
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    const records = readPromptLedgerRecords(filePath);
+    expect(records.map((record) => record.promptId)).toEqual(['p1', 'p2']);
+  });
+});
+
+describe('danglingInFlightPromptIds', () => {
+  it('reports prompts whose latest record is still in_flight', () => {
+    const records: PromptLedgerRecord[] = [
+      { v: 1, promptId: 'p1', state: 'in_flight', at: 1 },
+      { v: 1, promptId: 'p2', state: 'in_flight', at: 2 },
+      { v: 1, promptId: 'p1', terminal: 'completed', at: 3 },
+      { v: 1, promptId: 'p3', state: 'in_flight', at: 4 },
+    ];
+    expect(danglingInFlightPromptIds(records)).toEqual(['p2', 'p3']);
+  });
+
+  it('keeps first-appearance order and drops settled prompts', () => {
+    const records: PromptLedgerRecord[] = [
+      { v: 1, promptId: 'later', state: 'in_flight', at: 2 },
+      { v: 1, promptId: 'first', state: 'in_flight', at: 1 },
+      { v: 1, promptId: 'later', terminal: 'error', code: 'x', at: 3 },
+    ];
+    expect(danglingInFlightPromptIds(records)).toEqual(['first']);
+  });
+
+  it('returns empty for an empty ledger', () => {
+    expect(danglingInFlightPromptIds([])).toEqual([]);
+  });
+});
+
+describe('recentPromptTerminalRecords', () => {
+  it('filters to terminals and keeps file order', () => {
+    const records: PromptLedgerRecord[] = [
+      { v: 1, promptId: 'p1', state: 'in_flight', at: 1 },
+      { v: 1, promptId: 'p1', terminal: 'completed', at: 2 },
+      { v: 1, promptId: 'p2', state: 'in_flight', at: 3 },
+      {
+        v: 1,
+        promptId: 'p2',
+        terminal: 'interrupted',
+        code: 'daemon_lost',
+        at: 4,
+      },
+    ];
+    const terminals = recentPromptTerminalRecords(records);
+    expect(terminals.map((record) => record.promptId)).toEqual(['p1', 'p2']);
+    expect(isPromptLedgerTerminalRecord(terminals[0])).toBe(true);
+  });
+
+  it('returns only the trailing limit records', () => {
+    const records: PromptLedgerRecord[] = [];
+    for (let i = 0; i < 70; i += 1) {
+      records.push({
+        v: 1,
+        promptId: `p${i}`,
+        state: 'in_flight',
+        at: i,
+      });
+      records.push({
+        v: 1,
+        promptId: `p${i}`,
+        terminal: 'completed',
+        at: i + 100,
+      });
+    }
+    const terminals = recentPromptTerminalRecords(records);
+    expect(terminals).toHaveLength(64);
+    expect(terminals[0]?.promptId).toBe('p6');
+    expect(terminals[63]?.promptId).toBe('p69');
+  });
+});
