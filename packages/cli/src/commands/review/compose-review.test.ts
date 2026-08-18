@@ -2354,6 +2354,24 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
       expect(stderr()).toContain(
         'VOLUME: 2 inline comment(s) this round (previous round: 9)',
       );
+
+      // A CONVERGED predecessor: zero is a recorded value, not an absence.
+      // A falsy check here would drop the one observation a convergence
+      // trend most wants — the round that posted nothing — from the
+      // operator's only view of it.
+      (writeStderrLine as ReturnType<typeof vi.fn>).mockClear();
+      writeFileSync(
+        join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+        JSON.stringify({ v: 1, round: 5, findings: [], posted: 0 }),
+        'utf8',
+      );
+      await runComposeReviewCommand({
+        input: inputPath,
+        comments: commentsPath,
+      });
+      expect(stderr()).toContain(
+        'VOLUME: 2 inline comment(s) this round (previous round: 0)',
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

@@ -35,8 +35,15 @@ import { isSameFile } from './lib/same-file.js';
 import { volumeOf } from './lib/ledger.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 
-interface PersistedVerdict extends ComposeReviewResult {
+interface PersistedVerdict extends Omit<ComposeReviewResult, 'postedInline'> {
   verdictLine: string;
+  /**
+   * Optional HERE, required on the composed result it is otherwise a copy
+   * of: a live compose always knows how many comments the round posts, but
+   * an artifact read back from disk may have been written before the field
+   * existed. Absence is preserved rather than defaulted — see the validator.
+   */
+  postedInline?: number;
 }
 
 export interface ReviewArtifactV1 {
@@ -248,14 +255,22 @@ function validateVerdict(value: unknown): PersistedVerdict {
       'Composed verdict.floorEnforced must be an array of non-negative integers.',
     );
   }
-  // Absent reads as zero for the same reason its siblings do — a composed
-  // file from a CLI predating the volume telemetry recorded no count, and a
-  // mid-upgrade save must not fail over a number that only re-displays. A
-  // PRESENT value of the wrong shape is refused like every other field.
+  // Absence is PRESERVED here, not defaulted — the one place this field
+  // parts company with its siblings. `deferredCount: 0`, `floorEnforced: []`
+  // and an untrimmed `bodyTrim` are all TRUE statements about a round that
+  // predates those features: it deferred nothing, enforced nothing, trimmed
+  // nothing. But a pre-telemetry round DID post comments, so writing zero
+  // would assert a count nobody observed — and a converged round that really
+  // posted none becomes indistinguishable from it. That is the same
+  // zero-versus-absent conflation this field refuses at every other boundary
+  // (the parser, the side-file recovery, the carried `prevPosted`), and
+  // `lowSignal` in this very function already persists `null` rather than
+  // inventing a default. A PRESENT value of the wrong shape is still refused
+  // like every other field.
   const rawPosted = verdict['postedInline'];
-  const postedInline =
-    rawPosted === undefined || rawPosted === null ? 0 : volumeOf(rawPosted);
-  if (postedInline === undefined) {
+  const postedAbsent = rawPosted === undefined || rawPosted === null;
+  const postedInline = postedAbsent ? undefined : volumeOf(rawPosted);
+  if (!postedAbsent && postedInline === undefined) {
     throw new Error(
       'Composed verdict.postedInline must be a non-negative integer.',
     );
@@ -309,7 +324,7 @@ function validateVerdict(value: unknown): PersistedVerdict {
     ),
     deferredCount,
     floorEnforced: floorEnforced as number[],
-    postedInline,
+    ...(postedInline === undefined ? {} : { postedInline }),
     lowSignal:
       lowSignal === null
         ? null

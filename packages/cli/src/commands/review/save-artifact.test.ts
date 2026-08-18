@@ -412,17 +412,33 @@ describe('saveReviewArtifact', () => {
     },
   );
 
-  it('reads an absent or null postedInline as zero — a pre-telemetry composed file must still save', () => {
+  it('PRESERVES an absent or null postedInline — zero would assert an unobserved count', () => {
+    // The one field here whose absence is not defaulted. Its siblings'
+    // defaults are true of a pre-feature round (it deferred nothing,
+    // enforced nothing, trimmed nothing); a pre-telemetry round DID post,
+    // so a written zero would invent a count — and would be
+    // indistinguishable from a genuinely converged round. `lowSignal` in
+    // the same function already persists null rather than a default.
     const paths = fixture();
     const { postedInline: _absent, ...preTelemetry } = verdict;
     for (const composed of [preTelemetry, { ...verdict, postedInline: null }]) {
       writeJson(paths.composed, composed);
       saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' });
-      expect(
-        JSON.parse(readFileSync(paths.out, 'utf8')).verdict.postedInline,
-      ).toBe(0);
+      const saved = JSON.parse(readFileSync(paths.out, 'utf8'));
+      expect('postedInline' in saved.verdict).toBe(false);
       rmSync(paths.out, { force: true });
     }
+  });
+
+  it('persists a recorded zero — a converged round is an observation', () => {
+    // The other half of the same distinction: absence is unknown, zero is a
+    // measurement, and the artifact must carry the difference.
+    const paths = fixture();
+    writeJson(paths.composed, { ...verdict, postedInline: 0 });
+    saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' });
+    expect(
+      JSON.parse(readFileSync(paths.out, 'utf8')).verdict.postedInline,
+    ).toBe(0);
   });
 
   it('reads an absent or null floorEnforced as empty — a pre-enforcement composed file must still save', () => {
