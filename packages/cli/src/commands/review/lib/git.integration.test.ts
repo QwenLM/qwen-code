@@ -15,6 +15,7 @@ import {
   existsSync,
   writeFileSync,
   mkdirSync,
+  symlinkSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -144,6 +145,45 @@ describe('releaseWorktree', () => {
     // mask the error that got us there.
     process.chdir(tmpdir()); // not a repo
     expect(() => releaseWorktree('/nonexistent/wt')).not.toThrow();
+  });
+
+  it('unlinks a symlink at the path instead of releasing the worktree it points at', () => {
+    // `existsSync` follows a LIVE link and `git worktree remove --force`
+    // resolves it — together they delete whichever registered worktree the
+    // link names (the user's own, another review's live tree) while
+    // reporting this path as swept. `cleanStale` releases with no guard of
+    // its own, so the guard lives at this choke point.
+    git('worktree', 'add', '-q', 'victim', '-b', 'victim-topic');
+    writeFileSync(join(repo, 'victim', 'keep.txt'), 'must survive\n');
+    symlinkSync(join(repo, 'victim'), join(repo, 'wt-link'));
+
+    expect(releaseWorktree(join(repo, 'wt-link'))).toMatchObject({
+      existed: true,
+      freed: true,
+    });
+
+    expect(existsSync(join(repo, 'wt-link'))).toBe(false);
+    // The victim is still registered AND still on disk.
+    expect(git('worktree', 'list')).toContain(join(repo, 'victim'));
+    expect(existsSync(join(repo, 'victim', 'keep.txt'))).toBe(true);
+  });
+
+  it('unlinks a DANGLING symlink, which existsSync cannot see', () => {
+    // `existsSync` reports a dangling link as never existed, so the removal
+    // skips it — while the link still wedges the next `worktree add` at the
+    // path with `already exists`.
+    symlinkSync(join(repo, 'never-existed'), join(repo, 'wt-link'));
+
+    expect(releaseWorktree(join(repo, 'wt-link'))).toMatchObject({
+      existed: true,
+      freed: true,
+    });
+
+    expect(existsSync(join(repo, 'wt-link'))).toBe(false);
+    // The path is reusable — the wedge is gone.
+    expect(() =>
+      git('worktree', 'add', '-q', 'wt-link', '-b', 'topic2'),
+    ).not.toThrow();
   });
 });
 

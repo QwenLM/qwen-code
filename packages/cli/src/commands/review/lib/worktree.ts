@@ -498,6 +498,52 @@ export function worktreeResidue(cwd: string, cap = 12): WorktreeResidue {
       paths.push(records[++i]);
     }
   }
+  // `status` honors the ignore rules of the tree it measures, and those rules
+  // belong to the very actor this probe exists to catch: a committed
+  // whitelist-form `.gitignore` (`*` with `!`-negations), a line appended to
+  // the common repo's `info/exclude`, or a `.gitignore` planted at runtime
+  // each hide the contamination — and themselves — from `status`. Merge the
+  // ignore-INDEPENDENT untracked listing: `--others` without
+  // `--exclude-standard` honors no ignore rule at all. What the pipeline's
+  // excludes would have filtered is dropped in code below, where a
+  // contaminator cannot reach the filter.
+  const others = spawnSync(
+    'git',
+    ['-c', 'core.fsmonitor=', 'ls-files', '--others', '-z'],
+    {
+      cwd,
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+      env: sanitizedGitEnv(),
+    },
+  );
+  if (
+    others.error ||
+    others.status !== 0 ||
+    typeof others.stdout !== 'string'
+  ) {
+    const why = others.error
+      ? ((others.error as NodeJS.ErrnoException).code ?? others.error.message)
+      : `git ls-files exited ${others.status}`;
+    return { paths: [], total: 0, unmeasured: why };
+  }
+  const seen = new Set(paths);
+  for (const rec of others.stdout.split('\0')) {
+    if (rec.length === 0 || seen.has(rec)) continue;
+    // The excludes `status` applies are directory patterns (`node_modules/`,
+    // `dist/`): drop records UNDER such a directory the same way — a plain
+    // FILE named `dist` is not build output, and `status` would name it.
+    if (
+      rec
+        .split('/')
+        .slice(0, -1)
+        .some((part) => part === 'node_modules' || part === 'dist')
+    ) {
+      continue;
+    }
+    seen.add(rec);
+    paths.push(rec);
+  }
   // `git status` never looks INSIDE a committed gitlink (mode 160000), and
   // untracked content there does not dirty the superproject — the raw oracle
   // this probe trusts is blind there. `worktree add` leaves submodules
@@ -530,6 +576,11 @@ export function worktreeResidue(cwd: string, cap = 12): WorktreeResidue {
     .filter((rec) => rec.startsWith('160000 '))
     .map((rec) => rec.slice(rec.indexOf('\t') + 1))
     .filter((gitlink) => {
+      // A name carrying U+FFFD held bytes `encoding: 'utf8'` could not
+      // decode — a committed gitlink can carry them — and no spelling of
+      // such a name resolves on disk, so its directory cannot be proved
+      // empty. That is the definition of unmeasured, not of clean.
+      if (gitlink.includes('\uFFFD')) return true;
       try {
         return readdirSync(join(cwd, gitlink)).length > 0;
       } catch (err) {
@@ -646,13 +697,6 @@ export function exposeDependencies(
     selfLinked: 0,
   };
   if (probeTree === dependencyRoot) return done;
-  farmNodeModules(dependencyRoot, probeTree, done, opts.rebuild === true);
-  // Every `node_modules` this call recreates. Anything else carrying the name
-  // inside the disposable tree — a probe's own install at an intermediate path
-  // Node resolves BEFORE the root farm, a module stub planted there between
-  // two runs — survives the rebuild otherwise, and whatever occupies it
-  // decides module resolution for every later run in that tree.
-  const owned = new Set<string>([join(probeTree, 'node_modules')]);
   let members: string[] = [];
   try {
     const graph = readWorkspacePackages(dependencyRoot);
@@ -665,18 +709,53 @@ export function exposeDependencies(
     // manifest that will not read costs the tree its nested packages, never
     // the farm it already has.
   }
-  for (const dir of members) {
-    // The member list comes from the ROOT MANIFEST OF THE CODE UNDER REVIEW, and
-    // this loop both deletes and creates at the paths it names — so it is
-    // treated as the untrusted input it is. `workspaces: ["../.."]` resolves to
-    // a directory outside both trees (a scratch tree is a sibling, so the same
-    // one for source and target), and the farm's opening `rmSync` would take
-    // that directory's `node_modules` — the reviewer's own, in the layout this
-    // pipeline builds. `realpathSync` rather than string arithmetic because a
-    // COMMITTED SYMLINK at a workspace path is fully contained as a string and
-    // still lands the same delete outside the tree; `readWorkspacePackages`
-    // deliberately follows such links, because npm does.
-    const source = containedIn(dependencyRoot, dir);
+  // The member list comes from the ROOT MANIFEST OF THE CODE UNDER REVIEW, and
+  // the farm loop both deletes and creates at the paths it names — so it is
+  // treated as the untrusted input it is. `workspaces: ["../.."]` resolves to
+  // a directory outside both trees (a scratch tree is a sibling, so the same
+  // one for source and target), and the farm's opening `rmSync` would take
+  // that directory's `node_modules` — the reviewer's own, in the layout this
+  // pipeline builds. `realpathSync` rather than string arithmetic because a
+  // COMMITTED SYMLINK at a workspace path is fully contained as a string and
+  // still lands the same delete outside the tree; `readWorkspacePackages`
+  // deliberately follows such links, because npm does.
+  const memberSources = members.map((dir) => ({
+    dir,
+    source: containedIn(dependencyRoot, dir),
+  }));
+  // What a farm entry's symlink may resolve to, decided ONCE for every farm
+  // this call builds: a `node_modules` it borrows from, or a workspace member
+  // directory — npm's self-links. The resolved member directories are the
+  // whitelist; everything else a committed symlink under `node_modules` names
+  // is a PR-controlled channel out of the disposable tree (see
+  // farmNodeModules).
+  let rootNm: string | null = null;
+  try {
+    const nm = join(dependencyRoot, 'node_modules');
+    if (lstatSync(nm).isDirectory()) rootNm = realpathSync(nm);
+  } catch {
+    // No install at the root: nothing can resolve there.
+  }
+  const containment = {
+    rootNm,
+    selfLinks: new Set<string>(
+      memberSources.flatMap((m) => (m.source === null ? [] : [m.source])),
+    ),
+  };
+  farmNodeModules(
+    dependencyRoot,
+    probeTree,
+    done,
+    containment,
+    opts.rebuild === true,
+  );
+  // Every `node_modules` this call recreates. Anything else carrying the name
+  // inside the disposable tree — a probe's own install at an intermediate path
+  // Node resolves BEFORE the root farm, a module stub planted there between
+  // two runs — survives the rebuild otherwise, and whatever occupies it
+  // decides module resolution for every later run in that tree.
+  const owned = new Set<string>([join(probeTree, 'node_modules')]);
+  for (const { dir, source } of memberSources) {
     const target = containedIn(probeTree, dir);
     if (!source || !target) {
       // Only count it when the member exists at all — a workspace glob that
@@ -694,12 +773,26 @@ export function exposeDependencies(
     // walk, so every alphabetically later member silently went unfarmed while
     // `failed` stayed 0 and the caller reported success.
     try {
-      farmNodeModules(source, target, done, opts.rebuild === true);
+      farmNodeModules(source, target, done, containment, opts.rebuild === true);
     } catch {
       done.failed++;
     }
   }
   if (opts.rebuild === true) {
+    // The disclosure walk presents realpath'd spellings of what it finds
+    // while `owned` holds the caller's — on a host whose tree path carries
+    // a symlinked ancestor (macOS's `/var` vs `/private/var`) the two
+    // disagree, and the farm this call just re-linked counted a phantom
+    // failure. Normalize the set once, here, rather than at every
+    // comparison.
+    for (const path of [...owned]) {
+      try {
+        owned.add(realpathSync(path));
+      } catch {
+        // A concurrent unlink is the only throw; the as-spelled entry
+        // still matches.
+      }
+    }
     removeUnownedNodeModules(probeTree, owned, done);
   }
   return done;
@@ -879,28 +972,38 @@ function containedIn(root: string, dir: string): string | null {
 const FARM_MARKER = '.qwen-review-farm';
 
 /**
- * Does this `node_modules` entry lead back into the dependency root's own
- * source — an npm workspace SELF-link (`@scope/pkg` → `../../packages/pkg`)?
+ * Where a farm entry's symlink may resolve.
  *
- * Those are the links a disposable tree cannot make local: they resolve to the
- * dependency root's copy, which is the tree the caller is trying to stay out
- * of, so a mutation made in the disposable tree is invisible to any import that
- * goes through the package NAME rather than a relative path. Re-pointing them
- * at the disposable tree would break resolution outright for a package whose
- * entry point is a build artifact the fresh checkout does not have — so they
- * are counted and disclosed instead of silently mirrored.
+ * `internal` — inside a `node_modules` the farm borrows from: the ordinary
+ * shape, and pnpm-style links into the dependency root's store. `self` — an
+ * npm workspace SELF-link (`@scope/pkg` → `../../packages/pkg`), resolving
+ * to a member directory. Those are the links a disposable tree cannot make
+ * local: they resolve to the dependency root's copy, which is the tree the
+ * caller is trying to stay out of, so a mutation made in the disposable tree
+ * is invisible to any import that goes through the package NAME rather than
+ * a relative path. Re-pointing them at the disposable tree would break
+ * resolution outright for a package whose entry point is a build artifact
+ * the fresh checkout does not have — so they are counted and disclosed
+ * instead of silently mirrored. null — anywhere else: a commit can name it
+ * (force-add defeats gitignore), and the disposable tree must not reach it.
  */
-function resolvesInside(entry: string, root: string): boolean {
-  try {
-    const real = realpathSync(entry);
-    const base = realpathSync(resolve(root));
-    return (
-      (real === base || real.startsWith(base + sep)) &&
-      !real.startsWith(join(base, 'node_modules') + sep)
-    );
-  } catch {
-    return false;
+function farmLinkVerdict(
+  real: string,
+  sourceNm: string,
+  containment: { rootNm: string | null; selfLinks: ReadonlySet<string> },
+): 'internal' | 'self' | null {
+  if (insideDir(sourceNm, real)) return 'internal';
+  if (containment.rootNm !== null && insideDir(containment.rootNm, real)) {
+    return 'internal';
   }
+  for (const member of containment.selfLinks) {
+    if (insideDir(member, real)) return 'self';
+  }
+  return null;
+}
+
+function insideDir(base: string, real: string): boolean {
+  return real === base || real.startsWith(base + sep);
 }
 
 /**
@@ -943,6 +1046,7 @@ function farmNodeModules(
   sourceDir: string,
   targetDir: string,
   done: DependencyFarm,
+  containment: { rootNm: string | null; selfLinks: ReadonlySet<string> },
   rebuild = false,
 ): void {
   const source = join(sourceDir, 'node_modules');
@@ -974,6 +1078,13 @@ function farmNodeModules(
       done.failed++;
       return;
     }
+  } catch {
+    done.failed++;
+    return;
+  }
+  let sourceNm: string;
+  try {
+    sourceNm = realpathSync(source);
   } catch {
     done.failed++;
     return;
@@ -1047,17 +1158,39 @@ function farmNodeModules(
       done.failed++;
       continue;
     }
+    if (!sourceStats.isDirectory() && !sourceStats.isSymbolicLink()) {
+      continue;
+    }
     if (sourceStats.isSymbolicLink()) {
+      // Where the link RESOLVES decides whether mirroring it is safe: the
+      // commit controls symlink entries under `node_modules` (force-add
+      // defeats gitignore), and mirrored unchecked they become write
+      // channels from the disposable tree to wherever they point —
+      // re-established on every rebuild. Only entries staying inside a
+      // `node_modules` this farm borrows from, and npm's workspace
+      // self-links, pass; everything else is counted and disclosed like
+      // any entry that cannot be linked.
+      let real: string;
       try {
-        if (!statSync(sourceEntry).isDirectory()) continue;
+        real = realpathSync(sourceEntry);
       } catch {
         // A DANGLING link is a package the tree will not resolve, and the
         // caller's whole contract is that what could not be linked is counted.
         done.failed++;
         continue;
       }
-    } else if (!sourceStats.isDirectory()) {
-      continue;
+      const verdict = farmLinkVerdict(real, sourceNm, containment);
+      if (verdict === null) {
+        done.failed++;
+        continue;
+      }
+      if (verdict === 'self') done.selfLinked++;
+      try {
+        if (!statSync(sourceEntry).isDirectory()) continue;
+      } catch {
+        done.failed++;
+        continue;
+      }
     }
     if (entry.name.startsWith('@')) {
       let pkgs: string[];
@@ -1070,7 +1203,22 @@ function farmNodeModules(
       }
       for (const pkg of pkgs) {
         const scopedSource = join(sourceEntry, pkg);
-        if (resolvesInside(scopedSource, sourceDir)) done.selfLinked++;
+        // The same containment as the top level, and for the same reason: a
+        // SCOPE directory can itself be an escaping link — the readdir above
+        // followed it — so each entry's resolution is what is asked.
+        let real: string;
+        try {
+          real = realpathSync(scopedSource);
+        } catch {
+          done.failed++;
+          continue;
+        }
+        const verdict = farmLinkVerdict(real, sourceNm, containment);
+        if (verdict === null) {
+          done.failed++;
+          continue;
+        }
+        if (verdict === 'self') done.selfLinked++;
         // Same skip the top-level branch applies: a stray FILE under a scope
         // directory is not a package, and linking it as one is a link the
         // resolver will follow to something that cannot be imported.
@@ -1088,7 +1236,6 @@ function farmNodeModules(
         }
       }
     } else {
-      if (resolvesInside(sourceEntry, sourceDir)) done.selfLinked++;
       try {
         symlinkSync(sourceEntry, targetEntry, linkType);
         done.linked++;

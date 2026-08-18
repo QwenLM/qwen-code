@@ -10,7 +10,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { sanitizedGitEnv } from './worktree.js';
-import { existsSync, rmSync } from 'node:fs';
+import { existsSync, lstatSync, rmSync } from 'node:fs';
 
 /** Deadline for a single `git` invocation. Generous; a hang must still end. */
 const GIT_TIMEOUT_MS = 120_000;
@@ -191,6 +191,39 @@ export function worktreeReleaseResult(
  * **before** the branch delete that depends on it.
  */
 export function releaseWorktree(worktreePath: string): WorktreeRelease {
+  // A symlink at the path must never reach the removal below: `existsSync`
+  // follows a LIVE link and `git worktree remove --force` resolves it —
+  // together they delete whichever registered worktree the link points at
+  // (the user's own, another review's live tree) while reporting this path
+  // as swept. `lstatSync` sees the link itself, and `rmSync` unlinks it
+  // rather than following it. A DANGLING link `existsSync` cannot see at
+  // all still wedges the next `worktree add`, and the same unlink clears
+  // it. The guard cleanup's family sweep applies to every path it releases
+  // lives here at the choke point, so no release path can lose it.
+  try {
+    if (lstatSync(worktreePath).isSymbolicLink()) {
+      let removeError: unknown;
+      try {
+        rmSync(worktreePath, { force: true });
+      } catch (e) {
+        removeError = e;
+      }
+      // prune still runs: a registration whose tree once stood at this
+      // path must not wedge the next `worktree add` or hold the branch
+      // checked out.
+      gitOpt('worktree', 'prune');
+      let stillThere = false;
+      try {
+        lstatSync(worktreePath);
+        stillThere = true;
+      } catch {
+        // The link is gone — freed.
+      }
+      return worktreeReleaseResult(true, stillThere, removeError);
+    }
+  } catch {
+    // Nothing at the path: the `existsSync` below answers that case.
+  }
   const existed = existsSync(worktreePath);
   let removeError: unknown;
   if (existed) {

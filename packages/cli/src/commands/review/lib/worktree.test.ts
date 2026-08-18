@@ -349,6 +349,26 @@ describe('worktreeResidue', () => {
     expect(got.paths).toEqual(['__probe__.test.ts']);
     expect(got.total).toBe(1);
   });
+
+  it('sees residue a committed whitelist .gitignore hides from status', () => {
+    // The untracked view cannot come from `status` alone: `status` honors
+    // ignore rules the contaminator controls, and a PR can commit a
+    // whitelist-form `.gitignore` (`*` with `!`-negations) under which probe
+    // residue stays invisible to it. The ignore-INDEPENDENT listing merged
+    // into the answer is what keeps the tripwire sighted.
+    writeFileSync(join(tree, '.gitignore'), '*\n!.gitignore\n!a.ts\n');
+    git('add', '-f', '.gitignore');
+    git('commit', '-qm', 'whitelist');
+    writeFileSync(join(tree, '__probe__.test.ts'), 'it("x", () => {});');
+
+    // The blindness this closes: `status` exits 0 with zero bytes.
+    expect(git('status', '--porcelain', '--untracked-files=all')).toBe('');
+
+    const got = worktreeResidue(tree);
+    expect(got.paths).toEqual(['__probe__.test.ts']);
+    expect(got.total).toBe(1);
+    expect(got.unmeasured).toBeUndefined();
+  });
 });
 
 describe('worktreeResidue — the blind sets', () => {
@@ -410,6 +430,51 @@ describe('worktreeResidue — the blind sets', () => {
       } finally {
         chmodSync(join(wt, 'vendor'), 0o755);
       }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'reports UNMEASURED for a gitlink whose name carries invalid UTF-8 bytes',
+    () => {
+      // `encoding: 'utf8'` renders an undecodable byte as U+FFFD, and no
+      // spelling of such a name resolves on disk — so the directory cannot
+      // be proved empty. Dropping the entry from the blind set certified a
+      // contaminated gitlink clean.
+      const wt = join(repo, 'wt');
+      git(repo, 'worktree', 'add', '--detach', '-q', wt, 'HEAD');
+      const sub = join(repo, 'sub-origin-bad');
+      mkdirSync(sub, { recursive: true });
+      git(sub, 'init', '-q', '-b', 'main');
+      git(sub, 'config', 'user.email', 't@t.t');
+      git(sub, 'config', 'user.name', 't');
+      writeFileSync(join(sub, 's.txt'), 'x\n');
+      git(sub, 'add', '-A');
+      git(sub, 'commit', '-qm', 'one');
+      const sha = git(sub, 'rev-parse', 'HEAD');
+      // A raw 0xFF byte in the gitlink's name. Stdin carries it as a Buffer
+      // because a JS string would re-encode it as VALID UTF-8 — `--cacheinfo`
+      // cannot, its path arrives through argv.
+      const rawName = Buffer.from('ev\xffil', 'latin1');
+      execFileSync('git', ['update-index', '--index-info'], {
+        cwd: repo,
+        input: Buffer.concat([
+          Buffer.from(`160000 ${sha}\t`),
+          rawName,
+          Buffer.from('\n'),
+        ]),
+      });
+      git(repo, 'commit', '-qm', 'gitlink');
+      git(wt, 'checkout', '--detach', '-q', git(repo, 'rev-parse', 'main'));
+      // Contamination inside the raw-byte directory. Buffer paths, because
+      // the name does not survive a round-trip through JS strings.
+      const rawDir = Buffer.concat([Buffer.from(`${wt}/`), rawName]);
+      mkdirSync(rawDir, { recursive: true });
+      writeFileSync(
+        Buffer.concat([rawDir, Buffer.from('/probe-cache.txt')]),
+        'cache\n',
+      );
+
+      expect(worktreeResidue(wt).unmeasured).toBeTruthy();
     },
   );
 });
@@ -772,6 +837,115 @@ describe('exposeDependencies', () => {
     expect(existsSync(join(probe, 'node_modules', '@scope', 'notes.md'))).toBe(
       false,
     );
+  });
+
+  it('refuses node_modules symlink entries that escape the farm', () => {
+    // Force-add defeats gitignore, so the commit controls which symlink
+    // entries stand under `node_modules` — and a mirrored escape link is a
+    // write channel from the disposable tree to wherever it points,
+    // re-established on every rebuild. Only entries resolving inside a
+    // borrowed `node_modules` (and npm's workspace self-links) may pass.
+    const outer = tmp('expose-escape-entry-');
+    const root = join(outer, 'repo');
+    const probe = join(outer, 'probe');
+    mkdirSync(probe, { recursive: true });
+    mkdirSync(join(root, 'src'), { recursive: true });
+    writeFileSync(join(root, 'src', 'tracked.ts'), 'x\n');
+    mkdirSync(join(root, 'node_modules', 'plain-pkg'), { recursive: true });
+    symlinkSync(join(root, 'src'), join(root, 'node_modules', 'evil'), 'dir');
+    symlinkSync(outer, join(root, 'node_modules', 'outside'), 'dir');
+
+    const got = exposeDependencies(probe, root);
+
+    expect(got).toEqual({
+      linked: 1,
+      failed: 2,
+      alreadyPresent: false,
+      selfLinked: 0,
+    });
+    expect(existsSync(join(probe, 'node_modules', 'plain-pkg'))).toBe(true);
+    expect(existsSync(join(probe, 'node_modules', 'evil'))).toBe(false);
+    expect(existsSync(join(probe, 'node_modules', 'outside'))).toBe(false);
+  });
+
+  it('refuses an escaping scope directory, whose entries resolve out of the farm', () => {
+    // The scoped branch's hole is one level up: a scope DIRECTORY that is
+    // itself an escape link. The containment check sees it at the top level
+    // — the link's resolution is what is asked — and mirrors nothing of it.
+    const outer = tmp('expose-escape-scope-');
+    const root = join(outer, 'repo');
+    const probe = join(outer, 'probe');
+    mkdirSync(probe, { recursive: true });
+    mkdirSync(join(root, 'src'), { recursive: true });
+    writeFileSync(join(root, 'src', 'tracked.ts'), 'x\n');
+    mkdirSync(join(root, 'node_modules', 'plain-pkg'), { recursive: true });
+    symlinkSync(join(root, 'src'), join(root, 'node_modules', '@evil'), 'dir');
+
+    const got = exposeDependencies(probe, root);
+
+    expect(got).toEqual({
+      linked: 1,
+      failed: 1,
+      alreadyPresent: false,
+      selfLinked: 0,
+    });
+    expect(existsSync(join(probe, 'node_modules', '@evil'))).toBe(false);
+  });
+
+  it('still mirrors npm workspace self-links, counting them as such', () => {
+    // The containment gate must not close the shape the farm exists to
+    // borrow: npm links every workspace member into the root `node_modules`,
+    // and those links resolve outside it by construction.
+    const root = tmp('expose-selflink-root-');
+    const probe = tmp('expose-selflink-probe-');
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ workspaces: ['packages/*'] }),
+    );
+    mkdirSync(join(root, 'packages', 'core'), { recursive: true });
+    writeFileSync(
+      join(root, 'packages', 'core', 'package.json'),
+      JSON.stringify({ name: '@x/core' }),
+    );
+    mkdirSync(join(root, 'node_modules', '@x'), { recursive: true });
+    symlinkSync(
+      join(root, 'packages', 'core'),
+      join(root, 'node_modules', '@x', 'core'),
+      'dir',
+    );
+
+    const got = exposeDependencies(probe, root);
+
+    expect(got).toMatchObject({ linked: 1, failed: 0, selfLinked: 1 });
+    expect(
+      lstatSync(join(probe, 'node_modules', '@x', 'core')).isSymbolicLink(),
+    ).toBe(true);
+  });
+
+  it('does not count a phantom failure when the tree path is spelled through a symlink', () => {
+    // macOS's `/var` vs `/private/var` is the production shape; a symlinked
+    // ancestor reproduces it on Linux. The disclosure loop presents
+    // realpath'd spellings of what it finds, `owned` held only the caller's,
+    // and the farm this call just re-linked counted a failure on every
+    // rebuild.
+    const outer = tmp('expose-spelling-');
+    const root = join(outer, 'dep-root');
+    mkdirSync(join(root, 'node_modules', 'plain-pkg'), { recursive: true });
+    mkdirSync(join(outer, 'real-probe'), { recursive: true });
+    symlinkSync(join(outer, 'real-probe'), join(outer, 'alias-probe'), 'dir');
+    // A link resolving back into the tree: what reaches the disclosure loop.
+    symlinkSync('.', join(outer, 'real-probe', 'selfie'), 'dir');
+
+    const got = exposeDependencies(join(outer, 'alias-probe'), root, {
+      rebuild: true,
+    });
+
+    expect(got).toEqual({
+      linked: 1,
+      failed: 0,
+      alreadyPresent: false,
+      selfLinked: 0,
+    });
   });
 
   it('does not call an EMPTY farm dir a standing farm', () => {
