@@ -1094,6 +1094,14 @@ export interface UseComposerCoreOptions {
   onCycleMode?: () => void;
   onToggleShortcuts?: () => void;
   disabled?: boolean;
+  /**
+   * Whether the composer may react to FILE drags at all (drag highlight and
+   * drop ingestion on the inline image/text lane). `false` leaves paste
+   * working but makes file drag-and-drop inert, matching a host that
+   * force-disables file upload via `fileUploadEnabled={false}`. Defaults to
+   * `true`.
+   */
+  fileDragEnabled?: boolean;
   placeholderText?: string;
   commands: CommandInfo[];
   skills?: SkillInfo[];
@@ -1388,6 +1396,7 @@ export function useComposerCore(
     onCycleMode,
     onToggleShortcuts,
     disabled = false,
+    fileDragEnabled = true,
     placeholderText = 'Type a message...',
     commands,
     skills = [],
@@ -1505,6 +1514,8 @@ export function useComposerCore(
   onToggleShortcutsRef.current = onToggleShortcuts;
   const disabledRef = useRef(disabled);
   disabledRef.current = disabled;
+  const fileDragEnabledRef = useRef(fileDragEnabled);
+  fileDragEnabledRef.current = fileDragEnabled;
   const workspaceUploadBusyRef = useRef(workspaceUploadBusy);
   workspaceUploadBusyRef.current = workspaceUploadBusy;
   const commandsRef = useRef(commands);
@@ -1859,18 +1870,30 @@ export function useComposerCore(
         }
       },
       onDragEnterCapture: (event) => {
-        if (!hasFileTransferPayload(event.dataTransfer)) return;
+        if (
+          !fileDragEnabledRef.current ||
+          !hasFileTransferPayload(event.dataTransfer)
+        )
+          return;
         event.preventDefault();
         imageDragDepthRef.current += 1;
         if (!disabledRef.current) setImageDragActive(true);
       },
       onDragOverCapture: (event) => {
-        if (!hasFileTransferPayload(event.dataTransfer)) return;
+        if (
+          !fileDragEnabledRef.current ||
+          !hasFileTransferPayload(event.dataTransfer)
+        )
+          return;
         event.preventDefault();
         event.dataTransfer.dropEffect = 'copy';
       },
       onDragLeaveCapture: (event) => {
-        if (!hasFileTransferPayload(event.dataTransfer)) return;
+        if (
+          !fileDragEnabledRef.current ||
+          !hasFileTransferPayload(event.dataTransfer)
+        )
+          return;
         imageDragDepthRef.current = Math.max(0, imageDragDepthRef.current - 1);
         const nextTarget = event.relatedTarget;
         if (
@@ -1882,6 +1905,13 @@ export function useComposerCore(
       },
       onDropCapture: (event) => {
         if (!hasFileTransferPayload(event.dataTransfer)) return;
+        if (!fileDragEnabledRef.current) {
+          // File drags are inert, but still cancel the drop so the browser
+          // cannot navigate to the file. Capture-phase preventDefault does
+          // not stop propagation, so a host handler can still react.
+          event.preventDefault();
+          return;
+        }
         event.preventDefault();
         event.stopPropagation();
         clearImageDragState();
@@ -1908,6 +1938,12 @@ export function useComposerCore(
   useEffect(() => {
     if (disabled) clearImageDragState();
   }, [clearImageDragState, disabled]);
+  useEffect(() => {
+    // A host flipping `fileUploadEnabled` to false mid-drag gates the
+    // leave handler, so a depth already counted would never drain; clear
+    // the highlight explicitly instead of waiting for dragend/blur.
+    if (fileDragEnabled === false) clearImageDragState();
+  }, [clearImageDragState, fileDragEnabled]);
   useEffect(
     () => () => {
       resetImageIngestion(false);
