@@ -158,6 +158,7 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
 > {
   private userAnswers: Record<string, string> = {};
   private wasAnswered = false;
+  private cancelReason: string | undefined;
 
   constructor(
     private readonly _config: Config,
@@ -206,9 +207,17 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
             this.wasAnswered = true;
             this.userAnswers = payload?.answers ?? {};
             break;
-          case ToolConfirmationOutcome.Cancel:
+          case ToolConfirmationOutcome.Cancel: {
             this.wasAnswered = false;
+            // The confirmation pipeline uses `cancelMessage` to explain WHY the
+            // question was never put to the user (host could not render the
+            // approval surface, SDK denial, hook denial, stale approval...).
+            // Dropping it here is what made a pipeline failure indistinguishable
+            // from a real user decline in the tool result.
+            const reason = payload?.cancelMessage?.trim();
+            this.cancelReason = reason ? reason : undefined;
             break;
+          }
           default:
             this.wasAnswered = true;
             this.userAnswers = payload?.answers ?? {};
@@ -239,7 +248,11 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
       }
 
       if (!this.wasAnswered) {
-        const cancellationMessage = 'User declined to answer the questions.';
+        // Only report a user decision when there is no pipeline reason to
+        // report; "User declined..." is reserved for a real user-initiated
+        // cancel, which carries no `cancelMessage`.
+        const cancellationMessage =
+          this.cancelReason ?? 'User declined to answer the questions.';
         return {
           llmContent: cancellationMessage,
           returnDisplay: cancellationMessage,
