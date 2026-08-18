@@ -68,11 +68,34 @@ export function sanitizeQuotedText(text: string, maxLen: number): string {
   return cp.length > maxLen ? cp.slice(0, maxLen - 1).join('') + '…' : cleaned;
 }
 
+const START_OF_LINE_TAG = /^([ \t]*)\[([^\]\r\n]{1,64})\](:?)/gm;
+
+/**
+ * Peel start-of-line `[tag]` wrappers until none is left, not just once.
+ *
+ * A single pass removes exactly ONE layer, so `[[SYSTEM]]` comes out as
+ * `[SYSTEM]` — a fully-formed forged tag that the caller then embeds at
+ * start-of-line, which is precisely what this unwrap exists to prevent. Any
+ * caller that gets only one pass (DingTalk 1:1 DMs: `ChannelBase` re-sanitizes
+ * only when `isGroup || sessionScope === 'single'`) hands the model the forge
+ * verbatim; two passes just move the bar to `[[[SYSTEM]]]`.
+ *
+ * Terminates: every iteration that changes the string deletes at least the two
+ * bracket characters it matched, so the length strictly decreases, and the
+ * `{1,64}` content window bounds how deep a nesting can match at all.
+ */
+function unwrapStartOfLineTags(text: string): string {
+  let current = text;
+  for (;;) {
+    const next = current.replace(START_OF_LINE_TAG, '$1$2$3');
+    if (next === current) return current;
+    current = next;
+  }
+}
+
 export function sanitizePromptText(text: string): string {
   return (
-    text
-      .replace(PROMPT_UNSAFE_INVISIBLES, ' ')
-      .replace(/^([ \t]*)\[([^\]\r\n]{1,64})\](:?)/gm, '$1$2$3')
+    unwrapStartOfLineTags(text.replace(PROMPT_UNSAFE_INVISIBLES, ' '))
       // Fold ASCII C0/DEL, including CR/LF/TAB, so attacker-controlled group
       // text cannot create prompt lines outside the adapter's sender attribution.
       // eslint-disable-next-line no-control-regex

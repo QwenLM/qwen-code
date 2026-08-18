@@ -172,6 +172,14 @@ You can send photos and documents to the bot, not just text.
 
 **Files:** Send a PDF, code file, or any document. The bot downloads it from DingTalk's servers and saves it locally so the agent can read it with its file tools. Audio and video files are also supported. This works with any model.
 
+## Forwarded Chat Records
+
+You can merge-forward a run of messages from another chat to the bot (DingTalk's "combined forward"), either as a message of its own or as the message you are replying to. The bot expands the record into text for the agent: the record's title and summary become a header line, and each forwarded message is listed under `[Chat record messages]` as `Sender: message`. A forwarded message whose body is not text is shown as a placeholder — `[image]`, `[file: <name>]`, `[audio]`, `[video]`.
+
+Long records are **capped, and the cap is announced**: at most 50 messages, at most 4000 characters in total, and at most 500 characters per message. Whatever is cut is reported to the agent in the same text — a trailing `[N more message(s) not shown]` line for dropped messages, and a ` [truncated]` marker on any message that was shortened. So the agent knows it is answering about a partial record; if you need the whole thing, forward it in smaller batches.
+
+Because a forwarded record is written by people other than you, everything lifted out of it — titles, sender names, message bodies — is neutralized before it reaches the agent, so a forwarded message cannot pose as an instruction to the bot.
+
 ## Key Differences from Telegram
 
 - **Authentication:** AppKey + AppSecret instead of a static bot token. The SDK manages access token refresh automatically.

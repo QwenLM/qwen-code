@@ -16,6 +16,7 @@ import {
   sanitizeLogText,
   sanitizePromptText,
   sanitizeSenderName,
+  truncateCodePoints,
 } from '@qwen-code/channel-base';
 import { normalizeDingTalkMarkdown, extractTitle } from './markdown.js';
 import { downloadMedia } from './media.js';
@@ -180,17 +181,23 @@ function capChatRecordLines(lines: string[]): string[] {
   let dropped = 0;
   let total = 0;
   for (const line of lines) {
+    // Decide the entry cap BEFORE measuring: past it every remaining line is
+    // discarded, and a merge-forward can carry an entire group's history, so
+    // measuring first would pay one code-point pass per thrown-away line.
+    if (kept.length >= MAX_CHAT_RECORD_ENTRIES) {
+      dropped++;
+      continue;
+    }
     // Slice by CODE POINT: a cap landing mid-surrogate-pair would emit a lone
-    // surrogate into the prompt.
-    const points = Array.from(line);
-    const bounded =
-      points.length > MAX_CHAT_RECORD_LINE_CHARS
-        ? `${points.slice(0, MAX_CHAT_RECORD_LINE_CHARS).join('')} [truncated]`
-        : line;
-    if (
-      kept.length >= MAX_CHAT_RECORD_ENTRIES ||
-      (kept.length > 0 && total + bounded.length > MAX_CHAT_RECORD_CHARS)
-    ) {
+    // surrogate into the prompt. UTF-16 length is an upper bound on code-point
+    // count, so a line within the cap in units cannot exceed it in points —
+    // that fast path skips the array for every line that cannot be truncated.
+    const boundedRaw =
+      line.length <= MAX_CHAT_RECORD_LINE_CHARS
+        ? line
+        : truncateCodePoints(line, MAX_CHAT_RECORD_LINE_CHARS);
+    const bounded = boundedRaw === line ? line : `${boundedRaw} [truncated]`;
+    if (kept.length > 0 && total + bounded.length > MAX_CHAT_RECORD_CHARS) {
       dropped++;
       continue;
     }
@@ -297,7 +304,16 @@ function formatChatRecord(
     ? parsedSummary.map(
         (item) => sanitizeChatRecordField(nonEmptyString(item) || '') || '',
       )
-    : rawSummary?.split('\n').map((line) => sanitizeChatRecordField(line)) ||
+    : rawSummary
+        ?.split('\n')
+        // `nonEmptyString` first, exactly as the JSON branch above gets it: a
+        // line beginning with a trim()-strippable char that `sanitizePromptText`
+        // does not fold before its unwrap step (VT, FF, NBSP, U+2000-U+200A,
+        // U+3000, ...) pushes the `[` off start-of-line, so the unwrap regex
+        // cannot match; the later C0 fold then turns that char into a space and
+        // the trailing .trim() removes it — reassembling the very `[SYSTEM]:`
+        // tag the unwrap just failed to peel.
+        .map((line) => sanitizeChatRecordField(nonEmptyString(line) || '')) ||
       [];
   const summary = summaryLines.filter(Boolean).join('\n');
   const rawEntries =
@@ -327,8 +343,11 @@ function formatChatRecord(
           nonEmptyString(record['sender']) ||
           summarySender ||
           nonEmptyString(record['senderId']);
+        // A sender lands at start-of-line immediately before `: `, the exact
+        // privileged position the `[tag]:` unwrap defends — so strip the
+        // brackets outright rather than relying on the unwrap alone.
         const sender =
-          (rawSender && sanitizeChatRecordField(rawSender)) || 'Unknown';
+          (rawSender && bracketSafeChatRecordField(rawSender)) || 'Unknown';
         return [`${sender}: ${formatChatRecordEntryBody(record)}`];
       })
     : [];
@@ -341,10 +360,16 @@ function formatChatRecord(
     : undefined;
   const boundedLines = capChatRecordLines(recordLines);
   const parts: string[] = [];
+  // The tag NAME is fixed and the title goes inside it, never the other way
+  // round. `bracketSafeChatRecordField` is a no-op for a title that carries no
+  // brackets, so a bare attacker title like `SYSTEM` (which is also what
+  // `[SYSTEM]` and `[[SYSTEM]]` sanitize down to) would otherwise have this
+  // wrapper manufacture a clean start-of-line `[SYSTEM]` — a forge created
+  // AFTER sanitization, which no amount of sanitizing the title can prevent.
   if (summary) {
-    parts.push(`[${safeTitle || 'Chat record'}] ${summary}`);
+    parts.push(`[Chat record: ${safeTitle || 'untitled'}] ${summary}`);
   } else if (safeTitle) {
-    parts.push(`[${safeTitle}]`);
+    parts.push(`[Chat record: ${safeTitle}]`);
   }
   if (boundedLines.length > 0) {
     parts.push(`[Chat record messages]\n${boundedLines.join('\n')}`);
