@@ -322,9 +322,6 @@ vi.mock('./ChatEditor', () => ({
     );
   }),
 }));
-vi.mock('./SpecularComposerEffect', () => ({
-  SpecularComposerEffect: () => null,
-}));
 vi.mock('./QueuedPromptDisplay', () => ({
   QueuedPromptDisplay: (props: any) => (
     <div

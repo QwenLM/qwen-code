@@ -1304,7 +1304,6 @@ export function ChatPane({
           onImagePreview={handleImagePreview}
           atWorkspaceCwd={paneWorkspaceCwd}
           placeholderText={t('splitView.composerPlaceholder')}
-          animatePlaceholder={false}
         />
         {CustomComposerFooter && (
           <CustomComposerFooter

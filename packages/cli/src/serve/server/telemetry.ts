@@ -330,6 +330,18 @@ export const legacySessionTelemetryRoutes = [
     route: 'DELETE /session/:id/pending-prompts/:promptId',
   },
   {
+    method: 'GET',
+    path: '/session/:id/turns/current',
+    attribution: 'handler_resolved',
+    route: 'GET /session/:id/turns/current',
+  },
+  {
+    method: 'GET',
+    path: '/session/:id/turns/:promptId',
+    attribution: 'handler_resolved',
+    route: 'GET /session/:id/turns/:promptId',
+  },
+  {
     method: 'POST',
     path: '/session/:id/shell',
     attribution: 'handler_resolved',
