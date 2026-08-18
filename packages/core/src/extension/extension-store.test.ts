@@ -506,7 +506,10 @@ describe('ExtensionStore', () => {
     const initialized = await store.ensureInitialized([identity]);
     await fsp.writeFile(
       enablementPath,
-      JSON.stringify({ demo: { overrides: ['!/legacy/*'] } }),
+      JSON.stringify({
+        demo: { overrides: ['!/legacy/*'] },
+        future: { overrides: ['!/future/*'] },
+      }),
     );
     const stateStat = await fsp.stat(path.join(storeDir, 'state.json'));
     const newer = new Date(stateStat.mtimeMs + 10_000);
@@ -519,8 +522,12 @@ describe('ExtensionStore', () => {
       defaultActivation: 'disabled',
       legacyPathRules: ['!/legacy/*'],
     });
+    expect(updated.legacyProjectionRemainder).toEqual({
+      future: { overrides: ['!/future/*'] },
+    });
     expect(JSON.parse(await fsp.readFile(enablementPath, 'utf8'))).toEqual({
       demo: { overrides: ['!/*', '!/legacy/*'] },
+      future: { overrides: ['!/future/*'] },
     });
   });
 
@@ -592,6 +599,27 @@ describe('ExtensionStore', () => {
     expect(snapshot.extensions[newId]).toMatchObject({
       name: 'dotnet',
       defaultActivation: 'disabled',
+    });
+  });
+
+  it('adopts a loaded manifest rename without resetting activation', async () => {
+    const store = makeStore();
+    const identity = { id: 'd1'.repeat(32), name: 'before' };
+    await store.ensureInitialized([identity]);
+    const disabled = await store.setDefaultActivation(identity, 'disabled');
+
+    const renamed = await store.ensureInitialized([
+      { id: identity.id, name: 'after' },
+    ]);
+
+    expect(renamed.generation).toBe(disabled.generation + 1);
+    expect(renamed.extensions[identity.id]).toMatchObject({
+      name: 'after',
+      defaultActivation: 'disabled',
+    });
+    expect(renamed.legacyProjectionRemainder).toBeUndefined();
+    expect(JSON.parse(await fsp.readFile(enablementPath, 'utf8'))).toEqual({
+      after: { overrides: ['!/*'] },
     });
   });
 
@@ -1052,20 +1080,25 @@ describe('ExtensionStore', () => {
     expect(imported.extensions[id]?.legacyPathRules).toEqual(['!/workspace/*']);
   });
 
-  it('repairs an unchanged newer V1 projection without changing generation', async () => {
+  it('preserves an unknown entry added by a newer V1 writer', async () => {
     const store = makeStore();
     const id = 'e4'.repeat(32);
     const initialized = await store.ensureInitialized([{ id, name: 'demo' }]);
     await new Promise((resolve) => setTimeout(resolve, 10));
     await fsp.writeFile(
       enablementPath,
-      JSON.stringify({ stale: { overrides: ['/workspace/unused'] } }),
+      JSON.stringify({ future: { overrides: ['/workspace/future'] } }),
     );
 
-    const repaired = await store.ensureInitialized([{ id, name: 'demo' }]);
+    const imported = await store.ensureInitialized([{ id, name: 'demo' }]);
 
-    expect(repaired.generation).toBe(initialized.generation);
-    expect(JSON.parse(await fsp.readFile(enablementPath, 'utf8'))).toEqual({});
+    expect(imported.generation).toBe(initialized.generation + 1);
+    expect(imported.legacyProjectionRemainder).toEqual({
+      future: { overrides: ['/workspace/future'] },
+    });
+    expect(JSON.parse(await fsp.readFile(enablementPath, 'utf8'))).toEqual({
+      future: { overrides: ['/workspace/future'] },
+    });
   });
 
   it('merges newly discovered extensions while repairing an older V1 projection', async () => {

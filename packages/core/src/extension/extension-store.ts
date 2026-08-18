@@ -404,6 +404,7 @@ export class ExtensionStore {
     const legacy = await this.readLegacyProjection();
     if (existing) {
       let changed = false;
+      const renamedPolicyNames = new Set<string>();
       const importUnmappedLegacy =
         existing.legacyProjectionHash === projectionHash(legacy);
       let legacyProjectionIsNewer = false;
@@ -422,9 +423,17 @@ export class ExtensionStore {
         const directPolicy = existing.extensions[identity.id];
         if (directPolicy) {
           if (directPolicy.name.toLowerCase() !== identity.name.toLowerCase()) {
-            throw new ExtensionConflictError(
-              `Extension id belongs to "${directPolicy.name}", not "${identity.name}".`,
+            const nameOwner = Object.entries(existing.extensions).find(
+              ([id, policy]) =>
+                id !== identity.id &&
+                policy.name.toLowerCase() === identity.name.toLowerCase(),
             );
+            if (nameOwner) {
+              throw new ExtensionConflictError(
+                `Extension name "${identity.name}" conflicts with an installed extension.`,
+              );
+            }
+            renamedPolicyNames.add(directPolicy.name.toLowerCase());
           }
           if (directPolicy.name !== identity.name) {
             directPolicy.name = identity.name;
@@ -542,15 +551,21 @@ export class ExtensionStore {
           changed = true;
         }
       }
+      let remainderSource = legacyProjectionIsNewer
+        ? legacy
+        : importUnmappedLegacy
+          ? legacy
+          : (existing.legacyProjectionRemainder ?? {});
+      if (importUnmappedLegacy && renamedPolicyNames.size > 0) {
+        remainderSource = Object.fromEntries(
+          Object.entries(remainderSource).filter(
+            ([name]) => !renamedPolicyNames.has(name.toLowerCase()),
+          ),
+        );
+      }
       changed =
-        this.updateLegacyProjectionRemainder(
-          existing,
-          legacyProjectionIsNewer
-            ? this.reconcileLegacyProjectionRemainder(existing, legacy)
-            : importUnmappedLegacy
-              ? legacy
-              : (existing.legacyProjectionRemainder ?? {}),
-        ) || changed;
+        this.updateLegacyProjectionRemainder(existing, remainderSource) ||
+        changed;
       if (changed) {
         existing.generation += 1;
         await this.writeSnapshotUnlocked(existing);
@@ -1047,10 +1062,7 @@ export class ExtensionStore {
               delete policy.legacyPathRules;
             }
           }
-          legacyForRemainder = this.reconcileLegacyProjectionRemainder(
-            snapshot,
-            legacy,
-          );
+          legacyForRemainder = legacy;
         } else {
           legacyForImport = snapshot.legacyProjectionRemainder ?? {};
           legacyForRemainder = snapshot.legacyProjectionRemainder ?? {};
@@ -1220,20 +1232,6 @@ export class ExtensionStore {
       delete snapshot.legacyProjectionRemainder;
     }
     return projectionHash(previous) !== projectionHash(remainder);
-  }
-
-  private reconcileLegacyProjectionRemainder(
-    snapshot: ExtensionStoreSnapshot,
-    legacy: AllExtensionsEnablementConfig,
-  ): AllExtensionsEnablementConfig {
-    const remainder = Object.create(null) as AllExtensionsEnablementConfig;
-    for (const name of Object.keys(snapshot.legacyProjectionRemainder ?? {})) {
-      const entry = Object.entries(legacy).find(
-        ([candidate]) => candidate.toLowerCase() === name.toLowerCase(),
-      );
-      if (entry) remainder[entry[0]] = { overrides: [...entry[1].overrides] };
-    }
-    return remainder;
   }
 
   private importLegacyProjection(
