@@ -205,14 +205,16 @@ export {
   buildRecordArtifactReminder,
   buildWorkspaceArtifactMetadata,
 } from './tools/write-file.js';
+export {
+  resolveBoundWorkspaceRoot,
+  toCanonicalWorkspaceArtifactPath,
+} from './utils/workspace-artifact-path.js';
 export type {
   ArtifactTool,
   ArtifactToolParams,
 } from './tools/artifact/artifact-tool.js';
-export type {
-  RecordArtifactTool,
-  RecordArtifactParams,
-} from './tools/record-artifact.js';
+export { RecordArtifactTool } from './tools/record-artifact.js';
+export type { RecordArtifactParams } from './tools/record-artifact.js';
 export type {
   ArtifactPublisher,
   PublishArtifactInput,
@@ -391,6 +393,7 @@ export * from './services/usage-dashboard-service.js';
 export * from './utils/bareMode.js';
 export * from './utils/safe-mode.js';
 export * from './utils/sanitize-child-env.js';
+export { isUnusableScriptEntry } from './utils/shellContextEnv.js';
 export * from './utils/toolResultDisplayCompaction.js';
 
 // ============================================================================
@@ -588,6 +591,7 @@ export * from './utils/pathReader.js';
 export * from './utils/paths.js';
 export * from './utils/projectSummary.js';
 export * from './utils/promptIdContext.js';
+export * from './utils/tool-result-boundary-diagnostics.js';
 export * from './utils/proxyUtils.js';
 export * from './utils/quotaErrorDetection.js';
 export * from './utils/rateLimit.js';
