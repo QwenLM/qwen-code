@@ -813,6 +813,23 @@ export function clearBudgetStop(planPath: string): void {
 }
 
 /**
+ * Remove the admission stamps beside the prompt records. Called by the
+ * `--resume` path in `fetch-pr`: the span from the interrupted attempt's last
+ * stamp to the continuation's first admission contains the death gap and the
+ * retry backoff, which would price a "round" at hours and refuse round 1 of a
+ * fresh deadline. Without stamps the gate falls back to its conservative
+ * constant — the failure direction is an early stop with a disclosure, never
+ * a kill-before-compose. Errors are swallowed like `clearBudgetStop`'s.
+ */
+export function clearRoundStamps(planPath: string): void {
+  try {
+    rmSync(join(promptRecordDir(planPath), STAMPS_FILE), { force: true });
+  } catch {
+    // Best-effort: stale stamps only make the gate MORE conservative.
+  }
+}
+
+/**
  * The refusal, spelled as the termination rule it is. Printed to stderr by
  * `agent-prompt` alongside exit code 4; the disclosure sentence matches the
  * `budget-stop.json` marker byte for byte, so both channels cap the verdict
