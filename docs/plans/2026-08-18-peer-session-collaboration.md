@@ -380,7 +380,7 @@ released after the 5 s lock stale window. No peer's death blocks any other peer.
 
 | Not building                             | Because                                                                                                                                                                        |
 | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| PTY attach, terminal multiplexing, panes | herdr does this for 17+ CLIs, Apache-2.0. See §8                                                                                                                               |
+| PTY attach, terminal multiplexing, panes | herdr does this for 17+ CLIs, Apache-2.0, and measured faster (§8). This is a position, not a settled fact: #7800 is building PTY workers natively — contested in §7.6         |
 | Hosting other vendors' processes         | That is becoming herdr. We publish a format; we host nothing                                                                                                                   |
 | A new roster UI                          | This design reuses `ui/components/agent-view/`. But #7803 is building a second one at `ui/agent-view/`, so "already exists" is not a settled reason — disposition follows §7.6 |
 | Remote / SSH / cross-machine             | Same-uid filesystem permissions **are** the security model. Off-machine voids it                                                                                               |
