@@ -1307,6 +1307,61 @@ describe('UiTelemetryService', () => {
       expect(global2.models['m']?.tokens.prompt).toBe(350);
     });
 
+    it('snapshotForReplay/restoreFromReplaySnapshot undo an abandoned replay', () => {
+      // Session A is live; the user runs /resume B and the swap fails after
+      // the replay but before the UI commits.
+      service.addEvent(makeApiEvent('m', 100), SESSION_A);
+      const snapshot = service.snapshotForReplay(SESSION_B);
+
+      service.resetSession(SESSION_B);
+      service.addEvent(makeApiEvent('m', 300), SESSION_B);
+      expect(service.getMetrics().models['m']?.tokens.prompt).toBe(400);
+
+      service.restoreFromReplaySnapshot(snapshot);
+
+      // The abandoned session's contribution is gone from the aggregate...
+      expect(service.getMetrics().models['m']?.tokens.prompt).toBe(100);
+      // ...the surviving session's live data is untouched...
+      expect(
+        service.getMetricsForSession(SESSION_A).models['m']?.tokens.prompt,
+      ).toBe(100);
+      // ...and the bucket the replay created is gone rather than left empty.
+      expect(service.getMetricsForSession(SESSION_B).models).toEqual({});
+    });
+
+    it('restoreFromReplaySnapshot puts back a pre-existing bucket, not an empty one', () => {
+      service.addEvent(makeApiEvent('m', 40), SESSION_B);
+      const snapshot = service.snapshotForReplay(SESSION_B);
+
+      service.resetSession(SESSION_B);
+      service.addEvent(makeApiEvent('m', 300), SESSION_B);
+      service.restoreFromReplaySnapshot(snapshot);
+
+      expect(
+        service.getMetricsForSession(SESSION_B).models['m']?.tokens.prompt,
+      ).toBe(40);
+      expect(service.getMetrics().models['m']?.tokens.prompt).toBe(40);
+    });
+
+    it('restoreFromReplaySnapshot restores closed-session state and prompt counts', () => {
+      service.addEvent(makeApiEvent('m', 10), SESSION_B);
+      service.removeSession(SESSION_B);
+      service.setLastPromptTokenCount(7);
+      const snapshot = service.snapshotForReplay(SESSION_B);
+
+      // A replay re-opens the closed session and moves the prompt count.
+      service.resetSession(SESSION_B);
+      service.addEvent(makeApiEvent('m', 300), SESSION_B);
+      service.setLastPromptTokenCount(999);
+
+      service.restoreFromReplaySnapshot(snapshot);
+
+      expect(service.getLastPromptTokenCount()).toBe(7);
+      // Closed again: a late event must not resurrect the bucket.
+      service.addEvent(makeApiEvent('m', 5), SESSION_B);
+      expect(service.getMetricsForSession(SESSION_B).models).toEqual({});
+    });
+
     it('#closedSessions should be bounded', () => {
       // Add more than MAX_CLOSED_SESSIONS
       for (let i = 0; i < 1005; i++) {

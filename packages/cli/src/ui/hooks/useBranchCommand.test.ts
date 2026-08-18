@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { useBranchCommand } from './useBranchCommand.js';
 import type { LoadedSettings } from '../../config/settings.js';
+import { uiTelemetryService } from '@qwen-code/qwen-code-core';
 
 const replayUiTelemetryEventsMock = vi.hoisted(() => vi.fn());
 
@@ -304,7 +305,13 @@ describe('useBranchCommand', () => {
     // branch, which clears every live session's bucket and keys nothing
     // under the fork, so the new Goal meter reads zero history.
     const forkedSessionId = replayUiTelemetryEventsMock.mock.calls[0][1];
-    expect(forkedSessionId).toEqual(expect.any(String));
+    // Pin the exact id, not `expect.any(String)`: keying both calls onto a
+    // wrong-but-consistent id (the parent's, captured before the swap) would
+    // satisfy a self-referential assertion while double-counting in
+    // production — `consumeUiTelemetryEventsReplayed(newSessionId)` compares
+    // for exact equality, misses a parent-keyed marker, and lets initialize()
+    // replay the forked history a second time.
+    expect(forkedSessionId).toBe(startNewSessionConfig.mock.calls[0][0]);
     expect(
       replayUiTelemetryEventsMock.mock.invocationCallOrder[0],
     ).toBeLessThan(getGoalRuntimeReady.mock.invocationCallOrder[0]!);
@@ -623,6 +630,12 @@ describe('useBranchCommand', () => {
       .mockRejectedValueOnce(new Error('init boom')) // fork init fails
       .mockResolvedValueOnce(undefined); // rollback re-init succeeds
     config.getGeminiClient = () => ({ initialize });
+    replayUiTelemetryEventsMock.mockClear();
+    const snapshotForReplay = vi.spyOn(uiTelemetryService, 'snapshotForReplay');
+    const restoreFromReplaySnapshot = vi.spyOn(
+      uiTelemetryService,
+      'restoreFromReplaySnapshot',
+    );
 
     const { result } = renderHook(() => useBranchCommand(makeOptions()));
     await act(async () => {
@@ -658,6 +671,24 @@ describe('useBranchCommand', () => {
       }),
       expect.any(Number),
     );
+
+    // The forked history was replayed into the process-wide aggregate before
+    // the step that failed. `resetSession` clears only the fork's bucket and
+    // the global `reset()` would wipe the parent's live data, so the rollback
+    // has to hand back the snapshot taken before the replay — otherwise the
+    // abandoned fork's tokens are billed to the process for good.
+    expect(snapshotForReplay.mock.invocationCallOrder[0]).toBeLessThan(
+      replayUiTelemetryEventsMock.mock.invocationCallOrder[0],
+    );
+    expect(restoreFromReplaySnapshot).toHaveBeenCalledWith(
+      snapshotForReplay.mock.results[0]!.value,
+    );
+    // Undone before the rollback re-init runs its own replay.
+    expect(restoreFromReplaySnapshot.mock.invocationCallOrder[0]).toBeLessThan(
+      startNewSessionConfig.mock.invocationCallOrder[1],
+    );
+    snapshotForReplay.mockRestore();
+    restoreFromReplaySnapshot.mockRestore();
   });
 
   it('still surfaces the error and leaves core on the parent when rollback re-init also throws', async () => {

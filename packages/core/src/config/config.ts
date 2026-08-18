@@ -1769,6 +1769,20 @@ export class Config {
   private restoredFileHistory = false;
   private goalRestoreActivation?: () => Promise<void>;
   private rejectGoalRestoreActivation?: (reason?: unknown) => void;
+  /**
+   * A cold-start Goal restore held back until the client has replayed the
+   * resumed session's telemetry into the session bucket. Fired by
+   * {@link startDeferredGoalRestore}; see
+   * {@link shouldDeferGoalRestoreForTelemetryReplay} for why.
+   */
+  private deferredGoalRestoreActivation?: () => void;
+  /**
+   * Set once `initializeInternal` has passed the client-init step, which is
+   * where a resumed session's stored telemetry is replayed into its bucket.
+   * Before that point the bucket is empty, so a Goal permit minted then would
+   * open its meter on 0 and bill the whole replayed history to its first turn.
+   */
+  private clientSessionTelemetryReplayed = false;
   private readonly sessionRuntimeBaseDir: string;
   private sessionProjectDirRegistered = false;
   private pendingSessionWriterLease?: SessionWriterLease;
@@ -3080,6 +3094,13 @@ export class Config {
     } else {
       this.debugLogger.info('Gemini client initialization skipped');
     }
+    // The resumed session's telemetry is in its bucket now (or was never
+    // going to be, when client init is skipped). A cold-start Goal restore
+    // held back for it can activate: its first turn opens the meter on the
+    // restored totals instead of on an empty bucket. Unconditional so the
+    // skip path cannot strand `getGoalRuntimeReady()`.
+    this.clientSessionTelemetryReplayed = true;
+    this.startDeferredGoalRestore();
 
     // Detect and capture runtime model snapshot (from CLI/ENV/credentials)
     this.modelsConfig.detectAndCaptureRuntimeModel();
@@ -5435,6 +5456,7 @@ export class Config {
         );
         this.goalRestoreActivation = undefined;
         this.rejectGoalRestoreActivation = undefined;
+        this.deferredGoalRestoreActivation = undefined;
         this.goalTurnHostUnbind?.();
         this.goalTurnHostUnbind = undefined;
         // Shutting down before the writer arrived: nothing will ever run
@@ -7880,6 +7902,7 @@ export class Config {
     );
     this.goalRestoreActivation = undefined;
     this.rejectGoalRestoreActivation = undefined;
+    this.deferredGoalRestoreActivation = undefined;
     this.goalTurnHostUnbind?.();
     this.goalTurnHostUnbind = undefined;
     // A runtime built here supersedes any restore still waiting on the
@@ -7950,12 +7973,89 @@ export class Config {
         this.pendingGoalRestore = { runtime, resolve, reject };
       });
       this.goalRuntimeReady = ready;
+    } else if (this.shouldDeferGoalRestoreForTelemetryReplay()) {
+      this.goalRuntimeReady = this.deferGoalRestoreActivation(
+        runtime,
+        records ?? [],
+      );
     } else {
       this.goalRuntimeReady = runtime
         .restore(records ?? [])
         .then(() => runtime);
     }
     void this.goalRuntimeReady.catch(() => undefined);
+  }
+
+  /**
+   * Whether a Goal restore starting now must wait for the client's telemetry
+   * replay before it is allowed to mint a continuation permit.
+   *
+   * On a cold `--resume` start the restore is kicked off from the Config
+   * constructor (or, under a session-writer lease, from
+   * `activateChatRecording()`), both strictly before `initializeInternal`
+   * reaches `geminiClient.initialize()` — which is where the stored telemetry
+   * is replayed into the session bucket. A permit minted in that window
+   * samples `readSessionTokens()` on an empty bucket, so when the first
+   * restored turn closes, the delta it bills is the entire replayed history
+   * plus the turn's own spend: a Goal resumed from a 200k-token session bills
+   * ~200k extra on its first turn, and that figure is persisted into
+   * `GoalRecord.tokensUsed`.
+   *
+   * The `/resume` and `/branch` hooks, the headless path and the ACP path all
+   * replay before they let the runtime activate; this closes the same gap on
+   * the cold-start entrance. It only applies to a resumed session — a fresh
+   * session has nothing to replay, and a swap-time restore (`startNewSession`)
+   * runs after the caller already replayed.
+   */
+  private shouldDeferGoalRestoreForTelemetryReplay(): boolean {
+    return (
+      !this.clientSessionTelemetryReplayed && this.sessionData !== undefined
+    );
+  }
+
+  /**
+   * Prepares the restore now — recovering the Goal state so
+   * `getGoalRuntimeReady()` waiters see it — while holding back the
+   * activation that lets the runtime queue a continuation. Mirrors the split
+   * the session-restore-projection path already uses.
+   */
+  private deferGoalRestoreActivation(
+    runtime: GoalRuntime,
+    records: readonly GoalRecoveryRecord[],
+  ): Promise<GoalRuntime> {
+    const preparation = runtime.prepareRestore(records);
+    this.deferredGoalRestoreActivation = () => {
+      void runtime.activateRestoredWork().catch((error: unknown) => {
+        this.debugLogger.error(
+          `Deferred goal restore activation failed: ${error}`,
+        );
+      });
+    };
+    // Readiness deliberately tracks preparation, not activation: the Goal
+    // state is recovered and every `getGoalRuntimeReady()` awaiter can
+    // proceed. Only the continuation permit waits — `restoreActivationPending`
+    // holds `queueContinuation` until activation. Gating readiness on
+    // activation instead would hang any resumed Config that never calls
+    // `initialize()`.
+    return preparation.then(() => runtime);
+  }
+
+  /**
+   * Release a restore held by {@link deferGoalRestoreActivation}. Called once
+   * the client-init step has replayed the resumed session's telemetry, so the
+   * restored Goal's first turn opens its meter on the restored totals.
+   */
+  private startDeferredGoalRestore(): void {
+    const activate = this.deferredGoalRestoreActivation;
+    this.deferredGoalRestoreActivation = undefined;
+    if (!activate) return;
+    try {
+      activate();
+    } catch (error) {
+      this.debugLogger.error(
+        `Deferred goal restore activation failed: ${error}`,
+      );
+    }
   }
 
   /**
@@ -7979,12 +8079,20 @@ export class Config {
       );
       return;
     }
-    void pending.runtime
-      .restore(this.sessionData?.conversation.messages ?? [])
-      .then(
+    const records = this.sessionData?.conversation.messages ?? [];
+    if (this.shouldDeferGoalRestoreForTelemetryReplay()) {
+      // Same cold-start window as the constructor path: this runs from
+      // `activateChatRecording()`, still ahead of the client's replay.
+      void this.deferGoalRestoreActivation(pending.runtime, records).then(
         () => pending.resolve(pending.runtime),
         (error: unknown) => pending.reject(error),
       );
+      return;
+    }
+    void pending.runtime.restore(records).then(
+      () => pending.resolve(pending.runtime),
+      (error: unknown) => pending.reject(error),
+    );
   }
 
   /**
@@ -8017,6 +8125,10 @@ export class Config {
     );
     this.goalRestoreActivation = undefined;
     this.rejectGoalRestoreActivation = undefined;
+    // A restore waiting on the client's telemetry replay can never activate
+    // once the restore is abandoned — drop it so a later swap's activation
+    // cannot fire against the outgoing runtime.
+    this.deferredGoalRestoreActivation = undefined;
   }
 
   private notifyChatRecordingFailure(event: ChatRecordingFailureEvent): void {

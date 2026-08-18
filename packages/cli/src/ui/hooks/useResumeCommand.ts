@@ -9,7 +9,9 @@ import {
   SessionService,
   buildSessionRecoveryPlan,
   replayUiTelemetryEventsFromConversation,
+  uiTelemetryService,
   type Config,
+  type UiTelemetryReplaySnapshot,
   type SessionListItem,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -115,6 +117,11 @@ export function useResumeCommand(
       let coreSwapped = false;
       let uiSwapped = false;
       let recoveredBackgroundAgentsNotice: string | null = null;
+      // Set only while a replay for this swap is outstanding, so the rollback
+      // below can undo it. The service has no subtraction API, so without
+      // this an abandoned resume leaves the incoming session's whole history
+      // in the process-wide aggregate for good.
+      let telemetryReplaySnapshot: UiTelemetryReplaySnapshot | undefined;
 
       try {
         const cwd = config.getTargetDir();
@@ -169,11 +176,32 @@ export function useResumeCommand(
         // the restored totals, then tell the client it is already done —
         // otherwise initialize() replays the same history a second time and
         // the process-wide usage aggregate carries two copies of it.
-        replayUiTelemetryEventsFromConversation(
-          sessionData.conversation,
-          sessionId,
-        );
-        config.markUiTelemetryEventsReplayed(sessionId);
+        //
+        // Resuming the session that is already current is the one case that
+        // must not replay. Nothing upstream excludes it (`/resume` lists the
+        // current session, and `startNewSession` documents same-id resume),
+        // and there the live per-session bucket is already the authority:
+        //   - replaying adds a second full copy of the history to the
+        //     process-wide aggregate, and the hand-off marker is never
+        //     consumed because `initialize()` early-returns for an
+        //     already-initialized session id — so `persistSessionUsage`
+        //     writes the session out at roughly double its real usage;
+        //   - the `resetSession` inside the replay first wipes the live
+        //     bucket and refills it from a snapshot loaded before the
+        //     recorder's queued writes landed, dropping both not-yet-flushed
+        //     events and internal-prompt side-query tokens, which
+        //     `recordUiTelemetryEventToChat` never persists at all.
+        // Before this feature the same-session path replayed nothing:
+        // `initialize()` early-returned. Keep that.
+        if (sessionId !== oldSessionId) {
+          telemetryReplaySnapshot =
+            uiTelemetryService.snapshotForReplay(sessionId);
+          replayUiTelemetryEventsFromConversation(
+            sessionData.conversation,
+            sessionId,
+          );
+          config.markUiTelemetryEventsReplayed(sessionId);
+        }
         await waitForGoalRuntime(config);
         // Rebuild turn boundary tracking so rewind works within resumed sessions.
         config
@@ -214,6 +242,26 @@ export function useResumeCommand(
         remount?.();
       } catch (error) {
         if (coreSwapped && !uiSwapped) {
+          // Undo the replay first. Rolling core back does not touch the
+          // usage aggregate — `resetSession` clears only the abandoned
+          // session's bucket and the global `reset()` would wipe the
+          // surviving session's live data — so without this the process
+          // carries a full extra copy of the abandoned session's history
+          // until it exits, and `persistSessionUsage` writes it out.
+          if (telemetryReplaySnapshot) {
+            try {
+              uiTelemetryService.restoreFromReplaySnapshot(
+                telemetryReplaySnapshot,
+              );
+            } catch (restoreErr) {
+              config
+                .getDebugLogger()
+                .warn(
+                  `Telemetry rollback after failed /resume init failed: ${restoreErr}`,
+                );
+            }
+            telemetryReplaySnapshot = undefined;
+          }
           // Core switched to the resumed session but UI hasn't swapped
           // yet — put core back on the old session, otherwise the
           // recorder would keep writing new user messages into the

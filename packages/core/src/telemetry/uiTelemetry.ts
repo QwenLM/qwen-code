@@ -188,6 +188,33 @@ const createInitialMetrics = (): SessionMetrics => ({
   skills: createInitialSkillMetrics(),
 });
 
+/**
+ * The slice of telemetry state a session-swap replay overwrites.
+ *
+ * `/resume` and `/branch` replay the incoming session's stored history into
+ * the aggregate *before* the steps that can still fail (the Goal-runtime
+ * wait, client init), because the Goal meter has to open on the restored
+ * totals. Their catch blocks roll core back to the old session, but the
+ * service has no subtraction API — `resetSession` clears one bucket and
+ * `reset()` would take the surviving session's live data with it — so an
+ * abandoned swap would otherwise leak a full copy of the dead session's
+ * history into the process-wide totals for the life of the process, and
+ * `persistSessionUsage` would later write that inflated figure out.
+ *
+ * Take one with {@link UiTelemetryService.snapshotForReplay} immediately
+ * before replaying and hand it back to
+ * {@link UiTelemetryService.restoreFromReplaySnapshot} on the rollback path.
+ */
+export interface UiTelemetryReplaySnapshot {
+  readonly metrics: SessionMetrics;
+  readonly sessionId: string;
+  /** Absent when the session had no bucket yet — restore removes it again. */
+  readonly sessionMetrics: SessionMetrics | undefined;
+  readonly sessionWasClosed: boolean;
+  readonly lastPromptTokenCount: number;
+  readonly lastCachedContentTokenCount: number;
+}
+
 export class UiTelemetryService extends EventEmitter {
   static readonly #MAX_CLOSED_SESSIONS = 1000;
   #metrics: SessionMetrics = createInitialMetrics();
@@ -267,6 +294,58 @@ export class UiTelemetryService extends EventEmitter {
 
   setLastCachedContentTokenCount(count: number): void {
     this.#lastCachedContentTokenCount = count;
+  }
+
+  /**
+   * Captures everything a session replay is about to overwrite, so a session
+   * swap that fails after replaying can put the aggregate back.
+   *
+   * See {@link UiTelemetryReplaySnapshot} for why a snapshot is the only
+   * compensation available.
+   */
+  snapshotForReplay(sessionId: string): UiTelemetryReplaySnapshot {
+    const sessionMetrics = this.#sessionMetrics.get(sessionId);
+    return {
+      metrics: structuredClone(this.#metrics),
+      sessionId,
+      sessionMetrics: sessionMetrics
+        ? structuredClone(sessionMetrics)
+        : undefined,
+      sessionWasClosed: this.#closedSessions.has(sessionId),
+      lastPromptTokenCount: this.#lastPromptTokenCount,
+      lastCachedContentTokenCount: this.#lastCachedContentTokenCount,
+    };
+  }
+
+  /**
+   * Puts back the state {@link snapshotForReplay} captured, undoing a replay
+   * whose session swap was abandoned. Only the snapshotted session's bucket
+   * is touched — every other session's live data survives, which is what
+   * makes this usable on a rollback path where the old session is still live.
+   */
+  restoreFromReplaySnapshot(snapshot: UiTelemetryReplaySnapshot): void {
+    this.#metrics = structuredClone(snapshot.metrics);
+    if (snapshot.sessionMetrics) {
+      this.#sessionMetrics.set(
+        snapshot.sessionId,
+        structuredClone(snapshot.sessionMetrics),
+      );
+    } else {
+      // No bucket existed before the replay; the replay created one. Drop it
+      // rather than leave an empty bucket that reads as a live session.
+      this.#sessionMetrics.delete(snapshot.sessionId);
+    }
+    if (snapshot.sessionWasClosed) {
+      this.#closedSessions.add(snapshot.sessionId);
+    } else {
+      this.#closedSessions.delete(snapshot.sessionId);
+    }
+    this.#lastPromptTokenCount = snapshot.lastPromptTokenCount;
+    this.#lastCachedContentTokenCount = snapshot.lastCachedContentTokenCount;
+    this.emit('update', {
+      metrics: this.#metrics,
+      lastPromptTokenCount: this.#lastPromptTokenCount,
+    });
   }
 
   /**

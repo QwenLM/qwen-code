@@ -11,6 +11,7 @@ import {
   useResumeCommand,
 } from './useResumeCommand.js';
 import { useHistory } from './useHistoryManager.js';
+import { uiTelemetryService } from '@qwen-code/qwen-code-core';
 
 import type { Content } from '@google/genai';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -772,6 +773,12 @@ describe('useResumeCommand', () => {
   });
 
   it('rolls core back when persisted Goal state is malformed', async () => {
+    replayUiTelemetryEventsMock.mockClear();
+    const snapshotForReplay = vi.spyOn(uiTelemetryService, 'snapshotForReplay');
+    const restoreFromReplaySnapshot = vi.spyOn(
+      uiTelemetryService,
+      'restoreFromReplaySnapshot',
+    );
     const startNewSession = vi.fn();
     const geminiClient = {
       initialize: vi.fn().mockResolvedValue(undefined),
@@ -860,5 +867,103 @@ describe('useResumeCommand', () => {
       expect.any(Number),
     );
     expect(geminiClient.initialize).not.toHaveBeenCalled();
+
+    // The replay ran before the step that failed, and the service has no
+    // subtraction API — so the rollback has to hand back the snapshot taken
+    // before it. Without this the process-wide aggregate keeps a full copy of
+    // the abandoned session's history and `persistSessionUsage` writes it out.
+    expect(snapshotForReplay).toHaveBeenCalledWith('new-session-id');
+    expect(snapshotForReplay.mock.invocationCallOrder[0]).toBeLessThan(
+      replayUiTelemetryEventsMock.mock.invocationCallOrder[0],
+    );
+    expect(restoreFromReplaySnapshot).toHaveBeenCalledWith(
+      snapshotForReplay.mock.results[0]!.value,
+    );
+    // Undone before core is put back, so the rollback's own bookkeeping is
+    // the last word.
+    expect(restoreFromReplaySnapshot.mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(config.startNewSession).mock.invocationCallOrder[1],
+    );
+    snapshotForReplay.mockRestore();
+    restoreFromReplaySnapshot.mockRestore();
+  });
+
+  it('does not replay telemetry when resuming the session already current', async () => {
+    replayUiTelemetryEventsMock.mockClear();
+    resumeMocks.reset();
+
+    const startNewSession = vi.fn();
+    const geminiClient = {
+      initialize: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const config = {
+      getSessionId: () => 'current-session-id',
+      getTargetDir: () => '/tmp',
+      getGeminiClient: () => geminiClient,
+      startNewSession: vi.fn(),
+      markUiTelemetryEventsReplayed: vi.fn(),
+      getGoalRuntimeReady: vi.fn().mockResolvedValue({}),
+      getBackgroundTaskRegistry: () => ({
+        hasRunningTasks: vi.fn().mockReturnValue(false),
+        reset: vi.fn(),
+      }),
+      getBackgroundShellRegistry: () => ({
+        getAll: vi.fn().mockReturnValue([]),
+        hasRunningEntries: vi.fn().mockReturnValue(false),
+        reset: vi.fn(),
+      }),
+      getMonitorRegistry: () => ({
+        getRunning: vi.fn().mockReturnValue([]),
+        reset: vi.fn(),
+      }),
+      getWorkflowRunRegistry: () => ({
+        hasRunningEntries: vi.fn().mockReturnValue(false),
+        reset: vi.fn(),
+        abortAll: vi.fn(),
+      }),
+      loadPausedBackgroundAgents: vi.fn().mockResolvedValue([]),
+      getChatRecordingService: () => ({ rebuildTurnBoundaries: vi.fn() }),
+      getDebugLogger: () => ({
+        warn: vi.fn(),
+        debug: vi.fn(),
+        error: vi.fn(),
+      }),
+    } as unknown as import('@qwen-code/qwen-code-core').Config;
+
+    const historyManager = {
+      addItem: vi.fn(),
+      clearItems: vi.fn(),
+      loadHistory: vi.fn(),
+    };
+
+    const { result } = renderHook(() =>
+      useResumeCommand({
+        config,
+        settings: mockSettings,
+        historyManager,
+        startNewSession,
+      }),
+    );
+
+    await act(async () => {
+      await result.current.handleResume('current-session-id');
+    });
+
+    // Same-id resume is supported and the live per-session bucket is already
+    // the authority. Replaying would (a) add a second full copy of the
+    // history to the process-wide aggregate that nothing consumes the
+    // hand-off marker for — `initialize()` early-returns for an
+    // already-initialized session — and (b) wipe the live bucket and refill
+    // it from a snapshot that predates the recorder's queued writes and
+    // never contains internal-prompt side-query tokens at all.
+    expect(replayUiTelemetryEventsMock).not.toHaveBeenCalled();
+    expect(config.markUiTelemetryEventsReplayed).not.toHaveBeenCalled();
+    // The resume itself still runs.
+    expect(config.startNewSession).toHaveBeenCalledWith(
+      'current-session-id',
+      expect.any(Object),
+    );
+    expect(startNewSession).toHaveBeenCalledWith('current-session-id');
   });
 });

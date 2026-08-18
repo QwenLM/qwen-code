@@ -105,6 +105,7 @@ import {
   GoalPersistenceUnavailableError,
   type GoalTurnHost,
 } from '../goals/goal-runtime.js';
+import type { GoalTurnPermit } from '../goals/goal-protocol.js';
 import {
   getSessionWriterLockPath,
   SessionTranscriptChangedError,
@@ -2697,6 +2698,73 @@ describe('Server Config (config.ts)', () => {
       ).toBe(true);
     });
 
+    it('opens a cold-resumed Goal meter on the replayed totals, not an empty bucket', async () => {
+      const sessionId = 'cold-resume-session';
+      const telemetry = new UiTelemetryService();
+      vi.mocked(uiTelemetryService.getMetricsForSession).mockImplementation(
+        (requestedSessionId) =>
+          telemetry.getMetricsForSession(requestedSessionId),
+      );
+      const apiResponse = (
+        totalTokens: number,
+      ): ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE } =>
+        ({
+          'event.name': EVENT_API_RESPONSE,
+          model: 'model-a',
+          duration_ms: 1,
+          input_token_count: totalTokens - 15,
+          output_token_count: 15,
+          total_token_count: totalTokens,
+          cached_content_token_count: 0,
+          thoughts_token_count: 0,
+        }) as ApiResponseEvent & {
+          'event.name': typeof EVENT_API_RESPONSE;
+        };
+
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        sessionId,
+        sessionData: resumedGoalSession('active'),
+      });
+      const recorder = config.getChatRecordingService();
+      if (!recorder) throw new Error('expected a chat recording service');
+      vi.spyOn(recorder, 'recordGoalState').mockResolvedValue({} as ChatRecord);
+
+      let permit: GoalTurnPermit | undefined;
+      config.bindGoalTurnHost({
+        startGoalTurn: vi.fn(async (input) => {
+          permit = input.permit;
+        }),
+        preemptGoalTurn: vi.fn(),
+      });
+      const runtime = await config.getGoalRuntimeReady();
+
+      // The constructor kicked the restore off, but the client has not
+      // replayed the resumed session's telemetry into the bucket yet. A
+      // permit minted now would open its meter on 0.
+      expect(permit).toBeUndefined();
+
+      // What `GeminiClient.initialize()` does for a resumed session, deep
+      // inside `initializeInternal`.
+      telemetry.addEvent(apiResponse(200_000), sessionId);
+
+      await config.initialize();
+      await vi.waitFor(() => expect(permit).toBeDefined());
+
+      // The restored turn's own spend.
+      telemetry.addEvent(apiResponse(500), sessionId);
+      await runtime.finishTurn(permit!);
+
+      // 500, not 200_500: the replayed history belongs to the session that
+      // was interrupted, not to the first turn after the resume.
+      expect(runtime.getSnapshot().goal?.tokensUsed).toBe(500);
+
+      // `clearAllMocks` between tests clears call history, not
+      // implementations — leave the shared meter mock as this file found it.
+      vi.mocked(uiTelemetryService.getMetricsForSession).mockReset();
+    });
+
     it('rebinds the current Goal host to every replacement runtime', async () => {
       const config = new Config({
         ...baseParams,
@@ -2713,6 +2781,12 @@ describe('Server Config (config.ts)', () => {
 
       config.bindGoalTurnHost(host);
       await config.getGoalRuntimeReady();
+      // A cold-start restore does not mint its permit until initialize() has
+      // let the client replay the resumed session's telemetry — otherwise the
+      // meter opens on an empty bucket and the first restored turn bills the
+      // whole replayed history.
+      expect(started).toEqual([]);
+      await config.initialize();
       await vi.waitFor(() => expect(started).toEqual(['g-resumed']));
 
       config.startNewSession(
