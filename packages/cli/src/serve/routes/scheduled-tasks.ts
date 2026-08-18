@@ -107,12 +107,13 @@ export interface ScheduledTasksSessionBridge {
   ): unknown;
   /** Live summary for one session by id. Throws `SessionNotFoundError` when
    * no live session with that id exists on this daemon. Used to validate a
-   * caller-provided session (workspace, idle, archived) before binding it to
-   * a new task. */
+   * caller-provided session (workspace, idle) before binding it to a new
+   * task. Archiving removes a session from the live map, so archived (and
+   * otherwise persisted-but-not-live) ids surface as `SessionNotFoundError`
+   * and are classified by the route's on-disk location probe instead. */
   getSessionSummary(sessionId: string): {
     workspaceCwd: string;
     hasActivePrompt: boolean;
-    isArchived?: boolean;
   };
 }
 
@@ -592,6 +593,24 @@ function registerScheduledTaskCrudRoutes(
       // True only when THIS route minted the bound session (and must tear it
       // back down if the create fails). False for a caller-provided session.
       let sessionMintedHere = false;
+      // Best-effort ⏰ rename shared by both binding modes — the mint path
+      // calls it before the cron write, the reuse path strictly after commit
+      // (that timing difference is the intentional part and stays at the
+      // call sites). One copy so the naming payload can't drift between
+      // minted and reused task sessions.
+      const nameBoundSession = async () => {
+        if (!bridge) return;
+        try {
+          await runWithScheduledTaskTarget(target, async () =>
+            bridge.updateSessionMetadata(boundSessionId!, {
+              displayName: scheduledTaskSessionName(nameResult.value ?? prompt),
+            }),
+          );
+        } catch {
+          // metadata update is non-critical — a rename failure must not fail
+          // the create; the keepalive names bound sessions anyway.
+        }
+      };
       if (providedSessionId !== undefined && !bridge) {
         // Fail closed: silently creating an UNBOUND task would give the caller
         // a materially different task from the one it asked for.
@@ -605,10 +624,20 @@ function registerScheduledTaskCrudRoutes(
       if (bridge) {
         if (providedSessionId !== undefined) {
           // Validate the caller's session BEFORE any write.
+          // Two lookup failures share one response shape; keep the body in
+          // one place so the copies can't drift.
+          const sendSessionLookupFailed = (detail: string, err: unknown) => {
+            writeStderrLine(
+              `qwen serve: POST ${base} ${detail} '${providedSessionId}': ${err instanceof Error ? err.message : String(err)}`,
+            );
+            res.status(500).json({
+              error: 'Failed to look up the requested session',
+              code: 'scheduled_tasks_session_failed',
+            });
+          };
           let summary: {
             workspaceCwd: string;
             hasActivePrompt: boolean;
-            isArchived?: boolean;
           };
           try {
             summary = await runWithScheduledTaskTarget(target, () =>
@@ -616,17 +645,38 @@ function registerScheduledTaskCrudRoutes(
             );
           } catch (err) {
             if (err instanceof SessionNotFoundError) {
-              // Archiving removes a session from the live map first, so an
-              // archived id surfaces here instead of in `isArchived`. Consult
-              // the persisted location so the documented 409 still reaches
-              // the caller; anything not on disk either is genuinely gone.
+              // Archiving removes a session from the live map first, and
+              // persisted-but-not-live sessions (the routine state after a
+              // daemon restart or idle reaping) are absent from it too.
+              // Probe the persisted location so every on-disk state reaches
+              // the caller as a machine-actionable classification; only an
+              // id with nothing on disk is genuinely gone (404).
+              const sessionService = new SessionService(workspaceCwd, {
+                runtimeBaseDir: target.runtimeBaseDir,
+              });
               let location: SessionLocation;
               try {
                 location = await runWithScheduledTaskTarget(target, () =>
-                  new SessionService(workspaceCwd, {
-                    runtimeBaseDir: target.runtimeBaseDir,
-                  }).getSessionLocation(providedSessionId),
+                  sessionService.getSessionLocation(providedSessionId),
                 );
+                if (location === undefined) {
+                  // Legacy CLI sessions may be persisted with an uppercase
+                  // UUID spelling while caller ids are canonicalized to
+                  // lowercase; mirror session-id-admission's fallback so
+                  // those still resolve on case-sensitive filesystems.
+                  const legacyId = await runWithScheduledTaskTarget(
+                    target,
+                    () =>
+                      sessionService.findSessionIdIgnoringCase(
+                        providedSessionId,
+                      ),
+                  );
+                  if (legacyId !== undefined) {
+                    location = await runWithScheduledTaskTarget(target, () =>
+                      sessionService.getSessionLocation(legacyId),
+                    );
+                  }
+                }
               } catch {
                 location = undefined;
               }
@@ -638,19 +688,29 @@ function registerScheduledTaskCrudRoutes(
                 });
                 return;
               }
+              if (location === 'active' || location === 'conflict') {
+                // The session exists on disk but is not live on this daemon
+                // (only task-bound sessions are rehydrated at startup).
+                // Reserve 404 for ids that are genuinely gone so clients
+                // branching on `session_not_found` are not told an existing
+                // resumable session does not exist.
+                res.status(409).json({
+                  error:
+                    'The requested session is not live on this daemon; load it before binding it to a task',
+                  code:
+                    location === 'conflict'
+                      ? 'session_conflict'
+                      : 'session_not_live',
+                });
+                return;
+              }
               res.status(404).json({
                 error: `Session '${providedSessionId}' was not found`,
                 code: 'session_not_found',
               });
               return;
             }
-            writeStderrLine(
-              `qwen serve: POST ${base} failed to look up session '${providedSessionId}': ${err instanceof Error ? err.message : String(err)}`,
-            );
-            res.status(500).json({
-              error: 'Failed to look up the requested session',
-              code: 'scheduled_tasks_session_failed',
-            });
+            sendSessionLookupFailed('failed to look up session', err);
             return;
           }
           let sameWorkspace = false;
@@ -663,28 +723,22 @@ function registerScheduledTaskCrudRoutes(
             // here is a real filesystem failure (EACCES/EIO/ELOOP/ESTALE).
             // Surface it as a retryable 500 instead of a misleading
             // workspace-mismatch 400.
-            writeStderrLine(
-              `qwen serve: POST ${base} failed to resolve workspace paths for session '${providedSessionId}': ${err instanceof Error ? err.message : String(err)}`,
+            sendSessionLookupFailed(
+              'failed to resolve workspace paths for session',
+              err,
             );
-            res.status(500).json({
-              error: 'Failed to look up the requested session',
-              code: 'scheduled_tasks_session_failed',
-            });
             return;
           }
           if (!sameWorkspace) {
+            // Unreachable under production daemon wiring — one bridge serves
+            // exactly one workspace runtime, so a cross-workspace id throws
+            // SessionNotFoundError and is answered above before this runs.
+            // Kept as a defense for the structural bridge interface (a
+            // multi-workspace embedder can serve foreign sessions here).
             res.status(400).json({
               error:
                 "The requested session belongs to a different workspace; use that workspace's scheduled-task endpoint",
               code: 'session_workspace_mismatch',
-            });
-            return;
-          }
-          if (summary.isArchived === true) {
-            res.status(409).json({
-              error:
-                'The requested session is archived; unarchive it before binding it to a task',
-              code: 'session_archived',
             });
             return;
           }
@@ -756,17 +810,7 @@ function registerScheduledTaskCrudRoutes(
             }
             // Name the session after the task so it's recognizable in the session
             // list. Best-effort — a nameless session still fires correctly.
-            try {
-              await runWithScheduledTaskTarget(target, async () =>
-                bridge.updateSessionMetadata(boundSessionId!, {
-                  displayName: scheduledTaskSessionName(
-                    nameResult.value ?? prompt,
-                  ),
-                }),
-              );
-            } catch {
-              // metadata update is non-critical
-            }
+            await nameBoundSession();
           } catch (err) {
             if (sendActivityGateError(res, err)) return;
             if (sendGenerationClosedError(res, err)) return;
@@ -892,19 +936,9 @@ function registerScheduledTaskCrudRoutes(
       }
       if (providedSessionId !== undefined && bridge) {
         // Name the reused session after the task — like a minted one, but
-        // strictly after the cron write commits, so no failure path leaves
+        // strictly AFTER the cron write commits, so no failure path leaves
         // the caller's pre-existing session renamed with no owning task.
-        // Best-effort — a rename failure must not fail the committed create;
-        // the keepalive names bound sessions anyway.
-        try {
-          await runWithScheduledTaskTarget(target, async () =>
-            bridge.updateSessionMetadata(boundSessionId!, {
-              displayName: scheduledTaskSessionName(nameResult.value ?? prompt),
-            }),
-          );
-        } catch {
-          // metadata update is non-critical
-        }
+        await nameBoundSession();
       }
       if (task.delivery && task.sessionId) {
         channelDeliveryAuthorizations?.registerScheduledTask(workspaceCwd, {
@@ -1659,7 +1693,13 @@ function parseSessionIdField(raw: unknown): {
   );
   if (parsed.kind === 'absent') return { value: undefined };
   if (parsed.kind === 'invalid') {
-    return { error: '`sessionId` must be a valid session id' };
+    // Same actionable grammar hint as the sibling caller-id surfaces
+    // (POST /session and ACP session/new), so a malformed id gets one
+    // consistent, machine-translatable answer everywhere.
+    return {
+      error:
+        '`sessionId` must be an RFC UUID v1-v5 (e.g. "550e8400-e29b-41d4-a716-446655440000")',
+    };
   }
   return { value: parsed.sessionId };
 }

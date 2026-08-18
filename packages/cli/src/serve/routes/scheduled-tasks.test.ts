@@ -48,6 +48,10 @@ const BUSY_SESSION_ID = '10000000-0000-4000-8000-000000000004';
 const ARCHIVED_SESSION_ID = '10000000-0000-4000-8000-000000000005';
 const SECONDARY_SESSION_ID = '10000000-0000-4000-8000-000000000006';
 const PRIMARY_SESSION_ID = '10000000-0000-4000-8000-000000000007';
+// Contains cased hex letters so uppercase/lowercase spellings actually differ
+// (digit-only fixtures are byte-identical across case changes and can't pin
+// case normalization).
+const CASED_SESSION_ID = 'abcdef00-0000-4000-8000-000000000003';
 
 /** Stub session bridge: mints sequential fake session ids and records spawns /
  * closes so tests can assert binding and rollback without a real child. */
@@ -67,7 +71,6 @@ interface StubBridge {
     sessionId: string;
     workspaceCwd: string;
     hasActivePrompt: boolean;
-    isArchived?: boolean;
   };
   /** The sessions the stub reports as live (for getSessionSummary). */
   liveSessions: Map<
@@ -76,7 +79,6 @@ interface StubBridge {
       sessionId: string;
       workspaceCwd: string;
       hasActivePrompt: boolean;
-      isArchived?: boolean;
     }
   >;
   markSessionCatalogChanged: ReturnType<typeof vi.fn>;
@@ -197,6 +199,28 @@ async function makeHarness(
 async function teardown(h: Harness): Promise<void> {
   Storage.setRuntimeBaseDir(null);
   await fsp.rm(h.scratch, { recursive: true, force: true });
+}
+
+/** Writes a minimal persisted session file for `sessionId` in the given
+ * archive state so the route's disk-location probe can classify it. Used by
+ * the not-found fallback tests, where the (stub) bridge reports no live
+ * session and only the on-disk state decides the response. */
+async function writePersistedSession(
+  h: Harness,
+  sessionId: string,
+  state: 'active' | 'archived',
+): Promise<void> {
+  const dir = path.join(
+    new Storage(h.workspace, h.scratch).getProjectDir(),
+    'chats',
+    ...(state === 'archived' ? ['archive'] : []),
+  );
+  await fsp.mkdir(dir, { recursive: true });
+  await fsp.writeFile(
+    path.join(dir, `${sessionId}.jsonl`),
+    `${JSON.stringify({ cwd: h.workspace })}\n`,
+    'utf8',
+  );
 }
 
 function closeGenerationDuringCronCommit(): WorkspaceRuntime['generationGuard'] {
@@ -707,13 +731,15 @@ describe('scheduled-tasks routes', () => {
     expect(await readCronTasks(h.workspace)).toEqual([]);
   });
 
-  it('rejects an archived session with 409 session_archived', async () => {
-    h.bridge.liveSessions.set(ARCHIVED_SESSION_ID, {
-      sessionId: ARCHIVED_SESSION_ID,
-      workspaceCwd: h.workspace,
-      hasActivePrompt: false,
-      isArchived: true,
-    });
+  it('rejects an archived session the bridge only reports as not-found', async () => {
+    // Production archiving removes the session from the live map first, so
+    // the bridge throws SessionNotFoundError; the route must still surface
+    // the documented 409 by consulting the persisted location on disk. The
+    // runtime-enabled harness gives the target a runtimeBaseDir, which the
+    // lookup needs to find the workspace's persisted sessions.
+    await teardown(h);
+    h = await makeHarness(true);
+    await writePersistedSession(h, ARCHIVED_SESSION_ID, 'archived');
     const res = await create({
       cron: '0 9 * * *',
       prompt: 'p',
@@ -724,31 +750,56 @@ describe('scheduled-tasks routes', () => {
     expect(await readCronTasks(h.workspace)).toEqual([]);
   });
 
-  it('rejects an archived session the bridge only reports as not-found', async () => {
-    // Production archiving removes the session from the live map first
-    // (toSessionSummary never populates isArchived), so the bridge throws
-    // SessionNotFoundError; the route must still surface the documented 409
-    // by consulting the persisted location on disk. The runtime-enabled
-    // harness gives the target a runtimeBaseDir, which the lookup needs to
-    // find the workspace's persisted sessions.
+  it('rejects a persisted-but-not-live session with 409 session_not_live', async () => {
+    // After a daemon restart only task-bound sessions are rehydrated, so a
+    // plainly persisted session is 'active' on disk but not live in the
+    // bridge. The probe must answer 409 session_not_live — NOT 404 — so
+    // clients branching on `session_not_found` are not told an existing,
+    // resumable session is gone.
     await teardown(h);
     h = await makeHarness(true);
-    const archivedFile = path.join(
-      new Storage(h.workspace, h.scratch).getProjectDir(),
-      'chats',
-      'archive',
-      `${ARCHIVED_SESSION_ID}.jsonl`,
-    );
-    await fsp.mkdir(path.dirname(archivedFile), { recursive: true });
-    await fsp.writeFile(
-      archivedFile,
-      `${JSON.stringify({ cwd: h.workspace })}\n`,
-      'utf8',
-    );
+    await writePersistedSession(h, SECONDARY_SESSION_ID, 'active');
     const res = await create({
       cron: '0 9 * * *',
       prompt: 'p',
-      sessionId: ARCHIVED_SESSION_ID,
+      sessionId: SECONDARY_SESSION_ID,
+    });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('session_not_live');
+    expect(await readCronTasks(h.workspace)).toEqual([]);
+  });
+
+  it('rejects a conflicted persisted session with 409 session_conflict', async () => {
+    // A session file present in BOTH states classifies as 'conflict'; the
+    // probe maps it to the sibling `session_conflict` code instead of 404.
+    await teardown(h);
+    h = await makeHarness(true);
+    await writePersistedSession(h, SECONDARY_SESSION_ID, 'active');
+    await writePersistedSession(h, SECONDARY_SESSION_ID, 'archived');
+    const res = await create({
+      cron: '0 9 * * *',
+      prompt: 'p',
+      sessionId: SECONDARY_SESSION_ID,
+    });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('session_conflict');
+    expect(await readCronTasks(h.workspace)).toEqual([]);
+  });
+
+  it('classifies a legacy uppercase-spelled session via the case-insensitive fallback', async () => {
+    // Legacy CLI sessions may be persisted with `uuidgen`'s uppercase
+    // spelling while caller ids are canonicalized to lowercase. On a
+    // case-sensitive filesystem the exact-spelling probe misses the file;
+    // the findSessionIdIgnoringCase fallback (mirroring
+    // session-id-admission) must still classify it as archived rather than
+    // answering a false session_not_found.
+    await teardown(h);
+    h = await makeHarness(true);
+    await writePersistedSession(h, CASED_SESSION_ID.toUpperCase(), 'archived');
+    const res = await create({
+      cron: '0 9 * * *',
+      prompt: 'p',
+      sessionId: CASED_SESSION_ID,
     });
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('session_archived');
@@ -856,15 +907,34 @@ describe('scheduled-tasks routes', () => {
     });
     expect(padded.status).toBe(201);
     expect(padded.body.sessionId).toBe(CALLER_SESSION_ID);
+
+    // Positive case-normalization discriminator: a live session keyed by the
+    // lowercase spelling must be found — and bound with the normalized
+    // lowercase id — when the caller posts an uppercase spelling. A fixture
+    // with cased hex letters is required: digit-only ids are byte-identical
+    // across case changes, so they cannot catch a dropped lowercase step.
+    h.bridge.liveSessions.set(CASED_SESSION_ID, {
+      sessionId: CASED_SESSION_ID,
+      workspaceCwd: h.workspace,
+      hasActivePrompt: false,
+    });
     const upper = await create({
       cron: '0 10 * * *',
       prompt: 'q',
-      sessionId: OTHER_SESSION_ID.toUpperCase(),
+      sessionId: CASED_SESSION_ID.toUpperCase(),
     });
-    // A different (uppercase-spelled) session id that is NOT live → 404, and
-    // the lookup happened with the normalized lowercase spelling.
-    expect(upper.status).toBe(404);
-    expect(upper.body.code).toBe('session_not_found');
+    expect(upper.status).toBe(201);
+    expect(upper.body.sessionId).toBe(CASED_SESSION_ID);
+
+    // A genuinely absent id still 404s (looked up by its normalized
+    // lowercase spelling).
+    const missing = await create({
+      cron: '0 11 * * *',
+      prompt: 'r',
+      sessionId: MISSING_SESSION_ID,
+    });
+    expect(missing.status).toBe(404);
+    expect(missing.body.code).toBe('session_not_found');
   });
 
   it('rejects sessionId when session management is unavailable (no bridge)', async () => {
@@ -907,6 +977,32 @@ describe('scheduled-tasks routes', () => {
     // The ⏰ rename happens only after the write commits — a failed create
     // must not leave the caller's session renamed with no owning task.
     expect(h.bridge.named).toEqual([]);
+  });
+
+  it('keeps a committed create when the post-commit rename fails', async () => {
+    // Pins the documented invariant on the reuse path's post-commit rename:
+    // a transient updateSessionMetadata failure (catalog rebuild, bridge
+    // mid-restart) right after the cron write commits must NOT turn the
+    // successful 201 into a 500 — the task exists on disk, and a retry would
+    // then fail with session_already_bound for a task that was created.
+    h.bridge.liveSessions.set(CALLER_SESSION_ID, {
+      sessionId: CALLER_SESSION_ID,
+      workspaceCwd: h.workspace,
+      hasActivePrompt: false,
+    });
+    h.bridge.updateSessionMetadata = vi.fn(async () => {
+      throw new Error('metadata backend unavailable');
+    });
+    const res = await create({
+      cron: '0 9 * * *',
+      prompt: 'p',
+      sessionId: CALLER_SESSION_ID,
+    });
+    expect(res.status).toBe(201);
+    const tasks = await readCronTasks(h.workspace);
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]?.sessionId).toBe(CALLER_SESSION_ID);
+    expect(h.bridge.named).toEqual([]); // rename swallowed, not rethrown
   });
 
   it('rejects over-cap creates with a caller-provided sessionId too', async () => {
