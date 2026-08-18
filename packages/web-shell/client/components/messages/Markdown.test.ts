@@ -9,6 +9,7 @@ import {
   type WebShellCodeBlockRenderInfo,
 } from '../../customization';
 import { I18nProvider } from '../../i18n';
+import { TOAST_REQUEST_EVENT, type ToastRequestDetail } from '../ToastHost';
 import { ThemeProvider } from '../../themeContext';
 import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
 import * as EnhancedTableModule from './EnhancedMarkdownTable';
@@ -99,6 +100,10 @@ describe('isSafeImageSrc', () => {
 
   it('allows data:image/webp base64', () => {
     expect(isSafeImageSrc('data:image/webp;base64,UklG')).toBe(true);
+  });
+
+  it('allows data:image/bmp base64', () => {
+    expect(isSafeImageSrc('data:image/bmp;base64,Qk0=')).toBe(true);
   });
 
   it('blocks data:image/svg+xml (can load external resources)', () => {
@@ -1577,5 +1582,120 @@ describe('Markdown streaming throttle', () => {
       root.unmount();
     });
     container.remove();
+  });
+});
+
+describe('external links in the desktop shell', () => {
+  type TauriWindow = { __TAURI__?: { core?: { invoke?: unknown } } };
+
+  function renderMd(content: string): HTMLDivElement {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        createElement(
+          I18nProvider,
+          { language: 'en' },
+          createElement(Markdown, { content }),
+        ),
+      );
+    });
+    (container as HTMLDivElement & { __unmount: () => void }).__unmount = () =>
+      act(() => root.unmount());
+    return container as HTMLDivElement;
+  }
+
+  function clickLink(container: HTMLElement): MouseEvent {
+    const event = new MouseEvent('click', {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+    });
+    act(() => {
+      container.querySelector('a')!.dispatchEvent(event);
+    });
+    return event;
+  }
+
+  afterEach(() => {
+    delete (window as TauriWindow).__TAURI__;
+  });
+
+  it('routes external link clicks through the desktop opener', () => {
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    (window as TauriWindow).__TAURI__ = { core: { invoke } };
+    const c = renderMd(
+      '[issue](https://github.com/QwenLM/qwen-code/issues/9060)',
+    );
+    const event = clickLink(c);
+    expect(event.defaultPrevented).toBe(true);
+    expect(invoke).toHaveBeenCalledWith('plugin:opener|open_url', {
+      url: 'https://github.com/QwenLM/qwen-code/issues/9060',
+    });
+    (c as HTMLDivElement & { __unmount: () => void }).__unmount();
+    c.remove();
+  });
+
+  it('routes modified desktop clicks through the opener', () => {
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    (window as TauriWindow).__TAURI__ = { core: { invoke } };
+    const c = renderMd(
+      '[issue](https://github.com/QwenLM/qwen-code/issues/9060)',
+    );
+    const event = new MouseEvent('click', {
+      bubbles: true,
+      cancelable: true,
+      button: 1,
+      ctrlKey: true,
+    });
+    act(() => {
+      c.querySelector('a')!.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(true);
+    expect(invoke).toHaveBeenCalledWith('plugin:opener|open_url', {
+      url: 'https://github.com/QwenLM/qwen-code/issues/9060',
+    });
+    (c as HTMLDivElement & { __unmount: () => void }).__unmount();
+    c.remove();
+  });
+
+  it('requests an error toast when the desktop opener fails', async () => {
+    const invoke = vi.fn().mockRejectedValue(new Error('no browser'));
+    (window as TauriWindow).__TAURI__ = { core: { invoke } };
+    const toasts: ToastRequestDetail[] = [];
+    const handler = (e: Event) =>
+      toasts.push((e as CustomEvent<ToastRequestDetail>).detail);
+    window.addEventListener(TOAST_REQUEST_EVENT, handler);
+    const c = renderMd(
+      '[issue](https://github.com/QwenLM/qwen-code/issues/9060)',
+    );
+    const event = clickLink(c);
+    expect(event.defaultPrevented).toBe(true);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    window.removeEventListener(TOAST_REQUEST_EVENT, handler);
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0].tone).toBe('error');
+    expect(toasts[0].message).toContain('no browser');
+    (c as HTMLDivElement & { __unmount: () => void }).__unmount();
+    c.remove();
+  });
+
+  it('keeps native anchor behavior outside the desktop shell', () => {
+    const openSpy = vi.spyOn(window, 'open');
+    const c = renderMd(
+      '[issue](https://github.com/QwenLM/qwen-code/issues/9060)',
+    );
+    const a = c.querySelector('a')!;
+    expect(a.getAttribute('target')).toBe('_blank');
+    const event = clickLink(c);
+    expect(event.defaultPrevented).toBe(false);
+    expect(openSpy).not.toHaveBeenCalled();
+    openSpy.mockRestore();
+    (c as HTMLDivElement & { __unmount: () => void }).__unmount();
+    c.remove();
   });
 });

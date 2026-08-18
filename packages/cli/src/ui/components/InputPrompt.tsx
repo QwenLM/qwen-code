@@ -382,6 +382,12 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   );
   const showCompletionSuggestions =
     completion.showSuggestions && !isHistoryRestoredText;
+  const categoryTabsVisible =
+    !exportCompletion.suggestionDisplayProps &&
+    !commandSearchActive &&
+    !reverseSearchActive &&
+    !isAttachmentMode &&
+    (completion.availableCategories?.length ?? 0) > 2;
 
   // Ref so renderLineWithHighlighting (stable useCallback) can access fresh ghost text
   const midInputGhostTextRef = useRef<{
@@ -1081,6 +1087,21 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         return true;
       }
 
+      // The visible category tabs own the bare arrows, including in Vim mode.
+      // All other states fall through to their existing input owner.
+      if (showCompletionSuggestions && categoryTabsVisible) {
+        if (keyMatchers[Command.COMPLETION_TAB_RIGHT](key)) {
+          completion.switchCategory(1);
+          setExpandedSuggestionIndex(-1);
+          return true;
+        }
+        if (keyMatchers[Command.COMPLETION_TAB_LEFT](key)) {
+          completion.switchCategory(-1);
+          setExpandedSuggestionIndex(-1);
+          return true;
+        }
+      }
+
       if (vimHandleInput && vimHandleInput(key)) {
         return true;
       }
@@ -1442,23 +1463,6 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       }
 
       if (showCompletionSuggestions) {
-        // Category tab switching for the tabbed `@` completion UI. Only consume
-        // Ctrl+←/→ (per the COMPLETION_TAB_* bindings) and only when there are
-        // more than two tabs (at least 3 entries including 'all'). Plain ←/→ are
-        // never consumed here, so they always move the caret in the editable buffer.
-        if ((completion.availableCategories?.length ?? 0) > 2) {
-          if (keyMatchers[Command.COMPLETION_TAB_RIGHT](key)) {
-            completion.switchCategory(1);
-            setExpandedSuggestionIndex(-1);
-            return true;
-          }
-          if (keyMatchers[Command.COMPLETION_TAB_LEFT](key)) {
-            completion.switchCategory(-1);
-            setExpandedSuggestionIndex(-1);
-            return true;
-          }
-        }
-
         if (completion.suggestions.length > 1) {
           const isCompletionUpKey = keyMatchers[Command.COMPLETION_UP](key);
           const isCompletionDownKey = keyMatchers[Command.COMPLETION_DOWN](key);
@@ -1907,6 +1911,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       exportCompletion,
       isHistoryRestoredText,
       showCompletionSuggestions,
+      categoryTabsVisible,
       voiceInput,
       targetDir,
     ],
@@ -2308,11 +2313,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
                 : completion.activeCategory
             }
             availableCategories={
-              suggestionsFromExport ||
-              commandSearchActive ||
-              reverseSearchActive
-                ? undefined
-                : completion.availableCategories
+              categoryTabsVisible ? completion.availableCategories : undefined
             }
             onHoverIndex={
               suggestionsFromExport ? undefined : handleSuggestionHover

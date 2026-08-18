@@ -14,10 +14,12 @@ import {
   startBackgroundHousekeeping,
   _resetForTesting,
   _needsCatchUpForTesting,
+  _getFirstPassDelayForTesting,
   _runHousekeepingForTesting,
   _runPassForTesting,
   _FILE_HISTORY_MARKER_FOR_TESTING,
   _getSubagentMarkerPathForTesting,
+  _getOpenAILogsMarkerPathForTesting,
 } from './scheduler.js';
 import {
   noteInteraction,
@@ -223,6 +225,325 @@ describe('_runHousekeepingForTesting', () => {
     );
 
     expect(fs.readdirSync(fileHistoryRoot)).toEqual(['within']);
+  });
+});
+
+describe('_runHousekeepingForTesting (openai-logs cleanup)', () => {
+  let qwenHome: string;
+  let logDir: string;
+
+  beforeEach(() => {
+    qwenHome = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-scheduler-test-'));
+    logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-openai-logs-'));
+    vi.stubEnv('QWEN_HOME', qwenHome);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    fs.rmSync(qwenHome, { recursive: true, force: true });
+    fs.rmSync(logDir, { recursive: true, force: true });
+  });
+
+  function makeOpenAIConfig(
+    openAILoggingDir: string | undefined,
+    workingDir: string = process.cwd(),
+  ): Config {
+    return {
+      getSessionId: () => 's1',
+      getWorkingDir: () => workingDir,
+      getContentGeneratorConfig: () => ({ openAILoggingDir }),
+    } as unknown as Config;
+  }
+
+  function makeModelSettings(
+    retentionDays?: number,
+    options: {
+      openAILoggingDir?: string;
+      systemRetentionDays?: number;
+      userRetentionDays?: number;
+      workspaceRetentionDays?: number;
+    } = {},
+  ): LoadedSettings {
+    const model = {
+      ...(retentionDays !== undefined
+        ? { openAILogRetentionDays: retentionDays }
+        : {}),
+      ...(options.openAILoggingDir
+        ? { openAILoggingDir: options.openAILoggingDir }
+        : {}),
+    };
+    return {
+      merged: {
+        general: {},
+        model,
+      },
+      isTrusted: true,
+      system: {
+        settings: {
+          model:
+            options.systemRetentionDays !== undefined
+              ? { openAILogRetentionDays: options.systemRetentionDays }
+              : {},
+        },
+      },
+      systemDefaults: { settings: {} },
+      user: {
+        settings: {
+          model:
+            options.userRetentionDays !== undefined
+              ? { openAILogRetentionDays: options.userRetentionDays }
+              : {},
+        },
+      },
+      workspace: {
+        settings: {
+          model:
+            options.workspaceRetentionDays !== undefined
+              ? { openAILogRetentionDays: options.workspaceRetentionDays }
+              : {},
+        },
+      },
+    } as unknown as LoadedSettings;
+  }
+
+  function mkOpenAILogAt(
+    targetDir: string,
+    ageMs: number,
+    id = 'a1b2c3d4',
+  ): string {
+    const d = new Date(Date.now() - ageMs);
+    const name = `openai-${d.toISOString().replace(/:/g, '-')}-${id}.json`;
+    const p = path.join(targetDir, name);
+    fs.writeFileSync(p, '{}');
+    fs.utimesSync(p, d, d);
+    return p;
+  }
+
+  function mkOpenAILog(daysAgo: number, targetDir = logDir): string {
+    return mkOpenAILogAt(targetDir, daysAgo * MS_PER_DAY);
+  }
+
+  it('removes logs older than the retention and writes the per-dir marker', async () => {
+    const old = mkOpenAILog(10);
+    const fresh = mkOpenAILog(1);
+
+    await _runHousekeepingForTesting(
+      makeOpenAIConfig(logDir),
+      makeModelSettings(7),
+    );
+
+    expect(fs.existsSync(old)).toBe(false);
+    expect(fs.existsSync(fresh)).toBe(true);
+    expect(
+      fs.existsSync(_getOpenAILogsMarkerPathForTesting(qwenHome, logDir)),
+    ).toBe(true);
+  });
+
+  it('uses the default 7-day retention when openAILogRetentionDays is unset', async () => {
+    const old = mkOpenAILog(10);
+
+    await _runHousekeepingForTesting(
+      makeOpenAIConfig(logDir),
+      makeModelSettings(/* unset */),
+    );
+
+    expect(fs.existsSync(old)).toBe(false);
+  });
+
+  it('honors a longer configured retention', async () => {
+    const tenDays = mkOpenAILog(10);
+
+    await _runHousekeepingForTesting(
+      makeOpenAIConfig(logDir),
+      makeModelSettings(30, { userRetentionDays: 30 }),
+    );
+
+    expect(fs.existsSync(tenDays)).toBe(true);
+  });
+
+  it('honors retention = 0 through the scheduler', async () => {
+    const aged = mkOpenAILogAt(logDir, 2 * MS_PER_HOUR);
+    const fresh = mkOpenAILogAt(logDir, 30 * 60 * 1000, 'b2c3d4e5');
+
+    await _runHousekeepingForTesting(
+      makeOpenAIConfig(logDir),
+      makeModelSettings(0, { userRetentionDays: 0 }),
+    );
+
+    expect(fs.existsSync(aged)).toBe(false);
+    expect(fs.existsSync(fresh)).toBe(true);
+  });
+
+  it('throttles OpenAI log cleanup independently for different directories', async () => {
+    const otherLogDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'qwen-openai-logs-other-'),
+    );
+    try {
+      const first = mkOpenAILog(10);
+      const second = mkOpenAILog(10, otherLogDir);
+
+      await _runHousekeepingForTesting(
+        makeOpenAIConfig(logDir),
+        makeModelSettings(7),
+      );
+      await _runHousekeepingForTesting(
+        makeOpenAIConfig(otherLogDir),
+        makeModelSettings(7),
+      );
+
+      expect(fs.existsSync(first)).toBe(false);
+      expect(fs.existsSync(second)).toBe(false);
+      expect(_getOpenAILogsMarkerPathForTesting(qwenHome, logDir)).not.toBe(
+        _getOpenAILogsMarkerPathForTesting(qwenHome, otherLogDir),
+      );
+    } finally {
+      fs.rmSync(otherLogDir, { recursive: true, force: true });
+    }
+  });
+
+  it('resolves the default per-CWD log dir from getWorkingDir()', async () => {
+    const workingDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-cwd-'));
+    try {
+      const defaultLogDir = path.join(workingDir, 'logs', 'openai');
+      fs.mkdirSync(defaultLogDir, { recursive: true });
+      const d = new Date(Date.now() - 10 * MS_PER_DAY);
+      const old = path.join(
+        defaultLogDir,
+        'openai-2026-06-01T10-00-00.000Z-a1b2c3d4.json',
+      );
+      fs.writeFileSync(old, '{}');
+      fs.utimesSync(old, d, d);
+
+      await _runHousekeepingForTesting(
+        makeOpenAIConfig(undefined, workingDir),
+        makeModelSettings(7),
+      );
+
+      expect(fs.existsSync(old)).toBe(false);
+    } finally {
+      fs.rmSync(workingDir, { recursive: true, force: true });
+    }
+  });
+
+  it('uses the settings directory when content-generator config is unavailable', async () => {
+    const workingDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-cwd-'));
+    try {
+      const defaultLogDir = path.join(workingDir, 'logs', 'openai');
+      fs.mkdirSync(defaultLogDir, { recursive: true });
+      const configuredOld = mkOpenAILog(10);
+      const defaultSentinel = mkOpenAILog(10, defaultLogDir);
+      const config = {
+        getSessionId: () => 's1',
+        getWorkingDir: () => workingDir,
+        getContentGeneratorConfig: () => undefined,
+      } as unknown as Config;
+
+      await _runHousekeepingForTesting(
+        config,
+        makeModelSettings(7, {
+          openAILoggingDir: logDir,
+          userRetentionDays: 7,
+        }),
+      );
+
+      expect(fs.existsSync(configuredOld)).toBe(false);
+      expect(fs.existsSync(defaultSentinel)).toBe(true);
+    } finally {
+      fs.rmSync(workingDir, { recursive: true, force: true });
+    }
+  });
+
+  it('skips custom-directory cleanup for workspace-scoped retention', async () => {
+    const old = mkOpenAILog(60);
+
+    await _runHousekeepingForTesting(
+      makeOpenAIConfig(logDir),
+      makeModelSettings(7, { workspaceRetentionDays: 7 }),
+    );
+    await _runHousekeepingForTesting(
+      makeOpenAIConfig(logDir),
+      makeModelSettings(30, { workspaceRetentionDays: 30 }),
+    );
+
+    expect(fs.existsSync(old)).toBe(true);
+    expect(
+      fs.existsSync(_getOpenAILogsMarkerPathForTesting(qwenHome, logDir)),
+    ).toBe(false);
+  });
+
+  it('uses the system retention owner for a custom directory', async () => {
+    const old = mkOpenAILog(60);
+
+    await _runHousekeepingForTesting(
+      makeOpenAIConfig(logDir),
+      makeModelSettings(7, {
+        systemRetentionDays: 7,
+        workspaceRetentionDays: 30,
+      }),
+    );
+
+    expect(fs.existsSync(old)).toBe(false);
+    expect(
+      fs.existsSync(_getOpenAILogsMarkerPathForTesting(qwenHome, logDir)),
+    ).toBe(true);
+  });
+
+  it('uses catch-up delay when the OpenAI marker is missing', async () => {
+    fs.writeFileSync(path.join(qwenHome, _FILE_HISTORY_MARKER_FOR_TESTING), '');
+
+    await expect(
+      _getFirstPassDelayForTesting(
+        makeOpenAIConfig(logDir),
+        makeModelSettings(7),
+      ),
+    ).resolves.toBe(60 * 1000);
+  });
+
+  it('uses the normal delay only when the OpenAI marker is fresh', async () => {
+    fs.writeFileSync(path.join(qwenHome, _FILE_HISTORY_MARKER_FOR_TESTING), '');
+    fs.writeFileSync(_getOpenAILogsMarkerPathForTesting(qwenHome, logDir), '');
+
+    await expect(
+      _getFirstPassDelayForTesting(
+        makeOpenAIConfig(logDir),
+        makeModelSettings(7),
+      ),
+    ).resolves.toBe(10 * 60 * 1000);
+  });
+
+  it('uses catch-up delay when the OpenAI marker is older than seven days', async () => {
+    const fileHistoryMarker = path.join(
+      qwenHome,
+      _FILE_HISTORY_MARKER_FOR_TESTING,
+    );
+    const openaiMarker = _getOpenAILogsMarkerPathForTesting(qwenHome, logDir);
+    fs.writeFileSync(fileHistoryMarker, '');
+    fs.writeFileSync(openaiMarker, '');
+    const stale = new Date(Date.now() - 8 * MS_PER_DAY);
+    fs.utimesSync(openaiMarker, stale, stale);
+
+    await expect(
+      _getFirstPassDelayForTesting(
+        makeOpenAIConfig(logDir),
+        makeModelSettings(7),
+      ),
+    ).resolves.toBe(60 * 1000);
+  });
+
+  it('skips the sweep gracefully when the log dir cannot be resolved', async () => {
+    const fresh = mkOpenAILog(1);
+    const throwingConfig = {
+      getSessionId: () => 's1',
+      getWorkingDir: () => process.cwd(),
+      getContentGeneratorConfig: () => {
+        throw new Error('not ready');
+      },
+    } as unknown as Config;
+
+    await expect(
+      _runHousekeepingForTesting(throwingConfig, makeModelSettings(7)),
+    ).resolves.toBeUndefined();
+    expect(fs.existsSync(fresh)).toBe(true);
   });
 });
 

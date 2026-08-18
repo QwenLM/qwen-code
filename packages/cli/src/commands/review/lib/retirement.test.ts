@@ -16,6 +16,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { scheduleReverseAuditRound } from './retirement.js';
+import { appendRunSession, recordResume } from './run-ledger.js';
 import {
   promptRecordDir,
   recordPrompt,
@@ -160,6 +161,48 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
         }),
       );
     }
+    // A compliant auditor reads the cumulative findings list its prompt
+    // points at — the comparison against known findings IS the audit's
+    // method, and the scheduler now refuses receipts from an auditor that
+    // skipped it. Modeled by default, like the brief-opens elsewhere; a test
+    // that wants a skipping auditor writes its own transcript.
+    const pointer = /read_file\(file_path="([^"]*\.findings\.md)"\)/.exec(
+      launchPrompt,
+    );
+    if (pointer) {
+      lines.push(
+        JSON.stringify({
+          ...base,
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  name: 'read_file',
+                  args: { file_path: pointer[1] },
+                },
+              },
+            ],
+          },
+        }),
+        JSON.stringify({
+          ...base,
+          type: 'tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  name: 'read_file',
+                  response: { output: 'the cumulative list' },
+                },
+              },
+            ],
+          },
+        }),
+      );
+    }
     lines.push(
       JSON.stringify({
         ...base,
@@ -192,6 +235,8 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
       coldChecks: [],
       skipped: [],
       converged: false,
+      // No history yet — nothing is certifiable, so nothing is diagnosed.
+      diagnostics: [],
     });
     expect(schedule(2).due).toEqual([13, 14, 15]);
   });
@@ -573,12 +618,17 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     expect(schedule(3, [13]).due).toEqual([13]);
   });
 
-  it('an echoed file line without the finding block is not a yield', () => {
+  it('an echoed file line is not a yield — and its prose lead is not the form (#9213)', () => {
     // The cumulative list rides in the launch prompt, and an auditor
-    // explaining "already covered" can quote an entry's **File:** line into
-    // its return. A quotation is not a report: a filed finding carries the
-    // full block, severity included, and only the pair reads as `yielded`.
-    // The echo still ends in a substantive receipt, so the chunk retires.
+    // explaining "already covered" can quote an entry's **File:** line
+    // into its return. A quotation is not a report: a filed finding
+    // carries the full block, severity included, and only the pair reads
+    // as `yielded`. The echo's leading prose is not the receipt FORM
+    // either — an admission riding that same line-before-the-receipt
+    // shape retired a chunk on the probe (#9213) — so the return reads
+    // `unknown`, DIAGNOSED: a yield suppresses its diagnostic, and this
+    // one names the bar, proving the echo reached the form, not the
+    // filing check.
     const echo =
       'The cumulative list already covers **File:** src/pay.ts:42 — not ' +
       're-reporting it.\n\n' +
@@ -589,8 +639,11 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     }
 
     const r3 = schedule(3, [13]);
-    expect(r3.due).toEqual([]);
-    expect(r3.skipped.map((s) => s.chunkId)).toEqual([13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.skipped).toEqual([]);
+    expect(r3.diagnostics).toEqual([
+      'chunk 13 — round 1: receipt not matched; round 2: receipt not matched',
+    ]);
   });
 
   it('a Chinese receipt separated by a full-width colon is dry', () => {
@@ -609,6 +662,642 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     expect(r3.converged).toBe(true);
   });
 
+  it('an English receipt separated by a period is dry (#9206)', () => {
+    // One of the two shapes that never retired on the run the issue
+    // reports: the phrase, a full stop, then the clause naming the walk.
+    // The clause is the substance; the stop only has to open it.
+    const receipt =
+      'No new issues were found. Re-walked the retry cap and both changed ' +
+      "exports' call sites; every gap I checked was already in the list.";
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), receipt);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), receipt);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([]);
+    expect(r3.skipped.map((s) => s.chunkId)).toEqual([13]);
+  });
+
+  it('a Chinese receipt separated by a full-width comma is dry (#9206)', () => {
+    // The other shape: the most natural zh phrasing, comma-led clause.
+    const receipt =
+      '未发现新问题，重新走查了重连状态机与两个已改导出的全部调用点，' +
+      '每个疑点都已在确认清单中。';
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), receipt);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), receipt);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([]);
+    expect(r3.skipped.map((s) => s.chunkId)).toEqual([13]);
+  });
+
+  it.each([
+    [
+      'an ASCII comma',
+      'No new issues were found, re-walked the retry cap and both changed ' +
+        "exports' call sites; every gap I checked was already confirmed.",
+    ],
+    [
+      'an ASCII semicolon',
+      'No new issues found; re-walked the retry cap and both changed ' +
+        "exports' call sites.",
+    ],
+    [
+      'a full-width period',
+      '未发现问题。重新走查了重连状态机与两个已改导出的全部调用点,' +
+        '每个疑点都已在确认清单中。',
+    ],
+    [
+      'a full-width semicolon',
+      '未发现新问题；重新走查了重连状态机与两个已改导出的全部调用点，' +
+        '每个疑点都已在确认清单中。',
+    ],
+  ])(
+    'a receipt separated by %s is dry, like the period and full-width comma (#9206)',
+    (_label, receipt) => {
+      // The widened class admits six new separators; the suite must pin
+      // every one it admits. Dropping any of these four from the class
+      // reads such receipts `unknown` again — chunks silently never
+      // retire, the exact #9206 failure mode, and no test fails.
+      transcript(record(1, 13, 'chunk 13 round 1 territory walk'), receipt);
+      transcript(record(2, 13, 'chunk 13 round 2 territory walk'), receipt);
+
+      const r3 = schedule(3, [13]);
+      expect(r3.due).toEqual([]);
+      expect(r3.converged).toBe(true);
+    },
+  );
+
+  it('a hedged receipt is not dry — a clause that CONTRADICTS the phrase proves no walk (#9206)', () => {
+    // The widening admitted sentence punctuation; the substance floor
+    // measures length and objects, never polarity — so an auditor that
+    // admitted it never checked still cleared the floor and retired the
+    // chunk. Probed pre-guard: the receipt read `dry` and the chunk
+    // retired; under the pre-widening class both reads were `unknown`.
+    const hedged =
+      'No new issues were found, but I could not open the generated files ' +
+      'and did not check them.';
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), hedged);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), hedged);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.skipped).toEqual([]);
+  });
+
+  it('a dash-led hedge is not dry either — the polarity guard covers every separator path (#9206)', () => {
+    const hedged =
+      'No new issues were found — but the generated files would not open ' +
+      'and I did not check them.';
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), hedged);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), hedged);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.skipped).toEqual([]);
+  });
+
+  it('a Chinese hedged receipt is not dry, exactly like the English one (#9206)', () => {
+    const hedged = '未发现新问题，但是我未能打开生成的文件，没有检查它们。';
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), hedged);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), hedged);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.skipped).toEqual([]);
+  });
+
+  it.each([
+    [
+      'a hedge the contrast list does not name (though)',
+      'No new issues were found. I could not open the generated files, ' +
+        'though.',
+    ],
+    [
+      'a hedge led by Yet',
+      'No new issues were found. Yet I could not open the generated files ' +
+        'and did not check them.',
+    ],
+    [
+      'a hedge led by unfortunately',
+      'No new issues were found; unfortunately the generated files would ' +
+        'not open and I did not check them.',
+    ],
+    [
+      'a Chinese hedge without a listed contrast word (只是)',
+      '未发现新问题，只是我未能打开生成的文件，没有检查它们。',
+    ],
+    [
+      'a comma-led incapacity admission without any contrast word',
+      'No new issues were found, I could not open the generated files and ' +
+        'did not check them.',
+    ],
+    [
+      'a hedge riding inside the phrase filler',
+      'No new issues found but only skimmed. Re-walked the reconnect state ' +
+        'machine.',
+    ],
+  ])('a hedge is refused wherever it sits: %s (#9213)', (_label, hedged) => {
+    // The polarity guard used to enumerate contrast WORDS over unbounded
+    // prose: any hedge not on the list (though, Yet, unfortunately, 只是)
+    // retired the chunk on the clause that admitted it was not checked,
+    // and a hedge inside the phrase's filler (…found but only skimmed.)
+    // never reached the clause-only test at all. Both directions fail
+    // toward RETIREMENT — the direction this module declares impossible.
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), hedged);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), hedged);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.skipped).toEqual([]);
+  });
+
+  it.each([
+    [
+      'an incapacity admission with no listed marker (unable)',
+      'No issues found — I was unable to open the generated files.',
+    ],
+    [
+      'an omission admission with no listed marker (failed)',
+      'No issues found — I failed to check them.',
+    ],
+    [
+      'an omission admission with no listed marker (skipped)',
+      'No issues found — I skipped the generated files.',
+    ],
+    [
+      'an omission admission with no listed marker (unchecked)',
+      'No issues found — left them unchecked.',
+    ],
+    [
+      'a Chinese bare-不 incapacity admission',
+      '未发现问题——打不开生成的文件。',
+    ],
+    ['a Chinese omission verb (跳过)', '未发现问题——跳过了生成的文件。'],
+    [
+      'a marker riding inside a phrase echo the strip removes',
+      'No issues found — no issues, left them unchecked.',
+    ],
+    [
+      'a clause whose substance is only echoed phrases',
+      'No issues found — no issues found, no issues found, no issues ' +
+        'found.',
+    ],
+    [
+      'a hedge BEFORE the phrase on the same line',
+      'I could not check everything, but no new issues — re-walked the ' +
+        "retry cap and both changed exports' call sites.",
+    ],
+    [
+      'a filler hedge the contrast list does not name (dash path)',
+      'No issues found though only skimmed — re-walked the retry cap and ' +
+        "both changed exports' call sites.",
+    ],
+    [
+      'a filler hedge the contrast list does not name (anchored path)',
+      'No new issues found though only skimmed. Re-walked the retry cap ' +
+        "and both changed exports' call sites.",
+    ],
+  ])('an executed leak family is refused: %s (#9213)', (_label, leaked) => {
+    // The six leak families executed against the real scheduler (#9213
+    // on #9206): incapacity/omission admissions carrying no listed
+    // marker, zh bare-不 and 跳过, a marker lost to the saturation
+    // strip, phrase echoes lending the floor their substance, a hedge
+    // BEFORE the phrase the guard never saw, and filler hedges the
+    // contrast list does not name on both separator paths. Every one
+    // read dry twice and retired the chunk — the direction this module
+    // declares impossible.
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), leaked);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), leaked);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.skipped).toEqual([]);
+  });
+
+  it.each([
+    [
+      'a listed marker the phrase-strip used to swallow (skipped)',
+      'No issues found — no issues found but I skipped the generated ' +
+        'files and their call sites.',
+    ],
+    [
+      'an admission on the line BEFORE the receipt (en)',
+      'I did not check the generated files.\n' +
+        'No issues found — re-walked the retry cap and both changed ' +
+        "exports' call sites.",
+    ],
+    [
+      'an admission on the line BEFORE the receipt (zh)',
+      '没有检查生成的文件。\n未发现问题——重新走查了重连状态机。',
+    ],
+    [
+      'a self-admission the quoted-span exemption used to blank',
+      'No issues found — I "could not open" the generated files.',
+    ],
+    [
+      'a synonym the marker list does not name (overlooked)',
+      'No issues found — overlooked the generated files.',
+    ],
+    [
+      'a synonym the marker list does not name (without checking)',
+      'No issues found — without checking the generated files.',
+    ],
+    [
+      'a zh synonym the marker list does not name (忽略)',
+      '未发现问题——忽略了生成的文件。',
+    ],
+    [
+      'a minus-led hedge before the phrase',
+      'Minus the generated files, no issues found — re-walked the retry cap.',
+    ],
+  ])('a hedge the form closes is refused: %s (#9213)', (_label, leaked) => {
+    // The four entrance families executed at the round-4 commit (#9213 on
+    // #9206): the greedy phrase strip swallowing its OWN listed marker,
+    // an admission outside the receipt line, a quoted self-admission, and
+    // synonym vocabulary no marker list closes. The form closes the class
+    // where the list cannot: the receipt stands ALONE or reads `unknown`,
+    // and the clause names a WALK or reads `unknown` — every miss fails
+    // toward audit, the only direction the module header declares.
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), leaked);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), leaked);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.skipped).toEqual([]);
+  });
+
+  it('prose on EITHER side of the receipt line is refused alike (#9213)', () => {
+    // The clause capture used to run to the END of the return: prose
+    // AFTER the receipt line contradicted the phrase while identical
+    // prose BEFORE it passed — an executed asymmetry under the line-scope
+    // claim the comments stated (#9213). The form reads both sides
+    // alike: the receipt stands alone, or the return is not the receipt
+    // — named for the side it fell at.
+    const receiptLine =
+      'No new issues found — re-walked the reconnect flow and both ' +
+      "changed exports' call sites.";
+    const trailing =
+      'The list already covered the timer path, so I did not re-report it.';
+    transcript(
+      record(1, 13, 'chunk 13 round 1 territory walk'),
+      receiptLine + '\n' + trailing,
+    );
+    transcript(
+      record(2, 13, 'chunk 13 round 2 territory walk'),
+      receiptLine + '\n' + trailing,
+    );
+    transcript(
+      record(1, 14, 'chunk 14 round 1 territory walk'),
+      trailing + '\n' + receiptLine,
+    );
+    transcript(
+      record(2, 14, 'chunk 14 round 2 territory walk'),
+      trailing + '\n' + receiptLine,
+    );
+
+    const r3 = schedule(3, [13, 14]);
+    expect(r3.due).toEqual([13, 14]);
+    expect(r3.skipped).toEqual([]);
+    expect(r3.diagnostics).toEqual([
+      'chunk 13 — round 1: receipt not alone; round 2: receipt not alone',
+      'chunk 14 — round 1: receipt not matched; round 2: receipt not matched',
+    ]);
+  });
+
+  it('a clause that names no walk is not dry — the walk gate (#9213)', () => {
+    // A clause can clear the substance floor on length and still name no
+    // WALK — a conclusion, not a walk — and the unbounded hedge class
+    // (`overlooked`, `missed`, 忽略…) rides exactly such clauses. The
+    // gate's misses fail toward audit: a walk verb the vocabulary does
+    // not name reads `unknown`, never `dry`.
+    const noWalk = 'No issues found — the territory is clean.';
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), noWalk);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), noWalk);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.skipped).toEqual([]);
+  });
+
+  it('layer receipts above the receipt do not break the form (#9213)', () => {
+    // A modeled-system diff receipts each walked layer on its own line
+    // ABOVE the no-issues line; the form strips those with audit-layers'
+    // own matcher, so the receipt still stands alone and retires.
+    const ret =
+      'Layer walked: token-layer — comment tokens and globs examined.\n' +
+      'Layer walked: state-propagation — unset and alias paths examined.\n' +
+      'No issues found — re-walked the guard state model and both ' +
+      "changed exports' call sites.";
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), ret);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), ret);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([]);
+    expect(r3.converged).toBe(true);
+  });
+
+  it('a layer label fused onto the receipt line certifies nothing (#9213)', () => {
+    // The line-anchored strip only sees OWN-line labels, so a fused one
+    // rode the clause: the label's own "walked" passed the walk test and
+    // its length the substance floor, certifying a receipt the identical
+    // two-line form (above) refuses. The clause is cut at the inline
+    // marker, exactly as at an inline `Budget gap:`.
+    const fused = 'No issues found — Layer walked: lexing';
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), fused);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), fused);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.skipped).toEqual([]);
+    expect(r3.diagnostics).toEqual([
+      'chunk 13 — round 1: receipt clause not substantive; ' +
+        'round 2: receipt clause not substantive',
+    ]);
+  });
+
+  it('a receipt split across two lines is not dry — the matcher is line-bound (#9213)', () => {
+    // Every whitespace element in the matcher used to be `\s`, which
+    // matches `\n`: the matcher itself spanned lines and pulled the
+    // clause in from a LATER line, so the receipt-is-its-line form
+    // refused nothing. Each shape below reads `unknown` — the dangling
+    // separator leaves prose after the receipt's (empty) line, and a
+    // break before the separator is no receipt at all.
+    const shapes: Array<[string, string]> = [
+      // Dangling em dash at the end of line 1.
+      [
+        'No issues found —\nre-walked the parser and the retry cap call sites',
+        'receipt not alone',
+      ],
+      // Break before the separator.
+      [
+        'No issues found\n— re-walked the parser and the retry cap call sites',
+        'receipt not matched',
+      ],
+      // Blank line after the dangling separator.
+      [
+        'No issues found —\n\nre-walked the parser and the retry cap call sites',
+        'receipt not alone',
+      ],
+      // ASCII hyphen dangling — "stands alone" asks for a space, not `\n`.
+      [
+        'No issues found -\nre-walked the parser and the retry cap call sites',
+        'receipt not matched',
+      ],
+    ];
+    shapes.forEach(([ret], i) => {
+      const chunk = 13 + i;
+      transcript(
+        record(1, chunk, `chunk ${chunk} round 1 territory walk`),
+        ret,
+      );
+      transcript(
+        record(2, chunk, `chunk ${chunk} round 2 territory walk`),
+        ret,
+      );
+    });
+
+    const r3 = schedule(
+      3,
+      shapes.map((_, i) => 13 + i),
+    );
+    expect(r3.due).toEqual([13, 14, 15, 16]);
+    expect(r3.skipped).toEqual([]);
+    expect(r3.diagnostics).toEqual(
+      shapes.map(
+        ([, failure], i) =>
+          `chunk ${13 + i} — round 1: ${failure}; round 2: ${failure}`,
+      ),
+    );
+  });
+
+  it('an innocuous "but" does not block retirement — only a hedge does (#9213)', () => {
+    // The clause-contrast refusal used to reject ANY occurrence of a
+    // contrast word, so the commonest honest connective — "already in the
+    // list, still re-verified, BUT I checked again" — regressed from dry
+    // to unknown and blocked retirement on exactly the budgeted runs the
+    // optimization exists for. A contrast word without a negation or
+    // incapacity marker in its scope contradicts nothing.
+    const receipt =
+      'No new issues were found — re-walked the retry cap and both changed ' +
+      "exports' call sites; the list already covered them, but I " +
+      're-verified the readers.';
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), receipt);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), receipt);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([]);
+    expect(r3.converged).toBe(true);
+  });
+
+  it('an innocuous 不过 does not block the Chinese receipt either (#9213)', () => {
+    const receipt =
+      '未发现新问题——重新走查了重连状态机与两个已改导出的全部调用点，' +
+      '清单已覆盖它们，不过我又核对了一遍。';
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), receipt);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), receipt);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([]);
+    expect(r3.converged).toBe(true);
+  });
+
+  it('a nested phrase occurrence inside the clause does not truncate it (#9213)', () => {
+    // The clause naming the walk naturally repeats the brief's saturated
+    // vocabulary plus a colon or dash (`no gaps:`, `no issues —`); the
+    // unanchored matcher tried FIRST found the nested occurrence and
+    // refused the truncated clause, defeating the widening's purpose on
+    // exactly the receipts it was added to admit. The anchored matcher
+    // must take the lead.
+    for (const receipt of [
+      'No new issues were found. All six layers walked; no gaps: none.',
+      'No new issues were found. Re-walked the scheduler: no issues — all ' +
+        'cold.',
+    ]) {
+      transcript(record(1, 13, 'chunk 13 round 1 territory walk'), receipt);
+      transcript(record(2, 13, 'chunk 13 round 2 territory walk'), receipt);
+
+      const r3 = schedule(3, [13]);
+      expect(r3.due).toEqual([]);
+      expect(r3.converged).toBe(true);
+    }
+  });
+
+  it('a budget-gap line parted by a blank line does not block the receipt (#9213)', () => {
+    // Stripping the disclosure line leaves a leading blank when it sat a
+    // paragraph above the receipt; the anchored matcher's ^ must not die
+    // on strip's own leftover whitespace.
+    const receipt =
+      'Budget gap: walked the parser only\n\n' +
+      'No new issues found. Re-walked the reconnect state machine.';
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), receipt);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), receipt);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([]);
+    expect(r3.converged).toBe(true);
+  });
+
+  it('quoting the stock phrase to NEGATE it is not a receipt (#9206)', () => {
+    // A return that names the phrase inside a negation matched mid-text
+    // once the stops widened: the quoted phrase opened a clause out of
+    // the negation's own tail, and the chunk retired on the sentence
+    // that said it was not checked. Sentence-punctuation separators open
+    // a clause only when the phrase LEADS the return — a quotation is
+    // never the lead.
+    const quoted =
+      'I cannot write "No new issues were found." I could not open the ' +
+      'generated files and did not check them.';
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), quoted);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), quoted);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.skipped).toEqual([]);
+  });
+
+  it('the bare stock sentence stays unknown through the widened class (#9206)', () => {
+    // The widening admits the stop; the substance floor still refuses the
+    // clause. `No issues found.` opens an EMPTY clause, and a receipt with
+    // nothing after it proves no walk whatever separator let it through.
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), WHIFF);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), WHIFF);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.skipped).toEqual([]);
+  });
+
+  it('diagnoses a twice-audited chunk no transcript certified (#9206)', () => {
+    // The silent half of the reported loop: records on disk, launches that
+    // match none of them (an undelivered build, a paraphrase), and rounds
+    // that re-audited without a word. The schedule now names the bar.
+    record(1, 13, 'chunk 13 round 1 territory walk');
+    record(2, 13, 'chunk 13 round 2 territory walk');
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.diagnostics).toEqual([
+      'chunk 13 — round 1: no matching transcript; round 2: no matching transcript',
+    ]);
+  });
+
+  it('diagnoses a matched transcript whose receipt fell at a named bar (#9206)', () => {
+    // The launch pairs, the agent opened the territory — but the return
+    // carries no structural receipt at all. The diagnostic says WHICH bar,
+    // so the reader is not left with `unknown` and a destroyed record dir.
+    const noReceipt =
+      'Walked the territory carefully and studied every edge case in it.';
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), noReceipt);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), noReceipt);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.diagnostics).toEqual([
+      'chunk 13 — round 1: receipt not matched; round 2: receipt not matched',
+    ]);
+  });
+
+  it('diagnoses per round — a dry round beside a failed one names only the failure (#9206)', () => {
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), DRY);
+    record(2, 13, 'chunk 13 round 2 territory walk'); // undelivered
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.diagnostics).toEqual([
+      'chunk 13 — round 2: no matching transcript',
+    ]);
+  });
+
+  it('does not diagnose a yielded chunk — a yield explains its own heat (#9206)', () => {
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), DRY);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), YIELD);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.diagnostics).toEqual([]);
+  });
+
+  it('diagnoses a launch that never read the diff (#9206)', () => {
+    // A successful call ELSEWHERE (the brief) clears the tool-call bar
+    // but not the diff-read bar; the diagnostic must name the second one
+    // — a rename or a swap of the two bars would otherwise send the
+    // reader hunting the wrong mismatch.
+    for (const r of [1, 2]) {
+      transcript(
+        record(r, 13, `chunk 13 round ${r} territory walk`),
+        DRY,
+        1,
+        join(dir, 'brief.md'),
+      );
+    }
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.diagnostics).toEqual([
+      'chunk 13 — round 1: no read of the diff; round 2: no read of the diff',
+    ]);
+  });
+
+  it('diagnoses a diff read that missed the baked territory (#9206)', () => {
+    // The record bakes the chunk's window; the auditor read elsewhere in
+    // the file. The territory bar names the miss.
+    for (const r of [1, 2]) {
+      const built = record(
+        r,
+        13,
+        `chunk 13 round ${r} walk — ` +
+          `read_file(file_path="${diff}", offset=1000, limit=200)`,
+      );
+      transcript(built, DRY, 1, diff, 0, 50);
+    }
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.diagnostics).toEqual([
+      'chunk 13 — round 1: territory read missing; round 2: territory read missing',
+    ]);
+  });
+
+  it('diagnoses a receipt whose clause names nothing (#9206)', () => {
+    // The receipt matches and every tool-call bar clears — but the clause
+    // after the separator names no territory, so the substance floor is
+    // the bar that fell, and the diagnostic says so.
+    for (const r of [1, 2]) {
+      transcript(
+        record(r, 13, `chunk 13 round ${r} territory walk`),
+        'No new issues found — all good.',
+      );
+    }
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.diagnostics).toEqual([
+      'chunk 13 — round 1: receipt clause not substantive; round 2: receipt clause not substantive',
+    ]);
+  });
+
+  it('diagnoses an ambiguous launch — one transcript matching several records (#9206)', () => {
+    // Two same-round records (a repair rebuild), ONE transcript handed
+    // both blocks: it certifies neither, and the diagnostic names the
+    // ambiguity instead of leaving an unexplained `unknown`.
+    for (const r of [1, 2]) {
+      const a = record(r, 13, `chunk 13 round ${r} walk`, 'aaa111');
+      const b = record(
+        r,
+        13,
+        `chunk 13 round ${r} rules-corrected rebuild walk`,
+        'fff999',
+      );
+      transcript([a, b].join('\n\n'), DRY);
+    }
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.diagnostics).toEqual([
+      'chunk 13 — round 1: launch matched multiple records; round 2: launch matched multiple records',
+    ]);
+  });
+
   it("parroting the brief's own example receipt is not dry", () => {
     // Every reverse auditor is handed this exact sentence as the model
     // answer; a clause that echoes it names nothing the agent examined
@@ -620,6 +1309,60 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     );
 
     expect(schedule(3, [13]).due).toEqual([13]);
+  });
+
+  it('a case-shifted echo of the example receipt is not dry either (#9213)', () => {
+    // The example clause starts lowercase because it continues the model
+    // receipt mid-sentence; the widened sentence-punctuation separators
+    // let a parroting auditor open it as a NEW sentence — capitalized —
+    // and the case-sensitive compare never saw it. No honest clause
+    // contains the model clause verbatim in any casing.
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), DRY);
+    transcript(
+      record(2, 13, 'chunk 13 round 2 territory walk'),
+      'No issues found. Re-walked the reconnect state machine and the ' +
+        "two changed exports' call sites; every gap I checked was " +
+        'already in the list',
+    );
+
+    expect(schedule(3, [13]).due).toEqual([13]);
+  });
+
+  it('a doubled stock sentence is not dry — an echo cannot lend the floor its substance (#9213)', () => {
+    // The stock sentence pasted twice: the parrot refusal sees the model
+    // clause in any casing, and whatever the parrot misses the substance
+    // floor measures on the phrase-STRIPPED clause, so echoed phrases
+    // cannot lend the floor their length.
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), DRY);
+    transcript(
+      record(2, 13, 'chunk 13 round 2 territory walk'),
+      'No issues found. Re-walked the reconnect state machine and the ' +
+        "two changed exports' call sites; every gap I checked was " +
+        'already in the list. No issues found. Re-walked the reconnect ' +
+        "state machine and the two changed exports' call sites; every " +
+        'gap I checked was already in the list',
+    );
+
+    expect(schedule(3, [13]).due).toEqual([13]);
+  });
+
+  it('a quoted marker inside the clause contradicts the phrase (#9213)', () => {
+    // The polarity domain used to exempt quoted spans — and a
+    // self-admission wrapped in quotes — `I "could not open" the
+    // generated files` — blanked to nothing and retired the chunk
+    // (#9213). The exemption is gone: a quoted marker contradicts the phrase exactly
+    // as a bare one, and an honest clause quoting a marker-carrying
+    // label pays the refusal — the direction every failure here fails.
+    const receipt =
+      'No issues found — the "could not reproduce" note was already ' +
+      "known; re-walked the retry cap and both changed exports' call " +
+      'sites.';
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), receipt);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), receipt);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.skipped).toEqual([]);
   });
 
   it('a stray backtick is not a named object — only an enclosed span is', () => {
@@ -755,8 +1498,8 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     // The cumulative list rides in the launch prompt as full blocks —
     // File AND Severity — and an auditor justifying "already covered"
     // can quote one whole. A file line appearing verbatim in its own
-    // launch prompt marks the quotation; the honest receipt underneath
-    // still retires the chunk.
+    // launch prompt marks the quotation — the filing check refuses it;
+    // the FORM then refuses the return's prose lead (#9213).
     const quoted =
       'The list already carries this entry, so it is not re-reported:\n' +
       '- **File:** src/pay.ts:42\n' +
@@ -772,15 +1515,258 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     }
 
     const r3 = schedule(3, [13]);
-    expect(r3.due).toEqual([]);
-    expect(r3.skipped.map((s) => s.chunkId)).toEqual([13]);
+    // Not a yield — the entry is on the list — but not the receipt FORM
+    // either: the quotation's prose leads the return, and prose before
+    // the phrase is the executed leak family the form closes (#9213).
+    // The diagnostic proves the echo reached the form, not the filing
+    // check: a yield suppresses its diagnostic.
+    expect(r3.due).toEqual([13]);
+    expect(r3.skipped).toEqual([]);
+    expect(r3.diagnostics).toEqual([
+      'chunk 13 — round 1: receipt not matched; round 2: receipt not matched',
+    ]);
+  });
+
+  it('an auditor that SKIPPED the findings read cannot retire the chunk', () => {
+    // The comparison against known findings IS the audit's method, and the
+    // brief instructs the read. Two dry receipts from auditors that skipped
+    // it would retire the chunk on a comparison nobody made. The fixture
+    // builder models the compliant read automatically, so this one writes
+    // its transcripts by hand, minus the read.
+    for (const r of [1, 2]) {
+      const findingsFile = writeFindingsFile(
+        plan,
+        `reverse-audit--round-${r}--skip99`,
+        '- **File:** src/pay.ts:42 — the double charge\n' +
+          '- **Severity:** Suggestion\n',
+      );
+      const built = record(
+        r,
+        13,
+        `chunk 13 round ${r} territory\n` +
+          `read_file(file_path="${findingsFile}")`,
+      );
+      const id = `aud-skip-${r}`;
+      const base = {
+        agentId: id,
+        agentName: 'general-purpose',
+        sessionId: 'S1',
+      };
+      writeFileSync(
+        join(dir, 'subagents', 'S1', `agent-${id}.jsonl`),
+        [
+          JSON.stringify({
+            ...base,
+            type: 'user',
+            message: { role: 'user', parts: [{ text: built }] },
+          }),
+          JSON.stringify({
+            ...base,
+            type: 'assistant',
+            message: {
+              role: 'model',
+              parts: [
+                {
+                  functionCall: {
+                    name: 'read_file',
+                    args: { file_path: diff, offset: 0, limit: 100 },
+                  },
+                },
+              ],
+            },
+          }),
+          JSON.stringify({
+            ...base,
+            type: 'tool_result',
+            message: {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    name: 'read_file',
+                    response: { output: 'diff bytes' },
+                  },
+                },
+              ],
+            },
+          }),
+          JSON.stringify({
+            ...base,
+            type: 'assistant',
+            message: { role: 'model', parts: [{ text: DRY }] },
+          }),
+        ].join('\n') + '\n',
+      );
+    }
+
+    const r3 = schedule(3, [13]);
+    // The receipts do not classify, both rounds read `unknown`, and the
+    // chunk stays hot.
+    expect(r3.due).toEqual([13]);
+  });
+
+  /** A transcript whose FINAL text is followed by more tool traffic — the
+   *  died-mid-flight shape: `returned: false`, narration only. */
+  function deadTranscript(launchPrompt: string, narration: string): void {
+    const id = `aud-dead-${++seq}`;
+    const base = {
+      agentId: id,
+      agentName: 'general-purpose',
+      sessionId: 'S1',
+    };
+    const call = JSON.stringify({
+      ...base,
+      type: 'assistant',
+      message: {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              name: 'read_file',
+              args: { file_path: diff, offset: 0, limit: 100 },
+            },
+          },
+        ],
+      },
+    });
+    const result = JSON.stringify({
+      ...base,
+      type: 'tool_result',
+      message: {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'read_file',
+              response: { output: 'diff bytes' },
+            },
+          },
+        ],
+      },
+    });
+    writeFileSync(
+      join(dir, 'subagents', 'S1', `agent-${id}.jsonl`),
+      [
+        JSON.stringify({
+          ...base,
+          type: 'user',
+          message: { role: 'user', parts: [{ text: launchPrompt }] },
+        }),
+        call,
+        result,
+        JSON.stringify({
+          ...base,
+          type: 'assistant',
+          message: { role: 'model', parts: [{ text: narration }] },
+        }),
+        // The traffic AFTER the text is what makes it narration: the agent
+        // went on working and the process died mid-walk.
+        call,
+        result,
+      ].join('\n') + '\n',
+    );
+  }
+
+  it('a died-mid-flight narration carrying a receipt shape classifies nothing', () => {
+    // `finalText` keeps the last non-empty assistant text, narration
+    // included — an auditor that printed a receipt-shaped progress line and
+    // was killed mid-walk must not read `dry`. Two such corpses would
+    // retire the chunk on an audit that never finished.
+    deadTranscript(record(1, 13, 'chunk 13 round 1 territory walk'), DRY);
+    deadTranscript(record(2, 13, 'chunk 13 round 2 territory walk'), DRY);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.converged).toBe(false);
+  });
+
+  it('a filed YIELD survives a skipped findings read — the bar gates dry only', () => {
+    // The findings-read bar exists so a no-issues receipt cannot certify a
+    // comparison nobody made. Applied BEFORE classification it also
+    // suppressed filed findings: round 2's yielder skipped the list read,
+    // its yield vanished, the compliant dry sibling carried the round, and
+    // the chunk retired WITH a live finding on it.
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), DRY);
+    const findingsFile = writeFindingsFile(
+      plan,
+      'reverse-audit--round-2--yield7',
+      '- **File:** src/pay.ts:42 — the double charge\n' +
+        '- **Severity:** Suggestion\n',
+    );
+    const built = record(
+      2,
+      13,
+      `chunk 13 round 2 territory walk\n` +
+        `read_file(file_path="${findingsFile}")`,
+    );
+    // The yielder, by hand: territory read, NO findings read, a new finding.
+    const id = `aud-yielder-${++seq}`;
+    const base = {
+      agentId: id,
+      agentName: 'general-purpose',
+      sessionId: 'S1',
+    };
+    writeFileSync(
+      join(dir, 'subagents', 'S1', `agent-${id}.jsonl`),
+      [
+        JSON.stringify({
+          ...base,
+          type: 'user',
+          message: { role: 'user', parts: [{ text: built }] },
+        }),
+        JSON.stringify({
+          ...base,
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  name: 'read_file',
+                  args: { file_path: diff, offset: 0, limit: 100 },
+                },
+              },
+            ],
+          },
+        }),
+        JSON.stringify({
+          ...base,
+          type: 'tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  name: 'read_file',
+                  response: { output: 'diff bytes' },
+                },
+              },
+            ],
+          },
+        }),
+        JSON.stringify({
+          ...base,
+          type: 'assistant',
+          message: { role: 'model', parts: [{ text: YIELD }] },
+        }),
+      ].join('\n') + '\n',
+    );
+    // The compliant dry sibling for the same record (the helper models the
+    // findings read automatically).
+    transcript(built, DRY);
+
+    const r3 = schedule(3, [13]);
+    // yielded outranks dry: round 2 is hot and the chunk stays due.
+    expect(r3.due).toEqual([13]);
+    expect(r3.skipped).toEqual([]);
   });
 
   it('quoting a WHOLE entry from the findings FILE is not a yield (post-#8597 shape)', () => {
     // Since #8597 the cumulative list rides a digest-named `.findings.md`
     // file the launch prompt points at, not the prompt itself. The echo
-    // guard must read the list back from that file: quoting the whole entry
-    // the auditor was told not to re-report is still not a yield.
+    // guard must read the list back from that file: quoting the whole
+    // entry the auditor was told not to re-report is not a yield — and
+    // the form refuses the return's prose lead, like the prompt twin.
     const quoted =
       'The list already carries this entry, so it is not re-reported:\n' +
       '- **File:** src/pay.ts:42\n' +
@@ -803,8 +1789,14 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     }
 
     const r3 = schedule(3, [13]);
-    expect(r3.due).toEqual([]);
-    expect(r3.skipped.map((s) => s.chunkId)).toEqual([13]);
+    // The echo guard reads the list back from the findings file — the
+    // quotation is not a filing — and the form refuses the prose lead
+    // exactly like the prompt-side twin (#9213).
+    expect(r3.due).toEqual([13]);
+    expect(r3.skipped).toEqual([]);
+    expect(r3.diagnostics).toEqual([
+      'chunk 13 — round 1: receipt not matched; round 2: receipt not matched',
+    ]);
   });
 
   it('a MISSING findings file fails toward auditing — the quotation reads as a yield', () => {
@@ -966,5 +1958,151 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     const r3 = schedule(3, []);
     expect(r3.due).toEqual([]);
     expect(r3.converged).toBe(false);
+  });
+});
+
+describe('scheduleReverseAuditRound — a resumed run reads the prior attempt', () => {
+  let dir: string;
+  let plan: string;
+  let diff: string;
+  let seq = 0;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'retirement-resume-'));
+    plan = join(dir, 'plan.json');
+    writeFileSync(plan, '{}');
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+    diff = join(dir, 'diff.txt');
+    process.env['QWEN_CODE_PROJECT_DIR'] = dir;
+    process.env['QWEN_CODE_SESSION_ID'] = 'S1';
+    mkdirSync(join(dir, 'subagents', 'S1'), { recursive: true });
+    mkdirSync(join(dir, 'subagents', 'S0'), { recursive: true });
+  });
+
+  afterEach(() => {
+    delete process.env['QWEN_CODE_PROJECT_DIR'];
+    delete process.env['QWEN_CODE_SESSION_ID'];
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  function record(round: number, chunk: number, body: string): string {
+    const prompt = `reverse-audit ${body}`;
+    recordPrompt(
+      plan,
+      `reverse-audit--chunk-${chunk}--round-${round}--abc123`,
+      prompt,
+    );
+    return prompt;
+  }
+
+  /** A dry-receipt transcript, written into the named session's dir. */
+  function transcriptIn(session: string, launchPrompt: string): void {
+    const id = `aud-${++seq}`;
+    const base = {
+      agentId: id,
+      agentName: 'general-purpose',
+      sessionId: session,
+    };
+    const lines = [
+      JSON.stringify({
+        ...base,
+        type: 'user',
+        message: { role: 'user', parts: [{ text: launchPrompt }] },
+      }),
+      JSON.stringify({
+        ...base,
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                name: 'read_file',
+                args: { file_path: diff, offset: 0, limit: 100 },
+              },
+            },
+          ],
+        },
+      }),
+      JSON.stringify({
+        ...base,
+        type: 'tool_result',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'read_file',
+                response: { output: 'diff bytes' },
+              },
+            },
+          ],
+        },
+      }),
+      JSON.stringify({
+        ...base,
+        type: 'assistant',
+        message: { role: 'model', parts: [{ text: DRY }] },
+      }),
+    ];
+    const f = join(dir, 'subagents', session, `agent-${id}.jsonl`);
+    writeFileSync(f, lines.join('\n') + '\n');
+    // Backdated below the ledger fixture's prior-window close: a CI stall
+    // after ledger() would otherwise fence these out via the until clamp.
+    const past = new Date(Date.now() - 10_000);
+    utimesSync(f, past, past);
+  }
+
+  function ledger(...ids: string[]): void {
+    const d = promptRecordDir(plan);
+    mkdirSync(d, { recursive: true });
+    // Written by the real writer: it stamps the plan mtime each entry is
+    // keyed on, and the resume marker is what authorizes reading prior
+    // evidence at all. The current attempt is stamped last, since each
+    // attempt's window closes when the next one opened.
+    const nowMs = Date.now();
+    ids.forEach((id, i) =>
+      appendRunSession(
+        plan,
+        { QWEN_CODE_SESSION_ID: id },
+        i === ids.length - 1 ? nowMs + 1500 : nowMs,
+      ),
+    );
+    recordResume(plan, process.env, nowMs + 1500);
+  }
+
+  it('reads the prior attempt before this session has launched anything', () => {
+    // The scheduler runs BEFORE the first launch of a resumed run, so the
+    // harness has not created `subagents/<current>` yet — the exact shape
+    // `currentDirOptional` exists for.
+    ledger('S0', 'S1');
+    for (const r of [1, 2]) {
+      transcriptIn('S0', record(r, 13, `chunk 13 round ${r} territory walk`));
+    }
+    rmSync(join(dir, 'subagents', 'S1'), { recursive: true, force: true });
+    const r3 = scheduleReverseAuditRound(plan, [13], 3, process.env, diff);
+    expect(r3.due).toEqual([]);
+    expect(r3.converged).toBe(true);
+  });
+
+  it('retires a chunk on dry receipts the interrupted attempt earned', () => {
+    ledger('S0', 'S1');
+    for (const r of [1, 2]) {
+      transcriptIn('S0', record(r, 13, `chunk 13 round ${r} territory walk`));
+    }
+    const r3 = scheduleReverseAuditRound(plan, [13], 3, process.env, diff);
+    expect(r3.due).toEqual([]);
+    expect(r3.skipped.map((s) => s.chunkId)).toEqual([13]);
+    expect(r3.converged).toBe(true);
+  });
+
+  it('keeps every chunk hot when no ledger names the prior session', () => {
+    for (const r of [1, 2]) {
+      transcriptIn('S0', record(r, 13, `chunk 13 round ${r} territory walk`));
+    }
+    const r3 = scheduleReverseAuditRound(plan, [13], 3, process.env, diff);
+    expect(r3.due).toEqual([13]);
+    expect(r3.skipped).toEqual([]);
   });
 });

@@ -24,6 +24,7 @@ import {
   isTooLargeToHighlight,
 } from './codeHighlighter';
 import { useI18n } from '../../i18n';
+import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
 import {
   useWebShellCustomization,
   type MarkdownTableMode,
@@ -149,7 +150,7 @@ export function resolveFenceLanguage(
 }
 
 const SAFE_HREF_SCHEMES = /^(https?:|mailto:)/i;
-const SAFE_IMAGE_DATA_URI = /^data:image\/(png|jpeg|gif|webp);base64,/i;
+const SAFE_IMAGE_DATA_URI = /^data:image\/(png|jpeg|gif|webp|bmp);base64,/i;
 
 export function isSafeHref(url: string | undefined): boolean {
   if (!url) return false;
@@ -708,6 +709,7 @@ function MarkdownLink({
   children?: ReactNode;
 }) {
   const renderMode = useTranscriptRenderMode();
+  const openExternalLink = useExternalLinkOpener();
   if (href && QWEN_SESSION_SCHEME.test(href.trim())) {
     if (renderMode === 'readonly') {
       return <span className={styles.link}>{children}</span>;
@@ -737,6 +739,7 @@ function MarkdownLink({
       target="_blank"
       rel="noopener noreferrer"
       className={styles.link}
+      onClick={(event) => openExternalLink(event, safeHref)}
     >
       {children}
     </a>

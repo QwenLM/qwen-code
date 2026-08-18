@@ -10,7 +10,7 @@ import {
   isValidMemoryBudgetMb,
   memoryBudgetRangeError,
 } from '@qwen-code/acp-bridge/daemonMemoryBudget';
-import { normalizeServeFastPathArgv } from './fast-path-argv.js';
+import { normalizeServeFastPathArgv } from '../utils/serve-fast-path-argv.js';
 import type { ServeFastPathSettings } from './fast-path-settings.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import type { ServeOptions } from './types.js';
@@ -53,6 +53,7 @@ const NUMBER_OPTIONS = new Map<
   ['writerIdleTimeoutMs', 'writer-idle-timeout-ms'],
   ['channelIdleTimeoutMs', 'channel-idle-timeout-ms'],
   ['initializeTimeoutMs', 'initialize-timeout-ms'],
+  ['sessionRestoreTimeoutMs', 'session-restore-timeout-ms'],
   ['sessionReapIntervalMs', 'session-reap-interval-ms'],
   ['sessionIdleTimeoutMs', 'session-idle-timeout-ms'],
   ['permissionResponseTimeoutMs', 'permission-response-timeout-ms'],

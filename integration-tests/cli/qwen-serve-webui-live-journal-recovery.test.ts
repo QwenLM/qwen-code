@@ -121,7 +121,7 @@ describe('qwen serve WebUI live journal recovery', () => {
       };
       activeDaemon = await spawnDaemon({
         workspaceCwd: workspace,
-        extraArgs: ['--max-journal-events', '3'],
+        extraArgs: ['--max-journal-events', '3', '--max-journal-bytes', '300'],
         env: {
           QWEN_CLI_ENTRY: MOCK_AGENT_PATH,
           MOCK_ACP_MODE: 'echo',

@@ -8,11 +8,16 @@
   min-height: 0;
 }
 
-.panelDrawer {
+.panelDrawer,
+.panelFullscreen {
   border-left: 0;
   flex: 1 1 auto;
   min-width: 0;
   width: 100%;
+}
+
+.panelFullscreen {
+  --chat-content-width: 100%;
 }
 
 .header {
@@ -182,6 +187,10 @@
 }
 
 .addButton {
+  border-color: transparent;
+}
+
+.fullscreenButton {
   border-color: transparent;
 }
 
@@ -410,6 +419,31 @@
 
 .link:hover {
   text-decoration: underline;
+}
+
+.locationRow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.openButton {
+  flex: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--link-color, #2563eb);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  padding: 5px 10px;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.openButton:hover {
+  background: color-mix(in srgb, var(--link-color, #2563eb) 12%, transparent);
 }
 
 .review {
@@ -1037,7 +1071,7 @@ button.treeRow:hover {
 }
 
 @media (max-width: 900px) {
-  .panel:not(.panelDrawer) {
+  .panel:not(.panelDrawer):not(.panelFullscreen) {
     position: fixed;
     inset: env(safe-area-inset-top) 0 env(safe-area-inset-bottom) auto;
     z-index: 60;

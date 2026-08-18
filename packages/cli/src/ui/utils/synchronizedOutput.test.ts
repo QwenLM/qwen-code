@@ -31,6 +31,8 @@ function createStdout(write: NodeJS.WriteStream['write']): NodeJS.WriteStream {
 describe('terminalSupportsSynchronizedOutput', () => {
   it.each([
     [{ TERM_PROGRAM: 'WezTerm' }, true],
+    [{ TERM_PROGRAM: 'WarpTerminal' }, true],
+    [{ TERM_PROGRAM: 'ghostty' }, true],
     [{ TERM_PROGRAM: 'iTerm.app' }, true],
     [{ TERM: 'xterm-kitty' }, true],
     [{ KITTY_WINDOW_ID: '1' }, true],

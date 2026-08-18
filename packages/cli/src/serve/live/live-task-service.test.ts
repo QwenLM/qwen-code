@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import path from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import type {
@@ -15,7 +16,7 @@ import type {
   WorkspaceRuntime,
 } from '../workspace-registry.js';
 import { LiveTaskService } from './live-task-service.js';
-import { LIVE_SESSION_SOURCE_PREFIX } from './session-source.js';
+import { LIVE_SESSION_SOURCE_PREFIX } from '../conversations/session-source.js';
 
 const persistedSessions = vi.hoisted(() => new Map<string, unknown>());
 const persistedSessionOwners = vi.hoisted(() => new Map<string, string>());
@@ -31,6 +32,7 @@ const sessionSources = vi.hoisted(
 const removeSessionMock = vi.hoisted(() =>
   vi.fn(async (_sessionId: string) => true),
 );
+const removeSessionRuntimeBaseDirs = vi.hoisted(() => new Array<string>());
 const listWorkspaceSessionsForResponse = vi.hoisted(() => vi.fn());
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
@@ -71,6 +73,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
       }
 
       removeSession(sessionId: string) {
+        removeSessionRuntimeBaseDirs.push(actual.Storage.getRuntimeBaseDir());
         return removeSessionMock(sessionId);
       }
     },
@@ -229,6 +232,7 @@ function makeHarness() {
     sendPrompt,
     killSession: vi.fn(async () => true),
     detachClient: vi.fn(async () => undefined),
+    markSessionCatalogChanged: vi.fn(),
     getSessionEventEpoch: vi.fn(() => 'event-epoch'),
     getSessionLastEventId: vi.fn(() => 7),
     async *subscribeEvents(
@@ -247,6 +251,7 @@ function makeHarness() {
   const runtime = {
     workspaceId: 'conversations',
     workspaceCwd: '/conversations',
+    sessionRuntimeBaseDir: '/runtime/conversations',
     provenance: 'live-conversation',
     bridge,
   } as WorkspaceRuntime;
@@ -254,10 +259,12 @@ function makeHarness() {
   const projectRuntime = {
     workspaceId: 'project-1',
     workspaceCwd: '/project',
+    sessionRuntimeBaseDir: '/runtime/project',
     bridge: projectBridge,
   } as WorkspaceRuntime;
   const registry = {
-    list: () => [runtime, projectRuntime],
+    list: () => [projectRuntime],
+    listAll: () => [runtime, projectRuntime],
     getByWorkspaceId: (workspaceId: string) =>
       workspaceId === projectRuntime.workspaceId ? projectRuntime : undefined,
     resolveLiveSessionOwner: (sessionId: string) =>
@@ -291,7 +298,9 @@ function makeHarness() {
   return {
     service,
     bridge,
+    projectBridge,
     runtime,
+    registry,
     summaries,
     resident,
     sendPrompt,
@@ -307,6 +316,7 @@ beforeEach(() => {
   parentSessions.clear();
   sessionSources.clear();
   removeSessionMock.mockClear();
+  removeSessionRuntimeBaseDirs.length = 0;
   listWorkspaceSessionsForResponse.mockReset();
   listWorkspaceSessionsForResponse.mockResolvedValue({
     sessions: [],
@@ -314,6 +324,24 @@ beforeEach(() => {
 });
 
 describe('LiveTaskService', () => {
+  it('preserves the structured unavailable error for an inactive internal owner', async () => {
+    const harness = makeHarness();
+    vi.spyOn(harness.registry, 'resolveLiveSessionOwner').mockReturnValue({
+      kind: 'unavailable',
+    });
+
+    await expect(
+      harness.service.handle({
+        callerSessionId: 'live-root',
+        name: 'read_thread',
+        arguments: { threadId: 'inactive-task' },
+      }),
+    ).rejects.toMatchObject({
+      code: 'conversation_runtime_unavailable',
+      retryable: true,
+    });
+  });
+
   it('lists existing tasks in the current Codex wire shape without creating one', async () => {
     const harness = makeHarness();
     listWorkspaceSessionsForResponse
@@ -365,6 +393,23 @@ describe('LiveTaskService', () => {
       ],
       threads: [{ id: 'ordinary', status: 'idle', updatedAt: 1_785_369_601 }],
     });
+    expect(listWorkspaceSessionsForResponse).toHaveBeenNthCalledWith(
+      1,
+      harness.bridge,
+      '/conversations',
+      expect.objectContaining({ view: 'organized', group: 'all' }),
+      { runtimeBaseDir: '/runtime/conversations' },
+    );
+    expect(listWorkspaceSessionsForResponse).toHaveBeenNthCalledWith(
+      2,
+      harness.projectBridge,
+      '/project',
+      expect.objectContaining({ view: 'organized', group: 'all' }),
+      { runtimeBaseDir: '/runtime/project' },
+    );
+    expect(listWorkspaceSessionsForResponse.mock.calls[1]?.[0]).toBe(
+      harness.projectBridge,
+    );
     expect(harness.bridge.spawnOrAttach).not.toHaveBeenCalled();
   });
 
@@ -897,6 +942,37 @@ describe('LiveTaskService', () => {
     expect(harness.bridge.killSession).toHaveBeenCalledWith('new-task', {
       requireZeroAttaches: true,
     });
+    expect(removeSessionMock).toHaveBeenCalledWith('new-task');
+    expect(removeSessionRuntimeBaseDirs).toEqual([
+      path.resolve('/runtime/conversations'),
+    ]);
+    // The persisted removal succeeded, so the catalog clock advances.
+    expect(harness.bridge.markSessionCatalogChanged).toHaveBeenCalledTimes(1);
     expect(harness.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('does not mark the catalog when the rollback transcript removal is a no-op', async () => {
+    const harness = makeHarness();
+    vi.mocked(harness.bridge.spawnOrAttach).mockResolvedValueOnce({
+      sessionId: 'new-task',
+      workspaceCwd: '/conversations',
+      attached: false,
+      sourcePersisted: false,
+    });
+    removeSessionMock.mockResolvedValueOnce(false);
+
+    await expect(
+      harness.service.handle({
+        callerSessionId: 'live-root',
+        name: 'create_thread',
+        arguments: {
+          prompt: 'build a separate report',
+          target: { type: 'projectless' },
+        },
+      }),
+    ).rejects.toThrow('Projectless task metadata was not persisted.');
+
+    expect(removeSessionMock).toHaveBeenCalledWith('new-task');
+    expect(harness.bridge.markSessionCatalogChanged).not.toHaveBeenCalled();
   });
 });

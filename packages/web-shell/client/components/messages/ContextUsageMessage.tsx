@@ -5,6 +5,8 @@ import type {
   DaemonSessionContextUsageStatus,
 } from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../../i18n';
+import { getContextUsageLevel } from '../../utils/contextUsage';
+import { formatContextTokens as formatTokens } from '../../utils/formatTokenCount';
 import styles from './ContextUsageMessage.module.css';
 
 const SENTINEL = 'web-shell:context-usage:v1:';
@@ -39,11 +41,6 @@ function truncateName(name: string, maxLen: number): string {
   return `${name.slice(0, maxLen - 1)}\u2026`;
 }
 
-function formatTokens(tokens: number): string {
-  if (tokens >= 1000) return `${(tokens / 1000).toFixed(1)}k`;
-  return `${tokens}`;
-}
-
 function formatPercentage(tokens: number, contextWindowSize: number): string {
   if (contextWindowSize <= 0) return '0.0';
   const percentage = (tokens / contextWindowSize) * 100;
@@ -69,10 +66,11 @@ function ProgressBar({
       width,
   );
   const freeCount = Math.max(0, width - usedCount - bufferCount);
+  const usedLevel = getContextUsageLevel(usedPercentage);
   const usedClass =
-    usedPercentage > 80
+    usedLevel === 'error'
       ? styles.error
-      : usedPercentage > 60
+      : usedLevel === 'warning'
         ? styles.warning
         : styles.accent;
 

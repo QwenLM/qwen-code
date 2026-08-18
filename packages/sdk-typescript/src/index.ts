@@ -15,6 +15,7 @@ export {
   DaemonClient,
   DaemonHttpError,
   DaemonPendingPromptLimitError,
+  DaemonSessionIdProtocolError,
   WorkspaceDaemonClient,
   DaemonSessionClient,
   asKnownDaemonEvent,
@@ -100,6 +101,8 @@ export {
   type DaemonMcpServerRestartRefusedEvent,
   type DaemonSettingsReloadedData,
   type DaemonSettingsReloadedEvent,
+  type DaemonSettingsChangedData,
+  type DaemonSettingsChangedEvent,
   type DaemonToolToggleResult,
   type DaemonSkillBatchToggleError,
   type DaemonSkillBatchToggleErrorCode,
@@ -110,6 +113,8 @@ export {
   type ExtensionDefaultActivationBatchItem,
   type ExtensionWorkspaceActivationBatchItem,
   type DaemonSkillToggleActivation,
+  type DaemonSkillToggleMutation,
+  type DaemonSkillToggleMutationSkill,
   type DaemonSkillToggleResult,
   type DaemonSkillScope,
   type DaemonSkillInstallSource,
@@ -226,6 +231,9 @@ export {
   type DaemonSessionListPage,
   type DaemonSessionListPageOptions,
   type DaemonSessionListView,
+  type DaemonSessionCatalogVersion,
+  type DaemonSessionLiveState,
+  type DaemonWorkspaceSessionLiveState,
   type DaemonSessionOrganizationResult,
   type DaemonSessionOrganizationUpdate,
   type DaemonSessionSubscribeOptions,
@@ -256,6 +264,8 @@ export {
   type DaemonWorkspaceFileBytes,
   type DaemonWorkspaceFileEditRequest,
   type DaemonWorkspaceFileEditResult,
+  type DaemonWorkspaceFileUploadRequest,
+  type DaemonWorkspaceFileUploadResult,
   type DaemonWorkspaceFileWriteRequest,
   type DaemonWorkspaceFileWriteResult,
   type DaemonWorkspaceMemoryDreamOptions,
@@ -407,6 +417,11 @@ export type {
 export type { ServeBridgeMcpServerOptions } from './daemon-mcp/serve-bridge/index.js';
 
 export type { QueryOptions } from './query/createQuery.js';
+export type {
+  EffortOverride,
+  EffortStatus,
+  EffortTier,
+} from './types/types.js';
 export type { LogLevel, LoggerConfig, ScopedLogger } from './utils/logger.js';
 
 export type {

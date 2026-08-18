@@ -9,8 +9,10 @@
  * `BridgeFileSystem` interface by routing delegated ACP `writeTextFile` /
  * `readTextFile` requests through the `WorkspaceFileSystem`. Production
  * `qwen serve` keeps text reads in the same-host child and delegates final ACP
- * `writeTextFile` content writes through this adapter. The read path remains a
- * fail-closed boundary for unexpected or capability-violating delegated reads.
+ * `writeTextFile` content writes through this adapter. A daemon-owned adapter
+ * may opt into the narrow same-host built-in-tool write route; the default
+ * remains workspace-scoped. The read path remains a fail-closed boundary for
+ * unexpected or capability-violating delegated reads.
  *
  * The adapter is a thin translation layer:
  *   - ACP request → `WorkspaceFileSystem.resolve(path, intent)` to
@@ -57,14 +59,21 @@ import type {
   WriteTextFileResponse,
 } from '@agentclientprotocol/sdk';
 import type { BridgeFileSystem } from '@qwen-code/acp-bridge';
+import { parseToolWriteOriginMeta } from '@qwen-code/qwen-code-core/toolWriteOrigin';
 import type {
   WorkspaceFileSystemFactory,
   RequestContext,
+  SameHostToolTextWriteRequest,
 } from './fs/workspace-file-system.js';
 
 /** Route label used in audit events for ACP-triggered fs operations. */
 const ACP_WRITE_ROUTE = 'ACP writeTextFile';
 const ACP_READ_ROUTE = 'ACP readTextFile';
+
+interface BridgeFileSystemAdapterOptions {
+  /** Same-host daemon wiring only; generic adapters must leave this disabled. */
+  allowSameHostToolWritesOutsideWorkspace?: boolean;
+}
 
 /**
  * Build the per-tick `RequestContext` the `WorkspaceFileSystemFactory`
@@ -93,14 +102,26 @@ function buildAuditContext(
  */
 export function createBridgeFileSystemAdapter(
   factory: WorkspaceFileSystemFactory,
+  options: BridgeFileSystemAdapterOptions = {},
 ): BridgeFileSystem {
   return {
     async writeText(
       params: WriteTextFileRequest,
     ): Promise<WriteTextFileResponse> {
-      const wfs = factory.forRequest(
-        buildAuditContext(params, ACP_WRITE_ROUTE),
-      );
+      const ctx = buildAuditContext(params, ACP_WRITE_ROUTE);
+      if (
+        options.allowSameHostToolWritesOutsideWorkspace === true &&
+        parseToolWriteOriginMeta(params._meta) !== undefined &&
+        factory.writeSameHostToolText !== undefined
+      ) {
+        await factory.writeSameHostToolText(ctx, {
+          path: params.path,
+          content: params.content,
+          ...sanitizeWriteMeta(params._meta),
+        });
+        return {};
+      }
+      const wfs = factory.forRequest(ctx);
       const resolved = await wfs.resolve(params.path, 'write');
       await wfs.writeTextOverwrite(resolved, params.content);
       return {};
@@ -134,4 +155,20 @@ export function createBridgeFileSystemAdapter(
       return { content };
     },
   };
+}
+
+function sanitizeWriteMeta(
+  meta: WriteTextFileRequest['_meta'],
+): Pick<SameHostToolTextWriteRequest, 'meta'> {
+  const sanitized: NonNullable<SameHostToolTextWriteRequest['meta']> = {};
+  if (typeof meta?.['bom'] === 'boolean') {
+    sanitized.bom = meta['bom'];
+  }
+  if (typeof meta?.['encoding'] === 'string') {
+    sanitized.encoding = meta['encoding'];
+  }
+  if (meta?.['lineEnding'] === 'lf' || meta?.['lineEnding'] === 'crlf') {
+    sanitized.lineEnding = meta['lineEnding'];
+  }
+  return Object.keys(sanitized).length > 0 ? { meta: sanitized } : {};
 }

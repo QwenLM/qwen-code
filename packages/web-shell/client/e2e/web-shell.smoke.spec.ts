@@ -73,6 +73,105 @@ test('loads replayed transcript and connects to fake daemon @smoke', async ({
   }
 });
 
+test('branches from an earlier completed Assistant response and resumes the fork @smoke', async ({
+  page,
+}, testInfo) => {
+  const branchRecordId = '11111111-1111-4111-8111-111111111111';
+  const branchSessionId = 'web-shell-e2e-branch';
+  const firstTurn = [
+    userTextEvent('First question', { id: 1 }),
+    assistantTextEvent('First completed answer', {
+      id: 2,
+      branchRecordId,
+    }),
+    turnCompleteEvent('prompt-1', { id: 3 }),
+  ];
+  const scenario = createWebShellDaemonScenario({
+    events: [
+      ...firstTurn,
+      userTextEvent('Second question', { id: 4 }),
+      assistantTextEvent('Second completed answer', {
+        id: 5,
+        branchRecordId: '22222222-2222-4222-8222-222222222222',
+      }),
+      turnCompleteEvent('prompt-2', { id: 6 }),
+      userTextEvent('Third question', { id: 7 }),
+      assistantTextEvent('Third completed answer', {
+        id: 8,
+        branchRecordId: '33333333-3333-4333-8333-333333333333',
+      }),
+      turnCompleteEvent('prompt-3', { id: 9 }),
+    ],
+    branch: {
+      sessionId: branchSessionId,
+      clientId: 'web-shell-e2e-branch-client',
+      displayName: 'First answer branch',
+      events: firstTurn,
+    },
+  });
+  const daemon = await installScenario(page, scenario, testInfo);
+
+  await gotoSession(page, scenario, daemon);
+  const firstAnswerRow = page
+    .locator('[data-web-shell-message-row]')
+    .filter({ hasText: 'First completed answer' });
+  await firstAnswerRow.hover();
+  await firstAnswerRow
+    .getByRole('button', { name: 'Branch', exact: true })
+    .click();
+
+  await expect.poll(() => daemon.branchRequests().length).toBe(1);
+  const branchRequest = firstRequest(daemon.branchRequests());
+  expect(branchRequest.path).toBe(
+    `/session/${encodeURIComponent(scenario.sessionId)}/branch`,
+  );
+  expect(requestBodyRecord(branchRequest)).toEqual({
+    atRecordId: branchRecordId,
+  });
+  await expect(page).toHaveURL(
+    new RegExp(`/session/${encodeURIComponent(branchSessionId)}$`),
+  );
+  await completeReplay(
+    page,
+    daemon,
+    branchSessionId,
+    scenario.branch?.events.length,
+  );
+  const messages = page.locator('[data-web-shell-message-list]');
+  await expect(messages).toContainText('First completed answer');
+  await expect(messages).not.toContainText('Second completed answer');
+  await expect(messages).not.toContainText('Third completed answer');
+  expect(scenario.events).toHaveLength(9);
+
+  await fillComposer(page, 'Continue from the fork');
+  await page.locator('[data-web-shell-composer-submit]').click();
+  await expect
+    .poll(
+      () =>
+        daemon
+          .promptRequests()
+          .filter(
+            (request) => request.path === `/session/${branchSessionId}/prompt`,
+          ).length,
+    )
+    .toBe(1);
+
+  await page.reload();
+  await completeReplay(
+    page,
+    daemon,
+    branchSessionId,
+    scenario.branch?.events.length,
+  );
+  const restoredFirstAnswer = page
+    .locator('[data-web-shell-message-row]')
+    .filter({ hasText: 'First completed answer' });
+  await restoredFirstAnswer.hover();
+  await expect(
+    restoredFirstAnswer.getByRole('button', { name: 'Branch', exact: true }),
+  ).toBeVisible();
+});
+
 test('submits a prompt and renders a streamed assistant response @smoke', async ({
   page,
 }, testInfo) => {
@@ -98,6 +197,82 @@ test('submits a prompt and renders a streamed assistant response @smoke', async 
   await expect(page.locator('[data-web-shell-message-list]')).toContainText(
     'Pong from fake SSE',
   );
+});
+
+test('configures qwen3.8-max reasoning from the model popover @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario({
+    currentModel: 'qwen3.8-max',
+    state: {
+      configOptions: [
+        {
+          id: 'reasoning_effort',
+          name: 'Reasoning effort',
+          type: 'select',
+          currentValue: 'xhigh',
+          options: [
+            { value: 'none', name: 'Thinking off' },
+            { value: 'low', name: 'Low' },
+            { value: 'medium', name: 'Medium' },
+            { value: 'xhigh', name: 'Extra high' },
+          ],
+          _meta: {
+            'qwenCode/reasoning': { defaultEffort: 'xhigh' },
+          },
+        },
+      ],
+    },
+  });
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoSession(page, scenario, daemon);
+
+  await page.locator('[data-web-shell-model-button]').click();
+  const controls = page.locator('[data-web-shell-model-reasoning]');
+  const modelButton = page.locator('[data-web-shell-model-button]');
+  const modelSubmenu = page.locator('[data-web-shell-model-submenu-trigger]');
+  const thinking = controls.locator('[data-web-shell-thinking-toggle]');
+  const medium = controls.locator('[data-web-shell-effort="medium"]');
+  const xhigh = controls.locator('[data-web-shell-effort="xhigh"]');
+  await expect(controls).toBeVisible();
+  await expect(modelSubmenu).toBeVisible();
+  await expect(modelButton).toContainText('Extra High');
+  await expect(thinking).toBeChecked();
+  await expect(xhigh).toHaveAttribute('aria-pressed', 'true');
+
+  await medium.click();
+  await expect.poll(() => daemon.configOptionRequests().length).toBe(1);
+  expect(
+    requestBodyRecord(firstRequest(daemon.configOptionRequests())),
+  ).toEqual({ configId: 'reasoning_effort', value: 'medium' });
+  await expect(medium).toHaveAttribute('aria-pressed', 'true');
+  await expect(modelButton).toContainText('Medium');
+
+  await thinking.click();
+  await expect.poll(() => daemon.configOptionRequests().length).toBe(2);
+  expect(requestBodyRecord(daemon.configOptionRequests()[1]!)).toEqual({
+    configId: 'reasoning_effort',
+    value: 'none',
+  });
+  await expect(thinking).not.toBeChecked();
+  await expect(medium).toBeDisabled();
+  await expect(medium).toHaveAttribute('aria-pressed', 'true');
+  await expect(modelButton).toContainText('Thinking Off');
+
+  await thinking.click();
+  await expect.poll(() => daemon.configOptionRequests().length).toBe(3);
+  expect(requestBodyRecord(daemon.configOptionRequests()[2]!)).toEqual({
+    configId: 'reasoning_effort',
+    value: 'medium',
+  });
+  await expect(thinking).toBeChecked();
+  await expect(modelButton).toContainText('Medium');
+
+  await modelSubmenu.click();
+  await expect(page.locator('[data-web-shell-model-submenu]')).toBeVisible();
+  await expect(
+    page.locator('[data-web-shell-model-submenu] input[type="search"]'),
+  ).toBeVisible();
 });
 
 test('uploads an Extension archive from the manager @smoke', async ({
@@ -987,6 +1162,56 @@ test('lets a pasted image grow the composer without collapsing the text viewport
   await expect.poll(() => composerHeight(page)).toBe(initialHeight);
 });
 
+test('drops ordered PNG and BMP images and submits them without text @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+
+  await gotoSession(page, scenario, daemon);
+  const surface = page.locator('[data-web-shell-composer-surface]');
+  await dragComposerFileOver(surface);
+  await expect(surface).toHaveAttribute('data-image-drag-active', 'true');
+
+  await dropComposerImages(surface);
+  await expect(surface).not.toHaveAttribute('data-image-drag-active');
+  await expect(surface).not.toHaveAttribute('aria-busy');
+  const images = surface.locator(
+    '[data-web-shell-composer-attachments] img[src^="data:image/"]',
+  );
+  await expect(images).toHaveCount(2);
+  await expectImagesDecoded(images);
+
+  const submit = page.locator('[data-web-shell-composer-submit]');
+  await expect(submit).toBeEnabled();
+  await submit.click();
+
+  await expect.poll(() => daemon.promptRequests().length).toBe(1);
+  const prompt = requestBodyRecord(firstRequest(daemon.promptRequests()))[
+    'prompt'
+  ];
+  expect(Array.isArray(prompt)).toBe(true);
+  const blocks = prompt as Array<Record<string, unknown>>;
+  expect(blocks[0]).toMatchObject({ type: 'text', text: '' });
+  expect(blocks.slice(1)).toEqual([
+    {
+      type: 'image',
+      data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+      mimeType: 'image/png',
+    },
+    {
+      type: 'image',
+      data: 'Qk06AAAAAAAAADYAAAAoAAAAAQAAAAEAAAABABgAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAD/AA==',
+      mimeType: 'image/bmp',
+    },
+  ]);
+  const transcriptImages = page.locator(
+    '[data-web-shell-message-list] img[src^="data:image/"]',
+  );
+  await expect(transcriptImages).toHaveCount(2);
+  await expectImagesDecoded(transcriptImages);
+});
+
 async function installScenario(
   page: Page,
   scenario: WebShellDaemonScenario,
@@ -1093,6 +1318,64 @@ async function pasteComposerImages(page: Page, count: number): Promise<void> {
       }),
     );
   }, count);
+}
+
+async function dragComposerFileOver(surface: Locator): Promise<void> {
+  await surface.evaluate((element) => {
+    const transfer = new DataTransfer();
+    transfer.items.add(
+      new File([new Uint8Array([0])], 'dragged.png', { type: 'image/png' }),
+    );
+    element.dispatchEvent(
+      new DragEvent('dragenter', {
+        bubbles: true,
+        cancelable: true,
+        dataTransfer: transfer,
+      }),
+    );
+  });
+}
+
+async function dropComposerImages(surface: Locator): Promise<void> {
+  await surface.evaluate((element) => {
+    const pngBase64 =
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+    const binary = atob(pngBase64);
+    const pngBytes = Uint8Array.from(binary, (byte) => byte.charCodeAt(0));
+    const bmpBytes = new Uint8Array(58);
+    const view = new DataView(bmpBytes.buffer);
+    bmpBytes.set([0x42, 0x4d]);
+    view.setUint32(2, bmpBytes.length, true);
+    view.setUint32(10, 54, true);
+    view.setUint32(14, 40, true);
+    view.setInt32(18, 1, true);
+    view.setInt32(22, 1, true);
+    view.setUint16(26, 1, true);
+    view.setUint16(28, 24, true);
+    view.setUint32(34, 4, true);
+    bmpBytes.set([0x00, 0x00, 0xff, 0x00], 54);
+    const transfer = new DataTransfer();
+    transfer.items.add(
+      new File([pngBytes], 'first.png', { type: 'image/png' }),
+    );
+    transfer.items.add(
+      new File([bmpBytes], 'second.bmp', { type: 'image/bmp' }),
+    );
+    element.dispatchEvent(
+      new DragEvent('dragover', {
+        bubbles: true,
+        cancelable: true,
+        dataTransfer: transfer,
+      }),
+    );
+    element.dispatchEvent(
+      new DragEvent('drop', {
+        bubbles: true,
+        cancelable: true,
+        dataTransfer: transfer,
+      }),
+    );
+  });
 }
 
 async function expectImagesDecoded(images: Locator): Promise<void> {

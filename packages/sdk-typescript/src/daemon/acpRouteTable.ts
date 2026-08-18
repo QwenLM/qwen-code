@@ -14,6 +14,8 @@
 
 import { isRecord } from './acpTransportUtils.js';
 
+const REQUESTED_SESSION_ID_META_KEY = 'qwen-code/sessionId';
+
 export interface RouteMapping {
   method: string;
   /**
@@ -105,8 +107,22 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
       method: 'session/new',
       extractParams: (_s, body) => {
         if (!isRecord(body)) return {};
-        const { sessionScope: _, ...rest } = body as Record<string, unknown>;
-        return rest;
+        const {
+          sessionScope: _,
+          sessionId,
+          _meta,
+          ...rest
+        } = body as Record<string, unknown>;
+        if (sessionId === undefined) {
+          return { ...rest, ...(_meta !== undefined ? { _meta } : {}) };
+        }
+        return {
+          ...rest,
+          _meta: {
+            ...(isRecord(_meta) ? _meta : {}),
+            [REQUESTED_SESSION_ID_META_KEY]: sessionId,
+          },
+        };
       },
     },
   },

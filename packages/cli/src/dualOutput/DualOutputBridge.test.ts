@@ -5,11 +5,16 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { Buffer } from 'node:buffer';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { execSync } from 'node:child_process';
 import type { Config } from '@qwen-code/qwen-code-core';
+import {
+  HEADLESS_TOOL_RESULT_TEXT_JSON_BYTE_BUDGET,
+  HEADLESS_TOOL_RESULT_TEXT_TRUNCATION_MARKER,
+} from '../nonInteractive/io/headless-tool-result-text-projection.js';
 import {
   DualOutputBridge,
   DUAL_OUTPUT_PROTOCOL_VERSION,
@@ -165,6 +170,43 @@ describe('DualOutputBridge', () => {
       expect(data['version']).toBe('1.2.3');
       expect(data['protocol_version']).toBe(DUAL_OUTPUT_PROTOCOL_VERSION);
       expect(data['supported_events']).toEqual([...SUPPORTED_EVENTS]);
+      expect(DUAL_OUTPUT_PROTOCOL_VERSION).toBe(2);
+    });
+
+    it('writes bounded tool result content to the sidecar file', async () => {
+      bridge = new DualOutputBridge(config, { filePath: target });
+      const display = 'HEAD-' + 'x'.repeat(100_000) + '-TAIL';
+
+      bridge.emitToolResult(
+        {
+          callId: 'tool-large',
+          name: 'test_tool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-1',
+        },
+        {
+          callId: 'tool-large',
+          responseParts: [],
+          resultDisplay: display,
+          error: undefined,
+          errorType: undefined,
+        },
+      );
+      await bridge.shutdown();
+
+      const user = readJsonl(target).find((line) => line['type'] === 'user');
+      const content = (
+        user as {
+          message: { content: Array<{ content: string }> };
+        }
+      ).message.content[0].content;
+
+      expect(
+        Buffer.byteLength(JSON.stringify(content), 'utf8'),
+      ).toBeLessThanOrEqual(HEADLESS_TOOL_RESULT_TEXT_JSON_BYTE_BUDGET);
+      expect(content).toContain(HEADLESS_TOOL_RESULT_TEXT_TRUNCATION_MARKER);
+      expect(content).not.toBe(display);
     });
 
     it('emits session_end on shutdown for a clean termination signal', async () => {

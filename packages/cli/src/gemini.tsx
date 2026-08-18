@@ -22,9 +22,11 @@ import {
   uiTelemetryService,
 } from '@qwen-code/qwen-code-core';
 import {
+  EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE,
   EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
   EXTERNAL_TOOL_GUARD_TOKEN_ENV,
   PRIVATE_EXTERNAL_TOOL_GUARD_ENV,
+  PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV,
 } from '@qwen-code/acp-bridge/externalToolGuard';
 import dns from 'node:dns';
 import fs from 'node:fs';
@@ -367,6 +369,12 @@ export async function main() {
       ? EXTERNAL_TOOL_GUARD_REQUIRED_VALUE
       : undefined;
   delete process.env[PRIVATE_EXTERNAL_TOOL_GUARD_ENV];
+  const privateExternalToolGuardProvider =
+    process.env[PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV] ===
+    EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE
+      ? EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE
+      : undefined;
+  delete process.env[PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV];
 
   if (process.argv.includes('--bare')) {
     process.env[QWEN_CODE_SIMPLE_ENV_VAR] = '1';
@@ -393,6 +401,12 @@ export async function main() {
           ...(privateExternalToolGuard
             ? {
                 [PRIVATE_EXTERNAL_TOOL_GUARD_ENV]: privateExternalToolGuard,
+                ...(privateExternalToolGuardProvider
+                  ? {
+                      [PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV]:
+                        privateExternalToolGuardProvider,
+                    }
+                  : {}),
               }
             : {}),
         }
@@ -669,7 +683,7 @@ export async function main() {
     }
   }
 
-  if (isAcpMode && process.env[QWEN_CODE_SERVE_ENV]) {
+  if (isAcpMode && process.env[QWEN_CODE_SERVE_ENV] === '1') {
     // A daemon-spawned ACP child hosts sessions for arbitrary workspaces.
     // Loader vars from the daemon's launch environment were only needed to
     // boot this process (e.g. the dev harness tsx loader); left in
@@ -856,6 +870,16 @@ export async function main() {
     );
     markAcpStartup('configConstructionEnd');
     profileCheckpoint('after_load_cli_config');
+
+    const nonInteractiveHousekeeping =
+      !config.isInteractive() || config.getExperimentalZedIntegration()
+        ? await import('./utils/housekeeping/scheduler.js')
+        : undefined;
+    if (nonInteractiveHousekeeping) {
+      registerCleanup(() =>
+        nonInteractiveHousekeeping.stopNonInteractiveOpenAILogHousekeeping(),
+      );
+    }
 
     // Subscribe the running Config to settings changes so MCP servers
     // reconnect / disconnect / restart without a session restart (#3696,
@@ -1053,17 +1077,25 @@ export async function main() {
       markAcpStartup('acpImportStart');
       const { runAcpAgent } = await import('./acp-integration/acpAgent.js');
       markAcpStartup('acpImportEnd');
-      await runAcpAgent(config, settings, argv, {
-        privateParentCapability: isAcpMode
-          ? privateAcpParentCapability
-          : undefined,
-        externalToolGuardRequired:
-          isAcpMode &&
-          privateAcpParentCapability !== undefined &&
-          privateExternalToolGuard === EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
-      });
-      // Clean up child processes and force exit, matching other non-interactive modes
-      await runExitCleanup();
+      try {
+        await runAcpAgent(config, settings, argv, {
+          privateParentCapability: isAcpMode
+            ? privateAcpParentCapability
+            : undefined,
+          externalToolGuardRequired:
+            isAcpMode &&
+            privateAcpParentCapability !== undefined &&
+            privateExternalToolGuard === EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
+          externalToolGuardProviderAttached:
+            isAcpMode &&
+            privateAcpParentCapability !== undefined &&
+            privateExternalToolGuardProvider ===
+              EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE,
+        });
+      } finally {
+        // Clean up child processes even when ACP setup or shutdown fails.
+        await runExitCleanup();
+      }
       process.exit(0);
     }
 
@@ -1277,12 +1309,19 @@ export async function main() {
         './nonInteractive/session.js'
       );
 
-      await runNonInteractiveStreamJson(
+      nonInteractiveHousekeeping?.startNonInteractiveOpenAILogHousekeeping(
         nonInteractiveConfig,
-        trimmedInput.length > 0 ? trimmedInput : '',
         settings,
       );
-      await runExitCleanup();
+      try {
+        await runNonInteractiveStreamJson(
+          nonInteractiveConfig,
+          trimmedInput.length > 0 ? trimmedInput : '',
+          settings,
+        );
+      } finally {
+        await runExitCleanup();
+      }
       // `runNonInteractiveStreamJson` doesn't return an explicit exit
       // code yet, so a cleanup task that mutates `process.exitCode`
       // could clobber a non-zero failure signal. This is currently safe
@@ -1314,18 +1353,24 @@ export async function main() {
     debugLogger.debug(`Session ID: ${config.getSessionId()}`);
 
     const { runNonInteractive } = await import('./nonInteractiveCli.js');
-    const exitCode = await runNonInteractive(
+    nonInteractiveHousekeeping?.startNonInteractiveOpenAILogHousekeeping(
       nonInteractiveConfig,
       settings,
-      input,
-      prompt_id,
     );
-    // Call cleanup before process.exit, which causes cleanup to not run.
-    // Capture the exit code BEFORE cleanup so any cleanup task that
-    // mutates process.exitCode can't silently turn a structured-output
-    // failure (or other explicit non-zero return from runNonInteractive)
-    // into a zero exit.
-    await runExitCleanup();
+    let exitCode: number;
+    try {
+      exitCode = await runNonInteractive(
+        nonInteractiveConfig,
+        settings,
+        input,
+        prompt_id,
+      );
+    } finally {
+      // Call cleanup before process.exit, which causes cleanup to not run.
+      await runExitCleanup();
+    }
+    // Capture the exit code BEFORE cleanup so any cleanup task that mutates
+    // process.exitCode can't silently turn an explicit failure into success.
     process.exit(exitCode);
   }
 }

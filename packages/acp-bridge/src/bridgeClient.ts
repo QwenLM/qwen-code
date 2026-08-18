@@ -9,6 +9,7 @@ import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import type {
   Client,
+  ContentBlock,
   ReadTextFileRequest,
   ReadTextFileResponse,
   RequestPermissionRequest,
@@ -30,6 +31,7 @@ import {
   ACTIVE_WORK_MAX_SESSION_HOLDS,
   ACTIVE_WORK_MAX_SNAPSHOT_SESSIONS,
   ACTIVE_WORK_NOTIFICATION_METHOD,
+  MID_TURN_RECONCILIATION_RING_SIZE,
   MID_TURN_QUEUE_DRAIN_METHOD,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
   type ActiveWorkHoldV1,
@@ -82,6 +84,13 @@ import type {
   SessionArtifactInput,
   SessionArtifactStore,
 } from './sessionArtifacts.js';
+import {
+  isSessionMediaReference,
+  SessionMediaReferenceError,
+  withMediaDegradationMarker,
+  type SessionMediaReference,
+  type SessionMediaStore,
+} from './sessionMedia.js';
 
 /**
  * Validate a channel-wide active-work snapshot off the wire.
@@ -602,8 +611,11 @@ function sliceLineRange(
  */
 export interface BridgeClientSessionEntry {
   sessionId: string;
+  workspaceCwd: string;
+  effectiveCwd: string;
   events: EventBus;
   artifacts: SessionArtifactStore;
+  media: SessionMediaStore;
   recordingDegraded: boolean;
   pendingPermissionIds: Set<string>;
   /** Pollable pending human interactions, keyed by permission request id. */
@@ -615,6 +627,13 @@ export interface BridgeClientSessionEntry {
    * `extMethod` can splice it. See `SessionEntry.midTurnMessageQueue`.
    */
   midTurnMessageQueue: MidTurnQueueEntry[];
+  /**
+   * Bounded ring of drained mid-turn message ids. Owned by the full
+   * `SessionEntry` in `bridge.ts`; surfaced on this narrowed view so the
+   * drain in `extMethod` can record what it handed to the child. See
+   * `SessionEntry.settledMidTurnMessageIds`.
+   */
+  settledMidTurnMessageIds: string[];
   /** Complete prompts waiting behind the currently running prompt. */
   pendingPromptList: PendingPromptEntry[];
   /** Bridge prompt that owns the child Guard wait for this FIFO. */
@@ -803,6 +822,13 @@ export class BridgeClient implements Client {
      */
     private readonly externalToolGuard?: ExternalToolGuardHandler,
     private readonly onActiveWork?: (snapshot: ActiveWorkSnapshotV1) => void,
+    /**
+     * Catalog-clock mark forwarded from the bridge factory. Invoked when a
+     * child-side notification changes persisted catalog metadata the bridge
+     * never sees directly (currently: automatic title updates). Trailing and
+     * optional so existing direct constructors stay source-compatible.
+     */
+    private readonly onSessionCatalogChanged?: () => void,
   ) {}
 
   async requestPermission(
@@ -906,6 +932,9 @@ export class BridgeClient implements Client {
   }
 
   async sessionUpdate(params: SessionNotification): Promise<void> {
+    if (this.abandonedRestoreIds.has(params.sessionId)) {
+      return;
+    }
     if (
       !this.ownsSession(params.sessionId) &&
       !this.inFlightRestoreIds.has(params.sessionId)
@@ -1140,22 +1169,21 @@ export class BridgeClient implements Client {
    */
   private readonly tombstonedSessionIds = new Map<string, number>();
 
-  /**
-   * Allow-list of sessionIds currently being restored via
-   * `session/load` / `session/resume`. Bypasses the tombstone check
-   * in `bufferEarlyEvent` so restore-time events for a
-   * previously-closed id flow through to the future
-   * `createSessionEntry -> drainEarlyEvents` call.
-   *
-   * Without this, the tombstone set before a future `load` can clear
-   * it via `drainEarlyEvents` would silently drop legitimate
-   * restore-time events (e.g. MCP discovery budget events firing
-   * during the ACP call window).
-   *
-   * Bridge factory enters the set before awaiting the ACP restore
-   * call and exits on settle (success or failure).
-   */
+  /** Restore ownership for `sessionUpdate` and artifact demultiplexing. */
   private readonly inFlightRestoreIds = new Set<string>();
+
+  /**
+   * Registrations allowed to buffer early extended notifications through an
+   * ordinary close tombstone. This includes restores and caller-supplied-id
+   * spawns, and lasts only until their ACP registration attempt settles.
+   */
+  private readonly inFlightSessionRegistrationIds = new Set<string>();
+
+  /**
+   * Restore ids whose caller timed out while the non-cancellable ACP request
+   * continues.
+   */
+  private readonly abandonedRestoreIds = new Set<string>();
 
   /**
    * Handle child->bridge ACP `extMethod` requests (calls that expect a
@@ -1167,8 +1195,8 @@ export class BridgeClient implements Client {
    * between tool batches to pull any messages the browser queued mid-turn. We splice the per-session
    * queue, return them to the child as the response, and — when non-empty —
    * publish a `mid_turn_message_injected` SSE frame so the browser can move
-   * those messages out of its pending queue (a dedupe signal, not a transcript
-   * render). Unknown methods reject with ACP `methodNotFound` (-32601), matching
+   * those messages out of its pending queue and render the immediate echo.
+   * Unknown methods reject with ACP `methodNotFound` (-32601), matching
    * the SDK's
    * default for an unimplemented client surface; the child's drain caller
    * treats that as "drain unsupported" and stops asking.
@@ -1217,54 +1245,148 @@ export class BridgeClient implements Client {
     // The drain always carries a sessionId; without one we can't route it on a
     // multi-session channel (and `resolveEntry(undefined)` would throw there),
     // so answer with an empty drain rather than poisoning the turn.
-    if (!sessionId) return { messages: [], hasQueuedPrompt: false };
+    if (!sessionId) return { messages: [], items: [], hasQueuedPrompt: false };
+    if (!this.ownsSession(sessionId)) {
+      return { messages: [], items: [], hasQueuedPrompt: false };
+    }
     const entry = this.resolveEntry(sessionId);
-    if (!entry) return { messages: [], hasQueuedPrompt: false };
+    if (!entry) return { messages: [], items: [], hasQueuedPrompt: false };
     const drained = entry.midTurnMessageQueue.splice(0);
+    if (drained.length > 0) {
+      // Claim the ids before media I/O yields so retries and removals cannot
+      // observe a drained message as neither queued nor settled.
+      for (const item of drained) {
+        entry.settledMidTurnMessageIds.push(item.messageId);
+      }
+      if (
+        entry.settledMidTurnMessageIds.length >
+        MID_TURN_RECONCILIATION_RING_SIZE
+      ) {
+        entry.settledMidTurnMessageIds.splice(
+          0,
+          entry.settledMidTurnMessageIds.length -
+            MID_TURN_RECONCILIATION_RING_SIZE,
+        );
+      }
+    }
+    // Shared across every message in this drain: one stored mediaId that
+    // several queued messages reference is read and base64-encoded once
+    // instead of once per message.
+    const mediaMemo = new Map<string, Promise<ContentBlock>>();
+    const serializedMediaIds = new Set<string>();
+    const items: Array<{
+      messageId: string;
+      displayText: string;
+      content: ContentBlock[];
+      mediaReferences?: SessionMediaReference[];
+    }> = [];
+    try {
+      for (const item of drained) {
+        let degraded = 0;
+        const planned = (item.content ?? []).filter((block) => {
+          if (!isSessionMediaReference(block)) return true;
+          if (serializedMediaIds.has(block.mediaId)) {
+            degraded += 1;
+            return false;
+          }
+          serializedMediaIds.add(block.mediaId);
+          return true;
+        });
+        let resolvedBlocks: ContentBlock[];
+        let mediaReferences: SessionMediaReference[];
+        try {
+          resolvedBlocks = await entry.media.resolveContent(planned, mediaMemo);
+          mediaReferences = planned.filter(isSessionMediaReference);
+        } catch (error) {
+          // Only a gone/invalid reference degrades — per block, so one dead
+          // reference drops itself and keeps its siblings. Any other error
+          // (fd exhaustion, I/O failure) propagates instead of silently
+          // destroying the media of every message sharing the mediaId.
+          if (!(error instanceof SessionMediaReferenceError)) throw error;
+          writeStderrLine(
+            `[mid-turn] session=${JSON.stringify(entry.sessionId)} degraded media for message ${JSON.stringify(item.messageId)}: ${JSON.stringify(error instanceof Error ? error.message : String(error))}`,
+          );
+          const perBlock = await entry.media.resolveContentDegrading(
+            planned,
+            mediaMemo,
+          );
+          resolvedBlocks = perBlock.resolvedBlocks;
+          mediaReferences = perBlock.retainedBlocks.filter(
+            isSessionMediaReference,
+          );
+          degraded += perBlock.degraded;
+        }
+        let content: ContentBlock[] = [
+          ...(item.text ? [{ type: 'text' as const, text: item.text }] : []),
+          ...resolvedBlocks,
+        ];
+        if (degraded > 0) content = withMediaDegradationMarker(content);
+        items.push({
+          messageId: item.messageId,
+          displayText: item.text,
+          content,
+          ...(mediaReferences.length > 0 ? { mediaReferences } : {}),
+        });
+      }
+    } catch (error) {
+      // Non-media resolution failure after the splice + settle above: the
+      // store still holds the bytes, so hand the messages back to the queue
+      // for the next drain instead of losing them, and take their ids back
+      // out of the settled ring so a same-id retry is not acked as already
+      // delivered.
+      const requeued = new Set(drained.map((queued) => queued.messageId));
+      const ring = entry.settledMidTurnMessageIds;
+      const kept = ring.filter((id) => !requeued.has(id));
+      ring.splice(0, ring.length, ...kept);
+      entry.midTurnMessageQueue.unshift(...drained);
+      writeStderrLine(
+        `[mid-turn] session=${JSON.stringify(entry.sessionId)} drain failed, requeued ${drained.length} message(s): ${JSON.stringify(error instanceof Error ? error.message : String(error))}`,
+      );
+      throw error;
+    }
+    // Queue-only entries are private coordinator steering, not UI transcript.
+    const echoed = drained.filter((item) => !item.queueOnly);
     const messages = drained.map((item) => item.text);
+    // Structured twin of `messages` carrying any queued media blocks. The ACP
+    // child prefers `items` when present and falls back to `messages`, so
+    // text-only entries surface as a single text block and old children keep
+    // working unchanged. References travel beside the resolved content so the
+    // child can persist replay-safe metadata rather than inline bytes.
     const hasQueuedPrompt = entry.pendingPromptList.some(
       (prompt) =>
         prompt.state === 'queued' && !prompt.abortController.signal.aborted,
     );
-    if (drained.length > 0) {
+    if (echoed.length > 0) {
       // `publish()` never throws — it returns `undefined` on a closed bus (see
       // EventBus.publish's never-throws contract: "Don't add try/catch wrappers
       // around publish()"). Capture the result instead. A dropped frame is
       // teardown-only: the child still gets the spliced messages below, but the
-      // browser won't receive the echo and would resend them next turn — so log
-      // it.
-      //
-      // Publish ONE frame per originator client. The frame is broadcast to every
-      // SSE subscriber on the session, so it carries `originatorClientId` for
-      // clients to filter on — a peer that didn't queue the message must not
-      // dedupe its own coincidentally-equal entry. A mixed-originator batch (two
-      // clients pushing in the same window) is rare but still routed correctly.
-      const byOriginator = new Map<string | undefined, MidTurnQueueEntry[]>();
-      for (const item of drained) {
-        const group = byOriginator.get(item.originatorClientId);
-        if (group) group.push(item);
-        else byOriginator.set(item.originatorClientId, [item]);
-      }
-      for (const [originatorClientId, items] of byOriginator) {
-        const texts = items.map((item) => item.text);
-        const published = entry.events.publish({
-          type: MID_TURN_MESSAGE_INJECTED_EVENT,
-          ...(entry.activePromptId ? { promptId: entry.activePromptId } : {}),
-          data: {
-            sessionId: entry.sessionId,
-            messages: texts,
-            messageIds: items.map((item) => item.messageId),
-          },
-          ...(originatorClientId ? { originatorClientId } : {}),
-        });
-        writeStderrLine(
-          published
-            ? `[mid-turn] session=${entry.sessionId} drained=${texts.length}${originatorClientId ? ` originator=${originatorClientId}` : ''} injected into running turn`
-            : `[mid-turn] session=${entry.sessionId} drained=${texts.length} echo frame dropped (bus closed); browser may resend next turn`,
-        );
-      }
+      // browser must recover the handoff from the reconciliation ring.
+      const published = entry.events.publish({
+        type: MID_TURN_MESSAGE_INJECTED_EVENT,
+        ...(entry.activePromptId ? { promptId: entry.activePromptId } : {}),
+        data: {
+          sessionId: entry.sessionId,
+          messages: echoed.map((item) => item.text),
+          messageIds: echoed.map((item) => item.messageId),
+          // Carry the structured `items` twin (content blocks per message) so
+          // the browser-side echo renderer can show attached images alongside
+          // the message text. Older consumers that don't read this field keep
+          // working unchanged.
+          items: echoed.map((item) => ({
+            ...(item.content && item.content.length > 0
+              ? { content: item.content }
+              : {}),
+          })),
+        },
+      });
+      writeStderrLine(
+        published
+          ? `[mid-turn] session=${entry.sessionId} drained=${messages.length} echoed=${echoed.length} injected into running turn`
+          : `[mid-turn] session=${entry.sessionId} drained=${messages.length} echoed=${echoed.length} echo frame dropped (bus closed); reconciliation required`,
+      );
     }
-    return { messages, hasQueuedPrompt };
+    return { messages, items, hasQueuedPrompt };
   }
 
   private async handleExternalToolGuardPrepare(
@@ -1283,8 +1405,8 @@ export class BridgeClient implements Client {
     if (
       typeof sessionId !== 'string' ||
       sessionId.length === 0 ||
-      typeof promptId !== 'string' ||
-      promptId.length === 0 ||
+      (promptId !== undefined &&
+        (typeof promptId !== 'string' || promptId.length === 0)) ||
       typeof toolCallId !== 'string' ||
       toolCallId.length === 0 ||
       typeof toolName !== 'string' ||
@@ -1296,6 +1418,11 @@ export class BridgeClient implements Client {
         'Invalid external tool guard request',
       );
     }
+    // Context-less shell checks (subagents, cron turns, resumed background
+    // agents) carry no prompt binding; they are validated by session
+    // ownership alone. The host handler decides whether its policy can run
+    // without a live prompt.
+    const promptScoped = promptId !== undefined;
     if (!this.ownsSession(sessionId)) {
       throw RequestError.invalidParams(
         undefined,
@@ -1303,25 +1430,37 @@ export class BridgeClient implements Client {
       );
     }
     const entry = this.resolveEntry(sessionId);
-    if (!entry || !entry.promptActive || entry.activePromptId !== promptId) {
+    if (
+      !entry ||
+      (promptScoped &&
+        (!entry.promptActive || entry.activePromptId !== promptId))
+    ) {
       throw RequestError.invalidParams(
         undefined,
         'External tool guard prompt is not the active prompt',
       );
     }
+    const invocationCwd = params['invocationCwd'];
     const decision: unknown = await this.externalToolGuard({
       sessionId: entry.sessionId,
-      promptId: entry.activePromptId,
+      ...(promptScoped ? { promptId } : {}),
       toolCallId,
       toolName,
       arguments: args,
+      effectiveCwd: entry.effectiveCwd,
+      // Forwarded verbatim and explicitly untrusted: the host policy decides
+      // whether it can establish this scope from state it owns.
+      ...(typeof invocationCwd === 'string' && invocationCwd.length > 0
+        ? { invocationCwd }
+        : {}),
     });
     const currentEntry = this.resolveEntry(sessionId);
     if (
       !this.ownsSession(sessionId) ||
       currentEntry !== entry ||
-      !currentEntry.promptActive ||
-      currentEntry.activePromptId !== promptId
+      (promptScoped &&
+        (!currentEntry.promptActive ||
+          currentEntry.activePromptId !== promptId))
     ) {
       throw RequestError.invalidParams(
         undefined,
@@ -1796,6 +1935,13 @@ export class BridgeClient implements Client {
     method: string,
     params: Record<string, unknown>,
   ): Promise<void> {
+    const notificationSessionId = params['sessionId'];
+    if (
+      typeof notificationSessionId === 'string' &&
+      this.abandonedRestoreIds.has(notificationSessionId)
+    ) {
+      return;
+    }
     if (method === ACTIVE_WORK_NOTIFICATION_METHOD) {
       const snapshot = parseActiveWorkSnapshot(params);
       if (snapshot) {
@@ -1970,6 +2116,14 @@ export class BridgeClient implements Client {
         return;
       const entry = this.resolveEntry(sessionId);
       if (!entry) return;
+      // The child appends the automatic title as a `custom_title` record to
+      // the session's JSONL — the same file the persisted catalog scan reads
+      // — before notifying, so this is a daemon-observed catalog change. The
+      // live-state route invalidates the catalog cache when it first exposes
+      // the bumped revision, so the next full-catalog reload serves this
+      // title. Mark before the SSE publish so the revision never trails the
+      // client-visible event.
+      this.onSessionCatalogChanged?.();
       try {
         entry.events.publish({
           type: 'session_metadata_updated',
@@ -2174,6 +2328,9 @@ export class BridgeClient implements Client {
     data: Record<string, unknown>,
     turnScoped = false,
   ): void {
+    if (this.abandonedRestoreIds.has(sessionId)) {
+      return;
+    }
     const entry = this.resolveEntry(sessionId);
     const frame: Omit<BridgeEvent, 'id' | 'v'> = {
       type,
@@ -2389,20 +2546,22 @@ export class BridgeClient implements Client {
     sessionId: string,
     frame: Omit<BridgeEvent, 'id' | 'v'>,
   ): void {
+    if (this.abandonedRestoreIds.has(sessionId)) {
+      return;
+    }
     const now = Date.now();
     // Drop frames for ids the bridge has already marked closed/killed.
     // Sweep + check before any other work so a malicious / buggy child
     // can't keep appending post-mortem frames against an old id. Live
-    // ids that re-register (load/resume) clear their tombstone in
-    // `drainEarlyEvents`.
+    // ids that re-register (load/resume or a caller-supplied-id spawn) clear
+    // their tombstone in `drainEarlyEvents`.
     //
-    // Skip the tombstone check for ids currently being restored so a
-    // `close -> load same id` sequence within 60s doesn't lose
-    // restore-time early events.
+    // Skip the tombstone check for ids currently being registered so a
+    // legitimate owner can receive its ACP-call-time extended notifications.
     this.sweepExpiredTombstones(now);
     if (
       this.tombstonedSessionIds.has(sessionId) &&
-      !this.inFlightRestoreIds.has(sessionId)
+      !this.inFlightSessionRegistrationIds.has(sessionId)
     ) {
       writeStderrLine(
         `qwen serve: dropping early extNotification ` +
@@ -2484,7 +2643,32 @@ export class BridgeClient implements Client {
    * failed restore doesn't leave a dangling allow-list entry.
    */
   markRestoreInFlight(sessionId: string): void {
+    this.markSessionRegistrationInFlight(sessionId);
     this.inFlightRestoreIds.add(sessionId);
+  }
+
+  /**
+   * Transfer an id from closed/abandoned ownership to a new registration
+   * attempt before its ACP call starts. The in-flight allow-list is what lets
+   * legitimate early notifications bypass the ordinary close tombstone until
+   * `createSessionEntry` can drain them.
+   */
+  markSessionRegistrationInFlight(sessionId: string): void {
+    this.clearAbandonedRestoreFence(sessionId);
+    this.inFlightSessionRegistrationIds.add(sessionId);
+  }
+
+  /**
+   * Drop the abandoned-restore fence for `sessionId`.
+   *
+   * The fence has no TTL and suppresses session updates, guardrail events,
+   * and child notifications, so it must not outlive the abandoned attempt it
+   * was raised for. The bridge clears it whenever a legitimate owner takes
+   * the id — a new restore, or `createSessionEntry` registering a session
+   * from any other route.
+   */
+  clearAbandonedRestoreFence(sessionId: string): void {
+    this.abandonedRestoreIds.delete(sessionId);
   }
 
   /**
@@ -2495,6 +2679,18 @@ export class BridgeClient implements Client {
    */
   clearRestoreInFlight(sessionId: string): void {
     this.inFlightRestoreIds.delete(sessionId);
+    this.clearSessionRegistrationInFlight(sessionId);
+  }
+
+  clearSessionRegistrationInFlight(sessionId: string): void {
+    this.inFlightSessionRegistrationIds.delete(sessionId);
+  }
+
+  markRestoreAbandoned(sessionId: string): void {
+    this.inFlightRestoreIds.delete(sessionId);
+    this.inFlightSessionRegistrationIds.delete(sessionId);
+    this.abandonedRestoreIds.add(sessionId);
+    this.earlyEvents.delete(sessionId);
   }
 
   /**

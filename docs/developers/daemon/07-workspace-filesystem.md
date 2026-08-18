@@ -2,7 +2,7 @@
 
 ## Overview
 
-Daemon HTTP file routes and delegated ACP `readTextFile` / `writeTextFile` calls go through the `WorkspaceFileSystem` boundary (`packages/cli/src/serve/fs/`), which provides:
+Daemon HTTP file routes and ordinary delegated ACP `readTextFile` / `writeTextFile` calls go through the `WorkspaceFileSystem` boundary (`packages/cli/src/serve/fs/`), which provides:
 
 - **Path resolution** — canonicalize paths and reject anything escaping the bound workspace, including via symlinks.
 - **Trust gating** — refuse writes when the workspace is not trusted (`untrusted_workspace`).
@@ -11,15 +11,15 @@ Daemon HTTP file routes and delegated ACP `readTextFile` / `writeTextFile` calls
 - **Audit** — every access / denial emits a structured event for `PermissionAuditRing` / monitoring.
 - **Typed errors** — closed `FsErrorKind` union mapped to HTTP statuses.
 
-The HTTP file routes (`GET /file`, `GET /file/bytes`, `POST /file/write`, `POST /file/edit`, `GET /list`, `GET /glob`, `GET /stat`) use this boundary. In the production daemon, ACP calls that remain delegated reach WFS through the injected bridge adapter; generic bridge callers use WFS only when they inject such an adapter. Production same-host `qwen serve` runtimes advertise `readTextFile: false`, so all child `FileSystemService.readTextFile` consumers use the regular CLI filesystem service; final ACP `writeTextFile` content writes remain delegated through WFS.
+The HTTP file routes (`GET /file`, `GET /file/bytes`, `POST /file/write`, `POST /file/edit`, `GET /list`, `GET /glob`, `GET /stat`) use this boundary and never receive the same-host exception. In the production daemon, ACP calls that remain delegated reach the injected bridge adapter; generic bridge callers use WFS only when they inject such an adapter. Production same-host `qwen serve` runtimes advertise `readTextFile: false`, so all child `FileSystemService.readTextFile` consumers use the regular CLI filesystem service. Final ACP `writeTextFile` content writes remain delegated: workspace targets use WFS, while a strict built-in-tool marker may select an equivalent host writer for an external path only on daemon-created same-host adapters. See [the external write design](../../design/daemon-external-tool-text-writes.md).
 
 That text-read capability slice covers direct `read_file` plus the shared pre-reads used by write, edit, notebook, sed, and artifact operations:
 
 - It intentionally accepts regular CLI read behavior rather than the WFS read-side guarantees. [The design doc](../../design/daemon-local-text-reads.md) owns the exact list of what is given up.
-- The same doc records why #8618 still reproduces for the write and edit family even after this change, and the bounded sense in which the retained adapter read path "fails closed".
+- The same doc records the bounded sense in which the retained adapter read path "fails closed"; the separate external-write design records how the approved final-write failure is closed.
 - Direct external `read_file` keeps the normal CLI permission rules and core file-operation telemetry.
 - HTTP filesystem routes remain workspace-scoped, and agent discovery-tool behavior is unchanged by this capability.
-- Auxiliary actions such as parent-directory creation and shell commands are separate existing paths, not covered by this boundary.
+- Auxiliary actions such as parent-directory creation and arbitrary shell commands are separate existing paths, not covered by this boundary.
 - `qwen serve` assumes a same-machine, same-UID security principal and is not an OS sandbox.
 
 ## Responsibilities
@@ -40,7 +40,7 @@ That text-read capability slice covers direct `read_file` plus the shared pre-re
 | File                       | Purpose                                                                                                                                                                                                                                               |
 | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `paths.ts`                 | `canonicalizeWorkspace`, `resolveWithinWorkspace`, `hasSuspiciousPathPattern`, branded `ResolvedPath`, `Intent` union (`read \| write \| list \| stat \| glob`).                                                                                      |
-| `policy.ts`                | `MAX_READ_BYTES`, `MAX_TEXT_SCAN_BYTES`, `MAX_WRITE_BYTES`, `BINARY_PROBE_BYTES`, `assertTrustedForIntent`, `detectBinary`, `enforceReadBytesSize`, `enforceReadSize`, `enforceWriteSize`, `shouldIgnore`.                                            |
+| `policy.ts`                | `MAX_READ_BYTES`, `MAX_TEXT_SCAN_BYTES`, `MAX_WRITE_BYTES`, `MAX_UPLOAD_BYTES`, `BINARY_PROBE_BYTES`, `assertTrustedForIntent`, `detectBinary`, `enforceReadBytesSize`, `enforceReadSize`, `enforceWriteSize`, `shouldIgnore`.                        |
 | `audit.ts`                 | `FS_ACCESS_EVENT_TYPE`, `FS_DENIED_EVENT_TYPE`, `createAuditPublisher`, audit payload types.                                                                                                                                                          |
 | `errors.ts`                | `FsError` class, `isFsError`, `FsErrorKind` union (14 kinds), `FsErrorStatus` union (`400 / 403 / 404 / 409 / 413 / 422 / 500 / 503`).                                                                                                                |
 | `workspace-file-system.ts` | `createWorkspaceFileSystemFactory`, `WorkspaceFileSystem` (the orchestrator that reads/writes/lists), `WriteMode`, `ContentHash`, `FsEntry`, `FsStat`, `ListOptions`, `GlobOptions`, `ReadTextOptions`, `ReadBytesOptions`, `WriteTextAtomicOptions`. |
@@ -75,14 +75,14 @@ interface BridgeFileSystem {
 }
 ```
 
-This is the injection point for ACP `readTextFile` / `writeTextFile`. Bridge tests and Mode A embedded callers can omit it on `BridgeOptions`; `BridgeClient` falls back to its inline `fs.readFile` / `fs.writeFile` proxy (preserves pre-F1 behavior). Production `qwen serve` wires `BridgeFileSystem` through `createBridgeFileSystemAdapter(fsFactory)` (`packages/cli/src/serve/bridge-file-system-adapter.ts`) and sets `delegateReadTextFileToClient: false`. Capability-compliant children therefore read text locally and delegate final ACP text writes. The adapter retains its read implementation so unexpected or capability-violating delegated reads still encounter WFS's workspace boundary.
+This is the injection point for ACP `readTextFile` / `writeTextFile`. Bridge tests and Mode A embedded callers can omit it on `BridgeOptions`; `BridgeClient` falls back to its inline `fs.readFile` / `fs.writeFile` proxy (preserves pre-F1 behavior). Production `qwen serve` wires `BridgeFileSystem` through `createBridgeFileSystemAdapter(fsFactory)` (`packages/cli/src/serve/bridge-file-system-adapter.ts`) and sets `delegateReadTextFileToClient: false`. Capability-compliant children therefore read text locally and delegate final ACP text writes. The adapter retains its read implementation so unexpected or capability-violating delegated reads still encounter WFS's workspace boundary. Its external host-writer path is disabled by default and selected only by exact versioned provenance on daemon-owned same-host adapters; injected bridges, workspace registries and factories, generic ACP, and HTTP retain the ordinary boundary.
 
 Two defensive properties the adapter MUST preserve (because the inline proxy is fully bypassed when the adapter is injected):
 
 1. **Reject non-regular files** — sockets / pipes / char devices / procfs / sysfs entries can stream unbounded data despite `stats.size === 0`. The inline path throws with `describeStatKind(stats)` in the message.
 2. **Avoid unbounded full-file buffering.** The inline fallback caps a buffered read at `READ_FILE_SIZE_CAP = 100 MiB`. The injected adapter instead applies the stricter WorkspaceFileSystem contract: full snapshots stop at 256 KiB, while larger UTF-8 files require a finite `limit` and are streamed from an inode-bound handle with at most 256 KiB returned. It must not read an entire 500 MB log merely to return `{ line: 1, limit: 10 }`.
 
-The adapter goes further: it uses `WorkspaceFileSystem.writeTextOverwrite` (PR 18 primitive) for atomic temporary-file-and-rename writes with mode preservation, `0o600` default, and symlink rejection inside a per-path lock. This is a **divergence from the pre-F1 inline proxy** which resolved symlinks and wrote through to their target — agents that relied on writing through symlinked dotfiles now have to address the resolved path directly.
+The adapter goes further: it uses `WorkspaceFileSystem.writeTextOverwrite` (PR 18 primitive) for workspace writes and a factory-owned equivalent for strictly marked external built-in-tool writes. Both use atomic temporary-file-and-rename writes with mode preservation, `0o600` default, and symlink rejection inside the shared canonical-path lock. This is a **divergence from the pre-F1 inline proxy** which resolved symlinks and wrote through to their target — agents that relied on writing through symlinked dotfiles now have to address the resolved path directly.
 
 ### FsError preservation over the ACP wire
 
@@ -235,15 +235,16 @@ flowchart LR
 
 ## Configuration
 
-| Source                                            | Knob                                                                  | Effect                                                                                                            |
-| ------------------------------------------------- | --------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `WorkspaceFileSystemFactoryDeps.trusted: boolean` | Constructor input                                                     | Whether writes are allowed; defaults to `true` from `runQwenServe`, `false` from `createServeApp` (with warning). |
-| Constant                                          | `MAX_READ_BYTES = 256 KiB`                                            | Full-snapshot and returned-text cap; larger text requires an explicit window argument.                            |
-| Constant                                          | `MAX_TEXT_SCAN_BYTES = 8 MiB`                                         | Bytes a large-text read may scan to locate a line offset; past it, `file_too_large`.                              |
-| Constant                                          | `MAX_WRITE_BYTES = 5 MiB`                                             | Write cap; sized below `express.json({ limit: '10mb' })`.                                                         |
-| Constant                                          | `BINARY_PROBE_BYTES = 4096`                                           | Sample size for content-based binary detection.                                                                   |
-| Capability tags                                   | `workspace_file_read`, `workspace_file_bytes`, `workspace_file_write` | See [`11-capabilities-versioning.md`](./11-capabilities-versioning.md).                                           |
-| Workspace files                                   | `.gitignore`, `.qwenignore`                                           | Ignored paths surface as `ignored: true` from `shouldIgnore`.                                                     |
+| Source                                            | Knob                                                                                           | Effect                                                                                                            |
+| ------------------------------------------------- | ---------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `WorkspaceFileSystemFactoryDeps.trusted: boolean` | Constructor input                                                                              | Whether writes are allowed; defaults to `true` from `runQwenServe`, `false` from `createServeApp` (with warning). |
+| Constant                                          | `MAX_READ_BYTES = 256 KiB`                                                                     | Full-snapshot and returned-text cap; larger text requires an explicit window argument.                            |
+| Constant                                          | `MAX_TEXT_SCAN_BYTES = 8 MiB`                                                                  | Bytes a large-text read may scan to locate a line offset; past it, `file_too_large`.                              |
+| Constant                                          | `MAX_WRITE_BYTES = 5 MiB`                                                                      | Write cap; sized below `express.json({ limit: '10mb' })`.                                                         |
+| Constant                                          | `MAX_UPLOAD_BYTES = 50 MiB`                                                                    | Binary upload cap for `POST /file/upload`; uploads never overwrite and auto-number occupied names.                |
+| Constant                                          | `BINARY_PROBE_BYTES = 4096`                                                                    | Sample size for content-based binary detection.                                                                   |
+| Capability tags                                   | `workspace_file_read`, `workspace_file_bytes`, `workspace_file_write`, `workspace_file_upload` | See [`11-capabilities-versioning.md`](./11-capabilities-versioning.md).                                           |
+| Workspace files                                   | `.gitignore`, `.qwenignore`                                                                    | Ignored paths surface as `ignored: true` from `shouldIgnore`.                                                     |
 
 ## Caveats & Known Limits
 
