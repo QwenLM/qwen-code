@@ -329,10 +329,14 @@ silently overriding or silently complying.
   drop one silently.
 - Critical-only mode: when `feedback.md` contains a
   `Deferred non-Critical feedback` section, the workflow's deterministic brake
-  has engaged — the PR has completed five suggestion-capable, change-producing
-  rounds, or its diff has grown past the counting window's net-growth budget
-  (source and test lines are budgeted separately; the section's preamble names
-  the cause). That section is an audit record,
+  has engaged — the window's round counter has reached five, or its diff has
+  grown past the counting window's net-growth budget (source and test lines are
+  budgeted separately; the section's preamble names the cause). The counter is
+  not always the count of rounds YOU have run: a maintainer taking over a PR
+  that already spent N rounds in ordinary review can seed the window at N
+  (`@qwen-code /takeover from N`), so the brake can engage on your second or
+  third round. The preamble says so when it applies; treat it exactly the same
+  either way. That section is an audit record,
   not work: do not modify code, resolve threads, or write comment replies for
   those items. Everything rendered in the actionable sections IS in scope —
   the deterministic filter defers the automated reviewer's non-Critical
@@ -378,9 +382,14 @@ silently overriding or silently complying.
   - `drift` — implement the named simpler alternative and/or the deletion
     list FIRST (typically net-negative), then continue addressing feedback.
   - `conflict` — two defensible directions and the choice is not yours: STOP
-    `BLOCKED` with a handoff carrying the audit's reasoning. This is the ONLY
-    growth-related path to a human, and the question you leave must be the
-    narrowed contested choice with evidence, not "the diff is too big".
+    `BLOCKED` and write the handoff into `<workdir>/failure.md` — carry the
+    audit's reasoning, name the contested choice, lay out the options and
+    your recommendation. `failure.md` is the one stop file the round's
+    output contract accepts; run-agent.mjs wraps it into the workflow's
+    handoff comment. Do not write `handoff.md` yourself — that file belongs
+    to run-agent.mjs. This is the ONLY growth-related path to a human, and
+    the question you leave must be the narrowed contested choice with
+    evidence, not "the diff is too big".
 - Needs a maintainer's decision: a finding that turns on a judgment that is
   NOT yours to make — a product or scope tradeoff (is this acceptable for v1?
   should the PR be split?), two reviewers asking for opposite things, or whether
