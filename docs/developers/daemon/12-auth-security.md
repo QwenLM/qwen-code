@@ -120,13 +120,13 @@ Control is enabled (the LAN origin is added/removed with the listener):
 
 Per-route opt-in gate. Behavior matrix:
 
-| daemon config           | route opts      | result                           |
-| ----------------------- | --------------- | -------------------------------- |
-| `requireAuth=true`      | any             | passthrough¹                     |
-| `token` configured      | any             | passthrough²                     |
-| no token (loopback dev) | `strict: false` | passthrough                      |
+| daemon config           | route opts                      | result                           |
+| ----------------------- | ------------------------------- | -------------------------------- |
+| `requireAuth=true`      | any                             | passthrough¹                     |
+| `token` configured      | any                             | passthrough²                     |
+| no token (loopback dev) | `strict: false`                 | passthrough                      |
 | no token (loopback dev) | `strict: true`, unauthenticated | `401 { code: 'token_required' }` |
-| no token (loopback dev) | `strict: true`, authenticated³ | passthrough          |
+| no token (loopback dev) | `strict: true`, authenticated³  | passthrough                      |
 
 ¹ `--require-auth` boots only with a token, so global `bearerAuth` already 401'd unauthenticated callers.
 ² Any token configuration makes global `bearerAuth` enforce bearer-required-everywhere; the gate is redundant but harmless.
