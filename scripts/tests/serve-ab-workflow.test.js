@@ -1,0 +1,427 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { execFileSync, spawnSync } from 'node:child_process';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { basename, join } from 'node:path';
+import { describe, expect, it } from 'vitest';
+import { parse } from 'yaml';
+
+const workflow = readFileSync('.github/workflows/serve-ab.yml', 'utf8');
+
+const steps = parse(workflow).jobs['ab'].steps;
+const WIPE = 'Wipe stale workspace except the shared .git before checkout';
+const wipe = steps.find((s) => s.name === WIPE);
+
+// Runs the real wipe script under the runner's shell flags: this job sets
+// `defaults.run.shell: bash`, which GitHub Actions executes with
+// `-eo pipefail`, so the exec tests must reproduce that instead of hiding
+// it behind bare `bash -c`.
+const runWipe = (env, options = {}) =>
+  execFileSync('bash', ['-e', '-o', 'pipefail', '-c', wipe.run], {
+    encoding: 'utf8',
+    // The kept-.git config scrub ends in `git config --local`, which reads
+    // the CWD's repo; pin it to the fixture so a completing wipe never
+    // scrubs the host checkout's local config.
+    cwd: env.GITHUB_WORKSPACE,
+    env: { ...process.env, ...env },
+    ...options,
+  });
+
+// `realpath -m` (the script's canonicalization line) is a GNU coreutils
+// extension. Probe the host before asserting GNU-specific path behavior.
+const hasGnuRealpath =
+  spawnSync('realpath', ['-m', '--', '/'], { stdio: 'ignore' }).status === 0;
+
+describe('serve-ab pre-checkout workspace wipe', () => {
+  it('runs the wipe before both checkouts', () => {
+    // Both checkouts clone into the wiped workspace; a wipe ordered after
+    // either one deletes what was just cloned, and whichever build runs
+    // first runs on the previous run's leftovers — the exact cross-PR
+    // bleed the step exists to prevent. The sister qwen-triage suite pins
+    // the same property.
+    const names = steps.map((stepItem) => stepItem.name);
+    const wipeAt = names.indexOf(WIPE);
+    expect(wipeAt).toBeGreaterThanOrEqual(0);
+    expect(wipeAt).toBeLessThan(names.indexOf('Checkout PR head'));
+    expect(wipeAt).toBeLessThan(names.indexOf('Checkout the merge-base'));
+  });
+
+  it('runs only on self-hosted runners, where workspace state persists', () => {
+    expect(wipe).toBeTruthy();
+    // Hosted runners are ephemeral; the wipe (and its guard) exist for the
+    // reusable ECS pool only.
+    expect(wipe.if).toBe("${{ runner.environment == 'self-hosted' }}");
+  });
+
+  it('carries the full checkout-heal guard (#9220, #9265)', () => {
+    // Before the port this step had NO guard: under a mangled env even
+    // `/home` or an empty string reached `find … -exec rm -rf {} +`.
+    // Pin each ported layer textually, mirroring the reference guard in
+    // qwen-code-pr-review.yml; the exec tests below prove the behavior.
+    expect(wipe.run).toContain('GITHUB_WORKSPACE:?');
+    expect(wipe.run).toContain('realpath -m');
+    expect(wipe.run).toContain('realpath -m -- "$RWS"');
+    expect(wipe.run).toContain('refusing to wipe suspicious workspace path');
+    expect(wipe.run).toContain('RUNNER_WORKSPACE:?');
+    expect(wipe.run).toContain('"$RWS"/*');
+    // RWS-side layers: the '..' arm and the degenerate-root refusal that
+    // keeps a stripped-empty runner workspace from degenerating the
+    // allowlist pattern to `/*`.
+    expect(wipe.run).toContain(
+      "refusing runner workspace path containing '..'",
+    );
+    expect(wipe.run).toContain('runner workspace resolved to /');
+    // Exit contract: the guard and the destructive lines stay bare on
+    // purpose — under the job's `-eo pipefail` a wipe that cannot clear the
+    // workspace fails the job here instead of building both checkouts on
+    // top of the leftovers. `|| true` may appear only on the kept-.git
+    // config scrub, mirroring qwen-triage.yml's config-sanitize.
+    const loosened = wipe.run
+      .split('\n')
+      .filter((line) => line.includes('|| true'));
+    expect(loosened).toHaveLength(1);
+    expect(loosened[0]).toContain('git config --local --name-only --list');
+  });
+
+  it.skipIf(!hasGnuRealpath)(
+    'wipes a legitimate workspace but keeps and defangs the shared .git',
+    () => {
+      const parent = mkdtempSync(join(tmpdir(), 'serve-ab-wipe-ok-'));
+      const ws = join(parent, 'repo');
+      // Leftovers shaped like the real ones: the two checkout subtrees plus
+      // a stale build artifact.
+      mkdirSync(join(ws, 'head'), { recursive: true });
+      mkdirSync(join(ws, 'base'), { recursive: true });
+      writeFileSync(join(ws, 'head', 'package.json'), '{}');
+      writeFileSync(join(ws, 'bundle.tgz'), 'x');
+      // A shared root .git shaped like the real one: objects are the reason
+      // it is kept; hooks, info/attributes, and non-allowlisted local
+      // config are the exec vectors that must not survive into the next
+      // job's checkout.
+      execFileSync('git', ['init', '--quiet', ws]);
+      mkdirSync(join(ws, '.git', 'objects', 'pack'), { recursive: true });
+      writeFileSync(join(ws, '.git', 'objects', 'pack', 'sentinel'), 'x');
+      writeFileSync(
+        join(ws, '.git', 'hooks', 'post-checkout'),
+        '#!/bin/sh\necho pwned\n',
+      );
+      writeFileSync(join(ws, '.git', 'info', 'attributes'), '* filter=x\n');
+      execFileSync('git', ['config', '--local', 'alias.pwned', '!echo pwned'], {
+        cwd: ws,
+      });
+      execFileSync('git', ['config', '--local', 'safe.directory', ws], {
+        cwd: ws,
+      });
+      try {
+        runWipe({ GITHUB_WORKSPACE: ws, RUNNER_WORKSPACE: parent });
+        expect(readdirSync(ws)).toEqual(['.git']);
+        expect(
+          readFileSync(join(ws, '.git', 'objects', 'pack', 'sentinel'), 'utf8'),
+        ).toBe('x');
+        expect(existsSync(join(ws, '.git', 'hooks'))).toBe(false);
+        expect(existsSync(join(ws, '.git', 'info', 'attributes'))).toBe(false);
+        expect(() =>
+          execFileSync('git', ['config', '--local', 'alias.pwned'], {
+            cwd: ws,
+            stdio: 'pipe',
+          }),
+        ).toThrow();
+        expect(
+          execFileSync('git', ['config', '--local', 'safe.directory'], {
+            cwd: ws,
+            encoding: 'utf8',
+          }).trim(),
+        ).toBe(ws);
+        // The directory itself survives: the checkouts clone into it next.
+        expect(wipe.run).toContain('-mindepth 1 -maxdepth 1');
+      } finally {
+        rmSync(parent, { recursive: true, force: true });
+      }
+    },
+  );
+
+  // The guard must be exercised with the REAL dangerous paths, so `rm` is
+  // stubbed to a recorder on PATH: the destructive primitive cannot fire
+  // here under ANY edit, and the assertion is on the decision rather than
+  // on filesystem effects — with the guard gone the recorder shows an
+  // attempted delete and the test fails, having deleted nothing.
+  it('refuses suspicious workspace paths without invoking rm', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'serve-ab-wipe-guard-'));
+    try {
+      const calls = join(dir, 'rm-calls');
+      writeFileSync(
+        join(dir, 'rm'),
+        `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\nexit 0\n`,
+        { mode: 0o755 },
+      );
+
+      // Canonical roots, the non-canonical spellings the canonicalize and
+      // strip layers exist for, and /tmp + /opt which only the allowlist
+      // refuses (the denylist has no arm for them).
+      for (const bad of [
+        '/',
+        '/usr',
+        '/etc',
+        '/var',
+        '/root',
+        '/home',
+        '',
+        '/home/',
+        '/root/',
+        '/var/',
+        '//',
+        '/home//',
+        '/home/.',
+        '/home/..',
+        '//usr',
+        '//home',
+        '/tmp',
+        '/opt',
+      ]) {
+        writeFileSync(calls, '');
+        const guard = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', wipe.run],
+          {
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              GITHUB_WORKSPACE: bad,
+              // The recorder dir doubles as the allowlist root: every bad
+              // path sits outside it, so the refusal is the guard's, not
+              // a side effect of the fixture layout.
+              RUNNER_WORKSPACE: dir,
+            },
+          },
+        );
+        expect(
+          guard.status,
+          `path ${bad || '<empty>'} was not refused`,
+        ).not.toBe(0);
+        expect(
+          readFileSync(calls, 'utf8'),
+          `rm was invoked for ${bad || '<empty>'}`,
+        ).toBe('');
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(!hasGnuRealpath)(
+    'refuses an allowlist-escaping symlink via canonicalization',
+    () => {
+      // The bad paths above all sit outside the recorder dir, so the
+      // allowlist refuses them identically whether canonicalization runs
+      // or not — they cannot pin the realpath line. A raw '..' spelling
+      // does not pin it either: the '..' case arm refuses that vector
+      // first, mutant or not (executed mutant: exit 1 via 'refusing to
+      // wipe path containing ..', rm log empty). A symlink INSIDE the
+      // recorder dir pointing outside is the spelling only `realpath -m`
+      // can catch: with the line deleted the raw link path matches
+      // "$RWS"/*, but find's default -P mode does not descend symlink
+      // operands, so the mutant exits 0 having wiped nothing — caught by
+      // the non-zero-status assertion, not the rm recorder.
+      const dir = mkdtempSync(join(tmpdir(), 'serve-ab-wipe-escape-'));
+      const outside = mkdtempSync(join(tmpdir(), 'serve-ab-wipe-outside-'));
+      writeFileSync(join(outside, 'canary'), 'x');
+      symlinkSync(outside, join(dir, 'link'));
+      try {
+        const calls = join(dir, 'rm-calls');
+        writeFileSync(calls, '');
+        writeFileSync(
+          join(dir, 'rm'),
+          `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\nexit 0\n`,
+          { mode: 0o755 },
+        );
+        const res = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', wipe.run],
+          {
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              // A link inside the recorder dir whose target sits outside
+              // it — no '..' component, so only canonicalization can
+              // resolve the escape.
+              GITHUB_WORKSPACE: join(dir, 'link'),
+              RUNNER_WORKSPACE: dir,
+            },
+          },
+        );
+        expect(res.status).not.toBe(0);
+        expect(readFileSync(calls, 'utf8')).toBe('');
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+        rmSync(outside, { recursive: true, force: true });
+      }
+    },
+  );
+
+  // Fronts PATH with a failing realpath so the script must fail closed instead
+  // of matching and wiping a raw, potentially misleading spelling.
+  const stubRealpath = () => {
+    const bin = mkdtempSync(join(tmpdir(), 'serve-ab-wipe-bin-'));
+    writeFileSync(join(bin, 'realpath'), '#!/bin/sh\nexit 1\n');
+    chmodSync(join(bin, 'realpath'), 0o755);
+    return bin;
+  };
+
+  it('refuses to wipe when realpath is absent', () => {
+    const parent = mkdtempSync(join(tmpdir(), 'serve-ab-wipe-rws-'));
+    const ws = join(parent, 'repo');
+    mkdirSync(ws);
+    writeFileSync(join(ws, 'leftover'), 'x');
+    const bin = stubRealpath();
+    try {
+      const res = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', wipe.run], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          GITHUB_WORKSPACE: ws,
+          RUNNER_WORKSPACE: `${parent}/`,
+          PATH: `${bin}:${process.env.PATH}`,
+        },
+      });
+      expect(res.status).not.toBe(0);
+      expect(readdirSync(ws)).toEqual(['leftover']);
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+      rmSync(bin, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a trailing-slash GITHUB_WORKSPACE when realpath is absent', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'serve-ab-wipe-ws-'));
+    const bin = stubRealpath();
+    try {
+      const calls = join(dir, 'rm-calls');
+      writeFileSync(calls, '');
+      writeFileSync(
+        join(dir, 'rm'),
+        `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\nexit 0\n`,
+        { mode: 0o755 },
+      );
+      const res = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', wipe.run], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${dir}:${bin}:${process.env.PATH}`,
+          GITHUB_WORKSPACE: '/home/',
+          RUNNER_WORKSPACE: '/home',
+        },
+      });
+      expect(res.status).not.toBe(0);
+      expect(readFileSync(calls, 'utf8')).toBe('');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(bin, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses an allowlist-escaping .. path when realpath is absent', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'serve-ab-wipe-fallback-'));
+    const outside = mkdtempSync(join(tmpdir(), 'serve-ab-wipe-outside-'));
+    const bin = stubRealpath();
+    mkdirSync(join(dir, 'sub'));
+    try {
+      const calls = join(dir, 'rm-calls');
+      writeFileSync(calls, '');
+      writeFileSync(
+        join(dir, 'rm'),
+        `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\nexit 0\n`,
+        { mode: 0o755 },
+      );
+      const res = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', wipe.run], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${dir}:${bin}:${process.env.PATH}`,
+          GITHUB_WORKSPACE: `${dir}/sub/../../${basename(outside)}`,
+          RUNNER_WORKSPACE: dir,
+        },
+      });
+      expect(res.status).not.toBe(0);
+      expect(readFileSync(calls, 'utf8')).toBe('');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+      rmSync(bin, { recursive: true, force: true });
+    }
+  });
+
+  // The degenerate-root arm keeps a stripped-empty RUNNER_WORKSPACE from
+  // turning the allowlist pattern into `/*` (which admits every absolute
+  // path). The reference suite covers the review workflow; this copy needs
+  // its own case — deleting the arm ships green otherwise.
+  it('refuses a runner workspace that resolves to / without invoking rm', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'serve-ab-wipe-root-'));
+    const ws = join(dir, 'repo');
+    mkdirSync(ws);
+    writeFileSync(join(ws, 'leftover'), 'x');
+    try {
+      const calls = join(dir, 'rm-calls');
+      writeFileSync(calls, '');
+      writeFileSync(
+        join(dir, 'rm'),
+        `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\nexit 0\n`,
+        { mode: 0o755 },
+      );
+      const res = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', wipe.run], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${dir}:${process.env.PATH}`,
+          GITHUB_WORKSPACE: ws,
+          RUNNER_WORKSPACE: '/',
+        },
+      });
+      expect(res.status).not.toBe(0);
+      expect(readFileSync(calls, 'utf8')).toBe('');
+      expect(readdirSync(ws)).toEqual(['leftover']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The RWS realpath line has no refusal of its own to observe, so pin it
+  // from the happy side: a RUNNER_WORKSPACE spelled with '..' that
+  // canonicalizes back to the real parent must still be allowed to wipe.
+  // Deleting the RWS realpath line leaves the raw spelling to the '..'
+  // arm, which refuses — and this test fails on that mutant.
+  it.skipIf(!hasGnuRealpath)(
+    'canonicalizes a ..-spelled runner workspace instead of refusing it',
+    () => {
+      const parent = mkdtempSync(join(tmpdir(), 'serve-ab-wipe-rwsdot-'));
+      const ws = join(parent, 'repo');
+      mkdirSync(ws);
+      writeFileSync(join(ws, 'leftover'), 'x');
+      try {
+        runWipe({
+          GITHUB_WORKSPACE: ws,
+          RUNNER_WORKSPACE: join(ws, '..'),
+        });
+        expect(readdirSync(ws)).toEqual([]);
+      } finally {
+        rmSync(parent, { recursive: true, force: true });
+      }
+    },
+  );
+});

@@ -263,30 +263,34 @@ describe('serve-ab.yml runner routing', () => {
     assert.ok(checkouts.length >= 2, 'expected at least two checkouts');
     // Wiping the shared root .git forces the next job on this runner to
     // re-fetch the full history from github.com — on the ECS pool's slow
-    // link that is the "hung runner" pathology. Pin the wipe step's entire
-    // executed script so any change forces a deliberate test update.
+    // link that is the "hung runner" pathology. The checkout-heal path
+    // guard (#9220, #9265) ahead of it is pinned and exec-verified by
+    // scripts/tests/serve-ab-workflow.test.js; here pin that the guard is
+    // present and hands off to the kept-.git tail, line by line, so any
+    // change forces a deliberate test update.
+    assert.match(
+      wipe.run,
+      /refusing to wipe suspicious workspace path/,
+      'the wipe must keep the checkout-heal path guard',
+    );
     const executed = wipe.run
       .split('\n')
       .map((l) => l.trim())
       .filter((l) => l !== '' && !l.startsWith('#'));
-    assert.equal(
-      executed.length,
-      4,
-      'expected `set -uo pipefail`, the find, and the kept-.git scrub',
-    );
     assert.equal(executed[0], 'set -uo pipefail');
+    const tail = executed.slice(-3);
     assert.equal(
-      executed[1],
-      'find -H "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 ! \\( -name \'.git\' -type d \\) -exec rm -rf {} +',
-      'the wipe must keep only a REAL .git directory — a symlink or gitfile named .git can point outside the workspace; -H stops a symlinked workspace root from silently no-oping the wipe',
+      tail[0],
+      'find "$WS" -mindepth 1 -maxdepth 1 ! \\( -name \'.git\' -type d \\) -exec rm -rf {} +',
+      'the wipe must keep only a REAL .git directory — a symlink or gitfile named .git can point outside the workspace — and only the guarded $WS may reach the rm',
     );
     assert.equal(
-      executed[2],
-      'rm -rf "$GITHUB_WORKSPACE/.git/hooks" "$GITHUB_WORKSPACE/.git/info/attributes"',
+      tail[1],
+      'rm -rf "$WS/.git/hooks" "$WS/.git/info/attributes"',
       'the kept .git must lose its hooks and info/attributes exec vectors',
     );
     assert.equal(
-      executed[3],
+      tail[2],
       '{ git config --local --name-only --list 2>/dev/null || true; } | { grep -ivE \'^(core\\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\\.|branch\\.|extensions\\.|gc\\.|pack\\.|fetch\\.|index\\.|safe\\.|submodule\\.[^.]+\\.(url|active|branch))\' || true; } | while IFS= read -r key; do git config --local --unset-all "$key" 2>/dev/null || true; done',
       'the kept .git config must be scrubbed to the qwen-triage.yml config-sanitize allowlist',
     );

@@ -79,6 +79,47 @@ jobs:
           # bleed into the builds and silently change the posted A/B diff.
           # Hosted runners are ephemeral and never see this. After the
           # ownership-restore step everything is user-owned, so no sudo.
+          #
+          # Guard, ported from qwen-code-pr-review.yml's checkout heal
+          # (#9220, #9265): this step had none — under a mangled env even
+          # `/home` or an empty string reached the rm. A wipe pointed at the
+          # wrong path is far worse than a skipped wipe, so canonicalize,
+          # strip trailing slashes, denylist the known roots, and require
+          # the target to sit inside the runner workspace before any rm.
+          WS="${GITHUB_WORKSPACE:?}"
+          # Canonicalize before matching: the kernel resolves non-canonical
+          # spellings to the guarded roots (`/home/.` -> /home, `//usr` ->
+          # /usr), so a raw string match lets them slip past the case arms.
+          # Realpath also resolves a symlinked workspace root before the
+          # match, so the wipe below never starts from a link.
+          WS="$(realpath -m -- "$WS" 2>/dev/null)" || { echo "::error::refusing to wipe: realpath unavailable, cannot canonicalize ${GITHUB_WORKSPACE}"; exit 1; }
+          # Trailing slashes slip past the exact-match case arms below
+          # (`/home/` would pass the guard and reach the rm); realpath strips
+          # them too; keep the guard whole if the path reaches this point with
+          # trailing slashes.
+          while [ "${WS%/}" != "$WS" ]; do WS="${WS%/}"; done
+          case "$WS" in
+            ..|../*|*/..|*/../*) echo "::error::refusing to wipe path containing '..': ${WS}"; exit 1 ;;
+          esac
+          case "$WS" in
+            /|/home|/root|/usr*|/etc*|/var|"") echo "::error::refusing to wipe suspicious workspace path: ${WS}"; exit 1 ;;
+          esac
+          # A denylist can only enumerate known roots — the allowlist closes
+          # every other one (/tmp, /opt, ...): only a directory inside the
+          # runner workspace may be wiped.
+          RWS="${RUNNER_WORKSPACE:?}"
+          RWS="$(realpath -m -- "$RWS" 2>/dev/null)" || { echo "::error::refusing to wipe: realpath unavailable, cannot canonicalize ${RUNNER_WORKSPACE}"; exit 1; }
+          # Mirror the WS strip before building the allowlist pattern; "/"
+          # stripped empty would match every path instead.
+          while [ "${RWS%/}" != "$RWS" ]; do RWS="${RWS%/}"; done
+          if [ -z "$RWS" ]; then echo "::error::refusing to wipe: runner workspace resolved to /"; exit 1; fi
+          case "$RWS" in
+            ..|../*|*/..|*/../*) echo "::error::refusing runner workspace path containing '..': ${RWS}"; exit 1 ;;
+          esac
+          case "$WS" in
+            "$RWS"/*) ;;
+            *) echo "::error::refusing to wipe workspace outside the runner workspace: ${WS} (runner workspace: ${RWS})"; exit 1 ;;
+          esac
           # Everything is removed except a real shared root .git directory:
           # wiping the .git forces the next job on this runner to re-fetch
           # the full ~900 MB of history from github.com. On the ECS pool's
@@ -93,12 +134,13 @@ jobs:
           # closes the class instead of denylisting knobs one by one).
           # Objects and refs — the reason the .git is kept — are untouched,
           # and actions/checkout re-establishes remote/auth when it reuses
-          # the repo.
-          # -H follows a symlinked workspace root: without it, find treats the
-          # symlink itself as the start point and -mindepth 1 silently wipes
-          # nothing, leaving a swapped-in workspace intact for every later job.
-          find -H "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 ! \( -name '.git' -type d \) -exec rm -rf {} +
-          rm -rf "$GITHUB_WORKSPACE/.git/hooks" "$GITHUB_WORKSPACE/.git/info/attributes"
+          # the repo. The find and the defang rm stay bare on purpose: under
+          # the job's `bash -eo pipefail` a wipe that cannot clear the
+          # workspace fails the job here instead of building both checkouts
+          # on top of the leftovers. Only the config scrub is best-effort,
+          # mirroring qwen-triage.yml's config-sanitize.
+          find "$WS" -mindepth 1 -maxdepth 1 ! \( -name '.git' -type d \) -exec rm -rf {} +
+          rm -rf "$WS/.git/hooks" "$WS/.git/info/attributes"
           { git config --local --name-only --list 2>/dev/null || true; } | { grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\.|branch\.|extensions\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\.[^.]+\.(url|active|branch))' || true; } | while IFS= read -r key; do git config --local --unset-all "$key" 2>/dev/null || true; done
 
       - name: 'Checkout PR head'

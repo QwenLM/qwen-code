@@ -4003,6 +4003,10 @@ export class Config {
     this.getOwnActiveTodoReminderTurns().clear();
     setDebugLogSession(this);
     this.debugLogger = createDebugLogger();
+    // Pin the outgoing recorder to the session it wrote so late writes (a
+    // turn settling after this rotation) keep targeting that session's
+    // transcript instead of resolving the new session id from this Config.
+    outgoingChatRecordingService?.pinSessionIdentity(previousSessionId);
     this.chatRecordingService = this.chatRecordingEnabled
       ? this.createChatRecordingService()
       : undefined;
