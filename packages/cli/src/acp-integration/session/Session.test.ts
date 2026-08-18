@@ -35315,6 +35315,7 @@ describe('Session', () => {
 
     it('fires prompt-suggestion extNotification after end_turn when enabled', async () => {
       generateMock.mockResolvedValue({ suggestion: 'Run the tests next?' });
+      vi.mocked(mockChat.getHistoryTail).mockClear();
 
       await session.prompt({
         sessionId: 'test-session-id',
@@ -35333,13 +35334,44 @@ describe('Session', () => {
         );
       });
 
+      // Pin the curated-history tail: a revert to `chat.getHistory(true)`
+      // (full structuredClone per end_turn, the #4624 heap-peak shape) or a
+      // dropped curated argument (`getHistoryTail(40)` defaults
+      // curated=false) must not pass silently (#9233).
+      expect(vi.mocked(mockChat.getHistoryTail)).toHaveBeenCalledWith(40, true);
+
       // The generator received an AbortSignal so the daemon can cancel
-      // mid-flight if the next prompt arrives first.
+      // mid-flight if the next prompt arrives first. `merged.ui` above leaves
+      // `enableCacheSharing` UNSET, so the gate must honour the schema's
+      // declared `default: true` — `mergeSettings` never applies schema
+      // defaults, and gating on `=== true` turned the cache-aware fork into
+      // dead code unless the user explicitly set the flag (#9230).
       expect(generateMock).toHaveBeenCalledWith(
         mockConfig,
         expect.any(Array),
         expect.any(AbortSignal),
-        expect.objectContaining({ enableCacheSharing: expect.any(Boolean) }),
+        expect.objectContaining({ enableCacheSharing: true }),
+      );
+    });
+
+    it('forwards an explicit enableCacheSharing=false opt-out', async () => {
+      (mockSettings as unknown as { merged: { ui: unknown } }).merged.ui = {
+        enableFollowupSuggestions: true,
+        enableCacheSharing: false,
+      };
+      generateMock.mockResolvedValue({ suggestion: null });
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
+
+      await vi.waitFor(() => expect(generateMock).toHaveBeenCalled());
+      expect(generateMock).toHaveBeenCalledWith(
+        mockConfig,
+        expect.any(Array),
+        expect.any(AbortSignal),
+        expect.objectContaining({ enableCacheSharing: false }),
       );
     });
 

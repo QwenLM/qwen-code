@@ -4149,7 +4149,7 @@ export class Session implements SessionContext {
    * `qwen/notify/session/prompt-suggestion` extNotification. Mirrors
    * the CLI's `AppContainer.tsx` integration: same `generatePromptSuggestion`
    * call, same `enableCacheSharing` flag forwarding, same curated
-   * history slice (`getHistory(true).slice(-40)`).
+   * history tail (`getHistoryTail(40, true)`).
    *
    * Differences from the CLI:
    *   - Triggers only on `stopReason === 'end_turn'` (the daemon
@@ -4189,24 +4189,27 @@ export class Session implements SessionContext {
 
     void (async () => {
       try {
-        const fullHistory = chat.getHistory(true);
-        const lastEntry = fullHistory[fullHistory.length - 1];
+        const conversationHistory = chat.getHistoryTail(40, true);
+        const lastEntry = conversationHistory[conversationHistory.length - 1];
         if (!lastEntry || lastEntry.role !== 'model') {
           debugLogger.debug(
             'Skipping followup suggestion: last history entry is not model',
           );
           return;
         }
-        const conversationHistory =
-          fullHistory.length > 40 ? fullHistory.slice(-40) : fullHistory;
 
         const r = await generatePromptSuggestion(
           this.config,
           conversationHistory,
           ac.signal,
           {
+            // On by default: the schema declares `default: true`, but
+            // `mergeSettings` doesn't apply schema defaults, so an unset value
+            // is `undefined` and a `=== true` gate left the cache-aware fork
+            // as dead code unless the flag was explicitly set (#9230). Mirrors
+            // AppContainer — only an explicit `false` opts out.
             enableCacheSharing:
-              this.settings.merged.ui?.enableCacheSharing === true,
+              this.settings.merged.ui?.enableCacheSharing !== false,
           },
         );
         if (ac.signal.aborted) return;
