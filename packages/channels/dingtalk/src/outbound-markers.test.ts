@@ -126,6 +126,7 @@ describe('R1 round-1 Critical regressions', () => {
     const text = `Here you go:\n[IMAGE:\n/etc/passwd]\ndone`;
     const stripped = stripPartialOutboundMediaMarker(text, 'IMAGE', '');
     expect(stripped).not.toContain('/etc/passwd');
+    expect(stripped).toContain('done');
   });
 
   // R1-10: the path class admitted `[`, so an outer marker consumed the inner
@@ -213,4 +214,131 @@ describe('R1 round-1 Critical regressions', () => {
       expect(truncated.length).toBeLessThanOrEqual(20_000);
     },
   );
+});
+
+describe('R2 round-2 Critical regressions', () => {
+  const PRIVATE = '/Users/ben/private/report.pdf';
+
+  // rc:3804493271 / R2-3: the splice removed only the EARLIEST unclosed
+  // marker and the IMAGE display callers invoke the stripper exactly once, so
+  // a second unclosed marker on a later line shipped its absolute path. Both
+  // must go in a single call.
+  it('strips every unclosed marker in one pass, not just the earliest', () => {
+    expect(
+      stripPartialOutboundMediaMarker(
+        '[IMAGE: /secret/a.png\n\nsome text\n\n[IMAGE: /secret/b.png',
+        'IMAGE',
+        '[Image pending]',
+      ),
+    ).toBe('[Image pending]\n\nsome text\n\n');
+    expect(
+      stripPartialOutboundMediaMarker(
+        '[IMAGE: decoy\n\n[IMAGE: /secret/real.png',
+        'IMAGE',
+        '[Image pending]',
+      ),
+    ).not.toContain('/secret/real.png');
+  });
+
+  // rc:3804493311: the stripper hunted residue in maskCode(text), so an
+  // abandoned marker inside a masked code construct was invisible to every
+  // layer and the absolute path reached the card. Residue must be stripped
+  // from the RAW text; a COMPLETE marker quoted in code keeps its `]` and is
+  // never touched by this pass.
+  it('strips an abandoned marker inside a fenced code block', () => {
+    const stripped = stripPartialOutboundMediaMarker(
+      '```\n[FILE: /Users/ben/private/report.pdf\n```\ndone',
+      'FILE',
+      '',
+    );
+    expect(stripped).not.toContain(PRIVATE);
+    expect(stripped).toContain('done');
+  });
+
+  it('strips an abandoned marker inside an inline span', () => {
+    // Fail-closed: the residue runs from the opening `[` to end of line, so
+    // whatever followed the abandoned marker on that line goes with it — the
+    // same extent the unmasked control strips to. The path must not survive.
+    const stripped = stripPartialOutboundMediaMarker(
+      'see `[FILE: /Users/ben/private/report.pdf` ok',
+      'FILE',
+      '',
+    );
+    expect(stripped).not.toContain(PRIVATE);
+    expect(stripped).toBe('see `');
+  });
+
+  it('still leaves a complete marker inside code untouched', () => {
+    const text = '```text\n[FILE: /Users/ben/fenced.pdf]\n```';
+    expect(stripPartialOutboundMediaMarker(text, 'FILE', '')).toBe(text);
+  });
+
+  // rc:3804493313: the cross-line extension treated ANY bare `]` on a later
+  // line as the abandoned marker's close and deleted the prose in between.
+  // Only a single whitespace-free path token may extend the strip.
+  it('keeps prose carrying a later bracket when extending cross-line', () => {
+    const stripped = stripPartialOutboundMediaMarker(
+      `[FILE: ${PRIVATE}\nAnalysis complete ]`,
+      'FILE',
+      '',
+    );
+    expect(stripped).not.toContain(PRIVATE);
+    expect(stripped).toContain('Analysis complete ]');
+  });
+
+  it('still strips the cross-line single-token path shape', () => {
+    const stripped = stripPartialOutboundMediaMarker(
+      'Here you go:\n[IMAGE:\n/etc/passwd]\ndone',
+      'IMAGE',
+      '',
+    );
+    expect(stripped).not.toContain('/etc/passwd');
+    expect(stripped).toContain('done');
+  });
+
+  // rc:3804660649 / R2-8: the cross-line bracket veto ran on the MASKED text,
+  // so a `[` inside an inline span was blanked and could not stop the
+  // extension — user content was silently deleted. The veto must see the
+  // original text.
+  it('does not swallow content past a bracket hidden in an inline span', () => {
+    const stripped = stripPartialOutboundMediaMarker(
+      '[FILE: /tmp/x\nsee `arr[i]` ] done',
+      'FILE',
+      '',
+    );
+    expect(stripped).not.toContain('/tmp/x');
+    expect(stripped).toContain('arr[i]');
+    expect(stripped).toContain('done');
+  });
+
+  // rc:3804493327: when the cut lands between the keyword and a BRACKETED
+  // path, the strict completed-marker regex fails and the guard returned the
+  // raw cut — retaining a bracket-less path no sanitizer recognises. A span
+  // that genuinely opens a marker must advance the cut past its same-line
+  // extent; only prose brackets keep the raw cut.
+  it('does not retain a bracketed marker path when the cut splits it', () => {
+    const text = `${'a'.repeat(10)}[FILE: /etc/passwd [b] c]${'y'.repeat(50)}`;
+    // limit chosen so the naive cut lands right after `[FILE: `.
+    const truncated = truncateOutboundMediaText(text, 69, '…');
+    expect(truncated).not.toContain('/etc/passwd');
+  });
+
+  it('keeps the raw cut for a prose bracket that merely prefix-matches', () => {
+    // `[FILE-x` prefix-matches `FILE:` but is not a marker (no colon); the
+    // retained window must not be collapsed for it. limit lands the cut inside
+    // the bracket so the guard's opensMarker check is what keeps the raw cut.
+    const text = `${'a'.repeat(10)}[FILE-x]${'y'.repeat(50)}`;
+    const truncated = truncateOutboundMediaText(text, 57, '…');
+    expect(truncated).toContain('ILE-x');
+    expect(truncated.length).toBeLessThanOrEqual(57);
+  });
+
+  // rc:3804493280: the fence re-open loop broke on `budget <= 0` with the
+  // re-opener still set, prepending an unreserved fence on top of a tail
+  // already sized to the whole budget and breaking the `<= limit` guarantee.
+  it('keeps the result within the limit when the fence exhausts the budget', () => {
+    const text = '`'.repeat(200) + '\n' + 'a'.repeat(500);
+    const truncated = truncateOutboundMediaText(text, 200, '…(truncated)');
+    expect(truncated.length).toBeLessThanOrEqual(200);
+  });
 });

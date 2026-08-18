@@ -113,6 +113,22 @@ describe('streaming image markers', () => {
     ).toBe('before [Image pending]');
   });
 
+  // R2-3: the stripper removed only the EARLIEST unclosed marker per call and
+  // this composition invokes it exactly once, so a second abandoned marker on a
+  // later line shipped its absolute path to the card. Both must go in one pass.
+  it('strips every unclosed marker across lines in a single pass', () => {
+    expect(
+      sanitizeStreamingImageMarkers(
+        'Here are the charts:\n[IMAGE: /Users/ben/sales-q1.png\n[IMAGE: /Users/ben/sales-q2.png',
+      ),
+    ).not.toContain('/Users/ben/sales-q2.png');
+    expect(
+      sanitizeStreamingImageMarkers(
+        '[IMAGE: /secret/a.png\n\nsome text\n\n[IMAGE: /secret/b.png',
+      ),
+    ).not.toContain('/secret/b.png');
+  });
+
   it('preserves image-like text inside code', () => {
     expect(
       sanitizeStreamingImageMarkers(

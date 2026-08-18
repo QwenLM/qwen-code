@@ -157,7 +157,7 @@ const FILE_INSTRUCTIONS = [
   '`[FILE: /absolute/path/to/file]` (without the backticks)',
   '',
   'Use the marker only after the file is complete. Do not use it in progress text, inside code, or before asking the user for input.',
-  'The whole marker must sit on one line, and the path must not contain `]`. If it does, copy the file to a path without brackets first.',
+  'The whole marker must sit on one line, and the path must not contain `[` or `]`. If it does, copy the file to a path without brackets first.',
   'Do not claim that delivery succeeded; DingTalk will show the file as a separate attachment.',
 ].join('\n');
 
