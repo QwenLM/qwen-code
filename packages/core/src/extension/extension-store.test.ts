@@ -175,11 +175,13 @@ describe('ExtensionStore', () => {
       'enabled',
     );
 
-    const snapshot = await store.clearWorkspaceActivations(
+    const outcome = await store.clearWorkspaceActivations(
       identities,
       workspacePath('batch'),
     );
+    const snapshot = outcome.snapshot;
 
+    expect(outcome.updated).toBe(true);
     expect(snapshot.generation).toBe(before.generation + 1);
     for (const identity of identities) {
       expect(
@@ -195,6 +197,39 @@ describe('ExtensionStore', () => {
         source: 'default',
       });
     }
+  });
+
+  it('does not declare an unknown identity when clearing workspace activation', async () => {
+    const store = makeStore();
+    const identity = { id: 'cb'.repeat(32), name: 'future' };
+    const initial = await store.ensureInitialized([]);
+
+    const outcome = await store.clearWorkspaceActivations(
+      [identity],
+      workspacePath('batch'),
+    );
+
+    expect(outcome.updated).toBe(false);
+    expect(outcome.snapshot.generation).toBe(initial.generation);
+    expect(outcome.snapshot.extensions[identity.id]).toBeUndefined();
+
+    const staging = await store.createStagingDirectory();
+    await fsp.writeFile(path.join(staging, 'qwen-extension.json'), '{}');
+    const installed = await store.commitArtifact({
+      operation: 'install',
+      identity,
+      stagingDirectory: staging,
+      destinationDirectory: path.join(extensionsDir, identity.name),
+      initialActivation: {
+        scope: 'workspace',
+        workspacePath: workspacePath('install'),
+      },
+    });
+
+    expect(installed.extensions[identity.id]).toMatchObject({
+      defaultActivation: 'disabled',
+      workspaceOverrides: { [workspacePath('install')]: 'enabled' },
+    });
   });
 
   it('declares a missing identity in the same batch generation', async () => {
@@ -1333,6 +1368,45 @@ describe('ExtensionStore', () => {
       defaultActivation: 'disabled',
       workspaceOverrides: {},
     });
+  });
+
+  it('keeps a case-renamed installed extension attached to its artifact', async () => {
+    const store = makeStore();
+    const installedIdentity = { id: 'da'.repeat(32), name: 'Demo' };
+    const staging = await store.createStagingDirectory();
+    await fsp.writeFile(path.join(staging, 'qwen-extension.json'), '{}');
+    await store.commitArtifact({
+      operation: 'install',
+      identity: installedIdentity,
+      stagingDirectory: staging,
+      destinationDirectory: path.join(extensionsDir, installedIdentity.name),
+      initialActivation: { scope: 'user' },
+    });
+
+    const renamedIdentity = { ...installedIdentity, name: 'demo' };
+    await store.ensureInitialized([renamedIdentity]);
+    const internals = store as unknown as {
+      pathExists(filePath: string): Promise<boolean>;
+    };
+    const pathExists = internals.pathExists.bind(store);
+    vi.spyOn(internals, 'pathExists').mockImplementation(async (filePath) =>
+      filePath === path.join(extensionsDir, renamedIdentity.name)
+        ? false
+        : await pathExists(filePath),
+    );
+    const toggled = await store.setDefaultActivations(
+      [renamedIdentity],
+      'disabled',
+    );
+
+    expect(toggled.extensions[installedIdentity.id]).toMatchObject({
+      name: renamedIdentity.name,
+      defaultActivation: 'disabled',
+      artifactGeneration: expect.any(Number),
+    });
+    expect(
+      toggled.extensions[installedIdentity.id]?.declarationOnly,
+    ).toBeUndefined();
   });
 
   it('preserves the original error when rollback also fails', async () => {

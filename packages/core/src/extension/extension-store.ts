@@ -37,6 +37,11 @@ export interface ExtensionStoreSnapshot {
   extensions: Record<string, ExtensionPolicy>;
 }
 
+export interface ExtensionStoreBatchMutationOutcome {
+  snapshot: ExtensionStoreSnapshot;
+  updated: boolean;
+}
+
 export interface ExtensionIdentity {
   id: string;
   name: string;
@@ -847,9 +852,10 @@ export class ExtensionStore {
     identities: readonly ExtensionIdentity[],
     activation: ExtensionActivation,
   ): Promise<ExtensionStoreSnapshot> {
-    return await this.mutateMany(identities, (policy) => {
+    const outcome = await this.mutateMany(identities, (policy) => {
       policy.defaultActivation = activation;
     });
+    return outcome.snapshot;
   }
 
   async setActivationScope(
@@ -886,9 +892,10 @@ export class ExtensionStore {
     activation: ExtensionActivation,
   ): Promise<ExtensionStoreSnapshot> {
     const canonicalWorkspace = canonicalizeWorkspacePath(workspacePath);
-    return await this.mutateMany(identities, (policy) => {
+    const outcome = await this.mutateMany(identities, (policy) => {
       policy.workspaceOverrides[canonicalWorkspace] = activation;
     });
+    return outcome.snapshot;
   }
 
   async clearWorkspaceActivation(
@@ -903,11 +910,15 @@ export class ExtensionStore {
   async clearWorkspaceActivations(
     identities: readonly ExtensionIdentity[],
     workspacePath: string,
-  ): Promise<ExtensionStoreSnapshot> {
+  ): Promise<ExtensionStoreBatchMutationOutcome> {
     const canonicalWorkspace = canonicalizeWorkspacePath(workspacePath);
-    return await this.mutateMany(identities, (policy) => {
-      clearWorkspaceActivation(policy, workspacePath, canonicalWorkspace);
-    });
+    return await this.mutateMany(
+      identities,
+      (policy) => {
+        clearWorkspaceActivation(policy, workspacePath, canonicalWorkspace);
+      },
+      false,
+    );
   }
 
   async setLegacyPathActivation(
@@ -955,7 +966,8 @@ export class ExtensionStore {
   private async mutateMany(
     identities: readonly ExtensionIdentity[],
     update: (policy: ExtensionPolicy) => void,
-  ): Promise<ExtensionStoreSnapshot> {
+    declareUnknown = true,
+  ): Promise<ExtensionStoreBatchMutationOutcome> {
     identities.forEach(assertIdentity);
     if (identities.length === 0) {
       throw new Error('At least one extension identity is required.');
@@ -1001,6 +1013,8 @@ export class ExtensionStore {
           );
           if (existingByName) {
             policy = existingByName;
+          } else if (!declareUnknown) {
+            continue;
           } else {
             const rules = findLegacyRules(legacyForImport, identity.name);
             policy = {
@@ -1016,7 +1030,7 @@ export class ExtensionStore {
         if (
           !policy.declarationOnly &&
           policy.artifactGeneration !== undefined &&
-          !(await this.pathExists(path.join(this.extensionsDir, policy.name)))
+          !(await this.extensionArtifactExists(policy.name))
         ) {
           delete policy.artifactGeneration;
           policy.declarationOnly = true;
@@ -1028,12 +1042,28 @@ export class ExtensionStore {
         }
         policies.push(policy);
       }
+      if (policies.length === 0) {
+        return { snapshot, updated: false };
+      }
       for (const policy of policies) update(policy);
       this.updateLegacyProjectionRemainder(snapshot, legacyForRemainder);
       snapshot.generation += 1;
       await this.writeSnapshotUnlocked(snapshot);
-      return snapshot;
+      return { snapshot, updated: true };
     });
+  }
+
+  private async extensionArtifactExists(name: string): Promise<boolean> {
+    if (await this.pathExists(path.join(this.extensionsDir, name))) return true;
+    let entries: string[];
+    try {
+      entries = await fsp.readdir(this.extensionsDir);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+      throw error;
+    }
+    const normalizedName = name.toLowerCase();
+    return entries.some((entry) => entry.toLowerCase() === normalizedName);
   }
 
   private emptySnapshot(): ExtensionStoreSnapshot {

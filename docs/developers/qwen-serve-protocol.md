@@ -266,7 +266,7 @@ The same tag also exposes workspace-qualified project-agent CRUD at `/workspaces
 
 `extension_management_v2` advertises a user-level extension catalog and mutation surface at `/extensions/*`, plus workspace activation projections at `/workspaces/:workspace/extensions/*`. Artifacts are global; workspace routes expose only projection reads, exact activation overrides, and runtime refresh. Reads may target an untrusted registered workspace, while activation, refresh, and workspace-scoped install require a trusted target. Slow mutations use daemon-local operations at `/extensions/operations/:operationId`; store generation, not operation history, is authoritative across restart and across daemons. The published `workspace_extensions` capability and `/workspace/extensions/*` routes remain a primary-workspace compatibility adapter. Clients must preflight `extension_management_v2` and must not infer it from daemon mode or `workspace_qualified_rest_core`.
 
-`extension_batch_activation_v2` adds `PUT /extensions/activation` and `PUT /workspaces/:workspace/extensions/activation`. Both accept 1–100 names in `extensionNames`, deduplicate them case-insensitively while preserving first-seen order, persist all targets in one generation, and return one `202` operation handle. A target does not need to be installed: its name creates a desired-state declaration that is preserved when an Extension with that name is installed. The global route accepts `state: "enabled" | "disabled"`, writes V2 `defaultActivation`, and reconciles every registered runtime. The workspace route also accepts `"inherit"`, applies or clears exact overrides for the selected trusted runtime, and reconciles only that runtime. Singular activation routes remain installed-only and id-addressed.
+`extension_batch_activation_v2` adds `PUT /extensions/activation` and `PUT /workspaces/:workspace/extensions/activation`. Both accept 1–100 names in `extensionNames`, deduplicate them case-insensitively while preserving first-seen order, persist changed targets in one generation, and return one `202` operation handle. A target does not need to be installed when setting `enabled` or `disabled`: its name creates a desired-state declaration that is preserved when an Extension with that name is installed. The global route accepts `state: "enabled" | "disabled"`, writes V2 `defaultActivation`, and reconciles every registered runtime. The workspace route also accepts `"inherit"`, applies or clears exact overrides for the selected trusted runtime, and reconciles only that runtime. `inherit` does not declare an unknown name; an all-unknown clear reports `updated: false` and skips reconciliation. Singular activation routes remain installed-only and id-addressed.
 
 ### Extension Management V2 wire contract
 
@@ -359,19 +359,16 @@ Global and workspace activation `PUT` requests use the same body:
 
 `state` is `enabled` or `disabled`. Update, uninstall, check-updates, clear-activation, and refresh requests have no required body.
 
-Batch activation requests add full Extension identities:
+Batch activation requests use Extension names:
 
 ```json
 {
-  "extensions": [
-    { "extensionId": "<extension-id-1>", "name": "formatter" },
-    { "extensionId": "<extension-id-2>", "name": "review-tools" }
-  ],
+  "extensionNames": ["formatter", "review-tools"],
   "state": "disabled"
 }
 ```
 
-The workspace batch also accepts `"state": "inherit"`. Terminal global results contain `extensionId`, `name`, and `defaultActivation`; workspace results contain `extensionId`, `name`, `workspaceActivation` (`null` for inherit), and `effectiveActivation`. Malformed or internally conflicting identities reject the request; conflicts with existing Store identities fail atomically without a partial commit.
+The workspace batch also accepts `"state": "inherit"`. Terminal global results contain `name` and `defaultActivation`; workspace results contain `name`, `workspaceActivation` (`null` for inherit), and `effectiveActivation`. Malformed names reject the request; conflicts with existing Store identities fail atomically without a partial commit. An unknown `inherit` target is not persisted, because clearing an override must not manufacture a default-activation declaration or replace later install consent.
 
 Every accepted asynchronous mutation returns:
 

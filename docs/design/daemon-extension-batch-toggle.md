@@ -33,12 +33,14 @@ derive Qwen's source-dependent internal id. The global
 body accepts `state` as `enabled` or `disabled` and writes every target's
 `defaultActivation`. The workspace body also accepts `inherit`; it clears each
 target's exact override using the same legacy-rule masking semantics as the
-singular DELETE route.
+singular DELETE route. `inherit` does not create a declaration for a name with
+no existing policy; an all-unknown clear is a no-op.
 
 Malformed names or state reject the request
 before queueing. Batch operations intentionally do not require an installed
-artifact: an unknown identity creates a declaration policy so clients can set
-desired activation before installation. Successful global results report the
+artifact: setting `enabled` or `disabled` for an unknown identity creates a
+declaration policy so clients can set desired activation before installation.
+Successful global results report the
 resulting default activation. Successful workspace results report the exact
 override (`null` for inherit) and effective activation. Singular activation
 routes remain installed-only and id-addressed.

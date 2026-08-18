@@ -2111,6 +2111,7 @@ export function registerWorkspaceExtensionRoutes(
             );
             return {
               status: 'updated',
+              updated: snapshot.updated,
               results: names.map((name) => ({
                 name,
                 workspaceActivation: state === 'inherit' ? null : state,

@@ -2158,6 +2158,41 @@ describe('extension tests', () => {
       expect(extensions.every((extension) => extension.isActive)).toBe(true);
     });
 
+    it('treats inherit for an unknown extension as a no-op', async () => {
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const initial = await manager.getExtensionStoreSnapshot();
+      const refreshTools = vi
+        .spyOn(manager, 'refreshTools')
+        .mockResolvedValue();
+      const onCommitted = vi.fn();
+
+      const snapshot = await manager.setExtensionWorkspaceActivations(
+        ['future-extension'],
+        tempWorkspaceDir,
+        'inherit',
+        onCommitted,
+      );
+
+      expect(snapshot.updated).toBe(false);
+      expect(snapshot.generation).toBe(initial.generation);
+      expect(snapshot.extensions).toEqual(initial.extensions);
+      expect(onCommitted).not.toHaveBeenCalled();
+      expect(refreshTools).not.toHaveBeenCalled();
+      expect(
+        manager.getExtensionActivationForNameFromSnapshot(
+          'future-extension',
+          snapshot,
+          tempWorkspaceDir,
+        ),
+      ).toMatchObject({
+        default: 'enabled',
+        workspace: 'inherit',
+        effective: 'enabled',
+        source: 'default',
+      });
+    });
+
     it('updates loaded and declared extensions with one generation and refresh', async () => {
       createExtension({
         extensionsDir: userExtensionsDir,

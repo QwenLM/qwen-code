@@ -308,6 +308,7 @@ export interface CommittedExtensionMutation {
 
 export interface ExtensionStoreMutationResult extends ExtensionStoreSnapshot {
   warnings?: Array<{ code: string; error: string }>;
+  updated?: boolean;
 }
 
 export type ExtensionCommitCallback = (generation: number) => void;
@@ -771,7 +772,14 @@ export class ExtensionManager {
       ([, policy]) => policy.name.toLowerCase() === name.toLowerCase(),
     );
     if (!entry) {
-      throw new Error(`Extension with name ${name} does not exist.`);
+      const cliOverride = this.enabledExtensionNamesOverride.length > 0;
+      return {
+        default: 'enabled',
+        workspace: 'inherit',
+        effective:
+          cliOverride && !this.isEnabled(name) ? 'disabled' : 'enabled',
+        source: cliOverride ? 'cli_override' : 'default',
+      };
     }
     const [id, policy] = entry;
     return this.getExtensionActivationForIdentityFromSnapshot(
@@ -878,23 +886,34 @@ export class ExtensionManager {
     const endMutation = this.beginMutation('setExtensionWorkspaceActivations');
     try {
       const identities = this.resolveBatchExtensionIdentities(names);
-      const snapshot =
-        activation === 'inherit'
-          ? await this.extensionStore.clearWorkspaceActivations(
-              identities,
-              workspacePath,
-            )
-          : await this.extensionStore.setWorkspaceActivations(
-              identities,
-              workspacePath,
-              activation,
-            );
+      let snapshot: ExtensionStoreSnapshot;
+      let updated = true;
+      if (activation === 'inherit') {
+        const outcome = await this.extensionStore.clearWorkspaceActivations(
+          identities,
+          workspacePath,
+        );
+        snapshot = outcome.snapshot;
+        updated = outcome.updated;
+      } else {
+        snapshot = await this.extensionStore.setWorkspaceActivations(
+          identities,
+          workspacePath,
+          activation,
+        );
+      }
+      if (!updated) {
+        this.applyStoreActivation(snapshot);
+        return { ...snapshot, updated: false };
+      }
       onCommitted?.(snapshot.generation);
       this.applyStoreActivation(snapshot);
       const warning = await this.refreshToolsAfterActivation(
         `${identities.length} extensions`,
       );
-      return warning ? { ...snapshot, warnings: [warning] } : snapshot;
+      return warning
+        ? { ...snapshot, updated: true, warnings: [warning] }
+        : { ...snapshot, updated: true };
     } finally {
       endMutation();
     }
