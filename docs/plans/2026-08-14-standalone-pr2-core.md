@@ -342,9 +342,9 @@ Service维护process-local `creating: Map<normalizedUuid, state>`，state只区�
 
 `creating` insert与service terminal flag检查必须是同一个无`await`同步临界区。已经拿到runtime但尚未insert的请求若在此之前观察到terminal，直接返回runtime unavailable且不得取得global reservation；observer不需要追踪一个尚未拥有任何资源的request。若insert先发生，随后observer必定看到并冻结该entry。Insert后、每个下一次异步边界前仍执行`assertRuntimeCurrent()`；finally同时按entry object identity和service terminal/frozen状态决定是否移除，不能因该transaction本地还未看到quarantine completion而释放reservation。
 
-Service同时维护`directoryStates: Map<normalizedUuid, { pinned, agentBound? }>`。`pinned`是本daemon ownership lifetime的child identity，合法写入只有三处：new create materialization、daemon启动后该session第一次load/repair安全观察、以及exclusive load/repair证明old child absent后创建的新identity。普通load遇到已有pin必须传给workspace检查；同路径不同inode不能被当成“重新发现”。`agentBound`包含pinned identity、bridge session event epoch和`released` phase：同一runtime generation的managed relocation完成、daemon再次inspect得到同一pinned identity后先写`released: false`，只有child release确认成功才原子提升为`released: true`。所有reuse和cwd preflight只接受true；failure/unknown在close/quarantine前先清record。复用时重读`getSessionEventEpoch(storageSessionId)`，因此ACP channel/session重建不会误用旧bound。Cold session、epoch变化或pin替换都使它无效。PR3接入archive时保留pin但清除agentBound，clean rollback或PR3 delete确认child absent后才清除整个state；PR3也负责deletion journal恢复时的更新。ACP Session内的turn guard保留独立副本作为child-side defense，不能替代daemon state。
+Service同时维护`directoryStates: Map<normalizedUuid, { pinned, agentBound? }>`。`pinned`是本daemon ownership lifetime的child identity，合法写入只有三处：new create materialization、daemon启动后该session第一次load/repair安全观察、以及exclusive load/repair证明old child absent后创建的新identity。普通load遇到已有pin必须传给workspace检查；同路径不同inode不能被当成“重新发现”。`agentBound`包含pinned identity、bridge session event epoch和`released` phase：同一runtime generation的managed relocation完成、daemon再次inspect得到同一pinned identity后先写`released: false`，只有child release确认成功才原子提升为`released: true`。所有reuse和cwd preflight只接受true；failure/unknown在close/quarantine前先清record。复用时重读`getSessionEventEpoch(canonicalSessionId)`，因此ACP channel/session重建不会误用旧bound。Cold session、epoch变化或pin替换都使它无效。PR3接入archive时保留pin但清除agentBound，clean rollback或PR3 delete确认child absent后才清除整个state；PR3也负责deletion journal恢复时的更新。ACP Session内的turn guard保留独立副本作为child-side defense，不能替代daemon state。
 
-所有接受session identity的service方法都先执行同一个UUID v1-v5 parser并得到lowercase `canonicalSessionId`；malformed id返回`invalid_request`，map、reservation、lifecycle lock和wire DTO只使用canonical value。新建session的`storageSessionId`和canonical value相同。恢复历史mixed-case transcript时，service通过SessionService的case-insensitive resolver得到文件名中的authoritative `storageSessionId`，并且只在SessionService、bridge和directory hash操作中使用该原始拼写。这保持现有ACP mixed-case load语义，也不会把老transcript绑定到lowercase重算后的另一个child目录。若active/archived namespace中存在两个仅大小写不同的持久化ID，resolver返回conflict，service fail closed；不依赖`readdir`顺序选择其中一个。
+所有接受session identity的service方法都先执行同一个UUID v1-v5 parser并得到lowercase `canonicalSessionId`；malformed id返回`invalid_request`，map、reservation、lifecycle lock和wire DTO只使用canonical value。新建session的`storageSessionId`和canonical value相同。恢复历史mixed-case transcript时，service通过SessionService的case-insensitive resolver得到文件名中的authoritative `storageSessionId`，并且只在SessionService filename、directory hash和ACP-child Config/session storage操作中使用该原始拼写；daemon bridge的live entry lookup（包括`getSessionEventEpoch`）一律使用canonical ID——`packages/acp-bridge`的`byId.get`是精确匹配且无id归一化，storage拼写会错过canonical key的live entry。这保持现有ACP mixed-case load语义，也不会把老transcript绑定到lowercase重算后的另一个child目录。若active/archived namespace中存在两个仅大小写不同的持久化ID，resolver返回conflict，service fail closed；不依赖`readdir`顺序选择其中一个。
 
 创建步骤：
 
@@ -387,7 +387,7 @@ Reservation仅在success、已证明pre-persistence clean rollback、或未发�
 
 Listing复用 `server/session-list.ts` 的全量 persisted snapshot/cache和 live merge，不在 page之后过滤。新增 internal standalone predicate path：先筛选 compatible top-level standalone、排除所有 child/Live/other，再按 `(activityTime, sessionId)`排序分页。Cursor绑定 `archiveState + catalogKind: "standalone"`，不能与 generic metadata cursor互换。`truncated`/abort/liveMergeFailed语义保持现有实现。
 
-列表对外返回canonical UUID，但service内部record保留storage ID供bridge/child路由；storage ID是non-DTO字段，不能被object spread或error serialization带到响应。同一canonical UUID出现多个storage spelling时不选择或合并，而是记录bounded conflict并从列表排除；exact lookup仍返回409。列表不 probe child directory；工作目录状态只在 create/load/resume/repair/prompt中检查。
+列表对外返回canonical UUID，但service内部record保留storage ID供SessionService filename/directory-hash/ACP-child路由使用（daemon bridge entry lookup使用canonical ID，bridge包内无id归一化）；storage ID是non-DTO字段，不能被object spread或error serialization带到响应。同一canonical UUID出现多个storage spelling时不选择或合并，而是记录bounded conflict并从列表排除；exact lookup仍返回409。列表不 probe child directory；工作目录状态只在 create/load/resume/repair/prompt中检查。
 
 ### 7. Load、resume 与 repair
 
@@ -451,6 +451,7 @@ ACP child guard再次检查所有真正开始的turn，覆盖HTTP route之外的
 - Modify: `packages/cli/src/acp-integration/acpAgent.ts`及load/resume tests，移除exact-lowercase `sessionExists()` fast path；ACP child必须直接调用唯一case-insensitive resolver，才能在exact与case-only twin并存时于Config/filesystem初始化前fail closed。
 - Modify: `packages/cli/src/serve/live/live-task-service.ts`及现有caller tests，只把旧source adapter调用改为传入existence-aware SessionService store；不在PR2A迁移Live task的创建或restore语义。
 - Modify: `packages/cli/src/serve/session-id-admission.ts`及test，让case-only duplicate resolver结果按persisted UUID conflict处理，而不是被外层catch误映射为临时`session_id_admission_unavailable`；该适配只改变重复持久化ID的fail-closed分类，不改变I/O失败的retryable unavailable语义。
+- Modify: `packages/cli/src/serve/server/session-archive.ts`及test，把coordinator锁key（`exclusive`/`shared` map与`assertNotTransitioning`）经`normalizeSessionIdForLookup`归一化，使caller id的任意大小写变体竞争同一把锁，关闭大小写不敏感文件系统上跨拼写batch delete/archive/unarchive在restore mid-section去链transcript的窗口；batch helper的raw-spelling去重保持原样（归一化去重会让Linux上case-distinct legacy twin的exact-path lookup失配）。
 - Modify: `packages/core/src/services/sessionService.ts`及test，让case-insensitive persisted-ID resolver无论exact lowercase文件是否存在都扫描active/archived候选；单一candidate返回authoritative spelling，仅大小写不同的多个candidate抛typed conflict。同一文件新增`readCreationMetadataIfReadable()`，把creation metadata读取与existence state绑定，corrupt metadata fail closed。
 - Modify: `packages/core/src/utils/jsonl-utils.ts`及test，新增`readLinesWithIntegrity()` fail-closed reader，供`readCreationMetadataIfReadable()`区分missing与corrupt transcript；不新增其他core util。
 - Modify: `packages/cli/src/serve/server/error-response.ts`及test，把core `SessionIdCaseConflictError`映射为与`SessionConflictError`相同的无path 409 `session_conflict`形状，作为routes/dispatch翻译之后的defense-in-depth。
@@ -477,7 +478,7 @@ PR2A跨到`packages/core`的生产改动只允许`SessionService`既有case-inse
 
 若实现需要修改清单外production文件，先说明对应不变量；无法对应则视为scope leakage。特别是SDK/WebShell/capabilities/scheduled-task routes和archive/delete helpers不属于PR2。
 
-`SessionService.findSessionIdIgnoringCase()`当前生产consumer只有ACP child `loadSession`、ACP child `resumeSession`和`RequestedSessionIdAdmission`，其中三个入口目前都存在exact lookup bypass。PR2A还会让REST internal restore与ACP HTTP internal restore调用它。修改冲突语义时必须回归这五个consumer：单一mixed-case transcript仍返回authoritative spelling并用同一spelling做bridge/directory操作；case-only duplicate在四个restore入口都fail closed；global create/restore admission显式识别resolver的duplicate结果并把它视为persisted占用，不能让现有通用catch把它降成retryable unavailable，且错误不泄露路径。所有consumer都必须直接调用唯一resolver，不能先用exact lowercase fast path绕过duplicate检测。若实现新增返回类型而不是typed exception，同一轮必须更新全部consumer，不保留旧的“任选第一个”入口。
+`SessionService.findSessionIdIgnoringCase()`当前生产consumer只有ACP child `loadSession`、ACP child `resumeSession`和`RequestedSessionIdAdmission`，其中三个入口目前都存在exact lookup bypass。PR2A还会让REST internal restore与ACP HTTP internal restore调用它。修改冲突语义时必须回归这五个consumer：单一mixed-case transcript仍返回authoritative spelling并用同一spelling做SessionService filename/directory-hash/ACP-child操作（daemon bridge entry lookup保持canonical ID）；case-only duplicate在四个restore入口都fail closed；global create/restore admission显式识别resolver的duplicate结果并把它视为persisted占用，不能让现有通用catch把它降成retryable unavailable，且错误不泄露路径。所有consumer都必须直接调用唯一resolver，不能先用exact lowercase fast path绕过duplicate检测。若实现新增返回类型而不是typed exception，同一轮必须更新全部consumer，不保留旧的“任选第一个”入口。
 
 ## Structured errors
 
@@ -566,6 +567,7 @@ npx vitest run \
   src/serve/conversations/conversation-workspace.test.ts \
   src/utils/conversation-directory-identity.test.ts \
   src/serve/session-id-admission.test.ts \
+  src/serve/server/session-archive.test.ts \
   src/serve/acp-http/transport.test.ts \
   src/serve/acp-http/dispatch-error.test.ts \
   src/serve/multi-workspace-sessions.test.ts \
@@ -605,6 +607,7 @@ npx vitest run \
   src/acp-integration/session/permissionUtils.test.ts \
   src/serve/server/session-archive.test.ts \
   src/serve/acp-http/transport.test.ts \
+  src/serve/acp-http/dispatch-error.test.ts \
   src/serve/routes/workspace-management.test.ts \
   src/serve/live/live-task-service.test.ts \
   src/serve/create-sub-session.test.ts \

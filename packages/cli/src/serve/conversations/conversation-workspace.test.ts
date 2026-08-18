@@ -26,6 +26,36 @@ import {
 } from './conversation-workspace.js';
 import { ConversationDirectoryIdentityError } from '../../utils/conversation-directory-identity.js';
 
+const plantOnExpectedInspect = vi.hoisted(() => ({ armed: false }));
+
+vi.mock(
+  '../../utils/conversation-directory-identity.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('../../utils/conversation-directory-identity.js')
+      >();
+    return {
+      ...actual,
+      inspectConversationDirectoryIdentity: async (
+        ...args: Parameters<typeof actual.inspectConversationDirectoryIdentity>
+      ) => {
+        const identity = await actual.inspectConversationDirectoryIdentity(
+          ...args,
+        );
+        // Arms only on the final re-inspection (the sole caller passing
+        // `expected`): plants an entry into the child before the caller's
+        // emptiness snapshot, so a stale readdir ordering is observable.
+        if (plantOnExpectedInspect.armed && args[2] !== undefined && identity) {
+          plantOnExpectedInspect.armed = false;
+          await writeFile(join(identity.canonicalPath, 'planted.txt'), 'x');
+        }
+        return identity;
+      },
+    };
+  },
+);
+
 const cleanup: string[] = [];
 
 afterEach(async () => {
@@ -265,6 +295,27 @@ describe('Live conversation workspace root', () => {
     );
   });
 
+  it('rejects as not_empty when an entry appears during the final identity re-inspection', async () => {
+    const home = await tempHome();
+    const workspace = new ConversationWorkspace({ homeDir: home });
+
+    // The interposed inspect plants an entry after the identity verdict but
+    // before the caller's readdir; only a post-inspect entries snapshot can
+    // see it — the pre-inspect ordering resolves as empty here.
+    plantOnExpectedInspect.armed = true;
+    try {
+      await expect(
+        workspace.prepareStandaloneDirectory('standalone'),
+      ).rejects.toMatchObject({
+        name: 'ConversationDirectoryIdentityError',
+        scope: 'child',
+        reason: 'not_empty',
+      });
+    } finally {
+      plantOnExpectedInspect.armed = false;
+    }
+  });
+
   it('sanitizes standalone child filesystem errors', async () => {
     if (process.platform === 'win32') return;
     // Root bypasses the 0o000 chmod below via CAP_DAC_OVERRIDE, so the
@@ -366,5 +417,32 @@ describe('Live conversation workspace root', () => {
     }
     expect(ensured.error).toBeInstanceOf(ConversationDirectoryIdentityError);
     expect(ensured.error.reason).toBe('identity_changed');
+  });
+
+  it('propagates a raced compromised inspection verbatim from the ensure race', async () => {
+    const home = await tempHome();
+    const workspace = new ConversationWorkspace({ homeDir: home });
+    const prepared = await workspace.prepareStandaloneDirectory('standalone');
+
+    const racedError = new ConversationDirectoryIdentityError(
+      'child',
+      'unexpected_identity',
+    );
+    const inspect = vi.spyOn(workspace, 'inspectStandaloneDirectory');
+    inspect
+      .mockResolvedValueOnce({ status: 'missing' })
+      .mockResolvedValueOnce({ status: 'compromised', error: racedError });
+
+    const ensured = await workspace.ensureStandaloneDirectory(
+      'standalone',
+      prepared.identity,
+    );
+    expect(ensured.status).toBe('compromised');
+    if (ensured.status !== 'compromised') {
+      throw new Error('expected compromised');
+    }
+    // A narrowed `raced.status === 'ready'` pass-through would instead
+    // surface a fresh identity_changed here; the raced reason must survive.
+    expect(ensured.error).toBe(racedError);
   });
 });
