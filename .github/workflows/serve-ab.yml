@@ -69,7 +69,7 @@ jobs:
           if [ "$RUNNER_UID" != "0" ]; then
             chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
           fi
-          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
 
       - name: 'Wipe stale workspace before checkout'
         if: "${{ runner.environment == 'self-hosted' }}"
@@ -83,12 +83,14 @@ jobs:
           #
           # This wipe used to run unguarded — `set -u` stopped an UNSET
           # workspace and nothing else, so an empty or mangled one reached
-          # `rm -rf` unchallenged. The layers below are the reference
-          # implementation from the review workflow's heal chain (#9220),
-          # ported here in #9265: canonicalize (kernel-resolvable spellings
-          # like `/home/.` and `//usr` must not slip past the exact-match
-          # arms; `-m` is GNU-only, and off-GNU the strip loop and the
-          # allowlist still hold), strip trailing slashes, refuse the known
+          # `rm -rf` unchallenged. The layers below are the guard back-ported
+          # from the review workflow's checkout heal (#9220, #9265, #9277),
+          # plus the heal for symlinked workspaces: canonicalize FAIL-CLOSED
+          # (a wipe pointed at the wrong path is far worse than a skipped
+          # wipe; `-m` is GNU-only — a BSD realpath exits 1 on it, so off-GNU
+          # the step refuses rather than matching a raw, possibly misleading
+          # spelling), strip trailing slashes, heal a workspace replaced by a
+          # symlink or non-directory, refuse `..` spellings and the known
           # roots, and refuse anything outside the runner workspace.
           WS="${GITHUB_WORKSPACE:?}"
           # Prepare the allowlist root BEFORE the heal: the heal's containment
@@ -98,9 +100,14 @@ jobs:
           # ${RUNNER_WORKSPACE:?} aborts the step), a trailing-slashed one to
           # "//*" (refusing a legitimate heal).
           RWS="${RUNNER_WORKSPACE:?}"
-          RWS="$(realpath -m -- "$RWS" 2>/dev/null || printf '%s' "$RWS")"
+          RWS="$(realpath -m -- "$RWS" 2>/dev/null)" || { echo "::error::refusing to wipe: realpath unavailable, cannot canonicalize ${RUNNER_WORKSPACE}"; exit 1; }
+          # Mirror the WS strip before building the allowlist pattern; "/"
+          # stripped empty would match every path instead.
           while [ "${RWS%/}" != "$RWS" ]; do RWS="${RWS%/}"; done
           if [ -z "$RWS" ]; then echo "::error::refusing to wipe: runner workspace resolved to /"; exit 1; fi
+          case "$RWS" in
+            ..|../*|*/..|*/../*) echo "::error::refusing runner workspace path containing '..': ${RWS}"; exit 1 ;;
+          esac
           # Trailing slashes hide a symlink from the heal's predicates: both
           # [ -L "$WS/" ] and [ ! -d "$WS/" ] resolve THROUGH the link and
           # report its target, so the corruption stays invisible and the wedge
@@ -126,15 +133,31 @@ jobs:
               *) echo "::error::refusing to heal workspace outside the runner workspace: ${WS} (runner workspace: ${RWS})"; exit 1 ;;
             esac
           fi
-          WS="$(realpath -m -- "$WS" 2>/dev/null || printf '%s' "$WS")"
+          # Canonicalize before matching: the kernel resolves non-canonical
+          # spellings to the guarded roots (`/home/.` -> /home, `//usr` ->
+          # /usr), so a raw string match lets them slip past the case arms.
+          WS="$(realpath -m -- "$WS" 2>/dev/null)" || { echo "::error::refusing to wipe: realpath unavailable, cannot canonicalize ${GITHUB_WORKSPACE}"; exit 1; }
+          # Trailing slashes slip past the exact-match case arms below
+          # (`/home/` would pass the guard and reach the rm); realpath strips
+          # them too; keep the guard whole if the path reaches this point with
+          # trailing slashes.
           while [ "${WS%/}" != "$WS" ]; do WS="${WS%/}"; done
+          case "$WS" in
+            ..|../*|*/..|*/../*) echo "::error::refusing to wipe path containing '..': ${WS}"; exit 1 ;;
+          esac
           case "$WS" in
             /|/home|/root|/usr*|/etc*|/var|"") echo "::error::refusing to wipe suspicious workspace path: ${WS}"; exit 1 ;;
           esac
+          # A denylist can only enumerate known roots — the allowlist closes
+          # every other one (/tmp, /opt, ...): only a directory inside the
+          # runner workspace may be wiped.
           case "$WS" in
             "$RWS"/*) ;;
             *) echo "::error::refusing to wipe workspace outside the runner workspace: ${WS} (runner workspace: ${RWS})"; exit 1 ;;
           esac
+          # Bare on purpose: this job runs under `bash -eo pipefail`, so a
+          # wipe that cannot clear the workspace fails the job here instead
+          # of building both checkouts on top of the leftovers.
           find "$WS" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
 
       - name: 'Checkout PR head'

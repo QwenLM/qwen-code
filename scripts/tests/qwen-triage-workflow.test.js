@@ -6,6 +6,7 @@
 
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import {
+  chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -32,6 +33,8 @@ const prSkill = readFileSync(
   'utf8',
 );
 const verifySkill = readFileSync('.qwen/skills/verify-pr/SKILL.md', 'utf8');
+const hasGnuRealpath =
+  spawnSync('realpath', ['-m', '--', '/'], { stdio: 'ignore' }).status === 0;
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -1615,52 +1618,71 @@ describe('qwen-triage verify hardening', () => {
     // Fails the job when the workspace is not actually empty afterwards.
     expect(wipe).toContain('refusing to execute external code on it');
     expect(wipe).toContain('exit 1');
+    // The ported guard layers (#9265) — see the post-run wipe test for
+    // what each pin catches.
+    expect(wipe).toContain('realpath -m');
+    expect(wipe).toContain('realpath -m -- "$RWS"');
+    expect(wipe).toContain('RUNNER_WORKSPACE:?');
+    expect(wipe).toContain('"$RWS"/*');
+    // RWS-side layers: the '..' arm and the degenerate-root refusal that
+    // keeps a stripped-empty runner workspace from degenerating the
+    // allowlist pattern to `/*`.
+    expect(wipe).toContain("refusing runner workspace path containing '..'");
+    expect(wipe).toContain('runner workspace resolved to /');
   });
 
   // The wipe is the deny-by-default control, so run the real step text
   // against a workspace carrying the vectors the allowlist sweep is built
   // to enumerate — plus one it is not — and require every one to be gone.
-  it('removes planted persistence vectors, known and unknown', () => {
-    const wipe = stepIn('verify', 'Wipe workspace before external code')
-      .match(/run: \|-\n([\s\S]*)$/)?.[1]
-      .replace(/^ {10}/gm, '');
-    expect(wipe).toBeTruthy();
+  it.skipIf(!hasGnuRealpath)(
+    'removes planted persistence vectors, known and unknown',
+    () => {
+      const wipe = stepIn('verify', 'Wipe workspace before external code')
+        .match(/run: \|-\n([\s\S]*)$/)?.[1]
+        .replace(/^ {10}/gm, '');
+      expect(wipe).toBeTruthy();
 
-    const dir = mkdtempSync(join(tmpdir(), 'verify-wipe-'));
-    try {
-      const ws = join(dir, 'workspace');
-      mkdirSync(join(ws, '.git', 'hooks'), { recursive: true });
-      // Vectors the sweep enumerates...
-      writeFileSync(join(ws, '.git', 'hooks', 'pre-commit'), '#!/bin/sh\nid\n');
-      writeFileSync(
-        join(ws, '.git', 'config.worktree'),
-        '[core]\n\thooksPath = /\n',
-      );
-      // ...and ones it does not: a dotfile the next npm run would read,
-      // and an ordinary file. Deny-by-default has to take all of them.
-      writeFileSync(join(ws, '.npmrc'), 'script-shell=/tmp/evil\n');
-      writeFileSync(join(ws, 'package.json'), '{}');
-      mkdirSync(join(ws, 'node_modules'), { recursive: true });
+      const dir = mkdtempSync(join(tmpdir(), 'verify-wipe-'));
+      try {
+        const ws = join(dir, 'workspace');
+        mkdirSync(join(ws, '.git', 'hooks'), { recursive: true });
+        // Vectors the sweep enumerates...
+        writeFileSync(
+          join(ws, '.git', 'hooks', 'pre-commit'),
+          '#!/bin/sh\nid\n',
+        );
+        writeFileSync(
+          join(ws, '.git', 'config.worktree'),
+          '[core]\n\thooksPath = /\n',
+        );
+        // ...and ones it does not: a dotfile the next npm run would read,
+        // and an ordinary file. Deny-by-default has to take all of them.
+        writeFileSync(join(ws, '.npmrc'), 'script-shell=/tmp/evil\n');
+        writeFileSync(join(ws, 'package.json'), '{}');
+        mkdirSync(join(ws, 'node_modules'), { recursive: true });
 
-      const res = spawnSync('bash', ['-c', wipe], {
-        encoding: 'utf8',
-        env: {
-          ...process.env,
-          GITHUB_WORKSPACE: ws,
-          // Explicit, never inherited: on a real runner the ambient
-          // RUNNER_WORKSPACE points at that job's own workspace, so the
-          // allowlist would refuse this fixture — green on a laptop, red in
-          // CI, for a workspace the step itself would have wiped happily.
-          RUNNER_WORKSPACE: dir,
-          GITHUB_STEP_SUMMARY: join(dir, 'summary'),
-        },
-      });
-      expect(res.status).toBe(0);
-      expect(readdirSync(ws)).toEqual([]);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
+        // GitHub Actions runs `shell: bash` steps with `-eo pipefail`,
+        // so the battery must too: bare `bash -c` masks a failing
+        // sweep command into a green test (probed with a failing `find`
+        // stub on PATH: exit 0 here, exit 1 under the real step flags).
+        const res = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', wipe], {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            GITHUB_WORKSPACE: ws,
+            // The ported guard allowlists against the runner workspace
+            // (#9265): the test workspace must sit inside it.
+            RUNNER_WORKSPACE: dir,
+            GITHUB_STEP_SUMMARY: join(dir, 'summary'),
+          },
+        });
+        expect(res.status).toBe(0);
+        expect(readdirSync(ws)).toEqual([]);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   // The guard has to be exercised with the REAL dangerous paths — that is
   // the whole point of it — but a test that passes `/` to a live `rm -rf`
@@ -1695,7 +1717,31 @@ describe('qwen-triage verify hardening', () => {
         { mode: 0o755 },
       );
 
-      for (const bad of ['/', '/usr', '/etc', '/var', '/root', '/home', '']) {
+      // The second half are the spellings the ported guard layers exist
+      // for (#9265): the kernel resolves each of them to a guarded root,
+      // yet the bare denylist they faced before let every one through
+      // (measured on main in the issue). `/tmp` and `/opt` are refused by
+      // the allowlist alone — the denylist has no arm for them.
+      for (const bad of [
+        '/',
+        '/usr',
+        '/etc',
+        '/var',
+        '/root',
+        '/home',
+        '',
+        '/home/',
+        '/root/',
+        '/var/',
+        '//',
+        '/home//',
+        '/home/.',
+        '/home/..',
+        '//usr',
+        '//home',
+        '/tmp',
+        '/opt',
+      ]) {
         writeFileSync(calls, '');
         const guard = spawnSync('bash', ['-c', wipe], {
           encoding: 'utf8',
@@ -1704,17 +1750,18 @@ describe('qwen-triage verify hardening', () => {
             PATH: `${dir}:${process.env.PATH}`,
             RM_CALLS: calls,
             GITHUB_WORKSPACE: bad,
-            // Pinned so each refusal is attributable to the denylist arm
-            // under test: an inherited RUNNER_WORKSPACE would refuse these
-            // at the allowlist instead, and the loop would still pass with
-            // the denylist deleted.
+            // The recorder dir doubles as the allowlist root: every bad
+            // path sits outside it, so the refusal is the guard's, not a
+            // side effect of the fixture layout.
             RUNNER_WORKSPACE: dir,
             GITHUB_STEP_SUMMARY: join(dir, 'summary'),
           },
         });
-        // Non-zero, not exactly 1: two mechanisms refuse here — the `case`
-        // exits 1 for a named path, while an empty one never reaches it
-        // because `${GITHUB_WORKSPACE:?}` aborts the shell first (127).
+        // Non-zero, not exactly 1: several mechanisms refuse here — the
+        // `case` exits 1 for a named root, an empty path never reaches it
+        // because `${GITHUB_WORKSPACE:?}` aborts the shell first (127),
+        // and the allowlist exits 1 for everything outside the runner
+        // workspace. Which one fires depends on the host's realpath.
         expect(
           guard.status,
           `path ${bad || '<empty>'} was not refused`,
@@ -1729,6 +1776,300 @@ describe('qwen-triage verify hardening', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  // The canonicalization layer needs its own pin: every bad path above
+  // sits OUTSIDE the recorder dir, so the allowlist refuses them
+  // identically whether `realpath -m` ran or not — deleting that line
+  // ships green against the battery. A raw '..' spelling does not pin it
+  // either: the '..' case arm refuses that vector first, mutant or not.
+  // And a workspace that IS a bare symlink no longer pins it: the heal
+  // layer removes such a link BEFORE canonicalization (that is the wedge
+  // #9369 closes). The spelling that still pins the line is a path whose
+  // INTERMEDIATE component is a symlink: [ -L ]/[ ! -d ] test the FINAL
+  // component — a real directory — so no heal fires, but only
+  // canonicalization resolves the escape; with the line deleted the raw
+  // path matches "$RWS"/* and find wipes THROUGH the link (the kernel
+  // resolves intermediate symlinks for it), which the rm recorder
+  // catches.
+  const extractRun = (stepName) => {
+    const run = stepIn('verify', stepName)
+      .match(/run: \|-\n([\s\S]*)$/)?.[1]
+      .replace(/^ {10}/gm, '');
+    expect(run, `run block for ${stepName}`).toBeTruthy();
+    return run;
+  };
+
+  it.skipIf(!hasGnuRealpath)(
+    'refuses an escape through an intermediate symlink via canonicalization',
+    () => {
+      const dir = mkdtempSync(join(tmpdir(), 'verify-wipe-escape-'));
+      const outside = mkdtempSync(join(tmpdir(), 'verify-wipe-outside-'));
+      mkdirSync(join(outside, 'sub'));
+      writeFileSync(join(outside, 'sub', 'canary'), 'x');
+      symlinkSync(outside, join(dir, 'link'));
+      try {
+        const calls = join(dir, 'rm-calls');
+        writeFileSync(calls, '');
+        writeFileSync(
+          join(dir, 'rm'),
+          `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\nexit 0\n`,
+          { mode: 0o755 },
+        );
+
+        for (const stepName of [
+          'Wipe workspace before external code',
+          'Wipe workspace after external code',
+        ]) {
+          writeFileSync(calls, '');
+          const res = spawnSync(
+            'bash',
+            ['-e', '-o', 'pipefail', '-c', extractRun(stepName)],
+            {
+              encoding: 'utf8',
+              env: {
+                ...process.env,
+                PATH: `${dir}:${process.env.PATH}`,
+                // A directory reached THROUGH a link inside the recorder
+                // dir — no '..' component, and the final component is a
+                // real directory, so only canonicalization can resolve
+                // the escape.
+                GITHUB_WORKSPACE: join(dir, 'link', 'sub'),
+                RUNNER_WORKSPACE: dir,
+                GITHUB_STEP_SUMMARY: join(dir, 'summary'),
+              },
+            },
+          );
+          expect(res.status, `${stepName} did not refuse`).not.toBe(0);
+          expect(
+            readFileSync(calls, 'utf8'),
+            `${stepName} invoked rm on the escaping path`,
+          ).toBe('');
+        }
+        expect(existsSync(join(outside, 'sub', 'canary'))).toBe(true);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+        rmSync(outside, { recursive: true, force: true });
+      }
+    },
+  );
+
+  // Fronts PATH with a failing realpath so the script must fail closed instead
+  // of matching and wiping a raw, potentially misleading spelling.
+  const stubRealpath = () => {
+    const bin = mkdtempSync(join(tmpdir(), 'verify-wipe-bin-'));
+    writeFileSync(join(bin, 'realpath'), '#!/bin/sh\nexit 1\n');
+    chmodSync(join(bin, 'realpath'), 0o755);
+    return bin;
+  };
+
+  it('refuses to wipe when realpath is absent', () => {
+    const parent = mkdtempSync(join(tmpdir(), 'verify-wipe-rws-'));
+    const ws = join(parent, 'repo');
+    mkdirSync(ws);
+    writeFileSync(join(ws, 'leftover'), 'x');
+    const bin = stubRealpath();
+    try {
+      // Both copies carry the fail-closed realpath leg; exercise each so
+      // a fail-open regression of either copy is caught.
+      for (const stepName of [
+        'Wipe workspace before external code',
+        'Wipe workspace after external code',
+      ]) {
+        const res = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', extractRun(stepName)],
+          {
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: `${bin}:${process.env.PATH}`,
+              GITHUB_WORKSPACE: ws,
+              RUNNER_WORKSPACE: `${parent}/`,
+              GITHUB_STEP_SUMMARY: join(parent, 'summary'),
+            },
+          },
+        );
+        expect(res.status, `${stepName} did not fail closed`).not.toBe(0);
+        expect(readdirSync(ws), `${stepName} wiped without realpath`).toEqual([
+          'leftover',
+        ]);
+      }
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+      rmSync(bin, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a trailing-slash GITHUB_WORKSPACE when realpath is absent', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'verify-wipe-ws-'));
+    const bin = stubRealpath();
+    try {
+      const calls = join(dir, 'rm-calls');
+      writeFileSync(calls, '');
+      writeFileSync(
+        join(dir, 'rm'),
+        `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\nexit 0\n`,
+        { mode: 0o755 },
+      );
+
+      for (const stepName of [
+        'Wipe workspace before external code',
+        'Wipe workspace after external code',
+      ]) {
+        writeFileSync(calls, '');
+        const res = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', extractRun(stepName)],
+          {
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: `${dir}:${bin}:${process.env.PATH}`,
+              GITHUB_WORKSPACE: '/home/',
+              RUNNER_WORKSPACE: '/home',
+              GITHUB_STEP_SUMMARY: join(dir, 'summary'),
+            },
+          },
+        );
+        expect(res.status, `${stepName} did not refuse`).not.toBe(0);
+        expect(readFileSync(calls, 'utf8'), `${stepName} invoked rm`).toBe('');
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(bin, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses an allowlist-escaping .. path when realpath is absent', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'verify-wipe-fallback-'));
+    const outside = mkdtempSync(join(tmpdir(), 'verify-wipe-outside-'));
+    const bin = stubRealpath();
+    mkdirSync(join(dir, 'sub'));
+    try {
+      const calls = join(dir, 'rm-calls');
+      writeFileSync(calls, '');
+      writeFileSync(
+        join(dir, 'rm'),
+        `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\nexit 0\n`,
+        { mode: 0o755 },
+      );
+
+      for (const stepName of [
+        'Wipe workspace before external code',
+        'Wipe workspace after external code',
+      ]) {
+        writeFileSync(calls, '');
+        const res = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', extractRun(stepName)],
+          {
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: `${dir}:${bin}:${process.env.PATH}`,
+              GITHUB_WORKSPACE: `${dir}/sub/../../${basename(outside)}`,
+              RUNNER_WORKSPACE: dir,
+              GITHUB_STEP_SUMMARY: join(dir, 'summary'),
+            },
+          },
+        );
+        expect(res.status, `${stepName} did not refuse`).not.toBe(0);
+        expect(
+          readFileSync(calls, 'utf8'),
+          `${stepName} invoked rm on the escaping path`,
+        ).toBe('');
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+      rmSync(bin, { recursive: true, force: true });
+    }
+  });
+
+  // The degenerate-root arm keeps a stripped-empty RUNNER_WORKSPACE from
+  // turning the allowlist pattern into `/*` (which admits every absolute
+  // path). The reference suite covers the review workflow; each backported
+  // copy needs its own case — deleting the arm ships green otherwise.
+  it('refuses a runner workspace that resolves to / without invoking rm', () => {
+    const parent = mkdtempSync(join(tmpdir(), 'verify-wipe-root-'));
+    const ws = join(parent, 'repo');
+    mkdirSync(ws);
+    writeFileSync(join(ws, 'leftover'), 'x');
+    try {
+      const calls = join(parent, 'rm-calls');
+      writeFileSync(calls, '');
+      writeFileSync(
+        join(parent, 'rm'),
+        `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\nexit 0\n`,
+        { mode: 0o755 },
+      );
+
+      for (const stepName of [
+        'Wipe workspace before external code',
+        'Wipe workspace after external code',
+      ]) {
+        writeFileSync(calls, '');
+        const res = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', extractRun(stepName)],
+          {
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: `${parent}:${process.env.PATH}`,
+              GITHUB_WORKSPACE: ws,
+              RUNNER_WORKSPACE: '/',
+              GITHUB_STEP_SUMMARY: join(parent, 'summary'),
+            },
+          },
+        );
+        expect(res.status, `${stepName} did not refuse`).not.toBe(0);
+        expect(readFileSync(calls, 'utf8'), `${stepName} invoked rm`).toBe('');
+        expect(readdirSync(ws), `${stepName} wiped`).toEqual(['leftover']);
+      }
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  // The RWS realpath line has no refusal of its own to observe, so pin it
+  // from the happy side: a RUNNER_WORKSPACE spelled with '..' that
+  // canonicalizes back to the real parent must still be allowed to wipe.
+  // Deleting the RWS realpath line leaves the raw spelling to the '..'
+  // arm, which refuses — and this test fails on that mutant.
+  it.skipIf(!hasGnuRealpath)(
+    'canonicalizes a ..-spelled runner workspace instead of refusing it',
+    () => {
+      const parent = mkdtempSync(join(tmpdir(), 'verify-wipe-rwsdot-'));
+      const ws = join(parent, 'repo');
+      mkdirSync(ws);
+      try {
+        for (const stepName of [
+          'Wipe workspace before external code',
+          'Wipe workspace after external code',
+        ]) {
+          writeFileSync(join(ws, 'leftover'), 'x');
+          const res = spawnSync(
+            'bash',
+            ['-e', '-o', 'pipefail', '-c', extractRun(stepName)],
+            {
+              encoding: 'utf8',
+              env: {
+                ...process.env,
+                GITHUB_WORKSPACE: ws,
+                RUNNER_WORKSPACE: join(ws, '..'),
+                GITHUB_STEP_SUMMARY: join(parent, 'summary'),
+              },
+            },
+          );
+          expect(res.status, `${stepName} refused a canonical RWS`).toBe(0);
+          expect(readdirSync(ws), `${stepName} did not wipe`).toEqual([]);
+        }
+      } finally {
+        rmSync(parent, { recursive: true, force: true });
+      }
+    },
+  );
 
   // The pre-run wipe answers what an external run inherits; the
   // post-run wipe answers what it leaves behind for the next pool job.
@@ -1748,7 +2089,118 @@ describe('qwen-triage verify hardening', () => {
     );
     // Same path guard as the pre-run wipe.
     expect(postWipe).toContain('refusing to wipe suspicious workspace path');
+    // The ported guard layers (#9265), pinned on THIS copy: canonicalize
+    // before matching, and allowlist the target inside the runner
+    // workspace. The exec tests below prove behavior; these text pins
+    // catch a mutation that deletes a layer from this copy alone.
+    expect(postWipe).toContain('realpath -m');
+    expect(postWipe).toContain('realpath -m -- "$RWS"');
+    expect(postWipe).toContain('RUNNER_WORKSPACE:?');
+    expect(postWipe).toContain('"$RWS"/*');
+    expect(postWipe).toContain(
+      "refusing runner workspace path containing '..'",
+    );
+    expect(postWipe).toContain('runner workspace resolved to /');
   });
+
+  // The pre-run guard battery runs the post-run wipe too: it is a
+  // separate copy of the script, and the pre-run battery passing says
+  // nothing about mutations to this one.
+  it('refuses a suspicious workspace path in the post-run wipe without invoking rm', () => {
+    const wipe = extractRun('Wipe workspace after external code');
+
+    const dir = mkdtempSync(join(tmpdir(), 'verify-postwipe-guard-'));
+    try {
+      const calls = join(dir, 'rm-calls');
+      writeFileSync(
+        join(dir, 'rm'),
+        `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\nexit 0\n`,
+        { mode: 0o755 },
+      );
+
+      for (const bad of [
+        '/',
+        '/usr',
+        '/etc',
+        '/var',
+        '/root',
+        '/home',
+        '',
+        '/home/',
+        '/root/',
+        '/var/',
+        '//',
+        '/home//',
+        '/home/.',
+        '/home/..',
+        '//usr',
+        '//home',
+        '/tmp',
+        '/opt',
+      ]) {
+        writeFileSync(calls, '');
+        const guard = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', wipe], {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PATH: `${dir}:${process.env.PATH}`,
+            GITHUB_WORKSPACE: bad,
+            RUNNER_WORKSPACE: dir,
+            GITHUB_STEP_SUMMARY: join(dir, 'summary'),
+          },
+        });
+        expect(
+          guard.status,
+          `path ${bad || '<empty>'} was not refused`,
+        ).not.toBe(0);
+        expect(
+          readFileSync(calls, 'utf8'),
+          `rm was invoked for ${bad || '<empty>'}`,
+        ).toBe('');
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The post-run wipe still has to wipe: its `if: always()` means it is
+  // the ONLY cleanup a cancelled or timed-out external run gets, so a
+  // guard regression that refuses the legitimate workspace would leak
+  // every aborted run's tree into the next pool job.
+  it.skipIf(!hasGnuRealpath)(
+    'wipes a legitimate workspace in the post-run wipe and writes the summary',
+    () => {
+      const wipe = extractRun('Wipe workspace after external code');
+
+      const parent = mkdtempSync(join(tmpdir(), 'verify-postwipe-ok-'));
+      const ws = join(parent, 'workspace');
+      mkdirSync(join(ws, '.git', 'hooks'), { recursive: true });
+      writeFileSync(
+        join(ws, '.git', 'hooks', 'post-checkout'),
+        '#!/bin/sh\nid\n',
+      );
+      writeFileSync(join(ws, 'leftover.o'), 'x');
+      const summary = join(parent, 'summary');
+      try {
+        const res = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', wipe], {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            GITHUB_WORKSPACE: ws,
+            RUNNER_WORKSPACE: parent,
+            GITHUB_STEP_SUMMARY: summary,
+          },
+        });
+        expect(res.status).toBe(0);
+        expect(readdirSync(ws)).toEqual([]);
+        expect(readFileSync(summary, 'utf8')).toContain(
+          'Workspace wiped after external code',
+        );
+      } finally {
+        rmSync(parent, { recursive: true, force: true });
+      }
+    },
+  );
 
   // The sponsored lane's pre-execution risk screen, driven for real: the
   // actual resolve-step text runs against a stubbed gh and a live local
@@ -6064,14 +6516,12 @@ describe('qwen-triage workspace wipe guards (#9265 port)', () => {
     return text;
   };
 
-  // `realpath -m` is a GNU coreutils extension — a BSD userland (macOS ships
-  // FreeBSD's `realpath [-q]`) exits 1 on it and the script's `|| printf`
-  // fallback keeps the path raw, so the canonicalization never happens. The
-  // pool is Linux-only, so the ported script is unaffected; the assertion that
-  // depends on the flag is gated on the host that has it, not on a platform
-  // name — a Mac with coreutils on PATH keeps the coverage.
-  const hasGnuRealpath =
-    spawnSync('realpath', ['-m', '--', '/'], { stdio: 'ignore' }).status === 0;
+  // `realpath -m` is a GNU coreutils extension; the module-level
+  // hasGnuRealpath probe gates the tests whose behavior sits behind the
+  // guard's fail-closed canonicalization leg (#9277) — without GNU realpath
+  // the step refuses before the heal and allowlist layers can run, so those
+  // behaviors are unreachable on such a host. A Mac with coreutils on PATH
+  // keeps the coverage.
 
   // A recorder on PATH instead of the real thing: the guard must be exercised
   // with the REAL dangerous paths, and a live `rm -rf` there detonates at
@@ -6104,13 +6554,15 @@ describe('qwen-triage workspace wipe guards (#9265 port)', () => {
     return calls;
   };
 
+  // GitHub Actions runs `shell: bash` steps with `-eo pipefail`, so the
+  // battery must too: bare `bash -c` masks a failing sweep command into a
+  // green test.
   const runGuard = (wipe, dir, env) =>
-    spawnSync('bash', ['-c', wipe], {
+    spawnSync('bash', ['-e', '-o', 'pipefail', '-c', wipe], {
       encoding: 'utf8',
       env: {
         ...process.env,
         PATH: `${dir}:${process.env.PATH}`,
-        RM_CALLS: join(dir, 'rm-calls'),
         GITHUB_STEP_SUMMARY: join(dir, 'summary'),
         ...env,
       },
@@ -6149,118 +6601,152 @@ describe('qwen-triage workspace wipe guards (#9265 port)', () => {
         }
       });
 
-      it('refuses a workspace outside the runner workspace', () => {
-        // The denylist can only enumerate roots it knows; /tmp, /opt and
-        // every other one are closed by the allowlist alone.
-        const dir = mkdtempSync(join(tmpdir(), 'triage-wipe-allow-'));
-        const outside = mkdtempSync(join(tmpdir(), 'triage-wipe-outside-'));
-        try {
+      it.skipIf(!hasGnuRealpath)(
+        'refuses a workspace outside the runner workspace',
+        () => {
+          // The denylist can only enumerate roots it knows; /tmp, /opt and
+          // every other one are closed by the allowlist alone. Canonicalize
+          // the fixture roots at creation (the lockFixture pattern from
+          // qwen-pr-review-workflow.test.js): on a host whose tmpdir is a
+          // symlink (macOS: /var/folders -> /private/var/...), mkdtempSync
+          // returns the link spelling while realpathSync resolves it, and
+          // the refusal message below must compare equal to the canonical
+          // one. Gated on GNU realpath: without it the fail-closed
+          // canonicalization leg refuses before the allowlist can.
+          const dir = realpathSync(
+            mkdtempSync(join(tmpdir(), 'triage-wipe-allow-')),
+          );
+          const outside = realpathSync(
+            mkdtempSync(join(tmpdir(), 'triage-wipe-outside-')),
+          );
+          try {
+            const wipe = runOf(stepName);
+            const calls = recorder(dir);
+            writeFileSync(join(outside, 'canary'), 'x');
+            const res = runGuard(wipe, dir, {
+              GITHUB_WORKSPACE: outside,
+              RUNNER_WORKSPACE: dir,
+            });
+            expect(res.status).not.toBe(0);
+            expect(res.stdout + res.stderr).toContain(
+              'outside the runner workspace',
+            );
+            expect(res.stdout + res.stderr).toContain(
+              `(runner workspace: ${realpathSync(dir)})`,
+            );
+            expect(readFileSync(calls, 'utf8')).toBe('');
+            expect(existsSync(join(outside, 'canary'))).toBe(true);
+          } finally {
+            rmSync(dir, { recursive: true, force: true });
+            rmSync(outside, { recursive: true, force: true });
+          }
+        },
+      );
+
+      it.skipIf(!hasGnuRealpath)(
+        'heals a workspace replaced by a symlink instead of wedging on it',
+        () => {
+          // A leftover from the previous job can replace the workspace
+          // directory with a symlink pointing outside the runner workspace.
+          // Canonicalization resolves THROUGH the link, so the allowlist
+          // then refuses the target and exits 1 without removing anything —
+          // the link survives and every later job on the runner dies at
+          // this step. The heal deletes the link on the raw path (`rm -f`
+          // never follows it) and recreates the directory.
           const wipe = runOf(stepName);
-          const calls = recorder(dir);
-          writeFileSync(join(outside, 'canary'), 'x');
-          const res = runGuard(wipe, dir, {
-            GITHUB_WORKSPACE: outside,
-            RUNNER_WORKSPACE: dir,
-          });
-          expect(res.status).not.toBe(0);
-          expect(res.stdout + res.stderr).toContain(
-            'outside the runner workspace',
+          const dir = realpathSync(
+            mkdtempSync(join(tmpdir(), 'triage-wipe-link-')),
           );
-          expect(res.stdout + res.stderr).toContain(
-            `(runner workspace: ${realpathSync(dir)})`,
+          const outside = realpathSync(
+            mkdtempSync(join(tmpdir(), 'triage-wipe-outside-')),
           );
-          expect(readFileSync(calls, 'utf8')).toBe('');
-          expect(existsSync(join(outside, 'canary'))).toBe(true);
-        } finally {
-          rmSync(dir, { recursive: true, force: true });
-          rmSync(outside, { recursive: true, force: true });
-        }
-      });
+          try {
+            const calls = recordingRealRm(dir);
+            writeFileSync(join(outside, 'canary'), 'x');
+            const ws = join(dir, 'workspace');
+            symlinkSync(outside, ws);
+            const res = runGuard(wipe, dir, {
+              GITHUB_WORKSPACE: ws,
+              RUNNER_WORKSPACE: dir,
+            });
+            expect(res.status, res.stdout + res.stderr).toBe(0);
+            // The only delete is the link itself — never at its target.
+            expect(readFileSync(calls, 'utf8').trim()).toBe(`-f -- ${ws}`);
+            expect(existsSync(join(outside, 'canary'))).toBe(true);
+            expect(lstatSync(ws).isSymbolicLink()).toBe(false);
+            expect(lstatSync(ws).isDirectory()).toBe(true);
+            expect(readdirSync(ws)).toEqual([]);
+          } finally {
+            rmSync(dir, { recursive: true, force: true });
+            rmSync(outside, { recursive: true, force: true });
+          }
+        },
+      );
 
-      it('heals a workspace replaced by a symlink instead of wedging on it', () => {
-        // A leftover from the previous job can replace the workspace
-        // directory with a symlink pointing outside the runner workspace.
-        // Canonicalization resolves THROUGH the link, so the allowlist then
-        // refuses the target and exits 1 without removing anything — the
-        // link survives and every later job on the runner dies at this step.
-        // The heal deletes the link on the raw path (`rm -f` never follows
-        // it) and recreates the directory.
-        const wipe = runOf(stepName);
-        const dir = mkdtempSync(join(tmpdir(), 'triage-wipe-link-'));
-        const outside = mkdtempSync(join(tmpdir(), 'triage-wipe-outside-'));
-        try {
-          const calls = recordingRealRm(dir);
-          writeFileSync(join(outside, 'canary'), 'x');
-          const ws = join(dir, 'workspace');
-          symlinkSync(outside, ws);
-          const res = runGuard(wipe, dir, {
-            GITHUB_WORKSPACE: ws,
-            RUNNER_WORKSPACE: dir,
-          });
-          expect(res.status, res.stdout + res.stderr).toBe(0);
-          // The only delete is the link itself — never at its target.
-          expect(readFileSync(calls, 'utf8').trim()).toBe(`-f -- ${ws}`);
-          expect(existsSync(join(outside, 'canary'))).toBe(true);
-          expect(lstatSync(ws).isSymbolicLink()).toBe(false);
-          expect(lstatSync(ws).isDirectory()).toBe(true);
-          expect(readdirSync(ws)).toEqual([]);
-        } finally {
-          rmSync(dir, { recursive: true, force: true });
-          rmSync(outside, { recursive: true, force: true });
-        }
-      });
+      it.skipIf(!hasGnuRealpath)(
+        'heals a workspace replaced by a plain file, not just a symlink',
+        () => {
+          // The heal condition's other half — a non-symlink non-directory.
+          // A heal that only tested [ -L ] would leave the file in place,
+          // pass the allowlist, and report a successful wipe over the
+          // leftover.
+          const wipe = runOf(stepName);
+          const dir = realpathSync(
+            mkdtempSync(join(tmpdir(), 'triage-wipe-healfile-')),
+          );
+          try {
+            const calls = recordingRealRm(dir);
+            const ws = join(dir, 'workspace');
+            writeFileSync(ws, 'leftover');
+            const res = runGuard(wipe, dir, {
+              GITHUB_WORKSPACE: ws,
+              RUNNER_WORKSPACE: dir,
+            });
+            expect(res.status, res.stdout + res.stderr).toBe(0);
+            expect(readFileSync(calls, 'utf8').trim()).toBe(`-f -- ${ws}`);
+            expect(lstatSync(ws).isDirectory()).toBe(true);
+            expect(readdirSync(ws)).toEqual([]);
+          } finally {
+            rmSync(dir, { recursive: true, force: true });
+          }
+        },
+      );
 
-      it('heals a workspace replaced by a plain file, not just a symlink', () => {
-        // The heal condition's other half — a non-symlink non-directory. A
-        // heal that only tested [ -L ] would leave the file in place, pass
-        // the allowlist, and report a successful wipe over the leftover.
-        const wipe = runOf(stepName);
-        const dir = mkdtempSync(join(tmpdir(), 'triage-wipe-healfile-'));
-        try {
-          const calls = recordingRealRm(dir);
-          const ws = join(dir, 'workspace');
-          writeFileSync(ws, 'leftover');
-          const res = runGuard(wipe, dir, {
-            GITHUB_WORKSPACE: ws,
-            RUNNER_WORKSPACE: dir,
-          });
-          expect(res.status, res.stdout + res.stderr).toBe(0);
-          expect(readFileSync(calls, 'utf8').trim()).toBe(`-f -- ${ws}`);
-          expect(lstatSync(ws).isDirectory()).toBe(true);
-          expect(readdirSync(ws)).toEqual([]);
-        } finally {
-          rmSync(dir, { recursive: true, force: true });
-        }
-      });
-
-      it('heals a symlinked workspace spelled with a trailing slash', () => {
-        // [ -L "$WS/" ] and [ ! -d "$WS/" ] resolve THROUGH the link, so the
-        // slashed spelling hides the corruption from the heal's predicate
-        // and the wedge survives — the slash must be stripped before the
-        // test.
-        const wipe = runOf(stepName);
-        const dir = mkdtempSync(join(tmpdir(), 'triage-wipe-healslash-'));
-        const outside = mkdtempSync(join(tmpdir(), 'triage-wipe-outside-'));
-        try {
-          const calls = recordingRealRm(dir);
-          writeFileSync(join(outside, 'canary'), 'x');
-          const ws = join(dir, 'workspace');
-          symlinkSync(outside, ws);
-          const res = runGuard(wipe, dir, {
-            GITHUB_WORKSPACE: `${ws}/`,
-            RUNNER_WORKSPACE: dir,
-          });
-          expect(res.status, res.stdout + res.stderr).toBe(0);
-          expect(readFileSync(calls, 'utf8').trim()).toBe(`-f -- ${ws}`);
-          expect(existsSync(join(outside, 'canary'))).toBe(true);
-          expect(lstatSync(ws).isSymbolicLink()).toBe(false);
-          expect(lstatSync(ws).isDirectory()).toBe(true);
-          expect(readdirSync(ws)).toEqual([]);
-        } finally {
-          rmSync(dir, { recursive: true, force: true });
-          rmSync(outside, { recursive: true, force: true });
-        }
-      });
+      it.skipIf(!hasGnuRealpath)(
+        'heals a symlinked workspace spelled with a trailing slash',
+        () => {
+          // [ -L "$WS/" ] and [ ! -d "$WS/" ] resolve THROUGH the link, so
+          // the slashed spelling hides the corruption from the heal's
+          // predicate and the wedge survives — the slash must be stripped
+          // before the test.
+          const wipe = runOf(stepName);
+          const dir = realpathSync(
+            mkdtempSync(join(tmpdir(), 'triage-wipe-healslash-')),
+          );
+          const outside = realpathSync(
+            mkdtempSync(join(tmpdir(), 'triage-wipe-outside-')),
+          );
+          try {
+            const calls = recordingRealRm(dir);
+            writeFileSync(join(outside, 'canary'), 'x');
+            const ws = join(dir, 'workspace');
+            symlinkSync(outside, ws);
+            const res = runGuard(wipe, dir, {
+              GITHUB_WORKSPACE: `${ws}/`,
+              RUNNER_WORKSPACE: dir,
+            });
+            expect(res.status, res.stdout + res.stderr).toBe(0);
+            expect(readFileSync(calls, 'utf8').trim()).toBe(`-f -- ${ws}`);
+            expect(existsSync(join(outside, 'canary'))).toBe(true);
+            expect(lstatSync(ws).isSymbolicLink()).toBe(false);
+            expect(lstatSync(ws).isDirectory()).toBe(true);
+            expect(readdirSync(ws)).toEqual([]);
+          } finally {
+            rmSync(dir, { recursive: true, force: true });
+            rmSync(outside, { recursive: true, force: true });
+          }
+        },
+      );
 
       it('refuses to heal before an empty runner workspace is validated', () => {
         // The heal matches a RAW path: an empty $RUNNER_WORKSPACE
@@ -6288,93 +6774,108 @@ describe('qwen-triage workspace wipe guards (#9265 port)', () => {
         }
       });
 
-      it('refuses to heal a .. spelling the raw containment match cannot judge', () => {
-        // ".." components string-match the containment pattern while the
-        // kernel resolves them OUTSIDE the matched root, where rm -f +
-        // mkdir would act before canonicalization. The heal refuses the
-        // spelling instead.
-        const wipe = runOf(stepName);
-        const dir = mkdtempSync(join(tmpdir(), 'triage-wipe-healdotdot-'));
-        const outside = mkdtempSync(join(tmpdir(), 'triage-wipe-outside-'));
-        try {
-          const calls = recordingRealRm(dir);
-          mkdirSync(join(dir, 'sub'));
-          const victim = join(outside, 'victim');
-          writeFileSync(victim, 'canary');
-          const res = runGuard(wipe, dir, {
-            // Raw '..' spelling on purpose.
-            GITHUB_WORKSPACE: `${dir}/sub/../../${basename(outside)}/victim`,
-            RUNNER_WORKSPACE: dir,
-          });
-          expect(res.status).not.toBe(0);
-          expect(res.stdout + res.stderr).toContain('non-canonical');
-          expect(readFileSync(calls, 'utf8')).toBe('');
-          expect(lstatSync(victim).isFile()).toBe(true);
-          expect(readFileSync(victim, 'utf8')).toBe('canary');
-        } finally {
-          rmSync(dir, { recursive: true, force: true });
-          rmSync(outside, { recursive: true, force: true });
-        }
-      });
+      it.skipIf(!hasGnuRealpath)(
+        'refuses to heal a .. spelling the raw containment match cannot judge',
+        () => {
+          // ".." components string-match the containment pattern while the
+          // kernel resolves them OUTSIDE the matched root, where rm -f +
+          // mkdir would act before canonicalization. The heal refuses the
+          // spelling instead.
+          const wipe = runOf(stepName);
+          const dir = mkdtempSync(join(tmpdir(), 'triage-wipe-healdotdot-'));
+          const outside = mkdtempSync(join(tmpdir(), 'triage-wipe-outside-'));
+          try {
+            const calls = recordingRealRm(dir);
+            mkdirSync(join(dir, 'sub'));
+            const victim = join(outside, 'victim');
+            writeFileSync(victim, 'canary');
+            const res = runGuard(wipe, dir, {
+              // Raw '..' spelling on purpose.
+              GITHUB_WORKSPACE: `${dir}/sub/../../${basename(outside)}/victim`,
+              RUNNER_WORKSPACE: dir,
+            });
+            expect(res.status).not.toBe(0);
+            expect(res.stdout + res.stderr).toContain('non-canonical');
+            expect(readFileSync(calls, 'utf8')).toBe('');
+            expect(lstatSync(victim).isFile()).toBe(true);
+            expect(readFileSync(victim, 'utf8')).toBe('canary');
+          } finally {
+            rmSync(dir, { recursive: true, force: true });
+            rmSync(outside, { recursive: true, force: true });
+          }
+        },
+      );
 
-      it('refuses a sibling directory sharing the runner workspace prefix', () => {
-        // The allowlist pattern's strict-containment slash: without it,
-        // "$RWS"* matches a sibling whose name merely starts with the
-        // runner workspace and hands it to the wipe.
-        const wipe = runOf(stepName);
-        const dir = mkdtempSync(join(tmpdir(), 'triage-wipe-sib-'));
-        const sibling = `${dir}-sibling`;
-        mkdirSync(sibling);
-        try {
-          const calls = recorder(dir);
-          writeFileSync(join(sibling, 'canary'), 'x');
-          const res = runGuard(wipe, dir, {
-            GITHUB_WORKSPACE: sibling,
-            RUNNER_WORKSPACE: dir,
-          });
-          expect(res.status).not.toBe(0);
-          expect(res.stdout + res.stderr).toContain(
-            'outside the runner workspace',
+      it.skipIf(!hasGnuRealpath)(
+        'refuses a sibling directory sharing the runner workspace prefix',
+        () => {
+          // The allowlist pattern's strict-containment slash: without it,
+          // "$RWS"* matches a sibling whose name merely starts with the
+          // runner workspace and hands it to the wipe.
+          const wipe = runOf(stepName);
+          const dir = realpathSync(
+            mkdtempSync(join(tmpdir(), 'triage-wipe-sib-')),
           );
-          expect(readFileSync(calls, 'utf8')).toBe('');
-          expect(existsSync(join(sibling, 'canary'))).toBe(true);
-        } finally {
-          rmSync(dir, { recursive: true, force: true });
-          rmSync(sibling, { recursive: true, force: true });
-        }
-      });
-
-      it('refuses a symlinked workspace planted outside the runner workspace', () => {
-        // The heal matches the RAW path: a symlink whose own location is
-        // outside the runner workspace is refused before anything resolves
-        // through it — even when its target lies inside and would pass the
-        // allowlist.
-        const wipe = runOf(stepName);
-        const dir = mkdtempSync(join(tmpdir(), 'triage-wipe-linkout-'));
-        const outside = mkdtempSync(join(tmpdir(), 'triage-wipe-outside-'));
-        try {
-          const calls = recorder(dir);
-          const sibling = join(dir, 'sibling');
+          const sibling = `${dir}-sibling`;
           mkdirSync(sibling);
-          writeFileSync(join(sibling, 'canary'), 'x');
-          const link = join(outside, 'workspace');
-          symlinkSync(sibling, link);
-          const res = runGuard(wipe, dir, {
-            GITHUB_WORKSPACE: link,
-            RUNNER_WORKSPACE: dir,
-          });
-          expect(res.status).not.toBe(0);
-          expect(res.stdout + res.stderr).toContain(
-            'outside the runner workspace',
+          try {
+            const calls = recorder(dir);
+            writeFileSync(join(sibling, 'canary'), 'x');
+            const res = runGuard(wipe, dir, {
+              GITHUB_WORKSPACE: sibling,
+              RUNNER_WORKSPACE: dir,
+            });
+            expect(res.status).not.toBe(0);
+            expect(res.stdout + res.stderr).toContain(
+              'outside the runner workspace',
+            );
+            expect(readFileSync(calls, 'utf8')).toBe('');
+            expect(existsSync(join(sibling, 'canary'))).toBe(true);
+          } finally {
+            rmSync(dir, { recursive: true, force: true });
+            rmSync(sibling, { recursive: true, force: true });
+          }
+        },
+      );
+
+      it.skipIf(!hasGnuRealpath)(
+        'refuses a symlinked workspace planted outside the runner workspace',
+        () => {
+          // The heal matches the RAW path: a symlink whose own location is
+          // outside the runner workspace is refused before anything
+          // resolves through it — even when its target lies inside and
+          // would pass the allowlist.
+          const wipe = runOf(stepName);
+          const dir = realpathSync(
+            mkdtempSync(join(tmpdir(), 'triage-wipe-linkout-')),
           );
-          expect(readFileSync(calls, 'utf8')).toBe('');
-          expect(lstatSync(link).isSymbolicLink()).toBe(true);
-          expect(existsSync(join(sibling, 'canary'))).toBe(true);
-        } finally {
-          rmSync(dir, { recursive: true, force: true });
-          rmSync(outside, { recursive: true, force: true });
-        }
-      });
+          const outside = realpathSync(
+            mkdtempSync(join(tmpdir(), 'triage-wipe-outside-')),
+          );
+          try {
+            const calls = recorder(dir);
+            const sibling = join(dir, 'sibling');
+            mkdirSync(sibling);
+            writeFileSync(join(sibling, 'canary'), 'x');
+            const link = join(outside, 'workspace');
+            symlinkSync(sibling, link);
+            const res = runGuard(wipe, dir, {
+              GITHUB_WORKSPACE: link,
+              RUNNER_WORKSPACE: dir,
+            });
+            expect(res.status).not.toBe(0);
+            expect(res.stdout + res.stderr).toContain(
+              'outside the runner workspace',
+            );
+            expect(readFileSync(calls, 'utf8')).toBe('');
+            expect(lstatSync(link).isSymbolicLink()).toBe(true);
+            expect(existsSync(join(sibling, 'canary'))).toBe(true);
+          } finally {
+            rmSync(dir, { recursive: true, force: true });
+            rmSync(outside, { recursive: true, force: true });
+          }
+        },
+      );
 
       it.skipIf(!hasGnuRealpath)(
         'refuses an allowlist-escaping .. path via canonicalization',
@@ -6408,77 +6909,46 @@ describe('qwen-triage workspace wipe guards (#9265 port)', () => {
         },
       );
 
-      it('refuses when the runner workspace degenerates to / or is empty', () => {
-        // "/" strips to empty and an empty allowlist root would degenerate
-        // the pattern to the match-all "/*", which is worse than no
-        // allowlist at all — so the guard refuses its own pathological
-        // input. The empty case must also name the variable: a dropped `:?`
-        // dies later, in the strip loop, which says nothing about which
-        // layer failed.
-        const dir = mkdtempSync(join(tmpdir(), 'triage-wipe-rws-'));
-        try {
-          const wipe = runOf(stepName);
-          const ws = join(dir, 'workspace');
-          mkdirSync(ws);
-          writeFileSync(join(ws, 'leftover'), 'x');
-          const calls = recorder(dir);
+      it.skipIf(!hasGnuRealpath)(
+        'refuses when the runner workspace degenerates to / or is empty',
+        () => {
+          // "/" strips to empty and an empty allowlist root would
+          // degenerate the pattern to the match-all "/*", which is worse
+          // than no allowlist at all — so the guard refuses its own
+          // pathological input. The empty case must also name the
+          // variable: a dropped `:?` dies later, in the strip loop, which
+          // says nothing about which layer failed.
+          const dir = mkdtempSync(join(tmpdir(), 'triage-wipe-rws-'));
+          try {
+            const wipe = runOf(stepName);
+            const ws = join(dir, 'workspace');
+            mkdirSync(ws);
+            writeFileSync(join(ws, 'leftover'), 'x');
+            const calls = recorder(dir);
 
-          const root = runGuard(wipe, dir, {
-            GITHUB_WORKSPACE: ws,
-            RUNNER_WORKSPACE: '/',
-          });
-          expect(root.status).not.toBe(0);
-          expect(root.stdout + root.stderr).toContain(
-            'runner workspace resolved to /',
-          );
+            const root = runGuard(wipe, dir, {
+              GITHUB_WORKSPACE: ws,
+              RUNNER_WORKSPACE: '/',
+            });
+            expect(root.status).not.toBe(0);
+            expect(root.stdout + root.stderr).toContain(
+              'runner workspace resolved to /',
+            );
 
-          writeFileSync(calls, '');
-          const empty = runGuard(wipe, dir, {
-            GITHUB_WORKSPACE: ws,
-            RUNNER_WORKSPACE: '',
-          });
-          expect(empty.status).not.toBe(0);
-          expect(empty.stderr).toContain('RUNNER_WORKSPACE');
-          expect(readFileSync(calls, 'utf8')).toBe('');
-          expect(readdirSync(ws)).toEqual(['leftover']);
-        } finally {
-          rmSync(dir, { recursive: true, force: true });
-        }
-      });
-
-      it('refuses a trailing-slash workspace when realpath is absent', () => {
-        // The spelling cases above run with the REAL realpath, which strips
-        // the slash before the loop executes — so they pin the case arms,
-        // not the loop. With realpath absent (the fallback this script keeps
-        // for a non-GNU host), `/home/` misses every exact-match arm and the
-        // allowlist `"$RWS"/*` matches it, since `*` matches empty: dropping
-        // the loop hands /home's contents to rm.
-        const dir = mkdtempSync(join(tmpdir(), 'triage-wipe-strip-'));
-        const bin = mkdtempSync(join(tmpdir(), 'triage-wipe-bin-'));
-        try {
-          const wipe = runOf(stepName);
-          const calls = recorder(dir);
-          writeFileSync(join(bin, 'realpath'), '#!/bin/sh\nexit 1\n', {
-            mode: 0o755,
-          });
-          const res = spawnSync('bash', ['-c', wipe], {
-            encoding: 'utf8',
-            env: {
-              ...process.env,
-              PATH: `${dir}:${bin}:${process.env.PATH}`,
-              RM_CALLS: calls,
-              GITHUB_WORKSPACE: '/home/',
-              RUNNER_WORKSPACE: '/home',
-              GITHUB_STEP_SUMMARY: join(dir, 'summary'),
-            },
-          });
-          expect(res.status).not.toBe(0);
-          expect(readFileSync(calls, 'utf8')).toBe('');
-        } finally {
-          rmSync(bin, { recursive: true, force: true });
-          rmSync(dir, { recursive: true, force: true });
-        }
-      });
+            writeFileSync(calls, '');
+            const empty = runGuard(wipe, dir, {
+              GITHUB_WORKSPACE: ws,
+              RUNNER_WORKSPACE: '',
+            });
+            expect(empty.status).not.toBe(0);
+            expect(empty.stderr).toContain('RUNNER_WORKSPACE');
+            expect(readFileSync(calls, 'utf8')).toBe('');
+            expect(readdirSync(ws)).toEqual(['leftover']);
+          } finally {
+            rmSync(dir, { recursive: true, force: true });
+          }
+        },
+      );
 
       it.skipIf(!hasGnuRealpath)(
         'still wipes when the runner workspace is spelled non-canonically',
@@ -6495,15 +6965,19 @@ describe('qwen-triage workspace wipe guards (#9265 port)', () => {
             const ws = join(dir, 'workspace');
             mkdirSync(ws);
             writeFileSync(join(ws, 'leftover'), 'x');
-            const res = spawnSync('bash', ['-c', wipe], {
-              encoding: 'utf8',
-              env: {
-                ...process.env,
-                GITHUB_WORKSPACE: ws,
-                RUNNER_WORKSPACE: `${dir}/.`,
-                GITHUB_STEP_SUMMARY: join(dir, 'summary'),
+            const res = spawnSync(
+              'bash',
+              ['-e', '-o', 'pipefail', '-c', wipe],
+              {
+                encoding: 'utf8',
+                env: {
+                  ...process.env,
+                  GITHUB_WORKSPACE: ws,
+                  RUNNER_WORKSPACE: `${dir}/.`,
+                  GITHUB_STEP_SUMMARY: join(dir, 'summary'),
+                },
               },
-            });
+            );
             expect(res.status, res.stdout + res.stderr).toBe(0);
             expect(readdirSync(ws)).toEqual([]);
           } finally {
@@ -6512,33 +6986,41 @@ describe('qwen-triage workspace wipe guards (#9265 port)', () => {
         },
       );
 
-      it('still wipes a legitimate workspace, hidden entries included', () => {
-        // The guard layers must not cost the step its job: the same fixture
-        // shape the runner presents (workspace one level under the runner
-        // workspace) is emptied, directory kept, dotfiles taken.
-        const dir = mkdtempSync(join(tmpdir(), 'triage-wipe-ok-'));
-        try {
-          const wipe = runOf(stepName);
-          const ws = join(dir, 'workspace');
-          mkdirSync(join(ws, '.git'), { recursive: true });
-          writeFileSync(join(ws, '.git', 'HEAD'), 'x');
-          writeFileSync(join(ws, 'leftover'), 'x');
-          const res = spawnSync('bash', ['-c', wipe], {
-            encoding: 'utf8',
-            env: {
-              ...process.env,
-              GITHUB_WORKSPACE: ws,
-              RUNNER_WORKSPACE: dir,
-              GITHUB_STEP_SUMMARY: join(dir, 'summary'),
-            },
-          });
-          expect(res.status, res.stdout + res.stderr).toBe(0);
-          expect(existsSync(ws)).toBe(true);
-          expect(readdirSync(ws)).toEqual([]);
-        } finally {
-          rmSync(dir, { recursive: true, force: true });
-        }
-      });
+      it.skipIf(!hasGnuRealpath)(
+        'still wipes a legitimate workspace, hidden entries included',
+        () => {
+          // The guard layers must not cost the step its job: the same
+          // fixture shape the runner presents (workspace one level under
+          // the runner workspace) is emptied, directory kept, dotfiles
+          // taken.
+          const dir = mkdtempSync(join(tmpdir(), 'triage-wipe-ok-'));
+          try {
+            const wipe = runOf(stepName);
+            const ws = join(dir, 'workspace');
+            mkdirSync(join(ws, '.git'), { recursive: true });
+            writeFileSync(join(ws, '.git', 'HEAD'), 'x');
+            writeFileSync(join(ws, 'leftover'), 'x');
+            const res = spawnSync(
+              'bash',
+              ['-e', '-o', 'pipefail', '-c', wipe],
+              {
+                encoding: 'utf8',
+                env: {
+                  ...process.env,
+                  GITHUB_WORKSPACE: ws,
+                  RUNNER_WORKSPACE: dir,
+                  GITHUB_STEP_SUMMARY: join(dir, 'summary'),
+                },
+              },
+            );
+            expect(res.status, res.stdout + res.stderr).toBe(0);
+            expect(existsSync(ws)).toBe(true);
+            expect(readdirSync(ws)).toEqual([]);
+          } finally {
+            rmSync(dir, { recursive: true, force: true });
+          }
+        },
+      );
     });
   }
 

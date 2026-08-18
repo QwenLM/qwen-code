@@ -329,10 +329,14 @@ silently overriding or silently complying.
   drop one silently.
 - Critical-only mode: when `feedback.md` contains a
   `Deferred non-Critical feedback` section, the workflow's deterministic brake
-  has engaged — the PR has completed five suggestion-capable, change-producing
-  rounds, or its diff has grown past the counting window's net-growth budget
-  (source and test lines are budgeted separately; the section's preamble names
-  the cause). That section is an audit record,
+  has engaged — the window's round counter has reached five, or its diff has
+  grown past the counting window's net-growth budget (source and test lines are
+  budgeted separately; the section's preamble names the cause). The counter is
+  not always the count of rounds YOU have run: a maintainer taking over a PR
+  that already spent N rounds in ordinary review can seed the window at N
+  (`@qwen-code /takeover from N`), so the brake can engage on your second or
+  third round. The preamble says so when it applies; treat it exactly the same
+  either way. That section is an audit record,
   not work: do not modify code, resolve threads, or write comment replies for
   those items. Everything rendered in the actionable sections IS in scope —
   the deterministic filter defers the automated reviewer's non-Critical
@@ -355,12 +359,17 @@ silently overriding or silently complying.
   section, the growth brake has been over budget across rounds and the diff is
   still not shrinking — the findings themselves are driving the growth, so
   Critical-only cannot help (the Criticals ARE the growth). Do NOT apply more
-  code fixes this round. This is a `defer-to-human` item: STOP `BLOCKED` with a
-  handoff that names the decision and lays out the options — split the PR (land
-  the core, track the remaining findings as follow-up issues), redesign, or
-  accept the current state with the tail deferred — plus your recommendation.
-  Continuing to patch, or deciding the split yourself, is exactly the wrong
-  move; the call is the maintainer's.
+  code fixes this round. This is a `defer-to-human` item: STOP `BLOCKED` and
+  write the handoff into `<workdir>/failure.md` — name the decision, lay out
+  the options (split the PR: land the core and track the remaining findings
+  as follow-up issues; redesign; or accept the current state with the tail
+  deferred) and give your recommendation. `failure.md` is the one stop file
+  the round's output contract accepts; run-agent.mjs wraps it into the
+  workflow's handoff comment. Do not write `handoff.md` yourself — that file
+  belongs to run-agent.mjs, and a bare handoff.md satisfies no output
+  contract, so a correct defer-to-human would still be reported as a round
+  that produced nothing. Continuing to patch, or deciding the split yourself,
+  is exactly the wrong move; the call is the maintainer's.
 - Needs a maintainer's decision: a finding that turns on a judgment that is
   NOT yours to make — a product or scope tradeoff (is this acceptable for v1?
   should the PR be split?), two reviewers asking for opposite things, or whether
