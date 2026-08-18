@@ -165,10 +165,15 @@ export function useResumeCommand(
         resetBackgroundStateForSessionSwitch(config);
         config.startNewSession(sessionId, sessionData);
         coreSwapped = true;
+        // Replay before the Goal runtime opens its meter so the meter reads
+        // the restored totals, then tell the client it is already done —
+        // otherwise initialize() replays the same history a second time and
+        // the process-wide usage aggregate carries two copies of it.
         replayUiTelemetryEventsFromConversation(
           sessionData.conversation,
           sessionId,
         );
+        config.markUiTelemetryEventsReplayed(sessionId);
         await waitForGoalRuntime(config);
         // Rebuild turn boundary tracking so rewind works within resumed sessions.
         config

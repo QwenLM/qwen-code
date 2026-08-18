@@ -781,6 +781,122 @@ describe('Gemini Client (client.ts)', () => {
       expect(seedResumeTokenCountsSpy).toHaveBeenCalledWith(321, 45, false);
     });
 
+    it('does not replay telemetry a second time when the session swap already did', async () => {
+      // `/resume` and `/branch` replay before awaiting the Goal runtime, so
+      // the replay lands ahead of initialize(). addEvent accumulates into the
+      // process-wide aggregate as well as the per-session bucket, and the
+      // resetSession leading a replay clears only the bucket — so replaying
+      // again here would leave a second copy of the whole history in the
+      // aggregate that persistSessionUsage later writes out.
+      const seedResumeTokenCountsSpy = vi.spyOn(
+        GeminiChat.prototype,
+        'seedResumeTokenCounts',
+      );
+      const uiEvent = { 'event.name': 'api_response' };
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+        conversation: {
+          sessionId: 'test-session-id',
+          projectHash: 'project-hash',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          messages: [
+            {
+              uuid: 'telemetry-1',
+              parentUuid: null,
+              sessionId: 'test-session-id',
+              timestamp: new Date(0).toISOString(),
+              type: 'system',
+              subtype: 'ui_telemetry',
+              cwd: '/test/project',
+              version: '1.0.0',
+              systemPayload: { uiEvent },
+            },
+            {
+              uuid: 'assistant-1',
+              parentUuid: null,
+              sessionId: 'test-session-id',
+              timestamp: new Date(0).toISOString(),
+              type: 'assistant',
+              cwd: '/test/project',
+              version: '1.0.0',
+              message: { role: 'model', parts: [{ text: 'done' }] },
+              usageMetadata: {
+                promptTokenCount: 200,
+                candidatesTokenCount: 60,
+                thoughtsTokenCount: 20,
+                totalTokenCount: 280,
+              },
+            },
+          ],
+        },
+        filePath: '/test/session.jsonl',
+        lastCompletedUuid: null,
+      } as unknown as ReturnType<Config['getResumedSessionData']>);
+      const consume = vi.fn().mockReturnValue(true);
+      (
+        mockConfig as unknown as {
+          consumeUiTelemetryEventsReplayed: typeof consume;
+        }
+      ).consumeUiTelemetryEventsReplayed = consume;
+
+      const resumedClient = new GeminiClient(mockConfig);
+      await resumedClient.initialize();
+
+      expect(consume).toHaveBeenCalledWith('test-session-id');
+      expect(uiTelemetryService.addEvent).not.toHaveBeenCalled();
+      expect(uiTelemetryService.resetSession).not.toHaveBeenCalled();
+      // Skipping the replay must not skip the token-count restore: the chat
+      // still has to be seeded from the conversation's last response.
+      expect(seedResumeTokenCountsSpy).toHaveBeenCalledWith(200, 80, false);
+      expect(uiTelemetryService.setLastPromptTokenCount).toHaveBeenCalledWith(
+        200,
+      );
+    });
+
+    it('replays telemetry itself when the session swap did not', async () => {
+      const uiEvent = { 'event.name': 'api_response' };
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+        conversation: {
+          sessionId: 'test-session-id',
+          projectHash: 'project-hash',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          messages: [
+            {
+              uuid: 'telemetry-1',
+              parentUuid: null,
+              sessionId: 'test-session-id',
+              timestamp: new Date(0).toISOString(),
+              type: 'system',
+              subtype: 'ui_telemetry',
+              cwd: '/test/project',
+              version: '1.0.0',
+              systemPayload: { uiEvent },
+            },
+          ],
+        },
+        filePath: '/test/session.jsonl',
+        lastCompletedUuid: null,
+      } as unknown as ReturnType<Config['getResumedSessionData']>);
+      const consume = vi.fn().mockReturnValue(false);
+      (
+        mockConfig as unknown as {
+          consumeUiTelemetryEventsReplayed: typeof consume;
+        }
+      ).consumeUiTelemetryEventsReplayed = consume;
+
+      const resumedClient = new GeminiClient(mockConfig);
+      await resumedClient.initialize();
+
+      expect(uiTelemetryService.resetSession).toHaveBeenCalledWith(
+        'test-session-id',
+      );
+      expect(uiTelemetryService.addEvent).toHaveBeenCalledWith(
+        uiEvent,
+        'test-session-id',
+      );
+    });
+
     it('seeds resumed chat with replayed prompt token count', async () => {
       vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
         conversation: {

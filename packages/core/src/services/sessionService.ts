@@ -2644,14 +2644,14 @@ export function replayUiTelemetryEventsFromConversation(
 }
 
 /**
- * Replays stored UI telemetry and restores the last prompt token count.
+ * Restores the last prompt token count from a conversation without replaying
+ * its telemetry events. Use this when the events have already been replayed by
+ * the session-swap caller — replaying them twice adds a second copy of the
+ * whole history to the process-wide usage aggregate.
  */
-export function replayUiTelemetryFromConversation(
+export function restoreResumeTokenCountsFromConversation(
   conversation: ConversationRecord,
-  sessionId?: string,
 ): ResumeTokenCounts | undefined {
-  replayUiTelemetryEventsFromConversation(conversation, sessionId);
-
   const resumeTokenCounts = getResumeTokenCounts(conversation);
   if (resumeTokenCounts !== undefined) {
     uiTelemetryService.setLastPromptTokenCount(
@@ -2659,6 +2659,17 @@ export function replayUiTelemetryFromConversation(
     );
   }
   return resumeTokenCounts;
+}
+
+/**
+ * Replays stored UI telemetry and restores the last prompt token count.
+ */
+export function replayUiTelemetryFromConversation(
+  conversation: ConversationRecord,
+  sessionId?: string,
+): ResumeTokenCounts | undefined {
+  replayUiTelemetryEventsFromConversation(conversation, sessionId);
+  return restoreResumeTokenCountsFromConversation(conversation);
 }
 
 const MAX_BRANCH_COLLISION_SCAN = 99;

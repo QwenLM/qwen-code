@@ -256,6 +256,7 @@ describe('useResumeCommand', () => {
       getTargetDir: () => '/tmp',
       getGeminiClient: () => geminiClient,
       startNewSession: vi.fn(),
+      markUiTelemetryEventsReplayed: vi.fn(),
       getGoalRuntimeReady,
       getBackgroundTaskRegistry: () => ({
         hasRunningTasks: vi.fn().mockReturnValue(false),
@@ -338,9 +339,26 @@ describe('useResumeCommand', () => {
     );
     expect(resetMonitorRegistry).toHaveBeenCalledTimes(1);
     expect(getGoalRuntimeReady).toHaveBeenCalledTimes(1);
+    expect(replayUiTelemetryEventsMock).toHaveBeenCalledTimes(1);
+    // The session id is what keys the replayed history onto the resumed
+    // session. Dropping it sends sessionService down the global reset()
+    // branch, which clears every live session's bucket and keys nothing
+    // under the resumed id, so the new Goal meter reads zero history.
+    expect(replayUiTelemetryEventsMock.mock.calls[0][1]).toBe('session-2');
     expect(
       replayUiTelemetryEventsMock.mock.invocationCallOrder[0],
     ).toBeLessThan(getGoalRuntimeReady.mock.invocationCallOrder[0]!);
+    // Hand the replay off to the client so initialize() does not replay the
+    // same history a second time into the process-wide usage aggregate.
+    expect(config.markUiTelemetryEventsReplayed).toHaveBeenCalledWith(
+      'session-2',
+    );
+    expect(
+      replayUiTelemetryEventsMock.mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      vi.mocked(config.markUiTelemetryEventsReplayed).mock
+        .invocationCallOrder[0]!,
+    );
   });
 
   it('adds a recovery notice when resuming an interrupted tool turn', async () => {
@@ -362,6 +380,7 @@ describe('useResumeCommand', () => {
       getTargetDir: () => '/tmp',
       getGeminiClient: () => geminiClient,
       startNewSession: vi.fn(),
+      markUiTelemetryEventsReplayed: vi.fn(),
       getGoalRuntimeReady: vi.fn().mockResolvedValue({}),
       getBackgroundTaskRegistry: () => ({
         hasRunningTasks: vi.fn().mockReturnValue(false),
@@ -446,6 +465,7 @@ describe('useResumeCommand', () => {
       getTargetDir: () => '/tmp',
       getGeminiClient: () => geminiClient,
       startNewSession: vi.fn(),
+      markUiTelemetryEventsReplayed: vi.fn(),
       getGoalRuntimeReady: vi.fn().mockResolvedValue({}),
       getBackgroundTaskRegistry: () => ({
         hasRunningTasks: vi.fn().mockReturnValue(false),
@@ -542,6 +562,7 @@ describe('useResumeCommand', () => {
       getTargetDir: () => '/tmp',
       getGeminiClient: () => geminiClient,
       startNewSession: vi.fn(),
+      markUiTelemetryEventsReplayed: vi.fn(),
       getGoalRuntimeReady: vi.fn().mockResolvedValue({}),
       getBackgroundTaskRegistry: () => ({
         hasRunningTasks: vi.fn().mockReturnValue(false),
@@ -762,6 +783,7 @@ describe('useResumeCommand', () => {
       getTargetDir: () => '/tmp',
       getGeminiClient: () => geminiClient,
       startNewSession: vi.fn(),
+      markUiTelemetryEventsReplayed: vi.fn(),
       getGoalRuntimeReady: vi.fn().mockRejectedValue(goalFailure),
       getBackgroundTaskRegistry: () => ({
         hasRunningTasks: vi.fn().mockReturnValue(false),

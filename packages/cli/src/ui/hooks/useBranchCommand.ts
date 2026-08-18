@@ -200,10 +200,15 @@ export function useBranchCommand(
         //    the parent, silently recording user input into an orphan.
         config.startNewSession(newSessionId, resumed);
         coreSwapped = true;
+        // Replay before the Goal runtime opens its meter so the meter reads
+        // the inherited totals, then tell the client it is already done —
+        // otherwise initialize() replays the forked history a second time and
+        // the process-wide usage aggregate carries two copies of it.
         replayUiTelemetryEventsFromConversation(
           resumed.conversation,
           newSessionId,
         );
+        config.markUiTelemetryEventsReplayed(newSessionId);
         await waitForGoalRuntime(config);
         await config.getGeminiClient()?.initialize?.(SessionStartSource.Branch);
 

@@ -52,6 +52,9 @@ import {
   recoverGoalFromRecords,
   type GoalRecoveryRecord,
 } from './goal-persistence.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('GOAL_RUNTIME');
 
 export const GOAL_RUNTIME_DISPOSED_MESSAGE = 'Goal runtime has been disposed';
 export const STALE_GOAL_TURN_MESSAGE = 'Goal turn permit is no longer valid';
@@ -270,14 +273,37 @@ export function createGoalRuntime(
         }
       : undefined;
 
+  // Failing closed to zero is the policy, but doing it silently makes a
+  // persistent meter fault ("my Goal says 0 tokens but I was billed for
+  // millions") indistinguishable from "no API calls happened" — there is no
+  // log line, telemetry event, or error to grep for. One breadcrumb per
+  // runtime is enough to tell the two apart without flooding: the meter is
+  // read at every beginTurn/finishTurn.
+  let meterFailureReported = false;
+  const reportMeterFailure = (detail: string): void => {
+    if (meterFailureReported) return;
+    meterFailureReported = true;
+    debugLogger.warn(
+      `Goal token meter unreadable (${detail}); tokensUsed will report 0 ` +
+        `for this runtime until the meter recovers. Reported once per runtime.`,
+    );
+  };
+
   const readSessionTokens = (): number | undefined => {
     if (!options.tokenMeter) return undefined;
     try {
       const total = options.tokenMeter.readSessionTokens();
-      return Number.isFinite(total) ? total : undefined;
-    } catch {
+      if (Number.isFinite(total)) return total;
+      // A non-finite reading is the shape that drift produces: rename
+      // `tokens.total` and the config meter's reduce yields NaN.
+      reportMeterFailure(`non-finite reading ${String(total)}`);
+      return undefined;
+    } catch (error) {
       // Goal accounting is bookkeeping. A meter that cannot answer costs the
       // Goal its spend figure for this turn, not the turn.
+      reportMeterFailure(
+        `threw ${error instanceof Error ? error.message : String(error)}`,
+      );
       return undefined;
     }
   };

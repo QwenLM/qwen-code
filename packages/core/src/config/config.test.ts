@@ -2669,8 +2669,12 @@ describe('Server Config (config.ts)', () => {
           'event.name': EVENT_API_RESPONSE,
           model,
           duration_ms: 1,
-          input_token_count: totalTokens,
-          output_token_count: 0,
+          // Split the total across input and output so prompt !== total. With
+          // output at 0 the two are equal and the assertion below cannot tell
+          // a prompt-only meter from a total meter, while real API responses
+          // always carry output tokens.
+          input_token_count: totalTokens - 15,
+          output_token_count: 15,
           total_token_count: totalTokens,
           cached_content_token_count: 0,
           thoughts_token_count: 0,

@@ -1750,6 +1750,17 @@ export class Config {
   private sessionSourceType?: string;
   private sessionSourceId?: string;
   private sessionData?: ResumedSessionData;
+  /**
+   * Session id whose stored UI telemetry a session-swap caller has already
+   * replayed. `/resume` and `/branch` replay before awaiting the Goal runtime
+   * so the meter opens on the restored totals, which lands the replay ahead of
+   * `GeminiClient.initialize()`. The marker lets `initialize()` recognize that
+   * hand-off and skip its own replay: `addEvent` accumulates into both the
+   * process-wide metrics and the per-session bucket, while the `resetSession`
+   * leading a replay clears only the bucket, so a second pass would leave one
+   * extra copy of the whole history in the process-wide aggregate.
+   */
+  private uiTelemetryReplayedSessionId?: string;
   private pendingSessionRestoreProjection?: SessionRestoreProjection;
   private sessionRestoreRuntime?: SessionRuntimeResumeState;
   private readonly sessionRestoreProjectionSource?: () => Promise<
@@ -3997,6 +4008,9 @@ export class Config {
     unregisterSessionModel(previousSessionId);
     this.publishModelEnv();
     this.sessionData = sessionData;
+    // A swap re-arms the replay: the marker only ever covers the single
+    // initialize() that follows the caller's own replay for this swap.
+    this.uiTelemetryReplayedSessionId = undefined;
     this.clearSessionRestoreProjection();
     this.pendingRecoveredAgentsNotice = null;
     this.getOwnActiveTodoReminders().clear();
@@ -4232,6 +4246,27 @@ export class Config {
    */
   getResumedSessionData(): ResumedSessionData | undefined {
     return this.sessionData;
+  }
+
+  /**
+   * Records that the caller has already replayed the stored UI telemetry for
+   * `sessionId`, so `GeminiClient.initialize()` must not replay it again.
+   * The marker is one-shot and is cleared by the next `startNewSession()`, so
+   * resuming the same session again later still replays exactly once.
+   */
+  markUiTelemetryEventsReplayed(sessionId: string): void {
+    this.uiTelemetryReplayedSessionId = sessionId;
+  }
+
+  /**
+   * Returns whether `sessionId`'s stored UI telemetry was already replayed by
+   * the session-swap caller, clearing the marker so only the first reader
+   * skips its replay.
+   */
+  consumeUiTelemetryEventsReplayed(sessionId: string): boolean {
+    if (this.uiTelemetryReplayedSessionId !== sessionId) return false;
+    this.uiTelemetryReplayedSessionId = undefined;
+    return true;
   }
 
   shouldLoadMemoryFromIncludeDirectories(): boolean {

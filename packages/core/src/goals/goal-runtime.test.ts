@@ -5,6 +5,19 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
+
+const debugWarn = vi.hoisted(() => vi.fn());
+vi.mock('../utils/debugLogger.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/debugLogger.js')>();
+  return {
+    ...actual,
+    createDebugLogger: (tag?: string) => ({
+      ...actual.createDebugLogger(tag),
+      warn: debugWarn,
+    }),
+  };
+});
 import type { GoalEvidenceRecord } from './goal-evidence.js';
 import type { GoalRecoveryRecord } from './goal-persistence.js';
 import {
@@ -334,6 +347,41 @@ describe('goal runtime', () => {
       tokensUsed: 0,
     });
   });
+
+  it.each([
+    [
+      'throws',
+      () => {
+        throw new Error('metrics are unavailable');
+      },
+      'metrics are unavailable',
+    ],
+    ['reads back NaN', () => Number.NaN, 'non-finite'],
+  ])(
+    'leaves one breadcrumb per runtime when the token meter %s',
+    async (_label, readSessionTokens, expectedDetail) => {
+      // Failing closed to zero is the policy, but a silent failure is
+      // indistinguishable from "no API calls happened" when a user reports a
+      // Goal that says 0 tokens. The meter is read at every begin/finish, so
+      // the breadcrumb has to be capped at one per runtime.
+      debugWarn.mockClear();
+      const journal = fakeGoalJournal();
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({
+        journal,
+        tokenMeter: { readSessionTokens },
+      });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+      await runtime.finishTurn(host.started[0]!);
+      const permit = runtime.beginTurn('turn-2');
+      if (permit) await runtime.finishTurn(permit);
+
+      expect(debugWarn).toHaveBeenCalledTimes(1);
+      expect(debugWarn.mock.calls[0][0]).toContain(expectedDetail);
+      expect(debugWarn.mock.calls[0][0]).toContain('tokensUsed will report 0');
+    },
+  );
 
   it.each([Number.NaN, Number.POSITIVE_INFINITY])(
     'finishes the turn when the token meter returns %s',
@@ -2031,6 +2079,54 @@ describe('goal runtime', () => {
     },
   );
 
+  it('bills the meter delta for user input promoted after a rejection', async () => {
+    // promoteQueuedUserTurn opens the promoted turn's meter reading on its own
+    // line, and it is the only turn-start site reachable through verification
+    // rejection. Without a metered test here, deleting that reading bills the
+    // promoted turn nothing while the whole suite stays green.
+    const result = deferred<Awaited<ReturnType<GoalVerifier>>>();
+    const journal = fakeGoalJournal();
+    let records: readonly RuntimeRecord[] = [];
+    const evidenceSource = fakeEvidenceSource(() => records);
+    const verifier: GoalVerifier = vi.fn(() => result.promise);
+    const host = fakeGoalTurnHost();
+    let sessionTokens = 0;
+    const runtime = createGoalRuntime({
+      journal,
+      evidenceSource,
+      verifier,
+      tokenMeter: { readSessionTokens: () => sessionTokens },
+    });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+    const permit = host.started[0];
+    records = verifierEvidenceRecords(
+      permit,
+      runtime.getSnapshot().goal!.evidenceCursor.recordId!,
+    );
+    runtime.recordTerminalProposal(permit, {
+      status: 'complete',
+      reason: 'Delivered',
+      evidenceRefs: ['assistant-evidence'],
+    });
+    sessionTokens = 40;
+    const finishing = runtime.finishTurn(permit);
+    await vi.waitFor(() => expect(verifier).toHaveBeenCalledOnce());
+    expect(runtime.beginTurn('real-user')).toBeUndefined();
+
+    result.resolve({ decision: 'reject', reason: 'Add the missing example' });
+    await finishing;
+    expect(runtime.getSnapshot().goal?.tokensUsed).toBe(40);
+
+    const userPermit = runtime.permitForTurn('real-user')!;
+    expect(userPermit).toBeDefined();
+    sessionTokens = 95;
+    await runtime.finishTurn(userPermit);
+
+    // 40 from the verified turn plus the promoted turn's own 55.
+    expect(runtime.getSnapshot().goal?.tokensUsed).toBe(95);
+  });
+
   it('promotes queued user input with exact verifier feedback after rejection', async () => {
     const result = deferred<Awaited<ReturnType<GoalVerifier>>>();
     const journal = fakeGoalJournal();
@@ -2145,6 +2241,62 @@ describe('goal runtime', () => {
       activity: 'running',
       goal: { status: 'active', turnCount: 1 },
     });
+  });
+
+  it('bills the meter delta for a reservation promoted by finishTurn', async () => {
+    // The promotion opens the new turn's meter reading on its own line. Only
+    // the continuation and beginTurn admit paths were metered under test, so
+    // deleting the reading here left takeTurnTokens with `opened === undefined`
+    // — the promoted turn bills nothing and every suite stays green. The
+    // realistic trigger is a user turn queued while a Goal turn is running.
+    const host = fakeGoalTurnHost();
+    let sessionTokens = 0;
+    const runtime = createGoalRuntime({
+      journal: fakeGoalJournal(),
+      tokenMeter: { readSessionTokens: () => sessionTokens },
+    });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'ship' });
+    const initialPermit = host.started[0];
+
+    expect(runtime.beginTurn('queued-user')).toBeUndefined();
+    sessionTokens = 40;
+    await runtime.finishTurn(initialPermit);
+    expect(runtime.getSnapshot().goal?.tokensUsed).toBe(40);
+
+    const promoted = runtime.permitForTurn('queued-user');
+    expect(promoted).toBeDefined();
+    sessionTokens = 65;
+    await runtime.finishTurn(promoted!);
+
+    // 40 from the first turn plus the promoted turn's own 25 — not 40, which
+    // is what an unopened reading would leave behind.
+    expect(runtime.getSnapshot().goal?.tokensUsed).toBe(65);
+  });
+
+  it('bills the meter delta for a reservation promoted by releaseTurn', async () => {
+    const host = fakeGoalTurnHost();
+    let sessionTokens = 0;
+    const runtime = createGoalRuntime({
+      journal: fakeGoalJournal(),
+      tokenMeter: { readSessionTokens: () => sessionTokens },
+    });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'ship' });
+    const initialPermit = host.started[0];
+
+    expect(runtime.beginTurn('queued-user')).toBeUndefined();
+    sessionTokens = 30;
+    await expect(
+      runtime.releaseTurn(`goal-runtime:${initialPermit.turnId}`),
+    ).resolves.toBe(true);
+
+    const promoted = runtime.permitForTurn('queued-user');
+    expect(promoted).toBeDefined();
+    sessionTokens = 100;
+    await runtime.finishTurn(promoted!);
+
+    expect(runtime.getSnapshot().goal?.tokensUsed).toBe(70);
   });
 
   it('promotes a waiting reservation when the current turn is released', async () => {

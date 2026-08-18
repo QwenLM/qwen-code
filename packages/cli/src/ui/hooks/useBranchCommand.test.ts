@@ -32,6 +32,7 @@ describe('useBranchCommand', () => {
   let finalize: ReturnType<typeof vi.fn>;
   let flush: ReturnType<typeof vi.fn>;
   let startNewSessionConfig: ReturnType<typeof vi.fn>;
+  let markUiTelemetryEventsReplayed: ReturnType<typeof vi.fn>;
   let getGoalRuntimeReady: ReturnType<typeof vi.fn>;
   let startNewSessionUI: ReturnType<typeof vi.fn>;
   let clearPendingState: ReturnType<typeof vi.fn>;
@@ -108,6 +109,7 @@ describe('useBranchCommand', () => {
     flush = vi.fn().mockResolvedValue(undefined);
     findSessionTitlesByPrefix = vi.fn().mockResolvedValue([]);
     startNewSessionConfig = vi.fn();
+    markUiTelemetryEventsReplayed = vi.fn();
     getGoalRuntimeReady = vi.fn().mockResolvedValue({});
     startNewSessionUI = vi.fn();
     clearPendingState = vi.fn();
@@ -152,6 +154,7 @@ describe('useBranchCommand', () => {
       getBackgroundShellRegistry: () => backgroundShellRegistry,
       getWorkflowRunRegistry: () => workflowRunRegistry,
       startNewSession: startNewSessionConfig,
+      markUiTelemetryEventsReplayed,
       getGoalRuntimeReady,
       getDebugLogger: () => ({ warn: vi.fn() }),
     };
@@ -295,9 +298,22 @@ describe('useBranchCommand', () => {
       await result.current.handleBranch('my-branch');
     });
     expect(getGoalRuntimeReady).toHaveBeenCalledTimes(1);
+    expect(replayUiTelemetryEventsMock).toHaveBeenCalledTimes(1);
+    // The session id is what keys the inherited history onto the forked
+    // session. Dropping it sends sessionService down the global reset()
+    // branch, which clears every live session's bucket and keys nothing
+    // under the fork, so the new Goal meter reads zero history.
+    const forkedSessionId = replayUiTelemetryEventsMock.mock.calls[0][1];
+    expect(forkedSessionId).toEqual(expect.any(String));
     expect(
       replayUiTelemetryEventsMock.mock.invocationCallOrder[0],
     ).toBeLessThan(getGoalRuntimeReady.mock.invocationCallOrder[0]!);
+    // Hand the replay off to the client so initialize() does not replay the
+    // same history a second time into the process-wide usage aggregate.
+    expect(markUiTelemetryEventsReplayed).toHaveBeenCalledWith(forkedSessionId);
+    expect(
+      replayUiTelemetryEventsMock.mock.invocationCallOrder[0],
+    ).toBeLessThan(markUiTelemetryEventsReplayed.mock.invocationCallOrder[0]!);
   });
 
   it('rolls core back when the fork contains malformed Goal state', async () => {

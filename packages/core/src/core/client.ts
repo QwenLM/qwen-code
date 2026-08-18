@@ -132,6 +132,7 @@ import type { DeferredToolSummary } from '../tools/tool-registry.js';
 import {
   buildApiHistoryFromConversation,
   replayUiTelemetryFromConversation,
+  restoreResumeTokenCountsFromConversation,
 } from '../services/sessionService.js';
 import { reportError } from '../utils/errorReporting.js';
 import {
@@ -489,10 +490,24 @@ export class GeminiClient {
         );
       }
     } else if (resumedSessionData) {
-      const resumeTokenCounts = replayUiTelemetryFromConversation(
-        resumedSessionData.conversation,
-        this.config.getSessionId(),
-      );
+      // `/resume` and `/branch` replay the stored telemetry themselves, before
+      // awaiting the Goal runtime, so the meter opens on the restored totals.
+      // Replaying it again here would double-count: `addEvent` accumulates
+      // into both the process-wide metrics and the per-session bucket, but the
+      // `resetSession` leading each replay clears only the bucket — so the
+      // second pass leaves an extra copy of the whole history in the aggregate
+      // that `persistSessionUsage` later writes out. Honour the caller's
+      // hand-off and restore only the token counts when it already replayed.
+      const alreadyReplayed =
+        this.config.consumeUiTelemetryEventsReplayed?.(sessionId) ?? false;
+      const resumeTokenCounts = alreadyReplayed
+        ? restoreResumeTokenCountsFromConversation(
+            resumedSessionData.conversation,
+          )
+        : replayUiTelemetryFromConversation(
+            resumedSessionData.conversation,
+            sessionId,
+          );
       // Convert resumed session to API history format
       // Each ChatRecord's message field is already a Content object
       const resumedHistory = buildApiHistoryFromConversation(
