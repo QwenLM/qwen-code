@@ -355,12 +355,17 @@ silently overriding or silently complying.
   section, the growth brake has been over budget across rounds and the diff is
   still not shrinking — the findings themselves are driving the growth, so
   Critical-only cannot help (the Criticals ARE the growth). Do NOT apply more
-  code fixes this round. This is a `defer-to-human` item: STOP `BLOCKED` with a
-  handoff that names the decision and lays out the options — split the PR (land
-  the core, track the remaining findings as follow-up issues), redesign, or
-  accept the current state with the tail deferred — plus your recommendation.
-  Continuing to patch, or deciding the split yourself, is exactly the wrong
-  move; the call is the maintainer's.
+  code fixes this round. This is a `defer-to-human` item: STOP `BLOCKED` and
+  write the handoff into `<workdir>/failure.md` — name the decision, lay out
+  the options (split the PR: land the core and track the remaining findings
+  as follow-up issues; redesign; or accept the current state with the tail
+  deferred) and give your recommendation. `failure.md` is the one stop file
+  the round's output contract accepts; run-agent.mjs wraps it into the
+  workflow's handoff comment. Do not write `handoff.md` yourself — that file
+  belongs to run-agent.mjs, and a bare handoff.md satisfies no output
+  contract, so a correct defer-to-human would still be reported as a round
+  that produced nothing. Continuing to patch, or deciding the split yourself,
+  is exactly the wrong move; the call is the maintainer's.
 - Needs a maintainer's decision: a finding that turns on a judgment that is
   NOT yours to make — a product or scope tradeoff (is this acceptable for v1?
   should the PR be split?), two reviewers asking for opposite things, or whether
