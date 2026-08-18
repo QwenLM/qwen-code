@@ -215,6 +215,7 @@ export default {
   'toolDisplayName.TeamDelete': 'toolDisplayName.TeamDelete',
   'toolDisplayName.TeamPlanApproval': 'toolDisplayName.TeamPlanApproval',
   'toolDisplayName.SendMessage': 'toolDisplayName.SendMessage',
+  'toolDisplayName.RequestShutdown': 'toolDisplayName.RequestShutdown',
   'toolDisplayName.StructuredOutput': 'toolDisplayName.StructuredOutput',
   'toolDisplayName.Monitor': 'toolDisplayName.Monitor',
   'toolDisplayName.NotebookEdit': 'toolDisplayName.NotebookEdit',

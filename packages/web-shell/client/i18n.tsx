@@ -3136,6 +3136,7 @@ const ZH: Messages = {
   'toolName.team_create': '创建团队',
   'toolName.team_delete': '删除团队',
   'toolName.send_message': '发送消息',
+  'toolName.request_shutdown': '请求下线',
   'toolName.list_agents': '列出 Agent',
   'toolName.structured_output': '结构化输出',
   'toolName.monitor': '监控',
@@ -4189,9 +4190,7 @@ const ZH: Messages = {
   'turnOutputs.closeFileTree': '关闭文件树',
   'turnOutputs.artifactMissing': '工作区中未找到该文件',
   'turnOutputs.artifactUnavailable': (v) =>
-    v?.path
-      ? `工作区中未找到该文件 · ${v.path}`
-      : '工作区中未找到该文件',
+    v?.path ? `工作区中未找到该文件 · ${v.path}` : '工作区中未找到该文件',
   'sidebar.label': '工作区侧边栏',
   'sidebar.toggleMenu': '切换菜单',
   'sidebar.newChat': '新对话',
