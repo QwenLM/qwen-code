@@ -1560,11 +1560,24 @@ export class DingtalkChannel extends ChannelBase {
    * Download a media file and attach it to the envelope.
    * Images → base64 in envelope; files → saved to temp dir with path in text.
    */
+  /**
+   * `cleanPlaceholderText` is the placeholder `extractContent` generated for
+   * THIS message's own media — `(audio)`, `(video)`, `(file: name)`. Only the
+   * direct-media call site has one, and only that call may erase it.
+   *
+   * R1-1: the cleanup used to compare against reconstructed placeholders
+   * regardless of caller. On the quoted-media path `envelope.text` is the
+   * user's own reply, so a reply that happened to read exactly `(audio)` — or
+   * `(file: <the quoted file's name>)` — was silently blanked and the agent
+   * got an attachment with no prompt. A group `@Bot (audio)` reaches here as
+   * exactly `(audio)`, the mention having been stripped upstream.
+   */
   private async attachMedia(
     envelope: Envelope,
     downloadCode: string,
     mediaType: 'image' | 'file' | 'audio' | 'video',
     fileName?: string,
+    cleanPlaceholderText?: string,
   ): Promise<void> {
     let token: string;
     try {
@@ -1599,19 +1612,40 @@ export class DingtalkChannel extends ChannelBase {
         },
       ];
     } else {
-      // Save non-image files to temp dir so the agent can read them
-      const dir = join(tmpdir(), 'channel-files', randomUUID());
-      mkdirSync(dir, { recursive: true });
-      const safeName =
-        basename(fileName || '') || `dingtalk_${mediaType}_${Date.now()}`;
-      const filePath = join(dir, safeName);
-      writeFileSync(filePath, media.buffer);
+      // Save non-image files to temp dir so the agent can read them.
+      //
+      // R1-2: these are synchronous throw sites — ENOSPC on a write of up to
+      // 50 MB, ENAMETOOLONG from a quoted fileName over 255 bytes (`basename`
+      // does not truncate), a TypeError from a truthy non-string fileName. An
+      // escape rejects `processMessage`, whose catch sends the generic error
+      // reply and never calls `handleInbound`; the msgId is already in
+      // `seenMessages`, so DingTalk's retry is deduped and the user's prompt
+      // is lost for good. Degrade the way a failed download already does:
+      // skip the attachment, keep the text.
+      let filePath: string;
+      let safeName: string;
+      try {
+        const dir = join(tmpdir(), 'channel-files', randomUUID());
+        mkdirSync(dir, { recursive: true });
+        safeName =
+          basename(typeof fileName === 'string' ? fileName : '') ||
+          `dingtalk_${mediaType}_${Date.now()}`;
+        filePath = join(dir, safeName);
+        writeFileSync(filePath, media.buffer);
+      } catch (error) {
+        process.stderr.write(
+          `[DingTalk:${this.name}] Cannot store media, delivering the text without it: ${sanitizeLogText(
+            error instanceof Error ? error.message : String(error),
+            300,
+          )}\n`,
+        );
+        return;
+      }
 
-      // Clean up placeholder text like "(audio)", "(video)", "(file: name)"
+      // Clean up the placeholder this message's own media produced.
       if (
-        envelope.text === `(file: ${fileName || 'file'})` ||
-        envelope.text === '(audio)' ||
-        envelope.text === '(video)'
+        cleanPlaceholderText !== undefined &&
+        envelope.text === cleanPlaceholderText
       ) {
         envelope.text = '';
       }
@@ -1776,6 +1810,9 @@ export class DingtalkChannel extends ChannelBase {
             content.downloadCodes[0]!,
             content.mediaType,
             content.fileName,
+            content.mediaType === 'file'
+              ? `(file: ${content.fileName || 'file'})`
+              : `(${content.mediaType})`,
           );
         }
         if (quoted.media) {

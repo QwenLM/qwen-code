@@ -2433,6 +2433,15 @@ describe('DingtalkChannel quoted media', () => {
     msgType: string,
     content: Record<string, unknown>,
   ): void {
+    replyToMediaWithText(channel, msgType, 'inspect this', content);
+  }
+
+  function replyToMediaWithText(
+    channel: DingtalkChannelInstance,
+    msgType: string,
+    replyText: string,
+    content: Record<string, unknown>,
+  ): void {
     const downstream = {
       data: JSON.stringify({
         msgId: `quoted-${msgType}`,
@@ -2446,7 +2455,7 @@ describe('DingtalkChannel quoted media', () => {
         chatbotUserId: 'bot-1',
         isInAtList: true,
         text: {
-          content: '@DingTalkTest inspect this',
+          content: `@DingTalkTest ${replyText}`,
           isReplyMsg: true,
           repliedMsg: {
             msgId: `media-${msgType}`,
@@ -2589,6 +2598,65 @@ describe('DingtalkChannel quoted media', () => {
       ).not.toHaveProperty('attachments');
     },
   );
+
+  // R1-1: the placeholder cleanup was written for the DIRECT-media path,
+  // where `extractContent` generates `(audio)` / `(file: name)` itself. On the
+  // quoted path `envelope.text` is the user's own reply, so a reply reading
+  // exactly like a placeholder was blanked and the agent got an attachment
+  // with no prompt. A group `@Bot (audio)` arrives here as exactly `(audio)`.
+  it.each([
+    ['audio', {}, '(audio)'],
+    ['video', {}, '(video)'],
+    ['file', { fileName: 'report.pdf' }, '(file: report.pdf)'],
+  ])(
+    'keeps a quoted-%s reply whose text looks like a placeholder',
+    async (msgType, extra, replyText) => {
+      mockMediaDownload('application/octet-stream', new Uint8Array([1, 2, 3]));
+      const channel = createChannel();
+
+      replyToMediaWithText(channel, msgType, replyText, {
+        downloadCode: `quoted-${msgType}-code`,
+        ...extra,
+      });
+
+      await vi.waitFor(() => {
+        expect(channel.handleInbound).toHaveBeenCalledOnce();
+      });
+      const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
+      const filePath = envelope.attachments?.[0]?.filePath;
+      if (filePath) tempDirs.add(dirname(filePath));
+      expect(envelope.text).toBe(replyText);
+      expect(envelope.attachments).toHaveLength(1);
+    },
+  );
+
+  // R1-2: these are synchronous throw sites. An escape rejected
+  // `processMessage`, whose catch sends the generic error reply and never
+  // calls `handleInbound` — and the msgId is already deduped, so the retry is
+  // dropped and the prompt is lost for good.
+  it.each([
+    ['an over-long file name', 'a'.repeat(300)],
+    ['a non-string file name', 12345 as unknown as string],
+  ])('still delivers the text when storing quoted media throws (%s)', async (
+    _label,
+    fileName,
+  ) => {
+    mockMediaDownload('application/octet-stream', new Uint8Array([1, 2, 3]));
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const channel = createChannel();
+
+    replyToMedia(channel, 'file', {
+      downloadCode: 'quoted-file-code',
+      fileName,
+    });
+
+    await vi.waitFor(() => {
+      expect(channel.handleInbound).toHaveBeenCalledOnce();
+    });
+    expect(
+      vi.mocked(channel.handleInbound).mock.calls[0]![0].text,
+    ).toBe('inspect this');
+  });
 
   it('keeps processing the prompt when a quoted-media download fails', async () => {
     const fetchSpy = vi
