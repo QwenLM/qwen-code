@@ -363,6 +363,65 @@ export class MediaMemoryService {
   }
 
   /**
+   * The `memory.*` fixed-policy condition namespace (policy design
+   * §4.1/4.4): the set of output ROLES recorded anywhere in the
+   * subgraph rooted at the binding's version — the version itself plus
+   * every version derived from it (DERIVED_FROM child edges), bounded to
+   * the binding's root graph. This is what lets a `when` condition ask
+   * "does memory already hold a transcript/OCR/caption for this file"
+   * before deciding to run a policy — e.g. the §4.1 chain parents the
+   * transcript entry to the EXTRACTED-AUDIO version, a child of the
+   * video version being matched, so a same-version-only lookup would
+   * never see it.
+   *
+   * Returns an EMPTY set when the version is unknown (nothing recorded
+   * yet — a determinate "no roles"), and undefined only when the store
+   * itself is unreadable (the caller maps that to condition
+   * `unavailable`, never silently false). Persistence errors are logged,
+   * never thrown (same failure stance as the rest of the facade).
+   */
+  async collectVersionOutputRoles(
+    binding: MediaMemoryBinding,
+  ): Promise<Set<string> | undefined> {
+    try {
+      return await this.store.read(undefined, (snapshot) => {
+        const start = snapshot.versions[binding.fileVersionId];
+        if (!start) return new Set<string>();
+        // Iterative DERIVED_FROM walk, root-bounded (M §8: a version
+        // filed under another root is never followed).
+        const roles = new Set<string>();
+        const visited = new Set<string>();
+        const queue: string[] = [start.fileVersionId];
+        while (queue.length > 0) {
+          const versionId = queue.shift() as string;
+          if (visited.has(versionId)) continue;
+          visited.add(versionId);
+          const version = snapshot.versions[versionId];
+          if (!version) continue;
+          const file = snapshot.files[version.fileId];
+          if (!file || file.rootFileId !== binding.rootFileId) continue;
+          for (const entry of Object.values(snapshot.entries)) {
+            if (entry.parentVersionId === versionId && entry.role) {
+              roles.add(entry.role);
+            }
+          }
+          for (const child of Object.values(snapshot.versions)) {
+            if (child.parentVersionId === versionId) {
+              queue.push(child.fileVersionId);
+            }
+          }
+        }
+        return roles;
+      });
+    } catch (err) {
+      debugLogger.debug(
+        `collectVersionOutputRoles failed: ${err instanceof Error ? err.message : err}`,
+      );
+      return undefined;
+    }
+  }
+
+  /**
    * Read-side lookup by LOCATOR, for the harness only (design M §9.2.1:
    * path/hash lookup is a harness capability; the model is confined to
    * session handles). Returns the CURRENT version of the File recorded at

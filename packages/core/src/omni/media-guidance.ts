@@ -46,6 +46,10 @@ const MEDIA_TOOL_CAPABILITIES: ReadonlyArray<[string, string]> = [
     'cut a specific time range out of a video (startSec/durationSec) — the primary way to inspect parts of a long video that were not delivered',
   ],
   [
+    ToolNames.OMNI_UNDERSTAND_VIDEO_SEGMENTS,
+    'understand a long video end to end: fixed-length segments described in parallel by an omni model, assembled into a time-labeled text summary',
+  ],
+  [
     ToolNames.OMNI_EXTRACT_KEYFRAMES,
     'extract still frames from a video (clip a range first to sample frames from a specific segment)',
   ],
@@ -62,11 +66,31 @@ const MEDIA_TOOL_CAPABILITIES: ReadonlyArray<[string, string]> = [
     'transcribe speech in an audio file to text',
   ],
   [
+    ToolNames.OMNI_CAPTION_AUDIO,
+    'describe an audio file semantically (speech gist, timbre, sound events, mood) — understanding, not verbatim transcription',
+  ],
+  [
+    ToolNames.OMNI_CLIP_AUDIO,
+    'cut a specific time range out of an audio file (startMs/durationMs)',
+  ],
+  [
     ToolNames.OMNI_DOWNSAMPLE_AUDIO,
     're-encode audio at a lower bitrate/sample rate',
   ],
   [ToolNames.OMNI_DOWNSAMPLE_IMAGE, 'shrink an image to a smaller resolution'],
   [ToolNames.OMNI_CONVERT_IMAGE, 'convert an image to another format'],
+  [
+    ToolNames.OMNI_CLIP_IMAGE,
+    'crop a pixel rectangle (x/y/width/height) out of an image',
+  ],
+  [
+    ToolNames.OMNI_CAPTION_IMAGE,
+    'describe an image with a VL model under a custom prompt, turning visual content into text',
+  ],
+  [
+    ToolNames.OMNI_OCR_IMAGE,
+    'extract the text visible in an image (OCR), with automatic language detection',
+  ],
 ];
 
 /**

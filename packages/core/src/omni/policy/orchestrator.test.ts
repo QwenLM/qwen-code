@@ -1549,6 +1549,78 @@ describe('runFixedPolicies', () => {
       expect(fileDeliveries).toEqual([]);
     });
 
+    describe('memory.* condition namespace (§4.1/4.4)', () => {
+      /** A transcript-producing policy gated on "no transcript in memory". */
+      const MEMORY_GATED_WHEN = [
+        'all',
+        ['==', ['field', 'memory.hasTranscript'], 0],
+      ] as unknown as NormalizedFixedPolicy['when'];
+
+      async function memoryServiceWithBinding() {
+        const { MediaMemoryService } = await import(
+          '../../services/media-memory/index.js'
+        );
+        const service = new MediaMemoryService(store.getOmniRootDir());
+        const sha256 = createHash('sha256')
+          .update(await fs.readFile(sourcePath))
+          .digest('hex');
+        const sourceBinding = await service.recordFileRecognized({
+          fileRef: sourcePath,
+          sha256,
+          mediaType: 'image',
+          metadata: recognizedImage().metadata,
+          sizeBytes: recognizedImage().sizeBytes,
+          mimeType: 'image/png',
+          origin: 'user',
+          source: { protocol: 'local', locator: 'photo.png' },
+          recognition: {
+            ingestionConfigHash: '',
+            detectorVersion: 'omni-sniff-ffprobe/1',
+            probeStatus: 'complete',
+          },
+        });
+        return { service, sourceBinding };
+      }
+
+      it('runs the policy when memory holds no transcript, skips the second run', async () => {
+        const { service, sourceBinding } = await memoryServiceWithBinding();
+        mockFileArtifact();
+        const options = {
+          store,
+          policies: [transcriptPolicy({ when: MEMORY_GATED_WHEN })],
+          memory: { service, sourceBinding },
+        };
+
+        const first = await runFixedPolicies(config, source, options);
+        expect(first.records[0]).toMatchObject({ outcome: 'succeeded' });
+        expect(executeToolCallMock).toHaveBeenCalledTimes(1);
+
+        // Second run: memory now holds the transcript — the condition
+        // reads it and the policy is skipped WITHOUT a tool call or a
+        // run record (a `no_match` is a non-event). (The S4 reuse path
+        // would also have skipped the execution; the memory gate is what
+        // spares even the reuse bookkeeping and the delivery churn.)
+        const second = await runFixedPolicies(config, source, options);
+        expect(second.records).toEqual([]);
+        expect(executeToolCallMock).toHaveBeenCalledTimes(1);
+      });
+
+      it('evaluates unavailable (and honors onConditionUnavailable) when memory is off', async () => {
+        mockFileArtifact();
+        const { records } = await runFixedPolicies(config, source, {
+          store,
+          // No `memory` option: the namespace cannot be resolved, the
+          // condition is unavailable, and 'skip' records it.
+          policies: [transcriptPolicy({ when: MEMORY_GATED_WHEN })],
+        });
+        expect(records[0]).toMatchObject({
+          outcome: 'condition_unavailable',
+          missingFields: ['memory.hasTranscript'],
+        });
+        expect(executeToolCallMock).not.toHaveBeenCalled();
+      });
+    });
+
     it('an artifact no selector matches defaults to retain (no "*" entry)', async () => {
       mockFileArtifact();
       const { fileDeliveries, records } = await runFixedPolicies(

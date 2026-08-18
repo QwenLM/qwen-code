@@ -23,8 +23,10 @@ import {
 } from '../recognition.js';
 import type { OmniObjectStore } from '../storage.js';
 import {
+  conditionUsesNamespace,
   evaluateFixedPolicyCondition,
   type FixedPolicyConditionContext,
+  type MemoryConditionField,
   type RequestConditionField,
   type ResourceConditionField,
 } from './conditions.js';
@@ -229,7 +231,7 @@ function resolveArtifactSelector(
 
 function resourceConditionContext(
   recognized: RecognizedMedia,
-  shared?: Pick<FixedPolicyConditionContext, 'request' | 'session'>,
+  shared?: Pick<FixedPolicyConditionContext, 'request' | 'session' | 'memory'>,
 ): FixedPolicyConditionContext {
   const resource: Partial<Record<ResourceConditionField, number>> = {};
   const set = (
@@ -259,6 +261,42 @@ function resourceConditionContext(
     set('estimatedTokenCount', estimate.estimatedTokenCount);
   }
   return { resource, ...shared };
+}
+
+/** Memory-role name → the `memory.*` condition field it feeds. Free-form
+ * roles from tools simply have no condition field. */
+const MEMORY_ROLE_FIELDS: Record<string, MemoryConditionField> = {
+  transcript: 'hasTranscript',
+  ocr: 'hasOcr',
+  caption: 'hasCaption',
+  summary: 'hasSummary',
+  keyframe: 'hasKeyframes',
+  clip: 'hasClip',
+};
+
+/**
+ * The `memory.*` condition namespace for one work item (policy design
+ * §4.1/4.4): 0/1 presence flags derived from the roles recorded anywhere
+ * in the item's version subgraph. Returns undefined — every memory
+ * condition then evaluates `unavailable`, never silently false — when
+ * memory is off, the item has no binding, or the store is unreadable.
+ */
+async function memoryConditionNamespace(
+  memory: { service: MediaMemoryService } | undefined,
+  binding: MediaMemoryBinding | undefined,
+): Promise<Partial<Record<MemoryConditionField, number>> | undefined> {
+  if (!memory || !binding) return undefined;
+  const roles = await memory.service.collectVersionOutputRoles(binding);
+  if (!roles) return undefined;
+  const namespace: Partial<Record<MemoryConditionField, number>> = {};
+  for (const field of Object.values(MEMORY_ROLE_FIELDS)) {
+    namespace[field] = 0;
+  }
+  for (const role of roles) {
+    const field = MEMORY_ROLE_FIELDS[role];
+    if (field) namespace[field] = 1;
+  }
+  return namespace;
 }
 
 /**
@@ -483,14 +521,24 @@ async function runFixedPoliciesUnbounded(
     // Pass-start condition snapshot (policy design §8.3): the request
     // namespace is recomputed as each item enters matching so it reflects
     // derivatives added by earlier passes; the session namespace is the
-    // caller's per-delivery snapshot and never changes mid-run.
+    // caller's per-delivery snapshot and never changes mid-run. The
+    // memory namespace is per-ITEM (each version's subgraph has its own
+    // recorded roles) and is only consulted when some policy's `when`
+    // actually references `memory.*` — the subgraph query costs a store
+    // read.
+    const needsMemoryNamespace = policies.some(
+      (policy) => policy.when && conditionUsesNamespace(policy.when, 'memory'),
+    );
     const sharedConditionContext: Pick<
       FixedPolicyConditionContext,
-      'request' | 'session'
+      'request' | 'session' | 'memory'
     > = {
       request:
         options.conditionContext?.request ?? requestConditionNamespace(items),
       session: options.conditionContext?.session,
+      memory: needsMemoryNamespace
+        ? await memoryConditionNamespace(options.memory, item.memoryBinding)
+        : undefined,
     };
     for (const policy of policies) {
       if (!policy.mediaTypes.includes(item.recognized.modality)) continue;

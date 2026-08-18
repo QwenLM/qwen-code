@@ -10,6 +10,7 @@ import type {
   FixedPolicyConditionContext,
 } from './conditions.js';
 import {
+  conditionUsesNamespace,
   evaluateFixedPolicyCondition,
   validateFixedPolicyCondition,
 } from './conditions.js';
@@ -333,5 +334,105 @@ describe('validateFixedPolicyCondition', () => {
       ['all', ['nope', 1, 2]],
     ]);
     expect(errors.join('\n')).toContain('when[1][1][0]');
+  });
+});
+
+describe('memory.* namespace (policy design §4.1/4.4)', () => {
+  it('resolves presence flags from the memory context', () => {
+    const withMemory: FixedPolicyConditionContext = {
+      ...CONTEXT,
+      memory: { hasTranscript: 1, hasOcr: 0 },
+    };
+    // The §4.1 trigger: "memory 中无完整 ASR 结果" — hasTranscript == 0.
+    expect(
+      evaluateFixedPolicyCondition(
+        expr('==', ['field', 'memory.hasTranscript'], 0),
+        withMemory,
+      ).outcome,
+    ).toBe('no_match');
+    expect(
+      evaluateFixedPolicyCondition(
+        expr('==', ['field', 'memory.hasOcr'], 0),
+        withMemory,
+      ).outcome,
+    ).toBe('match');
+  });
+
+  it('evaluates unavailable when the memory namespace is absent', () => {
+    const result = evaluateFixedPolicyCondition(
+      expr('==', ['field', 'memory.hasTranscript'], 0),
+      CONTEXT,
+    );
+    expect(result.outcome).toBe('unavailable');
+    expect(result).toMatchObject({ missingFields: ['memory.hasTranscript'] });
+  });
+
+  it('propagates memory unavailability through combinators (strong Kleene)', () => {
+    // all(false, unavailable) is a determinate false — the missing memory
+    // field is not decisive.
+    expect(
+      evaluateFixedPolicyCondition(
+        expr(
+          'all',
+          ['<', ['field', 'resource.width'], 100],
+          ['==', ['field', 'memory.hasTranscript'], 0],
+        ),
+        CONTEXT,
+      ).outcome,
+    ).toBe('no_match');
+    // all(true, unavailable) stays unavailable.
+    expect(
+      evaluateFixedPolicyCondition(
+        expr(
+          'all',
+          ['>', ['field', 'resource.durationMs'] as unknown[], 0],
+          ['==', ['field', 'memory.hasTranscript'], 0],
+        ),
+        { ...CONTEXT, resource: { ...CONTEXT.resource, durationMs: 100 } },
+      ).outcome,
+    ).toBe('unavailable');
+  });
+
+  it('accepts memory fields in structural validation', () => {
+    expect(
+      validateFixedPolicyCondition(['==', ['field', 'memory.hasOcr'], 0]),
+    ).toEqual([]);
+    const errors = validateFixedPolicyCondition([
+      '==',
+      ['field', 'memory.hasBogus'],
+      0,
+    ]);
+    expect(errors.join('\n')).toMatch(/unknown field/);
+  });
+
+  it('conditionUsesNamespace detects memory references through nesting', () => {
+    expect(
+      conditionUsesNamespace(
+        expr(
+          'all',
+          ['>', ['field', 'resource.durationMs'], 1_800_000],
+          ['any', ['==', ['field', 'memory.hasTranscript'], 0]],
+        ),
+        'memory',
+      ),
+    ).toBe(true);
+    expect(
+      conditionUsesNamespace(
+        expr('>', ['field', 'resource.width'], 2000),
+        'memory',
+      ),
+    ).toBe(false);
+    expect(
+      conditionUsesNamespace(
+        expr('>', ['field', 'resource.width'], 2000),
+        'resource',
+      ),
+    ).toBe(true);
+    expect(
+      conditionUsesNamespace(
+        expr('!', ['==', ['field', 'session.promptTokenCount'], 0]),
+        'session',
+      ),
+    ).toBe(true);
   });
 });

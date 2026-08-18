@@ -531,6 +531,105 @@ describe('MediaMemoryService.findBindingBySha256', () => {
   });
 });
 
+describe('MediaMemoryService.collectVersionOutputRoles', () => {
+  it('returns an empty set for a version with no recorded outputs', async () => {
+    const source = (await service.recordFileRecognized(recognizedEvent()))!;
+    await expect(
+      service.collectVersionOutputRoles({
+        fileId: source.fileId,
+        fileVersionId: source.fileVersionId,
+        rootFileId: source.rootFileId,
+      }),
+    ).resolves.toEqual(new Set());
+  });
+
+  it('collects roles of outputs committed against the version itself', async () => {
+    const source = (await service.recordFileRecognized(recognizedEvent()))!;
+    await service.commitPolicySucceeded(
+      succeededInput(source, {
+        outputs: [
+          {
+            kind: 'text',
+            objectPath: `/store/objects/${SHA_TEXT}.txt`,
+            sha256: SHA_TEXT,
+            mimeType: 'text/plain',
+            text: 'full transcript',
+            sizeBytes: 15,
+            role: 'transcript',
+          },
+        ],
+      }),
+    );
+    const roles = await service.collectVersionOutputRoles({
+      fileId: source.fileId,
+      fileVersionId: source.fileVersionId,
+      rootFileId: source.rootFileId,
+    });
+    expect(roles).toEqual(new Set(['transcript']));
+  });
+
+  it('sees roles recorded on DERIVED versions (the §4.1 extract→transcribe chain)', async () => {
+    const source = (await service.recordFileRecognized(recognizedEvent()))!;
+    // Step 1: extract_audio on the video → derived audio version.
+    const extract = (await service.commitPolicySucceeded(
+      succeededInput(source, {
+        outputs: [
+          {
+            kind: 'media',
+            objectPath: `/store/objects/${SHA_OUT}.wav`,
+            sha256: SHA_OUT,
+            mediaType: 'audio',
+            metadata: { durationMs: 4_860_000 },
+            sizeBytes: 46_656_000,
+            mimeType: 'audio/wav',
+            role: 'extracted_audio',
+          },
+        ],
+      }),
+    ))!;
+    const audioBinding = extract.mediaBindings.get(SHA_OUT)!;
+    expect(audioBinding).toBeDefined();
+
+    // Step 2: transcribe the DERIVED audio — the transcript entry is
+    // parented to the audio version, not the video version.
+    await service.commitPolicySucceeded(
+      succeededInput(audioBinding, {
+        toolName: 'omni_transcribe_audio',
+        outputs: [
+          {
+            kind: 'text',
+            objectPath: `/store/objects/${SHA_TEXT}.txt`,
+            sha256: SHA_TEXT,
+            mimeType: 'text/plain',
+            text: 'full transcript',
+            sizeBytes: 15,
+            role: 'transcript',
+          },
+        ],
+      }),
+    );
+
+    // Querying the VIDEO version must still surface the transcript role:
+    // the audio version is in its derived subgraph.
+    const roles = await service.collectVersionOutputRoles({
+      fileId: source.fileId,
+      fileVersionId: source.fileVersionId,
+      rootFileId: source.rootFileId,
+    });
+    expect(roles).toEqual(new Set(['transcript', 'extracted_audio']));
+  });
+
+  it('returns an empty set for an unknown version id', async () => {
+    await expect(
+      service.collectVersionOutputRoles({
+        fileId: 'x'.repeat(16),
+        fileVersionId: 'y'.repeat(16),
+        rootFileId: 'z'.repeat(16),
+      }),
+    ).resolves.toEqual(new Set());
+  });
+});
+
 describe('truncateUtf8', () => {
   it('returns short text unchanged', () => {
     expect(truncateUtf8('hello', 10)).toBe('hello');

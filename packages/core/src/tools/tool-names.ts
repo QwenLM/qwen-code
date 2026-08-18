@@ -79,6 +79,12 @@ export const ToolNames = {
   OMNI_CLIP_VIDEO: 'omni_clip_video',
   OMNI_CONVERT_IMAGE: 'omni_convert_image',
   OMNI_TRANSCRIBE_AUDIO: 'omni_transcribe_audio',
+  OMNI_CLIP_IMAGE: 'omni_clip_image',
+  OMNI_CLIP_AUDIO: 'omni_clip_audio',
+  OMNI_CAPTION_IMAGE: 'omni_caption_image',
+  OMNI_CAPTION_AUDIO: 'omni_caption_audio',
+  OMNI_OCR_IMAGE: 'omni_ocr_image',
+  OMNI_UNDERSTAND_VIDEO_SEGMENTS: 'omni_understand_video_segments',
   // Omni memory recall (registered only when omni is enabled AND
   // `omni.memory.recall.mode === 'active'` — D10 mutual exclusion).
   OMNI_RECALL_MEDIA_MEMORY: 'omni_recall_media_memory',
@@ -144,6 +150,12 @@ export const ToolDisplayNames = {
   OMNI_CLIP_VIDEO: 'ClipVideo',
   OMNI_CONVERT_IMAGE: 'ConvertImage',
   OMNI_TRANSCRIBE_AUDIO: 'TranscribeAudio',
+  OMNI_CLIP_IMAGE: 'ClipImage',
+  OMNI_CLIP_AUDIO: 'ClipAudio',
+  OMNI_CAPTION_IMAGE: 'CaptionImage',
+  OMNI_CAPTION_AUDIO: 'CaptionAudio',
+  OMNI_OCR_IMAGE: 'OcrImage',
+  OMNI_UNDERSTAND_VIDEO_SEGMENTS: 'UnderstandVideoSegments',
   OMNI_RECALL_MEDIA_MEMORY: 'RecallMediaMemory',
 } as const;
 
