@@ -13,6 +13,7 @@ import { ensureAuthenticated, gh, ghApi, ghRaw, isOwnerRepo } from '../gh.js';
 import type {
   ClosingIssueRef,
   CommentKind,
+  FetchMeta,
   IssueComment,
   LinkedIssue,
   PrMeta,
@@ -109,6 +110,8 @@ export const githubReader: ReviewPlatformReader = {
       host: hostOfRepoUrl(view.url),
       owner: target.owner.login,
       repo: target.name,
+      // GitHub repos are always exactly two segments.
+      groupPath: `${target.owner.login}/${target.name}`.toLowerCase(),
     };
   },
 
@@ -222,5 +225,41 @@ export const githubReader: ReviewPlatformReader = {
     // transport's trim/CRLF-normalise never touches the body bytes).
     const obj = ghApi(path) as { body?: unknown } | null;
     return typeof obj?.body === 'string' ? obj.body : '';
+  },
+
+  fetchHeadRefSpec(prNumber: number): string {
+    return `pull/${prNumber}/head`;
+  },
+
+  getFetchMeta(prNumber: number, ownerRepo: string): FetchMeta {
+    checkOwnerRepo(ownerRepo);
+    const view = ghJson<{
+      headRefName: string;
+      headRefOid: string;
+      baseRefName: string;
+      additions: number;
+      deletions: number;
+      changedFiles: number;
+      isCrossRepository: boolean;
+      body?: string;
+    }>(
+      'pr',
+      'view',
+      String(prNumber),
+      '--repo',
+      ownerRepo,
+      '--json',
+      'headRefName,headRefOid,baseRefName,additions,deletions,changedFiles,isCrossRepository,body',
+    );
+    return {
+      headRefOid: view.headRefOid,
+      headRefName: view.headRefName,
+      baseRefName: view.baseRefName,
+      isCrossRepository: view.isCrossRepository,
+      body: view.body,
+      additions: view.additions,
+      deletions: view.deletions,
+      changedFiles: view.changedFiles,
+    };
   },
 };
