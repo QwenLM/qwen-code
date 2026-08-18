@@ -1247,8 +1247,39 @@ describe('isTempDirPath', () => {
   });
 
   it('returns false for a regular project path', () => {
-    expect(isTempDirPath(path.join(os.homedir(), 'my-project'))).toBe(false);
+    // Pin the temp root away from the home dir: merge-queue CI legs put
+    // HOME under os.tmpdir(), which would flip this fixture to temp.
+    const tmpdirSpy = vi
+      .spyOn(os, 'tmpdir')
+      .mockReturnValue(
+        process.platform === 'win32'
+          ? 'C:\\Windows\\Temp'
+          : '/nonexistent-tmp-root',
+      );
+    try {
+      expect(isTempDirPath(path.join(os.homedir(), 'my-project'))).toBe(false);
+    } finally {
+      tmpdirSpy.mockRestore();
+    }
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'does not trust a user-set TMPDIR pointing at a persistent dir',
+    () => {
+      // os.tmpdir() follows TMPDIR; a persistent user root (e.g.
+      // $HOME/tmp) must not classify real projects as disposable.
+      const tmpdirSpy = vi
+        .spyOn(os, 'tmpdir')
+        .mockReturnValue(path.join(os.homedir(), 'tmp'));
+      try {
+        expect(isTempDirPath(path.join(os.homedir(), 'tmp', 'myproj'))).toBe(
+          false,
+        );
+      } finally {
+        tmpdirSpy.mockRestore();
+      }
+    },
+  );
 
   it('returns false for nonexistent paths outside tmp', () => {
     // Exercises the realpath fallback for paths that no longer exist.

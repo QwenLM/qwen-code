@@ -439,6 +439,10 @@ export class Storage {
     }
     const now = Date.now();
     for (const entry of entries) {
+      // Yield between entries: scanning a stale candidate streams its
+      // transcripts synchronously and must not hog the freshly started
+      // session's event loop.
+      await new Promise((resolve) => setImmediate(resolve));
       const entryPath = path.join(projectsDir, entry);
       if (entry === currentProjectId) {
         // The active session's own entry: also clear any marker an
@@ -480,7 +484,13 @@ export class Storage {
           // hit live-but-idle (>24 h) temp-rooted sessions, whose
           // sidecar aged past trust and whose appends stopped.
           if (Storage.orphanMarkerExpired(entryPath, now)) {
-            await Storage.removeEntry(entryPath, entry, onBeforeRemove, result);
+            await Storage.removeEntry(
+              entryPath,
+              entry,
+              onBeforeRemove,
+              result,
+              cwds,
+            );
           } else {
             Storage.ensureOrphanMarker(entryPath);
           }
@@ -512,6 +522,7 @@ export class Storage {
       removed: string[];
       errors: Array<{ entry: string; error: unknown }>;
     },
+    cwds?: string[],
   ): Promise<void> {
     if (onBeforeRemove) {
       try {
@@ -519,6 +530,20 @@ export class Storage {
       } catch {
         // Salvage failures must never block removal.
       }
+    }
+    // The salvage await reads every transcript of the doomed entry,
+    // widening the check-then-delete window: a cwd may reappear (media
+    // plugged back in) and a new session may start writing into this
+    // very entry during that time. Re-run the cheap gates before the
+    // irreversible step and bail out if the entry is protected again.
+    if (cwds?.some((cwd) => fs.existsSync(cwd) && !isTempDirPath(cwd))) {
+      Storage.removeOrphanMarker(entryPath);
+      return;
+    }
+    const newest = Storage.newestFileMtimeMs(entryPath);
+    if (newest > 0 && Date.now() - newest <= Storage.ORPHAN_STALE_AGE_MS) {
+      Storage.removeOrphanMarker(entryPath);
+      return;
     }
     fs.rmSync(entryPath, { recursive: true, force: true });
     result.removed.push(entry);

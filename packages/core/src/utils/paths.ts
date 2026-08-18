@@ -565,9 +565,33 @@ export function isTempDirPath(p: string): boolean {
   if (process.platform !== 'win32') {
     tmpRoots.push('/tmp');
   }
-  return tmpRoots.some((root) =>
-    isSubpath(realpathNearestExisting(root), real),
+  return tmpRoots.some(
+    (root) =>
+      isSystemOwnedTempRoot(root) &&
+      isSubpath(realpathNearestExisting(root), real),
   );
+}
+
+/**
+ * `os.tmpdir()` follows the user-settable TMPDIR/TEMP env vars; a user
+ * who points them at a persistent directory (e.g. `$HOME/tmp`) must not
+ * see real projects under that root classified as disposable. On POSIX,
+ * trust only roots the OS itself owns; Windows keeps its well-known
+ * per-user temp locations.
+ */
+function isSystemOwnedTempRoot(root: string): boolean {
+  if (process.platform === 'win32') return true;
+  const real = realpathNearestExisting(root);
+  const systemBases = [
+    '/tmp',
+    '/private/tmp',
+    '/var/tmp',
+    '/private/var/tmp',
+    '/var/folders',
+    '/private/var/folders',
+    '/run/user',
+  ];
+  return systemBases.some((base) => isSubpath(base, real));
 }
 
 /**

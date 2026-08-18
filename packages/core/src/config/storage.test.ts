@@ -945,6 +945,45 @@ describe('Storage – cleanOrphanProjectDirs', () => {
     expect(actualFs.existsSync(path.join(projectsDir, '-glued'))).toBe(false);
   });
 
+  it('collects cwds from a final record without a trailing newline (R4-5)', async () => {
+    // Crash-mid-append residue: the last record has no '\n', so it is
+    // only reachable via the EOF-leftover branch of the stream scan.
+    const chats = path.join(projectsDir, '-no-newline', 'chats');
+    actualFs.mkdirSync(chats, { recursive: true });
+    actualFs.writeFileSync(
+      path.join(chats, 'session-1.jsonl'),
+      JSON.stringify({ cwd: goneCwd }),
+    );
+    ageEntry('-no-newline');
+    await sweepPastMarkerGrace('-no-newline');
+    expect(actualFs.existsSync(path.join(projectsDir, '-no-newline'))).toBe(
+      false,
+    );
+  });
+
+  it('recovers a live cwd from a record straddling a chunk boundary (R4-5)', async () => {
+    // The second record starts just before the 64 KB read boundary and
+    // ends past it; broken chunk stitching would drop the live cwd and
+    // the entry would be marked for removal.
+    const chats = path.join(projectsDir, '-boundary', 'chats');
+    actualFs.mkdirSync(chats, { recursive: true });
+    actualFs.writeFileSync(
+      path.join(chats, 'session-1.jsonl'),
+      JSON.stringify({ cwd: goneCwd, pad: 'x'.repeat(65490) }) +
+        '\n' +
+        JSON.stringify({ cwd: process.cwd() }) +
+        '\n',
+    );
+    ageEntry('-boundary');
+    await Storage.cleanOrphanProjectDirs('current');
+    expect(actualFs.existsSync(path.join(projectsDir, '-boundary'))).toBe(true);
+    expect(
+      actualFs.existsSync(
+        path.join(projectsDir, '-boundary', '.qwen-orphan-since'),
+      ),
+    ).toBe(false);
+  });
+
   it('marks gone non-temp entries first and removes only once the marker ages (R2-2)', async () => {
     // A vanished non-temp cwd may be a transiently absent mount, so the
     // first sweep writes a marker instead of deleting; removal happens
@@ -988,6 +1027,22 @@ describe('Storage – cleanOrphanProjectDirs', () => {
     };
     await sweepPastMarkerGrace('-hooked', hook);
     expect(seen).toEqual([path.join(projectsDir, '-hooked')]);
+  });
+
+  it('aborts removal when the entry becomes fresh during salvage (R4-1)', async () => {
+    // The salvage await widens the check-then-delete window: a new
+    // session may start writing into the doomed entry in that time, and
+    // the re-check before rmSync must abort.
+    writeSession('-raced', goneCwd);
+    ageEntry('-raced');
+    const hook = async (entryPath: string) => {
+      actualFs.writeFileSync(
+        path.join(entryPath, 'chats', 'session-1.jsonl'),
+        JSON.stringify({ cwd: goneCwd }) + '\n',
+      );
+    };
+    await sweepPastMarkerGrace('-raced', hook);
+    expect(actualFs.existsSync(path.join(projectsDir, '-raced'))).toBe(true);
   });
 
   it('keeps stale entries with files but no readable cwd records', async () => {
