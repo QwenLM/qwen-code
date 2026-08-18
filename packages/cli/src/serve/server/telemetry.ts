@@ -318,6 +318,18 @@ export const legacySessionTelemetryRoutes = [
     route: 'DELETE /session/:id/pending-prompts/:promptId',
   },
   {
+    method: 'GET',
+    path: '/session/:id/turns/current',
+    attribution: 'handler_resolved',
+    route: 'GET /session/:id/turns/current',
+  },
+  {
+    method: 'GET',
+    path: '/session/:id/turns/:promptId',
+    attribution: 'handler_resolved',
+    route: 'GET /session/:id/turns/:promptId',
+  },
+  {
     method: 'POST',
     path: '/session/:id/shell',
     attribution: 'handler_resolved',
@@ -488,6 +500,12 @@ export function resolveDaemonTelemetryRoute(
   }
   if (req.method === 'GET' && /^\/workspaces\/[^/]+\/sessions$/.test(path)) {
     return { route: 'GET /workspace/:id/sessions' };
+  }
+  if (
+    req.method === 'GET' &&
+    /^\/workspaces\/[^/]+\/sessions\/live-state$/.test(path)
+  ) {
+    return { route: 'GET /workspaces/:workspace/sessions/live-state' };
   }
   if (req.method === 'GET' && /^\/workspace\/[^/]+\/session-info$/.test(path)) {
     return { route: 'GET /workspace/:id/session-info' };

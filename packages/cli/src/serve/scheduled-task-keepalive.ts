@@ -91,6 +91,11 @@ export interface KeepaliveBridge {
     sourceId?: string;
   }): Promise<{ sessionId: string }>;
   closeSession(sessionId: string): Promise<unknown>;
+  /** Advance the in-memory session-catalog revision after a successful
+   * persisted removal driven by keepalive cleanup. Optional so existing
+   * structural test fakes stay source-compatible; the production bridge
+   * always provides it. */
+  markSessionCatalogChanged?(): void;
   updateSessionMetadata(
     sessionId: string,
     metadata: { displayName?: string },
@@ -274,9 +279,10 @@ export function startScheduledTaskKeepalive(
     opts.cleanupSession ??
     (async (sessionId: string) => {
       await bridge.closeSession(sessionId);
-      await new SessionService(boundWorkspace, {
+      const removed = await new SessionService(boundWorkspace, {
         runtimeBaseDir: opts.runtimeBaseDir,
       }).removeSession(sessionId);
+      if (removed) bridge.markSessionCatalogChanged?.();
     });
 
   // Per-session revive state: `nextAttemptAt` gates retries after failures so a
