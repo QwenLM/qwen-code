@@ -4463,7 +4463,12 @@ export class Session implements SessionContext {
               // The orphaned content is already persisted; recording a new user
               // message would duplicate the turn in the transcript.
             } else if (isRetry) {
-              this.#getCurrentChat().stripOrphanedUserEntriesFromHistory();
+              // Use the client wrapper, not the raw chat strip: the wrapper
+              // also clears FileReadCache and forces a full IDE context
+              // resend, both required for a clean retry.
+              this.config
+                .getGeminiClient()!
+                .stripOrphanedUserEntriesFromHistory();
             } else if (!isSlashInput || slashCommandName !== 'advisor') {
               // record user message for session management. Only `/advisor`
               // defers its record to after command resolution below — a
