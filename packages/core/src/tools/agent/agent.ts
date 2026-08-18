@@ -5,7 +5,6 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import * as path from 'node:path';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from '../tools.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
 import {
@@ -65,6 +64,7 @@ import {
   GitWorktreeService,
   writeWorktreeSessionMarker,
 } from '../../services/gitWorktreeService.js';
+import { resolveExternalWorktreeDir } from '../../agents/worktree-pin.js';
 import { FileDiscoveryService } from '../../services/fileDiscoveryService.js';
 import { WorkspaceContext } from '../../utils/workspaceContext.js';
 import { getStartupContextLength } from '../../utils/environmentContext.js';
@@ -117,7 +117,7 @@ import { createDenialState } from '../../permissions/denialTracking.js';
 import { isTeammate } from '../../agents/team/identity.js';
 import { isSubagentLikeExecutionContext } from '../../agents/runtime/subagent-plan-tool-policy.js';
 import {
-  getAgentJsonlPath,
+  buildAgentTranscriptAttach,
   getAgentMetaPath,
   attachJsonlTranscriptWriter,
   patchAgentMeta,
@@ -128,23 +128,8 @@ import type {
   BackgroundSlotReservation,
   ResidentBackgroundAgent,
 } from '../../agents/background-tasks.js';
-import { getGitBranch } from '../../utils/gitUtils.js';
 import { buildModelIdContext, resolveModelId } from '../../utils/modelId.js';
 import type { AuthOverrides } from '../../models/content-generator-config.js';
-
-// Memoize git branch per cwd for the agent-launch path. `getGitBranch`
-// shells out to `git rev-parse` synchronously; caching avoids the per-launch
-// execSync on a path that runs every time a subagent (foreground or
-// background) starts. Branches don't change within a process under normal
-// use; the transcript annotation is best-effort audit metadata, so a stale
-// value after a user `git checkout` mid-session is acceptable.
-const gitBranchCache = new Map<string, string | undefined>();
-function getCachedGitBranch(cwd: string): string | undefined {
-  if (gitBranchCache.has(cwd)) return gitBranchCache.get(cwd);
-  const branch = getGitBranch(cwd);
-  gitBranchCache.set(cwd, branch);
-  return branch;
-}
 
 function persistBackgroundCancellation(
   metaPath: string,
@@ -280,98 +265,6 @@ function getForkProfileModeError(config: Config): string | undefined {
   if (config.getBareMode()) return FORK_PROFILE_BARE_MODE_ERROR;
   if (config.isSafeMode()) return FORK_PROFILE_SAFE_MODE_ERROR;
   return undefined;
-}
-
-/**
- * Resolves and validates an `AgentParams.working_dir`: an EXISTING,
- * caller-owned git worktree that a sub-agent or teammate should be pinned to
- * (e.g. the PR-review worktree `/review`'s `fetch-pr` provisions). Unlike
- * `isolation:'worktree'`, the harness neither creates nor tears down this
- * directory — it only rebinds the child Config's cwd surfaces to it.
- *
- * Git's worktree registry stops a bad path from aiming the sub-agent somewhere
- * it should not be:
- *
- * - It must be a REGISTERED linked worktree of this repository, enforced by
- *   `isRegisteredLinkedWorktree`: git's own registry entry for the path must
- *   point back at it, and it must not be the primary working tree. That
- *   rejects arbitrary directories, sibling `git init`s, plain sub-directories
- *   (including a stale registry record whose directory was recreated),
- *   other repositories' worktrees, and a directory carrying a copied `.git`
- *   file.
- *
- * `getRegisteredWorktreeBranch` is consulted only for a best-effort branch
- * label; it is deliberately NOT a gate, since it returns null for a legitimate
- * detached-HEAD worktree.
- *
- * @returns the resolved absolute path + branch, or `{ error }` with a
- *   user-facing reason.
- */
-async function resolveExternalWorktreeDir(
-  config: Config,
-  workingDir: string,
-): Promise<
-  | { path: string; branch: string; slug: string; repoRoot: string }
-  | { error: string }
-> {
-  const parentCwd = config.getTargetDir();
-  const resolvedPath = path.resolve(parentCwd, workingDir);
-
-  const probe = new GitWorktreeService(parentCwd);
-  const gitCheck = await probe.checkGitAvailable();
-  if (!gitCheck.available) {
-    return {
-      error: `Cannot use working_dir: ${gitCheck.error ?? 'git is not available'}.`,
-    };
-  }
-  // Mirror the isolation:'worktree' preflight. Without it, a non-repo parent
-  // dir yields the confusing "not a registered git worktree" error below
-  // (getRepoTopLevel() → null, validation then fails) instead of naming the
-  // real cause.
-  if (!(await probe.isGitRepository())) {
-    return {
-      error: `Cannot use working_dir: ${parentCwd} is not a git repository.`,
-    };
-  }
-  // Anchor at the repo top-level so the common-dir comparison inside
-  // getRegisteredWorktreeBranch is against the repository, not a monorepo
-  // subdirectory the parent happened to launch from.
-  const repoRoot = (await probe.getRepoTopLevel()) ?? parentCwd;
-  const wtService =
-    repoRoot === parentCwd ? probe : new GitWorktreeService(repoRoot);
-
-  // The single authoritative gate: the path must be a REGISTERED linked
-  // worktree of this repository — git's own registry entry for it points back
-  // at exactly this path, and it is not the primary working tree. That one
-  // check rejects the main tree, a plain sub-directory (including a stale
-  // registry record whose directory was recreated), a worktree belonging to
-  // another repo, and a hand-crafted directory carrying a copied `.git` file.
-  if (!(await wtService.isRegisteredLinkedWorktree(resolvedPath))) {
-    // Fails closed (returns false) on a git error too, so the cause is either
-    // "not a registered linked worktree" (main tree / unregistered) or "its
-    // git metadata could not be read" — name both rather than assert one.
-    return {
-      error:
-        `working_dir "${resolvedPath}" is not a registered linked worktree of ` +
-        `this repository (it is the main working tree, is absent from \`git ` +
-        `worktree list\`, or its git metadata could not be read) — pinning a ` +
-        `sub-agent there would not isolate it. Pass a worktree created via ` +
-        `\`git worktree add\`.`,
-    };
-  }
-  // Best-effort branch label only — never a gate. A detached-HEAD worktree
-  // (`git worktree add --detach`, or a checkout of a bare commit) is a
-  // legitimate configuration with no branch, and `getRegisteredWorktreeBranch`
-  // returns null for it. `branch` is unused for caller-owned worktrees anyway
-  // (cleanup short-circuits on `externallyManaged`); it is carried only for
-  // parity with the isolation path.
-  const info = await wtService.getRegisteredWorktreeBranch(resolvedPath);
-  return {
-    path: resolvedPath,
-    branch: info?.branch ?? '',
-    slug: path.basename(resolvedPath),
-    repoRoot,
-  };
 }
 
 const TEAM_AGENT_NAME_PROPERTY = {
@@ -1542,6 +1435,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             : {}),
           ...(typeof event.resultDisplay === 'string'
             ? { resultDisplay: event.resultDisplay }
+            : {}),
+          ...(preserveProtocolPayloads && event.boundaryArtifact
+            ? { boundaryArtifact: event.boundaryArtifact }
             : {}),
         };
 
@@ -3192,17 +3088,22 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
         const projectDir = this.config.storage.getProjectDir();
         const sessionId = this.config.getSessionId();
-        const jsonlPath = getAgentJsonlPath(
-          projectDir,
-          sessionId,
-          hookOpts.agentId,
-        );
+        const { jsonlPath, options: transcriptAttachOptions } =
+          buildAgentTranscriptAttach(this.config, hookOpts.agentId, {
+            agentName: subagentConfig.name,
+            agentColor: subagentConfig.color,
+            // Seed the JSONL with the launching prompt so the transcript is
+            // self-describing — readers don't need to consult .meta.json to
+            // know what the agent was asked to do.
+            initialUserPrompt: this.params.prompt,
+            bootstrapHistory: isFork ? bgInitialMessages : undefined,
+            launchTaskPrompt: isFork ? bgTaskPrompt : undefined,
+          });
         const metaPath = getAgentMetaPath(
           projectDir,
           sessionId,
           hookOpts.agentId,
         );
-        const projectRoot = this.config.getProjectRoot();
         try {
           // Register before writing the meta sidecar — see the matching
           // foreground call below for the full rationale. Keeping the
@@ -3294,21 +3195,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         const { cleanup: cleanupJsonl } = attachJsonlTranscriptWriter(
           bgEventEmitter,
           jsonlPath,
-          {
-            agentId: hookOpts.agentId,
-            agentName: subagentConfig.name,
-            agentColor: subagentConfig.color,
-            sessionId,
-            cwd: projectRoot,
-            version: this.config.getCliVersion() || 'unknown',
-            gitBranch: getCachedGitBranch(projectRoot),
-            // Seed the JSONL with the launching prompt so the transcript is
-            // self-describing — readers don't need to consult .meta.json to
-            // know what the agent was asked to do.
-            initialUserPrompt: this.params.prompt,
-            bootstrapHistory: isFork ? bgInitialMessages : undefined,
-            launchTaskPrompt: isFork ? bgTaskPrompt : undefined,
-          },
+          transcriptAttachOptions,
         );
         writeAgentMeta(metaPath, {
           agentId: hookOpts.agentId,
@@ -3997,17 +3884,20 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       const registry = this.config.getBackgroundTaskRegistry();
       const fgProjectDir = this.config.storage.getProjectDir();
       const fgSessionId = this.config.getSessionId();
-      const fgJsonlPath = getAgentJsonlPath(
-        fgProjectDir,
-        fgSessionId,
-        hookOpts.agentId,
-      );
+      const { jsonlPath: fgJsonlPath, options: fgTranscriptAttachOptions } =
+        buildAgentTranscriptAttach(this.config, hookOpts.agentId, {
+          agentName: subagentConfig.name,
+          agentColor: subagentConfig.color,
+          // Seed the JSONL with the launching prompt so the transcript
+          // is self-describing — readers don't need the meta sidecar to
+          // know what the agent was asked to do.
+          initialUserPrompt: this.params.prompt,
+        });
       const fgMetaPath = getAgentMetaPath(
         fgProjectDir,
         fgSessionId,
         hookOpts.agentId,
       );
-      const fgProjectRoot = this.config.getProjectRoot();
       // Declared `let` so the `finally` block can release the writer's
       // listeners + fd even if the attach itself throws partway through.
       // The attach happens inside the `try` below — keeping it outside
@@ -4074,19 +3964,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         ({ cleanup: cleanupFgJsonl } = attachJsonlTranscriptWriter(
           this.eventEmitter,
           fgJsonlPath,
-          {
-            agentId: hookOpts.agentId,
-            agentName: subagentConfig.name,
-            agentColor: subagentConfig.color,
-            sessionId: fgSessionId,
-            cwd: fgProjectRoot,
-            version: this.config.getCliVersion() || 'unknown',
-            gitBranch: getCachedGitBranch(fgProjectRoot),
-            // Seed the JSONL with the launching prompt so the transcript
-            // is self-describing — readers don't need the meta sidecar to
-            // know what the agent was asked to do.
-            initialUserPrompt: this.params.prompt,
-          },
+          fgTranscriptAttachOptions,
         ));
         // Register before writing the meta sidecar: if register() throws
         // (e.g. duplicate agent id), we leave no orphaned 'running' meta

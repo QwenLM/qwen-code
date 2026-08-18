@@ -58,6 +58,21 @@ function makeAgentWithSubTool(subTool: ACPToolCall): ACPToolCall {
 }
 
 describe('SubAgentPanel sub-tool timestamps', () => {
+  it('marks a failed sub-tool with an error icon instead of text', () => {
+    const container = renderPanel(
+      makeAgentWithSubTool({
+        callId: 'sub-1',
+        toolName: 'Read',
+        status: 'failed',
+      }),
+    );
+
+    const errorIcon = container.querySelector('[class*="iconError"]');
+    expect(errorIcon).not.toBeNull();
+    expect(errorIcon?.querySelector('svg')).not.toBeNull();
+    expect(container.textContent).not.toContain('Failed');
+  });
+
   it('renders completed result content through assistant markdown', () => {
     const container = renderPanel({
       callId: 'agent-1',

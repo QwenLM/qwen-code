@@ -12,6 +12,7 @@ import type {
   DaemonSessionActions,
 } from '@qwen-code/webui/daemon-react-sdk';
 import { I18nProvider } from '../../i18n';
+import { TOAST_REQUEST_EVENT, type ToastRequestDetail } from '../ToastHost';
 import type { ArtifactWorkspaceTarget } from './useArtifactWorkspaceTarget';
 import type { TurnOutputScheduledTask } from './TurnOutputs';
 
@@ -193,6 +194,22 @@ const validCodeReviewDocument = JSON.stringify({
   markdownReportPath: '.qwen/reviews/review.md',
 });
 
+function linkArtifact(): DaemonSessionArtifact {
+  return {
+    id: 'review-artifact',
+    kind: 'link',
+    storage: 'external_url',
+    source: 'tool',
+    status: 'available',
+    title: 'Issue 9059',
+    url: 'https://github.com/QwenLM/qwen-code/issues/9059',
+    retention: 'ephemeral',
+    clientRetained: false,
+    createdAt: '2026-08-13T06:13:59.048Z',
+    updatedAt: '2026-08-13T06:13:59.048Z',
+  };
+}
+
 function artifactPanel(
   artifact: DaemonSessionArtifact,
   owner: { workspaceCwd: string; workspaceId: string } | null = {
@@ -289,6 +306,7 @@ function scheduledTaskPanel(
 }
 
 afterEach(() => {
+  delete (window as { __TAURI__?: unknown }).__TAURI__;
   for (const { root, container } of mounted) {
     act(() => root.unmount());
     container.remove();
@@ -646,6 +664,125 @@ describe('ArtifactPanel code review artifacts', () => {
       'workspace files',
     );
     expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
+  });
+
+  it('opens external_url link artifacts through the desktop opener', async () => {
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    (window as { __TAURI__?: unknown }).__TAURI__ = { core: { invoke } };
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(artifactPanel(linkArtifact())));
+    await flush();
+
+    const button = Array.from(container.querySelectorAll('a')).find(
+      (el) => el.textContent === 'Open link',
+    );
+    expect(button).toBeTruthy();
+    expect(button!.getAttribute('href')).toBe(
+      'https://github.com/QwenLM/qwen-code/issues/9059',
+    );
+    expect(button!.getAttribute('target')).toBe('_blank');
+    act(() => {
+      button!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }),
+      );
+    });
+    expect(invoke).toHaveBeenCalledWith('plugin:opener|open_url', {
+      url: 'https://github.com/QwenLM/qwen-code/issues/9059',
+    });
+  });
+
+  it('routes modified external_url link clicks through the desktop opener', async () => {
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    (window as { __TAURI__?: unknown }).__TAURI__ = { core: { invoke } };
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(artifactPanel(linkArtifact())));
+    await flush();
+
+    const button = Array.from(container.querySelectorAll('a')).find(
+      (el) => el.textContent === 'Open link',
+    );
+    expect(button).toBeTruthy();
+    const event = new MouseEvent('click', {
+      bubbles: true,
+      cancelable: true,
+      button: 1,
+      ctrlKey: true,
+    });
+    act(() => {
+      button!.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(true);
+    expect(invoke).toHaveBeenCalledWith('plugin:opener|open_url', {
+      url: 'https://github.com/QwenLM/qwen-code/issues/9059',
+    });
+  });
+
+  it('requests an error toast when opening a link artifact fails', async () => {
+    const invoke = vi.fn().mockRejectedValue(new Error('no browser'));
+    (window as { __TAURI__?: unknown }).__TAURI__ = { core: { invoke } };
+    const toasts: ToastRequestDetail[] = [];
+    const onToast = (e: Event) =>
+      toasts.push((e as CustomEvent<ToastRequestDetail>).detail);
+    window.addEventListener(TOAST_REQUEST_EVENT, onToast);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(artifactPanel(linkArtifact())));
+    await flush();
+
+    const button = Array.from(container.querySelectorAll('a')).find(
+      (el) => el.textContent === 'Open link',
+    );
+    expect(button).toBeTruthy();
+    act(() => {
+      button!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }),
+      );
+    });
+    await flush();
+    window.removeEventListener(TOAST_REQUEST_EVENT, onToast);
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0].tone).toBe('error');
+    expect(toasts[0].message).toContain('no browser');
+  });
+
+  it('keeps relative link artifacts on the native anchor path', async () => {
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    (window as { __TAURI__?: unknown }).__TAURI__ = { core: { invoke } };
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(artifactPanel({ ...linkArtifact(), url: '#artifact' })),
+    );
+    await flush();
+
+    const button = Array.from(container.querySelectorAll('a')).find(
+      (el) => el.textContent === 'Open link',
+    );
+    expect(button).toBeTruthy();
+    const event = new MouseEvent('click', {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+    });
+    act(() => {
+      button!.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(false);
+    expect(invoke).not.toHaveBeenCalled();
   });
 
   it('still sends an ordinary JSON artifact to the generic editor', async () => {

@@ -192,62 +192,153 @@ export function renderShellLayerBriefList(
 
 /** The marker an auditor writes to receipt a walked layer — the `Budget gap:`
  *  analogue. `Layer walked: <id> — <note>`; the note is free text after the id. */
-const LAYER_RECEIPT_LINE_RE =
+export const LAYER_RECEIPT_LINE_RE =
   /^[ \t]*(?:[-*+]|\d+[.)])?[ \t]*[*_~]{0,3}layer\s+walked[*_~]{0,3}[ \t]*[:：][\s*_~`]*([a-z][a-z0-9-]*)/i;
 
-/** Cheap pre-filter so the line walk skips returns with no marker at all. */
-const LAYER_HINT_RE = /layer\s+walked/i;
+/**
+ * The receipt marker ANYWHERE in a line — the `INLINE_BUDGET_GAP_RE`
+ * analogue: a layer label fused onto the no-issues receipt's own line
+ * (`No issues found — Layer walked: lexing`) slips past the line-anchored
+ * parser above, and the clause capture would otherwise absorb the label
+ * and take its walk verb AND its length from it (#9213). Only for cutting
+ * a clause, never for minting receipts — the line form above stays the
+ * receipt authority.
+ */
+export const INLINE_LAYER_WALKED_RE = /layer\s+walked[*_~`]{0,3}[ \t]*[:：]/i;
 
 /**
- * The one CommonMark tokenizer this module uses to LOCATE quoted regions. A
- * hand-rolled fence/blockquote scanner diverged from the spec round after round
- * — a second parser is a divergence hunt, and this skill's own lesson is that the
- * oracle must come from the authority the code is modelling, not a self-consistent
- * re-implementation. So it defers to `markdown-it`, the parser GitHub's own family
- * uses. `html: true` so a raw-HTML block registers as a quoted block too.
+ * Tests the text immediately AFTER a captured id: an optional run of trailing
+ * punctuation/symbols followed by either a non-space, non-punctuation code point
+ * OR a CONNECTOR (`\p{Pc}`) means the id is STITCHED to more of a visible word
+ * GitHub renders as one token (a letter/digit/mark — `toctou_x`, `toctoué` — a
+ * punctuation-then-more run — `toctou.x`, `toctou‐x` — the dropped-node sentinel
+ * — `` toctou`x` `` — or a lone connector, which UAX#29 joins with no word break:
+ * `toctou_` renders one word). A clean receipt has nothing but non-connector
+ * trailing punctuation before the next space: `toctou`, `toctou.`, `toctou — note`.
+ */
+const TRAILING_STITCH = /^[\p{P}\p{S}]*(?:[^\s\p{P}\p{S}]|\p{Pc})/u;
+
+/**
+ * The one CommonMark tokenizer this module uses. A hand-rolled fence/blockquote
+ * scanner diverged from the spec round after round — a second parser is a
+ * divergence hunt, and this skill's own lesson is that the oracle must come from
+ * the authority the code is modelling. So it defers to `markdown-it`, the parser
+ * GitHub's own family uses, and reads receipts from the prose it RENDERS (see
+ * `usedLines`). `html: true` so raw HTML is tokenized — and thus excluded — too.
  */
 const MD = new MarkdownIt({ html: true });
 
-/**
- * The 0-based source line indices inside a QUOTED block — fenced or indented
- * code, an HTML block, or the span of a blockquote — from the block tokens'
- * `.map` line ranges. A parser throw quotes nothing (an unreadable return still
- * has its inline spans guarded by the receipt regex's no-leading-backtick rule).
- */
-function quotedLines(text: string): Set<number> {
-  const quoted = new Set<number>();
-  let tokens: ReturnType<typeof MD.parse>;
-  try {
-    tokens = MD.parse(text, {});
-  } catch {
-    return quoted;
-  }
-  for (const t of tokens) {
-    if (
-      t.map &&
-      (t.type === 'fence' ||
-        t.type === 'code_block' ||
-        t.type === 'html_block' ||
-        t.type === 'blockquote_open')
-    ) {
-      for (let i = t.map[0]; i < t.map[1]; i++) quoted.add(i);
-    }
-  }
-  return quoted;
-}
+// Stands in for a dropped inline node (code span, inline HTML, image) in the
+// reconstructed prose. A single NON-whitespace, non-marker code point (U+0000):
+// unlike a newline it does not FORGE a line start, and unlike an empty string it
+// does not let the text on either side STITCH — the receipt regex's leading
+// anchor (`^\s*…`) and its id class (`[\s*_~\`]*[a-z]`) both reject it, so a
+// marker only ever begins a reconstructed line when it truly begins a visible one.
+const DROPPED_INLINE = '\u0000';
+
+// Directionality controls REORDER visible text rather than hide it, so deleting
+// them would make the reconstruction the LOGICAL text, not what a human sees
+// (`<RLO>Layer walked: toctou` displays reversed — never a readable receipt). Map
+// them to the dropped-node sentinel instead: opaque, so they break a match right
+// where they disrupt the visible reading. `\p{Bidi_Control}` is the whole family
+// (LRM/RLM/ALM, embeddings/overrides U+202A–202E, isolates U+2066–2069),
+// property-defined so it cannot drift.
+const BIDI_CONTROL = /\p{Bidi_Control}/gu;
+
+// Code points GitHub renders as NOTHING (truly invisible, not reordering): every
+// non-bidi format character (`\p{Cf}` — zero-width spaces/joiners, BOM, soft
+// hyphen, …) and variation selector, plus VT, FORM FEED (CSS does not collapse it
+// to a space), the combining grapheme joiner, and the line/paragraph separators
+// (not `\p{Cf}`). A Unicode PROPERTY class, not a hand-enumerated one, so it
+// cannot silently MISS a member the way a list does — enumerating by hand is what
+// left the bidi isolates open. Same family the sanitizer's `PROMPT_UNSAFE_INVISIBLES`
+// (channels/base) guards, the same drift-proof way. markdown-it decodes numeric
+// entities at parse time, so any of these can land in a text child (`&#8203;`,
+// `&#12;`). Left in the prose view they would glue a marker phrase GitHub shows
+// fused (`layerwalked`) or wedge invisibly between an id and following text;
+// deleted so the reconstruction is what a human sees (a wedge just before a REAL
+// break still leaves a clean receipt). Bidi controls are `\p{Cf}` too, but the
+// sentinel map above already replaced them.
+const INVISIBLE_FORMAT =
+  /[\p{Cf}\p{Variation_Selector}\u000B\u034F\u000C\u2028\u2029]/gu; // eslint-disable-line no-control-regex, no-misleading-character-class
 
 /**
- * The lines an auditor is USING, not quoting: every line outside a quoted block
- * (`quotedLines`). Shared by the receipt parser and the opt-in prose estimate so
- * neither credits a layer from quoted text — the module's "a return that QUOTES
- * the marker is not USING it" invariant, deferred to the authoritative parser.
+ * The lines an auditor is USING, not quoting — the VISIBLE PROSE markdown-it
+ * renders, reconstructed from its token stream. A quoted block (a fenced or
+ * indented code block, an HTML block, or anything inside a blockquote) yields
+ * nothing; a prose block (paragraph, heading, list item) yields its text nodes
+ * and visible line breaks, with inline code spans, raw HTML (tags, comments,
+ * attribute values, raw-text elements) and the title/alt attributes of links and
+ * images reduced to a non-line-starting sentinel — GitHub renders those as
+ * nothing, as monospace, or inline/escaped, never as a line-leading receipt.
+ *
+ * Reading the rendered prose, not the source lines, is what closes the divergence
+ * outright: a block-only pass still leaked a marker hidden in an INLINE construct
+ * — a multi-line inline code span, an HTML comment or attribute, a link title, a
+ * link-reference continuation — as a live receipt, and enumerating those one by
+ * one just opens the next. A parser throw (unconstructed in practice) falls back
+ * to the raw source lines, where the anchored receipt regex still holds.
  */
 function* usedLines(finalText: string): Generator<string> {
   const src = finalText.replace(/\r\n?/g, '\n');
-  const quoted = quotedLines(src);
-  const lines = src.split('\n');
-  for (let i = 0; i < lines.length; i++) {
-    if (!quoted.has(i)) yield lines[i];
+  let tokens: ReturnType<typeof MD.parse>;
+  try {
+    tokens = MD.parse(src, {});
+  } catch {
+    yield* src.split('\n');
+    return;
+  }
+  let blockquoteDepth = 0;
+  for (const t of tokens) {
+    if (t.type === 'blockquote_open') blockquoteDepth++;
+    else if (t.type === 'blockquote_close') blockquoteDepth--;
+    else if (t.type === 'inline' && blockquoteDepth === 0) {
+      // The visible prose of this inline, reconstructed the way GitHub lays it
+      // out. A visible line break — a soft/hard break, or a `<br>` tag, which
+      // GitHub renders as one — splits the line. Every OTHER inline node — a code
+      // span, other inline HTML (a raw tag, a comment, or a raw-text element like
+      // `<script>`/`<title>` whose inner text markdown-it exposes as a child but
+      // GitHub shows only inline or escaped), or an image — does NOT start a new
+      // visible line on GitHub, so it must not start one here: it is replaced by
+      // `DROPPED_INLINE`, a non-whitespace sentinel that neither forges a line
+      // start (`x <script>Layer walked: id` stays one line, marker mid-line →
+      // rejected, as GitHub renders it) nor lets fragments stitch (`Layer walked:
+      // <x>id` → the id capture stops at the sentinel). `text` is prose, except a
+      // raw newline in it can only come from a decoded numeric entity (`&#10;`) —
+      // a real source break is a `softbreak`/`hardbreak` TOKEN, never text — and
+      // GitHub collapses that entity LF to whitespace, so it must not split a line
+      // either. Emphasis and link open/close nodes are NEITHER a break nor a
+      // sentinel: their visible text children flow through (a link's visible text
+      // is a real receipt).
+      let prose = '';
+      for (const c of t.children ?? []) {
+        if (c.type === 'text')
+          prose += c.content
+            .replace(/[\r\n]+/g, ' ')
+            .replace(BIDI_CONTROL, DROPPED_INLINE)
+            .replace(INVISIBLE_FORMAT, '');
+        else if (c.type === 'softbreak' || c.type === 'hardbreak')
+          prose += '\n';
+        else if (
+          c.type === 'html_inline' &&
+          // A real GitHub break: `<br>`, self-closing, or with attributes — but
+          // NOT a `<br-…>` custom element (a hyphen keeps the tag name going, and
+          // GitHub strips the non-allowlisted tag, leaving no break). After `br`
+          // the tag must END, or continue with whitespace/slash then attributes.
+          /^<br(?:[ \t\n\f\r/][^>]*)?>$/i.test(c.content)
+        )
+          prose += '\n';
+        else if (
+          c.type === 'code_inline' ||
+          c.type === 'html_inline' ||
+          c.type === 'image'
+        )
+          prose += DROPPED_INLINE;
+      }
+      yield* prose.split('\n');
+    }
+    // fence, code_block, html_block, and any inline inside a blockquote yield
+    // nothing — they are quoted.
   }
 }
 
@@ -263,11 +354,33 @@ export function parseLayerReceipts(
   taxonomy: readonly DefectLayer[] = SHELL_MODEL_LAYERS,
 ): Set<string> {
   const ids = new Set<string>();
-  if (!LAYER_HINT_RE.test(finalText)) return ids;
+  // Cheap pre-filter. It reads RAW text but the parser reads DECODED, markup-joined
+  // prose, so it must not veto a marker whose words are split by inline markup —
+  // even MID-word, and even when BOTH words are (`La*yer* wal*ked*`) — or are
+  // entity-encoded (`Layer&#32;walked`). Strip the inline-markup delimiters first,
+  // then skip only when BOTH words are absent from that AND no entity could decode
+  // into them; a single surviving word (or any entity) runs the full parse.
+  const bare = finalText.replace(/[*_~`[\]()]/g, '');
+  if (
+    !/layer/i.test(bare) &&
+    !/walked/i.test(bare) &&
+    !/&[#a-z]/i.test(finalText)
+  )
+    return ids;
   const known = new Set(taxonomy.map((l) => l.id));
   for (const line of usedLines(finalText)) {
     const m = LAYER_RECEIPT_LINE_RE.exec(line);
     if (!m) continue;
+    // Trailing stitch: the id capture is un-anchored at its end, so anything that
+    // renders JOINED to the id disqualifies the receipt — GitHub shows one token
+    // (`toctoux`, `toctou_x`, `toctou.x`, `toctou‐x`, `toctou` + a dropped node),
+    // never a receipt. A clean receipt's id ends its visible word: the run up to
+    // the next space must be nothing but trailing PUNCTUATION/symbols (`toctou`,
+    // `toctou.`, `toctou — note`). So reject when that run holds any non-space,
+    // non-punctuation code point — a letter, digit, mark, connector, OR the
+    // dropped-node sentinel — after an optional punctuation prefix. This one rule
+    // is the mirror of the leading-stitch guard and subsumes the sentinel check.
+    if (TRAILING_STITCH.test(line.slice(m[0].length))) continue;
     const id = m[1].toLowerCase();
     if (known.has(id)) ids.add(id);
   }
@@ -284,9 +397,12 @@ export function inferLayersFromProse(
   finalText: string,
   taxonomy: readonly DefectLayer[] = SHELL_MODEL_LAYERS,
 ): Set<string> {
-  // Over the USED lines only — the estimate must not credit a layer from a
-  // signal that lives in quoted code or a blockquote, the same invariant the
-  // structured parser enforces.
+  // Over the USED lines only, sharing the receipt parser's quotation view: a
+  // signal in a fenced/indented block, a blockquote, OR an inline code span is
+  // dropped. For a receipt that is exactly right (a quoted marker is not a
+  // receipt); for this estimate it can UNDER-count a layer an auditor named in
+  // backticks (`` `set -a` ``), but that only infers FEWER layers → owes more →
+  // the over-cap (fail-safe) direction, acceptable for a non-authoritative guess.
   const lower = [...usedLines(finalText)].join('\n').toLowerCase();
   const ids = new Set<string>();
   for (const layer of taxonomy) {

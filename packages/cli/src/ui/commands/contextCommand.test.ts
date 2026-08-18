@@ -54,6 +54,7 @@ function makeMockConfig(contextWindowSize = 32_000): Config {
     getSkillManager: vi.fn().mockReturnValue({
       listSkills: vi.fn().mockResolvedValue([]),
     }),
+    getDisabledSkillNames: vi.fn().mockReturnValue(new Set()),
     getChatCompression: vi.fn().mockReturnValue(undefined),
     getAutoCompactThreshold: vi.fn(),
     getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
@@ -86,6 +87,7 @@ describe('collectContextData (contextCommand)', () => {
       getSkillManager: vi.fn().mockReturnValue({
         listSkills: vi.fn().mockResolvedValue([]),
       }),
+      getDisabledSkillNames: vi.fn().mockReturnValue(new Set()),
       getChatCompression: vi.fn().mockReturnValue(undefined),
       getAutoCompactThreshold: vi.fn(),
       getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
@@ -209,6 +211,7 @@ describe('collectContextData (contextCommand)', () => {
       getSkillManager: vi.fn().mockReturnValue({
         listSkills: vi.fn().mockResolvedValue([]),
       }),
+      getDisabledSkillNames: vi.fn().mockReturnValue(new Set()),
       getChatCompression: vi.fn().mockReturnValue(undefined),
       getAutoCompactThreshold: vi.fn(),
       getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
@@ -255,6 +258,7 @@ describe('collectContextData (contextCommand)', () => {
       getSkillManager: vi.fn().mockReturnValue({
         listSkills: vi.fn().mockResolvedValue([]),
       }),
+      getDisabledSkillNames: vi.fn().mockReturnValue(new Set()),
       getChatCompression: vi.fn().mockReturnValue(undefined),
       getAutoCompactThreshold: vi.fn(),
       getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
@@ -336,6 +340,37 @@ describe('collectContextData (contextCommand)', () => {
     expect(data.memoryFiles).toHaveLength(2);
     expect(data.memoryFiles[0].path).toBe('QWEN.md');
     expect(data.memoryFiles[1].path).toBe(path.join('docs', 'QWEN.md'));
+  });
+
+  it('excludes disabled skills from the detail breakdown', async () => {
+    const config = {
+      ...makeMockConfig(),
+      getSkillManager: vi.fn().mockReturnValue({
+        listSkills: vi.fn().mockResolvedValue([
+          {
+            name: 'enabled-skill',
+            description: 'Enabled skill',
+            level: 'user',
+            filePath: '/skills/enabled-skill/SKILL.md',
+            body: 'Enabled body',
+          },
+          {
+            name: 'Disabled-Skill',
+            description: 'Disabled skill',
+            level: 'user',
+            filePath: '/skills/disabled-skill/SKILL.md',
+            body: 'Disabled body',
+          },
+        ]),
+      }),
+      getDisabledSkillNames: vi
+        .fn()
+        .mockReturnValue(new Set(['disabled-skill'])),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, true);
+
+    expect(data.skills.map((skill) => skill.name)).toEqual(['enabled-skill']);
   });
 });
 

@@ -1746,6 +1746,107 @@ describe('loadCliConfig', () => {
     );
   });
 
+  it('rebinds a selective restore projection to the forked session', async () => {
+    const sourceSessionId = '123e4567-e89b-42d3-a456-426614174000';
+    const projectionSource = vi.fn(async (sessionId: string) => ({
+      sessionId,
+      filePath: `/mock/${sessionId}.jsonl`,
+      startTime: '2026-08-13T00:00:00.000Z',
+      lastUpdated: '2026-08-13T00:00:00.000Z',
+      runtime: {
+        apiHistory: [],
+        uiTelemetryEvents: [],
+        recording: { lastCompletedUuid: 'leaf', turnParentUuids: [] },
+        goalRecords: [],
+        initialTurn: 0,
+        backgroundNotificationTaskIds: [],
+      },
+    }));
+
+    const config = await loadCliConfig(
+      {},
+      { resume: sourceSessionId, forkSession: true } as CliArgs,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      { sessionRestore: { projectionSource } },
+    );
+
+    const forkedSessionId = config.getSessionId();
+    expect(mockSessionServiceInstance.forkSession).toHaveBeenCalledWith(
+      sourceSessionId,
+      forkedSessionId,
+    );
+    expect(projectionSource).toHaveBeenCalledOnce();
+    expect(projectionSource).toHaveBeenCalledWith(forkedSessionId);
+    expect(mockSessionServiceInstance.loadSession).not.toHaveBeenCalled();
+    const configParams = mockConfigConstructorParams.mock.calls.at(-1)?.[0];
+    expect(configParams).toEqual(
+      expect.objectContaining({
+        sessionId: forkedSessionId,
+        sessionData: undefined,
+        sessionRestoreProjection: expect.objectContaining({
+          sessionId: forkedSessionId,
+        }),
+        sessionRestoreProjectionSource: expect.any(Function),
+      }),
+    );
+
+    const deferredProjection =
+      await configParams.sessionRestoreProjectionSource();
+    expect(deferredProjection).toEqual(
+      expect.objectContaining({ sessionId: forkedSessionId }),
+    );
+    expect(projectionSource).toHaveBeenNthCalledWith(2, forkedSessionId);
+  });
+
+  it('preloads a selective projection when a non-ACP host cannot acquire a writer lease', async () => {
+    const sourceSessionId = '123e4567-e89b-42d3-a456-426614174000';
+    const projectionSource = vi.fn(async (sessionId: string) => ({
+      sessionId,
+      filePath: `/mock/${sessionId}.jsonl`,
+      startTime: '2026-08-13T00:00:00.000Z',
+      lastUpdated: '2026-08-13T00:00:00.000Z',
+      runtime: {
+        apiHistory: [],
+        uiTelemetryEvents: [],
+        recording: { lastCompletedUuid: 'leaf', turnParentUuids: [] },
+        goalRecords: [],
+        initialTurn: 0,
+        backgroundNotificationTaskIds: [],
+      },
+    }));
+
+    await loadCliConfig(
+      { experimental: { sessionWriterLease: true } },
+      { resume: sourceSessionId } as CliArgs,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      { sessionRestore: { projectionSource } },
+    );
+
+    expect(projectionSource).toHaveBeenCalledOnce();
+    expect(projectionSource).toHaveBeenCalledWith(sourceSessionId);
+    expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        experimentalZedIntegration: false,
+        sessionWriterLeaseEnabled: true,
+        sessionRestoreProjection: expect.objectContaining({
+          sessionId: sourceSessionId,
+        }),
+      }),
+    );
+  });
+
   it('should explain when --fork-session fails to copy the source session', async () => {
     const sourceSessionId = '123e4567-e89b-42d3-a456-426614174000';
     const sourceData = {
