@@ -495,6 +495,20 @@ function availableSessionSkillInfos(
     })
     .sort((a, b) => a.name.localeCompare(b.name));
 }
+
+function sessionSkillsReflectToggle(
+  sessionSkills: readonly string[] | undefined,
+  mutationSkills: ReadonlyArray<{ name: string; enabled: boolean }>,
+): boolean {
+  const enabledNames = new Set(
+    (sessionSkills ?? []).map((name) => name.toLowerCase()),
+  );
+  return mutationSkills.every((skill) => {
+    const enabled = enabledNames.has(skill.name.toLowerCase());
+    return skill.enabled === enabled;
+  });
+}
+
 const COMPACT_MODE_SETTING_KEY = 'ui.compactMode';
 const HIDE_TIPS_SETTING_KEY = 'ui.hideTips';
 
@@ -4469,17 +4483,12 @@ export function App({
     useState<string>();
   const connectionSkillSnapshotRef = useRef({
     sessionId: connection.sessionId,
-    commands: connection.commands,
     skills: connection.skills,
   });
   connectionSkillSnapshotRef.current = {
     sessionId: connection.sessionId,
-    commands: connection.commands,
     skills: connection.skills,
   };
-  const loadedSkillsFallbackSnapshotRef = useRef<
-    typeof connectionSkillSnapshotRef.current | undefined
-  >(undefined);
   const loadedSkillsRequestRef = useRef(0);
   const reloadLoadedSkills = useCallback(
     async (workspaceCwd?: string, notifyOnError = false) => {
@@ -4513,6 +4522,7 @@ export function App({
   }, [connected, connection.workspaceCwd, reloadLoadedSkills]);
   const handledSkillMutationIdRef = useRef<string | undefined>(undefined);
   useEffect(() => {
+    if (!connected) return;
     const mutation = workspaceEventSignals?.lastSkillMutation;
     const sessionId = connection.sessionId;
     const handleKey = mutation
@@ -4525,11 +4535,9 @@ export function App({
       mutation.sessionsFailed === 0
     ) {
       handledSkillMutationIdRef.current = handleKey;
-      loadedSkillsFallbackSnapshotRef.current = undefined;
       setLoadedSkillsFallbackSessionId(undefined);
       return;
     }
-    const sourceSnapshot = connectionSkillSnapshotRef.current;
     let cancelled = false;
     void reloadLoadedSkills(connection.workspaceCwd, true).then((loaded) => {
       if (cancelled || !loaded) return;
@@ -4539,14 +4547,12 @@ export function App({
       }
       const currentSnapshot = connectionSkillSnapshotRef.current;
       if (
-        currentSnapshot.sessionId !== sourceSnapshot.sessionId ||
-        currentSnapshot.commands !== sourceSnapshot.commands ||
-        currentSnapshot.skills !== sourceSnapshot.skills
+        currentSnapshot.sessionId === sessionId &&
+        sessionSkillsReflectToggle(currentSnapshot.skills, mutation.skills)
       ) {
         handledSkillMutationIdRef.current = handleKey;
         return;
       }
-      loadedSkillsFallbackSnapshotRef.current = sourceSnapshot;
       setLoadedSkillsFallbackSessionId(sessionId);
       handledSkillMutationIdRef.current = handleKey;
     });
@@ -4554,6 +4560,7 @@ export function App({
       cancelled = true;
     };
   }, [
+    connected,
     connection.sessionId,
     connection.workspaceCwd,
     reloadLoadedSkills,
@@ -4562,22 +4569,22 @@ export function App({
   ]);
   useEffect(() => {
     if (!loadedSkillsFallbackSessionId) return;
-    const fallbackSnapshot = loadedSkillsFallbackSnapshotRef.current;
-    if (
-      fallbackSnapshot &&
-      fallbackSnapshot.sessionId === connection.sessionId &&
-      fallbackSnapshot.commands === connection.commands &&
-      fallbackSnapshot.skills === connection.skills
-    ) {
+    if (connection.sessionId !== loadedSkillsFallbackSessionId) {
+      setLoadedSkillsFallbackSessionId(undefined);
       return;
     }
-    loadedSkillsFallbackSnapshotRef.current = undefined;
-    setLoadedSkillsFallbackSessionId(undefined);
+    const mutation = workspaceEventSignals?.lastSkillMutation;
+    if (
+      mutation &&
+      sessionSkillsReflectToggle(connection.skills, mutation.skills)
+    ) {
+      setLoadedSkillsFallbackSessionId(undefined);
+    }
   }, [
-    connection.commands,
     connection.sessionId,
     connection.skills,
     loadedSkillsFallbackSessionId,
+    workspaceEventSignals?.lastSkillMutation,
   ]);
 
   const [modelDialogMode, setModelDialogMode] =
