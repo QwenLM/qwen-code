@@ -1014,8 +1014,24 @@ function ledgerMarkerFor(
     // withholding every anchor on an older plan.
     const roundStart =
       typeof plan.reviewModelId === 'string' ? plan.reviewModelId.trim() : '';
+    // A blank runtime is a MISMATCH once the round carries a stamp, not a
+    // reason to skip the check. The recovery side already rules it that way
+    // (`certifierMatchesRound` refuses an empty `running` outright), and the
+    // asymmetry was load-bearing in the wrong direction: with the runtime
+    // channel empty — a deferred `qwen review submit` run from a terminal
+    // outside a session shell, which `round-model.ts` documents as reachable
+    // in normal operation — `certifying` falls back to `input.modelId`, the
+    // model-WRITTEN field these docstrings retire. The marker then certifies
+    // the sha to a typed id, and a later round under a matching typed id
+    // scopes past code it never reviewed: the regression this PR exists to
+    // close, arriving through the one channel left open.
+    //
+    // A stamped round whose poster cannot be identified is exactly "this
+    // round cannot say who reviewed the range", which is what withholding
+    // means. An UNSTAMPED round still keeps today's behaviour — see above:
+    // it cannot prove disagreement either.
     const identityDrifted =
-      roundStart !== '' && runtime !== '' && roundStart !== runtime;
+      roundStart !== '' && (runtime === '' || roundStart !== runtime);
     const model =
       attribution && certifying !== '' && !identityDrifted
         ? certifying
