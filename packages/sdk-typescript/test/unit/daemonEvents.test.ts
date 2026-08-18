@@ -482,6 +482,69 @@ describe('daemon event schema', () => {
     ).toBeUndefined();
   });
 
+  it('validates settings_changed optional fields', () => {
+    expect(
+      asKnownDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'settings_changed',
+        data: { key: 'skills.disabled' },
+      }),
+    ).toBeDefined();
+    expect(
+      asKnownDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'settings_changed',
+        data: {
+          key: 'skills.disabled',
+          scope: 'workspace',
+          mutation: {
+            id: 'mutation-1',
+            kind: 'skill_toggle',
+            skills: [{ name: 'review', enabled: false }],
+            activation: 'applied',
+            sessionsRefreshed: 1,
+            sessionsFailed: 0,
+          },
+        },
+      }),
+    ).toBeDefined();
+    expect(
+      asKnownDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'settings_changed',
+        data: {},
+      }),
+    ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'settings_changed',
+        data: { key: 'skills.disabled', scope: 1 },
+      }),
+    ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'settings_changed',
+        data: {
+          key: 'skills.disabled',
+          mutation: {
+            id: 'mutation-1',
+            kind: 'skill_toggle',
+            activation: 'applied',
+            sessionsRefreshed: 1,
+            sessionsFailed: 0,
+          },
+        },
+      }),
+    ).toBeUndefined();
+  });
+
   it('reduces permission, model, and terminal events into a session view', () => {
     const state = reduceDaemonSessionEvents([
       {

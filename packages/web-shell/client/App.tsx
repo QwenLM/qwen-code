@@ -104,7 +104,6 @@ import {
 } from './components/panels/EnvironmentPanel';
 import { ChatContextHeader } from './components/ChatContextHeader';
 import { WelcomeHeader } from './components/WelcomeHeader';
-import { NewSessionDotField } from './components/NewSessionDotField';
 import { ApprovalModeDialog } from './components/dialogs/ApprovalModeDialog';
 import { ResumeDialog } from './components/dialogs/ResumeDialog';
 import { DialogShell } from './components/dialogs/DialogShell';
@@ -949,6 +948,16 @@ export interface WebShellProps {
    * `true`/omitted still requires the capability to be satisfied.
    */
   fileUploadEnabled?: boolean;
+  /**
+   * Directory that drag-and-dropped files upload into, **relative to the
+   * workspace root**. Use a relative path WITHOUT a leading `/` — e.g.
+   * `'uploads'`, `'uploads/images'`, or omit it to upload into the
+   * workspace root (the default). A leading-slash path like `'/uploads'`
+   * is rejected by the daemon as outside the workspace. The directory
+   * (including intermediate components) is created automatically on upload
+   * when it does not exist.
+   */
+  fileUploadDirectory?: string;
   /** Additional @ mention categories shown alongside built-in files/extensions. */
   atProviders?: readonly WebShellAtProvider[];
   /** Icon URLs for custom composer tag kinds used by @ mention chips. */
@@ -1816,6 +1825,7 @@ export function App({
   atProviders,
   composerTagIcons,
   fileUploadEnabled,
+  fileUploadDirectory,
   renderToolHeaderExtra,
   renderWelcomeHeader,
   renderWelcomeFooter,
@@ -2075,6 +2085,7 @@ export function App({
       markdown,
       loadingPhrases,
       fileUploadEnabled,
+      fileUploadDirectory,
     }),
     [
       composerTagIcons,
@@ -2101,6 +2112,7 @@ export function App({
       markdown,
       loadingPhrases,
       fileUploadEnabled,
+      fileUploadDirectory,
     ],
   );
   const CustomFooter = renderFooter;
@@ -2146,6 +2158,16 @@ export function App({
     }
     return capabilityWorkspaces;
   }, [lockedWorkspaceCapability, workspace.capabilities?.workspaces]);
+  const ordinaryWorkspaces = useMemo(
+    () => workspaces.filter((entry) => entry.kind !== 'live'),
+    [workspaces],
+  );
+  const isKnownLiveWorkspaceCwd = useCallback(
+    (cwd: string | undefined) =>
+      cwd !== undefined &&
+      workspaces.some((entry) => entry.kind === 'live' && entry.cwd === cwd),
+    [workspaces],
+  );
   const composerWorkspacesRef = useRef<
     | Array<{
         id: string;
@@ -2157,11 +2179,10 @@ export function App({
     | undefined
   >(undefined);
   const nextComposerWorkspaces = !lockedWorkspaceCwd
-    ? workspaces.map((entry) => ({
+    ? ordinaryWorkspaces.map((entry) => ({
         id: entry.id,
         cwd: entry.cwd,
-        label:
-          entry.kind === 'live' ? t('sidebar.live') : workspaceLabel(entry),
+        label: workspaceLabel(entry),
         primary: entry.primary,
         trusted: entry.trusted,
       }))
@@ -2184,14 +2205,14 @@ export function App({
     composerWorkspacesRef.current = nextComposerWorkspaces;
   }
   const composerWorkspaces = composerWorkspacesRef.current;
-  const workspacesRef = useRef(workspaces);
-  workspacesRef.current = workspaces;
+  const workspacesRef = useRef(ordinaryWorkspaces);
+  workspacesRef.current = ordinaryWorkspaces;
   const visibleWorkspaces = useMemo(
     () =>
       lockedWorkspaceCwd
-        ? workspaces.filter((entry) => entry.cwd === lockedWorkspaceCwd)
-        : workspaces,
-    [lockedWorkspaceCwd, workspaces],
+        ? ordinaryWorkspaces.filter((entry) => entry.cwd === lockedWorkspaceCwd)
+        : ordinaryWorkspaces,
+    [lockedWorkspaceCwd, ordinaryWorkspaces],
   );
   const sessionActions = useActions();
   const reloadTranscript = useCallback(
@@ -2262,14 +2283,14 @@ export function App({
 
   useEffect(() => {
     if (!workspace.capabilities || !selectedWorkspaceCwd) return;
-    const selected = workspaces.find(
+    const selected = ordinaryWorkspaces.find(
       (entry) => entry.cwd === selectedWorkspaceCwd,
     );
     if (selected?.trusted) return;
     composerSourceVersionRef.current += 1;
     selectedWorkspaceCwdRef.current = undefined;
     setSelectedWorkspaceCwd(undefined);
-  }, [selectedWorkspaceCwd, workspace.capabilities, workspaces]);
+  }, [ordinaryWorkspaces, selectedWorkspaceCwd, workspace.capabilities]);
   // The workspace the chip's status was last fetched for. On a workspace switch
   // we clear the status immediately so the chip never shows the previous repo's
   // branch/dirty counts while the new fetch is in flight; same-workspace
@@ -2381,20 +2402,20 @@ export function App({
         ? connection.workspaceCwd
         : (lockedWorkspaceCwd ??
           selectedWorkspaceCwd ??
-          workspaces.find((entry) => entry.primary)?.cwd),
+          ordinaryWorkspaces.find((entry) => entry.primary)?.cwd),
     [
       connection.sessionId,
       connection.workspaceCwd,
       lockedWorkspaceCwd,
       selectedWorkspaceCwd,
-      workspaces,
+      ordinaryWorkspaces,
     ],
   );
   // Worktree sessions query git status with the worktree path (?cwd=
   // parameter); the chip prefers the live branch from that status, falling
   // back to the creation-time sessionWorktree.branch.
   useEffect(() => {
-    if (!activeWorkspaceCwd) {
+    if (!activeWorkspaceCwd || isKnownLiveWorkspaceCwd(activeWorkspaceCwd)) {
       gitStatusWorkspaceCwdRef.current = undefined;
       setSelectedWorkspaceGitStatus(undefined);
       return;
@@ -2462,6 +2483,7 @@ export function App({
   }, [
     activeWorkspaceCwd,
     connection.gitBranch,
+    isKnownLiveWorkspaceCwd,
     workspace.client,
     sessionWorktree,
   ]);
@@ -4091,6 +4113,9 @@ export function App({
       (!failedPromptRetry.admitted || failedPromptRetry.settled),
   );
   const streamingStateRef = useRef<DaemonStreamingState>(streamingState);
+  useEffect(() => {
+    streamingStateRef.current = streamingState;
+  }, [streamingState]);
   // Cleared in three places: the session-switch effect, the drain loop, and
   // handleCancel. Bumping drainGenerationRef at each clear site also cancels
   // any in-flight inline ! command whose ensureSessionForPrompt is resolving.
@@ -5407,18 +5432,21 @@ export function App({
         currentModelRef.current || connectionRef.current.currentModel;
       const modeId =
         currentModeRef.current || connectionRef.current.currentMode;
-      const primaryWorkspaceCwd = workspaces.find(
+      const primaryWorkspaceCwd = ordinaryWorkspaces.find(
         (entry) => entry.primary,
       )?.cwd;
       const requestedWorkspaceCwd = selectedWorkspaceCwdRef.current;
       const acceptedWorkspaceCwd = requestedWorkspaceCwd
-        ? workspaces.find(
+        ? ordinaryWorkspaces.find(
             (entry) =>
               entry.cwd === requestedWorkspaceCwd && entry.trusted === true,
           )?.cwd
         : undefined;
       const targetWorkspaceCwd =
-        lockedWorkspaceCwd ?? acceptedWorkspaceCwd ?? primaryWorkspaceCwd;
+        ordinaryWorkspaces.find((entry) => entry.cwd === lockedWorkspaceCwd)
+          ?.cwd ??
+        acceptedWorkspaceCwd ??
+        primaryWorkspaceCwd;
       const catalogWorkspaceCwd =
         targetWorkspaceCwd ??
         workspace.workspaceCwd ??
@@ -5492,7 +5520,7 @@ export function App({
     sessionActions,
     sessionCatalogController,
     workspace.workspaceCwd,
-    workspaces,
+    ordinaryWorkspaces,
   ]);
   const onSubmitBeforeRef = useRef(onSubmitBefore);
   onSubmitBeforeRef.current = onSubmitBefore;
@@ -5503,7 +5531,8 @@ export function App({
       return connectionRef.current.workspaceCwd;
     }
     return (
-      lockedWorkspaceCwd ??
+      workspacesRef.current.find((entry) => entry.cwd === lockedWorkspaceCwd)
+        ?.cwd ??
       selectedWorkspaceCwdRef.current ??
       workspacesRef.current.find((entry) => entry.primary)?.cwd
     );
@@ -5831,10 +5860,13 @@ export function App({
   // The workspace the Changes dialog reads — the same active workspace the
   // git-status effect targets (computed once above), so the chip and the
   // dialog always target the same repo.
-  const gitDiffWorkspaceCwd = activeWorkspaceCwd;
+  const gitDiffWorkspaceCwd = isKnownLiveWorkspaceCwd(activeWorkspaceCwd)
+    ? undefined
+    : activeWorkspaceCwd;
   const gitModeEligible = Boolean(
     !connection.sessionId &&
-      workspaces.find((entry) => entry.cwd === activeWorkspaceCwd)?.trusted &&
+      ordinaryWorkspaces.find((entry) => entry.cwd === activeWorkspaceCwd)
+        ?.trusted &&
       selectedWorkspaceGitStatus?.branch,
   );
   useEffect(() => {
@@ -5898,7 +5930,7 @@ export function App({
         sessionId: connection.sessionId,
         workspaces:
           workspace.capabilities?.workspaces || lockedWorkspaceCapability
-            ? workspaces
+            ? ordinaryWorkspaces
             : undefined,
       }),
     [
@@ -5906,7 +5938,7 @@ export function App({
       connection.sessionId,
       lockedWorkspaceCapability,
       workspace.capabilities,
-      workspaces,
+      ordinaryWorkspaces,
     ],
   );
   const [voiceUserRevision, setVoiceUserRevision] = useState(0);
@@ -6106,6 +6138,8 @@ export function App({
     connection.capabilities?.features.includes(
       'session_mid_turn_message_query',
     ) === true;
+  const canInjectMidTurnMedia =
+    connection.capabilities?.features.includes('session_media') === true;
   const {
     queuedPrompts,
     queuedTexts,
@@ -6124,6 +6158,7 @@ export function App({
     clientId: connection.clientId,
     canMutateMidTurn,
     canQueryMidTurn,
+    canInjectMidTurnMedia,
     streamingState,
     sessionActions,
     store,
@@ -7015,10 +7050,6 @@ export function App({
       t,
     ],
   );
-
-  useEffect(() => {
-    streamingStateRef.current = streamingState;
-  }, [streamingState]);
 
   // Drop queued commands on a session switch so the drain never runs a
   // command against a different workspace's daemon (mirrors useQueuedPrompts).
@@ -8647,7 +8678,6 @@ export function App({
         shouldBlockComposerSubmit({
           connectionStatus: connectionRef.current.status,
           hasSession: Boolean(connectionRef.current.sessionId),
-          restartSseOnPrompt: Boolean(restartSseOnPrompt),
         })
       ) {
         pushToast('warning', t('editor.connectionDisconnected'));
@@ -9783,7 +9813,6 @@ export function App({
       runVisibleBtw,
       reconcileCatalogRename,
       requireActiveSessionForLocalCommand,
-      restartSseOnPrompt,
       resumeChatBottomFollow,
       selectedLanguage,
       setPendingModel,
@@ -10299,7 +10328,6 @@ export function App({
   const isDisabled =
     sessionWriteBlocked ||
     shouldDisableComposerInput({
-      catchingUp: Boolean(connection.catchingUp),
       pendingApproval: pendingApproval !== null,
       isPreparingPrompt,
     });
@@ -10327,7 +10355,6 @@ export function App({
       ? latestUserBlock
       : undefined;
   const composerPlaceholderInputState = {
-    catchingUp: Boolean(connection.catchingUp),
     isPreparingPrompt,
     isStreaming: streamingState !== 'idle',
   };
@@ -11301,7 +11328,7 @@ export function App({
               <div className="flex flex-col gap-4">
                 <p>{t('sidebar.scratchOutcomeUnknown')}</p>
                 <ul className="max-h-48 overflow-y-auto text-sm text-muted-foreground">
-                  {workspaces.map((entry) => (
+                  {ordinaryWorkspaces.map((entry) => (
                     <li key={entry.id}>{entry.cwd}</li>
                   ))}
                 </ul>
@@ -11559,10 +11586,6 @@ export function App({
                 .filter(Boolean)
                 .join(' ')}
             >
-              {isChatEmptyState &&
-                !showMissingSessionState &&
-                !activePanel &&
-                mainView === 'chat' && <NewSessionDotField />}
               {sidebarOptions.enabled &&
                 sidebarOptions.showCompactToggle &&
                 (!chatHeaderEnabled || isChatEmptyState) &&
@@ -11829,7 +11852,7 @@ export function App({
                       workspaces={
                         lockedWorkspaceCwd
                           ? visibleWorkspaces
-                          : workspaces
+                          : ordinaryWorkspaces
                       }
                       lockedWorkspace={lockedWorkspaceCapability}
                       onCreateViaChat={() => {
@@ -12036,7 +12059,7 @@ export function App({
                         voiceWorkspaces={
                           workspace.capabilities?.workspaces ||
                           lockedWorkspaceCapability
-                            ? workspaces
+                            ? ordinaryWorkspaces
                             : undefined
                         }
                         sessionWorkflowEnabled={sessionWorkflowEnabled}
@@ -12054,8 +12077,9 @@ export function App({
                   hasWelcomeMiddle
                     ? styles.chatViewWithWelcomeMiddle
                     : undefined,
-                  // Marker class (no declarations): keeps the ':not(...)'
-                  // exclusion in App.module.css matching.
+                  // Positioning hook: completes the compound selector in
+                  // App.module.css that keeps this wrap relative so the
+                  // absolutely-positioned bottom panels keep their anchor.
                   CustomFooter ? styles.chatViewWithCustomFooter : undefined,
                   activePanel ||
                   mainView !== 'chat' ||
@@ -12467,6 +12491,7 @@ export function App({
                           onEdit={editQueuedPrompt}
                           onRestoreUnknown={restoreUnknownQueuedPrompt}
                           onDiscardUnknown={discardUnknownQueuedPrompt}
+                          onImagePreview={openImagePanel}
                         />
                         {CustomComposerHeader && (
                           <div className={styles.composerHeader}>
@@ -12562,21 +12587,28 @@ export function App({
                           workspaces={composerWorkspaces}
                           selectedWorkspaceCwd={
                             connection.sessionId
-                              ? workspaces.find(
+                              ? ordinaryWorkspaces.find(
                                   (entry) =>
-                                    entry.cwd === connection.workspaceCwd,
-                                )?.primary
-                                ? undefined
-                                : connection.workspaceCwd
+                                    entry.cwd === connection.workspaceCwd &&
+                                    !entry.primary,
+                                )?.cwd
                               : selectedWorkspaceCwd
                           }
                           workspaceSelectionDisabled={false}
                           atWorkspaceCwd={
-                            lockedWorkspaceCwd ??
+                            ordinaryWorkspaces.find(
+                              (entry) => entry.cwd === lockedWorkspaceCwd,
+                            )?.cwd ??
                             (connection.sessionId
-                              ? connection.workspaceCwd
+                              ? isKnownLiveWorkspaceCwd(
+                                  connection.workspaceCwd,
+                                )
+                                ? undefined
+                                : connection.workspaceCwd
                               : (selectedWorkspaceCwd ??
-                                workspaces.find((entry) => entry.primary)?.cwd))
+                                ordinaryWorkspaces.find(
+                                  (entry) => entry.primary,
+                                )?.cwd))
                           }
                           onSelectWorkspace={handleSelectComposerWorkspace}
                           scratchWorkspaceSupported={
@@ -12602,7 +12634,6 @@ export function App({
                           composerInput={composerInput}
                           composerInputVersion={composerInputVersion}
                           placeholderText={composerPlaceholderText}
-                          animatePlaceholder={isChatEmptyState}
                         />
                         {CustomComposerFooter && (
                           <CustomComposerFooter

@@ -46,6 +46,10 @@ import {
   writeStderrLine,
   writeStderrLineSafe,
 } from '../../utils/stdioHelpers.js';
+import {
+  MAX_RESUME_CALLS,
+  SHELL_TOOL_MAX_TIMEOUT_MS,
+} from './lib/build-budget.js';
 import { launchToolBudget, reverseAuditRoundCap } from './lib/budget.js';
 import {
   clearBudgetStop,
@@ -89,6 +93,7 @@ import {
   type RepositoryContext,
 } from './lib/repository-context.js';
 import { HOSTNAME_RE, isOwnerRepo } from './lib/gh.js';
+import { SHA_RE } from './lib/ledger.js';
 import { pathRulesFor } from './lib/path-rules.js';
 import { shellQuotePath } from './lib/shell-quote.js';
 import {
@@ -144,6 +149,7 @@ interface PlanReport {
   worktreePath?: unknown;
   mergeBaseSha?: unknown;
   host?: unknown;
+  incremental?: unknown;
   repositoryContext?: unknown;
   /**
    * The two size fields the topology gate reads (#9242) and the ones
@@ -1330,7 +1336,40 @@ export function buildRoleBrief(
           `\`${wt}\`. Do not \`cd\` elsewhere and do not build the user's main checkout.`,
       );
     }
-    const base = report.mergeBaseSha;
+    // On a delta-scoped incremental round the probe's range must match the
+    // round's scope: test-efficacy recomputes its own diff as base..HEAD, and
+    // handed the merge base it would reverse hunks and delete mutants from
+    // commits an earlier round already reviewed — spending the probe budget
+    // out of scope and reporting survivors this round's diff never contains.
+    const inc = report.incremental as
+      | { effective?: unknown; upToDate?: unknown; diffBase?: unknown }
+      | undefined;
+    // Shape-checked, not merely non-empty. This value is interpolated
+    // UNQUOTED into the fenced bash block below, which the agent runs with a
+    // 600s budget, so `typeof === 'string'` is not the guard it looks like:
+    // `abc123; touch /tmp/pwned` is a non-empty string and passed every
+    // conjunct. `SHA_RE` is the same predicate the anchor itself must satisfy,
+    // and it subsumes the emptiness check.
+    //
+    // This falls back where the sibling `host` guard above throws, and the
+    // difference is that a fallback exists here: the merge base is what every
+    // non-incremental round already welds, so a plan whose `diffBase` is not a
+    // sha costs a wider probe scope rather than the round. `host` has no such
+    // second-best — a wrong hostname reroutes the evidence fetch — so it
+    // refuses instead.
+    //
+    // BOTH sources, not just the anchor. `mergeBaseSha` reaches the same
+    // unquoted interpolation on every non-incremental round — the common case
+    // — and the plan is `JSON.parse`d with no field validation on this path,
+    // so shape-checking one source and not the other leaves the wider door
+    // open. A base that is not a sha emits no probe block at all, which is
+    // already what a report with no merge base does.
+    const shaOrNull = (v: unknown): string | null =>
+      typeof v === 'string' && SHA_RE.test(v) ? v : null;
+    const base =
+      inc?.effective === true && inc.upToDate !== true
+        ? (shaOrNull(inc.diffBase) ?? shaOrNull(report.mergeBaseSha))
+        : shaOrNull(report.mergeBaseSha);
     const pr = report.prNumber;
 
     // The tree build-test builds in. A PR review has a worktree; a **local** review
@@ -1368,7 +1407,7 @@ export function buildRoleBrief(
         '**Build and test what the diff changed.** Give this one call a long tool ' +
           'timeout — it installs, builds and tests in a single process, which the ' +
           'default 120-second shell timeout would kill mid-run (the very failure this ' +
-          'command exists to prevent, one level up). Invoke it with `timeout: 600000`:',
+          `command exists to prevent, one level up). Invoke it with \`timeout: ${SHELL_TOOL_MAX_TIMEOUT_MS}\`:`,
         '',
         '```bash',
         // Prefixed like every other executable review command: this block is run
@@ -1382,6 +1421,32 @@ export function buildRoleBrief(
         `  --plan ${resolve(opts.planPath)} \\`,
         `  --worktree ${resolve(buildTree)} \\`,
         `  --out ${resolve(dirname(opts.planPath), outName)}`,
+        '```',
+        '',
+        '**If the report says work is left, run it again with `--resume`.** The ' +
+          `${SHELL_TOOL_MAX_TIMEOUT_MS / 1000}-second ceiling is per CALL, not per run: this repo needs more than ` +
+          'one call to finish its suites (install, the builds, then `packages/core` ' +
+          'at 106s and `packages/cli` at 401s, before the rest). Work is left when ' +
+          '`testScope.notRun` is non-empty, or when any `test[]` entry has ' +
+          '`"clamped": true` — a suite the budget started too late and killed, which ' +
+          'says nothing about the suite. A third shape carries no field at all: a ' +
+          'single-package repo whose budget ran out before its one suite has an ' +
+          'empty `test[]` and no `testScope`, and only its `note` says so — read ' +
+          'the note before calling the dimension finished. That shape cannot be ' +
+          'continued (a continuation has no recorded scope to read, and answers ' +
+          '"ended before its test phase" without running anything): report the ' +
+          'dimension UNFINISHED and do not spend a continuation on it. A resumed ' +
+          'call skips install and build and ' +
+          'runs only what is left, merging into the SAME report file. Same ' +
+          `\`timeout: ${SHELL_TOOL_MAX_TIMEOUT_MS}\`, and at most ` +
+          `${MAX_RESUME_CALLS} continuations — then report what the run has:`,
+        '',
+        '```bash',
+        `"\${QWEN_CODE_CLI:-qwen}" review build-test \\`,
+        `  --plan ${resolve(opts.planPath)} \\`,
+        `  --worktree ${resolve(buildTree)} \\`,
+        `  --out ${resolve(dirname(opts.planPath), outName)} \\`,
+        '  --resume',
         '```',
       );
     }
@@ -1397,7 +1462,7 @@ export function buildRoleBrief(
         '',
         '**Then run the test-efficacy probe.** A green suite says the tests pass. It does ' +
           'not say they would have failed had the change been wrong, and those are ' +
-          'different claims. Give this call `timeout: 600000` too — besides the revert ' +
+          `different claims. Give this call \`timeout: ${SHELL_TOOL_MAX_TIMEOUT_MS}\` too — besides the revert ` +
           'probe it runs up to 8 single-statement deletion mutants and up to 6 per-hunk ' +
           'reverse-apply probes, each a suite run, and it budgets itself to finish inside ' +
           'that ceiling:',

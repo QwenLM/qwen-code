@@ -642,6 +642,7 @@ vi.mock('./components/ChatEditor', async () => {
               customization.fileUploadEnabled === undefined
                 ? undefined
                 : String(customization.fileUploadEnabled),
+            'data-file-upload-directory': customization.fileUploadDirectory,
           },
           React.createElement(
             'button',
@@ -692,12 +693,6 @@ vi.mock('./components/ChatEditor', async () => {
     ),
   };
 });
-
-vi.mock('./components/NewSessionDotField', () => ({
-  NewSessionDotField: () => (
-    <div data-web-shell-new-session-dot-field aria-hidden="true" />
-  ),
-}));
 
 vi.mock('./components/MessageList', async () => {
   const React = await import('react');
@@ -4986,9 +4981,6 @@ describe('App composer footer renderer', () => {
     expect(composer?.nextElementSibling).toBe(composerFooter);
     expect(composerFooter?.parentElement).toBe(composer?.parentElement);
     expect(composer?.parentElement?.nextElementSibling).toBe(shellFooter);
-    expect(
-      container.querySelector('[data-web-shell-new-session-dot-field]'),
-    ).toBeNull();
   });
 
   it('updates composer footer state and renders it in the empty welcome state', async () => {
@@ -5021,8 +5013,10 @@ describe('App composer footer renderer', () => {
     rerender({ renderComposerFooter: ComposerFooter });
     await flush();
 
+    // Catch-up no longer disables the composer (only a pending approval or
+    // prompt preparation does).
     expect(composerFooterProps.at(-1)).toEqual({
-      disabled: true,
+      disabled: false,
       isRunning: true,
       currentMode: 'plan',
       currentModel: 'qwen-next',
@@ -5038,9 +5032,6 @@ describe('App composer footer renderer', () => {
 
     expect(
       container.querySelector('[data-testid="composer-footer"]'),
-    ).not.toBeNull();
-    expect(
-      container.querySelector('[data-web-shell-new-session-dot-field]'),
     ).not.toBeNull();
     expect(composerFooterProps.at(-1)).toEqual({
       disabled: false,
@@ -8449,9 +8440,9 @@ describe('App session callbacks', () => {
     ).toContain('Visible session title');
   });
 
-  it('submits through a disconnected session when prompt SSE restart is enabled', async () => {
+  it('submits through a disconnected session', async () => {
     mockConnection.status = 'disconnected';
-    renderApp({ restartSseOnPrompt: true });
+    renderApp();
 
     await act(async () => {
       testState.latestChatEditorProps?.onSubmit('recover connection');
@@ -9460,7 +9451,7 @@ describe('App session callbacks', () => {
     );
   });
 
-  it('labels the Live composer workspace without exposing its backing name', async () => {
+  it('keeps the Live runtime out of the ordinary composer workspace selector', async () => {
     mockWorkspace.capabilities = {
       workspaces: [
         {
@@ -9483,16 +9474,9 @@ describe('App session callbacks', () => {
     renderApp();
     await flush();
 
-    expect(
-      testState.latestChatEditorProps?.workspaces?.find(
-        (entry) => entry.id === 'live',
-      ),
-    ).toMatchObject({ label: 'Live' });
-    expect(
-      testState.latestChatEditorProps?.workspaces?.some(
-        (entry) => entry.label === 'Conversations',
-      ),
-    ).toBe(false);
+    expect(testState.latestChatEditorProps?.workspaces).toEqual([
+      expect.objectContaining({ id: 'primary', cwd: '/tmp/project' }),
+    ]);
   });
 
   it('keeps composer git status stable across an equivalent refresh', async () => {
@@ -9891,7 +9875,6 @@ describe('App session callbacks', () => {
   it('uses configured composer placeholders by state and falls back for blank values', async () => {
     const composerPlaceholders = {
       idle: 'Ask a question',
-      loading: 'Preparing chat',
       processing: 'Working on it',
     };
     const { rerender } = renderApp({ composerPlaceholders });
@@ -9917,8 +9900,10 @@ describe('App session callbacks', () => {
     mockConnection.catchingUp = true;
     rerender({ composerPlaceholders });
     await flush();
+    // Catch-up no longer overrides the streaming placeholder: the composer
+    // keeps its processing text while history replays in the background.
     expect(testState.latestChatEditorProps?.placeholderText).toBe(
-      'Preparing chat',
+      'Working on it',
     );
 
     mockConnection.catchingUp = false;
@@ -20193,5 +20178,19 @@ describe('fileUploadEnabled customization plumbing', () => {
     const { container } = renderApp({});
     const composer = container.querySelector('[data-web-shell-composer]');
     expect(composer?.hasAttribute('data-file-upload-enabled')).toBe(false);
+  });
+
+  it('reaches the composer customization with the upload directory', () => {
+    const { container } = renderApp({ fileUploadDirectory: 'uploads' });
+    const composer = container.querySelector('[data-web-shell-composer]');
+    expect(composer?.getAttribute('data-file-upload-directory')).toBe(
+      'uploads',
+    );
+  });
+
+  it('leaves the upload directory unset when the prop is omitted', () => {
+    const { container } = renderApp({});
+    const composer = container.querySelector('[data-web-shell-composer]');
+    expect(composer?.hasAttribute('data-file-upload-directory')).toBe(false);
   });
 });

@@ -16,6 +16,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { scheduleReverseAuditRound } from './retirement.js';
+import { appendRunSession, recordResume } from './run-ledger.js';
 import {
   promptRecordDir,
   recordPrompt,
@@ -153,6 +154,48 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
                 functionResponse: {
                   name: 'read_file',
                   response: { output: 'diff bytes' },
+                },
+              },
+            ],
+          },
+        }),
+      );
+    }
+    // A compliant auditor reads the cumulative findings list its prompt
+    // points at — the comparison against known findings IS the audit's
+    // method, and the scheduler now refuses receipts from an auditor that
+    // skipped it. Modeled by default, like the brief-opens elsewhere; a test
+    // that wants a skipping auditor writes its own transcript.
+    const pointer = /read_file\(file_path="([^"]*\.findings\.md)"\)/.exec(
+      launchPrompt,
+    );
+    if (pointer) {
+      lines.push(
+        JSON.stringify({
+          ...base,
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  name: 'read_file',
+                  args: { file_path: pointer[1] },
+                },
+              },
+            ],
+          },
+        }),
+        JSON.stringify({
+          ...base,
+          type: 'tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  name: 'read_file',
+                  response: { output: 'the cumulative list' },
                 },
               },
             ],
@@ -1484,6 +1527,240 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     ]);
   });
 
+  it('an auditor that SKIPPED the findings read cannot retire the chunk', () => {
+    // The comparison against known findings IS the audit's method, and the
+    // brief instructs the read. Two dry receipts from auditors that skipped
+    // it would retire the chunk on a comparison nobody made. The fixture
+    // builder models the compliant read automatically, so this one writes
+    // its transcripts by hand, minus the read.
+    for (const r of [1, 2]) {
+      const findingsFile = writeFindingsFile(
+        plan,
+        `reverse-audit--round-${r}--skip99`,
+        '- **File:** src/pay.ts:42 — the double charge\n' +
+          '- **Severity:** Suggestion\n',
+      );
+      const built = record(
+        r,
+        13,
+        `chunk 13 round ${r} territory\n` +
+          `read_file(file_path="${findingsFile}")`,
+      );
+      const id = `aud-skip-${r}`;
+      const base = {
+        agentId: id,
+        agentName: 'general-purpose',
+        sessionId: 'S1',
+      };
+      writeFileSync(
+        join(dir, 'subagents', 'S1', `agent-${id}.jsonl`),
+        [
+          JSON.stringify({
+            ...base,
+            type: 'user',
+            message: { role: 'user', parts: [{ text: built }] },
+          }),
+          JSON.stringify({
+            ...base,
+            type: 'assistant',
+            message: {
+              role: 'model',
+              parts: [
+                {
+                  functionCall: {
+                    name: 'read_file',
+                    args: { file_path: diff, offset: 0, limit: 100 },
+                  },
+                },
+              ],
+            },
+          }),
+          JSON.stringify({
+            ...base,
+            type: 'tool_result',
+            message: {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    name: 'read_file',
+                    response: { output: 'diff bytes' },
+                  },
+                },
+              ],
+            },
+          }),
+          JSON.stringify({
+            ...base,
+            type: 'assistant',
+            message: { role: 'model', parts: [{ text: DRY }] },
+          }),
+        ].join('\n') + '\n',
+      );
+    }
+
+    const r3 = schedule(3, [13]);
+    // The receipts do not classify, both rounds read `unknown`, and the
+    // chunk stays hot.
+    expect(r3.due).toEqual([13]);
+  });
+
+  /** A transcript whose FINAL text is followed by more tool traffic — the
+   *  died-mid-flight shape: `returned: false`, narration only. */
+  function deadTranscript(launchPrompt: string, narration: string): void {
+    const id = `aud-dead-${++seq}`;
+    const base = {
+      agentId: id,
+      agentName: 'general-purpose',
+      sessionId: 'S1',
+    };
+    const call = JSON.stringify({
+      ...base,
+      type: 'assistant',
+      message: {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              name: 'read_file',
+              args: { file_path: diff, offset: 0, limit: 100 },
+            },
+          },
+        ],
+      },
+    });
+    const result = JSON.stringify({
+      ...base,
+      type: 'tool_result',
+      message: {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'read_file',
+              response: { output: 'diff bytes' },
+            },
+          },
+        ],
+      },
+    });
+    writeFileSync(
+      join(dir, 'subagents', 'S1', `agent-${id}.jsonl`),
+      [
+        JSON.stringify({
+          ...base,
+          type: 'user',
+          message: { role: 'user', parts: [{ text: launchPrompt }] },
+        }),
+        call,
+        result,
+        JSON.stringify({
+          ...base,
+          type: 'assistant',
+          message: { role: 'model', parts: [{ text: narration }] },
+        }),
+        // The traffic AFTER the text is what makes it narration: the agent
+        // went on working and the process died mid-walk.
+        call,
+        result,
+      ].join('\n') + '\n',
+    );
+  }
+
+  it('a died-mid-flight narration carrying a receipt shape classifies nothing', () => {
+    // `finalText` keeps the last non-empty assistant text, narration
+    // included — an auditor that printed a receipt-shaped progress line and
+    // was killed mid-walk must not read `dry`. Two such corpses would
+    // retire the chunk on an audit that never finished.
+    deadTranscript(record(1, 13, 'chunk 13 round 1 territory walk'), DRY);
+    deadTranscript(record(2, 13, 'chunk 13 round 2 territory walk'), DRY);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.converged).toBe(false);
+  });
+
+  it('a filed YIELD survives a skipped findings read — the bar gates dry only', () => {
+    // The findings-read bar exists so a no-issues receipt cannot certify a
+    // comparison nobody made. Applied BEFORE classification it also
+    // suppressed filed findings: round 2's yielder skipped the list read,
+    // its yield vanished, the compliant dry sibling carried the round, and
+    // the chunk retired WITH a live finding on it.
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), DRY);
+    const findingsFile = writeFindingsFile(
+      plan,
+      'reverse-audit--round-2--yield7',
+      '- **File:** src/pay.ts:42 — the double charge\n' +
+        '- **Severity:** Suggestion\n',
+    );
+    const built = record(
+      2,
+      13,
+      `chunk 13 round 2 territory walk\n` +
+        `read_file(file_path="${findingsFile}")`,
+    );
+    // The yielder, by hand: territory read, NO findings read, a new finding.
+    const id = `aud-yielder-${++seq}`;
+    const base = {
+      agentId: id,
+      agentName: 'general-purpose',
+      sessionId: 'S1',
+    };
+    writeFileSync(
+      join(dir, 'subagents', 'S1', `agent-${id}.jsonl`),
+      [
+        JSON.stringify({
+          ...base,
+          type: 'user',
+          message: { role: 'user', parts: [{ text: built }] },
+        }),
+        JSON.stringify({
+          ...base,
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  name: 'read_file',
+                  args: { file_path: diff, offset: 0, limit: 100 },
+                },
+              },
+            ],
+          },
+        }),
+        JSON.stringify({
+          ...base,
+          type: 'tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  name: 'read_file',
+                  response: { output: 'diff bytes' },
+                },
+              },
+            ],
+          },
+        }),
+        JSON.stringify({
+          ...base,
+          type: 'assistant',
+          message: { role: 'model', parts: [{ text: YIELD }] },
+        }),
+      ].join('\n') + '\n',
+    );
+    // The compliant dry sibling for the same record (the helper models the
+    // findings read automatically).
+    transcript(built, DRY);
+
+    const r3 = schedule(3, [13]);
+    // yielded outranks dry: round 2 is hot and the chunk stays due.
+    expect(r3.due).toEqual([13]);
+    expect(r3.skipped).toEqual([]);
+  });
+
   it('quoting a WHOLE entry from the findings FILE is not a yield (post-#8597 shape)', () => {
     // Since #8597 the cumulative list rides a digest-named `.findings.md`
     // file the launch prompt points at, not the prompt itself. The echo
@@ -1681,5 +1958,151 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     const r3 = schedule(3, []);
     expect(r3.due).toEqual([]);
     expect(r3.converged).toBe(false);
+  });
+});
+
+describe('scheduleReverseAuditRound — a resumed run reads the prior attempt', () => {
+  let dir: string;
+  let plan: string;
+  let diff: string;
+  let seq = 0;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'retirement-resume-'));
+    plan = join(dir, 'plan.json');
+    writeFileSync(plan, '{}');
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+    diff = join(dir, 'diff.txt');
+    process.env['QWEN_CODE_PROJECT_DIR'] = dir;
+    process.env['QWEN_CODE_SESSION_ID'] = 'S1';
+    mkdirSync(join(dir, 'subagents', 'S1'), { recursive: true });
+    mkdirSync(join(dir, 'subagents', 'S0'), { recursive: true });
+  });
+
+  afterEach(() => {
+    delete process.env['QWEN_CODE_PROJECT_DIR'];
+    delete process.env['QWEN_CODE_SESSION_ID'];
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  function record(round: number, chunk: number, body: string): string {
+    const prompt = `reverse-audit ${body}`;
+    recordPrompt(
+      plan,
+      `reverse-audit--chunk-${chunk}--round-${round}--abc123`,
+      prompt,
+    );
+    return prompt;
+  }
+
+  /** A dry-receipt transcript, written into the named session's dir. */
+  function transcriptIn(session: string, launchPrompt: string): void {
+    const id = `aud-${++seq}`;
+    const base = {
+      agentId: id,
+      agentName: 'general-purpose',
+      sessionId: session,
+    };
+    const lines = [
+      JSON.stringify({
+        ...base,
+        type: 'user',
+        message: { role: 'user', parts: [{ text: launchPrompt }] },
+      }),
+      JSON.stringify({
+        ...base,
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                name: 'read_file',
+                args: { file_path: diff, offset: 0, limit: 100 },
+              },
+            },
+          ],
+        },
+      }),
+      JSON.stringify({
+        ...base,
+        type: 'tool_result',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'read_file',
+                response: { output: 'diff bytes' },
+              },
+            },
+          ],
+        },
+      }),
+      JSON.stringify({
+        ...base,
+        type: 'assistant',
+        message: { role: 'model', parts: [{ text: DRY }] },
+      }),
+    ];
+    const f = join(dir, 'subagents', session, `agent-${id}.jsonl`);
+    writeFileSync(f, lines.join('\n') + '\n');
+    // Backdated below the ledger fixture's prior-window close: a CI stall
+    // after ledger() would otherwise fence these out via the until clamp.
+    const past = new Date(Date.now() - 10_000);
+    utimesSync(f, past, past);
+  }
+
+  function ledger(...ids: string[]): void {
+    const d = promptRecordDir(plan);
+    mkdirSync(d, { recursive: true });
+    // Written by the real writer: it stamps the plan mtime each entry is
+    // keyed on, and the resume marker is what authorizes reading prior
+    // evidence at all. The current attempt is stamped last, since each
+    // attempt's window closes when the next one opened.
+    const nowMs = Date.now();
+    ids.forEach((id, i) =>
+      appendRunSession(
+        plan,
+        { QWEN_CODE_SESSION_ID: id },
+        i === ids.length - 1 ? nowMs + 1500 : nowMs,
+      ),
+    );
+    recordResume(plan, process.env, nowMs + 1500);
+  }
+
+  it('reads the prior attempt before this session has launched anything', () => {
+    // The scheduler runs BEFORE the first launch of a resumed run, so the
+    // harness has not created `subagents/<current>` yet — the exact shape
+    // `currentDirOptional` exists for.
+    ledger('S0', 'S1');
+    for (const r of [1, 2]) {
+      transcriptIn('S0', record(r, 13, `chunk 13 round ${r} territory walk`));
+    }
+    rmSync(join(dir, 'subagents', 'S1'), { recursive: true, force: true });
+    const r3 = scheduleReverseAuditRound(plan, [13], 3, process.env, diff);
+    expect(r3.due).toEqual([]);
+    expect(r3.converged).toBe(true);
+  });
+
+  it('retires a chunk on dry receipts the interrupted attempt earned', () => {
+    ledger('S0', 'S1');
+    for (const r of [1, 2]) {
+      transcriptIn('S0', record(r, 13, `chunk 13 round ${r} territory walk`));
+    }
+    const r3 = scheduleReverseAuditRound(plan, [13], 3, process.env, diff);
+    expect(r3.due).toEqual([]);
+    expect(r3.skipped.map((s) => s.chunkId)).toEqual([13]);
+    expect(r3.converged).toBe(true);
+  });
+
+  it('keeps every chunk hot when no ledger names the prior session', () => {
+    for (const r of [1, 2]) {
+      transcriptIn('S0', record(r, 13, `chunk 13 round ${r} territory walk`));
+    }
+    const r3 = scheduleReverseAuditRound(plan, [13], 3, process.env, diff);
+    expect(r3.due).toEqual([13]);
+    expect(r3.skipped).toEqual([]);
   });
 });

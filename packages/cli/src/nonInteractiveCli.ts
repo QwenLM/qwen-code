@@ -2209,7 +2209,14 @@ export async function runNonInteractive(
             toolName: request.name,
             responseParts: response.responseParts,
             persistedOutputFiles: response.persistedOutputFiles,
+            artifacts: response.artifacts,
           })),
+          new Map(
+            orderedResponses.map(({ request }) => [
+              request.callId,
+              request.prompt_id,
+            ]),
+          ),
         );
 
         const chatRecordingService = config.getChatRecordingService?.();
@@ -2224,6 +2231,8 @@ export async function runNonInteractive(
               statusByResponse.get(response) ??
               (response.error ? 'error' : 'success'),
             resultDisplay: response.resultDisplay,
+            persistedOutputFiles: finalized[index].persistedOutputFiles,
+            artifacts: finalized[index].artifacts,
             error: response.error,
             errorType: response.errorType,
             executionStatus: response.executionStatus,
