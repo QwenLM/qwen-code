@@ -68,6 +68,9 @@ export interface AgentViewRosterProps {
 export interface AgentViewPeekPanel {
   title: string;
   lines: string[];
+  // Error-shaped panels (peek load / reply failures) render their lines
+  // verbatim instead of the row's structured activity fields.
+  error?: boolean;
 }
 
 export interface AgentViewNotice {
@@ -95,6 +98,8 @@ interface RosterInputKey {
   downArrow?: boolean;
   leftArrow?: boolean;
   rightArrow?: boolean;
+  home?: boolean;
+  end?: boolean;
   return?: boolean;
   tab?: boolean;
   shift?: boolean;
@@ -143,12 +148,17 @@ export function AgentViewRoster({
   const hasPrompt = currentPrompt.trim().length > 0;
   const hasPeekPrompt = peekPrompt.trim().length > 0;
   const peekPromptPending = Boolean(peekQueuedPrompts?.length);
-  const peekInputActive = Boolean(
-    peekPanel && peekInputMode && !peekPromptPending,
-  );
   const peekRow =
     rows.find((row) => row.sessionId === peekInputTarget) ??
     rows.find((row) => row.sessionId === peekPanel?.title);
+  // A blocking approval (e.g. 'Waiting: Edit') must stay answerable even
+  // while follow-up prompts are queued.
+  const peekBlockingWait = Boolean(
+    peekRow?.waitingFor && peekRow.waitingFor !== 'response',
+  );
+  const peekInputActive = Boolean(
+    peekPanel && peekInputMode && (!peekPromptPending || peekBlockingWait),
+  );
   const sessionPeekActive = Boolean(
     peekPanel && peekRow && peekPanel.title === peekRow.sessionId,
   );
@@ -263,10 +273,11 @@ export function AgentViewRoster({
       return;
     }
 
-    if (key.rightArrow) {
-      if (!hasPrompt && !peekInputActive && rows.length > 0) {
-        onAttachSelected();
-      }
+    if (key.rightArrow && !hasPrompt && !peekInputActive && rows.length > 0) {
+      // Only consume Right when it actually attaches; otherwise fall through
+      // so the buffer's cursor-right movement keeps working while a prompt
+      // is typed.
+      onAttachSelected();
       return;
     }
 
@@ -282,7 +293,9 @@ export function AgentViewRoster({
 
     if (key.backspace || key.delete) {
       if (peekInputActive) {
-        onPeekPromptChange(peekPrompt.slice(0, -1));
+        // Delete one code point so astral characters (emoji) are not split
+        // into lone surrogates.
+        onPeekPromptChange(Array.from(peekPrompt).slice(0, -1).join(''));
       } else {
         promptInput.handleBufferKey(input, key);
       }
@@ -367,14 +380,16 @@ export function AgentViewRoster({
 }
 
 function isTerminalFocusInput(input: string): boolean {
+  // Only anchored whole-chunk equality: substring scans would swallow
+  // legitimate user text such as a prompt starting with "[Info] ...".
   const stripped = input.split('\x1b').join('');
   return (
-    input.includes(FOCUS_IN) ||
-    input.includes(FOCUS_OUT) ||
+    input === FOCUS_IN ||
+    input === FOCUS_OUT ||
     stripped === '[I' ||
     stripped === '[O' ||
-    stripped.includes('[I[O') ||
-    stripped.includes('[O[I')
+    stripped === '[I[O' ||
+    stripped === '[O[I'
   );
 }
 
@@ -390,8 +405,27 @@ function getReturnInputPrefix(
     return '';
   }
   const returnIndex = input.search(/[\r\n]/);
-  return returnIndex >= 0 ? input.slice(0, returnIndex) : undefined;
+  if (returnIndex < 0) {
+    return undefined;
+  }
+  // Content after the newline means a multi-line paste; submitting here
+  // would silently discard the tail, so let the chunk fall through to the
+  // text-insert path instead.
+  if (input.slice(returnIndex + 1).trim() !== '') {
+    return undefined;
+  }
+  return input.slice(0, returnIndex);
 }
+
+// Commands the roster can actually execute locally. Any other built-in
+// command offered by typeahead would otherwise be dispatched as the initial
+// prompt of a brand-new background session.
+const ROSTER_EXECUTABLE_COMMAND_NAMES = new Set([
+  'exit',
+  'quit',
+  'resume',
+  'continue',
+]);
 
 function useAgentViewSlashCommands(
   fallbackCommands: readonly SlashCommand[],
@@ -409,8 +443,16 @@ function useAgentViewSlashCommands(
     void new BuiltinCommandLoader(null)
       .loadCommands(abortController.signal)
       .then((loadedCommands) => {
-        if (!disposed && loadedCommands.length > 0) {
-          setCommands(loadedCommands);
+        if (disposed) return;
+        // Keep user commands / MCP prompts / skills dispatchable, but limit
+        // built-ins to the ones the roster handles.
+        const filtered = loadedCommands.filter(
+          (command) =>
+            command.kind !== CommandKind.BUILT_IN ||
+            ROSTER_EXECUTABLE_COMMAND_NAMES.has(command.name.toLowerCase()),
+        );
+        if (filtered.length > 0) {
+          setCommands(filtered);
         }
       })
       .catch(() => undefined);
@@ -462,6 +504,9 @@ function useAgentViewPromptInput({
   const commandContext = useMemo(() => createAgentViewCommandContext(), []);
   const lastPromptRef = useRef(prompt);
   const lastSeenPromptPropRef = useRef(prompt);
+  // Values we emitted, so lagging prop echoes can be told apart from genuine
+  // external updates. Cleared whenever the prompt is emptied, so it cannot
+  // grow across the component's whole lifetime.
   const emittedPromptsRef = useRef<Set<string>>(new Set());
   const onChange = useCallback(
     (nextPrompt: string) => {
@@ -469,7 +514,11 @@ function useAgentViewPromptInput({
         return;
       }
       lastPromptRef.current = nextPrompt;
-      emittedPromptsRef.current.add(nextPrompt);
+      if (nextPrompt === '') {
+        emittedPromptsRef.current.clear();
+      } else {
+        emittedPromptsRef.current.add(nextPrompt);
+      }
       onPromptChange(nextPrompt);
     },
     [onPromptChange],
@@ -494,19 +543,20 @@ function useAgentViewPromptInput({
     }
     lastSeenPromptPropRef.current = prompt;
     if (prompt === lastPromptRef.current) {
+      // In-order echo of a value we emitted; the buffer already has it.
       return;
     }
-    if (emittedPromptsRef.current.delete(prompt)) {
-      lastPromptRef.current = prompt;
-      if (buffer.text === '' && prompt !== '') {
-        buffer.setText(prompt);
-      }
-      return;
-    }
+    const isEcho = emittedPromptsRef.current.delete(prompt);
     lastPromptRef.current = prompt;
-    if (prompt !== buffer.text) {
-      buffer.setText(prompt);
+    if (prompt === buffer.text) {
+      return;
     }
+    if (isEcho) {
+      // A lagging echo of an intermediate typed value must not clobber
+      // newer text. Genuine external updates always reach the buffer.
+      return;
+    }
+    buffer.setText(prompt);
   }, [buffer, prompt]);
 
   const acceptActiveSuggestion = useCallback((): boolean => {
@@ -588,6 +638,8 @@ function getInputKeyName(input: string, key: RosterInputKey): string {
   if (key.downArrow) return 'down';
   if (key.leftArrow) return 'left';
   if (key.rightArrow) return 'right';
+  if (key.home) return 'home';
+  if (key.end) return 'end';
   if (isReturnInput(input, key)) return 'return';
   if (key.tab || input === '\t') return 'tab';
   if (key.backspace) return 'backspace';
@@ -654,24 +706,6 @@ function isExactSlashCommand(
 
 const AGENT_VIEW_SLASH_COMMANDS: readonly SlashCommand[] = [
   {
-    name: 'model',
-    description: 'Switch the model for this session',
-    kind: CommandKind.BUILT_IN,
-    action: () => undefined,
-  },
-  {
-    name: 'login',
-    description: 'Connect an LLM provider',
-    kind: CommandKind.BUILT_IN,
-    action: () => undefined,
-  },
-  {
-    name: 'logout',
-    description: 'Clear provider credentials',
-    kind: CommandKind.BUILT_IN,
-    action: () => undefined,
-  },
-  {
     name: 'exit',
     altNames: ['quit'],
     description: 'Exit Agent View',
@@ -682,6 +716,20 @@ const AGENT_VIEW_SLASH_COMMANDS: readonly SlashCommand[] = [
     name: 'quit',
     altNames: ['exit'],
     description: 'Exit Agent View',
+    kind: CommandKind.BUILT_IN,
+    action: () => undefined,
+  },
+  {
+    name: 'resume',
+    altNames: ['continue'],
+    description: 'Resume a previous session',
+    kind: CommandKind.BUILT_IN,
+    action: () => undefined,
+  },
+  {
+    name: 'continue',
+    altNames: ['resume'],
+    description: 'Resume a previous session',
     kind: CommandKind.BUILT_IN,
     action: () => undefined,
   },
@@ -722,7 +770,7 @@ function SessionPeekBox({
   inputMode: 'answer' | 'send' | undefined;
   queuedPrompts: string[] | undefined;
 }) {
-  const lines = getPanelDisplayLines(row, panel, queuedPrompts);
+  const lines = getSessionPeekLines(row, panel, queuedPrompts);
   const inputActive = Boolean(inputMode && !queuedPrompts?.length);
   return (
     <Box flexDirection="column" borderStyle="round" paddingX={1}>
@@ -765,6 +813,9 @@ function getPeekFooter(
 ): string {
   if (queuedPrompts?.length) {
     return 'waiting for response · space to close · ctrl+x to delete';
+  }
+  if (inputMode) {
+    return 'enter to send · space to close · ctrl+x to delete';
   }
   return 'enter to open · space to close · ctrl+x to delete';
 }
@@ -810,21 +861,24 @@ function AgentViewPromptBox({
   );
 }
 
-function getPanelDisplayLines(
+function getSessionPeekLines(
   row: AgentRosterRow,
   panel: AgentViewPeekPanel,
   queuedPrompts: readonly string[] | undefined,
 ): string[] {
-  const parsed = parsePanelLines(panel.lines);
-  const output =
-    cleanRowText(row.lastResult) ??
-    parsed.result ??
-    parsed.summary ??
-    parsed.other.at(-1);
-  const queuedLine = getQueuedPromptLine(queuedPrompts);
-  return [output, queuedLine ?? formatWaitingLine(row.waitingFor)].filter(
-    (line): line is string => Boolean(line),
-  );
+  // Error-shaped panels (peek load / reply failures) take precedence over
+  // the row's possibly stale activity fields.
+  if (panel.error) {
+    return panel.lines;
+  }
+  // Render from the structured row fields; never re-parse rendered text.
+  // The blocking-wait line is shown alongside (not replaced by) the queued
+  // prompt line.
+  return [
+    cleanRowText(row.lastResult) ?? cleanRowText(row.summary),
+    formatWaitingLine(row.waitingFor),
+    getQueuedPromptLine(queuedPrompts),
+  ].filter((line): line is string => Boolean(line));
 }
 
 function formatWaitingLine(waitingFor: string | undefined): string | undefined {
@@ -832,43 +886,6 @@ function formatWaitingLine(waitingFor: string | undefined): string | undefined {
     return undefined;
   }
   return `Waiting: ${waitingFor}`;
-}
-
-function parsePanelLines(lines: readonly string[]): {
-  result?: string;
-  summary?: string;
-  other: string[];
-} {
-  return lines
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .reduce<{
-      result?: string;
-      summary?: string;
-      other: string[];
-    }>(
-      (parsed, line) => {
-        if (/^State:\s*/i.test(line)) return parsed;
-        if (/^Cwd:\s*/i.test(line)) return parsed;
-        if (/^Worker:\s*/i.test(line)) return parsed;
-        const result = line.match(/^Result:\s*(.+)$/i);
-        if (result?.[1]) {
-          parsed.result = result[1];
-          return parsed;
-        }
-        const summary = line.match(/^Summary:\s*(.+)$/i);
-        if (summary?.[1]) {
-          parsed.summary = summary[1];
-          return parsed;
-        }
-        if (/^Waiting for response/i.test(line)) return parsed;
-        if (/^Waiting:\s*/i.test(line)) return parsed;
-        const prompt = line.match(/^Prompt:\s*(.+)$/i);
-        parsed.other.push(prompt?.[1] ? `> ${prompt[1]}` : line);
-        return parsed;
-      },
-      { other: [] },
-    );
 }
 
 function getQueuedPromptLine(

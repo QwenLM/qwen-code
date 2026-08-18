@@ -65,36 +65,36 @@ describe('buildAgentRosterRows', () => {
     ]);
   });
 
-  it('sorts rows by default state groups, then stable creation order', () => {
+  it('sorts rows by state groups, then newest first within a group', () => {
     const rows = buildAgentRosterRows({
       sessions: [
         session('failed-new', {
           sessionState: 'failed',
-          updatedAt: '2026-07-17T09:59:00.000Z',
+          createdAt: '2026-07-17T09:59:00.000Z',
         }),
-        session('idle-new', {
+        session('idle-old', {
           sessionState: 'idle',
-          updatedAt: '2026-07-17T09:58:00.000Z',
+          createdAt: '2026-07-17T08:00:00.000Z',
         }),
         session('working-old', {
           sessionState: 'working',
-          updatedAt: '2026-07-17T09:00:00.000Z',
+          createdAt: '2026-07-17T08:30:00.000Z',
         }),
         session('needs-input', {
           sessionState: 'needs_input',
-          updatedAt: '2026-07-17T08:00:00.000Z',
+          createdAt: '2026-07-17T09:00:00.000Z',
         }),
         session('working-new', {
           sessionState: 'starting',
-          updatedAt: '2026-07-17T09:30:00.000Z',
+          createdAt: '2026-07-17T09:30:00.000Z',
         }),
         session('completed', {
           sessionState: 'completed',
-          updatedAt: '2026-07-17T09:57:00.000Z',
+          createdAt: '2026-07-17T09:57:00.000Z',
         }),
         session('stopped', {
           sessionState: 'stopped',
-          updatedAt: '2026-07-17T09:56:00.000Z',
+          createdAt: '2026-07-17T09:56:00.000Z',
         }),
       ],
       now,
@@ -104,11 +104,20 @@ describe('buildAgentRosterRows', () => {
       'needs-input',
       'working-new',
       'working-old',
-      'completed',
       'failed-new',
-      'idle-new',
+      'completed',
       'stopped',
+      'idle-old',
     ]);
+  });
+
+  it('renders an unparseable createdAt as a zero age instead of ~56 years', () => {
+    const rows = buildAgentRosterRows({
+      sessions: [session('broken', { createdAt: 'not-a-date' })],
+      now,
+    });
+
+    expect(rows[0]).toMatchObject({ ageMs: 0, ageLabel: '0s' });
   });
 
   it('filters by text across identity, cwd, and summaries', () => {
@@ -179,6 +188,23 @@ describe('buildAgentRosterRows', () => {
     ).toEqual(['completed', 'failed', 'idle', 'stopped']);
   });
 
+  it('matches the whole Working group with s:working, including starting', () => {
+    const rows = buildAgentRosterRows({
+      sessions: [
+        session('working-one', { sessionState: 'working' }),
+        session('starting-one', { sessionState: 'starting' }),
+        session('done-one', { sessionState: 'completed' }),
+      ],
+      filter: 's:working',
+      now,
+    });
+
+    expect(rows.map((row) => row.sessionId)).toEqual([
+      'starting-one',
+      'working-one',
+    ]);
+  });
+
   it('sorts pinned rows first and searches display names from roster entries', () => {
     const rows = buildAgentRosterRows({
       sessions: [
@@ -242,7 +268,6 @@ describe('buildAgentRosterRows', () => {
       }),
     ]);
   });
-
 });
 
 function session(

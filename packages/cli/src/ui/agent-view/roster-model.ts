@@ -24,10 +24,7 @@ import type {
 } from '../../agent-view/presentation.js';
 import { deriveAgentViewPresentation } from '../../agent-view/presentation.js';
 
-export type AgentRosterStateGroup =
-  | 'needs_input'
-  | 'working'
-  | 'done';
+export type AgentRosterStateGroup = 'needs_input' | 'working' | 'done';
 
 export type AgentRosterAliveIndicator = 'alive' | 'hibernating' | 'offline';
 export type AgentRosterGroupMode = 'state' | 'directory';
@@ -115,7 +112,12 @@ function toRosterRow(
   worker: AgentViewWorkerFile | undefined,
   now: number,
 ): AgentRosterRow {
-  const ageMs = Math.max(0, now - toTime(session.createdAt));
+  // An unparseable createdAt must not surface as a ~56-year duration.
+  const createdAt = toTime(session.createdAt);
+  const ageMs =
+    Number.isNaN(now) || Number.isNaN(createdAt)
+      ? 0
+      : Math.max(0, now - createdAt);
   const stateLabel = formatStateLabel(session.sessionState);
   const presentation = deriveAgentViewPresentation({
     state: session,
@@ -213,6 +215,10 @@ function matchesStateFilter(row: AgentRosterRow, stateFilter: string): boolean {
   switch (stateFilter) {
     case 'blocked':
       return row.stateGroup === 'needs_input';
+    case 'working':
+      // Group-level alias (like blocked/done) so starting sessions, which
+      // render in the Working group, are not silently excluded.
+      return row.stateGroup === 'working';
     case 'done':
       return row.stateGroup === 'done';
     default:
@@ -321,8 +327,9 @@ function formatDuration(durationMs: number): string {
 
 function toTime(value: Date | string): number {
   const date = value instanceof Date ? value : new Date(value);
-  const time = date.getTime();
-  return Number.isNaN(time) ? 0 : time;
+  // Callers must handle NaN explicitly; coercing here would turn an
+  // unparseable timestamp into epoch 0 and a bogus ~56-year age.
+  return date.getTime();
 }
 
 function assertNever(value: never): never {

@@ -312,7 +312,8 @@ export function SessionPicker(props: SessionPickerProps) {
     maxVisibleItems,
     centerSelection,
     initialSessions,
-    isActive: true,
+    // Gate picker input while the managed-session preview overlay is open.
+    isActive: managedPreviewSessionId === undefined,
     enablePreview,
     enableMultiSelect,
     onConfirmMulti,

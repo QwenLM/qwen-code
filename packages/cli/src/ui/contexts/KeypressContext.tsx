@@ -64,9 +64,19 @@ const OPTION_COMPOSED_GLYPHS: Record<string, string> = {
 };
 export const PASTE_MODE_PREFIX = `${ESC}[200~`;
 export const PASTE_MODE_SUFFIX = `${ESC}[201~`;
-const FOCUS_EVENT_PATTERN = new RegExp(
-  `^(?:${escapeRegExp(FOCUS_IN)}|${escapeRegExp(FOCUS_OUT)})+$`,
-);
+// Built lazily: FOCUS_IN/FOCUS_OUT come from useFocus.ts, which is part of a
+// circular import chain (useFocus -> useKeypress -> KeypressContext -> useFocus).
+// Evaluating the pattern at module load crashes when the cycle is entered at
+// useFocus.ts because the bindings are not initialized yet.
+let focusEventPattern: RegExp | undefined;
+function getFocusEventPattern(): RegExp {
+  if (!focusEventPattern) {
+    focusEventPattern = new RegExp(
+      `^(?:${escapeRegExp(FOCUS_IN)}|${escapeRegExp(FOCUS_OUT)})+$`,
+    );
+  }
+  return focusEventPattern;
+}
 export const DRAG_COMPLETION_TIMEOUT_MS = 100; // Broadcast full path after 100ms if no more input
 // Kitty sequence timeout: 200ms balances between:
 // - Too short: prematurely clear valid sequences during slow input
@@ -793,7 +803,7 @@ export function KeypressProvider({
       if (TERMINAL_RESPONSE_RE.test(key.sequence)) {
         return;
       }
-      if (FOCUS_EVENT_PATTERN.test(key.sequence)) {
+      if (getFocusEventPattern().test(key.sequence)) {
         return;
       }
 

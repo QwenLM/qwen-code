@@ -1568,12 +1568,6 @@ export const AppContainer = (props: AppContainerProps) => {
         existingCallback?.(customTitle, source, sessionId);
         if (sessionId === config.getSessionId()) {
           setSessionName(customTitle);
-          if (isAgentViewWorkerEnv()) {
-            void reportAgentViewWorkerState({
-              sessionState: isIdleRef.current ? 'idle' : 'working',
-              summary: customTitle,
-            });
-          }
         }
       },
     );
@@ -1753,16 +1747,23 @@ export const AppContainer = (props: AppContainerProps) => {
   );
 
   const detachAgentViewSession = useCallback(async () => {
-    if (isAgentViewWorkerEnv()) {
-      await sendAgentViewWorkerEvent({ type: 'detach' });
+    try {
+      if (isAgentViewWorkerEnv()) {
+        await sendAgentViewWorkerEvent({ type: 'detach' });
+        return;
+      }
+      await detachCurrentSessionToAgentView(config, {
+        terminal: {
+          columns: terminalWidth,
+          rows: terminalHeight,
+        },
+      });
+    } catch (error) {
+      // Callers are fire-and-forget key handlers; surface the failure in the
+      // debug log instead of letting it become an unhandled rejection.
+      debugLogger.warn('Failed to detach agent view session:', error);
       return;
     }
-    await detachCurrentSessionToAgentView(config, {
-      terminal: {
-        columns: terminalWidth,
-        rows: terminalHeight,
-      },
-    });
     config.getGeminiClient()?.requestShutdown();
     await runExitCleanup();
     process.exit(runAgentViewRosterCommand(config.getProjectRoot()));
@@ -2233,22 +2234,27 @@ export const AppContainer = (props: AppContainerProps) => {
 
   useEffect(() => {
     if (!isAgentViewWorkerEnv()) return;
-    void reportAgentViewWorkerState(
-      getAgentViewWorkerStateForUi({
-        initError,
-        streamingState,
-        pendingToolCalls,
-        lastResult: getLastAgentViewModelOutputLine([
-          ...historyManager.history,
-          ...pendingGeminiHistoryItems,
-        ]),
-      }),
-    );
+    const report = getAgentViewWorkerStateForUi({
+      initError,
+      streamingState,
+      pendingToolCalls,
+      lastResult: getLastAgentViewModelOutputLine([
+        ...historyManager.history,
+        ...pendingGeminiHistoryItems,
+      ]),
+    });
+    void reportAgentViewWorkerState({
+      ...report,
+      // Fold the recorded session title into the authoritative report instead
+      // of emitting a partial one that would clobber waitingFor/lastResult.
+      ...(report.summary || !sessionName ? {} : { summary: sessionName }),
+    });
   }, [
     historyManager.history,
     initError,
     pendingGeminiHistoryItems,
     pendingToolCalls,
+    sessionName,
     streamingState,
   ]);
 
@@ -2833,6 +2839,11 @@ export const AppContainer = (props: AppContainerProps) => {
   );
 
   const pendingAgentViewControlPromptsRef = useRef<string[]>([]);
+  // Keep the poll loop mounted across streaming-state transitions; reading
+  // the submitter through a ref avoids tearing down/restarting the 250 ms
+  // loop (and its immediate poll RPC) on every state change.
+  const handleFinalSubmitRef = useRef(handleFinalSubmit);
+  handleFinalSubmitRef.current = handleFinalSubmit;
   useEffect(() => {
     if (!isAgentViewWorkerEnv()) return undefined;
 
@@ -2847,7 +2858,7 @@ export const AppContainer = (props: AppContainerProps) => {
       }
       const nextPrompt = pendingAgentViewControlPromptsRef.current.shift();
       if (nextPrompt) {
-        handleFinalSubmit(nextPrompt);
+        handleFinalSubmitRef.current(nextPrompt);
       }
     };
     const poll = async () => {
@@ -2867,10 +2878,18 @@ export const AppContainer = (props: AppContainerProps) => {
               if (streamingStateRef.current === StreamingState.Responding) {
                 cancelOngoingRequestRef.current();
               }
+              // Terminal stop: drop queued prompts and shut the worker down
+              // gracefully (the supervisor's SIGTERM is only a 10 s backstop).
+              pendingAgentViewControlPromptsRef.current = [];
+              const shutdown = async () => {
+                config.getGeminiClient()?.requestShutdown();
+                await runExitCleanup();
+                process.exit(0);
+              };
               void reportAgentViewWorkerState({
                 sessionState: 'stopped',
                 lastResult: 'Stopped by user',
-              });
+              }).then(shutdown, shutdown);
             },
           );
         }
@@ -2894,7 +2913,7 @@ export const AppContainer = (props: AppContainerProps) => {
         clearTimeout(timer);
       }
     };
-  }, [handleFinalSubmit, refreshStatic]);
+  }, [config, refreshStatic]);
 
   const handleArenaModelsSelected = useCallback(
     (models: string[]) => {
@@ -4140,14 +4159,9 @@ export const AppContainer = (props: AppContainerProps) => {
         return; // Btw cancelled, end processing
       }
 
-      // 4. Cancel ongoing requests
+      // 4. Cancel ongoing requests (cancel-and-continue: the worker session
+      // stays alive, so no terminal state is reported)
       if (streamingState === StreamingState.Responding) {
-        if (isAgentViewWorkerEnv()) {
-          void reportAgentViewWorkerState({
-            sessionState: 'stopped',
-            lastResult: 'Stopped by user',
-          });
-        }
         cancelOngoingRequest?.();
         return; // Request cancelled, end processing
       }
@@ -4195,6 +4209,7 @@ export const AppContainer = (props: AppContainerProps) => {
         key.ctrl &&
         key.name === 'z' &&
         isAgentViewWorkerEnv() &&
+        !embeddedShellFocused &&
         !dialogsVisibleRef.current
       ) {
         void detachAgentViewSession();
@@ -4206,6 +4221,7 @@ export const AppContainer = (props: AppContainerProps) => {
         !key.ctrl &&
         !key.meta &&
         !key.shift &&
+        !embeddedShellFocused &&
         buffer.text.length === 0 &&
         !dialogsVisibleRef.current
       ) {
@@ -4291,12 +4307,8 @@ export const AppContainer = (props: AppContainerProps) => {
             clearTimeout(escapeTimerRef.current);
             escapeTimerRef.current = null;
           }
-          if (isAgentViewWorkerEnv()) {
-            void reportAgentViewWorkerState({
-              sessionState: 'stopped',
-              lastResult: 'Stopped by user',
-            });
-          }
+          // Cancel-and-continue: the worker session stays alive, so no
+          // terminal state is reported.
           cancelOngoingRequest?.();
           setEscapePressedOnce(false);
           return;
@@ -5085,8 +5097,12 @@ export function runAgentViewRosterCommand(
       QWEN_CODE_NO_RELAUNCH: '1',
     },
   });
-  if (result.signal) {
+  if (result.error || result.signal) {
+    if (result.error) {
+      // eslint-disable-next-line no-console
+      console.error(result.error);
+    }
     return 1;
   }
-  return result.status ?? 0;
+  return result.status ?? 1;
 }

@@ -61,13 +61,6 @@ import {
   useQueuedSubmissionDrain,
 } from './AppContainer.js';
 import {
-  answerAgentViewPendingToolCall,
-  applyAgentViewWorkerControlEventForUi,
-  getAgentViewAnswerableToolCalls,
-  getAgentViewWorkerStateForUi,
-  getLastAgentViewModelOutputLine,
-} from './agent-view/worker-ui-bridge.js';
-import {
   formatSessionWindowTitle,
   writeTerminalTitle,
 } from '../utils/windowTitle.js';
@@ -79,8 +72,6 @@ import {
   type GeminiClient,
   type GoalTurnHost,
   type SubagentManager,
-  ToolConfirmationOutcome,
-  type WaitingToolCall,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../config/settings.js';
 import type { InitializationResult } from '../core/initializer.js';
@@ -756,6 +747,33 @@ describe('AppContainer State Management', () => {
       ).toBe(1);
     } finally {
       process.argv[1] = originalArgv1;
+    }
+  });
+
+  it('reports spawn failures from the Agent View roster relaunch', () => {
+    const spawnError = new Error('spawn ENOENT');
+    const consoleErrorSpy = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+    const spawnSyncSpy = vi.fn(() => ({
+      status: null,
+      signal: null,
+      error: spawnError,
+    }));
+    const originalArgv1 = process.argv[1];
+    process.argv[1] = '/workspace/qwen-code/packages/cli/dist/src/cli.js';
+    try {
+      expect(
+        runAgentViewRosterCommand(
+          '/workspace/qwen-code',
+          spawnSyncSpy as unknown as SpawnSync,
+        ),
+      ).toBe(1);
+      expect(spawnSyncSpy).toHaveBeenCalledTimes(1);
+      expect(consoleErrorSpy).toHaveBeenCalledWith(spawnError);
+    } finally {
+      process.argv[1] = originalArgv1;
+      consoleErrorSpy.mockRestore();
     }
   });
 
@@ -6438,293 +6456,6 @@ describe('AppContainer State Management', () => {
         hasPendingToolConfirmation: true,
       });
     });
-  });
-});
-
-describe('getAgentViewWorkerStateForUi', () => {
-  it('selects the newest non-empty model output line', () => {
-    expect(
-      getLastAgentViewModelOutputLine([
-        { type: 'gemini', text: 'first response' },
-        {
-          type: 'gemini_content',
-          text: 'opening line\n\nfinal question?',
-        },
-      ]),
-    ).toBe('final question?');
-  });
-
-  it('maps responding state to working with the last model output', () => {
-    expect(
-      getAgentViewWorkerStateForUi({
-        initError: null,
-        streamingState: StreamingState.Responding,
-        pendingToolCalls: [{ status: 'executing', request: { name: 'Bash' } }],
-        lastResult: 'Running the requested test file.',
-      }),
-    ).toEqual({
-      sessionState: 'working',
-      lastResult: 'Running the requested test file.',
-    });
-  });
-
-  it('maps confirmation waits to needs_input', () => {
-    expect(
-      getAgentViewWorkerStateForUi({
-        initError: null,
-        streamingState: StreamingState.WaitingForConfirmation,
-        pendingToolCalls: [
-          { status: 'awaiting_approval', request: { name: 'Edit' } },
-        ],
-      }),
-    ).toEqual({
-      sessionState: 'needs_input',
-      waitingFor: 'Edit',
-      inputKind: 'blocking',
-    });
-  });
-
-  it('maps nested Agent confirmation waits to needs_input', () => {
-    expect(
-      getAgentViewWorkerStateForUi({
-        initError: null,
-        streamingState: StreamingState.WaitingForConfirmation,
-        pendingToolCalls: [
-          {
-            status: 'executing',
-            request: { name: 'Agent' },
-            liveOutput: {
-              type: 'task_execution',
-              pendingConfirmation: { type: 'info' },
-            },
-          },
-        ],
-      }),
-    ).toEqual({
-      sessionState: 'needs_input',
-      waitingFor: 'Agent',
-      inputKind: 'blocking',
-    });
-  });
-
-  it('maps idle and initialization failures', () => {
-    expect(
-      getAgentViewWorkerStateForUi({
-        initError: null,
-        streamingState: StreamingState.Idle,
-        lastResult: 'Ready for the next step.',
-      }),
-    ).toEqual({
-      sessionState: 'idle',
-      lastResult: 'Ready for the next step.',
-    });
-
-    expect(
-      getAgentViewWorkerStateForUi({
-        initError: new Error('init failed'),
-        streamingState: StreamingState.Idle,
-      }),
-    ).toEqual({
-      sessionState: 'failed',
-      summary: 'init failed',
-    });
-  });
-
-  it('maps idle model questions to needs_input', () => {
-    expect(
-      getAgentViewWorkerStateForUi({
-        initError: null,
-        streamingState: StreamingState.Idle,
-        lastResult:
-          'What would you like to test? A specific file, the full suite, or something else?',
-      }),
-    ).toEqual({
-      sessionState: 'needs_input',
-      waitingFor: 'response',
-      inputKind: 'soft',
-      lastResult:
-        'What would you like to test? A specific file, the full suite, or something else?',
-    });
-  });
-});
-
-describe('answerAgentViewPendingToolCall', () => {
-  it('resolves a matching permission confirmation', async () => {
-    const onConfirm = vi.fn(async () => {});
-    const pendingCall = {
-      status: 'awaiting_approval',
-      request: { callId: 'call-1', name: 'Edit' },
-      confirmationDetails: {
-        type: 'info',
-        title: 'Allow edit?',
-        prompt: 'Allow edit?',
-        onConfirm,
-      },
-    } as unknown as WaitingToolCall;
-
-    await expect(
-      answerAgentViewPendingToolCall(
-        {
-          type: 'answer',
-          sequence: 1,
-          callId: 'call-1',
-          text: 'yes',
-          at: '2026-07-17T00:00:00.000Z',
-        },
-        [pendingCall],
-      ),
-    ).resolves.toBe(true);
-
-    expect(onConfirm).toHaveBeenCalledWith(ToolConfirmationOutcome.ProceedOnce);
-  });
-
-  it('passes text answers to AskUserQuestion confirmations', async () => {
-    const onConfirm = vi.fn(async () => {});
-    const pendingCall = {
-      status: 'awaiting_approval',
-      request: { callId: 'call-2', name: 'AskUserQuestion' },
-      confirmationDetails: {
-        type: 'ask_user_question',
-        title: 'Choose',
-        questions: [
-          {
-            question: 'Which path?',
-            header: 'Path',
-            options: [],
-          },
-        ],
-        onConfirm,
-      },
-    } as unknown as WaitingToolCall;
-
-    await expect(
-      answerAgentViewPendingToolCall(
-        {
-          type: 'answer',
-          sequence: 1,
-          text: 'src/index.ts',
-          at: '2026-07-17T00:00:00.000Z',
-        },
-        [pendingCall],
-      ),
-    ).resolves.toBe(true);
-
-    expect(onConfirm).toHaveBeenCalledWith(
-      ToolConfirmationOutcome.ProceedOnce,
-      { answers: { 0: 'src/index.ts' } },
-    );
-  });
-
-  it('maps negative text answers to cancel', async () => {
-    const onConfirm = vi.fn(async () => {});
-    const pendingCall = {
-      status: 'awaiting_approval',
-      request: { callId: 'call-3', name: 'Bash' },
-      confirmationDetails: {
-        type: 'exec',
-        title: 'Run command?',
-        prompt: 'Run command?',
-        command: 'npm test',
-        rootCommand: 'npm',
-        onConfirm,
-      },
-    } as unknown as WaitingToolCall;
-
-    await expect(
-      answerAgentViewPendingToolCall(
-        {
-          type: 'answer',
-          sequence: 1,
-          text: 'no',
-          at: '2026-07-17T00:00:00.000Z',
-        },
-        [pendingCall],
-      ),
-    ).resolves.toBe(true);
-
-    expect(onConfirm).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
-  });
-
-  it('answers nested Agent pending confirmations', async () => {
-    const onConfirm = vi.fn(async () => {});
-    const answerable = getAgentViewAnswerableToolCalls([
-      {
-        status: 'executing',
-        request: { callId: 'agent-call', name: 'Agent' },
-        liveOutput: {
-          type: 'task_execution',
-          pendingConfirmation: {
-            type: 'info',
-            title: 'Allow nested action?',
-            prompt: 'Allow nested action?',
-            onConfirm,
-          },
-        },
-      },
-    ]);
-
-    await expect(
-      answerAgentViewPendingToolCall(
-        {
-          type: 'answer',
-          sequence: 1,
-          text: 'yes',
-          at: '2026-07-17T00:00:00.000Z',
-        },
-        answerable,
-      ),
-    ).resolves.toBe(true);
-
-    expect(onConfirm).toHaveBeenCalledWith(ToolConfirmationOutcome.ProceedOnce);
-  });
-});
-
-describe('applyAgentViewWorkerControlEventForUi', () => {
-  it('queues normal text answers as prompts when no approval is pending', async () => {
-    const enqueuePrompt = vi.fn();
-
-    await applyAgentViewWorkerControlEventForUi(
-      {
-        type: 'answer',
-        sequence: 1,
-        text: 'run the focused test',
-        at: '2026-07-17T00:00:00.000Z',
-      },
-      [],
-      enqueuePrompt,
-    );
-
-    expect(enqueuePrompt).toHaveBeenCalledWith('run the focused test');
-  });
-
-  it('does not queue approval answers as prompts', async () => {
-    const onConfirm = vi.fn(async () => {});
-    const enqueuePrompt = vi.fn();
-    const pendingCall = {
-      status: 'awaiting_approval',
-      request: { callId: 'call-1', name: 'Edit' },
-      confirmationDetails: {
-        type: 'info',
-        title: 'Allow edit?',
-        prompt: 'Allow edit?',
-        onConfirm,
-      },
-    } as unknown as WaitingToolCall;
-
-    await applyAgentViewWorkerControlEventForUi(
-      {
-        type: 'answer',
-        sequence: 1,
-        callId: 'call-1',
-        text: 'yes',
-        at: '2026-07-17T00:00:00.000Z',
-      },
-      [pendingCall],
-      enqueuePrompt,
-    );
-
-    expect(onConfirm).toHaveBeenCalledWith(ToolConfirmationOutcome.ProceedOnce);
-    expect(enqueuePrompt).not.toHaveBeenCalled();
   });
 });
 

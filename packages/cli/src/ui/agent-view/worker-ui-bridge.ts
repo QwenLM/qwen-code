@@ -128,8 +128,15 @@ export async function answerAgentViewPendingToolCall(
     return false;
   }
 
-  const outcome = toToolConfirmationOutcome(event.outcome, event.text);
-  if (toolCall.confirmationDetails.type === 'ask_user_question') {
+  // Questions deliver the text as the answer payload; the negative-text
+  // heuristic below must not turn a real "no" answer into a refusal.
+  const isQuestion = toolCall.confirmationDetails.type === 'ask_user_question';
+  const outcome = toToolConfirmationOutcome(
+    event.outcome,
+    event.text,
+    isQuestion,
+  );
+  if (isQuestion) {
     await toolCall.confirmationDetails.onConfirm(
       outcome,
       getAgentViewAnswerPayload(event),
@@ -144,14 +151,18 @@ export async function answerAgentViewPendingToolCall(
 export function getAgentViewAnswerableToolCalls(
   pendingToolCalls: readonly unknown[],
 ): WaitingToolCall[] {
-  const answerable: WaitingToolCall[] = [];
+  // Two passes so genuinely awaiting calls always precede synthesized
+  // nested-Agent confirmations — mirroring the display rule, so the call
+  // that receives the answer is the one the roster shows as waiting.
+  const awaiting: WaitingToolCall[] = [];
+  const nested: WaitingToolCall[] = [];
   for (const toolCall of pendingToolCalls) {
     if (!isRecord(toolCall)) continue;
     if (
       toolCall['status'] === 'awaiting_approval' &&
       isRecord(toolCall['confirmationDetails'])
     ) {
-      answerable.push(toolCall as unknown as WaitingToolCall);
+      awaiting.push(toolCall as unknown as WaitingToolCall);
       continue;
     }
 
@@ -159,7 +170,7 @@ export function getAgentViewAnswerableToolCalls(
       toolCall['liveOutput'],
     );
     if (pendingConfirmation) {
-      answerable.push({
+      nested.push({
         status: 'awaiting_approval',
         request: isRecord(toolCall['request'])
           ? {
@@ -177,7 +188,7 @@ export function getAgentViewAnswerableToolCalls(
       } as unknown as WaitingToolCall);
     }
   }
-  return answerable;
+  return [...awaiting, ...nested];
 }
 
 export async function applyAgentViewWorkerControlEventForUi(
@@ -236,6 +247,7 @@ function getNestedAgentViewPendingConfirmation(
 function toToolConfirmationOutcome(
   outcome: AgentViewWorkerAnswerOutcome | undefined,
   text: string | undefined,
+  isQuestion = false,
 ): ToolConfirmationOutcome {
   switch (outcome) {
     case 'proceed_always':
@@ -254,6 +266,12 @@ function toToolConfirmationOutcome(
       return ToolConfirmationOutcome.ProceedOnce;
     default:
       break;
+  }
+
+  // For ask_user_question the text is the answer itself (a "no" answer must
+  // still be delivered), matching AskUserQuestionDialog behavior.
+  if (isQuestion) {
+    return ToolConfirmationOutcome.ProceedOnce;
   }
 
   const normalized = text?.trim().toLowerCase();

@@ -199,7 +199,6 @@ vi.mock('../ui/components/StandaloneSessionPicker.js', () => ({
 interface AgentsArgs {
   cwd?: string;
   json?: boolean;
-  all?: boolean;
 }
 
 function buildParser(): Argv<AgentsArgs> {
@@ -253,7 +252,7 @@ describe('agents command', () => {
     expect(mockWriteStdoutLine).toHaveBeenCalled();
   });
 
-  it('registers --cwd, --json, and --all options', () => {
+  it('registers --cwd and --json options', () => {
     const options = (
       buildParser() as Argv & {
         getOptions(): { key: Record<string, boolean> };
@@ -262,10 +261,9 @@ describe('agents command', () => {
 
     expect(options.key['cwd']).toBe(true);
     expect(options.key['json']).toBe(true);
-    expect(options.key['all']).toBe(true);
   });
 
-  it('prints active agents as a JSON array without entering interactive helper', async () => {
+  it('prints all managed agents as a JSON array without entering interactive helper', async () => {
     const runSpy = vi.spyOn(agentsInteractiveSession, 'run');
     const handler = agentsListCommand.handler;
     if (!handler) throw new Error('agents list command handler missing');
@@ -304,6 +302,13 @@ describe('agents command', () => {
         attached: true,
         pinned: false,
       }),
+      expect.objectContaining({
+        sessionId: 'session-done',
+        state: 'completed',
+        processState: 'exited',
+        pinned: false,
+        attached: false,
+      }),
     ]);
     expect(mockSupervisor.list).toHaveBeenCalledWith(
       path.resolve('/tmp/workspace'),
@@ -320,39 +325,6 @@ describe('agents command', () => {
     );
 
     expect(mockSupervisor.list).toHaveBeenCalledWith(undefined);
-  });
-
-  it('includes completed agents in JSON output with --all', async () => {
-    const handler = agentsListCommand.handler;
-    if (!handler) throw new Error('agents list command handler missing');
-
-    await handler(
-      buildParser().parseSync(
-        '--cwd /tmp/workspace --json --all',
-      ) as Parameters<typeof handler>[0],
-    );
-
-    const payload = JSON.parse(
-      String(mockWriteStdoutLine.mock.calls[0]?.[0]),
-    ) as Array<{ sessionId: string; state: string }>;
-    expect(payload.map((agent) => agent.sessionId)).toEqual([
-      'session-1',
-      'session-attached',
-      'session-done',
-    ]);
-    expect(payload[2]).toMatchObject({
-      sessionId: 'session-done',
-      state: 'completed',
-      processState: 'exited',
-      pinned: false,
-      attached: false,
-    });
-  });
-
-  it('rejects --all without --json', async () => {
-    expect(() => buildParser().parseSync('--all')).toThrow(
-      'qwen agents --all requires --json.',
-    );
   });
 
   it('runs the interactive helper when --json is not set', async () => {
@@ -382,6 +354,39 @@ describe('agents command', () => {
       }),
     });
     expect(mockSupervisor.list).not.toHaveBeenCalled();
+  });
+
+  it('prints a text roster when --json is not set and stdout is not a TTY', async () => {
+    const handler = agentsListCommand.handler;
+    if (!handler) throw new Error('agents list command handler missing');
+
+    await handler(
+      buildParser().parseSync('--cwd /tmp/workspace') as Parameters<
+        typeof handler
+      >[0],
+    );
+
+    const output = mockWriteStdoutLine.mock.calls
+      .map((call) => String(call[0]))
+      .join('\n');
+    expect(output).toContain('session-1');
+    expect(output).toContain('Working');
+    expect(output).toContain('session-done');
+    expect(output).toContain('Completed');
+  });
+
+  it('prints a placeholder when the non-TTY roster is empty', async () => {
+    vi.mocked(mockSupervisor.list).mockResolvedValueOnce([]);
+    const handler = agentsListCommand.handler;
+    if (!handler) throw new Error('agents list command handler missing');
+
+    await handler(
+      buildParser().parseSync('--cwd /tmp/workspace') as Parameters<
+        typeof handler
+      >[0],
+    );
+
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith('No background agents.');
   });
 
   it('builds rows for the roster renderer', async () => {

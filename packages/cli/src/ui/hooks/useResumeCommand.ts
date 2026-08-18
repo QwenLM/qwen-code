@@ -29,7 +29,6 @@ import {
   isManagedAgentViewResumeBlocked,
   MANAGED_AGENT_VIEW_RESUME_MESSAGE,
 } from '../../startup/agent-view-resume-guard.js';
-import { getAgentViewProjectSessionService } from '../../startup/agent-view-resume-sessions.js';
 import { waitForGoalRuntime } from '../utils/goal-runtime.js';
 
 export interface UseResumeCommandOptions {
@@ -146,20 +145,8 @@ export function useResumeCommand(
       let recoveredBackgroundAgentsNotice: string | null = null;
 
       try {
-        let sessionService = new SessionService(config.getTargetDir());
-        let sessionData = await sessionService.loadSession(sessionId);
-        if (!sessionData) {
-          const projectSessionService =
-            await getAgentViewProjectSessionService();
-          if (projectSessionService) {
-            const projectSessionData =
-              await projectSessionService.loadSession(sessionId);
-            if (projectSessionData) {
-              sessionService = projectSessionService;
-              sessionData = projectSessionData;
-            }
-          }
-        }
+        const sessionService = new SessionService(config.getTargetDir());
+        const sessionData = await sessionService.loadSession(sessionId);
 
         if (!sessionData) {
           return;

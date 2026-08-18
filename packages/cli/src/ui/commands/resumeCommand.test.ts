@@ -19,7 +19,6 @@ vi.mock('../../config/config.js', () => ({
 
 const mockIsManagedAgentViewResumeBlocked = vi.hoisted(() => vi.fn());
 const mockIsAgentViewWorkerResumeCommandBlocked = vi.hoisted(() => vi.fn());
-const mockGetAgentViewProjectSessionService = vi.hoisted(() => vi.fn());
 
 vi.mock('../../startup/agent-view-resume-guard.js', () => ({
   isManagedAgentViewResumeBlocked: mockIsManagedAgentViewResumeBlocked,
@@ -29,10 +28,6 @@ vi.mock('../../startup/agent-view-resume-guard.js', () => ({
   AGENT_VIEW_WORKER_RESUME_MESSAGE: 'worker resume message',
 }));
 
-vi.mock('../../startup/agent-view-resume-sessions.js', () => ({
-  getAgentViewProjectSessionService: mockGetAgentViewProjectSessionService,
-}));
-
 describe('resumeCommand', () => {
   let mockContext: CommandContext;
 
@@ -40,7 +35,6 @@ describe('resumeCommand', () => {
     vi.clearAllMocks();
     mockIsManagedAgentViewResumeBlocked.mockResolvedValue(false);
     mockIsAgentViewWorkerResumeCommandBlocked.mockReturnValue(false);
-    mockGetAgentViewProjectSessionService.mockResolvedValue(undefined);
     mockContext = createMockCommandContext();
   });
 

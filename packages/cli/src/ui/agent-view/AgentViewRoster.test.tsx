@@ -23,6 +23,8 @@ interface TestKey {
   downArrow?: boolean;
   leftArrow?: boolean;
   rightArrow?: boolean;
+  home?: boolean;
+  end?: boolean;
   tab?: boolean;
   backspace?: boolean;
   delete?: boolean;
@@ -160,6 +162,67 @@ describe('AgentViewRoster', () => {
     press('', { rightArrow: true });
 
     expect(onAttachSelected).toHaveBeenCalledTimes(2);
+  });
+
+  it('moves the cursor right instead of attaching while a prompt is typed', () => {
+    const onAttachSelected = vi.fn();
+    const onPromptChange = vi.fn();
+
+    renderRoster({
+      prompt: 'ab',
+      onAttachSelected,
+      onPromptChange,
+    });
+
+    press('', { leftArrow: true });
+    press('', { rightArrow: true });
+    press('c', {});
+
+    expect(onAttachSelected).not.toHaveBeenCalled();
+    expect(onPromptChange).toHaveBeenLastCalledWith('abc');
+  });
+
+  it('supports Home and End in the roster prompt', () => {
+    const onPromptChange = vi.fn();
+
+    renderRoster({
+      prompt: 'ab',
+      onPromptChange,
+    });
+
+    press('', { home: true });
+    press('X', {});
+
+    expect(onPromptChange).toHaveBeenLastCalledWith('Xab');
+  });
+
+  it('inserts multi-line pastes instead of dropping the tail', () => {
+    const onDispatch = vi.fn();
+    const onPromptChange = vi.fn();
+
+    renderRoster({
+      onDispatch,
+      onPromptChange,
+    });
+
+    press('fix the login bug\nalso update the tests', {});
+
+    expect(onDispatch).not.toHaveBeenCalled();
+    expect(onPromptChange).toHaveBeenLastCalledWith(
+      'fix the login bug\nalso update the tests',
+    );
+  });
+
+  it('drops real focus sequences but keeps focus-like user text', () => {
+    const onPromptChange = vi.fn();
+
+    renderRoster({ onPromptChange });
+
+    press('\x1b[I', {});
+    expect(onPromptChange).not.toHaveBeenCalled();
+
+    press('[Info] check', {});
+    expect(onPromptChange).toHaveBeenLastCalledWith('[Info] check');
   });
 
   it('moves selection and cancels from keyboard shortcuts', () => {
@@ -350,6 +413,46 @@ describe('AgentViewRoster', () => {
     expect(onSubmitPeekPrompt).toHaveBeenCalledWith('continue');
   });
 
+  it('keeps multi-line peek pastes in the reply instead of submitting early', () => {
+    const onPeekPromptChange = vi.fn();
+    const onSubmitPeekPrompt = vi.fn();
+
+    renderRoster({
+      peekPanel: {
+        title: 'alpha',
+        lines: ['Result: ready'],
+      },
+      peekInputMode: 'send',
+      peekInputTarget: 'alpha',
+      onPeekPromptChange,
+      onSubmitPeekPrompt,
+    });
+
+    press('line one\nline two', {});
+
+    expect(onSubmitPeekPrompt).not.toHaveBeenCalled();
+    expect(onPeekPromptChange).toHaveBeenLastCalledWith('line one\nline two');
+  });
+
+  it('deletes a full emoji code point on peek backspace', () => {
+    const onPeekPromptChange = vi.fn();
+
+    renderRoster({
+      peekPrompt: 'looks good 👍',
+      peekPanel: {
+        title: 'alpha',
+        lines: ['Result: ready'],
+      },
+      peekInputMode: 'send',
+      peekInputTarget: 'alpha',
+      onPeekPromptChange,
+    });
+
+    press('', { backspace: true });
+
+    expect(onPeekPromptChange).toHaveBeenCalledWith('looks good ');
+  });
+
   it('closes an open session peek on Space', () => {
     const onCancel = vi.fn();
 
@@ -370,6 +473,7 @@ describe('AgentViewRoster', () => {
 
   it('renders peek panel details', () => {
     const { lastFrame } = renderRoster({
+      rows: [row('alpha', { summary: 'ready' })],
       peekPanel: {
         title: 'alpha',
         lines: ['State: idle / alive', 'Summary: ready'],
@@ -380,10 +484,27 @@ describe('AgentViewRoster', () => {
 
     const output = lastFrame() ?? '';
     expect(output).toContain('ready');
-    expect(output).toContain('enter to open');
+    expect(output).toContain('enter to send');
     expect(output).toContain('space to close');
     expect(output).not.toContain('Summary: ready');
     expect(output).not.toContain('State: idle / alive');
+  });
+
+  it('shows error panel lines over stale row output', () => {
+    const { lastFrame } = renderRoster({
+      rows: [row('alpha', { summary: 'stale result' })],
+      peekPanel: {
+        title: 'alpha',
+        lines: ['worker is not responding'],
+        error: true,
+      },
+      peekInputMode: 'send',
+      peekInputTarget: 'alpha',
+    });
+
+    const output = lastFrame() ?? '';
+    expect(output).toContain('worker is not responding');
+    expect(output).not.toContain('stale result');
   });
 
   it('renders notices without hiding the dispatch input', () => {
@@ -436,7 +557,7 @@ describe('AgentViewRoster', () => {
     });
 
     const output = lastFrame() ?? '';
-    expect(output).toContain('ready');
+    expect(output).toContain('peeked row');
     expect(output).toContain('reply');
     expect(output).not.toContain('send follow-up to alpha');
   });

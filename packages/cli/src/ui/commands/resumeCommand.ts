@@ -14,7 +14,6 @@ import {
   isManagedAgentViewResumeBlocked,
   MANAGED_AGENT_VIEW_RESUME_MESSAGE,
 } from '../../startup/agent-view-resume-guard.js';
-import { getAgentViewProjectSessionService } from '../../startup/agent-view-resume-sessions.js';
 
 export const resumeCommand: SlashCommand = {
   name: 'resume',
@@ -59,10 +58,7 @@ export const resumeCommand: SlashCommand = {
         };
       }
       const sessionService = config.getSessionService();
-      const exists =
-        (await sessionService.sessionExists(arg)) ||
-        Boolean(await getAgentViewProjectSessionExists(arg));
-      if (exists) {
+      if (await sessionService.sessionExists(arg)) {
         return { type: 'dialog', dialog: 'resume', sessionId: arg };
       }
       return {
@@ -96,10 +92,3 @@ export const resumeCommand: SlashCommand = {
     };
   },
 };
-
-async function getAgentViewProjectSessionExists(
-  sessionId: string,
-): Promise<boolean> {
-  const sessionService = await getAgentViewProjectSessionService();
-  return sessionService ? sessionService.sessionExists(sessionId) : false;
-}

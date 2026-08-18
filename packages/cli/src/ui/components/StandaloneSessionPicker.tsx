@@ -144,7 +144,9 @@ export async function showResumeSessionPickerItem(
   const hasSession = await hasResumeSession(sessionService, initialSessions);
   const includeAgentViewSessions = options.includeAgentViewSessions ?? true;
   const managedSessions = await listManagedAgentViewResumeSessions();
-  const displayManagedSessions = includeAgentViewSessions ? managedSessions : [];
+  const displayManagedSessions = includeAgentViewSessions
+    ? managedSessions
+    : [];
   if (!hasSession && displayManagedSessions.length === 0) {
     writeStdoutLine('No sessions found. Start a new session with `qwen`.');
     return undefined;

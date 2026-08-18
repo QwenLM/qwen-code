@@ -143,7 +143,7 @@ describe('AgentViewApp', () => {
     expect(lastFrame()).toContain('ship it');
   });
 
-  it('handles row refresh failures after dispatch succeeds', async () => {
+  it('keeps a successful dispatch when the row refresh fails', async () => {
     const dispatchPrompt = vi.fn(async () => ({ sessionId: 'new-session' }));
     const loadRows = vi.fn(async () => {
       throw new Error('daemon unavailable');
@@ -161,11 +161,14 @@ describe('AgentViewApp', () => {
       await Promise.resolve();
     }
     stdin.write('\r');
-    await waitForFrame(lastFrame, 'daemon unavailable');
+    await waitForFrame(lastFrame, 'Dispatched.');
 
+    // The refresh failure must not mask the successful dispatch: no error
+    // notice and no restored prompt (a re-Enter would duplicate the session).
+    expect(dispatchPrompt).toHaveBeenCalledTimes(1);
     expect(dispatchPrompt).toHaveBeenCalledWith('ship it', false);
     expect(loadRows).toHaveBeenCalled();
-    expect(lastFrame()).toContain('daemon unavailable');
+    expect(lastFrame()).not.toContain('daemon unavailable');
   });
 
   it('shows peek details for the selected row on Space', async () => {

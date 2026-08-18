@@ -30,6 +30,7 @@ import type {
 import { showResumeSessionPickerItem } from '../ui/components/StandaloneSessionPicker.js';
 import type { AgentRosterRow } from '../ui/agent-view/roster-model.js';
 import { buildAgentRosterRows } from '../ui/agent-view/roster-model.js';
+import { getAuthTypeFromEnv } from '../utils/modelConfigUtils.js';
 import { writeStdoutLine } from '../utils/stdioHelpers.js';
 import { getCliVersion } from '../utils/version.js';
 import {
@@ -45,7 +46,6 @@ import { agentDaemonCommand } from './agent-daemon.js';
 interface AgentsArgs {
   cwd?: string;
   json?: boolean;
-  all?: boolean;
 }
 
 type AgentsInteractiveSupervisor = Pick<
@@ -110,8 +110,11 @@ export async function runAgentsInteractiveSession({
   renderRoster,
   header,
 }: RunAgentsInteractiveSessionOptions): Promise<void> {
+  // Titles only change on rename (handled via rosterEntry.displayName), so
+  // resolve each transcript at most once instead of re-reading on every tick.
+  const titleCache = new Map<string, string | undefined>();
   const loadRows = async () =>
-    toRosterRows(toSnapshots(await supervisor.list(listCwd)));
+    toRosterRows(toSnapshots(await supervisor.list(listCwd)), titleCache);
   const actions: AgentsInteractiveActions = {
     dispatchPrompt: async (prompt, _attach) => {
       const trimmedPrompt = prompt.trim();
@@ -252,7 +255,10 @@ async function defaultRenderAgentsRoster(
   writeStdoutLine(formatRosterRowsText(rows));
 }
 
-function toRosterRows(snapshots: AgentViewSessionSnapshot[]): AgentRosterRow[] {
+function toRosterRows(
+  snapshots: AgentViewSessionSnapshot[],
+  titleCache: Map<string, string | undefined>,
+): AgentRosterRow[] {
   if (snapshots.length === 0) {
     return [];
   }
@@ -268,18 +274,23 @@ function toRosterRows(snapshots: AgentViewSessionSnapshot[]): AgentRosterRow[] {
       snapshots.map((snapshot) => [snapshot.sessionId, snapshot.worker]),
     ),
     rosterEntries: snapshots
-      .map(getRosterEntryWithTitle)
+      .map((snapshot) => getRosterEntryWithTitle(snapshot, titleCache))
       .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry)),
   });
 }
 
 function getRosterEntryWithTitle(
   snapshot: AgentViewSessionSnapshot,
+  titleCache: Map<string, string | undefined>,
 ): AgentViewRosterEntry | undefined {
   if (snapshot.rosterEntry?.displayName) {
     return snapshot.rosterEntry;
   }
-  const title = readTranscriptTitle(snapshot);
+  let title = titleCache.get(snapshot.sessionId);
+  if (title === undefined && !titleCache.has(snapshot.sessionId)) {
+    title = readTranscriptTitle(snapshot);
+    titleCache.set(snapshot.sessionId, title);
+  }
   if (!title) {
     return snapshot.rosterEntry;
   }
@@ -310,7 +321,9 @@ function readTranscriptTitle(
       const title = readLastJsonStringFieldSync(
         filePath,
         'customTitle',
-        'custom_title',
+        // Strict marker: a loose 'custom_title' substring would also match
+        // tool/assistant records that merely mention the marker.
+        '"subtype":"custom_title"',
       )?.trim();
       if (title) return title;
     } catch {
@@ -346,17 +359,6 @@ export const agentsListCommand: CommandModule<unknown, AgentsArgs> = {
         default: false,
         description: 'Print machine-readable JSON',
       })
-      .option('all', {
-        type: 'boolean',
-        default: false,
-        description: 'Include completed and stopped agents',
-      })
-      .check((argv) => {
-        if (argv.all === true && argv.json !== true) {
-          return 'qwen agents --all requires --json.';
-        }
-        return true;
-      })
       .version(false),
   handler: async (argv) => {
     const cwd = path.resolve(argv.cwd ?? process.cwd());
@@ -364,7 +366,7 @@ export const agentsListCommand: CommandModule<unknown, AgentsArgs> = {
     const supervisor = await ensureAgentViewSupervisor();
     if (argv.json) {
       const snapshots = toSnapshots(await supervisor.list(listCwd));
-      writeStdoutLine(JSON.stringify(formatAgentsJson(snapshots, argv.all)));
+      writeStdoutLine(JSON.stringify(formatAgentsJson(snapshots)));
       return;
     }
 
@@ -393,9 +395,15 @@ function readConfiguredModelHeader(
     const settings = loadSettings(cwd, {
       skipLoadEnvironment: true,
     }).merged;
-    const model = readConfiguredModelFromSettings(settings);
+    const model =
+      readConfiguredModelFromSettings(settings) ||
+      process.env['OPENAI_MODEL']?.trim() ||
+      process.env['QWEN_MODEL']?.trim() ||
+      undefined;
     return {
-      authLabel: formatAuthLabel(settings.security?.auth?.selectedType),
+      authLabel: formatAuthLabel(
+        settings.security?.auth?.selectedType || getAuthTypeFromEnv(),
+      ),
       ...(model ? { model } : {}),
       ...readProviderLabel(settings.modelProviders, model),
     };
@@ -431,9 +439,9 @@ function readConfiguredModelFromSettings(
 }
 
 function formatAuthLabel(authType: string | undefined): string {
-  if (process.env['OPENAI_API_KEY']) return 'API Key';
   if (!authType) return 'Auth';
   if (authType === 'qwen-oauth') return 'Qwen OAuth';
+  if (authType === 'openai') return 'API Key';
   return formatProviderLabel(authType);
 }
 
@@ -466,46 +474,34 @@ export const agentsCommand: CommandModule = {
 
 function formatAgentsJson(
   snapshots: AgentViewSessionSnapshot[],
-  includeAll = false,
 ): Array<Record<string, unknown>> {
-  return snapshots
-    .filter((snapshot) => includeAll || isActiveAgentSnapshot(snapshot))
-    .map((snapshot) => {
-      const attached = snapshot.state.attachState === 'attached';
-      const name = snapshot.rosterEntry?.displayName;
-      return {
-        sessionId: snapshot.sessionId,
-        ...(name ? { name } : {}),
-        state: snapshot.state.sessionState,
-        processState: snapshot.state.processState,
-        projectCwd: snapshot.state.projectCwd,
-        activeCwd: snapshot.state.activeCwd,
-        attached,
-        pinned: Boolean(snapshot.rosterEntry?.pinned),
-        createdAt: snapshot.state.createdAt,
-        updatedAt: snapshot.state.updatedAt,
-        ...(snapshot.activity?.summary
-          ? { summary: snapshot.activity.summary }
-          : {}),
-        ...(snapshot.activity?.waitingFor
-          ? { waitingFor: snapshot.activity.waitingFor }
-          : {}),
-        ...(snapshot.activity?.queuedPromptCount
-          ? { queuedPromptCount: snapshot.activity.queuedPromptCount }
-          : {}),
-      };
-    });
-}
-
-function isActiveAgentSnapshot(snapshot: AgentViewSessionSnapshot): boolean {
-  if (
-    snapshot.state.sessionState === 'completed' ||
-    snapshot.state.sessionState === 'stopped' ||
-    snapshot.state.sessionState === 'failed'
-  ) {
-    return false;
-  }
-  return snapshot.state.processState !== 'exited';
+  // The roster manages every owned session, so list output includes
+  // completed/stopped/failed entries; consumers filter on `state` if needed.
+  return snapshots.map((snapshot) => {
+    const attached = snapshot.state.attachState === 'attached';
+    const name = snapshot.rosterEntry?.displayName;
+    return {
+      sessionId: snapshot.sessionId,
+      ...(name ? { name } : {}),
+      state: snapshot.state.sessionState,
+      processState: snapshot.state.processState,
+      projectCwd: snapshot.state.projectCwd,
+      activeCwd: snapshot.state.activeCwd,
+      attached,
+      pinned: Boolean(snapshot.rosterEntry?.pinned),
+      createdAt: snapshot.state.createdAt,
+      updatedAt: snapshot.state.updatedAt,
+      ...(snapshot.activity?.summary
+        ? { summary: snapshot.activity.summary }
+        : {}),
+      ...(snapshot.activity?.waitingFor
+        ? { waitingFor: snapshot.activity.waitingFor }
+        : {}),
+      ...(snapshot.activity?.queuedPromptCount
+        ? { queuedPromptCount: snapshot.activity.queuedPromptCount }
+        : {}),
+    };
+  });
 }
 
 function toSnapshots(value: unknown): AgentViewSessionSnapshot[] {

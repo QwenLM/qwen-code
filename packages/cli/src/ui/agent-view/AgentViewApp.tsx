@@ -94,6 +94,10 @@ export function AgentViewApp({
   const [lastInterruptAt, setLastInterruptAt] = useState(0);
   const dispatchInFlightRef = useRef(false);
   const peekSubmitInFlightRef = useRef(false);
+  const pinInFlightRef = useRef(false);
+  // Invalidates in-flight peek loads on every open/close so a stale response
+  // can never overwrite a newer panel or resurrect a closed one.
+  const peekGenerationRef = useRef(0);
   const displayFilter =
     peekPanel && peekPanel.title !== 'Filter'
       ? undefined
@@ -125,7 +129,17 @@ export function AgentViewApp({
   useEffect(() => {
     if (!peekPanel) return;
     const row = currentRows.find((item) => item.sessionId === peekPanel.title);
-    if (!row) return;
+    if (!row) {
+      if (peekPanel.title !== 'Filter') {
+        // The peeked session disappeared; close the stale panel instead of
+        // leaving a reply input aimed at a removed session.
+        peekGenerationRef.current += 1;
+        setPeekReplyTarget(undefined);
+        setPeekSubmittedPreview(undefined);
+        setPeekPanel(undefined);
+      }
+      return;
+    }
     setPeekReplyTarget(getReplyTarget(row));
     if (peekSubmittedPreview?.sessionId === row.sessionId && !isPending(row)) {
       setPeekSubmittedPreview(undefined);
@@ -141,7 +155,7 @@ export function AgentViewApp({
   useEffect(() => {
     if (!refreshIntervalMs || refreshIntervalMs <= 0) return undefined;
     const interval = setInterval(() => {
-      void refreshRows();
+      void refreshRows().catch(() => {});
     }, refreshIntervalMs);
     return () => {
       clearInterval(interval);
@@ -150,7 +164,7 @@ export function AgentViewApp({
 
   useEffect(() => {
     const subscription = actions.subscribeToChanges?.(() => {
-      void refreshRows();
+      void refreshRows().catch(() => {});
     });
     return () => {
       subscription?.dispose();
@@ -221,6 +235,7 @@ export function AgentViewApp({
       setNotice({
         lines: [`Starting session: ${submitted}`],
       });
+      peekGenerationRef.current += 1;
       setPeekPanel(undefined);
       setPeekReplyTarget(undefined);
       setPeekPrompt('');
@@ -243,7 +258,13 @@ export function AgentViewApp({
             onAttachRequested?.(sessionId);
             return;
           }
-          await refreshRows();
+          // The dispatch itself succeeded; a refresh failure must not present
+          // it as a failed dispatch (a re-Enter would duplicate the session).
+          try {
+            await refreshRows();
+          } catch {
+            // Rows catch up on the next poll tick.
+          }
           setNotice({
             lines: ['Dispatched.'],
           });
@@ -302,9 +323,17 @@ export function AgentViewApp({
           } else {
             await actions.sendToSession(target.sessionId, submitted);
           }
-          const rows = await refreshRows();
-          const row = rows.find((item) => item.sessionId === target.sessionId);
-          setPeekReplyTarget(row ? getReplyTarget(row) : undefined);
+          // The reply was delivered; only restore it if the send itself
+          // failed, never on a post-success refresh failure.
+          try {
+            const rows = await refreshRows();
+            const row = rows.find(
+              (item) => item.sessionId === target.sessionId,
+            );
+            setPeekReplyTarget(row ? getReplyTarget(row) : undefined);
+          } catch {
+            setPeekReplyTarget(undefined);
+          }
         } catch (error) {
           setPeekPrompt(submitted);
           setPeekSubmittedPreview(undefined);
@@ -314,6 +343,7 @@ export function AgentViewApp({
               `Prompt: ${submitted}`,
               error instanceof Error ? error.message : String(error),
             ],
+            error: true,
           });
         } finally {
           peekSubmitInFlightRef.current = false;
@@ -344,13 +374,20 @@ export function AgentViewApp({
     setPeekSubmittedPreview(undefined);
     setPeekReplyTarget(getReplyTarget(row));
     setPeekPrompt('');
+    const generation = ++peekGenerationRef.current;
     setPeekPanel({ title: row.sessionId, lines: ['Loading...'] });
     void Promise.resolve(actions.peekSelected(row.sessionId)).then(
-      setPeekPanel,
+      (panel) => {
+        if (peekGenerationRef.current === generation) {
+          setPeekPanel(panel);
+        }
+      },
       (error) => {
+        if (peekGenerationRef.current !== generation) return;
         setPeekPanel({
           title: row.sessionId,
           lines: [error instanceof Error ? error.message : String(error)],
+          error: true,
         });
       },
     );
@@ -358,7 +395,8 @@ export function AgentViewApp({
 
   const togglePinSelected = useCallback(() => {
     const row = visibleRows[selectedIndex];
-    if (!row) return;
+    if (!row || pinInFlightRef.current) return;
+    pinInFlightRef.current = true;
     void (async () => {
       try {
         await actions.pinSession(row.sessionId);
@@ -370,6 +408,8 @@ export function AgentViewApp({
         setNotice({
           lines: [error instanceof Error ? error.message : String(error)],
         });
+      } finally {
+        pinInFlightRef.current = false;
       }
     })();
   }, [actions, refreshRows, selectedIndex, visibleRows]);
@@ -510,6 +550,7 @@ export function AgentViewApp({
 
   const cancel = useCallback(() => {
     if (peekPanel) {
+      peekGenerationRef.current += 1;
       setPeekReplyTarget(undefined);
       setPeekSubmittedPreview(undefined);
       setPeekPrompt('');
@@ -563,7 +604,15 @@ export function AgentViewApp({
 }
 
 function getReplyTarget(row: AgentRosterRow): ReplyTarget | undefined {
-  if ((row.queuedPromptCount ?? 0) > 0 || !row.actions.canReply) {
+  if (!row.actions.canReply) {
+    return undefined;
+  }
+  // Queued prompts normally block replies, but a blocking approval (e.g.
+  // 'Waiting: Edit') still needs an answer even while follow-ups are queued.
+  if (
+    (row.queuedPromptCount ?? 0) > 0 &&
+    !(row.waitingFor && row.waitingFor !== 'response')
+  ) {
     return undefined;
   }
   return {

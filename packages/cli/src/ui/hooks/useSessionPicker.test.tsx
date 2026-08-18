@@ -292,9 +292,11 @@ describe('useSessionPicker filtering', () => {
       { wrapper },
     );
 
-    expect(result.current.filteredSessions.map((session) => session.sessionId))
-      .toEqual(['s2']);
-    expect(result.current.visibleSessions.map((session) => session.sessionId))
-      .toEqual(['s2']);
+    expect(
+      result.current.filteredSessions.map((session) => session.sessionId),
+    ).toEqual(['s2']);
+    expect(
+      result.current.visibleSessions.map((session) => session.sessionId),
+    ).toEqual(['s2']);
   });
 });
