@@ -341,8 +341,11 @@ describe('createChannelWorkerSupervisor', () => {
     const env = (spawnWorker.mock.calls[0]![2] as { env: NodeJS.ProcessEnv })
       .env;
     const combined = fs.readFileSync(env['NODE_EXTRA_CA_CERTS']!, 'utf8');
-    expect(combined).toContain('OP-CERT');
-    expect(combined).toContain('DAEMON-CERT');
+    // R2-5: exact text, not two `toContain`s — those survive a mutated
+    // separator, and with real PEM inputs that mutant fuses
+    // `-----END CERTIFICATE-----` onto the next `-----BEGIN CERTIFICATE-----`
+    // and makes the whole bundle unparseable.
+    expect(combined).toBe('OP-CERT\nDAEMON-CERT\n');
     fs.rmSync(path.dirname(env['NODE_EXTRA_CA_CERTS']!), {
       recursive: true,
       force: true,

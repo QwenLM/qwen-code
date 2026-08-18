@@ -1191,6 +1191,98 @@ gI/irGYXddbzWJQla/KPV53wn5nK6Ho4dY1Z76slnwMoufrLM1oUt1QKUeyOKsOD
 -----END CERTIFICATE-----
 `;
 
+// Self-signed and covering `::1` via an iPAddress SAN — the shape a daemon
+// bound to IPv6 loopback needs. Not a real secret.
+const TEST_TLS_CERT_IPV6_SAN = `-----BEGIN CERTIFICATE-----
+MIIDOjCCAiKgAwIBAgIUYLTXyX2vAhC+OaM3JD4xKLtyfV8wDQYJKoZIhvcNAQEL
+BQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MCAXDTI2MDgxODEyMjEzMFoYDzIxMjYw
+NzI1MTIyMTMwWjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwggEiMA0GCSqGSIb3DQEB
+AQUAA4IBDwAwggEKAoIBAQCY6GprczPMvANzG1zLli+HDkEyyUk9lnk3Lsgu8yQJ
+TqpBNBR+dTN7sYPccZpNbZ/N3G6vETbtvQ5VtKXI8izvliZMNGm2WNhr+OpMnWVb
+RQ03qiwxzISFArGwYPF9mDTDpS+fwvkIN7B0N88rdmlaPez5Oy3egHQfwSrzrzId
+dnd29tvGq9EnUps1xBgspFD8buK9fK1na4iypzSzYy9ub2tZ5ZliiqIGdmLxtE8j
+FdyIiASOCujAxjovrDcJ+Xnr3ANRgyzHS3tQdbemLlEmu9zRk/ic7FFK2acNji/O
+s5e8pJUKPmZnyyqIFlhFl8iIKvuZZev81p7Hnvmc0SHDAgMBAAGjgYEwfzAdBgNV
+HQ4EFgQUzZj7sxpXzyOiet7XS0oRiV8TQtIwHwYDVR0jBBgwFoAUzZj7sxpXzyOi
+et7XS0oRiV8TQtIwDwYDVR0TAQH/BAUwAwEB/zAsBgNVHREEJTAjhxAAAAAAAAAA
+AAAAAAAAAAABhwR/AAABgglsb2NhbGhvc3QwDQYJKoZIhvcNAQELBQADggEBAFEK
+M3+ggPGi6bFk3z9AjBWBLkJ2JsuHC1IwJ2ReXCBzwlzlHfJq8TyVTHeH+oHChVyK
+KZlWn2GDXZMrDzLxZLwH52iKq3seYw/bZZ/TpugO6OHj1WmGXyl0sajMFye3VQAT
++M+irxpT/2eQqGV73lNbuNFvcwu4FaO3n8Ux6eG1BusQCx1vc6wvoK42kb9wSJN8
+qpqn1pNDH9P3Ub/1GbhWEytVsB8B3EewG/SE11cGhXSup1K4IiPcLMJX9SYGq+uM
+GcrrZsPYuLm5eL6J3QjkFzMqyS6/4L881mihR/HKLdEnDyMzayGZ44O+DmZilUKv
+w3Chmx7wNIzXjtZRcUk=
+-----END CERTIFICATE-----
+`;
+
+// A CA-issued leaf shipped together with its issuing root in one file, the
+// standard `fullchain.pem` a real CA hands out. Not a real secret.
+const TEST_TLS_CERT_FULLCHAIN = `-----BEGIN CERTIFICATE-----
+MIIDMzCCAhugAwIBAgIUfMQ0J1fG/BhJQuzOilTasy8quOMwDQYJKoZIhvcNAQEL
+BQAwJjEkMCIGA1UEAwwbcXdlbiBmdWxsY2hhaW4gdGVzdCByb290IENBMCAXDTI2
+MDgxODEyMjEzN1oYDzIxMjYwNzI1MTIyMTM3WjAUMRIwEAYDVQQDDAlsb2NhbGhv
+c3QwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQCE4sZa+FxusjUk7TzX
+9FV/x7KAIy+lu7G20F2TjSeQ6mHhwkFb/rsADoi+9RU4MF+m/Mx+Lilccu2pVk+b
+Ri+GksxX4xAC8L7XIhRwDdYWHHOMr1WnERKMqdRcEbzCAuQhR32Z0vFdg+T3o+TH
+MkQ3AXQkQc0uu5r40e3VWuRweWnOfJqojH4VQfjk/44cLZBBRAS3owOWC9fAciJI
+C5IgBnuYC7TOoZ1A69Lo+2C5UhIm6QEBzPtzVI87gzbDwqM7x8e3mMhLDQmNS3uD
++EVd05spuBq/KXMTSqHK7OIUPMFr3wXgVRm8i+68/4C2TnZANS6WSD5QZYivB4r7
+MUTtAgMBAAGjaTBnMBoGA1UdEQQTMBGHBH8AAAGCCWxvY2FsaG9zdDAJBgNVHRME
+AjAAMB0GA1UdDgQWBBQr5x1h5l442pqfn0GFyn77KiWz0TAfBgNVHSMEGDAWgBSA
+9DApi3O49l8S/UWWA91PrZWtQDANBgkqhkiG9w0BAQsFAAOCAQEAaxo+Y/u1iCNt
+Vz4bmiRlqfhjVVe9yxa0Q8rzC/V9V7qrWpHjONXLErEKZ59oi8a80ndjugdXyw0g
+gUKCmeykUtSbRLUTsZ741VKADjt87YceLrxsSVrtwMJjX2GoDNXIggRzmzdEjz3d
+nRzDXFIEEn/g90kaNCYJSkPld2wk4M0IbEGpc8V7sO09I3T0igwfduVMO31X+mV4
+7A/J5QSE/oAF3PbuUvfzI9Hl1vdzgDUal3v8Sqh4oDgucc+YVZeCUuthq8zVT4Z5
+V6y0UOsNXHRE41EN7hK3zOKWJFwoS+ga2ACg+K4yuOnlhU+2MHa4XENVyaTsQaPo
+B6U6dT+UdA==
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDLzCCAhegAwIBAgIUFRsEYHgjJUpGISLDoybs5vSsCmEwDQYJKoZIhvcNAQEL
+BQAwJjEkMCIGA1UEAwwbcXdlbiBmdWxsY2hhaW4gdGVzdCByb290IENBMCAXDTI2
+MDgxODEyMjEzN1oYDzIxMjYwNzI1MTIyMTM3WjAmMSQwIgYDVQQDDBtxd2VuIGZ1
+bGxjaGFpbiB0ZXN0IHJvb3QgQ0EwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEK
+AoIBAQDuh/DLVFUTeOwksyGdtViAHe9TNBFWUdeq5zGlcxvX5c7Qbjkclyajclb3
+yY0pJ6zgD+uSw6zAE5jID4rtsmSyciakqgHMpPmBMn7GE0I5JCrBnxsN3g7P7EUE
+qKzgj8rbUIyNQQt1E43wx4dJy4qN2hlKTusBvnUTtPB2ocRmC6+nXX/+nZWPahzI
+MALyl17Nq5w/pzODEtSaC18jscN/bs8CkcDB0kjnKUV8UlbPtMy//n/WjXfDiQV4
+KUbQQ832Xl6xwuQTHEGq01Gb/NZO5CE/zdu86/82Jnn2Mv2uBDL+1CBL7kOxgZ0Y
+axxW/a55BNpMElTbZxkgTSYivBwLAgMBAAGjUzBRMB0GA1UdDgQWBBSA9DApi3O4
+9l8S/UWWA91PrZWtQDAfBgNVHSMEGDAWgBSA9DApi3O49l8S/UWWA91PrZWtQDAP
+BgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IBAQBfH7T/zM7pVxh4Qv+m
+InAyvXPPDdBXmVfoBwHKEMyRts7rbxBHa7BV+qVyBkgXyfjXUL6QQmSXNfG/aHIx
+rW9yVN1nM9sUwO5mTO3v07Hjqg00OJQYrqFMI8ba0nxpuIgr8Joj296/25/zwpxW
+BjkdDp6EK2LHD4JU73jEMWDMDhQ3VMf8eb6bL3SxujhhhD1T7omTJkPKcUt4BCsn
+boUKNFYlbk0HHXZmoXxTIoBxv8aOTWIIJ++sASqH7+9QY2iYtoW7kmdWLcM95nGb
+Ptz8eWt0AkYE+GuX4GgOQxWJi0IuHzM7ke3fqjOw/tu01V1inWvVx2eg4Gv+vq2I
+x2ZE
+-----END CERTIFICATE-----
+`;
+
+// The same leaf on its own — the chain does not terminate anywhere in the
+// file, so the workers really would fail to verify it. Not a real secret.
+const TEST_TLS_CERT_FULLCHAIN_LEAF_ONLY = `-----BEGIN CERTIFICATE-----
+MIIDMzCCAhugAwIBAgIUfMQ0J1fG/BhJQuzOilTasy8quOMwDQYJKoZIhvcNAQEL
+BQAwJjEkMCIGA1UEAwwbcXdlbiBmdWxsY2hhaW4gdGVzdCByb290IENBMCAXDTI2
+MDgxODEyMjEzN1oYDzIxMjYwNzI1MTIyMTM3WjAUMRIwEAYDVQQDDAlsb2NhbGhv
+c3QwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQCE4sZa+FxusjUk7TzX
+9FV/x7KAIy+lu7G20F2TjSeQ6mHhwkFb/rsADoi+9RU4MF+m/Mx+Lilccu2pVk+b
+Ri+GksxX4xAC8L7XIhRwDdYWHHOMr1WnERKMqdRcEbzCAuQhR32Z0vFdg+T3o+TH
+MkQ3AXQkQc0uu5r40e3VWuRweWnOfJqojH4VQfjk/44cLZBBRAS3owOWC9fAciJI
+C5IgBnuYC7TOoZ1A69Lo+2C5UhIm6QEBzPtzVI87gzbDwqM7x8e3mMhLDQmNS3uD
++EVd05spuBq/KXMTSqHK7OIUPMFr3wXgVRm8i+68/4C2TnZANS6WSD5QZYivB4r7
+MUTtAgMBAAGjaTBnMBoGA1UdEQQTMBGHBH8AAAGCCWxvY2FsaG9zdDAJBgNVHRME
+AjAAMB0GA1UdDgQWBBQr5x1h5l442pqfn0GFyn77KiWz0TAfBgNVHSMEGDAWgBSA
+9DApi3O49l8S/UWWA91PrZWtQDANBgkqhkiG9w0BAQsFAAOCAQEAaxo+Y/u1iCNt
+Vz4bmiRlqfhjVVe9yxa0Q8rzC/V9V7qrWpHjONXLErEKZ59oi8a80ndjugdXyw0g
+gUKCmeykUtSbRLUTsZ741VKADjt87YceLrxsSVrtwMJjX2GoDNXIggRzmzdEjz3d
+nRzDXFIEEn/g90kaNCYJSkPld2wk4M0IbEGpc8V7sO09I3T0igwfduVMO31X+mV4
+7A/J5QSE/oAF3PbuUvfzI9Hl1vdzgDUal3v8Sqh4oDgucc+YVZeCUuthq8zVT4Z5
+V6y0UOsNXHRE41EN7hK3zOKWJFwoS+ga2ACg+K4yuOnlhU+2MHa4XENVyaTsQaPo
+B6U6dT+UdA==
+-----END CERTIFICATE-----
+`;
+
 describe('describeWorkerTlsTrustGaps', () => {
   const daemonUrl = 'https://127.0.0.1:4170';
 
@@ -1245,6 +1337,56 @@ describe('describeWorkerTlsTrustGaps', () => {
         daemonUrl: 'https://example.invalid:4170',
       }),
     ).toEqual([]);
+  });
+
+  it('anchors a fullchain serving file on the issuing CA it carries', () => {
+    // R2-2: `X509Certificate` reads only the first PEM block, so a fullchain
+    // used to be judged on its leaf alone and reported as unanchorable — even
+    // though the supervisor injects the whole file, root included, as the
+    // workers' trust store.
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN),
+        certPath: '/certs/fullchain.pem',
+        daemonUrl,
+      }),
+    ).toEqual([]);
+  });
+
+  it('still names the gap when the bundle stops short of a root', () => {
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_LEAF_ONLY),
+      certPath: '/certs/fullchain.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('UNABLE_TO_VERIFY_LEAF_SIGNATURE');
+    expect(gaps[0]).toContain('qwen fullchain test root CA');
+  });
+
+  it('checks an IPv6 dial host against the iPAddress SAN, brackets stripped', () => {
+    // R2-1: `URL.hostname` yields `[::1]`, which `isIP` rejects, so the check
+    // used to take the DNS-name branch and false-positive on every correct
+    // IPv6 serving cert.
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from(TEST_TLS_CERT_IPV6_SAN),
+        certPath: '/certs/daemon.pem',
+        daemonUrl: 'https://[::1]:4170',
+      }),
+    ).toEqual([]);
+  });
+
+  it('names the SAN gap for an IPv6 host the certificate does not cover', () => {
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_IPV6_SAN),
+      certPath: '/certs/daemon.pem',
+      daemonUrl: 'https://[fd00::1]:4170',
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('ERR_TLS_CERT_ALTNAME_INVALID');
+    expect(gaps[0]).toContain('fd00::1');
+    expect(gaps[0]).not.toContain('[fd00::1]');
   });
 
   it('defers to the boot parse guard on an unreadable certificate', () => {

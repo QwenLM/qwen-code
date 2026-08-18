@@ -700,10 +700,13 @@ export function describeWorkerTlsTrustGaps(opts: {
   daemonUrl: string;
   operatorCaCertPath?: string;
 }): string[] {
-  let x509: X509Certificate;
-  try {
-    x509 = new X509Certificate(opts.cert);
-  } catch {
+  // A serving file is routinely a fullchain (leaf + issuing CA in one PEM),
+  // and the supervisor injects the whole file as the workers'
+  // NODE_EXTRA_CA_CERTS — so the trust question is about the file, not about
+  // its first block alone.
+  const chain = parseCertChain(opts.cert);
+  const x509 = chain[0];
+  if (!x509) {
     // Boot validation already rejected unparseable certs with a better message.
     return [];
   }
@@ -714,7 +717,7 @@ export function describeWorkerTlsTrustGaps(opts: {
   // terminates the chain. An operator-set NODE_EXTRA_CA_CERTS is merged into
   // the worker bundle and may already carry the issuing root, so only flag the
   // case where the leaf is all the worker gets.
-  if (!opts.operatorCaCertPath && !isSelfSignedCert(x509)) {
+  if (!opts.operatorCaCertPath && !chainIsSelfAnchored(chain)) {
     gaps.push(
       `--tls-cert "${opts.certPath}" is issued by another CA ` +
         `(${x509.issuer.replace(/\r?\n/g, ', ')}), not self-signed, so the ` +
@@ -745,9 +748,79 @@ function isSelfSignedCert(x509: X509Certificate): boolean {
   }
 }
 
+// Base64 never contains `-`, so the body match cannot run past its own
+// end marker and cannot backtrack.
+const PEM_CERTIFICATE_BLOCK =
+  /-----BEGIN CERTIFICATE-----[^-]*-----END CERTIFICATE-----/g;
+
+/**
+ * Every certificate in a PEM serving file, leaf first. `X509Certificate` reads
+ * only the first block of a bundle, so a fullchain file has to be split before
+ * any of it past the leaf can be reasoned about. A non-PEM (DER) buffer has no
+ * blocks to split and is handed over whole.
+ */
+function parseCertChain(cert: Buffer): X509Certificate[] {
+  const blocks = cert.toString('utf8').match(PEM_CERTIFICATE_BLOCK);
+  if (!blocks) {
+    try {
+      return [new X509Certificate(cert)];
+    } catch {
+      return [];
+    }
+  }
+  const chain: X509Certificate[] = [];
+  for (const block of blocks) {
+    try {
+      chain.push(new X509Certificate(block));
+    } catch {
+      // One malformed block does not make the rest of the file unusable.
+    }
+  }
+  return chain;
+}
+
+function certIssuedBy(cert: X509Certificate, issuer: X509Certificate): boolean {
+  try {
+    return cert.checkIssued(issuer) && cert.verify(issuer.publicKey);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether the leaf's chain terminates inside the file itself. Workers get the
+ * whole file as their trust store, so a fullchain that walks up to a
+ * self-signed root anchors fine even though the leaf never could alone.
+ */
+function chainIsSelfAnchored(chain: readonly X509Certificate[]): boolean {
+  let next: X509Certificate | undefined = chain[0];
+  const walked = new Set<string>();
+  while (next) {
+    const current: X509Certificate = next;
+    if (isSelfSignedCert(current)) return true;
+    walked.add(current.fingerprint256);
+    next = chain.find(
+      (candidate) =>
+        !walked.has(candidate.fingerprint256) &&
+        certIssuedBy(current, candidate),
+    );
+  }
+  return false;
+}
+
+/**
+ * WHATWG `URL.hostname` keeps the brackets on an IPv6 literal (`[::1]`), and
+ * `isIP` does not recognise the bracketed form — so an unstripped host falls
+ * through to the DNS-name branch of the SAN check, where it can never match
+ * the iPAddress SAN such a certificate actually carries.
+ */
 function workerDialHost(daemonUrl: string): string | undefined {
   try {
-    return new URL(daemonUrl).hostname || undefined;
+    const hostname = new URL(daemonUrl).hostname;
+    if (!hostname) return undefined;
+    return hostname.startsWith('[') && hostname.endsWith(']')
+      ? hostname.slice(1, -1)
+      : hostname;
   } catch {
     return undefined;
   }
