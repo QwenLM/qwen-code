@@ -75,6 +75,26 @@ describe('AddWorkspaceDialog', () => {
     expect(document.activeElement).toBe(input());
   });
 
+  it('renders no Browse… button when the host cannot pick a directory', () => {
+    // #9406 R1-7: every other browseButton() call site passes onPick, and
+    // App.test.tsx mocks this dialog out entirely, so nothing observed the
+    // `{onPick && (` guard — turning it into an unconditional render shipped
+    // green. On a headless daemon host that puts back the dead affordance
+    // this PR exists to remove: a Browse… button whose handler returns
+    // immediately.
+    mount(<AddWorkspaceDialog onClose={vi.fn()} onAdd={vi.fn()} />);
+
+    expect(browseButton()).toBeUndefined();
+  });
+
+  it('renders the Browse… button when the host can pick a directory', () => {
+    mount(
+      <AddWorkspaceDialog onClose={vi.fn()} onAdd={vi.fn()} onPick={vi.fn()} />,
+    );
+
+    expect(browseButton()).toBeDefined();
+  });
+
   it('hides the display name field unless the daemon supports it', () => {
     mount(<AddWorkspaceDialog onClose={vi.fn()} onAdd={vi.fn()} />);
 

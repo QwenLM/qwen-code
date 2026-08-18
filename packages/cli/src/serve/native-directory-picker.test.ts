@@ -242,15 +242,24 @@ describe('isNativeDirectoryPickerAvailable', () => {
     ).toBe(true);
   });
 
-  it('rejects a zenity without the executable bit on Linux', () => {
-    setPlatform('linux');
-    expect(
-      isNativeDirectoryPickerAvailable({
-        DISPLAY: ':0',
-        PATH: nonExecutableZenityDir,
-      }),
-    ).toBe(false);
-  });
+  // Windows has no exec bit: libuv's fs__access ignores X_OK entirely, so
+  // fs.accessSync succeeds for any existing path and this probe returns true
+  // there. `process.platform` is mocked to 'linux' but the filesystem is the
+  // real host's, so the assertion cannot hold on a Windows runner — and
+  // ci.yml's merge-queue `test_windows` job collects this file. Same shape as
+  // packages/core/src/utils/shellContextEnv.test.ts:157.
+  it.skipIf(process.platform === 'win32')(
+    'rejects a zenity without the executable bit on Linux',
+    () => {
+      setPlatform('linux');
+      expect(
+        isNativeDirectoryPickerAvailable({
+          DISPLAY: ':0',
+          PATH: nonExecutableZenityDir,
+        }),
+      ).toBe(false);
+    },
+  );
 
   it('rejects a directory named zenity on PATH on Linux', () => {
     setPlatform('linux');
