@@ -623,27 +623,31 @@ describe('narrowToDelta on real-git captures', () => {
     expect(everyLineIsDisplayed(narrowed!, full)).toBe(true);
   });
 
-  it('drops the netted section of one file while its sibling still scopes', () => {
+  it('carries a netted-undo section whole while its sibling still narrows', () => {
     // Round 1 edits f.ts line 10 and inserts X1–X3 after line 25; round 2
-    // reverts the insertion, keeps the edit, and edits g.ts. The f.ts delta
-    // ranges miss ALL of its full hunks while g.ts still overlaps — the
-    // refusal must stay per-section: an all-or-nothing refusal would answer
-    // nothing-to-narrow on every round that mixes an undo with new work,
-    // re-reviewing the whole PR — precisely the cost narrowing exists to
-    // remove.
+    // reverts the insertion, keeps the edit, and edits g.ts line 15. The
+    // f.ts delta hunk — the X revert — is corroborated by no full hunk:
+    // none overlaps its range and none shares its text. It IS a netted-out
+    // undo, but the captures cannot prove that — the same shape is how a
+    // Myers misplacement looks — so the join fails closed and carries the
+    // section whole: over-inclusion re-reviews the round-1 edit, while a
+    // dropped change would be certified unreviewed by the ledger. The
+    // treatment stays per-section: the corroborated sibling still narrows.
     const base = commit('section-drop base', {
       'sd-f.ts': lines(30, 'F'),
-      'sd-g.ts': lines(10, 'G'),
+      'sd-g.ts': lines(20, 'G'),
     });
     const anchor = commit('section-drop round 1', {
       'sd-f.ts': lines(30, 'F')
         .replace('F10\n', 'F10-EDIT\n')
         .replace('F25\n', 'F25\nX1\nX2\nX3\n'),
-      'sd-g.ts': lines(10, 'G'),
+      'sd-g.ts': lines(20, 'G').replace('G5\n', 'G5-EDIT\n'),
     });
     commit('section-drop round 2', {
       'sd-f.ts': lines(30, 'F').replace('F10\n', 'F10-EDIT\n'),
-      'sd-g.ts': lines(10, 'G').replace('G5\n', 'G5-EDIT\n'),
+      'sd-g.ts': lines(20, 'G')
+        .replace('G5\n', 'G5-EDIT\n')
+        .replace('G15\n', 'G15-EDIT\n'),
     });
 
     const full = capture(base, 'HEAD');
@@ -657,18 +661,25 @@ describe('narrowToDelta on real-git captures', () => {
       narrowToDelta(captureBytes(base, 'HEAD'), deltaBytes)?.toString('utf8') ??
       null;
     expect(narrowed).not.toBeNull();
-    expect(narrowed).toContain('sd-g.ts');
-    expect(narrowed).toContain('+G5-EDIT');
-    expect(narrowed).not.toContain('sd-f.ts');
+    // The uncorroborated section is carried whole — round-1 edit included
+    // — while the corroborated sibling narrows to its post-anchor hunk.
+    expect(narrowed).toContain('sd-f.ts');
+    expect(narrowed).toContain('+F10-EDIT');
+    expect(narrowed).toContain('+G15-EDIT');
+    expect(narrowed).not.toContain('+G5-EDIT');
+    expect(narrowed!).not.toContain('X1');
     expect(everyLineIsDisplayed(narrowed!, full)).toBe(true);
   });
 
-  it('falls back when the delta overlaps no hunk the PR diff still carries', () => {
+  it('carries the section whole when the delta overlaps no hunk the PR diff still carries', () => {
     // Round 1 inserts X1–X3 and edits U25; round 2 reverts the insertion,
-    // keeping the edit. The delta's one hunk — the X deletion — lands in a
-    // new-side range the full capture's single hunk (the U25 edit) does not
-    // reach, so there is genuinely nothing to narrow to. Unconditional: the
-    // fallback must not hide behind a null guard.
+    // keeping the edit. The delta's one hunk — the X deletion — is
+    // corroborated by no full hunk: the full capture's single hunk (the
+    // U25 edit) neither overlaps its range nor shares its text. The old
+    // design read that as "nothing to narrow to" and fell back; the join
+    // now fails closed instead and carries the section whole. Every line
+    // of it is displayed by the PR's diff — and a dropped change here
+    // would be certified unreviewed by the ledger.
     const base = commit('no-overlap base', { 'u.ts': lines(30, 'U') });
     const anchor = commit('no-overlap round 1', {
       'u.ts': lines(30, 'U')
@@ -683,7 +694,13 @@ describe('narrowToDelta on real-git captures', () => {
     const deltaBytes = captureBytes(anchor, 'HEAD');
     expect(deltaBytes.toString('utf8')).toContain('-X1');
     expect(full).not.toContain('X1');
-    expect(narrowToDelta(captureBytes(base, 'HEAD'), deltaBytes)).toBeNull();
+    const narrowed =
+      narrowToDelta(captureBytes(base, 'HEAD'), deltaBytes)?.toString('utf8') ??
+      null;
+    expect(narrowed).not.toBeNull();
+    expect(narrowed).toContain('+U25-EDIT');
+    expect(narrowed!).not.toContain('X1');
+    expect(everyLineIsDisplayed(narrowed!, full)).toBe(true);
   });
 
   it('carries a change the captures position disjointly in an identical run', () => {
@@ -770,6 +787,106 @@ describe('narrowToDelta on real-git captures', () => {
     expect(narrowed).toContain('+F20-EDIT'); // the matched hunk stays
     expect(narrowed).toContain('-R\n'); // the divergent hunk is carried
     expect(narrowed).toContain('+B-LEAD-EDIT'); // whole section: over-inclusion
+    expect(everyLineIsDisplayed(narrowed!, full)).toBe(true);
+  });
+
+  it('carries a change the captures display at disjoint positions under disjoint texts', () => {
+    // R9-1 entrance A: round 1 substitutes the line LEADING a run of
+    // identical lines with the run's own text, extending the run by one;
+    // round 2 deletes one line OF the run. `base..head` nets to the
+    // leader's deletion — the only one-edit script — which Myers displays
+    // at the FRONT of the file; `anchor..head` deletes one run line, which
+    // Myers displays at the run's BACK. The same change, displayed by both
+    // captures, sits at disjoint head-side ranges AND under disjoint
+    // changed texts (`-B` vs `-R`): the range join misses it, and a guard
+    // keyed on either conjunct alone misses it too. The section must still
+    // be carried — a dropped change here is certified unreviewed by the
+    // ledger.
+    const runOf = (n: number) =>
+      Array.from({ length: n }, () => 'R').join('\n') + '\n';
+    const base = commit('disjoint-text base', {
+      'dt-run.ts': 'B\n' + runOf(24),
+      'dt-sib.ts': lines(13, 'S'),
+    });
+    const anchor = commit('disjoint-text round 1', {
+      'dt-run.ts': 'R\n' + runOf(24),
+      'dt-sib.ts': lines(13, 'S').replace('S2\n', 'S2-EDIT\n'),
+    });
+    commit('disjoint-text round 2', {
+      'dt-run.ts': runOf(24),
+      'dt-sib.ts': lines(13, 'S')
+        .replace('S2\n', 'S2-EDIT\n')
+        .replace('S10\n', 'S10-EDIT\n'),
+    });
+
+    const full = capture(base, 'HEAD');
+    const deltaBytes = captureBytes(anchor, 'HEAD');
+    // The scenario's premise: the SAME deletion displayed by BOTH
+    // captures, at disjoint head-side ranges under disjoint changed texts.
+    expect(full).toContain('@@ -1,4 +1,3 @@');
+    expect(full).toContain('-B');
+    expect(deltaBytes.toString('utf8')).toContain('@@ -22,4 +22,3 @@');
+    expect(deltaBytes.toString('utf8')).not.toContain('-B');
+
+    const narrowed =
+      narrowToDelta(captureBytes(base, 'HEAD'), deltaBytes)?.toString('utf8') ??
+      null;
+    expect(narrowed).not.toBeNull();
+    // The divergent section is carried whole — over-inclusion is the
+    // chosen semantics — while the clean sibling still narrows.
+    expect(narrowed).toContain('dt-run.ts');
+    expect(narrowed).toContain('-B');
+    expect(narrowed).toContain('+S10-EDIT');
+    expect(narrowed).not.toContain('+S2-EDIT');
+    expect(everyLineIsDisplayed(narrowed!, full)).toBe(true);
+  });
+
+  it('carries a divergent hunk that overlaps an unrelated bystander hunk', () => {
+    // R9-1 entrance B: round 1 edits the line before the run AND inserts a
+    // line in the tail region; round 2 deletes one line OF the run. The
+    // full capture folds the deletion into the front-of-run hunk; the
+    // delta places it at the run's back, where its new-side range overlaps
+    // the BYSTANDER insertion hunk — a change that predates the anchor, so
+    // the delta never performs it. An overlap precondition sees the
+    // bystander and stands down; the range join then carries the bystander
+    // alone and drops the front hunk that actually displays the deletion.
+    // The divergent hunk must still be carried.
+    const run = Array.from({ length: 20 }, () => 'R').join('\n') + '\n';
+    const front = 'F1\nF2\nF3\nF4\nF5\n';
+    const tail =
+      Array.from({ length: 14 }, (_, i) => `F${i + 7}`).join('\n') + '\n';
+    const base = commit('bystander base', {
+      'by-run.ts': front + 'B-LEAD\n' + run + 'F6\n' + tail,
+    });
+    const anchor = commit('bystander round 1', {
+      'by-run.ts': front + 'B-LEAD-EDIT\n' + run + 'F6\nINSERTED\n' + tail,
+    });
+    commit('bystander round 2', {
+      'by-run.ts':
+        front +
+        'B-LEAD-EDIT\n' +
+        Array.from({ length: 19 }, () => 'R').join('\n') +
+        '\n' +
+        'F6\nINSERTED\n' +
+        tail,
+    });
+
+    const full = capture(base, 'HEAD');
+    const deltaBytes = captureBytes(anchor, 'HEAD');
+    // The scenario's premise: the deletion folded into the front hunk in
+    // full, the delta's divergent hunk overlapping the bystander's range.
+    expect(full).toContain('@@ -3,8 +3,7 @@');
+    expect(full).toContain('@@ -25,6 +24,7 @@');
+    expect(deltaBytes.toString('utf8')).toContain('@@ -23,7 +23,6 @@');
+    expect(deltaBytes.toString('utf8')).not.toContain('+INSERTED');
+
+    const narrowed =
+      narrowToDelta(captureBytes(base, 'HEAD'), deltaBytes)?.toString('utf8') ??
+      null;
+    expect(narrowed).not.toBeNull();
+    expect(narrowed).toContain('-R\n'); // the divergent hunk is carried
+    expect(narrowed).toContain('+B-LEAD-EDIT'); // whole section: over-inclusion
+    expect(narrowed).toContain('+INSERTED'); // the bystander stays
     expect(everyLineIsDisplayed(narrowed!, full)).toBe(true);
   });
 

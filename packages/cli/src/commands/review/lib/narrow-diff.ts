@@ -28,6 +28,14 @@
 // defects — along with the two refusal reasons that existed to report it —
 // cannot recur.
 //
+// The one judgment left — which of the full capture's hunks the delta's
+// ranges corroborate — fails closed the same way. A delta hunk no full hunk
+// corroborates (overlaps its new-side range AND shares a changed line with)
+// is a netted-out undo OR a Myers misplacement, and two alignment-dependent
+// rendered diffs cannot tell those apart, so its section is emitted whole:
+// over-inclusion re-reviews lines GitHub displays, while a dropped change
+// would be certified unreviewed by the ledger.
+//
 // The two captures' NEW-side line numbers are comparable because both end at
 // the same head commit. That is the only cross-capture fact this needs, and it
 // is the one fact that was never in doubt.
@@ -52,15 +60,15 @@ function overlaps(
  * Returns null when there is nothing to narrow to — the caller keeps the full
  * range, which is always safe because it is the review the round would have
  * done anyway. Null covers, deliberately treated alike: a capture on EITHER
- * side that did not decode, a delta carrying a path the full capture keys
- * differently (git's rename detection resolved differently across the two
- * ranges, so the change would drop from the scope under the key mismatch), a
- * delta touching no path the PR's diff carries, and a delta whose ranges miss
- * every hunk of it. The
- * last is the "undo per feedback" round, where the commits since the anchor
- * put lines back the way the base had them: the PR's diff no longer shows
- * that region at all, so there is genuinely nothing there to re-review, and
- * the round falls back rather than scoping to hunks nobody can comment on.
+ * side that did not decode, a delta carrying a path the full capture does not
+ * carry at all — the canonical "undo per feedback" round lands here when the
+ * undone file no longer appears in `base..head` — and a rename the full
+ * capture keys differently (git's rename detection resolved differently
+ * across the two ranges, so the change would drop from the scope under the
+ * key mismatch). A delta whose ranges miss the full capture's hunks does NOT
+ * land here: a missed hunk might be a netted-out undo, but it might equally
+ * be a change the two captures position disjointly, so the join fails closed
+ * for it — the section is emitted whole, never dropped.
  */
 export function narrowToDelta(
   fullBytes: Buffer,
@@ -98,13 +106,6 @@ export function narrowToDelta(
   const touched = new Map<string, Array<[number, number]>>();
   /** path -> the delta's hunks, read by the position-divergence guard. */
   const deltaHunks = new Map<string, DiffHunk[]>();
-  /**
-   * Paths whose delta section carries a header-level change — a rename or a
-   * mode flip. The change lives in the full section's header, so it keeps
-   * its section in the scope even when the section's hunks all miss: the
-   * hunk-less treatment, extended to sections whose hunks netted out.
-   */
-  const headerTouched = new Set<string>();
   const deltaLines = deltaText.split('\n');
   for (const f of delta.files) {
     const ranges = touched.get(f.path) ?? [];
@@ -119,14 +120,6 @@ export function narrowToDelta(
     }
     touched.set(f.path, ranges);
     deltaHunks.set(f.path, hunks);
-    if (
-      f.renameFrom !== undefined ||
-      deltaLines
-        .slice(f.diffStart - 1, f.diffEnd)
-        .some((l) => l.startsWith('new mode '))
-    ) {
-      headerTouched.add(f.path);
-    }
   }
 
   // The two captures can key the same change differently whenever git's
@@ -189,24 +182,29 @@ export function narrowToDelta(
     // Position divergence: Myers aligns a change inside a run of identical
     // lines against whatever surrounds it, and the two captures' old sides
     // differ — so the SAME post-anchor change can sit at disjoint head-side
-    // ranges in the two captures. The range join cannot see it; a missed
-    // delta hunk whose changed lines the full section also changed IS it.
-    // The path and rename guards fail closed for KEY divergence; this fails
-    // closed for POSITION divergence, emitting the section whole — every
-    // line of it is displayed, and a dropped change here is certified
-    // unreviewed by the ledger. A netted-out undo contributes no line the
-    // full section displays, so the deliberate section drop below is
-    // untouched.
-    const fullChanged = new Set(
-      file.hunks.flatMap((fh) => changedLines(lines, fh)),
-    );
+    // ranges in the two captures, and the divergent delta hunk can even
+    // overlap an unrelated bystander hunk. The range join sees neither
+    // shape: it drops the full hunk displaying the change, and can publish
+    // the bystander instead. A delta hunk is corroborated only by a full
+    // hunk that BOTH overlaps its new-side range — so the join carries that
+    // full hunk — AND shares one of its changed lines — so the carried hunk
+    // displays the same change. A hunk no full hunk corroborates might be a
+    // netted-out undo, but it might equally be a misplacement the join is
+    // about to drop, and the captures cannot tell the two apart — telling
+    // them was the old oracle's shape, a heuristic proof over two
+    // alignment-dependent rendered diffs. Fail closed instead: emit the
+    // section whole. Every line of it is displayed — over-inclusion is the
+    // chosen semantics — and a dropped change here is certified unreviewed
+    // by the ledger.
     if (
-      (deltaHunks.get(file.path) ?? []).some(
-        (dh) =>
-          !file.hunks.some((fh) =>
-            overlaps([fh.newStart, fh.newEnd], [dh.newStart, dh.newEnd]),
-          ) && changedLines(deltaLines, dh).some((l) => fullChanged.has(l)),
-      )
+      (deltaHunks.get(file.path) ?? []).some((dh) => {
+        const dhChanged = new Set(changedLines(deltaLines, dh));
+        return !file.hunks.some(
+          (fh) =>
+            overlaps([fh.newStart, fh.newEnd], [dh.newStart, dh.newEnd]) &&
+            changedLines(lines, fh).some((l) => dhChanged.has(l)),
+        );
+      })
     ) {
       selected.push([file.diffStart, file.diffEnd]);
       continue;
@@ -220,16 +218,6 @@ export function narrowToDelta(
     const matching = file.hunks.filter((h) =>
       ranges.some((r) => overlaps([h.newStart, h.newEnd], r)),
     );
-    if (firstHunk !== undefined && matching.length === 0) {
-      if (headerTouched.has(file.path)) {
-        // The hunks netted out, but the header carries a change the delta
-        // performed — a mode flip or a rename the round must still review.
-        // Emit the section whole, the hunk-less treatment: every line of it
-        // is displayed, and over-inclusion is the chosen semantics.
-        selected.push([file.diffStart, file.diffEnd]);
-      }
-      continue;
-    }
 
     const headerEnd =
       firstHunk === undefined ? file.diffEnd : firstHunk.diffStart - 1;

@@ -1325,12 +1325,15 @@ describe('fetch-pr report assembly', () => {
     expect((await reportFor({ since: ANCHOR })).emptyDiff).toBeUndefined();
   });
 
-  it('refuses a delta carrying hunks the PR diff does not contain', async () => {
+  it('publishes the full section when the delta carries hunks the PR diff does not contain', async () => {
     // An "undo per feedback" commit reverts some of the previous round's
     // lines back to base content: those lines are changed in `anchor..head`
     // and unchanged in `base..head`. Ancestry cannot see it — the anchor is
-    // a perfectly good ancestor — so containment is checked on the hunks,
-    // because a comment anchored on such a hunk 422s the entire review.
+    // a perfectly good ancestor — and the revert hunk is corroborated by no
+    // full hunk, so the join fails closed and publishes the section whole.
+    // The scope is assembled from the PR's own diff either way, so a
+    // comment anchored on any hunk of it is a comment on a line GitHub's
+    // PR diff displays.
     anchorIsValid();
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
@@ -1349,13 +1352,12 @@ describe('fetch-pr report assembly', () => {
     const report = await reportFor({ since: ANCHOR });
     expect(report.incremental).toEqual({
       since: ANCHOR,
-      effective: false,
-      reason: 'nothing-to-narrow',
+      effective: true,
+      diffBase: BASE,
     });
-    // Refused, so the round reviews the PR's own diff instead — and the
-    // FILE agents read must be that diff, not the refused delta: a publish
-    // left at capture time would hand them hunks the oracle just proved
-    // absent from GitHub's PR diff.
+    // The round reviews the PR's own diff — and the FILE agents read must
+    // be that diff, never the delta: a publish left at capture time would
+    // hand them hunks GitHub's PR diff does not display.
     expect(report.diffPath).not.toBeNull();
     expect(report.diffLines).toBeGreaterThan(0);
     expect(writtenDiff()).toBe(FULL_DIFF);

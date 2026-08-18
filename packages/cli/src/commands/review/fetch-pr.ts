@@ -235,8 +235,10 @@ type FetchPrResult = PlanReport & {
    * exists because the scope is BUILT from the PR's own diff rather than
    * checked against it, and it covers every shape the build can refuse,
    * deliberately alike: an "undo per feedback" round whose commits put lines
-   * back the way the base had them, so the PR no longer displays the region;
-   * a capture on either side whose bytes do not survive UTF-8; a delta the
+   * back the way the base had them, so the PR no longer displays the undone
+   * FILE at all (a file the PR still carries publishes its section whole
+   * instead of refusing); a capture on either side whose bytes do not
+   * survive UTF-8; a delta the
    * parser cannot read; and the fail-closed refusal — the two captures key
    * the same change differently (a path or a rename git resolves differently
    * across the two ranges), so narrowing would drop a change the PR's diff
@@ -953,13 +955,14 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         // nothing — the same state such a round reaches without `--since`.
         demote('capture-failed');
       } else if ((narrowed = narrowToDelta(fullBytes, deltaBytes)) === null) {
-        // The narrowing found nothing it could publish — four shapes, one
-        // reason, all safe, because keeping the full range costs a wider
-        // review and never a wrong one: the "undo per feedback" round (the
-        // commits since the anchor put lines back the way the base had them,
-        // so the region is absent from `base..head` entirely and there is
-        // nothing there left to re-review); a capture whose bytes do not
-        // survive UTF-8; a delta the parser cannot read; and the fail-closed
+        // The narrowing found nothing it could publish — all safe, because
+        // keeping the full range costs a wider review and never a wrong one:
+        // the "undo per feedback" round whose commits put lines back the way
+        // the base had them, so the undone FILE no longer appears in
+        // `base..head` at all (an undone file the PR's diff still carries
+        // does not land here — the join fails closed and publishes its
+        // section whole instead); a capture whose bytes do not survive
+        // UTF-8; a delta the parser cannot read; and the fail-closed
         // refusal — the two captures key the same change differently (a path
         // or a rename), so narrowing would drop a change the PR's diff
         // displays.
