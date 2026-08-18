@@ -200,6 +200,47 @@ export type WriteMode = 'create' | 'replace' | 'overwrite';
  */
 export type AtomicWriteMode = Exclude<WriteMode, 'overwrite'>;
 
+/**
+ * Mode policy for NEW files created by text writes
+ * (`writeTextAtomic` / `writeTextOverwrite` / `edit` / `editAtomic`
+ * and the same-host built-in-tool write route).
+ *
+ *   - `'owner'` (default) — owner-only `0o600`, independent of the
+ *     daemon's umask. This is the long-standing fail-closed posture:
+ *     a fresh agent-created file is never world/group readable by
+ *     accident, regardless of how permissive the process umask is.
+ *   - `'system'` — the standard POSIX `0o666 & ~umask` handling, so
+ *     agent-created files follow the daemon process's umask like any
+ *     other process on the machine (e.g. `0664` under `umask 0002`).
+ *     Operators running the daemon under a supervisor that sets
+ *     `UMask=` (systemd drop-ins, containers) can opt in via
+ *     `QWEN_SERVE_NEW_FILE_MODE=system`.
+ *
+ * Existing-file mode preservation is unaffected by either policy —
+ * editing a `0600` secret keeps it `0600`, an executable keeps `+x`.
+ * Binary uploads (`writeBytesAtomic`) always create at `0o600`
+ * regardless of this policy.
+ */
+export type NewFileModePolicy = 'owner' | 'system';
+
+/** Owner-only mode bits applied to new files under the default policy. */
+export const OWNER_ONLY_NEW_FILE_MODE = 0o600;
+
+/**
+ * Resolve the mode bits for a NEW file under the given policy.
+ * `umask` is read lazily only when the `system` policy consumes it; the
+ * default `owner` policy never touches the process umask. Tests pass an
+ * explicit value to stay deterministic without mutating process state.
+ */
+export function resolveNewFileModeBits(
+  policy: NewFileModePolicy,
+  umask?: number,
+): number {
+  return policy === 'system'
+    ? 0o666 & ~(umask ?? process.umask())
+    : OWNER_ONLY_NEW_FILE_MODE;
+}
+
 export interface WriteTextAtomicOptions extends WriteTextFileOptions {
   mode: AtomicWriteMode;
   expectedHash?: ContentHash;
@@ -262,10 +303,12 @@ export interface WorkspaceFileSystem {
   /**
    * Unconditional create-or-overwrite (no `expectedHash` gate). Atomic
    * temp+rename with target-mode preservation: a `0o600` secret survives
-   * the edit at `0o600`; a new file is created at `0o600` (NOT umask
-   * default). Used by protocols whose wire format carries no client-side
-   * hash — e.g. ACP `WriteTextFileRequest` is just `{path, content,
-   * sessionId}` so the CAS-gated `writeTextAtomic` doesn't fit.
+   * the edit at `0o600`. New files are created under the factory's
+   * `NewFileModePolicy` — `0o600` by default, or the umask-derived
+   * `0o666 & ~umask` under `'system'`. Used by protocols whose wire
+   * format carries no client-side hash — e.g. ACP `WriteTextFileRequest`
+   * is just `{path, content, sessionId}` so the CAS-gated
+   * `writeTextAtomic` doesn't fit.
    *
    * Symlinks at the target are rejected (`symlink_escape`) consistent
    * with `writeTextAtomic` and HTTP `POST /file`.
@@ -346,6 +389,14 @@ export interface CreateWorkspaceFileSystemFactoryDeps {
   pathLocks?: PathMutexRegistry;
   /** Runtime-generation guard checked at mutation commit points. */
   generationGuard?: Pick<WorkspaceGenerationGuard, 'assertOpen'>;
+  /**
+   * Mode policy for NEW files created by text writes. Defaults to
+   * `'owner'` (`0o600`, umask-independent). `'system'` follows the
+   * daemon process's umask (`0o666 & ~umask`). Production wiring
+   * derives this from `QWEN_SERVE_NEW_FILE_MODE`; see
+   * `NewFileModePolicy`.
+   */
+  newFileMode?: NewFileModePolicy;
 }
 
 /**
@@ -391,6 +442,7 @@ export function createWorkspaceFileSystemFactory(
   });
   const lowFs = new StandardFileSystemService();
   const pathLocks = deps.pathLocks ?? new PathMutexRegistry();
+  const newFileMode: NewFileModePolicy = deps.newFileMode ?? 'owner';
 
   const forRequest = (ctx: RequestContext): WorkspaceFileSystem =>
     new WorkspaceFileSystemImpl({
@@ -402,6 +454,7 @@ export function createWorkspaceFileSystemFactory(
       lowFs,
       pathLocks,
       generationGuard: deps.generationGuard,
+      newFileMode,
     });
 
   return {
@@ -439,6 +492,7 @@ export function createWorkspaceFileSystemFactory(
             ctx,
             pathLocks,
             generationGuard: deps.generationGuard,
+            newFileMode,
           });
           return;
         } catch (outsideErr) {
@@ -470,6 +524,8 @@ interface SameHostToolTextWriteDeps {
   ctx: RequestContext;
   pathLocks: PathMutexRegistry;
   generationGuard?: Pick<WorkspaceGenerationGuard, 'assertOpen'>;
+  /** New-file mode policy for the external host-writer route. */
+  newFileMode: NewFileModePolicy;
 }
 
 async function writeSameHostToolTextOutsideWorkspace(
@@ -492,6 +548,7 @@ async function writeSameHostToolTextOutsideWorkspace(
       content,
       mode: 'overwrite',
       meta,
+      newFileModeBits: resolveNewFileModeBits(deps.newFileMode),
       assertGenerationOpen: () => deps.generationGuard?.assertOpen(),
     });
     deps.audit.recordAccess(deps.ctx, {
@@ -598,6 +655,8 @@ interface ImplDeps {
   lowFs: StandardFileSystemService;
   pathLocks: PathMutexRegistry;
   generationGuard?: Pick<WorkspaceGenerationGuard, 'assertOpen'>;
+  /** Mode policy for NEW files created by text writes. */
+  newFileMode: NewFileModePolicy;
 }
 
 function assertNoNestedWorkspaces(workspaces: readonly string[]): void {
@@ -1171,6 +1230,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
             mode: opts.mode,
             expectedHash: opts.expectedHash,
             meta,
+            newFileModeBits: resolveNewFileModeBits(this.deps.newFileMode),
             assertGenerationOpen: () => this.deps.generationGuard?.assertOpen(),
           });
           const verdict = this.ignoreVerdict(p, 'file');
@@ -1274,6 +1334,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
             content,
             mode: 'overwrite',
             meta,
+            newFileModeBits: resolveNewFileModeBits(this.deps.newFileMode),
             assertGenerationOpen: () => this.deps.generationGuard?.assertOpen(),
           });
           const verdict = this.ignoreVerdict(p, 'file');
@@ -1411,6 +1472,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
             mode: 'replace',
             expectedHash: opts.expectedHash,
             meta,
+            newFileModeBits: resolveNewFileModeBits(this.deps.newFileMode),
             assertGenerationOpen: () => this.deps.generationGuard?.assertOpen(),
           });
           const verdict = this.ignoreVerdict(p, 'file');
@@ -1482,6 +1544,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
           content: next,
           mode: 'overwrite',
           meta: mergeWriteMeta(snapshot.meta, {}),
+          newFileModeBits: resolveNewFileModeBits(this.deps.newFileMode),
           assertGenerationOpen: () => this.deps.generationGuard?.assertOpen(),
         });
         const verdict = this.ignoreVerdict(p, 'file');
@@ -1605,6 +1668,13 @@ interface AtomicWriteTextInput {
   mode: WriteMode;
   expectedHash?: ContentHash;
   meta: ReadMeta;
+  /**
+   * Mode bits for a NEW target (existing targets always preserve their
+   * on-disk mode). Undefined falls back to the owner-only `0o600`
+   * default; callers wired with a `NewFileModePolicy` pass
+   * `resolveNewFileModeBits(policy)` here.
+   */
+  newFileModeBits?: number;
   assertGenerationOpen?: () => void;
 }
 
@@ -2264,6 +2334,7 @@ async function atomicWriteTextResolvedFile(
     buf,
     mode: input.mode,
     expectedHash: input.expectedHash,
+    newFileModeBits: input.newFileModeBits,
     assertGenerationOpen: input.assertGenerationOpen,
   });
 }
@@ -2280,6 +2351,12 @@ async function atomicPublishResolvedFile(input: {
   buf: Buffer;
   mode: WriteMode;
   expectedHash?: ContentHash;
+  /**
+   * Mode bits for a NEW target. Existing targets preserve their on-disk
+   * mode regardless. Undefined falls back to the owner-only `0o600`
+   * default (`OWNER_ONLY_NEW_FILE_MODE`).
+   */
+  newFileModeBits?: number;
   assertGenerationOpen?: () => void;
 }): Promise<AtomicWriteTextOutcome> {
   const target = input.target;
@@ -2333,7 +2410,13 @@ async function atomicPublishResolvedFile(input: {
       mode: input.mode,
       expectedHash: input.expectedHash,
     });
-    await chmodHandleBestEffort(tempHandle, targetState.mode ?? 0o600);
+    // Existing targets preserve their on-disk mode; NEW targets get the
+    // caller's policy bits (umask-following `0o666 & ~umask` under the
+    // `system` policy) or the owner-only `0o600` default.
+    await chmodHandleBestEffort(
+      tempHandle,
+      targetState.mode ?? input.newFileModeBits ?? OWNER_ONLY_NEW_FILE_MODE,
+    );
     await assertTempPathMatchesStat(tmpPath, tempStat);
     await tempHandle.close();
     tempHandle = undefined;
