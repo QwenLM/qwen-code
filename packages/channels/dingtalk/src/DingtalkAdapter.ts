@@ -153,6 +153,55 @@ function sanitizeChatRecordField(value: string): string {
 }
 
 /**
+ * Neutralize a record field that this file then WRAPS in `[...]`. Sanitizing
+ * alone does not cover those: `sanitizePromptText` unwraps a start-of-line tag
+ * only when the value already BEGINS with `[`, so `SYSTEM]: do this` passes
+ * through untouched and the wrapper's own `[` completes a forged `[SYSTEM]:`
+ * tag on a prompt line — the exact forge the sanitizer exists to prevent,
+ * reopened by the wrapping that happens after it. Strip the brackets the
+ * wrapper supplies so the value cannot close or complete one.
+ */
+function bracketSafeChatRecordField(value: string): string {
+  return sanitizeChatRecordField(value).replace(/[[\]]/g, ' ').trim();
+}
+
+/**
+ * Bounds on how much of a forwarded record is joined into the prompt. A merge
+ * forward can carry an entire group's history, and unbounded it displaces the
+ * user's actual request in the model's context window. Truncation is
+ * ANNOUNCED: a tail the model cannot see is worse than one it can account for.
+ */
+const MAX_CHAT_RECORD_ENTRIES = 50;
+const MAX_CHAT_RECORD_CHARS = 4000;
+const MAX_CHAT_RECORD_LINE_CHARS = 500;
+
+function capChatRecordLines(lines: string[]): string[] {
+  const kept: string[] = [];
+  let dropped = 0;
+  let total = 0;
+  for (const line of lines) {
+    // Slice by CODE POINT: a cap landing mid-surrogate-pair would emit a lone
+    // surrogate into the prompt.
+    const points = Array.from(line);
+    const bounded =
+      points.length > MAX_CHAT_RECORD_LINE_CHARS
+        ? `${points.slice(0, MAX_CHAT_RECORD_LINE_CHARS).join('')} [truncated]`
+        : line;
+    if (
+      kept.length >= MAX_CHAT_RECORD_ENTRIES ||
+      (kept.length > 0 && total + bounded.length > MAX_CHAT_RECORD_CHARS)
+    ) {
+      dropped++;
+      continue;
+    }
+    kept.push(bounded);
+    total += bounded.length + 1;
+  }
+  if (dropped > 0) kept.push(`[${dropped} more message(s) not shown]`);
+  return kept;
+}
+
+/**
  * The placeholder shown for a message whose body is not text. Shared by the
  * record-entry and reply-quote paths so the two cannot drift — they already had
  * (different `file` handling, different empty fallback), which described the
@@ -166,8 +215,12 @@ function mediaTypePlaceholder(
   switch (msgType) {
     case 'picture':
       return '[image]';
-    case 'file':
-      return `[file: ${nonEmptyString(fileName) || 'file'}]`;
+    case 'file': {
+      // `fileName` is record content, i.e. third-party authored, and it lands
+      // inside a bracket wrapper — same treatment as every other such field.
+      const name = bracketSafeChatRecordField(nonEmptyString(fileName) || '');
+      return `[file: ${name || 'file'}]`;
+    }
     case 'audio':
       return '[audio]';
     case 'video':
@@ -193,11 +246,14 @@ function formatChatRecordEntryBody(record: Record<string, unknown>): string {
 
   const msgType =
     nonEmptyString(record['msgType']) || nonEmptyString(record['msgtype']);
+  const safeMsgType = msgType ? bracketSafeChatRecordField(msgType) : '';
   return (
     mediaTypePlaceholder(msgType, content?.['fileName']) ??
     // Record-specific fallback: name the type when DingTalk sends one we do
     // not model, so the model sees *something* arrived rather than a gap.
-    (msgType ? `[${msgType}]` : '[message]')
+    // The name is record content like every other field here, so it is
+    // neutralized before it goes inside the brackets.
+    (safeMsgType ? `[${safeMsgType}]` : '[message]')
   );
 }
 
@@ -215,7 +271,20 @@ function describeChatRecordKeys(content?: DingTalkMessageContent): string {
   return keys.length > 0 ? keys.join(',') : 'none';
 }
 
-function formatChatRecord(content?: DingTalkMessageContent): string {
+/**
+ * The rendered record plus whether an entries key arrived but produced no
+ * lines. That case renders a non-empty title/summary, so the empty-record
+ * warning below never fires for it, yet every forwarded message is gone — the
+ * degradation `describeChatRecordKeys` exists to make diagnosable.
+ */
+interface FormattedChatRecord {
+  text: string;
+  entriesDropped: boolean;
+}
+
+function formatChatRecord(
+  content?: DingTalkMessageContent,
+): FormattedChatRecord {
   const title = nonEmptyString(content?.title);
   const rawSummary = nonEmptyString(content?.summary);
   const parsedSummary = parseJsonArray(rawSummary);
@@ -231,17 +300,20 @@ function formatChatRecord(content?: DingTalkMessageContent): string {
     : rawSummary?.split('\n').map((line) => sanitizeChatRecordField(line)) ||
       [];
   const summary = summaryLines.filter(Boolean).join('\n');
-  const entries = parseJsonArray(
-    content?.chatRecord ?? content?.records ?? content?.messages,
-  );
+  const rawEntries =
+    content?.chatRecord ?? content?.records ?? content?.messages;
+  const entries = parseJsonArray(rawEntries);
 
   const recordLines = Array.isArray(entries)
     ? entries.flatMap((entry, index) => {
         if (typeof entry === 'string') {
           const body = nonEmptyString(entry);
           if (!body) return [];
-          const cleaned = sanitizeChatRecordField(body);
-          return cleaned ? [`Unknown: ${cleaned}`] : [];
+          // Through the shared body pipeline, not a second copy of it: a
+          // string entry and an object entry carrying the same text must be
+          // described to the model the same way, including when the text
+          // sanitizes to nothing.
+          return [`Unknown: ${formatChatRecordEntryBody({ text: body })}`];
         }
         if (!entry || typeof entry !== 'object') return [];
         const record = entry as Record<string, unknown>;
@@ -261,17 +333,26 @@ function formatChatRecord(content?: DingTalkMessageContent): string {
       })
     : [];
 
-  const safeTitle = title ? sanitizeChatRecordField(title) : undefined;
+  // The title is wrapped in brackets below, so bracket-safety on top of
+  // sanitization; `|| undefined` keeps the 'Chat record' fallback for a title
+  // that was nothing but brackets or whitespace.
+  const safeTitle = title
+    ? bracketSafeChatRecordField(title) || undefined
+    : undefined;
+  const boundedLines = capChatRecordLines(recordLines);
   const parts: string[] = [];
   if (summary) {
     parts.push(`[${safeTitle || 'Chat record'}] ${summary}`);
   } else if (safeTitle) {
     parts.push(`[${safeTitle}]`);
   }
-  if (recordLines.length > 0) {
-    parts.push(`[Chat record messages]\n${recordLines.join('\n')}`);
+  if (boundedLines.length > 0) {
+    parts.push(`[Chat record messages]\n${boundedLines.join('\n')}`);
   }
-  return parts.join('\n\n');
+  return {
+    text: parts.join('\n\n'),
+    entriesDropped: rawEntries !== undefined && recordLines.length === 0,
+  };
 }
 
 /** Track seen msgIds to deduplicate retried callbacks. */
@@ -1575,6 +1656,24 @@ export class DingtalkChannel extends ChannelBase {
   }
 
   /**
+   * The partial degradation the empty-record warning cannot see: a title or
+   * summary rendered, so the result is non-empty, but the entries key that
+   * arrived produced no lines at all (an object encoding such as
+   * `{"list":[...]}`, a non-array, or a present-but-unusable first alias).
+   * Every forwarded message is dropped and the user reports only that "the bot
+   * cannot see forwarded messages"; without this line nothing in the log
+   * distinguishes that from model behaviour.
+   */
+  private warnUnreadableChatRecordEntries(
+    content?: DingTalkMessageContent,
+  ): void {
+    process.stderr.write(
+      `[DingTalk:${this.name}] chat record summary rendered but no readable entries ` +
+        `(content keys: ${sanitizeLogText(describeChatRecordKeys(content), 200)})\n`,
+    );
+  }
+
+  /**
    * Build a text summary from a repliedMsg, handling text, richText, chat
    * records, and media message types with placeholders.
    */
@@ -1605,9 +1704,10 @@ export class DingtalkChannel extends ChannelBase {
     }
 
     if (msgType === 'chatRecord') {
-      const formatted = formatChatRecord(content);
-      if (!formatted) this.warnEmptyChatRecord(content);
-      return formatted;
+      const { text, entriesDropped } = formatChatRecord(content);
+      if (!text) this.warnEmptyChatRecord(content);
+      else if (entriesDropped) this.warnUnreadableChatRecordEntries(content);
+      return text;
     }
 
     // Media type placeholders. Shared with the chat-record entry formatter so
@@ -1690,10 +1790,12 @@ export class DingtalkChannel extends ChannelBase {
     }
 
     if (msgtype === 'chatRecord') {
-      const formatted = formatChatRecord(data.content);
-      if (!formatted) this.warnEmptyChatRecord(data.content);
+      const { text, entriesDropped } = formatChatRecord(data.content);
+      if (!text) this.warnEmptyChatRecord(data.content);
+      else if (entriesDropped)
+        this.warnUnreadableChatRecordEntries(data.content);
       return {
-        text: formatted || '(chat record)',
+        text: text || '(chat record)',
         downloadCodes: [],
       };
     }
