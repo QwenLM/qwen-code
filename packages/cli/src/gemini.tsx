@@ -345,8 +345,12 @@ function installInteractiveSignalHandlers(wasRaw: boolean): () => void {
 export async function main() {
   profileCheckpoint('main_entry');
   // The startup sweep deletes on-disk state and must only fire in a real CLI
-  // process, never from a bare Storage construction in tests.
-  enableStartupSweep();
+  // process, never from a bare Storage construction in tests. Inside a
+  // sandbox re-launch the host state dir is mounted writable, so the markers
+  // (QWEN_SANDBOX for containers, SANDBOX for seatbelt) keep it disarmed there.
+  if (!process.env['QWEN_SANDBOX'] && !process.env['SANDBOX']) {
+    enableStartupSweep();
+  }
   const acpStartupProfilerEnabled = isAcpStartupProfilerEnabled();
   // Bridge core-package startup events (Config.initialize, MCP discovery,
   // GeminiClient.setTools) into the cli's startup profiler. Gated on

@@ -98,6 +98,27 @@ describe('sweepStaleWorktreeProjects', () => {
     expect(fs.existsSync(gone)).toBe(false);
   });
 
+  it('keeps the bucket when a colliding sibling worktree exists on disk', async () => {
+    // sanitizeCwd collapses fix.bug and fix-bug to one bucket name: the gone
+    // fix-bug sidecar matches the arm-1 gate, but the cold-but-alive fix.bug
+    // must keep the shared bucket.
+    const repo = path.join(base, 'repo');
+    const coowner = path.join(repo, '.qwen', 'worktrees', 'fix.bug');
+    fs.mkdirSync(coowner, { recursive: true });
+    const gone = path.join(repo, '.qwen', 'worktrees', 'fix-bug');
+    const entry = sanitizeCwd(gone);
+    expect(sanitizeCwd(coowner)).toBe(entry);
+    const kept = makeProjectSnapshot(base, entry, {
+      worktreePath: gone,
+      originalCwd: repo,
+    });
+
+    const removed = await sweepStaleWorktreeProjects(base);
+
+    expect(removed).toEqual([]);
+    expect(fs.existsSync(kept)).toBe(true);
+  });
+
   it('keeps a normal project bucket whose worktree sidecar points at a gone path', async () => {
     // enter/exit run from the original repo never relocates session storage,
     // so the sidecar lands in the normal bucket; deleting it would wipe the

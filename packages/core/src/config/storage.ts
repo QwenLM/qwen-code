@@ -118,12 +118,17 @@ export async function sweepStaleWorktreeProjects(
     // at the next start.
     if (keepBucket !== undefined && entry === keepBucket) continue;
     const chatsDir = path.join(projectsDir, entry, 'chats');
+    // Archiving is an explicit user retention action, and the sidecar move is
+    // best-effort (archived sidecars can be missing, unreadable, or corrupted,
+    // and a failed readdir would silently drop them all): any entry at all
+    // under chats/archive/ keeps the bucket, no parsing involved.
+    try {
+      if ((await fsp.readdir(path.join(chatsDir, 'archive'))).length > 0)
+        continue;
+    } catch {
+      // no archive dir: nothing retained
+    }
     const sidecars = await readWorktreeSidecarRecords(chatsDir);
-    // An archived sidecar means archiveSessions moved that session, transcript
-    // included, into chats/archive/: an explicit user retention action. Only
-    // active-dir sidecars are deletion evidence, so a bucket with any readable
-    // archived sidecar is kept no matter where the worktrees went.
-    if (sidecars.some((sidecar) => sidecar.archived)) continue;
     if (sidecars.length === 0) continue;
 
     const allWorktreesGone = sidecars.every(
@@ -148,6 +153,13 @@ export async function sweepStaleWorktreeProjects(
             sidecar.originalCwd !== undefined &&
             isPositivelyExistingDirectorySync(sidecar.originalCwd),
         );
+      if (stale && (await hasLiveSiblingWorktree(sidecars, entry))) {
+        // sanitizeCwd collapses fix.bug and fix-bug to one bucket name, so
+        // the gate cannot prove which worktree owns the bucket; a cold but
+        // on-disk co-owner worktree must keep it (cold data has no liveness
+        // signal for the vetoes below).
+        stale = false;
+      }
     } else {
       // Bucket keyed by a gone ephemeral launch cwd, #7906's main class:
       // enter_worktree from a throwaway T lands the sidecar here with
@@ -217,40 +229,53 @@ export async function sweepStaleWorktreeProjects(
  * nothing and is skipped, never treated as a reason to delete or keep on its
  * own.
  */
-async function readWorktreeSidecarRecords(
-  chatsDir: string,
-): Promise<
-  Array<{ worktreePath: string; originalCwd?: string; archived: boolean }>
-> {
-  const sidecars: Array<{ path: string; archived: boolean }> = [];
-  for (const [dir, archived] of [
-    [chatsDir, false],
-    [path.join(chatsDir, 'archive'), true],
-  ] as const) {
+// True when any on-disk worktree of the owning repo sanitizes to this bucket
+// name. The dead worktrees named by the sidecars are gone by definition, so
+// any directory found is live.
+async function hasLiveSiblingWorktree(
+  sidecars: Array<{ worktreePath: string; originalCwd?: string }>,
+  entry: string,
+): Promise<boolean> {
+  for (const sidecar of sidecars) {
+    if (sidecar.originalCwd === undefined) continue;
+    const worktreesDir = path.join(sidecar.originalCwd, '.qwen', 'worktrees');
     let names: string[];
     try {
-      names = await fsp.readdir(dir);
+      names = await fsp.readdir(worktreesDir);
     } catch {
       continue;
     }
-    sidecars.push(
-      ...names
-        .filter((name) => name.endsWith('.worktree.json'))
-        .map((name) => ({ path: path.join(dir, name), archived })),
-    );
+    for (const name of names) {
+      const candidate = path.join(worktreesDir, name);
+      if (isDirectorySync(candidate) && sanitizeCwd(candidate) === entry) {
+        return true;
+      }
+    }
   }
-  sidecars.sort((a, b) => a.path.localeCompare(b.path));
+  return false;
+}
+
+async function readWorktreeSidecarRecords(
+  chatsDir: string,
+): Promise<Array<{ worktreePath: string; originalCwd?: string }>> {
+  let names: string[];
+  try {
+    names = await fsp.readdir(chatsDir);
+  } catch {
+    return [];
+  }
+  const sidecars = names
+    .filter((name) => name.endsWith('.worktree.json'))
+    .map((name) => path.join(chatsDir, name))
+    .sort((a, b) => a.localeCompare(b));
 
   const records: Array<{
     worktreePath: string;
     originalCwd?: string;
-    archived: boolean;
   }> = [];
   for (const sidecar of sidecars) {
     try {
-      const parsed: unknown = JSON.parse(
-        await fsp.readFile(sidecar.path, 'utf-8'),
-      );
+      const parsed: unknown = JSON.parse(await fsp.readFile(sidecar, 'utf-8'));
       if (
         parsed !== null &&
         typeof parsed === 'object' &&
@@ -263,7 +288,6 @@ async function readWorktreeSidecarRecords(
             typeof record['originalCwd'] === 'string'
               ? (record['originalCwd'] as string)
               : undefined,
-          archived: sidecar.archived,
         });
       }
     } catch {
