@@ -109,6 +109,15 @@ export interface DurableCronTask {
    * (`cron_create`) and legacy tasks, which keep the shared-owner firing model.
    */
   sessionId?: string;
+  /**
+   * Whether the bound session was minted BY the task (`true`) or provided by
+   * the caller (`false`). Gates delete-time teardown: deleting a task closes a
+   * session it minted, but must never tear down a caller-provided session —
+   * that one pre-existed the task and survives it. Absent on tasks written
+   * before this field existed; every session bindable before then was
+   * task-minted, so absent is treated as owned (teardown preserved).
+   */
+  sessionOwnedByTask?: boolean;
   delivery?: CronTaskDelivery;
   /**
    * Bounded, newest-last history of recent fires (capped at MAX_TASK_RUNS).
@@ -486,6 +495,8 @@ function isValidTask(value: unknown): value is DurableCronTask {
     // would treat it as unbound, so a "bound" task would silently run unbound.
     (obj['sessionId'] === undefined ||
       (typeof obj['sessionId'] === 'string' && obj['sessionId'].length > 0)) &&
+    (obj['sessionOwnedByTask'] === undefined ||
+      typeof obj['sessionOwnedByTask'] === 'boolean') &&
     (obj['delivery'] === undefined || isValidDelivery(obj['delivery'])) &&
     (obj['runs'] === undefined || isValidRuns(obj['runs']))
   );

@@ -112,15 +112,18 @@ const KEEPALIVE_SPAWN_TIMEOUT_MS = 30_000;
 const MAX_REVIVE_BACKOFF_MS = 30 * 60_000;
 
 /**
- * Bind unbound durable tasks to dedicated sessions, and rename bound
- * sessions that don't yet have the ⏰ prefix. The cron_create tool leaves
- * durable tasks unbound so they stay pickable by any lock owner (CLI/ACP
- * /headless). In daemon mode this keepalive mints a dedicated session per
- * task and names it — binding is a daemon-only concern.
+ * Bind unbound durable tasks to dedicated sessions, and (re)name bound
+ * sessions. The cron_create tool leaves durable tasks unbound so they stay
+ * pickable by any lock owner (CLI/ACP/headless). In daemon mode this
+ * keepalive mints a dedicated session per task and names it — binding is a
+ * daemon-only concern.
  *
- * For unbound tasks: mints a dedicated session, names it `⏰ prompt`,
- * writes sessionId to disk.
- * For bound tasks without ⏰ name: renames the session to `⏰ prompt`.
+ * For unbound tasks: mints a dedicated session, names it `⏰ <name or
+ * prompt>`, writes sessionId to disk.
+ * For bound tasks: renames the session to `⏰ <name or prompt>` — the SAME
+ * payload the scheduled-tasks route names with, so the route's naming and
+ * this sweep agree instead of clobbering each other with different names
+ * (matters for caller-provided sessions, which the route also names).
  *
  * A Set tracks renamed sessions so we don't call updateSessionMetadata
  * every tick. Best-effort — failures are logged and retried next tick.
@@ -190,7 +193,7 @@ async function bindAndNameSessions(
       spawnedSessionId = sessionId;
       try {
         bridge.updateSessionMetadata(sessionId, {
-          displayName: scheduledTaskSessionName(task.prompt),
+          displayName: scheduledTaskSessionName(task.name ?? task.prompt),
         });
         renamed.add(sessionId);
       } catch {
@@ -211,7 +214,13 @@ async function bindAndNameSessions(
         }
         const result = list.map((t) =>
           t.id === task.id && !t.sessionId && t.enabled !== false
-            ? { ...t, sessionId }
+            ? {
+                ...t,
+                sessionId,
+                // The keepalive minted this session, so deleting the task
+                // later may tear it down (see the DELETE route's gate).
+                sessionOwnedByTask: true,
+              }
             : t,
         );
         matched = true;
@@ -239,7 +248,7 @@ async function bindAndNameSessions(
     const sessionId = task.sessionId!;
     try {
       bridge.updateSessionMetadata(sessionId, {
-        displayName: scheduledTaskSessionName(task.prompt),
+        displayName: scheduledTaskSessionName(task.name ?? task.prompt),
       });
       renamed.add(sessionId);
     } catch (err) {

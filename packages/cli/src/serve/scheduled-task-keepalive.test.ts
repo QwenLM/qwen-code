@@ -696,6 +696,39 @@ describe('scheduled-task keepalive', () => {
     expect(names[0]![1].displayName).toContain('⏰');
     const tasks = await readCronTasks(workspace);
     expect(tasks[0]!.sessionId).toBe('new-sess-1');
+    // The keepalive minted this session, so the task records ownership —
+    // the DELETE route's gate relies on it.
+    expect(tasks[0]!.sessionOwnedByTask).toBe(true);
+  });
+
+  it('names bound sessions from the task name when one is set', async () => {
+    // The scheduled-tasks route names a bound session `⏰ <name or prompt>`;
+    // the keepalive must use the same payload or it clobbers the route's
+    // name (visible on caller-provided sessions, which the route also names).
+    await updateCronTasks(workspace, () => [
+      task({
+        id: 'named-bound',
+        sessionId: 'existing-sess',
+        prompt: 'summarize the day',
+        name: 'Digest',
+      }),
+    ]);
+    const names: Array<[string, { displayName?: string }]> = [];
+    const naming = {
+      ...bridge,
+      updateSessionMetadata: (id: string, m: { displayName?: string }) => {
+        names.push([id, m]);
+      },
+    };
+    const ka = startScheduledTaskKeepalive({
+      bridge: naming,
+      boundWorkspace: workspace,
+      intervalMs: 60_000,
+    });
+    await ka.tick();
+    ka.stop();
+    expect(names).toHaveLength(1);
+    expect(names[0]![1].displayName).toBe('⏰ Digest');
   });
 
   it('renames a bound session without ⏰ prefix exactly once', async () => {

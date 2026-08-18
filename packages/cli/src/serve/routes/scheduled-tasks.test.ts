@@ -1274,6 +1274,80 @@ describe('scheduled-tasks routes', () => {
     expect(h.bridge.closed).toEqual([created.body.sessionId]);
   });
 
+  it('keeps a caller-provided session alive when its task is deleted', async () => {
+    h.bridge.liveSessions.set(CALLER_SESSION_ID, {
+      sessionId: CALLER_SESSION_ID,
+      workspaceCwd: h.workspace,
+      hasActivePrompt: false,
+    });
+    const created = await create({
+      cron: '0 9 * * *',
+      prompt: 'p',
+      sessionId: CALLER_SESSION_ID,
+    });
+    expect(created.status).toBe(201);
+    // The create persisted that the session is NOT owned by the task.
+    const persisted = await readCronTasks(h.workspace);
+    expect(persisted[0]?.sessionOwnedByTask).toBe(false);
+
+    const del = await request(h.app).delete(
+      `/scheduled-tasks/${created.body.id}`,
+    );
+    expect(del.status).toBe(200);
+    expect(await readCronTasks(h.workspace)).toEqual([]);
+    // The caller's pre-existing session must survive the task's deletion —
+    // it is the user's live working session, not the task's to tear down.
+    expect(h.bridge.closed).toEqual([]);
+  });
+
+  it('still closes the session of a legacy bound task without the ownership marker', async () => {
+    // Tasks written before ownership was persisted carry no marker; every
+    // session bindable back then was task-minted, so delete keeps tearing
+    // those sessions down (backward-compatible default).
+    await updateCronTasks(h.workspace, (tasks) => [
+      ...tasks,
+      {
+        id: 'legacytask',
+        cron: '0 9 * * *',
+        prompt: 'p',
+        recurring: true,
+        createdAt: Date.now(),
+        lastFiredAt: null,
+        sessionId: 'sess-legacy',
+      },
+    ]);
+
+    const del = await request(h.app).delete('/scheduled-tasks/legacytask');
+    expect(del.status).toBe(200);
+    expect(h.bridge.closed).toEqual(['sess-legacy']);
+  });
+
+  it('returns 500 (not 404) when the persisted-session probe hits a filesystem failure', async () => {
+    // The probe helpers rethrow non-ENOENT errors (EACCES/EIO/ESTALE). Such a
+    // failure is transient I/O, not "genuinely gone" — it must surface as a
+    // retryable 500, not a definitive 404 session_not_found.
+    const eacces = Object.assign(new Error('EACCES: permission denied'), {
+      code: 'EACCES',
+    });
+    const probe = vi
+      .spyOn(SessionService.prototype, 'getSessionLocation')
+      .mockRejectedValue(eacces);
+    try {
+      const res = await create({
+        cron: '0 9 * * *',
+        prompt: 'p',
+        sessionId: MISSING_SESSION_ID, // not live → falls through to the probe
+      });
+      expect(res.status).toBe(500);
+      expect(res.body.code).toBe('scheduled_tasks_session_failed');
+      expect(await readCronTasks(h.workspace)).toEqual([]);
+      expect(h.bridge.spawned).toEqual([]);
+      expect(h.bridge.closed).toEqual([]);
+    } finally {
+      probe.mockRestore();
+    }
+  });
+
   it('preserves a missing DELETE response when no mutation committed', async () => {
     await teardown(h);
     let checks = 0;

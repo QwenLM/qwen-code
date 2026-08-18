@@ -677,8 +677,17 @@ function registerScheduledTaskCrudRoutes(
                     );
                   }
                 }
-              } catch {
-                location = undefined;
+              } catch (err) {
+                // Both probe helpers swallow ENOENT themselves and rethrow
+                // every other filesystem error (EACCES/EIO/ESTALE/…), so a
+                // throw here is a real failure, not "genuinely gone" — answer
+                // a retryable 500 instead of misreporting an existing session
+                // as 404 session_not_found (and log it, unlike a true miss).
+                sendSessionLookupFailed(
+                  'failed to probe persisted session state',
+                  err,
+                );
+                return;
               }
               if (location === 'archived') {
                 res.status(409).json({
@@ -838,7 +847,15 @@ function registerScheduledTaskCrudRoutes(
         lastFiredAt: now - (now % 60_000),
         enabled,
         ...(delivery !== undefined ? { delivery } : {}),
-        ...(boundSessionId !== undefined ? { sessionId: boundSessionId } : {}),
+        ...(boundSessionId !== undefined
+          ? {
+              sessionId: boundSessionId,
+              // Persist WHO owns the bound session: DELETE may only tear down
+              // sessions the task itself minted — a caller-provided session
+              // pre-existed the task and must survive its deletion.
+              sessionOwnedByTask: sessionMintedHere,
+            }
+          : {}),
         ...(nameResult.value !== undefined ? { name: nameResult.value } : {}),
       };
 
@@ -1267,9 +1284,12 @@ function registerScheduledTaskCrudRoutes(
       }
       // Single atomic read-modify-write: capture the task's bound session AND
       // remove it in one cycle, closing the TOCTOU window a separate
-      // read-then-remove would open (and cutting three file reads to one). The
-      // dedicated session exists only to run this task, so it's torn down after.
+      // read-then-remove would open (and cutting three file reads to one). A
+      // session the task itself minted exists only to run it, so it's torn
+      // down after; a caller-provided session pre-existed the task and stays
+      // open (the persisted sessionOwnedByTask marker tells the two apart).
       let boundSessionId: string | undefined;
+      let sessionOwnedByTask = true;
       let removed = false;
       let rollbackBefore: DurableCronTask[] | undefined;
       let rollbackAfter: DurableCronTask[] | undefined;
@@ -1283,6 +1303,9 @@ function registerScheduledTaskCrudRoutes(
               const match = tasks[idx]!.sessionId;
               if (typeof match === 'string' && match.length > 0) {
                 boundSessionId = match;
+                // Absent marker = written before ownership was persisted; every
+                // session bindable then was task-minted, so keep tearing down.
+                sessionOwnedByTask = tasks[idx]!.sessionOwnedByTask !== false;
               }
               removed = true;
               rollbackBefore = tasks;
@@ -1324,8 +1347,11 @@ function registerScheduledTaskCrudRoutes(
           .json({ error: 'Task not found', code: 'task_not_found' });
         return;
       }
-      // Stop the now-orphaned session (keeps its transcript on disk as history).
-      if (boundSessionId && bridge) {
+      // Stop a task-minted session (keeps its transcript on disk as history).
+      // A caller-provided session is NEVER closed here — it pre-existed the
+      // task, may be the user's live working session, and must survive the
+      // task's deletion (same invariant the create path's rollback honors).
+      if (boundSessionId && sessionOwnedByTask && bridge) {
         try {
           await runWithScheduledTaskTarget(target, () =>
             bridge.closeSession(boundSessionId!),
