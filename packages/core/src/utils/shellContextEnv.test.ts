@@ -46,6 +46,8 @@ describe('getShellContextEnvVars', () => {
   // And QWEN_CODE_MODEL — Config claims it into process.env, so a test run
   // started from inside a qwen session inherits it too.
   let originalModel: string | undefined;
+  // And its provider-qualified twin, published from the same place.
+  let originalIdentity: string | undefined;
 
   beforeEach(() => {
     originalSessionId = process.env['QWEN_CODE_SESSION_ID'];
@@ -56,6 +58,8 @@ describe('getShellContextEnvVars', () => {
     delete process.env['QWEN_CODE_PROJECT_DIR'];
     originalModel = process.env['QWEN_CODE_MODEL'];
     delete process.env['QWEN_CODE_MODEL'];
+    originalIdentity = process.env['QWEN_CODE_MODEL_IDENTITY'];
+    delete process.env['QWEN_CODE_MODEL_IDENTITY'];
   });
 
   afterEach(() => {
@@ -78,6 +82,11 @@ describe('getShellContextEnvVars', () => {
       process.env['QWEN_CODE_MODEL'] = originalModel;
     } else {
       delete process.env['QWEN_CODE_MODEL'];
+    }
+    if (originalIdentity !== undefined) {
+      process.env['QWEN_CODE_MODEL_IDENTITY'] = originalIdentity;
+    } else {
+      delete process.env['QWEN_CODE_MODEL_IDENTITY'];
     }
   });
 
@@ -252,6 +261,8 @@ describe('getShellContextEnvVars', () => {
     expect(env).toEqual({
       QWEN_CODE_AGENT_ID: '',
       QWEN_CODE_PROMPT_ID: '',
+      // Blanked, not omitted — see the identity describe block below.
+      QWEN_CODE_MODEL_IDENTITY: '',
     });
   });
 
@@ -284,6 +295,7 @@ describe('getShellContextEnvVars', () => {
       QWEN_CODE_SESSION_ID: 'sess-uuid',
       QWEN_CODE_AGENT_ID: 'agent-xyz',
       QWEN_CODE_PROMPT_ID: 'prompt-456',
+      QWEN_CODE_MODEL_IDENTITY: '',
     });
   });
 
@@ -396,6 +408,98 @@ describe('getShellContextEnvVars', () => {
       expect(getShellContextEnvVars()['QWEN_CODE_MODEL']).toBe(
         'model-after-switch',
       );
+    });
+  });
+
+  describe('provider-qualified identity (QWEN_CODE_MODEL_IDENTITY)', () => {
+    it('passes the qualified identity down beside the bare model', () => {
+      process.env['QWEN_CODE_MODEL'] = 'qwen3-coder-plus';
+      process.env['QWEN_CODE_MODEL_IDENTITY'] = 'qwen3-coder-plus@1a2b3c4d';
+      const env = getShellContextEnvVars();
+      expect(env['QWEN_CODE_MODEL']).toBe('qwen3-coder-plus');
+      expect(env['QWEN_CODE_MODEL_IDENTITY']).toBe('qwen3-coder-plus@1a2b3c4d');
+    });
+
+    it('hands each session ITS identity, blanking rather than omitting', () => {
+      // Daemon mode. The point is not what the returned record contains but
+      // what the CHILD ends up with: every spawn site composes
+      // `{...process.env, ...getShellContextEnvVars()}`, so an omitted key
+      // leaves the parent's stale global riding the spread — the first cut of
+      // this test asserted on the raw record and passed while the leak was
+      // live. Compose it the way the spawn sites do.
+      registerSessionModel('sess-A', 'model-A', 'model-A@aaaaaaaa');
+      registerSessionModel('sess-B', 'model-B', 'model-B@bbbbbbbb');
+      process.env['QWEN_CODE_MODEL'] = 'model-A'; // the first to boot
+      process.env['QWEN_CODE_MODEL_IDENTITY'] = 'model-A@aaaaaaaa';
+
+      const child = (sid: string) => ({
+        ...process.env,
+        ...sessionIdContext.run(sid, () => getShellContextEnvVars()),
+      });
+      expect(child('sess-B')['QWEN_CODE_MODEL_IDENTITY']).toBe(
+        'model-B@bbbbbbbb',
+      );
+      expect(child('sess-A')['QWEN_CODE_MODEL_IDENTITY']).toBe(
+        'model-A@aaaaaaaa',
+      );
+
+      // A session with no identity of its own must not inherit A's either —
+      // and the global describes a DIFFERENT model, so it is dropped, not
+      // passed down as a qualification of the wrong one.
+      registerSessionModel('sess-C', 'model-C');
+      expect(child('sess-C')['QWEN_CODE_MODEL']).toBe('model-C');
+      expect(child('sess-C')['QWEN_CODE_MODEL_IDENTITY']).toBe('');
+
+      for (const s of ['sess-A', 'sess-B', 'sess-C']) {
+        unregisterSessionModel(s);
+      }
+    });
+
+    it('drops the identity with the session on unregister', () => {
+      registerSessionModel('sess-X', 'model-X', 'model-X@abcdabcd');
+      expect(
+        sessionIdContext.run('sess-X', () => getShellContextEnvVars())[
+          'QWEN_CODE_MODEL_IDENTITY'
+        ],
+      ).toBe('model-X@abcdabcd');
+      unregisterSessionModel('sess-X');
+      expect(
+        sessionIdContext.run('sess-X', () => getShellContextEnvVars())[
+          'QWEN_CODE_MODEL_IDENTITY'
+        ],
+      ).toBe('');
+    });
+
+    it('matches on the whole model id, `@` in the name included', () => {
+      // Split-on-first-`@` would compare `vendor` against `vendor@2026-01`
+      // and withhold a correct identity; the suffix is what is anchored.
+      process.env['QWEN_CODE_MODEL'] = 'vendor@2026-01';
+      process.env['QWEN_CODE_MODEL_IDENTITY'] = 'vendor@2026-01@0f0f0f0f';
+      expect(getShellContextEnvVars()['QWEN_CODE_MODEL_IDENTITY']).toBe(
+        'vendor@2026-01@0f0f0f0f',
+      );
+    });
+
+    it('drops \u2014 does not mis-qualify \u2014 a model NAMED like a qualified one', () => {
+      // `foo@1a2b3c4d` is a legal model id, and the suffix rule cannot tell it
+      // from `foo` qualified by a digest. The head then reads as `foo`, which
+      // is not this session's model, so the identity is dropped. That costs
+      // the qualification and nothing else: the subprocess falls back to the
+      // bare id, which is coarser and true. Mis-qualifying would be the
+      // failure; being coarse is the fail-safe direction.
+      process.env['QWEN_CODE_MODEL'] = 'foo@1a2b3c4d';
+      process.env['QWEN_CODE_MODEL_IDENTITY'] = 'foo@1a2b3c4d';
+      const env = getShellContextEnvVars();
+      expect(env['QWEN_CODE_MODEL']).toBe('foo@1a2b3c4d');
+      expect(env['QWEN_CODE_MODEL_IDENTITY']).toBe('');
+    });
+
+    it('blanks the key when nothing published one', () => {
+      // `''`, not absent: the spawn-site spread would otherwise leak an
+      // inherited value from a parent qwen-code process. `roundModelIdFrom`
+      // reads an empty identity as unpublished and falls back to the bare id.
+      process.env['QWEN_CODE_MODEL'] = 'qwen3-coder-plus';
+      expect(getShellContextEnvVars()['QWEN_CODE_MODEL_IDENTITY']).toBe('');
     });
   });
 

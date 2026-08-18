@@ -1507,9 +1507,12 @@ describe('qwen-triage verify workflow', () => {
     expect(runStep.indexOf(sweep)).toBeLessThan(
       runStep.indexOf('start_openai_proxy'),
     );
-    // Uploaded artifacts must not carry node-planted symlinks:
-    // actions/upload-artifact dereferences them.
-    expect(runStep).toContain('-type l -delete');
+    // Uploaded artifacts must not carry node-planted symlinks (or FIFOs/
+    // sockets/devices, which can hang or redirect the collection):
+    // actions/upload-artifact dereferences symlinks.
+    expect(runStep).toContain(
+      'find "$RUNNER_TEMP/verify-results" \\( -type l -o -type p -o -type s -o -type b -o -type c \\) -delete',
+    );
   });
 
   // RUNNER_TEMP hygiene between jobs is runner-managed; this pool is
@@ -2624,18 +2627,23 @@ describe('qwen-triage verify hardening', () => {
   // job's own commands: a bare step() lookup returns the tmux job's
   // identically named step, so verify-side regressions would pass silently.
   it('strips GitHub command files from every node-run verify command', () => {
-    // Bound to the lifecycle commands that run as node before the agent:
-    // npm ci and npm run build in the prepare step, plus the evidence
-    // browser download. The slice stops at the agent step, whose own
-    // `runuser` launches qwen under `env -i` and needs no per-variable
-    // stripping. Covering all three by construction (not enumeration) is
-    // what catches a future node-run command added without the strip.
+    // Bound to the commands that run as node before the agent: npm ci and
+    // npm run build in the prepare step, the evidence browser download,
+    // and the flake gate's four pre-sample git invocations — the .git
+    // sanitize, git reset --hard, git clean -ffd, and the PINNED_OID
+    // rev-parse (git filters run from PR-owned .git metadata). The slice
+    // stops at the agent step, whose own `runuser` launches qwen under
+    // `env -i` and needs no per-variable stripping; the gate's
+    // per-sample invocation is a line-continuation shape this
+    // single-line match does not fold. Covering all seven by
+    // construction (not enumeration) is what catches a future node-run
+    // command added without the strip.
     const prepare = verifyJob.slice(
       verifyJob.indexOf('Install and build PR app'),
       verifyJob.indexOf('Run verification agent'),
     );
     const commands = prepare.match(/runuser -u node -- env[\s\S]*?\n/g) ?? [];
-    expect(commands.length).toBe(3);
+    expect(commands.length).toBe(7);
     expect(step('Run verification agent')).toContain(
       'runuser -u node -- env -i',
     );
@@ -3389,7 +3397,9 @@ describe('qwen-triage verify hardening round 2', () => {
     const copy = runStep.indexOf(
       '-exec cp -r {} "$RUNNER_TEMP/verify-results/"',
     );
-    const strip = runStep.indexOf('-type l -delete');
+    const strip = runStep.indexOf(
+      'find "$RUNNER_TEMP/verify-results" \\( -type l -o -type p -o -type s -o -type b -o -type c \\) -delete',
+    );
     expect(copy).toBeGreaterThan(-1);
     expect(strip).toBeGreaterThan(copy);
   });

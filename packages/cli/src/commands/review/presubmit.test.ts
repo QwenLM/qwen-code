@@ -727,7 +727,13 @@ describe('presubmitCommand', () => {
 
     const FINDINGS = [{ path: 'a.ts', line: 12 }];
 
-    it('classifies footer-bearing comments regardless of their author', async () => {
+    it('admits a footer-bearing comment regardless of account — the footer is qwen provenance', async () => {
+      // The footer is generated only by qwen's submit, so any comment
+      // carrying it is a qwen post to dedup against, even one posted from a
+      // different bot account (an earlier CI run) — gating it on the account
+      // would miss those and duplicate-post. #9212 pins this ungated footer
+      // match; the plantability tradeoff is accepted there. The SHORT marker
+      // and bare finding shape stay authorship-gated (covered below).
       const result = await presubmitWithComments(
         [
           {
@@ -742,12 +748,33 @@ describe('presubmitCommand', () => {
         FINDINGS,
       );
       expect(result.existingComments.total).toBe(1);
+    });
+
+    it('classifies a footer-bearing prose comment by the reviewing account', async () => {
+      // Prose, not finding-shaped: only the footer disjunct recognizes this
+      // attributed post for dedup — deleting it reddens here.
+      const result = await presubmitWithComments(
+        [
+          {
+            id: 1,
+            body: 'looks good overall _— model via Qwen Code /review (v0.21.2)_',
+            path: 'a.ts',
+            line: 12,
+            commit_id: 'abc123',
+            user: { login: 'qwen-code-ci-bot' },
+          },
+        ],
+        FINDINGS,
+      );
+      expect(result.existingComments.total).toBe(1);
       expect(result.existingComments.byBucket.overlap).toBe(1);
       expect(result.blockOnExistingComments).toBe(true);
     });
 
     it('classifies a footer-less comment by the reviewing account (attribution-off dedup)', async () => {
-      // Case-insensitive login match, as with self-PR detection.
+      // Case-insensitive login match, as with self-PR detection. The
+      // severityOf branch remains for posts made before the comment marker
+      // existed.
       const result = await presubmitWithComments(
         [
           {
@@ -766,9 +793,74 @@ describe('presubmitCommand', () => {
       expect(result.blockOnExistingComments).toBe(true);
     });
 
-    it('ignores a footer-less comment from another account', async () => {
-      // No footer and not the reviewing account's: nothing presubmit can
-      // attribute — it stays outside the dedup set.
+    it('classifies the shape attribution-off actually posts — markerless body, trailing marker, reviewing account', async () => {
+      // `submit` strips the severity prefix and appends the comment marker;
+      // GitHub stores exactly this. The marker only counts together with
+      // authorship — the string is public and renders invisibly.
+      const result = await presubmitWithComments(
+        [
+          {
+            id: 2,
+            body: 'x\n\n<!-- qwen-review critical -->',
+            path: 'a.ts',
+            line: 12,
+            commit_id: 'abc123',
+            user: { login: 'qwen-code-ci-bot' },
+          },
+        ],
+        FINDINGS,
+      );
+      expect(result.existingComments.total).toBe(1);
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.blockOnExistingComments).toBe(true);
+    });
+
+    it('does not admit a marker-carrying comment from another account — the marker is plantable', async () => {
+      // The adversarial shape: a PR author who read the setting description
+      // plants the invisible marker on the line they expect a blocker on.
+      // Authorship is the gate that keeps this out of the dedup set.
+      const result = await presubmitWithComments(
+        [
+          {
+            id: 2,
+            body: 'x\n\n<!-- qwen-review critical -->',
+            path: 'a.ts',
+            line: 12,
+            commit_id: 'abc123',
+            user: { login: 'someone-else' },
+          },
+        ],
+        FINDINGS,
+      );
+      expect(result.existingComments.total).toBe(0);
+      expect(result.blockOnExistingComments).toBe(false);
+    });
+
+    it('does not admit a marker-carrying reply either — quote-reply copies the marker', async () => {
+      // GitHub's quote-reply copies raw markdown, so a reply to an
+      // attribution-off finding carries the marker and inherits the
+      // finding's path:line anchor. The reply guard keeps it out.
+      const result = await presubmitWithComments(
+        [
+          {
+            id: 4,
+            body: 'x\n\n<!-- qwen-review critical -->',
+            path: 'a.ts',
+            line: 12,
+            commit_id: 'abc123',
+            in_reply_to_id: 1,
+            user: { login: 'qwen-code-ci-bot' },
+          },
+        ],
+        FINDINGS,
+      );
+      expect(result.existingComments.total).toBe(0);
+      expect(result.blockOnExistingComments).toBe(false);
+    });
+
+    it('ignores a footer-less, marker-less comment from another account', async () => {
+      // No footer, no comment marker, and not the reviewing account's:
+      // nothing presubmit can attribute — it stays outside the dedup set.
       const result = await presubmitWithComments(
         [
           {
@@ -990,6 +1082,49 @@ describe('presubmitCommand', () => {
       expect(result.existingComments.byBucket.overlap).toBe(1);
       expect(result.existingComments.byBucket.repost).toBe(1);
       expect(result.existingComments.repost[0].matchedIds).toEqual(['R3-2']);
+    });
+
+    it('extracts the carried id from the attribution-off posted shape', async () => {
+      // An attribution-off re-post carries NO severity prefix — submit
+      // strips it before posting — and its severity rides the trailing
+      // invisible marker. The carried id still leads the first line;
+      // without reading it back off the marker-less body, the re-post
+      // lands as a plain overlap and is dedup-dropped from round 3
+      // onward, while the surviving id token bars the id-less fallback —
+      // a still-standing carried Critical the verdict then flips past.
+      const result = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            body: 'R3-2: eq-form rescue asymmetry\n\n<!-- qwen-review critical -->',
+          },
+        ],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(1);
+      expect(result.existingComments.repost[0].matchedIds).toEqual(['R3-2']);
+    });
+
+    it('keeps a marker-carrying id-less comment out of the repost bucket when the location is ambiguous', async () => {
+      // The attribution-off shape without a carried id: the id-less
+      // fallback stays off while two ids share the location, so the
+      // comment is a plain overlap — exactly the strictness the marked
+      // bodies get.
+      const result = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            body: 'eq-form rescue asymmetry\n\n<!-- qwen-review critical -->',
+          },
+        ],
+        [
+          { path: 'src/parse-args.ts', line: 44, id: 'R3-2' },
+          { path: 'src/parse-args.ts', line: 44, id: 'R3-3' },
+        ],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(0);
     });
 
     it('reads no carried id out of an unmarked body (#9212)', async () => {
