@@ -1564,6 +1564,28 @@ describe('composeReview — presubmit downgrades', () => {
     );
   });
 
+  it('keeps the presubmit downgrade reasons when a cap softens the Approve first', () => {
+    // The APPROVE→COMMENT cap runs before the presubmit arms, so a capped
+    // zero-finding Approve reached arm 1 as COMMENT — its `event === 'APPROVE'`
+    // gate failed, arm 2's REQUEST_CHANGES gate failed too, and the presubmit
+    // reasons vanished from the body and the verdict line while the identical
+    // uncapped run rendered both. The gate is derived from `baseEvent` — the
+    // row before every cap — exactly like its RC sibling.
+    const r = composeReview(
+      base({
+        contextUnavailable: true,
+        presubmit: { downgradeApprove: true, downgradeReasons: ['self-PR'] },
+      }),
+    );
+    expect(r.baseEvent).toBe('APPROVE');
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('context-unavailable');
+    expect(r.downgraded).toBe(true);
+    expect(r.downgradedFrom).toBe('Approve');
+    expect(r.body).toContain('⚠️ Downgraded from Approve to Comment: self-PR.');
+    expect(verdictLine(r)).toContain('a presubmit check failed');
+  });
+
   it('a downgraded Approve never certifies "no blockers" in the same body (the downgrade names failing CI two clauses earlier)', () => {
     const r = composeReview(
       base({

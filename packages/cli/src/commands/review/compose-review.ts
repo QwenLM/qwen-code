@@ -2143,11 +2143,15 @@ function composeReviewBody(
     event = 'COMMENT';
   }
 
-  // Presubmit downgrades apply after the caps and only when the verdict
-  // they name is the one on the table.
+  // Presubmit downgrades apply after the caps and only when the verdict they
+  // name was the one on the table — `baseEvent` is the row before every cap,
+  // so a softening cap that ran first cannot erase the presubmit's reasons.
   let downgraded = false;
   let downgradedFrom: 'Approve' | 'Request changes' | null = null;
-  if (event === 'APPROVE' && downgradeApprove) {
+  if (
+    (event === 'APPROVE' || (baseEvent === 'APPROVE' && event === 'COMMENT')) &&
+    downgradeApprove
+  ) {
     event = 'COMMENT';
     downgraded = true;
     downgradedFrom = 'Approve';
