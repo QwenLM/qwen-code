@@ -4547,10 +4547,9 @@ export function App({
     void reloadLoadedSkills(connection.workspaceCwd);
   }, [connected, connection.workspaceCwd, reloadLoadedSkills]);
   const handledSkillMutationIdRef = useRef<string | undefined>(undefined);
-  const skillMutationOriginRef = useRef<{
-    id: string;
-    workspaceCwd?: string;
-  }>();
+  const skillMutationOriginRef = useRef<
+    { id: string; workspaceCwd?: string } | undefined
+  >(undefined);
   const pendingSkillTogglesRef = useRef<
     Array<{ name: string; enabled: boolean }>
   >([]);
