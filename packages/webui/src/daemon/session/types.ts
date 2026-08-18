@@ -524,6 +524,7 @@ export interface DaemonWorkspaceEventSignals {
   settingsVersion: number;
   skillsVersion: number;
   lastSkillMutation?: DaemonSkillToggleMutation;
+  lastSkillMutationsByCwd?: Record<string, DaemonSkillToggleMutation>;
   mcpVersion: number;
   extensionsVersion: number;
   artifactsVersion: number;

@@ -386,6 +386,19 @@ const {
               sessionsFailed: number;
             }
           | undefined,
+        lastSkillMutationsByCwd: undefined as
+          | Record<
+              string,
+              {
+                id: string;
+                kind: 'skill_toggle';
+                skills: Array<{ name: string; enabled: boolean }>;
+                activation: 'applied' | 'deferred' | 'partial';
+                sessionsRefreshed: number;
+                sessionsFailed: number;
+              }
+            >
+          | undefined,
       },
       latestSettingsState: null as {
         settings: DaemonSettingDescriptor[];
@@ -4382,22 +4395,40 @@ function skillCommandFixture(name: string, description: string) {
   };
 }
 
+function emitSkillMutation(
+  id: string,
+  skills: Array<{ name: string; enabled: boolean }>,
+  activation: 'applied' | 'deferred' | 'partial' = 'partial',
+): void {
+  const mutation = {
+    id,
+    kind: 'skill_toggle' as const,
+    skills,
+    activation,
+    sessionsRefreshed: activation === 'applied' ? 1 : 0,
+    sessionsFailed: activation === 'partial' ? 1 : 0,
+  };
+  const cwd = mockConnection.workspaceCwd;
+  testState.workspaceEventSignals = {
+    ...testState.workspaceEventSignals,
+    skillsVersion: testState.workspaceEventSignals.skillsVersion + 1,
+    lastSkillMutation: mutation,
+    ...(cwd
+      ? {
+          lastSkillMutationsByCwd: {
+            ...testState.workspaceEventSignals.lastSkillMutationsByCwd,
+            [cwd]: mutation,
+          },
+        }
+      : {}),
+  };
+}
+
 function emitPartialSkillMutation(
   id: string,
   skills: Array<{ name: string; enabled: boolean }>,
 ): void {
-  testState.workspaceEventSignals = {
-    ...testState.workspaceEventSignals,
-    skillsVersion: testState.workspaceEventSignals.skillsVersion + 1,
-    lastSkillMutation: {
-      id,
-      kind: 'skill_toggle',
-      skills,
-      activation: 'partial',
-      sessionsRefreshed: 0,
-      sessionsFailed: 1,
-    },
-  };
+  emitSkillMutation(id, skills, 'partial');
 }
 
 async function triggerAutoRecap(): Promise<{
@@ -4514,6 +4545,7 @@ beforeEach(() => {
     extensionsVersion: 0,
     skillsVersion: 0,
     lastSkillMutation: undefined,
+    lastSkillMutationsByCwd: undefined,
   };
   mockWorkspace.capabilities = {
     workspaces: [{ id: 'primary', cwd: '/workspace', primary: true }],
@@ -10724,6 +10756,100 @@ describe('App session callbacks', () => {
     expect(testState.latestChatEditorProps?.commands).not.toEqual(
       expect.arrayContaining([expect.objectContaining({ name: 'review' })]),
     );
+
+    mockConnection.workspaceCwd = '/tmp/project';
+    mockConnection.sessionId = 'session-1';
+    mockConnection.commands = [
+      skillCommandFixture('web-search', 'Search the web'),
+    ];
+    mockConnection.skills = ['web-search'];
+    rerender();
+    await flush();
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.skills).toEqual([]);
+    });
+    expect(testState.latestChatEditorProps?.commands).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: 'web-search' })]),
+    );
+  });
+
+  it('restores an earlier workspace Skill fallback after an intervening toggle', async () => {
+    mockConnection.commands = [
+      skillCommandFixture('web-search', 'Search the web'),
+    ];
+    mockConnection.skills = ['web-search'];
+    mockWorkspaceActions.loadSkillsStatus
+      .mockResolvedValueOnce({
+        skills: [
+          {
+            name: 'web-search',
+            description: 'Search the web',
+            status: 'ok',
+          },
+        ],
+      })
+      .mockResolvedValue({
+        skills: [
+          {
+            name: 'web-search',
+            description: 'Search the web',
+            status: 'disabled',
+          },
+        ],
+      });
+    mockWorkspace.client.workspaceByCwd.mockImplementation((cwd: string) => ({
+      workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+      workspaceSkills:
+        cwd === '/tmp/other'
+          ? vi.fn().mockResolvedValue({
+              skills: [
+                {
+                  name: 'review',
+                  description: 'Review changes',
+                  status: 'ok',
+                },
+                {
+                  name: 'web-search',
+                  description: 'Search the web',
+                  status: 'ok',
+                },
+              ],
+            })
+          : mockWorkspaceActions.loadSkillsStatus,
+      workspaceGitHubPullRequests: vi.fn().mockResolvedValue({
+        v: 1,
+        workspaceCwd: cwd,
+        available: true,
+        pullRequests: [],
+      }),
+    }));
+
+    const { rerender } = renderApp();
+    await flush();
+    emitPartialSkillMutation('partial-web-search-workspace-a', [
+      { name: 'web-search', enabled: false },
+    ]);
+    rerender();
+    await flush();
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.skills).toEqual([]);
+    });
+
+    mockConnection.workspaceCwd = '/tmp/other';
+    mockConnection.sessionId = 'session-2';
+    mockConnection.commands = [
+      skillCommandFixture('web-search', 'Search the web'),
+    ];
+    mockConnection.skills = ['web-search'];
+    rerender();
+    await flush();
+    emitSkillMutation(
+      'applied-review-workspace-b',
+      [{ name: 'review', enabled: false }],
+      'applied',
+    );
+    rerender();
+    await flush();
 
     mockConnection.workspaceCwd = '/tmp/project';
     mockConnection.sessionId = 'session-1';

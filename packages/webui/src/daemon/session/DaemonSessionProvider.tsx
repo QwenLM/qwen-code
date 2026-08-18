@@ -1742,6 +1742,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               bumpWorkspaceEventSignals(
                 sideEffectEvents,
                 setWorkspaceEventSignals,
+                activeSession.workspaceCwd,
               );
             }
             if (replayExceededCapacity && historyHasMore) {
@@ -2130,7 +2131,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   break;
                 }
               }
-              bumpWorkspaceEventSignals(uiEvents, setWorkspaceEventSignals);
+              bumpWorkspaceEventSignals(
+                uiEvents,
+                setWorkspaceEventSignals,
+                activeSession.workspaceCwd,
+              );
               if (uiEvents.length > 0) {
                 const hasGenerationSignal = hasActiveGenerationSignal(uiEvents);
                 setPromptStatus((current) =>
@@ -3883,6 +3888,7 @@ function getNumber(
 function bumpWorkspaceEventSignals(
   events: readonly DaemonUiEvent[],
   setSignals: Dispatch<SetStateAction<DaemonWorkspaceEventSignals>>,
+  workspaceCwd?: string,
 ): void {
   let memory = 0;
   let agents = 0;
@@ -3989,6 +3995,13 @@ function bumpWorkspaceEventSignals(
     ) {
       return current;
     }
+    const lastSkillMutationsByCwd =
+      hasNewSkillMutation && workspaceCwd && lastSkillMutation
+        ? {
+            ...current.lastSkillMutationsByCwd,
+            [workspaceCwd]: lastSkillMutation,
+          }
+        : current.lastSkillMutationsByCwd;
     return {
       memoryVersion: current.memoryVersion + memory,
       agentsVersion: current.agentsVersion + agents,
@@ -4003,6 +4016,7 @@ function bumpWorkspaceEventSignals(
         : current.lastSkillMutation
           ? { lastSkillMutation: current.lastSkillMutation }
           : {}),
+      ...(lastSkillMutationsByCwd ? { lastSkillMutationsByCwd } : {}),
       ...(lastExtensionChange ? { lastExtensionChange } : {}),
       initVersion: current.initVersion + init,
       authVersion: current.authVersion + auth,

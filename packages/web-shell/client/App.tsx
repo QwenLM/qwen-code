@@ -41,6 +41,7 @@ import {
 import type {
   DaemonInputAnnotation,
   DaemonSessionAgentTaskStatus,
+  DaemonSkillToggleMutation,
   DaemonTranscriptBlock,
   DaemonSessionMonitorTaskStatus,
   DaemonSessionShellTaskStatus,
@@ -507,6 +508,21 @@ function sessionSkillsReflectToggle(
     const enabled = enabledNames.has(skill.name.toLowerCase());
     return skill.enabled === enabled;
   });
+}
+
+function skillMutationForWorkspace(
+  signals:
+    | {
+        lastSkillMutation?: DaemonSkillToggleMutation;
+        lastSkillMutationsByCwd?: Record<string, DaemonSkillToggleMutation>;
+      }
+    | undefined,
+  workspaceCwd?: string,
+): DaemonSkillToggleMutation | undefined {
+  if (workspaceCwd && signals?.lastSkillMutationsByCwd) {
+    return signals.lastSkillMutationsByCwd[workspaceCwd];
+  }
+  return signals?.lastSkillMutation;
 }
 
 function mergeSkillToggles(
@@ -4547,26 +4563,27 @@ export function App({
     void reloadLoadedSkills(connection.workspaceCwd);
   }, [connected, connection.workspaceCwd, reloadLoadedSkills]);
   const handledSkillMutationIdRef = useRef<string | undefined>(undefined);
-  const skillMutationOriginRef = useRef<
-    { id: string; workspaceCwd?: string } | undefined
-  >(undefined);
+  const skillMutationOriginByIdRef = useRef<Map<string, string | undefined>>(
+    new Map(),
+  );
   const pendingSkillTogglesRef = useRef<
     Array<{ name: string; enabled: boolean }>
   >([]);
+  const fallbackWorkspaceCwdRef = useRef<string | undefined>(undefined);
   useEffect(() => {
     if (!connected) return;
-    const mutation = workspaceEventSignals?.lastSkillMutation;
     const sessionId = connection.sessionId;
     const workspaceCwd = connection.workspaceCwd;
-    if (mutation && skillMutationOriginRef.current?.id !== mutation.id) {
-      skillMutationOriginRef.current = {
-        id: mutation.id,
-        workspaceCwd,
-      };
+    const mutation = skillMutationForWorkspace(
+      workspaceEventSignals,
+      workspaceCwd,
+    );
+    if (mutation && !skillMutationOriginByIdRef.current.has(mutation.id)) {
+      skillMutationOriginByIdRef.current.set(mutation.id, workspaceCwd);
     }
     if (
       mutation &&
-      skillMutationOriginRef.current?.workspaceCwd !== workspaceCwd
+      skillMutationOriginByIdRef.current.get(mutation.id) !== workspaceCwd
     ) {
       return;
     }
@@ -4581,6 +4598,7 @@ export function App({
     ) {
       handledSkillMutationIdRef.current = handleKey;
       pendingSkillTogglesRef.current = [];
+      fallbackWorkspaceCwdRef.current = undefined;
       setLoadedSkillsFallbackSessionId(undefined);
       return;
     }
@@ -4607,12 +4625,16 @@ export function App({
         handledSkillMutationIdRef.current = handleKey;
         return;
       }
+      fallbackWorkspaceCwdRef.current = workspaceCwd;
       setLoadedSkillsFallbackSessionId(sessionId);
       handledSkillMutationIdRef.current = handleKey;
     });
     return () => {
       cancelled = true;
     };
+    // Skill-specific fields only: other workspaceEventSignals versions must
+    // not cancel an in-flight /workspace/skills refresh.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- see above
   }, [
     connected,
     connection.sessionId,
@@ -4625,9 +4647,10 @@ export function App({
     if (!loadedSkillsFallbackSessionId) return;
     if (
       connection.sessionId !== loadedSkillsFallbackSessionId ||
-      skillMutationOriginRef.current?.workspaceCwd !== connection.workspaceCwd
+      fallbackWorkspaceCwdRef.current !== connection.workspaceCwd
     ) {
       handledSkillMutationIdRef.current = undefined;
+      fallbackWorkspaceCwdRef.current = undefined;
       setLoadedSkillsFallbackSessionId(undefined);
       return;
     }

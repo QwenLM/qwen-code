@@ -2925,6 +2925,9 @@ describe('DaemonSessionProvider', () => {
       settingsVersion: 1,
       skillsVersion: 1,
       lastSkillMutation: mutation,
+      lastSkillMutationsByCwd: {
+        '/mock-workspace': mutation,
+      },
     });
   });
 
