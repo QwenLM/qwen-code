@@ -17,6 +17,10 @@ const tauriManifest = readJson(
   path.join(repoRoot, 'packages/desktop-shell/src-tauri/tauri.conf.json'),
 );
 const main = read('src/main/index.ts');
+const browserPanel = read('src/main/browser-panel.ts');
+const preload = read('src/preload/index.ts');
+const preloadPanel = read('src/preload/browser-panel.ts');
+const sharedBrowserPanel = read('src/shared/browser-panel.ts');
 const runtime = read('src/main/runtime.ts');
 const runtimeBuilder = read('scripts/prepare-runtime.js');
 const entitlements = read('build/entitlements.mac.plist');
@@ -62,7 +66,11 @@ function testPackageIdentity() {
     'scripts/electron-builder-after-pack.cjs',
   );
   assert.equal(manifest.build.asar, true);
-  assert.deepEqual(manifest.build.files, ['dist/main/**/*', 'package.json']);
+  assert.deepEqual(manifest.build.files, [
+    'dist/main/**/*',
+    'dist/preload/**/*',
+    'package.json',
+  ]);
   assert.deepEqual(manifest.build.extraResources, [
     { from: 'runtime/qwen-code', to: 'runtime/qwen-code' },
   ]);
@@ -86,6 +94,7 @@ function testSecurityBoundary() {
   assert.match(main, /setBackgroundColor/);
   assert.match(main, /titleBarStyle:.*'hidden'/);
   assert.match(main, /insertCSS\(MACOS_TITLE_BAR_CSS\)/);
+  assert.match(main, /insertCSS\(BROWSER_PANEL_CSS\)/);
   assert.match(main, /\[data-sidebar-shell\] > aside/);
   assert.match(main, /padding-top: 40px/);
   assert.match(main, /\[data-testid='chat-context-header'\]/);
@@ -99,7 +108,19 @@ function testSecurityBoundary() {
   assert.match(runtime, /127\.0\.0\.1/);
   assert.match(runtime, /url\.hash = new URLSearchParams\(\{ token \}\)/);
   assert.doesNotMatch(runtime, /--allow-origin|qwen-desktop:\/\//);
-  assert.doesNotMatch(main, /ipcMain|contextBridge|preload:|WebContentsView/);
+  assert.match(main, /preload: path\.join/);
+  assert.match(browserPanel, /WebContentsView/);
+  assert.match(browserPanel, /contextIsolation: true/);
+  assert.match(browserPanel, /nodeIntegration: false/);
+  assert.match(browserPanel, /sandbox: true/);
+  assert.match(browserPanel, /setPermissionCheckHandler\(\(\) => false\)/);
+  assert.match(browserPanel, /will-download/);
+  assert.match(browserPanel, /event\.sender\.id === window\.webContents\.id/);
+  assert.match(sharedBrowserPanel, /qwen-browser-panel/);
+  assert.doesNotMatch(sharedBrowserPanel, /persist:/);
+  assert.match(preloadPanel, /shouldOpenLinkInApp/);
+  assert.match(preloadPanel, /event\.stopImmediatePropagation\(\)/);
+  assert.doesNotMatch(preload, /contextBridge|exposeInMainWorld/);
 }
 
 function testStandaloneWebShellOwnership() {
@@ -122,10 +143,7 @@ function testStandaloneWebShellOwnership() {
 }
 
 function testRemovedDesktopSurfaces() {
-  assert.doesNotMatch(
-    main,
-    /new-chat-window|open-browser|voice-overlay|WebContentsView|ipcMain/,
-  );
+  assert.doesNotMatch(main, /new-chat-window|voice-overlay/);
   assert.doesNotMatch(entitlements, /audio-input/);
   for (const permission of [
     'NSAudioCaptureUsageDescription',
@@ -140,11 +158,16 @@ function testRemovedDesktopSurfaces() {
   assert.deepEqual(
     sourceFiles.map((file) => path.relative(packageDir, file)).sort(),
     [
+      'src/main/browser-panel.ts',
       'src/main/index.ts',
       'src/main/runtime.test.ts',
       'src/main/runtime.ts',
       'src/main/state.test.ts',
       'src/main/state.ts',
+      'src/preload/browser-panel.ts',
+      'src/preload/index.ts',
+      'src/shared/browser-panel.test.ts',
+      'src/shared/browser-panel.ts',
     ],
   );
   const productionFiles = sourceFiles.filter(

@@ -19,15 +19,15 @@ providers, and routes displayed by both desktop hosts.
 - Display the complete standalone Web Shell without a second renderer entry.
 - Keep daemon/Core authoritative for sessions, tools, permissions, filesystem,
   models, MCP, Computer Use, voice, settings, and plugins.
-- Use a single desktop window without Electron-only product surfaces.
+- Use a single desktop window with narrowly scoped Electron-only host surfaces.
 - Package an authenticated, loopback-only Qwen runtime with the application.
 
 ## Non-goals
 
 - Rebuilding Web Shell screens from UI primitives.
-- Styling Web Shell from an Electron-owned stylesheet.
-- Adding an embedded browser, Voice overlay, or multiple chat windows.
-- Moving daemon APIs to Electron IPC or exposing a preload bridge.
+- Replacing or restyling Web Shell product UI from Electron.
+- Adding Voice overlay or multiple chat windows.
+- Moving daemon APIs to Electron IPC or exposing Electron APIs to page JavaScript.
 - Importing the legacy Electron implementation under `packages/desktop`.
 - Changing shared Core, CLI, daemon, ACP, or Tauri behavior.
 
@@ -70,9 +70,9 @@ preparation builds `packages/web-shell`, copies the root distribution including
 `dist/web-shell`, and records checksums for every runtime file. Electron then
 loads that server-owned document; there is no Electron HTML, React root,
 Tailwind pipeline, theme state, or product CSS capable of diverging from
-standalone Web Shell. The only injected CSS reserves the macOS title-bar inset
-and drag region; it uses Web Shell's existing sidebar theme tokens and does not
-restyle product content.
+standalone Web Shell. Injected host CSS is limited to native window chrome and
+the optional Electron-owned browser panel; it uses Web Shell's existing theme
+tokens and does not restyle product content.
 
 Therefore settings, plugins, navigation, dialogs, portals, fonts, semantic
 tokens, and responsive behavior use the same generated assets as Web Shell.
@@ -84,14 +84,17 @@ Electron.
 - `nodeIntegration: false`
 - `contextIsolation: true`
 - `sandbox: true`
-- no preload script, raw IPC, or Electron APIs in the page
+- a sandboxed preload owns fixed desktop-host messages but exposes no global or
+  Electron API to page JavaScript
 - the main process maps Web Shell's standard `theme-color` metadata to
   Electron's native theme and window background
 - on macOS, native traffic-light controls remain visible over a host drag strip
   colored by Web Shell's sidebar theme token
 - navigation restricted to the active daemon origin
 - new windows denied
-- safe external HTTP(S) links opened by the operating system browser
+- normal external HTTP(S) clicks open in the operating-system browser; an
+  explicit Cmd-click on macOS or Ctrl-click on Windows/Linux may open the
+  isolated in-app browser panel described in Issue #9412
 - daemon bound to `127.0.0.1` with bearer authentication
 
 ## Runtime and lifecycle
@@ -112,13 +115,13 @@ workflow remains unchanged.
 
 ## Acceptance criteria
 
-- Electron contains one Web Shell window and no embedded browser, Voice
-  overlay, additional chat window action, renderer IPC, or preload bridge.
+- Electron contains one Web Shell window, an optional isolated browser panel,
+  and no Voice overlay or additional chat window action.
 - The loaded page URL uses the authenticated loopback daemon origin.
 - The packaged page is `lib/web-shell/index.html` from the selected Qwen build.
-- No Electron-owned renderer HTML, React entry, Tailwind/Vite build, theme
-  state, or product style override exists. Host CSS is limited to the macOS
-  title-bar inset and drag strip.
+- No Electron-owned replacement renderer, React entry, Tailwind/Vite build,
+  theme state, or product style override exists. Host CSS is limited to native
+  window chrome and explicitly Electron-owned surfaces.
 - Settings, plugins, dialogs, and chat surfaces match standalone Web Shell at
   the same viewport and theme.
 - The macOS title bar and Web Shell sidebar form one continuous color surface

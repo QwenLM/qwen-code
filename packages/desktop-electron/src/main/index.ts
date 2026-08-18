@@ -15,7 +15,9 @@ import {
   screen,
   shell,
 } from 'electron';
+import { BrowserPanelController } from './browser-panel';
 import { DesktopRuntime } from './runtime';
+import { BROWSER_PANEL_CSS } from '../shared/browser-panel';
 import {
   captureWindowState,
   initialWindowBounds,
@@ -32,6 +34,7 @@ let statePath = '';
 let hostLogPath = '';
 let stateTimer: NodeJS.Timeout | undefined;
 let quitting = false;
+const browserPanel = new BrowserPanelController(() => mainWindow);
 
 const MACOS_TITLE_BAR_CSS = `
   [data-web-shell-root] [data-sidebar-shell] > aside {
@@ -107,6 +110,7 @@ app.on('before-quit', () => {
   try {
     flushDesktopState();
   } finally {
+    browserPanel.close();
     runtime?.stop();
     runtime = undefined;
   }
@@ -131,6 +135,7 @@ async function startApplication(): Promise<void> {
   statePath = path.join(app.getPath('userData'), 'desktop-state.json');
   hostLogPath = path.join(app.getPath('logs'), 'desktop-host.log');
   desktopState = readDesktopState(statePath);
+  browserPanel.registerIpc();
 
   const workspace = await resolveWorkspace();
   if (!workspace) {
@@ -174,6 +179,7 @@ async function showMainWindow(
   mainWindow = window;
   try {
     await window.loadURL(runtime.authenticatedWebUrl());
+    await window.webContents.insertCSS(BROWSER_PANEL_CSS);
     if (process.platform === 'darwin') {
       await window.webContents.insertCSS(MACOS_TITLE_BAR_CSS);
       window.show();
@@ -199,6 +205,7 @@ function createMainWindow(savedBounds?: WindowState): BrowserWindow {
     title: 'Qwen Code',
     titleBarStyle: process.platform === 'darwin' ? 'hidden' : 'default',
     webPreferences: {
+      preload: path.join(__dirname, '../preload/index.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
@@ -220,12 +227,20 @@ function createMainWindow(savedBounds?: WindowState): BrowserWindow {
   window.webContents.once('did-finish-load', () => {
     appendHostLog(`web shell ready at ${runtime?.baseUrl ?? 'unknown'}`);
   });
+  window.webContents.on(
+    'did-start-navigation',
+    (_event, url, isInPlace, isMainFrame) => {
+      if (isMainFrame && !isInPlace && isRuntimeUrl(url)) browserPanel.close();
+    },
+  );
+  window.webContents.on('render-process-gone', () => browserPanel.close());
   window.on('move', scheduleDesktopStateSave);
   window.on('resize', scheduleDesktopStateSave);
   window.on('maximize', scheduleDesktopStateSave);
   window.on('unmaximize', scheduleDesktopStateSave);
   window.on('close', flushDesktopState);
   window.on('closed', () => {
+    browserPanel.close();
     if (mainWindow === window) mainWindow = undefined;
   });
   window.webContents.on('will-navigate', (event, url) => {

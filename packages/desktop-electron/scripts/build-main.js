@@ -26,4 +26,15 @@ await build({
   sourcemap: false,
 });
 
-console.log('Built Electron main process.');
+await build({
+  entryPoints: [path.join(packageDir, 'src/preload/index.ts')],
+  outfile: path.join(outDir, 'preload/index.cjs'),
+  bundle: true,
+  platform: 'node',
+  format: 'cjs',
+  target: 'node22',
+  external: ['electron'],
+  sourcemap: false,
+});
+
+console.log('Built Electron main process and preload.');
