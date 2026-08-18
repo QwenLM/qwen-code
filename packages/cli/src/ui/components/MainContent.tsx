@@ -77,18 +77,15 @@ function addSourceBlockCounts(
 }
 
 /**
- * Stable identity of a tool_group for consecutive-duplicate collapsing
- * (#9420): the sorted callIds of its tool calls. Two adjacent tool_group rows
- * with the same signature are the same logical tool batch rendered twice
- * (once from committed history, once from the live pending list), so only one
- * should be shown.
+ * Stable identity of a tool_group for duplicate collapsing (#9420): the
+ * sorted callIds of its tool calls. The same in-flight batch can render
+ * twice — from committed history and from the live pending list — and the
+ * two copies share this signature.
  */
-function toolGroupSignature(item: unknown): string | null {
-  const it = item as { type?: unknown; tools?: unknown } | null;
-  if (!it || it.type !== 'tool_group') return null;
-  const tools = Array.isArray(it.tools) ? it.tools : [];
-  return (tools as Array<{ callId?: unknown }>)
-    .map((tool) => String(tool?.callId ?? ''))
+function toolGroupSignature(item: VpItem): string | null {
+  if (item.type !== 'tool_group') return null;
+  return item.tools
+    .map((tool) => tool.callId)
     .sort()
     .join(',');
 }
@@ -312,18 +309,33 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
       ...visibleHistory,
       ...pendingHistoryItems.map((item, i) => ({ ...item, id: -(i + 1) })),
     ];
-    // Collapse consecutive duplicate tool_group rows (#9420): the same
-    // in-flight tool batch can appear both in committed history and the live
-    // pending list (or twice within pending), rendering the latest tool call
-    // twice until the next call finalizes. Keep the LATER item so the live
-    // pending copy (which keeps updating) wins over the static history copy.
+    // Collapse duplicate tool_group rows (#9420): the same in-flight batch
+    // renders from both committed history and the live pending list between
+    // the onComplete commit and the scheduler clearing its display state.
+    // Continuation thought/content items can land between the two copies, so
+    // match by signature across the whole list — not by adjacency — and only
+    // drop committed copies that have a live pending counterpart (the pending
+    // copy keeps updating, so it wins). Committed rows without a live
+    // counterpart are never collapsed, so distinct batches whose signatures
+    // collide (e.g. synthetic speculation callIds) both survive.
+    const livePendingSigs = new Set<string>();
+    for (const item of combined) {
+      if (item.id < 0) {
+        const sig = toolGroupSignature(item);
+        if (sig !== null) livePendingSigs.add(sig);
+      }
+    }
     const deduped: VpItem[] = [];
     for (const item of combined) {
-      const prev = deduped[deduped.length - 1];
       const sig = toolGroupSignature(item);
-      if (prev && sig !== null && sig === toolGroupSignature(prev)) {
-        deduped[deduped.length - 1] = item;
-        continue;
+      if (sig !== null) {
+        if (item.id > 0 && livePendingSigs.has(sig)) continue;
+        // Same batch twice within the pending list: keep the later copy.
+        const prev = deduped[deduped.length - 1];
+        if (item.id < 0 && prev && sig === toolGroupSignature(prev)) {
+          deduped[deduped.length - 1] = item;
+          continue;
+        }
       }
       deduped.push(item);
     }

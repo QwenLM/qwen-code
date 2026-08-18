@@ -884,36 +884,116 @@ describe('<MainContent />', () => {
       expect(lastFrame()).toMatch(/VP_ITEM:1[\s\S]*VP_ITEM:2/);
     });
 
+    // Shared fixtures for the #9420 collapse tests.
+    const toolGroupFixture = (callId: string) => ({
+      type: 'tool_group' as const,
+      tools: [
+        {
+          callId,
+          name: 'read_file',
+          description: `read ${callId}`,
+          status: ToolCallStatus.Executing,
+          resultDisplay: undefined,
+          confirmationDetails: undefined,
+        },
+      ],
+    });
+    const lastVpDataIds = () =>
+      scrollableListPropsSpy.mock.calls
+        .at(-1)?.[0]
+        .data.map((item: { id: number }) => item.id);
+
     it('collapses a tool_group duplicated across history and pending (#9420)', () => {
       scrollableListPropsSpy.mockClear();
 
-      const dupToolGroup = {
-        type: 'tool_group' as const,
-        tools: [
-          {
-            callId: 'dup-call',
-            name: 'read_file',
-            description: 'read dup',
-            status: ToolCallStatus.Executing,
-            resultDisplay: undefined,
-            confirmationDetails: undefined,
-          },
-        ],
-      };
-
-      const { lastFrame } = renderMainContent(
+      renderMainContent(
         createUIState({
           useTerminalBuffer: true,
-          history: [{ id: 1, ...dupToolGroup }],
-          pendingHistoryItems: [dupToolGroup],
+          history: [{ id: 1, ...toolGroupFixture('dup-call') }],
+          pendingHistoryItems: [toolGroupFixture('dup-call')],
         }),
       );
 
-      // The same in-flight tool batch must render once (the live pending copy,
-      // negative id), not twice (history id 1 + pending id -1).
-      const frame = lastFrame() ?? '';
-      expect(frame).toContain('VP_ITEM:-1');
-      expect(frame).not.toContain('VP_ITEM:1');
+      // The same in-flight tool batch must render once (the live pending
+      // copy, negative id), not twice (history id 1 + pending id -1). The
+      // exact list data is pinned so a duplicate that both replaces and
+      // appends is caught (a substring check passes with two -1 rows).
+      expect(lastVpDataIds()).toEqual([Number.MIN_SAFE_INTEGER, -1]);
+    });
+
+    it('collapses a duplicated tool_group separated by pending items (#9420)', () => {
+      scrollableListPropsSpy.mockClear();
+
+      renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          history: [{ id: 1, ...toolGroupFixture('dup-call') }],
+          // The real lifecycle: onComplete commits the batch to history, then
+          // the continuation stream appends thought/content pending items
+          // before the scheduler clears the stale live copy — so the two
+          // copies are not adjacent in the combined list.
+          pendingHistoryItems: [
+            { type: 'gemini_thought' as const, text: 'thinking' },
+            toolGroupFixture('dup-call'),
+          ],
+        }),
+      );
+
+      expect(lastVpDataIds()).toEqual([Number.MIN_SAFE_INTEGER, -1, -2]);
+    });
+
+    it('collapses a tool_group duplicated within the pending list (#9420)', () => {
+      scrollableListPropsSpy.mockClear();
+
+      renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          pendingHistoryItems: [
+            toolGroupFixture('dup-call'),
+            toolGroupFixture('dup-call'),
+          ],
+        }),
+      );
+
+      // Only the later (more current) copy survives.
+      expect(lastVpDataIds()).toEqual([Number.MIN_SAFE_INTEGER, -2]);
+    });
+
+    it('keeps adjacent tool_groups with different signatures (#9420)', () => {
+      scrollableListPropsSpy.mockClear();
+
+      renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          history: [
+            { id: 1, ...toolGroupFixture('call-A') },
+            { id: 2, ...toolGroupFixture('call-B') },
+          ],
+          pendingHistoryItems: [toolGroupFixture('call-C')],
+        }),
+      );
+
+      expect(lastVpDataIds()).toEqual([Number.MIN_SAFE_INTEGER, 1, 2, -1]);
+    });
+
+    it('keeps committed tool_groups sharing a signature when no pending copy is live (#9420)', () => {
+      scrollableListPropsSpy.mockClear();
+
+      renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          // Two committed batches with identical signatures (e.g. accepted-
+          // speculation runs whose synthetic callIds collide) and no live
+          // pending copy: nothing is duplicated, both rows must survive.
+          history: [
+            { id: 1, ...toolGroupFixture('dup-call') },
+            { id: 2, type: 'gemini_thought' as const, text: 'between' },
+            { id: 3, ...toolGroupFixture('dup-call') },
+          ],
+        }),
+      );
+
+      expect(lastVpDataIds()).toEqual([Number.MIN_SAFE_INTEGER, 1, 2, 3]);
     });
 
     it('requests a full-height measurement only for pending plain-text confirmations', () => {
