@@ -135,8 +135,6 @@ export interface QueuedPrompt {
   isEditing?: boolean;
   isRemoving?: boolean;
   payloadCompleteness?: 'complete' | 'summary-only';
-  admissionOutcome?: 'unknown';
-  payloadAvailable?: boolean;
 }
 
 export function QueuedPromptDisplay({
@@ -145,8 +143,6 @@ export function QueuedPromptDisplay({
   canMutateMidTurn = false,
   onDelete,
   onEdit,
-  onRestoreUnknown,
-  onDiscardUnknown,
   onImagePreview,
 }: {
   prompts: readonly QueuedPrompt[];
@@ -154,8 +150,6 @@ export function QueuedPromptDisplay({
   canMutateMidTurn?: boolean;
   onDelete: (id: number) => void;
   onEdit: (id: number) => void;
-  onRestoreUnknown?: (id: number) => void;
-  onDiscardUnknown?: (id: number) => void;
   onImagePreview?: (src: string, alt?: string) => void;
 }) {
   const {
@@ -174,23 +168,10 @@ export function QueuedPromptDisplay({
     latestPrompt.serverState !== 'running' &&
     !latestPrompt.isEditing &&
     !latestPrompt.isRemoving &&
-    latestPrompt.payloadCompleteness !== 'summary-only' &&
-    latestPrompt.admissionOutcome !== 'unknown';
-  const mayContainDuplicateAdmission =
-    prompts.some((prompt) => prompt.admissionOutcome === 'unknown') &&
-    prompts.some(
-      (prompt) =>
-        prompt.payloadCompleteness === 'summary-only' &&
-        prompt.serverPromptId !== undefined,
-    );
+    latestPrompt.payloadCompleteness !== 'summary-only';
 
   return (
     <div className={styles.queuedPrompts}>
-      {mayContainDuplicateAdmission ? (
-        <div className={styles.queuedPromptAmbiguity} role="status">
-          {t('queue.mayCorrespond')}
-        </div>
-      ) : null}
       {prompts.map((prompt) => {
         const preview = truncateQueuedPromptParts(
           getQueuedPromptParts(prompt, parseUserMessageContent),
@@ -209,9 +190,6 @@ export function QueuedPromptDisplay({
           prompt.midTurnState === 'submitting' ||
           (prompt.midTurnState === 'queued' && !prompt.midTurnMessageId);
         const isSummaryOnly = prompt.payloadCompleteness === 'summary-only';
-        const isAdmissionUnknown = prompt.admissionOutcome === 'unknown';
-        const hasUnknownPayload =
-          isAdmissionUnknown && prompt.payloadAvailable !== false;
         const showActions = !isMidTurnPending || canMutateMidTurn;
         const isRemoving = prompt.isRemoving === true;
         const hasStateSpinner =
@@ -223,7 +201,6 @@ export function QueuedPromptDisplay({
           isSubmitting ||
           isRunning ||
           isMidTurnLocked ||
-          isAdmissionUnknown ||
           prompt.isEditing === true ||
           isRemoving;
         const isEditDisabled = isBusy || isSummaryOnly;
@@ -231,9 +208,7 @@ export function QueuedPromptDisplay({
         if (isEditDisabled) {
           editTitle = isSummaryOnly
             ? t('queue.summaryEditDisabled')
-            : isAdmissionUnknown
-              ? t('queue.admissionUnknown')
-              : t('queue.submittingDisabled');
+            : t('queue.submittingDisabled');
         }
         const deleteTitle = isBusy
           ? t('queue.submittingDisabled')
@@ -265,9 +240,6 @@ export function QueuedPromptDisplay({
               {preview.truncated ? '...' : null}
               {fileCount > 0
                 ? ` ${t('queue.fileCount', { count: fileCount })}`
-                : ''}
-              {isAdmissionUnknown && !hasUnknownPayload
-                ? ` ${t('queue.localCopyDiscarded')}`
                 : ''}
             </span>
             {imageCount > 0 ? (
@@ -313,7 +285,6 @@ export function QueuedPromptDisplay({
             {isSubmitting ||
             isQueued ||
             isMidTurnPending ||
-            isAdmissionUnknown ||
             prompt.isEditing ||
             isRemoving ? (
               <span
@@ -332,41 +303,14 @@ export function QueuedPromptDisplay({
                       ? t('queue.editing')
                       : isMidTurnPending
                         ? t('queue.midTurnQueued')
-                        : isAdmissionUnknown
-                          ? t('queue.admissionUnknown')
-                          : isQueued
-                            ? t('queue.serverQueued')
-                            : t('queue.submitting')}
+                        : isQueued
+                          ? t('queue.serverQueued')
+                          : t('queue.submitting')}
                 </span>
               </span>
             ) : null}
             <span className={styles.queuedPromptActions}>
-              {hasUnknownPayload ? (
-                <>
-                  <button
-                    type="button"
-                    className={styles.queuedPromptAction}
-                    onClick={() => {
-                      if (window.confirm(t('queue.continueEditingConfirm'))) {
-                        onRestoreUnknown?.(prompt.id);
-                      }
-                    }}
-                    aria-label={t('queue.restoreUnknown')}
-                    title={t('queue.restoreUnknown')}
-                  >
-                    {t('queue.restoreUnknown')}
-                  </button>
-                  <button
-                    type="button"
-                    className={styles.queuedPromptAction}
-                    onClick={() => onDiscardUnknown?.(prompt.id)}
-                    aria-label={t('queue.discardUnknown')}
-                    title={t('queue.discardUnknown')}
-                  >
-                    {t('queue.discardUnknown')}
-                  </button>
-                </>
-              ) : showActions && !isAdmissionUnknown ? (
+              {showActions ? (
                 <>
                   <button
                     type="button"
