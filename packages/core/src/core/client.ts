@@ -2612,7 +2612,8 @@ export class GeminiClient {
     const recordAcceptedExperienceInput = () => {
       const content =
         messageType === SendMessageType.ToolResult ||
-        messageType === SendMessageType.Retry
+        messageType === SendMessageType.Retry ||
+        messageType === SendMessageType.Teammate
           ? createUserContent(request)
           : undefined;
       if (content?.parts?.some((part) => part.functionResponse)) {

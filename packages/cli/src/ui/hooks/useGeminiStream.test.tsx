@@ -13721,6 +13721,14 @@ describe('useGeminiStream', () => {
         await mainRequest;
       });
 
+      expect(client.recordCompletedToolCall).toHaveBeenCalledWith(
+        'testTool',
+        {},
+        expect.objectContaining({
+          callId: 'btw-cancelled-tool',
+          status: 'cancelled',
+        }),
+      );
       expect(mockEndInteractionSpan).toHaveBeenCalledWith('cancelled', {
         promptId: btwPromptId,
       });

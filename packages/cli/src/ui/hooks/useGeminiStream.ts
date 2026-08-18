@@ -4381,12 +4381,15 @@ export const useGeminiStream = (
             toolCall.request.prompt_id,
           );
         }
-        if (toolCall.status !== 'cancelled') {
-          geminiClient?.recordCompletedToolCall(
-            toolCall.request.name,
-            toolCall.request.args as Record<string, unknown>,
-          );
-        }
+        geminiClient?.recordCompletedToolCall(
+          toolCall.request.name,
+          toolCall.request.args as Record<string, unknown>,
+          toCompletedToolCallOutcome(
+            toolCall.request.callId,
+            toolCall.status,
+            toolCall.response,
+          ),
+        );
         dualOutput?.emitToolResult(toolCall.request, toolCall.response);
       }
       if (secondaryTools.length > 0) {

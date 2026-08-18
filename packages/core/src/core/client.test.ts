@@ -8891,24 +8891,30 @@ hello
         },
       );
 
-      it('records an accepted same-tool failure and recovery', async () => {
-        recordOutcome('failed-edit', 'edit', 'error', 'error', {
-          error: 'patch failed',
-        });
-        await sendToolResult('failed-edit', 'edit', {
-          error: 'patch failed',
-        });
-        expect(client['experienceSignalsSinceReview'].failedToolNames).toEqual(
-          new Set(['edit']),
-        );
+      it.each([SendMessageType.ToolResult, SendMessageType.Teammate])(
+        'records an accepted same-tool failure and recovery for %s',
+        async (type) => {
+          recordOutcome('failed-edit', 'edit', 'error', 'error', {
+            error: 'patch failed',
+          });
+          await sendToolResult(
+            'failed-edit',
+            'edit',
+            { error: 'patch failed' },
+            type,
+          );
+          expect(
+            client['experienceSignalsSinceReview'].failedToolNames,
+          ).toEqual(new Set(['edit']));
 
-        recordOutcome('fixed-edit', 'edit', 'success', 'success', {
-          output: 'done',
-        });
-        await sendToolResult('fixed-edit', 'edit', { output: 'done' });
+          recordOutcome('fixed-edit', 'edit', 'success', 'success', {
+            output: 'done',
+          });
+          await sendToolResult('fixed-edit', 'edit', { output: 'done' }, type);
 
-        expect(client['experienceSignalsSinceReview'].retryArc).toBe(true);
-      });
+          expect(client['experienceSignalsSinceReview'].retryArc).toBe(true);
+        },
+      );
 
       it('waits for acceptance and consumes a retried ToolResult once', async () => {
         recordOutcome('retry-edit', 'edit', 'error', 'error', {
