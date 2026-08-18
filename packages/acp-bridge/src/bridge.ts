@@ -1012,6 +1012,14 @@ interface SessionEntry {
    * transcript.
    */
   enrichedTerminalPromptIds: Set<string>;
+  /**
+   * Monotonic counter incremented when a successful rewind truncates this
+   * session's history. `getSessionTurnStatus` captures it before scanning
+   * the child transcript and discards the scanned outcome when the
+   * generation moved, so a result rolled back by a concurrent rewind is
+   * never cached or served.
+   */
+  rewindGeneration: number;
   /** Bridge prompt that owns the child Guard wait for this FIFO. */
   todoStopGuardAwaitingQueuedPromptOwnerPromptId?: string;
   /**
@@ -2175,10 +2183,14 @@ function enrichTerminalTurnStatus(
 ): BridgeTurnStatus {
   return {
     ...terminal,
-    ...(persisted.promptText !== undefined
+    // The bridge's display projection is trusted; the child-recorded text
+    // only backfills when the terminal has none, so hidden channel context
+    // the child derived from raw blocks never replaces it.
+    ...(terminal.promptText === undefined && persisted.promptText !== undefined
       ? { promptText: persisted.promptText }
       : {}),
-    ...(persisted.promptTextTruncated !== undefined
+    ...(terminal.promptTextTruncated === undefined &&
+    persisted.promptTextTruncated !== undefined
       ? { promptTextTruncated: persisted.promptTextTruncated }
       : {}),
     ...(persisted.resultText !== undefined
@@ -2203,7 +2215,8 @@ function enrichTerminalTurnStatus(
  * flush) is superseded on the poll surface once the child has settled and
  * persisted a non-error outcome: the deadline releases the caller without
  * killing the agent, so the persisted outcome is what actually happened.
- * Every other combination keeps the overlay outcome and enriches it with
+ * The trusted prompt display projection always stays the terminal's. Every
+ * other combination keeps the overlay outcome and enriches it with
  * persisted text.
  */
 function mergeTerminalWithPersisted(
@@ -2211,7 +2224,15 @@ function mergeTerminalWithPersisted(
   persisted: BridgeTurnStatus,
 ): BridgeTurnStatus {
   if (terminal.state === 'error' && persisted.state !== 'error') {
-    return persisted;
+    return {
+      ...persisted,
+      ...(terminal.promptText !== undefined
+        ? { promptText: terminal.promptText }
+        : {}),
+      ...(terminal.promptTextTruncated !== undefined
+        ? { promptTextTruncated: terminal.promptTextTruncated }
+        : {}),
+    };
   }
   return enrichTerminalTurnStatus(terminal, persisted);
 }
@@ -5764,6 +5785,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       pendingPromptList: [],
       terminalTurnStatuses: new Map(),
       enrichedTerminalPromptIds: new Set(),
+      rewindGeneration: 0,
       midTurnMessageQueue: [],
       settledMidTurnMessageIds: [],
       promotedMidTurnMessageIds: [],
@@ -10560,6 +10582,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         if (enrichedTerminal) return enrichedTerminal;
       }
 
+      const rewindGenerationBeforeRead = entry.rewindGeneration;
       let result: {
         v: number;
         sessionId: string;
@@ -10590,9 +10613,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         promptId !== undefined
           ? entry.terminalTurnStatuses.get(promptId)
           : latestTerminalTurnStatus(entry);
-      const persisted = result.turnResult
-        ? settledTurnStatus(sessionId, result.turnResult)
-        : undefined;
+      // A rewind that completed while the scan was in flight may have
+      // rolled back the scanned outcome; drop it so neither the write-back
+      // nor the return below resurrects a rewound-away result. Rewind also
+      // cleared the overlay this read falls back to, so the failure path
+      // needs no equivalent guard.
+      const persisted =
+        result.turnResult &&
+        entry.rewindGeneration === rewindGenerationBeforeRead
+          ? settledTurnStatus(sessionId, result.turnResult)
+          : undefined;
       if (promptId !== undefined) {
         if (terminal && persisted) {
           const merged = mergeTerminalWithPersisted(terminal, persisted);
@@ -11370,6 +11400,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
         entry.terminalTurnStatuses.clear();
         entry.enrichedTerminalPromptIds.clear();
+        entry.rewindGeneration += 1;
 
         const targetTurnIndex = (response['targetTurnIndex'] as number) ?? 0;
         const filesChanged = (response['filesChanged'] as string[]) ?? [];

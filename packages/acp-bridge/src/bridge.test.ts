@@ -13185,7 +13185,8 @@ describe('createAcpSessionBridge', () => {
         { type: 'resource_link', uri: 'file:///visible', name: 'visible' },
       ]);
       // The forwarded display text stays the worker's raw projection; the
-      // child's turn recording treats '' as absent and derives `[image]`.
+      // child's turn recording treats '' as absent and falls back to the
+      // prompt's first raw text block ('hidden first'), not `[image]`.
       expect(
         handle.agent.promptCalls[0]?._meta?.['qwen.daemon.promptDisplayText'],
       ).toBe('');
@@ -16439,6 +16440,74 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('does not resurrect a rewound-away result when a scan resolves late', async () => {
+      const lookup = deferred<{
+        v: number;
+        sessionId: string;
+        turnResult: unknown;
+      }>();
+      let lookupStarted = false;
+      let rewound = false;
+      const handle = makeChannel({
+        promptImpl: () => ({ stopReason: 'end_turn' }),
+        extMethodImpl: async (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionTurnStatus) {
+            if (rewound) {
+              return { v: 1, sessionId: 'ignored', turnResult: null };
+            }
+            lookupStarted = true;
+            return lookup.promise;
+          }
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionRewind) {
+            rewound = true;
+            return { targetTurnIndex: 0, filesChanged: [], filesFailed: [] };
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'settles before rewind' }],
+        },
+        undefined,
+        { promptId: 'prompt-rewind-success-race' },
+      );
+
+      const status = bridge.getSessionTurnStatus(
+        session.sessionId,
+        undefined,
+        'prompt-rewind-success-race',
+      );
+      await vi.waitFor(() => expect(lookupStarted).toBe(true));
+      await bridge.rewindSession(session.sessionId, { promptId: 'target' });
+      lookup.resolve({
+        v: 1,
+        sessionId: 'ignored',
+        turnResult: {
+          promptId: 'prompt-rewind-success-race',
+          state: 'completed',
+          stopReason: 'end_turn',
+          endedAt: 1,
+          resultText: 'rewound-away answer',
+        },
+      });
+
+      // The late pre-rewind record must be neither returned nor cached.
+      await expect(status).resolves.toBeUndefined();
+      await expect(
+        bridge.getSessionTurnStatus(
+          session.sessionId,
+          undefined,
+          'prompt-rewind-success-race',
+        ),
+      ).resolves.toBeUndefined();
+      await bridge.shutdown();
+    });
+
     it('keeps a removed running prompt visible until it settles', async () => {
       const turn = deferred<PromptResponse>();
       const handle = makeChannel({
@@ -16741,6 +16810,66 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('keeps the trusted prompt projection when a persisted result supersedes a deadline error', async () => {
+      const handle = makeChannel({
+        promptImpl: () => new Promise<PromptResponse>(() => {}),
+        cancelImpl: () => new Promise<void>(() => {}),
+        extMethodImpl: (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionTurnStatus
+            ? {
+                v: 1,
+                sessionId: 'ignored',
+                turnResult: {
+                  promptId: 'prompt-supersede-display',
+                  state: 'completed',
+                  stopReason: 'end_turn',
+                  endedAt: 1,
+                  promptText: 'internal channel instructions\n\nvisible ask',
+                  resultText: 'settled after deadline',
+                },
+              }
+            : {},
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sourceType: 'channel',
+      });
+      const p1 = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [
+            {
+              type: 'text',
+              text: 'internal channel instructions\n\nvisible ask',
+            },
+          ],
+        },
+        undefined,
+        {
+          promptId: 'prompt-supersede-display',
+          promptDisplayText: 'visible ask',
+          deadlineMs: 50,
+        },
+      );
+      await expect(p1).rejects.toBeInstanceOf(PromptDeadlineExceededError);
+
+      // The persisted non-error outcome supersedes the deadline error, but
+      // the prompt display projection stays the bridge's trusted one.
+      const status = await bridge.getSessionTurnStatus(
+        session.sessionId,
+        undefined,
+        'prompt-supersede-display',
+      );
+      expect(status).toMatchObject({
+        state: 'completed',
+        promptText: 'visible ask',
+        resultText: 'settled after deadline',
+      });
+      await bridge.shutdown();
+    });
+
     it('keeps the trusted prompt display projection after persistence', async () => {
       const handle = makeChannel({
         promptImpl: () => ({ stopReason: 'end_turn' }),
@@ -16754,13 +16883,21 @@ describe('createAcpSessionBridge', () => {
                   state: 'completed',
                   stopReason: 'end_turn',
                   endedAt: 1,
-                  promptText: 'hello',
+                  // The child's record carries its raw-block derivation
+                  // (hidden context included); the trusted projection must
+                  // still win on the poll surface, while the persisted
+                  // result text stays authoritative.
+                  promptText: 'internal channel instructions\n\nhello',
+                  resultText: 'settled answer',
                 },
               }
             : {},
       });
       const bridge = makeBridge({ channelFactory: async () => handle.channel });
-      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sourceType: 'channel',
+      });
       await bridge.sendPrompt(
         session.sessionId,
         {
@@ -16776,6 +16913,18 @@ describe('createAcpSessionBridge', () => {
         { promptId: 'prompt-display', promptDisplayText: 'hello' },
       );
 
+      await expect(
+        bridge.getSessionTurnStatus(
+          session.sessionId,
+          undefined,
+          'prompt-display',
+        ),
+      ).resolves.toMatchObject({
+        state: 'completed',
+        promptText: 'hello',
+        resultText: 'settled answer',
+      });
+      // The enriched fast path serves the same trusted projection.
       await expect(
         bridge.getSessionTurnStatus(
           session.sessionId,
