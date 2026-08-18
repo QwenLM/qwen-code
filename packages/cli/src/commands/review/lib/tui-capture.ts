@@ -13,10 +13,12 @@
 // and its command are Phase 2's producer: drive the TUI in a throwaway tmux,
 // capture what it actually rendered, and hand back files a finding can carry.
 //
-// Everything here is pure so the naming, geometry and ladder rules are
-// unit-testable without tmux, freeze, or a filesystem. The command layer owns
-// the processes.
+// Everything here is deterministic so the naming, geometry and ladder rules
+// are unit-testable without tmux or freeze; the one filesystem touch is
+// verdict-path canonicalization, which falls back to lexical resolution when
+// a path does not resolve. The command layer owns the processes.
 
+import { realpathSync } from 'node:fs';
 import { posix } from 'node:path';
 
 /** The one server-name prefix, shared by the producer (captureServerName)
@@ -26,26 +28,39 @@ export const CAPTURE_SERVER_PREFIX = 'qwen-review-capture-';
 
 /** Whether a failed `kill-server` means there was NOTHING to kill — the
  * goal state, not a failure. tmux says it several ways depending on how far
- * the server got: `no server running on <socket>`, `error connecting to
- * <socket> (No such file or directory)`, `no such file or directory`, and —
- * when the socket directory itself could never be created (measured with a
- * mode-0555 TMUX_TMPDIR) — `couldn't create directory <dir> (Permission
- * denied)`. Reading only the first wording printed a false orphan WARNING
- * naming a server that never existed. */
+ * the server got: `no server running on <socket>` (the socket is present
+ * with no listener behind it) and — when the socket directory itself could
+ * never be created (measured with a mode-0555 TMUX_TMPDIR) — `couldn't
+ * create directory <dir> (Permission denied)`. Reading only the first
+ * wording printed a false orphan WARNING naming a server that never
+ * existed. The ENOENT-class wordings are deliberately NOT here — see
+ * isSocketPathAbsent. */
 export function isNothingToKill(stderr: string): boolean {
   return (
     /no server running/i.test(stderr) ||
-    // No branch of its own for the `error connecting to …` shape: that
-    // wording always carries the bare one below, and a branch it subsumes
-    // is dead logic that can never be pinned (deletion shipped 81/81 green).
     /(couldn't|could not|can't|cannot) create directory/i.test(stderr) ||
     // A socket path past sun_path (~108 bytes): tmux answers this to
     // new-session AND kill-server, so a start that never created a socket
     // printed a false orphan WARNING (reproduced on 3.3a with a long
     // TMUX_TMPDIR).
-    /file name too long/i.test(stderr) ||
-    /no such file or directory/i.test(stderr)
+    /file name too long/i.test(stderr)
   );
+}
+
+/** Whether a failed `kill-server` says the socket PATH was absent when the
+ * client looked — `error connecting to <path> (No such file or directory)`
+ * and the bare `no such file or directory`. Deliberately NOT part of
+ * isNothingToKill, though both wordings also appear when there was never a
+ * server: they prove only that the path was gone at look time — a LIVE
+ * server behind a removed socket file answers exactly these (probed live:
+ * rm the socket file under a running server, kill-server exits 1 with the
+ * wording, kill -0 shows it alive). Split out for the same folded-in
+ * reason isSocketDirUnusable carries: crediting the class read a live
+ * server as reaped in both consumers (the reap and the sweep). The caller
+ * knows the one shape where absence IS the goal state — a start that never
+ * bound a socket — and credits it there. */
+export function isSocketPathAbsent(stderr: string): boolean {
+  return /no such file or directory/i.test(stderr);
 }
 
 /** Whether a failed `kill-server` says the CLIENT could not reach the
@@ -83,6 +98,35 @@ function goalStatePath(stderr: string): string | undefined {
   return path === '' ? undefined : path;
 }
 
+/** Canonicalize a verdict path for comparison: tmux names the CANONICAL
+ * socket base in its wordings — a symlinked TMUX_TMPDIR answers with its
+ * realpath, and on macOS the stock `/tmp` base answers `/private/tmp/…`
+ * (probed on 3.4) — so a lexical pin never matched an honest verdict under
+ * any symlinked base. realpath the deepest ancestor that still exists and
+ * keep the rest lexical: the socket a verdict names is usually gone by the
+ * time the verdict arrives, and realpathSync throws on a missing path.
+ * Lexical resolution when nothing resolves — the same realpath-with-
+ * fallback shape cleanup.ts's base dedup uses. */
+function realpathSafe(p: string): string {
+  const resolved = posix.resolve(p);
+  let dir = resolved;
+  let tail = '';
+  for (;;) {
+    try {
+      const real = realpathSync(dir);
+      return tail === '' ? real : posix.join(real, tail);
+    } catch {
+      const parent = posix.dirname(dir);
+      if (parent === dir) return resolved;
+      tail =
+        tail === ''
+          ? posix.basename(dir)
+          : posix.join(posix.basename(dir), tail);
+      dir = parent;
+    }
+  }
+}
+
 /** Whether a goal-state kill verdict ESTABLISHES anything about the base
  * the kill was pinned to. tmux resolves the socket base from the client's
  * environment — but only while it is USABLE: a base that vanished before
@@ -95,8 +139,8 @@ function goalStatePath(stderr: string): string | undefined {
 export function verdictExaminedBase(stderr: string, base: string): boolean {
   const named = goalStatePath(stderr);
   if (named === undefined) return true;
-  const examined = posix.resolve(named);
-  const pinned = posix.resolve(base);
+  const examined = realpathSafe(named);
+  const pinned = realpathSafe(base);
   return (
     examined === pinned ||
     examined.startsWith(pinned === '/' ? '/' : `${pinned}/`)
@@ -445,11 +489,14 @@ export function tmuxPlan(opts: {
       // characters and was then erased and rewritten with `BBB` came back as
       // `BBB` plus four phantom spaces, so a verdict about column position,
       // clipping or trailing-space significance would judge allocation
-      // history instead of rendering. -T drops those unwritten trailing
-      // positions while -N keeps the REAL trailing spaces. The flag landed
-      // in 3.4 and the same probe on 3.3a shows no padding to remove, so
-      // older versions are correct without it — and passing it there would
-      // fail the call outright ("unknown flag -T", measured).
+      // history instead of rendering. -T drops the NEVER-WRITTEN trailing
+      // positions while -N keeps the REAL trailing spaces — a partial
+      // remedy, measured on 3.4: cells written and LATER erased (CR + EL,
+      // the canonical TUI redraw) still capture as trailing spaces under
+      // -T, so the capture records the caveat as a degradation. The flag
+      // landed in 3.4 and the same probe on 3.3a shows no padding to
+      // remove, so older versions are correct without it — and passing it
+      // there would fail the call outright ("unknown flag -T", measured).
       ...(opts.captureTrim ? ['-T'] : []),
       '-t',
       opts.session,
@@ -464,8 +511,11 @@ export function tmuxPlan(opts: {
       '-p',
       '-J',
       // Same padding hazard, and worse here: -J JOINS wrapped lines, so
-      // phantom trailing cells would be spliced into the middle of the text
-      // a --until/--ready marker is matched against.
+      // phantom cells would be spliced into the middle of the text a
+      // --until/--ready marker is matched against. -T drops the
+      // never-written ones but not the erased-after-write ones (measured
+      // identical with and without it), so a marker authored from the real
+      // rendering across an erased region can still never match.
       ...(opts.captureTrim ? ['-T'] : []),
       '-t',
       opts.session,

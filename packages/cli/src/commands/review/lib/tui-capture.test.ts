@@ -11,6 +11,7 @@ import {
   isNothingToKill,
   isSocketDirNeverCreated,
   isSocketDirUnusable,
+  isSocketPathAbsent,
   verdictExaminedBase,
   tmuxPlan,
   tmuxSupportsCaptureN,
@@ -18,6 +19,9 @@ import {
   tmuxPadsWithCaptureN,
   validGeometry,
 } from './tui-capture.js';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 describe('kill-server stderr classification', () => {
   // The two predicates answer DIFFERENT questions, and conflating them
@@ -25,14 +29,6 @@ describe('kill-server stderr classification', () => {
   // so it may only contain wordings that establish there is no server.
   const nothingToKill = [
     'no server running on /tmp/tmux-501/qwen-review-capture-1-a',
-    'error connecting to /tmp/x (No such file or directory)',
-    // The bare wording, on its own branch: the entry above rides it too
-    // (the `error connecting` prefix has no branch of its own), so this
-    // capital-N fixture pins the branch independently of that shape.
-    // Capital N, as strerror actually renders it: the all-lowercase
-    // fixture left the /i flag on this branch unpinned while the sibling
-    // `file name too long` branch had it covered by a capital F.
-    'No such file or directory',
     // All FOUR alternates of the create-directory branch: only two were
     // pinned, so narrowing the regex to those two shipped green while the
     // other wordings printed a false orphan WARNING.
@@ -45,6 +41,25 @@ describe('kill-server stderr classification', () => {
   for (const line of nothingToKill) {
     it(`treats as nothing to kill: ${line.slice(0, 40)}`, () => {
       expect(isNothingToKill(line)).toBe(true);
+      expect(isSocketDirUnusable(line)).toBe(false);
+    });
+  }
+
+  // The ENOENT class proves only that the socket path was absent when the
+  // client looked — a LIVE server behind a removed socket file answers
+  // exactly these (probed live on tmux), so the class left isNothingToKill
+  // for its own predicate the way isSocketDirUnusable did for the same
+  // folded-in reason. Both wordings: the `error connecting` shape always
+  // carries the bare one, and the bare capital-N fixture pins the /i flag
+  // independently of that shape (strerror renders it capital N).
+  const pathAbsent = [
+    'error connecting to /tmp/x (No such file or directory)',
+    'No such file or directory',
+  ];
+  for (const line of pathAbsent) {
+    it(`never establishes death on its own: ${line.slice(0, 40)}`, () => {
+      expect(isSocketPathAbsent(line)).toBe(true);
+      expect(isNothingToKill(line)).toBe(false);
       expect(isSocketDirUnusable(line)).toBe(false);
     });
   }
@@ -122,6 +137,40 @@ describe('kill-verdict base attribution', () => {
 
   it('keeps the old meaning for a wording that names no path', () => {
     expect(verdictExaminedBase('No such file or directory', '/tmp')).toBe(true);
+  });
+
+  it('canonicalizes a symlinked base the way tmux canonicalizes its wordings', () => {
+    // tmux names the REALPATH of a symlinked socket base in its wordings
+    // (probed on 3.4): under a linked TMUX_TMPDIR every honest verdict
+    // names the target while the kill was pinned to the link, and the
+    // lexical comparison rejected every one of them — a false orphan
+    // WARNING for every server that predeceased its reap.
+    const root = mkdtempSync(join(tmpdir(), 'tui-cap-verdict-'));
+    try {
+      const real = join(root, 'real');
+      mkdirSync(real);
+      const link = join(root, 'link');
+      symlinkSync(real, link);
+      expect(
+        verdictExaminedBase(`no server running on ${real}/tmux-501/srv`, link),
+      ).toBe(true);
+      expect(
+        verdictExaminedBase(
+          `error connecting to ${real}/tmux-501/srv ` +
+            '(No such file or directory)',
+          link,
+        ),
+      ).toBe(true);
+      // A wording about an UNRELATED directory stays refused.
+      expect(
+        verdictExaminedBase(
+          `no server running on ${root}/elsewhere/tmux-501/srv`,
+          link,
+        ),
+      ).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('recognizes every create-directory wording', () => {

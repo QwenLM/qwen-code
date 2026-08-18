@@ -81,9 +81,12 @@ import {
   constants as fsConstants,
   existsSync,
   fstatSync,
+  linkSync,
   mkdirSync,
   openSync,
   readSync,
+  realpathSync,
+  renameSync,
   rmSync,
   lstatSync,
   statSync,
@@ -110,6 +113,7 @@ import {
   isNothingToKill,
   isSocketDirNeverCreated,
   isSocketDirUnusable,
+  isSocketPathAbsent,
   verdictExaminedBase,
   validGeometry,
   type CaptureManifest,
@@ -1016,8 +1020,21 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   // with a TMUX_TMPDIR under a mkdtemp base — not an exotic shape at all,
   // since that is where a CI job's scratch directory lives.
   if (process.getuid) {
+    // Measure the CANONICAL base: tmux resolves a symlinked base before it
+    // binds, and the sockaddr_un bound applies to the canonical path — a
+    // lexical measure admitted runs whose real path was over the bound
+    // (then refused mid-capture, blaming tmux for a path this command
+    // chose) and refused runs whose real path fit. macOS meets this by
+    // default (/tmp -> /private/tmp). Lexical fallback when the base does
+    // not resolve — the same shape cleanup.ts's base dedup uses.
+    let measuredBase = startBase;
+    try {
+      measuredBase = realpathSync(startBase);
+    } catch {
+      // Unresolvable: the lexical measure is all there is.
+    }
     const socketPath = join(
-      startBase,
+      measuredBase,
       `tmux-${process.getuid()}`,
       // The nonce is 8 hex chars for every run — its VALUE cannot change
       // the length, so measuring a representative one measures them all.
@@ -1185,6 +1202,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   // phantom spaces, and its tmux has no -T. Trailing spaces are dropped
   // there rather than fabricated, and the manifest says so.
   const capturePads = tmuxPadsWithCaptureN(tmuxVersion) === true;
+  const captureTrims = tmuxSupportsCaptureT(tmuxVersion) === true;
   const plan = tmuxPlan({
     server,
     session,
@@ -1193,7 +1211,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     command: args.command,
     cwd: resolvedCwd,
     // Only 3.4+ has the flag; older versions have nothing to trim.
-    captureTrim: tmuxSupportsCaptureT(tmuxVersion) === true,
+    captureTrim: captureTrims,
     // ...and 3.1-3.2.x invent trailing spaces with -N and cannot undo it.
     captureTrailing: !capturePads,
     readyFile: holderReadyPath,
@@ -1208,6 +1226,10 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   // installed sees the signal a second time; accepted for a leaf
   // subcommand, which this is.
   let serverStarted = false;
+  // The inode of the socket start bound under the start base, when start
+  // produced one: the reap trusts goal-state kill verdicts about that base
+  // only while this identity survives (see the reap below).
+  let socketStampIno: number | undefined;
   let reaped = false;
   const reap = (): void => {
     // serverStarted is set BEFORE the start call: the call forks the
@@ -1246,6 +1268,21 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     let killSpawnFailed = false;
     let killDirUnusable = false;
     const uid = process.getuid?.();
+    // Whether the socket start bound is still the one at its path: a
+    // goal-state verdict about the start base is about THIS run's server
+    // only while the stamped socket survives unchanged. Computed before the
+    // loop: a kill this loop credits unlinks the socket, and that removal
+    // is this reap's own, not a mid-window destruction.
+    let stampedSocketAlive = false;
+    if (socketStampIno !== undefined && uid !== undefined) {
+      try {
+        stampedSocketAlive =
+          lstatSync(join(startBase, `tmux-${uid}`, server)).ino ===
+          socketStampIno;
+      } catch {
+        stampedSocketAlive = false;
+      }
+    }
     // Untrimmed, matching tmux (a padded value is used verbatim). Same
     // candidate set as before: tmux takes the first USABLE base.
     const envBase = process.env['TMUX_TMPDIR'];
@@ -1304,11 +1341,27 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
           // server may still be alive. The same wording stays honest
           // where the server started under the OTHER base: that base
           // never held it.
+          //
+          // The ENOENT class establishes death only where start never bound
+          // a socket: once stamped, it means the stamped socket was removed
+          // mid-window — possibly with a live server behind it (probed: rm
+          // the file under a running server and kill answers exactly this),
+          // so it is never credited once stamped, on any base. And on the
+          // START base, every goal-state wording is only as trustworthy as
+          // the stamped socket's identity: a base destroyed and recreated
+          // mid-window can answer about a socket this run never owned, and
+          // the live server behind the destroyed one would read as dead.
+          const onStartBase = resolve(base) === startBase;
           baseDead =
-            isNothingToKill(stderrText) &&
+            (isNothingToKill(stderrText) ||
+              (isSocketPathAbsent(stderrText) &&
+                socketStampIno === undefined)) &&
             verdictExaminedBase(stderrText, base) &&
+            !(isSocketDirNeverCreated(stderrText) && onStartBase) &&
             !(
-              isSocketDirNeverCreated(stderrText) && resolve(base) === startBase
+              onStartBase &&
+              socketStampIno !== undefined &&
+              !stampedSocketAlive
             );
           // ...and NOT for a refusal the client made before it looked. Those
           // two wordings were briefly folded into isNothingToKill, which made
@@ -1431,6 +1484,20 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // the goal state, so the early flag adds no false warnings.
     serverStarted = true;
     tmux(plan.start);
+    {
+      const uidAtStart = process.getuid?.();
+      if (uidAtStart !== undefined) {
+        try {
+          socketStampIno = lstatSync(
+            join(startBase, `tmux-${uidAtStart}`, server),
+          ).ino;
+        } catch {
+          // Start can bind under the OTHER base when the env base turns
+          // unusable between the gate and the start; the reap's per-base
+          // kills cover that shape, and its doubt is the fail-closed answer.
+        }
+      }
+    }
     // Before ANY key can be sent, wait for the holder's ready sentinel: the
     // pty's INTR fires the instant tmux writes 0x03 — a C-c racing the
     // holder's own `trap : INT` line killed pane, session and server
@@ -1646,6 +1713,21 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
         `a trailing-space or right-edge claim needs tmux 3.3+`,
     );
   }
+  if (captureTrims) {
+    degradations.push(
+      // The -T remedy is incomplete the way the pad case is: it trims only
+      // positions that NEVER held a character — cells written and later
+      // erased (CR + EL, the canonical TUI redraw) still capture as
+      // trailing spaces on the very versions that take the flag, and the
+      // joined marker-matching view carries them mid-line with and without
+      // -T (measured on 3.4). No capture-pane flag separates the two, so
+      // the caveat is the honest fix.
+      `${tmuxVersion} trims only never-written trailing positions under ` +
+        `-T — cells written and later erased still capture as trailing ` +
+        `spaces, and the joined marker view carries them mid-line; ` +
+        `trailing-space, right-edge and marker claims carry that caveat`,
+    );
+  }
   if (matchOverruns > 0) {
     // A budget cutoff is not the same as an absent marker: the match may
     // have been interrupted mid-backtrack, and the field's contract is that
@@ -1700,103 +1782,170 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // machine in one evening — the historical "freeze hangs" incidents on
     // this repo's workflows are this exact shape. The timeout stays as the
     // second belt.
-    const r = spawnSync(freezeRender.bin, freezePlan(ansPath, pngPath), {
-      encoding: 'utf8',
-      timeout: freezeRender.timeoutMs,
-      killSignal: 'SIGKILL',
-      stdio: ['ignore', 'pipe', 'pipe'],
-      maxBuffer: FREEZE_MAX_BUFFER,
-    });
-    // Read the size DEFENSIVELY: this was the only unguarded throwable fs
-    // call in the function. A png that disappears between the existsSync
-    // and the statSync — a concurrent actor on the same --out, the very
-    // shape the clear phase and collision gate exist to handle — threw an
-    // uncaught ENOENT: exit 1, no contract JSON on stdout, a stack trace on
-    // stderr, and .ans and .png both orphaned with no manifest
-    // (fault-injected). A gone png is simply not a png rung.
-    let pngSize = 0;
+    // BOTH render paths ride per-run nonces: freeze opens whatever names it
+    // is given and follows symlinks on INPUT and OUTPUT alike (measured on
+    // freeze v0.2.2), and the captured command — the survivor class the
+    // kill-plan comment documents — runs while these names are decided.
+    // link() stages the INPUT under a name only this run knows: it refuses
+    // a symlinked ansPath with ELOOP and pins the bytes this run wrote, so
+    // a swap of ansPath during the probe window cannot feed foreign bytes
+    // to the render. rename() lands the OUTPUT: it replaces a symlink
+    // planted at pngPath instead of following it out of the --out base.
+    const renderNonce = randomBytes(6).toString('hex');
+    const ansStage = `${ansPath}.render-${renderNonce}`;
+    const pngStage = `${pngPath}.render-${renderNonce}`;
+    let renderInputStaged = false;
     try {
-      pngSize = statSync(pngPath).size;
+      linkSync(ansPath, ansStage);
+      renderInputStaged = true;
     } catch {
-      // Gone or unstattable mid-check — the degradation branch below says so.
-    }
-    if (
-      r.status === 0 &&
-      pngSize > 0 &&
-      // ...and THIS run is what put those bytes there. Existence alone
-      // credited a file the clear phase deliberately spared — an unrelated
-      // <out>.png with no capture manifest beside it — as this run's
-      // rendering evidence whenever freeze exited 0 without writing
-      // (measured end to end: success JSON with evidence 'png', pngPath
-      // pointing at the user's untouched file, no degradation recorded).
-      changed(pngPath, pngStamp)
-    ) {
-      // Exit code alone is not evidence: a freeze that exits 0 without
-      // writing the file — or leaving a 0-byte/truncated one (ENOSPC
-      // mid-write, the shape the .ans write guard's comment names) — would
-      // otherwise manifest a png rung with no pixels, and a verifier would
-      // publish it.
-      png = pngPath;
-    } else {
-      // The stderr tail rides along: a bare exit code is undiagnosable from
-      // a manifest, and the whole point of recording degradation is that a
-      // reader can tell WHY the ladder stopped. A spawn that never ran
-      // (EMFILE, a binary vanishing between probe and render) has neither
-      // status nor signal — its reason lives in r.error.
-      // Bounded like everything else that rides into the manifest: a
-      // newline-free wall of freeze stderr (up to FREEZE_MAX_BUFFER of it)
-      // otherwise flowed into degradedBecause verbatim and pushed the
-      // manifest past the reader cap a successful run must stay under —
-      // probe-reproduced: the next run then refused to verify it.
-      const errTail = `${r.stderr ?? ''} ${r.stdout ?? ''}`
-        .trim()
-        .split('\n')
-        .slice(-2)
-        .join(' ')
-        .slice(0, 2048);
-      const why =
-        r.status === 0
-          ? 'exited 0 but wrote no image'
-          : r.signal
-            ? // A belt kill carries BOTH signal and error (ETIMEDOUT); name
-              // the belt, or it reads as an unexplained external kill. The
-              // error CODE decides, not its mere presence: a maxBuffer
-              // overrun kills with the same SIGKILL and also sets an error
-              // (ENOBUFS — probe-measured for this exact spawn), and
-              // blaming the render belt for it is a false causal claim
-              // that sends a reader hunting a hang that never happened.
-              `signal ${r.signal}${
-                (r.error as NodeJS.ErrnoException | undefined)?.code ===
-                'ETIMEDOUT'
-                  ? ` after the ${freezeRender.timeoutMs}ms render belt`
-                  : (r.error as NodeJS.ErrnoException | undefined)?.code ===
-                      'ENOBUFS'
-                    ? ` — freeze wrote more than the ${FREEZE_MAX_BUFFER} bytes this spawn captures`
-                    : ''
-              }`
-            : r.status !== null
-              ? `exit ${String(r.status)}`
-              : `spawn failed: ${r.error ? r.error.message : 'unknown error'}`;
+      // Swapped between this run's write and the render — degrade rather
+      // than attribute bytes this capture cannot show it produced.
       degradations.push(
-        `freeze failed (${why}${errTail ? `: ${errTail}` : ''}) — .ans text captured, no image rendered`,
+        `${ansPath} was replaced while the render was being prepared — ` +
+          '.ans text captured, no image rendered',
       );
-      // A failed render leaves whatever now sits at the png path in place.
-      // It can be this run's own torn output (a freeze that wrote bytes
-      // then failed — measured) or a file someone else claimed during the
-      // probe/render window (the captured command is the named planter,
-      // and the window legally runs up to an hour): the empty pre-window
-      // stamp makes changed() reduce to occupied(), so presence alone
-      // cannot tell the two apart. Deleting on presence destroyed the
-      // foreign file on a run that reported success (probe-reproduced) —
-      // the same harm the sibling manifest-write cleanup's `png === null`
-      // guard closes. A leftover is loud, not lost: this manifest denies
-      // the png rung, and the next run's ladder degrades on the occupant.
-      if (occupied(pngPath)) {
-        degradations.push(
-          `${pngPath} holds a file that appeared while the render failed — ` +
-            'left in place: this run cannot tell its own torn output from ' +
-            'a file it did not write, and it deletes neither',
-        );
+    }
+    if (renderInputStaged) {
+      try {
+        const r = spawnSync(freezeRender.bin, freezePlan(ansStage, pngStage), {
+          encoding: 'utf8',
+          timeout: freezeRender.timeoutMs,
+          killSignal: 'SIGKILL',
+          stdio: ['ignore', 'pipe', 'pipe'],
+          maxBuffer: FREEZE_MAX_BUFFER,
+        });
+        // Read the stage DEFENSIVELY: a concurrent actor on the same --out
+        // is the very shape the clear phase and collision gate exist to
+        // handle, and an uncaught ENOENT here meant exit 1, no contract
+        // JSON on stdout, a stack trace on stderr, and both artifacts
+        // orphaned with no manifest (fault-injected). lstat, and isFile:
+        // anything but a regular file at the stage is not a rung.
+        let pngSize = 0;
+        try {
+          const stageStat = lstatSync(pngStage);
+          if (stageStat.isFile()) pngSize = stageStat.size;
+        } catch {
+          // Gone or unstattable mid-check — the degradation branch below
+          // says so.
+        }
+        if (r.status === 0 && pngSize > 0) {
+          // Exit code alone is not evidence: a freeze that exits 0 without
+          // writing the file — or leaving a 0-byte/truncated one (ENOSPC
+          // mid-write, the shape the .ans write guard's comment names) —
+          // would otherwise manifest a png rung with no pixels, and a
+          // verifier would publish it.
+          if (occupied(pngPath)) {
+            // Claimed between the ladder's check and the landing: the same
+            // mid-window escape, degrade instead of replacing the claimant.
+            degradations.push(
+              `${pngPath} holds a file this capture did not write — the ` +
+                'rendered image was not landed; clear it or pick another ' +
+                '--out for a png rung',
+            );
+          } else {
+            try {
+              renameSync(pngStage, pngPath);
+              // lstat identity, never stat: a swap that lands a symlink at
+              // pngPath after the rename is not a rung either.
+              const landed = lstatSync(pngPath);
+              if (landed.isFile() && changed(pngPath, pngStamp)) {
+                png = pngPath;
+              } else {
+                degradations.push(
+                  `${pngPath} changed while the rendered image was being ` +
+                    'landed — .ans text captured, no image rendered',
+                );
+              }
+            } catch {
+              degradations.push(
+                `the rendered image could not be landed at ${pngPath} — ` +
+                  '.ans text captured, no image rendered',
+              );
+            }
+          }
+        } else {
+          // The stderr tail rides along: a bare exit code is undiagnosable from
+          // a manifest, and the whole point of recording degradation is that a
+          // reader can tell WHY the ladder stopped. A spawn that never ran
+          // (EMFILE, a binary vanishing between probe and render) has neither
+          // status nor signal — its reason lives in r.error.
+          // Bounded like everything else that rides into the manifest: a
+          // newline-free wall of freeze stderr (up to FREEZE_MAX_BUFFER of it)
+          // otherwise flowed into degradedBecause verbatim and pushed the
+          // manifest past the reader cap a successful run must stay under —
+          // probe-reproduced: the next run then refused to verify it.
+          const errTail = `${r.stderr ?? ''} ${r.stdout ?? ''}`
+            .trim()
+            .split('\n')
+            .slice(-2)
+            .join(' ')
+            .slice(0, 2048);
+          const why =
+            r.status === 0
+              ? 'exited 0 but wrote no image'
+              : r.signal
+                ? // A belt kill carries BOTH signal and error (ETIMEDOUT); name
+                  // the belt, or it reads as an unexplained external kill. The
+                  // error CODE decides, not its mere presence: a maxBuffer
+                  // overrun kills with the same SIGKILL and also sets an error
+                  // (ENOBUFS — probe-measured for this exact spawn), and
+                  // blaming the render belt for it is a false causal claim
+                  // that sends a reader hunting a hang that never happened.
+                  `signal ${r.signal}${
+                    (r.error as NodeJS.ErrnoException | undefined)?.code ===
+                    'ETIMEDOUT'
+                      ? ` after the ${freezeRender.timeoutMs}ms render belt`
+                      : (r.error as NodeJS.ErrnoException | undefined)?.code ===
+                          'ENOBUFS'
+                        ? ` — freeze wrote more than the ${FREEZE_MAX_BUFFER} bytes this spawn captures`
+                        : ''
+                  }`
+                : r.status !== null
+                  ? `exit ${String(r.status)}`
+                  : `spawn failed: ${r.error ? r.error.message : 'unknown error'}`;
+          degradations.push(
+            `freeze failed (${why}${errTail ? `: ${errTail}` : ''}) — .ans text captured, no image rendered`,
+          );
+          // A failed render's torn bytes sit at the STAGE and are this
+          // run's unambiguously (the nonce name): land them when the path
+          // is still free — a leftover is loud, not lost: this manifest
+          // denies the png rung, and the next run's ladder degrades on the
+          // occupant. An occupant that claimed the path meanwhile is
+          // spared, and the torn bytes go with the stage.
+          if (occupied(pngPath)) {
+            degradations.push(
+              `${pngPath} holds a file that appeared while the render ` +
+                "failed — left in place: this run's torn output was not " +
+                'landed beside it',
+            );
+          } else {
+            // Land the stage even at 0 bytes (the ENOSPC-truncated shape):
+            // the nonce makes it this run's unambiguously, and leaving it
+            // named keeps the next run's ladder loud about the occupant.
+            let stageIsFile = false;
+            try {
+              stageIsFile = lstatSync(pngStage).isFile();
+            } catch {
+              // Gone — nothing to land.
+            }
+            if (stageIsFile) {
+              try {
+                renameSync(pngStage, pngPath);
+                degradations.push(
+                  `${pngPath} holds this run's torn render output — left in ` +
+                    'place: the manifest denies the png rung',
+                );
+              } catch {
+                // Unlandable — the stage cleanup below removes it.
+              }
+            }
+          }
+        }
+      } finally {
+        rmSync(ansStage, { force: true });
+        // Gone already when the rename landed it.
+        rmSync(pngStage, { force: true });
       }
     }
   }

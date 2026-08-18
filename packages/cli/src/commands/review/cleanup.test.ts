@@ -12,6 +12,11 @@ const mocks = vi.hoisted(() => ({
   // type is declared so `mockReturnValue` can take string arrays — the
   // sweep-retention tests hand it the tmp-dir listing.
   readdirSync: vi.fn((_path: string): string[] => []),
+  // The sweep's entry-TYPE guard asks isSymbolicLink; the default answers
+  // "a socket" so the name-matched fixtures reach the pid probe and kill.
+  lstatSync: vi.fn((_path: string): { isSymbolicLink: () => boolean } => ({
+    isSymbolicLink: () => false,
+  })),
   readFileSync: vi.fn((_path: string): string => {
     throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
   }),
@@ -58,12 +63,14 @@ vi.mock('node:fs', async (importOriginal) => {
     default: {
       ...actual,
       existsSync: mocks.existsSync,
+      lstatSync: mocks.lstatSync,
       readdirSync: mocks.readdirSync,
       readFileSync: mocks.readFileSync,
       statSync: mocks.statSync,
       rmSync: mocks.rmSync,
     },
     existsSync: mocks.existsSync,
+    lstatSync: mocks.lstatSync,
     readdirSync: mocks.readdirSync,
     readFileSync: mocks.readFileSync,
     statSync: mocks.statSync,
@@ -139,6 +146,11 @@ describe('runCleanup', () => {
     // path-dependent implementations, and a later test reading the declared
     // `[]` default would otherwise inherit them.
     mocks.readdirSync.mockImplementation((_path: string): string[] => []);
+    mocks.lstatSync.mockImplementation(
+      (_path: string): { isSymbolicLink: () => boolean } => ({
+        isSymbolicLink: () => false,
+      }),
+    );
     mocks.refExists.mockReturnValue(true);
     mocks.releaseWorktree.mockReturnValue({
       existed: false,
@@ -606,6 +618,77 @@ describe('runCleanup', () => {
         );
         expect(mocks.writeStderrLine).not.toHaveBeenCalledWith(
           expect.stringContaining('could not reap'),
+        );
+      });
+
+      it('never follows a symlink planted under a capture-shaped name', () => {
+        // The sweep matches by NAME and used to inspect nothing else: a
+        // symlink planted under a capture-shaped name redirected the
+        // pinned kill-server to whatever socket it points at — the user's
+        // own server among them — and the exit-0 branch printed "Reaped"
+        // while the victim died and the link was unlinked behind it
+        // (probe-verified end to end; no race needed). The guard inspects
+        // the entry TYPE before the pid probe.
+        const planted = captureServerName(Number(deadPid), 'eeee');
+        mocks.readdirSync.mockImplementation((p: string) =>
+          p === dir ? [planted] : [],
+        );
+        mocks.lstatSync.mockImplementation(
+          (p: string): { isSymbolicLink: () => boolean } => ({
+            isSymbolicLink: () => p === `${dir}/${planted}`,
+          }),
+        );
+
+        runCleanup('local');
+
+        expect(mocks.execFileSync).not.toHaveBeenCalledWith(
+          'tmux',
+          ['-L', planted, 'kill-server'],
+          expect.anything(),
+        );
+        expect(mocks.rmSync).not.toHaveBeenCalledWith(
+          `${dir}/${planted}`,
+          expect.anything(),
+        );
+        expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${planted}`,
+        );
+        expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+          expect.stringContaining(`not reaping ${planted}`),
+        );
+      });
+
+      it('does not credit an ENOENT answer as death — the file can vanish under a live server', () => {
+        // The sweep found the entry by readdir, so an ENOENT answer from
+        // the kill means the file vanished between the scan and the kill —
+        // possibly off a LIVE server (probed: rm the socket under a
+        // running server and kill answers exactly this). Not death, not an
+        // unlink, and loud like the other never-death wordings.
+        mocks.execFileSync.mockImplementation((bin: string, argv: string[]) => {
+          if (bin === 'tmux' && argv?.[1] === orphan) {
+            throw Object.assign(new Error('exited 1'), {
+              stderr: Buffer.from(
+                `error connecting to ${dir}/${orphan} ` +
+                  '(No such file or directory)',
+              ),
+            });
+          }
+          return Buffer.from('');
+        });
+
+        runCleanup('local');
+
+        expect(mocks.rmSync).not.toHaveBeenCalledWith(
+          `${dir}/${orphan}`,
+          expect.anything(),
+        );
+        expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${orphan}`,
+        );
+        expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+          expect.stringContaining(
+            `could not reap orphaned capture server ${orphan}`,
+          ),
         );
       });
 

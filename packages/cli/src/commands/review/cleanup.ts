@@ -16,6 +16,7 @@ import type { CommandModule } from 'yargs';
 import { execFileSync } from 'node:child_process';
 import {
   existsSync,
+  lstatSync,
   readFileSync,
   readdirSync,
   realpathSync,
@@ -479,6 +480,24 @@ function reapOrphanedCaptureServers(): { reaped: boolean; failed: boolean } {
   for (const { dir, name } of entries) {
     const m = orphanRe.exec(name);
     if (!m) continue;
+    // The sweep matches by NAME; inspect the entry's TYPE before anything
+    // connects to it. A symlink planted under a capture-shaped name
+    // redirects the pinned kill-server to whatever socket it points at —
+    // including the user's own tmux server — and the exit-0 success branch
+    // then reports "Reaped" while the victim is destroyed (probe-verified
+    // end to end; no race needed, the planter class is this PR's own
+    // documented daemonized descendant). A gone entry is nothing to reap.
+    try {
+      if (lstatSync(join(dir, name)).isSymbolicLink()) {
+        writeStderrLine(
+          `note: not reaping ${name}: a symlink, not a socket — ` +
+            'kill-server would follow it to an unrelated server',
+        );
+        continue;
+      }
+    } catch {
+      continue;
+    }
     let alive = true;
     try {
       process.kill(Number(m[1]), 0);
