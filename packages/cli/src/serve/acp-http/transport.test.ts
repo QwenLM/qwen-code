@@ -4952,7 +4952,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   );
 
   it.each(['session/load', 'session/resume'] as const)(
-    '%s keys the shared restore guard on both the request and persisted session id spellings',
+    '%s takes the shared restore guard on the request session id',
     async (method) => {
       await withRuntimeDir(async () => {
         const sessionId =
@@ -4982,12 +4982,12 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           });
           reader.close();
 
-          // Parity with the REST restore handler: the exclusive batch
-          // delete locks the raw caller ids, whose spelling may be either
-          // the request id or the persisted one — the shared restore
-          // guard must contend on both.
+          // Parity with the REST restore handler: the coordinator
+          // canonicalizes lock keys, so holding the request spelling
+          // alone contends with the raw-spelled exclusive batch locks
+          // (pinned in session-archive.test.ts).
           expect(runSharedMany).toHaveBeenCalledWith(
-            [sessionId, storageSessionId],
+            [sessionId],
             expect.any(Function),
           );
         } finally {

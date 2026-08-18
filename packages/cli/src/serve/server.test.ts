@@ -12034,7 +12034,7 @@ describe('createServeApp', () => {
     );
 
     it.each(['load', 'resume'] as const)(
-      'keys the %s shared guard on both the request and persisted session id spellings',
+      'takes the %s shared restore guard on the request session id',
       async (action) => {
         const sessionId = '550e8400-e29b-41d4-a716-446655440144';
         const storageSessionId = sessionId.toUpperCase();
@@ -12062,11 +12062,11 @@ describe('createServeApp', () => {
             .send({});
 
           expect(res.status).toBe(200);
-          // The exclusive batch delete locks the raw caller ids, whose
-          // spelling may be either the request id or the persisted one —
-          // the restore guard must contend on both.
+          // The coordinator canonicalizes lock keys, so holding the
+          // request spelling alone contends with the raw-spelled
+          // exclusive batch locks (pinned in session-archive.test.ts).
           expect(runSharedMany).toHaveBeenCalledWith(
-            [sessionId, storageSessionId],
+            [sessionId],
             expect.any(Function),
           );
         } finally {
@@ -12171,9 +12171,10 @@ describe('createServeApp', () => {
             'Delete the session with POST /sessions/delete',
           );
           expect(getSessionLocation).toHaveBeenCalledWith(storageSessionId);
-          // The in-guard conversion requires the TOCTOU re-resolve inside
-          // the guard: pre-guard resolution succeeds, the in-guard one
-          // rejects — dropping the re-resolve would leave this green.
+          // Without the call-count assertion below, replacing the in-guard
+          // re-resolve with the pre-guard result still yields the same 409
+          // via assertSessionLoadable's mocked 'conflict' location — the
+          // count is what pins the second resolution.
           expect(findSessionId).toHaveBeenCalledTimes(2);
           expect(bridge.loadCalls).toEqual([]);
           expect(bridge.resumeCalls).toEqual([]);

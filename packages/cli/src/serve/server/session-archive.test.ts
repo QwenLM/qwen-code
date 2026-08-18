@@ -145,6 +145,30 @@ describe('SessionArchiveCoordinator', () => {
     });
   });
 
+  it('collapses case-variant spellings of a caller session id to one lock key', async () => {
+    const coordinator = new SessionArchiveCoordinator();
+    const sessionId = '550e8400-e29b-41d4-a716-446655440024';
+    const upper = sessionId.toUpperCase();
+
+    // Batch delete/archive/unarchive lock raw caller spellings while
+    // restore locks the request spelling; on a case-insensitive filesystem
+    // both reach the same transcript, so the two spellings must contend.
+    await coordinator.runSharedMany([sessionId], async () => {
+      await expect(
+        coordinator.runExclusiveMany([upper], async () => 'exclusive'),
+      ).rejects.toThrow(SessionArchivingError);
+    });
+
+    await coordinator.runExclusiveMany([sessionId], async () => {
+      await expect(
+        coordinator.runSharedMany([upper], async () => 'shared'),
+      ).rejects.toThrow(SessionArchivingError);
+      expect(() => coordinator.assertNotTransitioning(upper)).toThrow(
+        SessionArchivingError,
+      );
+    });
+  });
+
   it('allows concurrent shared access and reference-counts release', async () => {
     const coordinator = new SessionArchiveCoordinator();
     const sessionId = '550e8400-e29b-41d4-a716-446655440021';
