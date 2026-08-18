@@ -181,6 +181,24 @@ export const legacySessionTelemetryRoutes = [
   },
   {
     method: 'POST',
+    path: '/session/:id/media',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/media',
+  },
+  {
+    method: 'GET',
+    path: '/session/:id/media/:mediaId',
+    attribution: 'handler_resolved',
+    route: 'GET /session/:id/media/:mediaId',
+  },
+  {
+    method: 'DELETE',
+    path: '/session/:id/media/:mediaId',
+    attribution: 'handler_resolved',
+    route: 'DELETE /session/:id/media/:mediaId',
+  },
+  {
+    method: 'POST',
     path: '/session/:id/prompt',
     attribution: 'handler_resolved',
     route: 'POST /session/:id/prompt',
@@ -470,6 +488,12 @@ export function resolveDaemonTelemetryRoute(
   }
   if (req.method === 'GET' && /^\/workspaces\/[^/]+\/sessions$/.test(path)) {
     return { route: 'GET /workspace/:id/sessions' };
+  }
+  if (
+    req.method === 'GET' &&
+    /^\/workspaces\/[^/]+\/sessions\/live-state$/.test(path)
+  ) {
+    return { route: 'GET /workspaces/:workspace/sessions/live-state' };
   }
   if (req.method === 'GET' && /^\/workspace\/[^/]+\/session-info$/.test(path)) {
     return { route: 'GET /workspace/:id/session-info' };
