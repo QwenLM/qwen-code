@@ -20,7 +20,10 @@ import type {
   BaseUrlOption,
   ModelSpec,
 } from '@qwen-code/qwen-code-core';
-import type { ProviderSetupFlow } from './useProviderSetupFlow.js';
+import type {
+  ModelDiscoveryStatus,
+  ProviderSetupFlow,
+} from './useProviderSetupFlow.js';
 import { normalizeModelIds } from './useAuth.js';
 
 // ---------------------------------------------------------------------------
@@ -256,6 +259,28 @@ function getCustomModelIdsText(
     .join(', ');
 }
 
+/**
+ * Inline note about where the recommendations came from. Discovery is a
+ * best-effort enrichment, so a failure reads as a footnote, not an error —
+ * the list below it works either way.
+ */
+function ModelDiscoveryNotice({
+  status,
+}: {
+  status?: ModelDiscoveryStatus;
+}): React.JSX.Element | null {
+  if (status === 'loading') {
+    return <Text> · {t('fetching the provider model list…')}</Text>;
+  }
+  if (status === 'success') {
+    return <Text> · {t('from the provider')}</Text>;
+  }
+  if (status === 'failed') {
+    return <Text> · {t('provider list unavailable, showing built-ins')}</Text>;
+  }
+  return null;
+}
+
 function ModelIdsStep({
   config,
   flow,
@@ -263,20 +288,24 @@ function ModelIdsStep({
   config: ProviderConfig;
   flow: ProviderSetupFlow;
 }): React.JSX.Element {
-  const defaultIds = config.models?.map((m) => m.id).join(', ') ?? '';
-  const hasSelectableModels = (config.models?.length ?? 0) > 0;
+  // Recommendations come from the live endpoint when discovery succeeded and
+  // from the built-in list otherwise; `recommendedModels` is undefined only
+  // for callers that build flow state by hand (tests).
+  const recommendedModels = flow.state.recommendedModels ?? config.models;
+  const defaultIds = recommendedModels?.map((m) => m.id).join(', ') ?? '';
+  const hasSelectableModels = (recommendedModels?.length ?? 0) > 0;
   const selectedModelIds = useMemo(
     () => normalizeModelIds(flow.state.modelIds),
     [flow.state.modelIds],
   );
   const modelOptions = useMemo<ModelOption[]>(
     () =>
-      config.models?.map((model) => ({
+      recommendedModels?.map((model) => ({
         key: model.id,
         value: model.id,
         label: formatModelOptionLabel(model),
       })) ?? [],
-    [config.models],
+    [recommendedModels],
   );
   const recommendedModelIds = useMemo(
     () => new Set(modelOptions.map((item) => item.key)),
@@ -440,7 +469,10 @@ function ModelIdsStep({
           </Text>
         </Box>
         <Box marginTop={1}>
-          <Text color={theme.text.secondary}>{t('Recommended models')}</Text>
+          <Text color={theme.text.secondary}>
+            {t('Recommended models')}
+            <ModelDiscoveryNotice status={flow.state.discoveryStatus} />
+          </Text>
         </Box>
         <Box marginTop={0} flexDirection="column">
           <Text color={theme.text.secondary}>{t('Search')}</Text>
@@ -794,7 +826,16 @@ export function ProviderSetupSteps({
       return <ApiKeyStep config={provider} flow={flow} />;
 
     case 'models':
-      return <ModelIdsStep config={provider} flow={flow} />;
+      // Remount when the recommendation list is replaced so the checkbox and
+      // custom-input state re-derive against the new set instead of holding
+      // selections that are no longer on offer.
+      return (
+        <ModelIdsStep
+          key={`models-${flow.state.recommendedModelsRevision ?? 0}`}
+          config={provider}
+          flow={flow}
+        />
+      );
 
     case 'advancedConfig':
       return <AdvancedConfigStep flow={flow} />;

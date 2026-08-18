@@ -4,16 +4,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import {
   AuthType,
   shouldShowStep,
   resolveBaseUrl,
   getDefaultBaseUrlForProtocol,
   getDefaultModelIds,
+  fetchProviderModelIds,
+  mergeDiscoveredModels,
 } from '@qwen-code/qwen-code-core';
 import type {
   InputModalities,
+  ModelSpec,
   ProviderConfig,
   ProviderSetupInputs,
 } from '@qwen-code/qwen-code-core';
@@ -40,6 +43,14 @@ const STEP_ORDER: SetupStep[] = [
   'advancedConfig',
   'review',
 ];
+
+/**
+ * Lifecycle of the optional `GET {baseUrl}/models` lookup that backs the
+ * recommendation list. `failed` covers every reason the endpoint did not
+ * answer usefully — the wizard treats them all the same way, by showing the
+ * built-in list — and is never fatal to the flow.
+ */
+export type ModelDiscoveryStatus = 'idle' | 'loading' | 'success' | 'failed';
 
 function getVisibleSteps(config: ProviderConfig): SetupStep[] {
   return STEP_ORDER.filter((step) => {
@@ -74,6 +85,18 @@ export interface ProviderSetupState {
   // Model IDs
   modelIds: string;
   modelIdsError: string | null;
+
+  /**
+   * Models to offer as recommendations — the live list when discovery
+   * succeeded, the provider's built-in list otherwise.
+   */
+  recommendedModels: ModelSpec[];
+  discoveryStatus: ModelDiscoveryStatus;
+  /**
+   * Bumped whenever `recommendedModels` is replaced, so the model step can
+   * re-derive its local checkbox state from the new list.
+   */
+  recommendedModelsRevision: number;
 
   // Advanced config
   thinkingEnabled: boolean;
@@ -120,8 +143,102 @@ export function useProviderSetupFlow(
   const [modalityPdf, setModalityPdf] = useState(false);
   const [contextWindowSize, setContextWindowSize] = useState('');
   const [focusedConfigIndex, setFocusedConfigIndex] = useState(0);
+  const [discoveredModels, setDiscoveredModels] = useState<ModelSpec[] | null>(
+    null,
+  );
+  const [discoveryStatus, setDiscoveryStatus] =
+    useState<ModelDiscoveryStatus>('idle');
+  const [recommendedModelsRevision, setRecommendedModelsRevision] = useState(0);
+  // Discovery runs once per (baseUrl, apiKey) pair per wizard session: the
+  // model step is cheap to re-enter (Esc, then Enter) and the answer cannot
+  // change in between.
+  const discoveryCacheRef = useRef(new Map<string, ModelSpec[]>());
+  const discoveryKeyRef = useRef<string | null>(null);
+  const discoveryAbortRef = useRef<AbortController | null>(null);
 
   const currentStep = visibleSteps[stepIndex] ?? null;
+
+  // -- Model discovery ------------------------------------------------------
+
+  const resetDiscovery = useCallback(() => {
+    discoveryAbortRef.current?.abort();
+    discoveryAbortRef.current = null;
+    discoveryKeyRef.current = null;
+    setDiscoveredModels(null);
+    setDiscoveryStatus('idle');
+  }, []);
+
+  // Abort an in-flight lookup when the dialog goes away — nothing is left to
+  // render its result into.
+  useEffect(() => () => discoveryAbortRef.current?.abort(), []);
+
+  const applyDiscoveredModels = useCallback(
+    (config: ProviderConfig, models: ModelSpec[]) => {
+      setDiscoveredModels(models);
+      setDiscoveryStatus('success');
+      setRecommendedModelsRevision((revision) => revision + 1);
+
+      // Drop built-in ids the endpoint no longer serves from the pending
+      // selection — leaving them checked would install exactly the stale
+      // entries discovery exists to avoid. Ids the user typed are left alone;
+      // they may be legitimately unlisted (private deployments, aliases).
+      const served = new Set(models.map((model) => model.id));
+      const builtIn = new Set(getDefaultModelIds(config));
+      setModelIds((previous) => {
+        const kept = normalizeModelIds(previous).filter(
+          (id) => served.has(id) || !builtIn.has(id),
+        );
+        // Pruning everything would leave the step with nothing checked and no
+        // way to submit; fall back to the provider's first live model.
+        if (kept.length === 0 && models[0]) kept.push(models[0].id);
+        return kept.join(', ');
+      });
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (currentStep !== 'models') return;
+    if (!provider?.supportsModelDiscovery) return;
+
+    const resolvedBaseUrl = baseUrl.trim();
+    const resolvedApiKey = apiKey.trim();
+    if (!resolvedBaseUrl) return;
+
+    const discoveryKey = JSON.stringify([resolvedBaseUrl, resolvedApiKey]);
+    if (discoveryKeyRef.current === discoveryKey) return;
+    discoveryKeyRef.current = discoveryKey;
+
+    const cached = discoveryCacheRef.current.get(discoveryKey);
+    if (cached) {
+      applyDiscoveredModels(provider, cached);
+      return;
+    }
+
+    discoveryAbortRef.current?.abort();
+    const controller = new AbortController();
+    discoveryAbortRef.current = controller;
+    setDiscoveryStatus('loading');
+
+    void (async () => {
+      const result = await fetchProviderModelIds({
+        baseUrl: resolvedBaseUrl,
+        apiKey: resolvedApiKey,
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted) return;
+      if (!result.ok) {
+        // Every failure mode lands here on purpose: the built-in list is a
+        // working answer, so the step stays usable and says so quietly.
+        setDiscoveredModels(null);
+        setDiscoveryStatus('failed');
+        return;
+      }
+      const merged = mergeDiscoveredModels(provider.models, result.ids);
+      discoveryCacheRef.current.set(discoveryKey, merged);
+      applyDiscoveredModels(provider, merged);
+    })();
+  }, [currentStep, provider, baseUrl, apiKey, applyDiscoveredModels]);
 
   // -- Lifecycle ------------------------------------------------------------
 
@@ -176,15 +293,17 @@ export function useProviderSetupFlow(
       setModalityPdf(false);
       setContextWindowSize('');
       setFocusedConfigIndex(0);
+      resetDiscovery();
     },
-    [],
+    [resetDiscovery],
   );
 
   const reset = useCallback(() => {
     setProvider(null);
     setVisibleSteps([]);
     setStepIndex(0);
-  }, []);
+    resetDiscovery();
+  }, [resetDiscovery]);
 
   const goBack = useCallback((): boolean => {
     if (stepIndex > 0) {
@@ -488,6 +607,9 @@ export function useProviderSetupFlow(
     apiKeyError,
     modelIds,
     modelIdsError,
+    recommendedModels: discoveredModels ?? provider?.models ?? [],
+    discoveryStatus,
+    recommendedModelsRevision,
     thinkingEnabled,
     modalityEnabled,
     modalityImage,

@@ -304,6 +304,45 @@ describe('ProviderSetupSteps', () => {
     unmount();
   });
 
+  it('recommends the discovered list and says where it came from', () => {
+    // The flow hook prunes retired ids out of `modelIds` before handing the
+    // step a discovered list, so the fixture starts from a pruned selection.
+    const flow = createModelIdsFlow({ modelIds: 'MiniMax-M3' });
+    const state = flow.state as unknown as Record<string, unknown>;
+    state['recommendedModels'] = [
+      { id: 'MiniMax-M3', contextWindowSize: 1000000 },
+      { id: 'MiniMax-M4-new' },
+    ];
+    state['discoveryStatus'] = 'success';
+
+    const { lastFrame, unmount } = renderWithProviders(
+      <ProviderSetupSteps flow={flow} />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('from the provider');
+    expect(frame).toContain('MiniMax-M4-new');
+    // Built-ins the endpoint no longer serves are not offered.
+    expect(frame).not.toContain('MiniMax-M2.7');
+    unmount();
+  });
+
+  it('notes a failed lookup without hiding the built-in recommendations', () => {
+    const flow = createModelIdsFlow();
+    const state = flow.state as unknown as Record<string, unknown>;
+    state['discoveryStatus'] = 'failed';
+
+    const { lastFrame, unmount } = renderWithProviders(
+      <ProviderSetupSteps flow={flow} />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('provider list unavailable, showing built-ins');
+    expect(frame).toContain('MiniMax-M3');
+    expect(frame).toContain('MiniMax-M2.7');
+    unmount();
+  });
+
   it('filters recommended models when typing search while recommendations are focused', async () => {
     const flow = createModelIdsFlow();
 

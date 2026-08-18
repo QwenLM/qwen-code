@@ -34,6 +34,22 @@ export {
   shouldShowStep,
 } from './provider-config.js';
 
+// Model discovery
+export type {
+  ModelDiscoveryFailure,
+  ModelDiscoveryFailureReason,
+  ModelDiscoveryOptions,
+  ModelDiscoveryResult,
+  ModelDiscoverySuccess,
+} from './model-discovery.js';
+export {
+  fetchProviderModelIds,
+  isChatCapableModelId,
+  mergeDiscoveredModels,
+  MODEL_DISCOVERY_TIMEOUT_MS,
+  parseModelListResponse,
+} from './model-discovery.js';
+
 // Provider registry
 export {
   ALL_PROVIDERS,
