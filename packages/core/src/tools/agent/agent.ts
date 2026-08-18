@@ -1436,6 +1436,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           ...(typeof event.resultDisplay === 'string'
             ? { resultDisplay: event.resultDisplay }
             : {}),
+          ...(preserveProtocolPayloads && event.boundaryArtifact
+            ? { boundaryArtifact: event.boundaryArtifact }
+            : {}),
         };
 
         // When a tool result arrives for the tool that had a pending
