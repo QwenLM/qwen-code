@@ -2563,12 +2563,17 @@ describe('DingtalkChannel quoted media', () => {
     expect(readFileSync(filePath!, 'utf8')).toBe('{"name":"demo"}');
   });
 
+  // R5-1: DingTalk audio/video content carries no fileName (the audio wire
+  // shape is {downloadCode, duration}), so the store name is generated. It
+  // must carry a mimeType-derived extension: the agent reaches the file via
+  // `read_file`, whose type detection is extension-first, and an extensionless
+  // name is refused as binary.
   it.each([
-    ['audio', 'audio/ogg', 'recording.ogg'],
-    ['video', 'video/mp4', 'clip.mp4'],
+    ['audio', 'audio/ogg', { duration: 5 }, /^dingtalk_audio_\d+\.ogg$/],
+    ['video', 'video/mp4', {}, /^dingtalk_video_\d+\.mp4$/],
   ] as const)(
     'downloads replied %s media and attaches its local path to the prompt',
-    async (msgType, mimeType, fileName) => {
+    async (msgType, mimeType, extraContent, expectedName) => {
       const downloadCodes = mockMediaDownload(
         mimeType,
         new Uint8Array([4, 5, 6]),
@@ -2577,7 +2582,7 @@ describe('DingtalkChannel quoted media', () => {
 
       replyToMedia(channel, msgType, {
         downloadCode: `quoted-${msgType}-code`,
-        fileName,
+        ...extraContent,
       });
 
       await vi.waitFor(() => {
@@ -2590,8 +2595,9 @@ describe('DingtalkChannel quoted media', () => {
       expect(envelope).toMatchObject({
         text: 'inspect this',
         referencedText: `[${msgType}]`,
-        attachments: [{ type: msgType, mimeType, fileName }],
+        attachments: [{ type: msgType, mimeType }],
       });
+      expect(envelope.attachments?.[0]?.fileName).toMatch(expectedName);
       expect(filePath).toBeTruthy();
       expect(existsSync(filePath!)).toBe(true);
     },
@@ -2777,7 +2783,7 @@ describe('DingtalkChannel quoted media', () => {
     expect(filePath).toBeTruthy();
     expect(existsSync(filePath!)).toBe(true);
     expect(readFileSync(filePath!)).toEqual(Buffer.from([1, 2, 3]));
-    expect(quotedAttachment?.fileName).toMatch(/^dingtalk_image_/);
+    expect(quotedAttachment?.fileName).toMatch(/^dingtalk_image_\d+\.png$/);
   });
 
   it('cleans the generated placeholder for a direct file message', async () => {
@@ -2814,7 +2820,9 @@ describe('DingtalkChannel quoted media', () => {
     const filePath = envelope.attachments?.[0]?.filePath;
     if (filePath) tempDirs.add(dirname(filePath));
     expect(envelope.text).toBe('');
-    expect(envelope.attachments?.[0]?.fileName).toMatch(/^dingtalk_audio_/);
+    expect(envelope.attachments?.[0]?.fileName).toMatch(
+      /^dingtalk_audio_\d+\.ogg$/,
+    );
   });
 
   it('cleans the generated placeholder for a direct video message', async () => {
@@ -2831,7 +2839,9 @@ describe('DingtalkChannel quoted media', () => {
     if (filePath) tempDirs.add(dirname(filePath));
     expect(envelope.text).toBe('');
     expect(envelope.attachments).toMatchObject([{ type: 'video' }]);
-    expect(envelope.attachments?.[0]?.fileName).toMatch(/^dingtalk_video_/);
+    expect(envelope.attachments?.[0]?.fileName).toMatch(
+      /^dingtalk_video_\d+\.mp4$/,
+    );
   });
 
   // R1-1: the placeholder cleanup was written for the DIRECT-media path,
@@ -2912,7 +2922,9 @@ describe('DingtalkChannel quoted media', () => {
     const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
     expect(envelope.text).toBe('inspect this');
     // The attachment is still delivered, under a generated name.
-    expect(envelope.attachments?.[0]?.fileName).toMatch(/^dingtalk_file_/);
+    expect(envelope.attachments?.[0]?.fileName).toMatch(
+      /^dingtalk_file_\d+\.bin$/,
+    );
     const filePath = envelope.attachments?.[0]?.filePath;
     if (filePath) tempDirs.add(dirname(filePath));
   });

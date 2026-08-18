@@ -130,6 +130,19 @@ const DIRECT_MSG_API =
 const PROACTIVE_MSG_KEY = 'sampleMarkdown'; // DingTalk's built-in {title, text} markdown template key
 const TOKEN_API = 'https://oapi.dingtalk.com/gettoken';
 const PROACTIVE_FETCH_TIMEOUT_MS = 15_000;
+// Extensions for generated media store names, keyed by the download's mime
+// type. The agent reads stored media via `read_file`, whose type detection is
+// extension-first: an extensionless name falls through to the binary content
+// sampler and real image/audio/video bytes are refused.
+const GENERATED_MEDIA_EXT: Record<string, string> = {
+  'image/jpeg': 'jpg',
+  'image/png': 'png',
+  'image/gif': 'gif',
+  'image/webp': 'webp',
+  'audio/ogg': 'ogg',
+  'audio/mpeg': 'mp3',
+  'video/mp4': 'mp4',
+};
 const mentionTarget = Symbol('mentionTarget');
 const IMAGE_INSTRUCTIONS = [
   '',
@@ -1642,7 +1655,9 @@ export class DingtalkChannel extends ChannelBase {
         mkdirSync(dir, { recursive: true });
         safeName =
           basename(typeof fileName === 'string' ? fileName : '') ||
-          `dingtalk_${mediaType}_${Date.now()}`;
+          `dingtalk_${mediaType}_${Date.now()}.${
+            GENERATED_MEDIA_EXT[media.mimeType] ?? 'bin'
+          }`;
         filePath = join(dir, safeName);
         writeFileSync(filePath, media.buffer);
       } catch (error) {
