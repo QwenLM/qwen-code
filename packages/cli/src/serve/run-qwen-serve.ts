@@ -729,7 +729,18 @@ export function describeWorkerTlsTrustGaps(opts: {
   // terminates the chain — unless something else in the worker's bundle
   // carries the issuer that does.
   const anchorPath = walkWorkerAnchorPath(workerTrustStore);
-  if (!anchorPath.anchored) {
+  if (anchorPath.nonCaTerminator) {
+    gaps.push(
+      `--tls-cert "${opts.certPath}" chains up to ` +
+        `"${anchorPath.nonCaTerminator.subject.replace(/\r?\n/g, ', ')}", ` +
+        `which is self-signed but carries basicConstraints CA:FALSE — ` +
+        `OpenSSL refuses to let it issue the certificates below it, so every ` +
+        `worker handshake to the daemon will fail INVALID_PURPOSE ` +
+        `("unsuitable certificate purpose"). Reissue that certificate with ` +
+        `CA:TRUE, or point NODE_EXTRA_CA_CERTS at a real CA that anchors the ` +
+        `chain, and restart.`,
+    );
+  } else if (!anchorPath.anchored) {
     gaps.push(
       `--tls-cert "${opts.certPath}" is issued by another CA ` +
         `(${x509.issuer.replace(/\r?\n/g, ', ')}), not self-signed, and ` +
@@ -839,6 +850,8 @@ function certIssuedBy(cert: X509Certificate, issuer: X509Certificate): boolean {
 function walkWorkerAnchorPath(chain: readonly X509Certificate[]): {
   anchored: boolean;
   path: readonly X509Certificate[];
+  /** Set when the walk terminated on a self-signed cert that is not a CA. */
+  nonCaTerminator?: X509Certificate;
 } {
   let next: X509Certificate | undefined = chain[0];
   const walked = new Set<string>();
@@ -846,7 +859,17 @@ function walkWorkerAnchorPath(chain: readonly X509Certificate[]): {
   while (next) {
     const current: X509Certificate = next;
     path.push(current);
-    if (isSelfSignedCert(current)) return { anchored: true, path };
+    if (isSelfSignedCert(current)) {
+      // OpenSSL applies `basicConstraints CA:TRUE` to certificates that sign
+      // OTHER certificates, not to a self-signed leaf trusted at depth 0.
+      // Measured on Node 22: a CA:FALSE self-signed leaf in its own trust
+      // store handshakes fine, while the same shape used as an issuer fails
+      // INVALID_PURPOSE — so the constraint binds only past the leaf.
+      if (path.length > 1 && !current.ca) {
+        return { anchored: false, path, nonCaTerminator: current };
+      }
+      return { anchored: true, path };
+    }
     walked.add(current.fingerprint256);
     next = chain.find(
       (candidate) =>

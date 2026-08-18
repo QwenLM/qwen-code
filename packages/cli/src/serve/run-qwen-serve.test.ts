@@ -1283,6 +1283,80 @@ B6U6dT+UdA==
 -----END CERTIFICATE-----
 `;
 
+/**
+ * A leaf signed by a SELF-SIGNED issuer carrying `basicConstraints CA:FALSE`.
+ * Chain geometry alone calls this anchored; OpenSSL refuses the issuer the
+ * purpose of signing and every handshake fails INVALID_PURPOSE.
+ */
+const TEST_TLS_CERT_FULLCHAIN_NON_CA_ROOT = `-----BEGIN CERTIFICATE-----
+MIIDLzCCAhegAwIBAgIUZ0Gvb+9679AdH7Z3UTSH3bpFClUwDQYJKoZIhvcNAQEL
+BQAwIjEgMB4GA1UEAwwXcXdlbiBub24tQ0EgdGVzdCBpc3N1ZXIwIBcNMjYwODE4
+MTkzNzUxWhgPMjEyNjA3MjUxOTM3NTFaMBQxEjAQBgNVBAMMCWxvY2FsaG9zdDCC
+ASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAPV+RuIkLGY4UssJmrTVgT2N
++6NC/Z5zFOscBbe06uFIr+Afe4663XDykVKRBpsW99lGi4MHhuF7+an3RLpNE6NW
+cr8IFMcPWJs6PlvG72CGiO84cbjSWSu9HuZc9usQpryqaENB672xD80eIpazwfsQ
+rR0lgqhf8jACcOmGjbkmXZ7V5GOLFESmOT2W6Pyph0dRWRyDJ9hONYUURCWhKsDq
+KrUqEzR7hAYbAqp4MIY9pptAnZsWlTjClaynG9xh4OQckT+0kKXeA375AyMojb12
+y9yCqTHgIedkgMS9kJkzcuJCFaN8fl04XCEhK9YZFNteDD2UuNFWSljKSLFR588C
+AwEAAaNpMGcwCQYDVR0TBAIwADAaBgNVHREEEzARgglsb2NhbGhvc3SHBH8AAAEw
+HQYDVR0OBBYEFMDmmEJGwv7U1oNopBAgez9nxWjbMB8GA1UdIwQYMBaAFPMJzoYw
+2Kpic33Wk1grw6CvY51dMA0GCSqGSIb3DQEBCwUAA4IBAQAV+WxQ3pMUOPQUT92t
+3VzRD4k679a5NDB47MaXh0HMPqVbph0UQRg4+BAg8pSpf7tF0Ba84eUgLHUxNrEB
+sLRew6Sm5HQn6hRnYj9PQaeWmKvCLRZmKmeF93z5QyNCLtHsqb5ttJKbt+yM7ESH
+KiQcEC1LnZjFMgR9ItEuK8Xtjb6IVkN05V54DkF6cq/MVAX6dvRGCjo1jkRqFpNJ
++sil11vK3aAjD7BP3iw/v/1iYU2qLwcpXbqNXuM7ucVTvsxP5C1Ae4WTYvoZ2fid
+r/EUKFMwxP7u9kLyOXi9EzKkb0zpVhfAcd8+yOyTZ4bs8Cc7kIEBYvcXhNL/BrVi
+6wO7
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDNDCCAhygAwIBAgIUVsyE+9hGRXVXW98Yxi5WgUsuAsAwDQYJKoZIhvcNAQEL
+BQAwIjEgMB4GA1UEAwwXcXdlbiBub24tQ0EgdGVzdCBpc3N1ZXIwIBcNMjYwODE4
+MTkzNzUxWhgPMjEyNjA3MjUxOTM3NTFaMCIxIDAeBgNVBAMMF3F3ZW4gbm9uLUNB
+IHRlc3QgaXNzdWVyMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAmS4z
+ZtAqYZ+SnMeyaHlTkV6+601FGfgglpa3th/4ZO7fSILfsDZIN7X3aAaz3u8lOhm4
+IIE5OuqNTX0Nn5CIEoxaDBjP81/pw0vgIqIjmjRacTzLU7Pe1Jl4TtbXKLTOP1At
+nfnGuiHS+shw4vkqo47/C9OT18gJLvXuB/aIDYyI6DwCpUfljagrAHdmCvzfhKMj
+EuYw3E+OIErLYb3THAvShVcrpsnuW1Csj8WRnWsmB+S6FttEKFM6C5GnALOuGnmZ
+p9x39qbDtYZoKRHMGxt8V2LWVnnWbEAyFbGnkItI+dA2xjoCFKkUoIrtr1Z4A+jF
+f9gqDd3c0UNRaQvQ1QIDAQABo2AwXjAdBgNVHQ4EFgQU8wnOhjDYqmJzfdaTWCvD
+oK9jnV0wHwYDVR0jBBgwFoAU8wnOhjDYqmJzfdaTWCvDoK9jnV0wDAYDVR0TAQH/
+BAIwADAOBgNVHQ8BAf8EBAMCAoQwDQYJKoZIhvcNAQELBQADggEBAFvpSYNXbtl6
+RHE9Dt+GjRfBWAb73n7CVi+Ep7KBB4M/G7eHY9646T+Rzp0y/+mxEn2JDJP5yUhE
+FLEOzQvXUrc0bdwWUYPbsKhG0p0KhK4+B34GogORcv3+6AiXBvGdqjyMT5zwj9OJ
+sVV/Nswkn2dfkZr+JXj8sikllPjEn+LXto8nXNPbjZRe3MzIU32bYyOcJl+wQc4t
+TJEPPVrdusShzahl0xEBAfuctVmmVvdv9st1DsoFiaEQ+vGZkJzTbhm6ggXyKpNE
+1u3aBtPdxWWjuaF3Oy6jb+HG5BrQMemzExU1izkIg+cb9VJTZyP+cm0NjOp1Oo+E
+c9BNon/M6I0=
+-----END CERTIFICATE-----
+`;
+
+/**
+ * A self-signed leaf with `basicConstraints CA:FALSE` covering the loopback
+ * host — the shape `openssl req -x509` produces without an explicit CA
+ * extension. Measured on Node 22: trusted as its own anchor at depth 0, it
+ * handshakes fine, so the CA constraint must not be applied here.
+ */
+const TEST_TLS_CERT_SELF_SIGNED_NON_CA = `-----BEGIN CERTIFICATE-----
+MIIDJDCCAgygAwIBAgIUDFbAwso3M9+z+ZUt6pZ8vk1wS+QwDQYJKoZIhvcNAQEL
+BQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MCAXDTI2MDgxODE5MzgxM1oYDzIxMjYw
+NzI1MTkzODEzWjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwggEiMA0GCSqGSIb3DQEB
+AQUAA4IBDwAwggEKAoIBAQCyGf9lrTPBEDjZE91Mhw+0yISrs5UdR8ZF6UBntzIt
+xjnqOmv4SSNo9Uj+Nr2Fm3YZ2SRnyFgGVyfHICHdPddbMEo9YnFyq9PQeDy1CU2X
+l2YspCdcsgMzlUWwjqj2uaGdzW5a3kPP17VwoxMOFRJ0dMOnu/OLJQWK/2ouSR/2
+vDcGvVYV8oLwB60G6sgiWmxaBAoymfscU+ljFa9Q+FV8ma0Grtw6MU5g70Eo8hUT
+vdmhh3QdXEqPphN8Ehj1jnLkzgheLj6WUtSj0mXNgx9WiW82Eql+caQ65wyL66Lx
+kb23+Bp9jXFO4EQqcExx0del6sWA04aD4zPNzzeGaz6zAgMBAAGjbDBqMB0GA1Ud
+DgQWBBQAKIylvj34CVhT0ywSlIHBUdQtcTAfBgNVHSMEGDAWgBQAKIylvj34CVhT
+0ywSlIHBUdQtcTAMBgNVHRMBAf8EAjAAMBoGA1UdEQQTMBGCCWxvY2FsaG9zdIcE
+fwAAATANBgkqhkiG9w0BAQsFAAOCAQEAc9QfHZfvh5+tFWOa+7zZeXtH6EazImKu
+50iVfu4sI9noV+k+pA2WokMnShT3dDhp2DP0n2VRXet9CMhACz7KAEpgtpG7JTr6
+EIHFgT42V+/WVte/uxw2Uj5hfMoycvRCy8J8JFuGzdPKc2z7bn2angtXoQxZfOAk
+VNRXkOxi5lPsuJ3bW8of2DI1/q1EJkR/Ha1gdzuk/h0W6JpO2epuzOkuwckPMuu2
+FWlN+yXXWHUsIHCosHSqesOhS4qlxDoYihsggPJ2rWnibwMr7t6GC0Bo5xsMRWFS
+6gw2hOfWIeMnoRQ0ZkCB5t5z+RYPMBuCOMJoR8HxUOKm1EMHjVhoaQ==
+-----END CERTIFICATE-----
+`;
+
 describe('describeWorkerTlsTrustGaps', () => {
   const daemonUrl = 'https://127.0.0.1:4170';
 
@@ -1498,6 +1572,50 @@ describe('describeWorkerTlsTrustGaps', () => {
     expect(gaps[0]).toContain('ERR_TLS_CERT_ALTNAME_INVALID');
     expect(gaps[0]).toContain('fd00::1');
     expect(gaps[0]).not.toContain('[fd00::1]');
+  });
+
+  it('reports both gaps when a CA-issued cert also misses the dialled host', () => {
+    // R2-7: every other case produces 0 or 1 gap, so an inserted `return gaps`
+    // after the first push — or turning the SAN `if` into an `else if` —
+    // survived the whole suite. Under that mutant an operator fixes the trust
+    // anchor, restarts, and only then discovers the SAN failure.
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_CA_ISSUED),
+      certPath: '/certs/daemon.pem',
+      daemonUrl: 'https://example.invalid:4170',
+    });
+    expect(gaps).toHaveLength(2);
+    expect(gaps.join('\n')).toContain('UNABLE_TO_VERIFY_LEAF_SIGNATURE');
+    expect(gaps.join('\n')).toContain('ERR_TLS_CERT_ALTNAME_INVALID');
+  });
+
+  it('names a self-signed chain terminator that is not a CA', () => {
+    // R2-10: chain geometry alone blesses this file as anchored, but OpenSSL
+    // also requires a signing certificate to carry CA:TRUE. Measured on Node
+    // 22: leaf + CA:FALSE self-signed issuer as the trust store fails
+    // INVALID_PURPOSE, while boot stays green and warning-free.
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_NON_CA_ROOT),
+      certPath: '/certs/fullchain.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('INVALID_PURPOSE');
+    expect(gaps[0]).toContain('qwen non-CA test issuer');
+  });
+
+  it('keeps trusting a self-signed leaf that carries CA:FALSE', () => {
+    // The constraint binds only past the leaf: a CA:FALSE self-signed cert in
+    // its OWN trust store is verified at depth 0 and handshakes fine
+    // (measured on Node 22), so requiring CA:TRUE here would cry wolf on the
+    // ordinary `openssl req -x509` daemon cert.
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from(TEST_TLS_CERT_SELF_SIGNED_NON_CA),
+        certPath: '/certs/self-signed.pem',
+        daemonUrl,
+      }),
+    ).toEqual([]);
   });
 
   it('defers to the boot parse guard on an unreadable certificate', () => {

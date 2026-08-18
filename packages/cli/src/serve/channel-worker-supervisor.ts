@@ -227,7 +227,17 @@ export interface CreateChannelWorkerSupervisorOptions {
   workerBaseEnv?: Readonly<NodeJS.ProcessEnv>;
   /**
    * PEM cert the worker must additionally trust when calling the daemon
-   * over a self-signed TLS listener. Injected via NODE_EXTRA_CA_CERTS.
+   * over a self-signed TLS listener, injected as their `NODE_EXTRA_CA_CERTS`.
+   *
+   * With no operator CA set this is handed over as a PATH, and Node re-reads
+   * it at every (re)spawn — while the daemon keeps serving the bytes it read
+   * at boot. Rotating this file in place without restarting the daemon
+   * therefore leaves respawned workers trusting the NEW contents against the
+   * OLD served cert, and they restart-loop until the daemon restarts. (With an
+   * operator CA set the merged bundle pins a snapshot instead, so the same
+   * rotation is invisible to workers until the daemon restarts.) Either way,
+   * rotating `--tls-cert` requires a daemon restart; see the HTTPS / TLS notes
+   * in docs/users/qwen-serve.md.
    */
   tlsCaCertPath?: string;
   startupTimeoutMs?: number;
