@@ -11964,12 +11964,14 @@ describe('DaemonSessionProvider', () => {
     expect(retainedBytes).toBe(expected);
   });
 
-  it('keeps a media-heavy history page intact while materializing it', async () => {
-    // The pagination scratch store is deliberately trim-free (unlimited block
-    // count). The retention byte budget must not evict the page's oldest
-    // records mid-build there: the pagination anchor is exclusive of the
-    // oldest fetched record, so an evicted record is never re-fetched and
-    // leaves a permanent silent gap in the timeline.
+  it('rejects a history page that would overflow the retention byte budget', async () => {
+    // Pagination admission must be byte-budget-aware, not just block-count
+    // aware: merging a page that pushes the retained estimate over the
+    // budget leaves it over budget while the session is idle, and the next
+    // live trim evicts the freshly prepended oldest records, which the
+    // exclusive pagination anchor can never re-fetch — a permanent silent
+    // gap. The whole page is rejected atomically instead, mirroring the
+    // block-cap rejection.
     sdkMocks.capabilities.mockResolvedValue({
       workspaceCwd: '/mock-workspace',
       features: ['session_transcript_pagination'],
@@ -11991,7 +11993,7 @@ describe('DaemonSessionProvider', () => {
       },
     });
     // ~10 MB estimated per block; 14 of them cross the default 128 MiB
-    // retention budget so an active budget would evict during materialization.
+    // retention budget, so admitting the page would overflow it.
     const heavyToolEvent = (id: number, index: number): DaemonEvent => ({
       id,
       v: 1,
@@ -12025,14 +12027,16 @@ describe('DaemonSessionProvider', () => {
       events: Array.from({ length: 14 }, (_, index) =>
         heavyToolEvent(index + 1, index),
       ),
-      hasMore: false,
+      hasMore: true,
     });
     let history: ReturnType<typeof useDaemonTranscriptHistory> | undefined;
     let blocks: readonly DaemonTranscriptBlock[] = [];
+    let retainedBytes = 0;
 
     function Harness() {
       history = useDaemonTranscriptHistory();
       blocks = useDaemonTranscriptBlocks();
+      retainedBytes = useDaemonTranscriptState().retainedBytes;
       return null;
     }
 
@@ -12040,16 +12044,24 @@ describe('DaemonSessionProvider', () => {
       autoConnect: true,
       historyPageSize: 25,
     });
+    const retainedBefore = retainedBytes;
+    expect(retainedBefore).toBeGreaterThan(0);
     await act(async () => {
       await history?.loadMore();
       await flushPromises();
     });
 
-    const toolCallIds = blocks
-      .filter((block) => block.kind === 'tool')
-      .map((block) => (block as { toolCallId?: string }).toolCallId);
-    expect(toolCallIds).toHaveLength(14);
-    expect(toolCallIds).toContain('tool-0');
+    // Atomic rejection: nothing from the page merges (a partial merge would
+    // mean the scratch store trimmed mid-build and leaked a headless page),
+    // the byte counter is untouched, and the capacity latch stops paging.
+    expect(blocks.filter((block) => block.kind === 'tool')).toHaveLength(0);
+    expect(blocks).toHaveLength(1);
+    expect(retainedBytes).toBe(retainedBefore);
+    expect(history).toMatchObject({
+      hasMore: false,
+      loading: false,
+      capacityReached: true,
+    });
   });
 
   it('drops fetched transcript events whose records are already displayed', async () => {

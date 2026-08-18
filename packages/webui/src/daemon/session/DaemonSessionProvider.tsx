@@ -156,6 +156,7 @@ interface LiveJournalRepairEpisode {
 interface TranscriptHistoryMaterialization {
   blocks: readonly DaemonTranscriptBlock[];
   nextOrdinal: number;
+  retainedBytes: number;
   toolBlockByCallId: Record<string, string>;
   permissionBlockByRequestId: Record<string, string>;
 }
@@ -298,9 +299,21 @@ function materializeTranscriptHistory(
   if (history.blocks.length + current.blocks.length > maxBlocks) {
     return undefined;
   }
+  let retainedBytes = 0;
+  for (const block of history.blocks) {
+    retainedBytes += estimateDaemonTranscriptBlockBytes(block);
+  }
+  // Byte-budget admission: an over-budget merge stays untrimmed while the
+  // session is idle, and the next live trim evicts the freshly prepended
+  // oldest records, which the exclusive pagination anchor can never
+  // re-fetch — a permanent silent gap. Reject atomically like the block cap.
+  if (current.retainedBytes + retainedBytes > current.maxRetainedBytes) {
+    return undefined;
+  }
   return {
     blocks: history.blocks,
     nextOrdinal: history.nextOrdinal,
+    retainedBytes,
     toolBlockByCallId: history.toolBlockByCallId,
     permissionBlockByRequestId: history.permissionBlockByRequestId,
   };
@@ -310,14 +323,10 @@ function applyTranscriptHistory(
   current: DaemonTranscriptState,
   history: TranscriptHistoryMaterialization,
 ): DaemonTranscriptState {
-  let prependedBytes = 0;
-  for (const block of history.blocks) {
-    prependedBytes += estimateDaemonTranscriptBlockBytes(block);
-  }
   return {
     ...current,
     blocks: [...history.blocks, ...current.blocks],
-    retainedBytes: current.retainedBytes + prependedBytes,
+    retainedBytes: current.retainedBytes + history.retainedBytes,
     nextOrdinal: history.nextOrdinal,
     toolBlockByCallId: {
       ...history.toolBlockByCallId,
