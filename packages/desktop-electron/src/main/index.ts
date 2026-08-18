@@ -61,6 +61,20 @@ const MACOS_TITLE_BAR_CSS = `
     user-select: none;
     z-index: 1;
   }
+
+  /* Electron 38+ only hit-tests native title tooltips reliably at the edges
+     of elements on macOS. Keep the Chromium workaround inside this host and
+     scoped to buttons that already opt in with a title attribute.
+     https://github.com/electron/electron/issues/49843 */
+  :where([data-web-shell-root] button[title]) {
+    position: relative;
+  }
+
+  :where([data-web-shell-root] button[title])::after {
+    content: '';
+    inset: 0;
+    position: absolute;
+  }
 `;
 
 const testStateRoot = process.env['QWEN_DESKTOP_STATE_ROOT'];

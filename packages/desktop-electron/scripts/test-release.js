@@ -88,6 +88,8 @@ function testSecurityBoundary() {
   assert.match(main, /insertCSS\(MACOS_TITLE_BAR_CSS\)/);
   assert.match(main, /var\(--sidebar-background/);
   assert.match(main, /app-region: drag/);
+  assert.match(main, /button\[title\]\)::after/);
+  assert.match(main, /github\.com\/electron\/electron\/issues\/49843/);
   assert.match(runtime, /--require-auth/);
   assert.match(runtime, /127\.0\.0\.1/);
   assert.match(runtime, /url\.hash = new URLSearchParams\(\{ token \}\)/);
