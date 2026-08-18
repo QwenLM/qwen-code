@@ -4809,6 +4809,7 @@ describe('Gemini Client (client.ts)', () => {
       const history = JSON.stringify(getCacheSafeParams()?.history);
       expect(history).not.toContain('image-bytes');
       expect(history).toContain('pdf-bytes');
+      expect(getCacheSafeParams()?.sessionId).toBe('test-session-id');
     });
 
     it.each([

@@ -24,8 +24,11 @@ import {
   reviewLeaseHeldByAnotherSession,
 } from '../../services/review-worktree-lease.js';
 import { classifyHeavy } from './lib/heavy.js';
+import { DEADLINE_ENV } from './lib/deadline.js';
+import type { MergeBaseResult } from './lib/merge-base.js';
 import { buildRoleBrief } from './agent-prompt.js';
 import { PARSE_ARGS_REPORT, worktreePath } from './lib/paths.js';
+import { makeDiff } from './lib/test-utils.js';
 
 describe('classifyHeavy', () => {
   it('flags a substantially rewritten existing file', () => {
@@ -238,7 +241,7 @@ const producerMocks = vi.hoisted(() => ({
   gitOpt: vi.fn((..._args: string[]): string | null => null),
   gitRaw: vi.fn((..._args: string[]): Buffer => Buffer.from('')),
   resolveMergeBase: vi.fn(
-    (): { sha: string | null; baseFetchFailed: boolean } => ({
+    (): MergeBaseResult => ({
       sha: null,
       baseFetchFailed: false,
     }),
@@ -339,10 +342,10 @@ describe('fetch-pr report assembly', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     // clearAllMocks resets call history but NOT implementations, so a
-    // mockReturnValue a prior test set on readFileSync would leak into a test
-    // that relies on the default. Re-assert the default (no prior report →
-    // ENOENT) here so every test starts from a known state regardless of
-    // order.
+    // mockReturnValue a prior test set would leak into a test that relies on
+    // the default. Re-assert the defaults (no prior report → ENOENT, no
+    // merge base → no diff) here so every test starts from a known state
+    // regardless of order.
     producerMocks.readFileSync.mockImplementation(() => {
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
     });
@@ -438,6 +441,39 @@ describe('fetch-pr report assembly', () => {
   it('carries --host into the report for the cleanup audit to reuse', async () => {
     const report = await reportFor({ host: 'ghe.example.com' });
     expect(report.host).toBe('ghe.example.com');
+  });
+
+  it('records the round cap its capture wiring writes — huge tier only with a clock (#9256)', async () => {
+    // plan-diff and capture-local pin this wiring in their own handlers; the
+    // fetch-pr side had no assertion because this harness steers the lightest
+    // real path (no merge base → no diff). Override the two mocks that steer
+    // it into a real diff instead: a resolvable merge base and a raw diff
+    // buffer. A handler that forgot the deadline read — or the capture-time
+    // tier call — would keep every budget unit test green and this one red.
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: 'beef0000',
+      baseFetchFailed: false,
+    });
+    producerMocks.gitRaw.mockReturnValue(
+      Buffer.from(makeDiff('src/huge.ts', 9000)),
+    );
+
+    const before = process.env[DEADLINE_ENV];
+    try {
+      delete process.env[DEADLINE_ENV];
+      producerMocks.writeFileSync.mockClear();
+      const noClock = await reportFor({});
+      expect(noClock.srcDiffLines).toBeGreaterThanOrEqual(3000);
+      expect(noClock.budget.reverseAuditRounds).toBe(5);
+
+      process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 7200);
+      producerMocks.writeFileSync.mockClear();
+      const withClock = await reportFor({});
+      expect(withClock.budget.reverseAuditRounds).toBe(3);
+    } finally {
+      if (before === undefined) delete process.env[DEADLINE_ENV];
+      else process.env[DEADLINE_ENV] = before;
+    }
   });
 
   // The lease is also a lock (#9205): a concurrent same-PR fetch-pr used to
