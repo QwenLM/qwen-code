@@ -80,7 +80,7 @@ import { hasReviewDeadline } from './lib/deadline.js';
 import { appendRunSession } from './lib/run-ledger.js';
 import { SHA_RE } from './lib/ledger.js';
 import { blobPairs } from './lib/file-verdicts.js';
-import { roundModelIdFrom } from './lib/round-model.js';
+import { certifierMatchesRound, roundModelIdFrom } from './lib/round-model.js';
 import {
   computeIncrementalScope,
   type IncrementalScope,
@@ -113,6 +113,20 @@ interface FetchPrArgs {
    * array and the recovery flow can produce one; `runFetchPr` normalizes.
    */
   since?: string | string[];
+  /**
+   * WHO certified the `--since` anchor: the `lastModelId` beside it in the
+   * cache, or the `model` beside the marker's `sha`. Copied through verbatim
+   * — the orchestrator never compares it to anything, because a comparison
+   * stated in prompt text is one that can be skipped, and because the two
+   * sides are not even the same kind of string there (`{{model}}` is the bare
+   * `config.getModel()`; what the CLI writes is provider-qualified). The gate
+   * lives HERE, over `certifierMatchesRound`, which is the same function the
+   * marker-recovery ruling uses.
+   *
+   * Omitted for an anchor nobody certified — a cache written before the
+   * field. That is a mismatch, not a pass.
+   */
+  sinceModel?: string | string[];
 }
 
 type FetchPrResult = PlanReport & {
@@ -268,6 +282,7 @@ export interface IncrementalDecision {
     | 'hunks-outside-pr-diff'
     | 'containment-unverified'
     | 'lineage-unfollowable'
+    | 'cross-model-anchor'
     | 'base-untrusted'
     | 'capture-failed'
     | 'partition-failed';
@@ -917,7 +932,45 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     // later, `since.slice(…)` — which crashed the command after the worktree
     // existed and before any report was written.
     const sinceArg = typeof rawSince === 'string' ? rawSince : undefined;
-    if (sinceArg !== undefined && sinceArg !== '') {
+    // WHO certified it, gated before the history is consulted at all: "clean
+    // up to this sha" is the recorded identity's verdict, and `fetch-pr`
+    // validates an anchor against the HISTORY, never against who certified
+    // it — so an anchor from another model is ancestrally perfect and still
+    // scopes this round past code it never reviewed.
+    //
+    // Ruled here rather than in the skill because every prompt-text version
+    // of this comparison has been wrong: `{{model}}` interpolates the BARE
+    // `config.getModel()` while every identity the CLI writes is
+    // provider-qualified, so the two sides were never the same kind of string
+    // and two providers exposing one model name passed each other's gate.
+    // With the check here there is no identity comparison left in prompt text
+    // at all — the orchestrator copies two fields and reads a decision.
+    const rawSinceModel = Array.isArray(args.sinceModel)
+      ? args.sinceModel[args.sinceModel.length - 1]
+      : args.sinceModel;
+    const sinceModel =
+      typeof rawSinceModel === 'string' ? rawSinceModel : undefined;
+    const crossModel =
+      sinceArg !== undefined &&
+      sinceArg !== '' &&
+      !certifierMatchesRound(sinceModel, roundModelIdFrom(process.env));
+    if (crossModel) {
+      anchor = {
+        incremental: {
+          since: sinceArg,
+          effective: false,
+          reason: 'cross-model-anchor',
+        },
+        diffBase: null,
+      };
+      writeStderrLine(
+        `Incremental anchor not used — it was certified by ` +
+          `${sinceModel ? `"${sinceModel}"` : 'no recorded identity'}, and ` +
+          `this review runs as ` +
+          `${roundModelIdFrom(process.env) || 'an unpublished identity'}. ` +
+          `Reviewing the full range.`,
+      );
+    } else if (sinceArg !== undefined && sinceArg !== '') {
       try {
         anchor = resolveIncrementalAnchor(
           sinceArg,
@@ -1655,6 +1708,18 @@ export const fetchPrCommand: CommandModule = {
           'diff with the reason in the report; a valid one scopes the diff ' +
           "and the chunk plan to since..head. The decision is the report's " +
           '`incremental` field.',
+      })
+      .option('since-model', {
+        type: 'string',
+        describe:
+          'WHO certified the --since anchor: the `lastModelId` beside it in ' +
+          'the review cache, or the `model` beside the marker sha. Copy it ' +
+          'through verbatim — do NOT compare it to anything yourself. The ' +
+          'anchor is used only when it matches the identity running this ' +
+          'review; otherwise the report says `cross-model-anchor` and the ' +
+          'round reviews the full diff, because "clean up to this sha" is ' +
+          "the recorded identity's verdict and this command validates an " +
+          'anchor against the history, never against who certified it.',
       }),
   handler: async (argv) => {
     setGhHost((argv as { host?: string }).host);
