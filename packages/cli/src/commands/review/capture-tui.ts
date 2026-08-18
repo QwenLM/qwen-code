@@ -1804,21 +1804,34 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // is given and follows symlinks on INPUT and OUTPUT alike (measured on
     // freeze v0.2.2), and the captured command — the survivor class the
     // kill-plan comment documents — runs while these names are decided.
-    // link() stages the INPUT under a name only this run knows: it refuses
-    // a symlinked ansPath with ELOOP and pins the bytes this run wrote, so
-    // a swap of ansPath during the probe window cannot feed foreign bytes
-    // to the render. rename() lands the OUTPUT: it replaces a symlink
-    // planted at pngPath instead of following it out of the --out base.
+    // link() stages the INPUT under a name only this run knows, and the
+    // isFile() check on the stage pins the bytes this run wrote: link()
+    // clones a symlinked ansPath instead of refusing it with ELOOP
+    // (measured on Linux), so a symlink swapped in during the probe window
+    // would otherwise be staged intact and feed the victim's bytes to the
+    // render. rename() lands the OUTPUT: it replaces a symlink planted at
+    // pngPath instead of following it out of the --out base.
     const renderNonce = randomBytes(6).toString('hex');
     const ansStage = `${ansPath}.render-${renderNonce}`;
     const pngStage = `${pngPath}.render-${renderNonce}`;
     let renderInputStaged = false;
     try {
       linkSync(ansPath, ansStage);
+      // lstat never follows: a cloned symlink is not a regular file.
+      if (!lstatSync(ansStage).isFile()) {
+        throw new Error('staged render input is not a regular file');
+      }
       renderInputStaged = true;
     } catch {
       // Swapped between this run's write and the render — degrade rather
-      // than attribute bytes this capture cannot show it produced.
+      // than attribute bytes this capture cannot show it produced. The
+      // stage exists when the link itself landed, and only this run names
+      // it, so it is this run's to remove.
+      try {
+        rmSync(ansStage, { force: true });
+      } catch {
+        // Litter is cosmetic; never let cleanup mask the capture's result.
+      }
       degradations.push(
         `${ansPath} was replaced while the render was being prepared — ` +
           '.ans text captured, no image rendered',

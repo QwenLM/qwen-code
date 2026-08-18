@@ -989,6 +989,86 @@ exit 0
   );
 
   it.skipIf(process.platform === 'win32')(
+    'refuses a symlink swapped in for the .ans before staging — link() clones it',
+    async () => {
+      // The staging comment claimed link() refuses a symlinked ansPath
+      // with ELOOP; measured on Linux it CLONES the link, so a survivor
+      // swapping ansPath for a symlink during the probe window (a fresh
+      // freeze availability probe — seconds, not microseconds) staged the
+      // link intact and freeze rendered the victim's bytes, credited as
+      // "evidence": "png" (probe-verified end to end). lstat never
+      // follows: only a staged regular file may reach the render.
+      probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+      const realFreezeProbe = probes.freeze;
+      const dir = mkdtempSync(join(tmpdir(), 'capture-tui-anssym-'));
+      const victim = join(dir, 'victim.txt');
+      writeFileSync(victim, 'FOREIGN-VICTIM-BYTES');
+      writeFakeTmux(dir, '    :');
+      const freezeBin = join(dir, 'fakebin', 'freeze');
+      const rendered = join(dir, 'freeze-ran');
+      writeFileSync(
+        freezeBin,
+        // Reads the staged input by name — following a symlink exactly
+        // like the real freeze (measured on v0.2.2) — and records that it
+        // ran at all.
+        `#!/bin/sh\ncat "$3" > "$5"\n: > '${rendered}'\nexit 0\n`,
+        { mode: 0o755 },
+      );
+      const realPath = process.env['PATH'];
+      const realBin = freezeRender.bin;
+      process.env['PATH'] = `${join(dir, 'fakebin')}:${realPath ?? ''}`;
+      freezeRender.bin = freezeBin;
+      // The swap rides the freeze AVAILABILITY probe: it runs after the
+      // .ans is on disk and before the staging linkSync — the seconds-long
+      // window the survivor class plants in.
+      probes.freeze = () => {
+        rmSync(join(dir, 'cap.ans'));
+        symlinkSync(victim, join(dir, 'cap.ans'));
+        return { status: 'ok', out: '' } as const;
+      };
+      try {
+        await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: dir,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: 'MARK',
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 10_000,
+          } as never),
+        );
+        expect(process.exitCode).toBeUndefined();
+        // freeze never saw the staged input...
+        expect(existsSync(rendered)).toBe(false);
+        expect(readFileSync(victim, 'utf8')).toBe('FOREIGN-VICTIM-BYTES');
+        const manifest = JSON.parse(
+          readFileSync(join(dir, 'cap.json'), 'utf8'),
+        );
+        // ...and the victim's bytes are never credited as this capture's
+        // image.
+        expect(manifest.evidence).toBe('ans-only');
+        expect(manifest.pngPath).toBeNull();
+        expect(manifest.degradedBecause).toContain(
+          'was replaced while the render was being prepared',
+        );
+        // The link this run's linkSync staged is this run's to remove.
+        expect(readdirSync(dir).filter((f) => f.includes('.render-'))).toEqual(
+          [],
+        );
+      } finally {
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+        freezeRender.bin = realBin;
+        probes.freeze = realFreezeProbe;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
     'a stage replaced by a directory during the render does not mask the capture result',
     async () => {
       // The stage-removal rmSync pair in the render finally was the only
