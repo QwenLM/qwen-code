@@ -2647,6 +2647,81 @@ describe('GeminiChat', async () => {
       },
     );
 
+    it('keeps an Anthropic-routed refusal quiet tool result completion fatal (#9026)', async () => {
+      // Anthropic's `refusal` stop_reason is converted to SAFETY by
+      // mapAnthropicFinishReasonToGemini (anthropicContentGenerator/
+      // converter.ts). Without that mapping it would fall through to
+      // FINISH_REASON_UNSPECIFIED and the armed attempt would accept the
+      // refusal as a quiet "(empty content)" completion, masking the
+      // provider's safety decision.
+      vi.useFakeTimers();
+      try {
+        const recordAssistantTurn = vi.fn();
+        const chatWithRecording = chatWithRecorder(recordAssistantTurn);
+        chatWithRecording.setHistory([
+          { role: 'user', parts: [{ text: 'inspect the project' }] },
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  args: { path: '/tmp/example' },
+                },
+              },
+            ],
+          },
+        ]);
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () =>
+          streamResponse({
+            candidates: [
+              {
+                content: { parts: [] },
+                finishReason: 'SAFETY',
+              },
+            ],
+          } as unknown as GenerateContentResponse),
+        );
+
+        const stream = await chatWithRecording.sendMessageStream(
+          'test-model',
+          {
+            message: [
+              {
+                functionResponse: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  response: { output: 'file contents' },
+                },
+              },
+            ],
+          },
+          'prompt-id-tool-result-anthropic-refusal-fatal',
+        );
+
+        await expectStreamExhaustion(stream, {
+          type: 'NO_TOOL_RESULT_PROGRESS',
+        });
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(5);
+        expect(recordAssistantTurn).not.toHaveBeenCalled();
+        // The refusal must not be masked by an accepted placeholder turn.
+        expect(
+          chatWithRecording
+            .getHistory()
+            .some((content) =>
+              content.parts?.some((part) => part.text === '(empty content)'),
+            ),
+        ).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('should keep MAX_TOKENS quiet tool result completions fatal after retry exhaustion (#9026)', async () => {
       vi.useFakeTimers();
       try {
