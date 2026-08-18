@@ -29,21 +29,29 @@ rest of `qwen-autofix.yml` already follows.
 
 ## Tasks
 
-- [ ] Create branch `feat/autofix-handoff-bilingual` from `origin/main`
-- [ ] Commit design + plan docs
-- [ ] yml: add HEADLINE_ZH (+ GATE_CLAUSE_ZH / CAUSE_ZH / LAST_FIX_ZH /
+- [x] Create branch `feat/autofix-handoff-bilingual` from `origin/main`
+- [x] Commit design + plan docs
+- [x] yml: add HEADLINE_ZH (+ GATE_CLAUSE_ZH / CAUSE_ZH / LAST_FIX_ZH /
       IDLE_CLAUSE_ZH / REMEDY_ZH) at every HEADLINE assignment
-- [ ] yml: report block — emit details section (headline ZH, section labels
+- [x] yml: report block — emit details section (headline ZH, section labels
       ZH, failure.zh.md excerpt with 3000B truncation + iconv + sed
-      escaping, gate-rejection note, graceful absence)
-- [ ] SKILL.md: extend bilingual-outputs rule with failure.zh.md contract
-- [ ] Tests: extend handoff-comment contract block; run focused vitest
-- [ ] Self-audit full diff (two clean passes), then offer to push/open PR
+      escaping, gate-rejection note, graceful absence); also the
+      develop-issue withdraw comment; failure.zh.md added to all cleanup
+      and artifact lists
+- [x] SKILL.md: extend bilingual-outputs rule with failure.zh.md contract
+- [x] Tests: extend handoff-comment contract block; run focused vitest
+- [x] Self-audit full diff (two clean passes), then offer to push/open PR
 
 ## Verification
 
-- `npx vitest run scripts/tests/qwen-autofix-workflow.test.js` (exact
-  invocation confirmed at implementation time)
-- `npx yamllint .github/workflows/qwen-autofix.yml` if config covers it
+- `npx vitest run --config ./scripts/tests/vitest.config.ts
+qwen-autofix-workflow.test.js qwen-fleet-shepherd-workflow.test.js` —
+  all green except two pre-existing local-environment failures (macOS bash
+  3.2 lacks `mapfile` for the gate script; confirmed failing on the clean
+  tree via stash)
+- YAML parse (PyYAML) + `bash -n` over all 58 run blocks
+- Smoke tests: zh excerpt sanitization (`<details`/`</details`/`<summary`/
+  `<!--` neutralized), mid-character truncation under `set -eo pipefail`,
+  three render scenarios (zh + gate-rejection / no zh / committed-not-pushed)
 - Manual render check: assemble a sample report.md locally and eyeball the
   GitHub Markdown rendering of the details block

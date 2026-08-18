@@ -8314,6 +8314,13 @@ exit 1
     expect(skill).toContain(
       'Keep `failure.md` and `handoff.md` English-only WITHOUT a details block',
     );
+    // The Chinese for a failure.md handoff lives in a SEPARATE companion file
+    // the workflow wraps in its own <details> — never inside failure.md.
+    expect(skill).toContain('failure.zh.md');
+    expect(skill).toContain('ALSO write');
+    // The companion is byte-truncated inside the workflow's wrapper, so it
+    // must not carry markup that could break the wrapper.
+    expect(skill).toContain('NO HTML tags at');
   });
 
   it('includes issue-level comments in review feedback scanning', () => {
@@ -13551,7 +13558,8 @@ exit 1
       '::warning::Failed to post handoff comment on PR #${PR}',
     );
     expect(reviewAddressReportStep).toContain('human should take over');
-    // Token-breaking neutralization at ALL NINE workflow publish sites
+    // Token-breaking neutralization at ALL NINE single-expression workflow
+    // publish sites
     // (address-summary, no-action, DETAIL_FILE, API_ERROR_DETAIL, the
     // gate-rejection body, the comment-reply body whose content is agent
     // stdout that can echo external comment text, the two
@@ -13561,6 +13569,9 @@ exit 1
     // must be LINE-INDEPENDENT: a whole-comment strip misses a marker whose
     // --> sits on another line, while jq scan() matches across newlines.
     // Proven end-to-end on a split forged marker.
+    // The two failure.zh.md excerpt sites (PR-lane report, issue-lane
+    // withdraw) escape in a multi-`-e` sed and are pinned by the
+    // 'posts failure-path handoff comments bilingually' test instead.
     // Count the correct spelling AND prove no site uses a different one.
     // Counting alone is not enough: a fifth site added with `\-\-` (single
     // backslashes — a NO-OP on both GNU and BSD sed, verified) left the count
@@ -13608,6 +13619,77 @@ exit 1
         ),
       ),
     ).toBe(0);
+  });
+
+  it('posts failure-path handoff comments bilingually', () => {
+    // The repo convention is English first with a collapsed Chinese block,
+    // and the handoff comments are the ones that ask a maintainer to decide —
+    // the Chinese block lets a Chinese-speaking maintainer act without
+    // translating the English body. failure.md itself stays English-only (a
+    // byte-truncated excerpt of it is embedded inline); the Chinese lives in
+    // the agent-written failure.zh.md, which the workflow wraps in its OWN
+    // <details>: the wrapper tags are emitted by the workflow, so a truncated
+    // translation can lose content but never swallow the markers that follow.
+    expect(reviewAddressReportStep).toContain("echo '<details>'");
+    expect(reviewAddressReportStep).toContain(
+      "echo '<summary>中文说明</summary>'",
+    );
+    expect(reviewAddressReportStep).toContain("echo '</details>'");
+    expect(reviewAddressReportStep).toContain('${HEADLINE_ZH}');
+    expect(reviewAddressReportStep).toContain(
+      'head -c 3000 "${WORKDIR}/failure.zh.md"',
+    );
+    // Wrapper-defense escaping: a pathological translation quoting markup
+    // must not be able to open or close a <details>/<summary> of its own.
+    expect(reviewAddressReportStep).toContain('s/<details/＜details/g');
+    expect(reviewAddressReportStep).toContain('s/<\\/details/＜\\/details/g');
+    expect(reviewAddressReportStep).toContain('s/<summary/＜summary/g');
+    // The eval markers stay AFTER the closing tag: the next scan parses them
+    // out of the raw comment body.
+    expect(reviewAddressReportStep.indexOf("echo '</details>'")).toBeLessThan(
+      reviewAddressReportStep.indexOf('<!-- autofix-eval ts=${MARK_TS}'),
+    );
+    // EVERY headline variant (model-error retry/terminal, stale base,
+    // needs-human, could-not-start, both breakers) carries a Chinese
+    // counterpart, and so do the clause variables composed into them.
+    // Scoped to this step: other steps (the growth-brake feedback builder)
+    // have their own *_ZH variables with different pairing shapes.
+    const headlineAssignments =
+      reviewAddressReportStep.match(/^\s*HEADLINE="/gm) ?? [];
+    const headlineZhAssignments =
+      reviewAddressReportStep.match(/^\s*HEADLINE_ZH="/gm) ?? [];
+    expect(headlineAssignments.length).toBeGreaterThan(0);
+    expect(headlineZhAssignments).toHaveLength(headlineAssignments.length);
+    for (const name of [
+      'CAUSE',
+      'LAST_FIX',
+      'GATE_CLAUSE',
+      'IDLE_CLAUSE',
+      'REMEDY',
+    ]) {
+      const en =
+        reviewAddressReportStep.match(new RegExp(`^\\s*${name}=`, 'gm')) ?? [];
+      const zh =
+        reviewAddressReportStep.match(new RegExp(`^\\s*${name}_ZH=`, 'gm')) ??
+        [];
+      expect(zh.length, `${name}_ZH pairing`).toBe(en.length);
+    }
+    // A missing companion (run-agent.mjs wrote failure.md itself, or the
+    // agent skipped it) degrades to the headline translation alone — never
+    // fails the round.
+    expect(reviewAddressReportStep).toContain(
+      '[[ -s "${WORKDIR}/failure.zh.md" ]]',
+    );
+    // The develop-issue withdraw comment carries the same block.
+    expect(withdrawClaimStep).toContain('failure.zh.md');
+    expect(withdrawClaimStep).toContain('<summary>中文说明</summary>');
+    // A repair re-run must not inherit a stale companion from the rejected
+    // attempt: run 2's success would leave run 1's translation behind, and
+    // run 2's failure-without-failure.md would pair run 1's Chinese with
+    // run 2's English.
+    expect(repairDeterministicRejectionStep).toContain(
+      '"${WORKDIR}/failure.zh.md"',
+    );
   });
 
   it('announces a working round up front and closes the same status comment', () => {
