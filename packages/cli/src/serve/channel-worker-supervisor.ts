@@ -5,6 +5,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { channelSelectionNames } from './channel-selection.js';
+import { extractCertificateBlocks } from './pem-certificate-blocks.js';
 import type { ServeChannelSelection } from './types.js';
 import {
   CHANNEL_DAEMON_WORKER_SENTINEL,
@@ -233,11 +234,12 @@ export interface CreateChannelWorkerSupervisorOptions {
    * it at every (re)spawn — while the daemon keeps serving the bytes it read
    * at boot. Rotating this file in place without restarting the daemon
    * therefore leaves respawned workers trusting the NEW contents against the
-   * OLD served cert, and they restart-loop until the daemon restarts. (With an
-   * operator CA set the merged bundle pins a snapshot instead, so the same
-   * rotation is invisible to workers until the daemon restarts.) Either way,
-   * rotating `--tls-cert` requires a daemon restart; see the HTTPS / TLS notes
-   * in docs/users/qwen-serve.md.
+   * OLD served cert, and they restart-loop until the daemon restarts. An
+   * operator CA gives no cover: `resolveWorkerCaCertPath` stamps BOTH sources,
+   * so rotating this file in place invalidates the merged bundle and rebuilds
+   * it from the NEW contents — the same restart loop. Either way, rotating
+   * `--tls-cert` requires a daemon restart; see the HTTPS / TLS notes in
+   * docs/users/qwen-serve.md.
    */
   tlsCaCertPath?: string;
   startupTimeoutMs?: number;
@@ -411,43 +413,25 @@ function sourceStamp(filePath: string): string {
 }
 
 /**
- * A PEM certificate block with every marker alone on its own line. Node's
- * certificate loader is line-strict AND all-or-nothing: one fused
- * `-----END CERTIFICATE----------BEGIN CERTIFICATE-----` (what
- * `cat a.pem b.pem` produces when `a.pem` has no trailing newline) makes it
- * discard the WHOLE bundle with `bad end line` — including the daemon cert
- * appended after it, so the workers lose the trust the merge exists to give
- * them. `tls.createSecureContext({ ca })` does not throw on that shape, so it
- * cannot stand in as the validator. Base64 never contains `-`, so the body
- * match cannot run past its own end marker or backtrack.
+ * Path pairs already warned about, keyed the way `mergedWorkerCaBundles` is.
+ * Every fallback branch returns without caching, `launch()` rebuilds the env
+ * on every 'initial' and 'restart' spawn, and `process.emitWarning` does not
+ * dedup identical text — so without this a crash-looping worker appends one
+ * identical multi-line warning per restart, burying the very log stream the
+ * operator reads to diagnose the loop.
  */
-const STRICT_PEM_CERTIFICATE_BLOCK =
-  /^-----BEGIN CERTIFICATE-----\n(?:[A-Za-z0-9+/=]+\n)+-----END CERTIFICATE-----$/gm;
-
-/**
- * The certificate blocks of `contents`, or `undefined` when Node's loader
- * would reject the file: no block at all, or a `BEGIN CERTIFICATE` marker
- * that did not yield a well-formed block.
- *
- * Only certificate blocks come back. A combined cert+key serving PEM passes
- * boot validation (which parses the first block alone), and copying its
- * private key into a tmpdir bundle `NODE_EXTRA_CA_CERTS` never reads would
- * leave key material behind a SIGKILLed daemon, where the `exit` cleanup
- * cannot run.
- */
-function extractCertificateBlocks(contents: string): string[] | undefined {
-  const normalized = contents.replace(/\r\n/g, '\n');
-  const blocks = normalized.match(STRICT_PEM_CERTIFICATE_BLOCK) ?? [];
-  const markers = normalized.match(/-----BEGIN CERTIFICATE-----/g) ?? [];
-  if (blocks.length === 0 || blocks.length !== markers.length) return undefined;
-  return blocks;
-}
+const warnedWorkerCaMergeFallbacks = new Set<string>();
 
 function warnWorkerCaMergeFallback(
   operatorCaPath: string,
   daemonCertPath: string,
   reason: string,
 ): void {
+  // Keyed on the paths alone: `reason` varies with errno text, and keying on
+  // it would let a flapping error message defeat the dedup.
+  const key = `${operatorCaPath}\0${daemonCertPath}`;
+  if (warnedWorkerCaMergeFallbacks.has(key)) return;
+  warnedWorkerCaMergeFallbacks.add(key);
   // Falling back to the daemon cert alone silently drops the operator CA
   // the merge above exists to preserve, and Node says nothing when the
   // remaining cert loads fine — so say it here.
@@ -503,7 +487,12 @@ function resolveWorkerCaCertPath(
     } catch {
       // Unreadable source or vanished bundle: rebuild below.
     }
-    mergedWorkerCaBundles.delete(cacheKey);
+    // No eviction here on purpose. Control always reaches the rebuild below,
+    // which overwrites this key on success, and every future hit re-stats the
+    // bundle and re-compares both stamps before returning it — so a stale
+    // entry can never be handed out, and deleting it changes no observable
+    // behaviour. The rebuild itself is pinned by the rotation and tmp-cleaner
+    // tests.
   }
   try {
     const sourceStamps = sources.map(sourceStamp);

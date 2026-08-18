@@ -176,6 +176,7 @@ import type {
   ChannelWorkerSnapshot,
   CreateChannelWorkerSupervisorOptions,
 } from './channel-worker-supervisor.js';
+import { loadableCertificates } from './pem-certificate-blocks.js';
 import { QWEN_SERVER_TOKEN_ENV } from './channel-worker-env.js';
 import { ChannelWebhookEnqueueError } from './channel-webhook-ipc.js';
 import {
@@ -720,9 +721,37 @@ export function describeWorkerTlsTrustGaps(opts: {
   const gaps: string[] = [];
   // Exactly what a worker gets: the serving file merged with the operator's
   // CA file (see resolveWorkerCaCertPath in channel-worker-supervisor.ts).
-  const workerTrustStore = opts.operatorCaCert
-    ? [...chain, ...parseCertChain(opts.operatorCaCert)]
-    : chain;
+  //
+  // The merge is all-or-nothing, and judges both files with the loader's own
+  // rules — so an operator file Node cannot load contributes NOTHING to the
+  // workers' trust and makes the merge hand them the daemon cert alone.
+  // Judging it here with the looser `parseCertChain` (which also falls back to
+  // DER, a format NODE_EXTRA_CA_CERTS never reads) is how a fused or DER
+  // operator bundle got counted as an anchor at boot: the daemon log stayed
+  // clean while every worker handshake failed UNABLE_TO_VERIFY_LEAF_SIGNATURE.
+  const operatorChain = opts.operatorCaCert
+    ? loadableCertificates(opts.operatorCaCert.toString('utf8'))
+    : undefined;
+  if (opts.operatorCaCert && !operatorChain) {
+    gaps.push(
+      `NODE_EXTRA_CA_CERTS "${opts.operatorCaCertPath}" holds no PEM ` +
+        `certificate block Node's loader can read — every ` +
+        `-----BEGIN/END CERTIFICATE----- marker must sit alone on its own ` +
+        `line and every block must decode, and a DER file is never read at ` +
+        `all. Channel workers therefore receive the daemon cert alone and ` +
+        `anchor nothing through this file. Re-export it as PEM and restart.`,
+    );
+  }
+  // Same rule for the serving file. In practice it always extracts — a fused
+  // or DER serving file cannot serve at all, `createSecureContext` throws at
+  // boot long before this runs — so the fallback below only keeps a leaf to
+  // reason about instead of reporting phantom gaps for a daemon that never
+  // started.
+  const servingChain =
+    loadableCertificates(opts.cert.toString('utf8')) ?? chain;
+  const workerTrustStore = operatorChain
+    ? [...servingChain, ...operatorChain]
+    : servingChain;
   // A leaf in NODE_EXTRA_CA_CERTS is a usable trust anchor only when it signed
   // itself: chain verification has no PARTIAL_CHAIN flag here, so a CA-issued
   // leaf (what the `mkcert` flow this project documents produces) never
@@ -789,6 +818,28 @@ export function describeWorkerTlsTrustGaps(opts: {
     );
   }
   return gaps;
+}
+
+/** DER for the basicConstraints OBJECT IDENTIFIER, 2.5.29.19. */
+const BASIC_CONSTRAINTS_OID_DER = Buffer.from([0x06, 0x03, 0x55, 0x1d, 0x13]);
+
+/**
+ * Whether `cert` says, in the extension itself, that it is not a CA.
+ *
+ * `X509Certificate.ca` is `false` in two very different cases: an explicit
+ * `basicConstraints CA:FALSE`, and an X.509 v1 / no-extension root (old
+ * internal PKIs, `openssl x509 -req -signkey`). OpenSSL accepts the second as
+ * an issuer — `X509_check_ca` returns 3 for a v1 cert and 2 only for an
+ * explicit CA:FALSE. Measured on Node 22 / OpenSSL 3: a leaf anchored by a v1
+ * root completes a real handshake `authorized: true`, while the explicit
+ * CA:FALSE twin really does fail INVALID_PURPOSE. Warning on `.ca` alone
+ * therefore sends operators to reissue a CA that already works.
+ *
+ * `toLegacyObject()` exposes no more than `.ca` does, so read the DER: the
+ * extension's presence is what separates the two shapes.
+ */
+function declaresNotACa(cert: X509Certificate): boolean {
+  return !cert.ca && cert.raw.includes(BASIC_CONSTRAINTS_OID_DER);
 }
 
 function isSelfSignedCert(x509: X509Certificate): boolean {
@@ -865,7 +916,7 @@ function walkWorkerAnchorPath(chain: readonly X509Certificate[]): {
       // Measured on Node 22: a CA:FALSE self-signed leaf in its own trust
       // store handshakes fine, while the same shape used as an issuer fails
       // INVALID_PURPOSE — so the constraint binds only past the leaf.
-      if (path.length > 1 && !current.ca) {
+      if (path.length > 1 && declaresNotACa(current)) {
         return { anchored: false, path, nonCaTerminator: current };
       }
       return { anchored: true, path };

@@ -585,6 +585,139 @@ describe('createChannelWorkerSupervisor', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it('keeps the daemon cert when an operator CA block does not decode', async () => {
+    // R3-1(lax arm): the marker check validates block SHAPE only. A body made
+    // of base64 *characters* that does not decode (one misplaced `=` in a
+    // truncated or hand-edited cert) passed it, was merged ahead of the daemon
+    // cert, and Node's loader then discarded the WHOLE bundle with `bad base64
+    // decode` — measured on Node 22: the worker ends up trusting NEITHER the
+    // operator CA nor the daemon cert, while /health stays green.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-ca-badb64-'));
+    const operatorCa = path.join(dir, 'operator.pem');
+    const daemonCa = path.join(dir, 'daemon.pem');
+    const lines = OPERATOR_CA_PEM.trimEnd().split('\n');
+    const body = Math.floor(lines.length / 2);
+    lines[body] = `${lines[body]!.slice(0, 10)}=${lines[body]!.slice(11)}`;
+    const corrupted = `${lines.join('\n')}\n`;
+    // Still matches the marker/alphabet shape — only decoding tells them apart.
+    expect(corrupted).toMatch(
+      /^-----BEGIN CERTIFICATE-----\n(?:[A-Za-z0-9+/=]+\n)+-----END CERTIFICATE-----\n$/,
+    );
+    fs.writeFileSync(operatorCa, corrupted);
+    fs.writeFileSync(daemonCa, DAEMON_CERT_PEM);
+
+    const { env } = await startWorkerWithCaPaths(daemonCa, operatorCa);
+
+    expect(env['NODE_EXTRA_CA_CERTS']).toBe(daemonCa);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('merges a CRLF-terminated operator CA file', async () => {
+    // R3-4: the CRLF normalization is the only thing keeping Windows-edited
+    // and vendor-exported bundles out of the daemon-cert-only fallback —
+    // Node's loader accepts CRLF PEM (measured: NODE_EXTRA_CA_CERTS with a
+    // CRLF root handshakes authorized=true), so rejecting it would drop an
+    // operator CA the loader would have taken.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-ca-crlf-'));
+    const operatorCa = path.join(dir, 'operator.pem');
+    const daemonCa = path.join(dir, 'daemon.pem');
+    fs.writeFileSync(operatorCa, OPERATOR_CA_PEM.replace(/\n/g, '\r\n'));
+    fs.writeFileSync(daemonCa, DAEMON_CERT_PEM);
+
+    const { env } = await startWorkerWithCaPaths(daemonCa, operatorCa);
+
+    const bundlePath = env['NODE_EXTRA_CA_CERTS']!;
+    expect(bundlePath).not.toBe(daemonCa);
+    // Normalized to LF on the way in, so the bundle is canonical PEM.
+    expect(fs.readFileSync(bundlePath, 'utf8')).toBe(
+      `${OPERATOR_CA_PEM.trimEnd()}\n${DAEMON_CERT_PEM.trimEnd()}\n`,
+    );
+    fs.rmSync(path.dirname(bundlePath), { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('merges an operator CA file behind a UTF-8 BOM', async () => {
+    // R3-1(strict arm): a corporate bundle saved by Windows tooling carries a
+    // BOM. Node's loader reads it fine (measured), so rejecting it sent the
+    // operator to edit a file that was never the problem.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-ca-bom-'));
+    const operatorCa = path.join(dir, 'operator.pem');
+    const daemonCa = path.join(dir, 'daemon.pem');
+    fs.writeFileSync(operatorCa, `\uFEFF${OPERATOR_CA_PEM}`);
+    fs.writeFileSync(daemonCa, DAEMON_CERT_PEM);
+
+    const { env } = await startWorkerWithCaPaths(daemonCa, operatorCa);
+
+    const bundlePath = env['NODE_EXTRA_CA_CERTS']!;
+    expect(bundlePath).not.toBe(daemonCa);
+    expect(fs.readFileSync(bundlePath, 'utf8')).toBe(
+      `${OPERATOR_CA_PEM.trimEnd()}\n${DAEMON_CERT_PEM.trimEnd()}\n`,
+    );
+    fs.rmSync(path.dirname(bundlePath), { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('merges an operator CA file with marker and body whitespace', async () => {
+    // R3-1(strict arm): Node's loader also accepts trailing whitespace after a
+    // marker line and leading whitespace on body lines (measured through a
+    // real NODE_EXTRA_CA_CERTS handshake), so the line-anchored match must not
+    // send either shape to the daemon-cert-only fallback.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-ca-ws-'));
+    const operatorCa = path.join(dir, 'operator.pem');
+    const daemonCa = path.join(dir, 'daemon.pem');
+    const padded = OPERATOR_CA_PEM.split('\n')
+      .map((line) =>
+        line.startsWith('-----')
+          ? `${line}  `
+          : line === ''
+            ? line
+            : `  ${line}`,
+      )
+      .join('\n');
+    fs.writeFileSync(operatorCa, padded);
+    fs.writeFileSync(daemonCa, DAEMON_CERT_PEM);
+
+    const { env } = await startWorkerWithCaPaths(daemonCa, operatorCa);
+
+    const bundlePath = env['NODE_EXTRA_CA_CERTS']!;
+    expect(bundlePath).not.toBe(daemonCa);
+    expect(fs.readFileSync(bundlePath, 'utf8')).toBe(
+      `${OPERATOR_CA_PEM.trimEnd()}\n${DAEMON_CERT_PEM.trimEnd()}\n`,
+    );
+    fs.rmSync(path.dirname(bundlePath), { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('warns once per path pair, not once per spawn', async () => {
+    // R3-5: every fallback branch returns without caching and `launch()`
+    // rebuilds the env on each 'initial'/'restart' spawn, while
+    // `process.emitWarning` does not dedup identical text — so a crash-looping
+    // worker appended one identical multi-line warning per restart, burying
+    // the log stream the operator reads to diagnose the loop.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-ca-dedup-'));
+    const operatorCa = path.join(dir, 'operator.pem');
+    const daemonCa = path.join(dir, 'daemon.pem');
+    fs.writeFileSync(
+      operatorCa,
+      `${OPERATOR_CA_PEM.trimEnd()}${OPERATOR_CA_PEM}`,
+    );
+    fs.writeFileSync(daemonCa, DAEMON_CERT_PEM);
+    const warnings: string[] = [];
+    const onWarning = (warning: Error) => warnings.push(warning.message);
+    process.on('warning', onWarning);
+
+    await startWorkerWithCaPaths(daemonCa, operatorCa);
+    await startWorkerWithCaPaths(daemonCa, operatorCa);
+    await startWorkerWithCaPaths(daemonCa, operatorCa);
+
+    await new Promise((resolve) => setImmediate(resolve));
+    process.off('warning', onWarning);
+    expect(
+      warnings.filter((message) => message.includes(operatorCa)),
+    ).toHaveLength(1);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it('leaves the private key of a combined operator PEM out of the bundle', async () => {
     // R2-13: boot validation parses the first block only, so a combined
     // cert+key PEM serves fine — and copying its key into a tmpdir bundle
