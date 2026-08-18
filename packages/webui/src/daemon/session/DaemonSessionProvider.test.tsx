@@ -6707,9 +6707,9 @@ describe('DaemonSessionProvider', () => {
       await renderWithProvider(<Harness />, { autoConnect: true });
       await act(async () => {
         await flushPromises();
-        // Batched transcript dispatch rides a setTimeout; under fake timers
-        // advance it so the passive assistant chunk lands before asserting.
-        await vi.advanceTimersByTimeAsync(0);
+        // Advance through the transcript batching window so the passive
+        // assistant chunk lands before asserting.
+        await vi.advanceTimersByTimeAsync(20);
         await flushPromises();
       });
       expect(blocks).toMatchObject([
@@ -12717,14 +12717,14 @@ async function flushPromises(): Promise<void> {
   await Promise.resolve();
 }
 
-// Transcript dispatch is batched onto a macrotask (setTimeout 0) so a burst of
+// Transcript dispatch is batched onto a short timer so a burst of
 // SSE events coalesces into one reducer pass. Stay-alive mock generators never
 // end the consumer loop (which would flush synchronously), so tests that assert
 // transcript state mid-stream drain the batched dispatch here.
 // Two hops are required because the dispatch timer and the first timer can be
 // registered from concurrently draining microtask chains in either order.
 async function flushTranscriptDispatch(): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 20));
   await new Promise((resolve) => setTimeout(resolve, 0));
   await Promise.resolve();
   await Promise.resolve();
