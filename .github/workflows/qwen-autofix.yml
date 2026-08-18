@@ -6266,6 +6266,19 @@ jobs:
             # walk silently stops after page one.
             if [[ -s "${WORKDIR}/resolved-comments.txt" || -s "${WORKDIR}/comment-replies.json" ]]; then
               THREADS_FETCH_OK='true'
+              # gh's stderr goes to a fresh mktemp regular file, never a named
+              # WORKDIR path: WORKDIR is bind-mounted read-write into the agent
+              # sandbox, so branch code from the round that just ran can plant
+              # anything it likes at a predictable name here. A planted FIFO
+              # blocks bash's O_WRONLY open before gh even execs, and the only
+              # reader is the tail below gh — so the step would hang to the job
+              # timeout AFTER the push landed, losing the report and the round
+              # markers and breaking this block's own invariant that a resolve
+              # failure must never fail a good push. A planted symlink would
+              # instead truncate its target and fold 300 bytes of it into a
+              # public ::warning::. Same reasoning, same shape as the `gh api
+              # user` checks elsewhere in this file.
+              threads_err_file="$(mktemp)"
               THREADS_RAW="$(gh api graphql --paginate -f owner="${REPO%%/*}" -f name="${REPO##*/}" -F pr="${PR}" -f query='
                 query($owner:String!,$name:String!,$pr:Int!,$endCursor:String){
                   repository(owner:$owner,name:$name){
@@ -6276,7 +6289,7 @@ jobs:
                       }
                     }
                   }
-                }' --jq '.data.repository.pullRequest.reviewThreads.nodes[]' 2> "${WORKDIR}/threads-fetch.err")" || THREADS_FETCH_OK='false'
+                }' --jq '.data.repository.pullRequest.reviewThreads.nodes[]' 2> "${threads_err_file}")" || THREADS_FETCH_OK='false'
               # gh emits one node per line across every page; slurp them
               # into the flat array both blocks below already expect. The
               # stream is consumed inline into a shell variable and never
@@ -6298,8 +6311,9 @@ jobs:
                 # stopped, and only this says WHY — a transient rate limit
                 # (back off) reads identically to an expired PAT (rotate) or a
                 # network failure without it.
-                echo "::warning::review-thread pagination did not complete; $(jq 'length' <<< "${THREADS_JSON}") thread(s) fetched, and any thread past them will not be resolved or answered in-thread: $(tail -c 300 "${WORKDIR}/threads-fetch.err" 2> /dev/null | tr '\r\n' '  ')"
+                echo "::warning::review-thread pagination did not complete; $(jq 'length' <<< "${THREADS_JSON}") thread(s) fetched, and any thread past them will not be resolved or answered in-thread: $(tail -c 300 "${threads_err_file}" 2> /dev/null | tr '\r\n' '  ')"
               fi
+              rm -f "${threads_err_file}"
               if [[ "$(jq -r 'map(select(.comments.pageInfo.hasNextPage)) | length' <<< "${THREADS_JSON}")" != "0" ]]; then
                 echo "::warning::a review thread carries more than 100 comments; a comment past that page is not mapped to its thread"
               fi

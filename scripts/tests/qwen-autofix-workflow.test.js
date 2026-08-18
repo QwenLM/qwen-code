@@ -12,6 +12,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -16002,6 +16003,46 @@ exit 1
     expect(paginationWarning).toContain(
       'You have exceeded a secondary rate limit.',
     );
+
+    // R4-1: gh's stderr must not go to a NAMED path under WORKDIR. WORKDIR is
+    // bind-mounted read-write into the agent sandbox, and the round that just
+    // ran executes branch code inside it, so anything at a predictable name
+    // here is attacker-chosen by the time this step runs. A planted FIFO makes
+    // bash block on the O_WRONLY open before gh execs — and the only reader is
+    // the tail AFTER gh returns — so the step hangs to the job timeout with
+    // the push already landed, losing the report and the round markers. A
+    // planted symlink instead truncates its target and folds 300 bytes of it
+    // into a public ::warning::. Probe both plants; the fix (a fresh mktemp
+    // regular file) makes the named path irrelevant, so neither can bite.
+    const canaryTarget = join(dir, 'canary-secret');
+    writeFileSync(canaryTarget, 'CANARY-MUST-SURVIVE\n');
+    const plantedPath = join(dir, 'threads-fetch.err');
+    rmSync(plantedPath, { force: true });
+    symlinkSync(canaryTarget, plantedPath);
+    const symlinkPlant = runResolve({ THREADS_FETCH_EXIT: '1' });
+    expect(symlinkPlant.status).toBe(0);
+    // Still reports, and still carries gh's own reason — the plant changed
+    // nothing about the diagnostic.
+    expect(symlinkPlant.out).toContain(
+      'review-thread pagination did not complete',
+    );
+    expect(symlinkPlant.out).toContain('threads-fetch stub failure');
+    // …and the symlink's target was never opened for write. Under the
+    // pre-fix `2> "${WORKDIR}/threads-fetch.err"` this file is truncated and
+    // overwritten with gh's stderr.
+    expect(readFileSync(canaryTarget, 'utf8')).toBe('CANARY-MUST-SURVIVE\n');
+    // …and the canary's bytes were never read back out into the annotation.
+    expect(symlinkPlant.out).not.toContain('CANARY-MUST-SURVIVE');
+    rmSync(plantedPath, { force: true });
+
+    // The named path is not written at all — the assertion that kills the
+    // mutation directly, and the same property that defuses the FIFO plant
+    // (a FIFO test cannot be written as a plain assertion: under the pre-fix
+    // code it hangs rather than fails).
+    const noNamedFile = runResolve({ THREADS_FETCH_EXIT: '1' });
+    expect(noNamedFile.status).toBe(0);
+    expect(noNamedFile.out).toContain('threads-fetch stub failure');
+    expect(existsSync(plantedPath)).toBe(false);
 
     // The residual cap the fix does NOT close: a thread carrying more than
     // 100 comments still truncates, so a comment past that page is unmapped.
