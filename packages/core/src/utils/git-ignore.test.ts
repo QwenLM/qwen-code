@@ -255,11 +255,33 @@ describe('isGitIgnored', () => {
     }
   });
 
+  it('answers for the -C worktree even when GIT_CONFIG_PARAMETERS injects config', () => {
+    // PARAMETERS is the sibling inline-config channel git itself uses to
+    // propagate -c options to child processes; aim it at a foreign
+    // excludesFile. Without the scrub the injected rule answers for the
+    // -C worktree (measured: the verdict flips to true). Forward slashes
+    // keep the fixture parseable on Windows, as in the redirect arm.
+    const excludes = join(outside, 'foreign-excludes');
+    writeFileSync(excludes, '.qwen/\n');
+    const saved = process.env['GIT_CONFIG_PARAMETERS'];
+    process.env['GIT_CONFIG_PARAMETERS'] = `'core.excludesfile'='${excludes
+      .split('\\')
+      .join('/')}'`;
+    try {
+      expect(isGitIgnored(dir, '.qwen/audits/x.md')).toBe(false);
+    } finally {
+      if (saved === undefined) delete process.env['GIT_CONFIG_PARAMETERS'];
+      else process.env['GIT_CONFIG_PARAMETERS'] = saved;
+    }
+  });
+
   it('answers for the -C worktree even when the config files redirect elsewhere', () => {
     // GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM redirect the config files;
     // point both at a foreign gitconfig whose core.excludesFile carries the
-    // rule. NOSYSTEM must go for the arm — with it set, git skips the
-    // system file and the SYSTEM scrub line would ship green unpinned.
+    // rule. beforeEach's GIT_CONFIG_NOSYSTEM stays in place: the probe
+    // closes the system tier itself, and unsetting the pin here would let
+    // the host's real /etc/gitconfig answer for the fixture — a red suite
+    // on any host whose system config matches the probe path.
     const excludes = join(outside, 'foreign-excludes');
     writeFileSync(excludes, '.qwen/\n');
     // Git config treats backslashes as escapes, so a platform-native
@@ -272,10 +294,8 @@ describe('isGitIgnored', () => {
     );
     const savedGlobal = process.env['GIT_CONFIG_GLOBAL'];
     const savedSystem = process.env['GIT_CONFIG_SYSTEM'];
-    const savedNosystem = process.env['GIT_CONFIG_NOSYSTEM'];
     process.env['GIT_CONFIG_GLOBAL'] = foreignConfig;
     process.env['GIT_CONFIG_SYSTEM'] = foreignConfig;
-    delete process.env['GIT_CONFIG_NOSYSTEM'];
     try {
       expect(isGitIgnored(dir, '.qwen/audits/x.md')).toBe(false);
     } finally {
@@ -283,21 +303,19 @@ describe('isGitIgnored', () => {
       else process.env['GIT_CONFIG_GLOBAL'] = savedGlobal;
       if (savedSystem === undefined) delete process.env['GIT_CONFIG_SYSTEM'];
       else process.env['GIT_CONFIG_SYSTEM'] = savedSystem;
-      if (savedNosystem === undefined)
-        delete process.env['GIT_CONFIG_NOSYSTEM'];
-      else process.env['GIT_CONFIG_NOSYSTEM'] = savedNosystem;
     }
   });
 
   // The pathspec-magic family is the same fatal-128 → catch →
   // false-not-ignored class as GIT_OBJECT_DIRECTORY: any one of them makes
-  // check-ignore reject every pathspec outright (exit 128), so each scrub
-  // line needs a pin — set the variable, dir's own rule keeps the expected
-  // verdict true.
+  // check-ignore reject every pathspec outright (exit 128), so each member
+  // of the family needs a pin — set the variable, dir's own rule keeps the
+  // expected verdict true.
   it.each([
     'GIT_LITERAL_PATHSPECS',
     'GIT_GLOB_PATHSPECS',
     'GIT_NOGLOB_PATHSPECS',
+    'GIT_ICASE_PATHSPECS',
   ])('answers for the -C worktree even when %s is set', (variable) => {
     writeFileSync(join(dir, '.gitignore'), '.qwen/\n');
     const saved = process.env[variable];
@@ -340,9 +358,9 @@ describe('isGitIgnored', () => {
   it.skipIf(process.platform === 'win32')(
     'kills a wedged probe at the caller’s deadline and reads it as not-ignored',
     () => {
-      // Every other call rides the default deadline; this is the only pin
-      // of the timeoutMs wiring. The blocking shim stands in for a wedged
-      // check-ignore on a worktree the caller does not control.
+      // This pins the caller-supplied timeoutMs wiring; the default
+      // deadline has its own arm below. The blocking shim stands in for a
+      // wedged check-ignore on a worktree the caller does not control.
       const shimDir = mkdtempSync(join(tmpdir(), 'git-ignore-shim-'));
       writeFileSync(join(shimDir, 'git'), '#!/bin/sh\nexec sleep 30\n', {
         mode: 0o755,
@@ -354,6 +372,10 @@ describe('isGitIgnored', () => {
         // time distinguishes the caller deadline from the 5 s default.
         const start = Date.now();
         expect(isGitIgnored(dir, 'anything.md', 500)).toBe(false);
+        // A lower bound too: without it the arm passes vacuously (~0 ms)
+        // wherever the shim cannot run (a noexec tmpdir, a PATH walk that
+        // skips it), so the wiring would ship green unpinned.
+        expect(Date.now() - start).toBeGreaterThanOrEqual(400);
         expect(Date.now() - start).toBeLessThan(2500);
       } finally {
         if (savedPath === undefined) delete process.env['PATH'];
@@ -361,5 +383,32 @@ describe('isGitIgnored', () => {
         rmSync(shimDir, { recursive: true, force: true });
       }
     },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'kills a wedged probe at the default deadline',
+    () => {
+      // Same blocking shim, no explicit deadline: every no-arg caller
+      // (e.g. team-memory-git-status.ts) rides GIT_TIMEOUT_MS, and no
+      // other arm pins its value.
+      const shimDir = mkdtempSync(join(tmpdir(), 'git-ignore-shim-'));
+      writeFileSync(join(shimDir, 'git'), '#!/bin/sh\nexec sleep 30\n', {
+        mode: 0o755,
+      });
+      const savedPath = process.env['PATH'];
+      process.env['PATH'] = `${shimDir}${delimiter}${savedPath ?? ''}`;
+      try {
+        const start = Date.now();
+        expect(isGitIgnored(dir, 'anything.md')).toBe(false);
+        const elapsed = Date.now() - start;
+        expect(elapsed).toBeGreaterThanOrEqual(4000);
+        expect(elapsed).toBeLessThan(8000);
+      } finally {
+        if (savedPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = savedPath;
+        rmSync(shimDir, { recursive: true, force: true });
+      }
+    },
+    15000,
   );
 });
