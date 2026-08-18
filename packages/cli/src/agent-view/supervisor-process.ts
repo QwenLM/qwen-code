@@ -392,8 +392,9 @@ class AgentViewSupervisorProcessHandler
       );
       void ready.catch(() => {});
       const host = await this.workers.launchPtyHostForSupervisor(launch, store);
-      await ensureSessionStillLaunchable(result.sessionId, store, host);
-      this.workers.set(result.sessionId, host);
+      // Persist the pids right after spawn, before any store I/O: a crash
+      // before the ready wait must not leave an unsignalable orphan host
+      // holding the deterministic session socket (mirrors adopt()).
       await writeAgentViewWorker(
         result.sessionId,
         {
@@ -408,6 +409,8 @@ class AgentViewSupervisorProcessHandler
         },
         store,
       );
+      await ensureSessionStillLaunchable(result.sessionId, store, host);
+      this.workers.set(result.sessionId, host);
       await ready;
       readyCompleted = true;
       await ensureSessionStillLaunchable(result.sessionId, store);
@@ -473,10 +476,14 @@ class AgentViewSupervisorProcessHandler
       }
       if (existingState?.ownership === 'adopting') {
         const worker = await readAgentViewWorker(adoption.sessionId, store);
+        // A recycled pid probes as live: once the record is past the ready
+        // timeout, treat the ghost 'adopting' as stale despite live pids —
+        // with auto-exit disabled nothing else can ever clear it.
+        const pidAlive =
+          isPidRunning(worker?.hostPid) || isPidRunning(worker?.workerPid);
         if (
           this.workers.has(adoption.sessionId) ||
-          isPidRunning(worker?.hostPid) ||
-          isPidRunning(worker?.workerPid)
+          (pidAlive && !isStaleStartingState(existingState, this.options))
         ) {
           return {
             sessionId: adoption.sessionId,
@@ -2046,8 +2053,9 @@ class WorkerRegistry {
     // for its predecessor; prompt/answer controls are preserved.
     this.preserveQueuedInputControls(sessionId);
     const existingHost = this.ptyHosts.get(sessionId);
-    existingHost?.kill('SIGTERM');
-    if (!existingHost) {
+    if (existingHost) {
+      await this.retirePredecessorHost(existingHost);
+    } else {
       // No in-memory host: a persisted worker process may still be running
       // (e.g. a graceful-stop straggler after a supervisor restart), so
       // signal it before launching its replacement.
@@ -2178,6 +2186,16 @@ class WorkerRegistry {
     return current;
   }
 
+  private async retirePredecessorHost(
+    host: AgentViewPtyHostHandle,
+  ): Promise<void> {
+    // SIGTERM alone leaves a draining worker holding the per-session socket
+    // lock, failing the replacement launch with EADDRINUSE: shut down with
+    // SIGKILL escalation and wait for the actual exit before relaunching.
+    await shutdownPtyHost(host);
+    await host.exited.catch(() => {});
+  }
+
   private async killStoredWorkerPids(
     sessionId: string,
     signal: NodeJS.Signals,
@@ -2241,23 +2259,38 @@ class WorkerRegistry {
       // before writing the 'exited' verdict, which disables every later
       // signaling path for this session.
       await this.killStoredWorkerPids(sessionId, 'SIGTERM');
-      state = {
-        ...state,
-        sessionState: 'failed',
-        processState: 'exited',
-        attachState: 'detached',
-        updatedAt: new Date().toISOString(),
-      };
-      await patchAgentViewSessionState(
+      const failedAt = new Date().toISOString();
+      let failedApplied = false;
+      await patchAgentViewSessionStateIf(
         sessionId,
-        {
-          sessionState: 'failed',
-          processState: 'exited',
-          attachState: 'detached',
-          updatedAt: state.updatedAt,
+        (existing) => {
+          // Re-validate inside the queue: a concurrent stop (or completed)
+          // verdict that landed first must not be rewritten as a failure.
+          if (
+            existing.sessionState === 'stopped' ||
+            existing.sessionState === 'completed'
+          ) {
+            return undefined;
+          }
+          failedApplied = true;
+          return {
+            sessionState: 'failed',
+            processState: 'exited',
+            attachState: 'detached',
+            updatedAt: failedAt,
+          };
         },
         this.store,
       );
+      state = failedApplied
+        ? {
+            ...state,
+            sessionState: 'failed',
+            processState: 'exited',
+            attachState: 'detached',
+            updatedAt: failedAt,
+          }
+        : ((await readAgentViewSessionState(sessionId, this.store)) ?? state);
     }
     if (state.sessionState === 'stopped') {
       state = {
@@ -2316,14 +2349,16 @@ class WorkerRegistry {
           `Agent View session ${sessionId} cannot be respawned: it is currently attached.`,
         );
       }
-      host?.kill('SIGTERM');
-      if (host && this.ptyHosts.get(sessionId) === host) {
-        // Reviving releases only the registry entry: queued prompt/answer
-        // controls and the persisted marker belong to accepted user input
-        // the replacement worker must still deliver. respawnSessionLocked
-        // filters out superseded stop/redraw controls before launching.
-        this.ptyHosts.delete(sessionId);
-      } else if (!host) {
+      if (host) {
+        await this.retirePredecessorHost(host);
+        if (this.ptyHosts.get(sessionId) === host) {
+          // Reviving releases only the registry entry: queued prompt/answer
+          // controls and the persisted marker belong to accepted user input
+          // the replacement worker must still deliver. respawnSessionLocked
+          // filters out superseded stop/redraw controls before launching.
+          this.ptyHosts.delete(sessionId);
+        }
+      } else {
         await this.killStoredWorkerPids(sessionId, 'SIGTERM');
       }
       await patchAgentViewSessionState(

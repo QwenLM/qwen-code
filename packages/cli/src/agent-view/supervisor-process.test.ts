@@ -2049,7 +2049,7 @@ describe('Agent View supervisor process helpers', () => {
     await socket.waitForOutput('request-1');
 
     expect(hosts).toHaveLength(2);
-    expect(hosts[0]?.killedWith).toBe('SIGTERM');
+    expect(hosts[0]?.shutdowns).toBe(1);
     expect(JSON.parse(socket.outputLine())).toMatchObject({
       id: 'request-1',
       ok: true,
@@ -2485,7 +2485,7 @@ describe('Agent View supervisor process helpers', () => {
       ],
     });
     expect(hosts).toHaveLength(2);
-    expect(hosts[0]?.killedWith).toBe('SIGTERM');
+    expect(hosts[0]?.shutdowns).toBe(1);
 
     await fs.rm(globalDir, { recursive: true, force: true });
   });
@@ -3199,11 +3199,10 @@ describe('Agent View supervisor process helpers', () => {
     await expect(handler.hibernateIdleSessions()).resolves.toEqual({
       hibernated: [result.sessionId],
     });
-    expect(hosts[0]?.killedWith).toBe('SIGTERM');
+    expect(hosts[0]?.shutdowns).toBe(1);
     await expect(
       readAgentViewSessionState(result.sessionId, { globalDir }),
     ).resolves.toMatchObject({ processState: 'hibernated' });
-    hosts[0]?.resolveExit(0);
     await new Promise((resolve) => setImmediate(resolve));
     await expect(
       readAgentViewSessionState(result.sessionId, { globalDir }),
@@ -3239,7 +3238,7 @@ describe('Agent View supervisor process helpers', () => {
     await expect(handler.hibernateIdleSessions()).resolves.toEqual({
       hibernated: [result.sessionId],
     });
-    expect(hosts[1]?.killedWith).toBe('SIGTERM');
+    expect(hosts[1]?.shutdowns).toBe(1);
 
     await handler.respawn?.({ sessionId: result.sessionId });
     await writeSessionStateForTest(result.sessionId, globalDir, 'idle');
@@ -3265,7 +3264,7 @@ describe('Agent View supervisor process helpers', () => {
     await expect(handler.hibernateIdleSessions()).resolves.toEqual({
       hibernated: [result.sessionId],
     });
-    expect(hosts[2]?.killedWith).toBe('SIGTERM');
+    expect(hosts[2]?.shutdowns).toBe(1);
 
     await fs.rm(globalDir, { recursive: true, force: true });
   });
@@ -3710,7 +3709,7 @@ describe('Agent View supervisor process helpers', () => {
       shuttingDown: true,
       workersStopped: 1,
     });
-    expect(hosts[0]?.killedWith).toBe('SIGTERM');
+    expect(hosts[0]?.shutdowns).toBe(1);
     await expect(
       readAgentViewSessionState(result.sessionId, { globalDir }),
     ).resolves.toMatchObject({
@@ -3734,6 +3733,7 @@ describe('Agent View supervisor process helpers', () => {
 
 type FakePtyHost = AgentViewPtyHostHandle & {
   killedWith?: string;
+  shutdowns: number;
   input: string;
   resizes: Array<{ columns: number; rows: number }>;
   emitData(data: string): void;
@@ -3753,6 +3753,7 @@ function fakePtyHost(
     output: new BoundedOutputRing(100),
     input: '',
     resizes: [],
+    shutdowns: 0,
     exited: new Promise((resolve) => {
       resolveExit = resolve;
     }),
@@ -3772,6 +3773,10 @@ function fakePtyHost(
     },
     kill: (signal) => {
       host.killedWith = signal;
+    },
+    shutdown: () => {
+      host.shutdowns += 1;
+      resolveExit({ exitCode: 0 });
     },
     resolveExit: (exitCode) => {
       resolveExit({ exitCode });
