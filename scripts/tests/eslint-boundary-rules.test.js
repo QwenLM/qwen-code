@@ -1215,4 +1215,101 @@ describe('eslint cli serve boundary rules', () => {
       ).toBe(true);
     }
   });
+
+  // R13-5: one binding hop must not defeat the name-based arms — the
+  // top-level binding-propagation pre-scan covers rebinding chains,
+  // member extraction, destructuring from guarded globals / tracked
+  // namespaces / awaited dynamic imports, and .then namespace params.
+  it('tracks bindings propagated from guarded names and imports', async () => {
+    for (const code of [
+      "const { Worker: W } = await import('node:worker_threads');\nnew W('../serve/worker.js');",
+      "const { fork: f } = await import('node:child_process');\nf('../serve/index.js');",
+      "import * as wt from 'node:worker_threads';\nconst { Worker: W } = wt;\nnew W('../serve/worker.js');",
+      "const W = Worker;\nconst W2 = W;\nnew W2('../serve/worker.js');",
+      "const m = await import('node:vm');\nm.runInThisContext('x');",
+      "import('node:vm').then((vmNs) => { vmNs.runInThisContext('x'); });",
+      "const P = process;\nP.getBuiltinModule('node:module');",
+      "const { mock: m } = await import('vitest');\nm('../serve/live/live-task-service.js');",
+    ]) {
+      await expectServeBoundaryError(ACP_FIXTURE, code);
+    }
+    // Extracted/destructured getBuiltinModule keeps the dedicated
+    // moduleBuiltin message on every entrance.
+    for (const code of [
+      "const { getBuiltinModule: g } = process;\ng('node:module');",
+      'const g = process.getBuiltinModule;\ng.call(null, "node:module");',
+    ]) {
+      const [result] = await lintCliFile(ACP_FIXTURE, code);
+      expect(
+        result.messages.some(
+          (message) =>
+            message.ruleId === RULE_ID && message.messageId === 'moduleBuiltin',
+        ),
+      ).toBe(true);
+    }
+  });
+
+  // R13-6: the indirection and Reflect arms guard Worker/Script too —
+  // the target lists mirror the direct-call arms.
+  it('covers Worker/Script through indirection and Reflect targets', async () => {
+    for (const code of [
+      "import * as wt from 'node:worker_threads';\nReflect.construct(wt.Worker, ['../serve/worker.js']);",
+      "import * as wt from 'node:worker_threads';\nReflect.apply(wt.Worker, null, ['../serve/worker.js']);",
+      "const W = Worker.bind(null, '../serve/worker.js');\nnew W();",
+      "import { Script as S } from 'node:vm';\nS.call(null, 'x');",
+    ]) {
+      await expectServeBoundaryError(ACP_FIXTURE, code);
+    }
+  });
+
+  // R13-7: statically-known callee shapes resolve to their targets; an
+  // unclassifiable callee fails closed like an unresolvable source.
+  it('resolves or fails closed on opaque callee shapes', async () => {
+    await expectServeBoundaryError(
+      ACP_FIXTURE,
+      "import { fork } from 'node:child_process';\n[fork][0]('../serve/index.js');",
+    );
+    await expectServeBoundaryError(
+      ACP_FIXTURE,
+      "new [Worker][0]('../serve/worker.js');",
+    );
+    for (const code of [
+      "Reflect.get(process, 'getBuiltinModule')('node:module');",
+      "(1 ? process.getBuiltinModule : 0)('node:module');",
+      "const { getBuiltinModule: g } = process;\nReflect.get(process, 'getBuiltinModule').call(null, 'node:module');",
+      // Opaque key on a guarded global at callee depth keeps the family
+      // message (R13-4 posture, R13-7 entrance).
+      "const k = 'getBuiltinModule';\nReflect.get(process, k)('node:module');",
+    ]) {
+      const [result] = await lintCliFile(ACP_FIXTURE, code);
+      expect(
+        result.messages.some(
+          (message) =>
+            message.ruleId === RULE_ID && message.messageId === 'moduleBuiltin',
+        ),
+      ).toBe(true);
+    }
+    for (const code of [
+      "[Worker][0]('../serve/worker.js');",
+      "const i = 1;\n[Worker][i]('../serve/worker.js');",
+      "const c = Math.random();\n(c ? process.getBuiltinModule : 0)('node:module');",
+    ]) {
+      await expectServeBoundaryError(ACP_FIXTURE, code);
+    }
+    // Inline-defined callees cannot alias a guarded binding, and call
+    // results of any other provenance (it.each spellings, factories)
+    // keep their documented pass-through — no over-blocking (regression
+    // pins).
+    await expectNoBoundaryHits(ACP_FIXTURE, "((x) => x)('y');");
+    await expectNoBoundaryHits(ACP_FIXTURE, 'new (class {})();');
+    await expectNoBoundaryHits(
+      ACP_FIXTURE,
+      "const w = makeWorker('./plugin.js');\nw();",
+    );
+    await expectNoBoundaryHits(
+      ACP_FIXTURE,
+      "each([1, 2])('case %s', (n) => n);",
+    );
+    await expectNoBoundaryHits(ACP_FIXTURE, 'finishUpdate!();');
+  });
 });

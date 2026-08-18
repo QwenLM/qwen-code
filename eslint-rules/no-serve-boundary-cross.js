@@ -23,7 +23,12 @@
  * paths, traversal-bearing bare specifiers, `node:module` imports,
  * `process.getBuiltinModule`) is rejected in a guarded tree, because a
  * guarded tree has no legitimate business importing code it cannot name —
- * none of those shapes occurs anywhere in the guarded trees today.
+ * none of those shapes occurs anywhere in the guarded trees today. The
+ * same posture covers CALLEE opacity: a call whose callee cannot be
+ * classified (an unreduced call result, undecided conditional, or
+ * non-static element access) is rejected too, and one binding hop from a
+ * guarded name is tracked, because a guarded function reached through an
+ * opaque or rebound callee is the same boundary crossing (R13-5, R13-7).
  *
  * Path comparison is case-insensitive: case-variant spellings
  * (`../../Serve/index.js`) load serve/ on case-insensitive filesystems, so
@@ -318,11 +323,103 @@ export default {
 
     /** Unwrap sequence expressions recursively: `(0, x)` evaluates to
      *  `x`, and double-wrapping `(0, (0, x))` is equally transparent
-     *  (R12-2). */
+     *  (R12-2). TS assertion/instantiation wrappers (`x!`, `x as T`,
+     *  `x satisfies T`, `x<T>`) are runtime no-ops and equally
+     *  transparent. */
     function unwrapSequence(node) {
       let current = node;
-      while (current?.type === 'SequenceExpression') {
-        current = current.expressions[current.expressions.length - 1];
+      for (;;) {
+        if (current?.type === 'SequenceExpression') {
+          current = current.expressions[current.expressions.length - 1];
+          continue;
+        }
+        if (
+          current?.type === 'TSNonNullExpression' ||
+          current?.type === 'TSAsExpression' ||
+          current?.type === 'TSSatisfiesExpression' ||
+          current?.type === 'TSInstantiationExpression'
+        ) {
+          current = current.expression;
+          continue;
+        }
+        break;
+      }
+      return current;
+    }
+
+    /** Callee resolution on top of unwrapSequence (#8084 R13-7): the
+     *  statically-known callee shapes evaluate to their targets — element
+     *  access into a literal array (`[fork][0]`), a conditional whose
+     *  test is a static literal, and `Reflect.get(obj, 'key')` (the
+     *  equivalent member access). Every other shape keeps its node so the
+     *  classifiability check can fail it closed. */
+    function unwrapCallee(node) {
+      let current = unwrapSequence(node);
+      for (;;) {
+        // A member chain whose OBJECT is itself a resolvable shape
+        // (`Reflect.get(process, 'getBuiltinModule').call(...)`) keeps
+        // its property but takes the resolved object.
+        if (current?.type === 'MemberExpression') {
+          const object = unwrapCallee(current.object);
+          if (object !== current.object) {
+            current = {
+              type: 'MemberExpression',
+              object,
+              property: current.property,
+              computed: current.computed,
+            };
+            continue;
+          }
+        }
+        if (
+          current?.type === 'MemberExpression' &&
+          current.computed &&
+          current.object.type === 'ArrayExpression' &&
+          current.property.type === 'Literal' &&
+          typeof current.property.value === 'number' &&
+          Number.isInteger(current.property.value) &&
+          current.property.value >= 0 &&
+          current.property.value < current.object.elements.length &&
+          current.object.elements[current.property.value]
+        ) {
+          current = unwrapSequence(
+            current.object.elements[current.property.value],
+          );
+          continue;
+        }
+        if (current?.type === 'ConditionalExpression') {
+          const test = unwrapSequence(current.test);
+          let decided;
+          if (test?.type === 'Literal') {
+            decided = Boolean(test.value);
+          } else if (test?.type === 'TemplateLiteral') {
+            const value = staticTemplateValue(test);
+            if (value === undefined) break;
+            decided = Boolean(value);
+          } else {
+            break;
+          }
+          current = unwrapSequence(
+            decided ? current.consequent : current.alternate,
+          );
+          continue;
+        }
+        if (
+          current?.type === 'CallExpression' &&
+          memberCall(current.callee, ['Reflect'], /^get$/) &&
+          current.arguments.length >= 2 &&
+          current.arguments[1].type === 'Literal' &&
+          typeof current.arguments[1].value === 'string'
+        ) {
+          current = {
+            type: 'MemberExpression',
+            object: current.arguments[0],
+            property: current.arguments[1],
+            computed: true,
+          };
+          continue;
+        }
+        break;
       }
       return current;
     }
@@ -425,7 +522,9 @@ export default {
     function isProcessObject(node) {
       const unwrapped = unwrapSequence(node);
       if (unwrapped?.type === 'Identifier') {
-        return unwrapped.name === 'process';
+        return (
+          unwrapped.name === 'process' || processAliases.has(unwrapped.name)
+        );
       }
       if (unwrapped?.type !== 'MemberExpression') return false;
       const objectName = rightmostObjectName(unwrapped.object);
@@ -466,6 +565,13 @@ export default {
       /^(?:runInThisContext|runInNewContext|runInContext|compileFunction)$/;
     const vmBareExecAliases = new Set();
     const vitestLoaderAliases = new Set();
+    // Rebindings of the `process` global (isProcessObject consults these)
+    // and of getBuiltinModule extracted/destructured from it (#8084 R13-5).
+    const processAliases = new Set();
+    const bareGetBuiltinModuleAliases = new Set();
+    /** local name -> bare lib, for namespace-like bindings of tracked libs */
+    const namespaceAliases = new Map();
+    const trackedLibs = /^(?:worker_threads|child_process|vitest|vm)$/;
 
     function registerImportAliases(importNode) {
       const value = importNode.source?.value;
@@ -476,6 +582,16 @@ export default {
           spec.type === 'ImportSpecifier'
             ? (spec.imported?.name ?? spec.imported?.value)
             : undefined;
+        // Namespace/default imports of a tracked lib are destructurable
+        // namespaces: `const { Worker: W } = wt` must see wt's lib
+        // (#8084 R13-5). vm additionally uses the name as a vm object.
+        if (
+          (spec.type === 'ImportNamespaceSpecifier' ||
+            spec.type === 'ImportDefaultSpecifier') &&
+          trackedLibs.test(bare)
+        ) {
+          namespaceAliases.set(spec.local.name, bare);
+        }
         if (bare === 'child_process' && imported === 'fork') {
           forkAliases.add(spec.local.name);
         } else if (bare === 'worker_threads' && imported === 'Worker') {
@@ -508,6 +624,191 @@ export default {
       if (statement.type === 'ImportDeclaration') {
         registerImportAliases(statement);
       }
+    }
+
+    /** Bare lib name of a (possibly awaited, sequence-wrapped) dynamic
+     *  import expression; undefined for any other shape. */
+    function dynamicImportLib(node) {
+      let current = unwrapSequence(node);
+      if (current?.type === 'AwaitExpression') {
+        current = unwrapSequence(current.argument);
+      }
+      if (current?.type !== 'ImportExpression') return undefined;
+      const source =
+        current.source?.type === 'Literal' ? current.source.value : undefined;
+      if (typeof source !== 'string') return undefined;
+      return source.startsWith('node:') ? source.slice(5) : source;
+    }
+
+    /** Lib of a namespace-like object expression: a tracked namespace
+     *  alias, or an inline dynamic import of a tracked lib. */
+    function namespaceLibOf(node) {
+      const current = unwrapSequence(node);
+      if (current?.type === 'Identifier') {
+        return namespaceAliases.get(current.name);
+      }
+      const lib = dynamicImportLib(current);
+      return lib !== undefined && trackedLibs.test(lib) ? lib : undefined;
+    }
+
+    /** Register one named binding extracted from a tracked lib. */
+    function registerNamedBinding(local, imported, lib, add) {
+      if (lib === 'child_process' && imported === 'fork') {
+        add(forkAliases, local);
+      } else if (lib === 'worker_threads' && imported === 'Worker') {
+        add(workerAliases, local);
+      } else if (lib === 'vitest' && vitestLoaderNames.test(imported ?? '')) {
+        add(vitestLoaderAliases, local);
+      } else if (lib === 'vm') {
+        if (imported === 'Script') add(scriptAliases, local);
+        else if (vmExecNames.test(imported ?? '')) {
+          add(vmBareExecAliases, local);
+        }
+      }
+    }
+
+    // import('<lib>').then((ns) => ...) binds the namespace inside the
+    // callback — register the first parameter of any such callback,
+    // wherever it appears (#8084 R13-5).
+    (function walkForThenNamespaces(node) {
+      if (!node || typeof node !== 'object') return;
+      if (node.type === 'CallExpression') {
+        const callee = unwrapSequence(node.callee);
+        const callback = node.arguments?.[0];
+        if (
+          callee?.type === 'MemberExpression' &&
+          staticPropertyName(callee.property, callee.computed) === 'then' &&
+          (callback?.type === 'ArrowFunctionExpression' ||
+            callback?.type === 'FunctionExpression') &&
+          callback.params[0]?.type === 'Identifier'
+        ) {
+          const lib = dynamicImportLib(callee.object);
+          if (lib !== undefined && trackedLibs.test(lib)) {
+            if (lib === 'vm') vmObjectNames.add(callback.params[0].name);
+            namespaceAliases.set(callback.params[0].name, lib);
+          }
+        }
+      }
+      for (const key of Object.keys(node)) {
+        if (key === 'parent') continue;
+        const value = node[key];
+        if (Array.isArray(value)) {
+          for (const child of value) walkForThenNamespaces(child);
+        } else if (value && typeof value.type === 'string') {
+          walkForThenNamespaces(value);
+        }
+      }
+    })(context.sourceCode.ast);
+
+    // One binding hop defeats a name-based arm: a local holding a guarded
+    // function IS that function (#8084 R13-5). Propagate bindings over
+    // top-level declarators to a fixpoint (rebinding chains converge):
+    // rebinding of tracked names, member extraction from guarded globals
+    // and tracked namespaces, destructuring from guarded globals /
+    // namespaces / awaited dynamic imports, and whole-namespace bindings
+    // from dynamic imports.
+    for (;;) {
+      let changed = false;
+      const add = (set, name) => {
+        if (!set.has(name)) {
+          set.add(name);
+          changed = true;
+        }
+      };
+      for (const statement of context.sourceCode.ast?.body ?? []) {
+        if (statement.type !== 'VariableDeclaration') continue;
+        for (const declarator of statement.declarations) {
+          const init = declarator.init
+            ? unwrapSequence(declarator.init)
+            : undefined;
+          if (!init) continue;
+
+          if (declarator.id.type === 'Identifier') {
+            const local = declarator.id.name;
+            if (init.type === 'Identifier') {
+              const name = init.name;
+              if (name === 'process' || processAliases.has(name)) {
+                add(processAliases, local);
+              }
+              if (name === 'Worker' || workerAliases.has(name)) {
+                add(workerAliases, local);
+              }
+              if (name === 'fork' || forkAliases.has(name)) {
+                add(forkAliases, local);
+              }
+              if (name === 'Script' || scriptAliases.has(name)) {
+                add(scriptAliases, local);
+              }
+              if (
+                name === 'getBuiltinModule' ||
+                bareGetBuiltinModuleAliases.has(name)
+              ) {
+                add(bareGetBuiltinModuleAliases, local);
+              }
+              if (vmObjectNames.has(name)) add(vmObjectNames, local);
+              if (vmBareExecAliases.has(name)) add(vmBareExecAliases, local);
+              if (vitestLoaderAliases.has(name)) {
+                add(vitestLoaderAliases, local);
+              }
+              const nsLib = namespaceAliases.get(name);
+              if (
+                nsLib !== undefined &&
+                namespaceAliases.get(local) !== nsLib
+              ) {
+                namespaceAliases.set(local, nsLib);
+                changed = true;
+              }
+            }
+            if (init.type === 'MemberExpression') {
+              const property = staticPropertyName(init.property, init.computed);
+              if (
+                property === 'getBuiltinModule' &&
+                isProcessObject(init.object)
+              ) {
+                add(bareGetBuiltinModuleAliases, local);
+              }
+              if (property !== undefined) {
+                const lib = namespaceLibOf(init.object);
+                if (lib !== undefined) {
+                  registerNamedBinding(local, property, lib, add);
+                }
+              }
+            }
+            const lib = dynamicImportLib(init);
+            if (lib !== undefined && trackedLibs.test(lib)) {
+              if (lib === 'vm') add(vmObjectNames, local);
+              if (namespaceAliases.get(local) !== lib) {
+                namespaceAliases.set(local, lib);
+                changed = true;
+              }
+            }
+          }
+
+          if (declarator.id.type === 'ObjectPattern') {
+            const fromProcess = isProcessObject(init);
+            const lib = fromProcess ? undefined : namespaceLibOf(init);
+            if (!fromProcess && lib === undefined) continue;
+            for (const property of declarator.id.properties) {
+              if (
+                property.type !== 'Property' ||
+                property.value.type !== 'Identifier'
+              ) {
+                continue;
+              }
+              const key = staticPropertyName(property.key, property.computed);
+              if (key === undefined) continue;
+              if (fromProcess) {
+                if (key === 'getBuiltinModule') {
+                  add(bareGetBuiltinModuleAliases, property.value.name);
+                }
+              } else {
+                registerNamedBinding(property.value.name, key, lib, add);
+              }
+            }
+          }
+        }
+      }
+      if (!changed) break;
     }
 
     return {
@@ -545,8 +846,61 @@ export default {
       },
       CallExpression(node) {
         // `(0, x)` (and nested `(0, (0, x))`) evaluates to `x` — unwrap
-        // recursively and uniformly before every callee-shape check (R12-2).
-        const callee = unwrapSequence(node.callee);
+        // recursively and uniformly before every callee-shape check
+        // (R12-2); statically-known callee shapes ([x][0], static
+        // conditionals, Reflect.get with a literal key) additionally
+        // resolve to their targets (R13-7).
+        const callee = unwrapCallee(node.callee);
+
+        // Callee opacity (#8084 R13-7): a guarded function invoked
+        // through a callee shape no arm can classify evades every
+        // name-based check. Fail closed narrowly: a conditional callee
+        // whose branch is statically undecided, a non-static element
+        // access into an array callee (the static-index form is resolved
+        // by unwrapCallee), and Reflect.get with an opaque key on a
+        // guarded global. Call-result callees of any other provenance
+        // (`it.each([...])(...)`, factory patterns) keep the documented
+        // pass-through — their binding is no more resolvable than any
+        // other local the rule does not track.
+        if (callee.type === 'ConditionalExpression') {
+          reportUnknown(node);
+          return;
+        }
+        if (
+          callee.type === 'MemberExpression' &&
+          callee.computed &&
+          callee.object.type === 'ArrayExpression'
+        ) {
+          reportUnknown(node);
+          return;
+        }
+        if (
+          callee.type === 'CallExpression' &&
+          memberCall(callee.callee, ['Reflect'], /^get$/) &&
+          callee.arguments.length > 0
+        ) {
+          const staticKey =
+            callee.arguments.length >= 2 &&
+            staticPropertyName(callee.arguments[1], true) !== undefined;
+          if (!staticKey) {
+            const target = unwrapSequence(callee.arguments[0]);
+            const targetObjectName = rightmostObjectName(target);
+            if (
+              isProcessObject(target) ||
+              targetObjectName === 'process' ||
+              targetObjectName === 'globalThis' ||
+              targetObjectName === 'global'
+            ) {
+              reportUnknown(
+                node,
+                isProcessObject(target) || targetObjectName === 'process'
+                  ? 'moduleBuiltin'
+                  : 'failClosed',
+              );
+              return;
+            }
+          }
+        }
 
         // Function.prototype.call/apply/bind indirection on guarded
         // callees: `.call` unwraps like a direct call with the specifier
@@ -575,6 +929,13 @@ export default {
               innerName === 'eval' ||
               innerName === 'Function' ||
               innerName === 'constructor' ||
+              // Worker/Script forward a module path / code — same
+              // fail-closed class as eval/Function; the alias sets keep
+              // this list mirrored with the direct-call arms (R13-6).
+              innerName === 'Worker' ||
+              innerName === 'Script' ||
+              (innerName !== undefined && workerAliases.has(innerName)) ||
+              (innerName !== undefined && scriptAliases.has(innerName)) ||
               // vm exec callees forward CODE, not a specifier — and a
               // renamed vm-exec import resolves through its alias set.
               (innerName !== undefined && vmExecNames.test(innerName)) ||
@@ -583,7 +944,11 @@ export default {
               reportUnknown(node);
               return;
             }
-            if (innerName === 'getBuiltinModule') {
+            if (
+              innerName === 'getBuiltinModule' ||
+              (innerName !== undefined &&
+                bareGetBuiltinModuleAliases.has(innerName))
+            ) {
               if (node.arguments.length > 0) {
                 reportUnknown(node, 'moduleBuiltin');
               }
@@ -673,6 +1038,20 @@ export default {
           return;
         }
 
+        // Worker invoked as a plain function — direct or reached through
+        // a resolved opaque shape ([Worker][0]('...'), R13-7). The
+        // guarded trees have no legitimate Worker-named factories, and
+        // the member match mirrors the object-agnostic new-Worker arm
+        // (#8084 R13-6).
+        if (
+          node.arguments.length > 0 &&
+          (calleeName === 'Worker' ||
+            (callee.type === 'Identifier' && workerAliases.has(callee.name)))
+        ) {
+          reportUnknown(node);
+          return;
+        }
+
         // node:vm string-execution surface — runInThisContext /
         // runInNewContext / runInContext / compileFunction compile or run
         // arbitrary string code. Scoped to vm imports (default/namespace
@@ -756,7 +1135,11 @@ export default {
           (callee.type === 'MemberExpression' &&
             builtinModuleProperty(callee) &&
             namedGuardedObjectWithOpaqueKey(callee.object)) ||
-          (callee.type === 'Identifier' && callee.name === 'getBuiltinModule')
+          // Bare identifier: destructured/extracted spellings resolve
+          // through the alias set (R13-5 binding propagation).
+          (callee.type === 'Identifier' &&
+            (callee.name === 'getBuiltinModule' ||
+              bareGetBuiltinModuleAliases.has(callee.name)))
         ) {
           reportUnknown(node, 'moduleBuiltin');
           return;
@@ -798,6 +1181,11 @@ export default {
               targetName === 'eval' ||
               targetName === 'Function' ||
               targetName === 'fork' ||
+              // Worker mirrors the object-agnostic new-Worker arm; the
+              // alias sets keep this list mirrored with the direct-call
+              // arms (R13-6).
+              targetName === 'Worker' ||
+              (targetName !== undefined && workerAliases.has(targetName)) ||
               (targetName !== undefined &&
                 vmExecNames.test(targetName) &&
                 isVmObject(target.object)) ||
@@ -847,8 +1235,26 @@ export default {
       },
       NewExpression(node) {
         // Recursive sequence unwrap, same invariant as CallExpression
-        // (`new (0, (0, Worker))(…)` is transparent too, R12-2).
-        const callee = unwrapSequence(node.callee);
+        // (`new (0, (0, Worker))(…)` is transparent too, R12-2); the
+        // statically-known callee shapes resolve as well (R13-7).
+        const callee = unwrapCallee(node.callee);
+
+        // Callee opacity, constructor spelling (#8084 R13-7): same
+        // narrow fail-closed shapes as the call arm — an undecided
+        // conditional callee and a non-static element access into an
+        // array callee.
+        if (callee.type === 'ConditionalExpression') {
+          reportUnknown(node);
+          return;
+        }
+        if (
+          callee.type === 'MemberExpression' &&
+          callee.computed &&
+          callee.object.type === 'ArrayExpression'
+        ) {
+          reportUnknown(node);
+          return;
+        }
 
         // new Function(body) / new globalThis.Function(body) compiles
         // arbitrary string code that can import() anything — fail closed
