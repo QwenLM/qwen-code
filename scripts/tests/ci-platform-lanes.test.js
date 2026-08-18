@@ -41,9 +41,12 @@ describe('platform lanes — triggers', () => {
   for (const lane of LANES) {
     it(`${lane} runs on the schedule, the queue, a dispatch, and a sensitive PR`, () => {
       const cond = condOf(lane);
-      expect(cond).toContain("github.event_name == 'schedule'");
-      expect(cond).toContain("github.event_name == 'merge_group'");
-      expect(cond).toContain("github.event_name == 'workflow_dispatch'");
+      // Presence AND the disjunction between clauses: an `&&` where a `||`
+      // belongs leaves the gate unsatisfiable for a trigger (event_name is
+      // single-valued) while a presence-only check stays green.
+      expect(cond).toMatch(/event_name == 'schedule'\s*\|\|/);
+      expect(cond).toMatch(/event_name == 'merge_group'\s*\|\|/);
+      expect(cond).toMatch(/event_name == 'workflow_dispatch'\s*\|\|/);
       expect(cond).toContain("github.event_name == 'pull_request'");
       expect(cond).toContain(
         'needs.classify_platform.outputs.platform_sensitive',
@@ -61,6 +64,15 @@ describe('platform lanes — triggers', () => {
       // And the gate must survive a skipped or failed classifier job.
       expect(cond).toContain('!cancelled()');
       expect(ci.jobs[lane].needs).toContain('classify_platform');
+    });
+  }
+
+  for (const lane of LANES) {
+    it(`${lane} is bounded so a hang cannot burn the 360-minute default`, () => {
+      // The nightly's alert fires only when the run completes; a lane hung
+      // on a host-specific prompt otherwise sits out GitHub's default
+      // timeout before it fails and anyone is told.
+      expect(ci.jobs[lane]['timeout-minutes'], lane).toBe(60);
     });
   }
 
@@ -152,6 +164,18 @@ describe('platform lanes — the sensitivity classifier job', () => {
     // non-zero exit or anything else warns and runs the lanes.
     expect(run).toContain('0:true|0:false');
     expect(run).toMatch(/::warning::.*running the macOS and Windows lanes/);
+    // The wrapper call is wrapped in `set +e`/`set -e`: the runner invokes
+    // `shell: bash` steps with `-e`, so without the guard a non-zero exit
+    // aborts the step at the assignment and the warn-and-run case above is
+    // dead code. Same shape as the sibling Classify CI profile step.
+    expect(run).toContain(
+      [
+        '  set +e',
+        '  classified="$(.github/scripts/ci/classify-pr-profile.sh "${GITHUB_REPOSITORY}" "${PR_NUMBER}" platform)"',
+        '  rc=$?',
+        '  set -e',
+      ].join('\n'),
+    );
   });
 
   it('drives the classifier through the shared listing wrapper', () => {
@@ -181,6 +205,10 @@ describe('platform lanes — a failing nightly is visible', () => {
     // effectively off again.
     const wr = (failureIssue[true] ?? failureIssue['on']).workflow_run;
     expect(wr.workflows).toContain('Qwen Code CI');
+    // `workflow_run.workflows` matches the watched workflow's `name:` key:
+    // pin the coupling itself, so renaming ci.yml's name fails here instead
+    // of silently stopping the nightly's workflow_run events.
+    expect(wr.workflows).toContain(ci.name);
     const cond = String(failureIssue.jobs.analyze.if);
     expect(cond).toContain("workflow_run.event == 'schedule'");
     expect(cond).toContain("workflow_run.head_branch == 'main'");

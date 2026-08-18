@@ -27,7 +27,7 @@ jobs:
   # and hands the finished title and body to the privileged job as outputs.
   analyze:
     name: 'Identify the failing tests'
-    if: "${{ github.repository == 'QwenLM/qwen-code' && github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.head_branch == 'main' && (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'schedule') }}"
+    if: "${{ github.repository == 'QwenLM/qwen-code' && github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.head_branch == 'main' && (github.event.workflow_run.event == 'push' || (github.event.workflow_run.event == 'schedule' && github.event.workflow_run.name == 'Qwen Code CI')) }}"
     runs-on: 'ubuntu-latest'
     timeout-minutes: 10
     permissions:

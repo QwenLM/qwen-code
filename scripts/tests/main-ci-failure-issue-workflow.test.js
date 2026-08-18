@@ -36,12 +36,17 @@ describe('main CI failure issue workflow', () => {
     expect(workflow).toContain(
       "github.event.workflow_run.head_branch == 'main'",
     );
-    // Push covers the other two watched workflows; schedule is the nightly
-    // platform-lane run. A pull-request run of any of them must never open an
-    // issue — that is contributor-triggered, and the branch filter plus this
-    // clause are what keep it out.
-    expect(workflow).toContain("github.event.workflow_run.event == 'push'");
-    expect(workflow).toContain("github.event.workflow_run.event == 'schedule'");
+    // Push covers the other two watched workflows; schedule is scoped to
+    // 'Qwen Code CI' — that nightly is the platform lanes' only trigger
+    // outside a pull request, and the other watched workflows' own
+    // nightlies must not dispatch the autofix agent through this watcher.
+    // A pull-request run of any of them must never open an issue — that is
+    // contributor-triggered, and the branch filter plus this clause are
+    // what keep it out. Pin the whole event clause so a connective or
+    // scope mutation fails here.
+    expect(workflow).toContain(
+      "(github.event.workflow_run.event == 'push' || (github.event.workflow_run.event == 'schedule' && github.event.workflow_run.name == 'Qwen Code CI'))",
+    );
     expect(workflow).not.toContain(
       "github.event.workflow_run.event == 'pull_request'",
     );

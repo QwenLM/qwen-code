@@ -193,8 +193,10 @@ jobs:
           # gate that fails open stops testing without ever saying so.
           sensitive=true
           if [ "${IS_SAME_REPO_PR}" = 'true' ]; then
+            set +e
             classified="$(.github/scripts/ci/classify-pr-profile.sh "${GITHUB_REPOSITORY}" "${PR_NUMBER}" platform)"
             rc=$?
+            set -e
             case "${rc}:${classified}" in
               0:true|0:false) sensitive="${classified}" ;;
               *) echo "::warning::Platform-sensitivity classifier returned rc=${rc} '${classified}'; running the macOS and Windows lanes." ;;
@@ -882,6 +884,7 @@ jobs:
         )
       }}
     runs-on: 'macos-latest'
+    timeout-minutes: 60
     permissions:
       contents: 'read'
     steps:
@@ -957,11 +960,13 @@ jobs:
 
   # Windows counterpart of test_macos (see that job's note). ECS is the default
   # with a windows-2022 kill-switch fallback; the check name stays unchanged so
-  # it matches the required-status-check context. The job is merge_group-only,
-  # so code reaching it is post-approval; maintainers can still queue fork PRs.
-  # The runs-on expression therefore needs only the kill switch. ECS-only
-  # tuning is gated on runner.environment; the hosted fallback is the pre-ECS
-  # job plus the checkout guard and a job-level timeout-minutes.
+  # it matches the required-status-check context. The lane now runs on pull
+  # requests too, so the runs-on mirrors classify_pr's trust routing: same-repo
+  # branches and write-access authors (OWNER/MEMBER/COLLABORATOR) run on ECS,
+  # every other fork PR runs on hosted windows-2022, where its code cannot
+  # reach the persistent pool's cache and workspace. ECS-only tuning is gated
+  # on runner.environment; the hosted fallback is the pre-ECS job plus the
+  # checkout guard and a job-level timeout-minutes.
   test_windows:
     name: 'Test (windows-latest, Node 22.x)'
     needs:
@@ -977,7 +982,7 @@ jobs:
             needs.classify_platform.outputs.platform_sensitive != 'false')
         )
       }}
-    runs-on: '${{ vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && fromJSON(''["self-hosted", "Windows", "X64", "ecs-win"]'') || fromJSON(''["windows-2022"]'') }}'
+    runs-on: '${{ vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association)) && fromJSON(''["self-hosted", "Windows", "X64", "ecs-win"]'') || fromJSON(''["windows-2022"]'') }}'
     timeout-minutes: 60
     permissions:
       contents: 'read'

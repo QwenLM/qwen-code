@@ -30,6 +30,7 @@ test('shell scripts pull in the lanes, on every dialect', () => {
     'ci/run.bat',
     'ci/run.cmd',
     'deep/nested/dir/helper.SH',
+    'tools/setup.zsh',
   ]) {
     assert.equal(
       classifyChangedFiles([`packages/core/src/x.ts`, file]),
