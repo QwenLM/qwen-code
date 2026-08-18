@@ -750,8 +750,12 @@
 
 /* In-flow bottom sheet: the approval replaces the hidden composer, so the
    message list shrinks above it instead of being covered by a floating
-   overlay. */
+   overlay. The relative positioning + z-index still keeps the sheet above
+   portal-hosted DialogShell modals (backdrop at z-50) without overlapping
+   the message list. */
 .approvalOverlay {
+  position: relative;
+  z-index: calc(var(--web-shell-dialog-backdrop-z-index, 50) + 10);
   margin-bottom: 8px;
   min-width: 0;
 }

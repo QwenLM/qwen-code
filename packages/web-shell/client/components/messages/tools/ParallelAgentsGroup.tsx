@@ -456,6 +456,9 @@ export function ParallelAgentsGroup({
                   // non-interactive, mirroring ToolLine's pending guard.
                   const approvalPending =
                     pendingApproval?.toolCallId === agent.callId;
+                  const statusLabel = approvalPending
+                    ? t('subagent.pending')
+                    : rowStatusLabel;
                   const localizedAgentType = localizeAgentTypeName(
                     agentType,
                     t,
@@ -470,8 +473,8 @@ export function ParallelAgentsGroup({
                         // bare <span> (generic role) is not exposed to
                         // assistive tech (see ChatPane's workspace tag).
                         role="img"
-                        aria-label={rowStatusLabel}
-                        title={rowStatusLabel}
+                        aria-label={statusLabel}
+                        title={statusLabel}
                       >
                         {rowStatus === 'active'
                           ? '●'
@@ -509,11 +512,8 @@ export function ParallelAgentsGroup({
                     <div key={agent.callId}>
                       {approvalPending ? (
                         <div
-                          className={
-                            rowStatus === 'active'
-                              ? `${styles.row} ${styles.rowActive}`
-                              : styles.row
-                          }
+                          className={styles.row}
+                          data-agent-status={rowStatus}
                           aria-disabled="true"
                         >
                           {rowContent}

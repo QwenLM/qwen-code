@@ -271,6 +271,12 @@ export function useMessagesFromBlocks(
     errorAttempts: new Map(),
   });
   const missingAgentMissesRef = useRef(new Map<string, number>());
+  // Last 404 timestamp per callId. The grace ladder is wall-clock paced: a
+  // miss only counts toward the grace once the base backoff has elapsed since
+  // the previous miss, so a re-probe triggered by an unrelated transcript
+  // change (for example another permission appearing) cannot collapse the
+  // retry ladder into two immediate misses.
+  const missTimestampsRef = useRef(new Map<string, number>());
   const lastConnectionKeyRef = useRef<string | undefined>(undefined);
 
   useEffect(() => {
@@ -282,6 +288,7 @@ export function useMessagesFromBlocks(
     if (lastConnectionKeyRef.current !== connectionKey) {
       lastConnectionKeyRef.current = connectionKey;
       missingAgentMissesRef.current.clear();
+      missTimestampsRef.current.clear();
       retryBackoffRef.current = {
         key: '',
         attempts: 0,
@@ -324,6 +331,7 @@ export function useMessagesFromBlocks(
     for (const callId of [...missingAgentMissesRef.current.keys()]) {
       if (!callIds.includes(callId)) {
         missingAgentMissesRef.current.delete(callId);
+        missTimestampsRef.current.delete(callId);
       }
     }
     const roundErrors: Array<{ callId: string; error: unknown }> = [];
@@ -399,11 +407,22 @@ export function useMessagesFromBlocks(
         round.processed = true;
         // Grace-miss accounting lives in the active handler, not the per-call
         // closure: a superseded round's late 404 must not consume grace that
-        // belongs to the live round.
+        // belongs to the live round. The handler also re-checks the current
+        // probe set: a round that straddles a permission transition settles
+        // with misses for an agent that is now excluded, and those must not
+        // be counted (or re-added after the exclusion cleanup ran).
         for (const callId of succeeded) {
           missingAgentMissesRef.current.delete(callId);
+          missTimestampsRef.current.delete(callId);
         }
         for (const callId of notFounds) {
+          if (!callIds.includes(callId)) continue;
+          const now = Date.now();
+          const lastMiss = missTimestampsRef.current.get(callId) ?? 0;
+          if (now - lastMiss < BACKGROUND_AGENT_RECONCILIATION_RETRY_BASE_MS) {
+            continue;
+          }
+          missTimestampsRef.current.set(callId, now);
           const misses = (missingAgentMissesRef.current.get(callId) ?? 0) + 1;
           missingAgentMissesRef.current.set(callId, misses);
           if (misses >= MISSING_BACKGROUND_AGENT_GRACE_MISSES) {
@@ -430,6 +449,7 @@ export function useMessagesFromBlocks(
           // never consume the budget.
           const errorAttempts = new Map<string, number>();
           for (const entry of errors) {
+            if (!callIds.includes(entry.callId)) continue;
             const count = (previous.errorAttempts.get(entry.callId) ?? 0) + 1;
             errorAttempts.set(entry.callId, count);
             if (count >= BACKGROUND_AGENT_RECONCILIATION_MAX_ATTEMPTS) {

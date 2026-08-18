@@ -829,6 +829,68 @@ describe('background agent task reconciliation', () => {
     vi.useRealTimers();
   });
 
+  it('keeps the missing-agent grace when an unrelated permission re-probes', async () => {
+    vi.useFakeTimers();
+    // Phase 1: a background agent probes and 404s once (miss 1).
+    hookState.blocks = [backgroundAgentBlock('agent-call')];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockRejectedValue(
+      new DaemonHttpError(
+        404,
+        { code: 'session_not_found', toolCallId: 'agent-call' },
+        'not found',
+      ),
+    );
+    const { container, render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1),
+    );
+    expect(container.textContent).toBe('pending');
+
+    // Phase 2: an unrelated permission appears inside the retry window. The
+    // effect re-runs and probes again immediately; that second 404 must not
+    // count toward the grace because the base backoff has not elapsed — the
+    // ladder is wall-clock paced, not round-paced.
+    hookState.blocks = [
+      baseBlock({
+        id: 'perm-file',
+        kind: 'permission',
+        requestId: 'req-file',
+        sessionId: 'session-1',
+        title: 'Write file',
+        options: [{ optionId: 'allow', label: 'Allow', raw: {} }],
+        toolCall: {
+          toolCallId: 'file-call',
+          kind: 'other',
+          status: 'pending',
+          title: 'Write file',
+          rawInput: {},
+        },
+        preview: { kind: 'generic' as const },
+      }),
+      backgroundAgentBlock('agent-call'),
+    ];
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2),
+    );
+    // Two immediate 404s inside the backoff window must leave the miss count
+    // at 1, so the card stays pending.
+    expect(container.textContent).toBe('pending');
+
+    // Phase 3: the next probe after the base backoff crosses the grace.
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    await vi.waitFor(() => {
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(3);
+      expect(container.textContent).toBe('failed');
+    });
+
+    await act(async () => unmount());
+    vi.useRealTimers();
+  });
+
   it('gives a session-level 404 the same grace as a missing agent', async () => {
     vi.useFakeTimers();
     hookState.blocks = [backgroundAgentBlock('agent-call')];
