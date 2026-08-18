@@ -7,11 +7,13 @@
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -6086,6 +6088,21 @@ describe('qwen-triage workspace wipe guards (#9265 port)', () => {
     return calls;
   };
 
+  // The symlink-heal fixtures need the link ACTUALLY removed (`mkdir` must
+  // succeed afterwards), so their stub records and then delegates to the
+  // real `rm`. Every path it can reach sits inside the fixture's temp dirs —
+  // unlike the guarded-root fixtures, where a live delete detonates.
+  const recordingRealRm = (dir) => {
+    const calls = join(dir, 'rm-calls');
+    writeFileSync(calls, '');
+    writeFileSync(
+      join(dir, 'rm'),
+      `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\nexec /bin/rm "$@"\n`,
+      { mode: 0o755 },
+    );
+    return calls;
+  };
+
   const runGuard = (wipe, dir, env) =>
     spawnSync('bash', ['-c', wipe], {
       encoding: 'utf8',
@@ -6150,6 +6167,71 @@ describe('qwen-triage workspace wipe guards (#9265 port)', () => {
           );
           expect(readFileSync(calls, 'utf8')).toBe('');
           expect(existsSync(join(outside, 'canary'))).toBe(true);
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+          rmSync(outside, { recursive: true, force: true });
+        }
+      });
+
+      it('heals a workspace replaced by a symlink instead of wedging on it', () => {
+        // A leftover from the previous job can replace the workspace
+        // directory with a symlink pointing outside the runner workspace.
+        // Canonicalization resolves THROUGH the link, so the allowlist then
+        // refuses the target and exits 1 without removing anything — the
+        // link survives and every later job on the runner dies at this step.
+        // The heal deletes the link on the raw path (`rm -f` never follows
+        // it) and recreates the directory.
+        const wipe = runOf(stepName);
+        const dir = mkdtempSync(join(tmpdir(), 'triage-wipe-link-'));
+        const outside = mkdtempSync(join(tmpdir(), 'triage-wipe-outside-'));
+        try {
+          const calls = recordingRealRm(dir);
+          writeFileSync(join(outside, 'canary'), 'x');
+          const ws = join(dir, 'workspace');
+          symlinkSync(outside, ws);
+          const res = runGuard(wipe, dir, {
+            GITHUB_WORKSPACE: ws,
+            RUNNER_WORKSPACE: dir,
+          });
+          expect(res.status, res.stdout + res.stderr).toBe(0);
+          // The only delete is the link itself — never at its target.
+          expect(readFileSync(calls, 'utf8').trim()).toBe(`-f -- ${ws}`);
+          expect(existsSync(join(outside, 'canary'))).toBe(true);
+          expect(lstatSync(ws).isSymbolicLink()).toBe(false);
+          expect(lstatSync(ws).isDirectory()).toBe(true);
+          expect(readdirSync(ws)).toEqual([]);
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+          rmSync(outside, { recursive: true, force: true });
+        }
+      });
+
+      it('refuses a symlinked workspace planted outside the runner workspace', () => {
+        // The heal matches the RAW path: a symlink whose own location is
+        // outside the runner workspace is refused before anything resolves
+        // through it — even when its target lies inside and would pass the
+        // allowlist.
+        const wipe = runOf(stepName);
+        const dir = mkdtempSync(join(tmpdir(), 'triage-wipe-linkout-'));
+        const outside = mkdtempSync(join(tmpdir(), 'triage-wipe-outside-'));
+        try {
+          const calls = recorder(dir);
+          const sibling = join(dir, 'sibling');
+          mkdirSync(sibling);
+          writeFileSync(join(sibling, 'canary'), 'x');
+          const link = join(outside, 'workspace');
+          symlinkSync(sibling, link);
+          const res = runGuard(wipe, dir, {
+            GITHUB_WORKSPACE: link,
+            RUNNER_WORKSPACE: dir,
+          });
+          expect(res.status).not.toBe(0);
+          expect(res.stdout + res.stderr).toContain(
+            'outside the runner workspace',
+          );
+          expect(readFileSync(calls, 'utf8')).toBe('');
+          expect(lstatSync(link).isSymbolicLink()).toBe(true);
+          expect(existsSync(join(sibling, 'canary'))).toBe(true);
         } finally {
           rmSync(dir, { recursive: true, force: true });
           rmSync(outside, { recursive: true, force: true });

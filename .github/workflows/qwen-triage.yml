@@ -2599,6 +2599,17 @@ jobs:
           # silently keeps the raw spelling. Safe here (this pool is
           # Linux-only), and off-GNU the strip loop and the allowlist below
           # are what still hold.
+          # Heal a workspace replaced by a symlink (or any non-directory)
+          # BEFORE canonicalization: `realpath -m` resolves through the link,
+          # the allowlist then refuses the target, and that refusal removes
+          # nothing — every later job on the runner would die at this step.
+          # On the raw path `rm -f` removes the link itself, never follows it.
+          if [ -L "$WS" ] || [ ! -d "$WS" ]; then
+            case "$WS" in
+              "$RUNNER_WORKSPACE"/*) rm -f -- "$WS" && mkdir -- "$WS" ;;
+              *) echo "::error::refusing to wipe workspace outside the runner workspace: ${WS}"; exit 1 ;;
+            esac
+          fi
           WS="$(realpath -m -- "$WS" 2>/dev/null || printf '%s' "$WS")"
           # Trailing slashes slip past the exact-match case arms below
           # (`/home/` would pass the guard and reach the rm); realpath strips
@@ -3550,6 +3561,17 @@ jobs:
           # Same guard layers as the pre-run wipe above, and for the same
           # reason — see that step for why each one exists.
           WS="${GITHUB_WORKSPACE:?}"
+          # Heal a symlinked (or otherwise non-directory) workspace BEFORE
+          # canonicalization: `realpath -m` resolves through the link, the
+          # allowlist then refuses the target, and that refusal removes
+          # nothing — every later job on the runner would die at this step.
+          # On the raw path `rm -f` removes the link itself, never follows it.
+          if [ -L "$WS" ] || [ ! -d "$WS" ]; then
+            case "$WS" in
+              "$RUNNER_WORKSPACE"/*) rm -f -- "$WS" && mkdir -- "$WS" ;;
+              *) echo "::error::refusing to wipe workspace outside the runner workspace: ${WS}"; exit 1 ;;
+            esac
+          fi
           WS="$(realpath -m -- "$WS" 2>/dev/null || printf '%s' "$WS")"
           while [ "${WS%/}" != "$WS" ]; do WS="${WS%/}"; done
           case "$WS" in

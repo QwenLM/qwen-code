@@ -91,6 +91,17 @@ jobs:
           # allowlist still hold), strip trailing slashes, refuse the known
           # roots, and refuse anything outside the runner workspace.
           WS="${GITHUB_WORKSPACE:?}"
+          # Heal a workspace replaced by a symlink (or any non-directory)
+          # BEFORE canonicalization: `realpath -m` resolves through the link,
+          # the allowlist then refuses the target, and that refusal removes
+          # nothing — every later job on the runner would die at this step.
+          # On the raw path `rm -f` removes the link itself, never follows it.
+          if [ -L "$WS" ] || [ ! -d "$WS" ]; then
+            case "$WS" in
+              "$RUNNER_WORKSPACE"/*) rm -f -- "$WS" && mkdir -- "$WS" ;;
+              *) echo "::error::refusing to wipe workspace outside the runner workspace: ${WS}"; exit 1 ;;
+            esac
+          fi
           WS="$(realpath -m -- "$WS" 2>/dev/null || printf '%s' "$WS")"
           while [ "${WS%/}" != "$WS" ]; do WS="${WS%/}"; done
           case "$WS" in
