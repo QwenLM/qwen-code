@@ -87,10 +87,24 @@ describe('parseRemoteUrl hardening', () => {
     });
   });
 
-  it('consumes a `/`-bearing scp userinfo whole', () => {
+  it('agrees with GIT on a `:`/`/`-bearing scp userinfo (fails closed)', () => {
+    // GIT_TRACE-probed: git's scp grammar ends the hostinfo at the FIRST
+    // `:`, so `git ls-remote 'ci-user:/tok@host:g/p.git'` connects to host
+    // `ci-user` — the parser must agree, not parse the token's tail as the
+    // identity. The `@` residue lands in the path and fails closed: the
+    // earlier last-`@` consumption let fetchDiff's same-repo guard pass
+    // while git fetched from a DIFFERENT server than the identity named.
     expect(
       parseRemoteUrl('ci-user:/token-with-slash@code.alibaba-inc.com:g/p.git'),
-    ).toEqual({
+    ).toBeNull();
+    // The plain token-bearing scp shape too: git reads host `oauth2`, so
+    // the residue fails closed here as well.
+    expect(
+      parseRemoteUrl('oauth2:SECRET@code.alibaba-inc.com:g/p.git'),
+    ).toBeNull();
+    // The legitimate shape is untouched: `user@` with no colon/slash in
+    // the user part.
+    expect(parseRemoteUrl('ci-user@code.alibaba-inc.com:g/p.git')).toEqual({
       host: 'code.alibaba-inc.com',
       owner: 'g',
       repo: 'p',
@@ -664,7 +678,17 @@ describe('aoneReader.fetchDiff', () => {
       if (args[0] === 'remote') return 'git@gitlab.alibaba-inc.com:g/p.git';
       return '';
     });
-    for (const target of ['FETCH_HEAD', 'ORIG_HEAD', 'MERGE_HEAD']) {
+    for (const target of [
+      'FETCH_HEAD',
+      'ORIG_HEAD',
+      'MERGE_HEAD',
+      // Case-insensitive: on case-insensitive filesystems (macOS/Windows
+      // defaults) `.git/fetch_head` folds onto the `.git/FETCH_HEAD` the
+      // immediately-preceding fetch wrote.
+      'fetch_head',
+      'orig_head',
+      'head',
+    ]) {
       a1JsonMock.mockReturnValue({
         mergeRequest: { sourceBranch: 'sha', targetBranch: target },
       });
@@ -673,5 +697,28 @@ describe('aoneReader.fetchDiff', () => {
       );
     }
     expect(gitRawMock).not.toHaveBeenCalled();
+  });
+
+  it('merge-bases against the QUALIFIED tracking ref (no shadow tag)', () => {
+    // A tag literally named `origin/master` is pushable by anyone with push
+    // access (e.g. the MR author) and auto-carried at clone; git resolves
+    // the UNQUALIFIED name in refs/tags before refs/remotes — the shadow
+    // would silently move the merge base with no disclosure firing. The
+    // merge-base must key on refs/remotes/origin/<target>.
+    a1JsonMock.mockReturnValue({
+      mergeRequest: { sourceBranch: 'sha', targetBranch: 'master' },
+    });
+    gitMock.mockImplementation((...args: string[]) => {
+      if (args[0] === 'merge-base') return 'base-sha';
+      if (args[0] === 'remote') return 'git@gitlab.alibaba-inc.com:g/p.git';
+      return '';
+    });
+    gitRawMock.mockReturnValue(Buffer.from('d', 'latin1'));
+    aoneReader.fetchDiff(7, 'g/p');
+    expect(gitMock).toHaveBeenCalledWith(
+      'merge-base',
+      'refs/remotes/origin/master',
+      expect.stringMatching(/^__qwen-review-diff-7-\d+$/),
+    );
   });
 });

@@ -93,12 +93,16 @@ export function parseRemoteUrl(url: string): RepoIdentity | null {
   //    `/`-bearing secret puts the `@` in PATH territory (the authority
   //    ends at the first `/`): nothing is stripped, and the residue fails
   //    closed in `take` — it must never fold into a fabricated host.
-  //  - scp form: the token may contain `:` AND `/`, so consume up to the
-  //    LAST `@` before any `?`/`#` that leaves a `host:` shape behind (the
-  //    lookahead); when the only `@` cannot front a host (`host:path@x`,
-  //    `user:tok@nohost`) nothing is stripped and the residue fails closed
-  //    in `take`. (`[^?#]` — git re-emits newline-bearing URLs, and the
-  //    markers bound the credential span.)
+  //  - scp form: parsed with GIT'S OWN grammar — hostinfo ends at the
+  //    FIRST `:`, and userinfo is `user@` where the user carries neither
+  //    `:` nor `/` (probed via GIT_TRACE: `git ls-remote
+  //    'ci-user:/tok@host:g/p.git'` connects to host `ci-user`). A
+  //    token-bearing origin (`oauth2:SECRET@host:…`) therefore has host
+  //    `oauth2` in git too — the parser must agree, and the `@` residue
+  //    fails closed in `take`. The earlier last-`@` consumption diverged
+  //    from git and let the same-repo guard pass while git fetched from a
+  //    DIFFERENT server than the parsed identity named. No userinfo
+  //    cleaning here — the parse regex owns it.
   // The query string / fragment is then stripped on both forms: query-
   // string credentials (`?private_token=…`, a real CI pattern) would
   // otherwise become part of the repo coordinate; `[\s\S]*` eats newlines.
@@ -114,7 +118,7 @@ export function parseRemoteUrl(url: string): RepoIdentity | null {
       (at === -1 ? authority : authority.slice(at + 1)) +
       (parts?.[3] ?? '');
   } else {
-    cleaned = trimmed.replace(/^(?:[^?#]*@)(?=[^:@/?#]+:)/, '');
+    cleaned = trimmed;
   }
   cleaned = cleaned
     .replace(/[?#][\s\S]*$/, '')
@@ -154,10 +158,14 @@ export function parseRemoteUrl(url: string): RepoIdentity | null {
     );
     return m ? take(m[1], m[2]) : null;
   }
-  // scp-like: [user@]host:group[/subgroup]/project. user@ was consumed in
-  // the cleaning chain (the residue check in `take` is the backstop).
-  const m = /^([^:/]+):(?!\/\/)(.+)$/.exec(cleaned);
-  return m ? take(m[1], m[2]) : null;
+  // scp-like, GIT'S grammar: `[user@]host:path` — hostinfo ends at the
+  // FIRST `:`, userinfo is `user@` with no `:` or `/` in the user part.
+  // Token-bearing shapes (`oauth2:SECRET@host:…`, `ci-user:/tok@host:…`)
+  // parse host = the span before that first colon, exactly as git connects
+  // (GIT_TRACE-probed); their `@` residue lands in the path and fails
+  // closed in `take` instead of fabricating coordinates.
+  const m = /^(?:([^:@/]+)@)?([^:/]+):(?!\/\/)(.+)$/.exec(cleaned);
+  return m ? take(m[2], m[3]) : null;
 }
 
 /** Redact a URL before putting it in a message — the raw secret must not
@@ -216,17 +224,20 @@ function mrHeadRefSpec(prNumber: number): string {
  * merge-base resolves it through the stale clone-time symref), and never
  * the pseudo-ref set — `FETCH_HEAD` resolves to the just-fetched MR head
  * (an EMPTY diff beside full-range metadata), `ORIG_HEAD` to an arbitrary
- * ancestor. Both shape-legal, both silently wrong. Fail closed: an
- * unusual-but-legal name is refused with a clear metadata-stage error
- * rather than guessed at inside a git invocation. fetch-pr's baseRefName
- * guard carries the twin of this check.
+ * ancestor. Both shape-legal, both silently wrong. The match is
+ * CASE-INSENSITIVE: on case-insensitive filesystems (macOS/Windows
+ * defaults) `.git/fetch_head` folds onto `.git/FETCH_HEAD` the
+ * immediately-preceding fetch wrote, so lowercase spellings reach the same
+ * pseudo-refs. Fail closed: an unusual-but-legal name is refused with a
+ * clear metadata-stage error rather than guessed at inside a git
+ * invocation. fetch-pr's baseRefName guard carries the twin of this check.
  */
 const GIT_PSEUDO_REFS =
-  /^(FETCH|ORIG|MERGE|CHERRY_PICK|REVERT|REBASE|BISECT)_HEAD$/;
+  /^(FETCH|ORIG|MERGE|CHERRY_PICK|REVERT|REBASE|BISECT)_HEAD$/i;
 
 function isPlainBranchName(name: string): boolean {
   return (
-    name !== 'HEAD' &&
+    name.toUpperCase() !== 'HEAD' &&
     !GIT_PSEUDO_REFS.test(name) &&
     !name.includes('..') &&
     /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(name)
@@ -446,7 +457,13 @@ export const aoneReader: ReviewPlatformReader = {
       }
       let base: string;
       try {
-        base = git('merge-base', `origin/${target}`, ref);
+        // QUALIFIED tracking ref: git resolves an unqualified
+        // `origin/<target>` in refs/tags and refs/heads BEFORE refs/remotes,
+        // so a tag or branch literally named `origin/<targetBranch>` — a
+        // PUSHABLE refname any user with push access (e.g. the MR author)
+        // can create, and a fresh clone auto-carries — would shadow the
+        // just-fetched tracking ref and silently move the merge base.
+        base = git('merge-base', `refs/remotes/origin/${target}`, ref);
       } catch {
         // Target branch not present locally — fall back to diffing the head
         // against its first parent (single-commit AGit-Flow CRs). DISCLOSE:

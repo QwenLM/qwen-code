@@ -575,14 +575,16 @@ function sectionsContained(
  * the same rejection: `FETCH_HEAD` resolves to the JUST-fetched PR head
  * (merge-base(head, head) = empty diff beside full-range metadata), and
  * `ORIG_HEAD` to an arbitrary ancestor — both shape-legal, both silently
- * wrong.
+ * wrong. The match is CASE-INSENSITIVE: on case-insensitive filesystems
+ * (macOS/Windows defaults) `.git/fetch_head` folds onto `.git/FETCH_HEAD`,
+ * so the lowercase spellings reach the same pseudo-refs.
  */
 const GIT_PSEUDO_REFS =
-  /^(FETCH|ORIG|MERGE|CHERRY_PICK|REVERT|REBASE|BISECT)_HEAD$/;
+  /^(FETCH|ORIG|MERGE|CHERRY_PICK|REVERT|REBASE|BISECT)_HEAD$/i;
 
 function isPlainBranchName(name: string): boolean {
   return (
-    name !== 'HEAD' &&
+    name.toUpperCase() !== 'HEAD' &&
     !GIT_PSEUDO_REFS.test(name) &&
     !name.includes('..') &&
     /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(name)
@@ -601,12 +603,14 @@ const gitProbe: GitProbe = {
   // of a TAG exits 0 writing only FETCH_HEAD (`* tag v1.0 -> FETCH_HEAD`),
   // so the fetch "succeeds" yet no `origin/<ref>` exists — and the
   // bare-name fallback then merge-bases against the reviewer's LOCAL tag:
-  // a wrong-base diff with baseFetchFailed falsely false. Requiring the
-  // tracking ref converts the tag-only shape into the disclosed
-  // baseFetchFailed state.
+  // a wrong-base diff with baseFetchFailed falsely false. The check is
+  // FULLY QUALIFIED (`refs/remotes/…`): an unqualified `origin/<ref>`
+  // resolves in refs/tags and refs/heads FIRST, so a tag or branch named
+  // `origin/<ref>` — a pushable, server-controlled refname a plain clone
+  // auto-carries — would satisfy the check with no tracking ref present.
   fetch: (remote, ref) =>
     gitOpt('fetch', remote, '--', ref) !== null &&
-    refExists(`${remote}/${ref}`),
+    refExists(`refs/remotes/${remote}/${ref}`),
   refExists,
   mergeBase: (a, b) => gitOpt('merge-base', a, b),
 };

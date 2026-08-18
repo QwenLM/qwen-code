@@ -15,7 +15,7 @@
 
 import { gitOpt } from '../git.js';
 import { isAoneHostFamily } from '../remote-match.js';
-import { aoneReader } from './aone.js';
+import { aoneReader, parseRemoteUrl } from './aone.js';
 import { githubReader } from './github.js';
 import type { PlatformKind, ReviewPlatformReader } from './types.js';
 
@@ -36,29 +36,14 @@ export function isAoneHost(host: string | undefined): boolean {
   return isAoneHostFamily(host);
 }
 
-/** scheme://[user@]host/… or [user@]host:path → host. */
+/** scheme://[user@]host/… or [user@]host:path → host. DELEGATES to the
+ *  canonical aone.parseRemoteUrl — detection and the identity parser must
+ *  read the SAME grammar, or a shape one accepts the other refuses
+ *  misroutes silently (a `?`-bearing userinfo once detected 'github' while
+ *  the canonical parser said Aone). One parser, one source of truth. */
 function hostOfRemoteUrl(url: string | undefined): string | undefined {
   if (!url) return undefined;
-  // Query/fragment first: they can carry credentials AND `@`, and neither
-  // belongs to the authority the host is read from.
-  const s = url.trim().replace(/[?#][\s\S]*$/, '');
-  if (/^[a-z+]+:\/\//i.test(s)) {
-    // URL form. The userinfo consumption is GREEDY — up to the last `@`
-    // that still leaves a host shape — because token-bearing CI origins
-    // put `:` AND `/` inside the secret (`https://oauth2:abc/def@host/…`),
-    // and a bounded `(?:[^@/]+@)?` capture would parse the credential
-    // prefix as the host, silently misrouting detection. Mirrors
-    // aone.parseRemoteUrl's cleaning.
-    const stripped = s.replace(/^([a-z+]+:\/\/)[\s\S]*@(?=[^:@/]+[:/])/i, '$1');
-    const u = /^[a-z+]+:\/\/([^:/?#]+)/i.exec(stripped);
-    return u ? u[1].toLowerCase() : undefined;
-  }
-  // scp-like: [user@]host:path — userinfo may contain `:` and `/`; consume
-  // up to the last `@` that leaves a `host:` shape. A plain local path has
-  // no host:path shape. Mirrors aone.parseRemoteUrl / remote-match.
-  const stripped = s.replace(/^(?:[\s\S]*@)(?=[^:@/]+:)/, '');
-  const scp = /^([^:/]+):(?!\/\/)/.exec(stripped);
-  return scp ? scp[1].toLowerCase() : undefined;
+  return parseRemoteUrl(url)?.host;
 }
 
 /** The cwd clone's origin URL, or undefined when unreadable / not a repo.

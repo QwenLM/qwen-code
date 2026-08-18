@@ -19,10 +19,12 @@
 // `{"comment":{"effective":true}}` to any file and point at it; it cannot
 // retroactively edit the user's own keystrokes.
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   skillArgsPath,
   currentSessionId,
+  SKILL_ARGS_DIR,
 } from '../../../services/skill-args-file.js';
 import { parseReviewArgs } from '../parse-args.js';
 
@@ -89,23 +91,64 @@ export interface WriteAuthorizationRequest {
  * Best-effort extraction of the recorded pr-url target's host for the
  * `--user-authorized` fast path — it must publish without running the full
  * gate, but the write gate's platform binding must not lose the host the
- * recorded target names. Any read/parse trouble degrades to `undefined` (the
- * environment fallback) and never blocks a user-authorised publish.
+ * recorded target names.
+ *
+ * The host is bound to THIS write: only a recorded target naming the same
+ * PR number surfaces its host — a stale recording of a DIFFERENT PR must
+ * not supply a host (the refusal would fire on the wrong target, or a
+ * stale non-Aone host would suppress the environment arms).
+ *
+ * Lookup order: the session-scoped args file first, then a scan of the
+ * SIBLING session directories. The args file is named for the session that
+ * recorded the review, and a `--user-authorized` publish characteristically
+ * runs in a DIFFERENT session ("post the review we saved") — without the
+ * sibling scan the file is simply absent there, the host degrades to
+ * undefined, and a recorded Aone target posts at github.com's same-named
+ * repo from a non-Aone cwd: the exact leak the binding exists to close.
+ * Any read/parse trouble still degrades to undefined (the environment arms)
+ * and never blocks a user-authorised publish.
  */
 function recordedHostFromArgsFile(
   req: WriteAuthorizationRequest,
 ): string | undefined {
+  const bindHost = (raw: string): string | undefined => {
+    try {
+      const t = parseReviewArgs(raw, { comment: req.defaultComment }).target;
+      return t.type === 'pr-url' && t.number === req.pr ? t.host : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const candidates: string[] = [
+    currentSessionId() === '' && req.skillArgs
+      ? req.skillArgs
+      : defaultSkillArgsPath(),
+  ];
   try {
-    const path =
-      currentSessionId() === '' && req.skillArgs
-        ? req.skillArgs
-        : defaultSkillArgsPath();
-    const raw = readFileSync(path, 'utf8');
-    const t = parseReviewArgs(raw, { comment: req.defaultComment }).target;
-    return t.type === 'pr-url' ? t.host : undefined;
+    const entries = readdirSync(SKILL_ARGS_DIR, {
+      withFileTypes: true,
+    }).sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        candidates.push(
+          join(SKILL_ARGS_DIR, entry.name, 'qwen-skill-args-review.txt'),
+        );
+      }
+    }
+    candidates.push(join(SKILL_ARGS_DIR, 'qwen-skill-args-review.txt'));
   } catch {
-    return undefined;
+    // No recorded-args directory at all — the session-scoped candidate
+    // above is the only one.
   }
+  for (const path of candidates) {
+    try {
+      const host = bindHost(readFileSync(path, 'utf8'));
+      if (host !== undefined) return host;
+    } catch {
+      // Unreadable / unparseable recording — skip it.
+    }
+  }
+  return undefined;
 }
 
 /**

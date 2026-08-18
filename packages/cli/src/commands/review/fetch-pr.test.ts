@@ -234,7 +234,7 @@ const producerMocks = vi.hoisted(() => ({
   gh: vi.fn(),
   git: vi.fn(),
   execFileSync: vi.fn(),
-  refExists: vi.fn(() => false),
+  refExists: vi.fn((..._refs: unknown[]): boolean => false),
   releaseWorktree: vi.fn(() => ({ existed: false, freed: true })),
   gitOpt: vi.fn((..._args: string[]): string | null => null),
   gitRaw: vi.fn((..._args: string[]): Buffer => Buffer.from('')),
@@ -518,8 +518,17 @@ describe('fetch-pr report assembly', () => {
     // `FETCH_HEAD` resolves to the just-fetched PR head — merge-base(head,
     // head) = an EMPTY diff beside full-range metadata; `ORIG_HEAD` to an
     // arbitrary ancestor. Shape-legal, silently wrong — refused at the
-    // metadata stage.
-    for (const baseRefName of ['FETCH_HEAD', 'ORIG_HEAD', 'MERGE_HEAD']) {
+    // metadata stage. Case-insensitively: on case-insensitive filesystems
+    // (macOS/Windows defaults) `.git/fetch_head` folds onto the
+    // `.git/FETCH_HEAD` the immediately-preceding fetch wrote.
+    for (const baseRefName of [
+      'FETCH_HEAD',
+      'ORIG_HEAD',
+      'MERGE_HEAD',
+      'fetch_head',
+      'orig_head',
+      'head',
+    ]) {
       producerMocks.gh.mockReturnValue(
         JSON.stringify({
           headRefName: 'feat/x',
@@ -570,6 +579,42 @@ describe('fetch-pr report assembly', () => {
     });
     const report = await reportFor({});
     expect(report.baseFetchFailed).toBe(true);
+  });
+
+  it('the tracking-ref check is FULLY QUALIFIED (no origin/<name> shadow)', async () => {
+    // A local tag or branch literally named `origin/v1.0` (slash-bearing
+    // ref names are legal) satisfies an UNQUALIFIED refExists with no
+    // tracking ref present — and such a tag is SERVER-CONTROLLED: a remote
+    // carrying it auto-carries it into refs/tags/ at plain clone time. The
+    // probe must check `refs/remotes/origin/<ref>` so the shadow cannot
+    // satisfy it and silently move the base.
+    producerMocks.gh.mockReturnValue(
+      JSON.stringify({
+        headRefName: 'feat/x',
+        headRefOid: 'f00df00df00d',
+        baseRefName: 'v1.0',
+        additions: 1,
+        deletions: 0,
+        changedFiles: 1,
+        isCrossRepository: false,
+        body: '',
+      }),
+    );
+    producerMocks.gitOpt.mockImplementation((...args: string[]) =>
+      args[0] === 'fetch' ? '' : null,
+    );
+    const checked: string[] = [];
+    producerMocks.refExists.mockImplementation((...refs: unknown[]) => {
+      checked.push(String(refs[0]));
+      return false;
+    });
+    producerMocks.resolveMergeBase.mockImplementation((...args: unknown[]) => {
+      const probe = args[3] as { fetch: (r: string, b: string) => boolean };
+      return { sha: null, baseFetchFailed: !probe.fetch('origin', 'v1.0') };
+    });
+    await reportFor({});
+    expect(checked).toContain('refs/remotes/origin/v1.0');
+    expect(checked).not.toContain('origin/v1.0');
   });
 
   it('refuses a non-positive pr_number before any side effect', async () => {

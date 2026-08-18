@@ -87,20 +87,29 @@ describe('detectPlatformKind', () => {
     expect(detectPlatformKind({})).toBe('github');
   });
 
-  it('detects Aone through token-bearing userinfo (`:` and `/` in the secret)', () => {
-    // The userinfo group must consume up to the last `@` of the authority —
-    // a bounded capture parses the credential prefix as the host and
-    // silently misroutes detection to GitHub while the parse side says
-    // Aone. Both the scp and the URL shape carry the token class this
-    // PR's suite blesses as legitimate.
+  it('detection agrees with GIT (and the canonical parser) on token-bearing userinfo', () => {
+    // Round-11 re-bless: detection delegates to the canonical
+    // aone.parseRemoteUrl, which reads git's OWN scp grammar — hostinfo
+    // ends at the FIRST `:` (GIT_TRACE-probed: `git ls-remote
+    // 'git:S1/xx@…'` connects to host `git`), and URL userinfo cannot
+    // carry `/`. These shapes therefore carry no Aone identity — detection
+    // says GitHub while the parse side fails closed, and the two can never
+    // disagree again (one parser, one source of truth).
     expect(
       detectPlatformKind({
         remoteUrl: 'git:S1/xx@gitlab.alibaba-inc.com:maxcompute/odps_src.git',
       }),
-    ).toBe('aone');
+    ).toBe('github');
     expect(
       detectPlatformKind({
         remoteUrl: 'https://oauth2:abc/def@code.alibaba-inc.com/group/proj.git',
+      }),
+    ).toBe('github');
+    // The `?`-bearing userinfo corner stays consistent in the other
+    // direction: the canonical parser accepts it, so detection says Aone.
+    expect(
+      detectPlatformKind({
+        remoteUrl: 'https://user:pa?ss@code.alibaba-inc.com/group/proj.git',
       }),
     ).toBe('aone');
   });

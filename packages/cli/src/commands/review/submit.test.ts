@@ -97,6 +97,7 @@ const { runSubmit, submitCommand } = await import('./submit.js');
 
 let dir: string;
 let savedSessionId: string | undefined;
+let savedGhHost: string | undefined;
 
 /**
  * The payload as it is now: findings and states. No verdict.
@@ -146,12 +147,20 @@ beforeEach(() => {
   process.exitCode = undefined;
   savedSessionId = process.env['QWEN_CODE_SESSION_ID'];
   delete process.env['QWEN_CODE_SESSION_ID'];
+  // The Aone refusal reads the AMBIENT GH_HOST (its env arm), and the org's
+  // standard intranet export pattern is an Aone-family host — without
+  // isolating it, every recorded-host-less posting test below refuses
+  // instead of posting on exactly the population this PR targets.
+  savedGhHost = process.env['GH_HOST'];
+  delete process.env['GH_HOST'];
 });
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
   process.exitCode = undefined;
   if (savedSessionId === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
   else process.env['QWEN_CODE_SESSION_ID'] = savedSessionId;
+  if (savedGhHost === undefined) delete process.env['GH_HOST'];
+  else process.env['GH_HOST'] = savedGhHost;
 });
 
 describe('authorization — URL-shaped host and repo binding at the submit call site', () => {
@@ -352,6 +361,61 @@ describe('the user-authorized fast path keeps the refusal shut (round-6 witness)
     ) as { posted?: boolean; reason?: string };
     expect(out).toEqual({ posted: false, reason: 'aone-read-only-phase' });
     expect(ghMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('the user-authorized fast path binds the recorded host cross-session', () => {
+  // The characteristic `--user-authorized` shape runs in a DIFFERENT
+  // session than the /review that recorded the target ("post the review we
+  // saved") — the session-scoped args file is absent there. The fast path
+  // must scan the sibling session recordings for the host, or the recorded
+  // Aone target posts at github.com's same-named repo (round-11 witness:
+  // exit 0, COMMENT review filed at repos/maxcompute/odps_src/pulls/42).
+  const siblingDir = join('.qwen', 'tmp', 's-r11-cross-session');
+  const siblingFile = join(siblingDir, 'qwen-skill-args-review.txt');
+  beforeEach(() => {
+    mkdirSync(siblingDir, { recursive: true });
+    writeFileSync(
+      siblingFile,
+      'https://code.alibaba-inc.com/maxcompute/odps_src/codereview/42 --comment\n',
+      'utf8',
+    );
+  });
+  afterEach(() => {
+    rmSync(siblingDir, { recursive: true, force: true });
+  });
+
+  it('refuses when a SIBLING session recorded the same PR on Aone', () => {
+    expect(() =>
+      runSubmit(
+        args({ userAuthorized: true, pr: 42, repo: 'maxcompute/odps_src' }),
+        'unknown',
+        { defaultComment: false },
+      ),
+    ).not.toThrow();
+    expect(process.exitCode).toBe(3);
+    const out = JSON.parse(
+      writeStdoutSpy.mock.calls.map((c) => String(c[0])).join(''),
+    ) as { posted?: boolean; reason?: string };
+    expect(out).toEqual({ posted: false, reason: 'aone-read-only-phase' });
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('does not bind a sibling recording of a DIFFERENT PR', () => {
+    // A stale recording of another PR must not supply a host — the refusal
+    // would fire on the wrong target, and a stale non-Aone host would
+    // suppress the environment arms.
+    expect(() =>
+      runSubmit(
+        args({ userAuthorized: true, pr: 999, repo: 'maxcompute/odps_src' }),
+        'unknown',
+        { defaultComment: false },
+      ),
+    ).not.toThrow();
+    expect(process.exitCode).toBeUndefined();
+    // ghWithInput is aliased onto ghMock in this file: the post reached the
+    // wire (the write proceeded instead of refusing on a stale host).
+    expect(ghMock).toHaveBeenCalled();
   });
 });
 
