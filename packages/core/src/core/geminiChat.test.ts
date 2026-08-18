@@ -12231,15 +12231,35 @@ describe('GeminiChat', async () => {
             },
           ],
         },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call-1',
+                name: 'read_file',
+                response: { output: 'ok' },
+              },
+            },
+          ],
+        },
       ];
+      const expectedHistory = structuredClone(history.slice(0, 4));
       chat.setHistory(history);
 
-      expect(chat.repairOrphanedToolUseTurns().injected).toEqual([]);
-      expect(chat.getHistory()).toEqual(history);
+      expect(chat.repairOrphanedToolUseTurns()).toEqual({
+        injected: [],
+        droppedDuplicates: [{ callId: 'call-1', name: 'read_file' }],
+      });
+      expect(chat.repairOrphanedToolUseTurns()).toEqual({
+        injected: [],
+        droppedDuplicates: [],
+      });
+      expect(chat.getHistory()).toEqual(expectedHistory);
       expect(chat.getHistory(true)).toEqual([
-        history[0],
-        history[1],
-        history[3],
+        expectedHistory[0],
+        expectedHistory[1],
+        expectedHistory[3],
       ]);
     });
 

@@ -1564,6 +1564,7 @@ interface ScanResult {
 interface RepairPlan {
   modelIdx: number;
   scanEnd: number;
+  adjacentIdx: number;
   synthesizeIds: Array<[string, string]>;
   hoistedParts: Part[];
   removalTargets: Array<{ turnIdx: number; partIdx: number }>;
@@ -1651,6 +1652,7 @@ function planRepair(scan: ScanResult): RepairPlan {
   return {
     modelIdx: scan.modelIdx,
     scanEnd: scan.scanEnd,
+    adjacentIdx: scan.adjacentIdx,
     synthesizeIds,
     hoistedParts,
     removalTargets,
@@ -1660,12 +1662,12 @@ function planRepair(scan: ScanResult): RepairPlan {
 
 /**
  * MUTATION — apply the plan to `history` in place. Returns the count
- * of new user turns inserted ahead of `modelIdx + 1` (0 or 1) so the
- * outer loop can advance its cursor.
+ * of new user turns inserted (0 or 1) so the outer loop can advance its
+ * cursor.
  *
  * Order: (1) splice removal targets desc-by-desc, (2) drop empty user
- * turns in `[modelIdx + 2, scanEnd)`, (3) HEAD-insert at the adjacent
- * user turn OR splice a new user turn between. The HEAD insert is
+ * turns after the resolved adjacent turn, (3) HEAD-insert at that user
+ * turn OR splice a new user turn there. The HEAD insert is
  * load-bearing (mirrors upstream `hoistToolResults`) — see the
  * canonical note for why tail-append re-triggers the wedge.
  */
@@ -1693,19 +1695,20 @@ function applyRepair(
     if (turnParts) turnParts.splice(loc.partIdx, 1);
   }
 
-  // (2) Drop now-empty user turns within [modelIdx + 2, scanEnd).
+  // (2) Drop now-empty user turns after the resolved adjacent turn.
   // Preserve the adjacent turn even if empty — we'll rewrite it
   // below.
-  const adjacentIdx = plan.modelIdx + 1;
+  const adjacentIdx = plan.adjacentIdx;
   for (let j = plan.scanEnd - 1; j > adjacentIdx; j--) {
     if (history[j]?.role === 'user' && (history[j].parts?.length ?? 0) === 0) {
       history.splice(j, 1);
     }
   }
 
+  if (partsToInject.length === 0) return { insertedBefore: 0 };
+
   // (3) Place new parts at the head of the adjacent user turn, OR
-  // insert a fresh user turn between this model turn and whatever
-  // follows.
+  // insert a fresh user turn at the resolved adjacency.
   const next = history[adjacentIdx];
   if (next?.role === 'user') {
     const existing = next.parts ?? [];
