@@ -4016,6 +4016,72 @@ describe('DingtalkChannel outbound file delivery', () => {
     };
   }
 
+  // R1-6: the files are uploaded and their `[File sent: …]` receipts baked into
+  // the text BEFORE any of it is delivered, and text over CHUNK_LIMIT (3800)
+  // goes out as several POSTs. A later chunk failing used to skip the file
+  // delivery entirely, leaving the receipt in the chat, the file undelivered
+  // and no notice — the notice lives inside the delivery path that was skipped.
+  it('still delivers the file when a later text chunk fails (sendReply)', async () => {
+    const file = createTempFile('report.pdf');
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      seedWebhook(channel, 'cid123');
+      const { events, fileCalls, markdownCalls } = stubFileReplyFetch({
+        markdownHandler: (call) => {
+          if (call === 1) throw new Error('connection reset');
+          return new Response(JSON.stringify({ errcode: 0 }), { status: 200 });
+        },
+      });
+
+      await expect(
+        channel.sendMessage(
+          'cid123',
+          `[FILE: ${file.path}]\n${'x'.repeat(4200)}`,
+        ),
+      ).rejects.toThrow('connection reset');
+
+      // The receipt went out in chunk 1 …
+      expect(markdownCalls().length).toBeGreaterThanOrEqual(1);
+      const firstChunk = JSON.parse(
+        String((markdownCalls()[0]![1] as RequestInit).body),
+      ) as { markdown: { text: string } };
+      expect(firstChunk.markdown.text).toContain('[File sent: report.pdf]');
+      // … so the file must still be delivered rather than stranded.
+      expect(fileCalls()).toHaveLength(1);
+      expect(events).toContain('file');
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('surfaces the text error, not a delivery error, when both fail', async () => {
+    const file = createTempFile('report.pdf');
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      seedWebhook(channel, 'cid123');
+      stubFileReplyFetch({
+        markdownHandler: (call) => {
+          if (call === 1) throw new Error('connection reset');
+          return new Response(JSON.stringify({ errcode: 0 }), { status: 200 });
+        },
+        fileHandler: () => {
+          throw new Error('file endpoint down');
+        },
+      });
+
+      // The chunk failure is what made the send fail; a failure inside the
+      // rescue delivery must not replace it.
+      await expect(
+        channel.sendMessage(
+          'cid123',
+          `[FILE: ${file.path}]\n${'x'.repeat(4200)}`,
+        ),
+      ).rejects.toThrow('connection reset');
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
   it('uploads and sends a native file after path-free Markdown', async () => {
     const file = createTempFile('周报 final.PDF');
     try {

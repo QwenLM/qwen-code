@@ -814,6 +814,56 @@ export class DingtalkChannel extends ChannelBase {
     return true;
   }
 
+  /**
+   * Send the text, then the files — and send the files even when the text
+   * send throws part-way through.
+   *
+   * R1-6: `prepareOutgoingContent` uploads the files and bakes their
+   * `[File sent: …]` receipts INTO the text before anything is delivered, and
+   * text over `CHUNK_LIMIT` goes out as several POSTs. If a later chunk fails,
+   * the receipt is already in the user's chat while the files never arrive and
+   * no notice is emitted — because the per-file `[File delivery failed: …]`
+   * notice lives inside the delivery path the throw skipped. ChannelBase marks
+   * the delivery failed and never retries, so the chat keeps a receipt for a
+   * file that does not exist.
+   *
+   * Running the delivery on the failure path either lands the files or emits
+   * their notices. The text error is rethrown unchanged afterwards, so the
+   * caller's failure accounting is untouched; a failure inside the delivery
+   * itself is logged rather than allowed to replace it.
+   *
+   * `sendText` returning `false` is the "no webhook for this chat" answer, not
+   * a failure — it keeps the pre-existing behaviour of skipping the files.
+   */
+  private async sendTextThenFiles(
+    sendText: () => Promise<boolean | void>,
+    sendFiles: () => Promise<void>,
+  ): Promise<void> {
+    let textError: unknown;
+    let deliverFiles = true;
+    try {
+      deliverFiles = (await sendText()) !== false;
+    } catch (error) {
+      textError = error;
+    }
+    if (deliverFiles) {
+      try {
+        await sendFiles();
+      } catch (deliveryError) {
+        if (textError === undefined) throw deliveryError;
+        process.stderr.write(
+          `[DingTalk:${this.name}] file delivery after a failed text send also failed: ${sanitizeLogText(
+            deliveryError instanceof Error
+              ? deliveryError.message
+              : String(deliveryError),
+            300,
+          )}\n`,
+        );
+      }
+    }
+    if (textError !== undefined) throw textError;
+  }
+
   private async sendReply(
     chatId: string,
     text: string,
@@ -824,9 +874,10 @@ export class DingtalkChannel extends ChannelBase {
       return;
     }
     const prepared = await this.prepareOutgoingContent(text);
-    if (!(await this.sendPreparedReply(chatId, prepared.text, atUserId)))
-      return;
-    await this.sendReplyFiles(chatId, prepared.files);
+    await this.sendTextThenFiles(
+      () => this.sendPreparedReply(chatId, prepared.text, atUserId),
+      () => this.sendReplyFiles(chatId, prepared.files),
+    );
   }
 
   async sendMessage(chatId: string, text: string): Promise<void> {
@@ -881,13 +932,22 @@ export class DingtalkChannel extends ChannelBase {
     const chunks = normalizeDingTalkMarkdown(prepared.text);
     const title = extractTitle(prepared.text);
 
-    for (let i = 0; i < chunks.length; i++) {
-      await this.sendProactiveChunk(
-        target,
-        i === 0 ? title : `${title} (cont.)`,
-        chunks[i]!,
-        `chunk ${i + 1}/${chunks.length}`,
-      );
+    // R1-6 (location 1 of 3): a failed chunk must not strand the files. The
+    // receipts are already baked into the text — and possibly already
+    // delivered by an earlier chunk — so the file loop below still runs, and
+    // the chunk error is rethrown after it.
+    let chunkError: unknown;
+    try {
+      for (let i = 0; i < chunks.length; i++) {
+        await this.sendProactiveChunk(
+          target,
+          i === 0 ? title : `${title} (cont.)`,
+          chunks[i]!,
+          `chunk ${i + 1}/${chunks.length}`,
+        );
+      }
+    } catch (error) {
+      chunkError = error;
     }
 
     let firstError: Error | undefined;
@@ -926,6 +986,10 @@ export class DingtalkChannel extends ChannelBase {
         }
       }
     }
+    // The chunk failure is the one the caller must see: it is what made the
+    // send fail, and the file loop above has already logged and (where it
+    // could) notified about its own.
+    if (chunkError !== undefined) throw chunkError;
     if (firstError) throw firstError;
   }
 
@@ -1701,9 +1765,10 @@ export class DingtalkChannel extends ChannelBase {
       ? this.sessionMentionTargets.get(sessionId)
       : undefined;
     if (atUserId) this.sessionMentionTargets.delete(sessionId);
-    if (!(await this.sendPreparedReply(chatId, prepared.text, atUserId)))
-      return;
-    await this.sendReplyFiles(chatId, prepared.files);
+    await this.sendTextThenFiles(
+      () => this.sendPreparedReply(chatId, prepared.text, atUserId),
+      () => this.sendReplyFiles(chatId, prepared.files),
+    );
   }
 
   private async sendFallbackReply(
