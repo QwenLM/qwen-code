@@ -24,7 +24,10 @@ export interface GitProbe {
    * a null sha is how a transient failure came to be reported as a
    * deterministic refusal the recovery flow then refused to retry.
    */
-  mergeBase(a: string, b: string): { sha: string | null; status: number | null };
+  mergeBase(
+    a: string,
+    b: string,
+  ): { sha: string | null; status: number | null };
 }
 
 export interface MergeBaseResult {
