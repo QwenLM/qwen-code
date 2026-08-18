@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { realpathSync } from 'node:fs';
+import { lstatSync, readlinkSync, realpathSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { Config } from '../config/config.js';
@@ -456,7 +456,7 @@ function validateWorkspacePath(value: string, cwd: string): string | null {
       ? '"workspacePath" contains control characters'
       : '"workspacePath" contains unsafe markup';
   }
-  if (isUncWorkspacePath(trimmed) || isForeignWindowsAbsolute(trimmed)) {
+  if (isRedirectorRoutedPath(trimmed) || isForeignWindowsAbsolute(trimmed)) {
     return WORKSPACE_PATH_HINT;
   }
   if (isAbsoluteWorkspaceInput(trimmed)) {
@@ -556,12 +556,20 @@ function hasLegacyPathField(params: RecordArtifactParams): boolean {
   );
 }
 
-function isUncWorkspacePath(value: string): boolean {
+function isRedirectorRoutedPath(value: string): boolean {
   const slashes = value.replace(/\//g, '\\');
-  return (
+  if (
     /^\\\\[^\\?]+(?:\\|$)/.test(slashes) ||
     /^\\\\\?\\[Uu][Nn][Cc]\\/.test(slashes)
-  );
+  ) {
+    return true;
+  }
+  // `\\?\C:\...` is a local drive; every other `\\?\` form (UNC, Mup,
+  // GLOBALROOT, Volume GUID) can leave the machine via the redirector.
+  if (/^\\\\\?\\/.test(slashes) && !/^\\\\\?\\[A-Za-z]:\\/.test(slashes)) {
+    return true;
+  }
+  return /GLOBALROOT\\Device\\Mup\\/i.test(slashes);
 }
 
 function isForeignWindowsAbsolute(value: string): boolean {
@@ -615,18 +623,36 @@ async function resolveExistingDir(dir: string): Promise<string> {
  */
 function tryResolveForContainment(absolutePath: string): string | undefined {
   const resolved = path.resolve(absolutePath);
+  if (pointsAtRedirector(resolved)) {
+    return undefined;
+  }
   try {
     return realpathSync(resolved);
   } catch {
     try {
-      return path.join(
-        realpathSync(path.dirname(resolved)),
-        path.basename(resolved),
-      );
+      const parent = path.dirname(resolved);
+      if (pointsAtRedirector(parent)) {
+        return undefined;
+      }
+      return path.join(realpathSync(parent), path.basename(resolved));
     } catch {
       return undefined;
     }
   }
+}
+
+function pointsAtRedirector(absolutePath: string): boolean {
+  if (isRedirectorRoutedPath(absolutePath)) {
+    return true;
+  }
+  try {
+    if (lstatSync(absolutePath).isSymbolicLink()) {
+      return isRedirectorRoutedPath(readlinkSync(absolutePath));
+    }
+  } catch {
+    // Missing path: let the caller decide from realpath/lstat.
+  }
+  return false;
 }
 
 async function resolveWorkspaceArtifactLocator(
@@ -666,7 +692,7 @@ function workspacePathCandidate(
   root: string,
   preservePosixBackslash: boolean,
 ): { ok: true; path: string } | WorkspaceLocatorFailure {
-  if (isUncWorkspacePath(locator) || isForeignWindowsAbsolute(locator)) {
+  if (isRedirectorRoutedPath(locator) || isForeignWindowsAbsolute(locator)) {
     return locatorFailure(
       ToolErrorType.INVALID_TOOL_PARAMS,
       WORKSPACE_PATH_HINT,
@@ -714,6 +740,26 @@ async function inspectWorkspaceCandidate(
       ToolErrorType.TARGET_IS_DIRECTORY,
       `Failed to record artifact: "${candidate}" is a directory, not a file.\n${WORKSPACE_PATH_HINT}`,
     );
+  }
+
+  if (lst.isSymbolicLink()) {
+    let target: string;
+    try {
+      target = await fs.readlink(candidate);
+    } catch (error) {
+      return pathInspectFailure(
+        error,
+        candidate,
+        rawPath,
+        `Failed to record artifact: could not resolve "${rawPath}" (${error instanceof Error ? error.message : String(error)}).`,
+      );
+    }
+    if (isRedirectorRoutedPath(target)) {
+      return locatorFailure(
+        ToolErrorType.PATH_NOT_IN_WORKSPACE,
+        `Failed to record artifact: "${rawPath}" resolves outside the workspace.\n${WORKSPACE_PATH_HINT}`,
+      );
+    }
   }
 
   let resolved: string;

@@ -457,6 +457,7 @@ describe('RecordArtifactTool', () => {
       '\\\\attacker.example\\share\\report.csv',
       '//attacker.example/share/report.csv',
       '\\\\?\\UNC\\attacker.example\\share\\report.csv',
+      '\\\\?\\GLOBALROOT\\Device\\Mup\\attacker.example\\share\\report.csv',
     ]) {
       expect(() =>
         tool.build({
@@ -531,6 +532,29 @@ describe('RecordArtifactTool', () => {
       })
       .execute(signal);
 
+    expect(result.error?.type).toBe(ToolErrorType.PATH_NOT_IN_WORKSPACE);
+    expect(String(result.llmContent)).not.toContain('Recorded artifact');
+  });
+
+  it('rejects a workspace symlink whose target is a UNC path', async () => {
+    const ws = await workspace();
+    try {
+      await symlink(
+        '\\\\attacker.example\\share\\report.csv',
+        path.join(ws.cwd, 'report.csv'),
+      );
+    } catch {
+      return;
+    }
+
+    const result = await ws.tool
+      .build({
+        title: 'UNC link',
+        workspacePath: 'report.csv',
+      })
+      .execute(signal);
+
+    expect(result.artifacts).toBeUndefined();
     expect(result.error?.type).toBe(ToolErrorType.PATH_NOT_IN_WORKSPACE);
     expect(String(result.llmContent)).not.toContain('Recorded artifact');
   });
