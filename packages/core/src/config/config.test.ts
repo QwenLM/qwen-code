@@ -2263,6 +2263,26 @@ describe('Server Config (config.ts)', () => {
       );
     });
 
+    it('pins the outgoing chat recorder to the outgoing session id', async () => {
+      const config = new Config({ ...baseParams, chatRecording: true });
+      await config.initialize({
+        skipGeminiInitialization: true,
+        skipHooks: true,
+        skipMcpDiscovery: true,
+        skipSkillManager: true,
+        skipFileCheckpointing: true,
+      });
+      const outgoingSessionId = config.getSessionId();
+      const outgoingRecorder = config.getChatRecordingService();
+      expect(outgoingRecorder).toBeDefined();
+      const pinSpy = vi.spyOn(outgoingRecorder!, 'pinSessionIdentity');
+
+      config.startNewSession('replacement-session');
+
+      expect(pinSpy).toHaveBeenCalledWith(outgoingSessionId);
+      expect(config.getChatRecordingService()).not.toBe(outgoingRecorder);
+    });
+
     it('ends the outgoing session before starting a replacement without continuation', async () => {
       const config = new Config({ ...baseParams });
       await config.initialize({
@@ -2714,24 +2734,29 @@ describe('Server Config (config.ts)', () => {
       });
       const finalize = vi.fn();
       const flush = vi.fn().mockResolvedValue(undefined);
+      const pinSessionIdentity = vi.fn();
       (
         config as unknown as {
           chatRecordingService?: {
             finalize: () => void;
             flush: () => Promise<void>;
             hasWriteOwnership: () => boolean;
+            pinSessionIdentity: (sessionId: string) => void;
           };
         }
       ).chatRecordingService = {
         finalize,
         flush,
         hasWriteOwnership: () => false,
+        pinSessionIdentity,
       };
 
+      const outgoingSessionId = config.getSessionId();
       config.startNewSession();
 
       expect(finalize).toHaveBeenCalledTimes(1);
       expect(flush).toHaveBeenCalledTimes(1);
+      expect(pinSessionIdentity).toHaveBeenCalledWith(outgoingSessionId);
     });
   });
 

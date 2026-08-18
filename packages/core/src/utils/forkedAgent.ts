@@ -86,6 +86,14 @@ export interface CacheSafeParams {
   model: string;
   /** Version number — increments when systemInstruction or tools change */
   version: number;
+  /**
+   * The session that saved these params. The slot is a process-global, so
+   * in a multi-session daemon it can hold another session's params; readers
+   * must match this against their own session id before trusting it, or a
+   * forked query could be built from a different session's transcript
+   * (cross-session content leak) (#9233).
+   */
+  sessionId?: string;
 }
 
 // Module-level slot written after each successful main turn.
@@ -107,6 +115,7 @@ export function saveCacheSafeParams(
   generationConfig: GenerateContentConfig,
   history: Content[],
   model: string,
+  sessionId?: string,
 ): void {
   const prevConfig = currentCacheSafeParams?.generationConfig;
   const sysChanged =
@@ -126,6 +135,7 @@ export function saveCacheSafeParams(
     history: copyHistoryContainers(history),
     model,
     version: currentVersion,
+    sessionId,
   };
 }
 
@@ -139,7 +149,12 @@ export function getCacheSafeParams(): CacheSafeParams | null {
     history: copyHistoryContainers(currentCacheSafeParams.history),
     model: currentCacheSafeParams.model,
     version: currentCacheSafeParams.version,
+    sessionId: currentCacheSafeParams.sessionId,
   };
+}
+
+export function getCacheSafeParamsSessionId(): string | undefined {
+  return currentCacheSafeParams?.sessionId;
 }
 
 /**

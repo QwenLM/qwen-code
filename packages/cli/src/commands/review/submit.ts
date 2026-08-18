@@ -44,6 +44,7 @@
 // caller's.
 
 import type { CommandModule } from 'yargs';
+import { roundModelIdFrom } from './lib/round-model.js';
 import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -214,6 +215,7 @@ function compose(
   payload: ReviewPayload,
   cliVersion: string,
   attribution: boolean,
+  runtimeModelId: string | undefined,
 ): {
   event: string;
   body: string;
@@ -252,6 +254,7 @@ function compose(
     },
     cliVersion,
     attribution,
+    runtimeModelId,
   );
   return { event: r.event, body: r.body, cappedBy: r.cappedBy };
 }
@@ -490,7 +493,19 @@ export function runSubmit(
   let body: string;
   let cappedBy: string[];
   try {
-    ({ event, body, cappedBy } = compose(payload, cliVersion, attribution));
+    ({ event, body, cappedBy } = compose(
+      payload,
+      cliVersion,
+      attribution,
+      // The anchor's certifying identity is the model the runtime published
+      // for this session — Config publishes it per session, the shell tool
+      // injects it into this subprocess. It supersedes the typed id, but the
+      // launching command can still override the env (and a hijacked
+      // orchestrator can forge the marker outright via the API) — the same
+      // forgeable posture DESIGN.md records for the cache path.
+      // The identity this round runs under — see lib/round-model.ts.
+      roundModelIdFrom(process.env),
+    ));
   } catch (err) {
     throw new Error(
       `The review state does not compose into a verdict; refusing to post:\n` +
