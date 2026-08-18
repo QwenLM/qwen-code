@@ -97,6 +97,46 @@ describe('TaskListTool', () => {
     expect(result.llmContent).not.toContain('Pending');
   });
 
+  it('canonicalizes owner filters', async () => {
+    const t = await createTask(TEAM, {
+      subject: 'Owned',
+      description: 'desc',
+    });
+    await updateTask(TEAM, t.id, { owner: 'alice' });
+    // Negative control: without it, dropping the owner filter entirely
+    // still passes the positive assertion above.
+    await createTask(TEAM, {
+      subject: 'Unrelated',
+      description: 'desc',
+    }).then((other) => updateTask(TEAM, other.id, { owner: 'bob' }));
+
+    const invocation = tool.build({ owner: 'Alice' });
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.llmContent).toContain('Owned');
+    expect(result.llmContent).not.toContain('Unrelated');
+  });
+
+  it('matches legacy raw-spelled owners against a canonical filter', async () => {
+    const t = await createTask(TEAM, {
+      subject: 'Legacy',
+      description: 'desc',
+    });
+    // Owners persisted before the sanitization landed keep their raw
+    // spelling on disk; the filter must still find them.
+    await updateTask(TEAM, t.id, { owner: 'Bob' });
+
+    const invocation = tool.build({ owner: 'bob' });
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.llmContent).toContain('Legacy');
+  });
+
+  it('rejects owner filters that sanitize to empty', async () => {
+    const invocation = tool.build({ owner: '!!!' });
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeDefined();
+    expect(String(result.llmContent)).toContain('owner must include');
+  });
+
   it('returns TaskListResultDisplay', async () => {
     await createTask(TEAM, {
       subject: 'Task X',

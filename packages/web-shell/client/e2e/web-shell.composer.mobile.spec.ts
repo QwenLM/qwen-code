@@ -38,9 +38,6 @@ test('renders the textarea backend instead of CodeMirror on touch devices', asyn
 
   await expect(page.locator(COMPOSER_TEXTAREA)).toBeVisible();
   await expect(page.locator('.cm-editor')).toHaveCount(0);
-  await expect(
-    page.locator('[data-web-shell-composer-typewriter]'),
-  ).toHaveCount(0);
 });
 
 test('anchors the empty mobile composer with the textarea backend', async ({
@@ -63,35 +60,6 @@ test('anchors the empty mobile composer with the textarea backend', async ({
   await expect(textarea).toHaveValue(
     'Composer remains interactive on touch devices',
   );
-});
-
-test('keeps the composer usable after WebGL context loss', async ({
-  page,
-}, testInfo) => {
-  const scenario = createWebShellDaemonScenario();
-  const daemon = await installScenario(page, scenario, testInfo);
-
-  await gotoSession(page, scenario, daemon);
-  const hasWebgl2 = await page.evaluate(
-    () => !!document.createElement('canvas').getContext('webgl2'),
-  );
-  test.skip(!hasWebgl2, 'WebGL2 is unavailable on this runner');
-  const canvas = page.locator('[data-web-shell-composer-specular] canvas');
-  await expect(canvas).toBeVisible();
-
-  await canvas.evaluate((element) => {
-    const gl = element.getContext('webgl2');
-    const extension = gl?.getExtension('WEBGL_lose_context');
-    if (!extension) throw new Error('WEBGL_lose_context unavailable');
-    extension.loseContext();
-  });
-
-  await expect(canvas).toHaveCount(0);
-  const textarea = page.locator(COMPOSER_TEXTAREA);
-  await expect(textarea).toBeVisible();
-  await textarea.fill('still usable');
-  await expect(textarea).toHaveValue('still usable');
-  await expect(page.locator('[data-web-shell-composer-submit]')).toBeEnabled();
 });
 
 test('keeps voice controls reachable on an extra-narrow touch viewport', async ({

@@ -22,6 +22,7 @@ import {
 } from '../utils/composerTag';
 import { cssUrlVar } from '../utils/cssUrlVar';
 import { ReadonlyComposerTag } from './messages/UserMessage';
+import { isSafeImageSrc } from './messages/Markdown';
 import styles from '../App.module.css';
 
 const MAX_QUEUED_PROMPT_PREVIEW_CHARS = 240;
@@ -134,8 +135,6 @@ export interface QueuedPrompt {
   isEditing?: boolean;
   isRemoving?: boolean;
   payloadCompleteness?: 'complete' | 'summary-only';
-  admissionOutcome?: 'unknown';
-  payloadAvailable?: boolean;
 }
 
 export function QueuedPromptDisplay({
@@ -144,16 +143,14 @@ export function QueuedPromptDisplay({
   canMutateMidTurn = false,
   onDelete,
   onEdit,
-  onRestoreUnknown,
-  onDiscardUnknown,
+  onImagePreview,
 }: {
   prompts: readonly QueuedPrompt[];
   t: ReturnType<typeof getTranslator>;
   canMutateMidTurn?: boolean;
   onDelete: (id: number) => void;
   onEdit: (id: number) => void;
-  onRestoreUnknown?: (id: number) => void;
-  onDiscardUnknown?: (id: number) => void;
+  onImagePreview?: (src: string, alt?: string) => void;
 }) {
   const {
     parseUserMessageContent,
@@ -171,28 +168,19 @@ export function QueuedPromptDisplay({
     latestPrompt.serverState !== 'running' &&
     !latestPrompt.isEditing &&
     !latestPrompt.isRemoving &&
-    latestPrompt.payloadCompleteness !== 'summary-only' &&
-    latestPrompt.admissionOutcome !== 'unknown';
-  const mayContainDuplicateAdmission =
-    prompts.some((prompt) => prompt.admissionOutcome === 'unknown') &&
-    prompts.some(
-      (prompt) =>
-        prompt.payloadCompleteness === 'summary-only' &&
-        prompt.serverPromptId !== undefined,
-    );
+    latestPrompt.payloadCompleteness !== 'summary-only';
 
   return (
     <div className={styles.queuedPrompts}>
-      {mayContainDuplicateAdmission ? (
-        <div className={styles.queuedPromptAmbiguity} role="status">
-          {t('queue.mayCorrespond')}
-        </div>
-      ) : null}
       {prompts.map((prompt) => {
         const preview = truncateQueuedPromptParts(
           getQueuedPromptParts(prompt, parseUserMessageContent),
         );
-        const imageCount = prompt.images?.length ?? 0;
+        const safeImages = (prompt.images ?? []).flatMap((image, index) => {
+          const src = `data:${image.media_type};base64,${image.data}`;
+          return isSafeImageSrc(src) ? [{ index, src }] : [];
+        });
+        const imageCount = safeImages.length;
         const fileCount = prompt.files?.length ?? 0;
         const isSubmitting = prompt.serverState === 'submitting';
         const isQueued = prompt.serverState === 'queued';
@@ -202,9 +190,6 @@ export function QueuedPromptDisplay({
           prompt.midTurnState === 'submitting' ||
           (prompt.midTurnState === 'queued' && !prompt.midTurnMessageId);
         const isSummaryOnly = prompt.payloadCompleteness === 'summary-only';
-        const isAdmissionUnknown = prompt.admissionOutcome === 'unknown';
-        const hasUnknownPayload =
-          isAdmissionUnknown && prompt.payloadAvailable !== false;
         const showActions = !isMidTurnPending || canMutateMidTurn;
         const isRemoving = prompt.isRemoving === true;
         const hasStateSpinner =
@@ -216,7 +201,6 @@ export function QueuedPromptDisplay({
           isSubmitting ||
           isRunning ||
           isMidTurnLocked ||
-          isAdmissionUnknown ||
           prompt.isEditing === true ||
           isRemoving;
         const isEditDisabled = isBusy || isSummaryOnly;
@@ -224,9 +208,7 @@ export function QueuedPromptDisplay({
         if (isEditDisabled) {
           editTitle = isSummaryOnly
             ? t('queue.summaryEditDisabled')
-            : isAdmissionUnknown
-              ? t('queue.admissionUnknown')
-              : t('queue.submittingDisabled');
+            : t('queue.submittingDisabled');
         }
         const deleteTitle = isBusy
           ? t('queue.submittingDisabled')
@@ -256,20 +238,53 @@ export function QueuedPromptDisplay({
                 ),
               )}
               {preview.truncated ? '...' : null}
-              {imageCount > 0
-                ? ` ${t('queue.imageCount', { count: imageCount })}`
-                : ''}
               {fileCount > 0
                 ? ` ${t('queue.fileCount', { count: fileCount })}`
                 : ''}
-              {isAdmissionUnknown && !hasUnknownPayload
-                ? ` ${t('queue.localCopyDiscarded')}`
-                : ''}
             </span>
+            {imageCount > 0 ? (
+              <span
+                className={styles.queuedPromptImages}
+                aria-label={t('queue.imageCount', { count: imageCount })}
+                title={t('queue.imageCount', { count: imageCount })}
+              >
+                {safeImages.map(({ index, src }) => {
+                  const alt = t('user.uploadedImage', { index: index + 1 });
+                  return (
+                    <img
+                      key={index}
+                      className={`${styles.queuedPromptImage}${
+                        onImagePreview
+                          ? ` ${styles.queuedPromptImageInteractive}`
+                          : ''
+                      }`}
+                      src={src}
+                      alt={alt}
+                      role={onImagePreview ? 'button' : undefined}
+                      tabIndex={onImagePreview ? 0 : undefined}
+                      onClick={
+                        onImagePreview
+                          ? () => onImagePreview(src, alt)
+                          : undefined
+                      }
+                      onKeyDown={
+                        onImagePreview
+                          ? (event) => {
+                              if (event.key !== 'Enter' && event.key !== ' ')
+                                return;
+                              event.preventDefault();
+                              onImagePreview(src, alt);
+                            }
+                          : undefined
+                      }
+                    />
+                  );
+                })}
+              </span>
+            ) : null}
             {isSubmitting ||
             isQueued ||
             isMidTurnPending ||
-            isAdmissionUnknown ||
             prompt.isEditing ||
             isRemoving ? (
               <span
@@ -288,41 +303,14 @@ export function QueuedPromptDisplay({
                       ? t('queue.editing')
                       : isMidTurnPending
                         ? t('queue.midTurnQueued')
-                        : isAdmissionUnknown
-                          ? t('queue.admissionUnknown')
-                          : isQueued
-                            ? t('queue.serverQueued')
-                            : t('queue.submitting')}
+                        : isQueued
+                          ? t('queue.serverQueued')
+                          : t('queue.submitting')}
                 </span>
               </span>
             ) : null}
             <span className={styles.queuedPromptActions}>
-              {hasUnknownPayload ? (
-                <>
-                  <button
-                    type="button"
-                    className={styles.queuedPromptAction}
-                    onClick={() => {
-                      if (window.confirm(t('queue.continueEditingConfirm'))) {
-                        onRestoreUnknown?.(prompt.id);
-                      }
-                    }}
-                    aria-label={t('queue.restoreUnknown')}
-                    title={t('queue.restoreUnknown')}
-                  >
-                    {t('queue.restoreUnknown')}
-                  </button>
-                  <button
-                    type="button"
-                    className={styles.queuedPromptAction}
-                    onClick={() => onDiscardUnknown?.(prompt.id)}
-                    aria-label={t('queue.discardUnknown')}
-                    title={t('queue.discardUnknown')}
-                  >
-                    {t('queue.discardUnknown')}
-                  </button>
-                </>
-              ) : showActions && !isAdmissionUnknown ? (
+              {showActions ? (
                 <>
                   <button
                     type="button"
