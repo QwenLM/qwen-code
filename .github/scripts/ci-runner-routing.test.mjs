@@ -194,6 +194,6 @@ describe('serve-ab.yml runner routing', () => {
     );
     assert.ok(wipe, 'self-hosted reuse must not bleed one PR into the next');
     assert.equal(wipe.if, "${{ runner.environment == 'self-hosted' }}");
-    assert.match(wipe.run, /find "\$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf/);
+    assert.match(wipe.run, /find "\$WS" -mindepth 1 -maxdepth 1 -exec rm -rf/);
   });
 });

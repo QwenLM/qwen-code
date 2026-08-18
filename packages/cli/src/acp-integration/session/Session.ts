@@ -49,6 +49,8 @@ import type {
   MemoryWriteCandidate,
   CronTaskDelivery,
   InvocationContextV1,
+  ChatRecordingService,
+  TurnResultRecordPayload,
   WorkflowApproval,
   BranchPoint,
 } from '@qwen-code/qwen-code-core';
@@ -181,7 +183,13 @@ import {
   getFullTurnVisionModelSelector,
   splitImageParts,
   approxBase64Bytes,
+  normalizeTurnResultError,
+  TURN_RESULT_CODE_TEXT_TRUNCATED,
+  TURN_RESULT_TEXT_MAX_CHARS,
   runWithRuntimeContentGenerator,
+  observeToolResultBoundary,
+  toolResultBoundaryArtifact,
+  toolResultPartDiagnosticValues,
   getInvocationContext,
   runWithInvocationContext,
   truncateNotificationLabel,
@@ -264,7 +272,10 @@ import {
   getAvailableCommands,
   type NonInteractiveSlashCommandResult,
 } from '../../nonInteractiveCliCommands.js';
-import { isSlashCommand } from '../../ui/utils/commandUtils.js';
+import {
+  getSlashCommandFirstToken,
+  isSlashCommand,
+} from '../../ui/utils/commandUtils.js';
 import {
   collectGoalStatusItemsFromRecords,
   findGoalToRestore,
@@ -302,6 +313,7 @@ import type {
 } from './types.js';
 import { HistoryReplayer } from './history-replayer.js';
 import { projectAcpToolResultUpdate } from './acp-tool-result-text-projection.js';
+import { observeAcpToolResultProjection } from '../../utils/tool-result-boundary-diagnostics.js';
 import { ToolCallEmitter } from './emitters/tool-call-emitter.js';
 import { ToolCallPreparationTracker } from './tool-call-preparation-tracker.js';
 import { PlanEmitter } from './emitters/PlanEmitter.js';
@@ -1053,6 +1065,42 @@ function hasInlineMediaContentBlock(content: ContentBlock[]): boolean {
   return content.some((part) => part.type === 'image' || part.type === 'audio');
 }
 
+function extractTurnPromptText(content: ContentBlock[]): string {
+  let hasImage = false;
+  for (const block of content) {
+    if (block.type === 'image') hasImage = true;
+    if (block.type === 'text' && block.text.length > 0) return block.text;
+  }
+  return hasImage ? '[image]' : '';
+}
+
+interface InFlightTurnRecording {
+  promptId: string;
+  originatorClientId?: string;
+  abortController?: AbortController;
+  startedAt?: number;
+  promptText: string;
+  promptTextTruncated: boolean;
+  finalAnswer: { finalText: string };
+  /**
+   * Captured at turn start; settle writes against this instance (pinned to
+   * the turn-start session by `Config.startNewSession`) instead of
+   * re-resolving, so a mid-turn session rotation cannot redirect this turn's
+   * `turn_result` into the new session's transcript.
+   */
+  recordingService?: ChatRecordingService;
+}
+
+function truncateTurnText(text: string): {
+  text: string;
+  truncated: boolean;
+} {
+  if (text.length <= TURN_RESULT_TEXT_MAX_CHARS) {
+    return { text, truncated: false };
+  }
+  return { text: text.slice(0, TURN_RESULT_TEXT_MAX_CHARS), truncated: true };
+}
+
 function stripReferencedInlineDataParts(
   parts: Part[],
   content: ContentBlock[],
@@ -1313,26 +1361,75 @@ interface AgentResponseCapture {
   channelDelivery?: {
     finalText: string;
   };
+  turnResult?: {
+    finalText: string;
+  };
   agentOutput: AgentOutputMessageCapture;
+}
+
+interface ChannelDeliveryResponseBlock {
+  parts: string[];
+  chars: number;
+  /**
+   * When set, stop accumulating once `chars` reaches the cap; settle then
+   * sees a length past the turn-result bound and flags truncation. Only set
+   * for turns without a channel delivery — the delivery needs the full text,
+   * and capped turns would otherwise retain a multi-megabyte answer in full
+   * just to keep a truncated prefix.
+   */
+  capChars?: number;
 }
 
 function beginChannelDeliveryResponseBlock(
   capture: AgentResponseCapture | undefined,
-): string[] | undefined {
+): ChannelDeliveryResponseBlock | undefined {
   capture?.agentOutput.beginResponse();
-  if (!capture?.channelDelivery) return undefined;
-  capture.channelDelivery.finalText = '';
-  return [];
+  if (capture?.channelDelivery) capture.channelDelivery.finalText = '';
+  if (capture?.turnResult) capture.turnResult.finalText = '';
+  if (!capture?.channelDelivery && !capture?.turnResult) return undefined;
+  return {
+    parts: [],
+    chars: 0,
+    ...(capture?.channelDelivery
+      ? {}
+      : { capChars: TURN_RESULT_TEXT_MAX_CHARS + 1 }),
+  };
+}
+
+function appendChannelDeliveryResponseText(
+  responseBlock: ChannelDeliveryResponseBlock | undefined,
+  text: string,
+): void {
+  if (!responseBlock) return;
+  if (
+    responseBlock.capChars !== undefined &&
+    responseBlock.chars >= responseBlock.capChars
+  ) {
+    return;
+  }
+  responseBlock.parts.push(text);
+  responseBlock.chars += text.length;
+}
+
+function rewindChannelDeliveryResponseBlock(
+  responseBlock: ChannelDeliveryResponseBlock | undefined,
+  checkpoint: number,
+): void {
+  if (!responseBlock) return;
+  const removed = responseBlock.parts.splice(checkpoint);
+  for (const part of removed) responseBlock.chars -= part.length;
 }
 
 function commitChannelDeliveryResponseBlock(
   capture: AgentResponseCapture | undefined,
-  responseBlock: string[] | undefined,
+  responseBlock: ChannelDeliveryResponseBlock | undefined,
   hasFunctionCalls: boolean,
 ): void {
   capture?.agentOutput.commitResponse(hasFunctionCalls);
-  if (capture?.channelDelivery && responseBlock && !hasFunctionCalls) {
-    capture.channelDelivery.finalText = responseBlock.join('');
+  if (responseBlock && !hasFunctionCalls) {
+    const finalText = responseBlock.parts.join('');
+    if (capture?.channelDelivery) capture.channelDelivery.finalText = finalText;
+    if (capture?.turnResult) capture.turnResult.finalText = finalText;
   }
 }
 
@@ -3574,6 +3671,66 @@ export class Session implements SessionContext {
     modelPrompt?: string,
     scheduledGoalTurn?: AcpGoalTurn,
   ): Promise<PromptResponse> {
+    if (
+      invocationContext !== undefined &&
+      invocationContext.sessionId !== this.config.getSessionId()
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Invocation context session does not match the active session',
+      );
+    }
+    const turnRecording = this.#beginTurnRecording(params, invocationContext);
+    try {
+      const result = await this.#promptWithTurnRecording(
+        params,
+        invocationContext,
+        admissionCancellation,
+        modelPrompt,
+        scheduledGoalTurn,
+        turnRecording,
+      );
+      this.#settleTurnRecording(
+        result.stopReason === 'cancelled' ? 'cancelled' : 'completed',
+        turnRecording,
+        result,
+      );
+      return result;
+    } catch (error) {
+      const pendingSend = turnRecording?.abortController;
+      const abortReason =
+        pendingSend?.signal.aborted === true
+          ? pendingSend.signal.reason
+          : undefined;
+      // Mirror the send-loop's controlled-cancellation contract: explicit
+      // user cancels and session disposal settle as `cancelled`. A
+      // successor-prompt abort does so only when the thrown error is the
+      // abort itself; the send loop deliberately excludes NEW_PROMPT from
+      // controlled cancellation so infrastructure failures are not hidden
+      // as cancellations, and a non-abort error landing after a successor
+      // aborted this turn is a real failure that must surface the same way.
+      const controlledAbort =
+        abortReason === USER_CANCEL_ABORT_REASON ||
+        abortReason === SESSION_DISPOSE_ABORT_REASON ||
+        (abortReason === NEW_PROMPT_ABORT_REASON && this.#isAbortError(error));
+      if (controlledAbort) {
+        const result = { stopReason: 'cancelled' as const };
+        this.#settleTurnRecording('cancelled', turnRecording, result);
+        return result;
+      }
+      this.#settleTurnRecording('error', turnRecording, undefined, error);
+      throw error;
+    }
+  }
+
+  async #promptWithTurnRecording(
+    params: PromptRequest,
+    invocationContext: InvocationContextV1 | undefined,
+    admissionCancellation: AbortSignal | undefined,
+    modelPrompt: string | undefined,
+    scheduledGoalTurn: AcpGoalTurn | undefined,
+    turnRecording: InFlightTurnRecording | null,
+  ): Promise<PromptResponse> {
     if (this.closing) {
       throw RequestError.invalidParams(undefined, 'Session is closing');
     }
@@ -3649,6 +3806,7 @@ export class Session implements SessionContext {
     // targets us. A cancel during admission cannot target this pending prompt.
     this.pendingPrompt?.abort(NEW_PROMPT_ABORT_REASON);
     const pendingSend = goalTurn?.controller ?? new AbortController();
+    if (turnRecording) turnRecording.abortController = pendingSend;
     const cancelPendingSend = () => pendingSend.abort(USER_CANCEL_ABORT_REASON);
     if (admissionCancellation) {
       admissionCancellation.addEventListener('abort', cancelPendingSend, {
@@ -3794,6 +3952,7 @@ export class Session implements SessionContext {
     const channelDelivery = parsePromptChannelDelivery(params);
     const responseCapture: AgentResponseCapture = {
       ...(channelDelivery ? { channelDelivery: { finalText: '' } } : {}),
+      ...(turnRecording ? { turnResult: turnRecording.finalAnswer } : {}),
       agentOutput: new AgentOutputMessageCapture(this.config),
     };
     // One server-side channel classification, consumed by both the
@@ -3815,6 +3974,7 @@ export class Session implements SessionContext {
     let rejectedByLoopProtection = false;
     let promptResult: PromptResponse | undefined;
     let promptFailed = false;
+    if (turnRecording) turnRecording.startedAt = Date.now();
     try {
       const result = await this.#executePrompt(
         params,
@@ -3989,7 +4149,7 @@ export class Session implements SessionContext {
    * `qwen/notify/session/prompt-suggestion` extNotification. Mirrors
    * the CLI's `AppContainer.tsx` integration: same `generatePromptSuggestion`
    * call, same `enableCacheSharing` flag forwarding, same curated
-   * history slice (`getHistory(true).slice(-40)`).
+   * history tail (`getHistoryTail(40, true)`).
    *
    * Differences from the CLI:
    *   - Triggers only on `stopReason === 'end_turn'` (the daemon
@@ -4029,24 +4189,27 @@ export class Session implements SessionContext {
 
     void (async () => {
       try {
-        const fullHistory = chat.getHistory(true);
-        const lastEntry = fullHistory[fullHistory.length - 1];
+        const conversationHistory = chat.getHistoryTail(40, true);
+        const lastEntry = conversationHistory[conversationHistory.length - 1];
         if (!lastEntry || lastEntry.role !== 'model') {
           debugLogger.debug(
             'Skipping followup suggestion: last history entry is not model',
           );
           return;
         }
-        const conversationHistory =
-          fullHistory.length > 40 ? fullHistory.slice(-40) : fullHistory;
 
         const r = await generatePromptSuggestion(
           this.config,
           conversationHistory,
           ac.signal,
           {
+            // On by default: the schema declares `default: true`, but
+            // `mergeSettings` doesn't apply schema defaults, so an unset value
+            // is `undefined` and a `=== true` gate left the cache-aware fork
+            // as dead code unless the flag was explicitly set (#9230). Mirrors
+            // AppContainer — only an explicit `false` opts out.
             enableCacheSharing:
-              this.settings.merged.ui?.enableCacheSharing === true,
+              this.settings.merged.ui?.enableCacheSharing !== false,
           },
         );
         if (ac.signal.aborted) return;
@@ -4235,6 +4398,12 @@ export class Session implements SessionContext {
                 );
               }
             }
+            const firstTextBlock = modelPromptBlocks.find(
+              (block) => block.type === 'text',
+            );
+            const inputText = firstTextBlock?.text || '';
+            const isSlashInput = !isContinue && isSlashCommand(inputText);
+            const slashCommandName = getSlashCommandFirstToken(inputText);
             let continuationParts: Part[] | null = null;
             // For an `interrupted_prompt` continuation we strip the orphaned
             // user run from history before re-sending it. If the send then
@@ -4293,8 +4462,13 @@ export class Session implements SessionContext {
               // message would duplicate the turn in the transcript.
             } else if (isRetry) {
               this.#getCurrentChat().stripOrphanedUserEntriesFromHistory();
-            } else {
-              // record user message for session management
+            } else if (!isSlashInput || slashCommandName !== 'advisor') {
+              // record user message for session management. Only `/advisor`
+              // defers its record to after command resolution below — a
+              // user-defined command shadowing the name must keep its record
+              // (R18-6) — while every other slash command records here,
+              // BEFORE its action runs: `/clear` swaps in a fresh recorder
+              // inside its action, so its record must land first (R20-9).
               const mediaReferences = readDaemonMediaReferences(
                 promptMetadata?.[DAEMON_MEDIA_REFERENCES_META_KEY],
               );
@@ -4312,13 +4486,6 @@ export class Session implements SessionContext {
               }
             }
 
-            // Check if the input contains a slash command
-            // Extract text from the first text block if present
-            const firstTextBlock = modelPromptBlocks.find(
-              (block) => block.type === 'text',
-            );
-            const inputText = firstTextBlock?.text || '';
-            const isSlashInput = !isContinue && isSlashCommand(inputText);
             if (!isSlashInput && !isContinue && !isRetry) {
               this.refreshContextFilesOnWrite = false;
             }
@@ -4355,16 +4522,80 @@ export class Session implements SessionContext {
                 },
               );
 
-              parts = await this.#processSlashCommandResult(
-                slashCommandResult,
-                modelPromptBlocks,
-                pendingSend.signal,
-                onFullTurnModel,
+              if (
+                slashCommandName === 'advisor' &&
+                pendingSend.signal.aborted &&
+                slashCommandResult.type === 'message'
+              ) {
+                this.todoStopGuard.suspend();
+                logConversationFinishedEvent(
+                  this.config,
+                  new ConversationFinishedEvent(
+                    this.config.getApprovalMode(),
+                    0,
+                  ),
+                );
+                return { stopReason: 'cancelled' };
+              }
+
+              // Classify by the RESOLVED command, not the raw token: a
+              // custom command named `advisor` shadows the built-in and
+              // must keep its transcript records (R18-6). Only `/advisor`
+              // defers its user-message record to here — every other slash
+              // command was already recorded above, before its action ran.
+              const resolvedCommandInfo = slashCommandResult.resolvedCommand;
+              const shouldRecordSlashCommand = !(
+                resolvedCommandInfo?.kind === CommandKind.BUILT_IN &&
+                resolvedCommandInfo.name === 'advisor'
               );
+              if (
+                slashCommandName === 'advisor' &&
+                shouldRecordSlashCommand &&
+                goalTurn?.origin !== 'runtime' &&
+                !isRetry
+              ) {
+                const recorder = this.config.getChatRecordingService();
+                if (promptDisplayText !== undefined) {
+                  recorder?.recordUserMessage(promptText, goalTurn?.permit, {
+                    displayText: promptDisplayText,
+                    hookContext: '',
+                  });
+                } else if (goalTurn) {
+                  recorder?.recordUserMessage(promptText, goalTurn.permit);
+                } else {
+                  recorder?.recordUserMessage(promptText);
+                }
+              }
+
+              try {
+                parts = await this.#processSlashCommandResult(
+                  slashCommandResult,
+                  modelPromptBlocks,
+                  pendingSend.signal,
+                  onFullTurnModel,
+                  shouldRecordSlashCommand,
+                );
+              } catch (error) {
+                logConversationFinishedEvent(
+                  this.config,
+                  new ConversationFinishedEvent(
+                    this.config.getApprovalMode(),
+                    0,
+                  ),
+                );
+                throw error;
+              }
 
               // If parts is null, the command was fully handled (e.g., /summary completed)
               // Return early without sending to the model
               if (parts === null) {
+                logConversationFinishedEvent(
+                  this.config,
+                  new ConversationFinishedEvent(
+                    this.config.getApprovalMode(),
+                    0,
+                  ),
+                );
                 return { stopReason: 'end_turn' };
               }
             } else {
@@ -4575,7 +4806,9 @@ export class Session implements SessionContext {
                 const messageDisplay = this.#createMessageDisplayDispatcher(
                   pendingSend.signal,
                 );
-                let channelDeliveryResponseBlock: string[] | undefined;
+                let channelDeliveryResponseBlock:
+                  | ChannelDeliveryResponseBlock
+                  | undefined;
                 let channelDeliveryCheckpoint = 0;
 
                 try {
@@ -4616,7 +4849,7 @@ export class Session implements SessionContext {
                   channelDeliveryResponseBlock =
                     beginChannelDeliveryResponseBlock(responseCapture);
                   channelDeliveryCheckpoint =
-                    channelDeliveryResponseBlock?.length ?? 0;
+                    channelDeliveryResponseBlock?.parts.length ?? 0;
 
                   let streamFailed = false;
                   try {
@@ -4644,7 +4877,10 @@ export class Session implements SessionContext {
                           );
                           if (!part.thought) {
                             responseCapture.agentOutput.appendText(part.text);
-                            channelDeliveryResponseBlock?.push(part.text);
+                            appendChannelDeliveryResponseText(
+                              channelDeliveryResponseBlock,
+                              part.text,
+                            );
                             messageDisplay?.addChunk(part.text);
                           }
                         }
@@ -4679,10 +4915,10 @@ export class Session implements SessionContext {
                           resp.type === StreamEventType.MODEL_FALLBACK ||
                           !resp.isContinuation
                         ) {
-                          if (channelDeliveryResponseBlock) {
-                            channelDeliveryResponseBlock.length =
-                              channelDeliveryCheckpoint;
-                          }
+                          rewindChannelDeliveryResponseBlock(
+                            channelDeliveryResponseBlock,
+                            channelDeliveryCheckpoint,
+                          );
                         }
                         await finalizeToolCallPreparations(
                           preparationTracker,
@@ -5320,7 +5556,9 @@ export class Session implements SessionContext {
       const messageDisplay = this.#createMessageDisplayDispatcher(
         pendingSend.signal,
       );
-      let channelDeliveryResponseBlock: string[] | undefined;
+      let channelDeliveryResponseBlock:
+        | ChannelDeliveryResponseBlock
+        | undefined;
       let channelDeliveryCheckpoint = 0;
       let providerSendChat: GeminiChat | undefined;
       let userContentPushCountBeforeSend = 0;
@@ -5622,7 +5860,8 @@ export class Session implements SessionContext {
         channelDeliveryResponseBlock = beginChannelDeliveryResponseBlock(
           options.responseCapture,
         );
-        channelDeliveryCheckpoint = channelDeliveryResponseBlock?.length ?? 0;
+        channelDeliveryCheckpoint =
+          channelDeliveryResponseBlock?.parts.length ?? 0;
         initialSend = false;
         if (guardForThisSend) {
           const guardCommitted = this.todoStopGuard.commitContinuation(
@@ -5663,7 +5902,10 @@ export class Session implements SessionContext {
               );
               if (!part.thought) {
                 options.responseCapture?.agentOutput.appendText(part.text);
-                channelDeliveryResponseBlock?.push(part.text);
+                appendChannelDeliveryResponseText(
+                  channelDeliveryResponseBlock,
+                  part.text,
+                );
                 messageDisplay?.addChunk(part.text);
               }
             }
@@ -5697,9 +5939,10 @@ export class Session implements SessionContext {
               response.type === StreamEventType.MODEL_FALLBACK ||
               !response.isContinuation
             ) {
-              if (channelDeliveryResponseBlock) {
-                channelDeliveryResponseBlock.length = channelDeliveryCheckpoint;
-              }
+              rewindChannelDeliveryResponseBlock(
+                channelDeliveryResponseBlock,
+                channelDeliveryCheckpoint,
+              );
             }
             await finalizeToolCallPreparations(
               preparationTracker,
@@ -5945,9 +6188,11 @@ export class Session implements SessionContext {
   }
 
   async sendUpdate(update: SessionUpdate): Promise<void> {
+    const projectedUpdate = projectAcpToolResultUpdate(update);
+    observeAcpToolResultProjection(update, projectedUpdate, this.sessionId);
     const params: SessionNotification = {
       sessionId: this.sessionId,
-      update: projectAcpToolResultUpdate(update),
+      update: projectedUpdate,
     };
 
     if (update.sessionUpdate === 'plan') {
@@ -6000,6 +6245,80 @@ export class Session implements SessionContext {
         });
     }, 0);
     timer.unref();
+  }
+
+  #beginTurnRecording(
+    params: PromptRequest,
+    invocationContext: InvocationContextV1 | undefined,
+  ): InFlightTurnRecording | null {
+    if (!invocationContext) return null;
+    const promptMetadata = (params as { _meta?: Record<string, unknown> })
+      ._meta;
+    const rawPromptDisplayText =
+      promptMetadata?.[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
+    // Treat an empty display text as absent so an image-only channel prompt
+    // still records `[image]` via the content fallback, without the bridge
+    // having to rewrite the forwarded value (which also feeds transcript
+    // displayText and telemetry outside this feature's surface).
+    const promptDisplayText =
+      typeof rawPromptDisplayText === 'string' && rawPromptDisplayText !== ''
+        ? rawPromptDisplayText
+        : undefined;
+    const { text, truncated } = truncateTurnText(
+      promptDisplayText ?? extractTurnPromptText(params.prompt),
+    );
+    const recordingService = this.config.getChatRecordingService();
+    return {
+      promptId: invocationContext.promptId,
+      ...(invocationContext.originatorClientId !== undefined
+        ? { originatorClientId: invocationContext.originatorClientId }
+        : {}),
+      promptText: text,
+      promptTextTruncated: truncated,
+      finalAnswer: { finalText: '' },
+      ...(recordingService !== undefined ? { recordingService } : {}),
+    };
+  }
+
+  #settleTurnRecording(
+    state: 'completed' | 'cancelled' | 'error',
+    recording: InFlightTurnRecording | null,
+    response?: PromptResponse,
+    error?: unknown,
+  ): void {
+    if (recording === null) return;
+    const finalAnswer = truncateTurnText(recording.finalAnswer.finalText);
+    const stopReason =
+      response?.stopReason ?? (state === 'cancelled' ? 'cancelled' : undefined);
+    const payload: TurnResultRecordPayload = {
+      promptId: recording.promptId,
+      state,
+      ...(stopReason !== undefined ? { stopReason } : {}),
+      ...(state === 'error' ? { error: normalizeTurnResultError(error) } : {}),
+      ...(recording.startedAt !== undefined
+        ? { startedAt: recording.startedAt }
+        : {}),
+      endedAt: Date.now(),
+      promptText: recording.promptText,
+      ...(recording.promptTextTruncated ? { promptTextTruncated: true } : {}),
+      ...(finalAnswer.text.length > 0 ? { resultText: finalAnswer.text } : {}),
+      ...(finalAnswer.truncated
+        ? {
+            resultTruncated: true,
+            resultCode: TURN_RESULT_CODE_TEXT_TRUNCATED,
+          }
+        : {}),
+      ...(recording.originatorClientId !== undefined
+        ? { originatorClientId: recording.originatorClientId }
+        : {}),
+    };
+    try {
+      recording.recordingService?.recordTurnResult(payload);
+    } catch (recordError) {
+      debugLogger.warn(
+        `Failed to record turn result: ${this.#formatError(recordError)}`,
+      );
+    }
   }
 
   #getCurrentChat(): GeminiChat {
@@ -7209,10 +7528,12 @@ export class Session implements SessionContext {
                   return;
                 }
                 const responseStream = sendResult.responseStream;
-                const channelDeliveryResponseBlock =
+                const channelDeliveryResponseBlock:
+                  | ChannelDeliveryResponseBlock
+                  | undefined =
                   beginChannelDeliveryResponseBlock(responseCapture);
                 const channelDeliveryCheckpoint =
-                  channelDeliveryResponseBlock?.length ?? 0;
+                  channelDeliveryResponseBlock?.parts.length ?? 0;
                 if (loopTick && turnCount === 1) {
                   // The block reached the model (the send started); commit it so
                   // the next tick can detect "unchanged". Deferring the commit
@@ -7248,7 +7569,10 @@ export class Session implements SessionContext {
                         );
                         if (!part.thought) {
                           responseCapture.agentOutput.appendText(part.text);
-                          channelDeliveryResponseBlock?.push(part.text);
+                          appendChannelDeliveryResponseText(
+                            channelDeliveryResponseBlock,
+                            part.text,
+                          );
                           messageDisplay?.addChunk(part.text);
                         }
                       }
@@ -7283,10 +7607,10 @@ export class Session implements SessionContext {
                         resp.type === StreamEventType.MODEL_FALLBACK ||
                         !resp.isContinuation
                       ) {
-                        if (channelDeliveryResponseBlock) {
-                          channelDeliveryResponseBlock.length =
-                            channelDeliveryCheckpoint;
-                        }
+                        rewindChannelDeliveryResponseBlock(
+                          channelDeliveryResponseBlock,
+                          channelDeliveryCheckpoint,
+                        );
                       }
                       await finalizeToolCallPreparations(
                         preparationTracker,
@@ -8546,12 +8870,18 @@ export class Session implements SessionContext {
           toolName: record.toolName,
           responseParts: record.responseParts,
           persistedOutputFiles: record.persistedOutputFiles,
+          artifacts: record.metadata.artifacts,
         })),
+        new Map(orderedRecords.map((record) => [record.callId, promptId])),
       );
       orderedRecords.forEach((record, index) => {
         this.config
           .getChatRecordingService()
-          ?.recordToolResult(finalized[index].responseParts, record.metadata);
+          ?.recordToolResult(finalized[index].responseParts, {
+            ...record.metadata,
+            persistedOutputFiles: finalized[index].persistedOutputFiles,
+            artifacts: finalized[index].artifacts,
+          });
       });
       return {
         ...result,
@@ -8697,6 +9027,8 @@ export class Session implements SessionContext {
             resultDisplay: response.resultDisplay,
             error: response.error,
             success: false,
+            artifacts: response.artifacts,
+            persistedOutputFiles: response.persistedOutputFiles,
           });
         }
       } catch (emitError) {
@@ -8718,6 +9050,7 @@ export class Session implements SessionContext {
           resultDisplay: response.resultDisplay,
           error: response.error,
           errorType: response.errorType,
+          artifacts: response.artifacts,
         },
       });
     };
@@ -9137,6 +9470,8 @@ export class Session implements SessionContext {
     let executionStatus: ToolExecutionStatus = 'not_started';
     let executionErrorType: ToolErrorType | undefined;
     let executeReturned = false;
+    let executeAttempted = false;
+    let producerObserved = false;
     let terminalStatus: 'success' | 'error' | 'cancelled' | undefined;
     let toolType: 'native' | 'mcp' = 'native';
     let mcpServerName: string | undefined = undefined;
@@ -9234,15 +9569,38 @@ export class Session implements SessionContext {
         executionStatus: ToolExecutionStatus;
         recordInvalidToolParams?: boolean;
         stopAfterPermissionCancel?: boolean;
+        settledMetadata?: {
+          artifacts?: ToolArtifact[];
+          persistedOutputFiles?: string[];
+        };
       },
     ) => {
       executionStatus = opts.executionStatus;
       terminalStatus = opts.status;
       spanError = opts.status === 'error' ? error.message : undefined;
       cleanupAgentToolResources();
+      const errorParts = errorResponse(
+        error,
+        toolName,
+        opts.status,
+        opts.errorType,
+      );
       if (toolName !== ToolNames.TODO_WRITE) {
         try {
-          await this.toolCallEmitter.emitError(callId, toolName, error);
+          if (opts.settledMetadata) {
+            await this.toolCallEmitter.emitResult({
+              callId,
+              toolName,
+              args,
+              message: errorParts,
+              error,
+              success: false,
+              artifacts: opts.settledMetadata.artifacts,
+              persistedOutputFiles: opts.settledMetadata.persistedOutputFiles,
+            });
+          } else {
+            await this.toolCallEmitter.emitError(callId, toolName, error);
+          }
         } catch (emitError) {
           debugLogger.debug(
             '[Session.runTool] Failed to emit terminal tool update',
@@ -9250,17 +9608,30 @@ export class Session implements SessionContext {
           );
         }
       }
-
-      const errorParts = errorResponse(
-        error,
-        toolName,
-        opts.status,
-        opts.errorType,
-      );
+      if (executeAttempted && !producerObserved) {
+        observeToolResultBoundary({
+          stage: 'producer',
+          sessionId: this.sessionId,
+          promptId,
+          toolCallId: callId,
+          toolName,
+          artifacts: [
+            opts.settledMetadata
+              ? toolResultBoundaryArtifact(
+                  opts.settledMetadata.persistedOutputFiles,
+                  opts.settledMetadata.artifacts,
+                )
+              : toolResultBoundaryArtifact([], []),
+          ],
+          values: () => toolResultPartDiagnosticValues(errorParts),
+        });
+        producerObserved = true;
+      }
       queueToolResultRecord?.(fc, {
         callId,
         toolName,
         responseParts: errorParts,
+        persistedOutputFiles: opts.settledMetadata?.persistedOutputFiles,
         policyToolName: guardContext.policyToolName,
         toolType,
         executionErrorType:
@@ -9272,6 +9643,7 @@ export class Session implements SessionContext {
           status: opts.status,
           executionStatus,
           resultDisplay: undefined,
+          artifacts: opts.settledMetadata?.artifacts,
           error: opts.status === 'error' ? error : undefined,
           errorType: opts.status === 'error' ? opts.errorType : undefined,
         },
@@ -10495,6 +10867,8 @@ export class Session implements SessionContext {
                   },
                 }
               : undefined;
+          let settledArtifacts: ToolArtifact[] | undefined;
+          let settledPersistedOutputFiles: string[] | undefined;
           const sleepInhibitorHandle = acquireSleepInhibitor(
             this.config,
             `Qwen Code is executing tool ${toolName}`,
@@ -10519,12 +10893,23 @@ export class Session implements SessionContext {
             // Set the attempted outcome immediately before calling execute so
             // synchronous throws are classified as execution failures.
             executionStatus = 'error';
+            executeAttempted = true;
             try {
               toolResult = await invocation.execute(
                 activeToolAbortSignal,
                 onToolProgress,
               );
               executeReturned = true;
+              try {
+                settledArtifacts = toolResult.artifacts;
+              } catch {
+                // Optional result metadata must not affect execution.
+              }
+              try {
+                settledPersistedOutputFiles = toolResult.persistedOutputFiles;
+              } catch {
+                // Optional result metadata must not affect execution.
+              }
               parentAbortedAtExecutionSettle = activeToolAbortSignal.aborted;
               isExecutionTimeout =
                 toolResult.error?.type === ToolErrorType.EXECUTION_TIMEOUT;
@@ -10591,6 +10976,36 @@ export class Session implements SessionContext {
           } finally {
             toolSettled = true;
             sleepInhibitorHandle.release();
+          }
+
+          producerObserved = true;
+          try {
+            observeToolResultBoundary({
+              stage: 'producer',
+              sessionId: this.sessionId,
+              promptId,
+              toolCallId: callId,
+              toolName,
+              artifacts: [
+                toolResultBoundaryArtifact(
+                  settledPersistedOutputFiles,
+                  settledArtifacts,
+                ),
+              ],
+              values: () => [
+                ...toolResultPartDiagnosticValues(toolResult.llmContent),
+                ...(typeof toolResult.returnDisplay === 'string'
+                  ? [
+                      {
+                        representation: 'display' as const,
+                        value: toolResult.returnDisplay,
+                      },
+                    ]
+                  : []),
+              ],
+            });
+          } catch {
+            // Diagnostics must not affect tool execution.
           }
 
           // Clean up event listeners
@@ -10684,6 +11099,10 @@ export class Session implements SessionContext {
                   status: 'cancelled',
                   errorType: undefined,
                   executionStatus,
+                  settledMetadata: {
+                    artifacts: settledArtifacts,
+                    persistedOutputFiles: settledPersistedOutputFiles,
+                  },
                 },
               );
             }
@@ -10701,6 +11120,10 @@ export class Session implements SessionContext {
                 status: 'error',
                 errorType: ToolErrorType.EXECUTION_DENIED,
                 executionStatus,
+                settledMetadata: {
+                  artifacts: settledArtifacts,
+                  persistedOutputFiles: settledPersistedOutputFiles,
+                },
               });
             }
 
@@ -10836,7 +11259,8 @@ export class Session implements SessionContext {
                 resultDisplay: toolResult.returnDisplay,
                 error: responseError,
                 success: succeeded,
-                artifacts: toolResult.artifacts,
+                artifacts: settledArtifacts,
+                persistedOutputFiles: settledPersistedOutputFiles,
               });
             } catch (emitError) {
               debugLogger.debug(
@@ -10879,7 +11303,7 @@ export class Session implements SessionContext {
             callId,
             toolName,
             responseParts,
-            persistedOutputFiles: toolResult.persistedOutputFiles,
+            persistedOutputFiles: settledPersistedOutputFiles,
             policyToolName,
             toolType,
             executionErrorType:
@@ -10892,6 +11316,7 @@ export class Session implements SessionContext {
               ...(visionBridgeNotice !== undefined
                 ? { visionBridgeNotice }
                 : {}),
+              artifacts: settledArtifacts,
               error:
                 status === 'error' && toolResult.error
                   ? new Error(toolResult.error.message)
@@ -11029,12 +11454,10 @@ export class Session implements SessionContext {
    *
    * Supported result types in ACP mode:
    * - submit_prompt: Submits content to the model
+   * - message: Emits a single message to the client
    * - stream_messages: Streams multiple messages to the client (ACP-specific)
    * - unsupported: Command cannot be executed in ACP mode
    * - no_command: No command was found, use original prompt
-   *
-   * Note: 'message' type is not supported in ACP mode - commands should use
-   * 'stream_messages' instead for consistent async handling.
    *
    * @param result The result from handleSlashCommand
    * @param originalPrompt The original prompt blocks
@@ -11045,10 +11468,14 @@ export class Session implements SessionContext {
     originalPrompt: ContentBlock[],
     abortSignal: AbortSignal,
     onFullTurnModel: (model: string) => boolean,
+    shouldRecordResult: boolean,
   ): Promise<Part[] | null> {
     this.refreshContextFilesOnWrite =
       result.type === 'submit_prompt' &&
       Boolean(result.refreshContextFilesOnWrite);
+    const recorder = shouldRecordResult
+      ? this.config.getChatRecordingService()
+      : undefined;
 
     switch (result.type) {
       case 'submit_prompt':
@@ -11075,7 +11502,7 @@ export class Session implements SessionContext {
         // Write a system/slash_command record so history replay on restart can
         // re-emit this message. system records are skipped by
         // buildApiHistoryFromConversation, so this won't pollute model context.
-        this.config.getChatRecordingService()?.recordSlashCommand({
+        recorder?.recordSlashCommand({
           phase: 'result',
           rawCommand: originalPrompt
             .filter((b) => b.type === 'text')
@@ -11104,7 +11531,7 @@ export class Session implements SessionContext {
         // Write a system/slash_command record for history replay (same reason as
         // 'message' case — system records are invisible to model history).
         if (chunks.length > 0) {
-          this.config.getChatRecordingService()?.recordSlashCommand({
+          recorder?.recordSlashCommand({
             phase: 'result',
             rawCommand: originalPrompt
               .filter((b) => b.type === 'text')

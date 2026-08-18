@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { promises as fsp, writeFileSync } from 'node:fs';
+import { promises as fsp, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
@@ -15,6 +15,8 @@ import {
   FS_ACCESS_EVENT_TYPE,
   FS_DENIED_EVENT_TYPE,
   createWorkspaceFileSystemFactory,
+  resolveNewFileModeBits,
+  type NewFileModePolicy,
   type ResolvedPath,
   type WorkspaceFileSystem,
   type WorkspaceFileSystemFactory,
@@ -36,6 +38,7 @@ async function makeHarness(opts?: {
   ignore?: Ignore;
   includeRawPaths?: boolean;
   generationGuard?: { assertOpen(): void };
+  newFileMode?: NewFileModePolicy;
 }): Promise<Harness> {
   const scratch = await fsp.mkdtemp(
     path.join(os.tmpdir(), `qwen-wfs-${randomBytes(4).toString('hex')}-`),
@@ -51,6 +54,7 @@ async function makeHarness(opts?: {
     ignore: opts?.ignore,
     includeRawPaths: opts?.includeRawPaths,
     generationGuard: opts?.generationGuard,
+    newFileMode: opts?.newFileMode,
   });
   const fs = factory.forRequest({
     originatorClientId: 'client-x',
@@ -1709,6 +1713,126 @@ describe('WorkspaceFileSystem - write/edit', () => {
   });
 });
 
+// New-file mode policy (#9250): the daemon's text writers historically
+// created every NEW file at `0o600` regardless of the process umask.
+// `QWEN_SERVE_NEW_FILE_MODE=system` lets operators opt into the
+// standard `0o666 & ~umask` handling; the default stays owner-only.
+describe('WorkspaceFileSystem - new-file mode policy', () => {
+  const isPosix = process.platform !== 'win32';
+
+  it('resolveNewFileModeBits: owner policy ignores the umask', () => {
+    expect(resolveNewFileModeBits('owner', 0o000)).toBe(0o600);
+    expect(resolveNewFileModeBits('owner', 0o002)).toBe(0o600);
+    expect(resolveNewFileModeBits('owner', 0o077)).toBe(0o600);
+  });
+
+  it('resolveNewFileModeBits: system policy applies 0o666 & ~umask', () => {
+    expect(resolveNewFileModeBits('system', 0o000)).toBe(0o666);
+    expect(resolveNewFileModeBits('system', 0o002)).toBe(0o664);
+    expect(resolveNewFileModeBits('system', 0o022)).toBe(0o644);
+    expect(resolveNewFileModeBits('system', 0o077)).toBe(0o600);
+  });
+
+  it('default (owner) policy ignores a permissive umask', async () => {
+    if (!isPosix) return;
+    const h = await makeHarness();
+    const prev = process.umask(0o002);
+    try {
+      const r = await h.fs.resolve('owner-default.txt', 'write');
+      await h.fs.writeTextOverwrite(r, 'x');
+      const st = await fsp.lstat(r as string);
+      expect(st.mode & 0o7777).toBe(0o600);
+    } finally {
+      process.umask(prev);
+      await teardown(h);
+    }
+  });
+
+  it('system policy creates new files at 0o666 & ~umask', async () => {
+    if (!isPosix) return;
+    const h = await makeHarness({ newFileMode: 'system' });
+    const prev = process.umask(0o002);
+    try {
+      const r = await h.fs.resolve('system-new.txt', 'write');
+      const out = await h.fs.writeTextOverwrite(r, 'hello\n');
+      expect(out.created).toBe(true);
+      const st = await fsp.lstat(r as string);
+      expect(st.mode & 0o7777).toBe(0o664);
+    } finally {
+      process.umask(prev);
+      await teardown(h);
+    }
+  });
+
+  it('system policy still preserves an existing target mode', async () => {
+    if (!isPosix) return;
+    const h = await makeHarness({ newFileMode: 'system' });
+    const prev = process.umask(0o002);
+    try {
+      const target = path.join(h.workspace, 'system-secret.txt');
+      await fsp.writeFile(target, 'old', { mode: 0o600 });
+      await fsp.chmod(target, 0o600);
+      const r = await h.fs.resolve('system-secret.txt', 'write');
+      const out = await h.fs.writeTextOverwrite(r, 'new');
+      expect(out.created).toBe(false);
+      const st = await fsp.lstat(target);
+      expect(st.mode & 0o7777).toBe(0o600);
+    } finally {
+      process.umask(prev);
+      await teardown(h);
+    }
+  });
+
+  it('system policy applies to writeTextAtomic create', async () => {
+    if (!isPosix) return;
+    const h = await makeHarness({ newFileMode: 'system' });
+    const prev = process.umask(0o022);
+    try {
+      const r = await h.fs.resolve('system-atomic.txt', 'write');
+      await h.fs.writeTextAtomic(r, 'a\n', { mode: 'create' });
+      const st = await fsp.lstat(r as string);
+      expect(st.mode & 0o7777).toBe(0o644);
+    } finally {
+      process.umask(prev);
+      await teardown(h);
+    }
+  });
+
+  it('system policy applies to the same-host external tool write route', async () => {
+    if (!isPosix) return;
+    const h = await makeHarness({ newFileMode: 'system' });
+    const prev = process.umask(0o002);
+    try {
+      expect(h.factory.writeSameHostToolText).toBeTypeOf('function');
+      const external = path.join(h.scratch, 'external-tool-write.txt');
+      await h.factory.writeSameHostToolText?.(
+        { route: 'TEST same-host', sessionId: 'sess-1' },
+        { path: external, content: 'ext\n' },
+      );
+      const st = await fsp.lstat(external);
+      expect(st.mode & 0o7777).toBe(0o664);
+    } finally {
+      process.umask(prev);
+      await teardown(h);
+    }
+  });
+
+  it('writeBytesAtomic keeps 0o600 even under the system policy', async () => {
+    if (!isPosix) return;
+    const h = await makeHarness({ newFileMode: 'system' });
+    const prev = process.umask(0o002);
+    try {
+      const r = await h.fs.resolve('system-bytes.bin', 'write');
+      await h.fs.writeBytesAtomic(r, Buffer.from('bin'));
+      const st = await fsp.lstat(r as string);
+      expect(st.mode & 0o7777).toBe(0o600);
+    } finally {
+      process.umask(prev);
+      await teardown(h);
+    }
+  });
+});
+
 describe('WorkspaceFileSystem - trust gate', () => {
   let h: Harness;
   beforeEach(async () => {
@@ -2492,6 +2616,139 @@ describe('WorkspaceFileSystem - writeBytesAtomic', () => {
         (e.data as { errorKind: string }).errorKind === 'file_too_large',
     );
     expect(denied).toBeDefined();
+  });
+});
+
+describe('WorkspaceFileSystem - mkdir', () => {
+  let h: Harness;
+  beforeEach(async () => {
+    h = await makeHarness();
+  });
+  afterEach(async () => {
+    await teardown(h);
+  });
+
+  it('creates a missing directory', async () => {
+    const r = await h.fs.resolve('new-dir', 'write');
+    await h.fs.mkdir(r);
+    const st = await fsp.stat(path.join(h.workspace, 'new-dir'));
+    expect(st.isDirectory()).toBe(true);
+  });
+
+  it('creates missing parents recursively', async () => {
+    const r = await h.fs.resolve('a/b/c', 'write');
+    await h.fs.mkdir(r, { recursive: true });
+    for (const p of ['a', 'a/b', 'a/b/c']) {
+      const st = await fsp.stat(path.join(h.workspace, p));
+      expect(st.isDirectory()).toBe(true);
+    }
+  });
+
+  it('reuses an existing directory without error', async () => {
+    const target = path.join(h.workspace, 'existing');
+    await fsp.mkdir(target);
+    const r = await h.fs.resolve('existing', 'write');
+    await expect(h.fs.mkdir(r)).resolves.toBeUndefined();
+    const st = await fsp.stat(target);
+    expect(st.isDirectory()).toBe(true);
+  });
+
+  it('rejects an existing non-directory at the target', async () => {
+    await fsp.writeFile(path.join(h.workspace, 'file.txt'), 'x');
+    const r = await h.fs.resolve('file.txt', 'write');
+    const err = await h.fs.mkdir(r).catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('parse_error');
+  });
+
+  it('rejects a target that becomes a symlink before creation completes', async () => {
+    // `resolve` already rejects symlink escapes at admission; this pins the
+    // post-create `lstat` re-check that defends the create itself.
+    const realMkdir = fsp.mkdir;
+    const target = path.join(h.workspace, 'race-dir');
+    const spy = vi
+      .spyOn(fsp, 'mkdir')
+      .mockImplementation(
+        async (
+          input: Parameters<typeof fsp.mkdir>[0],
+          options?: Parameters<typeof fsp.mkdir>[1],
+        ) => {
+          if (String(input) === target) {
+            await fsp.rm(target, { recursive: true, force: true });
+            await fsp.symlink(h.scratch, target, 'dir');
+          }
+          return realMkdir(input, options);
+        },
+      );
+    try {
+      const r = await h.fs.resolve('race-dir', 'write');
+      const err = await h.fs.mkdir(r).catch((e: unknown) => e);
+      expect(isFsError(err)).toBe(true);
+      expect((err as { kind: string }).kind).toBe('symlink_escape');
+      await expect(
+        fsp.stat(path.join(h.scratch, 'race-dir')),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('rejects a parent swapped for a symlink mid-recursive-create', async () => {
+    // The per-component `lstat` re-check cannot see an INTERMEDIATE ancestor
+    // that becomes a symlink (it only refuses to follow the final component);
+    // the parent re-check before the next `mkdir` is what closes that window.
+    let checks = 0;
+    let firstComponent = '';
+    await teardown(h);
+    h = await makeHarness({
+      generationGuard: {
+        assertOpen() {
+          checks += 1;
+          // The create loop's second iteration is about to mkdir `a/b`; the
+          // just-created `a` has been swapped for a symlink out of the
+          // workspace in the meantime.
+          if (checks === 5) {
+            rmSync(firstComponent, { recursive: true, force: true });
+            symlinkSync(h.scratch, firstComponent, 'dir');
+          }
+        },
+      },
+    });
+    firstComponent = path.join(h.workspace, 'a');
+    const r = await h.fs.resolve('a/b', 'write');
+    const err = await h.fs
+      .mkdir(r, { recursive: true })
+      .catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('symlink_escape');
+    // Nothing was created through the symlink.
+    await expect(fsp.stat(path.join(h.scratch, 'b'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+
+  it('refuses the non-recursive create when a parent is missing', async () => {
+    const r = await h.fs.resolve('a/b', 'write');
+    const err = await h.fs.mkdir(r).catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('path_not_found');
+  });
+
+  it('records audit access on success', async () => {
+    const r = await h.fs.resolve('audit-dir', 'write');
+    await h.fs.mkdir(r);
+    const access = h.events.find(
+      (e) =>
+        e.type === FS_ACCESS_EVENT_TYPE &&
+        (e.data as { intent: string }).intent === 'write',
+    );
+    expect(access).toBeDefined();
+    // Privacy mode hashes the path; only `QWEN_AUDIT_RAW_PATHS=1` exposes it.
+    expect((access!.data as { pathHash: string }).pathHash).toMatch(
+      /^[0-9a-f]{16}$/,
+    );
+    // `mkdir` must be distinguishable from a zero-byte file write.
+    expect((access!.data as { operation?: string }).operation).toBe('mkdir');
   });
 });
 

@@ -8,6 +8,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   ChatCompressionService,
   COMPACT_MAX_OUTPUT_TOKENS,
+  COMPACTION_BUDGET_SAFETY_MARGIN,
+  computeCompactionOutputBudget,
   computeThresholds,
   MAX_CONSECUTIVE_FAILURES,
   MAX_HOOK_INSTRUCTIONS_CHARS,
@@ -29,6 +31,7 @@ import * as sideQueryModule from '../utils/sideQuery.js';
 import * as postCompactModule from './postCompactAttachments.js';
 import * as slimmingModule from './compactionInputSlimming.js';
 import { logChatCompression } from '../telemetry/loggers.js';
+import { estimateContentTokens } from './tokenEstimation.js';
 
 vi.mock('../telemetry/uiTelemetry.js');
 vi.mock('../core/tokenLimits.js');
@@ -563,13 +566,19 @@ describe('ChatCompressionService', () => {
       { role: 'model', parts: [{ text: 'msg4' }] },
     ];
     vi.mocked(mockChat.getHistory).mockReturnValue(history);
-    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(900);
+    // Realistic window: a 1000-token window floors the side-query output
+    // budget to 1 (issue #7960 clamp), and the truncation guard rightly
+    // rejects any output at a 1-token cap. 32K keeps the budget at the 20K
+    // ceiling so the 50-token summary below is accepted.
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+      28_000,
+    );
     // Mock contextWindowSize instead of tokenLimit
     vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
       model: 'gemini-pro',
-      contextWindowSize: 1000,
+      contextWindowSize: 32_000,
     } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
-    // newTokenCount = 900 - (1600 - 1000) + 50 = 900 - 600 + 50 = 350 <= 900 (success)
+    // newTokenCount = 28000 - (1600 - 1000) + 50 = 27450 <= 28000 (success)
     const mockGenerateContent = vi.fn().mockResolvedValue({
       text: 'Summary',
       usage: {
@@ -591,7 +600,7 @@ describe('ChatCompressionService', () => {
     });
 
     expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
-    expect(result.info.newTokenCount).toBe(350); // 900 - (1600 - 1000) + 50
+    expect(result.info.newTokenCount).toBe(27_450); // 28000 - (1600 - 1000) + 50
     expect(result.newHistory).not.toBeNull();
     // postProcessSummary appends the resume trailer to the summary body,
     // so it's "Summary\n\n<trailer>" rather than a strict equality.
@@ -634,11 +643,16 @@ describe('ChatCompressionService', () => {
       throw new Error('getHistory should not be called by compression');
     });
     vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+    // Window must comfortably exceed the ~256K-token estimate of the 1MB
+    // tool output above, otherwise the issue-#7960 clamp floors the output
+    // budget to 1 and the truncation guard rejects the summary.
     vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
       model: 'gemini-pro',
-      contextWindowSize: 1000,
+      contextWindowSize: 1_000_000,
     } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
-    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(900);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+      900_000,
+    );
 
     const mockGenerateContent = vi.fn().mockResolvedValue({
       text: 'Summary',
@@ -1160,7 +1174,10 @@ describe('ChatCompressionService', () => {
     });
 
     const mockGenerateContent = vi.fn().mockResolvedValue({
-      text: 'Summary',
+      // Well-formed snapshot: the clamped budget + local-estimate path gates
+      // acceptance on snapshot well-formedness, so the summary must carry
+      // the closed tag the compression directive requires.
+      text: '<state_snapshot>Summary</state_snapshot>',
       // Some OpenAI-compatible providers (for example MiniMax-2.7) may omit
       // usage on the compression side-query even when they return a summary.
       usage: undefined,
@@ -1200,9 +1217,12 @@ describe('ChatCompressionService', () => {
     ];
     vi.mocked(mockChat.getHistory).mockReturnValue(history);
     vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(800);
+    // Window large enough that the output budget is not clamped: on the
+    // clamped + usage-missing path the well-formedness guard would preempt
+    // the inflation check this test targets (this summary is not XML).
     vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
       model: 'gemini-pro',
-      contextWindowSize: 6_000,
+      contextWindowSize: 128_000,
     } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
     const mockGenerateContent = vi.fn().mockResolvedValue({
@@ -1281,7 +1301,7 @@ describe('ChatCompressionService', () => {
       expect.stringContaining('local estimate'),
     );
     expect(warn).toHaveBeenCalledWith(
-      expect.stringContaining('COMPACT_MAX_OUTPUT_TOKENS'),
+      expect.stringContaining('truncation threshold'),
     );
   });
 
@@ -1337,7 +1357,7 @@ describe('ChatCompressionService', () => {
       expect.stringContaining('local estimate'),
     );
     expect(warn).toHaveBeenCalledWith(
-      expect.stringContaining('COMPACT_MAX_OUTPUT_TOKENS'),
+      expect.stringContaining('truncation threshold'),
     );
   });
 
@@ -1448,10 +1468,12 @@ describe('ChatCompressionService', () => {
       { role: 'model', parts: [{ text: 'msg4' }] },
     ];
     vi.mocked(mockChat.getHistory).mockReturnValue(history);
-    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(900);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+      28_000,
+    );
     vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
       model: 'gemini-pro',
-      contextWindowSize: 1000,
+      contextWindowSize: 32_000,
     } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
     const mockGenerateContent = vi.fn().mockResolvedValue({
@@ -1542,11 +1564,11 @@ describe('ChatCompressionService', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
-        900,
+        28_000,
       );
       vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
         model: 'gemini-pro',
-        contextWindowSize: 1000,
+        contextWindowSize: 32_000,
       } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
       const mockGenerateContent = vi.fn().mockResolvedValue({
@@ -1624,11 +1646,11 @@ describe('ChatCompressionService', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
-        900,
+        28_000,
       );
       vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
         model: 'gemini-pro',
-        contextWindowSize: 1000,
+        contextWindowSize: 32_000,
       } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
       mockFirePreCompactEvent.mockRejectedValue(
@@ -1670,11 +1692,11 @@ describe('ChatCompressionService', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
-        900,
+        28_000,
       );
       vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
         model: 'gemini-pro',
-        contextWindowSize: 1000,
+        contextWindowSize: 32_000,
       } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
       const callOrder: string[] = [];
@@ -1716,11 +1738,11 @@ describe('ChatCompressionService', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
-        900,
+        28_000,
       );
       vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
         model: 'gemini-pro',
-        contextWindowSize: 1000,
+        contextWindowSize: 32_000,
       } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
       const mockGenerateContent = vi.fn().mockResolvedValue({
@@ -1814,11 +1836,11 @@ describe('ChatCompressionService', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
-        900,
+        28_000,
       );
       vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
         model: 'gemini-pro',
-        contextWindowSize: 1000,
+        contextWindowSize: 32_000,
       } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
       const mockGenerateContent = vi.fn().mockResolvedValue({
@@ -1897,11 +1919,11 @@ describe('ChatCompressionService', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
-        900,
+        28_000,
       );
       vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
         model: 'gemini-pro',
-        contextWindowSize: 1000,
+        contextWindowSize: 32_000,
       } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
       mockFirePostCompactEvent.mockRejectedValue(
@@ -1943,11 +1965,11 @@ describe('ChatCompressionService', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
-        900,
+        28_000,
       );
       vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
         model: 'gemini-pro',
-        contextWindowSize: 1000,
+        contextWindowSize: 32_000,
       } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
       const callOrder: string[] = [];
@@ -1993,11 +2015,11 @@ describe('ChatCompressionService', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
-        900,
+        28_000,
       );
       vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
         model: 'gemini-pro',
-        contextWindowSize: 1000,
+        contextWindowSize: 32_000,
       } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
       const mockGenerateContent = vi.fn().mockResolvedValue({
@@ -2153,7 +2175,7 @@ describe('ChatCompressionService.compress sideQuery config', () => {
     );
     expect(result.newHistory).toBeNull();
     expect(warn).toHaveBeenCalledWith(
-      expect.stringContaining('COMPACT_MAX_OUTPUT_TOKENS'),
+      expect.stringContaining('truncation threshold'),
     );
   });
 });
@@ -4401,5 +4423,372 @@ describe('ChatCompressionService.compress — plan-mode + subagent attachment wi
     expect(flat).toContain('<plan-mode-active>');
     expect(flat).toContain('<background-tasks>');
     expect(flat).toContain('agent-bg');
+  });
+});
+
+// Regression tests for https://github.com/QwenLM/qwen-code/issues/7960
+// The compression side-query used to always request a fixed
+// maxOutputTokens=COMPACT_MAX_OUTPUT_TOKENS (20K). On a small-window
+// deployment (e.g. vLLM --max-model-len 65536) whose prompt is already near
+// the window, prompt + 20K exceeded the context window and the backend
+// rejected the request with a 400 before the model generated anything. The
+// side-query budget is now clamped to the window's remaining room.
+
+// The issue's real deployment: vLLM with --max-model-len 65536.
+const WINDOW = 65_536;
+
+describe('issue #7960: compression side-query output budget vs small windows', () => {
+  let service: ChatCompressionService;
+  let mockChat: GeminiChat;
+  let mockConfig: Config;
+  let capturedPromptTokens: number | undefined;
+  let capturedMaxOutputTokens: number | undefined;
+  let capturedModel: string | undefined;
+
+  beforeEach(() => {
+    capturedPromptTokens = undefined;
+    capturedMaxOutputTokens = undefined;
+    capturedModel = undefined;
+    service = new ChatCompressionService();
+    mockChat = {
+      getHistory: vi.fn(),
+      getHistoryShallow: vi.fn((curated?: boolean) =>
+        mockChat.getHistory(curated),
+      ),
+    } as unknown as GeminiChat;
+    mockConfig = {
+      getChatCompression: vi.fn(),
+      getAutoCompactThreshold: vi.fn(),
+      getBaseLlmClient: vi.fn(),
+      getContentGeneratorConfig: vi.fn().mockReturnValue({
+        model: 'test-model',
+        contextWindowSize: WINDOW,
+      }),
+      getHookSystem: vi.fn().mockReturnValue(undefined),
+      getModel: () => 'test-model',
+      getCompactionModel: vi.fn(),
+      getFastModel: vi.fn(),
+      getAllConfiguredModels: vi.fn().mockReturnValue([]),
+      getApprovalMode: () => 'default',
+      getDebugLogger: () => ({
+        warn: vi.fn(),
+        debug: vi.fn(),
+      }),
+      getTargetDir: () => '/tmp/test-workspace',
+    } as unknown as Config;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // Emulates the vLLM/OpenAI-compatible backend preflight check:
+  // prompt_tokens + max_tokens must fit the model window or the request is
+  // rejected with a 400 before generation starts. With hitCap the mock model
+  // additionally stops exactly at the requested budget and returns an unclosed
+  // <state_snapshot>, like a real model that runs out of output tokens.
+  // omitUsage drops the usage block, like the OpenAI-compatible providers
+  // documented in chatCompressionService.ts that omit it on streamed
+  // side-queries.
+  function mockVllmBackend(
+    window: number = WINDOW,
+    hitCap = false,
+    mockOpts: { omitUsage?: boolean; text?: string } = {},
+  ) {
+    const generateText = vi.fn(async (opts: GenerateTextOptions) => {
+      const contents = opts.contents as Content[];
+      const systemText =
+        typeof opts.systemInstruction === 'string'
+          ? opts.systemInstruction
+          : '';
+      capturedModel = opts.model;
+      capturedPromptTokens =
+        estimateContentTokens(contents) + Math.ceil(systemText.length / 4);
+      capturedMaxOutputTokens = (
+        opts.config as { maxOutputTokens?: number } | undefined
+      )?.maxOutputTokens;
+      if (
+        capturedMaxOutputTokens !== undefined &&
+        capturedPromptTokens + capturedMaxOutputTokens > window
+      ) {
+        throw new Error(
+          `400 BadRequestError: {"error":{"message":"This model's maximum ` +
+            `context length is ${window} tokens. However, you requested ` +
+            `${capturedMaxOutputTokens} output tokens and your prompt ` +
+            `contains at least ${capturedPromptTokens} input tokens, for a ` +
+            `total of at least ${capturedPromptTokens + capturedMaxOutputTokens} ` +
+            `tokens."}}`,
+        );
+      }
+      if (hitCap) {
+        return {
+          text: mockOpts.text ?? '<state_snapshot>truncated mid-content...',
+          usage: mockOpts.omitUsage
+            ? undefined
+            : {
+                promptTokenCount: capturedPromptTokens,
+                candidatesTokenCount: capturedMaxOutputTokens,
+              },
+        };
+      }
+      return {
+        text: mockOpts.text ?? '<state_snapshot>summary</state_snapshot>',
+        usage: mockOpts.omitUsage
+          ? undefined
+          : {
+              promptTokenCount: capturedPromptTokens,
+              candidatesTokenCount: 2_000,
+            },
+      };
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText,
+    } as unknown as BaseLlmClient);
+    return generateText;
+  }
+
+  it('clamps maxOutputTokens so the request fits a 65K window with a ~45.5K prompt (manual /compress)', async () => {
+    // ~45,500 estimated tokens of history (chars/4), matching the issue's
+    // real failed session ("Estimated prompt Tokens: 45512").
+    const bigText = 'x'.repeat(182_000);
+    vi.mocked(mockChat.getHistory).mockReturnValue([
+      { role: 'user', parts: [{ text: bigText }] },
+      { role: 'model', parts: [{ text: 'ok' }] },
+    ]);
+    mockVllmBackend();
+
+    // Before the fix the fixed 20K budget overflowed the window and the
+    // backend 400 escaped compress(). Now the budget is clamped and
+    // compression succeeds.
+    const result = await service.compress(mockChat, {
+      promptId: 'test-prompt-id',
+      force: true,
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 45_000,
+    });
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+
+    // The budget was actually clamped below the fixed ceiling...
+    expect(capturedMaxOutputTokens).toBeLessThan(COMPACT_MAX_OUTPUT_TOKENS);
+    // ...to window - prompt - safety margin (with a 2-token tolerance for
+    // per-part vs combined ceil rounding between the service's estimate and
+    // this mock's)...
+    expect(capturedMaxOutputTokens).toBeLessThanOrEqual(
+      WINDOW - capturedPromptTokens! - COMPACTION_BUDGET_SAFETY_MARGIN,
+    );
+    expect(capturedMaxOutputTokens).toBeGreaterThanOrEqual(
+      WINDOW - capturedPromptTokens! - COMPACTION_BUDGET_SAFETY_MARGIN - 2,
+    );
+    // ...and the request now satisfies the backend invariant.
+    expect(
+      capturedPromptTokens! + capturedMaxOutputTokens!,
+    ).toBeLessThanOrEqual(WINDOW);
+  });
+
+  it('still requests the full 20K budget on a large window', async () => {
+    vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+      model: 'test-model',
+      contextWindowSize: 128_000,
+    });
+    vi.mocked(mockChat.getHistory).mockReturnValue([
+      { role: 'user', parts: [{ text: 'x'.repeat(182_000) }] },
+      { role: 'model', parts: [{ text: 'ok' }] },
+    ]);
+    mockVllmBackend(128_000);
+
+    const result = await service.compress(mockChat, {
+      promptId: 'test-prompt-id',
+      force: true,
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 45_000,
+    });
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    expect(capturedMaxOutputTokens).toBe(COMPACT_MAX_OUTPUT_TOKENS);
+  });
+
+  it('drops a summary truncated at the clamped budget instead of persisting it', async () => {
+    // The truncation guard must compare against the budget actually
+    // requested, not the fixed 20K ceiling: output can never exceed what
+    // was requested, so against the ceiling the guard could never fire on a
+    // clamped request and a truncated summary would be persisted.
+    vi.mocked(mockChat.getHistory).mockReturnValue([
+      { role: 'user', parts: [{ text: 'x'.repeat(182_000) }] },
+      { role: 'model', parts: [{ text: 'ok' }] },
+    ]);
+    mockVllmBackend(WINDOW, true);
+
+    const result = await service.compress(mockChat, {
+      promptId: 'test-prompt-id',
+      force: true,
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 45_000,
+    });
+    expect(capturedMaxOutputTokens).toBeLessThan(COMPACT_MAX_OUTPUT_TOKENS);
+    expect(result.info.compressionStatus).toBe(
+      CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
+    );
+    expect(result.newHistory).toBeNull();
+  });
+
+  it('keys the budget to the compaction model window when a distinct compaction model is kept', async () => {
+    // Main window 65K, compaction model window 200K, ~60K history: the
+    // guard keeps the compaction model, and the budget must clamp against
+    // the receiving model's 200K window — not the main window, which would
+    // needlessly shrink the summary ceiling to ~3.6K.
+    vi.mocked(mockConfig.getCompactionModel).mockReturnValue('compact-model');
+    vi.mocked(mockConfig.getAllConfiguredModels).mockReturnValue([
+      { id: 'compact-model', contextWindowSize: 200_000 },
+    ] as never[]);
+    vi.mocked(mockChat.getHistory).mockReturnValue([
+      { role: 'user', parts: [{ text: 'x'.repeat(240_000) }] },
+      { role: 'model', parts: [{ text: 'ok' }] },
+    ]);
+    mockVllmBackend(200_000);
+
+    const result = await service.compress(mockChat, {
+      promptId: 'test-prompt-id',
+      force: true,
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 60_000,
+    });
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    expect(capturedModel).toBe('compact-model');
+    expect(capturedMaxOutputTokens).toBe(COMPACT_MAX_OUTPUT_TOKENS);
+  });
+
+  it('rejects any output at a floored budget of 1 instead of persisting a degenerate summary', async () => {
+    // When the slimmed estimate already fills the window the budget floors
+    // at 1. A 1-token cap cannot hold a usable summary, so the single token
+    // the model emits is definitionally truncated and must be dropped —
+    // persisting it would replace the entire history with a 1-token fragment
+    // while resetting the failure breaker.
+    // 257,900 chars (~64.5K tokens) puts the estimate inside the narrow
+    // floor band where estimate >= window - margin (budget floors at 1) yet
+    // estimate + 1 still fits the window, so the backend accepts the request
+    // instead of 400-ing preflight.
+    vi.mocked(mockChat.getHistory).mockReturnValue([
+      { role: 'user', parts: [{ text: 'x'.repeat(257_900) }] },
+      { role: 'model', parts: [{ text: 'ok' }] },
+    ]);
+    mockVllmBackend(WINDOW, true);
+
+    const result = await service.compress(mockChat, {
+      promptId: 'test-prompt-id',
+      force: true,
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 65_000,
+    });
+    expect(capturedMaxOutputTokens).toBe(1);
+    expect(result.info.compressionStatus).toBe(
+      CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
+    );
+    expect(result.newHistory).toBeNull();
+  });
+
+  it('rejects a floored-budget fragment even when usage metadata is missing', async () => {
+    // Same floor band as above, but the provider omits usage so the output
+    // count is a local estimate. The floor regime must drop estimates too:
+    // no complete summary can exist at a 1-token cap, so the estimator
+    // false-positive rationale for the 20K threshold cannot apply here.
+    vi.mocked(mockChat.getHistory).mockReturnValue([
+      { role: 'user', parts: [{ text: 'x'.repeat(257_900) }] },
+      { role: 'model', parts: [{ text: 'ok' }] },
+    ]);
+    mockVllmBackend(WINDOW, true, { omitUsage: true });
+
+    const result = await service.compress(mockChat, {
+      promptId: 'test-prompt-id',
+      force: true,
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 65_000,
+    });
+    expect(capturedMaxOutputTokens).toBe(1);
+    expect(result.info.compressionStatus).toBe(
+      CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
+    );
+    expect(result.newHistory).toBeNull();
+  });
+
+  it('accepts a complete summary whose local estimate exceeds a clamped budget when usage is missing', async () => {
+    // The estimated branch of the truncation guard keeps the fixed 20K
+    // ceiling precisely so estimator error on the usage-missing path cannot
+    // drop complete summaries. ~50K history clamps the budget to ~13.5K;
+    // a complete summary locally estimated at ~17K (between the clamped
+    // budget and 20K) must still be persisted. Pins the provenance split:
+    // comparing estimates against the clamped budget would drop it.
+    vi.mocked(mockChat.getHistory).mockReturnValue([
+      { role: 'user', parts: [{ text: 'x'.repeat(200_000) }] },
+      { role: 'model', parts: [{ text: 'ok' }] },
+    ]);
+    mockVllmBackend(WINDOW, false, {
+      omitUsage: true,
+      text: '<state_snapshot>' + 'x'.repeat(68_000) + '</state_snapshot>',
+    });
+
+    const result = await service.compress(mockChat, {
+      promptId: 'test-prompt-id',
+      force: true,
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 50_000,
+    });
+    // The budget was actually clamped below the ceiling...
+    expect(capturedMaxOutputTokens).toBeLessThan(COMPACT_MAX_OUTPUT_TOKENS);
+    // ...yet the complete summary survives the guard.
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    expect(result.newHistory).not.toBeNull();
+  });
+
+  it('drops a clamped-cap fragment lacking a closed snapshot when usage is missing', async () => {
+    // With a clamped budget and a local estimate the threshold comparison
+    // cannot detect cap-hits: output never exceeds the requested budget and
+    // the estimator tops out at ~1.5x actual tokens, so below ~2/3 of the
+    // ceiling the estimate never reaches the fixed threshold. The
+    // well-formedness gate must drop the unclosed fragment instead of
+    // persisting it as COMPRESSED.
+    // ~55K history clamps the budget to ~8.6K on the 65K window.
+    vi.mocked(mockChat.getHistory).mockReturnValue([
+      { role: 'user', parts: [{ text: 'x'.repeat(220_000) }] },
+      { role: 'model', parts: [{ text: 'ok' }] },
+    ]);
+    mockVllmBackend(WINDOW, true, { omitUsage: true });
+
+    const result = await service.compress(mockChat, {
+      promptId: 'test-prompt-id',
+      force: true,
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 55_000,
+    });
+    expect(capturedMaxOutputTokens).toBeLessThan(COMPACT_MAX_OUTPUT_TOKENS);
+    expect(result.info.compressionStatus).toBe(
+      CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
+    );
+    expect(result.newHistory).toBeNull();
+  });
+
+  describe('computeCompactionOutputBudget', () => {
+    it('returns the fixed ceiling when the window has ample room', () => {
+      expect(computeCompactionOutputBudget(10_000, 128_000)).toBe(
+        COMPACT_MAX_OUTPUT_TOKENS,
+      );
+    });
+
+    it('clamps to the remaining room on the issue scenario', () => {
+      // The issue's real numbers: ~45,537 prompt tokens in a 65,536 window.
+      const budget = computeCompactionOutputBudget(45_537, 65_536);
+      expect(budget).toBe(65_536 - 45_537 - COMPACTION_BUDGET_SAFETY_MARGIN);
+      expect(45_537 + budget).toBeLessThan(65_536);
+    });
+
+    it('floors at 1 when the estimate already exceeds the window', () => {
+      expect(computeCompactionOutputBudget(70_000, 65_536)).toBe(1);
+    });
   });
 });

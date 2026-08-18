@@ -7,7 +7,7 @@
  * Displays web fetch and search operations with URL/query and output
  */
 
-import { useState, type FC } from 'react';
+import { type FC } from 'react';
 import {
   ToolCallContainer,
   safeTitle,
@@ -17,6 +17,7 @@ import {
 import type { BaseToolCallProps } from './shared/index.js';
 import { getToolDisplayLabel } from './labelUtils.js';
 import { MarkdownRenderer } from '../messages/MarkdownRenderer/MarkdownRenderer.js';
+import { useControlledExpanded } from '../../context/ExpandControlContext.js';
 
 type WebVariant = 'fetch' | 'search';
 
@@ -60,7 +61,7 @@ const OutputCard: FC<{
   content: string;
   isError?: boolean;
 }> = ({ content, isError = false }) => {
-  const [isExpanded, setIsExpanded] = useState(false);
+  const [isExpanded, setIsExpanded] = useControlledExpanded(false);
   const isLongContent = content.length > EXPAND_THRESHOLD;
 
   return (
@@ -71,7 +72,7 @@ const OutputCard: FC<{
             OUT
           </div>
           <div
-            className={`break-words m-0 p-1 overflow-hidden ${
+            className={`webfetch-output-content break-words m-0 p-1 overflow-hidden ${
               isError ? 'whitespace-pre-wrap' : ''
             }`}
             style={
@@ -101,7 +102,12 @@ const OutputCard: FC<{
           <div className="flex justify-center border-t border-[var(--app-input-border)] pt-1">
             <button
               type="button"
-              onClick={() => setIsExpanded(!isExpanded)}
+              onClick={(event) => {
+                event.stopPropagation();
+                setIsExpanded(!isExpanded);
+              }}
+              aria-expanded={isExpanded}
+              aria-label={isExpanded ? 'Collapse output' : 'Expand output'}
               className="text-[var(--app-secondary-foreground)] text-[0.8em] hover:text-[var(--app-primary-foreground)] cursor-pointer bg-transparent border-none px-2 py-1 rounded hover:bg-[var(--app-input-background)] transition-colors"
             >
               {isExpanded ? '▲ Collapse' : '▼ Show more'}

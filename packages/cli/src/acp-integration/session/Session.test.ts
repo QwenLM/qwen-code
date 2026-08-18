@@ -421,6 +421,7 @@ describe('Session', () => {
   let switchModelSpy: ReturnType<typeof vi.fn>;
   let getAvailableCommandsSpy: ReturnType<typeof vi.fn>;
   let mockChatRecordingService: {
+    recordTurnResult: ReturnType<typeof vi.fn>;
     recordUserMessage: ReturnType<typeof vi.fn>;
     recordGoalRuntimeMessage: ReturnType<typeof vi.fn>;
     recordMidTurnUserMessage: ReturnType<typeof vi.fn>;
@@ -691,6 +692,7 @@ describe('Session', () => {
     };
 
     mockChatRecordingService = {
+      recordTurnResult: vi.fn(),
       recordUserMessage: vi.fn(),
       recordGoalRuntimeMessage: vi.fn(),
       recordMidTurnUserMessage: vi.fn(),
@@ -4495,6 +4497,945 @@ describe('Session', () => {
       expect(core.getInvocationContext()).toBeUndefined();
     });
 
+    describe('turn result recording', () => {
+      const trustedContext: core.InvocationContextV1 = {
+        version: 1,
+        sessionId: 'test-session-id',
+        promptId: 'daemon-prompt-id',
+        originatorClientId: 'client-1',
+      };
+
+      it('records a completed turn_result for a daemon-admitted prompt', async () => {
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'trusted prompt' }],
+          },
+          trustedContext,
+        );
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledTimes(
+          1,
+        );
+        const payload =
+          mockChatRecordingService.recordTurnResult.mock.calls[0][0];
+        expect(payload).toMatchObject({
+          promptId: 'daemon-prompt-id',
+          state: 'completed',
+          stopReason: 'end_turn',
+          promptText: 'trusted prompt',
+          originatorClientId: 'client-1',
+        });
+        expect(payload.startedAt).toBeLessThanOrEqual(payload.endedAt);
+      });
+
+      it('keeps the settle append on the turn-start recorder across a mid-turn rotation', async () => {
+        const rotatedRecordingService: typeof mockChatRecordingService = {
+          ...mockChatRecordingService,
+          recordTurnResult: vi.fn(),
+        };
+        let rotated = false;
+        vi.mocked(mockConfig.getChatRecordingService).mockImplementation(
+          () =>
+            (rotated
+              ? rotatedRecordingService
+              : mockChatRecordingService) as unknown as core.ChatRecordingService,
+        );
+        mockChat.sendMessageStream = vi.fn().mockImplementation(() => {
+          // Simulates a session rotation landing between admission and
+          // settle (e.g. `/clear` dispatched as daemon prompt text).
+          rotated = true;
+          return Promise.resolve(createEmptyStream());
+        });
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'trusted prompt' }],
+          },
+          trustedContext,
+        );
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledTimes(
+          1,
+        );
+        expect(rotatedRecordingService.recordTurnResult).not.toHaveBeenCalled();
+      });
+
+      it('records daemon display text instead of internal prompt context', async () => {
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [
+              {
+                type: 'text',
+                text: 'internal channel instructions\n\nhello',
+              },
+            ],
+            _meta: { 'qwen.daemon.promptDisplayText': 'hello' },
+          },
+          trustedContext,
+        );
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({
+            promptId: 'daemon-prompt-id',
+            promptText: 'hello',
+          }),
+        );
+      });
+
+      it('records the image placeholder used by the live turn status', async () => {
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [
+              {
+                type: 'text',
+                text: 'hidden channel instructions',
+              },
+              {
+                type: 'image',
+                mimeType: 'image/png',
+                data: 'aGVsbG8=',
+              },
+            ],
+            _meta: { 'qwen.daemon.promptDisplayText': '[image]' },
+          },
+          trustedContext,
+        );
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({
+            promptId: 'daemon-prompt-id',
+            promptText: '[image]',
+          }),
+        );
+      });
+
+      it('falls back to the prompt extractor when no display text meta is present', async () => {
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [
+              { type: 'image', mimeType: 'image/png', data: 'aGVsbG8=' },
+            ],
+          },
+          trustedContext,
+        );
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({
+            promptId: 'daemon-prompt-id',
+            promptText: '[image]',
+          }),
+        );
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: '' }],
+          },
+          trustedContext,
+        );
+
+        expect(
+          mockChatRecordingService.recordTurnResult,
+        ).toHaveBeenLastCalledWith(
+          expect.objectContaining({
+            promptId: 'daemon-prompt-id',
+            promptText: '',
+          }),
+        );
+      });
+
+      it('treats an empty display text meta as absent for the turn record', async () => {
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [
+              { type: 'image', mimeType: 'image/png', data: 'aGVsbG8=' },
+            ],
+            _meta: { 'qwen.daemon.promptDisplayText': '' },
+          },
+          trustedContext,
+        );
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({
+            promptId: 'daemon-prompt-id',
+            promptText: '[image]',
+          }),
+        );
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'projected prompt body' }],
+            _meta: { 'qwen.daemon.promptDisplayText': '' },
+          },
+          trustedContext,
+        );
+
+        expect(
+          mockChatRecordingService.recordTurnResult,
+        ).toHaveBeenLastCalledWith(
+          expect.objectContaining({
+            promptId: 'daemon-prompt-id',
+            promptText: 'projected prompt body',
+          }),
+        );
+      });
+
+      it('accumulates streamed agent text into resultText', async () => {
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [{ content: { parts: [{ text: 'Hello, ' }] } }],
+              },
+            },
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [{ content: { parts: [{ text: 'world!' }] } }],
+              },
+            },
+          ]),
+        );
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'greet' }],
+          },
+          trustedContext,
+        );
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({
+            state: 'completed',
+            resultText: 'Hello, world!',
+          }),
+        );
+      });
+
+      it('records only the final answer after a tool-call boundary', async () => {
+        mockToolRegistry.getTool.mockReturnValue({
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: vi.fn().mockResolvedValue({
+              llmContent: 'file contents',
+              returnDisplay: 'file contents',
+            }),
+          }),
+        });
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [
+                    { content: { parts: [{ text: 'I will check first. ' }] } },
+                  ],
+                  functionCalls: [
+                    {
+                      id: 'call-1',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [
+                    {
+                      content: { parts: [{ text: 'The final answer is 42.' }] },
+                    },
+                  ],
+                },
+              },
+            ]),
+          );
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'read the file' }],
+          },
+          trustedContext,
+        );
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledTimes(
+          1,
+        );
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({ resultText: 'The final answer is 42.' }),
+        );
+      });
+
+      it('excludes subagent updates and leaves resultText absent without a parent answer', async () => {
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          (async function* () {
+            await session.sendUpdate({
+              sessionUpdate: 'agent_message_chunk',
+              content: {
+                type: 'text',
+                text: 'x'.repeat(core.TURN_RESULT_TEXT_MAX_CHARS + 1),
+              },
+              _meta: { parentToolCallId: 'subagent-call' },
+            });
+            yield* createEmptyStream();
+          })(),
+        );
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'delegate this' }],
+          },
+          trustedContext,
+        );
+
+        const payload =
+          mockChatRecordingService.recordTurnResult.mock.calls[0][0];
+        expect(payload.resultText).toBeUndefined();
+        expect(payload.resultTruncated).toBeUndefined();
+      });
+
+      it('caps resultText at TURN_RESULT_TEXT_MAX_CHARS and flags truncation', async () => {
+        const longText = 'a'.repeat(core.TURN_RESULT_TEXT_MAX_CHARS + 100);
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [{ content: { parts: [{ text: longText }] } }],
+              },
+            },
+          ]),
+        );
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'long' }],
+          },
+          trustedContext,
+        );
+
+        const payload =
+          mockChatRecordingService.recordTurnResult.mock.calls[0][0];
+        expect(payload.resultText).toHaveLength(
+          core.TURN_RESULT_TEXT_MAX_CHARS,
+        );
+        expect(payload.resultTruncated).toBe(true);
+        expect(payload.resultCode).toBe('RESULT_TEXT_TRUNCATED');
+      });
+
+      it('keeps the same surface contract when many chunks exceed the cap', async () => {
+        const chunk = 'a'.repeat(
+          Math.ceil(core.TURN_RESULT_TEXT_MAX_CHARS / 2),
+        );
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [{ content: { parts: [{ text: chunk }] } }],
+              },
+            },
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [{ content: { parts: [{ text: chunk }] } }],
+              },
+            },
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [{ content: { parts: [{ text: chunk }] } }],
+              },
+            },
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [{ content: { parts: [{ text: chunk }] } }],
+              },
+            },
+          ]),
+        );
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'long' }],
+          },
+          trustedContext,
+        );
+
+        const payload =
+          mockChatRecordingService.recordTurnResult.mock.calls[0][0];
+        expect(payload.resultText).toHaveLength(
+          core.TURN_RESULT_TEXT_MAX_CHARS,
+        );
+        expect(payload.resultTruncated).toBe(true);
+        expect(payload.resultCode).toBe('RESULT_TEXT_TRUNCATED');
+      });
+
+      it('records a cancelled turn when admission aborts before dispatch', async () => {
+        let releaseAdmission!: () => void;
+        const admission = new Promise<void>((resolve) => {
+          releaseAdmission = resolve;
+        });
+        mockConfig.assertCanStartTurn = vi.fn().mockReturnValue(admission);
+        const cancellation = new AbortController();
+
+        const prompt = session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'cancelled prompt' }],
+          },
+          trustedContext,
+          cancellation.signal,
+        );
+        await vi.waitFor(() =>
+          expect(mockConfig.assertCanStartTurn).toHaveBeenCalledOnce(),
+        );
+        cancellation.abort();
+        releaseAdmission();
+
+        await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({
+            promptId: 'daemon-prompt-id',
+            state: 'cancelled',
+            stopReason: 'cancelled',
+          }),
+        );
+      });
+
+      it('records admission errors without a startedAt timestamp', async () => {
+        mockConfig.assertCanStartTurn = vi
+          .fn()
+          .mockRejectedValueOnce(new Error('writer unavailable'));
+
+        await expect(
+          session.prompt(
+            {
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'cannot start' }],
+            },
+            trustedContext,
+          ),
+        ).rejects.toThrow('writer unavailable');
+
+        const payload =
+          mockChatRecordingService.recordTurnResult.mock.calls[0][0];
+        expect(payload).toMatchObject({
+          promptId: 'daemon-prompt-id',
+          state: 'error',
+          error: { message: 'writer unavailable' },
+        });
+        expect(payload.startedAt).toBeUndefined();
+      });
+
+      it('records an error turn when the model stream fails', async () => {
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createFailingStream('model exploded'));
+
+        await expect(
+          session.prompt(
+            {
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'boom' }],
+            },
+            trustedContext,
+          ),
+        ).rejects.toThrow('model exploded');
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({
+            promptId: 'daemon-prompt-id',
+            state: 'error',
+            error: { message: 'model exploded' },
+          }),
+        );
+        const errorPayload =
+          mockChatRecordingService.recordTurnResult.mock.calls[0][0];
+        expect(typeof errorPayload.startedAt).toBe('number');
+        expect(errorPayload.startedAt!).toBeLessThanOrEqual(
+          errorPayload.endedAt!,
+        );
+      });
+
+      it('records an error turn for an abort-shaped stream failure without a user cancel', async () => {
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createFailingStream('Request was aborted.'));
+
+        await expect(
+          session.prompt(
+            {
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'abort shaped' }],
+            },
+            trustedContext,
+          ),
+        ).rejects.toThrow('Request was aborted.');
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({
+            promptId: 'daemon-prompt-id',
+            state: 'error',
+          }),
+        );
+      });
+
+      it('records a cancelled turn when user cancel races an abort-shaped stream error', async () => {
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createFailingStream('Request was aborted.', () => {
+            void session.cancelPendingPrompt();
+          }),
+        );
+
+        await expect(
+          session.prompt(
+            {
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'cancel me' }],
+            },
+            trustedContext,
+          ),
+        ).resolves.toEqual({ stopReason: 'cancelled' });
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({
+            promptId: 'daemon-prompt-id',
+            state: 'cancelled',
+          }),
+        );
+      });
+
+      it('records a cancelled turn when user cancel races a plain stream error', async () => {
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createFailingStream('model exploded', () => {
+            void session.cancelPendingPrompt();
+          }),
+        );
+
+        await expect(
+          session.prompt(
+            {
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'cancel me' }],
+            },
+            trustedContext,
+          ),
+        ).resolves.toEqual({ stopReason: 'cancelled' });
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({
+            promptId: 'daemon-prompt-id',
+            state: 'cancelled',
+            stopReason: 'cancelled',
+          }),
+        );
+      });
+
+      it('does not record a turn_result without an invocation context', async () => {
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'standalone prompt' }],
+        });
+
+        expect(
+          mockChatRecordingService.recordTurnResult,
+        ).not.toHaveBeenCalled();
+      });
+
+      it('keeps overlapping turn records attributed to their own promptIds', async () => {
+        // DAEMON-003 overlap: the bridge releases the FIFO on deadline
+        // while the agent is still executing, so the successor prompt is
+        // admitted before the predecessor settles. Each turn must still
+        // settle its own record under its own promptId.
+        mockConfig.assertCanStartTurn = vi.fn().mockResolvedValue(undefined);
+        let releaseFirst!: () => void;
+        const firstBlocked = new Promise<void>((resolve) => {
+          releaseFirst = resolve;
+        });
+        const firstStream = (async function* () {
+          yield {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              candidates: [{ content: { parts: [{ text: 'first answer' }] } }],
+            },
+          };
+          await firstBlocked;
+        })();
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(firstStream)
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [
+                    { content: { parts: [{ text: 'second answer' }] } },
+                  ],
+                },
+              },
+            ]),
+          );
+
+        const first = session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'first prompt' }],
+          },
+          trustedContext,
+        );
+        await vi.waitFor(() =>
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1),
+        );
+
+        const secondContext: core.InvocationContextV1 = {
+          version: 1,
+          sessionId: 'test-session-id',
+          promptId: 'second-prompt-id',
+          originatorClientId: 'client-1',
+        };
+        const second = session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'second prompt' }],
+          },
+          secondContext,
+        );
+        // Third assertCanStartTurn call = the successor's prompt()-level
+        // admission (turn A used the prompt + inner calls). Flush
+        // microtasks so the successor's recording begin has run.
+        await vi.waitFor(() =>
+          expect(mockConfig.assertCanStartTurn).toHaveBeenCalledTimes(3),
+        );
+        await Promise.resolve();
+        await Promise.resolve();
+
+        releaseFirst();
+        await first;
+        await second;
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledTimes(
+          2,
+        );
+        const payloads =
+          mockChatRecordingService.recordTurnResult.mock.calls.map(
+            (call) => call[0],
+          );
+        const firstPayload = payloads.find(
+          (payload) => payload.promptId === 'daemon-prompt-id',
+        );
+        const secondPayload = payloads.find(
+          (payload) => payload.promptId === 'second-prompt-id',
+        );
+        expect(firstPayload).toMatchObject({
+          promptId: 'daemon-prompt-id',
+          state: 'cancelled',
+          promptText: 'first prompt',
+          resultText: 'first answer',
+        });
+        expect(secondPayload).toMatchObject({
+          promptId: 'second-prompt-id',
+          state: 'completed',
+          promptText: 'second prompt',
+          resultText: 'second answer',
+        });
+      });
+
+      it('records a superseded turn as cancelled when its stream throws the abort', async () => {
+        mockConfig.assertCanStartTurn = vi.fn().mockResolvedValue(undefined);
+        let rejectFirst!: (error: unknown) => void;
+        const firstFailure = new Promise<never>((_resolve, reject) => {
+          rejectFirst = reject;
+        });
+        const firstStream = (async function* () {
+          yield {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              candidates: [{ content: { parts: [{ text: 'partial' }] } }],
+            },
+          };
+          await firstFailure;
+        })();
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(firstStream)
+          .mockResolvedValueOnce(createEmptyStream());
+
+        const first = session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'first prompt' }],
+          },
+          trustedContext,
+        );
+        await vi.waitFor(() =>
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1),
+        );
+
+        const second = session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'second prompt' }],
+          },
+          {
+            version: 1,
+            sessionId: 'test-session-id',
+            promptId: 'second-prompt-id',
+          },
+        );
+        await vi.waitFor(() =>
+          expect(mockConfig.assertCanStartTurn).toHaveBeenCalledTimes(3),
+        );
+        rejectFirst(
+          new DOMException('superseded stream aborted', 'AbortError'),
+        );
+
+        const [firstResult, secondResult] = await Promise.allSettled([
+          first,
+          second,
+        ]);
+        expect(firstResult).toEqual({
+          status: 'fulfilled',
+          value: { stopReason: 'cancelled' },
+        });
+        expect(secondResult.status).toBe('fulfilled');
+
+        const firstPayload =
+          mockChatRecordingService.recordTurnResult.mock.calls
+            .map((call) => call[0])
+            .find((payload) => payload.promptId === 'daemon-prompt-id');
+        expect(firstPayload).toMatchObject({
+          state: 'cancelled',
+          stopReason: 'cancelled',
+          promptText: 'first prompt',
+        });
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledTimes(
+          2,
+        );
+        const secondPayload =
+          mockChatRecordingService.recordTurnResult.mock.calls
+            .map((call) => call[0])
+            .find((payload) => payload.promptId === 'second-prompt-id');
+        expect(secondPayload).toMatchObject({
+          promptId: 'second-prompt-id',
+          state: 'completed',
+        });
+      });
+
+      it('surfaces a genuine failure after a successor abort instead of cancelling', async () => {
+        mockConfig.assertCanStartTurn = vi.fn().mockResolvedValue(undefined);
+        let rejectFirst!: (error: unknown) => void;
+        const firstFailure = new Promise<never>((_resolve, reject) => {
+          rejectFirst = reject;
+        });
+        const firstStream = (async function* () {
+          yield {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              candidates: [{ content: { parts: [{ text: 'partial' }] } }],
+            },
+          };
+          await firstFailure;
+        })();
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(firstStream)
+          .mockResolvedValueOnce(createEmptyStream());
+
+        const first = session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'first prompt' }],
+          },
+          trustedContext,
+        );
+        await vi.waitFor(() =>
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1),
+        );
+
+        const second = session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'second prompt' }],
+          },
+          {
+            version: 1,
+            sessionId: 'test-session-id',
+            promptId: 'second-prompt-id',
+          },
+        );
+        await vi.waitFor(() =>
+          expect(mockConfig.assertCanStartTurn).toHaveBeenCalledTimes(3),
+        );
+        const genuineFailure = new Error('model backend failed');
+        rejectFirst(genuineFailure);
+
+        const [firstResult, secondResult] = await Promise.allSettled([
+          first,
+          second,
+        ]);
+        expect(firstResult).toEqual({
+          status: 'rejected',
+          reason: genuineFailure,
+        });
+        expect(secondResult.status).toBe('fulfilled');
+
+        const firstPayload =
+          mockChatRecordingService.recordTurnResult.mock.calls
+            .map((call) => call[0])
+            .find((payload) => payload.promptId === 'daemon-prompt-id');
+        expect(firstPayload).toMatchObject({
+          promptId: 'daemon-prompt-id',
+          state: 'error',
+          promptText: 'first prompt',
+        });
+        const secondPayload =
+          mockChatRecordingService.recordTurnResult.mock.calls
+            .map((call) => call[0])
+            .find((payload) => payload.promptId === 'second-prompt-id');
+        expect(secondPayload).toMatchObject({
+          promptId: 'second-prompt-id',
+          state: 'completed',
+        });
+      });
+
+      it('records a cancelled turn when cancelled while waiting for the predecessor', async () => {
+        // The successor is admitted while the predecessor still streams,
+        // then cancelled during the predecessor wait; it must settle its
+        // own cancelled record without disturbing the predecessor's.
+        mockConfig.assertCanStartTurn = vi.fn().mockResolvedValue(undefined);
+        let releaseFirst!: () => void;
+        const firstBlocked = new Promise<void>((resolve) => {
+          releaseFirst = resolve;
+        });
+        const firstStream = (async function* () {
+          yield {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              candidates: [{ content: { parts: [] } }],
+            },
+          };
+          await firstBlocked;
+        })();
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(firstStream)
+          .mockResolvedValueOnce(createEmptyStream());
+
+        const first = session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'first prompt' }],
+          },
+          trustedContext,
+        );
+        await vi.waitFor(() =>
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1),
+        );
+
+        const secondContext: core.InvocationContextV1 = {
+          version: 1,
+          sessionId: 'test-session-id',
+          promptId: 'second-prompt-id',
+        };
+        const admissionCancellation = new AbortController();
+        const second = session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'second prompt' }],
+          },
+          secondContext,
+          admissionCancellation.signal,
+        );
+        await vi.waitFor(() =>
+          expect(mockConfig.assertCanStartTurn).toHaveBeenCalledTimes(3),
+        );
+        await Promise.resolve();
+        await Promise.resolve();
+        admissionCancellation.abort();
+
+        releaseFirst();
+        await first;
+        await expect(second).resolves.toEqual({ stopReason: 'cancelled' });
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledTimes(
+          2,
+        );
+        const payloads =
+          mockChatRecordingService.recordTurnResult.mock.calls.map(
+            (call) => call[0],
+          );
+        const firstPayload = payloads.find(
+          (payload) => payload.promptId === 'daemon-prompt-id',
+        );
+        const secondPayload = payloads.find(
+          (payload) => payload.promptId === 'second-prompt-id',
+        );
+        expect(firstPayload).toMatchObject({
+          promptId: 'daemon-prompt-id',
+          promptText: 'first prompt',
+        });
+        expect(secondPayload).toMatchObject({
+          promptId: 'second-prompt-id',
+          state: 'cancelled',
+          stopReason: 'cancelled',
+          promptText: 'second prompt',
+        });
+      });
+    });
+
     it('rejects a trusted context for a different session', async () => {
       const trustedContext: core.InvocationContextV1 = {
         version: 1,
@@ -4514,6 +5455,7 @@ describe('Session', () => {
         'Invocation context session does not match the active session',
       );
       expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      expect(mockChatRecordingService.recordTurnResult).not.toHaveBeenCalled();
     });
 
     it('does not create invocation context for standalone ACP prompts', async () => {
@@ -12731,6 +13673,73 @@ describe('Session', () => {
         expect(capture.writeToSpan).toHaveBeenCalledWith(agentTelemetry.span);
       });
 
+      it('does not apply the turn-result limit to channel delivery text', async () => {
+        // Multi-chunk on purpose: the accumulation cap must never apply to
+        // delivery turns, and a single chunk would pass even if it did (the
+        // first append is always accepted).
+        const chunk = 'x'.repeat(
+          Math.ceil(core.TURN_RESULT_TEXT_MAX_CHARS / 2) + 50,
+        );
+        const answer = chunk + chunk + chunk;
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [{ content: { parts: [{ text: chunk }] } }],
+              },
+            },
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [{ content: { parts: [{ text: chunk }] } }],
+              },
+            },
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [{ content: { parts: [{ text: chunk }] } }],
+              },
+            },
+          ]),
+        );
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'long delivery' }],
+            _meta: {
+              'qwen.daemon.channelDelivery': {
+                deliveryId: 'prompt-long-delivery',
+                target: {
+                  channelName: 'dingtalk',
+                  type: 'user',
+                  id: 'user-1',
+                },
+              },
+            },
+          },
+          {
+            version: 1,
+            sessionId: 'test-session-id',
+            promptId: 'prompt-long-delivery',
+          },
+        );
+
+        await vi.waitFor(() => {
+          expect(mockClient.extMethod).toHaveBeenCalledWith(
+            'qwen/control/channel-delivery',
+            expect.objectContaining({ text: answer }),
+          );
+        });
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({
+            resultText: answer.slice(0, core.TURN_RESULT_TEXT_MAX_CHARS),
+            resultTruncated: true,
+          }),
+        );
+      });
+
       it('delivers only the final tool-free response block for a prompt', async () => {
         agentTelemetry.getActiveInteractionSpan.mockReturnValue(
           agentTelemetry.span,
@@ -15613,6 +16622,224 @@ describe('Session', () => {
             _meta: { source: 'slash_command' },
           },
         });
+        expect(
+          mockChatRecordingService.recordSlashCommand,
+        ).toHaveBeenCalledWith(
+          expect.objectContaining({ rawCommand: '/compress' }),
+        );
+      });
+
+      it('does not record /advisor in the ACP transcript', async () => {
+        const finishedSpy = vi
+          .spyOn(core, 'logConversationFinishedEvent')
+          .mockImplementation(() => {});
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'message',
+          messageType: 'info',
+          content: 'Review complete.',
+          resolvedCommand: {
+            name: 'advisor',
+            kind: CommandKind.BUILT_IN,
+          },
+        });
+        mockChatRecordingService.recordUserMessage.mockClear();
+        mockChatRecordingService.recordSlashCommand.mockClear();
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/advisor' }],
+        });
+
+        expect(
+          mockChatRecordingService.recordUserMessage,
+        ).not.toHaveBeenCalled();
+        expect(
+          mockChatRecordingService.recordSlashCommand,
+        ).not.toHaveBeenCalled();
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Review complete.' },
+            _meta: { source: 'slash_command' },
+          },
+        });
+        expect(finishedSpy).toHaveBeenCalledTimes(1);
+      });
+
+      it('keeps replay records for other ACP slash-command messages', async () => {
+        const finishedSpy = vi
+          .spyOn(core, 'logConversationFinishedEvent')
+          .mockImplementation(() => {});
+        let finish!: () => void;
+        const delayed = new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+        let markStarted!: () => void;
+        const started = new Promise<void>((resolve) => {
+          markStarted = resolve;
+        });
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockImplementationOnce(async () => {
+          markStarted();
+          await delayed;
+          return {
+            type: 'message',
+            messageType: 'info',
+            content: 'Side answer.',
+          };
+        });
+        mockChatRecordingService.recordUserMessage.mockClear();
+        mockChatRecordingService.recordSlashCommand.mockClear();
+
+        const prompt = session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/btw question' }],
+        });
+        await started;
+        await session.cancelPendingPrompt();
+        finish();
+
+        await expect(prompt).resolves.toEqual({ stopReason: 'end_turn' });
+
+        expect(finishedSpy).toHaveBeenCalledTimes(1);
+        expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+          '/btw question',
+        );
+        expect(
+          mockChatRecordingService.recordSlashCommand,
+        ).toHaveBeenCalledWith(
+          expect.objectContaining({ rawCommand: '/btw question' }),
+        );
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Side answer.' },
+            _meta: { source: 'slash_command' },
+          },
+        });
+      });
+
+      it('returns cancelled when /advisor finishes after cancellation', async () => {
+        const finishedSpy = vi
+          .spyOn(core, 'logConversationFinishedEvent')
+          .mockImplementation(() => {});
+        let markStarted!: () => void;
+        const started = new Promise<void>((resolve) => {
+          markStarted = resolve;
+        });
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockImplementationOnce(async (_input, abortController) => {
+          markStarted();
+          await new Promise<void>((resolve) => {
+            abortController.signal.addEventListener('abort', () => resolve(), {
+              once: true,
+            });
+          });
+          return {
+            type: 'message',
+            messageType: 'error',
+            content: 'Advisor review failed: aborted',
+            resolvedCommand: {
+              name: 'advisor',
+              kind: CommandKind.BUILT_IN,
+            },
+          };
+        });
+
+        const prompt = session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/advisor' }],
+        });
+        await started;
+        await session.cancelPendingPrompt();
+
+        await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+        expect(finishedSpy).toHaveBeenCalledTimes(1);
+      });
+
+      it('records completion when /advisor returns an error message', async () => {
+        const finishedSpy = vi
+          .spyOn(core, 'logConversationFinishedEvent')
+          .mockImplementation(() => {});
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'message',
+          messageType: 'error',
+          content: 'Advisor review failed: provider rejected schema',
+          resolvedCommand: {
+            name: 'advisor',
+            kind: CommandKind.BUILT_IN,
+          },
+        });
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: '/advisor' }],
+          }),
+        ).rejects.toThrow('Advisor review failed: provider rejected schema');
+
+        expect(finishedSpy).toHaveBeenCalledTimes(1);
+      });
+
+      it('records a custom command shadowing the advisor name', async () => {
+        // R18-6: the recording gate must classify by the RESOLVED command,
+        // not the raw token — a user-defined `advisor` command keeps its
+        // user-turn record while the built-in advisor's is skipped.
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'submit_prompt',
+          content: [{ text: 'Shadowed advisor prompt' }],
+          resolvedCommand: {
+            name: 'advisor',
+            kind: CommandKind.FILE,
+          },
+        });
+        mockChatRecordingService.recordUserMessage.mockClear();
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/advisor check my work' }],
+        });
+
+        expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalled();
+      });
+
+      it('preserves an expanded slash prompt cancelled before model send', async () => {
+        const finishedSpy = vi
+          .spyOn(core, 'logConversationFinishedEvent')
+          .mockImplementation(() => {});
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockImplementationOnce(async (_input, abortController) => {
+          abortController.abort();
+          return {
+            type: 'submit_prompt',
+            content: [{ text: 'Expanded prompt' }],
+          };
+        });
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: '/custom' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'cancelled' });
+
+        expect(mockChat.addHistory).toHaveBeenCalledWith({
+          role: 'user',
+          parts: [{ text: 'Expanded prompt' }],
+        });
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+        expect(finishedSpy).toHaveBeenCalledTimes(1);
       });
 
       it('marks streamed slash-command messages with their source', async () => {
@@ -16103,6 +17330,44 @@ describe('Session', () => {
             'goalState'
           ],
         ).toMatchObject({ goal: { goalId: 'goal-2' } });
+      });
+
+      // R20-9: `/clear` swaps in a fresh recorder inside its action, so its
+      // user-turn record must land BEFORE the action runs — otherwise the
+      // deferred record is written into the NEW session's transcript.
+      it('records /clear user-turn before the session switch', async () => {
+        mockChatRecordingService.recordUserMessage.mockClear();
+        const callOrder: string[] = [];
+        mockChatRecordingService.recordUserMessage.mockImplementationOnce(
+          () => {
+            callOrder.push('recordUserMessage');
+          },
+        );
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockImplementationOnce(
+          async (_query, _abort, _config, _settings, hooks) => {
+            callOrder.push('action-start');
+            hooks?.startNewSession?.('new-session-id');
+            callOrder.push('action-end');
+            return {
+              type: 'message',
+              messageType: 'info',
+              content: 'Conversation cleared.',
+            };
+          },
+        );
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/clear' }],
+        });
+
+        expect(callOrder).toEqual([
+          'recordUserMessage',
+          'action-start',
+          'action-end',
+        ]);
       });
 
       it('preserves canonical Goal state publication order', async () => {
@@ -23230,6 +24495,9 @@ describe('Session', () => {
       const logToolCallSpy = vi
         .spyOn(core, 'logToolCall')
         .mockImplementation(() => {});
+      const boundarySpy = vi
+        .spyOn(core, 'observeToolResultBoundary')
+        .mockReturnValue(false);
       const messageBus = {
         request: vi
           .fn()
@@ -23248,9 +24516,18 @@ describe('Session', () => {
       mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
       mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
       mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      const artifacts = [
+        {
+          kind: 'link' as const,
+          title: 'Completed report',
+          url: 'https://example.com/report',
+        },
+      ];
       const execute = vi.fn().mockResolvedValue({
         llmContent: 'completed',
         returnDisplay: 'completed',
+        artifacts,
+        persistedOutputFiles: ['/private/post-stop-output.txt'],
       });
       mockToolRegistry.getTool.mockReturnValue(
         mockAllowedTool('post_stop_tool', execute),
@@ -23281,8 +24558,28 @@ describe('Session', () => {
           status: 'error',
           executionStatus: 'success',
           errorType: core.ToolErrorType.EXECUTION_DENIED,
+          resultDisplay: undefined,
+          artifacts,
+          persistedOutputFiles: ['/private/post-stop-output.txt'],
         }),
       );
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: expect.objectContaining({
+            toolCallId: 'post_stop_call',
+            _meta: expect.objectContaining({ artifacts }),
+          }),
+        }),
+      );
+      const producerObservations = boundarySpy.mock.calls.filter(
+        ([observation]) =>
+          observation.stage === 'producer' &&
+          observation.toolCallId === 'post_stop_call',
+      );
+      expect(producerObservations).toHaveLength(1);
+      expect(producerObservations[0][0].artifacts).toEqual([
+        { state: 'reusable', kinds: ['file', 'link'] },
+      ]);
     });
 
     it('records postprocessing failure after successful execution', async () => {
@@ -23457,6 +24754,9 @@ describe('Session', () => {
       const logToolCallSpy = vi
         .spyOn(core, 'logToolCall')
         .mockImplementation(() => {});
+      const boundarySpy = vi
+        .spyOn(core, 'observeToolResultBoundary')
+        .mockReturnValue(false);
       vi.mocked(mockClient.sessionUpdate).mockRejectedValue(
         new Error('ACP update unavailable'),
       );
@@ -23507,6 +24807,104 @@ describe('Session', () => {
           status: 'error',
           executionStatus: 'error',
           errorType: core.ToolErrorType.UNHANDLED_EXCEPTION,
+        }),
+      );
+      expect(boundarySpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          stage: 'producer',
+          sessionId: 'test-session-id',
+          promptId: 'prompt-hook-fail',
+          toolCallId: 'hook_fail_call',
+          toolName: 'failing_tool',
+          values: expect.any(Function),
+        }),
+      );
+    });
+
+    it('observes a producer error when a settled tool result is malformed', async () => {
+      const boundarySpy = vi
+        .spyOn(core, 'observeToolResultBoundary')
+        .mockReturnValue(false);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool('malformed_tool', vi.fn().mockResolvedValue(null)),
+      );
+
+      await (session as unknown as ToolCallInternals).runToolCalls(
+        new AbortController().signal,
+        'prompt-malformed-result',
+        [
+          {
+            id: 'malformed_result_call',
+            name: 'malformed_tool',
+            args: {},
+          },
+        ],
+      );
+
+      const producerObservations = boundarySpy.mock.calls.filter(
+        ([observation]) =>
+          observation.stage === 'producer' &&
+          observation.toolCallId === 'malformed_result_call',
+      );
+      expect(producerObservations).toHaveLength(1);
+      expect(producerObservations[0][0]).toEqual(
+        expect.objectContaining({
+          sessionId: 'test-session-id',
+          promptId: 'prompt-malformed-result',
+          toolName: 'malformed_tool',
+          values: expect.any(Function),
+        }),
+      );
+    });
+
+    it('ignores throwing optional metadata on a successful tool result', async () => {
+      const toolResult = {
+        llmContent: 'completed',
+        returnDisplay: 'completed',
+      } as core.ToolResult;
+      Object.defineProperties(toolResult, {
+        artifacts: {
+          get: () => {
+            throw new Error('artifacts unavailable');
+          },
+        },
+        persistedOutputFiles: {
+          get: () => {
+            throw new Error('persisted output unavailable');
+          },
+        },
+      });
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool(
+          'throwing_metadata_tool',
+          vi.fn().mockResolvedValue(toolResult),
+        ),
+      );
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-metadata', [
+        {
+          id: 'throwing_metadata_call',
+          name: 'throwing_metadata_tool',
+          args: {},
+        },
+      ]);
+
+      expect(result.parts[0].functionResponse?.response).toEqual({
+        output: 'completed',
+      });
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        result.parts,
+        expect.objectContaining({
+          callId: 'throwing_metadata_call',
+          status: 'success',
+          artifacts: undefined,
+          persistedOutputFiles: undefined,
         }),
       );
     });
@@ -23705,9 +25103,18 @@ describe('Session', () => {
       mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
       mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
       mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      const artifacts = [
+        {
+          kind: 'file' as const,
+          title: 'Cancelled report',
+          workspacePath: 'reports/cancelled.txt',
+        },
+      ];
       const execute = vi.fn().mockResolvedValue({
         llmContent: 'completed',
         returnDisplay: 'completed',
+        artifacts,
+        persistedOutputFiles: ['/private/post-cancel-output.txt'],
       });
       mockToolRegistry.getTool.mockReturnValue(
         mockAllowedTool('post_hook_tool', execute),
@@ -23746,6 +25153,17 @@ describe('Session', () => {
           executionStatus: 'success',
           error: undefined,
           errorType: undefined,
+          resultDisplay: undefined,
+          artifacts,
+          persistedOutputFiles: ['/private/post-cancel-output.txt'],
+        }),
+      );
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: expect.objectContaining({
+            toolCallId: 'post_hook_cancel_call',
+            _meta: expect.objectContaining({ artifacts }),
+          }),
         }),
       );
     });
@@ -33897,6 +35315,7 @@ describe('Session', () => {
 
     it('fires prompt-suggestion extNotification after end_turn when enabled', async () => {
       generateMock.mockResolvedValue({ suggestion: 'Run the tests next?' });
+      vi.mocked(mockChat.getHistoryTail).mockClear();
 
       await session.prompt({
         sessionId: 'test-session-id',
@@ -33915,13 +35334,44 @@ describe('Session', () => {
         );
       });
 
+      // Pin the curated-history tail: a revert to `chat.getHistory(true)`
+      // (full structuredClone per end_turn, the #4624 heap-peak shape) or a
+      // dropped curated argument (`getHistoryTail(40)` defaults
+      // curated=false) must not pass silently (#9233).
+      expect(vi.mocked(mockChat.getHistoryTail)).toHaveBeenCalledWith(40, true);
+
       // The generator received an AbortSignal so the daemon can cancel
-      // mid-flight if the next prompt arrives first.
+      // mid-flight if the next prompt arrives first. `merged.ui` above leaves
+      // `enableCacheSharing` UNSET, so the gate must honour the schema's
+      // declared `default: true` — `mergeSettings` never applies schema
+      // defaults, and gating on `=== true` turned the cache-aware fork into
+      // dead code unless the user explicitly set the flag (#9230).
       expect(generateMock).toHaveBeenCalledWith(
         mockConfig,
         expect.any(Array),
         expect.any(AbortSignal),
-        expect.objectContaining({ enableCacheSharing: expect.any(Boolean) }),
+        expect.objectContaining({ enableCacheSharing: true }),
+      );
+    });
+
+    it('forwards an explicit enableCacheSharing=false opt-out', async () => {
+      (mockSettings as unknown as { merged: { ui: unknown } }).merged.ui = {
+        enableFollowupSuggestions: true,
+        enableCacheSharing: false,
+      };
+      generateMock.mockResolvedValue({ suggestion: null });
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
+
+      await vi.waitFor(() => expect(generateMock).toHaveBeenCalled());
+      expect(generateMock).toHaveBeenCalledWith(
+        mockConfig,
+        expect.any(Array),
+        expect.any(AbortSignal),
+        expect.objectContaining({ enableCacheSharing: false }),
       );
     });
 

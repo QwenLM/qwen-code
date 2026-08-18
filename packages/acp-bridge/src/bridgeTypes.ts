@@ -8,6 +8,8 @@ import type {
   ApprovalMode,
   GoalSnapshotV2,
   SessionGroupPresetColor,
+  TurnResultCode,
+  TurnResultErrorPayload,
 } from '@qwen-code/qwen-code-core';
 import type {
   CancelNotification,
@@ -645,6 +647,18 @@ export interface BridgeSessionSummary {
 }
 
 /**
+ * In-memory equality token for daemon-observed session-catalog changes.
+ * `generation` is unique to a bridge instance; `revision` increases
+ * monotonically within it. The only supported operation is equality over
+ * the whole pair — no revision arithmetic, no cross-generation comparison,
+ * and conservative extra increments are allowed.
+ */
+export interface BridgeSessionCatalogVersion {
+  readonly generation: string;
+  readonly revision: number;
+}
+
+/**
  * A session's live canonical Goal state, as reported by the `qwen --acp`
  * child. `active` remains as a compatibility projection for existing hosts.
  */
@@ -921,6 +935,7 @@ export interface BridgeMidTurnMessagesSnapshot {
 export interface PendingPromptEntry {
   promptId: string;
   queuedAt: number;
+  startedAt?: number;
   originatorClientId?: string;
   promotedMidTurn?: true;
   text: string;
@@ -971,6 +986,23 @@ export interface PendingPromptSummary {
   content?: BridgePromptContentBlock[];
   queuedAt: number;
   state: 'queued' | 'running';
+  originatorClientId?: string;
+}
+
+export interface BridgeTurnStatus {
+  sessionId: string;
+  state: 'idle' | 'queued' | 'running' | 'completed' | 'cancelled' | 'error';
+  promptId?: string;
+  promptText?: string;
+  promptTextTruncated?: boolean;
+  queuedAt?: number;
+  startedAt?: number;
+  endedAt?: number;
+  stopReason?: string;
+  error?: TurnResultErrorPayload;
+  resultText?: string;
+  resultTruncated?: boolean;
+  resultCode?: TurnResultCode;
   originatorClientId?: string;
 }
 
@@ -1264,6 +1296,13 @@ export interface AcpSessionBridge {
     context?: BridgeClientRequestContext,
   ): readonly PendingPromptSummary[];
 
+  /** Read an exact prompt, or the current/newest turn when omitted. */
+  getSessionTurnStatus(
+    sessionId: string,
+    context?: BridgeClientRequestContext,
+    promptId?: string,
+  ): Promise<BridgeTurnStatus | undefined>;
+
   /**
    * Remove a specific prompt from the pending queue. For `queued` prompts,
    * aborts them so the FIFO skips dispatch. For `running` prompts, aborts
@@ -1395,6 +1434,21 @@ export interface AcpSessionBridge {
    * supplied cwd. Empty array (not throw) when no sessions exist.
    */
   listWorkspaceSessions(workspaceCwd: string): BridgeSessionSummary[];
+
+  /**
+   * Read the current in-memory session-catalog version. The returned value
+   * is an immutable snapshot — a later {@link markSessionCatalogChanged}
+   * call never mutates a previously returned version.
+   */
+  getSessionCatalogVersion(): BridgeSessionCatalogVersion;
+
+  /**
+   * Advance the session-catalog revision. Marks daemon-observed catalog
+   * membership and static-metadata changes that the bridge does not track
+   * internally (e.g. persisted mutations performed by serve-layer helpers).
+   * Conservative extra increments are safe and preferred over a missed mark.
+   */
+  markSessionCatalogChanged(): void;
 
   /**
    * Live status summary for a single session by id — the same shape
