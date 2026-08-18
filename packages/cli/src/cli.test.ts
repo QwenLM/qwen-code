@@ -223,6 +223,29 @@ describe('resolveBootstrapRoute', () => {
     expect(resolveBootstrapRoute(['-v'])).toBe('version');
   });
 
+  it('demotes the version fast path when a hidden help state is possible', () => {
+    // yargs sees help states the exact-token scanner cannot: a trailing
+    // positional literally named `help` (popped into the help flag before
+    // the help/version decision, where help wins in every ordering), the
+    // `--help=*` form, and the `--h` alias spelling. All print help on the
+    // full parser, so the version fast path must demote them to the slow
+    // path, which prints the same page.
+    expect(resolveBootstrapRoute(['help', '-v'])).toBe('default');
+    expect(resolveBootstrapRoute(['help', '--version'])).toBe('default');
+    expect(resolveBootstrapRoute(['-v', 'help'])).toBe('default');
+    expect(resolveBootstrapRoute(['foo', 'help', '-v'])).toBe('default');
+    expect(resolveBootstrapRoute(['update', 'help', '-v'])).toBe('default');
+    expect(resolveBootstrapRoute(['--help=true', '-v'])).toBe('default');
+    expect(resolveBootstrapRoute(['--help=true', '--version'])).toBe('default');
+    expect(resolveBootstrapRoute(['--h', '-v'])).toBe('default');
+    // Conservative demotion: `--help=false -v` prints the version even on
+    // the full parser, but the slow path reaches the same output.
+    expect(resolveBootstrapRoute(['--help=false', '-v'])).toBe('default');
+    // Version still wins when no help state is possible.
+    expect(resolveBootstrapRoute(['--model', '-v'])).toBe('version');
+    expect(resolveBootstrapRoute(['mcp', '--version'])).toBe('version');
+  });
+
   it('demotes unrecognized short-option clusters to the slow path', () => {
     // Documented limitation (see skipOptionValues): clusters are matched as
     // whole tokens, so -h/-v inside a cluster falls back to the full boot.

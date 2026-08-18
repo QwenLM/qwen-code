@@ -192,6 +192,17 @@ function normalizeMcpFastPathArgv(argv: readonly string[]): readonly string[] {
   return argv;
 }
 
+// Help states the exact-token scanner cannot see: yargs pops a trailing
+// positional literally named `help` into the help flag before deciding
+// between help and version (help wins in every ordering), `--help=*` reaches
+// the same flag through the parsed-value truthiness check, and `--h`
+// resolves through the h→help alias. When any of these is possible, the
+// version fast path must demote to the slow path, which prints exactly what
+// the full parser prints.
+function helpStatePossible(argv: readonly string[]): boolean {
+  return argv.some((token) => token === 'help' || token.startsWith('--h'));
+}
+
 export function resolveBootstrapRoute(
   rawArgv: readonly string[],
 ): BootstrapRoute {
@@ -205,7 +216,11 @@ export function resolveBootstrapRoute(
     return 'help';
   }
 
-  if (!hasFlag(argv, '--help', '-h') && hasFlag(argv, '--version', '-v')) {
+  if (
+    !hasFlag(argv, '--help', '-h') &&
+    !helpStatePossible(argv) &&
+    hasFlag(argv, '--version', '-v')
+  ) {
     return 'version';
   }
 
