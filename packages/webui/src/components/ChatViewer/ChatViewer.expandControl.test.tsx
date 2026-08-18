@@ -324,17 +324,15 @@ describe('ChatViewer global expand control', () => {
         '.user-message-container button[aria-expanded]',
       ) as HTMLButtonElement;
     const getReadToggle = () =>
-      Array.from(
-        container?.querySelectorAll('.read-tool-call-success button') ?? [],
-      ).find((button) => button.textContent?.includes('Show more')) ??
-      Array.from(
-        container?.querySelectorAll('.read-tool-call-success button') ?? [],
-      ).find((button) => button.textContent?.includes('Collapse'));
+      container?.querySelector(
+        '.read-tool-call-success button[aria-expanded]',
+      ) as HTMLButtonElement;
 
     // Baseline: both sections start collapsed. The collapsed file-reference
     // body is not rendered at all.
     expect(getFileRefToggle().getAttribute('aria-expanded')).toBe('false');
     expect(container?.textContent).not.toContain('FILE-REF-BODY-LINE-1');
+    expect(getReadToggle().getAttribute('aria-expanded')).toBe('false');
     expect(getReadToggle()?.textContent).toContain('Show more');
 
     clickButton('Expand all sections');
@@ -342,6 +340,7 @@ describe('ChatViewer global expand control', () => {
     await vi.waitFor(() => {
       expect(getFileRefToggle().getAttribute('aria-expanded')).toBe('true');
       expect(container?.textContent).toContain('FILE-REF-BODY-LINE-1');
+      expect(getReadToggle().getAttribute('aria-expanded')).toBe('true');
       expect(getReadToggle()?.textContent).toContain('Collapse');
     });
 
@@ -350,6 +349,7 @@ describe('ChatViewer global expand control', () => {
     await vi.waitFor(() => {
       expect(getFileRefToggle().getAttribute('aria-expanded')).toBe('false');
       expect(container?.textContent).not.toContain('FILE-REF-BODY-LINE-1');
+      expect(getReadToggle().getAttribute('aria-expanded')).toBe('false');
       expect(getReadToggle()?.textContent).toContain('Show more');
     });
   });
@@ -408,7 +408,14 @@ describe('ChatViewer global expand control', () => {
     });
 
     // Baseline: the search result body starts collapsed (its content is not
-    // rendered until expanded).
+    // rendered until expanded), and its trigger is a keyboard-reachable
+    // button with expanded-state semantics.
+    const searchToggle = container?.querySelector(
+      '[role="button"][aria-expanded]',
+    ) as HTMLElement;
+    expect(searchToggle).not.toBeNull();
+    expect(searchToggle.getAttribute('aria-expanded')).toBe('false');
+    expect(searchToggle.tabIndex).toBe(0);
     expect(container?.textContent).not.toContain('SEARCH-TAIL-MARKER');
 
     clickButton('Expand all sections');

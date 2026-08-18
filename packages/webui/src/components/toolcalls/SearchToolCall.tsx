@@ -36,7 +36,17 @@ const CollapsibleOutput: FC<{
     <div className="flex flex-col">
       <div
         className="inline-flex text-[var(--app-secondary-foreground)] text-[0.85em] opacity-70 mt-[2px] mb-[2px] flex-row items-start w-full gap-1 cursor-pointer hover:opacity-100 transition-opacity"
+        role="button"
+        tabIndex={0}
+        aria-expanded={isExpanded}
+        aria-label={isExpanded ? 'Collapse output' : 'Expand output'}
         onClick={() => setIsExpanded(!isExpanded)}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            setIsExpanded(!isExpanded);
+          }
+        }}
       >
         <span className="flex-shrink-0 relative top-[-0.1em]">⎿</span>
         <span className="flex-shrink-0">{summary}</span>

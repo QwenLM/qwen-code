@@ -269,6 +269,8 @@ export const ReadToolCall: FC<BaseToolCallProps> = ({
             {isLongContent && (
               <button
                 onClick={() => setIsExpanded(!isExpanded)}
+                aria-expanded={isExpanded}
+                aria-label={isExpanded ? 'Collapse output' : 'Expand output'}
                 className="flex items-center justify-center w-full py-1 px-2 border-t border-[var(--app-input-border)] cursor-pointer text-[var(--app-secondary-foreground)] text-[0.75em] opacity-70 hover:opacity-100 hover:bg-[var(--app-code-background)] transition-opacity bg-transparent"
               >
                 {isExpanded ? '▲ Collapse' : '▼ Show more'}
@@ -326,6 +328,8 @@ export const ReadToolCall: FC<BaseToolCallProps> = ({
           {isLongContent && (
             <button
               onClick={() => setIsExpanded(!isExpanded)}
+              aria-expanded={isExpanded}
+              aria-label={isExpanded ? 'Collapse output' : 'Expand output'}
               className="flex items-center justify-center w-full py-1 px-2 border-t border-[var(--app-input-border)] cursor-pointer text-[var(--app-secondary-foreground)] text-[0.75em] opacity-70 hover:opacity-100 hover:bg-[var(--app-code-background)] transition-opacity bg-transparent"
             >
               {isExpanded ? '▲ Collapse' : '▼ Show more'}

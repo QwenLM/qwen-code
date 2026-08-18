@@ -74,6 +74,14 @@ const webuiJs = (await readFile(join(webuiDistDir, 'index.umd.js'), 'utf8'))
   // Escape for inlining into a <script> block, mirroring the CLI's
   // escapeJsonForHtml: a literal "</script" would terminate the tag.
   .replace(/<\/script/gi, '<\\/script');
+// The bundle inevitably contains `<!--` (markdown-it's HTML regexes). If a
+// `<script` byte ever appears after it, HTML5 script-data double-escaping
+// swallows the rest of the template — fail the build instead of every export.
+if (/<script/i.test(webuiJs)) {
+  throw new Error(
+    'webui UMD bundle contains a <script sequence; refusing to inline.',
+  );
+}
 const webuiCss = await readFile(join(webuiDistDir, 'styles.css'), 'utf8');
 
 const buildResult = await build(buildConfig);
@@ -95,15 +103,30 @@ const htmlTemplate = await readFile(join(srcDir, 'index.html'), 'utf8');
 const faviconSvg = await readFile(join(srcDir, 'favicon.svg'), 'utf8');
 const faviconData = encodeURIComponent(faviconSvg.trim());
 
+// Function-form replacers: the bundles are untrusted replacement content,
+// and a string replacement would interpret `$&`/`$'`/`` $` `` sequences in
+// them as substitution patterns, corrupting the inlined code.
 const htmlOutput = htmlTemplate
-  .replace('__INLINE_CSS__', css.trim())
-  .replace('__INLINE_SCRIPT__', jsBundle.text.trim())
-  .replace('__WEBUI_UMD_JS__', webuiJs.trim())
-  .replace('__WEBUI_CSS__', webuiCss.trim())
+  .replace('__INLINE_CSS__', () => css.trim())
+  .replace('__INLINE_SCRIPT__', () => jsBundle.text.trim())
+  .replace('__WEBUI_UMD_JS__', () => webuiJs.trim())
+  .replace('__WEBUI_CSS__', () => webuiCss.trim())
   .replaceAll('__REACT_UMD_VERSION__', reactUmdVersion)
   .replaceAll('__REACT_DOM_UMD_VERSION__', reactDomUmdVersion)
-  .replace('__FAVICON_SVG__', faviconSvg.trim())
-  .replace('__FAVICON_DATA__', faviconData);
+  .replace('__FAVICON_SVG__', () => faviconSvg.trim())
+  .replace('__FAVICON_DATA__', () => faviconData);
+
+// A dropped or renamed .replace() above would otherwise still exit 0 and
+// ship a template that throws at view time.
+const residualPlaceholder =
+  /__(INLINE_CSS|INLINE_SCRIPT|WEBUI_UMD_JS|WEBUI_CSS|FAVICON_SVG|FAVICON_DATA)__/.exec(
+    htmlOutput,
+  );
+if (residualPlaceholder) {
+  throw new Error(
+    `Unreplaced placeholder ${residualPlaceholder[0]} in export HTML template.`,
+  );
+}
 
 const templateModule = `/**
  * @license
