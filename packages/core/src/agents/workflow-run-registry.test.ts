@@ -1082,6 +1082,21 @@ describe('WorkflowRunRegistry', () => {
     });
   });
 
+  it('fail() sanitizes and caps entry.error like the sibling persisted strings', () => {
+    const r = new WorkflowRunRegistry();
+    const entry = r.register(reg('wf_failed_error'));
+
+    r.fail(entry.runId, `\u001b[2J\u001b[H\u0000${'x'.repeat(5_000)}`, 2_000);
+
+    expect(entry.error).toHaveLength(4_096);
+    expect(entry.error).not.toContain('\u001b');
+    expect(entry.error).not.toContain('\u0000');
+    expect(entry.events.at(-1)).toMatchObject({
+      type: 'workflow-failed',
+      error: entry.error,
+    });
+  });
+
   it('marks live dispatches cancelled when the workflow is stopped', () => {
     const r = new WorkflowRunRegistry();
     const entry = r.register(reg('wf_graph_cancel'));
@@ -1292,6 +1307,37 @@ describe('WorkflowRunRegistry', () => {
     r.setRecentLogs('wf_long_mirrored_logs', ['y'.repeat(5_000)]);
 
     expect(r.get('wf_long_mirrored_logs')?.recentLogs?.[0]).toHaveLength(4_096);
+  });
+
+  it('setRecentLogs resyncs the log event window to the settlement tail', () => {
+    const r = new WorkflowRunRegistry();
+    const entry = r.register(reg('wf_settlement_resync'));
+    r.onPhaseStarted(entry.runId, 'Build', 1_000);
+    // Live mirror: the shared emitter publishes lines as they are emitted —
+    // including lines the sandbox buffer tail later reorders or never
+    // receives (nested merges via appendLog notify nobody, and the overflow
+    // sentinel can be pushed without emission).
+    r.onLogAppended(entry.runId, 'parent-1', 1_001);
+    r.onLogAppended(entry.runId, 'nested-1', 1_002);
+    r.onLogAppended(entry.runId, 'nested-2', 1_003);
+
+    r.setRecentLogs(entry.runId, [
+      'parent-1',
+      '[workflow log truncated at 10000 lines]',
+    ]);
+
+    // Both persisted log projections must keep agreeing after settlement.
+    expect(entry.events.filter((event) => event.type === 'log')).toEqual(
+      entry.recentLogs.map((message) =>
+        expect.objectContaining({ type: 'log', message }),
+      ),
+    );
+    expect(entry.recentLogs).toEqual([
+      'parent-1',
+      '[workflow log truncated at 10000 lines]',
+    ]);
+    // Non-log events survive the resync.
+    expect(entry.events[0]).toMatchObject({ type: 'phase-started' });
   });
 
   it('onLogAppended keeps recentLogs and log events at the last 100 lines', () => {

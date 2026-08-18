@@ -187,6 +187,29 @@ describe('WorkflowRunner', () => {
     ]);
   });
 
+  it('keeps sandbox and registry phase projections equal for normalization-colliding titles', async () => {
+    const { config, registry } = configWithRegistry();
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script:
+        'phase("\\u001b[1mBuild\\u001b[0m");' +
+        'phase("Build");' +
+        'await agent("x", { phase: "\\u001b[1mBuild\\u001b[0m" });' +
+        'return 1;',
+      args: undefined,
+      runInBackground: true,
+      dispatch: async () => 'unused',
+    });
+
+    const settlement = await handle.completion;
+
+    expect(settlement.ok).toBe(true);
+    const outcomePhases = settlement.ok ? settlement.outcome.phases : [];
+    expect(registry.get(handle.runId)?.phases).toEqual(['Build']);
+    expect(outcomePhases).toEqual(registry.get(handle.runId)?.phases);
+  });
+
   it('records a journal retry as sourced from the same run', async () => {
     const { config, registry } = configWithRegistry();
     const runId = 'wf_1234abcd';

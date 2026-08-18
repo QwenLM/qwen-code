@@ -363,6 +363,7 @@ function isRegexContext(source: string, i: number): boolean {
 
 import * as vm from 'node:vm';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { stripAnsiAndControl } from '../../utils/textUtils.js';
 import type { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
 
 // Shared with workflow-orchestrator (avoids a duplicate createDebugLogger
@@ -766,7 +767,11 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
 
   const safePhase = (title: string): void => {
     if (phases.length < MAX_PHASE_ENTRIES) {
-      const t = String(title);
+      // Normalize before collapse/push/emit so the sandbox list and the
+      // registry mirror (same rule at its boundary) compare the same value:
+      // titles colliding only after ANSI/control stripping or the 200-char
+      // cap previously diverged the two phase surfaces of the same run.
+      const t = stripAnsiAndControl(String(title)).slice(0, 200) || 'phase';
       // R7 (wenshao): collapse consecutive identical titles so the
       // sandbox is the single source of truth for the phase list.
       // Without this, `outcome.phases` (terminal `returnDisplay` JSON)

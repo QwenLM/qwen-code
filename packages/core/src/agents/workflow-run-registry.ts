@@ -1083,6 +1083,15 @@ export class WorkflowRunRegistry {
     entry.recentLogs = tail.map((line) =>
       stripAnsiAndControl(line).slice(0, 4_096),
     );
+    // The sandbox buffer tail is the run's final log account: nested merges
+    // reach it via appendLog without re-emitting, and the overflow sentinel
+    // can be pushed without emission, so the live-mirrored 'log' window can
+    // disagree with it in membership AND order. Rebuild the window from the
+    // same tail so the two persisted log projections keep agreeing.
+    entry.events = entry.events.filter((event) => event.type !== 'log');
+    for (const message of entry.recentLogs) {
+      this.appendEvent(entry, { type: 'log', at: Date.now(), message });
+    }
     this.emitStatusChange(entry);
   }
 
@@ -1111,11 +1120,14 @@ export class WorkflowRunRegistry {
     entry.endTime = endTime;
     this.closeCurrentPhase(entry, endTime);
     this.cancelLiveDispatches(entry, endTime);
-    entry.error = message;
+    // Script-derived failure text rides into the snapshot, the /workflows
+    // render, and the completion-notification XML: normalize it once at
+    // this boundary and persist the same string in both projections.
+    entry.error = stripAnsiAndControl(message).slice(0, 4_096);
     this.appendEvent(entry, {
       type: 'workflow-failed',
       at: endTime,
-      error: stripAnsiAndControl(message).slice(0, 4_096),
+      error: entry.error,
     });
     entry.notified = true;
     this.emitStatusChange(entry);
