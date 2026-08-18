@@ -17747,7 +17747,7 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
-    it('stays strictly increasing when the wall clock does not advance', async () => {
+    it('stays strictly increasing under a pinned clock and tracks wall time once it advances', async () => {
       // Pinning Date.now is what actually exercises the logical +1ms
       // tie-breaker: with real time the assertion would pass on wall-clock
       // movement alone.
@@ -17771,6 +17771,19 @@ describe('createAcpSessionBridge', () => {
           '2026-08-18T08:00:00.001Z',
           '2026-08-18T08:00:00.002Z',
         ]);
+
+        // The wall-clock half of the max needs pinning too: turns are seconds
+        // apart in production, so a watermark that kept adding the logical
+        // millisecond instead of reading the clock would report a just-active
+        // session as minutes stale and rank it below quieter rows.
+        nowSpy.mockReturnValue(Date.parse('2026-08-18T08:05:00.000Z'));
+        await bridge.sendPrompt(session.sessionId, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'four' }],
+        });
+        expect(watermarkOf(bridge, session.sessionId)).toBe(
+          '2026-08-18T08:05:00.000Z',
+        );
       } finally {
         nowSpy.mockRestore();
       }
@@ -17920,6 +17933,104 @@ describe('createAcpSessionBridge', () => {
       await new Promise((r) => setTimeout(r, 30));
       expect(terminalCount(events, 'prompt-a')).toBe(1);
       expect(watermarkOf(bridge, session.sessionId)).toBe(afterError);
+
+      await bridge.shutdown();
+    });
+
+    it('advances exactly once for a deadline terminal despite its duplicate publish', async () => {
+      // The deadline path publishes twice: `onDeadline` publishes the terminal
+      // and rejects the raced prompt, then that rejection reaches the `result`
+      // handler and re-enters `publishPromptTerminal`, where the per-prompt
+      // latch drops it. The clock is pinned because that is what makes a
+      // second advance observable — it would report the logical `previous + 1`
+      // instead of the wall time the single terminal actually landed at, and
+      // one logical turn would outrank a later one.
+      let releaseLateResult!: () => void;
+      const lateResult = new Promise<void>((r) => {
+        releaseLateResult = r;
+      });
+      const handle = makeChannel({
+        promptImpl: async () => {
+          await lateResult;
+          return { stopReason: 'end_turn' } as PromptResponse;
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const events: BridgeEvent[] = [];
+      collectEvents(bridge, session.sessionId, events);
+      // The deadline timer is a real timer, so pinning `Date.now` changes only
+      // the recorded watermark, not when the deadline fires.
+      const nowSpy = vi
+        .spyOn(Date, 'now')
+        .mockReturnValue(Date.parse('2026-08-18T10:00:00.000Z'));
+      try {
+        await expect(
+          bridge.sendPrompt(
+            session.sessionId,
+            {
+              sessionId: session.sessionId,
+              prompt: [{ type: 'text', text: 'wedge past the deadline' }],
+            },
+            undefined,
+            { promptId: 'prompt-a', deadlineMs: 30 },
+          ),
+        ).rejects.toBeInstanceOf(PromptDeadlineExceededError);
+        await vi.waitFor(() =>
+          expect(terminalCount(events, 'prompt-a')).toBe(1),
+        );
+        expect(watermarkOf(bridge, session.sessionId)).toBe(
+          '2026-08-18T10:00:00.000Z',
+        );
+
+        // The agent's own result lands after the raced promise already
+        // settled, so it produces neither a second terminal nor a second
+        // advance.
+        releaseLateResult();
+        await new Promise((r) => setTimeout(r, 40));
+        expect(terminalCount(events, 'prompt-a')).toBe(1);
+        expect(watermarkOf(bridge, session.sessionId)).toBe(
+          '2026-08-18T10:00:00.000Z',
+        );
+      } finally {
+        nowSpy.mockRestore();
+      }
+
+      await bridge.shutdown();
+    });
+
+    it('never decreases when a forward clock jump is later corrected', async () => {
+      const handle = makeChannel({});
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const nowSpy = vi
+        .spyOn(Date, 'now')
+        .mockReturnValue(Date.parse('2026-08-18T08:00:00.000Z'));
+      try {
+        const settle = (text: string) =>
+          bridge.sendPrompt(session.sessionId, {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text }],
+          });
+        await settle('before the jump');
+
+        nowSpy.mockReturnValue(Date.parse('2026-08-18T09:00:00.000Z'));
+        await settle('during the jump');
+        expect(watermarkOf(bridge, session.sessionId)).toBe(
+          '2026-08-18T09:00:00.000Z',
+        );
+
+        // Time is corrected back an hour. The watermark stays ahead of wall
+        // time rather than rewinding: clients order rows by this value, so a
+        // decrease would reshuffle a catalog that nothing actually changed.
+        nowSpy.mockReturnValue(Date.parse('2026-08-18T08:00:01.000Z'));
+        await settle('after the correction');
+        expect(watermarkOf(bridge, session.sessionId)).toBe(
+          '2026-08-18T09:00:00.001Z',
+        );
+      } finally {
+        nowSpy.mockRestore();
+      }
 
       await bridge.shutdown();
     });

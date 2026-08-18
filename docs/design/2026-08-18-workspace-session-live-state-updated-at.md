@@ -292,6 +292,12 @@ The comparison helper must preserve a valid value when the other candidate is
 absent or invalid. No filesystem read is added: both candidate strings are
 already present in memory in the existing merge path.
 
+Every surface that holds both candidates applies the same rule, including the
+Live Task read and wait paths, which read the bridge summary directly rather
+than through the list merge. Otherwise one task would report two different
+recencies depending on the tool that asked, and a wait cursor keyed on the live
+value alone would not change when only the transcript advanced.
+
 While the session remains live, activity-based full catalog responses and
 live-only session lists can therefore use the same effective recency. Once the
 live entry disappears, persisted mtime becomes the only authority again and may
@@ -343,16 +349,16 @@ served.
 Populating the existing `BridgeSessionSummary.updatedAt` field has a wider but
 intentional additive effect than projecting a route-local value.
 
-| Consumer                                         | Effect                                                                                   |
-| ------------------------------------------------ | ---------------------------------------------------------------------------------------- |
-| Workspace live-state                             | Returns optional activity watermark for the intended client optimization                 |
-| Full workspace session lists                     | Live/persisted merge and activity ordering can reflect the latest running terminal       |
-| Live-only session list and cursor                | Live rows are ordered by the populated activity timestamp instead of creation time alone |
-| `GET /session/:id/status`                        | Adds the already-typed bridge-local field directly, without a persisted merge            |
-| Live Task thread summaries and cursors           | A running terminal advances the live task's `updatedAt`/change cursor                    |
-| Goals routes                                     | Ignore the new field; behavior is unchanged                                              |
-| Session-owner resolution and admission           | Read identity/ownership fields only; behavior is unchanged                               |
-| Create-sub-session and live-session coordinators | Read caller or interaction state only; behavior is unchanged                             |
+| Consumer                                         | Effect                                                                                                                       |
+| ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------- |
+| Workspace live-state                             | Returns optional activity watermark for the intended client optimization                                                     |
+| Full workspace session lists                     | Live/persisted merge and activity ordering can reflect the latest running terminal                                           |
+| Live-only session list and cursor                | Live rows are ordered by the populated activity timestamp instead of creation time alone                                     |
+| `GET /session/:id/status`                        | Adds the already-typed bridge-local field directly, without a persisted merge                                                |
+| Live Task thread summaries and cursors           | A running terminal advances the live task's `updatedAt`/change cursor; read/wait apply the same later-valid rule as the list |
+| Goals routes                                     | Ignore the new field; behavior is unchanged                                                                                  |
+| Session-owner resolution and admission           | Read identity/ownership fields only; behavior is unchanged                                                                   |
+| Create-sub-session and live-session coordinators | Read caller or interaction state only; behavior is unchanged                                                                 |
 
 The implementation PR must update exact-object tests for the affected public
 summary surfaces while retaining tests that prove unrelated ownership and
@@ -484,10 +490,16 @@ name the complete downstream consumer audit above in its risk section.
 - A newly created or restored live entry omits `updatedAt` before its first
   running terminal.
 - A successful running terminal produces a valid ISO timestamp.
-- Running success, structured error, transport error, cancellation, deadline,
-  and teardown terminal paths each advance exactly once.
+- Running success, structured error, transport error, cancellation, and deadline
+  terminal paths each advance exactly once. The teardown paths (session close,
+  kill, channel exit, daemon shutdown) advance through the same helper, but each
+  removes the entry from live state in the same operation, so the advanced value
+  has no reader and no test asserts it.
 - Queued removal/cancellation/deadline does not advance.
-- A duplicate natural result arriving after a deadline does not advance again.
+- The deadline path publishes its terminal twice — once from the expiry and
+  once from the raced rejection reaching the settle handler — and still
+  advances exactly once. An agent result arriving later lands after the raced
+  promise settled, so it adds neither a terminal nor an advance.
 - Two running terminals under a fixed `Date.now()` produce strictly increasing
   values.
 - A forward clock jump followed by a correction never decreases the watermark;

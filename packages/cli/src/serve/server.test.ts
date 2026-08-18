@@ -17066,6 +17066,35 @@ describe('createServeApp', () => {
 
       expect(res.status).toBe(200);
       expect('displayName' in res.body).toBe(false);
+      expect('updatedAt' in res.body).toBe(false);
+    });
+
+    it('200 passes the activity watermark through verbatim', async () => {
+      // The route returns the bridge summary as-is. A response projection or
+      // field whitelist added later would drop the documented watermark from
+      // this surface with every other status test still green.
+      const summary: BridgeSessionSummary = {
+        sessionId: 's-updated',
+        workspaceCwd: WS_BOUND,
+        createdAt: '2026-05-17T12:00:00.000Z',
+        updatedAt: '2026-05-17T12:00:09.000Z',
+        clientCount: 1,
+        hasActivePrompt: false,
+      };
+      const bridge = fakeBridge({ summaryImpl: () => summary });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .get('/session/s-updated/status')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual(summary);
+      expect(res.body.updatedAt).toBe('2026-05-17T12:00:09.000Z');
     });
 
     it('200 includes pending interaction details for a single session', async () => {
