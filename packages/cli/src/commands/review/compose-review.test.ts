@@ -2077,6 +2077,234 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
     ).toBe(true);
   });
 
+  /**
+   * Drive the handler with a state floor, a recorded floor, and a plan
+   * naming PR 8255 (the recovery is PR-bound), then return the ARCHIVED
+   * composed JSON — read from --out before cleanup, because the archive is
+   * what Step 8 registers and later rounds consume; asserting stdout alone
+   * let a hoisted pre-override archive write ship unnoticed.
+   */
+  async function composeWithRecordedFloor(opts: {
+    stateFloor?: string;
+    argsLine: string;
+    settings?: Record<string, unknown>;
+    /** Omit the plan from the state — the R4-1 shape: the recovery must
+     * fall back to the handler's own --pr, exactly as submit does. */
+    noPlan?: boolean;
+    /** The handler's caller identity — --pr / --repo / --host. */
+    pr?: number;
+    repo?: string;
+    host?: string;
+  }): Promise<{
+    written: ComposeReviewResult;
+    stderrHasOverride: boolean;
+    stderr: string[];
+  }> {
+    if (opts.settings) reviewSettingsMock.mockReturnValue(opts.settings);
+    // The stderr spy accumulates across tests; the no-override assertion
+    // below must not read an earlier test's note.
+    (writeStderrLine as ReturnType<typeof vi.fn>).mockClear();
+    const dir = mkdtempSync(join(tmpdir(), 'compose-recorded-floor-'));
+    const inputPath = join(dir, 'compose.json');
+    const commentsPath = join(dir, 'comments.json');
+    const outPath = join(dir, 'composed.json');
+    const argsPath = join(dir, 'skill-args.txt');
+    const planPath = join(dir, 'plan.json');
+    writeFileSync(planPath, JSON.stringify({ prNumber: 8255 }), 'utf8');
+    writeFileSync(
+      inputPath,
+      JSON.stringify({
+        modelId: MODEL,
+        ...(opts.noPlan ? {} : { planPath }),
+        ...(opts.stateFloor === undefined
+          ? {}
+          : { severityFloor: opts.stateFloor }),
+      }),
+      'utf8',
+    );
+    writeFileSync(
+      commentsPath,
+      JSON.stringify([
+        { path: 'a.ts', line: 3, body: '**[Suggestion]** tidy this' },
+      ]),
+      'utf8',
+    );
+    writeFileSync(argsPath, `${opts.argsLine}\n`, 'utf8');
+    const savedSession = process.env['QWEN_CODE_SESSION_ID'];
+    delete process.env['QWEN_CODE_SESSION_ID'];
+    let written: ComposeReviewResult;
+    try {
+      await runComposeReviewCommand({
+        input: inputPath,
+        comments: commentsPath,
+        out: outPath,
+        skillArgs: argsPath,
+        ...(opts.pr === undefined ? {} : { pr: opts.pr }),
+        ...(opts.repo === undefined ? {} : { repo: opts.repo }),
+        ...(opts.host === undefined ? {} : { host: opts.host }),
+      });
+      written = JSON.parse(readFileSync(outPath, 'utf8'));
+    } finally {
+      if (savedSession === undefined)
+        delete process.env['QWEN_CODE_SESSION_ID'];
+      else process.env['QWEN_CODE_SESSION_ID'] = savedSession;
+      rmSync(dir, { recursive: true, force: true });
+    }
+    const stderr = (writeStderrLine as ReturnType<typeof vi.fn>).mock.calls.map(
+      (c) => String(c[0]),
+    );
+    return {
+      written,
+      stderrHasOverride: stderr.some((l) =>
+        l.includes('verbatim record outranks'),
+      ),
+      stderr,
+    };
+  }
+
+  it('resolves the recorded floor at THIS boundary too — the archive must match the post', async () => {
+    // The recorded-floor recovery lives in the shared lib helper; if only
+    // submit resolved it, the archived composed JSON and terminal verdict
+    // (this boundary's outputs) would describe a different review than the
+    // posted body whenever the override fired.
+    const { written, stderrHasOverride } = await composeWithRecordedFloor({
+      stateFloor: 'suggestion',
+      argsLine: '8255 --severity-floor critical',
+    });
+    expect(written.floorEnforced).toEqual([0]);
+    expect(stderrHasOverride).toBe(true);
+  });
+
+  it('overrides in BOTH directions — a recorded posture-off outranks a drifted critical', async () => {
+    // Direction-independence: an enforcement-direction-only condition would
+    // let a drifted state 'critical' stand over the operator's recorded
+    // `--severity-floor suggestion` and silently invert a posture-off
+    // decision.
+    const { written, stderrHasOverride } = await composeWithRecordedFloor({
+      stateFloor: 'critical',
+      argsLine: '8255 --severity-floor suggestion',
+    });
+    expect(written.floorEnforced).toEqual([]);
+    expect(stderrHasOverride).toBe(true);
+  });
+
+  it('the configured setting reaches this boundary without a flag', async () => {
+    // The flag-less leg: the record names only the PR; the floor comes from
+    // `review.severityFloor` through `operatorReviewSettings()` — deleting
+    // that argument from the handler must fail here.
+    const { written } = await composeWithRecordedFloor({
+      argsLine: '8255',
+      settings: { attribution: true, severityFloor: 'critical' },
+    });
+    expect(written.floorEnforced).toEqual([0]);
+  });
+
+  it('falls back to --pr when the state carries no usable plan — the R4-1 symmetry', async () => {
+    // With the plan absent (or unusable) the recovery must resolve exactly
+    // as submit's does through its own --pr, or the archived compose and
+    // the post describe different reviews on precisely the drifted-state
+    // shape enforcement exists for.
+    const { written, stderr } = await composeWithRecordedFloor({
+      stateFloor: 'suggestion',
+      argsLine: '8255 --severity-floor critical',
+      noPlan: true,
+      pr: 8255,
+    });
+    expect(written.floorEnforced).toEqual([0]);
+    // And the flag-sourced note names the flag, not the setting.
+    expect(
+      stderr.some((l) => l.includes('the recorded `--severity-floor` flag')),
+    ).toBe(true);
+  });
+
+  it('binds a URL-shaped GHE record with the caller identity — full submit symmetry', async () => {
+    // R5-1's split: submit passed repo/host while compose did not, so on
+    // the plan-less shape a GHE URL record recovered at one boundary and
+    // not the other. The compose handler now feeds --repo and the
+    // effective --host into the same bar.
+    const prevHost = getGhHost();
+    try {
+      const { written } = await composeWithRecordedFloor({
+        stateFloor: 'suggestion',
+        argsLine:
+          'https://ghe.corp.example/QwenLM/qwen-code/pull/8255 --severity-floor critical',
+        noPlan: true,
+        pr: 8255,
+        repo: 'QwenLM/qwen-code',
+        host: 'ghe.corp.example',
+      });
+      expect(written.floorEnforced).toEqual([0]);
+    } finally {
+      // The handler routes gh via setGhHost; undo it so later tests do not
+      // inherit the Enterprise host.
+      setGhHost(prevHost);
+    }
+  });
+
+  it("refuses a foreign repo's URL record — the handler's --repo is the bar", async () => {
+    // The compose boundary is the one call shape where the identity repo
+    // can be unknown (--repo is optional, the plan may carry no
+    // ownerRepo), so it is where a last-writer-wins record of ANOTHER
+    // repo's PR 8255 could bind on number and host alone. Two arms: with
+    // --repo the bar refuses the foreign record; without it the unknown
+    // repo refuses it too (fail-closed), so dropping the handler's
+    // callerRepo leg cannot pass both.
+    for (const repo of ['QwenLM/qwen-code', undefined]) {
+      const { written, stderrHasOverride } = await composeWithRecordedFloor({
+        stateFloor: 'suggestion',
+        argsLine:
+          'https://github.com/other/repo/pull/8255 --severity-floor critical',
+        noPlan: true,
+        pr: 8255,
+        repo,
+      });
+      expect(written.floorEnforced).toEqual([]);
+      expect(stderrHasOverride).toBe(false);
+    }
+  });
+
+  it('stays silent when the recovered floor equals the state — normalised', async () => {
+    // The equality guard compares the normalised state floor: a
+    // case-drifted transcription of the SAME floor is agreement, and an
+    // override note over it is a false audit claim.
+    for (const stateFloor of ['critical', 'CRITICAL']) {
+      const { written, stderrHasOverride } = await composeWithRecordedFloor({
+        stateFloor,
+        argsLine: '8255 --severity-floor critical',
+      });
+      expect(written.floorEnforced).toEqual([0]);
+      expect(stderrHasOverride).toBe(false);
+    }
+  });
+
+  it('names the setting as the source when no flag was typed', async () => {
+    const { written, stderr } = await composeWithRecordedFloor({
+      stateFloor: 'suggestion',
+      argsLine: '8255',
+      settings: { attribution: true, severityFloor: 'critical' },
+    });
+    expect(written.floorEnforced).toEqual([0]);
+    expect(
+      stderr.some((l) =>
+        l.includes('setting resolved against the recorded invocation'),
+      ),
+    ).toBe(true);
+    expect(
+      stderr.some((l) => l.includes('the recorded `--severity-floor` flag')),
+    ).toBe(false);
+  });
+
+  it("does not recover another PR's recorded floor", async () => {
+    // The record is last-writer-wins across /review invocations; unbound,
+    // a later review of PR 999 would hand ITS floor to this PR's archive.
+    const { written, stderrHasOverride } = await composeWithRecordedFloor({
+      stateFloor: 'suggestion',
+      argsLine: '999 --severity-floor critical',
+    });
+    expect(written.floorEnforced).toEqual([]);
+    expect(stderrHasOverride).toBe(false);
+  });
+
   it('honours review.attribution=false through the handler (wiring)', async () => {
     // Third wiring leg: deleting the attribution argument from the
     // composeReviewCommand call leaves the direct composeReview test and the
@@ -3517,6 +3745,7 @@ describe('verdictLine — the terminal verdict, and its dangling colon', () => {
       baseEvent: 'COMMENT',
       cappedBy: [],
       downgraded: false,
+      floorEnforced: [],
       downgradedFrom: null,
       remediation: [],
       deferredCount: 0,
@@ -7397,5 +7626,484 @@ describe('composeReview — continuity renders on every verdict', () => {
     const r = composeReview(resumedInput({ suggestionsInline: 1 }));
     expect(r.event).toBe('COMMENT');
     expect(r.body).toContain('Resumed run (not a gap): 1 agent result(s)');
+  });
+});
+
+describe('floor enforcement — the posture, as code', () => {
+  // SKILL Step 6 resolves the posting floor in prose and tells the MODEL to
+  // defer; six live PRs measured 2026-08-16 posted double-digit Suggestions
+  // at rounds ≥ 6 anyway. The floor is the operator's configured policy, so
+  // `composeReview` now enforces it mechanically: drafted Suggestions leave
+  // the posting set and join the deferral list. Every case here is a row of
+  // the decision table (floor × round × knowability), and the fail-open rows
+  // matter as much as the firing ones — a posting bar in doubt posts.
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'floor-enf-'));
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  const plan = (over: Record<string, unknown> = {}) => {
+    const p = join(dir, 'plan.json');
+    writeFileSync(p, JSON.stringify({ prNumber: 8255, ...over }));
+    return p;
+  };
+  const sideFile = (round: number) =>
+    writeFileSync(
+      join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+      JSON.stringify({ v: 1, round, findings: [] }),
+    );
+  const drafts = () => [
+    { path: 'a.ts', line: 3, body: '**[Critical]** boom' },
+    { path: 'b.ts', line: 7, body: '**[Suggestion]** R2-4: tidy this' },
+    { path: 'c.ts', line: 9, body: '**[Suggestion]** rename the flag' },
+  ];
+  const compose = (over: Partial<ComposeReviewInput> = {}) =>
+    composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 1,
+      suggestionsInline: 2,
+      draftedComments: drafts(),
+      ...over,
+    });
+
+  it('reroutes drafted Suggestions under an explicit critical floor, any round', () => {
+    const r = compose({ severityFloor: 'critical' });
+    expect(r.floorEnforced).toEqual([1, 2]);
+    expect(r.deferredCount).toBe(2);
+    // The finding is not lost: the body discloses the move and lists the
+    // entries, carried ids included — the record survives on the PR.
+    expect(r.body).toContain('floor enforcement');
+    expect(r.body).toContain('b.ts:7');
+    expect(r.body).toContain('R2-4: tidy this');
+    // The ledger work list holds only what posts — the same semantics as a
+    // model-side deferral.
+    const ledger = parseLedger(r.body)!;
+    expect(ledger.findings.map((f) => f.sev)).toEqual(['C']);
+    // A posting decision, never a cap: the licence holds by construction.
+    expect(r.cappedBy).not.toContain('unlicensed-deferral');
+    // The Critical still posts and still counts toward the base event (on
+    // this bare plan the existing criticals-unverified cap then softens the
+    // posted event, exactly as it would without enforcement — enforcement
+    // itself moved no verdict).
+    expect(r.baseEvent).toBe('REQUEST_CHANGES');
+    expect(verdictLine(r)).toContain('moved by CLI floor enforcement');
+  });
+
+  it('enforces auto from round 6 — the side-file round decides', () => {
+    sideFile(5); // this review is round 6
+    const r = compose({ severityFloor: 'auto' });
+    expect(r.floorEnforced).toEqual([1, 2]);
+    expect(parseLedger(r.body)?.round).toBe(6);
+  });
+
+  it('does not enforce auto before round 6 — the rounds-2-5 age rule stays model-side', () => {
+    sideFile(4); // this review is round 5
+    const r = compose({ severityFloor: 'auto' });
+    expect(r.floorEnforced).toEqual([]);
+    expect(r.body).not.toContain('floor enforcement');
+  });
+
+  it('fails open when auto cannot know the round — context-unavailable', () => {
+    sideFile(9);
+    const r = compose({ severityFloor: 'auto', contextUnavailable: true });
+    expect(r.floorEnforced).toEqual([]);
+  });
+
+  it('fails open when auto recovered no round — round 1', () => {
+    const r = compose({ severityFloor: 'auto' });
+    expect(r.floorEnforced).toEqual([]);
+  });
+
+  it('an explicit suggestion floor turns the posture off — no enforcement', () => {
+    sideFile(9);
+    const r = compose({ severityFloor: 'suggestion' });
+    expect(r.floorEnforced).toEqual([]);
+  });
+
+  it('an absent floor fails open — the licence cannot be checked', () => {
+    sideFile(9);
+    const r = compose({});
+    expect(r.floorEnforced).toEqual([]);
+  });
+
+  it('leaves a pathless Suggestion inline — fail open, the submit gate refuses it anyway', () => {
+    const r = compose({
+      severityFloor: 'critical',
+      criticalsInline: 0,
+      suggestionsInline: 2,
+      draftedComments: [
+        { line: 7, body: '**[Suggestion]** no path to defer to' },
+        { path: 'c.ts', line: 9, body: '**[Suggestion]** rename the flag' },
+      ],
+    });
+    expect(r.floorEnforced).toEqual([1]);
+  });
+
+  it('an all-enforced round reads as deferrals, never as silence', () => {
+    const r = compose({
+      severityFloor: 'critical',
+      criticalsInline: 0,
+      suggestionsInline: 2,
+      draftedComments: drafts().slice(1),
+    });
+    expect(r.floorEnforced).toEqual([0, 1]);
+    expect(r.deferredCount).toBe(2);
+    // A deferral must not regenerate a review round: nothing counts toward S.
+    expect(r.body).toContain('Deferred under the convergence posture');
+    expect(r.body).not.toContain('Suggestions are inline.');
+    // A posting decision, never a cap: the base event reads deferrals-only
+    // APPROVE, and no enforcement-born cap state may appear.
+    expect(r.baseEvent).toBe('APPROVE');
+    expect(r.cappedBy).not.toContain('floor-enforcement');
+  });
+
+  it('an all-enforced CLEAN round composes a deferrals-only APPROVE — never a cap', () => {
+    // The APPROVE branch of the body composer carries its own floorEnforced
+    // return; the bare-plan fixtures above never reach it (their coverage
+    // caps soften APPROVE to COMMENT), so a regression there sailed through
+    // the whole suite. This is also the strongest pin of the PR's stated
+    // invariant: enforcement is a posting decision, never a cap — event
+    // APPROVE, empty cappedBy, and the anchor still rides.
+    const r = composeReview({
+      planPath: coveredPlan(['verify', 'reverse-audit'], {
+        prNumber: 8255,
+        fetchedSha: 'deadbeef00112233',
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      severityFloor: 'critical',
+      draftedComments: [
+        { path: 'src/a.ts', line: 3, body: '**[Suggestion]** untested' },
+      ],
+    });
+    expect(r.floorEnforced).toEqual([0]);
+    expect(r.event).toBe('APPROVE');
+    expect(r.baseEvent).toBe('APPROVE');
+    expect(r.cappedBy).toEqual([]);
+    expect(r.body).toContain('No blocking issues');
+    expect(parseLedger(r.body)?.sha).toBe('deadbeef00112233');
+  });
+
+  it('clamps an understated suggestionsInline to a composable zero', () => {
+    // The counts are model-transcribed; a state understating the drafted
+    // Suggestions is the drift class this PR exists for, and without the
+    // clamp the effective count goes negative and toCount refuses the WHOLE
+    // round — the exact outcome the documented wrong-but-composable-zero
+    // degrade exists to avoid.
+    const r = compose({
+      severityFloor: 'critical',
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: drafts().slice(1),
+    });
+    expect(r.floorEnforced).toEqual([0, 1]);
+    expect(r.deferredCount).toBe(2);
+  });
+
+  it('adjusts an array-shaped seam count — the legacy list form toCount accepts', () => {
+    // Without the Array.isArray arm the stale pre-enforcement length stays,
+    // and the posted body carries "Suggestions are inline." two lines from
+    // the enforcement disclosure saying they are not.
+    const r = compose({
+      severityFloor: 'critical',
+      criticalsInline: 0,
+      suggestionsInline: ['x', 'y'] as never,
+      draftedComments: drafts().slice(1),
+    });
+    expect(r.floorEnforced).toEqual([0, 1]);
+    expect(r.body).not.toContain('Suggestions are inline.');
+    expect(r.body).toContain('floor enforcement');
+  });
+
+  it('an unrecognised present floor fails open — a posting bar in doubt posts', () => {
+    // Model-transcribed drift ("Critical-only", "blocker", "high") must not
+    // enforce: the absent-floor row alone cannot catch a mutation that fires
+    // on any unknown non-empty string.
+    for (const floor of ['blocker', 'Critical-only', 'high']) {
+      const r = compose({ severityFloor: floor as never });
+      expect(r.floorEnforced).toEqual([]);
+    }
+  });
+
+  it('an explicit critical floor enforces even when the round is unknowable', () => {
+    // context-unavailable stands only `auto` down — what is unknowable there
+    // is the ROUND, and an explicit critical floor applies the posture from
+    // round 1 regardless of round.
+    const r = compose({ severityFloor: 'critical', contextUnavailable: true });
+    expect(r.floorEnforced).toEqual([1, 2]);
+  });
+
+  it('merges enforced entries and model deferrals into one list, one count', () => {
+    const r = compose({
+      severityFloor: 'critical',
+      deferredSuggestions: [
+        {
+          file: 'd.ts',
+          line: 1,
+          source: 'review',
+          severity: 'Suggestion',
+          title: 'model deferred this',
+        },
+      ],
+    });
+    expect(r.deferredCount).toBe(3);
+    expect(r.body).toContain('model deferred this');
+    expect(r.body).toContain('rename the flag');
+  });
+
+  it('leaves a deterministic-source Suggestion inline — the floor excludes it by source', () => {
+    // SKILL Step 6: a [build]/[test]/[probe] finding is pre-confirmed and the
+    // floor excludes it by its source field. The inline channel carries no
+    // source, so the tag convention decides — the same predicate the
+    // body-Critical scan reads deterministic by.
+    const r = compose({
+      severityFloor: 'critical',
+      criticalsInline: 0,
+      suggestionsInline: 2,
+      draftedComments: [
+        {
+          path: 'src/retry.ts',
+          line: 42,
+          body: '**[Suggestion]** [test] mutation survivor on the retry guard',
+        },
+        { path: 'c.ts', line: 9, body: '**[Suggestion]** rename the flag' },
+      ],
+    });
+    expect(r.floorEnforced).toEqual([1]);
+    // The deterministic finding still posts — it is the ledger's only entry
+    // after the plain Suggestion moved to the deferral list.
+    const ledger = parseLedger(r.body)!;
+    expect(ledger.findings.map((f) => f.file)).toEqual(['src/retry.ts']);
+  });
+
+  it('normalises the floor exactly as the licence block does — case and whitespace', () => {
+    // Mutation guard: deleting the shared trim/lowercase must fail here —
+    // the state field arrives model-transcribed on both entry paths.
+    for (const floor of ['CRITICAL', ' critical ']) {
+      const r = compose({ severityFloor: floor as never });
+      expect(r.floorEnforced).toEqual([1, 2]);
+    }
+  });
+
+  it('keeps BOTH channels’ records when they share an anchor — no dedup, no lost finding', () => {
+    // An anchor-keyed identity cannot distinguish "the same finding riding
+    // both channels" from "a different finding drafted at an anchor the
+    // model also deferred" — and collapsing the second loses a finding from
+    // every posted surface. Between the failure modes, a duplicated public
+    // record is the cheap one, so both entries render and every count is
+    // honest about it.
+    const r = compose({
+      severityFloor: 'critical',
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: [
+        { path: 'c.ts', line: 9, body: '**[Suggestion]** rename the flag' },
+      ],
+      deferredSuggestions: [
+        {
+          file: 'c.ts',
+          line: 9,
+          source: 'review',
+          severity: 'Suggestion',
+          title: 'model kept this record',
+        },
+      ],
+    });
+    // The inline comment leaves the posting set…
+    expect(r.floorEnforced).toEqual([0]);
+    // …and BOTH records survive — the constructed one and the model's.
+    expect(r.deferredCount).toBe(2);
+    expect(r.body).toContain('model kept this record');
+    expect(r.body).toContain('rename the flag');
+    // The two disclosure surfaces count from the same basis: the moved
+    // count can never exceed its antecedent (a "2 of 1" verdict line was
+    // the observed self-contradiction under anchor-keyed dedup), and the
+    // body note's N is the MOVED count, not the merged list's — swapping
+    // its basis for deferredSuggestions.length would overclaim "2 moved"
+    // here.
+    const line = verdictLine(r);
+    expect(line).toContain('2 non-Critical finding(s) deferred');
+    expect(line).toContain('1 of those moved by CLI floor enforcement');
+    expect(r.body).toContain(
+      '1 Suggestion(s) were drafted inline past the resolved critical posting floor',
+    );
+  });
+
+  it('renders the zh disclosure arm beside the en one on a bilingual review', () => {
+    // The zh non-overflow arm posts on Han-flagged plans; a broken
+    // interpolation there ships a Chinese disclosure contradicting the
+    // English note beside it. (The overflow arm's zh twin is pinned in the
+    // cap-aware test.)
+    const hanPlan = join(dir, 'plan-han-note.json');
+    writeFileSync(
+      hanPlan,
+      JSON.stringify({ prNumber: 8255, prDescriptionHasHan: true }),
+    );
+    const r = compose({
+      severityFloor: 'critical',
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: [
+        { path: 'c.ts', line: 9, body: '**[Suggestion]** rename the flag' },
+      ],
+      planPath: hanPlan,
+    });
+    expect(r.floorEnforced).toEqual([0]);
+    expect(r.body).toContain(
+      '1 条 Suggestion 在已解析的 critical 发布下限之外被起草为行内评论',
+    );
+    expect(r.body).toContain('下限强制执行）。');
+  });
+
+  it('turns the enforcement note cap-aware when the moved entries overflow the render cap', () => {
+    const manyDrafts = Array.from({ length: 21 }, (_, i) => ({
+      path: `f${i}.ts`,
+      line: i + 1,
+      body: `**[Suggestion]** enforced finding ${i}`,
+    }));
+    const r = compose({
+      severityFloor: 'critical',
+      criticalsInline: 0,
+      suggestionsInline: 21,
+      draftedComments: manyDrafts,
+      // Han-flagged plan under its OWN filename: the shared plan() helper
+      // writes plan.json and the compose() base would overwrite the flag.
+      // The bilingual fold renders the zh arm into the POSTED body, so a
+      // broken zh interpolation posts — pin it beside the en arm, per the
+      // suite's own bilingual-pinning convention.
+      planPath: (() => {
+        const p = join(dir, 'plan-han.json');
+        writeFileSync(
+          p,
+          JSON.stringify({ prNumber: 8255, prDescriptionHasHan: true }),
+        );
+        return p;
+      })(),
+    });
+    expect(r.floorEnforced).toHaveLength(21);
+    // The universal "listed below" claim would be false for entry 20 — the
+    // note must say where the overflow went instead of asserting a list
+    // that truncated it. Both language arms carry the same counts.
+    expect(r.body).toContain('20 listed, 1 more inside the overflow count');
+    expect(r.body).toContain('下限强制执行——列出 20 条，其余 1 条计入溢出计数');
+    expect(r.body).toContain('and 1 more');
+  });
+
+  it('a tag outside the claim line does not exempt — the footer is not a kill-switch', () => {
+    // The deterministic carve-out reads the CLAIM LINE only. The body's
+    // tail is state-writable surface (the attribution footer is built from
+    // the model-written modelId and appended before the predicate runs at
+    // the submit boundary): matched over the whole body, one `[test]` in a
+    // footer disabled enforcement for the entire review.
+    const r = compose({
+      severityFloor: 'critical',
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: [
+        {
+          path: 'c.ts',
+          line: 9,
+          body: '**[Suggestion]** rename the flag\n\n_— qwen3.7-max [test] via Qwen Code /review (v0.21.2)_',
+        },
+      ],
+    });
+    expect(r.floorEnforced).toEqual([0]);
+    // And the forged footer never reaches the moved record: without the
+    // strip, collapseToLine folds the attribution into the published
+    // deferral title.
+    expect(r.body).not.toContain('qwen3.7-max');
+  });
+
+  it('carries the whole marker-stripped body into the moved record, not just line one', () => {
+    // The skill mandates multi-line Suggestion bodies (failure scenario,
+    // suggested fix), and a moved comment's body leaves every posted
+    // surface — a first-line-only title silently dropped the proposed fix
+    // from the record.
+    const r = compose({
+      severityFloor: 'critical',
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: [
+        {
+          path: 'c.ts',
+          line: 9,
+          body: '**[Suggestion]** normalise the floor once.\n\nFailure scenario: drift.\n\nSuggested fix: parseFloor(raw)',
+        },
+      ],
+    });
+    expect(r.floorEnforced).toEqual([0]);
+    expect(r.body).toContain('parseFloor(raw)');
+  });
+
+  it('renders enforced entries ahead of the cap, never truncated behind model deferrals', () => {
+    const many = Array.from({ length: 20 }, (_, i) => ({
+      file: `m${i}.ts`,
+      line: i + 1,
+      source: 'review' as const,
+      severity: 'Suggestion' as const,
+      title: `model deferral ${i}`,
+    }));
+    const r = compose({
+      severityFloor: 'critical',
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: [
+        { path: 'c.ts', line: 9, body: '**[Suggestion]** rename the flag' },
+      ],
+      deferredSuggestions: many,
+    });
+    expect(r.deferredCount).toBe(21);
+    // The CLI-moved entry is IN the rendered list — the disclosure note must
+    // never point at a list that truncated away the entries it names.
+    expect(r.body).toContain('rename the flag');
+    expect(r.body).toContain('and 1 more');
+    // The note counts MOVED comments and its overflow qualifier keys on the
+    // ENFORCED entries, not the merged list: with the one moved entry
+    // rendered in full, a "1 listed, 20 more inside the overflow count"
+    // claim would be false — the model deferrals overflowed, not the move.
+    expect(r.body).toContain(
+      '1 Suggestion(s) were drafted inline past the resolved critical posting floor',
+    );
+    expect(r.body).not.toContain('inside the overflow count');
+  });
+
+  it('omits an unusable line and falls back on an all-marker body', () => {
+    const r = compose({
+      severityFloor: 'critical',
+      criticalsInline: 0,
+      suggestionsInline: 2,
+      draftedComments: [
+        { path: 'b.ts', line: 0, body: '**[Suggestion]** zero-line anchor' },
+        { path: 'c.ts', line: 9, body: '**[Suggestion]**' },
+      ],
+    });
+    expect(r.floorEnforced).toEqual([0, 1]);
+    // The reroute path bypasses the consistency gate by construction, so its
+    // own guards are the only protection against a `b.ts:0` locator or a
+    // null title reaching the posted record.
+    expect(r.body).not.toContain('b.ts:0');
+    expect(r.body).toContain('zero-line anchor');
+    expect(r.body).toContain('(comment carried no text)');
+  });
+
+  it('omits a non-integer line the same way — no fabricated locator', () => {
+    // The Number.isSafeInteger conjunct is the only guard between a
+    // model-transcribed `line: 2.5` and a `c.ts:2.5` anchor published into
+    // the PR's permanent deferral record.
+    const r = compose({
+      severityFloor: 'critical',
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: [
+        { path: 'c.ts', line: 2.5, body: '**[Suggestion]** fractional line' },
+      ],
+    });
+    expect(r.floorEnforced).toEqual([0]);
+    expect(r.body).not.toContain('c.ts:2.5');
+    expect(r.body).toContain('fractional line');
   });
 });
