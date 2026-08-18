@@ -25,7 +25,7 @@
  */
 
 import { MouseButton } from '@opentui/core';
-import { useRenderer } from '@opentui/react';
+import { useRenderer, useTerminalDimensions } from '@opentui/react';
 import { useMemo, useState } from 'react';
 import { C, SYNTAX } from './theme.js';
 import { renderDiffBody } from './diff-render.js';
@@ -65,6 +65,49 @@ export const selectionProps = () => ({
 
 /** TextAttributes bitmask (1 << 7) for the canceled strikethrough. */
 const STRIKETHROUGH_ATTR = 128;
+
+/** ink ToolMessage MAXIMUM_RESULT_DISPLAY_CHARACTERS. */
+export const MAX_RESULT_DISPLAY_CHARACTERS = 1000000;
+
+/** ink AppContainer staticAreaMaxItemHeight: max(terminalHeight * 4, 100). */
+export function maxHistoryItemRows(terminalHeight: number): number {
+  return Math.max(Math.floor(terminalHeight) * 4, 100);
+}
+
+/** ink StringResultRenderer: over-long results keep the trailing content. */
+export function truncateResultDisplayChars(text: string): string {
+  return text.length > MAX_RESULT_DISPLAY_CHARACTERS
+    ? '...' + text.slice(-MAX_RESULT_DISPLAY_CHARACTERS)
+    : text;
+}
+
+export interface TailWindow<T> {
+  visible: readonly T[];
+  hiddenCount: number;
+}
+
+/**
+ * ink MaxSizedBox (overflowDirection 'top') parity: an item taller than
+ * `maxRows` keeps its LAST maxRows-1 rows; the hidden head is summarized by
+ * a `... first N lines hidden ...` indicator (hiddenLinesLabel).
+ */
+export function tailWindow<T>(
+  lines: readonly T[],
+  maxRows: number,
+): TailWindow<T> {
+  const target = Math.max(Math.round(maxRows), 2);
+  if (lines.length <= target) return { visible: lines, hiddenCount: 0 };
+  const visibleContentHeight = target - 1;
+  return {
+    visible: lines.slice(lines.length - visibleContentHeight),
+    hiddenCount: lines.length - visibleContentHeight,
+  };
+}
+
+/** ink MaxSizedBox hidden-lines indicator text. */
+export function hiddenLinesLabel(hiddenCount: number): string {
+  return `... first ${hiddenCount} line${hiddenCount === 1 ? '' : 's'} hidden ...`;
+}
 
 /**
  * Tool-card naming/status parity with the original ToolMessage: a card line
@@ -290,6 +333,7 @@ interface ToolCardProps {
 function ToolCard({ item, expanded, onToggle }: ToolCardProps) {
   const [hover, setHover] = useState(false);
   const renderer = useRenderer();
+  const { height: terminalHeight } = useTerminalDimensions();
   const meta = toolStatusMeta(item);
   const suffix = toolCardSummarySuffix(item.done, item.summary);
   const confirmLabel =
@@ -306,6 +350,20 @@ function ToolCard({ item, expanded, onToggle }: ToolCardProps) {
     () => (item.diff ? renderDiffBody(item.diff.fileDiff) : null),
     [item.diff],
   );
+  // ink static history caps one item at staticAreaMaxItemHeight rows, tail
+  // first (MaxSizedBox); an uncapped mega-diff would dominate the scrollbox.
+  const diffWindow = useMemo(
+    () =>
+      diffLines
+        ? tailWindow(diffLines, maxHistoryItemRows(terminalHeight))
+        : null,
+    [diffLines, terminalHeight],
+  );
+  const outputWindow = useMemo(() => {
+    if (!expanded || item.output.length === 0) return null;
+    const lines = truncateResultDisplayChars(item.output).split('\n');
+    return tailWindow(lines, maxHistoryItemRows(terminalHeight));
+  }, [expanded, item.output, terminalHeight]);
 
   return (
     <box flexDirection="column">
@@ -339,9 +397,14 @@ function ToolCard({ item, expanded, onToggle }: ToolCardProps) {
           </text>
         </box>
       </box>
-      {diffLines && (
+      {diffWindow && (
         <box paddingLeft={STATUS_INDICATOR_WIDTH} flexDirection="column">
-          {diffLines.map((spans, i) => (
+          {diffWindow.hiddenCount > 0 && (
+            <text fg={C.dim} {...selectionProps()}>
+              {hiddenLinesLabel(diffWindow.hiddenCount)}
+            </text>
+          )}
+          {diffWindow.visible.map((spans, i) => (
             <box key={`${i}`} flexDirection="row">
               {spans.map((span, j) => (
                 <text key={`${j}`} fg={span.color} {...selectionProps()}>
@@ -359,10 +422,19 @@ function ToolCard({ item, expanded, onToggle }: ToolCardProps) {
           </text>
         </box>
       )}
-      {expanded && item.output.length > 0 && (
-        <box paddingLeft={STATUS_INDICATOR_WIDTH} marginTop={0}>
+      {outputWindow && (
+        <box
+          paddingLeft={STATUS_INDICATOR_WIDTH}
+          marginTop={0}
+          flexDirection="column"
+        >
+          {outputWindow.hiddenCount > 0 && (
+            <text fg={C.dim} {...selectionProps()}>
+              {hiddenLinesLabel(outputWindow.hiddenCount)}
+            </text>
+          )}
           <code
-            content={item.output}
+            content={outputWindow.visible.join('\n')}
             filetype="txt"
             syntaxStyle={SYNTAX}
             fg={C.dim}

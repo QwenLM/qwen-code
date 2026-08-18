@@ -22,12 +22,17 @@ vi.mock('@opentui/core', () => ({
 
 import {
   GENERIC_TOOL_SUMMARIES,
+  MAX_RESULT_DISPLAY_CHARACTERS,
   assistantMessageMeta,
+  hiddenLinesLabel,
+  maxHistoryItemRows,
+  tailWindow,
   thinkingMeta,
   toolCardDescription,
   toolCardName,
   toolCardSummarySuffix,
   toolStatusMeta,
+  truncateResultDisplayChars,
   userMessageMeta,
 } from './messages.js';
 import type { LiveToolItem } from './live-session-model.js';
@@ -115,6 +120,46 @@ describe('toolCardSummarySuffix (status format parity)', () => {
   it('shows nothing while the tool is still running', () => {
     expect(toolCardSummarySuffix(false, 'anything')).toBe('');
     expect(toolCardSummarySuffix(true, undefined)).toBe('');
+  });
+});
+
+describe('long-content caps (ink MaxSizedBox parity)', () => {
+  it('caps an item at max(terminalHeight * 4, 100) rows', () => {
+    expect(maxHistoryItemRows(24)).toBe(100);
+    expect(maxHistoryItemRows(25)).toBe(100);
+    expect(maxHistoryItemRows(50)).toBe(200);
+  });
+
+  it('keeps everything when the content fits', () => {
+    const lines = ['a', 'b', 'c'];
+    expect(tailWindow(lines, 100)).toEqual({ visible: lines, hiddenCount: 0 });
+  });
+
+  it('keeps the tail and counts the hidden head', () => {
+    const lines = Array.from({ length: 10 }, (_, i) => `line ${i}`);
+    const win = tailWindow(lines, 5);
+    expect(win.visible).toEqual(['line 6', 'line 7', 'line 8', 'line 9']);
+    expect(win.hiddenCount).toBe(6);
+  });
+
+  it('never shrinks below the ink MINIMUM_MAX_HEIGHT of 2', () => {
+    const win = tailWindow(['a', 'b', 'c'], 1);
+    expect(win.visible).toEqual(['c']);
+    expect(win.hiddenCount).toBe(2);
+  });
+
+  it('renders the ink hidden-lines indicator', () => {
+    expect(hiddenLinesLabel(1)).toBe('... first 1 line hidden ...');
+    expect(hiddenLinesLabel(4779)).toBe('... first 4779 lines hidden ...');
+  });
+
+  it('truncates over-long results to the trailing characters', () => {
+    const short = 'short output';
+    expect(truncateResultDisplayChars(short)).toBe(short);
+    const long = 'x'.repeat(MAX_RESULT_DISPLAY_CHARACTERS + 10);
+    const truncated = truncateResultDisplayChars(long);
+    expect(truncated.length).toBe(MAX_RESULT_DISPLAY_CHARACTERS + 3);
+    expect(truncated.startsWith('...')).toBe(true);
   });
 });
 
