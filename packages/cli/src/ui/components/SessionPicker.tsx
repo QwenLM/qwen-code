@@ -366,7 +366,10 @@ export function SessionPicker(props: SessionPickerProps) {
         mtime={previewed?.mtime}
         gitBranch={previewed?.gitBranch}
         onExit={picker.exitPreview}
-        onResume={onSelect}
+        // Pass the resolved list item: resume consumers (e.g. the roster
+        // adopt flow) read session.cwd, and an id-only resume would force
+        // them to fabricate the cwd — wrong for worktree sessions.
+        onResume={(sessionId) => onSelect(sessionId, previewed)}
       />
     );
   }

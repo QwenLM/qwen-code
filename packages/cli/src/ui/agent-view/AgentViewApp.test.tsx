@@ -166,6 +166,12 @@ describe('AgentViewApp', () => {
     stdin.write('\r');
     await waitForFrame(lastFrame, 'Dispatched.');
 
+    // waitForFrame returns silently on timeout, so pin the wait explicitly.
+    expect(lastFrame()).toContain('Dispatched.');
+    // The prompt must stay cleared; restoring it would let a re-Enter
+    // duplicate the dispatched session.
+    expect(lastFrame()).not.toContain('> ship it');
+
     // The refresh failure must not mask the successful dispatch: no error
     // notice and no restored prompt (a re-Enter would duplicate the session).
     expect(dispatchPrompt).toHaveBeenCalledTimes(1);
@@ -247,6 +253,54 @@ describe('AgentViewApp', () => {
 
     expect(answerSession).toHaveBeenCalledWith('session-1', 'yes');
     expect(onExit).not.toHaveBeenCalled();
+  });
+
+  it('does not resurrect a closed peek when the reply send fails', async () => {
+    let rejectSend: ((error: Error) => void) | undefined;
+    const sendToSession = vi.fn(
+      () =>
+        new Promise<{ sent: boolean }>((_, reject) => {
+          rejectSend = reject;
+        }),
+    );
+    const { stdin, lastFrame } = render(
+      <AgentViewApp
+        rows={[row('session-1')]}
+        actions={actions({
+          sendToSession,
+          peekSelected: async () => ({
+            title: 'session-1',
+            lines: ['Result: ready'],
+          }),
+        })}
+        onExit={vi.fn()}
+      />,
+    );
+
+    stdin.write(' ');
+    await settleInput();
+    for (const char of 'hello') {
+      stdin.write(char);
+      await Promise.resolve();
+    }
+    stdin.write('\r');
+    await settleInput();
+    expect(sendToSession).toHaveBeenCalledWith('session-1', 'hello');
+
+    // Close the peek while the send is still in flight (Space cancels once
+    // the reply input is inactive; ESC is buffered by the readline layer).
+    stdin.write(' ');
+    await settleInput();
+    expect(lastFrame()).not.toContain('space to close');
+
+    await act(async () => {
+      rejectSend?.(new Error('worker is gone'));
+      await flushInk();
+    });
+
+    // The failure must not resurrect the panel the user explicitly closed.
+    expect(lastFrame()).not.toContain('space to close');
+    expect(lastFrame()).not.toContain('worker is gone');
   });
 
   it('sends soft needs-input replies as follow-ups', async () => {

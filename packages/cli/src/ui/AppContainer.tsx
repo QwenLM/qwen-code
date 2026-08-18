@@ -2563,9 +2563,13 @@ export const AppContainer = (props: AppContainerProps) => {
       options?: {
         deferUntilIdle?: boolean;
         submittedPrompt?: string;
+        bypassAgentTabRouting?: boolean;
       },
     ) => {
-      const consumesComposerState = options !== undefined;
+      // Control prompts (bypassAgentTabRouting) are not composer
+      // submissions and must not consume composer restore state.
+      const consumesComposerState =
+        options !== undefined && !options.bypassAgentTabRouting;
       const restoredSubmission = consumesComposerState
         ? restoredSubmissionRef.current
         : null;
@@ -2593,7 +2597,12 @@ export const AppContainer = (props: AppContainerProps) => {
       }
 
       // Route to active in-process agent if viewing a sub-agent tab.
-      if (agentViewState.activeView !== 'main') {
+      // Control prompts from the roster target the main session and must
+      // not be swallowed by a sub-agent the roster has no visibility into.
+      if (
+        !options?.bypassAgentTabRouting &&
+        agentViewState.activeView !== 'main'
+      ) {
         const agent = agentViewState.agents.get(agentViewState.activeView);
         if (agent) {
           agent.interactiveAgent.enqueueMessage(submittedValue.trim());
@@ -2859,7 +2868,9 @@ export const AppContainer = (props: AppContainerProps) => {
       }
       const nextPrompt = pendingAgentViewControlPromptsRef.current.shift();
       if (nextPrompt) {
-        handleFinalSubmitRef.current(nextPrompt);
+        handleFinalSubmitRef.current(nextPrompt, {
+          bypassAgentTabRouting: true,
+        });
       }
     };
     const poll = async () => {

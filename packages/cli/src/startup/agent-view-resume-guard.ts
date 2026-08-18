@@ -23,6 +23,9 @@ export const AGENT_VIEW_WORKER_RESUME_MESSAGE =
 export const MANAGED_AGENT_VIEW_ONE_SHOT_RESUME_MESSAGE =
   'Cannot use one-shot input (-p/--prompt, -i, --input-file, --fork-session, or piped stdin) with --resume of a session that is still running as a background agent. Use `qwen agents attach <id>` to interact with it instead.';
 
+export const MANAGED_AGENT_VIEW_DELETE_MESSAGE =
+  'That session is still running as a background agent. Stop or remove it from `qwen agents` before deleting it here.';
+
 // The worker-env bypass is load-bearing (respawned workers resume their own
 // session), so require the sideband session id to match — a lone forged
 // QWEN_AGENT_VIEW_WORKER=1 no longer defeats the guard.
@@ -48,6 +51,20 @@ export async function isManagedAgentViewResumeBlocked(
  * resume directly in the foreground.
  */
 export async function isManagedAgentViewContinueBlocked(
+  sessionId: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<boolean> {
+  if (isSessionWorker(sessionId, env)) return false;
+  const state = await readAgentViewSessionState(sessionId);
+  return state?.ownership === 'managed' && state.processState !== 'exited';
+}
+
+/**
+ * `/delete` removes transcripts, archives and file-history backups, so a
+ * managed session that is still alive must not be deletable mid-run. An
+ * exited managed session has no live writer and is safe to delete.
+ */
+export async function isManagedAgentViewDeleteBlocked(
   sessionId: string,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<boolean> {

@@ -308,6 +308,7 @@ export function AgentViewApp({
         ? (getReplyTarget(currentRow) ?? peekReplyTarget)
         : peekReplyTarget;
       const submitted = promptToSubmit;
+      const generation = peekGenerationRef.current;
       setPeekPrompt('');
       setPeekSubmittedPreview({
         sessionId: target.sessionId,
@@ -338,16 +339,21 @@ export function AgentViewApp({
             setPeekReplyTarget(undefined);
           }
         } catch (error) {
+          // Restore the undelivered reply for retry, but never resurrect a
+          // panel the user closed (or overwrite a newer one) while the send
+          // was in flight.
           setPeekPrompt(submitted);
           setPeekSubmittedPreview(undefined);
-          setPeekPanel({
-            title: target.sessionId,
-            lines: [
-              `Prompt: ${submitted}`,
-              error instanceof Error ? error.message : String(error),
-            ],
-            error: true,
-          });
+          if (peekGenerationRef.current === generation) {
+            setPeekPanel({
+              title: target.sessionId,
+              lines: [
+                `Prompt: ${submitted}`,
+                error instanceof Error ? error.message : String(error),
+              ],
+              error: true,
+            });
+          }
         } finally {
           peekSubmitInFlightRef.current = false;
         }
