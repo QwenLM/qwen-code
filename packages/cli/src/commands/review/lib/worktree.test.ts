@@ -433,7 +433,13 @@ describe('worktreeResidue — the blind sets', () => {
     },
   );
 
-  it.skipIf(process.platform === 'win32')(
+  // Linux only, and not as a convenience: APFS and NTFS both REFUSE a filename
+  // that is not valid UTF-8, so the fixture cannot be created there at all
+  // (`mkdir` fails ENOENT on macOS) — and the shape it pins cannot exist on
+  // those filesystems either, so skipping loses no coverage. The repo's
+  // convention for a POSIX-only fixture is `skipIf`; this one is narrower than
+  // POSIX.
+  it.skipIf(process.platform !== 'linux')(
     'reports UNMEASURED for a gitlink whose name carries invalid UTF-8 bytes',
     () => {
       // `encoding: 'utf8'` renders an undecodable byte as U+FFFD, and no
