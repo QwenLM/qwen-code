@@ -10,7 +10,10 @@ import {
   collectToolCallIdsFromHistory,
   dedupeToolCallsById,
   getProviderToolCallId,
+  getToolCallFingerprint,
+  isReplayOfHandledToolCall,
   normalizeModelToolCallIds,
+  recordHandledToolCall,
   reserveModelToolCallId,
 } from './toolCallIdUtils.js';
 
@@ -160,5 +163,65 @@ describe('toolCallIdUtils', () => {
       calls[3],
       calls[4],
     ]);
+  });
+
+  describe('replay detection fingerprints', () => {
+    it('treats a handled id as a replay only when name and args match', () => {
+      const handled = new Map<string, string>();
+      recordHandledToolCall(handled, 'shell_0', 'run_shell_command', {
+        command: 'ls -la',
+      });
+
+      expect(
+        isReplayOfHandledToolCall(handled, 'shell_0', 'run_shell_command', {
+          command: 'ls -la',
+        }),
+      ).toBe(true);
+      expect(
+        isReplayOfHandledToolCall(handled, 'shell_0', 'run_shell_command', {
+          command: 'git status',
+        }),
+      ).toBe(false);
+      expect(
+        isReplayOfHandledToolCall(handled, 'shell_0', 'read_file', {
+          command: 'ls -la',
+        }),
+      ).toBe(false);
+      expect(
+        isReplayOfHandledToolCall(handled, 'shell_1', 'run_shell_command', {
+          command: 'ls -la',
+        }),
+      ).toBe(false);
+    });
+
+    it('ignores argument key order in fingerprints', () => {
+      expect(getToolCallFingerprint('edit', { a: 1, b: [2, 3] })).toBe(
+        getToolCallFingerprint('edit', { b: [2, 3], a: 1 }),
+      );
+      expect(getToolCallFingerprint('edit', { a: 1 })).not.toBe(
+        getToolCallFingerprint('edit', { a: 2 }),
+      );
+    });
+
+    it('keeps the first occurrence when recording a colliding id', () => {
+      const handled = new Map<string, string>();
+      recordHandledToolCall(handled, 'shell_0', 'run_shell_command', {
+        command: 'first',
+      });
+      recordHandledToolCall(handled, 'shell_0', 'run_shell_command', {
+        command: 'second',
+      });
+
+      expect(
+        isReplayOfHandledToolCall(handled, 'shell_0', 'run_shell_command', {
+          command: 'first',
+        }),
+      ).toBe(true);
+      expect(
+        isReplayOfHandledToolCall(handled, 'shell_0', 'run_shell_command', {
+          command: 'second',
+        }),
+      ).toBe(false);
+    });
   });
 });

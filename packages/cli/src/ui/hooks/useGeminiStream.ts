@@ -65,6 +65,8 @@ import {
   createDuplicateProviderToolCallResponse,
   markDuplicateProviderToolCallResponseSent,
   findRepeatedDuplicateProviderToolCall,
+  isReplayOfHandledToolCall,
+  recordHandledToolCall,
   AutonomousLoopTickResolver,
   didWriteProjectContextFile,
   refreshMemoryAfterManagedWrite,
@@ -834,7 +836,10 @@ export const useGeminiStream = (
       (!current?.endsWith('\0') || current === model)
     );
   }, []);
-  const handledProviderToolCallIdsRef = useRef<Set<string>>(new Set());
+  // Provider tool-call id → (name, args) fingerprint of calls admitted for
+  // execution in the current submit; merged with the history-derived map for
+  // duplicate provider-id replay detection.
+  const handledToolCallFingerprintsRef = useRef<Map<string, string>>(new Map());
   // Scoped to a top-level submit and cleared below before a new user prompt.
   // Repeated duplicate provider ids within that submit are terminal/drop-only.
   const duplicateProviderToolCallResponseIdsRef = useRef<Set<string>>(
@@ -2826,17 +2831,34 @@ export const useGeminiStream = (
           response: ToolCallResponseInfo;
         }> = [];
         let duplicatePromptId: string | undefined;
-        const historyCallIdsWithResponse: Set<string> = geminiClient
-          ? geminiClient.getHistoryFunctionResponseIds()
-          : new Set<string>();
-        const handledProviderIds = new Set([
-          ...handledProviderToolCallIdsRef.current,
-          ...historyCallIdsWithResponse,
-        ]);
+        // Copied so per-batch recording never mutates the accessor-owned
+        // map; in-flight entries from this submit are merged on top.
+        const handledToolCallFingerprints = new Map(
+          geminiClient ? geminiClient.getHistoryToolCallFingerprints() : [],
+        );
+        for (const [
+          providerCallId,
+          fingerprint,
+        ] of handledToolCallFingerprintsRef.current) {
+          if (!handledToolCallFingerprints.has(providerCallId)) {
+            handledToolCallFingerprints.set(providerCallId, fingerprint);
+          }
+        }
+        const isReplayOfHandledRequest = (
+          request: ToolCallRequestInfo,
+        ): boolean =>
+          request.providerCallId
+            ? isReplayOfHandledToolCall(
+                handledToolCallFingerprints,
+                request.providerCallId,
+                request.name,
+                request.args,
+              )
+            : false;
         const repeatedDuplicateRequest = findRepeatedDuplicateProviderToolCall(
           toolCallRequests,
           (request) => request.providerCallId,
-          handledProviderIds,
+          isReplayOfHandledRequest,
           duplicateProviderToolCallResponseIdsRef.current,
         );
         if (repeatedDuplicateRequest?.providerCallId) {
@@ -2857,10 +2879,7 @@ export const useGeminiStream = (
             continue;
           }
 
-          if (
-            handledProviderToolCallIdsRef.current.has(providerCallId) ||
-            historyCallIdsWithResponse.has(providerCallId)
-          ) {
+          if (isReplayOfHandledRequest(request)) {
             markDuplicateProviderToolCallResponseSent(
               providerCallId,
               duplicateProviderToolCallResponseIdsRef.current,
@@ -2876,7 +2895,18 @@ export const useGeminiStream = (
             continue;
           }
 
-          handledProviderToolCallIdsRef.current.add(providerCallId);
+          recordHandledToolCall(
+            handledToolCallFingerprints,
+            providerCallId,
+            request.name,
+            request.args,
+          );
+          recordHandledToolCall(
+            handledToolCallFingerprintsRef.current,
+            providerCallId,
+            request.name,
+            request.args,
+          );
           executableToolCallRequests.push(request);
         }
 
@@ -3309,7 +3339,7 @@ export const useGeminiStream = (
         lastTurnUserItemRef.current = null;
         canUndoLastLoggedUserMessageRef.current = false;
         turnSawContentEventRef.current = false;
-        handledProviderToolCallIdsRef.current.clear();
+        handledToolCallFingerprintsRef.current.clear();
         duplicateProviderToolCallResponseIdsRef.current.clear();
         pendingDuplicateToolResponsesRef.current = [];
         immediateDuplicateToolResponsesRef.current = null;

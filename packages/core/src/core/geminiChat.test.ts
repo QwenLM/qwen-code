@@ -24,6 +24,7 @@ import {
   type StreamEvent,
 } from './geminiChat.js';
 import { RETRYABLE_STREAM_TRANSPORT_CODES } from './stream-transport-retry.js';
+import { getToolCallFingerprint } from './toolCallIdUtils.js';
 import { classifyRetryError } from '../utils/retryErrorClassification.js';
 import { StreamContentError } from './openaiContentGenerator/pipeline.js';
 import { OpenAIContentGenerator } from './openaiContentGenerator/openaiContentGenerator.js';
@@ -5658,6 +5659,55 @@ describe('GeminiChat', async () => {
       const second = chat.getHistoryFunctionResponseIds();
       expect(second.has('cid_immut')).toBe(true);
       expect(second.has('cid_FAKE')).toBe(false);
+    });
+  });
+
+  describe('getHistoryToolCallFingerprints', () => {
+    it('returns an empty Map for empty history', () => {
+      expect(chat.getHistoryToolCallFingerprints()).toEqual(new Map());
+    });
+
+    it('maps only responded functionCall ids to (name, args) fingerprints', () => {
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'go' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'cid_a',
+                name: 'read_file',
+                args: { file_path: 'a.ts' },
+              },
+            },
+            {
+              functionCall: {
+                id: 'cid_unanswered',
+                name: 'read_file',
+                args: { file_path: 'b.ts' },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'cid_a',
+                name: 'read_file',
+                response: { output: 'a' },
+              },
+            },
+          ],
+        },
+      ]);
+
+      const fingerprints = chat.getHistoryToolCallFingerprints();
+      expect([...fingerprints.keys()]).toEqual(['cid_a']);
+      expect(fingerprints.get('cid_a')).toBe(
+        getToolCallFingerprint('read_file', { file_path: 'a.ts' }),
+      );
     });
   });
 
