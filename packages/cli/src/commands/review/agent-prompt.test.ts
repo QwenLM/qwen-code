@@ -6004,7 +6004,7 @@ describe('incremental-scope briefs', () => {
     expect(seam.split('(+12 more)')[0]).not.toContain('src/d8.ts');
   });
 
-  it('a chunk-scoped role brief lists its own files UNCAPPED', () => {
+  it('past the cap, the chunk briefs AND the role brief stay uncapped', () => {
     // The namesake property of the sibling test, which its one-file-per-chunk
     // fixture could never reach: no count came near the cap, so adding
     // `.slice(0, 30)` to `chunkScopeBullets` left the whole suite green. A
@@ -6050,6 +6050,18 @@ describe('incremental-scope briefs', () => {
       expect(brief).toContain(path);
     }
     expect(brief).not.toContain('more)');
+    // The role-brief path too — the ONLY call site of `chunkScopeBullets`.
+    // The chunk-AGENT prompt renders its own bullets inline, so the
+    // assertions above never touched it, and the mutant this test exists to
+    // catch (`.slice(0, 30)` inside `chunkScopeBullets`) shipped green
+    // against them. `src/d30.ts` appears in no capped list — the global one
+    // shows d0..d29 and counts the rest — so its bullet can only come from
+    // the uncapped path.
+    const roleBrief = buildRoleBrief(wide, 'reverse-audit', { chunk: 1 });
+    expect(roleBrief).toContain('src/d30.ts');
+    expect(roleBrief).toContain(
+      'src/d39.ts — **changed since the last round**',
+    );
   });
 
   it('an interaction entry whose edges are all EMPTY strings degrades away', () => {

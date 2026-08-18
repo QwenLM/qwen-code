@@ -34,15 +34,21 @@
 //   per-repo config surface this scanner deliberately does not parse. An
 //   alias yields a missed edge (the file keeps the pre-widening floor). An
 //   exports map can also make the conventional-layout guesses below resolve
-//   a subpath to a file the map actually routes elsewhere — a WRONG edge,
-//   whose whole cost is one extra widened file; the scope never narrows.
+//   a subpath to a file the map actually routes elsewhere — a WRONG edge.
+//   Its cost depends on the membership: one extra widened file when the true
+//   target is absent, but DISPLACEMENT of the true seam when both are
+//   present — the first-hit resolver returns the wrong file instead, and the
+//   pairing the widening exists to check retires unreviewed under a scope
+//   entry claiming the caller was covered. Literal-first candidate order
+//   closes the emitted-extension shape of that displacement; `candidatesFor`
+//   below names the mechanics.
 //
 // The scan reads files from the review worktree (post-change state), because
 // the question is whether the caller AS IT NOW STANDS uses what changed.
 
 import * as nodePath from 'node:path';
 
-/** File-reading seam: rescope passes worktree reads, tests pass a map. */
+/** File-reading seam: the incremental scope passes worktree reads, tests pass a map. */
 export type SourceReader = (repoRelPath: string) => string | null;
 
 /**
@@ -78,9 +84,11 @@ export function scanImportSpecifiers(source: string): string[] {
  * Extension candidates for a specifier, ESM-TS aware.
  *
  * This repo — like every NodeNext TypeScript workspace — imports `./x.js`
- * meaning `x.ts`: the specifier names the EMITTED file. So the mapped form is
- * tried first, then the literal, then the bare-specifier extension walk, then
- * the directory-index forms.
+ * meaning `x.ts`: the specifier names the EMITTED file. Candidates are tried
+ * in order and the first membership hit wins: the LITERAL specifier first —
+ * the true edge whenever the file it names exists — then the extension
+ * remaps, then the bare-specifier extension walk, then the directory-index
+ * forms.
  */
 const EXT_MAP: ReadonlyArray<[RegExp, string]> = [
   // BOTH TS source extensions for an emitted `.js`: under `react-jsx` a

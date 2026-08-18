@@ -311,10 +311,10 @@ vi.mock('./lib/gh.js', async (importOriginal) => {
 vi.mock('./lib/git.js', () => ({
   git: producerMocks.git,
   gitOpt: producerMocks.gitOpt,
-  // Moved out of fetch-pr.ts into lib/git.ts (it is `rescope`'s too now), so
-  // the mock owes it an export. Expressed over the same `gitRaw` fixture the
-  // real one reads, rather than a constant: a report's line counts decide
-  // heaviness, and a stub returning 0 everywhere would make every plan light.
+  // Moved out of fetch-pr.ts into lib/git.ts, so the mock owes it an export.
+  // Expressed over the same `gitRaw` fixture the real one reads, rather than
+  // a constant: a report's line counts decide heaviness, and a stub returning
+  // 0 everywhere would make every plan light.
   fileLineCount: (ref: string, path: string) => {
     try {
       const buf = producerMocks.gitRaw('show', `${ref}:${path}`);

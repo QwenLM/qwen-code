@@ -19,6 +19,11 @@ function fakeGit(opts: {
    * flows.
    */
   unanswerable?: string[];
+  /**
+   * Probes KILLED outright, keyed like `bases` — the 120s timeout shape,
+   * which yields no status at all (`status: null`), not 128.
+   */
+  killed?: string[];
 }): GitProbe & { calls: string[] } {
   const calls: string[] = [];
   return {
@@ -33,11 +38,13 @@ function fakeGit(opts: {
     },
     mergeBase(a, b) {
       calls.push(`mergeBase ${a} ${b}`);
-      const sha = opts.bases?.[`${a}..${b}`] ?? null;
+      const key = `${a}..${b}`;
+      const sha = opts.bases?.[key] ?? null;
       if (sha) return { sha, status: 0 };
+      if ((opts.killed ?? []).includes(key)) return { sha: null, status: null };
       return {
         sha: null,
-        status: (opts.unanswerable ?? []).includes(`${a}..${b}`) ? 128 : 1,
+        status: (opts.unanswerable ?? []).includes(key) ? 128 : 1,
       };
     },
   };
@@ -129,6 +136,44 @@ describe('resolveMergeBase', () => {
       baseFetchFailed: false,
       probeUnavailable: true,
     });
+  });
+
+  it('a KILLED probe — no status at all — is unanswerable like an exit 128', () => {
+    // The 120s merge-base timeout ends in a kill, and a kill yields
+    // `status: null`, NOT 128 — `gitProbe`'s doc in lib/git.ts says so.
+    // Keying the split on `status === 128` (or collapsing a kill to the
+    // definitive exit 1 on the producer seam) would classify exactly the
+    // motivating shape as "no common ancestor", filing a transient under a
+    // reason the recovery flow never retries.
+    const sole = resolveMergeBase(
+      'origin',
+      'main',
+      'pr-head',
+      fakeGit({
+        refs: ['refs/remotes/origin/main'],
+        killed: ['refs/remotes/origin/main..pr-head'],
+      }),
+    );
+    expect(sole).toEqual({
+      sha: null,
+      baseFetchFailed: false,
+      probeUnavailable: true,
+    });
+
+    // …and it taints the resolution even when the local fallback answers a
+    // definitive exit 1: one unanswerable probe means determinism was never
+    // established, whatever the other candidate says.
+    const tainted = resolveMergeBase(
+      'origin',
+      'main',
+      'pr-head',
+      fakeGit({
+        refs: ['refs/remotes/origin/main', 'main'],
+        killed: ['refs/remotes/origin/main..pr-head'],
+      }),
+    );
+    expect(tainted.sha).toBeNull();
+    expect(tainted.probeUnavailable).toBe(true);
   });
 
   it('an unanswerable probe on ONE candidate taints the whole resolution', () => {

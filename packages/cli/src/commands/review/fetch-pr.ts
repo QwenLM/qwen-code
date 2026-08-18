@@ -276,22 +276,25 @@ export interface IncrementalDecision {
     | 'capture-failed'
     | 'partition-failed';
   /**
-   * The scoped range's left side as a FULL sha, present exactly when the
-   * report's diff is the delta (`effective` and not `upToDate`). Downstream
-   * consumers that recompute their own ranges read it instead of
-   * `mergeBaseSha` — Agent 7's test-efficacy probe welds `--base` into its
-   * brief, and probing the full range on a delta-scoped round would spend
-   * the probe budget on already-reviewed hunks and report survivors from
-   * outside this round's scope.
+   * LEGACY — the scoped range's left side as a FULL sha, written only by
+   * plans an older CLI produced, when the published diff was a capture of
+   * `since..head` and a consumer recomputing its own range (Agent 7's
+   * test-efficacy probe welds `--base` into its brief) needed the anchor.
+   * This CLI never writes it: a sliced round publishes sections of
+   * `merge-base..head`, so the published range's left side IS
+   * `mergeBaseSha`, and the weld falls back to exactly that. Honoured when
+   * an older report still carries it; deliberately absent on new rounds.
    */
   diffBase?: string;
   /**
-   * WHICH files this round reviews and why, present with `diffBase`. The
-   * scoped diff is a slice of the PR's own, so a file can be in scope with no
-   * change of its own: `interaction` names the still-clean importers the
-   * one-hop widening pulled in, with the changed files each of them imports,
-   * and a brief built for one points its agent at that seam instead of a
-   * from-scratch re-review.
+   * WHICH files this round reviews and why, present exactly when `diffBase`
+   * is absent: this CLI writes it on the sliced rounds where it no longer
+   * writes `diffBase`, and an older report carrying `diffBase` never carried
+   * this. The scoped diff is a slice of the PR's own, so a file can be in
+   * scope with no change of its own: `interaction` names the still-clean
+   * importers the one-hop widening pulled in, with the changed files each of
+   * them imports, and a brief built for one points its agent at that seam
+   * instead of a from-scratch re-review.
    */
   scope?: IncrementalScope;
   /**

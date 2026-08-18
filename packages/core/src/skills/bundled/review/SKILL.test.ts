@@ -134,34 +134,41 @@ describe('bundled review skill', () => {
   });
 
   it('pins which refusal reasons the recovery flow may retry', () => {
-    // The orchestrator's recovery loop acts on this prose alone, and the
-    // producer deliberately manufactures both planless shapes. Deleting the
-    // retry exception strands the one shape a re-run fixes; widening the
-    // retryable set re-refuses a dead anchor every round forever.
+    // The orchestrator's recovery loop acts on this prose alone. The
+    // retryable class is the infrastructure reasons — a base fetch, a
+    // merge-base probe, a capture — whose components a re-run repeats;
+    // widening it re-refuses a dead anchor every round forever.
     const body = skillBody();
     expect(body).toContain(
       'Every other reason is deterministic for the same sha and must NOT be retried',
     );
-    expect(body).toContain('Retry that one, once.');
-    // …and the exception's OTHER condition: a null merge base has two causes
-    // and only the fetch-failure one is retryable.
-    expect(body).toContain('`baseFetchFailed: true`');
-    expect(body).toContain('found no common ancestor at all');
+    expect(body).toContain(
+      'the component that failed — a base fetch, a merge-base probe, a capture — is re-run by the re-run',
+    );
+    // The ONE-exception paragraph this test used to pin named a shape the
+    // CLI can no longer produce — `partition-failed` implies a base
+    // resolved, because every publish site needs one — and the transient
+    // shape it carved out now arrives as `base-untrusted`, already
+    // retryable under the infrastructure clause above.
+    expect(body).not.toContain('Retry that one, once.');
   });
 
   it('records the range the round actually reviewed in provenance', () => {
-    // A saved report is read by someone who cannot re-derive its scope, so
-    // recording the merge base for a round that reviewed `diffBase..head`
-    // hands that reader a range the run never had.
-    // The whole rule, not its opening clause. The discriminating CONDITION
-    // and the fallback half were each pinned by nothing: deleting the
-    // condition, flipping it to `and upToDate`, or swapping the fallback for
-    // `fetchedSha` all shipped this file green, and each one records a scope
-    // the run never had.
+    // A saved report is read by someone who cannot re-derive its scope.
+    // Slicing made every delta-scoped round publish sections of
+    // `merge-base..head`, so the merge base IS the range the round used;
+    // the field that named a delta range's left side left new reports, and
+    // the instruction that pointed the writer at it named a field that is
+    // never there — inviting an improvisation that records the anchor, a
+    // scope the run never had.
     expect(skillBody()).toContain(
-      '`incremental.diffBase` on a delta-scoped round (`incremental.effective` and no `upToDate`)',
+      '`mergeBaseSha` in every case — a delta-scoped round publishes sections of `merge-base..head`',
     );
-    expect(skillBody()).toContain('`mergeBaseSha` on every other');
+    // …and the legacy carve-out: an older report's `diffBase` still names
+    // the range that CLI published, so it stays authoritative there.
+    expect(skillBody()).toContain(
+      'honour the field when an older report still carries it',
+    );
   });
 
   it('pins the same-model gate on both incremental-anchor paths', () => {
