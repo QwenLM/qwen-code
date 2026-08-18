@@ -170,7 +170,12 @@ function recoverableApiError(output) {
 
 function writeHandoff(workdir, message) {
   mkdirSync(workdir, { recursive: true });
-  writeFileSync(file(workdir, 'handoff.md'), `${message}\n`);
+  const handoffPath = file(workdir, 'handoff.md');
+  // A non-empty handoff.md is an agent-written verdict — the same
+  // convention missing() and the gate's -s checks apply — and a verdict
+  // must not be reclassified by a synthesized note.
+  if (existsSync(handoffPath) && statSync(handoffPath).size > 0) return;
+  writeFileSync(handoffPath, `${message}\n`);
 }
 
 function isLoopGuardOutput(output) {
@@ -525,6 +530,22 @@ if (
             ? 'recoverable API error without an agent verdict'
             : `status ${String(result.status)}`;
   if (!existsSync(file(options.workdir, 'failure.md'))) {
+    if (hasHandoffVerdict) {
+      // A handoff is a verdict here too: the agent stopped under
+      // instruction and wrote its decision, then qwen died (crash,
+      // budget kill, loop guard). Synthesizing a failure.md would
+      // shadow the note — the gate reads failure.md first and would
+      // report a failed fix, and the timeout/api-error sentinels would
+      // re-hand the item the brake stopped on the next scan. Mirror the
+      // sibling arm that preserves an agent-written failure.md across
+      // the same crash, and exit 0 like the status-0 handoff path so
+      // the check color matches the outcome the gate reports from the
+      // preserved note.
+      console.error(
+        `Qwen failed during ${options.mode}: ${detail}; preserving agent-written handoff.md.`,
+      );
+      process.exit(0);
+    }
     if (result.loopDetected) {
       writeFailure(
         options.workdir,

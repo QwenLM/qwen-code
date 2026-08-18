@@ -6090,14 +6090,19 @@ jobs:
             echo "verified_head=${VERIFIED_HEAD}" >> "${GITHUB_OUTPUT}"
           fi
           case "${OUTCOME}" in
-            # handoff is a deliberate verdict, not a failure: the agent
-            # stopped under instruction (the growth-brake BLOCKED stop) and
-            # deferred the item to a human. Failing the job here would leave
-            # a red review-address check, which the next scan counts as NEW
-            # feedback — turning one deliberate stop into a self-feeding
-            # loop. The 'Report dry-run / failure' step still posts the
-            # handoff comment and the eval marker for this outcome.
-            fixed|noop|handoff) ;;
+            # handoff and the two brake-violation rejections are
+            # deliberate, PUBLISHED verdicts, not failures: the agent
+            # stopped under instruction (the growth-brake BLOCKED stop)
+            # and the 'Report dry-run / failure' step posts the honest
+            # headline, the handoff note, and the eval marker for all
+            # three. Failing the job here would leave a red
+            # review-address check that completes AFTER the marker's
+            # ts=NEWEST — the next scan's N_FAILED_CHECKS includes this
+            # workflow's own review-address checks, so it would count
+            # the round's own rejection as NEW feedback and re-dispatch
+            # the very item the headline promises not to retry, turning
+            # one deliberate stop into a self-feeding loop.
+            fixed|noop|handoff|dirty_handoff|committed_handoff) ;;
             *) exit 1 ;;
           esac
 
@@ -6815,7 +6820,7 @@ jobs:
 
       - name: 'Report dry-run / failure'
         if: |-
-          ${{ always() && (needs.route.outputs.dry_run == 'true' || failure() || cancelled() || steps.final_verify.outputs.outcome == 'handoff') }}
+          ${{ always() && (needs.route.outputs.dry_run == 'true' || failure() || cancelled() || steps.final_verify.outputs.outcome == 'handoff' || steps.final_verify.outputs.outcome == 'dirty_handoff' || steps.final_verify.outputs.outcome == 'committed_handoff') }}
         env:
           OUTCOME: '${{ steps.final_verify.outputs.outcome }}'
           COMMITTED: '${{ steps.final_verify.outputs.committed }}'
@@ -6907,8 +6912,12 @@ jobs:
             # handoff rounds end with a SUCCESS job status (a deliberate
             # verdict), so they must trigger on the outcome itself — without
             # this clause nothing would post and the loop would go silent on
-            # exactly the rounds that most need a visible human handoff.
-            if [[ "${OUTCOME:-unknown}" == "failed" || "${OUTCOME:-unknown}" == "handoff" || "${JOB_STATUS:-}" != "success" ]]; then
+            # exactly the rounds that most need a visible human handoff. The
+            # two brake-violation rejections are green, published verdicts
+            # for the same reason (finalize passes them so their own check
+            # cannot re-select the PR), so they key on the outcome the same
+            # way.
+            if [[ "${OUTCOME:-unknown}" == "failed" || "${OUTCOME:-unknown}" == "handoff" || "${OUTCOME:-unknown}" == "dirty_handoff" || "${OUTCOME:-unknown}" == "committed_handoff" || "${JOB_STATUS:-}" != "success" ]]; then
               POST_HANDOFF=true
             fi
           fi
