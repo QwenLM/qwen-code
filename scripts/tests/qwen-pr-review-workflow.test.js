@@ -13,6 +13,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -2687,7 +2688,7 @@ describe('checkout self-heal', () => {
     // retry. Hidden entries are the regression case: a glob-shaped wipe
     // skips dotfiles and would leave exactly the .git this heal exists to
     // remove.
-    const dir = mkdtempSync(join(tmpdir(), 'checkout-heal-'));
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'checkout-heal-')));
     try {
       mkdirSync(join(dir, 'leftover-dir'));
       writeFileSync(join(dir, 'leftover'), 'x');
@@ -2727,7 +2728,9 @@ describe('checkout self-heal', () => {
   // bypasses the 0o500 lock via CAP_DAC_OVERRIDE, so the tests built on it
   // skip there, and win32 has no POSIX permission bits to honor.
   const lockFixture = () => {
-    const parent = mkdtempSync(join(tmpdir(), 'checkout-heal-lock-'));
+    const parent = realpathSync(
+      mkdtempSync(join(tmpdir(), 'checkout-heal-lock-')),
+    );
     const dir = join(parent, 'workspace');
     mkdirSync(dir);
     writeFileSync(join(dir, 'leftover'), 'x');
@@ -2812,7 +2815,9 @@ describe('checkout self-heal', () => {
     // — then the secret-bearing review step runs through the redirection.
     // A legitimate workspace is always a runner-created plain directory, so
     // the refusal costs nothing; the link target must survive it untouched.
-    const parent = mkdtempSync(join(tmpdir(), 'checkout-heal-link-'));
+    const parent = realpathSync(
+      mkdtempSync(join(tmpdir(), 'checkout-heal-link-')),
+    );
     const target = join(parent, 'target');
     mkdirSync(target);
     writeFileSync(join(target, 'victim'), 'x');
@@ -2828,12 +2833,41 @@ describe('checkout self-heal', () => {
     }
   });
 
+  it('refuses a workspace redirected through an intermediate symlink', () => {
+    // `[ -L ]` lstats only the final component and `[ -d ]` follows
+    // intermediate links, so a workspace whose PARENT is a symlink passes
+    // both — and find then deletes the redirect target's contents OUTSIDE
+    // the runner workspace while logging a successful wipe. The guard must
+    // validate the resolved path, not just the last component; the victim
+    // under the redirect target must survive the refusal untouched.
+    const parent = realpathSync(
+      mkdtempSync(join(tmpdir(), 'checkout-heal-midlink-')),
+    );
+    const target = join(parent, 'target');
+    mkdirSync(target);
+    mkdirSync(join(target, 'workspace'));
+    writeFileSync(join(target, 'workspace', 'victim'), 'x');
+    symlinkSync(target, join(parent, 'repo'));
+    const ws = join(parent, 'repo', 'workspace');
+    try {
+      expect(() =>
+        runWipe({ GITHUB_WORKSPACE: ws }, { stdio: 'pipe' }),
+      ).toThrow();
+      expect(readdirSync(join(target, 'workspace'))).toContain('victim');
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
   it('refuses a non-directory workspace instead of wiping nothing', () => {
-    // The symlink test short-circuits at `[ -L ]`, leaving the `[ ! -d ]`
-    // disjunct unpinned: a plain file at the workspace path must hit the
-    // same loud refusal, because find on a non-directory matches nothing
-    // and the step would log a successful wipe while deleting nothing.
-    const parent = mkdtempSync(join(tmpdir(), 'checkout-heal-file-'));
+    // The symlink tests short-circuit at the resolved-path check, leaving
+    // the `[ ! -d ]` disjunct unpinned: a plain file at the workspace path
+    // must hit the same loud refusal, because find on a non-directory
+    // matches nothing and the step would log a successful wipe while
+    // deleting nothing.
+    const parent = realpathSync(
+      mkdtempSync(join(tmpdir(), 'checkout-heal-file-')),
+    );
     const file = join(parent, 'workspace');
     writeFileSync(file, 'x');
     try {
@@ -2852,7 +2886,11 @@ describe('checkout self-heal', () => {
     // letting the missing path through: both wipe legs then fail on the
     // absent start point and the step exits 0 into a retry that fails
     // again — the refusal must stay loud for this shape too.
-    const missing = join(tmpdir(), 'checkout-heal-missing', 'workspace');
+    const missing = join(
+      realpathSync(tmpdir()),
+      'checkout-heal-missing',
+      'workspace',
+    );
     expect(() =>
       runWipe({ GITHUB_WORKSPACE: missing }, { stdio: 'pipe' }),
     ).toThrow();

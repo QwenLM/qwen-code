@@ -557,18 +557,20 @@ jobs:
           # GITHUB_WORKSPACE is set by actions/runner (always
           # <runner workspace>/<repo>/<repo>), so the `:?` guard is the only
           # STRING check this needs. The wipe also validates the filesystem
-          # OBJECT at $WS: find -P does not descend a symlinked start, so a
-          # redirected workspace would log success and delete nothing, then
-          # run the secret-bearing review step through the redirection —
-          # refuse loud instead. A legitimate workspace is always a
-          # runner-created plain directory, so refusal costs nothing. The
-          # sudo leg only helps on pool members WITH passwordless sudo; on
-          # the rest a root-owned poisoning degrades to warn-and-retry — the
-          # heal chain must never fail, so the retry still runs against
-          # survivors.
+          # OBJECT at $WS against its resolved path: `[ -L ]`/`[ -d ]` see
+          # only the FINAL path component, so a symlinked INTERMEDIATE
+          # component would pass both and let find delete content OUTSIDE
+          # the runner workspace through the redirection, then run the
+          # secret-bearing review step there — refuse any path that does not
+          # resolve to itself instead. A legitimate workspace is always a
+          # runner-created plain directory with no symlink components, so
+          # refusal costs nothing. The sudo leg only helps on pool members
+          # WITH passwordless sudo; on the rest a root-owned poisoning
+          # degrades to warn-and-retry — the heal chain must never fail, so
+          # the retry still runs against survivors.
           WS="${GITHUB_WORKSPACE:?}"
-          if [ -L "$WS" ] || [ ! -d "$WS" ]; then
-            echo "::error::workspace is not a plain directory: $WS"
+          if [ "$(realpath -- "$WS")" != "$WS" ] || [ -L "$WS" ] || [ ! -d "$WS" ]; then
+            echo "::error::workspace is not a plain directory or resolves through symlinks: $WS"
             exit 1
           fi
           if find "$WS" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || sudo -n find "$WS" -mindepth 1 -maxdepth 1 -exec rm -rf {} +; then
