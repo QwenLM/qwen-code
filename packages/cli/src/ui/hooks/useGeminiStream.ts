@@ -2029,10 +2029,10 @@ export const useGeminiStream = (
       userMessageTimestamp: number,
       submitType: SendMessageType,
     ) => {
-      if (submitType !== SendMessageType.Goal) {
-        lastPromptErroredRef.current = true;
-      } else {
+      if (submitType === SendMessageType.Goal) {
         goalTerminalErrorRef.current = true;
+      } else {
+        lastPromptErroredRef.current = true;
       }
       // Persist any streamed reasoning (collapsed) above the error.
       commitPendingThought(userMessageTimestamp);
@@ -2052,9 +2052,9 @@ export const useGeminiStream = (
 
       if (!isShowingAutoRetry) {
         const retryHint =
-          submitType !== SendMessageType.Goal
-            ? t('Press Ctrl+Y to retry')
-            : undefined;
+          submitType === SendMessageType.Goal
+            ? undefined
+            : t('Press Ctrl+Y to retry');
         // Store error with hint as a pending item (not in history).
         // This allows the hint to be removed when the user retries with Ctrl+Y,
         // since pending items are in the dynamic rendering area (not <Static>).
@@ -2439,7 +2439,7 @@ export const useGeminiStream = (
                 type: assistantOutputStarted ? 'gemini_content' : 'gemini',
                 text: '',
                 images: [nextEvent.value],
-                ...(!assistantOutputStarted ? { timestamp: Date.now() } : {}),
+                ...(assistantOutputStarted ? {} : { timestamp: Date.now() }),
               });
               assistantInlineImageCount++;
             } else {
@@ -2447,7 +2447,7 @@ export const useGeminiStream = (
                 type: assistantOutputStarted ? 'gemini_content' : 'gemini',
                 text: '',
                 omittedImageCount: 1,
-                ...(!assistantOutputStarted ? { timestamp: Date.now() } : {}),
+                ...(assistantOutputStarted ? {} : { timestamp: Date.now() }),
               });
             }
             assistantOutputStarted = true;
@@ -2676,7 +2676,9 @@ export const useGeminiStream = (
               // otherwise handleContentEvent would see a null pending item,
               // create a fresh one, and reset the buffer to just the new chunk,
               // losing the partial text we meant to preserve.
-              if (!event.isContinuation) {
+              if (event.isContinuation) {
+                flushBufferedStreamEvents();
+              } else {
                 discardBufferedStreamEvents();
                 setPendingAssistantItems([]);
                 if (pendingHistoryItemRef.current) {
@@ -2688,8 +2690,6 @@ export const useGeminiStream = (
                 geminiMessageBuffer = '';
                 assistantOutputStarted = false;
                 assistantInlineImageCount = 0;
-              } else {
-                flushBufferedStreamEvents();
               }
               // Always discard tool call requests from the truncated/failed
               // attempt to prevent duplicate execution after escalation or
@@ -3700,7 +3700,7 @@ export const useGeminiStream = (
             todoWorkChainId: metadata?.todoWorkChainId,
             modelOverride: modelOverrideRef.current,
             steerInput: metadata?.steerInput,
-            ...(submittedPrompt !== undefined ? { submittedPrompt } : {}),
+            ...(submittedPrompt === undefined ? {} : { submittedPrompt }),
             ...(!allowConcurrentBtwDuringResponse &&
             !isDetachedToolContinuation &&
             midTurnDrainRef
@@ -3923,9 +3923,9 @@ export const useGeminiStream = (
               lastPromptErroredRef.current = true;
             }
             const retryHint =
-              submitType !== SendMessageType.Goal
-                ? t('Press Ctrl+Y to retry')
-                : undefined;
+              submitType === SendMessageType.Goal
+                ? undefined
+                : t('Press Ctrl+Y to retry');
             // Store error with hint as a pending item (same as handleErrorEvent)
             setPendingRetryErrorItem({
               type: 'error' as const,

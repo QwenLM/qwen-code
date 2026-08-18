@@ -174,7 +174,7 @@ import { MessageDisplayDispatcher } from './message-display-dispatcher.js';
 
 // IDE integration
 import { ideContextStore } from '../ide/ideContext.js';
-import { type File, type IdeContext } from '../ide/types.js';
+import type { File, IdeContext } from '../ide/types.js';
 import { PermissionMode, type StopHookOutput } from '../hooks/types.js';
 
 const MAX_TURNS = 100;
@@ -410,7 +410,7 @@ export class GeminiClient {
   private agentRemindersInitialized = false;
 
   private static skillEntryKey(e: AvailableSkillEntry): string {
-    return e.level !== undefined ? `skill:${e.name}` : `cmd:${e.name}`;
+    return e.level === undefined ? `cmd:${e.name}` : `skill:${e.name}`;
   }
 
   /**
@@ -542,12 +542,10 @@ export class GeminiClient {
 
       // Restore attribution state from the last snapshot in the session
       this.restoreAttributionFromSession(resumedSessionData.conversation);
+    } else if (sessionStartSource === undefined) {
+      await this.startChat();
     } else {
-      if (sessionStartSource !== undefined) {
-        await this.startChat(undefined, sessionStartSource);
-      } else {
-        await this.startChat();
-      }
+      await this.startChat(undefined, sessionStartSource);
     }
 
     this.initializedSessionId = sessionId;
@@ -2352,12 +2350,12 @@ export class GeminiClient {
         const virtualAfter =
           (m.toolResultCharsAfter ?? 0) + (m.pendingToolResultChars ?? 0);
         const targetNote =
-          m.toolResultsLowWatermark !== undefined
-            ? `, target ${m.toolResultsLowWatermark}` +
+          m.toolResultsLowWatermark === undefined
+            ? ''
+            : `, target ${m.toolResultsLowWatermark}` +
               (virtualAfter > m.toolResultsLowWatermark
                 ? ' (soft-exceeded)'
-                : '')
-            : '';
+                : '');
         debugLogger.info(
           `[TOOL-RESULT MC] tool result chars ${m.toolResultCharsBefore} > ` +
             `${m.toolResultsTotalCharsThreshold}, cleared ${m.toolsCleared} ` +
@@ -2473,7 +2471,7 @@ export class GeminiClient {
         pendingGoalStateEvents.push({
           type: GeminiEventType.GoalState,
           value,
-          ...(cause !== undefined ? { cause } : {}),
+          ...(cause === undefined ? {} : { cause }),
         });
       });
       pendingGoalStateEvents.push({
@@ -2746,9 +2744,9 @@ export class GeminiClient {
             eventName: 'UserPromptSubmit',
             input: {
               prompt: promptText,
-              ...(submittedPrompt !== undefined
-                ? { submitted_prompt: submittedPrompt }
-                : {}),
+              ...(submittedPrompt === undefined
+                ? {}
+                : { submitted_prompt: submittedPrompt }),
             },
           },
           MessageBusType.HOOK_EXECUTION_RESPONSE,
@@ -3698,9 +3696,9 @@ export class GeminiClient {
                     ? 'Rate limit exceeded'
                     : status !== undefined && status >= 500
                       ? 'Provider service unavailable'
-                      : status !== undefined
-                        ? `API request failed (${status})`
-                        : 'Provider request failed';
+                      : status === undefined
+                        ? 'Provider request failed'
+                        : `API request failed (${status})`;
               try {
                 await arenaAgentClient.reportError(arenaError);
               } catch {
