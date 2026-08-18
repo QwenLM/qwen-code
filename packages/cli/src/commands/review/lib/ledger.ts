@@ -213,13 +213,24 @@ export const LEDGER_MAX_ROUND = 10_000;
 export const LEDGER_MAX_VOLUME = 100_000;
 
 /**
- * A usable volume: a non-negative whole number. Zero is meaningful and kept
- * — "this round posted nothing" is exactly the observation a convergence
- * trend is looking for, and dropping it would make a converged round
- * indistinguishable from a round that never recorded one.
+ * The ONE reading of a volume field: a non-negative whole number, clamped to
+ * the cap — or `undefined` for anything else.
+ *
+ * Shared by every boundary that reads one (the serializer, the parser, and
+ * `compose-review`'s side-file recovery) because the shape check and the
+ * clamp have to travel together: a boundary that validated without clamping
+ * let one compose emit an uncapped number to its terminal line while its own
+ * marker recorded the capped one — two outputs of a single round disagreeing
+ * about the same count.
+ *
+ * Zero survives on purpose: "this round posted nothing" is exactly the
+ * observation a convergence trend is looking for, and dropping it would make
+ * a converged round indistinguishable from one that never recorded a volume.
  */
-function isVolume(n: unknown): n is number {
-  return typeof n === 'number' && Number.isInteger(n) && n >= 0;
+export function volumeOf(n: unknown): number | undefined {
+  return typeof n === 'number' && Number.isInteger(n) && n >= 0
+    ? Math.min(n, LEDGER_MAX_VOLUME)
+    : undefined;
 }
 
 /**
@@ -277,12 +288,10 @@ export function serializeLedger(ledger: Ledger): string {
     // nothing about it. Bounded like every other written field — a
     // non-integer or negative count is not a volume, and the cap keeps a
     // forged marker from spending the byte budget on digits.
-    if (isVolume(ledger.posted)) {
-      payload.posted = Math.min(ledger.posted, LEDGER_MAX_VOLUME);
-    }
-    if (isVolume(ledger.prevPosted)) {
-      payload.prevPosted = Math.min(ledger.prevPosted, LEDGER_MAX_VOLUME);
-    }
+    const postedOut = volumeOf(ledger.posted);
+    if (postedOut !== undefined) payload.posted = postedOut;
+    const prevPostedOut = volumeOf(ledger.prevPosted);
+    if (prevPostedOut !== undefined) payload.prevPosted = prevPostedOut;
     if (dropped > 0) payload.dropped = dropped;
     // A truncated list must not certify a range: the dropped entries reference
     // code at or before the anchored head, and a next round scoped to
@@ -424,12 +433,8 @@ export function parseLedger(body: string | undefined): Ledger | null {
     // would not have written (a float, a negative, a string) simply does not
     // survive — the trend loses a point, which is the whole cost of a field
     // no gate reads.
-    const posted = isVolume(raw.posted)
-      ? Math.min(raw.posted, LEDGER_MAX_VOLUME)
-      : undefined;
-    const prevPosted = isVolume(raw.prevPosted)
-      ? Math.min(raw.prevPosted, LEDGER_MAX_VOLUME)
-      : undefined;
+    const posted = volumeOf(raw.posted);
+    const prevPosted = volumeOf(raw.prevPosted);
     return {
       v: 1,
       round: raw.round,

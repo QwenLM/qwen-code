@@ -392,6 +392,39 @@ describe('saveReviewArtifact', () => {
     },
   );
 
+  it.each([
+    ['a string', 'three'],
+    ['a negative', -1],
+    ['a fraction', 1.5],
+  ])(
+    'refuses a present postedInline of the wrong shape (%s)',
+    (_label, bad) => {
+      // The sibling discipline: the absent-means-zero arm exists for
+      // pre-telemetry composed files and must not launder a present value
+      // that says nothing true into the durable artifact.
+      const paths = fixture();
+      writeJson(paths.composed, { ...verdict, postedInline: bad });
+
+      expect(() =>
+        saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' }),
+      ).toThrow(/postedInline/);
+      expect(existsSync(paths.out)).toBe(false);
+    },
+  );
+
+  it('reads an absent or null postedInline as zero — a pre-telemetry composed file must still save', () => {
+    const paths = fixture();
+    const { postedInline: _absent, ...preTelemetry } = verdict;
+    for (const composed of [preTelemetry, { ...verdict, postedInline: null }]) {
+      writeJson(paths.composed, composed);
+      saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' });
+      expect(
+        JSON.parse(readFileSync(paths.out, 'utf8')).verdict.postedInline,
+      ).toBe(0);
+      rmSync(paths.out, { force: true });
+    }
+  });
+
   it('reads an absent or null floorEnforced as empty — a pre-enforcement composed file must still save', () => {
     // Null rides the same absence semantics as the sibling deferredCount
     // pair — an undefined-only check would refuse a composed file that

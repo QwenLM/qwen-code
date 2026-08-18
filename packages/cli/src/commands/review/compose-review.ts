@@ -77,6 +77,7 @@ import {
   LEDGER_MAX_BYTES,
   LEDGER_MAX_ROUND,
   serializeLedger,
+  volumeOf,
   type Ledger,
   type LedgerFinding,
 } from './lib/ledger.js';
@@ -1148,10 +1149,11 @@ export function composeReview(
   // result assembled elsewhere.
   // The volume this round puts on the PR: the posting set AFTER floor
   // enforcement removed what it moved, because that is what `submit` sends
-  // and therefore what the next round will see on the pull request. Counting
-  // the pre-enforcement drafts would record a number no comment list can
-  // corroborate.
-  const postedInline = (effective.draftedComments ?? []).length;
+  // and therefore what the next round will see on the pull request. Taken
+  // from the body composer's own result rather than re-derived here — one
+  // count, one origin, so the marker and the reported number cannot drift
+  // apart under a later edit to either.
+  const postedInline = result.postedInline;
   const marker = ledgerMarkerFor(
     effective,
     result.cappedBy,
@@ -1211,15 +1213,21 @@ function prevLedgerFacts(planPath: string | undefined): {
     ) as Ledger;
     const round =
       Number.isInteger(prev.round) && prev.round > 0 ? prev.round : 0;
-    // Validated here rather than trusted: the side file is a JSON
-    // `pr-context` wrote, not a marker `parseLedger` already normalised.
-    const posted =
-      typeof prev.posted === 'number' &&
-      Number.isInteger(prev.posted) &&
-      prev.posted >= 0
-        ? prev.posted
-        : undefined;
-    return { round, ...(posted === undefined ? {} : { posted }) };
+    // Read through the ledger's own volume reader rather than a local
+    // restatement: the side file is a JSON `pr-context` wrote, not a marker
+    // `parseLedger` already normalised, and a boundary that checked the
+    // shape without applying the cap let this round's terminal line and its
+    // own marker disagree about the same number.
+    const posted = volumeOf(prev.posted);
+    // The volume travels WITH its round or not at all. A side file carrying
+    // a volume but no usable round (partially written, hand-edited) would
+    // otherwise attribute it to round 0 — and a round-1 marker would ship
+    // `prevPosted` for a round that never existed, against this field's own
+    // "absent on round 1" contract.
+    return {
+      round,
+      ...(posted === undefined || round === 0 ? {} : { posted }),
+    };
   } catch {
     return { round: 0 };
   }

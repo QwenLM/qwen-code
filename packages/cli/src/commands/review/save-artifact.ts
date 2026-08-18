@@ -32,6 +32,7 @@ import {
 import { EFFORT_LEVELS, type ReviewEffort } from './parse-args.js';
 import { REVIEWS_DIR } from './lib/paths.js';
 import { isSameFile } from './lib/same-file.js';
+import { volumeOf } from './lib/ledger.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 
 interface PersistedVerdict extends ComposeReviewResult {
@@ -251,12 +252,10 @@ function validateVerdict(value: unknown): PersistedVerdict {
   // file from a CLI predating the volume telemetry recorded no count, and a
   // mid-upgrade save must not fail over a number that only re-displays. A
   // PRESENT value of the wrong shape is refused like every other field.
-  const postedInline = verdict['postedInline'] ?? 0;
-  if (
-    typeof postedInline !== 'number' ||
-    !Number.isInteger(postedInline) ||
-    postedInline < 0
-  ) {
+  const rawPosted = verdict['postedInline'];
+  const postedInline =
+    rawPosted === undefined || rawPosted === null ? 0 : volumeOf(rawPosted);
+  if (postedInline === undefined) {
     throw new Error(
       'Composed verdict.postedInline must be a non-negative integer.',
     );

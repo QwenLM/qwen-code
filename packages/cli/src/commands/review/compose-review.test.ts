@@ -2305,6 +2305,60 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
     expect(stderrHasOverride).toBe(false);
   });
 
+  it('states the round volume on stderr, with and without a predecessor', async () => {
+    // The line is the operator's only view of this round's contribution to
+    // the PR's comment volume; both branches of its ternary are
+    // user-visible, and neither reddened anything before this test.
+    const dir = mkdtempSync(join(tmpdir(), 'compose-volume-'));
+    const inputPath = join(dir, 'compose.json');
+    const commentsPath = join(dir, 'comments.json');
+    const planPath = join(dir, 'plan.json');
+    writeFileSync(planPath, JSON.stringify({ prNumber: 8255 }), 'utf8');
+    writeFileSync(
+      inputPath,
+      JSON.stringify({ modelId: MODEL, planPath }),
+      'utf8',
+    );
+    writeFileSync(
+      commentsPath,
+      JSON.stringify([
+        { path: 'a.ts', line: 3, body: '**[Suggestion]** one' },
+        { path: 'b.ts', line: 4, body: '**[Suggestion]** two' },
+      ]),
+      'utf8',
+    );
+    const stderr = () =>
+      (writeStderrLine as ReturnType<typeof vi.fn>).mock.calls.map((c) =>
+        String(c[0]),
+      );
+    try {
+      // No side file: no predecessor, so the line carries no parenthetical.
+      (writeStderrLine as ReturnType<typeof vi.fn>).mockClear();
+      await runComposeReviewCommand({
+        input: inputPath,
+        comments: commentsPath,
+      });
+      expect(stderr()).toContain('VOLUME: 2 inline comment(s) this round');
+
+      // With a recorded predecessor the previous round rides along.
+      (writeStderrLine as ReturnType<typeof vi.fn>).mockClear();
+      writeFileSync(
+        join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+        JSON.stringify({ v: 1, round: 4, findings: [], posted: 9 }),
+        'utf8',
+      );
+      await runComposeReviewCommand({
+        input: inputPath,
+        comments: commentsPath,
+      });
+      expect(stderr()).toContain(
+        'VOLUME: 2 inline comment(s) this round (previous round: 9)',
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('honours review.attribution=false through the handler (wiring)', async () => {
     // Third wiring leg: deleting the attribution argument from the
     // composeReviewCommand call leaves the direct composeReview test and the
@@ -8233,6 +8287,26 @@ describe('convergence telemetry — volume, carried in the marker', () => {
       expect(r.prevPostedInline).toBeUndefined();
       expect(parseLedger(r.body)?.round).toBe(7);
     }
+  });
+
+  it('will not pair a volume with a round that does not exist', () => {
+    // A side file carrying a volume but no usable round (partially written,
+    // hand-edited) must not attribute it to round 0: the round-1 marker
+    // this compose posts is permanent, and `prevPosted` on it would assert
+    // a volume for a round that never ran.
+    sideFile({ posted: 7 });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: drafts(1),
+    });
+    expect(r.prevPostedInline).toBeUndefined();
+    const l = parseLedger(r.body)!;
+    expect(l.round).toBe(1);
+    expect(l.prevPosted).toBeUndefined();
+    expect(l.posted).toBe(1);
   });
 
   it('keeps the volume on a round whose anchor is withheld', () => {

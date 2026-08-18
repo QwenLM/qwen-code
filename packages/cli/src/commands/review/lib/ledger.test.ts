@@ -19,6 +19,7 @@ import {
   LEDGER_MAX_TITLE,
   LEDGER_MAX_BYTES,
   LEDGER_MAX_MODEL,
+  LEDGER_MAX_VOLUME,
   type Ledger,
   type LedgerFinding,
 } from './ledger.js';
@@ -457,5 +458,99 @@ describe('LEDGER_ID_READBACK', () => {
   ];
   it.each(cases)('reads %j as %j', (line, expected) => {
     expect(LEDGER_ID_READBACK.exec(line)?.[1] ?? null).toBe(expected);
+  });
+});
+
+describe('the volume fields — telemetry across the untrusted boundary', () => {
+  // This suite is the marker's untrusted-input boundary: `parseLedger` reads
+  // PR bodies any account can write, so the volume fields are pinned here
+  // rather than only through the serializer that always writes them well.
+  const base = { v: 1 as const, round: 3, findings: [] };
+
+  it('round-trips both volumes', () => {
+    const l = parseLedger(
+      serializeLedger({ ...base, posted: 4, prevPosted: 9 }),
+    )!;
+    expect(l.posted).toBe(4);
+    expect(l.prevPosted).toBe(9);
+  });
+
+  it('keeps zero — a converged round is the observation', () => {
+    const l = parseLedger(
+      serializeLedger({ ...base, posted: 0, prevPosted: 0 }),
+    )!;
+    expect(l.posted).toBe(0);
+    expect(l.prevPosted).toBe(0);
+  });
+
+  it.each([
+    ['a float', 2.5],
+    ['a negative', -1],
+    ['a string', '7'],
+    ['null', null],
+    ['a NaN', Number.NaN],
+  ])(
+    'refuses %s in a hand-crafted marker without losing the ledger',
+    (_label, bad) => {
+      // The real input domain: a body another account wrote. A volume that
+      // does not parse costs the trend a point; the work list it rides beside
+      // must survive it.
+      const marker = `<!-- qwen-review-ledger ${JSON.stringify({
+        v: 1,
+        round: 5,
+        findings: [{ id: 'R5-1', sev: 'S', file: 'a.ts', title: 'x' }],
+        posted: bad,
+      })} -->`;
+      const l = parseLedger(marker)!;
+      expect(l.round).toBe(5);
+      expect(l.findings).toHaveLength(1);
+      expect(l.posted).toBeUndefined();
+    },
+  );
+
+  it('clamps to the cap on write AND on read', () => {
+    const over = LEDGER_MAX_VOLUME + 1;
+    expect(
+      parseLedger(serializeLedger({ ...base, posted: over }))?.posted,
+    ).toBe(LEDGER_MAX_VOLUME);
+    // Read side, independently: a hand-crafted marker cannot exceed what the
+    // serializer would have written.
+    const marker = `<!-- qwen-review-ledger ${JSON.stringify({
+      v: 1,
+      round: 2,
+      findings: [],
+      posted: over,
+      prevPosted: over,
+    })} -->`;
+    const l = parseLedger(marker)!;
+    expect(l.posted).toBe(LEDGER_MAX_VOLUME);
+    expect(l.prevPosted).toBe(LEDGER_MAX_VOLUME);
+  });
+
+  it('survives a truncated work list, unlike the anchor pair', () => {
+    // The anchor is withheld when the list is partial because a partial list
+    // cannot certify a range. A volume certifies nothing, and a trend that
+    // went blank exactly on the rounds that overflow would be blind where it
+    // matters most.
+    const findings = Array.from(
+      { length: LEDGER_MAX_FINDINGS + 5 },
+      (_, i) => ({
+        id: `R3-${i + 1}`,
+        sev: 'S' as const,
+        file: `f${i}.ts`,
+        title: `finding ${i}`,
+      }),
+    );
+    const l = parseLedger(
+      serializeLedger({
+        ...base,
+        findings,
+        sha: 'deadbeef00112233',
+        posted: 12,
+      }),
+    )!;
+    expect(l.dropped).toBeGreaterThan(0);
+    expect(l.sha).toBeUndefined();
+    expect(l.posted).toBe(12);
   });
 });
