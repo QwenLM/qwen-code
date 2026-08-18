@@ -18,9 +18,17 @@ describe('main CI failure issue workflow', () => {
 
   it('opens an autofix-ready issue only for failed main CI runs', () => {
     expect(workflow).toContain('workflow_run:');
-    expect(workflow).toContain("workflows: ['E2E Tests', 'SDK Python']");
-    expect(workflow).not.toContain("'Qwen Code CI'");
+    expect(workflow).toContain(
+      "workflows: ['E2E Tests', 'SDK Python', 'Qwen Code CI']",
+    );
     expect(workflow).toContain("types: ['completed']");
+    // 'Qwen Code CI' joined the list when the macOS and Windows lanes got a
+    // nightly run on main (#9265): that run is their only trigger outside a
+    // pull request, and a red lane nobody is told about is the same silence
+    // the merge-queue-only gate produced. It completes on every pull request
+    // too, so the branch filter keeps those events out entirely rather than
+    // raising one per run just to skip it.
+    expect(workflow).toContain("branches: ['main']");
     expect(workflow).toContain("github.repository == 'QwenLM/qwen-code'");
     expect(workflow).toContain(
       "github.event.workflow_run.conclusion == 'failure'",
@@ -28,7 +36,15 @@ describe('main CI failure issue workflow', () => {
     expect(workflow).toContain(
       "github.event.workflow_run.head_branch == 'main'",
     );
+    // Push covers the other two watched workflows; schedule is the nightly
+    // platform-lane run. A pull-request run of any of them must never open an
+    // issue — that is contributor-triggered, and the branch filter plus this
+    // clause are what keep it out.
     expect(workflow).toContain("github.event.workflow_run.event == 'push'");
+    expect(workflow).toContain("github.event.workflow_run.event == 'schedule'");
+    expect(workflow).not.toContain(
+      "github.event.workflow_run.event == 'pull_request'",
+    );
   });
 
   it('creates an issue that the existing autofix worker can pick up', () => {
