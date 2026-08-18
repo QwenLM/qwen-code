@@ -52,6 +52,26 @@ The 100 ms budget stays internal, per RFC #7040's direction of a small fixed
 internal budget determined by benchmark rather than exposed as public
 configuration; telemetry can show whether a later change is justified.
 
+### `MAX_RELEVANT_DOCS` is per delivery, not per turn
+
+`MAX_RELEVANT_DOCS = 5` bounds one prompt. It does not bound a turn. A turn
+that fast-delivers two documents and then, at ToolResult, delivers five
+documents the fast phase did not include puts **seven** documents in front of
+the model. Deduplication removes repeats, not the sum.
+
+This is a deliberate consequence of dropping combined fast/refined budget
+accounting, which RFC #7040 originally specified as a fill-to-five limit
+across both phases. Keeping the combined limit means carrying a cross-phase
+document budget through the delivery path — the same bookkeeping this design
+declined for the duplicate-injection risk it introduces. Both prompts stay
+individually bounded, each document body is still truncated to
+`MAX_DOC_BODY_CHARS`, and the fast phase is capped at two, so the worst case
+is bounded and small; it is simply not five.
+
+Should the aggregate ever need a hard ceiling, the cheap version is to pass
+`limit - fastDeliveredPaths.size` as the refined limit rather than to
+reintroduce a second budget.
+
 ### Why not the original Fast/Refined architecture
 
 RFC #7040 specified two results produced from one shared scan, with the refined

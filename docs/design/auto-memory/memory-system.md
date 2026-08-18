@@ -373,6 +373,15 @@ flowchart TD
     R --> S[返回注入主系统提示的 prompt 片段]
 ```
 
+> **关于 200 上限：这是换了截断依据，不是抬高了天花板。** 旧路径按 scope 各自
+> 保留最近 200 篇，截断发生在看 query 之前；新路径先扫全量，再按词法相关性 +
+> recency reserve 选出最多 200 篇候选。因此效果分三档：总量 ≤200 时两者都不按
+> 数量丢弃（但新增了 25 KB manifest 上限，长 description 场景可能被截）；总量
+> 在 200–400 且单个 scope 不超 200 时，旧路径会把全部（最多 400 篇）送给
+> Selector，新路径只送 200 篇，**候选变少了**；只有单个 scope 超过 200 时，
+> 才是这次真正要解决的场景——旧的 recency 上限会让老而相关的文档永久不可见。
+> 详见 `docs/design/2026-08-09-bounded-memory-recall-candidates.md`。
+
 **评分规则（启发式）**：
 
 | 条件                                       | 加分                |
@@ -391,10 +400,16 @@ flowchart TD
 
 **Prompt 构建规则**：
 
-- 最多注入 5 篇文档（`MAX_RELEVANT_DOCS`）
+- 单次注入最多 5 篇文档（`MAX_RELEVANT_DOCS`）
 - 每篇文档 body 截断至 1200 字符（`MAX_DOC_BODY_CHARS`）
 - 超出截断时追加提示："NOTE: Relevant memory truncated for prompt budget."
 - 包含文档的新鲜度信息（基于文件 mtime）
+
+> **`MAX_RELEVANT_DOCS` 限制的是单次注入，不是单轮总量。** Fast 阶段投递 2 篇、
+> ToolResult 阶段又投递 5 篇全新文档时，本轮进入模型的是 **7 篇**——去重只消除
+> 重复，不压缩总和。这是放弃跨阶段预算核算的有意结果（见
+> `2026-08-08-native-memory-recall-reliability.md`）：两次 Prompt 各自有界，
+> 每篇 body 仍截断到 1200 字符，Fast 上限为 2，因此最坏情况有界且不大，只是不等于 5。
 
 ### 投递时机（Delivery）
 
