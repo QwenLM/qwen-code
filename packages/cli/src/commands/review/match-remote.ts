@@ -34,6 +34,13 @@ interface MatchRemoteArgs {
   repo: string;
   /** Absent means inherit an operator-exported GH_HOST, else github.com. */
   host?: string;
+  /**
+   * The target's FULL group path when its URL grammar carries one (Aone
+   * nested groups) — with it, the match compares every path segment
+   * against a three-or-more-segment remote; without it, only the
+   * non-injective last-two collapse is compared.
+   */
+  groupPath?: string;
 }
 
 export function runMatchRemote(args: MatchRemoteArgs): void {
@@ -75,6 +82,7 @@ export function runMatchRemote(args: MatchRemoteArgs): void {
     owner: args.owner,
     repo: args.repo,
     host,
+    groupPath: args.groupPath,
   });
 
   // Loud `writeStdoutLine`, not the `*Safe` variant: this line is the
@@ -126,12 +134,18 @@ export const matchRemoteCommand: CommandModule = {
         type: 'string',
         describe:
           "The PR's host — from its URL, or from `review meta` for a bare number (omitted: inherit an operator-exported GH_HOST, else github.com)",
+      })
+      .option('group-path', {
+        type: 'string',
+        describe:
+          "The target's FULL group path (`group/subgroup/project`) when its URL carries a nested group — compares every path segment against nested-group remotes (without it only the last two segments are compared)",
       }),
   handler: (argv) => {
     runMatchRemote({
       owner: String(argv['owner']),
       repo: String(argv['repo']),
       host: (argv as { host?: string }).host,
+      groupPath: (argv as { 'group-path'?: string })['group-path'],
     });
   },
 };
