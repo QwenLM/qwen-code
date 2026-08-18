@@ -30,7 +30,7 @@ import {
   READ_FILE_CHAR_CAP,
 } from './lib/diff-plan.js';
 import {
-  type IncrementalScope,
+  type IncrementalBlock,
   buildPlanReport,
   warnOnReportSize,
   stringifyPlanReport,
@@ -71,7 +71,7 @@ type CaptureLocalResult = PlanReport & {
   /** Untracked files that were NOT reviewed. Named, never silently dropped. */
   skippedFiles: SkippedFile[];
   /** Present only when `--cache` scoped this capture incrementally. */
-  incremental?: IncrementalScope;
+  incremental?: IncrementalBlock;
   /** Where this round's content anchor landed — Step 8 promotes it on a clean run. */
   cacheCandidatePath: string;
 };
@@ -223,7 +223,7 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   // Incremental scoping, when the caller brought the previous round's anchor.
   let diffBytes = capture.diff;
   let plan = fullPlan;
-  let incremental: IncrementalScope | undefined;
+  let incremental: IncrementalBlock | undefined;
   if (args.cache) {
     const cache = readLocalCache(args.cache);
     const refusal = anchorRefusalReason(
@@ -277,14 +277,21 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
           .map((f) => ({ startLine: f.diffStart, endLine: f.diffEnd })),
       );
       plan = buildDiffPlan(diffBytes.toString('utf8'));
+      // Under `scope`, exactly as the PR flow writes it — see
+      // `IncrementalBlock`. Written flat here once, which rendered no
+      // incremental frame on any local round while the diff was sliced
+      // regardless, so nothing looked wrong.
       incremental = {
-        anchor: cache!.stateId,
-        deltaFiles: changed,
-        interaction: [...interaction.entries()].map(
-          ([path, importsChanged]) => ({ path, importsChanged }),
-        ),
-        contextFileCount: candidates.filter((p) => !interaction.has(p)).length,
-        fullDiffPath,
+        scope: {
+          anchor: cache!.stateId,
+          deltaFiles: changed,
+          interaction: [...interaction.entries()].map(
+            ([path, importsChanged]) => ({ path, importsChanged }),
+          ),
+          contextFileCount: candidates.filter((p) => !interaction.has(p))
+            .length,
+          fullDiffPath,
+        },
       };
       // Paths that vanished since the cached round have no diff section and
       // no deltaFiles entry — say they existed, or a deletion-only round
@@ -308,7 +315,7 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
                 ? `${removedCount} cached path(s) no longer present ` +
                   `(treated as changes for the widening), `
                 : '') +
-              `${incremental.contextFileCount} clean file(s) left out of ` +
+              `${incremental.scope!.contextFileCount} clean file(s) left out of ` +
               `scope.`,
       );
     }
