@@ -36,8 +36,10 @@ async function advanceToModelStep(
   provider = codingPlanProvider,
 ) {
   act(() => result.current.start(provider));
-  if (Array.isArray(provider.baseUrl)) {
-    act(() => result.current.selectBaseUrl(provider.baseUrl![0]!.url));
+  const baseUrls = provider.baseUrl;
+  if (Array.isArray(baseUrls)) {
+    const firstUrl = baseUrls[0]!.url;
+    act(() => result.current.selectBaseUrl(firstUrl));
   }
   await act(async () => {
     result.current.submitApiKey('sk-sp-test-key');
