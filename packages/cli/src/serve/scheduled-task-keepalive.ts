@@ -200,25 +200,32 @@ async function bindAndNameSessions(
         // naming is non-critical — the session still fires correctly
       }
       let matched = false;
+      // The two no-write reasons must stay distinguishable: when a COMMITTED
+      // task already references the just-minted session the session is NOT an
+      // orphan and must not be rolled back (see below); when the task itself
+      // is no longer bindable the session IS orphaned and rolls back.
+      let sessionClaimedByCommittedTask = false;
       await updateCronTasks(boundWorkspace, (list) => {
+        // Bail when ANY committed task already references the just-minted
+        // session: the scheduled-tasks reuse path can bind a session the
+        // moment the spawn above registers it in the live map, BEFORE this
+        // write commits — without this check the session would be bound to
+        // two tasks (same transcript, conflicting ⏰ renames), and a later
+        // delete of THIS task would close the session out from under the
+        // surviving one. Checked FIRST: a session a committed task references
+        // must never be torn down, whatever this task's own state.
+        if (list.some((t) => t.sessionId === sessionId)) {
+          sessionClaimedByCommittedTask = true;
+          return list;
+        }
         // Another process may have bound or disabled this task between our
         // read and this write-lock acquisition — only attach when the task is
         // still unbound and enabled. Otherwise return unchanged so the
         // orphan spawn is rolled back below.
-        //
-        // Also bail when ANY committed task already references the
-        // just-minted session: the scheduled-tasks reuse path can bind a
-        // session the moment the spawn above registers it in the live map,
-        // BEFORE this write commits — without this check the session would be
-        // bound to two tasks (same transcript, conflicting ⏰ renames), and a
-        // later delete of THIS task would close the session out from under
-        // the surviving one. The orphan rollback below then tears the
-        // unclaimed session back down.
         if (
           !list.some(
             (t) => t.id === task.id && !t.sessionId && t.enabled !== false,
-          ) ||
-          list.some((t) => t.sessionId === sessionId)
+          )
         ) {
           return list;
         }
@@ -237,6 +244,25 @@ async function bindAndNameSessions(
         return result;
       });
       if (!matched) {
+        if (sessionClaimedByCommittedTask) {
+          // A concurrent create committed a reference to the just-minted
+          // session before this write ran — it owns the session now (the
+          // route's symmetric `alreadyBound` branch performs NO rollback for
+          // the same reason). Rolling back here would kill the winner's live
+          // session: in production wiring cleanupSession is
+          // deleteDaemonSessionIfOrphan, whose requireZeroAttaches passes
+          // for a just-minted session, and whose persisted removal cascades
+          // removeTasksForSessions — deleting the winner's committed task.
+          // Leave the session to its owner; THIS task stays unbound on
+          // disk and a later tick retries it with a fresh session.
+          log.debug(
+            'keepalive: session',
+            sessionId,
+            'already committed to another task — leaving it to its owner',
+            task.id,
+          );
+          continue;
+        }
         // Task was deleted between read and write — roll back the orphan.
         throw new Error(`task ${task.id} no longer on disk`);
       }

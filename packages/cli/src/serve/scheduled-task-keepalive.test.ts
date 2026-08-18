@@ -887,11 +887,19 @@ describe('scheduled-task keepalive', () => {
     removeSpy.mockRestore();
   });
 
-  it('rolls back when the just-minted session is already committed to another task', async () => {
+  it('leaves a just-minted session alone when another committed task already references it', async () => {
     // The scheduled-tasks reuse path can bind a session as soon as the spawn
     // registers it in the live map — BEFORE this bind write commits. The
     // in-lock check must notice the committed reference and leave the task
-    // unbound (the orphan spawn rolls back), not double-bind the session.
+    // unbound, not double-bind the session — but it must NOT roll the
+    // session back either: the committed task owns it now. In production
+    // wiring cleanupSession is deleteDaemonSessionIfOrphan, whose
+    // requireZeroAttaches passes for a just-minted session and whose
+    // persisted removal cascades removeTasksForSessions — a rollback here
+    // would kill the winner's live session AND delete the winner's task
+    // from the cron file. (Mirrors the route's alreadyBound branch, which
+    // deliberately performs no rollbackSession.) Reverting the fix puts
+    // 'contested-sess' back in `closed` and calls removeSession for it.
     const closed: string[] = [];
     const removeSpy = vi
       .spyOn(SessionService.prototype, 'removeSession')
@@ -927,10 +935,13 @@ describe('scheduled-task keepalive', () => {
     });
     await ka.tick();
     ka.stop();
-    // The orphaned mint is rolled back...
-    expect(closed).toContain('contested-sess');
-    expect(raceBridge.markSessionCatalogChanged).toHaveBeenCalledTimes(1);
-    // ...and the session stays bound to exactly ONE task: the caller's.
+    // No rollback: the winner's session survives untouched...
+    expect(closed).toEqual([]);
+    expect(removeSpy).not.toHaveBeenCalled();
+    expect(raceBridge.markSessionCatalogChanged).not.toHaveBeenCalled();
+    // ...and the session stays bound to exactly ONE task: the caller's,
+    // while THIS task remains unbound for a later tick to retry with a
+    // fresh session.
     const tasks = await readCronTasks(workspace);
     expect(tasks).toHaveLength(2);
     const toolTask = tasks.find((t) => t.id === 'tool-task');

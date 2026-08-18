@@ -11,6 +11,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
+import * as core from '@qwen-code/qwen-code-core';
 import {
   SessionService,
   Storage,
@@ -897,6 +898,40 @@ describe('scheduled-tasks routes', () => {
     expect(h.bridge.named).toEqual([]);
   });
 
+  it('returns 500 (not session_not_live) when the under-lock re-validation hits a generic error', async () => {
+    // Pins the under-write-lock rethrow contract: ONLY SessionNotFoundError
+    // maps to the 409 session_not_live branch; any other getSessionSummary
+    // failure is transient I/O and must abort the write as a retryable 500.
+    // Coercing generic errors into sessionGoneUnderLock would turn this into
+    // a 409 with the wrong code.
+    h.bridge.liveSessions.set(CALLER_SESSION_ID, {
+      sessionId: CALLER_SESSION_ID,
+      workspaceCwd: h.workspace,
+      hasActivePrompt: false,
+    });
+    let summaryCalls = 0;
+    const originalGetSessionSummary = h.bridge.getSessionSummary.bind(h.bridge);
+    h.bridge.getSessionSummary = (sessionId: string) => {
+      summaryCalls += 1;
+      if (summaryCalls > 1) {
+        // The pre-lock validation passes; the under-lock re-validation hits
+        // a generic (non-SessionNotFoundError) failure.
+        throw new Error('summary backend unavailable');
+      }
+      return originalGetSessionSummary(sessionId);
+    };
+    const res = await create({
+      cron: '0 9 * * *',
+      prompt: 'p',
+      sessionId: CALLER_SESSION_ID,
+    });
+    expect(res.status).toBe(500);
+    expect(res.body.code).toBe('scheduled_tasks_write_failed');
+    expect(await readCronTasks(h.workspace)).toEqual([]);
+    // Caller-provided session — never torn down by this route.
+    expect(h.bridge.closed).toEqual([]);
+  });
+
   it('does not double-bind a just-minted session a concurrent reuse-create committed', async () => {
     // Mint-vs-reuse race: a mint registers its session in the live map
     // (doSpawn) BEFORE its cron write commits, so a concurrent reuse-create
@@ -936,6 +971,65 @@ describe('scheduled-tasks routes', () => {
     // The loser must not kill the session the winner committed to.
     expect(h.bridge.closed).toEqual([]);
     expect(h.cleanupSession).not.toHaveBeenCalled();
+  });
+
+  it('answers session_already_bound (not max_tasks_reached) when both fire at the cap boundary', async () => {
+    // Pins the load-bearing ordering of the under-lock checks: the
+    // duplicate-binding check runs BEFORE the cap check. At the cap boundary
+    // both conditions are observable at once — a mint create whose
+    // just-minted session a concurrent reuse-create committed (as the 50th
+    // task) while its own write was still pending lands exactly at the cap.
+    // The overCap branch calls rollbackSession() while alreadyBound
+    // deliberately does not, so swapping the two checks would tear down the
+    // session the committed winner owns. Swapping them turns the response
+    // into max_tasks_reached and puts the contested session in `closed`.
+    await updateCronTasks(h.workspace, (tasks) => [
+      ...tasks,
+      ...Array.from({ length: 49 }, (_, i) => ({
+        id: `cap-task-${i}`,
+        cron: '0 9 * * *',
+        prompt: `existing ${i}`,
+        recurring: true,
+        createdAt: 1_700_000_000_000,
+        lastFiredAt: 1_700_000_000_000,
+        enabled: true,
+        sessionId: `cap-sess-${i}`,
+      })),
+    ]);
+    h.bridge.spawnOrAttach = async () => {
+      const sessionId = 'sess-cap-contested';
+      h.bridge.spawned.push(sessionId);
+      // Simulate the concurrent reuse-create committing the 50th task —
+      // referencing the just-minted session — while this create's write is
+      // still pending. Under the lock, BOTH the duplicate reference and the
+      // cap are now observable.
+      await updateCronTasks(h.workspace, (tasks) => [
+        ...tasks,
+        {
+          id: 'reuse-task',
+          cron: '0 10 * * *',
+          prompt: 'q',
+          recurring: true,
+          createdAt: 1_700_000_000_000,
+          lastFiredAt: 1_700_000_000_000,
+          enabled: true,
+          sessionId,
+          sessionOwnedByTask: false,
+        },
+      ]);
+      return { sessionId };
+    };
+    const res = await create({ cron: '0 9 * * *', prompt: 'p' });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('session_already_bound');
+    // The loser must not roll back the session the winner committed to.
+    expect(h.bridge.closed).toEqual([]);
+    expect(h.cleanupSession).not.toHaveBeenCalled();
+    const tasks = await readCronTasks(h.workspace);
+    expect(tasks).toHaveLength(50); // at cap, unchanged
+    expect(tasks.find((t) => t.id === 'reuse-task')?.sessionId).toBe(
+      'sess-cap-contested',
+    );
   });
 
   it('rejects an invalid sessionId field with 400 invalid_session_id', async () => {
@@ -1440,6 +1534,47 @@ describe('scheduled-tasks routes', () => {
     const tasks = await readCronTasks(h.workspace);
     expect(tasks).toHaveLength(1);
     expect(tasks[0]?.id).toBe('surviving-task');
+  });
+
+  it('still closes a task-minted session when the DELETE pre-close re-read fails', async () => {
+    // Pins the documented fallback for the pre-close re-read: when the
+    // post-commit re-read itself fails (transient I/O), DELETE keeps the
+    // historical behavior and closes the task-minted session. Letting the
+    // read failure escape turns the 200 into a 500; changing the fallback
+    // to skip the close empties `closed`.
+    await updateCronTasks(h.workspace, (tasks) => [
+      ...tasks,
+      {
+        id: 'owned-task',
+        cron: '0 9 * * *',
+        prompt: 'p',
+        recurring: true,
+        createdAt: 1_700_000_000_000,
+        lastFiredAt: 1_700_000_000_000,
+        enabled: true,
+        sessionId: 'sess-owned',
+        sessionOwnedByTask: true,
+      },
+    ]);
+    // Reject ONLY the post-commit re-read: the removal above commits through
+    // updateCronTasks's module-local read, which the barrel spy does not
+    // intercept.
+    const readSpy = vi.spyOn(core, 'readCronTasks').mockRejectedValue(
+      Object.assign(new Error('EACCES: permission denied'), {
+        code: 'EACCES',
+      }),
+    );
+    const del = await (async () => {
+      try {
+        return await request(h.app).delete('/scheduled-tasks/owned-task');
+      } finally {
+        readSpy.mockRestore();
+      }
+    })();
+    expect(del.status).toBe(200);
+    expect(del.body).toEqual({ deleted: true, id: 'owned-task' });
+    expect(h.bridge.closed).toEqual(['sess-owned']);
+    expect(await readCronTasks(h.workspace)).toEqual([]);
   });
 
   it('returns 500 (not 404) when the persisted-session probe hits a filesystem failure', async () => {
