@@ -42,6 +42,8 @@
 
 零配置时 `fixedPolicies` 为空,预处理完全不运行——只有强制的传输守卫(见下文)在媒体超出上传通道限制时兜底。
 
+> **预设模板**:设计文档 4.1–4.9 的 9 条策略(长视频 ASR 链、大图降采样、上下文紧张抽帧、长音频转写、文档图 OCR、大视频降分辨率、三模态 >10MB 超限兜底)有一份开箱即用的预设 [`omni-fixed-policies-preset.json`](./omni-fixed-policies-preset.json)——把其中的 `omni` 对象合并进 settings.json 即可,策略已按 priority 排好执行顺序(链式派生先于条件分支,超限兜底最后),并附带 ASR 链所需的超时与预算放大。该预设由 `packages/core/src/omni/policy/preset-validation.test.ts` 持续验证可正常归一化。
+
 ---
 
 ## 配置总览
