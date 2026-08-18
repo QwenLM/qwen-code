@@ -44,6 +44,7 @@ import {
   hashWorktreeFiles,
   readLocalCache,
   stateIdOf,
+  attributeStateId,
   type LocalCacheCandidate,
 } from './lib/local-anchor.js';
 import {
@@ -104,6 +105,8 @@ function anchorRefusalReason(
   target: string,
   skippedCount: number,
   treeHeldStill: boolean,
+  /** This capture's attribute-state digest — see `attributeStateId`. */
+  attrId: string,
 ): string | null {
   if (!treeHeldStill) {
     // The hashes this scoping would compare against were computed over a tree
@@ -142,6 +145,24 @@ function anchorRefusalReason(
     // A cache belonging to another target (a different file-path review)
     // describes a different reviewed scope entirely.
     return `the cache belongs to target ${display(cache.target.slice(0, 64))}, not ${display(target)}`;
+  }
+  if (cache.attrId === undefined || cache.attrId !== attrId) {
+    // What a round READS is the rendering, and `.gitattributes`,
+    // `.git/info/attributes` and `core.attributesFile` decide it — none of
+    // them visible to a `<mode>:<blob>` file identity. A file whose bytes
+    // never moved can go from "Binary files … differ" to a readable text
+    // section, and the scoping would slice that section out: the first round
+    // that CAN read the file never does. Two of the three sources are not in
+    // the worktree, so the delta is EMPTY in that case and the round would
+    // report "no changes" over a capture it had never read.
+    //
+    // An absent digest is a cache written before the field, and reading it as
+    // "no attribute state" would compare equal to a repository that genuinely
+    // has none — the same hole by another route. One full round after an
+    // upgrade is the price.
+    return cache.attrId === undefined
+      ? 'the cache predates the attribute-state digest'
+      : 'the attribute state that decides how these files render has changed';
   }
   if (cache.stateId !== stateIdOf(cache.headSha, cache.files)) {
     // Integrity: a shape-valid cache whose hashes were edited without
@@ -201,12 +222,18 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     includeUntracked: args.untracked,
   });
   const treeHeldStill = capture.diff.equals(recapture.diff);
+  // Computed once and used twice — written into the candidate this round
+  // promotes, and compared against the cached one below. Two calls could
+  // disagree if an attributes file moved between them, and the value that
+  // reaches disk must be the value the gate ruled on.
+  const attrId = attributeStateId(capture.repoRoot, planPaths);
   const candidate: LocalCacheCandidate = {
     v: 1,
     target,
     headSha,
     files: hashes,
     stateId: stateIdOf(headSha, hashes),
+    attrId,
   };
   const cacheCandidatePath = tmpFile(target, 'cache-candidate.json');
   if (treeHeldStill) {
@@ -233,6 +260,7 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
       target,
       capture.skipped.length,
       treeHeldStill,
+      attrId,
     );
     if (refusal !== null) {
       writeStderrLine(
