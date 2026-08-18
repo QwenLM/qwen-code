@@ -210,6 +210,13 @@ describe('persistRecoveredLedger', () => {
           round: 7,
           reviewId: 100,
           commitId: 'b'.repeat(40),
+          // The volumes belong to round 7. This branch advances the counter
+          // past it, so they must go the way the anchor and the age
+          // reference go — kept, they would attribute this account's round-7
+          // posting count to the foreign round that won recovery, and the
+          // next compose would stamp it as `prevPosted`.
+          posted: 4,
+          prevPosted: 2,
         }),
       );
       persistRecoveredLedger(

@@ -275,6 +275,7 @@ export function serializeLedger(ledger: Ledger): string {
     findings: LedgerFinding[],
     dropped: number,
     anchor: boolean,
+    volume: boolean,
   ): string => {
     const payload: Ledger = {
       v: 1,
@@ -283,15 +284,18 @@ export function serializeLedger(ledger: Ledger): string {
       round: Math.min(ledger.round, LEDGER_MAX_ROUND),
       findings,
     };
-    // The volume telemetry rides before the anchor block and OUTSIDE its
-    // truncation rule: it qualifies no range, so a partial work list says
-    // nothing about it. Bounded like every other written field — a
-    // non-integer or negative count is not a volume, and the cap keeps a
-    // forged marker from spending the byte budget on digits.
-    const postedOut = volumeOf(ledger.posted);
-    if (postedOut !== undefined) payload.posted = postedOut;
-    const prevPostedOut = volumeOf(ledger.prevPosted);
-    if (prevPostedOut !== undefined) payload.prevPosted = prevPostedOut;
+    // The volume telemetry rides OUTSIDE the truncation rule that governs the
+    // anchor — it qualifies no range, so a partial work list says nothing
+    // about it — but it is the FIRST thing the byte budget sheds (see the
+    // cascade below). Bounded like every other written field: a non-integer
+    // or negative count is not a volume, and the cap keeps a forged marker
+    // from spending the byte budget on digits.
+    if (volume) {
+      const postedOut = volumeOf(ledger.posted);
+      if (postedOut !== undefined) payload.posted = postedOut;
+      const prevPostedOut = volumeOf(ledger.prevPosted);
+      if (prevPostedOut !== undefined) payload.prevPosted = prevPostedOut;
+    }
     if (dropped > 0) payload.dropped = dropped;
     // A truncated list must not certify a range: the dropped entries reference
     // code at or before the anchored head, and a next round scoped to
@@ -325,7 +329,18 @@ export function serializeLedger(ledger: Ledger): string {
   // 51 findings in, 24 kept, and it said 26 missing.
   const total = ledger.findings.length;
   let kept = capped.length;
-  let marker = render(capped, total - kept, true);
+  let marker = render(capped, total - kept, true, true);
+  if (marker.length > LEDGER_MAX_BYTES) {
+    // The VOLUME sheds first — it is the only thing here that decides
+    // nothing, and its absence is a documented, free reading ("not
+    // recorded"). Everything below it buys something the next round spends:
+    // the anchor scopes that round's diff, and a finding is a ruling it
+    // owes. Written unconditionally, ~27 bytes of telemetry could push a
+    // marker that fit WITH its anchor over the cap and make the re-render
+    // pay with the anchor instead — trading a full-diff re-review for a
+    // trend line.
+    marker = render(capped, total - kept, true, false);
+  }
   if (marker.length > LEDGER_MAX_BYTES) {
     // Shed the anchor PAIR before any finding: `dropped` withholds the pair
     // the moment a finding goes anyway, so the old order paid a ruling from
@@ -333,11 +348,11 @@ export function serializeLedger(ledger: Ledger): string {
     // first keeps the whole work list — recovery degrades to the full diff,
     // which the findings survive — and findings start going only when the
     // anchorless form still exceeds the cap.
-    marker = render(capped, total - kept, false);
+    marker = render(capped, total - kept, false, false);
   }
   while (marker.length > LEDGER_MAX_BYTES && kept > 0) {
     kept--;
-    marker = render(capped.slice(0, kept), total - kept, false);
+    marker = render(capped.slice(0, kept), total - kept, false, false);
   }
   return marker;
 }

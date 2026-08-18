@@ -527,6 +527,48 @@ describe('the volume fields — telemetry across the untrusted boundary', () => 
     expect(l.prevPosted).toBe(LEDGER_MAX_VOLUME);
   });
 
+  it('sheds itself before the anchor when the byte budget binds', () => {
+    // The reported window: a ledger that fits WITH its anchor, plus the ~27
+    // bytes of volume, crosses the cap — and the re-render must pay with the
+    // telemetry, not with the anchor that scopes the next round's diff.
+    // Search the shape space for a marker sitting just under the budget with
+    // its anchor intact, then assert adding volume does not cost the anchor.
+    let windows = 0;
+    for (let n = 24; n <= 32; n++) {
+      for (let title = 20; title <= 40; title++) {
+        const findings = Array.from({ length: n }, (_, i) => ({
+          id: `R3-${i + 1}`,
+          sev: 'S' as const,
+          file: `src/${'p'.repeat(LEDGER_MAX_FILE - 10)}${i}.ts`.slice(
+            0,
+            LEDGER_MAX_FILE,
+          ),
+          title: 't'.repeat(title),
+        }));
+        const bare: Ledger = {
+          v: 1,
+          round: 3,
+          findings,
+          sha: 'deadbeef00112233',
+          model: 'qwen3.8-max',
+        };
+        const withoutVolume = parseLedger(serializeLedger(bare));
+        // Only the windows where the anchor survives without volume can
+        // regress; anywhere else the anchor was already gone.
+        if (!withoutVolume?.sha || withoutVolume.dropped) continue;
+        windows++;
+        const withVolume = parseLedger(
+          serializeLedger({ ...bare, posted: 12, prevPosted: 9 }),
+        )!;
+        expect(withVolume.sha).toBe('deadbeef00112233');
+        expect(withVolume.findings).toHaveLength(withoutVolume.findings.length);
+      }
+    }
+    // The sweep must actually have found the pressure region, or the
+    // assertions above are vacuous.
+    expect(windows).toBeGreaterThan(0);
+  });
+
   it('survives a truncated work list, unlike the anchor pair', () => {
     // The anchor is withheld when the list is partial because a partial list
     // cannot certify a range. A volume certifies nothing, and a trend that
