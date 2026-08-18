@@ -507,6 +507,66 @@ prune` removes settled items past a retention window. Deliberately manual in v1:
 deletion of a record another participant may still be reading is a concurrency problem worth
 not having yet.
 
+### 2.9 What the items contain
+
+`task` already exists as `SwarmTask` and is unchanged. The two new items follow its shape —
+flat JSON, one file, `schemaVersion` first — so the same atomic-write and lock discipline
+applies without special cases.
+
+```jsonc
+// asks/{id}.json
+{
+  "schemaVersion": 1,
+  "id": "a-7", // short and typeable: a human enters this in a command
+  "from": "api-worker",
+  "to": "web-worker",
+  "question": "does the client depend on /v2/orders.status being a string?",
+  "aboutTask": "t-3", // optional
+  "state": "open", // open | answered | declined | timeout
+  "createdAt": 1786168326693,
+  "expiresAt": 1786168386693, // see below
+  "answer": null, // set when answered
+  "reason": null, // set when declined
+  "settledAt": null,
+}
+```
+
+```jsonc
+// decisions/{id}.json
+{
+  "schemaVersion": 1,
+  "id": "d-2",
+  "kind": "approval", // approval | acceptance | adjudication
+  "raisedBy": "api-worker",
+  "about": "t-3", // optional for approval, required for the other two
+  "question": "accept the worktree result for t-3?",
+  "state": "open", // open | approved | rejected
+  "createdAt": 1786168326693,
+  "resolvedAt": null,
+  "note": null, // the human's reason, when they give one
+}
+```
+
+Three properties are doing real work here.
+
+**`expiresAt` makes `timeout` terminal without a sweeper.** Any reader that sees `state:
+"open"` and `now > expiresAt` treats the ask as timed out. No background job has to walk the
+directory and rewrite files, which matters because a fetch-based system has no daemon
+guaranteed to be running — the one process you can count on is the one currently asking.
+Settling is lazy: the file is rewritten when someone next touches it, and until then every
+reader computes the same answer.
+
+**`decision` has no expiry, deliberately.** A decision that silently expires is strictly worse
+than one that waits: it converts "a person has not looked yet" into "the system decided for
+them", which is the exact authority the design refuses to let anything but a human hold
+(§2.4). Decisions stall visibly, and §0.1 already lists that as the cost of the authority
+layer.
+
+**IDs are short because humans type them.** `a-7`, `d-2`, `t-3` go into
+`qwen decision resolve d-2 --approve`. UUIDs would make the CLI unusable by hand, and the CLI
+is the contract (§0.1) — a surface that is painful for a person is a surface that will be
+wrapped, and the wrapper becomes the real contract.
+
 ## 3. Flows
 
 ### 3.1 Joining the board
