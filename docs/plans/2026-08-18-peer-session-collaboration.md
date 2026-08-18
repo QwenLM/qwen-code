@@ -16,8 +16,11 @@ directories, discover each other and share work.
 
 The design rests on one relocation:
 
-> **Authority moves from `TeamManager`'s in-memory state to the files under `~/.qwen/`.
-> Sockets become an optimization, never a correctness requirement.**
+> **The source of truth moves from `TeamManager`'s in-memory state to the files under
+> `~/.qwen/`. Sockets become an optimization, never a correctness requirement.**
+
+("Authority" is reserved throughout for the human plane (§0.1) — the files are
+_authoritative_ about state, but they decide nothing.)
 
 Everything else follows. Once the durable board is authoritative rather than a mirror,
 cross-process participation is not a feature that must be built — it is what remains when
@@ -43,19 +46,19 @@ implicit is what produces a leader agent that must adjudicate, and therefore a b
 
 ### 0.2 Settled product decisions
 
-| Decision            | Choice                                                                                                             | Rejected alternative and why                                                                                                 |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------- |
-| **Topology**        | Peer. `leader` is a **role** — transferable, and validly empty                                                     | Owner-leader: makes an independently started session a second-class observer, which is the exact case this design exists for |
-| **Membership**      | **None.** A session is addressable because it registered, not because it joined (§2.2)                             | Any join step: it makes an already-running session ask permission to be talked to, which is the case this design exists for  |
-| **Consent**         | Receiver-side gate with approval-mode parity, fail-closed ([#8730](https://github.com/QwenLM/qwen-code/pull/8730)) | Sender-side authorization: `from` is unauthenticatable on this transport (§2.5), so only the receiver can decide safely      |
-| **Write conflicts** | Out of scope by construction: peers collaborate **across** workspaces                                              | Path-claim protocol: a joined peer's permissions were fixed by whoever started it; no member can demote another              |
-| **Heterogeneity**   | Format stays vendor-neutral (it already is), but **v1 publishes no compatibility promise**                         | Either designing _for_ foreign agents (premature) or actively excluding them (costs work, buys nothing)                      |
+| Decision            | Choice                                                                                                             | Rejected alternative and why                                                                                                |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------- |
+| **Topology**        | Peer, with **no leader in the routing path** (§2.4). Information goes to a peer, authority to the human            | Leader-as-router: it becomes the bottleneck and spends its context coordinating instead of working                          |
+| **Membership**      | **None.** A session is addressable because it registered, not because it joined (§2.2)                             | Any join step: it makes an already-running session ask permission to be talked to, which is the case this design exists for |
+| **Consent**         | Receiver-side gate with approval-mode parity, fail-closed ([#8730](https://github.com/QwenLM/qwen-code/pull/8730)) | Sender-side authorization: `from` is unauthenticatable on this transport (§2.5), so only the receiver can decide safely     |
+| **Write conflicts** | Out of scope by construction: peers collaborate **across** workspaces                                              | Path-claim protocol: a peer's permissions were fixed by whoever started it, so no participant can demote another            |
+| **Heterogeneity**   | Format stays vendor-neutral (it already is), but **v1 publishes no compatibility promise**                         | Either designing _for_ foreign agents (premature) or actively excluding them (costs work, buys nothing)                     |
 
 Two consequences worth stating plainly:
 
 - The consent gate is **load-bearing, not polish**. Nothing may deliver a cross-session
-  message before it lands. This is [#8730](https://github.com/QwenLM/qwen-code/pull/8730)'s own
-  receive-before-send argument and it is adopted verbatim.
+  item before it lands. This is [#8730](https://github.com/QwenLM/qwen-code/pull/8730)'s own
+  receive-before-send argument, adopted on the narrower surface §2.5 describes.
 - Because peers collaborate across workspaces, the single-writer invariant that
   `/coordinate` relies on is **not inherited**. Peer collaboration is advisory and
   read-heavy by construction. Same-checkout multi-writer stays unsupported (§4).
@@ -211,26 +214,48 @@ participation fall out for free. They are the same change.**
 
 ## 2. Target architecture
 
-### 2.1 Authority
+### 2.1 The four planes
 
 ```
-                       ┌──────────────────────────────────────┐
-   discovery (hint)    │      COORDINATION  (authoritative)   │
-   ~/.qwen/sessions/   │   tasks · inboxes · team config      │
-        │              │   files + proper-lockfile + atomic   │
-        │              └──────────────────────────────────────┘
-        │                    ▲              ▲              ▲
-        │           poll/write│     poll/write│    poll/write│
-        ▼                     │              │              │
-   ┌─────────┐         ┌──────────┐   ┌──────────┐   ┌──────────┐
-   │ session │         │ session  │   │ daemon   │   │ scheduled│
-   │   A     │◀───────▶│    B     │   │ session  │   │  agent   │
-   └─────────┘  UDS    └──────────┘   └──────────┘   └──────────┘
-                (wake signal only — never the source of truth)
+                     ┌──────────────────────────────┐
+                     │            HUMAN             │   AUTHORITY
+                     │     resolves `decision`      │   final — no agent
+                     └──────────────▲───────────────┘   resolves one
+                                    │
+                    approval · acceptance · adjudication
+                                    │
+  ┌─────────────────────────────────┴─────────────────────────────────┐
+  │                   COORDINATION — source of truth                  │
+  │        ~/.qwen/     `task`: owner · status · dependencies         │
+  │             files + proper-lockfile + atomic write                │
+  └──▲───────────────▲─────────────────▲──────────────────▲───────────┘
+     │ claim/update  │                 │                  │  pull only
+  ┌──┴──────────┐ ┌──┴──────────┐ ┌────┴────────┐ ┌───────┴─────┐
+  │  session A  │ │  session B  │ │   daemon    │ │   foreign   │
+  │             │ │             │ │   session   │ │    agent    │
+  └──┬──────────┘ └──┬──────────┘ └─────────────┘ └──────▲──────┘
+     │  ask ──▶      │                                   │
+     │  ◀── answer   │                          qwen ask list --wait
+     └───────────────┘                          qwen task claim …
+
+     TRANSPORT — UDS wake frame           DISCOVERY — ~/.qwen/sessions/<pid>.json
+     optimization only; losing it         registered ⇒ addressable
+     costs latency, never an item
 ```
 
-A participant is anything that can (a) read and write the board under the lock protocol
-and (b) be woken. (b) is optional: polling is a correct, if slower, substitute.
+Read it as three claims:
+
+1. **Only the human resolves a `decision`.** No arrow returns from an agent to that box.
+   That is what keeps a leader agent out of the routing path (§2.4).
+2. **Every participant reaches the board directly.** No one proxies for anyone, which is
+   why an independently started session is a full participant rather than an observer.
+3. **The right-hand column is the heterogeneity test.** A foreign agent has no inbound
+   arrow — nothing can push to it — but it reaches the board through the same commands.
+   Any capability that cannot be drawn as an arrow _from_ that box does not exist for it.
+
+A participant is anything that can (a) read and write the board under the lock protocol and
+(b) be woken. (b) is optional: polling is a correct, if slower, substitute — which is
+precisely how the foreign column participates.
 
 ### 2.2 Vocabulary
 
@@ -304,8 +329,9 @@ excludes every agent we did not write.**
 ### 2.3 Identity
 
 `identity.ts` resolves identity from AsyncLocalStorage, with the predicate literally named
-`isInProcessTeammate()`. A joined peer has no such ambient context. Identity becomes:
-registry record (pid, sessionId, cwd) + self-declared name, recorded at join.
+`isInProcessTeammate()`. An independently started session has no such ambient context.
+Identity becomes: registry record (pid, sessionId, cwd) + self-declared name, written at
+registration.
 
 This is a **claim, not an authentication** — see §2.5. It is adequate because authorization
 is enforced at the receiver, never derived from the sender's assertion.
@@ -471,34 +497,41 @@ ignored" — very different signals for deciding whether to follow up.
 
 ### 3.5 Reporting
 
-A teammate's completion is **already** a board state transition. The leader does not need
-a message to learn it. `send_message` is therefore reserved for what a task record cannot
-express: blockers, questions, material interim findings.
+Completion is **already** a board state transition, so nobody has to be told. What a task
+record cannot express splits by what it needs rather than collapsing into one channel: a
+question goes out as an `ask` (§2.2), and anything needing authority is raised as a
+`decision` (§2.4). Interim findings are notes on the task — they belong to the work, not to
+a conversation.
 
-This is what #9284 landed as prompt wording. Here it becomes the architecture that makes
-the wording true.
+This is what #9284 landed as prompt wording. Here it becomes the structure that makes the
+wording true: with no general-purpose message, "just report it" has nowhere to go except
+the right one.
 
 ### 3.6 Departure and crash
 
-Clean exit: `team_leave`, release tasks, unlink registry record.
-Crash: registry record is stale → liveness check fails → membership reaped; owned tasks
-released after the 5 s lock stale window. No peer's death blocks any other peer.
+Clean exit: release owned tasks, unlink the registry record. There is nothing to leave —
+departure is deregistration (§2.2).
+
+Crash: the registry record is stale → the liveness check fails → the session stops being
+addressable; owned tasks are released after the 5 s lock stale window, and any `ask`
+outstanding against it reaches `timeout` rather than hanging. No peer's death blocks
+another.
 
 ## 4. Explicit non-goals
 
 Scope: what **this design** does not build. Not a ruling on what the project should build —
 other work may cover any of these, and §1.6 records a series that covers the first two.
 
-| Not building                             | Because                                                                                    |
-| ---------------------------------------- | ------------------------------------------------------------------------------------------ |
-| PTY attach, terminal multiplexing, panes | herdr does this for 17+ CLIs, Apache-2.0, and measured faster (§8)                         |
-| Hosting other vendors' processes         | That is becoming herdr. We publish a format; we host nothing                               |
-| A new roster UI                          | This design reuses `ui/components/agent-view/`                                             |
-| Remote / SSH / cross-machine             | Same-uid filesystem permissions **are** the security model. Off-machine voids it           |
-| Broadcast (`to: "*"`)                    | #8724 removes it rather than extending it to N processes                                   |
-| Same-checkout multi-writer               | A joined peer's permissions were fixed by whoever started it; no member can demote another |
-| Central completion guarantee             | Peers decide what to claim. Unclaimed work stays visible on the board, not forced          |
-| Windows in the first cut                 | Follows #8724. The IPC path is abstracted so named pipes can be added                      |
+| Not building                             | Because                                                                                  |
+| ---------------------------------------- | ---------------------------------------------------------------------------------------- |
+| PTY attach, terminal multiplexing, panes | herdr does this for 17+ CLIs, Apache-2.0, and measured faster (§8)                       |
+| Hosting other vendors' processes         | That is becoming herdr. We publish a format; we host nothing                             |
+| A new roster UI                          | This design reuses `ui/components/agent-view/`                                           |
+| Remote / SSH / cross-machine             | Same-uid filesystem permissions **are** the security model. Off-machine voids it         |
+| Broadcast (`to: "*"`)                    | #8724 removes it rather than extending it to N processes                                 |
+| Same-checkout multi-writer               | A peer's permissions were fixed by whoever started it; no participant can demote another |
+| Central completion guarantee             | Peers decide what to claim. Unclaimed work stays visible on the board, not forced        |
+| Windows in the first cut                 | Follows #8724. The IPC path is abstracted so named pipes can be added                    |
 
 ## 5. Build plan
 
