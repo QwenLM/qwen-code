@@ -138,6 +138,14 @@ export interface DaemonSessionProviderProps {
   maxQueued?: number;
   /** Maximum normalized transcript blocks retained in memory. */
   maxBlocks?: number;
+  /**
+   * Maximum estimated bytes of transcript blocks retained in memory.
+   * Trimming evicts oldest blocks until the estimate is back under this
+   * budget; a block-count window alone is not a memory ceiling because
+   * blocks can carry large raw tool payloads. Defaults to the transcript
+   * store's built-in budget.
+   */
+  maxRetainedBytes?: number;
   /** Latest persisted records requested during an existing-session load. */
   historyPageSize?: number;
   /** Keep the full subagent transcript, or retain only bounded root summaries. */

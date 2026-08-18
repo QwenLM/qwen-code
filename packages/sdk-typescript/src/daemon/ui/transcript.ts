@@ -1571,6 +1571,10 @@ function trimTranscriptState(
   truncationCallbacks.get(state)?.({
     kind: 'blocks',
     oldestRetainedRecordId: oldestRetainedBlock?.sourceRecordIds?.[0],
+    blockCount: state.blocks.length,
+    retainedBytes: state.retainedBytes,
+    maxBlocks: state.maxBlocks,
+    maxRetainedBytes: state.maxRetainedBytes,
   });
   return state;
 }

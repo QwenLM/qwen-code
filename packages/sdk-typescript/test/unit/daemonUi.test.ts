@@ -1333,10 +1333,12 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(onTruncation).not.toHaveBeenCalled();
     store.dispatch(toolEvent(2));
     expect(onTruncation).toHaveBeenCalledTimes(1);
-    expect(onTruncation).toHaveBeenCalledWith({
-      kind: 'blocks',
-      oldestRetainedRecordId: 'record-1',
-    });
+    expect(onTruncation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'blocks',
+        oldestRetainedRecordId: 'record-1',
+      }),
+    );
 
     onTruncation.mockClear();
     store.reset({ maxBlocks: 2 });
@@ -1344,10 +1346,12 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(onTruncation).not.toHaveBeenCalled();
     store.dispatch(toolEvent(5));
     expect(onTruncation).toHaveBeenCalledTimes(1);
-    expect(onTruncation).toHaveBeenCalledWith({
-      kind: 'blocks',
-      oldestRetainedRecordId: 'record-4',
-    });
+    expect(onTruncation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'blocks',
+        oldestRetainedRecordId: 'record-4',
+      }),
+    );
   });
 
   it('counts every image merged into a user block against the retention budget', () => {

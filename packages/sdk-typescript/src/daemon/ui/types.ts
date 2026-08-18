@@ -1083,6 +1083,15 @@ export interface DaemonTranscriptTruncationDetail {
    * pagination anchors with retention trimming.
    */
   oldestRetainedRecordId?: string;
+  /**
+   * Set for `kind: 'blocks'`: the post-trim window occupancy. Lets consumers
+   * decide whether a previously rejected history page would now be admitted,
+   * without reading a snapshot that may lag the in-flight dispatch.
+   */
+  blockCount?: number;
+  retainedBytes?: number;
+  maxBlocks?: number;
+  maxRetainedBytes?: number;
 }
 
 export interface DaemonTranscriptStore {

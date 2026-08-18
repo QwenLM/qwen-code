@@ -161,6 +161,17 @@ interface TranscriptHistoryMaterialization {
   permissionBlockByRequestId: Record<string, string>;
 }
 
+type TranscriptHistoryAdmission =
+  | { admitted: true; materialization: TranscriptHistoryMaterialization }
+  | {
+      admitted: false;
+      reason: 'count' | 'bytes';
+      pageBlocks: number;
+      pageBytes: number;
+      /** True when the page can never be admitted, even into an empty window. */
+      impossible: boolean;
+    };
+
 const SESSION_TRANSCRIPT_PAGINATION_FEATURE = 'session_transcript_pagination';
 const CLIENT_IDENTITY_FEATURE = 'client_identity';
 const WORKSPACE_ACP_PREHEAT_FEATURE = 'workspace_acp_preheat';
@@ -263,7 +274,7 @@ function materializeTranscriptHistory(
   current: DaemonTranscriptState,
   events: DaemonUiEvent[],
   maxBlocks: number,
-): TranscriptHistoryMaterialization | undefined {
+): TranscriptHistoryAdmission {
   // Drop fetched events whose source records are already displayed.
   // `beforeRecordId` pagination is exclusive of the anchor but the anchor
   // can sit inside the retained window (e.g. the daemon's transcript
@@ -296,26 +307,48 @@ function materializeTranscriptHistory(
   });
   historyStore.dispatch(freshEvents);
   const history = historyStore.getSnapshot();
-  if (history.blocks.length + current.blocks.length > maxBlocks) {
-    return undefined;
-  }
-  let retainedBytes = 0;
+  let pageBytes = 0;
   for (const block of history.blocks) {
-    retainedBytes += estimateDaemonTranscriptBlockBytes(block);
+    pageBytes += estimateDaemonTranscriptBlockBytes(block);
   }
-  // Byte-budget admission: an over-budget merge stays untrimmed while the
-  // session is idle, and the next live trim evicts the freshly prepended
-  // oldest records, which the exclusive pagination anchor can never
-  // re-fetch — a permanent silent gap. Reject atomically like the block cap.
-  if (current.retainedBytes + retainedBytes > current.maxRetainedBytes) {
-    return undefined;
+  const pageBlocks = history.blocks.length;
+  // Count admission: an over-count merge stays untrimmed while the session
+  // is idle, and the next live trim evicts the freshly prepended oldest
+  // records, which the exclusive pagination anchor can never re-fetch — a
+  // permanent silent gap. Reject atomically.
+  if (pageBlocks + current.blocks.length > maxBlocks) {
+    return {
+      admitted: false,
+      reason: 'count',
+      pageBlocks,
+      pageBytes,
+      // A page that alone exceeds the whole block window can never be
+      // admitted, in any occupancy state.
+      impossible: pageBlocks > maxBlocks,
+    };
+  }
+  // Byte-budget admission: same silent-gap hazard as the count cap — an
+  // over-budget merge is evicted oldest-first by the next live trim.
+  if (current.retainedBytes + pageBytes > current.maxRetainedBytes) {
+    return {
+      admitted: false,
+      reason: 'bytes',
+      pageBlocks,
+      pageBytes,
+      // A page that alone exceeds the whole byte budget can never be
+      // admitted, even into an empty window.
+      impossible: pageBytes > current.maxRetainedBytes,
+    };
   }
   return {
-    blocks: history.blocks,
-    nextOrdinal: history.nextOrdinal,
-    retainedBytes,
-    toolBlockByCallId: history.toolBlockByCallId,
-    permissionBlockByRequestId: history.permissionBlockByRequestId,
+    admitted: true,
+    materialization: {
+      blocks: history.blocks,
+      nextOrdinal: history.nextOrdinal,
+      retainedBytes: pageBytes,
+      toolBlockByCallId: history.toolBlockByCallId,
+      permissionBlockByRequestId: history.permissionBlockByRequestId,
+    },
   };
 }
 
@@ -548,6 +581,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     createSessionRequest,
     maxQueued = 1024,
     maxBlocks = DEFAULT_MAX_BLOCKS,
+    maxRetainedBytes,
     historyPageSize,
     subagentTranscriptMode = 'full',
     suppressOwnUserEcho = true,
@@ -602,6 +636,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     loading: boolean;
     capacityReached: boolean;
     paginationError: boolean;
+    /**
+     * Footprint of the last page rejected by admission. The eviction
+     * re-open of the capacity latch consults it so the affordance only
+     * reappears once enough capacity has been freed for that page to be
+     * admitted; undefined when the latch came from replay saturation.
+     */
+    rejectedPage?: { blocks: number; bytes: number };
   }>({
     hasMore: false,
     loading: false,
@@ -624,6 +665,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     () =>
       createDaemonTranscriptStore({
         maxBlocks,
+        ...(maxRetainedBytes !== undefined ? { maxRetainedBytes } : {}),
         retainSubagentBlocks: subagentTranscriptMode === 'full',
         onTruncation: (detail) => {
           if (detail.kind !== 'blocks') return;
@@ -656,6 +698,32 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             if (!paginationSupported || !anchored) {
               return;
             }
+            // Admission-headroom gate: only re-open when the rejected page
+            // would actually be admitted now. A count trim restores the
+            // window to exactly maxBlocks (zero headroom), so without this
+            // check every live block during streaming would re-open the
+            // latch into an immediate fetch/reject cycle. Caps are stable
+            // across a trim; the snapshot only backs detail-field fallbacks.
+            const windowCaps = store.getSnapshot();
+            const postTrimBlockCount =
+              detail.blockCount ?? windowCaps.blocks.length;
+            const postTrimRetainedBytes =
+              detail.retainedBytes ?? windowCaps.retainedBytes;
+            const blockCap = detail.maxBlocks ?? windowCaps.maxBlocks;
+            const byteCap =
+              detail.maxRetainedBytes ?? windowCaps.maxRetainedBytes;
+            const rejected = history.rejectedPage;
+            // A footprint-less latch (replay saturation) re-opens only on
+            // real count headroom: while the count window is saturated,
+            // count admission rejects every page regardless of bytes.
+            const admissionHeadroom = rejected
+              ? rejected.blocks + postTrimBlockCount <= blockCap &&
+                rejected.bytes + postTrimRetainedBytes <= byteCap
+              : postTrimBlockCount < blockCap;
+            if (!admissionHeadroom) {
+              return;
+            }
+            history.rejectedPage = undefined;
             history.hasMore = true;
             history.capacityReached = false;
             setTranscriptHistoryState({
@@ -667,7 +735,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           }
         },
       }),
-    [maxBlocks, subagentTranscriptMode],
+    [maxBlocks, maxRetainedBytes, subagentTranscriptMode],
   );
   const eventStreamRef = useRef<
     | {
@@ -1754,6 +1822,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                       maxBlocks: replayMaxBlocks,
                       retainSubagentBlocks:
                         subagentTranscriptModeRef.current === 'full',
+                      // Rebuild under the same byte budget as the live store
+                      // so an oversized replay is trimmed to the same ceiling.
+                      ...(maxRetainedBytes !== undefined
+                        ? { maxRetainedBytes }
+                        : {}),
                       // The count cap and the default byte budget can both
                       // evict mid-rebuild; observe either so the pagination
                       // anchor and capacity indicator reconcile below.
@@ -2912,6 +2985,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     sessionScope,
     maxQueued,
     maxBlocks,
+    maxRetainedBytes,
     store,
     restoreSessionId,
     restoreWorkspaceCwd,
@@ -3304,7 +3378,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             );
           }
         }
-        const historyMaterialization =
+        const admission =
           uiEvents.length > 0
             ? materializeTranscriptHistory(
                 store.getSnapshot(),
@@ -3312,10 +3386,30 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 maxBlocks,
               )
             : undefined;
-        if (uiEvents.length > 0 && !historyMaterialization) {
+        if (admission && !admission.admitted) {
+          if (admission.impossible) {
+            // A page that alone exceeds the whole window (block count or
+            // byte budget) can never be admitted in any occupancy state.
+            // Surface a terminal pagination failure instead of a re-openable
+            // capacity latch — otherwise every later trim would re-offer the
+            // same doomed page, and everything older than it would stay
+            // unreachable with no terminal signal.
+            history.rejectedPage = undefined;
+            terminalFailure = true;
+            throw new Error(
+              'Earlier history page exceeds the transcript retention window',
+            );
+          }
           history.hasMore = false;
           history.loading = false;
           history.capacityReached = true;
+          // Remember the rejected page's footprint: the eviction re-open
+          // must only fire once enough capacity has been freed for THIS page
+          // to be admitted, or streaming trims churn fetch/reject/re-render.
+          history.rejectedPage = {
+            blocks: admission.pageBlocks,
+            bytes: admission.pageBytes,
+          };
           setTranscriptHistoryState({
             hasMore: false,
             loading: false,
@@ -3324,7 +3418,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           });
           return;
         }
+        const historyMaterialization = admission?.admitted
+          ? admission.materialization
+          : undefined;
         if (historyMaterialization) {
+          history.rejectedPage = undefined;
           store.reset(
             applyTranscriptHistory(store.getSnapshot(), historyMaterialization),
           );
