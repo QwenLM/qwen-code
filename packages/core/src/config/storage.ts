@@ -408,8 +408,10 @@ export class Storage {
    * once the marker has aged past the grace window, so a transiently
    * absent mount gets its chance to come back and a live-but-idle
    * temp-rooted session is never removed on a single sweep. Entries
-   * without any readable records are only removed when completely empty
-   * and older than one day.
+   * without any readable records are only removed when they hold no
+   * content beyond sweep bookkeeping and qwen-owned residue (workflow
+   * snapshots/journals, subagent transcripts) and are older than one
+   * day.
    *
    * `onBeforeRemove` runs before each deletion so callers can salvage
    * derived state (e.g. usage summaries) from the transcripts; its
@@ -496,9 +498,10 @@ export class Storage {
           }
           continue;
         }
-        // No readable records: only remove if the entry is completely
-        // empty and stale, so a concurrently starting session is never
-        // hit mid-write.
+        // No readable records: only remove if the entry holds nothing
+        // beyond sweep bookkeeping and qwen-owned residue, and is
+        // stale, so a concurrently starting session is never hit
+        // mid-write.
         const stat = fs.statSync(entryPath);
         if (
           stat.isDirectory() &&
@@ -623,7 +626,10 @@ export class Storage {
    * sidecars contribute `work_dir`; worktree sidecars contribute
    * `worktreePath` (a sidecar-only entry — a worktree session killed
    * before its first record — must reach the marker flow, not the
-   * empty-entry branch it can never satisfy). Subdirectories
+   * empty-entry branch it can never satisfy); subagent transcripts
+   * contribute the cwd they were launched from, so an entry reduced to
+   * subagent residue (`/cd` moves only the session files) keeps its
+   * veto protection for a live project. Subdirectories
    * (`chats/archive/`) are scanned too. Scanning stops once a cwd is
    * found that still exists outside temp roots: such a cwd vetoes
    * removal for every caller, and transcripts can be large.
@@ -631,6 +637,7 @@ export class Storage {
   static collectRecordedCwds(entryPath: string): string[] {
     const cwds = new Set<string>();
     Storage.scanDirForCwds(path.join(entryPath, 'chats'), cwds, 0);
+    Storage.scanDirForCwds(path.join(entryPath, 'subagents'), cwds, 0);
     return [...cwds];
   }
 
@@ -893,11 +900,27 @@ export class Storage {
     }
   }
 
-  private static countFiles(dirPath: string): number {
+  /**
+   * Counts content that must keep an entry alive. Sweep bookkeeping
+   * (the orphan marker) and qwen-owned residue — workflow snapshots and
+   * journals, subagent transcripts — carry no cwd a live project could
+   * be recognized by (`/cd` moves only the session files and leaves
+   * them behind), so they must not block the empty-entry branch
+   * forever.
+   */
+  private static countFiles(dirPath: string, depth = 0): number {
     let count = 0;
     for (const entry of fs.readdirSync(dirPath, { withFileTypes: true })) {
+      if (
+        depth === 0 &&
+        (entry.name === Storage.ORPHAN_MARKER_FILE ||
+          entry.name === 'workflows' ||
+          entry.name === 'subagents')
+      ) {
+        continue;
+      }
       const child = path.join(dirPath, entry.name);
-      count += entry.isDirectory() ? Storage.countFiles(child) : 1;
+      count += entry.isDirectory() ? Storage.countFiles(child, depth + 1) : 1;
     }
     return count;
   }

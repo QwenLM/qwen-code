@@ -1023,6 +1023,75 @@ describe('Storage – cleanOrphanProjectDirs', () => {
     );
   });
 
+  it('removes an entry reduced to just the orphan marker (R7-1)', async () => {
+    // A marked entry whose records /cd moved elsewhere: the marker is
+    // sweep bookkeeping, not content — counting it would block the
+    // empty-entry branch forever.
+    const entry = path.join(projectsDir, '-marker-only');
+    actualFs.mkdirSync(path.join(entry, 'chats'), { recursive: true });
+    actualFs.writeFileSync(
+      path.join(entry, '.qwen-orphan-since'),
+      String(Date.now() - STALE_AGE_MS),
+    );
+    ageEntry('-marker-only');
+    await Storage.cleanOrphanProjectDirs('current');
+    expect(actualFs.existsSync(entry)).toBe(false);
+  });
+
+  it('removes an entry reduced to workflow residue (R7-2)', async () => {
+    // /cd moves only the session files: workflow snapshots and journals
+    // carry no cwd and must not strand the entry forever.
+    const entry = path.join(projectsDir, '-workflow-residue');
+    actualFs.mkdirSync(path.join(entry, 'chats'), { recursive: true });
+    actualFs.mkdirSync(path.join(entry, 'workflows', 'run-1'), {
+      recursive: true,
+    });
+    actualFs.writeFileSync(
+      path.join(entry, 'workflows', 'run-1.json'),
+      JSON.stringify({ runId: 'run-1' }),
+    );
+    actualFs.writeFileSync(
+      path.join(entry, 'workflows', 'run-1', 'journal.jsonl'),
+      JSON.stringify({ step: 1 }) + '\n',
+    );
+    ageEntry('-workflow-residue');
+    await Storage.cleanOrphanProjectDirs('current');
+    expect(actualFs.existsSync(entry)).toBe(false);
+  });
+
+  it('keeps an entry reduced to subagent transcripts of a live cwd (R7-2)', async () => {
+    // Subagent records carry their launch cwd: a live project must veto
+    // exactly like chat records do.
+    const entry = path.join(projectsDir, '-subagent-live');
+    actualFs.mkdirSync(path.join(entry, 'subagents', 'sess-1'), {
+      recursive: true,
+    });
+    actualFs.writeFileSync(
+      path.join(entry, 'subagents', 'sess-1', 'agent-1.jsonl'),
+      JSON.stringify({ cwd: process.cwd(), type: 'agent' }) + '\n',
+    );
+    ageEntry('-subagent-live');
+    await Storage.cleanOrphanProjectDirs('current');
+    expect(actualFs.existsSync(entry)).toBe(true);
+  });
+
+  it('removes an entry reduced to subagent transcripts of a gone cwd (R7-2)', async () => {
+    // The scan must reach subagents/: without it the residue blocks the
+    // empty-entry branch forever and the entry never enters the marker
+    // flow.
+    const entry = path.join(projectsDir, '-subagent-gone');
+    actualFs.mkdirSync(path.join(entry, 'subagents', 'sess-1'), {
+      recursive: true,
+    });
+    actualFs.writeFileSync(
+      path.join(entry, 'subagents', 'sess-1', 'agent-1.jsonl'),
+      JSON.stringify({ cwd: goneCwd, type: 'agent' }) + '\n',
+    );
+    ageEntry('-subagent-gone');
+    await sweepPastMarkerGrace('-subagent-gone');
+    expect(actualFs.existsSync(entry)).toBe(false);
+  });
+
   it('marks gone non-temp entries first and removes only once the marker ages (R2-2)', async () => {
     // A vanished non-temp cwd may be a transiently absent mount, so the
     // first sweep writes a marker instead of deleting; removal happens
