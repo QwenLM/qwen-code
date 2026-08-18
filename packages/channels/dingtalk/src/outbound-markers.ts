@@ -26,11 +26,14 @@ function maskCode(text: string): string {
 
   let fence: { character: '`' | '~'; length: number } | undefined;
   let lineStart = 0;
+  let previousBlank = true; // start of document opens an indented block
+  let inIndentedCode = false;
   while (lineStart < text.length) {
     const newline = text.indexOf('\n', lineStart);
     const lineEnd = newline === -1 ? text.length : newline;
     const line = text.slice(lineStart, lineEnd).replace(/\r$/u, '');
     const body = withoutQuotePrefix(line);
+    const blankLine = body.trim() === '';
     if (fence) {
       blank(lineStart, lineEnd);
       const closing = body.match(/^ {0,3}(`+|~+)[\t ]*$/u)?.[1];
@@ -47,10 +50,21 @@ function maskCode(text: string): string {
           length: delimiter.length,
         };
         blank(lineStart, lineEnd);
-      } else if (/^(?: {4}|\t)/u.test(body)) {
+      } else if (/^(?: {4}|\t)/u.test(body) && (previousBlank || inIndentedCode)) {
+        // R1-8: an indented line is a CommonMark indented code block only when
+        // it does not continue a paragraph or a list item — the block cannot
+        // interrupt one. Blanking every indented line hid genuine markers on
+        // list-continuation lines from every layer, so the absolute path
+        // shipped as literal text and the file was never delivered. Requiring
+        // a blank line to open the block (and letting consecutive indented
+        // lines continue it) keeps real indented code masked.
         blank(lineStart, lineEnd);
+        inIndentedCode = true;
+      } else if (body.trim() !== '') {
+        inIndentedCode = false;
       }
     }
+    previousBlank = blankLine;
     if (newline === -1) break;
     lineStart = newline + 1;
   }
@@ -60,15 +74,23 @@ function maskCode(text: string): string {
     if (masked[offset] === '`') {
       let runLength = 1;
       while (masked[offset + runLength] === '`') runLength++;
+      const newline = text.indexOf('\n', offset + runLength);
+      // R1-9: a run of one or two backticks must find its closing run before
+      // the next newline. Without that bound a cross-line span masks whatever
+      // it covers — including a genuine same-line media marker — which every
+      // sanitizer then misses, so the absolute path ships as literal text and
+      // the media is never delivered. Longer runs keep spanning lines.
+      const searchLimit =
+        runLength < 3 && newline !== -1 ? newline : text.length;
       let closing = offset + runLength;
-      while (closing < text.length) {
-        while (closing < text.length && masked[closing] !== '`') closing++;
+      while (closing < searchLimit) {
+        while (closing < searchLimit && masked[closing] !== '`') closing++;
         let closingLength = 0;
         while (masked[closing + closingLength] === '`') closingLength++;
         if (closingLength === runLength) break;
         closing += Math.max(1, closingLength);
       }
-      const newline = text.indexOf('\n', offset + runLength);
+      if (closing >= searchLimit) closing = text.length;
       const end =
         closing < text.length
           ? closing + runLength
@@ -124,11 +146,40 @@ function markerSafeTruncationStart(text: string, start: number): number {
         const newline = text
           .slice(start, close === -1 ? undefined : close)
           .search(/[\r\n]/u);
-        // No same-line close: not a marker at all, so the tail is ordinary
-        // prose and nothing needs skipping. Returning `text.length` here would
-        // discard the entire retained window — a bare `[` at the cut collapsed
-        // a 28k answer to the truncation marker alone.
-        if (close === -1 || newline !== -1) return start;
+        if (close === -1 || newline !== -1) {
+          // R1-7: no same-line close, so the cut sits inside an UNCLOSED
+          // marker. Returning raw `start` dropped the opening `[` and left a
+          // bare `FILE: /abs/path` fragment that no sanitizer recognises —
+          // truncation defeating the stripper and leaking the full path.
+          // Advance past the span's same-line extent instead: exactly what
+          // `stripPartialOutboundMediaMarker` would delete.
+          //
+          // Only for a span that really opens a marker, though. An empty
+          // candidate (the cut landing right after a `[`) prefix-matches every
+          // marker name vacuously, so a prose bracket would take this branch
+          // too and discard the whole retained window — the bare-`[` collapse
+          // that turned a 28k answer into the truncation marker alone.
+          const opensMarker = new RegExp(
+            `^\\[(?:${MEDIA_MARKER_PREFIXES.join('|')})`,
+            'iu',
+          ).test(text.slice(open));
+          if (!opensMarker) return start;
+          const eol = text.slice(start).search(/[\r\n]/u);
+          return eol === -1 ? text.length : start + eol;
+        }
+        // R1-11: only skip when the span really completes a marker. A prose
+        // bracket like `[IMAGE [FILE: /p]` prefix-matches too, and jumping to
+        // the next `]` swallowed an intact marker that was fully inside the
+        // retained window — the file then silently never shipped.
+        const completed = `[${candidate}${text.slice(start, close)}]`;
+        if (
+          !new RegExp(
+            `^\\[(?:${MEDIA_MARKER_PREFIXES.join('|')})[^\\S\\r\\n]*[^\\[\\]\\r\\n]+\\]$`,
+            'iu',
+          ).test(completed)
+        ) {
+          return start;
+        }
         return close + 1;
       }
     }
@@ -186,13 +237,32 @@ export function truncateOutboundMediaText(
   if (limit <= truncationMarker.length) {
     return text.slice(markerSafeTruncationStart(text, text.length - limit));
   }
-  const start = markerSafeTruncationStart(
+  let start = markerSafeTruncationStart(
     text,
     text.length - (limit - truncationMarker.length),
   );
   // Re-open a fence the cut landed inside, so the tail keeps the parity every
   // downstream consumer assumes: the code masker, and DingTalk's own renderer.
-  const reopen = openFenceAt(text, start);
+  let reopen = openFenceAt(text, start);
+  // R1-3: the re-opener has to be RESERVED, not prepended on top of a tail
+  // already sized to the whole budget — that returned up to
+  // `limit + fence.length + 1` characters and broke the `<= limit` guarantee
+  // `withSenderPrefix`'s budget arithmetic depends on. Re-cut with the prefix
+  // paid for, then re-check the fence at the moved start (it can change, and a
+  // longer delimiter must not reintroduce the overrun).
+  for (let pass = 0; pass < 4 && reopen; pass++) {
+    const budget = limit - truncationMarker.length - reopen.length - 1;
+    if (budget <= 0) break;
+    const movedStart = markerSafeTruncationStart(
+      text,
+      text.length - budget,
+    );
+    if (movedStart === start) break;
+    start = movedStart;
+    const nextReopen = openFenceAt(text, start);
+    if (nextReopen === reopen) break;
+    reopen = nextReopen;
+  }
   const prefix = reopen ? `${truncationMarker}${reopen}\n` : truncationMarker;
   return `${prefix}${text.slice(start)}`;
 }
@@ -207,8 +277,15 @@ export function findOutboundMediaMarkers(
   // the next line parsed as one marker — a shape the truncation guard (which
   // only ever looks for a same-line close) could not model, leaving the two
   // disagreeing about where a marker ends.
+  // R1-10: `[` is excluded from the path class as well as `]`. With it
+  // admitted, `[FILE: [FILE: /a]/secret/key.pdf]` matched at the OUTER
+  // bracket and consumed the inner marker's closing `]`, leaving a
+  // bracket-less `/secret/key.pdf]` that `stripPartialOutboundMediaMarker`
+  // (which only ever walks back from a `[`) could not recognise — an absolute
+  // path surviving every sanitizer on under-limit text. Excluding it makes the
+  // INNER marker match first, so the fixed-point sweep unwinds the nesting.
   const markerPattern = new RegExp(
-    `\\[${markerName}:[^\\S\\r\\n]*([^\\]\\r\\n]+)\\]`,
+    `\\[${markerName}:[^\\S\\r\\n]*([^\\[\\]\\r\\n]+)\\]`,
     'gi',
   );
   const markers: OutboundMediaMarker[] = [];
@@ -259,23 +336,44 @@ export function stripPartialOutboundMediaMarker(
   // would otherwise leave the earlier one — absolute path and all — as literal
   // text in the delivered card.
   let stripAt = -1;
+  let stripTo = text.length;
   while (open !== -1) {
-    const candidate = visibleText.slice(open + 1);
-    if (/[\r\n]/u.test(candidate)) break;
-    if (candidate.includes(']')) {
-      open = previousOpen(visibleText, open);
-      continue;
-    }
-    const normalizedCandidate = candidate.toUpperCase();
-    if (
-      normalizedCandidate &&
-      (prefix.startsWith(normalizedCandidate) ||
-        normalizedCandidate.startsWith(prefix))
-    ) {
-      stripAt = open;
+    // R1-5: confine the candidate to its OWN line instead of breaking the walk
+    // at the first newline. Breaking meant only a marker on the final line
+    // could ever be stripped, so an abandoned `[FILE: /abs/path` followed by
+    // more output survived every sanitizer — contradicting this function's own
+    // documented intent and leaking the path onto the card.
+    const rest = visibleText.slice(open + 1);
+    const eol = rest.search(/[\r\n]/u);
+    const candidate = eol === -1 ? rest : rest.slice(0, eol);
+    // R1-4: a marker whose close sits on a LATER line is matched by no layer —
+    // the same-line grammar misses it and the finder never sees it — so it
+    // shipped as literal text with the absolute path. Treat it as strippable
+    // residue here, which is where unclosed markers are already handled.
+    if (!candidate.includes(']')) {
+      const normalizedCandidate = candidate.toUpperCase();
+      if (
+        normalizedCandidate &&
+        (prefix.startsWith(normalizedCandidate) ||
+          normalizedCandidate.startsWith(prefix))
+      ) {
+        stripAt = open;
+        // Splice only to end-of-line so the lines after an abandoned marker
+        // survive; a marker on the final line still takes the rest of the text.
+        stripTo = eol === -1 ? text.length : open + 1 + eol;
+        // R1-4: …unless the span is a marker whose close simply sits on a
+        // LATER line. The same-line grammar cannot see that shape and the
+        // finder never returns it, so without consuming it through its close
+        // the path stays in the text. Only a bracket-free run qualifies, so a
+        // later unrelated marker is not swallowed.
+        const close = rest.indexOf(']');
+        if (close !== -1 && !rest.slice(0, close).includes('[')) {
+          stripTo = open + 1 + close + 1;
+        }
+      }
     }
     open = previousOpen(visibleText, open);
   }
   if (stripAt === -1) return text;
-  return `${text.slice(0, stripAt)}${pendingText}`;
+  return `${text.slice(0, stripAt)}${pendingText}${text.slice(stripTo)}`;
 }

@@ -52,8 +52,15 @@ export function sanitizeStreamingFileMarkers(text: string): string {
  * File markers are removed rather than replaced, so a removal can splice its
  * surroundings into a marker that was not there before —
  * `[FI[FILE: /tmp/a]LE: /etc/passwd]` becomes `[FILE: /etc/passwd]` after one
- * pass. Each pass only deletes, so the text shrinks monotonically and this
- * terminates; the cap guards a future non-monotonic pass, not this one.
+ * pass. Each pass only deletes, so the text shrinks monotonically and the
+ * loop terminates on its own — which is why it runs to a real fixed point.
+ * R1-1: it used to stop after 8 passes, and since a pass unwinds only one
+ * level of self-similar nesting, depth >= 9 returned text with a LIVE
+ * `[FILE: …]` marker that both display consumers then rendered with the
+ * absolute path — the exact display this function exists to prevent. The
+ * monotone-shrink argument proves an uncapped loop halts; the cap was what
+ * broke the contract. `text.length` is a sound bound: every iteration that
+ * changes the text removes at least one character.
  *
  * Run this BEFORE any image sanitisation. The image pass substitutes a
  * bracketed `[Image pending]` placeholder, and a file pass run afterwards
@@ -62,7 +69,7 @@ export function sanitizeStreamingFileMarkers(text: string): string {
  */
 export function sanitizeFileMarkersToFixedPoint(text: string): string {
   let sanitized = text;
-  for (let pass = 0; pass < 8; pass++) {
+  for (let pass = 0; pass <= text.length; pass++) {
     const next = sanitizeStreamingFileMarkers(sanitized);
     if (next === sanitized) break;
     sanitized = next;

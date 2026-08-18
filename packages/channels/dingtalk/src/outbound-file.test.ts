@@ -312,3 +312,18 @@ describe('uploadDingTalkFile', () => {
     expect((media as File).name).toBe('report.pdf');
   });
 });
+
+describe('sanitizeFileMarkersToFixedPoint depth', () => {
+  // R1-1: each pass unwinds one level of self-similar nesting, so the old
+  // `pass < 8` cap returned text with a LIVE marker at depth >= 9 — which both
+  // display consumers then rendered with the absolute path.
+  it.each([8, 9, 24])('reaches a fixed point at nesting depth %s', (depth) => {
+    const text =
+      '[FI'.repeat(depth) + '[FILE: /etc/passwd]' + 'LE: /etc/passwd]'.repeat(depth);
+    const sanitized = sanitizeFileMarkersToFixedPoint(text);
+    expect(sanitized).not.toContain('[FILE:');
+    expect(sanitized).not.toContain('/etc/passwd');
+    // A real fixed point: one more pass changes nothing.
+    expect(sanitizeFileMarkersToFixedPoint(sanitized)).toBe(sanitized);
+  });
+});

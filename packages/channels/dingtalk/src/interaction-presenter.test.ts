@@ -819,10 +819,6 @@ describe('DingtalkInteractionPresenter', () => {
       ['~~~text', '[FILE: /Users/ben/private/report.pdf]', '~~~'].join('\n'),
     ],
     ['indented code', '    [FILE: /Users/ben/private/report.pdf]'],
-    [
-      'multiline inline code',
-      '`example\n[FILE: /Users/ben/private/report.pdf]\ncontinued`',
-    ],
   ])('preserves file-like text inside %s', async (_label, output) => {
     const sendFallback = vi.fn().mockResolvedValue(undefined);
     const presenter = new DingtalkInteractionPresenter({ sendFallback });
@@ -832,6 +828,30 @@ describe('DingtalkInteractionPresenter', () => {
     await presenter.closeOutput('segment-1', '', 'response_boundary');
 
     expect(sendFallback).toHaveBeenCalledWith('cid-1', output, 'session-1');
+  });
+
+  // R1-9: a one- or two-backtick span must close before the next newline, as
+  // the pre-PR masker required. This case used to pin the opposite — a marker
+  // inside a CROSS-LINE span was masked and therefore preserved verbatim —
+  // which defeats the invariant this machinery exists for: the span masked the
+  // marker from every sanitizer, so the absolute path shipped as literal text
+  // and the file was never delivered. Substituting it is the safe direction;
+  // the cost is that a code sample spanning lines in a short span loses its
+  // marker-shaped text, which is the trade the leak forces.
+  it('substitutes a marker inside a cross-line inline code span', async () => {
+    const sendFallback = vi.fn().mockResolvedValue(undefined);
+    const presenter = new DingtalkInteractionPresenter({ sendFallback });
+    presenter.registerRun('run-1', 'owner-1', target);
+    presenter.appendOutput(
+      segment('segment-1'),
+      '`example\n[FILE: /Users/ben/private/report.pdf]\ncontinued`',
+    );
+
+    await presenter.closeOutput('segment-1', '', 'response_boundary');
+
+    const fallbackText = vi.mocked(sendFallback).mock.calls[0]?.[1];
+    expect(fallbackText).not.toContain('/Users/ben/private');
+    expect(fallbackText).not.toContain('[FILE:');
   });
 
   it('does not expose a file path when truncation splits its marker', async () => {
