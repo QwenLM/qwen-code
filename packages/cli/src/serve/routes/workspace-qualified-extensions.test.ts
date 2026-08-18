@@ -2098,6 +2098,38 @@ describe('extension management v2 REST', () => {
     }
   });
 
+  it('treats an activation declaration as absent during uninstall', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    vi.mocked(
+      ExtensionManager.prototype.getExtensionStoreSnapshot,
+    ).mockResolvedValueOnce({
+      version: 2,
+      generation: 8,
+      legacyProjectionHash: 'hash',
+      extensions: {
+        [extensionId]: {
+          name: 'demo',
+          declarationOnly: true,
+          defaultActivation: 'disabled',
+          workspaceOverrides: {},
+        },
+      },
+    });
+    try {
+      const response = await auth(
+        request(h.app).delete(`/extensions/${extensionId}`),
+      );
+
+      expect(response.status).toBe(204);
+      expect(
+        ExtensionManager.prototype.uninstallExtensionById,
+      ).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
   it('rejects singular and batch activation on an untrusted target', async () => {
     const h = await makeHarness({ secondaryTrusted: false });
     mockExtensionManager();

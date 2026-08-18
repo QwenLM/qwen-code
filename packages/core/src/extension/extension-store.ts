@@ -24,6 +24,7 @@ export interface ExtensionPolicy {
   name: string;
   artifactGeneration?: number;
   declarationOnly?: true;
+  preserveActivationOnNextInstall?: true;
   defaultActivation: ExtensionActivation;
   workspaceOverrides: Record<string, WorkspaceActivation>;
   legacyPathRules?: string[];
@@ -283,6 +284,8 @@ function parseState(
           parsed.artifactGeneration >= 0)) &&
       (parsed.declarationOnly === undefined ||
         parsed.declarationOnly === true) &&
+      (parsed.preserveActivationOnNextInstall === undefined ||
+        parsed.preserveActivationOnNextInstall === true) &&
       (parsed.defaultActivation === 'enabled' ||
         parsed.defaultActivation === 'disabled') &&
       !!parsed.workspaceOverrides &&
@@ -381,6 +384,22 @@ export class ExtensionStore {
   private async ensureInitializedUnlocked(
     extensions: readonly ExtensionIdentity[],
   ): Promise<ExtensionStoreSnapshot> {
+    const loadedNames = new Map<string, ExtensionIdentity>();
+    for (const identity of extensions) {
+      assertIdentity(identity);
+      const normalizedName = identity.name.toLowerCase();
+      const existingIdentity = loadedNames.get(normalizedName);
+      if (
+        existingIdentity &&
+        (existingIdentity.id !== identity.id ||
+          existingIdentity.name !== identity.name)
+      ) {
+        throw new ExtensionConflictError(
+          `Extension name "${identity.name}" conflicts with loaded extension "${existingIdentity.name}".`,
+        );
+      }
+      loadedNames.set(normalizedName, identity);
+    }
     const existing = await this.readSnapshotUnlocked();
     const legacy = await this.readLegacyProjection();
     if (existing) {
@@ -413,6 +432,8 @@ export class ExtensionStore {
           }
           if (directPolicy.declarationOnly) {
             delete directPolicy.declarationOnly;
+            directPolicy.artifactGeneration = existing.generation + 1;
+            directPolicy.preserveActivationOnNextInstall = true;
             changed = true;
           }
           continue;
@@ -426,6 +447,8 @@ export class ExtensionStore {
           const [staleId, policy] = staleEntry;
           if (policy.declarationOnly) {
             delete policy.declarationOnly;
+            policy.artifactGeneration = existing.generation + 1;
+            policy.preserveActivationOnNextInstall = true;
           }
           delete existing.extensions[staleId];
           policy.name = identity.name;
@@ -551,6 +574,7 @@ export class ExtensionStore {
       legacyProjectionHash: projectionHash(legacy),
       extensions: policies,
     };
+    this.updateLegacyProjectionRemainder(snapshot, legacy);
     await this.writeSnapshotUnlocked(snapshot);
     return snapshot;
   }
@@ -599,21 +623,30 @@ export class ExtensionStore {
           extensionId !== input.identity.id &&
           policy.name.toLowerCase() === input.identity.name.toLowerCase(),
       );
+      const currentPolicy = snapshot.extensions[input.identity.id];
+      const currentPolicyIsAdoptable =
+        input.operation === 'install' &&
+        !!currentPolicy &&
+        (currentPolicy.declarationOnly ||
+          (currentPolicy.preserveActivationOnNextInstall &&
+            !(await this.extensionArtifactExists(currentPolicy.name))));
+      const nameConflictIsAdoptable =
+        input.operation === 'install' &&
+        !currentPolicy &&
+        !!nameConflict &&
+        (nameConflict[1].declarationOnly ||
+          (nameConflict[1].preserveActivationOnNextInstall &&
+            !(await this.extensionArtifactExists(nameConflict[1].name))));
       if (
         input.operation !== 'uninstall' &&
         nameConflict &&
-        !(
-          input.operation === 'install' &&
-          !snapshot.extensions[input.identity.id] &&
-          nameConflict[1].declarationOnly
-        )
+        !nameConflictIsAdoptable
       ) {
         throw new ExtensionConflictError(
           `Extension name "${input.identity.name}" conflicts with an installed extension.`,
         );
       }
 
-      const currentPolicy = snapshot.extensions[input.identity.id];
       if (
         currentPolicy &&
         currentPolicy.name.toLowerCase() !== input.identity.name.toLowerCase()
@@ -626,6 +659,11 @@ export class ExtensionStore {
         if (!destinationExists) return snapshot;
         throw new ExtensionConflictError(
           `Extension "${input.identity.name}" has no matching policy.`,
+        );
+      }
+      if (input.operation === 'uninstall' && currentPolicy.declarationOnly) {
+        throw new ExtensionConflictError(
+          `Extension "${input.identity.name}" is not installed.`,
         );
       }
       if (input.operation === 'update' && !currentPolicy) {
@@ -646,16 +684,17 @@ export class ExtensionStore {
 
       const targetSnapshot = structuredClone(snapshot);
       if (input.operation === 'install') {
-        const declarationEntry = currentPolicy?.declarationOnly
+        const declarationEntry = currentPolicyIsAdoptable
           ? ([input.identity.id, currentPolicy] as const)
-          : nameConflict?.[1].declarationOnly
-            ? nameConflict
+          : nameConflictIsAdoptable
+            ? nameConflict!
             : undefined;
         if (declarationEntry) {
           const [declarationId] = declarationEntry;
           const policy = targetSnapshot.extensions[declarationId]!;
           delete targetSnapshot.extensions[declarationId];
           delete policy.declarationOnly;
+          delete policy.preserveActivationOnNextInstall;
           policy.name = input.identity.name;
           policy.artifactGeneration = targetSnapshot.generation + 1;
           targetSnapshot.extensions[input.identity.id] = policy;
@@ -694,6 +733,8 @@ export class ExtensionStore {
           );
         }
         targetSnapshot.extensions[input.identity.id] = policy!;
+        delete targetSnapshot.extensions[input.identity.id]!
+          .preserveActivationOnNextInstall;
         targetSnapshot.extensions[input.identity.id]!.artifactGeneration =
           targetSnapshot.generation + 1;
       }
@@ -1045,6 +1086,7 @@ export class ExtensionStore {
           !(await this.extensionArtifactExists(policy.name))
         ) {
           delete policy.artifactGeneration;
+          delete policy.preserveActivationOnNextInstall;
           policy.declarationOnly = true;
         }
         if (policy.name.toLowerCase() !== identity.name.toLowerCase()) {

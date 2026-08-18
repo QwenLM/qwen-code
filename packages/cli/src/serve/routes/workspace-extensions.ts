@@ -2007,7 +2007,7 @@ export function registerWorkspaceExtensionRoutes(
         );
         const snapshot = await manager.getExtensionStoreSnapshot();
         const policy = snapshot.extensions[extensionId];
-        if (!policy) {
+        if (!policy || policy.declarationOnly) {
           res.status(204).end();
           return;
         }

@@ -1797,6 +1797,23 @@ describe('extension tests', () => {
       expect(fs.existsSync(destination)).toBe(false);
     });
 
+    it('treats a declaration as absent when uninstalling by id', async () => {
+      const identity = { id: 'aa'.repeat(32), name: 'declared-extension' };
+      const extensionStore = new ExtensionStore({
+        extensionsDir: userExtensionsDir,
+      });
+      const declared = await extensionStore.setDefaultActivations(
+        [identity],
+        'disabled',
+      );
+      const manager = createExtensionManager({ extensionStore });
+
+      const snapshot = await manager.uninstallExtensionById(identity.id, true);
+
+      expect(snapshot).toEqual(declared);
+      expect(snapshot.extensions[identity.id]?.declarationOnly).toBe(true);
+    });
+
     it('uninstalls by id using the loaded artifact directory', async () => {
       const original = createExtension({
         extensionsDir: userExtensionsDir,

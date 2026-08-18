@@ -2723,7 +2723,7 @@ export class ExtensionManager {
     try {
       const snapshot = await this.extensionStore.readSnapshot();
       const policy = snapshot.extensions[extensionId];
-      if (!policy) return snapshot;
+      if (!policy || policy.declarationOnly) return snapshot;
       const extension = this.getLoadedExtensions().find(
         (candidate) => candidate.id === extensionId,
       );
