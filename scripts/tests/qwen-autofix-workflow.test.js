@@ -15641,6 +15641,9 @@ exit 1
         'if [[ "$query" == *"reviewThreads(first:100, after:\\$endCursor)"* ]]; then',
         '  [[ " $* " == *" --paginate "* ]] || exit 3',
         '  printf \'%s\' "$THREADS_RAW_STUB"',
+        '  # Real gh writes the reason to stderr; the workflow folds its tail',
+        '  # into the warning, so the stub must produce one to assert on.',
+        '  [[ "${THREADS_FETCH_EXIT:-0}" == 0 ]] || echo "threads-fetch stub failure" >&2',
         '  exit "${THREADS_FETCH_EXIT:-0}"',
         'fi',
         'if [[ "$query" == *PullRequestReviewThread* ]]; then',
@@ -15940,6 +15943,9 @@ exit 1
     expect(partialFetch.out).toContain(
       'review-thread pagination did not complete',
     );
+    // …and carries gh's own stderr, the only text that separates a transient
+    // rate limit (back off) from an expired PAT (rotate credentials).
+    expect(partialFetch.out).toContain('threads-fetch stub failure');
 
     // The residual cap the fix does NOT close: a thread carrying more than
     // 100 comments still truncates, so a comment past that page is unmapped.
@@ -15959,6 +15965,19 @@ exit 1
     const deepThread = runResolve({ THREADS_RAW_STUB: innerTruncated });
     expect(deepThread.status).toBe(0);
     expect(deepThread.out).toContain(
+      'carries more than 100 comments; a comment past that page is not mapped',
+    );
+
+    // Both warnings must be ABSENT on a clean run. Asserted only in the
+    // positive, either could be made unconditional and ship green — and a
+    // warning that always fires is a warning nobody reads.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\n');
+    const cleanRun = runResolve();
+    expect(cleanRun.status).toBe(0);
+    expect(cleanRun.out).not.toContain(
+      'review-thread pagination did not complete',
+    );
+    expect(cleanRun.out).not.toContain(
       'carries more than 100 comments; a comment past that page is not mapped',
     );
     writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\r\n333\n999\n');

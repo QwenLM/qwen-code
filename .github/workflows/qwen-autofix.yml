@@ -6249,6 +6249,13 @@ jobs:
             # Residual: a thread with more than 100 comments still truncates,
             # so a comment past that page is unmapped and each block falls
             # back to the id as given; announced below, and unobserved so far.
+            # Do NOT close that residual by adding endCursor to the inner
+            # comments pageInfo: gh's paginator adopts the FIRST pageInfo
+            # carrying both hasNextPage and endCursor, so the inner one would
+            # hijack the thread-page cursor and stop after page one (exit 0, no
+            # warning) — silently restoring the oldest-hundred bug this fetch
+            # exists to fix. The outer cursor wins only because the inner
+            # pageInfo asks for hasNextPage alone.
             if [[ -s "${WORKDIR}/resolved-comments.txt" || -s "${WORKDIR}/comment-replies.json" ]]; then
               THREADS_FETCH_OK='true'
               THREADS_RAW="$(gh api graphql --paginate -f owner="${REPO%%/*}" -f name="${REPO##*/}" -F pr="${PR}" -f query='
@@ -6261,7 +6268,7 @@ jobs:
                       }
                     }
                   }
-                }' --jq '.data.repository.pullRequest.reviewThreads.nodes[]' 2> /dev/null)" || THREADS_FETCH_OK='false'
+                }' --jq '.data.repository.pullRequest.reviewThreads.nodes[]' 2> "${WORKDIR}/threads-fetch.err")" || THREADS_FETCH_OK='false'
               # gh emits one node per line across every page; slurp them
               # into the flat array both blocks below already expect. The
               # stream is consumed inline into a shell variable and never
@@ -6270,7 +6277,11 @@ jobs:
               THREADS_JSON="$(jq -s '.' <<< "${THREADS_RAW}" 2> /dev/null)" || THREADS_JSON='[]'
               [[ -n "${THREADS_JSON}" ]] || THREADS_JSON='[]'
               if [[ "${THREADS_FETCH_OK}" != 'true' ]]; then
-                echo "::warning::review-thread pagination did not complete; $(jq 'length' <<< "${THREADS_JSON}") thread(s) fetched, and any thread past them will not be resolved or answered in-thread"
+                # Fold in gh's stderr: the warning announces THAT pagination
+                # stopped, and only this says WHY — a transient rate limit
+                # (back off) reads identically to an expired PAT (rotate) or a
+                # network failure without it.
+                echo "::warning::review-thread pagination did not complete; $(jq 'length' <<< "${THREADS_JSON}") thread(s) fetched, and any thread past them will not be resolved or answered in-thread: $(tail -c 300 "${WORKDIR}/threads-fetch.err" 2> /dev/null)"
               fi
               if [[ "$(jq -r 'map(select(.comments.pageInfo.hasNextPage)) | length' <<< "${THREADS_JSON}")" != "0" ]]; then
                 echo "::warning::a review thread carries more than 100 comments; a comment past that page is not mapped to its thread"
