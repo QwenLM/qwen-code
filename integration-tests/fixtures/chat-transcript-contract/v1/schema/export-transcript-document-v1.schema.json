@@ -16,7 +16,7 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 128,
-      "not": { "pattern": "latest|[~^*><=]" }
+      "pattern": "^([0-9a-f]{64}|(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?(\\+[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?)$"
     },
     "blocks": {
       "type": "array",

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -23,20 +23,26 @@ const caseRoot = resolve(fixtureRoot, 'cases/representative');
 
 interface FixtureManifest {
   readonly fixtureVersion: number;
+  readonly name: string;
+  readonly generatorVersion?: string;
   readonly sources: readonly string[];
   readonly consumers: readonly string[];
+  readonly capabilities: readonly string[];
   readonly complete: boolean;
   readonly expectedDiagnostics: readonly string[];
+  readonly normalizedFields?: readonly string[];
   readonly hashes: Readonly<Record<string, string>>;
 }
 
 interface ExpectedModel {
   readonly kinds: readonly string[];
+  readonly texts: readonly string[];
   readonly sourceRecordIds: readonly (readonly string[])[];
 }
 
 interface ExpectedRenderItems {
   readonly roles: readonly string[];
+  readonly expectedTextContent: readonly string[];
   readonly runtimeFields: readonly string[];
   readonly expectedToolArgs: Readonly<Record<string, unknown>>;
   readonly expectedToolResult: unknown;
@@ -45,6 +51,7 @@ interface ExpectedRenderItems {
 interface ExpectedExportContract {
   readonly schemaVersion: number;
   readonly forbiddenFields: readonly string[];
+  readonly frozenErrorKinds: readonly string[];
   readonly timestamps: number;
   readonly implementation: string;
 }
@@ -79,6 +86,82 @@ function readJsonLines<T>(path: string): T[] {
 
 function sha256(path: string): string {
   return createHash('sha256').update(readFileSync(path)).digest('hex');
+}
+
+function listFixtureEvidenceFiles(
+  directory: string,
+  relativeDirectory = '',
+): string[] {
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const relativePath = relativeDirectory
+      ? `${relativeDirectory}/${entry.name}`
+      : entry.name;
+    if (entry.isDirectory()) {
+      return listFixtureEvidenceFiles(
+        resolve(directory, entry.name),
+        relativePath,
+      );
+    }
+    return relativePath === 'cases/representative/manifest.json'
+      ? []
+      : [relativePath];
+  });
+}
+
+function expectManifestToMatchSchema(
+  manifest: FixtureManifest,
+  schema: Record<string, unknown>,
+): void {
+  const properties = schema['properties'] as Record<
+    string,
+    Record<string, unknown>
+  >;
+  const required = schema['required'];
+  expect(properties).toBeTypeOf('object');
+  expect(required).toBeInstanceOf(Array);
+  expect(schema['additionalProperties']).toBe(false);
+
+  const allowedKeys = new Set(Object.keys(properties));
+  for (const key of Object.keys(manifest)) {
+    expect(allowedKeys.has(key), `manifest property ${key}`).toBe(true);
+  }
+  for (const key of required as string[]) {
+    expect(manifest, `required manifest property ${key}`).toHaveProperty(key);
+  }
+
+  const nameSchema = properties['name'];
+  expect(manifest.name.length).toBeGreaterThanOrEqual(
+    nameSchema?.['minLength'] as number,
+  );
+  expect(manifest.name.length).toBeLessThanOrEqual(
+    nameSchema?.['maxLength'] as number,
+  );
+  const capabilitySchema = properties['capabilities'];
+  const capabilityItemSchema = capabilitySchema?.['items'] as Record<
+    string,
+    unknown
+  >;
+  expect(manifest.capabilities.length).toBeGreaterThanOrEqual(
+    capabilitySchema?.['minItems'] as number,
+  );
+  expect(new Set(manifest.capabilities)).toHaveLength(
+    manifest.capabilities.length,
+  );
+  for (const capability of manifest.capabilities) {
+    expect(capability).toBeTypeOf('string');
+    expect(capability.length).toBeLessThanOrEqual(
+      capabilityItemSchema['maxLength'] as number,
+    );
+  }
+  const hashSchema = properties['hashes']?.['additionalProperties'] as Record<
+    string,
+    unknown
+  >;
+  const hashPattern = new RegExp(hashSchema['pattern'] as string, 'u');
+  for (const [relativePath, hash] of Object.entries(manifest.hashes)) {
+    expect(relativePath).not.toBe('cases/representative/manifest.json');
+    expect(hash, relativePath).toMatch(hashPattern);
+  }
 }
 
 function collectDeclaredSchemaProperties(
@@ -127,39 +210,68 @@ function reduceAcpUpdates(
 }
 
 function blockSemanticKey(block: DaemonTranscriptBlock): string {
-  if (
-    block.kind === 'user' ||
-    block.kind === 'assistant' ||
-    block.kind === 'thought'
-  ) {
-    return `${block.kind}:${block.text}`;
+  switch (block.kind) {
+    case 'user':
+    case 'assistant':
+    case 'thought':
+      return `${block.kind}:${block.text}`;
+    case 'tool':
+      return `tool:${block.toolCallId}`;
+    case 'permission':
+      return `permission:${block.requestId}`;
+    default:
+      throw new Error(`Unsupported identity probe block kind: ${block.kind}`);
   }
-  if (block.kind === 'tool') return `tool:${block.toolCallId}`;
-  if (block.kind === 'permission') return `permission:${block.requestId}`;
-  return `${block.kind}:${block.id}`;
+}
+
+function indexBlocksBySemanticKey(
+  blocks: readonly DaemonTranscriptBlock[],
+  label: 'complete' | 'partial',
+): ReadonlyMap<string, DaemonTranscriptBlock> {
+  const indexed = new Map<string, DaemonTranscriptBlock>();
+  for (const block of blocks) {
+    const key = blockSemanticKey(block);
+    if (indexed.has(key)) {
+      throw new Error(`Ambiguous ${label} identity probe semantic key: ${key}`);
+    }
+    indexed.set(key, block);
+  }
+  return indexed;
 }
 
 function probeIdentity(
   complete: readonly DaemonTranscriptBlock[],
   partial: readonly DaemonTranscriptBlock[],
 ): IdentityCandidateResult {
-  const completeBySemanticKey = new Map(
-    complete.map((block) => [blockSemanticKey(block), block]),
-  );
-  const unstableBlockKinds = partial.flatMap((block) => {
-    const completeBlock = completeBySemanticKey.get(blockSemanticKey(block));
-    return completeBlock && completeBlock.id !== block.id ? [block.kind] : [];
-  });
-  const missingNativeTextIdentity = complete.flatMap((block) => {
-    if (
-      block.kind !== 'user' &&
-      block.kind !== 'assistant' &&
-      block.kind !== 'thought'
-    ) {
-      return [];
-    }
-    return block.sourceRecordIds?.length || block.promptId ? [] : [block.kind];
-  });
+  const completeBySemanticKey = indexBlocksBySemanticKey(complete, 'complete');
+  const partialBySemanticKey = indexBlocksBySemanticKey(partial, 'partial');
+  const unstableBlockKinds = [
+    ...new Set(
+      [...partialBySemanticKey].flatMap(([key, block]) => {
+        const completeBlock = completeBySemanticKey.get(key);
+        if (!completeBlock) {
+          throw new Error(`Missing complete identity probe block: ${key}`);
+        }
+        return completeBlock.id !== block.id ? [block.kind] : [];
+      }),
+    ),
+  ];
+  const missingNativeTextIdentity = [
+    ...new Set(
+      complete.flatMap((block) => {
+        if (
+          block.kind !== 'user' &&
+          block.kind !== 'assistant' &&
+          block.kind !== 'thought'
+        ) {
+          return [];
+        }
+        return block.sourceRecordIds?.length || block.promptId
+          ? []
+          : [block.kind];
+      }),
+    ),
+  ];
 
   expect(unstableBlockKinds.length).toBeGreaterThan(0);
   return {
@@ -189,6 +301,14 @@ describe('chat transcript contract prevalidation', () => {
       'utf8',
     );
 
+    expectManifestToMatchSchema(manifest, manifestSchema);
+    const manifestWithUnknownProperty = {
+      ...manifest,
+      unknownProperty: true,
+    };
+    expect(() =>
+      expectManifestToMatchSchema(manifestWithUnknownProperty, manifestSchema),
+    ).toThrow(/manifest property unknownProperty/u);
     expect(manifest.fixtureVersion).toBe(1);
     expect(manifest.complete).toBe(true);
     expect(new Set(manifest.sources)).toEqual(
@@ -213,7 +333,15 @@ describe('chat transcript contract prevalidation', () => {
       const definition = exportDefinitions[definitionName] as {
         properties: { errorKind: { enum: string[] } };
       };
-      expect(definition.properties.errorKind.enum).toEqual(DAEMON_ERROR_KINDS);
+      expect(definition.properties.errorKind.enum).toEqual(
+        expectedExport.frozenErrorKinds,
+      );
+    }
+    for (const errorKind of expectedExport.frozenErrorKinds) {
+      expect(
+        DAEMON_ERROR_KINDS,
+        `Export V1 error kind ${errorKind} must remain supported by the SDK`,
+      ).toContain(errorKind);
     }
     const declaredExportProperties =
       collectDeclaredSchemaProperties(exportSchema);
@@ -223,6 +351,14 @@ describe('chat transcript contract prevalidation', () => {
     const permissionOption = exportDefinitions['permissionOption'] as {
       properties: { raw: { const: unknown } };
     };
+    const toolBlock = exportDefinitions['toolBlock'] as {
+      properties: Record<string, unknown>;
+    };
+    const statusBlock = exportDefinitions['statusBlock'] as {
+      properties: Record<string, unknown>;
+    };
+    expect(toolBlock.properties).not.toHaveProperty('content');
+    expect(statusBlock.properties).not.toHaveProperty('data');
     expect(permissionOption.properties.raw.const).toBeNull();
     expect(expectedExport).toMatchObject({
       schemaVersion: 1,
@@ -230,10 +366,44 @@ describe('chat transcript contract prevalidation', () => {
       implementation: 'deferred-to-mr2',
     });
 
+    expect(Object.keys(manifest.hashes).sort()).toEqual(
+      listFixtureEvidenceFiles(fixtureRoot).sort(),
+    );
     for (const [relativePath, expectedHash] of Object.entries(
       manifest.hashes,
     )) {
       expect(sha256(resolve(fixtureRoot, relativePath))).toBe(expectedHash);
+    }
+
+    const exportProperties = exportSchema['properties'] as Record<
+      string,
+      Record<string, unknown>
+    >;
+    const rendererVersionPattern = new RegExp(
+      exportProperties['rendererVersion']?.['pattern'] as string,
+      'u',
+    );
+    for (const validVersion of [
+      '1.2.3',
+      '1.2.3-beta.1+build.7',
+      'a'.repeat(64),
+    ]) {
+      expect(validVersion, validVersion).toMatch(rendererVersionPattern);
+    }
+    for (const invalidVersion of [
+      'LATEST',
+      'latest',
+      '1.0.0 - 2.0.0',
+      '1.x',
+      '1.0.0 || 2.0.0',
+      '^1.2.3',
+      '~1.2.3',
+      '*',
+      '>=1.0.0',
+    ]) {
+      expect(invalidVersion, invalidVersion).not.toMatch(
+        rendererVersionPattern,
+      );
     }
     expect(matrix).toContain('FAIL — migration blocked');
     expect(matrix).toContain('No VS Code transport is selected in MR1');
@@ -263,11 +433,35 @@ describe('chat transcript contract prevalidation', () => {
       expected.kinds,
     );
     expect(
+      projection.blocks.flatMap((block) => {
+        switch (block.kind) {
+          case 'user':
+          case 'assistant':
+          case 'thought':
+            return [block.text];
+          default:
+            return [];
+        }
+      }),
+    ).toEqual(expected.texts);
+    expect(
       projection.blocks.map((block) => block.sourceRecordIds ?? []),
     ).toEqual(expected.sourceRecordIds);
     expect(messages.map((message) => message.role)).toEqual(
       expectedRender.roles,
     );
+    expect(
+      messages.flatMap((message) => {
+        switch (message.role) {
+          case 'user':
+          case 'thinking':
+          case 'assistant':
+            return [message.content];
+          default:
+            return [];
+        }
+      }),
+    ).toEqual(expectedRender.expectedTextContent);
     expect(toolBlock).toMatchObject({
       rawInput: expectedRender.expectedToolArgs,
       rawOutput: expectedRender.expectedToolResult,
@@ -315,17 +509,90 @@ describe('chat transcript contract prevalidation', () => {
     expect(observedGate).toEqual(expectedGate);
   });
 
+  it('fails closed on ambiguous identity keys and records kind sets', () => {
+    const assistantBlock = (
+      id: string,
+      text: string,
+    ): DaemonTranscriptBlock => ({
+      id,
+      kind: 'assistant',
+      clientReceivedAt: 0,
+      createdAt: 0,
+      updatedAt: 0,
+      text,
+    });
+
+    expect(() =>
+      probeIdentity(
+        [assistantBlock('complete-1', 'duplicate')],
+        [
+          assistantBlock('partial-1', 'duplicate'),
+          assistantBlock('partial-2', 'duplicate'),
+        ],
+      ),
+    ).toThrow(/Ambiguous partial identity probe semantic key/u);
+
+    expect(
+      probeIdentity(
+        [
+          assistantBlock('complete-1', 'first'),
+          assistantBlock('complete-2', 'second'),
+        ],
+        [
+          assistantBlock('partial-1', 'first'),
+          assistantBlock('partial-2', 'second'),
+        ],
+      ),
+    ).toEqual({
+      status: 'fail',
+      stableUnderPartialPrepend: false,
+      unstableBlockKinds: ['assistant'],
+      missingNativeTextIdentity: ['assistant'],
+    });
+
+    expect(() =>
+      probeIdentity(
+        [
+          {
+            id: 'status-1',
+            kind: 'status',
+            clientReceivedAt: 0,
+            createdAt: 0,
+            updatedAt: 0,
+            text: 'status',
+          },
+        ],
+        [],
+      ),
+    ).toThrow(/Unsupported identity probe block kind: status/u);
+  });
+
   it('keeps Tauri wired to the packaged Web Shell artifact', () => {
     const prepareRuntime = readFileSync(
       resolve(repoRoot, 'packages/desktop-shell/scripts/prepare-runtime.js'),
       'utf8',
     );
+    const normalizedPrepareRuntime = prepareRuntime.replace(/\s+/gu, ' ');
+    const skipBuildIndex = normalizedPrepareRuntime.indexOf(
+      "const skipBuild = process.env.QWEN_DESKTOP_SKIP_BUILD === '1';",
+    );
+    const guardedBuildIndex =
+      normalizedPrepareRuntime.indexOf('if (!skipBuild) {');
+    const webShellBuildIndex = normalizedPrepareRuntime.indexOf(
+      "'--workspace=packages/web-shell'",
+    );
+    const distDirectoryIndex = normalizedPrepareRuntime.indexOf(
+      "const distDir = path.join(sourceRoot, 'dist');",
+    );
 
     expect(prepareRuntime).toContain("'web-shell/index.html'");
     expect(prepareRuntime).toContain("'web-shell/assets'");
-    expect(prepareRuntime).toContain(
-      "[npm, 'run', 'build', '--workspace=packages/web-shell']",
+    expect(normalizedPrepareRuntime).toContain(
+      'copyDirectory(distDir, libDir)',
     );
-    expect(prepareRuntime).toContain('copyDirectory(distDir, libDir)');
+    expect(skipBuildIndex).toBeGreaterThanOrEqual(0);
+    expect(guardedBuildIndex).toBeGreaterThan(skipBuildIndex);
+    expect(webShellBuildIndex).toBeGreaterThan(guardedBuildIndex);
+    expect(distDirectoryIndex).toBeGreaterThan(webShellBuildIndex);
   });
 });

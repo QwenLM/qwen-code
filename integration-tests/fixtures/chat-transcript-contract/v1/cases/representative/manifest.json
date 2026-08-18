@@ -18,14 +18,15 @@
   ],
   "normalizedFields": ["clientReceivedAt", "createdAt", "updatedAt"],
   "hashes": {
+    "capability-matrix.md": "bbfb12546580f2587692dca439d0bb5e8aa0cbe319c4f5d9524322c2ef392d87",
     "cases/representative/daemon-events.jsonl": "196d6d03c8e71545123a2be340f41f9ad128fe9a53ddb934511858c89e936041",
     "cases/representative/acp-session-updates.jsonl": "7c7fc96fcf3768c8595ce21d069cb7e7cabccc2d5359596e2c442ff7df887a34",
     "cases/representative/chat-records.jsonl": "b66abea928c3c65cdedc4ca1c455d86b1b0a46b90e2a6a186afefaa89e87db0e",
-    "cases/representative/expected-model.json": "9a750134d6d821769279ba18ac4dc26da0d2787f1d7cee700c1209eafb65df7c",
-    "cases/representative/expected-render-items.json": "df2b0193357f352ce9e19ca8c365507112827a9e91fdc4753b866e907c7e59a4",
-    "cases/representative/expected-export.json": "87758313eeecfbb85a0cb51eed4054ca79f73c28756154346bf0edd13c80b468",
+    "cases/representative/expected-model.json": "c0380aac16a7d85e855148fff95959d58f9662ff4589b3a230452ef5ada7410e",
+    "cases/representative/expected-render-items.json": "d51acc8a0b6282898fec49f1870c0e78c901af5136b9866da3da874722d1db7b",
+    "cases/representative/expected-export.json": "501854756ea8cd0990e19e8f77bb8339f05024a6b21c8a57c024bdb951aa8496",
     "cases/representative/expected-gate.json": "d644198a43a35b765672c407966ec99abedadd8c2de00a587e5e5d983bdd9acf",
-    "schema/export-transcript-document-v1.schema.json": "30c6f6ef805deed5adc88c5d003a71963c7831e43433526323890f06c3b08886",
+    "schema/export-transcript-document-v1.schema.json": "1c0a48d006d2906d6e527dd131c00ee67ac564028f8ffef7bf04407a9592ae9f",
     "schema/manifest.schema.json": "c6c72f87a9fafff94ba62cd031259a6fdf7235277a8638be21aa26cc3366f3fa"
   }
 }

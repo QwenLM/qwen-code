@@ -135,6 +135,7 @@ describe('no-AK integration CI wiring', () => {
         'cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests --poolOptions.forks.maxForks 2',
         './fake-openai-server.test.ts',
         './test-helper.test.ts',
+        './chat-transcript-contract.test.ts',
         './cli/daemon-invocation-context.test.ts',
         './cli/list_directory.test.ts',
         './cli/qwen-serve-routes.test.ts',
