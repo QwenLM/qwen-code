@@ -35,15 +35,32 @@ import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
 
-/**
- * Match a hook command that is a bare quoted path (`"C:/Program Files/x.cmd"`
- * or single-quoted). PowerShell evaluates it as a string literal and echoes
- * it instead of executing it, so the cmd→powershell fallback must prefix
- * it with `&` and an explicit powershell shell must error. The trailing
- * operator check excludes `"literal" | pipeline` / `"literal"; next`
- * where the leading quoted token is data, not a path.
- */
-const BARE_QUOTED_COMMAND_RE = /^\s*["'][^"']*["']\s*(?:(?![|>;]).)*$/;
+/** Match a bare-quoted path (`"..."` or `'...'`); trailer operators only disqualify when UNQUOTED. */
+function isBareQuotedPowerShellCommand(command: string): boolean {
+  const lead = /^\s*(["'])[^"']*\1/.exec(command);
+  if (!lead) return false;
+  let i = lead[0].length;
+  let state: 'outside' | 'in-double' | 'in-single' = 'outside';
+  while (i < command.length) {
+    const ch = command[i];
+    if (state === 'outside') {
+      if (ch === '"') { state = 'in-double'; i++; continue; }
+      if (ch === "'") { state = 'in-single'; i++; continue; }
+      if (ch === '|' || ch === ';' || ch === '>') return false;
+      if (ch === '\n') return true;
+      i++;
+    } else if (state === 'in-double' && ch === '"') {
+      state = 'outside';
+      i++;
+    } else if (state === 'in-single' && ch === "'") {
+      state = 'outside';
+      i++;
+    } else {
+      i++;
+    }
+  }
+  return true;
+}
 
 /**
  * Default timeout for hook execution (60 seconds)
@@ -603,14 +620,20 @@ export class HookRunner {
 
       // PowerShell only runs a bare-quoted path via the call operator; the
       // cmd→powershell fallback must `& ` it or the path is echoed and never
-      // runs. An explicit powershell shell with a bare-quoted command is a
-      // config error.
+      // runs. An explicit powershell shell with an author-intended
+      // bare-quoted command is a config error. We check the author's
+      // command (not the expanded one) for the error so that quotes
+      // injected by placeholder expansion don't trigger a misattributed
+      // diagnostic.
       let resolvedCommand = command;
       if (
         shellConfig.shell === 'powershell' &&
-        BARE_QUOTED_COMMAND_RE.test(command)
+        isBareQuotedPowerShellCommand(command)
       ) {
-        if (hookConfig.shell === 'powershell') {
+        if (
+          hookConfig.shell === 'powershell' &&
+          isBareQuotedPowerShellCommand(hookConfig.command)
+        ) {
           const errorMessage =
             'Command starts with a quoted path under an explicit powershell shell; prefix it with the call operator (&) so PowerShell executes it instead of echoing it';
           debugLogger.warn(
@@ -859,74 +882,92 @@ export class HookRunner {
         match: string,
         offset: number,
       ): string => {
-        let state: 'outside' | 'in-double' | 'in-single' = 'outside';
-        // $() sub-expression opens a fresh region; inner quotes do not
-        // affect the outer region. We also track plain ( / ) groupings so
-        // a $(Get-Foo (Get-Bar)) does not pop on the inner paren.
-        let substitutionDepth = 0;
+        let state: 'outside' | 'in-double' | 'in-single' | 'in-opaque' =
+          'outside';
+        // parenKind tracks whether each open paren is a $() opener
+        // (restores outer state on close) or a grouping paren (closes
+        // silently). Without subst tracking, `$(Get-X $(Get-Y))` leaks
+        // the outer subst and the enclosing `"..."` is lost.
         let parenDepth = 0;
+        const parenKind: Array<'subst' | 'group'> = [];
         const quoteStack: Array<'outside' | 'in-double' | 'in-single'> = [];
+        // # is a comment only at token boundary (start, after
+        // whitespace, or after a quote/operator/paren). Bareword `#`
+        // (fix#123) must NOT start a comment.
+        const isTokenBoundary = (pos: number): boolean => {
+          if (pos === 0) return true;
+          const prev = command[pos - 1];
+          return /\s/.test(prev) || /["'();|&>]/.test(prev);
+        };
         for (let i = 0; i < offset; i++) {
           const ch = command[i];
-          // Backtick is literal inside single quotes; skipping would
-          // swallow a real closing `'`.
-          if (state !== 'in-single' && ch === '`') {
+          // Backtick skips the next char inside non-single regions; in
+          // single quotes and opaque regions it's literal.
+          if (state !== 'in-single' && state !== 'in-opaque' && ch === '`') {
             i++;
             continue;
           }
-          // $( opens a fresh region (outside or in-double); literal in
-          // single quotes. Save the outer state so ) can restore it.
+          // $() opens a fresh region; literal in single quotes /
+          // opaque regions. The outer state is restored by the matching
+          // `)`.
           if (
-            state !== 'in-single' &&
+            (state === 'outside' || state === 'in-double') &&
             ch === '$' &&
             command[i + 1] === '('
           ) {
+            parenKind.push('subst');
             quoteStack.push(state);
             state = 'outside';
-            substitutionDepth++;
             parenDepth++;
-            i++; // skip `(`
+            i++;
             continue;
           }
-          // ( inside $() is a grouping paren — track so ) does not pop.
-          if (
-            ch === '(' &&
-            substitutionDepth > 0 &&
-            state === 'outside'
-          ) {
+          // Grouping `(` inside an open subst.
+          if (ch === '(' && parenKind.length > 0 && state === 'outside') {
+            parenKind.push('group');
             parenDepth++;
             continue;
           }
-          // ) only closes when unquoted; closing the last grouping pops
-          // the $() and restores the pre-$( state.
+          // `)` closes the most-recent open paren; subst restores
+          // pre-$( state, group doesn't.
           if (ch === ')' && parenDepth > 0 && state === 'outside') {
             parenDepth--;
-            if (parenDepth === 0 && substitutionDepth > 0) {
-              substitutionDepth--;
+            if (parenKind.pop() === 'subst') {
               state = quoteStack.pop()!;
             }
             continue;
           }
-          // # comment (when outside quotes) runs to end of line; quote
-          // chars inside must not toggle state.
-          if (state === 'outside' && ch === '#') {
+          // # comment at token boundary (bareword # stays literal).
+          if (state === 'outside' && ch === '#' && isTokenBoundary(i)) {
             while (i < offset && command[i] !== '\n' && command[i] !== '\r') {
               i++;
             }
             continue;
           }
-          // PowerShell here-string: `@'...'@` / `@"..."@`. Body quotes
-          // are data; only the closing `'@` / `"@` at line start exits.
-          if (state === 'outside' && ch === '@' && i + 1 < offset) {
+          // Block comment <#…#>: content is opaque.
+          if (
+            state === 'outside' &&
+            ch === '<' &&
+            command[i + 1] === '#'
+          ) {
+            const closeIdx = command.indexOf('#>', i + 2);
+            if (closeIdx !== -1) {
+              if (closeIdx > offset) state = 'in-opaque';
+              i = closeIdx + 1;
+              continue;
+            }
+          }
+          // Here-string @'…'@ / @"…"@: body is opaque.
+          if (state === 'outside' && ch === '@' && i + 1 < command.length) {
             const open = command[i + 1];
             if (open === "'" || open === '"') {
               const closing = open === "'" ? "'@" : '"@';
               const bodyStart = i + 2;
               let j = bodyStart;
               let closeIdx = -1;
-              while (j < offset) {
+              while (j < command.length) {
                 const k = command.indexOf(closing, j);
-                if (k === -1 || k >= offset) break;
+                if (k === -1) break;
                 if (
                   k === bodyStart ||
                   command[k - 1] === '\n' ||
@@ -938,6 +979,7 @@ export class HookRunner {
                 j = k + 1;
               }
               if (closeIdx !== -1) {
+                if (closeIdx > offset) state = 'in-opaque';
                 i = closeIdx + 1;
                 continue;
               }
@@ -954,6 +996,8 @@ export class HookRunner {
         }
         if (state === 'in-double') return doubleQuotedCwd;
         if (state === 'in-single') return singleQuotedCwd;
+        // Opaque (here-string body / block comment): content is literal.
+        if (state === 'in-opaque') return match;
         return escapedCwd;
       };
       // Feed the first replace's result into the second so the

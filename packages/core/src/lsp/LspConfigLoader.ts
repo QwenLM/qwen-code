@@ -126,16 +126,17 @@ export class LspConfigLoader {
     configs: LspServerConfig[],
     trustSymlinks: boolean,
   ): void {
-    const data = readExtraJsonFile(extension.path, lspServers, trustSymlinks);
-    if (!data) {
-      const lspConfigPath = path.isAbsolute(lspServers)
-        ? lspServers
-        : path.join(extension.path, lspServers);
-      if (!fs.existsSync(lspConfigPath)) {
+    const data = readExtraJsonFile(extension.path, lspServers, trustSymlinks, (reason) => {
+      if (reason === 'missing') {
+        const lspConfigPath = path.isAbsolute(lspServers)
+          ? lspServers
+          : path.join(extension.path, lspServers);
         debugLogger.warn(
           `LSP config not found for ${originBase}: ${stripAnsiAndControl(lspConfigPath)}`,
         );
       }
+    });
+    if (!data) {
       return;
     }
     const hydrated = this.hydrateExtensionLspConfig(

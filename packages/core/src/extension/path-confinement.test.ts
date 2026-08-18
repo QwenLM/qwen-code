@@ -14,6 +14,7 @@ import {
   readExtraJsonFile,
   resolvePathWithin,
   resolvePluginRelativeFile,
+  type ExtraJsonNullReason,
 } from './path-confinement.js';
 
 describe('isPathWithin', () => {
@@ -309,6 +310,21 @@ describe('readExtraJsonFile', () => {
     try {
       fs.writeFileSync(path.join(dir, 'hooks.json'), body, 'utf-8');
       expect(readExtraJsonFile(dir, 'hooks.json')).toBeNull();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns null with `directory` reason when the path is a directory, not a file', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
+    try {
+      fs.mkdirSync(path.join(dir, 'hooks.json'), { recursive: true });
+      let observed: ExtraJsonNullReason | null = null;
+      const result = readExtraJsonFile(dir, 'hooks.json', false, (reason) => {
+        observed = reason;
+      });
+      expect(result).toBeNull();
+      expect(observed).toBe('directory');
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }

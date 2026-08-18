@@ -70,6 +70,8 @@ function explicitMcpFailureMessage(
   switch (reason) {
     case 'missing':
       return `Invalid Qoder MCP configuration at ${safePath}: file does not exist`;
+    case 'directory':
+      return `Invalid Qoder MCP configuration at ${safePath}: path is a directory, not a file`;
     case 'parse-error':
       return `Invalid Qoder MCP configuration at ${safePath}: JSON parse failed (${stripAnsiAndControl(cause instanceof Error ? cause.message : String(cause))})`;
     case 'non-object-body':
@@ -124,10 +126,11 @@ function loadMcpServersFile(
     servers === null ||
     Array.isArray(servers)
   ) {
-    // Typo-wrapper in auto-detected `.mcp.json` installs with zero
-    // servers and emits only a debug-only warn (matches the sibling
-    // claude converter's auto-detect convention at
-    // convertClaudePluginStandalone).
+    // Mode-agnostic warn-and-skip: both auto-detected `.mcp.json` and
+    // explicit references with a defective wrapper (top-level server
+    // map, scalar, array) install with zero servers and surface a
+    // debug-only warn. Matches the sibling claude converter's
+    // convertClaudePluginStandalone convention.
     debugLogger.warn(
       `Invalid Qoder MCP configuration at ${safeMcpPath}: expected an "mcpServers" object`,
     );

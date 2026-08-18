@@ -154,6 +154,11 @@ export type ExtraJsonNullReason =
   | 'confinement-threw'
   /** File does not exist at the resolved path. */
   | 'missing'
+  /** Resolved path is a directory, not a regular file. Without this
+   * classification the EISDIR from `readFileSync` surfaces as a
+   * misleading `parse-error`; the hooks path already guards the same
+   * slip with `isRegularFile` (R6-23). */
+  | 'directory'
   /** `JSON.parse` threw on the file body. */
   | 'parse-error'
   /** File parsed to a non-object (null / array / scalar). */
@@ -235,6 +240,17 @@ export function readExtraJsonFile(
   if (!fs.existsSync(filePath)) {
     return reportNull('missing');
   }
+  // Inlined here to avoid importing from claude-converter (which would
+  // create a cross-module dependency between two converter files).
+  let isFile = false;
+  try {
+    isFile = fs.statSync(filePath).isFile();
+  } catch {
+    isFile = false;
+  }
+  if (!isFile) {
+    return reportNull('directory');
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
@@ -267,6 +283,8 @@ function defaultNullMessage(
       );
     case 'missing':
       return null;
+    case 'directory':
+      return `Ignoring "${safeFileRef}"; it is a directory, not a regular file.`;
     case 'parse-error':
       return `Failed to parse ${safeFileRef}: ${stripAnsiAndControl(cause instanceof Error ? cause.message : String(cause))}`;
     case 'non-object-body':

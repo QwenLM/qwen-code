@@ -1631,6 +1631,46 @@ describe('convertClaudePluginStandalone', () => {
       /expected a JSON object/,
     );
   });
+
+  // Non-strict + non-object body used to install via mergeClaudeConfigs
+  // overlay; restore that tolerance. Strict mode still throws (next).
+  it.each(['null', '[1,2]', '5'])(
+    'falls back to the marketplace entry when a non-strict plugin.json body is %s',
+    async (body) => {
+      const pluginDir = path.join(testDir, `non-obj-${body}`);
+      const mpDir = path.join(pluginDir, '.claude-plugin');
+      fs.mkdirSync(mpDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(mpDir, 'marketplace.json'),
+        JSON.stringify({
+          plugins: [{ name: 'p', source: './' }],
+        }),
+        'utf-8',
+      );
+      fs.writeFileSync(path.join(mpDir, 'plugin.json'), body, 'utf-8');
+
+      const result = await convertClaudePluginPackage(pluginDir, 'p');
+      expect(result.convertedDir).toBeDefined();
+    },
+  );
+
+  it('throws when a strict plugin.json body is non-object', async () => {
+    const pluginDir = path.join(testDir, 'strict-non-obj');
+    const mpDir = path.join(pluginDir, '.claude-plugin');
+    fs.mkdirSync(mpDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(mpDir, 'marketplace.json'),
+      JSON.stringify({
+        plugins: [{ name: 'p', source: './', strict: true }],
+      }),
+      'utf-8',
+    );
+    fs.writeFileSync(path.join(mpDir, 'plugin.json'), 'null', 'utf-8');
+
+    await expect(convertClaudePluginPackage(pluginDir, 'p')).rejects.toThrow(
+      /expected a JSON object/,
+    );
+  });
 });
 
 describe('performVariableReplacement for Claude extensions', () => {
@@ -1694,6 +1734,59 @@ describe('performVariableReplacement for Claude extensions', () => {
     expect(result).toContain('.message.parts | map(select(has("text")))');
     expect(result).not.toContain('.message.content');
   });
+
+  // Classifier skips null entries; converter must do the same or
+  // the consume point throws on `p.name`.
+  it('skips null entries in marketplace plugins without dereferencing', async () => {
+    const extDir = path.join(testDir, 'null-entry');
+    const mpDir = path.join(extDir, '.claude-plugin');
+    fs.mkdirSync(mpDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(mpDir, 'marketplace.json'),
+      JSON.stringify({
+        plugins: [null, { name: 'x', source: './' }],
+      }),
+      'utf-8',
+    );
+    await expect(convertClaudePluginPackage(extDir, 'x')).resolves.toBeDefined();
+  });
+
+  it('throws a precise error when marketplace plugins is not an array', async () => {
+    const extDir = path.join(testDir, 'non-array');
+    const mpDir = path.join(extDir, '.claude-plugin');
+    fs.mkdirSync(mpDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(mpDir, 'marketplace.json'),
+      JSON.stringify({ plugins: 'not-an-array' }),
+      'utf-8',
+    );
+    await expect(convertClaudePluginPackage(extDir, 'x')).rejects.toThrow(
+      /must be an array/i,
+    );
+  });
+
+  // Marketplace source whose symlink target IS the marketplace dir:
+  // realpath collapses to the root and fs.promises.cp then crashes
+  // (source = destination).
+  it.runIf(process.platform !== 'win32')(
+    'a relative source whose symlink target is the marketplace dir returns the marketplace dir without copying',
+    async () => {
+      const mpDir = path.join(testDir, 'symlink-to-root');
+      fs.mkdirSync(mpDir, { recursive: true });
+      fs.symlinkSync(mpDir, path.join(mpDir, 'self-link'));
+      const extDir = path.join(testDir, 'symlink-to-root-ext');
+      fs.mkdirSync(path.join(extDir, '.claude-plugin'), { recursive: true });
+      fs.writeFileSync(
+        path.join(extDir, '.claude-plugin', 'marketplace.json'),
+        JSON.stringify({
+          plugins: [{ name: 'p', source: './self-link' }],
+        }),
+        'utf-8',
+      );
+      const result = await convertClaudePluginPackage(extDir, 'p');
+      expect(result.convertedDir).toBeDefined();
+    },
+  );
 });
 
 describe('convertClaudePluginPackage — git-subdir source', () => {

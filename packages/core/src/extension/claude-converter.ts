@@ -522,9 +522,21 @@ export async function convertClaudePluginPackage(
     );
   }
 
-  // Find the target plugin in marketplace
+  // Find the target plugin in marketplace. Validate the `plugins` shape
+  // with the same predicate `isClaudePluginConfig` uses for the
+  // classifier — without it, a single null entry in the array
+  // (`[null, {name, source}]`) dereferences `null.name` and throws
+  // an opaque TypeError instead of the precise "not found" error.
+  if (!Array.isArray(marketplaceConfig.plugins)) {
+    throw new Error(
+      `Invalid marketplace.json at ${path.join(extensionDir, '.claude-plugin', 'marketplace.json')}: 'plugins' must be an array`,
+    );
+  }
   const marketplacePlugin = marketplaceConfig.plugins.find(
-    (p) => p.name === pluginName,
+    (p) =>
+      typeof p === 'object' &&
+      p !== null &&
+      (p as { name?: string }).name === pluginName,
   );
   if (!marketplacePlugin) {
     throw new Error(`Plugin ${pluginName} not found in marketplace.json`);
@@ -577,15 +589,34 @@ export async function convertClaudePluginPackage(
     fs.existsSync(pluginJsonPath) &&
     realPathWithin(pluginJsonPath, pluginSource);
   if (pluginJsonSafe) {
-    // readExtensionManifest throws on a symlink escape or unparseable body;
-    // the existsSync/realPathWithin above already confined it, so it returns
-    // the parsed object here.
-    const pluginConfig = readExtensionManifest(
-      pluginSource,
-      '.claude-plugin/plugin.json',
-    ) as unknown as ClaudePluginConfig | null;
+    // readExtensionManifest throws on a symlink escape or unparseable
+    // body (including a parseable-but-non-object body — `null`,
+    // array, scalar). The existsSync/realPathWithin above already
+    // confined symlink escapes, so the remaining throw kinds here are
+    // parse-error and non-object-body. For non-strict plugins the
+    // merge base tolerated these by overlaying the marketplace entry
+    // via mergeClaudeConfigs; restore that contract.
+    let pluginConfig: Record<string, unknown> | null = null;
+    try {
+      pluginConfig = readExtensionManifest(
+        pluginSource,
+        '.claude-plugin/plugin.json',
+      );
+    } catch (err) {
+      if (strict) {
+        throw err;
+      }
+      debugLogger.warn(
+        `Falling back to marketplace entry for ${pluginJsonPath}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
     if (pluginConfig) {
-      mergedConfig = mergeClaudeConfigs(marketplacePlugin, pluginConfig);
+      mergedConfig = mergeClaudeConfigs(
+        marketplacePlugin,
+        pluginConfig as unknown as ClaudePluginConfig,
+      );
     } else {
       mergedConfig = marketplacePlugin as ClaudePluginConfig;
     }
@@ -1080,9 +1111,24 @@ async function resolvePluginSource(
       );
     }
 
-    // If source path equals marketplace dir (source is '.' or ''),
-    // return marketplaceDir directly to avoid copying to subdirectory of self
-    if (sourcePath === path.resolve(marketplaceDir)) {
+    // If source path equals marketplace dir (source is '.' or ''), or a
+    // subdir whose symlink target IS the marketplace dir, return
+    // marketplaceDir directly to avoid copying a directory into
+    // itself. The lexical check at line 1116 alone misses the
+    // symlink-to-root case: `fs.promises.cp` would then crash with a
+    // raw SystemError because the source and the destination resolve to
+    // the same path.
+    const realMarketplaceDir = fs.realpathSync(marketplaceDir);
+    let realSourcePath: string;
+    try {
+      realSourcePath = fs.realpathSync(sourcePath);
+    } catch {
+      realSourcePath = sourcePath;
+    }
+    if (
+      sourcePath === path.resolve(marketplaceDir) ||
+      realSourcePath === realMarketplaceDir
+    ) {
       return { pluginSource: marketplaceDir, externalContent: false };
     }
 
