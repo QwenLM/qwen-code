@@ -325,6 +325,10 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
         if (sig !== null) livePendingSigs.add(sig);
       }
     }
+    // Neither collapse branch can fire without a live pending tool_group.
+    // Skip the history-wide signature pass — this memo recomputes on every
+    // streaming tick.
+    if (livePendingSigs.size === 0) return combined;
     const deduped: VpItem[] = [];
     for (const item of combined) {
       const sig = toolGroupSignature(item);
