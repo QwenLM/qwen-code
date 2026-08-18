@@ -72,7 +72,7 @@ const OutputCard: FC<{
             OUT
           </div>
           <div
-            className={`break-words m-0 p-1 overflow-hidden ${
+            className={`webfetch-output-content break-words m-0 p-1 overflow-hidden ${
               isError ? 'whitespace-pre-wrap' : ''
             }`}
             style={

@@ -192,6 +192,11 @@ describe('ChatViewer global expand control', () => {
       '.toolcall-collapsible-output-content',
     ) as HTMLDivElement;
 
+  const getOutputCardContent = () =>
+    container?.querySelector(
+      '.webfetch-output-content',
+    ) as HTMLDivElement | null;
+
   const isThinkingExpanded = () =>
     container?.querySelector('.thinking-content') != null;
 
@@ -414,23 +419,14 @@ describe('ChatViewer global expand control', () => {
     const toggle = getOutputToggle();
     expect(toggle).not.toBeNull();
     expect(toggle.getAttribute('aria-expanded')).toBe('false');
-    const card = container?.querySelector(
-      '.break-words',
-    ) as HTMLDivElement | null;
-    expect(card?.style.maxHeight).toBe('120px');
+    expect(getOutputCardContent()?.style.maxHeight).toBe('120px');
 
     clickButton('Expand all sections');
     expect(getOutputToggle().getAttribute('aria-expanded')).toBe('true');
-    expect(
-      (container?.querySelector('.break-words') as HTMLDivElement).style
-        .maxHeight,
-    ).toBe('');
+    expect(getOutputCardContent()?.style.maxHeight).toBe('');
 
     clickButton('Collapse all sections');
     expect(getOutputToggle().getAttribute('aria-expanded')).toBe('false');
-    expect(
-      (container?.querySelector('.break-words') as HTMLDivElement).style
-        .maxHeight,
-    ).toBe('120px');
+    expect(getOutputCardContent()?.style.maxHeight).toBe('120px');
   });
 });
