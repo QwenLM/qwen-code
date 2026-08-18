@@ -152,6 +152,24 @@ const createInitialModelMetrics = (): ModelMetrics => ({
   bySource: Object.create(null) as Record<string, ModelMetricsCore>,
 });
 
+/**
+ * `structuredClone` copies own properties onto a FRESH object with
+ * `Object.prototype` — it does not preserve the null prototype above, so a
+ * plain clone silently re-arms the crash that comment describes, permanently,
+ * for every `bySource` map it touches. Every snapshot/restore clone goes
+ * through here so the guard survives a replay rollback.
+ */
+const cloneSessionMetrics = (metrics: SessionMetrics): SessionMetrics => {
+  const clone = structuredClone(metrics);
+  for (const model of Object.values(clone.models)) {
+    model.bySource = Object.assign(
+      Object.create(null) as Record<string, ModelMetricsCore>,
+      model.bySource,
+    );
+  }
+  return clone;
+};
+
 const createInitialSkillMetrics = (): SkillMetrics => ({
   totalCalls: 0,
   totalSuccess: 0,
@@ -306,10 +324,10 @@ export class UiTelemetryService extends EventEmitter {
   snapshotForReplay(sessionId: string): UiTelemetryReplaySnapshot {
     const sessionMetrics = this.#sessionMetrics.get(sessionId);
     return {
-      metrics: structuredClone(this.#metrics),
+      metrics: cloneSessionMetrics(this.#metrics),
       sessionId,
       sessionMetrics: sessionMetrics
-        ? structuredClone(sessionMetrics)
+        ? cloneSessionMetrics(sessionMetrics)
         : undefined,
       sessionWasClosed: this.#closedSessions.has(sessionId),
       lastPromptTokenCount: this.#lastPromptTokenCount,
@@ -324,11 +342,11 @@ export class UiTelemetryService extends EventEmitter {
    * makes this usable on a rollback path where the old session is still live.
    */
   restoreFromReplaySnapshot(snapshot: UiTelemetryReplaySnapshot): void {
-    this.#metrics = structuredClone(snapshot.metrics);
+    this.#metrics = cloneSessionMetrics(snapshot.metrics);
     if (snapshot.sessionMetrics) {
       this.#sessionMetrics.set(
         snapshot.sessionId,
-        structuredClone(snapshot.sessionMetrics),
+        cloneSessionMetrics(snapshot.sessionMetrics),
       );
     } else {
       // No bucket existed before the replay; the replay created one. Drop it
