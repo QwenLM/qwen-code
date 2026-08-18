@@ -8,6 +8,7 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
 import type { FetchPolicyResult } from '../../utils/fetch.js';
 import { FetchError } from '../../utils/fetch.js';
 import {
+  MODEL_DISCOVERY_TIMEOUT_MS,
   fetchProviderModelIds,
   isChatCapableModelId,
   mergeDiscoveredModels,
@@ -67,6 +68,13 @@ describe('parseModelListResponse', () => {
     expect(parseModelListResponse([{ id: 'a' }])).toEqual(['a']);
     expect(parseModelListResponse({ models: [{ id: 'a' }] })).toEqual(['a']);
     expect(parseModelListResponse({ data: ['a', 'b'] })).toEqual(['a', 'b']);
+  });
+
+  it('reads `model` and `name` when the entry carries no `id`', () => {
+    // Gateways in the wild name the field either way; dropping these keys
+    // turns a usable listing into `malformed` and a silent static fallback.
+    expect(parseModelListResponse({ data: [{ model: 'a' }] })).toEqual(['a']);
+    expect(parseModelListResponse({ data: [{ name: 'b' }] })).toEqual(['b']);
   });
 
   it('deduplicates while preserving provider order', () => {
@@ -159,15 +167,52 @@ describe('fetchProviderModelIds', () => {
       jsonResponse({ data: [{ id: 'qwen3.8-max' }] }),
     );
 
+    const controller = new AbortController();
     const result = await fetchProviderModelIds({
-      baseUrl: 'https://token-plan.example/compatible-mode/v1/',
+      // The shape every real preset uses: no trailing slash. A relative-URL
+      // join would silently drop the `/v1` segment here and 404.
+      baseUrl: 'https://token-plan.example/compatible-mode/v1',
       apiKey: 'sk-test',
+      signal: controller.signal,
     });
 
-    expect(result).toEqual({ ok: true, ids: ['qwen3.8-max'], totalCount: 1 });
+    expect(result).toEqual({ ok: true, ids: ['qwen3.8-max'] });
     const [url, options] = fetchWithPolicyMock.mock.calls[0];
     expect(url).toBe('https://token-plan.example/compatible-mode/v1/models');
     expect(options.headers['Authorization']).toBe('Bearer sk-test');
+    // The signal is the only wire for the wizard's unmount/re-key abort.
+    expect(options.signal).toBe(controller.signal);
+    expect(options.timeoutMs).toBe(MODEL_DISCOVERY_TIMEOUT_MS);
+    // 403 is classified as deterministic here, so the transport must not
+    // re-send the request behind discovery's back.
+    expect(options.retryTransientStatuses).toBe(false);
+  });
+
+  it('trims a trailing slash instead of doubling it', async () => {
+    fetchWithPolicyMock.mockResolvedValue(
+      jsonResponse({ data: [{ id: 'a' }] }),
+    );
+
+    await fetchProviderModelIds({
+      baseUrl: 'https://token-plan.example/compatible-mode/v1/',
+    });
+
+    expect(fetchWithPolicyMock.mock.calls[0][0]).toBe(
+      'https://token-plan.example/compatible-mode/v1/models',
+    );
+  });
+
+  it('honours an explicit timeout override', async () => {
+    fetchWithPolicyMock.mockResolvedValue(
+      jsonResponse({ data: [{ id: 'a' }] }),
+    );
+
+    await fetchProviderModelIds({
+      baseUrl: 'https://a.example/v1',
+      timeoutMs: 250,
+    });
+
+    expect(fetchWithPolicyMock.mock.calls[0][1].timeoutMs).toBe(250);
   });
 
   it('omits the header when no key is available', async () => {
@@ -181,7 +226,7 @@ describe('fetchProviderModelIds', () => {
     expect(options.headers['Authorization']).toBeUndefined();
   });
 
-  it('filters non-chat models but reports the raw count', async () => {
+  it('filters non-chat models out of the listing', async () => {
     fetchWithPolicyMock.mockResolvedValue(
       jsonResponse({
         data: [{ id: 'qwen3.8-max' }, { id: 'wan2.7-image' }],
@@ -190,7 +235,7 @@ describe('fetchProviderModelIds', () => {
 
     await expect(
       fetchProviderModelIds({ baseUrl: 'https://a.example/v1' }),
-    ).resolves.toEqual({ ok: true, ids: ['qwen3.8-max'], totalCount: 2 });
+    ).resolves.toEqual({ ok: true, ids: ['qwen3.8-max'] });
   });
 
   it.each([

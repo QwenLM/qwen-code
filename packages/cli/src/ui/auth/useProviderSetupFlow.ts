@@ -13,6 +13,7 @@ import {
   getDefaultModelIds,
   fetchProviderModelIds,
   mergeDiscoveredModels,
+  createDebugLogger,
 } from '@qwen-code/qwen-code-core';
 import type {
   InputModalities,
@@ -22,6 +23,8 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 import { normalizeModelIds, maskApiKey } from './useAuth.js';
+
+const debugLogger = createDebugLogger('PROVIDER_SETUP');
 
 // ---------------------------------------------------------------------------
 // Setup step names (generic, config-driven)
@@ -155,6 +158,12 @@ export function useProviderSetupFlow(
   const discoveryCacheRef = useRef(new Map<string, ModelSpec[]>());
   const discoveryKeyRef = useRef<string | null>(null);
   const discoveryAbortRef = useRef<AbortController | null>(null);
+  // The selection as the user authored it: the defaults `start()` checked plus
+  // every later edit on the model step. Discovery derives what is checked from
+  // this rather than from its own previous output — the prune can only remove
+  // ids, so pruning an already-pruned value makes the result depend on which
+  // pairs the session visited instead of on the pair in force.
+  const authoredModelIdsRef = useRef('');
   // Mirrors `discoveredModels` so the discovery effect can tell whether the
   // displayed list actually changes without taking the state as a dependency
   // (which would re-run the effect on its own result).
@@ -199,41 +208,59 @@ export function useProviderSetupFlow(
 
       // Drop built-in ids the endpoint no longer serves from the pending
       // selection — leaving them checked would install exactly the stale
-      // entries discovery exists to avoid. Ids the user typed are left alone;
-      // they may be legitimately unlisted (private deployments, aliases).
+      // entries discovery exists to avoid. An unserved built-in id is dropped
+      // whether it was checked by default or typed: the step composes both
+      // into one string, so they are indistinguishable here. Ids outside the
+      // built-in list are left alone; they may be legitimately unlisted
+      // (private deployments, aliases).
       const served = new Set(models.map((model) => model.id));
       const builtIn = new Set(getDefaultModelIds(config));
-      setModelIds((previous) => {
-        const kept = normalizeModelIds(previous).filter(
-          (id) => served.has(id) || !builtIn.has(id),
-        );
-        // Pruning everything would leave the step with nothing checked and no
-        // way to submit; fall back to the provider's first live model.
-        if (kept.length === 0 && models[0]) kept.push(models[0].id);
-        return kept.join(', ');
-      });
+      const kept = normalizeModelIds(authoredModelIdsRef.current).filter(
+        (id) => served.has(id) || !builtIn.has(id),
+      );
+      // Pruning everything would leave the step with nothing checked and no
+      // way to submit; fall back to the provider's first live model. That is
+      // the wizard's pick, not the user's, so it stays out of the authored
+      // baseline: carried into the next pair it would read as a typed id,
+      // survive a prune the endpoint does not serve it through, and suppress
+      // that pair's own fallback.
+      if (kept.length === 0 && models[0]) kept.push(models[0].id);
+      setModelIds(kept.join(', '));
     },
     [replaceRecommendations],
   );
 
   useEffect(() => {
-    if (currentStep !== 'models') return;
     if (!provider?.supportsModelDiscovery) return;
 
     const resolvedBaseUrl = baseUrl.trim();
     const resolvedApiKey = apiKey.trim();
-    if (!resolvedBaseUrl) return;
+    // The cached list is merged against the fetching provider's built-in
+    // specs, so it is only an answer for that provider — two providers can
+    // share an endpoint and key within one dialog session.
+    const discoveryKey = resolvedBaseUrl
+      ? JSON.stringify([provider.id, resolvedBaseUrl, resolvedApiKey])
+      : null;
 
-    const discoveryKey = JSON.stringify([resolvedBaseUrl, resolvedApiKey]);
+    // Pair-change detection sits above the step guard on purpose. Changing the
+    // key one step back (Esc off the model step, then retype) re-runs this
+    // effect only while the user is off-step, so detecting it below the guard
+    // would leave the abandoned lookup running with its key still claimed —
+    // and both continuation guards would then pass when it resolved, applying
+    // the pair the user moved off.
+    if (
+      discoveryKeyRef.current !== null &&
+      discoveryKeyRef.current !== discoveryKey
+    ) {
+      discoveryAbortRef.current?.abort();
+      discoveryAbortRef.current = null;
+      discoveryKeyRef.current = null;
+    }
+
+    if (currentStep !== 'models') return;
+    if (!discoveryKey) return;
     if (discoveryKeyRef.current === discoveryKey) return;
     discoveryKeyRef.current = discoveryKey;
-
-    // The pair changed, so any lookup still in flight is for a pair the user
-    // has moved off. Abort before either branch below: a cache hit that
-    // returned early used to leave it running, and it would then apply the
-    // abandoned pair's result over the current one.
-    discoveryAbortRef.current?.abort();
-    discoveryAbortRef.current = null;
 
     const cached = discoveryCacheRef.current.get(discoveryKey);
     if (cached) {
@@ -257,13 +284,18 @@ export function useProviderSetupFlow(
         signal: controller.signal,
       });
       // `aborted` covers unmount; the key check covers a pair change that
-      // raced this continuation — the abort above happens on the next effect
+      // raced this continuation — the release above happens on the next effect
       // run, which can land after this await resolved.
       if (controller.signal.aborted) return;
       if (discoveryKeyRef.current !== discoveryKey) return;
       if (!result.ok) {
         // Every failure mode lands here on purpose: the built-in list is a
         // working answer, so the step stays usable and says so quietly.
+        // Quietly for the user, not for the log — the notice cannot say which
+        // of six reasons applied without turning a non-event into an error.
+        debugLogger.debug(
+          `Model discovery failed (${result.reason}): ${result.message}`,
+        );
         // The list on screen changes back to the built-ins, so the mounted
         // step must re-derive rather than keep checkbox state pointing at ids
         // the built-in list does not offer.
@@ -331,7 +363,9 @@ export function useProviderSetupFlow(
       // flow.state.modelIds automatically based on config.models.
       const defaultIds = getDefaultModelIds(config);
       const customIds = existingModelIds ?? [];
-      setModelIds([...defaultIds, ...customIds].join(', '));
+      const initialModelIds = [...defaultIds, ...customIds].join(', ');
+      authoredModelIdsRef.current = initialModelIds;
+      setModelIds(initialModelIds);
       setModelIdsError(null);
       setThinkingEnabled(false);
       setModalityEnabled(false);
@@ -477,6 +511,7 @@ export function useProviderSetupFlow(
   );
 
   const changeModelIds = useCallback((value: string) => {
+    authoredModelIdsRef.current = value;
     setModelIds(value);
     setModelIdsError(null);
   }, []);
@@ -488,7 +523,8 @@ export function useProviderSetupFlow(
         setModelIdsError(t('Model IDs cannot be empty.'));
         return false;
       }
-      setModelIds(normalized.join(', '));
+      authoredModelIdsRef.current = normalized.join(', ');
+      setModelIds(authoredModelIdsRef.current);
       setModelIdsError(null);
       submitOrNext({ ...overrides, modelIds: normalized });
       return true;

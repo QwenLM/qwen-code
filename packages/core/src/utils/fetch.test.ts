@@ -370,6 +370,21 @@ describe('fetchWithPolicy retry', () => {
     },
   );
 
+  it('does not retry 403/429 when the caller opts out', async () => {
+    let calls = 0;
+    globalThis.fetch = vi.fn(async () => {
+      calls++;
+      return new Response('blocked', { status: 403 });
+    }) as typeof fetch;
+
+    const result = await fetchWithPolicy('https://example.com/deterministic', {
+      ...opts,
+      retryTransientStatuses: false,
+    });
+    expect(calls).toBe(1);
+    if (result.kind === 'response') expect(result.status).toBe(403);
+  });
+
   it('does not retry deterministic statuses like 404', async () => {
     let calls = 0;
     globalThis.fetch = vi.fn(async () => {

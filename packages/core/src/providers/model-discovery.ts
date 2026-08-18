@@ -28,7 +28,11 @@ export const MODEL_DISCOVERY_TIMEOUT_MS = 5_000;
 /** A `/models` listing is a few KB; anything near this is not one. */
 const MODEL_DISCOVERY_MAX_BYTES = 1024 * 1024;
 
-/** Same-host redirects only (http → https upgrades, region shuffles). */
+/**
+ * Same-host, same-protocol redirects only — the transport's redirect guard
+ * requires identical protocol, port, and hostname, so a scheme upgrade or a
+ * host change is never followed and surfaces as a `'network'` failure.
+ */
 const MODEL_DISCOVERY_MAX_REDIRECTS = 3;
 
 export type ModelDiscoveryFailureReason =
@@ -49,8 +53,6 @@ export interface ModelDiscoverySuccess {
   ok: true;
   /** Chat-capable model ids, in the order the provider returned them. */
   ids: string[];
-  /** Ids the provider returned before the non-chat filter ran. */
-  totalCount: number;
 }
 
 export interface ModelDiscoveryFailure {
@@ -194,6 +196,11 @@ export async function fetchProviderModelIds(
       maxBytes: MODEL_DISCOVERY_MAX_BYTES,
       maxRedirects: MODEL_DISCOVERY_MAX_REDIRECTS,
       headers,
+      // 403 is classified below as a deterministic auth failure, and the whole
+      // budget is a few seconds the user spends waiting — re-sending a doomed
+      // request, or burning half the budget on a 429 delay, buys nothing the
+      // built-in list does not already give.
+      retryTransientStatuses: false,
       ...(options.signal ? { signal: options.signal } : {}),
     });
   } catch (error) {
@@ -263,7 +270,7 @@ export async function fetchProviderModelIds(
     };
   }
 
-  return { ok: true, ids: chatIds, totalCount: ids.length };
+  return { ok: true, ids: chatIds };
 }
 
 // ---------------------------------------------------------------------------

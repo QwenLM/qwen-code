@@ -175,6 +175,14 @@ export interface FetchPolicyOptions {
   headers?: Record<string, string>;
   /** Caller cancellation (e.g. the tool's abort signal). */
   signal?: AbortSignal;
+  /**
+   * Whether a 403/429 answer is retried once. Callers that classify those
+   * statuses as deterministic — model discovery reads 403 as "wrong key" and
+   * has a few seconds of budget in total — pass `false` to spend neither the
+   * second request nor the retry delay on them. Connection-reset retries are
+   * unaffected. Defaults to `true`.
+   */
+  retryTransientStatuses?: boolean;
 }
 
 export interface FetchPolicyResponse {
@@ -213,7 +221,8 @@ const RETRY_DELAY_MS = 500;
 /**
  * Fetch with manual redirect handling, a full-transfer timeout, a byte cap
  * enforced while streaming, caller-abort wiring, and a single retry on
- * transient failures (403/429 statuses, connection resets). Uses the global
+ * transient failures (403/429 statuses unless `retryTransientStatuses` is
+ * `false`, and connection resets). Uses the global
  * fetch so the process-wide proxy dispatcher (setGlobalDispatcher) applies.
  * The timeout budget spans both attempts.
  */
@@ -265,6 +274,7 @@ export async function fetchWithPolicy(
 
   if (
     first.kind === 'response' &&
+    options.retryTransientStatuses !== false &&
     RETRYABLE_STATUSES.has(first.status) &&
     !signal.aborted
   ) {

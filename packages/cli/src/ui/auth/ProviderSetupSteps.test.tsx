@@ -6,7 +6,7 @@
 
 import { renderWithProviders } from '../../test-utils/render.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { act } from 'react';
+import { act, useState } from 'react';
 import { AuthType } from '@qwen-code/qwen-code-core';
 import type { KeypressHandler, Key } from '../contexts/KeypressContext.js';
 import { useKeypress } from '../hooks/useKeypress.js';
@@ -324,6 +324,74 @@ describe('ProviderSetupSteps', () => {
     expect(frame).toContain('MiniMax-M4-new');
     // Built-ins the endpoint no longer serves are not offered.
     expect(frame).not.toContain('MiniMax-M2.7');
+    unmount();
+  });
+
+  it('says the list is still being fetched while the lookup is in flight', () => {
+    const flow = createModelIdsFlow();
+    const state = flow.state as unknown as Record<string, unknown>;
+    state['discoveryStatus'] = 'loading';
+
+    const { lastFrame, unmount } = renderWithProviders(
+      <ProviderSetupSteps flow={flow} />,
+    );
+
+    const frame = lastFrame() ?? '';
+    // Saying "from the provider" here would be a lie about a list that is
+    // still the built-in one.
+    expect(frame).toContain('fetching the provider model list…');
+    expect(frame).not.toContain('from the provider');
+    expect(frame).toContain('MiniMax-M3');
+    expect(frame).toContain('MiniMax-M2.7');
+    unmount();
+  });
+
+  it('re-derives the model step when the recommendation list is replaced', () => {
+    // The step derives its checkbox and custom-input split once, at mount.
+    // Without the revision remount, an id that was checked from the previous
+    // list renders nowhere after the swap — invisible and unremovable, yet
+    // still submitted.
+    let swapFlow!: (next: ProviderSetupFlow) => void;
+    function FlowHarness({ first }: { first: ProviderSetupFlow }) {
+      const [flow, setFlow] = useState(first);
+      swapFlow = setFlow;
+      return <ProviderSetupSteps flow={flow} />;
+    }
+
+    const before = createModelIdsFlow({
+      modelIds: 'MiniMax-M3, discovered-only',
+    });
+    const beforeState = before.state as unknown as Record<string, unknown>;
+    beforeState['recommendedModels'] = [
+      { id: 'MiniMax-M3', contextWindowSize: 1000000 },
+      { id: 'discovered-only' },
+    ];
+    beforeState['discoveryStatus'] = 'success';
+    beforeState['recommendedModelsRevision'] = 0;
+
+    const { lastFrame, unmount } = renderWithProviders(
+      <FlowHarness first={before} />,
+    );
+    expect(lastFrame() ?? '').toContain('discovered-only');
+
+    // The lookup for the next pair failed, so the built-in list comes back.
+    const after = createModelIdsFlow({
+      modelIds: 'MiniMax-M3, discovered-only',
+    });
+    const afterState = after.state as unknown as Record<string, unknown>;
+    afterState['recommendedModels'] = [
+      { id: 'MiniMax-M3', contextWindowSize: 1000000 },
+    ];
+    afterState['discoveryStatus'] = 'failed';
+    afterState['recommendedModelsRevision'] = 1;
+
+    act(() => {
+      swapFlow(after);
+    });
+
+    // Re-derived: the id no longer on offer moved into the custom-ids input,
+    // where the user can still see and remove it.
+    expect(lastFrame() ?? '').toContain('discovered-only');
     unmount();
   });
 
