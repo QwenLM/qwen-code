@@ -13023,6 +13023,309 @@ describe('DaemonSessionProvider', () => {
     );
   });
 
+  it('keeps the capacity latch closed on live trims when pagination is unavailable', async () => {
+    // The eviction re-open of the load-older affordance must apply the same
+    // gates as the sibling paths: without the pagination feature (or without
+    // an anchor) a re-opened affordance would call a route the daemon does
+    // not serve and latch a pagination error instead of the terminal
+    // capacity state.
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: [],
+    });
+    const chunk = (
+      id: number,
+      kind: 'user_message_chunk' | 'agent_message_chunk',
+      text: string,
+      recordId: string,
+    ): DaemonEvent => ({
+      id,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: kind,
+          content: { type: 'text', text },
+          _meta: {
+            'qwen.session.recordId': recordId,
+            qwenTranscript: { sourceRecordIds: [recordId] },
+          },
+        },
+      },
+    });
+    const liveGate = createDeferred<void>();
+    const session = createMockSession({
+      sessionId: 'session-latch-no-pagination',
+      historyHasMore: true,
+      replaySnapshot: {
+        compactedReplay: [
+          chunk(1, 'user_message_chunk', 'replay prompt', 'record-1'),
+          chunk(2, 'agent_message_chunk', 'replay answer', 'record-2'),
+        ],
+        liveJournal: [],
+      },
+      events: async function* liveEventAfterGate(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        await Promise.race([
+          liveGate.promise,
+          new Promise<void>((resolve) => {
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            });
+          }),
+        ]);
+        if (opts.signal?.aborted) return;
+        yield chunk(3, 'user_message_chunk', 'live one', 'record-live-1');
+        await new Promise<void>((resolve) => {
+          if (opts.signal?.aborted) {
+            resolve();
+            return;
+          }
+          opts.signal?.addEventListener('abort', () => resolve(), {
+            once: true,
+          });
+        });
+        yield* [];
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let history: ReturnType<typeof useDaemonTranscriptHistory> | undefined;
+
+    function Harness() {
+      history = useDaemonTranscriptHistory();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      historyPageSize: 25,
+      maxBlocks: 2,
+    });
+
+    // Saturated replay on a non-pagination daemon latches the capacity
+    // state with the affordance closed.
+    expect(history).toMatchObject({
+      hasMore: false,
+      loading: false,
+      capacityReached: true,
+    });
+
+    // Live growth count-trims; the re-open must stay gated.
+    await act(async () => {
+      liveGate.resolve();
+      await flushTranscriptDispatch();
+    });
+    expect(history).toMatchObject({
+      hasMore: false,
+      loading: false,
+      capacityReached: true,
+    });
+    expect(sdkMocks.getSessionTranscriptPage).not.toHaveBeenCalled();
+  });
+
+  it('drops an in-flight history page when a trim re-anchors pagination mid-fetch', async () => {
+    // A byte/count trim firing while a load-older page is in flight
+    // re-anchors the exclusive `beforeRecordId`; merging the stale page
+    // afterwards would advance the anchor below the evicted band and make
+    // evicted-but-persisted records unreachable. The page must be dropped
+    // losslessly instead.
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_transcript_pagination'],
+    });
+    const chunk = (
+      id: number,
+      kind: 'user_message_chunk' | 'agent_message_chunk',
+      text: string,
+      recordId: string,
+    ): DaemonEvent => ({
+      id,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: kind,
+          content: { type: 'text', text },
+          _meta: {
+            'qwen.session.recordId': recordId,
+            qwenTranscript: { sourceRecordIds: [recordId] },
+          },
+        },
+      },
+    });
+    const firstLiveGate = createDeferred<void>();
+    const secondLiveGate = createDeferred<void>();
+    const session = createMockSession({
+      sessionId: 'session-inflight-page-trim',
+      historyHasMore: true,
+      replaySnapshot: {
+        compactedReplay: [
+          chunk(1, 'user_message_chunk', 'replay prompt', 'record-1'),
+          chunk(2, 'agent_message_chunk', 'replay answer', 'record-2'),
+        ],
+        liveJournal: [],
+      },
+      events: async function* liveEventsAfterGates(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        await Promise.race([
+          firstLiveGate.promise,
+          new Promise<void>((resolve) => {
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            });
+          }),
+        ]);
+        if (opts.signal?.aborted) return;
+        yield chunk(3, 'user_message_chunk', 'live one', 'record-live-1');
+        await Promise.race([
+          secondLiveGate.promise,
+          new Promise<void>((resolve) => {
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            });
+          }),
+        ]);
+        if (opts.signal?.aborted) return;
+        yield chunk(4, 'agent_message_chunk', 'live two', 'record-live-2');
+        await new Promise<void>((resolve) => {
+          if (opts.signal?.aborted) {
+            resolve();
+            return;
+          }
+          opts.signal?.addEventListener('abort', () => resolve(), {
+            once: true,
+          });
+        });
+        yield* [];
+      },
+    });
+    sdkMocks.sessions.push(session);
+    // Page 1 merges and saturates the window; page 2 resolves only when the
+    // test triggers it — after the mid-fetch trim.
+    const stalePage = createDeferred<{
+      v: 1;
+      sessionId: string;
+      events: DaemonEvent[];
+      hasMore: boolean;
+    }>();
+    sdkMocks.getSessionTranscriptPage
+      .mockResolvedValueOnce({
+        v: 1,
+        sessionId: session.sessionId,
+        events: [chunk(10, 'user_message_chunk', 'older prompt', 'record-a')],
+        hasMore: true,
+      })
+      .mockReturnValueOnce(stalePage.promise)
+      .mockResolvedValueOnce({
+        v: 1,
+        sessionId: session.sessionId,
+        events: [],
+        hasMore: false,
+      });
+    let history: ReturnType<typeof useDaemonTranscriptHistory> | undefined;
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+
+    function Harness() {
+      history = useDaemonTranscriptHistory();
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      historyPageSize: 25,
+      maxBlocks: 3,
+    });
+
+    // Admit the older page; the window is now full (3 of 3).
+    await act(async () => {
+      await history?.loadMore();
+      await flushPromises();
+    });
+    expect(blocks.map((block) => block.sourceRecordIds?.[0])).toEqual([
+      'record-a',
+      'record-1',
+      'record-2',
+    ]);
+    expect(history).toMatchObject({
+      hasMore: false,
+      loading: false,
+      capacityReached: true,
+    });
+
+    // Live growth evicts the prepended page block, releases the latch and
+    // re-anchors to record-1.
+    await act(async () => {
+      firstLiveGate.resolve();
+      await flushTranscriptDispatch();
+    });
+    expect(history).toMatchObject({
+      hasMore: true,
+      loading: false,
+      capacityReached: false,
+    });
+
+    // Start the next fetch (against record-1) but leave it in flight...
+    let pendingLoad: Promise<void> | undefined;
+    await act(async () => {
+      pendingLoad = history?.loadMore();
+      await flushPromises();
+    });
+    expect(sdkMocks.getSessionTranscriptPage).toHaveBeenNthCalledWith(
+      2,
+      session.sessionId,
+      {
+        beforeRecordId: 'record-1',
+        limit: 25,
+        clientId: session.clientId,
+      },
+    );
+
+    // ...while another live block trims again, re-anchoring to record-2.
+    await act(async () => {
+      secondLiveGate.resolve();
+      await flushTranscriptDispatch();
+    });
+
+    // The stale page now resolves; it must be dropped, not merged.
+    await act(async () => {
+      stalePage.resolve({
+        v: 1,
+        sessionId: session.sessionId,
+        events: [chunk(11, 'agent_message_chunk', 'older answer', 'record-b')],
+        hasMore: true,
+      });
+      await pendingLoad;
+      await flushPromises();
+    });
+    expect(blocks.map((block) => block.sourceRecordIds?.[0])).toEqual([
+      'record-2',
+      'record-live-1',
+      'record-live-2',
+    ]);
+    expect(history).toMatchObject({
+      hasMore: true,
+      loading: false,
+    });
+
+    // A retry fetches against the re-anchored anchor; nothing was lost.
+    await act(async () => {
+      await history?.loadMore();
+      await flushPromises();
+    });
+    expect(sdkMocks.getSessionTranscriptPage).toHaveBeenNthCalledWith(
+      3,
+      session.sessionId,
+      {
+        beforeRecordId: 'record-2',
+        limit: 25,
+        clientId: session.clientId,
+      },
+    );
+  });
+
   it('releases the replay snapshot after injection and never raises the block cap', async () => {
     sdkMocks.capabilities.mockResolvedValue({
       workspaceCwd: '/mock-workspace',

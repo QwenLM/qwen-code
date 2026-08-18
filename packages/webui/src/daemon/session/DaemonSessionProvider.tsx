@@ -614,6 +614,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     capacityReached: false,
     paginationError: false,
   });
+  // Monotonic counter bumped whenever a block trim invalidates the
+  // pagination position (the anchor record may have been evicted). A
+  // load-older fetch captures it before the await and drops the page if it
+  // moved mid-fetch, so a stale page can never advance the anchor below the
+  // evicted band.
+  const paginationGenerationRef = useRef(0);
   const store = useMemo(
     () =>
       createDaemonTranscriptStore({
@@ -633,9 +639,23 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           if (detail.oldestRetainedRecordId !== undefined) {
             history.beforeRecordId = detail.oldestRetainedRecordId;
           }
+          // Any eviction can invalidate an in-flight page's anchor.
+          paginationGenerationRef.current += 1;
           if (history.capacityReached) {
             // Eviction freed retention capacity, so the page rejected at the
-            // latch may fit now — re-open the load-older affordance.
+            // latch may fit now — re-open the load-older affordance, but
+            // only where the sibling paths would have offered it: the daemon
+            // must support pagination and a positional anchor must exist.
+            const features = sessionCapabilitiesRef.current?.features;
+            const paginationSupported =
+              Array.isArray(features) &&
+              features.includes(SESSION_TRANSCRIPT_PAGINATION_FEATURE);
+            const anchored =
+              history.beforeRecordId !== undefined ||
+              history.cursor !== undefined;
+            if (!paginationSupported || !anchored) {
+              return;
+            }
             history.hasMore = true;
             history.capacityReached = false;
             setTranscriptHistoryState({
@@ -3197,6 +3217,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         capacityReached: false,
         paginationError: false,
       });
+      const fetchPaginationGeneration = paginationGenerationRef.current;
       let terminalFailure = false;
       try {
         const page = await activeSession.getTranscriptPage({
@@ -3212,6 +3233,22 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           sessionRef.current !== activeSession ||
           transcriptHistoryRef.current !== history
         ) {
+          return;
+        }
+        if (paginationGenerationRef.current !== fetchPaginationGeneration) {
+          // A retention trim re-anchored pagination while this page was in
+          // flight. The page was fetched against the stale anchor; merging it
+          // would advance the anchor below the evicted band and make the
+          // evicted-but-persisted records unreachable. Drop it without
+          // mutating pagination state — every record it carries is older
+          // than the new anchor and will be re-served by the next fetch.
+          history.loading = false;
+          setTranscriptHistoryState({
+            hasMore: history.hasMore,
+            loading: false,
+            capacityReached: history.capacityReached,
+            paginationError: history.paginationError,
+          });
           return;
         }
         if (page.partial || page.replayError) {
