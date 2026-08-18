@@ -146,7 +146,10 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     'packages/cli/src/serve/run-qwen-serve.ts',
     {
       reason:
-        'The serve entry point owns daemon bootstrap, feature flags, child-process defaults, and the launch-env loader scrub.',
+        'The serve entry point owns daemon bootstrap, feature flags, child-process defaults, and the launch-env loader scrub. ' +
+        'NODE_EXTRA_CA_CERTS is read from the daemon process environment on purpose: it is the trust store Node itself ' +
+        'already loaded for this process, so the worker TLS trust-gap check has to consult the same value to know whether ' +
+        'an operator has already supplied the issuing CA.',
       accesses: {
         'computed:EXTERNAL_TOOL_GUARD_TOKEN_ENV': 1,
         'computed:QWEN_SERVER_TOKEN_ENV': 1,
@@ -156,6 +159,7 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'computed:QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV': 1,
         'computed:RUNTIME_STARTUP_TIMEOUT_ENV': 1,
         'key:DEV': 1,
+        'key:NODE_EXTRA_CA_CERTS': 2,
         'key:QWEN_CODE_IDE_WORKSPACE_PATH': 1,
         'key:QWEN_SERVE_NO_MCP_POOL': 1,
         'key:QWEN_SERVE_NO_PERSISTENT_REGISTRATION': 1,
