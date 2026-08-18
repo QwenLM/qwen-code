@@ -61,7 +61,7 @@ async function main() {
 
   const snapshot = buildSnapshot(await response.json());
   await mkdir(path.dirname(outputPath), { recursive: true });
-  await writeFile(outputPath, `${JSON.stringify(snapshot)}\n`);
+  await writeFile(outputPath, `${JSON.stringify(snapshot, null, 2)}\n`);
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === scriptPath) {

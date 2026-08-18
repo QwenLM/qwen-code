@@ -261,6 +261,9 @@ describe('buildInstallPlan', () => {
     expect(
       plan.modelProviders?.[0]?.models[0]?.generationConfig?.modalities,
     ).toBeUndefined();
+    expect(
+      plan.modelProviders?.[0]?.models[0]?.generationConfig?.contextWindowSize,
+    ).toBe(8192);
     expect(plan.providerState?.['providerMetadata.test']?.['version']).toBe(
       computeModelListVersion(template),
     );

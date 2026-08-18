@@ -14,7 +14,11 @@ import { getDefaultBaseUrlForProtocol } from '../providers/provider-config.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { normalizeProxyUrl } from '../utils/proxyUtils.js';
-import { loadUndici, redactProxyError } from '../utils/runtimeFetchOptions.js';
+import {
+  isTlsVerificationDisabled,
+  loadUndici,
+  redactProxyError,
+} from '../utils/runtimeFetchOptions.js';
 import builtInModelModalities from './generated/models-dev-modalities.json' with { type: 'json' };
 
 const MODELS_DEV_URL = 'https://models.dev/api.json';
@@ -213,6 +217,7 @@ async function fetchCatalog(
   fetchOverride?: CatalogFetch,
 ): Promise<{ catalog: ModelMetadataCatalog; text: string }> {
   const signal = AbortSignal.timeout(FETCH_TIMEOUT_MS);
+  const insecure = isTlsVerificationDisabled();
   let response: Response;
   let closeDispatcher: (() => Promise<void>) | undefined;
 
@@ -224,6 +229,31 @@ async function fetchCatalog(
     const dispatcher = new EnvHttpProxyAgent({
       httpProxy: normalizedProxyUrl,
       httpsProxy: normalizedProxyUrl,
+      // Mirrors getOrCreateSharedDispatcher: `connect` covers a direct NO_PROXY
+      // connection, `requestTls` the origin through a proxy, and `proxyTls` an
+      // HTTPS proxy itself.
+      ...(insecure
+        ? {
+            connect: { rejectUnauthorized: false },
+            requestTls: { rejectUnauthorized: false },
+            proxyTls: { rejectUnauthorized: false },
+          }
+        : {}),
+    });
+    closeDispatcher = () => dispatcher.close();
+    try {
+      response = (await undiciFetch(MODELS_DEV_URL, {
+        dispatcher,
+        signal,
+      })) as unknown as Response;
+    } catch (error) {
+      await dispatcher.close();
+      throw error;
+    }
+  } else if (insecure) {
+    const { Agent, fetch: undiciFetch } = await loadUndici();
+    const dispatcher = new Agent({
+      connect: { rejectUnauthorized: false },
     });
     closeDispatcher = () => dispatcher.close();
     try {

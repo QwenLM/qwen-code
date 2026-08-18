@@ -60,6 +60,7 @@ function deferred<T>(): {
 
 afterEach(async () => {
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   runtimeFetchMock.loadUndici.mockReset();
   await Promise.all(
     tempDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true })),
@@ -1352,6 +1353,16 @@ describe('loadModelMetadataCatalog', () => {
 
     expect(undiciFetch).toHaveBeenCalledTimes(2);
     expect(EnvHttpProxyAgent).toHaveBeenCalledTimes(2);
+
+    // After both refreshes settle as failures, further alternating loads must
+    // be bounded by the failure backoff instead of starting a new fetch per
+    // options change.
+    await loadModelMetadataCatalog({ proxyUrl: 'second-proxy:8080' });
+    await loadModelMetadataCatalog({ proxyUrl: 'first-proxy:8080' });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(undiciFetch).toHaveBeenCalledTimes(2);
+    expect(EnvHttpProxyAgent).toHaveBeenCalledTimes(2);
   });
 
   it('backs off after failed refreshes when workspace proxies alternate', async () => {
@@ -1411,6 +1422,99 @@ describe('loadModelMetadataCatalog', () => {
 
     expect(undiciFetch).toHaveBeenCalledOnce();
     expect(EnvHttpProxyAgent).toHaveBeenCalledOnce();
+  });
+
+  it('keeps a cache-fresh catalog without fetching when proxies alternate', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'models-dev-test-'));
+    tempDirs.push(dir);
+    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(dir);
+    // Seed a fresh cache file so the initial load succeeds from disk and no
+    // refresh attempt is ever recorded — the freshness gate is then the only
+    // guard that can stop options-change re-triggers (the failure backoff
+    // cannot, because nothing has been attempted).
+    await fs.writeFile(
+      path.join(dir, 'models-dev.json'),
+      JSON.stringify(catalog),
+    );
+    const close = vi.fn(async () => undefined);
+    const EnvHttpProxyAgent = vi.fn(() => ({ close }));
+    const undiciFetch = vi.fn(
+      async () => new Response(JSON.stringify(catalog)),
+    );
+    runtimeFetchMock.loadUndici.mockResolvedValue({
+      EnvHttpProxyAgent,
+      fetch: undiciFetch,
+    });
+
+    const first = await loadModelMetadataCatalog({
+      proxyUrl: 'first-proxy:8080',
+    });
+    const second = await loadModelMetadataCatalog({
+      proxyUrl: 'second-proxy:8080',
+    });
+    const third = await loadModelMetadataCatalog({
+      proxyUrl: 'first-proxy:8080',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(first).toBe(second);
+    expect(second).toBe(third);
+    expect(undiciFetch).not.toHaveBeenCalled();
+    expect(EnvHttpProxyAgent).not.toHaveBeenCalled();
+  });
+
+  it('disables TLS verification for proxy refreshes when QWEN_TLS_INSECURE is set', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'models-dev-test-'));
+    tempDirs.push(dir);
+    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(dir);
+    vi.stubEnv('QWEN_TLS_INSECURE', '1');
+    const close = vi.fn(async () => undefined);
+    const EnvHttpProxyAgent = vi.fn(() => ({ close }));
+    const undiciFetch = vi.fn(
+      async () => new Response(JSON.stringify(catalog)),
+    );
+    runtimeFetchMock.loadUndici.mockResolvedValue({
+      EnvHttpProxyAgent,
+      fetch: undiciFetch,
+    });
+
+    await loadModelMetadataCatalog({ proxyUrl: 'http://proxy.example:8080' });
+    await vi.waitFor(() => expect(undiciFetch).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
+
+    expect(EnvHttpProxyAgent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        connect: { rejectUnauthorized: false },
+        requestTls: { rejectUnauthorized: false },
+        proxyTls: { rejectUnauthorized: false },
+      }),
+    );
+  });
+
+  it('disables TLS verification for direct refreshes when QWEN_TLS_INSECURE is set', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'models-dev-test-'));
+    tempDirs.push(dir);
+    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(dir);
+    vi.stubEnv('QWEN_TLS_INSECURE', '1');
+    const close = vi.fn(async () => undefined);
+    const Agent = vi.fn(() => ({ close }));
+    const undiciFetch = vi.fn(
+      async () => new Response(JSON.stringify(catalog)),
+    );
+    runtimeFetchMock.loadUndici.mockResolvedValue({
+      Agent,
+      fetch: undiciFetch,
+    });
+
+    await loadModelMetadataCatalog({});
+    await vi.waitFor(() => expect(undiciFetch).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
+
+    expect(Agent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        connect: { rejectUnauthorized: false },
+      }),
+    );
   });
 
   it('closes the proxy dispatcher and keeps the snapshot on rejection', async () => {
