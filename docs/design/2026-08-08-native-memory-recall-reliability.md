@@ -27,7 +27,9 @@ Keep a single recall lifecycle and model-primary selection. Add one
 deterministic delivery stage in front of it — not the two-stage shared-scan
 Fast/Refined architecture originally proposed in RFC #7040.
 
-- Give user-query recall a fixed 100 ms initial wait budget.
+- Give user-query recall a 100 ms initial wait **ceiling**, not a fixed cost.
+  The wait ends on whichever comes first: recall settling, the deterministic
+  result being published, cancellation, or the ceiling.
 - Deliver a result that settles inside the budget in the initial prompt.
 - If the budget expires and the deterministic candidate pass found relevant
   documents, deliver that bounded result instead of nothing.
@@ -51,6 +53,37 @@ Fast/Refined architecture originally proposed in RFC #7040.
 The 100 ms budget stays internal, per RFC #7040's direction of a small fixed
 internal budget determined by benchmark rather than exposed as public
 configuration; telemetry can show whether a later change is justified.
+
+### The budget is a ceiling because the scan, not the selector, decides
+
+The fast result is published once recall has enumerated, read, and parsed the
+memory tree — and this design removed the 200-document cap for recall, so that
+scan grows with the tree. `recall-scan-latency.test.ts` measures the wall-clock
+time from the recall call to that publication against a real temporary tree:
+
+| topics | median  | share of the 100 ms budget |
+| ------ | ------- | -------------------------- |
+| 200    | ~29 ms  | ~29%                       |
+| 500    | ~70 ms  | ~70%                       |
+| 1000   | ~130 ms | ~130%                      |
+
+Two conclusions follow, and neither is visible in the deterministic _scoring_
+cost, which is microseconds.
+
+First, for any tree small enough to scan in time — which is the ordinary case,
+where a user holds tens of topics rather than hundreds — the fast result is in
+hand long before the ceiling. Spending the remainder waits for a model selector
+that this design already assumes will miss the budget, so it is close to pure
+added latency on every user turn. The wait therefore ends on the fast result.
+The preference order is unchanged: whatever ends the wait, a settled recall is
+still delivered in preference to the fast result.
+
+Second, past roughly a thousand topics the scan alone exceeds the ceiling. Such
+a turn spends the whole budget and still delivers nothing, which is worse than
+the zero-wait behaviour this design replaced. Ending the wait early does not fix
+that case; it bounds it and removes the cost everywhere else. A persistent
+catalog is the actual fix and remains out of scope, per
+`2026-08-09-bounded-memory-recall-candidates.md`.
 
 ### `MAX_RELEVANT_DOCS` is per delivery, not per turn
 
@@ -98,7 +131,12 @@ Improve the deterministic scorer, which now serves both the fast path and the
 selector-failure fallback:
 
 - normalize query and document text with Unicode NFKC;
-- keep ASCII alphanumeric tokens of at least three characters;
+- keep runs of at least three non-CJK letters, marks, and digits as whole
+  tokens. `\p{L}`-based rather than `[a-z0-9]`, so Cyrillic, Greek, Arabic,
+  and accented Latin produce tokens instead of none. CJK is excluded per
+  character rather than by alternation order, because `\p{L}` also matches
+  Han and a Latin-initial run would otherwise swallow the CJK after it and
+  turn `abc漢字` into a single token;
 - generate Unicode code-point bigrams for Han, Hiragana, Katakana, and Hangul
   runs;
 - ignore isolated CJK characters;
@@ -128,10 +166,17 @@ selector-failure fallback:
 ## Verification
 
 Recall quality is measured in `packages/core/src/memory/recall-eval.test.ts`
-against a 48-case labeled corpus, scored both by the shipped scorer and by a
-frozen copy of the pre-change one so "no regression" is reproducible rather
-than asserted. Delivery is measured separately in `recall-delivery-eval.test.ts`,
-because a correct selection that never reaches the model is worth nothing.
+against a 51-case, 25-document labeled corpus, scored both by the shipped
+scorer and by a frozen copy of the pre-change one so "no regression" is
+reproducible rather than asserted. Delivery is measured separately in
+`recall-delivery-eval.test.ts`, because a correct selection that never reaches
+the model is worth nothing, and scan latency in `recall-scan-latency.test.ts`,
+because a correct selection that is not ready in time reaches nothing either.
+
+The eval prints the corpus size and the Recall@5 a query-blind random scorer
+would achieve on it (5 of 25 documents, so 20%), and a test keeps that floor
+at or below 25% with the measured result well clear of it. A small corpus
+flatters every design; the floor is what makes the headline readable.
 
 - Recall settling inside the budget is delivered initially.
 - A budget expiry with deterministic candidates delivers that bounded result
@@ -141,8 +186,17 @@ because a correct selection that never reaches the model is worth nothing.
 - A fast result never crosses a query boundary.
 - No-result queries stay silent under both designs.
 - A labeled set covers Chinese, English, Japanese, Korean, mixed text,
-  NFKC normalization, body-only matches, no-result queries, and answerable
-  queries that share no token with their document.
+  NFKC normalization, body-only matches, no-result queries, answerable
+  queries that share no token with their document, and alphabetic scripts
+  outside ASCII and CJK (Cyrillic, Greek, accented Latin).
+- The fast result is published inside the initial ceiling for tree sizes a
+  user can plausibly reach, measured against a real temporary memory tree
+  rather than modelled.
+- The initial wait ends as soon as the deterministic result is published and
+  does not run to the ceiling; a wait with nothing to deliver still runs to
+  the ceiling and then proceeds without memory.
+- The active-tool alias set is derived once per recall rather than once per
+  scanned document.
 - Score ties are broken by recency rather than by document type, so a
   user-typed document is not pushed out of the two-document fast result by a
   tied feedback, project, or reference document.
@@ -180,6 +234,14 @@ because a correct selection that never reaches the model is worth nothing.
   it, so requiring a lexical match did not create the gap, but it does keep
   the fast path silent there. This is why the headline tool-free delivery
   figure is 92.3% and not 100%: the residual 7.7% is exactly that slice.
+- Past roughly a thousand topics in one scope, the memory-tree scan alone
+  exceeds the initial ceiling, so the turn spends the whole budget and still
+  delivers nothing. Ending the wait on the fast result bounds this rather than
+  removing it; the real fix is a persistent catalog, which is out of scope.
+- Scripts written without word separators and outside the CJK set — Thai,
+  Khmer, Lao — now produce a token where they previously produced none, but
+  the token is the whole run. That is not segmentation, and such a query will
+  usually still match nothing.
 - Recall can see older documents outside the shared 200-document scanner cap,
   but non-recall callers, including Forget, keep the existing capped scanner.
   A broader manageability pass is separate from this recall-only change.

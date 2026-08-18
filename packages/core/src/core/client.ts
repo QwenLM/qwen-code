@@ -304,6 +304,15 @@ function sameActiveGoalProjection(
  *  3. Aborted-and-discarded by every cleanup path (resetChat,
  *     MaxSessionTurns, etc.) or replaced when a new UserQuery arrives.
  */
+/**
+ * Publication slot for recall's deterministic result, plus a one-shot
+ * listener for its arrival.
+ */
+type MemoryFastResultBox = {
+  current: RelevantAutoMemoryPromptResult | null;
+  onArrive?: () => void;
+};
+
 type MemoryPrefetchHandle = {
   promise: Promise<RelevantAutoMemoryPromptResult>;
   /** Set by promise.finally(). null until the promise settles. */
@@ -320,8 +329,11 @@ type MemoryPrefetchHandle = {
    * Deterministic result published by recall before it blocks on the model
    * selector. A box rather than a plain field because recall can invoke the
    * callback before this handle object exists.
+   *
+   * `onArrive` lets the bounded initial wait stop as soon as there is
+   * something to deliver, instead of always spending the whole budget.
    */
-  fastResultRef: { current: RelevantAutoMemoryPromptResult | null };
+  fastResultRef: MemoryFastResultBox;
   /** True after the fast result was injected — prevents double-inject and double-log. */
   fastDelivered: boolean;
   /** Paths injected by the fast phase, excluded from the later refined delivery. */
@@ -911,11 +923,32 @@ export class GeminiClient {
       return null;
     }
 
-    if (handle.settledAt === null && waitMs > 0) {
+    // `waitMs` is a ceiling, not a fixed cost. The wait ends on whichever
+    // comes first: recall settling, the deterministic result being published,
+    // cancellation, or the budget expiring.
+    //
+    // Ending on the fast result matters more than it looks. That result is
+    // published once recall has scanned the memory tree, which is milliseconds
+    // for an ordinary tree — while the model selector is a network round trip
+    // that this design already assumes will miss the budget. Spending the rest
+    // of the budget after the fast result is in hand therefore buys an
+    // outcome that almost never arrives, and charges every user turn for it.
+    // See `recall-scan-latency.test.ts` for the scan measurements.
+    //
+    // The preference order is unchanged: whatever ends the wait, the code
+    // below still prefers a settled recall over the fast result.
+    if (
+      handle.settledAt === null &&
+      handle.fastResultRef.current === null &&
+      waitMs > 0
+    ) {
       await new Promise<void>((resolve) => {
         const finish = () => {
           clearTimeout(timer);
           handle.controller.signal.removeEventListener('abort', finish);
+          if (handle.fastResultRef.onArrive === finish) {
+            handle.fastResultRef.onArrive = undefined;
+          }
           resolve();
         };
 
@@ -926,6 +959,7 @@ export class GeminiClient {
           handle.controller.signal.addEventListener('abort', finish, {
             once: true,
           });
+          handle.fastResultRef.onArrive = finish;
           void handle.promise.then(finish, finish);
         }
       });
@@ -2862,9 +2896,7 @@ export class GeminiClient {
           } else {
             signal.addEventListener('abort', onParentAbort, { once: true });
           }
-          const fastResultRef: {
-            current: RelevantAutoMemoryPromptResult | null;
-          } = { current: null };
+          const fastResultRef: MemoryFastResultBox = { current: null };
           const promise = this.config
             .getMemoryManager()
             .recall(
@@ -2877,6 +2909,7 @@ export class GeminiClient {
                 abortSignal: controller.signal,
                 onFastResult: (result) => {
                   fastResultRef.current = result;
+                  fastResultRef.onArrive?.();
                 },
               },
             )

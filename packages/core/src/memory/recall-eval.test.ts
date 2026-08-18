@@ -43,6 +43,7 @@ const categories = new Set([
   'nfkc',
   'body-only',
   'semantic-no-lexical',
+  'other-script',
   'no-result',
 ] as const);
 
@@ -322,6 +323,15 @@ const isEnglish = (testCase: EvalCase) => testCase.category === 'english';
  */
 const isSemanticNoLexical = (testCase: EvalCase) =>
   testCase.category === 'semantic-no-lexical';
+/**
+ * Alphabetic scripts outside ASCII and CJK — Cyrillic, Greek, and accented
+ * Latin here. The pre-change tokenizer kept only `[a-z0-9]{3,}` runs, so
+ * these queries produced no tokens at all and the deterministic path was
+ * unconditionally silent; the shipped tokenizer keeps whole non-CJK letter
+ * runs instead.
+ */
+const isOtherScript = (testCase: EvalCase) =>
+  testCase.category === 'other-script';
 const isCjk = (testCase: EvalCase) =>
   testCase.category === 'chinese' ||
   testCase.category === 'japanese' ||
@@ -334,11 +344,26 @@ function formatPercent(value: number | null): string {
   return value === null ? 'n/a' : `${(value * 100).toFixed(1)}%`;
 }
 
+/**
+ * Expected Recall@5 of a scorer that ignores the query and returns five
+ * documents drawn uniformly at random from the corpus. Each labeled document
+ * has a `RECALL_AT / corpusSize` chance of being among them, so the expected
+ * per-case recall — and therefore the mean over any slice — is that ratio.
+ *
+ * Printed beside the measured columns because a small corpus flatters the
+ * headline: on a pool this size "100% Recall@5" is a much weaker statement
+ * than it reads, and a reader comparing designs needs the floor to calibrate
+ * against. It is exact rather than sampled, so the table stays deterministic.
+ */
+function randomBaselineRecallAt5(corpusSize: number): number {
+  return corpusSize === 0 ? 0 : Math.min(1, RECALL_AT / corpusSize);
+}
+
 describe('auto-memory recall evaluation', () => {
   it('loads a labeled corpus covering every required category', () => {
     const fixture = loadFixture();
     expect(fixture.cases.length).toBeGreaterThanOrEqual(30);
-    expect(fixture.cases.length).toBeLessThanOrEqual(50);
+    expect(fixture.cases.length).toBeLessThanOrEqual(60);
     expect(new Set(fixture.cases.map((testCase) => testCase.category))).toEqual(
       categories,
     );
@@ -434,6 +459,7 @@ describe('auto-memory recall evaluation', () => {
       ['english', isEnglish],
       ['cjk', isCjk],
       ['mixed', isMixed],
+      ['other-script', isOtherScript],
       ['semantic-no-lexical', isSemanticNoLexical],
     ] as const;
 
@@ -444,6 +470,14 @@ describe('auto-memory recall evaluation', () => {
       '| slice | metric | before | after |',
       '| --- | --- | --- | --- |',
     ];
+
+    const randomFloor = randomBaselineRecallAt5(fixture.docs.length);
+    lines.splice(
+      2,
+      0,
+      `corpus: ${fixture.docs.length} documents, ${fixture.cases.length} cases — a query-blind random scorer returning ${RECALL_AT} documents scores ${formatPercent(randomFloor)} Recall@5 on this pool`,
+      '',
+    );
 
     for (const [label, filter] of rows) {
       const before = evaluate(
@@ -475,6 +509,24 @@ describe('auto-memory recall evaluation', () => {
 
     console.log(lines.join('\n'));
     expect(lines.length).toBeGreaterThan(5);
+  });
+
+  /**
+   * Guards the headline against a corpus so small that Recall@5 is nearly
+   * free. This is a property of the fixture, not of the scorer: shrink the
+   * corpus far enough and every metric approaches 100% for any design.
+   */
+  it('keeps the corpus large enough for Recall@5 to discriminate', () => {
+    const fixture = loadFixture();
+    const randomFloor = randomBaselineRecallAt5(fixture.docs.length);
+
+    expect(randomFloor).toBeLessThanOrEqual(0.25);
+    const after = evaluate(
+      fixture,
+      selectRelevantAutoMemoryDocuments,
+      (testCase) => !isSemanticNoLexical(testCase),
+    );
+    expect(after.recallAt5!).toBeGreaterThan(randomFloor * 3);
   });
 
   it('produces deterministic summaries', () => {

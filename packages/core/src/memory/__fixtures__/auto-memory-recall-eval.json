@@ -153,6 +153,27 @@
       "title": "Deployment 发布说明",
       "description": "Release 流程",
       "body": "Mixed-language deployment notes."
+    },
+    {
+      "id": "ru-deploy",
+      "type": "project",
+      "title": "Процесс развёртывания",
+      "description": "Контрольный список релиза",
+      "body": "Перед выкатом проверить мониторинг и переключатели отката."
+    },
+    {
+      "id": "el-auth",
+      "type": "reference",
+      "title": "Ρύθμιση ταυτοποίησης",
+      "description": "Επίλυση προβλημάτων σύνδεσης",
+      "body": "Έλεγχος λήξης συνεδρίας και δικαιωμάτων."
+    },
+    {
+      "id": "fr-perf",
+      "type": "project",
+      "title": "Réduction du démarrage à froid",
+      "description": "Objectifs de performance trimestriels",
+      "body": "Mesurer la latence côté serveur avant toute optimisation."
     }
   ],
   "cases": [
@@ -479,6 +500,27 @@
       "category": "semantic-no-lexical",
       "query": "首屏加载太久了",
       "relevantIds": ["zh-perf"]
+    },
+    {
+      "id": "other-script-ru-deploy",
+      "category": "other-script",
+      "query": "процесс развёртывания",
+      "relevantIds": ["ru-deploy"],
+      "expectedTopId": "ru-deploy"
+    },
+    {
+      "id": "other-script-el-auth",
+      "category": "other-script",
+      "query": "ρύθμιση ταυτοποίησης",
+      "relevantIds": ["el-auth"],
+      "expectedTopId": "el-auth"
+    },
+    {
+      "id": "other-script-fr-perf",
+      "category": "other-script",
+      "query": "démarrage à froid",
+      "relevantIds": ["fr-perf"],
+      "expectedTopId": "fr-perf"
     }
   ]
 }

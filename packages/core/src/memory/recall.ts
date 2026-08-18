@@ -72,8 +72,35 @@ const TYPE_KEYWORDS: Record<string, string[]> = {
   reference: ['reference', 'dashboard', 'ticket', 'docs', 'doc', 'link'],
 };
 
-const RECALL_TOKEN_RUN =
-  /[a-z0-9]{3,}|[\p{Script=Han}\p{Script=Hiragana}\p{Script_Extensions=Katakana}\p{Script=Hangul}]+/gu;
+/**
+ * Scripts tokenized as code-point bigrams because they are written without
+ * word separators, so a whole run is one unsegmentable token.
+ */
+const CJK_CLASS =
+  '[\\p{Script=Han}\\p{Script=Hiragana}\\p{Script_Extensions=Katakana}\\p{Script=Hangul}]';
+
+/**
+ * One token run: either a CJK run (bigram-tokenized below) or a run of at
+ * least three non-CJK letters, marks, and digits (kept whole).
+ *
+ * The alphabetic alternative is `\p{L}`-based rather than `[a-z0-9]`, so
+ * Cyrillic, Greek, Arabic, and accented Latin produce tokens instead of
+ * silently producing none. It excludes CJK per character rather than relying
+ * on alternation order: `\p{L}` also matches Han, so a plain class would let
+ * a run starting in Latin swallow the CJK that follows it and turn
+ * `abc漢字` into one token.
+ *
+ * Scripts written without spaces and outside the CJK set (Thai, Khmer, Lao)
+ * still collapse into a single long token. That is no worse than the previous
+ * behaviour of producing nothing, but it is not segmentation.
+ */
+const RECALL_TOKEN_RUN = new RegExp(
+  `${CJK_CLASS}+|(?!${CJK_CLASS})[\\p{L}\\p{N}](?:(?!${CJK_CLASS})[\\p{L}\\p{M}\\p{N}]){2,}`,
+  'gu',
+);
+
+/** Whether a matched run is CJK, and therefore bigram-tokenized. */
+const CJK_RUN_START = new RegExp(`^${CJK_CLASS}`, 'u');
 
 function normalizeRecallText(text: string): string {
   return text.normalize('NFKC').toLowerCase();
@@ -103,14 +130,14 @@ function tokenize(text: string): string[] {
 
   for (const match of normalized.matchAll(RECALL_TOKEN_RUN)) {
     const run = match[0];
-    if (run.charCodeAt(0) <= 0x7f) {
-      addToken(run);
-    } else {
+    if (CJK_RUN_START.test(run)) {
       let previous = '';
       for (const codePoint of run) {
         if (previous) addToken(previous + codePoint);
         previous = codePoint;
       }
+    } else {
+      addToken(run);
     }
   }
 
@@ -146,35 +173,48 @@ function toolAliases(toolName: string): string[] {
   );
 }
 
-function isActiveToolUsageMemory(
-  doc: ScannedAutoMemoryDocument,
+/**
+ * Build the active-tool noise predicate once per recall rather than deriving
+ * it per document. The alias set depends only on `recentTools`, so computing
+ * it inside the per-document filter re-derived up to
+ * `MAX_RECENT_TOOL_NAMES_FOR_MEMORY` alias lists for every scanned document —
+ * which recall now does over an uncapped pool.
+ *
+ * Returns a predicate rather than a boolean so both filter sites share the
+ * hoisting; a `recentTools`-free recall short-circuits to a constant `false`.
+ */
+function createActiveToolUsageFilter(
   recentTools: readonly string[],
-): boolean {
+): (doc: ScannedAutoMemoryDocument) => boolean {
   if (recentTools.length === 0) {
-    return false;
+    return () => false;
   }
 
-  const haystack = [doc.title, doc.description, normalizeBody(doc.body)]
-    .join(' ')
-    .toLowerCase();
-  const namesActiveTool = recentTools.some((toolName) =>
-    toolAliases(toolName).some((alias) => haystack.includes(alias)),
-  );
-  if (!namesActiveTool) {
-    return false;
+  const aliases = Array.from(new Set(recentTools.flatMap(toolAliases)));
+  if (aliases.length === 0) {
+    return () => false;
   }
 
-  if (
-    DURABLE_ACTIVE_TOOL_MEMORY_MARKERS.some((marker) =>
+  return (doc) => {
+    const haystack = [doc.title, doc.description, normalizeBody(doc.body)]
+      .join(' ')
+      .toLowerCase();
+    if (!aliases.some((alias) => haystack.includes(alias))) {
+      return false;
+    }
+
+    if (
+      DURABLE_ACTIVE_TOOL_MEMORY_MARKERS.some((marker) =>
+        haystack.includes(marker),
+      )
+    ) {
+      return false;
+    }
+
+    return ACTIVE_TOOL_USAGE_MEMORY_MARKERS.some((marker) =>
       haystack.includes(marker),
-    )
-  ) {
-    return false;
-  }
-
-  return ACTIVE_TOOL_USAGE_MEMORY_MARKERS.some((marker) =>
-    haystack.includes(marker),
-  );
+    );
+  };
 }
 
 function scoreDocument(
@@ -246,9 +286,8 @@ function selectModelCandidateDocuments(
   modelCandidates: ScannedAutoMemoryDocument[];
   fallbackDocs: ScannedAutoMemoryDocument[];
 } {
-  const eligible = docs.filter(
-    (doc) => !isActiveToolUsageMemory(doc, recentTools),
-  );
+  const isActiveToolNoise = createActiveToolUsageFilter(recentTools);
+  const eligible = docs.filter((doc) => !isActiveToolNoise(doc));
   const lexical = selectRelevantAutoMemoryDocuments(
     query,
     eligible,
@@ -498,13 +537,14 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
     };
   }
 
+  const isActiveToolNoise = createActiveToolUsageFilter(
+    options.recentTools ?? [],
+  );
   const selectedDocs =
     fallbackDocs ??
     selectRelevantAutoMemoryDocuments(
       query,
-      docs.filter(
-        (doc) => !isActiveToolUsageMemory(doc, options.recentTools ?? []),
-      ),
+      docs.filter((doc) => !isActiveToolNoise(doc)),
       limit,
     );
   const strategy: RelevantAutoMemoryPromptResult['strategy'] =

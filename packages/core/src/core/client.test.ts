@@ -5156,10 +5156,9 @@ hello
         ),
       );
 
-      // Held for the budget, then the fast result goes out instead of nothing.
-      await vi.advanceTimersByTimeAsync(99);
-      expect(mockTurnRunFn).not.toHaveBeenCalled();
-      await vi.advanceTimersByTimeAsync(1);
+      // The deterministic result was already published, so the budget has
+      // nothing left to wait for and the request goes out without spending it.
+      await vi.advanceTimersByTimeAsync(0);
       await done;
 
       expect(mockTurnRunFn).toHaveBeenCalledWith(
@@ -5169,6 +5168,58 @@ hello
         ]),
         expect.any(AbortSignal),
       );
+    });
+
+    it('ends the initial wait as soon as the deterministic result arrives', async () => {
+      vi.useFakeTimers();
+      // Stands in for the memory-tree scan: the fast result is not ready when
+      // the wait begins, but lands well before the budget expires.
+      const SCAN_MS = 30;
+      mockMemoryManager.recall.mockImplementation((_root, _query, options) => {
+        setTimeout(() => {
+          if (options.abortSignal?.aborted) return;
+          options.onFastResult?.({
+            prompt: '## Relevant memory\n\nFast deterministic result.',
+            selectedDocs: [fastDoc('/m/fast.md', '- terse')],
+            strategy: 'heuristic',
+          });
+        }, SCAN_MS);
+        // Selector never settles — stands in for a slow round trip.
+        return new Promise(() => {});
+      });
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'Hello' };
+        })(),
+      );
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+
+      const done = fromAsync(
+        client.sendMessageStream(
+          [{ text: 'What do you know about me?' }],
+          new AbortController().signal,
+          'prompt-id-fast-early-return',
+        ),
+      );
+
+      await vi.advanceTimersByTimeAsync(SCAN_MS - 1);
+      expect(mockTurnRunFn).not.toHaveBeenCalled();
+      // The remaining ~70 ms of budget is never spent.
+      await vi.advanceTimersByTimeAsync(1);
+      expect(mockTurnRunFn).toHaveBeenCalledWith(
+        'test-model',
+        expect.arrayContaining([
+          expect.stringContaining('Fast deterministic result.'),
+        ]),
+        expect.any(AbortSignal),
+      );
+
+      await vi.advanceTimersByTimeAsync(100);
+      await done;
     });
 
     it('still delivers the model-selected result at ToolResult after a fast initial delivery', async () => {
@@ -5507,12 +5558,18 @@ hello
     it('delivers no fast result when the turn is cancelled inside the initial window', async () => {
       vi.useFakeTimers();
       const controller = new AbortController();
+      // The fast result must still be in flight when the abort lands,
+      // otherwise the wait would already have ended on its arrival and there
+      // would be no window left to cancel inside.
       mockMemoryManager.recall.mockImplementation((_root, _query, options) => {
-        options.onFastResult?.({
-          prompt: '## Relevant memory\n\nFast deterministic result.',
-          selectedDocs: [fastDoc('/m/fast.md', '- terse')],
-          strategy: 'heuristic',
-        });
+        setTimeout(() => {
+          if (options.abortSignal?.aborted) return;
+          options.onFastResult?.({
+            prompt: '## Relevant memory\n\nFast deterministic result.',
+            selectedDocs: [fastDoc('/m/fast.md', '- terse')],
+            strategy: 'heuristic',
+          });
+        }, 80);
         return new Promise(() => {});
       });
 
@@ -5737,9 +5794,11 @@ hello
     });
 
     it('should hold the main request for exactly the initial recall budget when recall never settles', async () => {
-      // Recall never settles. Fake timers pin the budget contract: the
+      // Recall never settles and never publishes a deterministic result, so
+      // nothing can end the wait early. Fake timers pin the ceiling: the
       // request must still be blocked 1 ms inside the budget and proceed,
-      // without memory, the moment the budget expires.
+      // without memory, the moment the budget expires. This is also the shape
+      // of a memory tree whose scan is slower than the budget.
       vi.useFakeTimers();
       mockMemoryManager.recall.mockReturnValue(new Promise(() => {}));
 

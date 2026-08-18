@@ -340,6 +340,57 @@ describe('auto-memory relevant recall', () => {
     );
   });
 
+  it('tokenizes alphabetic scripts outside ASCII and CJK', () => {
+    // `[a-z0-9]{3,}` produced no tokens at all for these, so the
+    // deterministic path was unconditionally silent — no fast result, and a
+    // silent selector-failure fallback.
+    const cyrillic = memoryDoc(
+      'ru.md',
+      'project',
+      'Процесс развёртывания',
+      '',
+      '',
+    );
+    const greek = memoryDoc('el.md', 'reference', 'Ρύθμιση σύνδεσης', '', '');
+    const accented = memoryDoc('fr.md', 'project', 'Démarrage à froid', '', '');
+    const docs = [cyrillic, greek, accented];
+
+    expect(
+      selectRelevantAutoMemoryDocuments('развёртывания', docs)[0]?.filename,
+    ).toBe('ru.md');
+    expect(
+      selectRelevantAutoMemoryDocuments('σύνδεσης', docs)[0]?.filename,
+    ).toBe('el.md');
+    expect(
+      selectRelevantAutoMemoryDocuments('démarrage', docs)[0]?.filename,
+    ).toBe('fr.md');
+  });
+
+  it('does not let a Latin run swallow the CJK that follows it', () => {
+    // `\p{L}` also matches Han, so a naive alphabetic class would tokenize
+    // `abc漢字` as one run and stop matching either half on its own.
+    const latin = memoryDoc('latin.md', 'reference', 'abc', '', '');
+    const han = memoryDoc('han.md', 'reference', '漢字', '', '');
+
+    expect(
+      selectRelevantAutoMemoryDocuments('abc漢字', [latin, han]).map(
+        (doc) => doc.filename,
+      ),
+    ).toEqual(['latin.md', 'han.md']);
+  });
+
+  it('still ignores runs shorter than three characters', () => {
+    const doc = memoryDoc('go.md', 'reference', 'go go go', '', '');
+
+    expect(selectRelevantAutoMemoryDocuments('go', [doc])).toEqual([]);
+    // Two Cyrillic letters are below the threshold for the same reason.
+    expect(
+      selectRelevantAutoMemoryDocuments('до', [
+        memoryDoc('ru.md', 'reference', 'до свидания', '', ''),
+      ]),
+    ).toEqual([]);
+  });
+
   it('breaks score ties by recency, not by document type', () => {
     // Every type carries the same title, so the only thing separating these
     // documents is the tie-break. An alphabetical type comparison orders them

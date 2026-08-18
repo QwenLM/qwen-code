@@ -361,7 +361,7 @@ flowchart TD
     I -- 有文档 --> J[strategy: model]
     I -- 无文档 --> K[strategy: none\n仍然返回空]
     H -- "失败/异常" --> L[复用已计算的启发式排序]
-    F -- 否 --> M[tokenize query\nNFKC + ASCII token + CJK bigram\n最多 64 个 token]
+    F -- 否 --> M[tokenize query\nNFKC + 非 CJK 字母整串 + CJK bigram\n最多 64 个 token]
     M --> N[scoreDocument 打分\ntitle +4 / description +3 / body +1\n词法命中后类型加成最多 +2]
     N --> O[过滤 score=0 的文档\n按分数降序、mtime 降序、输入顺序排列\n取 Top 5]
     L --> O
@@ -391,6 +391,16 @@ flowchart TD
 | query token 出现在 body 前 1200 字符       | +1（每个 token）    |
 | 至少一次词法命中后，token 是类型特征关键词 | +1，整篇文档最多 +2 |
 
+> **Tokenize 规则**：NFKC 归一化并转小写后，Han/Hiragana/Katakana/Hangul 连续片段
+> 按 code point bigram 切分（单字不产生 token）；其余至少 3 个字母、组合符或数字的
+> 连续片段整串保留。后者基于 `\p{L}` 而非 `[a-z0-9]`，因此西里尔、希腊、阿拉伯和
+> 带重音拉丁文都能产生 token。CJK 是**逐字符**排除的，不能只依赖正则分支顺序——
+> `\p{L}` 也匹配 Han，否则 `abc漢字` 会被并成一个 token。Thai/Khmer/Lao 这类
+> 无分词符又不在 CJK 集合内的文字，会整段变成一个 token：比之前完全没有 token 强，
+> 但不是分词。
+>
+> **同分排序**：按 mtime 降序，再按输入顺序（稳定排序），**不按 type**。
+
 **每种类型的特征关键词**：
 
 - `user`：user, preference, background, role, terse
@@ -418,11 +428,12 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A[UserQuery 到达\n启动 Recall Prefetch] --> B{100 ms 内\nRecall 是否完成?\nINITIAL_MEMORY_RECALL_WAIT_MS}
-    B -- 是 --> C{选中结果非空?}
+    A[UserQuery 到达\n启动 Recall Prefetch] --> B{等待结束\n以先到者为准:\nRecall 完成 / Fast 就绪 /\n取消 / 100 ms 上限}
+    B --> B1{Recall 是否完成?}
+    B1 -- 是 --> C{选中结果非空?}
     C -- 是 --> C1[注入首轮 Prompt\nphase: refined]
     C -- 否 --> C0[丢弃\nno_relevant_results]
-    B -- 否 --> D{是否有确定性\nFast 结果?}
+    B1 -- 否 --> D{是否有确定性\nFast 结果?}
     D -- 是 --> E[注入首轮 Prompt\nphase: fast\n最多 2 篇 MAX_FAST_RECALL_DOCS]
     D -- 否 --> F[首轮不注入]
     E --> G[Recall 继续运行]
@@ -446,6 +457,15 @@ flowchart TD
 若没有 Fast 阶段，**没有工具调用的轮次将完全拿不到 Memory**——而这正是
 用户级 Memory 最重要的场景。Fast 结果复用 `selectModelCandidateDocuments`
 为 Model Manifest 已经算好的候选，不产生额外扫描或 I/O。
+
+**100 ms 是上限而不是固定开销**：Fast 结果在 Recall 扫完 Memory 树之后才发布，
+所以真正决定它能否赶上的是**扫描耗时**，不是打分耗时（后者是微秒级）。
+`recall-scan-latency.test.ts` 在真实临时 Memory 树上实测：200 篇约 29 ms、
+500 篇约 70 ms、1000 篇约 130 ms。对能在预算内扫完的树（普通用户的常见情况），
+Fast 就绪后继续等待只是在等一个本设计已经假定赶不上的 Model Selector，
+因此等待会在 Fast 就绪时立即结束。超过约 1000 篇时扫描本身就超预算，
+该轮会付满 100 ms 且什么都投不到——提前结束等待只能把这种情况**限制住**，
+消除不了它。
 
 **Fast 阶段的边界**：Fast 结果就是确定性结果，因此它只能解决**时机**问题，
 解决不了**匹配**问题。与文档没有任何词面重叠的 Query 产生不了 Fast 结果，
