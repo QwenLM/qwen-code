@@ -1608,6 +1608,97 @@ describe('ChatEditor file upload gating', () => {
     expect(composerCoreState.onFileUploadRequest).toBeUndefined();
   });
 
+  it('fileUploadEnabled={false} disables file drag-and-drop in the composer core', () => {
+    uploadWorkspaceState.current = makeWorkspace(['workspace_file_upload']);
+    renderChatEditor({ customization: { fileUploadEnabled: false } });
+    expect(latestComposerCoreOptions.current?.fileDragEnabled).toBe(false);
+  });
+
+  it('enables file drag-and-drop in the composer core by default', () => {
+    uploadWorkspaceState.current = makeWorkspace(['workspace_file_upload']);
+    renderChatEditor({});
+    expect(latestComposerCoreOptions.current?.fileDragEnabled).toBe(true);
+  });
+
+  it('fileUploadEnabled={false} ingests nothing on file drop', () => {
+    const workspace = makeWorkspace(['workspace_file_upload']);
+    uploadWorkspaceState.current = workspace;
+    composerCoreState.imageDropCapture.mockImplementation((event: Event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    });
+    const container = renderChatEditor({
+      customization: { fileUploadEnabled: false },
+    });
+    const editor = container.querySelector('[data-web-shell-composer-editor]')!;
+    const drop = dispatchDrag(
+      editor,
+      'drop',
+      ['Files'],
+      [new File(['abc'], 'notes.txt')],
+    );
+    // Cancelled so the browser cannot navigate to the dropped file, but no
+    // lane — upload or inline image/text — reacts.
+    expect(drop.defaultPrevented).toBe(true);
+    expect(composerCoreState.imageDropCapture).not.toHaveBeenCalled();
+    expect(workspace.client.uploadWorkspaceFile).not.toHaveBeenCalled();
+    expect(composerCoreState.addTags).not.toHaveBeenCalled();
+    expect(container.querySelector('[data-web-shell-upload-strip]')).toBeNull();
+  });
+
+  it('uploads dropped files into the configured directory', async () => {
+    const workspace = makeWorkspace(['workspace_file_upload']);
+    workspace.client.uploadWorkspaceFile.mockResolvedValue({
+      kind: 'file_upload',
+      path: 'uploads/notes.txt',
+      sizeBytes: 3,
+      hash: `sha256:${'b'.repeat(64)}`,
+    });
+    uploadWorkspaceState.current = workspace;
+    const container = renderChatEditor({
+      customization: { fileUploadDirectory: 'uploads' },
+    });
+    const editor = container.querySelector('[data-web-shell-composer-editor]')!;
+    dispatchDrag(editor, 'drop', ['Files'], [new File(['abc'], 'notes.txt')]);
+    await act(async () => {});
+
+    expect(workspace.client.uploadWorkspaceFile).toHaveBeenCalledTimes(1);
+    expect(workspace.client.uploadWorkspaceFile.mock.calls[0][0].path).toBe(
+      'uploads/notes.txt',
+    );
+    // The directory flows through the whole chain: request path, server
+    // response, and the inserted @reference.
+    expect(composerCoreState.addTags).toHaveBeenCalledWith(
+      [
+        expect.objectContaining({
+          kind: 'file',
+          value: 'uploads/notes.txt',
+        }),
+      ],
+      { placement: 'inline', position: 'end' },
+    );
+  });
+
+  it('uploads dropped files to the workspace root by default', async () => {
+    const workspace = makeWorkspace(['workspace_file_upload']);
+    workspace.client.uploadWorkspaceFile.mockResolvedValue({
+      kind: 'file_upload',
+      path: 'notes.txt',
+      sizeBytes: 3,
+      hash: `sha256:${'d'.repeat(64)}`,
+    });
+    uploadWorkspaceState.current = workspace;
+    const container = renderChatEditor({});
+    const editor = container.querySelector('[data-web-shell-composer-editor]')!;
+    dispatchDrag(editor, 'drop', ['Files'], [new File(['abc'], 'notes.txt')]);
+    await act(async () => {});
+
+    expect(workspace.client.uploadWorkspaceFile).toHaveBeenCalledTimes(1);
+    expect(workspace.client.uploadWorkspaceFile.mock.calls[0][0].path).toBe(
+      'notes.txt',
+    );
+  });
+
   it('fileUploadEnabled={true} still requires the capability (AND, not override)', () => {
     // No workspace_file_upload capability: upload stays disabled even though
     // the host prop opts in — the prop does not bypass the capability check.
