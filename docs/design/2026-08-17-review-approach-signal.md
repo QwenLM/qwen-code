@@ -36,7 +36,7 @@ has taken enough rounds _and_ grown enough since the review first measured it.
 
 It fires when all of:
 
-- the composed event is not `APPROVE`
+- this round confirmed at least one finding (the pre-cap verdict, `baseEvent`, is not `APPROVE`)
 - the round is at or past the threshold (default 5; `review.approachRounds`)
 - a baseline exists from an earlier round
 - the source diff is past the module's existing non-trivial floor (100 lines)

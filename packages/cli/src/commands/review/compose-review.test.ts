@@ -8316,6 +8316,9 @@ describe('composeReview — approach signal', () => {
       src0: 228,
       srcDiffLines: 920,
     });
+    // The marker the NEXT round reads keeps the previous baseline — a
+    // same-round assertion cannot see a rewrite of it.
+    expect(r.body).toMatch(/"src0":228/);
   });
 
   it('baselines from the full-range size on an incremental round', () => {
@@ -8395,6 +8398,131 @@ describe('composeReview — approach signal', () => {
       severityFloor: 'auto',
     });
     expect(r.body).toMatch(/"src0":340/);
+  });
+
+  // The gate is `round >= rounds`: an off-by-one there makes every PR at
+  // exactly the threshold wait one more round, and nothing else notices.
+  it('fires at exactly the round threshold', () => {
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      ownerRepo: 'QwenLM/qwen-code',
+      srcDiffLines: 920,
+    });
+    prevLedger(planPath, { v: 1, round: 4, findings: [], src0: 228 });
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+    });
+    expect(r.approachSignal).toMatchObject({ round: 5, src0: 228 });
+  });
+
+  // `growth >= APPROACH_GROWTH_FACTOR` — exactly the documented "grown by
+  // at least 3x" must fire.
+  it('fires at exactly the growth factor', () => {
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      ownerRepo: 'QwenLM/qwen-code',
+      srcDiffLines: 300,
+    });
+    prevLedger(planPath, { v: 1, round: 5, findings: [], src0: 100 });
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+    });
+    expect(r.approachSignal).toMatchObject({
+      src0: 100,
+      srcDiffLines: 300,
+      growth: 3,
+    });
+  });
+
+  // The floor is STRICT — "past the floor": exactly 100 source diff lines
+  // stays silent even at 20x growth.
+  it('stays silent at exactly the source-diff floor', () => {
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      ownerRepo: 'QwenLM/qwen-code',
+      srcDiffLines: 100,
+    });
+    prevLedger(planPath, { v: 1, round: 5, findings: [], src0: 5 });
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+    });
+    expect(r.approachSignal).toBeNull();
+  });
+
+  // The corroborating clause: the incident that motivated this feature was
+  // a round-cap stop beside a ballooned diff, the exact shape no other test
+  // composes — every other firing case has no stop file.
+  it('names a round-cap stop in the paragraph when one happened', () => {
+    const planPath = ballooned();
+    writeRoundCapStop(planPath, 5, 6);
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+    });
+    expect(r.approachSignal?.nonConverged).toBe(true);
+    expect(r.body).toContain(
+      'the reverse audit also stopped at its round cap without converging',
+    );
+  });
+
+  // The zh half of the paragraph, rendered for a Han-character description
+  // like every other bilingual clause in this module — a broken or
+  // truncated translation would otherwise ship unseen.
+  it('renders the zh half of the paragraph for a Han-character description', () => {
+    const planPath = ballooned({ han: true });
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+    });
+    expect(r.body).toContain('⚠️ 第 6 轮');
+    expect(r.body).toContain('228 → 920');
+    expect(r.body).toContain('仅供参考');
+  });
+
+  // A legacy incremental plan carries no full-range size, so the signal
+  // stays silent — but a baseline already on record must still ride the
+  // marker forward, or the next round loses the growth record.
+  it('keeps the previous baseline on a silent legacy incremental round', () => {
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      ownerRepo: 'QwenLM/qwen-code',
+      srcDiffLines: 350,
+      incremental: { since: 'a'.repeat(40), effective: true },
+    });
+    prevLedger(planPath, { v: 1, round: 5, findings: [], src0: 228 });
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+    });
+    expect(r.approachSignal).toBeNull();
+    expect(r.body).toMatch(/"src0":228/);
   });
 });
 
