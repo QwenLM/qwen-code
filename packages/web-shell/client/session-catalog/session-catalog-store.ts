@@ -148,7 +148,13 @@ export class SessionCatalogStore {
     ReturnType<typeof setTimeout>
   >();
   private readonly liveStateWorkspaceUsers = new Map<string, number>();
-  private readonly liveStateWorkspaceRefreshRequests = new Set<string>();
+  private readonly liveStateWorkspaceRefreshRequests = new Map<
+    string,
+    'interactive' | 'invalidated'
+  >();
+  private readonly liveStateWakeHandlers = new Set<
+    (workspaceCwd: string) => void
+  >();
   private activeRequests = 0;
   private activeBackgroundRequests = 0;
   private queueSequence = 0;
@@ -201,8 +207,41 @@ export class SessionCatalogStore {
     return this.liveStateWorkspaceUsers.has(workspaceCwd);
   }
 
-  consumeWorkspaceLiveStateRefreshRequest(workspaceCwd: string): boolean {
-    return this.liveStateWorkspaceRefreshRequests.delete(workspaceCwd);
+  consumeWorkspaceLiveStateRefreshRequest(
+    workspaceCwd: string,
+  ): 'interactive' | 'invalidated' | undefined {
+    const kind = this.liveStateWorkspaceRefreshRequests.get(workspaceCwd);
+    if (kind !== undefined) {
+      this.liveStateWorkspaceRefreshRequests.delete(workspaceCwd);
+    }
+    return kind;
+  }
+
+  onLiveStateWake(handler: (workspaceCwd: string) => void): () => void {
+    this.liveStateWakeHandlers.add(handler);
+    return () => {
+      this.liveStateWakeHandlers.delete(handler);
+    };
+  }
+
+  requestWorkspaceLiveStateRefresh(workspaceCwd: string): void {
+    if (!this.isWorkspaceLiveStateEnabled(workspaceCwd)) return;
+    this.requestLiveStateRefresh(workspaceCwd, 'interactive');
+  }
+
+  private requestLiveStateRefresh(
+    workspaceCwd: string,
+    kind: 'interactive' | 'invalidated',
+  ): void {
+    if (
+      this.liveStateWorkspaceRefreshRequests.get(workspaceCwd) === 'interactive'
+    ) {
+      return;
+    }
+    this.liveStateWorkspaceRefreshRequests.set(workspaceCwd, kind);
+    if (kind === 'interactive') {
+      for (const handler of this.liveStateWakeHandlers) handler(workspaceCwd);
+    }
   }
 
   subscribe(
@@ -226,21 +265,22 @@ export class SessionCatalogStore {
     const liveStateEnabled = this.isWorkspaceLiveStateEnabled(
       query.workspaceCwd,
     );
-    if (
-      liveStateEnabled &&
-      (entry.snapshot.page === undefined || entry.snapshot.stale)
-    ) {
-      this.liveStateWorkspaceRefreshRequests.add(query.workspaceCwd);
-    }
-    this.updateVisibilityListener();
-    this.resetPollSchedule(entry);
-
     const retainedPageExpired =
       subscriber.autoLoad &&
       options.maxAgeMs !== undefined &&
       entry.snapshot.page !== undefined &&
       (entry.snapshot.updatedAt === undefined ||
         Date.now() - entry.snapshot.updatedAt >= options.maxAgeMs);
+    if (
+      liveStateEnabled &&
+      (entry.snapshot.page === undefined ||
+        entry.snapshot.stale ||
+        retainedPageExpired)
+    ) {
+      this.requestLiveStateRefresh(query.workspaceCwd, 'interactive');
+    }
+    this.updateVisibilityListener();
+    this.resetPollSchedule(entry);
 
     if (
       !liveStateEnabled &&
@@ -319,7 +359,7 @@ export class SessionCatalogStore {
     const hidden = this.isHidden();
     const liveStateEnabled = this.isWorkspaceLiveStateEnabled(workspaceCwd);
     if (liveStateEnabled) {
-      this.liveStateWorkspaceRefreshRequests.add(workspaceCwd);
+      this.requestLiveStateRefresh(workspaceCwd, 'invalidated');
     }
     for (const entry of this.entries.values()) {
       if (entry.query.workspaceCwd !== workspaceCwd) continue;
@@ -335,6 +375,13 @@ export class SessionCatalogStore {
             ...entry.snapshot,
             loading: entry.runningRevision !== undefined,
           });
+        }
+        // Non-coordinated waiters (e.g. a pre-live `loadOnce` still in
+        // flight) can never be resolved by the live-state reconcile path,
+        // and their presence blocks `stageWorkspaceRefresh` for the whole
+        // workspace — schedule a real job so they settle.
+        if (entry.waiters.some((waiter) => !waiter.liveStateCoordinated)) {
+          this.ensureScheduled(entry, PRIORITY.interactive, false);
         }
         continue;
       }
@@ -391,6 +438,12 @@ export class SessionCatalogStore {
       }
       let changed = false;
       const sessions = entry.snapshot.page.sessions.map((session) => {
+        // A page can hold sessions from another workspace (the daemon merges
+        // live runtime state); a workspace-scoped live-state response cannot
+        // list them, so applying it would zero their volatile state.
+        if (session.workspaceCwd && session.workspaceCwd !== workspaceCwd) {
+          return session;
+        }
         const live = liveById.get(session.sessionId);
         const clientCount = live?.clientCount ?? 0;
         const hasActivePrompt = live?.hasActivePrompt ?? false;
@@ -462,34 +515,75 @@ export class SessionCatalogStore {
       entry.retryAt = undefined;
       this.setSnapshot(entry, { ...entry.snapshot, stale: true });
     }
-    const pages: StagedCatalogPage[] = [];
-    try {
-      for (const { entry, revision } of targets) {
-        if (entry.runningPromise) await entry.runningPromise;
-        if (entry.desiredRevision !== revision) {
-          return { workspaceCwd, pages, complete: false };
-        }
-        pages.push({
-          key: entry.key,
+    const results = await Promise.all(
+      targets.map(
+        async ({
+          entry,
           revision,
-          page: await this.fetchStagedPage(entry, revision),
+        }): Promise<
+          | {
+              entry: CatalogEntry;
+              revision: number;
+              page: DaemonSessionListPage;
+            }
+          | { entry: CatalogEntry; revision: number; superseded: true }
+          | { entry: CatalogEntry; revision: number; error: Error }
+        > => {
+          if (entry.runningPromise) await entry.runningPromise;
+          if (entry.desiredRevision !== revision) {
+            return { entry, revision, superseded: true };
+          }
+          try {
+            return {
+              entry,
+              revision,
+              page: await this.fetchStagedPage(entry, revision),
+            };
+          } catch (error) {
+            return { entry, revision, error: normalizeError(error) };
+          }
+        },
+      ),
+    );
+    const pages: StagedCatalogPage[] = [];
+    let complete = true;
+    let firstFailure: Error | undefined;
+    for (const result of results) {
+      if ('page' in result) {
+        pages.push({
+          key: result.entry.key,
+          revision: result.revision,
+          page: result.page,
         });
+        continue;
       }
-    } catch (error) {
-      const normalized = normalizeError(error);
-      for (const { entry, revision } of targets) {
-        if (entry.desiredRevision !== revision) continue;
-        this.setSnapshot(entry, {
-          ...entry.snapshot,
-          loading: false,
-          stale: true,
-          error: normalized,
-        });
-        this.rejectWaiters(entry, revision, normalized);
-      }
-      throw normalized;
+      complete = false;
+      if ('superseded' in result) continue;
+      firstFailure ??= result.error;
+      if (result.entry.desiredRevision !== result.revision) continue;
+      // Scope the failure to the entry whose own fetch rejected; entries
+      // that already staged successfully keep their old page and commit on
+      // the next reconcile.
+      this.setSnapshot(result.entry, {
+        ...result.entry.snapshot,
+        loading: false,
+        stale: true,
+        error: result.error,
+      });
+      this.rejectWaiters(result.entry, result.revision, result.error);
     }
-    return { workspaceCwd, pages, complete: true };
+    if (firstFailure) {
+      for (const result of results) {
+        if ('page' in result && result.entry.snapshot.loading) {
+          this.setSnapshot(result.entry, {
+            ...result.entry.snapshot,
+            loading: false,
+          });
+        }
+      }
+      throw firstFailure;
+    }
+    return { workspaceCwd, pages, complete };
   }
 
   commitWorkspaceRefresh(staged: StagedWorkspaceSessionCatalog): boolean {
@@ -590,7 +684,10 @@ export class SessionCatalogStore {
     );
     const promise = this.createWaiter(entry, revision, liveStateCoordinated);
     if (liveStateCoordinated) {
-      this.liveStateWorkspaceRefreshRequests.add(entry.query.workspaceCwd);
+      this.requestLiveStateRefresh(entry.query.workspaceCwd, 'interactive');
+      if (entry.waiters.some((waiter) => !waiter.liveStateCoordinated)) {
+        this.ensureScheduled(entry, PRIORITY.interactive, false);
+      }
       return promise;
     }
     this.ensureScheduled(entry, PRIORITY.interactive, false);
@@ -723,7 +820,7 @@ export class SessionCatalogStore {
     this.activeRequests += 1;
     if (job.background) this.activeBackgroundRequests += 1;
 
-    const request = this.fetchPage(entry.query, job.staged !== undefined);
+    const request = this.fetchPage(entry.query);
     let completion: Promise<void>;
     if (job.staged) {
       const staged = job.staged;
@@ -840,10 +937,8 @@ export class SessionCatalogStore {
 
   private async fetchPage(
     query: SessionCatalogQuery,
-    forceWorkspaceQualified = false,
   ): Promise<DaemonSessionListPage> {
-    const page = await (forceWorkspaceQualified ||
-    query.routeKind === 'qualified'
+    const page = await (query.routeKind === 'qualified'
       ? this.client
           .workspaceByCwd(query.workspaceCwd)
           .listWorkspaceSessionsPage(query.options)

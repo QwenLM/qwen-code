@@ -1140,3 +1140,14 @@ describe('WorkspaceSection git chip', () => {
     expect(gitChip()).toBeNull();
   });
 });
+
+describe('isAbsolutePath', () => {
+  it('accepts unix, Windows and UNC absolute paths and rejects relative ones', async () => {
+    const { isAbsolutePath } = await import('./WorkspaceSection');
+    expect(isAbsolutePath('/x')).toBe(true);
+    expect(isAbsolutePath('C:\\x')).toBe(true);
+    expect(isAbsolutePath('\\\\server\\share')).toBe(true);
+    expect(isAbsolutePath('relative/path')).toBe(false);
+    expect(isAbsolutePath('name')).toBe(false);
+  });
+});

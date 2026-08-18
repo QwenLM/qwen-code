@@ -85,7 +85,7 @@ import {
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { formatRelativeTime } from '../../utils/formatRelativeTime';
 import { DialogShell } from '../dialogs/DialogShell';
-import { WorkspaceSection } from './WorkspaceSection';
+import { WorkspaceSection, isAbsolutePath } from './WorkspaceSection';
 import {
   hasWorkspaceExpansionPreference,
   migrateWorkspaceExpansionPreference,
@@ -157,12 +157,6 @@ function getSessionIdentity(
   workspaceCwd: string | undefined,
 ): string {
   return `${workspaceCwd ?? ''}\0${sessionId}`;
-}
-
-function isAbsoluteWorkspaceCwd(cwd: string): boolean {
-  return (
-    cwd.startsWith('/') || cwd.startsWith('\\') || /^[a-zA-Z]:[\\/]/.test(cwd)
-  );
 }
 
 export type WebShellSidebarFooterItem =
@@ -942,7 +936,7 @@ export function WebShellSidebar({
   const liveStateWorkspaceCwds = useMemo(
     () =>
       displayedWorkspaces
-        .filter((entry) => entry.trusted && isAbsoluteWorkspaceCwd(entry.cwd))
+        .filter((entry) => entry.trusted && isAbsolutePath(entry.cwd))
         .map((entry) => entry.cwd),
     [displayedWorkspaces],
   );
@@ -958,7 +952,7 @@ export function WebShellSidebar({
               (entry) =>
                 entry.kind !== 'live' &&
                 entry.trusted &&
-                isAbsoluteWorkspaceCwd(entry.cwd),
+                isAbsolutePath(entry.cwd),
             )
             .map((entry) => entry.cwd)
         : [],
@@ -1099,6 +1093,10 @@ export function WebShellSidebar({
   const [deleteCandidate, setDeleteCandidate] =
     useState<DaemonSessionSummary | null>(null);
   const [groupMenu, setGroupMenu] = useState<GroupMenuState | null>(null);
+  const groupMenuOpenRef = useRef(groupMenu !== null);
+  useEffect(() => {
+    groupMenuOpenRef.current = groupMenu !== null;
+  }, [groupMenu]);
   const [groupEditor, setGroupEditor] = useState<GroupEditorState | null>(null);
   const [groupName, setGroupName] = useState('');
   const [groupColor, setGroupColor] = useState<DaemonSessionGroupColor>('blue');
@@ -1839,8 +1837,14 @@ export function WebShellSidebar({
       setGroupsCatalogReady(false);
       if (!primaryLiveStateGroupCatalog) return;
       setGroups(primaryLiveStateGroupCatalog.groups);
-      setMenuGroups(primaryLiveStateGroupCatalog.groups);
-      setColorOptions(primaryLiveStateGroupCatalog.colorOptions);
+      // The open group menu may be anchored to a session from a different
+      // workspace (openGroupMenuFromAnchor loads menuGroups from the
+      // session's own workspace) — don't clobber it with the primary
+      // workspace's catalog on every reconcile.
+      if (!groupMenuOpenRef.current) {
+        setMenuGroups(primaryLiveStateGroupCatalog.groups);
+        setColorOptions(primaryLiveStateGroupCatalog.colorOptions);
+      }
       setGroupsCatalogReady(true);
       return;
     }
@@ -3573,9 +3577,7 @@ export function WebShellSidebar({
     groupMenuSelectedGroupId === null && groupMenuSelectedColor === null;
   const deleteGroupCandidateLabel = deleteGroupCandidate?.group.name ?? '';
   const groupColorChoices =
-    colorOptions.length > 0
-      ? colorOptions
-      : (['blue'] as DaemonSessionGroupPresetColor[]);
+    colorOptions.length > 0 ? colorOptions : SESSION_GROUP_COLORS;
   const normalizedGroupColor = normalizeGroupColorInput(
     groupColor,
     groupColorChoices,

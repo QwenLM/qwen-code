@@ -550,7 +550,7 @@ describe('SessionCatalogStore', () => {
     ]);
   });
 
-  it('stages active queries through the qualified route and stales retained pages', async () => {
+  it('stages active queries through their own route kind and stales retained pages', async () => {
     legacy.mockImplementation(async (cwd: string) => page(cwd, cwd));
     const active = query('/work');
     const pinned = {
@@ -568,8 +568,8 @@ describe('SessionCatalogStore', () => {
 
     const staged = await store.stageWorkspaceRefresh('/work');
 
-    expect(qualified).toHaveBeenCalledTimes(1);
-    expect(legacy).toHaveBeenCalledTimes(3);
+    expect(qualified).not.toHaveBeenCalled();
+    expect(legacy).toHaveBeenCalledTimes(4);
     expect(store.getSnapshot(active).page).toBe(activeBefore);
     expect(store.getSnapshot(pinned).page).toBe(pinnedBefore);
     expect(store.getSnapshot(active).stale).toBe(true);
@@ -578,7 +578,7 @@ describe('SessionCatalogStore', () => {
     expect(store.getSnapshot(pinned).stale).toBe(true);
     expect(store.getSnapshot(other).stale).toBe(false);
     expect(store.getSnapshot(active).page?.sessions[0]?.sessionId).toBe(
-      'fresh',
+      '/work',
     );
     unsubscribe();
   });
@@ -596,8 +596,12 @@ describe('SessionCatalogStore', () => {
 
     expect(legacy).toHaveBeenCalledTimes(1);
     expect(qualified).not.toHaveBeenCalled();
-    expect(store.consumeWorkspaceLiveStateRefreshRequest('/work')).toBe(true);
-    expect(store.consumeWorkspaceLiveStateRefreshRequest('/work')).toBe(false);
+    expect(store.consumeWorkspaceLiveStateRefreshRequest('/work')).toBe(
+      'interactive',
+    );
+    expect(
+      store.consumeWorkspaceLiveStateRefreshRequest('/work'),
+    ).toBeUndefined();
 
     Object.defineProperty(document, 'hidden', {
       configurable: true,
@@ -620,7 +624,9 @@ describe('SessionCatalogStore', () => {
 
     expect(legacy).toHaveBeenCalledTimes(1);
     expect(qualified).not.toHaveBeenCalled();
-    expect(store.consumeWorkspaceLiveStateRefreshRequest('/work')).toBe(true);
+    expect(store.consumeWorkspaceLiveStateRefreshRequest('/work')).toBe(
+      'interactive',
+    );
 
     unsubscribeChannel();
     releaseLiveState();
@@ -628,8 +634,9 @@ describe('SessionCatalogStore', () => {
   });
 
   it('resolves an explicit live-state refresh only from a staged commit', async () => {
-    legacy.mockResolvedValue(page('cached'));
-    qualified.mockResolvedValue(page('refreshed'));
+    legacy
+      .mockResolvedValueOnce(page('cached'))
+      .mockResolvedValueOnce(page('refreshed'));
     const target = query('/work');
     await store.loadOnce(target, { fresh: true });
     const releaseLiveState = store.retainWorkspaceLiveState('/work');
@@ -638,10 +645,13 @@ describe('SessionCatalogStore', () => {
 
     expect(legacy).toHaveBeenCalledTimes(1);
     expect(qualified).not.toHaveBeenCalled();
-    expect(store.consumeWorkspaceLiveStateRefreshRequest('/work')).toBe(true);
+    expect(store.consumeWorkspaceLiveStateRefreshRequest('/work')).toBe(
+      'interactive',
+    );
 
     const staged = await store.stageWorkspaceRefresh('/work');
-    expect(qualified).toHaveBeenCalledTimes(1);
+    expect(legacy).toHaveBeenCalledTimes(2);
+    expect(qualified).not.toHaveBeenCalled();
     expect(store.getSnapshot(target).page).toEqual(page('cached'));
     expect(store.commitWorkspaceRefresh(staged)).toBe(true);
     await expect(refresh).resolves.toEqual(page('refreshed'));
@@ -650,40 +660,42 @@ describe('SessionCatalogStore', () => {
   });
 
   it('resumes an explicit refresh when live-state ownership is released', async () => {
+    const stagedResponse = deferred<DaemonSessionListPage>();
     legacy
       .mockResolvedValueOnce(page('cached'))
+      .mockReturnValueOnce(stagedResponse.promise)
       .mockResolvedValueOnce(page('legacy-refresh'));
-    const stagedResponse = deferred<DaemonSessionListPage>();
-    qualified.mockReturnValueOnce(stagedResponse.promise);
     const target = query('/work');
     await store.loadOnce(target, { fresh: true });
     const releaseLiveState = store.retainWorkspaceLiveState('/work');
     const refresh = store.refresh(target);
     const stagedPromise = store.stageWorkspaceRefresh('/work');
-    expect(qualified).toHaveBeenCalledTimes(1);
+    expect(legacy).toHaveBeenCalledTimes(2);
+    expect(qualified).not.toHaveBeenCalled();
 
     releaseLiveState();
     stagedResponse.resolve(page('staged'));
     await stagedPromise;
     await flushMicrotasks();
 
-    expect(legacy).toHaveBeenCalledTimes(2);
+    expect(legacy).toHaveBeenCalledTimes(3);
     await expect(refresh).resolves.toEqual(page('legacy-refresh'));
   });
 
   it('does not publish an older request or a staged page before commit', async () => {
     const initial = deferred<DaemonSessionListPage>();
     const stagedResponse = deferred<DaemonSessionListPage>();
-    legacy.mockReturnValueOnce(initial.promise);
-    qualified.mockReturnValueOnce(stagedResponse.promise);
+    legacy
+      .mockReturnValueOnce(initial.promise)
+      .mockReturnValueOnce(stagedResponse.promise);
     const target = query('/work');
     const unsubscribe = store.subscribe(target, vi.fn(), { autoLoad: true });
 
     const stagedPromise = store.stageWorkspaceRefresh('/work');
     initial.resolve(page('superseded'));
     await flushMicrotasks();
-    expect(legacy).toHaveBeenCalledTimes(1);
-    expect(qualified).toHaveBeenCalledTimes(1);
+    expect(legacy).toHaveBeenCalledTimes(2);
+    expect(qualified).not.toHaveBeenCalled();
     expect(store.getSnapshot(target).page).toBeUndefined();
 
     stagedResponse.resolve(page('staged'));
@@ -701,19 +713,20 @@ describe('SessionCatalogStore', () => {
     const unsubscribe = store.subscribe(target, vi.fn());
     const stagedResponse = deferred<DaemonSessionListPage>();
     const refreshedResponse = deferred<DaemonSessionListPage>();
-    qualified.mockReturnValueOnce(stagedResponse.promise);
-    legacy.mockReturnValueOnce(refreshedResponse.promise);
+    legacy
+      .mockReturnValueOnce(stagedResponse.promise)
+      .mockReturnValueOnce(refreshedResponse.promise);
 
     const stagedPromise = store.stageWorkspaceRefresh('/work');
     const refreshPromise = store.refresh(target);
-    expect(qualified).toHaveBeenCalledTimes(1);
+    expect(legacy).toHaveBeenCalledTimes(2);
+    expect(qualified).not.toHaveBeenCalled();
     stagedResponse.resolve(page('staged'));
     const staged = await stagedPromise;
 
     expect(store.commitWorkspaceRefresh(staged)).toBe(false);
     expect(store.getSnapshot(target).page).toEqual(page('cached'));
-    expect(qualified).toHaveBeenCalledTimes(1);
-    expect(legacy).toHaveBeenCalledTimes(2);
+    expect(legacy).toHaveBeenCalledTimes(3);
     refreshedResponse.resolve(page('refreshed'));
     await expect(refreshPromise).resolves.toEqual(page('refreshed'));
     unsubscribe();
@@ -731,6 +744,93 @@ describe('SessionCatalogStore', () => {
     expect(qualified).not.toHaveBeenCalled();
     response.resolve(page('explicit'));
     await expect(request).resolves.toEqual(page('explicit'));
+  });
+
+  it('resolves a non-coordinated waiter after a live-mode invalidation', async () => {
+    const initial = deferred<DaemonSessionListPage>();
+    legacy
+      .mockReturnValueOnce(initial.promise)
+      .mockResolvedValueOnce(page('rescued'));
+    const target = query('/work');
+    const request = store.loadOnce(target, { fresh: true });
+    const releaseLiveState = store.retainWorkspaceLiveState('/work');
+
+    store.invalidateWorkspace('/work');
+
+    initial.resolve(page('stale'));
+    await flushMicrotasks();
+    // The invalidation bumped the revision past the in-flight job; a real
+    // follow-up job must settle the pre-live waiter.
+    await expect(request).resolves.toEqual(page('rescued'));
+    expect(legacy).toHaveBeenCalledTimes(2);
+    releaseLiveState();
+  });
+
+  it('scopes a staged failure to the failing entry', async () => {
+    legacy.mockResolvedValue(page('cached'));
+    const active = query('/work');
+    const pinned = {
+      ...query('/work'),
+      options: { ...query('/work').options, view: 'organized' as const },
+    };
+    await store.loadOnce(active, { fresh: true });
+    await store.loadOnce(pinned, { fresh: true });
+    const unsubscribeActive = store.subscribe(active, vi.fn());
+    const unsubscribePinned = store.subscribe(pinned, vi.fn());
+    let calls = 0;
+    legacy.mockImplementation(async () => {
+      calls += 1;
+      if (calls === 2) throw new Error('pinned blip');
+      return page('fresh');
+    });
+
+    await expect(store.stageWorkspaceRefresh('/work')).rejects.toThrow(
+      'pinned blip',
+    );
+
+    expect(store.getSnapshot(active).error).toBeUndefined();
+    expect(store.getSnapshot(active).loading).toBe(false);
+    expect(store.getSnapshot(pinned).error?.message).toBe('pinned blip');
+    expect(store.getSnapshot(pinned).loading).toBe(false);
+    unsubscribeActive();
+    unsubscribePinned();
+  });
+
+  it('flags an interactive refresh when a live-mode subscriber maxAge expires', async () => {
+    legacy.mockResolvedValue(page('cached'));
+    const target = query('/work');
+    await store.loadOnce(target, { fresh: true });
+    const releaseLiveState = store.retainWorkspaceLiveState('/work');
+
+    vi.advanceTimersByTime(2_000);
+    const unsubscribe = store.subscribe(target, vi.fn(), {
+      autoLoad: true,
+      maxAgeMs: 1_000,
+    });
+
+    expect(store.consumeWorkspaceLiveStateRefreshRequest('/work')).toBe(
+      'interactive',
+    );
+    unsubscribe();
+    releaseLiveState();
+  });
+
+  it('wakes live-state listeners for interactive refreshes only', () => {
+    const wake = vi.fn();
+    const stopWake = store.onLiveStateWake(wake);
+    const releaseLiveState = store.retainWorkspaceLiveState('/work');
+    legacy.mockResolvedValue(page('cached'));
+
+    store.invalidateWorkspace('/work');
+    expect(wake).not.toHaveBeenCalled();
+
+    // The waiter settles via a later staged commit (not exercised here), so
+    // drop the promise; the wake fires synchronously inside refresh().
+    void store.refresh(query('/work')).catch(() => undefined);
+    expect(wake).toHaveBeenCalledWith('/work');
+
+    stopWake();
+    releaseLiveState();
   });
 
   it('uses the qualified client only for qualified queries', async () => {

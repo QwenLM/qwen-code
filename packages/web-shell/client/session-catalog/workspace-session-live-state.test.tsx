@@ -207,17 +207,20 @@ describe('useWorkspaceSessionLiveState', () => {
     await renderProbe();
     expect(listSessions).toHaveBeenCalledTimes(1);
 
+    // The new source subscription raises an interactive refresh request,
+    // which wakes the loop immediately rather than waiting for a tick.
     await renderProbe(false, 'channel');
-    expect(listSessions).toHaveBeenCalledTimes(1);
+    expect(listSessions).toHaveBeenCalledTimes(2);
+    expect(listSessions).toHaveBeenLastCalledWith(
+      '/work',
+      expect.objectContaining({ sourceType: 'channel' }),
+    );
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(SESSION_LIVE_STATE_POLL_MS);
     });
 
     expect(listSessions).toHaveBeenCalledTimes(2);
-    expect(listSessions).toHaveBeenLastCalledWith(
-      expect.objectContaining({ sourceType: 'channel' }),
-    );
   });
 
   it('uses one trailing reconciliation for an A/B mismatch and publishes only the stable groups', async () => {
@@ -340,5 +343,125 @@ describe('useWorkspaceSessionLiveState', () => {
     expect(listGroups).toHaveBeenCalledTimes(2);
     expect(listSessions).toHaveBeenCalledTimes(catalogRequestsAfterFailure);
     expect(container.textContent).toBe('true:true:no-group');
+  });
+
+  it('retries the initial catalog fallback until it commits', async () => {
+    getLiveState.mockRejectedValue(new Error('live down'));
+    listSessions.mockRejectedValueOnce(new Error('catalog blip'));
+    await renderProbe();
+    expect(listSessions).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toBe('undefined:undefined:no-group');
+
+    // The failed fallback must not consume the one-shot latch: the next
+    // live-state failure cycle retries it and the catalog renders.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(
+        SESSION_LIVE_STATE_ERROR_RETRY_MS + SESSION_LIVE_STATE_POLL_MS,
+      );
+    });
+    expect(listSessions).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toBe('false:undefined:no-group');
+  });
+
+  it('rate-limits sustained lifecycle invalidations to one reconcile per window', async () => {
+    await renderProbe();
+    const initialCatalogRequests = listSessions.mock.calls.length;
+
+    // A single local change still reconciles immediately.
+    act(() => controller.sessionCreated('/work', 'session-b'));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SESSION_LIVE_STATE_POLL_MS);
+    });
+    expect(listSessions).toHaveBeenCalledTimes(initialCatalogRequests + 1);
+
+    // Sustained invalidations inside the cooldown window coalesce instead
+    // of one full catalog rescan per event.
+    act(() => {
+      controller.sessionCreated('/work', 'session-c');
+      controller.renamed('/work', 'session-b', 'Renamed');
+      controller.promptAdmissionUncertain('/work');
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SESSION_LIVE_STATE_POLL_MS * 3);
+    });
+    expect(listSessions).toHaveBeenCalledTimes(initialCatalogRequests + 1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(
+        SESSION_LIVE_STATE_RECONCILE_COOLDOWN_MS,
+      );
+    });
+    expect(listSessions).toHaveBeenCalledTimes(initialCatalogRequests + 2);
+  });
+
+  it('reconciles when the catalog generation changes at the same revision', async () => {
+    await renderProbe();
+    expect(listSessions).toHaveBeenCalledTimes(1);
+
+    getLiveState.mockImplementation(async () => ({
+      ...liveState(1),
+      catalogVersion: { generation: 'generation-b', revision: 1 },
+    }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(
+        SESSION_LIVE_STATE_RECONCILE_COOLDOWN_MS,
+      );
+    });
+    expect(listSessions).toHaveBeenCalledTimes(2);
+  });
+
+  it('pauses polling while hidden and polls immediately on visibility return', async () => {
+    await renderProbe();
+    const liveCallsAfterMount = getLiveState.mock.calls.length;
+
+    Object.defineProperty(document, 'hidden', {
+      configurable: true,
+      value: true,
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SESSION_LIVE_STATE_POLL_MS * 3);
+    });
+    expect(getLiveState).toHaveBeenCalledTimes(liveCallsAfterMount);
+
+    Object.defineProperty(document, 'hidden', {
+      configurable: true,
+      value: false,
+    });
+    await act(async () => {
+      document.dispatchEvent(new Event('visibilitychange'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(getLiveState.mock.calls.length).toBeGreaterThan(liveCallsAfterMount);
+  });
+
+  it('applies the promptAdmitted optimistic patch immediately in live mode', async () => {
+    await renderProbe();
+    expect(container.textContent).toBe('false:false:no-group');
+
+    // The optimistic patch must apply synchronously — the sidebar's active
+    // indicator cannot wait for the next live-state poll.
+    act(() => controller.promptAdmitted('/work', 'session-a'));
+    expect(container.textContent).toBe('true:false:no-group');
+  });
+
+  it('stays inert when disabled', async () => {
+    function DisabledProbe() {
+      useWorkspaceSessionLiveState(client, {
+        enabled: false,
+        workspaceCwds: ['/work'],
+        groupWorkspaceCwds: [],
+      });
+      return null;
+    }
+    await act(async () => {
+      root.render(<DisabledProbe />);
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SESSION_LIVE_STATE_POLL_MS * 3);
+    });
+    expect(getLiveState).not.toHaveBeenCalled();
+    expect(listSessions).not.toHaveBeenCalled();
   });
 });

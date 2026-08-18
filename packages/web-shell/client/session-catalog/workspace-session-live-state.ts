@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type {
   DaemonClient,
   DaemonSessionCatalogVersion,
@@ -23,6 +23,8 @@ interface WorkspacePollState {
   lastReconcileAt: number;
   fallbackAttempted: boolean;
   reconcileRequested: boolean;
+  invalidationRequested: boolean;
+  invalidationReconcileAt: number;
 }
 
 interface WorkspaceSessionLiveStateOptions {
@@ -33,10 +35,33 @@ interface WorkspaceSessionLiveStateOptions {
 
 function versionsEqual(
   left: DaemonSessionCatalogVersion | undefined,
-  right: DaemonSessionCatalogVersion,
+  right: DaemonSessionCatalogVersion | undefined,
 ): boolean {
   return (
-    left?.generation === right.generation && left.revision === right.revision
+    left?.generation === right?.generation && left?.revision === right?.revision
+  );
+}
+
+function groupCatalogsEqual(
+  left: DaemonSessionGroupCatalog,
+  right: DaemonSessionGroupCatalog,
+): boolean {
+  if (left.groups.length !== right.groups.length) return false;
+  if (left.colorOptions.length !== right.colorOptions.length) return false;
+  const rightById = new Map(right.groups.map((group) => [group.id, group]));
+  for (const group of left.groups) {
+    const other = rightById.get(group.id);
+    if (
+      !other ||
+      other.name !== group.name ||
+      other.color !== group.color ||
+      other.order !== group.order
+    ) {
+      return false;
+    }
+  }
+  return left.colorOptions.every(
+    (color, index) => color === right.colorOptions[index],
   );
 }
 
@@ -49,18 +74,20 @@ export function useWorkspaceSessionLiveState(
   }: WorkspaceSessionLiveStateOptions,
 ): ReadonlyMap<string, DaemonSessionGroupCatalog> {
   const catalogStore = useMemo(() => getSessionCatalogStore(client), [client]);
-  const targetsKey = JSON.stringify([...new Set(workspaceCwds)].sort());
+  const targetsKey = [...new Set(workspaceCwds)].sort().join('\n');
   const targets = useMemo(
-    () => JSON.parse(targetsKey) as string[],
+    () => targetsKey.split('\n').filter(Boolean),
     [targetsKey],
   );
-  const groupTargetsKey = JSON.stringify(
-    [...new Set(groupWorkspaceCwds)].sort(),
-  );
+  const groupTargetsKey = [...new Set(groupWorkspaceCwds)].sort().join('\n');
   const groupTargets = useMemo(
-    () => new Set(JSON.parse(groupTargetsKey) as string[]),
+    () => new Set(groupTargetsKey.split('\n').filter(Boolean)),
     [groupTargetsKey],
   );
+  const groupTargetsRef = useRef(groupTargets);
+  useEffect(() => {
+    groupTargetsRef.current = groupTargets;
+  }, [groupTargets]);
   const [groupCatalogs, setGroupCatalogs] = useState<
     ReadonlyMap<string, DaemonSessionGroupCatalog>
   >(() => new Map());
@@ -86,7 +113,16 @@ export function useWorkspaceSessionLiveState(
       }
       return next;
     });
-  }, [enabled, groupTargets, targets]);
+    // Group-membership growth (e.g. toggling the session source back to
+    // Tasks) must fetch groups for newly covered workspaces; the polling
+    // loop below intentionally does not restart on groupTargets changes.
+    if (!enabled) return;
+    for (const cwd of groupTargets) {
+      if (activeTargets.has(cwd)) {
+        catalogStore.requestWorkspaceLiveStateRefresh(cwd);
+      }
+    }
+  }, [catalogStore, enabled, groupTargets, targets]);
 
   useEffect(() => {
     if (!enabled || targets.length === 0) return;
@@ -102,6 +138,8 @@ export function useWorkspaceSessionLiveState(
       lastReconcileAt: Number.NEGATIVE_INFINITY,
       fallbackAttempted: false,
       reconcileRequested: false,
+      invalidationRequested: false,
+      invalidationReconcileAt: Number.NEGATIVE_INFINITY,
     }));
 
     const publishGroups = (
@@ -110,7 +148,10 @@ export function useWorkspaceSessionLiveState(
     ) => {
       if (!catalog || disposed) return;
       setGroupCatalogs((current) => {
-        if (current.get(workspaceCwd) === catalog) return current;
+        const previous = current.get(workspaceCwd);
+        if (previous && groupCatalogsEqual(previous, catalog)) {
+          return current;
+        }
         const next = new Map(current);
         next.set(workspaceCwd, catalog);
         return next;
@@ -128,8 +169,13 @@ export function useWorkspaceSessionLiveState(
     ): Promise<
       [StagedWorkspaceSessionCatalog, DaemonSessionGroupCatalog | undefined]
     > => {
-      const groupRequest = groupTargets.has(state.workspaceCwd)
-        ? client.workspaceByCwd(state.workspaceCwd).listSessionGroups()
+      // Groups and sessions are independent failure domains: a failing
+      // groups endpoint must not discard a committable staged catalog.
+      const groupRequest = groupTargetsRef.current.has(state.workspaceCwd)
+        ? client
+            .workspaceByCwd(state.workspaceCwd)
+            .listSessionGroups()
+            .catch(() => undefined)
         : Promise.resolve(undefined);
       return await Promise.all([
         catalogStore.stageWorkspaceRefresh(state.workspaceCwd),
@@ -139,12 +185,23 @@ export function useWorkspaceSessionLiveState(
 
     const loadFallbackBundle = async (
       state: WorkspacePollState,
-    ): Promise<void> => {
+    ): Promise<boolean> => {
       const [stagedCatalog, groups] = await stageCatalogBundle(state);
       if (disposed || !catalogStore.commitWorkspaceRefresh(stagedCatalog)) {
-        return;
+        return false;
       }
       publishGroups(state.workspaceCwd, groups);
+      return true;
+    };
+
+    const consumeRefreshRequest = (state: WorkspacePollState): void => {
+      const request = catalogStore.consumeWorkspaceLiveStateRefreshRequest(
+        state.workspaceCwd,
+      );
+      state.reconcileRequested =
+        state.reconcileRequested || request === 'interactive';
+      state.invalidationRequested =
+        state.invalidationRequested || request === 'invalidated';
     };
 
     const reconcile = async (
@@ -152,11 +209,7 @@ export function useWorkspaceSessionLiveState(
       liveA: DaemonWorkspaceSessionLiveState,
       allowTrailing: boolean,
     ): Promise<void> => {
-      state.reconcileRequested =
-        state.reconcileRequested ||
-        catalogStore.consumeWorkspaceLiveStateRefreshRequest(
-          state.workspaceCwd,
-        );
+      consumeRefreshRequest(state);
       state.lastReconcileAt = Date.now();
       const [stagedCatalog, groups] = await stageCatalogBundle(state);
       if (disposed) return;
@@ -171,11 +224,15 @@ export function useWorkspaceSessionLiveState(
         catalogStore.applyLiveState(state.workspaceCwd, liveB.sessions);
         state.acceptedVersion = liveB.catalogVersion;
         state.reconcileRequested = false;
+        state.invalidationRequested = false;
         publishGroups(state.workspaceCwd, groups);
         return;
       }
       if (allowTrailing) await reconcile(state, liveB, false);
-      else state.reconcileRequested = false;
+      else {
+        state.reconcileRequested = false;
+        state.invalidationRequested = false;
+      }
     };
 
     const poll = async (state: WorkspacePollState): Promise<void> => {
@@ -196,9 +253,10 @@ export function useWorkspaceSessionLiveState(
         state.liveRetryAt = Date.now() + SESSION_LIVE_STATE_ERROR_RETRY_MS;
         console.warn('[session-live-state] request failed:', error);
         if (!state.acceptedVersion && !state.fallbackAttempted) {
-          state.fallbackAttempted = true;
           try {
-            await loadFallbackBundle(state);
+            // Only a committed fallback latches; a failed or uncommitted
+            // attempt stays retryable on the next live-state failure.
+            state.fallbackAttempted = await loadFallbackBundle(state);
           } catch (fallbackError) {
             if (!disposed) {
               console.warn(
@@ -217,28 +275,34 @@ export function useWorkspaceSessionLiveState(
       }
       catalogStore.applyLiveState(state.workspaceCwd, live.sessions);
       state.liveRetryAt = 0;
-      state.reconcileRequested =
-        state.reconcileRequested ||
-        catalogStore.consumeWorkspaceLiveStateRefreshRequest(
-          state.workspaceCwd,
-        );
+      consumeRefreshRequest(state);
       if (
         !state.reconcileRequested &&
+        !state.invalidationRequested &&
         versionsEqual(state.acceptedVersion, live.catalogVersion)
       ) {
         state.inFlight = false;
         return;
       }
+      // Interactive requests bypass the reconcile cooldown. Lifecycle
+      // invalidations get one prompt reconcile per cooldown window — tracked
+      // on a separate timestamp so a single local create stays immediate
+      // while sustained event churn stays rate-limited.
       if (
         Date.now() < state.reconcileRetryAt ||
         (!state.reconcileRequested &&
-          Date.now() - state.lastReconcileAt <
+          (state.invalidationRequested
+            ? Date.now() - state.invalidationReconcileAt
+            : Date.now() - state.lastReconcileAt) <
             SESSION_LIVE_STATE_RECONCILE_COOLDOWN_MS)
       ) {
         state.inFlight = false;
         return;
       }
       try {
+        if (state.invalidationRequested && !state.reconcileRequested) {
+          state.invalidationReconcileAt = Date.now();
+        }
         await reconcile(state, live, true);
         state.reconcileRetryAt = 0;
       } catch (error) {
@@ -252,16 +316,36 @@ export function useWorkspaceSessionLiveState(
       }
     };
 
+    // Interactive refresh requests (explicit refresh(), expiring
+    // maxAgeMs subscriptions, group-membership growth) wake the loop
+    // immediately instead of waiting for the next 2s tick.
+    const stopWake = catalogStore.onLiveStateWake((workspaceCwd) => {
+      const state = states.find(
+        (candidate) => candidate.workspaceCwd === workspaceCwd,
+      );
+      if (state) void poll(state);
+    });
+    const onVisibilityWake = (): void => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      for (const state of states) void poll(state);
+    };
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', onVisibilityWake);
+    }
     for (const state of states) void poll(state);
     const interval = window.setInterval(() => {
       for (const state of states) void poll(state);
     }, SESSION_LIVE_STATE_POLL_MS);
     return () => {
       disposed = true;
+      stopWake();
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', onVisibilityWake);
+      }
       window.clearInterval(interval);
       for (const release of releaseLiveState) release();
     };
-  }, [catalogStore, client, enabled, groupTargets, targets]);
+  }, [catalogStore, client, enabled, targets]);
 
   return groupCatalogs;
 }

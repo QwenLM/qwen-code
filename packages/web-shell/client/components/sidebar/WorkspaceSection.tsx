@@ -54,7 +54,7 @@ function cx(...classes: Array<string | false | undefined>): string {
 // A synthetic fallback workspace (daemon reports no workspaces and the
 // connection has no cwd) carries a display name in `cwd`, which is neither, so
 // qualifying a request with it would only ever 400.
-function isAbsolutePath(cwd: string): boolean {
+export function isAbsolutePath(cwd: string): boolean {
   return (
     cwd.startsWith('/') || cwd.startsWith('\\') || /^[a-zA-Z]:[\\/]/.test(cwd)
   );
@@ -293,7 +293,9 @@ export function WorkspaceSection({
     }
     if (!sessionCatalogRequestsEnabled) return;
     if (sessionLiveStateEnabled) {
-      if (sessionGroupCatalog) setGroups(sessionGroupCatalog.groups);
+      // Live-state owns group freshness here; while its catalog is pending
+      // there is no valid group data, so clear rather than render stale.
+      setGroups(sessionGroupCatalog?.groups ?? []);
       return;
     }
     let cancelled = false;
