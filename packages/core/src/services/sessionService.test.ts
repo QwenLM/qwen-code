@@ -2532,6 +2532,9 @@ describe('SessionService', () => {
           `${sessionIdA.toUpperCase()}.jsonl`,
         ] as never)
         .mockReturnValueOnce([] as never);
+      // Both heads fail content validation but the files are still on
+      // disk — occupancy, not absence.
+      existsSyncSpy.mockReturnValue(true);
       const getLocation = vi.spyOn(sessionService, 'getSessionLocation');
 
       await expect(
@@ -2542,12 +2545,14 @@ describe('SessionService', () => {
         candidateSessionId: undefined,
         message: `Multiple persisted sessions match "${sessionIdA}" by case.`,
       });
-      expect(getLocation).not.toHaveBeenCalled();
+      expect(getLocation).toHaveBeenCalledTimes(2);
     });
 
     it('rejects one spelling that exists in both active and archive state', async () => {
       readdirSyncSpy.mockReturnValue([`${sessionIdA}.jsonl`] as never);
-      const getLocation = vi.spyOn(sessionService, 'getSessionLocation');
+      const getLocation = vi
+        .spyOn(sessionService, 'getSessionLocation')
+        .mockResolvedValue('conflict');
 
       await expect(
         sessionService.findSessionIdIgnoringCase(sessionIdA),
@@ -2557,7 +2562,58 @@ describe('SessionService', () => {
         candidateSessionId: sessionIdA,
         message: `Session "${sessionIdA}" is persisted in both active and archived states.`,
       });
-      expect(getLocation).not.toHaveBeenCalled();
+      expect(getLocation).toHaveBeenCalledTimes(1);
+    });
+
+    it('rejects a present-but-unreadable single candidate as occupying the id', async () => {
+      const legacySessionId = sessionIdA.toUpperCase();
+      readdirSyncSpy
+        .mockReturnValueOnce([`${legacySessionId}.jsonl`] as never)
+        .mockReturnValueOnce([] as never);
+      // The head recovers no records (torn/empty/foreign), but the file
+      // still occupies the id — admission must not mint a case-only twin.
+      vi.spyOn(sessionService, 'getSessionLocation').mockResolvedValue(
+        undefined,
+      );
+      existsSyncSpy.mockReturnValue(true);
+
+      await expect(
+        sessionService.findSessionIdIgnoringCase(sessionIdA),
+      ).rejects.toMatchObject({
+        name: 'SessionIdCaseConflictError',
+        sessionId: sessionIdA,
+        candidateSessionId: legacySessionId,
+      });
+    });
+
+    it('returns the sole readable spelling when a case twin is unreadable', async () => {
+      const legacySessionId = sessionIdA.toUpperCase();
+      readdirSyncSpy
+        .mockReturnValueOnce([
+          `${sessionIdA}.jsonl`,
+          `${legacySessionId}.jsonl`,
+        ] as never)
+        .mockReturnValueOnce([] as never);
+      vi.spyOn(sessionService, 'getSessionLocation').mockImplementation(
+        async (id) => (id === legacySessionId ? 'active' : undefined),
+      );
+
+      await expect(
+        sessionService.findSessionIdIgnoringCase(sessionIdA),
+      ).resolves.toBe(legacySessionId);
+    });
+
+    it('returns the spelling when one of its two state copies is unreadable', async () => {
+      readdirSyncSpy.mockReturnValue([`${sessionIdA}.jsonl`] as never);
+      // getSessionLocation counts only readable copies, so one garbage
+      // twin still resolves to the surviving state.
+      vi.spyOn(sessionService, 'getSessionLocation').mockResolvedValue(
+        'active',
+      );
+
+      await expect(
+        sessionService.findSessionIdIgnoringCase(sessionIdA),
+      ).resolves.toBe(sessionIdA);
     });
 
     it('returns undefined when the matching transcript disappears during resolution', async () => {

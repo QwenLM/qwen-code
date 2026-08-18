@@ -770,19 +770,55 @@ export class SessionService {
       }
     }
     if (candidates.size > 1) {
+      // Conflict decisions are content-based, not filename-based: a file
+      // whose head recovers no records (crash-mid-append tear, foreign
+      // project) still occupies the id, but does not make a loadable
+      // session conflict with one.
+      const readable: string[] = [];
+      for (const candidateSessionId of candidates.keys()) {
+        const location = await this.getSessionLocation(candidateSessionId);
+        if (location === 'conflict') {
+          throw new SessionIdCaseConflictError(sessionId, candidateSessionId);
+        }
+        if (location !== undefined) readable.push(candidateSessionId);
+      }
+      if (readable.length === 1) return readable[0];
+      if (readable.length === 0) {
+        // Every enumerated file failed content validation: files still on
+        // disk occupy the id (admission must not mint a case-only twin);
+        // files that raced away mid-resolution are genuinely absent.
+        let anyPresent = false;
+        for (const [candidateSessionId, states] of candidates) {
+          for (const state of states) {
+            anyPresent ||= fs.existsSync(
+              this.getSessionFilePath(candidateSessionId, state),
+            );
+          }
+        }
+        if (!anyPresent) return undefined;
+      }
       throw new SessionIdCaseConflictError(sessionId);
     }
     const candidate = candidates.entries().next().value;
     if (candidate === undefined) return undefined;
     const [candidateSessionId, states] = candidate;
-    if (states.size > 1) {
-      throw new SessionIdCaseConflictError(sessionId, candidateSessionId);
-    }
+    // Content first: one readable copy of a spelling present in both state
+    // directories resolves to that copy (getSessionLocation counts only
+    // readable transcripts), not a conflict.
     const location = await this.getSessionLocation(candidateSessionId);
     if (location === 'conflict') {
       throw new SessionIdCaseConflictError(sessionId, candidateSessionId);
     }
-    return location === undefined ? undefined : candidateSessionId;
+    if (location !== undefined) return candidateSessionId;
+    // The head recovered no records: a file still on disk occupies the id
+    // (admission must not mint a case-only twin of it); one that raced
+    // away mid-resolution is genuinely absent.
+    for (const state of states) {
+      if (fs.existsSync(this.getSessionFilePath(candidateSessionId, state))) {
+        throw new SessionIdCaseConflictError(sessionId, candidateSessionId);
+      }
+    }
+    return undefined;
   }
 
   private removeFileIfExists(filePath: string): void {
