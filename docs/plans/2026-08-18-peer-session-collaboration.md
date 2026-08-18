@@ -656,20 +656,50 @@ and the CLI/MCP surface.
 | **Stage 2 touches `TeamManager` broadly**               | `coordination-harness.test.ts` (1,456 LOC) is the existing regression net                                    |
 | **Work stalls unclaimed**                               | Accepted. The board is durable and visible; no central scheduler is promised                                 |
 
-## 7. Open questions
+## 7. Questions, and how they resolved
 
-1. **Split storage roots.** Team config and inboxes live at `~/.qwen/teams/{team}/`, but
-   tasks live at `~/.qwen/tasks/{team}/` (`teamHelpers.ts:69`). One team's state spans two
-   roots. Consolidate before the layout is externally visible, or accept and document it?
-2. **Does the daemon register?** Uniformity argues yes — a daemon session should be
-   discoverable like any other. Confirm it does not conflict with the workspace runtime
-   ownership work in [#7308](https://github.com/QwenLM/qwen-code/pull/7308).
-3. **Sub-session residency.** Making a daemon sub-session a resident peer is new semantics
-   (§1.4), not wiring. Does it belong in this design, or as a daemon-side follow-up?
-4. **Remote join.** v1 forbids pulling another session in. Is self-join sufficient in
-   practice, or does the workflow demand invitations — which would need an accept path?
-5. **Re-engagement.** #8724's author stated the work would return. The fastest path is to
-   ask rather than to reimplement. Who reaches out?
+Recorded rather than deleted, so they are not relitigated.
+
+**1. Split storage roots — accept now, consolidate at Stage 5.**
+Team config and inboxes live under `~/.qwen/teams/{team}/`, tasks under
+`~/.qwen/tasks/{team}/` (`teamHelpers.ts:69`): one board's state across two roots. Ugly, but
+consolidating is a data migration with no functional benefit while the layout is internal,
+and §2.6 makes no format promise in v1, so nothing outside can observe the split. The
+trigger is concrete rather than "someday": **consolidate before the board surface ships**
+(Stage 5), because that is the moment the layout becomes something a foreign agent reads.
+The merged registry already carries `schemaVersion`, so versioned layout change is
+anticipated.
+
+**2. Daemon sessions register — yes, and it needs a `kind` field.**
+Today only `startInteractiveUI.tsx` calls `registerSession`, and the merged
+`SessionRegistryRecord` (`schemaVersion`, `pid`, `procStart`, `pidNs`, `sessionId`, `cwd`,
+`name`, `startedAt`, `qwenVersion`) has no `kind`. §2.1 already draws a daemon session as a
+participant, and a participant that cannot be discovered cannot be addressed. `kind` is not
+extra work: it is needed regardless to distinguish an interactive session from a daemon one
+and from a wrapped foreign agent, all three of which register on the same terms (§3.2).
+Lands with Stage 3.
+
+**3. Sub-session residency — out of scope, deliberately.**
+`create-sub-session.ts` states that a sub-session is **"NOT kept resident"** and is reaped
+once idle. Making one resident would convert it into a long-lived agent — which is the
+_spawn_ model this design is not about. Anyone who wants a resident participant starts a
+session, and serving exactly that case is the point of the design. Leaving this alone keeps
+the boundary sharp; it can be revisited daemon-side on its own merits.
+
+**4. Remote join — the question dissolved; the real one is assignment.**
+There is no join to make remote (§2.2). What survives is: may A give B work B did not ask
+for? Yes — A creates a `task` with an owner, which #9289 already dispatches. But
+**assignment is a proposal, not an obligation.** B claims it or leaves it, exactly as any
+peer decides what to claim. This is the same rule as §4's refusal of a central completion
+guarantee, and it is what stops a peer model from quietly becoming a hierarchy: the ability
+to name an owner is not the authority to compel one.
+
+**5. Re-engagement over #8724 — withdrawn; it was never a design question.**
+It asked who should contact the author of the closed #8728/#8730. That is a process item,
+not an unknown, and it is moot besides: #8969 landed the registry independently, and the
+remaining code is public on an open branch. Nothing here needs anyone's agreement to
+proceed. Recorded because the same category error — treating a social step as a technical
+dependency — also produced the retracted conflict in §1.6.
 
 ## 8. Relationship to herdr
 
