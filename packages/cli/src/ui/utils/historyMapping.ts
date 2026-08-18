@@ -74,14 +74,17 @@ function isUserTextContent(content: Content): boolean {
   // text equals a generated placeholder shape is indistinguishable from a
   // cleared media-only entry once serialized — both carry the identical
   // text. Such a prompt is excluded here, leaving the API prompt count one
-  // behind the UI turn count, so every later rewind target returns -1 and
-  // AppContainer surfaces a loud "Cannot rewind to a turn that was
-  // compressed" abort (rewinding to the colliding turn itself still works
-  // via the uiUserTurnCount === 0 shortcut). This fails safe — a visible
-  // error, never silent history loss. Disambiguating it durably needs a
-  // structural sentinel on cleared parts, which changes the persisted API
-  // history shape and is out of scope for this fix; see the pinned test in
-  // historyMapping.test.ts.
+  // behind the UI turn count. Every rewind target AFTER the colliding turn
+  // then returns -1 and AppContainer surfaces a loud "Cannot rewind to a
+  // turn that was compressed" abort. Rewinding TO the colliding turn itself
+  // depends on position: as the first post-compression turn it works via
+  // the uiUserTurnCount === 0 shortcut; mid-history the walk lands on the
+  // next counted prompt and truncates one turn LATE, so the colliding
+  // turn's prompt+response stays in model context while the UI removes the
+  // turn (under-deletion of context, not loss of context the UI keeps).
+  // Disambiguating any of this durably needs a structural sentinel on
+  // cleared parts, which changes the persisted API history shape and is out
+  // of scope for this fix; see the pinned tests in historyMapping.test.ts.
   //
   // The ACP session's private `#isUserTextContent`
   // (packages/cli/src/acp-integration/session/Session.ts) deliberately

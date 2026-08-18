@@ -178,6 +178,29 @@ describe('isClearedMediaPlaceholder', () => {
     expect(isClearedMediaPlaceholder('hello world')).toBe(false);
     expect(isClearedMediaPlaceholder('')).toBe(false);
   });
+
+  it('does not match interiors the producer can never emit (newline/tab/CR)', () => {
+    // sanitizeMimeForPlaceholder normalizes \r/\n/\t to spaces before
+    // interpolation, so a generated placeholder never contains them.
+    // Accepting them would misclassify multi-line user text that starts
+    // with the prefix as a placeholder.
+    expect(
+      isClearedMediaPlaceholder(
+        '[Old inline media cleared: screenshot\nfrom staging]',
+      ),
+    ).toBe(false);
+    expect(isClearedMediaPlaceholder('[Old inline media cleared: a\tb]')).toBe(
+      false,
+    );
+    expect(isClearedMediaPlaceholder('[Old inline media cleared: a\rb]')).toBe(
+      false,
+    );
+    // …while the space-normalized interior the producer DOES emit for
+    // such a mimeType still matches.
+    expect(isClearedMediaPlaceholder('[Old inline media cleared: a b]')).toBe(
+      true,
+    );
+  });
 });
 
 describe('microcompactHistory', () => {

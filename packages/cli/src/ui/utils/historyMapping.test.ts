@@ -631,6 +631,40 @@ describe('computeApiTruncationIndex', () => {
       // against a misaligned prompt count.
       expect(computeApiTruncationIndex(ui, 3, api)).toBe(-1);
     });
+
+    it('pins the mid-history exact-match collision: own turn one-late, later turns loud', () => {
+      // Same known limitation as the test above, with the colliding turn in
+      // a mid-history position (uiUserTurnCount >= 1): the shortcut does
+      // not apply, so rewinding TO the colliding turn lands on the next
+      // counted prompt and truncates one turn LATE — the colliding turn's
+      // prompt+response stays in model context while the UI removes the
+      // turn (under-deletion, not loss of context the UI keeps). Every
+      // later target still fails loud (-1). Pinned so a structural fix
+      // (sentinel on cleared parts) updates both expectations.
+      const exactPlaceholderText = '[Old inline media cleared: image/png]';
+      const ui: HistoryItem[] = [
+        userItem(1, 'hello'),
+        geminiItem(2),
+        userItem(3, exactPlaceholderText),
+        geminiItem(4),
+        userItem(5, 'world'),
+        geminiItem(6),
+      ];
+      const api: Content[] = [
+        startupEntry(),
+        userContent('hello'),
+        modelContent('response hello'),
+        userContent(exactPlaceholderText),
+        modelContent('response colliding'),
+        userContent('world'),
+        modelContent('response world'),
+      ];
+      // Rewinding TO the colliding turn keeps its prompt+response (index 5,
+      // one turn late)…
+      expect(computeApiTruncationIndex(ui, 3, api)).toBe(5);
+      // …while every later target fails loud (-1).
+      expect(computeApiTruncationIndex(ui, 5, api)).toBe(-1);
+    });
   });
 
   describe('mid-turn user messages (notification type)', () => {
