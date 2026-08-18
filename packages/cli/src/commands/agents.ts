@@ -107,6 +107,13 @@ export const agentsCommand: CommandModule = {
   describe: 'Manage Agent View background agents',
   builder: (yargs: Argv) =>
     yargs
+      // Hoisted from the list subcommand so the space form
+      // `agents --cwd <dir>` is consumed at this level instead of failing
+      // strict mode (the $0 builder only applies once yargs descends).
+      .option('cwd', {
+        type: 'string',
+        description: 'Workspace directory to inspect',
+      })
       // Session verbs are subcommands of `qwen agents` so they cannot
       // hijack natural-language prompts at the top level.
       .command(agentsListCommand)

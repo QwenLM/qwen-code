@@ -391,6 +391,7 @@ describe('parseArguments', () => {
     ['agents respawn --all', ['agents', 'respawn', '--all']],
     ['agents rm <id>', ['agents', 'rm', 'session-1']],
     ['agents --cwd=<dir>', ['agents', '--cwd=/tmp']],
+    ['agents --cwd <dir>', ['agents', '--cwd', '/tmp']],
   ])(
     'exits after `%s` instead of continuing to main CLI flow',
     async (_label, args) => {
@@ -452,6 +453,23 @@ describe('parseArguments', () => {
       'node',
       'script.js',
       '--debug',
+      'agents',
+      'fix',
+      'the',
+      'bug',
+    ];
+
+    const argv = await parseArguments();
+
+    expect(argv.query).toBe('agents fix the bug');
+  });
+
+  it('routes `--model <value> agents <prompt>` as a positional prompt', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--model',
+      'qwen3-max',
       'agents',
       'fix',
       'the',

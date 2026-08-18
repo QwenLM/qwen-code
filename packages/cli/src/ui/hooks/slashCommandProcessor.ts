@@ -424,10 +424,17 @@ export const useSlashCommandProcessor = (
 
   // AbortController for cancelling async slash commands via ESC
   const abortControllerRef = useRef<AbortController | null>(null);
+  // Agent View adoption (detach) is not abortable — the supervisor spawn
+  // takes no cancellation signal. While it is in flight, ESC must not report
+  // a cancellation that does not happen.
+  const detachInFlightRef = useRef(false);
 
   const cancelSlashCommand = useCallback(() => {
     cancelBtw();
     if (!abortControllerRef.current) {
+      return;
+    }
+    if (detachInFlightRef.current) {
       return;
     }
     abortControllerRef.current.abort();
@@ -1148,7 +1155,12 @@ export const useSlashCommandProcessor = (
                       'Agent View detach action is not available.',
                     );
                   }
-                  await actions.detachAgentViewSession();
+                  detachInFlightRef.current = true;
+                  try {
+                    await actions.detachAgentViewSession();
+                  } finally {
+                    detachInFlightRef.current = false;
+                  }
                   return { type: 'handled' };
                 case 'message':
                   // Picker-shaped commands can still reject their arguments

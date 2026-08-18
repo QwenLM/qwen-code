@@ -71,13 +71,30 @@ describe('managed Agent View resume guards', () => {
     mockReadAgentViewSessionState.mockResolvedValue(state('managed', 'alive'));
 
     await expect(
+      isManagedAgentViewContinueBlocked('session-1', workerEnv('session-1')),
+    ).resolves.toBe(false);
+
+    expect(mockReadAgentViewSessionState).not.toHaveBeenCalled();
+  });
+
+  it('does not bypass the guard for a two-key marker/session-id env', async () => {
+    mockReadAgentViewSessionState.mockResolvedValue(state('managed', 'alive'));
+
+    // Marker + matching session id alone (no sideband endpoint/token/cwd)
+    // must not exempt the process from the guard.
+    await expect(
+      isManagedAgentViewResumeBlocked('session-1', {
+        QWEN_AGENT_VIEW_WORKER: '1',
+        QWEN_AGENT_VIEW_SESSION_ID: 'session-1',
+      }),
+    ).resolves.toBe(true);
+
+    await expect(
       isManagedAgentViewContinueBlocked('session-1', {
         QWEN_AGENT_VIEW_WORKER: '1',
         QWEN_AGENT_VIEW_SESSION_ID: 'session-1',
       }),
-    ).resolves.toBe(false);
-
-    expect(mockReadAgentViewSessionState).not.toHaveBeenCalled();
+    ).resolves.toBe(true);
   });
 
   it('does not bypass the guard for a forged or foreign worker env', async () => {
@@ -125,13 +142,10 @@ describe('managed Agent View resume guards', () => {
   it('does not release ownership from inside a worker', async () => {
     mockReadAgentViewSessionState.mockResolvedValue(state('managed', 'exited'));
 
-    await releaseExitedManagedSessionForContinue('session-1', {
-      QWEN_AGENT_VIEW_WORKER: '1',
-      QWEN_AGENT_VIEW_SESSION_ID: 'session-1',
-      QWEN_AGENT_VIEW_SIDEBAND: 'unix:/tmp/qwen-agent-view.sock',
-      QWEN_AGENT_VIEW_TOKEN: 'token-1',
-      QWEN_AGENT_VIEW_ACTIVE_CWD: '/repo',
-    });
+    await releaseExitedManagedSessionForContinue(
+      'session-1',
+      workerEnv('session-1'),
+    );
 
     expect(mockPatchAgentViewSessionState).not.toHaveBeenCalled();
   });
@@ -149,6 +163,16 @@ describe('managed Agent View resume guards', () => {
     );
   });
 });
+
+function workerEnv(sessionId: string): NodeJS.ProcessEnv {
+  return {
+    QWEN_AGENT_VIEW_WORKER: '1',
+    QWEN_AGENT_VIEW_SESSION_ID: sessionId,
+    QWEN_AGENT_VIEW_SIDEBAND: 'unix:/tmp/qwen-agent-view.sock',
+    QWEN_AGENT_VIEW_TOKEN: 'token-1',
+    QWEN_AGENT_VIEW_ACTIVE_CWD: '/repo',
+  };
+}
 
 function state(
   ownership: AgentViewSessionStateFile['ownership'],

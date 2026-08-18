@@ -8,11 +8,7 @@ import {
   patchAgentViewSessionState,
   readAgentViewSessionState,
 } from '../agent-view/supervisor-store.js';
-import {
-  isAgentViewWorkerEnv,
-  QWEN_AGENT_VIEW_SESSION_ID,
-  readAgentViewWorkerSidebandEnv,
-} from '../agent-view/worker-sideband.js';
+import { readAgentViewWorkerSidebandEnv } from '../agent-view/worker-sideband.js';
 
 export const MANAGED_AGENT_VIEW_RESUME_MESSAGE =
   'That session is still running as a background agent. Open `qwen agents` to attach to it, or remove it from Agent View first to resume here.';
@@ -24,12 +20,11 @@ export const MANAGED_AGENT_VIEW_ONE_SHOT_RESUME_MESSAGE =
   'Cannot use one-shot input (-p/--prompt, -i, --input-file, --fork-session, or piped stdin) with --resume of a session that is still running as a background agent. Use `qwen agents attach <id>` to interact with it instead.';
 
 // The worker-env bypass is load-bearing (respawned workers resume their own
-// session), so require the sideband session id to match — a lone forged
-// QWEN_AGENT_VIEW_WORKER=1 no longer defeats the guard.
+// session), so require the full sideband env plus a matching session id —
+// both production spawn paths build env via createAgentViewWorkerSidebandEnv,
+// while a pasted/stray marker+id pair must not defeat the guard.
 function isSessionWorker(sessionId: string, env: NodeJS.ProcessEnv): boolean {
-  return (
-    isAgentViewWorkerEnv(env) && env[QWEN_AGENT_VIEW_SESSION_ID] === sessionId
-  );
+  return readAgentViewWorkerSidebandEnv(env)?.sessionId === sessionId;
 }
 
 export async function isManagedAgentViewResumeBlocked(

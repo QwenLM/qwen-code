@@ -561,41 +561,23 @@ const AGENTS_SUBCOMMAND_TOKENS = new Set([
   'daemon',
 ]);
 
-function isAgentsPromptFallback(rawArgv: readonly string[]): boolean {
-  // Option tokens may precede the positional prompt, and natural-language
-  // prompts never start with '-', so key the decision on the first two
-  // non-option tokens only: `--debug agents fix` falls back, while
-  // `agents --yolo` stays on the command path and fails in strict mode
-  // instead of becoming a stray "agents" prompt.
-  const positionals = rawArgv.filter((token) => !token.startsWith('-'));
-  const [first, second] = positionals;
-  return (
-    first === 'agents' &&
-    second !== undefined &&
-    !AGENTS_SUBCOMMAND_TOKENS.has(second)
-  );
-}
+// Top-level commands registered by buildCliParser that carry side-effecting
+// handlers; the agents-fallback oracle parse must never run when one of
+// these could match first (probe parsing executes command handlers).
+const TOP_LEVEL_COMMAND_TOKENS = new Set([
+  'mcp',
+  'extensions',
+  'auth',
+  'hooks',
+  'channel',
+  'review',
+  'serve',
+  'sessions',
+  'update',
+]);
 
-export async function parseArguments(): Promise<CliArgs> {
-  let rawArgv = hideBin(process.argv);
-
-  // hack: if the first argument is the CLI entry point, remove it
-  if (
-    rawArgv.length > 0 &&
-    (rawArgv[0].endsWith('/dist/qwen-cli/cli.js') ||
-      rawArgv[0].endsWith('/dist/cli.js') ||
-      rawArgv[0].endsWith('/dist/cli/cli.js'))
-  ) {
-    rawArgv = rawArgv.slice(1);
-  }
-
-  // `qwen agents explain this project` must stay a positional prompt: when
-  // the second positional token is not a real `agents` subcommand, skip
-  // registering the command group so the tokens route to the default prompt
-  // command instead of dying in strict mode.
-  const agentsPromptFallback = isAgentsPromptFallback(rawArgv);
-
-  const yargsInstance = yargs(rawArgv)
+function buildCliParser(rawArgv: string[]): Argv {
+  const parser = yargs(rawArgv)
     .locale('en')
     .scriptName('qwen')
     .usage(
@@ -1257,6 +1239,54 @@ export async function parseArguments(): Promise<CliArgs> {
     .command(sessionsCommand)
     // Register update command
     .command(updateCommand);
+  return parser;
+}
+
+export async function parseArguments(): Promise<CliArgs> {
+  let rawArgv = hideBin(process.argv);
+
+  // hack: if the first argument is the CLI entry point, remove it
+  if (
+    rawArgv.length > 0 &&
+    (rawArgv[0].endsWith('/dist/qwen-cli/cli.js') ||
+      rawArgv[0].endsWith('/dist/cli.js') ||
+      rawArgv[0].endsWith('/dist/cli/cli.js'))
+  ) {
+    rawArgv = rawArgv.slice(1);
+  }
+
+  // `qwen agents explain this project` must stay a positional prompt: when
+  // the second positional token is not a real `agents` subcommand, skip
+  // registering the command group so the tokens route to the default prompt
+  // command instead of dying in strict mode. Decide with an oracle parse of
+  // the same option grammar (no strict, no agents group): hand-rolled token
+  // filtering cannot tell option values apart from positionals (`--model
+  // qwen3-max agents fix` or `agents --cwd /tmp`).
+  let agentsPromptFallback = false;
+  const firstAgentsToken = rawArgv.indexOf('agents');
+  const shadowsOtherCommand = rawArgv
+    .slice(0, firstAgentsToken)
+    .some((token) => TOP_LEVEL_COMMAND_TOKENS.has(token));
+  if (
+    firstAgentsToken !== -1 &&
+    !shadowsOtherCommand &&
+    (rawArgv[0] === 'agents' || rawArgv[0]?.startsWith('-'))
+  ) {
+    const probe = await buildCliParser(rawArgv)
+      .option('cwd', { type: 'string' })
+      .parse();
+    const probedQuery = (probe as { query?: unknown }).query;
+    const positionals = Array.isArray(probedQuery)
+      ? probedQuery.map(String)
+      : probe._.map(String);
+    const [first, second] = positionals;
+    agentsPromptFallback =
+      first === 'agents' &&
+      second !== undefined &&
+      !AGENTS_SUBCOMMAND_TOKENS.has(second);
+  }
+
+  const yargsInstance = buildCliParser(rawArgv);
 
   // Register Agent View Phase 1 command surface (skipped on the
   // agents-initial positional-prompt fallback above).
@@ -2205,16 +2235,22 @@ export async function loadCliConfig(
 
     if (argv.forkSession && sessionId) {
       const sourceSessionId = sessionId;
-      // --continue --fork-session: the continue guard in gemini.tsx runs
-      // after this fork and would check the fresh fork UUID, so gate the
-      // source here — a live managed session must never be forked into a
-      // second foreground runtime.
-      if (argv.continue) {
+      // --continue/--resume --fork-session: the continue guard in gemini.tsx
+      // runs after this fork and would check the fresh fork UUID, so gate
+      // the source here — a live managed session must never be forked into
+      // a second foreground runtime. In the sandbox-host partial-config
+      // process the --resume routing never runs at all, so the resume case
+      // must be gated here too.
+      if (argv.continue || argv.resume) {
         const {
           isManagedAgentViewContinueBlocked,
+          isManagedAgentViewResumeBlocked,
           MANAGED_AGENT_VIEW_RESUME_MESSAGE,
         } = await import('../startup/agent-view-resume-guard.js');
-        if (await isManagedAgentViewContinueBlocked(sourceSessionId)) {
+        const blocked = argv.resume
+          ? await isManagedAgentViewResumeBlocked(sourceSessionId)
+          : await isManagedAgentViewContinueBlocked(sourceSessionId);
+        if (blocked) {
           writeStderrLine(MANAGED_AGENT_VIEW_RESUME_MESSAGE);
           process.exit(1);
         }
