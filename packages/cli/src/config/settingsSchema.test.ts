@@ -8,6 +8,7 @@ import { describe, it, expect } from 'vitest';
 import {
   DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
   DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
+  OutputFormat,
   SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -580,7 +581,14 @@ describe('SettingsSchema', () => {
 
       expect(format.type).toBe('enum');
       const values = format.options?.map((o: { value: string }) => o.value);
-      expect(values).toContain('stream-json');
+      // Pin the full enum (sibling-test pattern) so an accidental removal of
+      // an existing value fails too, and bind it to the runtime's
+      // `OutputFormat` constants so the schema tracks core.
+      expect(values).toEqual([
+        OutputFormat.TEXT,
+        OutputFormat.JSON,
+        OutputFormat.STREAM_JSON,
+      ]);
     });
 
     it('should have loadFromIncludeDirectories setting in schema', () => {

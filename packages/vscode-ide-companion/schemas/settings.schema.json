@@ -227,7 +227,7 @@
       "type": "object",
       "properties": {
         "format": {
-          "description": "The format of the CLI output. Options: text, json, stream-json",
+          "description": "The format of the CLI output. With `stream-json`, runs started with a prompt behave as non-interactive (headless), matching `--output-format stream-json`. Options: text, json, stream-json",
           "enum": [
             "text",
             "json",
