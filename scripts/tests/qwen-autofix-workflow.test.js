@@ -7750,6 +7750,12 @@ exit 1
     const skill = readAutofixSkill();
     expect(skill).toContain('this PR is not converging');
     expect(skill).toContain('Diff-growth trajectory');
+    // The brake's handoff must land in failure.md — the one stop file the
+    // run-agent verdict gate accepts. Telling the agent to write handoff.md
+    // instead reproduces run 32076785809: a correct defer-to-human reported
+    // as "finished without required output file(s)".
+    expect(skill).toContain('write the handoff into `<workdir>/failure.md`');
+    expect(skill).toContain('Do not write `handoff.md` yourself');
   });
 
   it('anchors a per-window growth baseline and splits src/test nets against a real repo', () => {
