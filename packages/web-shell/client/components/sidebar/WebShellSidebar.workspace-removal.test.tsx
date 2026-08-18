@@ -1524,6 +1524,21 @@ describe('WebShellSidebar workspace removal', () => {
     expect(onNewSession).toHaveBeenCalledWith('/tmp/other');
   });
 
+  it('shows a native tooltip for the workspace create-group action', async () => {
+    connection.capabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'session_organization'],
+    };
+    renderSidebar({ lockedWorkspaceCwd: '/tmp/other' });
+    await expandWorkspace('other');
+
+    const createGroupButton = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Create group"]',
+    );
+    expect(createGroupButton).not.toBeNull();
+    expect(createGroupButton?.getAttribute('title')).toBe('Create group');
+  });
+
   it('applies items and inlineItems consistently to locked normal, pinned, and archived rows', async () => {
     connection.capabilities = {
       ...capabilities,
