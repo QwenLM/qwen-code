@@ -92,8 +92,8 @@ const rootDir = join(__dirname, '..');
 // metadata (#9180).
 // Bumped from 195KB to 196KB for transient-vs-gone media hydration errors and
 // the reference-only replay placeholder.
-// Bumped from 196KB to 200KB for transcript segment identity plus typed,
-// export-safe tool and result presentation fields.
+// Bumped from 196KB to 200KB for the workspace session live-state surface,
+// transcript segment identity, and typed export-safe presentation fields.
 const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 200 * 1024;
 // The opt-in `daemon/transports` browser bundle legitimately ships the concrete
 // ACP transports (AcpHttpTransport/AcpWsTransport/AutoReconnect + negotiate), so
