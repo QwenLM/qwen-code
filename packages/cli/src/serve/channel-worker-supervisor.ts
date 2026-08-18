@@ -382,11 +382,42 @@ function hasObservedExit(snapshot: ChannelWorkerSnapshot): boolean {
 
 const NODE_EXTRA_CA_CERTS_ENV = 'NODE_EXTRA_CA_CERTS';
 
+/**
+ * Merged bundles keyed by `${operatorCaPath}\0${daemonCertPath}`. Workers are
+ * respawned on every restart, so without this the daemon would mint a fresh
+ * bundle directory per spawn and leak all of them.
+ */
+const mergedWorkerCaBundles = new Map<string, string>();
+
+function writeMergedWorkerCaBundle(contents: string): string {
+  // mkdtempSync gives a 0700 directory with a random suffix, so the bundle
+  // path cannot be pre-planted the way a fixed `qwen-worker-ca-<pid>.pem` in
+  // the shared tmpdir can (CWE-377/CWE-59: a pre-planted symlink redirects
+  // the write, a pre-planted regular file keeps attacker ownership and mode
+  // while receiving the cert — the private key too, for a combined PEM).
+  // Same defence as standalone-update.ts's extract dir.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-worker-ca-'));
+  const bundlePath = path.join(dir, 'ca-bundle.pem');
+  fs.writeFileSync(bundlePath, contents, { mode: 0o600 });
+  // Nothing else references this directory, so the daemon owns its lifetime.
+  process.once('exit', () => {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // Best effort: the daemon is already exiting.
+    }
+  });
+  return bundlePath;
+}
+
 function resolveWorkerCaCertPath(
   daemonCertPath: string,
   existing: string | undefined,
 ): string {
   if (!existing || existing === daemonCertPath) return daemonCertPath;
+  const cacheKey = `${existing}\0${daemonCertPath}`;
+  const cached = mergedWorkerCaBundles.get(cacheKey);
+  if (cached) return cached;
   try {
     // NODE_EXTRA_CA_CERTS takes a single file; merge so an operator-set CA
     // (e.g. corporate proxy) keeps working alongside the daemon cert.
@@ -394,13 +425,19 @@ function resolveWorkerCaCertPath(
       fs.readFileSync(existing, 'utf8').trimEnd(),
       fs.readFileSync(daemonCertPath, 'utf8').trimEnd(),
     ].join('\n');
-    const combinedPath = path.join(
-      os.tmpdir(),
-      `qwen-worker-ca-${process.pid}.pem`,
+    const bundlePath = writeMergedWorkerCaBundle(`${combined}\n`);
+    mergedWorkerCaBundles.set(cacheKey, bundlePath);
+    return bundlePath;
+  } catch (err) {
+    // Falling back to the daemon cert alone silently drops the operator CA
+    // the merge above exists to preserve, and Node says nothing when the
+    // remaining cert loads fine — so say it here.
+    process.emitWarning(
+      `qwen: failed to merge ${NODE_EXTRA_CA_CERTS_ENV} "${existing}" with ` +
+        `the daemon cert "${daemonCertPath}": ` +
+        `${err instanceof Error ? err.message : String(err)}; channel ` +
+        `workers will trust only the daemon cert`,
     );
-    fs.writeFileSync(combinedPath, `${combined}\n`, { mode: 0o600 });
-    return combinedPath;
-  } catch {
     return daemonCertPath;
   }
 }

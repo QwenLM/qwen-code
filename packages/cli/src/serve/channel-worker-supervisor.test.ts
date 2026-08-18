@@ -343,7 +343,143 @@ describe('createChannelWorkerSupervisor', () => {
     const combined = fs.readFileSync(env['NODE_EXTRA_CA_CERTS']!, 'utf8');
     expect(combined).toContain('OP-CERT');
     expect(combined).toContain('DAEMON-CERT');
+    fs.rmSync(path.dirname(env['NODE_EXTRA_CA_CERTS']!), {
+      recursive: true,
+      force: true,
+    });
     fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('reuses one merged bundle across worker spawns', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-ca-reuse-'));
+    const operatorCa = path.join(dir, 'operator.pem');
+    const daemonCa = path.join(dir, 'daemon.pem');
+    fs.writeFileSync(operatorCa, 'OP-CERT\n');
+    fs.writeFileSync(daemonCa, 'DAEMON-CERT\n');
+    const spawnWorker = vi.fn(
+      (_execPath: string, _argv: string[], _options: unknown) =>
+        new FakeChild(),
+    );
+    const makeSupervisor = () =>
+      createChannelWorkerSupervisor({
+        cliEntryPath: '/repo/dist/index.js',
+        daemonUrl: 'https://127.0.0.1:4170',
+        tlsCaCertPath: daemonCa,
+        workspace: '/workspace',
+        selection: { mode: 'names', names: ['telegram'] },
+        workerBaseEnv: { NODE_EXTRA_CA_CERTS: operatorCa },
+        spawnWorker,
+      });
+
+    for (const supervisor of [makeSupervisor(), makeSupervisor()]) {
+      const started = supervisor.start();
+      const child = spawnWorker.mock.results.at(-1)!.value as FakeChild;
+      child.emit('message', {
+        type: 'ready',
+        pid: 54321,
+        channels: ['telegram'],
+        requestedChannels: ['telegram'],
+      });
+      await started;
+    }
+
+    // Workers respawn on every restart; minting a fresh bundle directory per
+    // spawn would leak one per restart for the daemon's whole lifetime.
+    const paths = spawnWorker.mock.calls.map(
+      (call) =>
+        (call[2] as { env: NodeJS.ProcessEnv }).env['NODE_EXTRA_CA_CERTS'],
+    );
+    expect(paths).toHaveLength(2);
+    expect(paths[0]).toBe(paths[1]);
+    fs.rmSync(path.dirname(paths[0]!), { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('keeps the daemon cert when the operator CA cannot be merged', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-ca-fallback-'));
+    const daemonCa = path.join(dir, 'daemon.pem');
+    fs.writeFileSync(daemonCa, 'DAEMON-CERT\n');
+    const warnings: string[] = [];
+    const onWarning = (warning: Error) => warnings.push(warning.message);
+    process.on('warning', onWarning);
+    const child = new FakeChild();
+    const spawnWorker = vi.fn(
+      (_execPath: string, _argv: string[], _options: unknown) => child,
+    );
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'https://127.0.0.1:4170',
+      tlsCaCertPath: daemonCa,
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      workerBaseEnv: {
+        NODE_EXTRA_CA_CERTS: path.join(dir, 'missing-operator.pem'),
+      },
+      spawnWorker,
+    });
+
+    const started = supervisor.start();
+    child.emit('message', {
+      type: 'ready',
+      pid: 54321,
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+    });
+    await started;
+
+    const env = (spawnWorker.mock.calls[0]![2] as { env: NodeJS.ProcessEnv })
+      .env;
+    expect(env['NODE_EXTRA_CA_CERTS']).toBe(daemonCa);
+    await new Promise((resolve) => setImmediate(resolve));
+    process.off('warning', onWarning);
+    expect(
+      warnings.some((message) => message.includes('missing-operator.pem')),
+    ).toBe(true);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('writes the merged bundle into a private directory, not a predictable tmp path', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-ca-private-'));
+    const operatorCa = path.join(dir, 'operator.pem');
+    const daemonCa = path.join(dir, 'daemon.pem');
+    fs.writeFileSync(operatorCa, 'OP-CERT\n');
+    fs.writeFileSync(daemonCa, 'DAEMON-CERT\n');
+    const child = new FakeChild();
+    const spawnWorker = vi.fn(
+      (_execPath: string, _argv: string[], _options: unknown) => child,
+    );
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'https://127.0.0.1:4170',
+      tlsCaCertPath: daemonCa,
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      workerBaseEnv: { NODE_EXTRA_CA_CERTS: operatorCa },
+      spawnWorker,
+    });
+
+    const started = supervisor.start();
+    child.emit('message', {
+      type: 'ready',
+      pid: 54321,
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+    });
+    await started;
+
+    const bundlePath = (
+      spawnWorker.mock.calls[0]![2] as { env: NodeJS.ProcessEnv }
+    ).env['NODE_EXTRA_CA_CERTS']!;
+    // A pre-planted path is only exploitable when it is predictable; the
+    // bundle now lives in a 0700 mkdtemp directory with a random suffix.
+    expect(bundlePath).not.toBe(
+      path.join(os.tmpdir(), `qwen-worker-ca-${process.pid}.pem`),
+    );
+    const bundleDir = path.dirname(bundlePath);
+    expect(path.dirname(bundleDir)).toBe(os.tmpdir());
+    expect(fs.statSync(bundleDir).mode & 0o777).toBe(0o700);
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(bundleDir, { recursive: true, force: true });
   });
 
   it('ignores non-ready IPC messages before the ready message', async () => {

@@ -8,6 +8,7 @@ import { X509Certificate, createHash, timingSafeEqual } from 'node:crypto';
 import * as fs from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import * as https from 'node:https';
+import { isIP } from 'node:net';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { monitorEventLoopDelay, performance } from 'node:perf_hooks';
@@ -683,6 +684,85 @@ export function formatChannelWorkerDaemonUrl(
     return `${scheme}://127.0.0.1:${port}`;
   }
   return `${scheme}://${formatHostForUrl(host)}:${port}`;
+}
+
+/**
+ * Two TLS misconfigurations boot green and break only the channel workers:
+ * a serving cert that is not its own trust anchor (workers fail
+ * `UNABLE_TO_VERIFY_LEAF_SIGNATURE`) and one whose SANs do not cover the
+ * loopback host workers dial (`ERR_TLS_CERT_ALTNAME_INVALID`). In both cases
+ * the daemon listens, browsers connect and `/health` stays green while every
+ * worker restart-loops, so name them at boot the way the expiry guard does.
+ */
+export function describeWorkerTlsTrustGaps(opts: {
+  cert: Buffer;
+  certPath: string;
+  daemonUrl: string;
+  operatorCaCertPath?: string;
+}): string[] {
+  let x509: X509Certificate;
+  try {
+    x509 = new X509Certificate(opts.cert);
+  } catch {
+    // Boot validation already rejected unparseable certs with a better message.
+    return [];
+  }
+  const gaps: string[] = [];
+  // A leaf in NODE_EXTRA_CA_CERTS is a usable trust anchor only when it signed
+  // itself: chain verification has no PARTIAL_CHAIN flag here, so a CA-issued
+  // leaf (what the `mkcert` flow this project documents produces) never
+  // terminates the chain. An operator-set NODE_EXTRA_CA_CERTS is merged into
+  // the worker bundle and may already carry the issuing root, so only flag the
+  // case where the leaf is all the worker gets.
+  if (!opts.operatorCaCertPath && !isSelfSignedCert(x509)) {
+    gaps.push(
+      `--tls-cert "${opts.certPath}" is issued by another CA ` +
+        `(${x509.issuer.replace(/\r?\n/g, ', ')}), not self-signed, so the ` +
+        `certificate alone cannot anchor the channel workers' trust — every ` +
+        `worker handshake to the daemon will fail ` +
+        `UNABLE_TO_VERIFY_LEAF_SIGNATURE. Point NODE_EXTRA_CA_CERTS at the ` +
+        `issuing CA (for mkcert: "$(mkcert -CAROOT)/rootCA.pem") and restart.`,
+    );
+  }
+  const host = workerDialHost(opts.daemonUrl);
+  if (host && !certCoversHost(x509, host)) {
+    gaps.push(
+      `--tls-cert "${opts.certPath}" has no subjectAltName covering ` +
+        `"${host}", the host channel workers dial — every worker handshake ` +
+        `will fail ERR_TLS_CERT_ALTNAME_INVALID. Reissue the certificate ` +
+        `with that host in its SANs and restart.`,
+    );
+  }
+  return gaps;
+}
+
+function isSelfSignedCert(x509: X509Certificate): boolean {
+  try {
+    return x509.verify(x509.publicKey);
+  } catch {
+    // Unsupported key type: assume self-signed rather than warn on a guess.
+    return true;
+  }
+}
+
+function workerDialHost(daemonUrl: string): string | undefined {
+  try {
+    return new URL(daemonUrl).hostname || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function certCoversHost(x509: X509Certificate, host: string): boolean {
+  try {
+    // IP literals need an iPAddress SAN — checkServerIdentity has no CN
+    // fallback for them — while names go through the normal host match.
+    return isIP(host)
+      ? Boolean(x509.checkIP(host))
+      : Boolean(x509.checkHost(host));
+  } catch {
+    return true;
+  }
 }
 
 /**
@@ -2417,6 +2497,7 @@ async function runQwenServeImpl(
   // downgrade would serve the web shell over an insecure transport they
   // believe is encrypted.
   let tlsOptions: { cert: Buffer; key: Buffer } | undefined;
+  let tlsCertPath: string | undefined;
   if ((opts.tlsCert && !opts.tlsKey) || (!opts.tlsCert && opts.tlsKey)) {
     throw new Error(
       `--tls-cert and --tls-key must be provided together (got only ` +
@@ -2475,6 +2556,10 @@ async function runQwenServeImpl(
       );
     }
     tlsOptions = { cert, key };
+    // Workers are forked with `cwd: opts.workspace`, so a relative --tls-cert
+    // would resolve against the worker's cwd instead of the daemon's and load
+    // nothing. Resolve once here, against the cwd the daemon just read it with.
+    tlsCertPath = path.resolve(opts.tlsCert);
   }
 
   if (!isLoopbackBind(opts.hostname) && !token) {
@@ -7111,6 +7196,23 @@ async function runQwenServeImpl(
             );
           }
           const workerRuntime = await ensureChannelRuntime();
+          const workerDaemonUrl = formatChannelWorkerDaemonUrl(
+            opts.hostname,
+            actualPort,
+            tlsOptions !== undefined,
+          );
+          if (tlsOptions && tlsCertPath) {
+            for (const gap of describeWorkerTlsTrustGaps({
+              cert: tlsOptions.cert,
+              certPath: tlsCertPath,
+              daemonUrl: workerDaemonUrl,
+              ...(process.env['NODE_EXTRA_CA_CERTS']
+                ? { operatorCaCertPath: process.env['NODE_EXTRA_CA_CERTS'] }
+                : {}),
+            })) {
+              daemonLog.warn(gap);
+            }
+          }
           const createSupervisor =
             deps.channelWorkerSupervisorFactory ??
             workerRuntime.createChannelWorkerSupervisor;
@@ -7121,13 +7223,9 @@ async function runQwenServeImpl(
               createSupervisor,
               shared: {
                 cliEntryPath: workerRuntime.findCliEntryPath(),
-                daemonUrl: formatChannelWorkerDaemonUrl(
-                  opts.hostname,
-                  actualPort,
-                  tlsOptions !== undefined,
-                ),
+                daemonUrl: workerDaemonUrl,
                 ...(token ? { daemonToken: token } : {}),
-                ...(tlsOptions ? { workerTlsCaCertPath: opts.tlsCert } : {}),
+                ...(tlsCertPath ? { workerTlsCaCertPath: tlsCertPath } : {}),
               },
               onReady: (snapshot) => {
                 if (runtimeStartupError !== undefined) return;

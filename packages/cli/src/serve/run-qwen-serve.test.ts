@@ -16,6 +16,7 @@ import {
   createLazyBridgeProxy,
   extractContextFilename,
   formatChannelWorkerDaemonUrl,
+  describeWorkerTlsTrustGaps,
   InvalidPolicyConfigError,
   createDisabledChannelWorkerSupervisor,
   createBoundChannelDeliveryHandler,
@@ -1141,6 +1142,119 @@ describe('formatChannelWorkerDaemonUrl', () => {
     expect(formatChannelWorkerDaemonUrl('::1', 4170, true)).toBe(
       'https://[::1]:4170',
     );
+  });
+});
+
+// A CA-issued leaf, the shape the documented `mkcert` flow produces: usable
+// as a serving cert, useless as a trust anchor. Not a real secret.
+const TEST_TLS_CERT_CA_ISSUED = `-----BEGIN CERTIFICATE-----
+MIIDHjCCAgagAwIBAgIUMfJwZrF6DjLX1ypLgu2A4v/SwKEwDQYJKoZIhvcNAQEL
+BQAwHDEaMBgGA1UEAwwRcXdlbiB0ZXN0IHJvb3QgQ0EwIBcNMjYwODE4MDk0NzE4
+WhgPMjEyNjA3MjUwOTQ3MThaMBQxEjAQBgNVBAMMCWxvY2FsaG9zdDCCASIwDQYJ
+KoZIhvcNAQEBBQADggEPADCCAQoCggEBAOff38zsoMq+oe2koKyZJ7aoGJC8CuAc
+oYoLcJaWdp6yJaj5BpYeHAnQt8QCQZB86Fj1f3yuK6KwmGm3p49NrVJMl/T39CnK
+ZAcIWATBw8mCWLFWlWhRgqrIQ5ka935m+z63gVhSQiCq2mNkAzm9I4UcbeAucSXn
+Plk0Bc/CBUh5knrjxPEebicbCUaKteWnG3SBe5PjgP6DKZojd0VakmbrDhTW+yD4
+9LRqURfzvQZghA7stqErp+WJREKAaJbNNUEhGvRSwucIsah6u7OAbYP1IRaYBGDm
+nlxaYBETRg0/3Kzx4SnPUuyx3uR6YP9MNuSzK5udCf39+iWSFCC+AnMCAwEAAaNe
+MFwwGgYDVR0RBBMwEYcEfwAAAYIJbG9jYWxob3N0MB0GA1UdDgQWBBSItY/bpVFx
+QRATvUzvo+JRFVpuyjAfBgNVHSMEGDAWgBRfCBabaBn4orvntHRiDcBU8W3vEzAN
+BgkqhkiG9w0BAQsFAAOCAQEAjIiKztoj9JtpKfP2qSYsTe+4nvCZ1ZT4PtmXQMVp
+lyHI02iH+NSSY92/ZdvGn2jBMzAFpVgJFlI6aZOne/qHI5qMf1RW7BfHBXza7wF6
+mdILIKRUYzm96o6IEuObE+QkSjRuA5OpLkObzGZLWfem0+fxnz0djbzeEBhHpP+b
+VUUcl7r2wFb3+ClobIYS24Y+tWCl53XF+2YFNebECkA+19TivHPYgyywljyFNmzk
+jCELOKOvOESV6kWBGUcrj8rcXoaF3BABInxZURGMRqWuivfYSjkGj65Trf2sVCXS
+9mkiDfB/mYPvq3ODVYLvOjcxqPFsKaRA0Gw5Nm7WKGiOhg==
+-----END CERTIFICATE-----
+`;
+
+// Self-signed, but its only SAN is a name the worker never dials — the
+// classic `openssl req -x509 -subj "/CN=localhost"` cert. Not a real secret.
+const TEST_TLS_CERT_NO_LOOPBACK_SAN = `-----BEGIN CERTIFICATE-----
+MIIDJzCCAg+gAwIBAgIUAVVYUcnN8DryJZGEaaVCTk+wO8EwDQYJKoZIhvcNAQEL
+BQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MCAXDTI2MDgxODA5NDcxOFoYDzIxMjYw
+NzI1MDk0NzE4WjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwggEiMA0GCSqGSIb3DQEB
+AQUAA4IBDwAwggEKAoIBAQC/B3++tHrPbzLk0vSJrIbqxM1PYAIlEnxc/Jz/PAkX
+TH2ChYAqdAIUnUK18/WecgDAVUMNbuOh8+JjS2O/+eOwa9McMFBD9KLzwClkFQXY
+i9w0EQ+SI8haXYQhHo931KW/dP6JaNLhAxmGuTsypbvxRmJ3PKnOwcDZZYZ4uHgj
+DOVROEVTMrm+QUh1gfPZRStPFePUFLggcjmaWzF0Zyi5DX9KKMvTMrgaSKm5nHev
+WYMK/tEDTh7ofJqt1a9RRscixQlhp/8GkP39uXB2xfQjzHuybK0lvTYHLK4WMjw2
+tjU3ClZSaZ2kgxN6/cPn6dPMZeZWEyaH11wa0DDmzOWZAgMBAAGjbzBtMB0GA1Ud
+DgQWBBQ36jRlglSAhVatEXwAqTfbvDaT0zAfBgNVHSMEGDAWgBQ36jRlglSAhVat
+EXwAqTfbvDaT0zAPBgNVHRMBAf8EBTADAQH/MBoGA1UdEQQTMBGCD2V4YW1wbGUu
+aW52YWxpZDANBgkqhkiG9w0BAQsFAAOCAQEAYSXyw7t8KeTir/G94izDvKIvkOZW
+DxmdDDFDDEeeyKIo0MRttJoHbcmYkSTLz2UcOKn1bnAgx3ZQWjAm3NdeKF7XSiwH
+NQTyGw0OxvTtzCX72xtBhS8md+dstcQ20YGN8rIEEgkUUOZlwJkhfe9URLNsSbBX
+dcAfcNrfExtg49r1kpwhKL6lXmAi3lNKBgHz6+oyhJpCVehCEtoE4pvwRFW9oyrB
+gI/irGYXddbzWJQla/KPV53wn5nK6Ho4dY1Z76slnwMoufrLM1oUt1QKUeyOKsOD
+8rRyH3UVlQkkJUGlQHPaJ+OU65xrNMkTLS7MdSQfJ1Eti4GyiR2P0vySrg==
+-----END CERTIFICATE-----
+`;
+
+describe('describeWorkerTlsTrustGaps', () => {
+  const daemonUrl = 'https://127.0.0.1:4170';
+
+  it('reports nothing for a self-signed cert covering the dialled host', () => {
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from(TEST_TLS_CERT),
+        certPath: '/certs/daemon.pem',
+        daemonUrl,
+      }),
+    ).toEqual([]);
+  });
+
+  it('names the leaf-as-trust-anchor gap for a CA-issued cert', () => {
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_CA_ISSUED),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('UNABLE_TO_VERIFY_LEAF_SIGNATURE');
+    expect(gaps[0]).toContain('qwen test root CA');
+  });
+
+  it('stays quiet about a CA-issued cert when the operator supplies a CA', () => {
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from(TEST_TLS_CERT_CA_ISSUED),
+        certPath: '/certs/daemon.pem',
+        daemonUrl,
+        operatorCaCertPath: '/certs/rootCA.pem',
+      }),
+    ).toEqual([]);
+  });
+
+  it('names the SAN gap when the cert does not cover the dialled host', () => {
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_NO_LOOPBACK_SAN),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('ERR_TLS_CERT_ALTNAME_INVALID');
+    expect(gaps[0]).toContain('127.0.0.1');
+  });
+
+  it('checks the host actually dialled, not a fixed loopback literal', () => {
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from(TEST_TLS_CERT_NO_LOOPBACK_SAN),
+        certPath: '/certs/daemon.pem',
+        daemonUrl: 'https://example.invalid:4170',
+      }),
+    ).toEqual([]);
+  });
+
+  it('defers to the boot parse guard on an unreadable certificate', () => {
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from('not a certificate'),
+        certPath: '/certs/daemon.pem',
+        daemonUrl,
+      }),
+    ).toEqual([]);
   });
 });
 
@@ -8905,6 +9019,55 @@ describe('runQwenServe channel worker supervisor', () => {
       code: 'channel_worker_unavailable',
       message: 'Channel worker is not running.',
     } satisfies Partial<ChannelWebhookEnqueueError>);
+  });
+
+  it('hands workers an absolute --tls-cert path and an https daemon url', async () => {
+    // Workers are forked with `cwd: opts.workspace`, so a relative
+    // --tls-cert would resolve against the worker's cwd, load nothing, and
+    // fail every handshake with DEPTH_ZERO_SELF_SIGNED_CERT.
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-tls-')),
+    );
+    const certPath = path.join(tmpDir, 'cert.pem');
+    const keyPath = path.join(tmpDir, 'key.pem');
+    fs.writeFileSync(certPath, TEST_TLS_CERT);
+    fs.writeFileSync(keyPath, TEST_TLS_KEY);
+    const relativeCert = path.relative(process.cwd(), certPath);
+    expect(path.isAbsolute(relativeCert)).toBe(false);
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    const factory = makeReadyWorkerFactory(worker);
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        tlsCert: relativeCert,
+        tlsKey: path.relative(process.cwd(), keyPath),
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge: makeFakeBridge(),
+        channelWorkerSupervisorFactory: factory,
+        channelServicePidfile: makePidfileDeps(),
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      const opts = factory.mock.calls[0]![0];
+      expect(opts.tlsCaCertPath).toBe(certPath);
+      expect(opts.daemonUrl).toMatch(/^https:\/\//);
+    } finally {
+      await handle.close();
+    }
   });
 
   it('forwards webhook tasks through the channel worker group', async () => {
