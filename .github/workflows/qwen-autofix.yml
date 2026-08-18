@@ -1866,7 +1866,15 @@ jobs:
           # shellcheck disable=SC2016
           if [[ -f "${WORKDIR}/failure.md" ]]; then
             REASON='no further automated attempts will be made on this issue.'
-            DETAIL="$(head -c 1500 "${WORKDIR}/failure.md")"
+            # Same hygiene as the PR-lane DETAIL_FILE excerpt: -c drops a
+            # partial multi-byte sequence the byte-level head -c may have
+            # split, and the `<!--` escape stops a failure.md quoting an HTML
+            # comment whose closer sits past the 1500-byte cut from opening
+            # an unterminated comment that swallows the 中文说明 <details>
+            # block appended below (|| true: iconv -c exits 1 when it
+            # discards a byte, which under set -eo pipefail would drop the
+            # whole comment post).
+            DETAIL="$(head -c 1500 "${WORKDIR}/failure.md" | iconv -f utf-8 -t utf-8 -c | sed 's/<!--/<!\\-\\-/g' || true)"
             LABEL_ARGS=(--remove-label 'autofix/in-progress' --add-label 'autofix/skip')
           elif [[ "${PUBLISH_OUTCOME}" == 'failure' ]]; then
             REASON='the issue will require the `autofix/approved` label to be re-added before any future automated attempt.'
