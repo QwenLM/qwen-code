@@ -109,6 +109,10 @@ const withdrawClaimStep =
   workflow.match(
     /- name: 'Withdraw claim on failure'[\s\S]*?(?=\n[ ]{2}# ==========)/,
   )?.[0] ?? '';
+const showRunArtifactsStep =
+  workflow.match(
+    /- name: 'Show run artifacts'[\s\S]*?(?=\n[ ]{6}- name: 'Upload run artifacts')/,
+  )?.[0] ?? '';
 const prepareQwenCliSteps =
   workflow.match(
     /- name: 'Prepare Qwen Code CLI'[\s\S]*?(?=\n[ ]{6}- name: ')/g,
@@ -10223,11 +10227,21 @@ exit 1
       expect(step).not.toContain('for attempt in 1 2; do');
       expect(step).not.toContain('Qwen Code failed on attempt');
     }
+    // Full-line pins: the zh sibling must sit in the SAME rm -f. Substring
+    // pins that stop at failure.md stay green when the zh argument is
+    // dropped (mutation-verified), and a stale assess-phase translation
+    // surviving into a develop-issue invocation pairs an old Chinese report
+    // with a fresh English failure.md in the withdraw comment — the exact
+    // mispairing the repair-step pin's comment names.
     expect(assessCandidatesStep).toContain(
-      'rm -f "${WORKDIR}/decision.json" "${WORKDIR}/failure.md"',
+      'rm -f "${WORKDIR}/decision.json" "${WORKDIR}/failure.md" "${WORKDIR}/failure.zh.md"',
     );
-    expect(developFixStep).toContain('rm -f "${WORKDIR}/failure.md"');
-    expect(triageAndAddressStep).toContain('rm -f "${WORKDIR}/failure.md"');
+    expect(developFixStep).toContain(
+      'rm -f "${WORKDIR}/failure.md" "${WORKDIR}/failure.zh.md"',
+    );
+    expect(triageAndAddressStep).toContain(
+      'rm -f "${WORKDIR}/failure.md" "${WORKDIR}/failure.zh.md"',
+    );
     expect(repairDeterministicRejectionStep).toContain(
       '"${WORKDIR}/failure.md"',
     );
@@ -11272,6 +11286,7 @@ exit 1
       'pr-body.md',
       'e2e-report.md',
       'failure.md',
+      'failure.zh.md',
     ]) {
       expect(issueAutofixReportStep).toContain(filename);
     }
@@ -14222,9 +14237,119 @@ exit 1
     // whose opener lands before the 1500-byte cut and closer after it opens
     // an unterminated comment that swallows the <details> block this test
     // pins (probe-verified). iconv -c also fixes mid-character byte
-    // truncation from a raw head -c.
+    // truncation from a raw head -c. The full four-expression form (not
+    // just `<!--`): the wrapper appended below is exposed to a
+    // contract-violating `<details` in the excerpt the same way the PR-lane
+    // DETAIL_FILE site is.
+    const wrapperDefensePipeline =
+      "iconv -f utf-8 -t utf-8 -c | sed -e 's/<!--/<!\\\\-\\\\-/g' -e 's/<details/＜details/g' -e 's/<\\/details/＜\\/details/g' -e 's/<summary/＜summary/g' || true";
     expect(withdrawClaimStep).toContain(
-      'DETAIL="$(head -c 1500 "${WORKDIR}/failure.md" | iconv -f utf-8 -t utf-8 -c | sed \'s/<!--/<!\\\\-\\\\-/g\' || true)"',
+      'DETAIL="$(head -c 1500 "${WORKDIR}/failure.md" | ' +
+        wrapperDefensePipeline +
+        ')"',
+    );
+    // Same pipeline on the PR-lane DETAIL_FILE excerpt: address-summary /
+    // no-action files are mandated by SKILL to END with their own collapsed
+    // <details> 中文说明 tail, so a mid-size summary whose tail straddles
+    // the 1500-byte cut leaves a severed live opener that swallows the
+    // wrapper this step appends (trigger is contract-COMPLIANT).
+    expect(reviewAddressReportStep).toContain(
+      'head -c 1500 "${DETAIL_FILE}" | ' + wrapperDefensePipeline,
+    );
+    // API_ERROR_DETAIL flows into CAUSE_ZH -> HEADLINE_ZH, which renders
+    // INSIDE the wrapper — a bare `</details` in the first 200 bytes of
+    // agent stdout (which can echo contributor-authored comment text) would
+    // close the wrapper early, so it needs the same four substitutions.
+    expect(reviewAddressReportStep).toContain(
+      "API_ERROR_DETAIL=\"$(head -n 1 \"${WORKDIR}/agent-api-error\" | sed -e 's/<!--/<!\\\\-\\\\-/g' -e 's/<details/＜details/g' -e 's/<\\/details/＜\\/details/g' -e 's/<summary/＜summary/g' | cut -c1-200 | iconv -f utf-8 -t utf-8 -c || true)\"",
+    );
+    // The two branch-selected Chinese section labels inside the block must
+    // sit under THEIR branches — the same wrong-label-on-the-decision-
+    // distinction class the pairing pins above catch, one block lower.
+    // Contiguous pin: swapping the two echo bodies ships green against
+    // position-independent substring pins (mutation-verified).
+    expect(reviewAddressReportStep).toContain(
+      'if [[ "${COMMITTED}" == "true" ]]; then\n' +
+        '                  echo "⚠️ 此改动未被推送 —— 下文引用的任何提交都只存在于 runner 工作区，已被丢弃。以下是 agent 的报告："\n' +
+        '                else\n' +
+        '                  echo "**停止前我了解到的情况：**"',
+    );
+    // The zh gate-note and ITS condition, contiguous: deleting the block or
+    // swapping the condition for the always-true `-s failure.zh.md` sibling
+    // both shipped green with looser pins (mutation-verified). The note
+    // must stay after the gate section it points at.
+    expect(reviewAddressReportStep).toContain(
+      'if [[ -s "${WORKDIR}/gate-rejection.md" ]]; then\n' +
+        '                echo\n' +
+        '                echo "验证门的拒绝原因与日志证据见上方英文部分（gate-rejection 不翻译）。"\n' +
+        '              fi',
+    );
+    expect(
+      reviewAddressReportStep.indexOf('autofix-gate-rejection-end'),
+    ).toBeLessThan(
+      reviewAddressReportStep.indexOf(
+        '验证门的拒绝原因与日志证据见上方英文部分',
+      ),
+    );
+    // Wrapper internal ordering: position-independent toContain pins let a
+    // reordering ship green (mutation-verified) — an empty collapsed block
+    // with the headline/excerpt spilled uncollapsed into the comment.
+    expect(reviewAddressReportStep.indexOf("echo '<details>'")).toBeLessThan(
+      reviewAddressReportStep.indexOf(
+        'head -c 3000 "${WORKDIR}/failure.zh.md"',
+      ),
+    );
+    expect(
+      reviewAddressReportStep.indexOf("echo '<summary>中文说明</summary>'"),
+    ).toBeLessThan(reviewAddressReportStep.indexOf("echo '</details>'"));
+    // The develop-issue withdraw comment carries the same block, running
+    // the identical zh pipeline (pinned above for the PR lane).
+    expect(withdrawClaimStep).toContain(zhPipeline);
+    expect(withdrawClaimStep).toContain('<summary>中文说明</summary>');
+    // The English body must SURVIVE the zh append (a future edit rewriting
+    // `BODY="${BODY}` to `BODY="` ships green without this pin, dropping
+    // the withdrawal reason and excerpt whenever failure.zh.md exists —
+    // mutation-verified).
+    expect(withdrawClaimStep).toContain('BODY="${BODY}');
+    // The ZH_DETAIL guard stays conditional...
+    expect(withdrawClaimStep).toContain('if [[ -n "${ZH_DETAIL}" ]]; then');
+    // ...but the 中文说明 block itself renders UNCONDITIONALLY, mirroring
+    // the PR lane's floor: on the crash shapes run-agent.mjs writes
+    // failure.md itself with no zh companion, and this lane must still show
+    // the translated REASON instead of degrading to zero Chinese. The
+    // contiguous `fi` -> BODY append shape pins the block OUTSIDE the
+    // ZH_DETAIL guard; re-wrapping it breaks the adjacency.
+    expect(withdrawClaimStep.match(/^\s*REASON=/gm)).toHaveLength(3);
+    expect(withdrawClaimStep.match(/^\s*REASON_ZH=/gm)).toHaveLength(3);
+    expect(withdrawClaimStep).toMatch(
+      /REASON='no further automated attempts will be made on this issue\.'\n\s*REASON_ZH='不会对该 issue 再做自动尝试。'/,
+    );
+    expect(withdrawClaimStep).toMatch(
+      /REASON='the issue will require the `autofix\/approved` label to be re-added before any future automated attempt\.'\n\s*REASON_ZH='该 issue 需要重新添加 `autofix\/approved` 标签才能再次自动尝试。'/,
+    );
+    expect(withdrawClaimStep).toContain('ZH_BLOCK="${REASON_ZH}"');
+    expect(withdrawClaimStep).toContain(
+      'fi\n          BODY="${BODY}\n\n          <details>\n          <summary>中文说明</summary>\n\n          ${ZH_BLOCK}\n\n          </details>"',
+    );
+    // The issue-lane run-log dump echoes agent-written files to step
+    // STDOUT, where a line-start `::` parses as a workflow command — it
+    // must neutralize like the PR-lane dump loop does, and carry the zh
+    // report: these loops are the only full-copy echo of it (the handoff
+    // comment carries a 3000-byte excerpt).
+    expect(showRunArtifactsStep).toContain(
+      'for f in decision.json pr-title.txt pr-body.md e2e-report.md failure.md failure.zh.md fix.diff; do',
+    );
+    expect(showRunArtifactsStep).toMatch(
+      /=============== \$\{f\} ==============="\n(?:[ ]*#[^\n]*\n)*[ ]*sed 's\/::\/;;\/g' "\$\{WORKDIR\}\/\$\{f\}"/,
+    );
+    expect(issueAutofixReportStep).toContain(
+      'for f in decision.json pr-title.txt pr-body.md e2e-report.md failure.md failure.zh.md fix.diff; do',
+    );
+    expect(reviewAddressJob).toContain(
+      'for f in feedback.md address-summary.md no-action.md failure.md failure.zh.md handoff.md gate-rejection.md gate-advisories.md agent-api-error agent-api-error-kind agent-timeout resolved-comments.txt comment-replies.json deferred-findings.json deferred-findings.carry.json deferred-findings.unmerged.json pr.diff; do',
+    );
+    expect(reviewAddressReportStep).toContain(
+      'for f in address-summary.md no-action.md failure.md failure.zh.md handoff.md; do',
     );
     // A repair re-run must not inherit a stale companion from the rejected
     // attempt: run 2's success would leave run 1's translation behind, and

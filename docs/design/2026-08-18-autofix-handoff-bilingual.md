@@ -80,10 +80,17 @@ HEADLINE_ZH="🤖 未能为该反馈产生通过验证的修复（第 ${MARK_ROU
 Precedent for parallel `_ZH` variables already exists in the workflow
 (`WIN_DESC_ZH` in the milestone comment).
 
-Section labels inside the report block also gain Chinese counterparts used
-only inside the details block (`**What I found before stopping:**`, the
-NOT-pushed warning, the no-detail fallback sentence, `**Why it was not
-pushed:**`, the stale-base note).
+Section labels inside the report block also gain Chinese handling inside
+the details block: the two branch-selected labels that open the excerpt
+(`**What I found before stopping:**`, the NOT-pushed warning) are
+translated. `**Why it was not pushed:**` and the stale-base note are NOT —
+they open the gate section whose body stays English, and a pointer sentence
+inside the details block tells the zh reader the evidence is above. The
+no-detail fallback sentence has no counterpart by construction: when
+`DETAIL_FILE` is empty `failure.zh.md` cannot exist (it is only written
+alongside `failure.md`, itself a `DETAIL_FILE` candidate), so the details
+block degrades to the headline translation alone, which already carries
+that state (see §5).
 
 ### 3. Report layout
 
@@ -127,7 +134,23 @@ Budget knobs live next to the existing 1500/3900 constants with a comment.
   over a missing translation.
 - `DETAIL_FILE` = `address-summary.md` / `no-action.md` (already bilingual
   by SKILL contract) → those files have no `failure.zh.md` sibling;
-  headline-only details block is correct for them too.
+  headline-only details block is correct for them too. (Their mandated
+  `<details>` tail can still be severed by the 1500-byte cut — the excerpt
+  site neutralizes the tag forms so the severed opener is inert.)
+- A byte-truncated excerpt can sever a fenced code block: the 1500/3000-byte
+  cut lands mid-line, so a fence opened before the cut and closed after it
+  renders the excerpt as an unterminated code block and everything appended
+  after it (the 中文说明 wrapper) as literal monospace text inside it.
+  ACCEPTED without fence balancing: render-only (the loop markers parse from
+  the raw body), the full uncut report still reaches the run-log dumps and
+  step summary, and a balancing heuristic stays wrong when the cut lands
+  mid-closer. The class covers every byte-truncated excerpt site — the
+  English failure.md / DETAIL_FILE excerpts and both zh excerpts.
+- Issue-lane withdraw comment: the 中文说明 block renders UNCONDITIONALLY
+  with a translated `REASON` (`REASON_ZH` sibling per branch), mirroring
+  the PR-lane headline floor; the sanitized failure.zh.md excerpt joins the
+  block only when present. Crash shapes (run-agent.mjs wrote failure.md
+  itself, no companion) therefore still show the Chinese withdraw sentence.
 
 ### 6. SKILL.md changes
 

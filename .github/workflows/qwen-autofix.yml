@@ -1704,7 +1704,12 @@ jobs:
           for f in decision.json pr-title.txt pr-body.md e2e-report.md failure.md failure.zh.md fix.diff; do
             if [[ -f "${WORKDIR}/${f}" ]]; then
               echo "=============== ${f} ==============="
-              cat "${WORKDIR}/${f}"
+              # Agent-written content on step STDOUT: a line-start `::` would
+              # be parsed as a workflow command (::error::, ::add-mask::), the
+              # same reason the PR-lane dump loop neutralizes it. (The two
+              # step-SUMMARY loops write to a file, where `::` is not
+              # parsed.)
+              sed 's/::/;;/g' "${WORKDIR}/${f}"
               echo
             fi
           done
@@ -1879,22 +1884,25 @@ jobs:
           # shellcheck disable=SC2016
           if [[ -f "${WORKDIR}/failure.md" ]]; then
             REASON='no further automated attempts will be made on this issue.'
+            REASON_ZH='不会对该 issue 再做自动尝试。'
             # Same hygiene as the PR-lane DETAIL_FILE excerpt: -c drops a
             # partial multi-byte sequence the byte-level head -c may have
-            # split, and the `<!--` escape stops a failure.md quoting an HTML
-            # comment whose closer sits past the 1500-byte cut from opening
-            # an unterminated comment that swallows the 中文说明 <details>
-            # block appended below (|| true: iconv -c exits 1 when it
-            # discards a byte, which under set -eo pipefail would drop the
-            # whole comment post).
-            DETAIL="$(head -c 1500 "${WORKDIR}/failure.md" | iconv -f utf-8 -t utf-8 -c | sed 's/<!--/<!\\-\\-/g' || true)"
+            # split, and the markup neutralization stops a failure.md quoting
+            # HTML whose opener sits before the 1500-byte cut and closer
+            # after it (`<!--`) — or a contract-violating `<details` — from
+            # swallowing the 中文说明 <details> block appended below
+            # (|| true: iconv -c exits 1 when it discards a byte, which
+            # under set -eo pipefail would drop the whole comment post).
+            DETAIL="$(head -c 1500 "${WORKDIR}/failure.md" | iconv -f utf-8 -t utf-8 -c | sed -e 's/<!--/<!\\-\\-/g' -e 's/<details/＜details/g' -e 's/<\/details/＜\/details/g' -e 's/<summary/＜summary/g' || true)"
             LABEL_ARGS=(--remove-label 'autofix/in-progress' --add-label 'autofix/skip')
           elif [[ "${PUBLISH_OUTCOME}" == 'failure' ]]; then
             REASON='the issue will require the `autofix/approved` label to be re-added before any future automated attempt.'
+            REASON_ZH='该 issue 需要重新添加 `autofix/approved` 标签才能再次自动尝试。'
             DETAIL='The agent produced and verified a fix, but publishing the PR failed. Check the Publish PR step logs for the CI_DEV_BOT_PAT actor, git push, PR creation, or PR comment error.'
             LABEL_ARGS=(--remove-label 'autofix/in-progress')
           else
             REASON='the issue will require the `autofix/approved` label to be re-added before any future automated attempt.'
+            REASON_ZH='该 issue 需要重新添加 `autofix/approved` 标签才能再次自动尝试。'
             DETAIL='The run failed before producing a verified fix.'
             LABEL_ARGS=(--remove-label 'autofix/in-progress')
           fi
@@ -1911,16 +1919,26 @@ jobs:
           What the agent found, in case it helps a human contributor:
 
           ${DETAIL}"
+          # The 中文说明 block renders UNCONDITIONALLY, mirroring the PR
+          # lane's floor: on the crash shapes run-agent.mjs writes failure.md
+          # itself with no zh companion, and degrading this lane to zero
+          # Chinese while the PR lane still shows HEADLINE_ZH contradicts the
+          # design doc §5 floor — so the translated REASON always renders,
+          # with the sanitized excerpt inside it only when present.
+          ZH_BLOCK="${REASON_ZH}"
           if [[ -n "${ZH_DETAIL}" ]]; then
-            BODY="${BODY}
+            ZH_BLOCK="${ZH_BLOCK}
+
+          ${ZH_DETAIL}"
+          fi
+          BODY="${BODY}
 
           <details>
           <summary>中文说明</summary>
 
-          ${ZH_DETAIL}
+          ${ZH_BLOCK}
 
           </details>"
-          fi
           gh issue comment "${ISSUE}" --repo "${REPO}" --body "${BODY}" || true
           if [[ -n "${COMMENT_ID}" ]]; then
             gh api -X DELETE "/repos/${REPO}/issues/comments/${COMMENT_ID}" || true
@@ -6957,9 +6975,14 @@ jobs:
             API_ERROR_DETAIL=''
             API_ERROR_KIND=''
             if [[ -s "${WORKDIR}/agent-api-error" ]]; then
-              # First line only, comment-opener escaped (agent stdout can echo
+              # First line only, markup neutralized (agent stdout can echo
               # external PR-comment text and the marker regex spans '<!-- ... -->'
               # happily), and capped so a long span can't bloat the headline.
+              # The tag substitutions are not just the comment opener: this
+              # value flows into CAUSE_ZH -> HEADLINE_ZH, which renders INSIDE
+              # the 中文说明 <details> wrapper — a bare `</details` in the
+              # first 200 bytes would close that wrapper early and spill the
+              # zh excerpt outside it.
               # `cut -c` counts BYTES, so the cap can split a multi-byte
               # character - and the classifier deliberately matches CJK renders,
               # so a >200-byte Chinese error is a supported input, not a
@@ -6968,7 +6991,7 @@ jobs:
               # this step's `set -eo pipefail` would abort before the marker and
               # the gh pr comment - hence the `|| true`, same as the sibling
               # publish site below.
-              API_ERROR_DETAIL="$(head -n 1 "${WORKDIR}/agent-api-error" | sed 's/<!--/<!\\-\\-/g' | cut -c1-200 | iconv -f utf-8 -t utf-8 -c || true)"
+              API_ERROR_DETAIL="$(head -n 1 "${WORKDIR}/agent-api-error" | sed -e 's/<!--/<!\\-\\-/g' -e 's/<details/＜details/g' -e 's/<\/details/＜\/details/g' -e 's/<summary/＜summary/g' | cut -c1-200 | iconv -f utf-8 -t utf-8 -c || true)"
             fi
             if [[ -s "${WORKDIR}/agent-api-error-kind" ]]; then
               API_ERROR_KIND="$(head -n 1 "${WORKDIR}/agent-api-error-kind" | tr -cd 'a-z')"
@@ -7366,7 +7389,13 @@ jobs:
                 # `set -eo pipefail` would abort the step and skip the marker + gh
                 # pr comment below — the exact silent stall this block prevents — so
                 # `|| true` keeps the (already-emitted) cleaned text and continues.
-                head -c 1500 "${DETAIL_FILE}" | iconv -f utf-8 -t utf-8 -c | sed 's/<!--/<!\\-\\-/g' || true
+                # The tag substitutions beyond `<!--` matter on the
+                # address-summary/no-action shapes: SKILL mandates those files
+                # END with their own collapsed <details> 中文说明 block, so a
+                # mid-size summary whose mandated tail straddles the 1500-byte
+                # cut leaves a live severed <details> opener that swallows the
+                # 中文说明 wrapper this step appends below.
+                head -c 1500 "${DETAIL_FILE}" | iconv -f utf-8 -t utf-8 -c | sed -e 's/<!--/<!\\-\\-/g' -e 's/<details/＜details/g' -e 's/<\/details/＜\/details/g' -e 's/<summary/＜summary/g' || true
               else
                 echo "AutoFix failed before producing a verified commit (the run crashed or timed out before it could explain why)."
               fi
