@@ -1225,6 +1225,11 @@ const EN: Messages = {
   'turnOutputs.fileCount': (v) => `${v?.count ?? 0} files`,
   'turnOutputs.openFileTree': 'Open file tree',
   'turnOutputs.closeFileTree': 'Close file tree',
+  'turnOutputs.artifactMissing': 'File not found in the workspace',
+  'turnOutputs.artifactUnavailable': (v) =>
+    v?.path
+      ? `File not found in the workspace · ${v.path}`
+      : 'File not found in the workspace',
   'sidebar.label': 'Workspace sidebar',
   'sidebar.toggleMenu': 'Toggle menu',
   'sidebar.newChat': 'New chat',
@@ -1398,14 +1403,11 @@ const EN: Messages = {
     'This restored queue summary cannot recover its original attachments.',
   'queue.admissionUnknown':
     'Delivery is uncertain. Check the session before trying again.',
-  'queue.mayCorrespond':
-    'The uncertain local copy and server queue entry may be the same prompt.',
   'queue.restoreUnknown': 'Restore local copy',
   'queue.discardUnknown': 'Discard local copy',
   'queue.continueEditing': 'Continue editing',
   'queue.continueEditingConfirm':
     'The prompt may already be running. Continue editing only if you accept the risk of sending it twice.',
-  'queue.localCopyDiscarded': 'Local copy discarded',
   'queue.commandBlocked':
     "Slash commands can't be queued while a turn is running.",
   'queue.shellQueued':
@@ -2914,6 +2916,23 @@ const EN: Messages = {
   'settings.alsoModifiedIn': (v) => `(Also modified in ${v?.scope ?? ''})`,
   'settings.invalidNumber': 'Invalid number',
   'settings.requiresRestart': 'This change requires a restart to take effect.',
+  'settings.localControl.title': 'Local Control',
+  'settings.localControl.description':
+    'Continue this Qwen Code session from a phone on the same trusted network.',
+  'settings.localControl.on': 'On',
+  'settings.localControl.off': 'Off',
+  'settings.localControl.network': 'Local network',
+  'settings.localControl.selectNetwork': 'Choose a network',
+  'settings.localControl.qr': 'Local Control QR code',
+  'settings.localControl.enable': 'Turn on Local Control',
+  'settings.localControl.disable': 'Disconnect phone access',
+  'settings.localControl.encrypted': 'Encrypted',
+  'settings.localControl.unencrypted':
+    'Unencrypted — trusted networks only; re-enable after network changes',
+  'settings.localControl.awake': 'This Mac will stay awake',
+  'settings.localControl.maySleep': 'This Mac may sleep',
+  'settings.localControl.urlRedacted':
+    'The pairing URL is not shown here because this daemon has no bearer token. It was printed to the terminal where the daemon is running — pair from there.',
   'settings.models.title': 'Models',
   'settings.models.add': '+ Add Model',
   'settings.models.setCurrent': 'Set current',
@@ -4166,6 +4185,9 @@ const ZH: Messages = {
   'turnOutputs.fileCount': (v) => `${v?.count ?? 0} 个文件`,
   'turnOutputs.openFileTree': '打开文件树',
   'turnOutputs.closeFileTree': '关闭文件树',
+  'turnOutputs.artifactMissing': '工作区中未找到该文件',
+  'turnOutputs.artifactUnavailable': (v) =>
+    v?.path ? `工作区中未找到该文件 · ${v.path}` : '工作区中未找到该文件',
   'sidebar.label': '工作区侧边栏',
   'sidebar.toggleMenu': '切换菜单',
   'sidebar.newChat': '新对话',
@@ -4330,14 +4352,11 @@ const ZH: Messages = {
   'queue.submittingDisabled': '排队消息正在提交中...',
   'queue.summaryEditDisabled': '恢复的队列摘要无法还原原始附件。',
   'queue.admissionUnknown': '消息是否送达尚不确定，请先检查会话再重试。',
-  'queue.mayCorrespond':
-    '送达不确定的本地副本与服务器队列项可能对应同一条消息。',
   'queue.restoreUnknown': '恢复本地副本',
   'queue.discardUnknown': '丢弃本地副本',
   'queue.continueEditing': '继续编辑',
   'queue.continueEditingConfirm':
     '这条消息可能已经在执行。只有在接受重复发送风险时才继续编辑。',
-  'queue.localCopyDiscarded': '本地副本已丢弃',
   'queue.commandBlocked': '当前回合运行时，Slash 命令不能进入排队。',
   'queue.shellQueued': 'Shell 命令已排队，将在当前回合结束后执行。',
   'queue.shellDropped': (v) =>
@@ -5727,6 +5746,23 @@ const ZH: Messages = {
   'settings.alsoModifiedIn': (v) => `（同时在${v?.scope ?? ''}中修改）`,
   'settings.invalidNumber': '无效数字',
   'settings.requiresRestart': '此更改需要重启后才能生效。',
+  'settings.localControl.title': '本地控制',
+  'settings.localControl.description':
+    '通过同一受信任网络中的手机继续当前 Qwen Code 会话。',
+  'settings.localControl.on': '已开启',
+  'settings.localControl.off': '关闭',
+  'settings.localControl.network': '本地网络',
+  'settings.localControl.selectNetwork': '选择网络',
+  'settings.localControl.qr': '本地控制二维码',
+  'settings.localControl.enable': '开启本地控制',
+  'settings.localControl.disable': '断开手机访问',
+  'settings.localControl.encrypted': '已加密',
+  'settings.localControl.unencrypted':
+    '未加密，仅限受信任网络；网络变化后请重新启用',
+  'settings.localControl.awake': '这台 Mac 将保持唤醒',
+  'settings.localControl.maySleep': '这台 Mac 可能进入睡眠',
+  'settings.localControl.urlRedacted':
+    '由于该守护进程未配置 bearer token，配对 URL 不在此显示。它已打印到运行守护进程的终端，请到该终端获取配对 URL 完成配对。',
   'settings.models.title': '模型',
   'settings.models.add': '+ 增加模型',
   'settings.models.setCurrent': '设为当前',

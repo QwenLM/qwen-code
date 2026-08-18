@@ -535,8 +535,10 @@ describe('qwen-autofix workflow', () => {
     // caught, not just a removed constant.
     expect(reviewScanJob).toContain('.startedAt // $cut) > $cut');
     // Round is the max across markers so a terminal handoff marker is honored
-    // regardless of its timestamp.
-    expect(reviewScanJob).toContain('map(.round) | max // 0');
+    // regardless of its timestamp; the fallback is the window's SEED (0 unless
+    // '@qwen-code /takeover from N' anchored this window at N), never a
+    // hardcoded 0.
+    expect(reviewScanJob).toContain('map(.round) | max // $start');
     // Never fall back to the mutable head commit date for the pre-first-eval
     // floor (a base-sync HEAD would recreate feedback burial); use the immutable
     // createdAt, or an empty floor if the metadata query failed.
@@ -588,6 +590,7 @@ describe('qwen-autofix workflow', () => {
             ...process.env,
             PENDING_CUTOFF: '2026-07-21T00:00:00Z',
             NON_BLOCKING_CHECKS: JSON.stringify(nonBlocking),
+            DISPATCH_STATUS_CONTEXT: 'qwen-autofix/dispatch-pending',
           },
           encoding: 'utf8',
         },
@@ -2113,6 +2116,119 @@ describe('qwen-autofix workflow', () => {
     expect(failed.log).toContain('metadata fetch failed (API error)');
   });
 
+  it('releases the dispatch-pending marker when the recheck discards a target', () => {
+    // The discard exits BEFORE checkout, where the leg-side release lives, so
+    // a discarded same-repo head would otherwise keep being skipped as
+    // dispatch-pending for the full TTL with no leg coming — against the
+    // re-emit promise its own comment makes. Replay the recheck block
+    // VERBATIM with a recording gh stub: the release must fire on same-repo
+    // discards and never where it cannot (fork heads were never stamped;
+    // dry runs stamp nothing; a missing head sha has nothing to stamp).
+    const recheck = prepareBranchAndFeedbackStep.match(
+      /(PR_LIVE="\$\(gh pr view[\s\S]*?exit 0\n {10}fi)/,
+    )?.[1];
+    expect(recheck).toBeTruthy();
+    // The live fetch carries the head sha the release stamps.
+    expect(recheck).toContain(',headRefOid');
+    expect(recheck).toContain(
+      'LIVE_HEAD_OID="$(jq -r \'.headRefOid // ""\' <<< "${PR_LIVE}")"',
+    );
+    expect(recheck).toContain(
+      'if [[ "${DRY_RUN}" != "true" && "${LIVE_XREPO}" == "false" && -n "${LIVE_HEAD_OID}" ]]; then',
+    );
+    const runReleaseRecheck = (prJson, { dryRun = 'false' } = {}) => {
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-release-'));
+      try {
+        writeFileSync(
+          join(dir, 'gh'),
+          [
+            '#!/bin/bash',
+            `if [[ "$*" == *"/collaborators/"* ]]; then printf '%s' 'write';`,
+            `elif [[ "$1" == "api" && "$2" == repos/*/statuses/* ]]; then echo "API $*" >> '${join(dir, 'writes.log')}';`,
+            `else printf '%s' '${JSON.stringify(prJson)}'; fi`,
+          ].join('\n'),
+        );
+        chmodSync(join(dir, 'gh'), 0o755);
+        writeFileSync(join(dir, 'writes.log'), '');
+        const out = join(dir, 'out.txt');
+        writeFileSync(out, '');
+        const stdout = execFileSync(
+          'bash',
+          ['-c', `${recheck.replace(/\n {10}/g, '\n')}\nprintf 'PASSED'`],
+          {
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              PR: '7163',
+              REPO: 'QwenLM/qwen-code',
+              BRANCH: 'ci/some-branch',
+              HEAD_REPO: 'QwenLM/qwen-code',
+              WATERMARK: '2026-07-18T08:00:00Z',
+              ROUND: '2',
+              AUTOFIX_BOT: 'qwen-code-dev-bot',
+              TAKEOVER_LABEL: 'autofix/takeover',
+              SKIP_LABEL: 'autofix/skip',
+              DISPATCH_STATUS_CONTEXT: 'qwen-autofix/dispatch-pending',
+              DRY_RUN: dryRun,
+              GITHUB_OUTPUT: out,
+              GITHUB_TOKEN: 'x',
+            },
+            encoding: 'utf8',
+          },
+        );
+        return {
+          passed: stdout.endsWith('PASSED'),
+          out: readFileSync(out, 'utf8'),
+          writes: readFileSync(join(dir, 'writes.log'), 'utf8'),
+        };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    const pr = (over = {}) => ({
+      state: 'OPEN',
+      author: { login: 'qwen-code-dev-bot' },
+      isCrossRepository: false,
+      baseRefName: 'main',
+      headRefName: 'ci/some-branch',
+      headRefOid: 'deadbeefcafe',
+      labels: [],
+      ...over,
+    });
+    // Same-repo discard → the marker is released on the live head.
+    const closed = runReleaseRecheck(pr({ state: 'CLOSED' }));
+    expect(closed.passed).toBe(false);
+    expect(closed.out).toContain('stale=true');
+    expect(closed.writes).toContain(
+      'API api repos/QwenLM/qwen-code/statuses/deadbeefcafe -X POST',
+    );
+    expect(closed.writes).toContain('state=success');
+    expect(closed.writes).toContain('context=qwen-autofix/dispatch-pending');
+    // A skip-label discard releases too (same-repo).
+    expect(
+      runReleaseRecheck(pr({ labels: [{ name: 'autofix/skip' }] })).writes,
+    ).toContain('statuses/deadbeefcafe');
+    // Fork discard → no release: fork heads were never stamped.
+    expect(
+      runReleaseRecheck(
+        pr({ isCrossRepository: true, author: { login: 'human' } }),
+      ).writes,
+    ).toBe('');
+    // Dry run → no release: no stamp was ever written.
+    expect(
+      runReleaseRecheck(pr({ state: 'CLOSED' }), { dryRun: 'true' }).writes,
+    ).toBe('');
+    // Missing head sha → nothing to stamp.
+    expect(
+      runReleaseRecheck(pr({ state: 'CLOSED', headRefOid: '' })).writes,
+    ).toBe('');
+    // Healthy target passes through WITHOUT a release here — the
+    // checkout-path release owns that stamp.
+    const ok = runReleaseRecheck(pr());
+    expect(ok.passed).toBe(true);
+    expect(ok.writes).toBe('');
+  });
+
   it('falls back to existing issue backlog only when review has no target', () => {
     expect(issueAutofixJob).toContain("needs: ['route', 'review-scan']");
     // Anchor the job `if` opening: a bare toContain('always()') is also
@@ -2122,7 +2238,7 @@ describe('qwen-autofix workflow', () => {
     );
     expect(issueAutofixJob).toContain("needs.review-scan.result == 'success'");
     expect(issueAutofixJob).toContain(
-      "github.event_name != 'schedule' || (needs.review-scan.result == 'success' && needs.review-scan.outputs.has_targets != 'true')",
+      "github.event_name != 'schedule' || (needs.review-scan.result == 'success' && needs.review-scan.outputs.has_targets != 'true' && needs.review-scan.outputs.enum_failed != 'true')",
     );
     expect(findCandidateIssuesStep).toContain('OPEN_AUTOFIX_PR_COUNT');
     expect(findCandidateIssuesStep).toContain('MAX_OPEN_AUTOFIX_PRS');
@@ -2281,7 +2397,7 @@ describe('qwen-autofix workflow', () => {
     // run-unique suffix appended as a continuation line would also become
     // part of the group value while a trailing-newline anchor stayed green.
     expect(issueAutofixJob).toContain(
-      "group: >-\n        ${{ needs.route.outputs.do_issue == 'true' && needs.route.outputs.dry_run != 'true' && (github.event_name != 'schedule' || (needs.review-scan.result == 'success' && needs.review-scan.outputs.has_targets != 'true')) && format('qwen-autofix-issue-{0}', needs.route.outputs.issue_number || github.event.issue.number || 'scheduled') || format('qwen-autofix-issue-run-{0}', github.run_id) }}\n      cancel-in-progress: false",
+      "group: >-\n        ${{ needs.route.outputs.do_issue == 'true' && needs.route.outputs.dry_run != 'true' && (github.event_name != 'schedule' || (needs.review-scan.result == 'success' && needs.review-scan.outputs.has_targets != 'true' && needs.review-scan.outputs.enum_failed != 'true')) && format('qwen-autofix-issue-{0}', needs.route.outputs.issue_number || github.event.issue.number || 'scheduled') || format('qwen-autofix-issue-run-{0}', github.run_id) }}\n      cancel-in-progress: false",
     );
     expect(issueAutofixJob).not.toContain('|| github.run_id }}');
     // The group identity and the scan step's FORCED_ISSUE env are
@@ -2997,7 +3113,7 @@ describe('qwen-autofix workflow', () => {
     )?.[1];
     expect(markersProgram).toBeTruthy();
     const roundProgram = reviewScanJob.match(
-      /ROUND="\$\(jq -r --arg key "\$\{REARM_KEY\}" '([\s\S]*?)' <<< "\$\{MARKERS\}"\)"/,
+      /ROUND="\$\(jq -r --arg key "\$\{REARM_KEY\}" --argjson start "\$\{ROUND_START\}" '([\s\S]*?)' <<< "\$\{MARKERS\}"\)"/,
     )?.[1];
     expect(roundProgram).toBeTruthy();
     const pageOne = JSON.stringify([
@@ -3032,7 +3148,7 @@ describe('qwen-autofix workflow', () => {
     expect(markers.split('\n')).toHaveLength(1);
     const round = execFileSync(
       'jq',
-      ['-r', '--arg', 'key', 'none', roundProgram],
+      ['-r', '--arg', 'key', 'none', '--argjson', 'start', '0', roundProgram],
       { encoding: 'utf8', input: markers },
     ).trim();
     expect(round).toBe('7'); // max round crosses the page boundary
@@ -3748,6 +3864,321 @@ describe('qwen-autofix workflow', () => {
     expect(reviewScanJob).toContain('still-red checks');
   });
 
+  it('fails closed on busy-enumeration failure, keeps explicit dispatches, and signals the issue phase', () => {
+    // Measured 2026-08-16 (#9296): a swallowed enumeration failure
+    // re-dispatched PRs with live legs. The fail-closed block must (a) empty
+    // the candidate set, (b) keep ONLY explicit workflow_dispatch dispatches
+    // (FORCED_PR is also set for trusted pull_request_review scans — those
+    // stay fail-closed), (c) emit enum_failed so the scheduled issue phase
+    // cannot flip ON over an emptied set (the scan exits 0, so has_targets
+    // alone would read exactly like "no PR needs work"), and (d) carry the
+    // underlying error tail — transient API instability and PAT decay need
+    // different oncall responses. Replay the block VERBATIM with a stubbed
+    // gh: the string pins alone would stay green on a flipped carve-out or a
+    // dropped enum_failed echo.
+    expect(reviewScanJob).toContain('BUSY_ENUM_OK=1');
+    expect(reviewScanJob).toContain(
+      "enum_failed: '${{ steps.scan.outputs.enum_failed }}'",
+    );
+    const enumBlock = reviewScanJob.match(
+      /BUSY_PRS=' '\n[\s\S]*?rm -f "\$\{BUSY_ENUM_ERR\}"/,
+    )?.[0];
+    expect(enumBlock).toBeTruthy();
+    // The carve-out is bounded to explicit dispatches (the cap-refused gate
+    // splits on EVENT_NAME the same way).
+    expect(enumBlock).toContain(
+      'if [[ -z "${FORCED_PR}" || "${EVENT_NAME}" != \'workflow_dispatch\' ]]; then',
+    );
+    // The warning and the fleet row carry the captured error tail.
+    expect(enumBlock).toContain(
+      'failing closed: no scan targets dispatched this pass${BUSY_ENUM_ERR_TAIL:+ — last error: ${BUSY_ENUM_ERR_TAIL}}',
+    );
+    const runEnum = ({
+      listAnswer = '',
+      listError = '',
+      viewAnswer = '',
+      viewError = '',
+      forcedPr = '',
+      eventName = 'schedule',
+    }) => {
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-enum-'));
+      try {
+        writeFileSync(
+          join(dir, 'gh'),
+          [
+            '#!/bin/bash',
+            '# Emulate the gh CLI contract: answer with the fixture payload,',
+            '# applying the --jq filter when one is passed (like real gh).',
+            "jq_filter=''",
+            'positional=()',
+            'while [[ $# -gt 0 ]]; do',
+            '  case "$1" in',
+            '    --jq) jq_filter="$2"; shift 2 ;;',
+            '    *) positional+=("$1"); shift ;;',
+            '  esac',
+            'done',
+            'set -- "${positional[@]}"',
+            'if [[ "$1" == "run" && "$2" == "list" ]]; then',
+            '  if [[ -n "${ENUM_LIST_ERROR}" ]]; then printf \'%s\' "${ENUM_LIST_ERROR}" >&2; exit 1; fi',
+            '  payload="${ENUM_LIST_ANSWER}"',
+            'elif [[ "$1" == "run" && "$2" == "view" ]]; then',
+            '  if [[ -n "${ENUM_VIEW_ERROR}" ]]; then printf \'%s\' "${ENUM_VIEW_ERROR}" >&2; exit 1; fi',
+            '  payload="${ENUM_VIEW_ANSWER}"',
+            'else',
+            '  exit 0',
+            'fi',
+            'if [[ -n "$jq_filter" ]]; then printf \'%s\' "$payload" | jq -r "$jq_filter"; else printf \'%s\' "$payload"; fi',
+          ].join('\n'),
+        );
+        chmodSync(join(dir, 'gh'), 0o755);
+        const outFile = join(dir, 'out.txt');
+        const fleetFile = join(dir, 'fleet.tsv');
+        writeFileSync(outFile, '');
+        writeFileSync(fleetFile, '');
+        const stdout = execFileSync(
+          'bash',
+          [
+            '-c',
+            [
+              'set -uo pipefail',
+              `FLEET_FILE='${fleetFile}'`,
+              'fleet_row() { printf \'%s\\t%s\\t%s\\n\' "$1" "$2" "$3" >> "${FLEET_FILE}"; }',
+              "CANDIDATES='101 102'",
+              enumBlock.replace(/\n {10}/g, '\n'),
+              'printf \'CANDIDATES=[%s]|BUSY=[%s]\' "${CANDIDATES}" "${BUSY_PRS}"',
+            ].join('\n'),
+          ],
+          {
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              FORCED_PR: forcedPr,
+              EVENT_NAME: eventName,
+              REPO: 'QwenLM/qwen-code',
+              GITHUB_OUTPUT: outFile,
+              ENUM_LIST_ANSWER: listAnswer,
+              ENUM_LIST_ERROR: listError,
+              ENUM_VIEW_ANSWER: viewAnswer,
+              ENUM_VIEW_ERROR: viewError,
+            },
+            encoding: 'utf8',
+          },
+        );
+        return {
+          candidates: stdout.match(/CANDIDATES=\[(.*)\]\|/)?.[1],
+          busy: stdout.match(/BUSY=\[(.*)\]/)?.[1],
+          out: readFileSync(outFile, 'utf8'),
+          fleet: readFileSync(fleetFile, 'utf8'),
+        };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    // A run-list failure empties the candidates on a scheduled scan and
+    // emits the issue-phase signal with the error tail attached.
+    const listFailed = runEnum({ listError: 'HTTP 502: bad gateway' });
+    expect(listFailed.candidates).toBe('');
+    expect(listFailed.out).toContain('enum_failed=true');
+    expect(listFailed.fleet).toContain('fail-closed');
+    expect(listFailed.fleet).toContain('HTTP 502: bad gateway');
+    // A jobs-view failure mid-enumeration fails closed the same way.
+    const viewFailed = runEnum({
+      listAnswer: JSON.stringify([{ databaseId: 101 }]),
+      viewError: 'HTTP 500',
+    });
+    expect(viewFailed.candidates).toBe('');
+    expect(viewFailed.out).toContain('enum_failed=true');
+    expect(viewFailed.fleet).toContain('HTTP 500');
+    // A healthy enumeration accumulates the busy set and keeps candidates.
+    const ok = runEnum({
+      listAnswer: JSON.stringify([{ databaseId: 101 }]),
+      viewAnswer: JSON.stringify({
+        jobs: [
+          { name: 'review-address (101, round 2)', status: 'in_progress' },
+        ],
+      }),
+    });
+    expect(ok.candidates).toBe('101 102');
+    expect(ok.busy).toBe(' 101 ');
+    expect(ok.out).not.toContain('enum_failed');
+    expect(ok.fleet).not.toContain('fail-closed');
+    // ONLY an explicit workflow_dispatch dispatch keeps its candidates
+    // through an enumeration failure...
+    const explicit = runEnum({
+      listError: 'x',
+      forcedPr: '77',
+      eventName: 'workflow_dispatch',
+    });
+    expect(explicit.candidates).toBe('101 102');
+    expect(explicit.out).toContain('enum_failed=true');
+    // ...a trusted pull_request_review scan ALSO carries FORCED_PR but is
+    // not an explicit dispatch and stays fail-closed.
+    const reviewEvent = runEnum({
+      listError: 'x',
+      forcedPr: '77',
+      eventName: 'pull_request_review',
+    });
+    expect(reviewEvent.candidates).toBe('');
+  });
+
+  it('pins the dispatch-pending marker lifecycle across its check, stamp, and release sites', () => {
+    // The marker closes the dispatch→leg visibility window (#9296). Its
+    // reader and writers live in three different steps; a context mismatch
+    // between them leaves the marker permanently unread, and a flipped TTL
+    // comparison re-opens the duplicate window — pin both behaviorally, and
+    // pin the HAS_PENDING_CHECKS exemption that keeps a stranded marker from
+    // blocking past its TTL.
+    expect(workflow).toContain(
+      "DISPATCH_STATUS_CONTEXT: 'qwen-autofix/dispatch-pending'",
+    );
+    expect(workflow).toContain("DISPATCH_STATUS_TTL_MINUTES: '30'");
+    expect(reviewScanJob).toContain(
+      'DISPATCH_CUTOFF="$(date -u -d "${DISPATCH_STATUS_TTL_MINUTES} minutes ago"',
+    );
+    // The freshness predicate's comparison direction: flipped, fresh markers
+    // would pass and stale markers block.
+    expect(reviewScanJob).toContain('select((.startedAt // "") > $cut)');
+    // Behavioral replay of the scan-side skip predicate over fixture
+    // rollups.
+    const markerCheck = reviewScanJob.match(
+      /if jq -e --arg ctx "\$\{DISPATCH_STATUS_CONTEXT\}" --arg cut "\$\{DISPATCH_CUTOFF\}" '[\s\S]*?' <<< "\$\{PR_META\}" > \/dev\/null; then/,
+    )?.[0];
+    expect(markerCheck).toBeTruthy();
+    const runMarkerCheck = (rollup) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `${markerCheck.replace(/\n {12}/g, '\n')} printf skip; else printf pass; fi`,
+        ],
+        {
+          env: {
+            ...process.env,
+            DISPATCH_STATUS_CONTEXT: 'qwen-autofix/dispatch-pending',
+            DISPATCH_CUTOFF: '2026-08-17T06:00:00Z',
+            PR_META: JSON.stringify({ statusCheckRollup: rollup }),
+          },
+          encoding: 'utf8',
+        },
+      );
+    const marker = (
+      state,
+      startedAt,
+      context = 'qwen-autofix/dispatch-pending',
+    ) => ({
+      __typename: 'StatusContext',
+      context,
+      state,
+      startedAt,
+    });
+    // Fresh PENDING marker → busy.
+    expect(runMarkerCheck([marker('PENDING', '2026-08-17T06:30:00Z')])).toBe(
+      'skip',
+    );
+    // Stale PENDING marker (past the TTL) → dispatchable again.
+    expect(runMarkerCheck([marker('PENDING', '2026-08-17T05:00:00Z')])).toBe(
+      'pass',
+    );
+    // The leg materialized (SUCCESS re-stamp) → dispatchable.
+    expect(runMarkerCheck([marker('SUCCESS', '2026-08-17T06:30:00Z')])).toBe(
+      'pass',
+    );
+    // A foreign status context → dispatchable (the marker is keyed exactly).
+    expect(
+      runMarkerCheck([marker('PENDING', '2026-08-17T06:30:00Z', 'other-ci')]),
+    ).toBe('pass');
+    // No rollup entries → dispatchable.
+    expect(runMarkerCheck([])).toBe('pass');
+
+    // A stranded marker must NOT keep blocking through the 330-minute
+    // HAS_PENDING_CHECKS gate after its TTL expired: replay the gate's jq
+    // over fixture rollups.
+    const pendingGate = reviewScanJob.match(
+      /HAS_PENDING_CHECKS="\$\(jq -r --arg cut "\$\{PENDING_CUTOFF\}" \\[\s\S]*?' <<< "\$\{CHECKS_JSON\}"\)"/,
+    )?.[0];
+    expect(pendingGate).toBeTruthy();
+    expect(pendingGate).toContain('--arg ctx "${DISPATCH_STATUS_CONTEXT}"');
+    expect(pendingGate).toContain('select((.context // "") != $ctx)');
+    const runPendingGate = (checks) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `${pendingGate.replace(/\n {12}/g, '\n')}\nprintf '%s' "$HAS_PENDING_CHECKS"`,
+        ],
+        {
+          env: {
+            ...process.env,
+            PENDING_CUTOFF: '2026-08-17T02:30:00Z',
+            NON_BLOCKING_CHECKS: '["review-pr"]',
+            DISPATCH_STATUS_CONTEXT: 'qwen-autofix/dispatch-pending',
+            CHECKS_JSON: JSON.stringify(checks),
+          },
+          encoding: 'utf8',
+        },
+      );
+    const checkRun = (name, status, startedAt) => ({
+      name,
+      workflowName: 'CI',
+      status,
+      startedAt,
+    });
+    // A stranded marker ALONE blocks nobody...
+    expect(runPendingGate([marker('PENDING', '2026-08-17T07:00:00Z')])).toBe(
+      'false',
+    );
+    // ...a genuine in-flight check still blocks...
+    expect(
+      runPendingGate([
+        checkRun('build', 'IN_PROGRESS', '2026-08-17T07:50:00Z'),
+      ]),
+    ).toBe('true');
+    // ...including alongside the marker...
+    expect(
+      runPendingGate([
+        marker('PENDING', '2026-08-17T07:00:00Z'),
+        checkRun('build', 'IN_PROGRESS', '2026-08-17T07:50:00Z'),
+      ]),
+    ).toBe('true');
+    // ...a check stuck past the 330-minute horizon is aged out...
+    expect(
+      runPendingGate([
+        checkRun('build', 'IN_PROGRESS', '2026-08-17T01:00:00Z'),
+      ]),
+    ).toBe('false');
+    // ...and a foreign PENDING status context still blocks (the exemption is
+    // exactly the marker's own context).
+    expect(
+      runPendingGate([marker('PENDING', '2026-08-17T07:50:00Z', 'other-ci')]),
+    ).toBe('true');
+
+    // Writer/reader identity: all three status writes and both readers bind
+    // the SAME context variable — a mismatch on any site leaves the marker
+    // permanently unread (the fork-bridge tests pin their cross-site signal
+    // the same way).
+    const stampSites =
+      workflow.match(
+        /gh api "repos\/\$\{REPO\}\/statuses\/[^"]+" -X POST \\\n\s*-f state="\w+" -f context="\$\{DISPATCH_STATUS_CONTEXT\}"/g,
+      ) ?? [];
+    expect(stampSites).toHaveLength(3);
+    expect(
+      (reviewScanJob.match(/--arg ctx "\$\{DISPATCH_STATUS_CONTEXT\}"/g) ?? [])
+        .length,
+    ).toBe(2);
+    // Every write site is guarded same-repo and dry-run: fork head shas are
+    // absent from this repo's object store, and a dry run must leave no
+    // real, PR-visible status behind.
+    expect(reviewScanJob).toContain(
+      'if [[ "${DRY_RUN}" != "true" && "${HEAD_REPO_FULL}" == "${REPO}" ]]; then',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'if [[ "${DRY_RUN}" != "true" && "${HEAD_REPO:-${REPO}}" == "${REPO}" ]]; then',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      "DRY_RUN: '${{ needs.route.outputs.dry_run }}'",
+    );
+  });
+
   it('behaviorally replays the takeover-command toggle across all four paths', () => {
     // Extract the toggle VERBATIM (drift fails the test) and replay it with
     // a PATH-stubbed gh that records writes: add+absent applies the label,
@@ -3770,6 +4201,9 @@ describe('qwen-autofix workflow', () => {
       author = 'fork-owner',
       postFails = '',
       deleteFails = '',
+      cmdFrom = '',
+      commentFails = '',
+      commentFailTimes = '',
     }) => {
       const dir = mkdtempSync(join(tmpdir(), 'autofix-toggle-'));
       try {
@@ -3795,7 +4229,7 @@ describe('qwen-autofix workflow', () => {
             // universally exiting 0.
             `elif [[ "$1" == "label" && "$2" == "create" ]]; then echo "LABEL-CREATE $*" >> '${join(dir, 'writes.log')}';`,
             `elif [[ "$1" == "api" ]]; then echo "API $*" >> '${join(dir, 'writes.log')}'; if [[ "$2" == "-X" && "$3" == "POST" && -n "\${TOGGLE_POST_FAILS:-}" ]]; then printf '%s' "\${TOGGLE_POST_FAILS}" >&2; exit 1; fi; if [[ "$2" == "-X" && "$3" == "DELETE" && -n "\${TOGGLE_DELETE_FAILS:-}" ]]; then printf '%s' "\${TOGGLE_DELETE_FAILS}" >&2; exit 1; fi; if [[ "$2" == "-X" && "$3" == "DELETE" ]]; then printf '%s' '[{"name":"Tracks HTTP 5xx flakes"}]'; fi`,
-            `elif [[ "$1" == "pr" && "$2" == "comment" ]]; then echo "COMMENT $*" >> '${join(dir, 'writes.log')}';`,
+            `elif [[ "$1" == "pr" && "$2" == "comment" ]]; then echo "COMMENT-ATTEMPT" >> '${join(dir, 'writes.log')}'; if [[ -n "\${TOGGLE_COMMENT_FAILS:-}" ]]; then CF=0; if [[ -f '${join(dir, 'comment-fails')}' ]]; then CF="$(< '${join(dir, 'comment-fails')}')"; fi; if (( CF < \${TOGGLE_COMMENT_FAIL_TIMES:-1} )); then printf '%s' "$(( CF + 1 ))" > '${join(dir, 'comment-fails')}'; printf '%s' "\${TOGGLE_COMMENT_FAILS}" >&2; exit 1; fi; fi; echo "COMMENT $*" >> '${join(dir, 'writes.log')}';`,
             'fi',
           ].join('\n'),
         );
@@ -3811,7 +4245,7 @@ describe('qwen-autofix workflow', () => {
             '-eo',
             'pipefail',
             '-c',
-            `${toggle.replace(/\n {10}/g, '\n')}\nprintf 'DONE'`,
+            `sleep() { :; }\n${toggle.replace(/\n {10}/g, '\n')}\nprintf 'DONE'`,
           ],
           {
             env: {
@@ -3828,6 +4262,10 @@ describe('qwen-autofix workflow', () => {
               GITHUB_TOKEN: 'x',
               TOGGLE_POST_FAILS: postFails,
               TOGGLE_DELETE_FAILS: deleteFails,
+              TOGGLE_COMMENT_FAILS: commentFails,
+              TOGGLE_COMMENT_FAIL_TIMES: commentFailTimes,
+              CMD_FROM: cmdFrom,
+              CRITICAL_ONLY_AFTER_ROUND: '5',
             },
             encoding: 'utf8',
           },
@@ -3844,6 +4282,7 @@ describe('qwen-autofix workflow', () => {
         error.writes = existsSync(join(dir, 'writes.log'))
           ? readFileSync(join(dir, 'writes.log'), 'utf8')
           : '';
+        error.log = error.stdout ?? '';
         throw error;
       } finally {
         rmSync(dir, { recursive: true, force: true });
@@ -3891,6 +4330,58 @@ describe('qwen-autofix workflow', () => {
     );
     expect(rearm.writes.match(/^API /gm) ?? []).toHaveLength(1);
     expect(rearm.log).toContain('re-armed');
+    // The seed marker's WRITE side: a valid 'from N' appends the marker on
+    // its own line after the untouched engage literal on BOTH ack paths, so
+    // the seed reads see exactly what the parser captured.
+    const seededEngage = runToggle({ cmd: 'add', cmdFrom: '3' });
+    expect(seededEngage.writes).toContain(
+      '<!-- takeover-ack engaged -->\n<!-- autofix-round-start 3 -->',
+    );
+    // Engage wording stays before-takeover (there it is true), and the
+    // remainder arithmetic reads the harness's CRITICAL_ONLY_AFTER_ROUND=5.
+    expect(seededEngage.writes).toContain(
+      'the rounds this PR spent in review before takeover',
+    );
+    expect(seededEngage.writes).toContain(
+      'engages after 2 more change-producing round(s) instead of a full fresh 5',
+    );
+    // A seeded RE-ARM must not contradict itself: the earlier rounds DO
+    // count toward the cap (they are the seed), so the unseeded "previous
+    // rounds no longer count" clause cannot ship next to the seed note, and
+    // the note names rounds already spent on the PR, not pre-takeover
+    // review (from 60 leaves zero remainder before the brake).
+    const seededRearm = runToggle({
+      cmd: 'add',
+      labels: ['autofix/takeover'],
+      cmdFrom: '60',
+    });
+    expect(seededRearm.writes).toContain(
+      '<!-- takeover-ack engaged -->\n<!-- autofix-round-start 60 -->',
+    );
+    expect(seededRearm.writes).toContain(
+      'earlier rounds count toward the cap only via this seed',
+    );
+    expect(seededRearm.writes).not.toContain(
+      'previous rounds no longer count toward the cap',
+    );
+    expect(seededRearm.writes).toContain('rounds already spent on this PR');
+    expect(seededRearm.writes).not.toContain(
+      'the rounds this PR spent in review before takeover',
+    );
+    expect(seededRearm.writes).toContain(
+      'engages after 0 more change-producing round(s) instead of a full fresh 5',
+    );
+    // The unseeded re-arm keeps the original fresh-window clause…
+    expect(rearm.writes).toContain(
+      'previous rounds no longer count toward the cap',
+    );
+    // …and no path emits a marker for the guard values: the explicit
+    // no-seed spelling '0', empty, or a non-number.
+    for (const from of ['', '0', 'abc']) {
+      expect(runToggle({ cmd: 'add', cmdFrom: from }).writes).not.toContain(
+        'autofix-round-start',
+      );
+    }
     // remove + present → label removed, through the URI-encoded path segment
     // (real jq runs in the substitution, so the %2F is the executed truth).
     const removePresent = runToggle({
@@ -4018,6 +4509,73 @@ describe('qwen-autofix workflow', () => {
     }
     expect(engageFailure).toBeTruthy();
     expect(engageFailure.writes).not.toContain('takeover-ack engaged');
+    // A TRANSIENT engage-ack failure retries once before the heal-path
+    // warning: the seed marker's only copy lives in the failed body, and
+    // the heal ack has no slot to recover it — the retry is the only thing
+    // that keeps a 'from N' seed alive across a 5xx.
+    const transientAckFailure = runToggle({
+      cmd: 'add',
+      cmdFrom: '12',
+      commentFails: 'HTTP 502',
+    });
+    expect(transientAckFailure.done).toBe(true);
+    expect(
+      transientAckFailure.writes.match(/^COMMENT-ATTEMPT$/gm) ?? [],
+    ).toHaveLength(2);
+    expect(transientAckFailure.writes).toContain(
+      '<!-- takeover-ack engaged -->\n<!-- autofix-round-start 12 -->',
+    );
+    expect(transientAckFailure.log).not.toContain('::warning::');
+    // A TRANSIENT re-arm ack failure gets the same one-retry shape — the
+    // seed marker's only copy rides in the re-arm body too, and nothing
+    // heals a missing re-arm (the scan heals only engage-less PRs, and the
+    // pre-existing engage ack suppresses the dedup), so a single 5xx must
+    // not drop the window reset AND the seed. The fallback stays loud
+    // (there is no heal path to warn-and-lean on): a double failure aborts
+    // before the 're-armed' claim and the stale-escalation cleanup.
+    const transientRearmFailure = runToggle({
+      cmd: 'add',
+      labels: ['autofix/takeover'],
+      cmdFrom: '7',
+      commentFails: 'HTTP 502',
+    });
+    expect(transientRearmFailure.done).toBe(true);
+    expect(
+      transientRearmFailure.writes.match(/^COMMENT-ATTEMPT$/gm) ?? [],
+    ).toHaveLength(2);
+    expect(transientRearmFailure.writes).toContain(
+      '<!-- takeover-ack engaged -->\n<!-- autofix-round-start 7 -->',
+    );
+    expect(transientRearmFailure.log).toContain('re-armed');
+    expect(transientRearmFailure.log).not.toContain('::error::');
+    // …but a DOUBLE re-arm ack failure must abort instead: nothing heals a
+    // missing re-arm (the scan heals only engage-less PRs, and the
+    // pre-existing engage ack suppresses the dedup), so the 're-armed'
+    // claim and the stale-escalation cleanup must never follow a window
+    // reset that never landed. The stub's fail-once guard above can never
+    // reach this arm — TOGGLE_COMMENT_FAIL_TIMES=2 makes both POSTs fail.
+    let rearmDoubleFailure;
+    try {
+      runToggle({
+        cmd: 'add',
+        labels: ['autofix/takeover'],
+        cmdFrom: '7',
+        commentFails: 'HTTP 502',
+        commentFailTimes: 2,
+      });
+    } catch (error) {
+      rearmDoubleFailure = error;
+    }
+    expect(rearmDoubleFailure).toBeTruthy();
+    expect(
+      rearmDoubleFailure.writes.match(/^COMMENT-ATTEMPT$/gm) ?? [],
+    ).toHaveLength(2);
+    expect(rearmDoubleFailure.writes).not.toContain('takeover-ack engaged');
+    expect(rearmDoubleFailure.writes).not.toContain(
+      'labels/autofix%2Fneeds-human',
+    );
+    expect(rearmDoubleFailure.log).toContain('::error::');
+    expect(rearmDoubleFailure.log).not.toContain('re-armed');
     // The release DELETE tolerates the 404 race (a concurrent removal
     // already reached the end state): the release ack still posts, no
     // warning.
@@ -4199,6 +4757,136 @@ describe('qwen-autofix workflow', () => {
     // present, and the prepare-side live counting is keyed identically.
     expect(workflow).toContain('re-armed ${TAKEOVER_LABEL} window');
     expect(prepareBranchAndFeedbackStep).toContain('LIVE_REARM_KEY');
+  });
+
+  it('behaviorally seeds the round counter from the window anchor and only from it', () => {
+    // '@qwen-code /takeover from N' rides as its OWN marker on the engage
+    // ack, never as a field inside '<!-- takeover-ack engaged -->' — that
+    // literal is matched with jq contains(), closing '-->' included, at four
+    // sites here and three in qwen-fleet-shepherd.yml, and a field would
+    // silently break all seven. Replay the scan's real trio to prove the
+    // marker survives alongside the untouched ack, and that the seed is
+    // scoped exactly like the window key it is read from.
+    const trio = reviewScanJob.match(
+      /(MARKERS="\$\(jq -c[\s\S]*?ROUND="\$\(jq -r --arg key "\$\{REARM_KEY\}"[^\n]*)/,
+    )?.[1];
+    expect(trio).toBeTruthy();
+    const BOT = 'qwen-code-dev-bot';
+    const roundOf = (comments) => {
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-seed-'));
+      try {
+        writeFileSync(join(dir, 'ic.json'), JSON.stringify(comments));
+        return execFileSync(
+          'bash',
+          [
+            '-c',
+            `set -uo pipefail\nWORKDIR='${dir}'\n${trio.replace(/\n {12}/g, '\n')}\nprintf '\\n%s' "$ROUND"`,
+          ],
+          {
+            // EFF_MAX_ROUNDS is SET so both clamp branches execute in the
+            // fixtures below; PR is the clamp echo's only other expansion
+            // under set -u.
+            env: {
+              ...process.env,
+              AUTOFIX_BOT: BOT,
+              EFF_MAX_ROUNDS: '10',
+              PR: '1',
+            },
+            encoding: 'utf8',
+          },
+        )
+          .split('\n')
+          .at(-1);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    const ack = (at, seed) => ({
+      user: { login: BOT },
+      created_at: at,
+      body: `🤝 …\n<!-- takeover-ack engaged -->${seed === undefined ? '' : `\n<!-- autofix-round-start ${seed} -->`}`,
+    });
+    const evalMarker = (at, round, win) => ({
+      user: { login: BOT },
+      created_at: at,
+      body: `<!-- autofix-eval ts=${at} acted=true round=${round} win=${win} -->`,
+    });
+    const K1 = '2026-08-03T00:00:00Z';
+    const K0 = '2026-08-01T00:00:00Z';
+    // The whole point: a PR taken over at round 3 starts there, so with
+    // CRITICAL_ONLY_AFTER_ROUND=5 the brake is two managed rounds away
+    // instead of five.
+    expect(roundOf([ack(K1, 3)])).toBe('3');
+    // Last marker wins: a hand-written marker prepended by an edit loses to
+    // the workflow's own final-line marker (GitHub edits preserve user.login
+    // and created_at, so the edited ack still passes both filter halves).
+    expect(
+      roundOf([
+        {
+          user: { login: BOT },
+          created_at: K1,
+          body: 'edited <!-- autofix-round-start 99 -->\n<!-- takeover-ack engaged -->\n<!-- autofix-round-start 3 -->',
+        },
+      ]),
+    ).toBe('3');
+    // Real markers outrank the seed as soon as one exists — the seed is a
+    // FLOOR for an empty window, not an offset added to every round.
+    expect(
+      roundOf([ack(K1, 3), evalMarker('2026-08-04T00:00:00Z', 4, K1)]),
+    ).toBe('4');
+    // Window scoping, in both directions. A superseded window's seed cannot
+    // leak forward…
+    expect(roundOf([ack(K0, 7), ack(K1, 3)])).toBe('3');
+    // …and a bare re-arm (no marker) drops the seed to 0, which is what
+    // per-window scoping MEANS: re-arming a late-stage PR reopens the
+    // suggestion valve unless the number is supplied again.
+    expect(roundOf([ack(K0, 7), ack(K1)])).toBe('0');
+    // Unseeded acks behave exactly as before this feature existed.
+    expect(roundOf([ack(K1)])).toBe('0');
+    expect(roundOf([])).toBe('0');
+    // Trust boundary: the seed is read from the bot-authored comment whose
+    // created_at IS the window key. Both halves of that predicate carry
+    // weight, so both are exercised against a payload that would otherwise
+    // park the PR at its round cap. The stranger here posts AT the window
+    // key — GitHub stamps created_at to the second, so a comment landing in
+    // the same second as the engage ack is a real collision and the author
+    // filter is the only thing that rejects it. (Dating the impostor
+    // anywhere else tests the key check twice and the author check not at
+    // all: with the author filter deleted such a case still passes.)
+    expect(
+      roundOf([
+        ack(K1),
+        {
+          user: { login: 'mallory' },
+          created_at: K1,
+          body: 'lgtm <!-- autofix-round-start 99 -->',
+        },
+      ]),
+    ).toBe('0');
+    expect(
+      roundOf([
+        ack(K1),
+        {
+          user: { login: BOT },
+          created_at: '2026-08-05T00:00:00Z',
+          body: 'report <!-- autofix-round-start 99 -->',
+        },
+      ]),
+    ).toBe('0');
+    // Shape gate: the marker reader takes 1-2 digits, so a longer number is
+    // not silently truncated to its first two digits.
+    expect(roundOf([ack(K1, 100)])).toBe('0');
+    // Read-site clamp (cap 10 from the harness env): a seed at or past the
+    // cap lands strictly below it…
+    expect(roundOf([ack(K1, 15)])).toBe('9');
+    // …and a seed just under the cap passes through unclamped. Same value
+    // out, different path — together they pin both clamp branches against
+    // deletion and against a -ge→-le flip (which would clamp every seeded
+    // window to cap−1).
+    expect(roundOf([ack(K1, 9)])).toBe('9');
+    // The ack literal the other seven read sites match must survive verbatim
+    // next to the seed marker.
+    expect(ack(K1, 3).body).toContain('<!-- takeover-ack engaged -->');
   });
 
   it('behaviorally validates forced targets against author, takeover, and skip', () => {
@@ -5124,7 +5812,7 @@ exit 1
           'bash',
           [
             '-c',
-            `${sanitize.replace(/\n {10}/g, '\n')}\nEVENT_NAME=issue_comment\nTAKEOVER_CMD=''\nCMD_PR=''\n${cmdBranch.replace(/\n {14}/g, '\n')}\nprintf '%s|%s' "$TAKEOVER_CMD" "$CMD_PR"`,
+            `${sanitize.replace(/\n {10}/g, '\n')}\nEVENT_NAME=issue_comment\nTAKEOVER_CMD=''\nTAKEOVER_FROM=''\nCMD_PR=''\n${cmdBranch.replace(/\n {14}/g, '\n')}\nprintf '%s|%s' "$TAKEOVER_CMD" "$CMD_PR"`,
           ],
           {
             env: {
@@ -5231,6 +5919,119 @@ exit 1
         headRepo: 'human-a/qwen-code',
       }),
     ).toBe('add|7165');
+  });
+
+  it('behaviorally parses the takeover round seed and keeps every other body closed', () => {
+    // '@qwen-code /takeover from N' is the ONE parameterized command form, so
+    // it is also the one place a value is read out of a comment body. Replay
+    // the issue_comment branch VERBATIM (drift fails) and pin both halves:
+    // the literal prefix must still match TAKEOVER_COMMAND byte-for-byte, and
+    // the tail must be a bounded integer. Everything else — a prefixed body, a
+    // 'stop from N' hybrid, double spaces, a 3-digit number, a shell/command
+    // substitution payload — must fail CLOSED to "not an exact command", which
+    // is the property the constants-only discipline bought in the first place.
+    const sanitize = routeStep.match(
+      /(sanitize_number\(\) \{[\s\S]*?\n {10}\})/,
+    )?.[1];
+    const cmdBranch = routeStep.match(
+      /(if \[\[ "\$\{EVENT_NAME\}" == 'issue_comment' \]\]; then[\s\S]*?\n {14}fi)/,
+    )?.[1];
+    expect(sanitize).toBeTruthy();
+    expect(cmdBranch).toBeTruthy();
+    const seedOf = (body) => {
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-from-'));
+      try {
+        writeFileSync(
+          join(dir, 'gh'),
+          `#!/bin/bash\nif [[ "$*" == *"/pulls/"* ]]; then printf '%s' 'QwenLM/qwen-code'; else printf '%s' 'write'; fi\n`,
+        );
+        chmodSync(join(dir, 'gh'), 0o755);
+        // TAKEOVER_FROM is echoed through sanitize_number exactly as the
+        // route step's own output line does, so a value that survives the
+        // parser but not the re-validation shows up here as empty.
+        const out = execFileSync(
+          'bash',
+          [
+            '-c',
+            `${sanitize.replace(/\n {10}/g, '\n')}\nEVENT_NAME=issue_comment\nTAKEOVER_CMD=''\nTAKEOVER_FROM=''\nCMD_PR=''\n${cmdBranch.replace(/\n {14}/g, '\n')}\nprintf '%s|%s' "$TAKEOVER_CMD" "$(sanitize_number "$TAKEOVER_FROM")"`,
+          ],
+          {
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              COMMENT_BODY: body,
+              SENDER_LOGIN: 'maintainer-b',
+              COMMENT_PR_AUTHOR: 'human-a',
+              HAS_PR_URL: 'url',
+              ISSUE_STATE: 'open',
+              ISSUE_NUMBER: '7165',
+              AUTOFIX_BOT: 'qwen-code-dev-bot',
+              TAKEOVER_COMMAND: '@qwen-code /takeover',
+              TAKEOVER_LABEL: 'autofix/takeover',
+              REPO: 'QwenLM/qwen-code',
+              GITHUB_TOKEN: 'x',
+            },
+            encoding: 'utf8',
+          },
+        ).split('\n');
+        return out.at(-1);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    // Seeded engagement, including surrounding whitespace (the body is
+    // trimmed before matching) and the two-digit upper end.
+    expect(seedOf('@qwen-code /takeover from 3')).toBe('add|3');
+    expect(seedOf('  @qwen-code /takeover from 12  ')).toBe('add|12');
+    expect(seedOf('@qwen-code /takeover from 99')).toBe('add|99');
+    // 'from 0' is the explicit no-seed spelling: it must engage exactly like
+    // the bare command rather than being rejected, so a maintainer who types
+    // it gets management, not silence.
+    expect(seedOf('@qwen-code /takeover from 0')).toBe('add|0');
+    // Zero-padded spellings canonicalize to decimal at capture: the seed
+    // reaches bare-context bash arithmetic downstream, where a leading zero
+    // means octal — '08'/'09' error outright and silently drop the seed
+    // note — and '00' lands on the explicit no-seed spelling '0'.
+    expect(seedOf('@qwen-code /takeover from 08')).toBe('add|8');
+    expect(seedOf('@qwen-code /takeover from 01')).toBe('add|1');
+    expect(seedOf('@qwen-code /takeover from 00')).toBe('add|0');
+    // The unparameterized forms are untouched.
+    expect(seedOf('@qwen-code /takeover')).toBe('add|');
+    expect(seedOf('@qwen-code /takeover stop')).toBe('remove|');
+    // Fail-closed set. 'stop from 3' is the interesting one: it must NOT
+    // release (the exact-'stop' match misses) and must NOT engage (the
+    // prefix is not TAKEOVER_COMMAND) — an ambiguous body does nothing.
+    for (const body of [
+      '@qwen-code /takeover stop from 3',
+      '@qwen-code /takeover from 100',
+      '@qwen-code /takeover from 3x',
+      '@qwen-code /takeover from -1',
+      '@qwen-code /takeover from',
+      '@qwen-code /takeover  from 3',
+      '@qwen-code /takeoverfrom 3',
+      'please @qwen-code /takeover from 3',
+      '@qwen-code /takeover from 3 please',
+      '@qwen-code /takeover from 3; rm -rf /',
+      '@qwen-code /takeover from $(id)',
+      '@qwen-code /takeover from `id`',
+    ]) {
+      expect(seedOf(body)).toBe('|');
+    }
+    // The captured value crosses a GITHUB_OUTPUT write and two
+    // job-boundary wires no behavioral harness exercises — every replay
+    // injects CMD_FROM directly, starting inside a single job — so pin
+    // them verbatim like the suite's other wires: a deleted or typo'd
+    // link would silently degrade 'from N' to a bare '/takeover' with the
+    // whole suite still green.
+    expect(workflow).toContain(
+      'echo "takeover_from=$(sanitize_number "${TAKEOVER_FROM}")" >> "${GITHUB_OUTPUT}"',
+    );
+    expect(workflow).toContain(
+      "takeover_from: '${{ steps.decide.outputs.takeover_from }}'",
+    );
+    expect(workflow).toContain(
+      "CMD_FROM: '${{ needs.route.outputs.takeover_from }}'",
+    );
   });
 
   it('gates real-time review triggers on bot author, trusted sender, and in-repo PR', () => {
@@ -7378,6 +8179,12 @@ exit 1
     const skill = readAutofixSkill();
     expect(skill).toContain('this PR is not converging');
     expect(skill).toContain('Diff-growth trajectory');
+    // The brake's handoff must land in failure.md — the one stop file the
+    // run-agent verdict gate accepts. Telling the agent to write handoff.md
+    // instead reproduces run 32076785809: a correct defer-to-human reported
+    // as "finished without required output file(s)".
+    expect(skill).toContain('write the handoff into `<workdir>/failure.md`');
+    expect(skill).toContain('Do not write `handoff.md` yourself');
   });
 
   it('anchors a per-window growth baseline and splits src/test nets against a real repo', () => {
@@ -7671,12 +8478,12 @@ exit 1
       /(GROWTH_CLAUSE_EN="the PR's diff grew[\s\S]*?CAUSE_ZH="\$\{ROUNDS_CLAUSE_ZH\}"\n\s+fi)/,
     )?.[1];
     expect(causeBlock).toBeTruthy();
-    const causeFor = (rounds, growth, growthSrc, growthTest) =>
+    const causeFor = (rounds, growth, growthSrc, growthTest, seed = '') =>
       execFileSync(
         'bash',
         [
           '-c',
-          `CRITICAL_ONLY_ROUNDS=${rounds}\nCRITICAL_ONLY_GROWTH=${growth}\nGROWTH_SRC=${growthSrc}\nGROWTH_TEST=${growthTest}\nGROWTH_BUDGET_SRC_LINES=400\nGROWTH_BUDGET_TEST_LINES=400\nCRITICAL_ONLY_AFTER_ROUND=5\n${causeBlock}\nprintf '%s\\n%s' "$CAUSE_EN" "$CAUSE_ZH"`,
+          `CRITICAL_ONLY_ROUNDS=${rounds}\nCRITICAL_ONLY_GROWTH=${growth}\nGROWTH_SRC=${growthSrc}\nGROWTH_TEST=${growthTest}\nGROWTH_BUDGET_SRC_LINES=400\nGROWTH_BUDGET_TEST_LINES=400\nCRITICAL_ONLY_AFTER_ROUND=5\nTAKEOVER_COMMAND='@qwen-code /takeover'\n${seed}\n${causeBlock}\nprintf '%s\\n%s' "$CAUSE_EN" "$CAUSE_ZH"`,
         ],
         { encoding: 'utf8' },
       ).split('\n');
@@ -7694,6 +8501,55 @@ exit 1
     expect(both[0]).toContain('rounds are complete and');
     expect(both[0]).toContain('src 900 / test 20');
     expect(both[1]).toContain('轮次，且');
+    // A SEEDED window must not claim five completed rounds: this PR reached
+    // the threshold from `@qwen-code /takeover from 3` plus two managed
+    // rounds, and the audit record has to say so or a maintainer reading
+    // "5 change-producing rounds are complete" on a twice-run PR cannot tell
+    // the brake from a misfire. An UNSET seed (every ordinary PR, and the
+    // roundsOnly case above) must keep the plain wording — `!= '0'` without
+    // the :-0 default renders the seeded text for everyone.
+    const seeded = causeFor(
+      'true',
+      'false',
+      0,
+      0,
+      'LIVE_ROUND_START=3\nROUND=5',
+    );
+    expect(seeded[0]).toContain('seeded at round 3');
+    expect(seeded[0]).toContain('@qwen-code /takeover from 3');
+    expect(seeded[0]).toContain('plus 2 change-producing round(s) since');
+    expect(seeded[0]).not.toBe('5 change-producing rounds are complete');
+    expect(seeded[1]).toContain('从第 3 轮起算');
+    expect(seeded[1]).toContain('又完成 2 个产生改动的轮次');
+    // A seed that hit the read-site clamp must still cite the number as
+    // TYPED: quoting the post-clamp value renders a command nobody sent
+    // while the engage ack above still shows the original (from 12,
+    // clamped to 9 under cap 10 — the label-removal path the clamp's own
+    // comment names).
+    const clampedSeed = causeFor(
+      'true',
+      'false',
+      0,
+      0,
+      'LIVE_ROUND_START_RAW=12\nLIVE_ROUND_START=9\nROUND=14\nMAX_ROUNDS=10',
+    );
+    expect(clampedSeed[0]).toContain('seeded at round 12');
+    expect(clampedSeed[0]).toContain('@qwen-code /takeover from 12');
+    expect(clampedSeed[0]).toContain('clamped to 9 under the effective cap 10');
+    expect(clampedSeed[0]).toContain('plus 5 change-producing round(s) since');
+    expect(clampedSeed[0]).not.toContain('from 9');
+    expect(clampedSeed[1]).toContain('从第 12 轮起算');
+    expect(clampedSeed[1]).toContain('收敛为 9');
+    // The seed crosses two more job-boundary wires no behavioral harness
+    // exercises — the cause replay above injects LIVE_ROUND_START and the
+    // digest replay injects ROUND_START, both starting inside a single job
+    // — so pin them verbatim like the suite's other wires.
+    expect(workflow).toContain(
+      'echo "round_start=${LIVE_ROUND_START}" >> "${GITHUB_OUTPUT}"',
+    );
+    expect(workflow).toContain(
+      "ROUND_START: '${{ steps.prepare.outputs.round_start }}'",
+    );
 
     // The batch-budget sentence must describe the policy actually in force:
     // the OVER_BUDGET census only builds spans in round-brake territory, so
@@ -9987,6 +10843,7 @@ exit 1
         outcome = 'fixed',
         maxRounds = '100',
         commentExit = 0,
+        roundStart = '',
       } = {},
     ) => {
       const dir = mkdtempSync(join(tmpdir(), 'milestone-'));
@@ -10021,6 +10878,7 @@ exit 1
               PR: '1',
               TAKEOVER_LABEL: 'autofix/takeover',
               TAKEOVER_COMMAND: '@qwen-code /takeover',
+              ROUND_START: roundStart,
             },
             encoding: 'utf8',
           },
@@ -10108,6 +10966,29 @@ exit 1
       { nextRound: 11 },
     );
     expect(freshWindow.body).toContain('round 11/100');
+    // Seeded windows count rounds IN THE WINDOW: the window opens at the
+    // seed, so "10+ accumulated" is measured from the seed — a takeover
+    // 'from 60' must not digest on its first managed rounds just because
+    // the absolute counter already reads 61+…
+    expect(
+      runDigest([evalC(HEADS.noop, K, '2026-07-02T00:00:00Z')], {
+        nextRound: 61,
+        roundStart: '60',
+      }).body,
+    ).toBe('');
+    expect(
+      runDigest([evalC(HEADS.noop, K, '2026-07-02T00:00:00Z')], {
+        nextRound: 10,
+        roundStart: '8',
+      }).body,
+    ).toBe('');
+    // …and once 10 managed rounds HAVE accumulated past the seed, it posts.
+    expect(
+      runDigest([evalC(HEADS.push, K, '2026-07-02T00:00:00Z')], {
+        nextRound: 70,
+        roundStart: '60',
+      }).body,
+    ).toContain('round 70/100');
 
     // WINDOW=none says what it counts instead of claiming a window.
     const noWindow = runDigest(
@@ -14263,7 +15144,7 @@ exit 1
       created_at: at,
       body: `<!-- autofix-eval ts=${ts} acted=false round=${round} win=none -->`,
     });
-    const run = (comments) => {
+    const run = (comments, { maxRounds } = {}) => {
       const dir = mkdtempSync(join(tmpdir(), 'rearm-live-'));
       writeFileSync(join(dir, 'ic.json'), JSON.stringify(comments));
       const out = execFileSync(
@@ -14273,7 +15154,12 @@ exit 1
           `set -uo pipefail\n${block}\nprintf '%s|%s|%s' "$LIVE_EVAL_WM" "$LIVE_REARM_KEY" "$LIVE_MAX_ROUND"`,
         ],
         {
-          env: { ...process.env, WORKDIR: dir, AUTOFIX_BOT: BOT },
+          env: {
+            ...process.env,
+            WORKDIR: dir,
+            AUTOFIX_BOT: BOT,
+            ...(maxRounds === undefined ? {} : { MAX_ROUNDS: maxRounds }),
+          },
           encoding: 'utf8',
         },
       );
@@ -14322,6 +15208,20 @@ exit 1
       },
     ]);
     expect(wmSpoof).toBe('2026-07-20T08:30:00Z');
+
+    // Seeded windows compare too: the LIVE copy honors a marker on the
+    // window anchor and clamps a seed at/past the cap exactly like the
+    // scan-side twin (cap 10: 15 clamps to 9; 9 passes through), so the two
+    // copies cannot drift on a seeded window.
+    const seededAck = (at, seed) => ({
+      user: { login: BOT },
+      created_at: at,
+      body: `🤝 … <!-- takeover-ack engaged -->\n<!-- autofix-round-start ${seed} -->`,
+    });
+    const SEEDED_AT = '2026-07-20T12:00:00Z';
+    expect(run([seededAck(SEEDED_AT, 3)], { maxRounds: '10' })[2]).toBe('3');
+    expect(run([seededAck(SEEDED_AT, 15)], { maxRounds: '10' })[2]).toBe('9');
+    expect(run([seededAck(SEEDED_AT, 9)], { maxRounds: '10' })[2]).toBe('9');
   });
 
   it('routes @qwen-code /retry through the takeover command authorization', () => {
@@ -15527,6 +16427,9 @@ exit 1
           '--argjson',
           'nonblocking',
           '[]',
+          '--arg',
+          'ctx',
+          'qwen-autofix/dispatch-pending',
           jqFilter,
         ],
         { input: JSON.stringify(checks), encoding: 'utf8' },

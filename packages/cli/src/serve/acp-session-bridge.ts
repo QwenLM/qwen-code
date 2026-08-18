@@ -84,6 +84,8 @@ export type {
   BridgeWorkspaceGenerationStreamEvent,
   BridgePromptContentBlock,
   BridgeSessionSummary,
+  BridgeTurnStatus,
+  BridgeSessionCatalogVersion,
   SessionMetadataUpdate,
   BridgeClientRequestContext,
   BridgeHeartbeatResult,
