@@ -3045,7 +3045,7 @@ describe('qwen-autofix workflow', () => {
     // forces a deliberate test update, however it is spaced or line-wrapped:
     // bump this count AND pipe the new site through the normalizer (bumping
     // the count below too) — bumping this pin alone leaves toBe(10) green.
-    expect(workflow.split('--paginate').length - 1).toBe(18);
+    expect(workflow.split('--paginate').length - 1).toBe(19);
     // scan ic + pr-events + ic re-fetch + scan rv/rc + prepare rv/rc/ic +
     // report COMMENTS_JSON fallback + the cap-branch release-evidence events
     // fetch (R4-1) = ten normalized fetch sites. The
@@ -3059,7 +3059,11 @@ describe('qwen-autofix workflow', () => {
     // The R11-2 engaged-stale guard's comments/events reads in
     // takeover-ack are the same class too: captured into shell variables
     // and consumed by slurp-style `jq -rs 'add // [] | …'` (idempotent
-    // over a single flat array), never a WORKDIR file.
+    // over a single flat array), never a WORKDIR file. The review-thread
+    // fetch in resolve_and_reply_threads is the same class again — a GraphQL
+    // paginate whose `--jq '…nodes[]'` stream is slurped straight into
+    // THREADS_JSON — so it bumps the total pin above without joining the
+    // normalizer count below.
     expect(workflow.split("jq -s 'add // []'").length - 1).toBe(10);
     // Empty-input semantics: a total gh failure feeds the fallback an EMPTY
     // stream, where the normalizer filter must yield '[]' and not 'null' —
@@ -15634,9 +15638,10 @@ exit 1
         '  [[ "$a" == query=* ]] && query="${a#query=}"',
         '  [[ "$a" == threadId=* ]] && thread_id="${a#threadId=}"',
         'done',
-        'if [[ "$query" == *"reviewThreads(first:100)"* ]]; then',
+        'if [[ "$query" == *"reviewThreads(first:100, after:\\$endCursor)"* ]]; then',
+        '  [[ " $* " == *" --paginate "* ]] || exit 3',
         '  printf \'%s\' "$THREADS_RAW_STUB"',
-        '  exit 0',
+        '  exit "${THREADS_FETCH_EXIT:-0}"',
         'fi',
         'if [[ "$query" == *PullRequestReviewThread* ]]; then',
         '  saw_jq=false; saw_guard_filter=false',
@@ -15673,31 +15678,45 @@ exit 1
     const localHead = execFileSync('git', ['rev-parse', 'HEAD'], {
       encoding: 'utf8',
     }).trim();
-    const threadsRaw = JSON.stringify({
-      nodes: [
-        {
-          id: 'T_open_1',
-          isResolved: false,
-          comments: { nodes: [{ databaseId: 111 }] },
+    // The real `gh --paginate --jq '...nodes[]'` emits ONE node per line,
+    // concatenated across every page — so the stub stands in for gh's output
+    // after its own jq, not for the raw GraphQL envelope. Two "pages" worth
+    // are interleaved deliberately: the block must treat them as one stream.
+    const threadNodes = [
+      {
+        id: 'T_open_1',
+        isResolved: false,
+        comments: {
+          nodes: [{ databaseId: 111 }],
+          pageInfo: { hasNextPage: false },
         },
-        {
-          id: 'T_open_2',
-          isResolved: false,
-          comments: { nodes: [{ databaseId: 222 }] },
+      },
+      {
+        id: 'T_open_2',
+        isResolved: false,
+        comments: {
+          nodes: [{ databaseId: 222 }],
+          pageInfo: { hasNextPage: false },
         },
-        {
-          id: 'T_open_3',
-          isResolved: false,
-          comments: { nodes: [{ databaseId: 444 }] },
+      },
+      {
+        id: 'T_open_3',
+        isResolved: false,
+        comments: {
+          nodes: [{ databaseId: 444 }],
+          pageInfo: { hasNextPage: false },
         },
-        {
-          id: 'T_done',
-          isResolved: true,
-          comments: { nodes: [{ databaseId: 333 }] },
+      },
+      {
+        id: 'T_done',
+        isResolved: true,
+        comments: {
+          nodes: [{ databaseId: 333 }],
+          pageInfo: { hasNextPage: false },
         },
-      ],
-      pageInfo: { hasNextPage: false },
-    });
+      },
+    ];
+    const threadsRaw = threadNodes.map((n) => JSON.stringify(n)).join('\n');
     const headReadCount = join(dir, 'head-read-count');
     const threadStateFile = join(dir, 'thread-state');
     const runResolve = (env = {}) => {
@@ -15739,6 +15758,15 @@ exit 1
     expect(block).toContain(
       'node(id:$threadId){... on PullRequestReviewThread{isResolved}}',
     );
+
+    // The fix this block exists for: GitHub returns reviewThreads in
+    // ASCENDING creation order, so an unpaginated first-100 page is the
+    // OLDEST hundred — precisely not the threads the current round answers.
+    // Ask for pagination, and ask for it in the shape gh's --paginate needs
+    // (an $endCursor variable plus pageInfo), or the stub gh exits 3.
+    expect(block).toContain('--paginate');
+    expect(block).toContain('reviewThreads(first:100, after:$endCursor)');
+    expect(block).toContain('pageInfo{hasNextPage endCursor}');
 
     const matching = runResolve();
     expect(matching.status).toBe(0);
@@ -15871,6 +15899,67 @@ exit 1
     );
     expect(movedBeforeSecondMutation.out).toContain(
       'confirmed 1 selected review thread(s) resolved',
+    );
+
+    // A thread far past the old first-100 cap must resolve like any other:
+    // #8403 carries 1256 threads, and one page reached 8% of them. The target
+    // sits at index 400 of the stream, so any surviving hundred-item ceiling
+    // in the slurp would drop it.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:900001\n');
+    const deepStream = [
+      ...Array.from({ length: 400 }, (_, i) => ({
+        id: `T_filler_${i}`,
+        isResolved: false,
+        comments: {
+          nodes: [{ databaseId: 800000 + i }],
+          pageInfo: { hasNextPage: false },
+        },
+      })),
+      {
+        id: 'T_page_five',
+        isResolved: false,
+        comments: {
+          nodes: [{ databaseId: 900001 }],
+          pageInfo: { hasNextPage: false },
+        },
+      },
+    ]
+      .map((n) => JSON.stringify(n))
+      .join('\n');
+    const pastFirstPage = runResolve({ THREADS_RAW_STUB: deepStream });
+    expect(pastFirstPage.status).toBe(0);
+    expect(pastFirstPage.resolved).toEqual(['resolve:T_page_five']);
+
+    // A pagination that dies partway (rate limit on a later page) USES what it
+    // got rather than discarding it — throwing away twelve good pages to fail
+    // on the thirteenth would resolve nothing at all — and says so.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\n');
+    const partialFetch = runResolve({ THREADS_FETCH_EXIT: '1' });
+    expect(partialFetch.status).toBe(0);
+    expect(partialFetch.resolved).toEqual(['resolve:T_open_1']);
+    expect(partialFetch.out).toContain(
+      'review-thread pagination did not complete',
+    );
+
+    // The residual cap the fix does NOT close: a thread carrying more than
+    // 100 comments still truncates, so a comment past that page is unmapped.
+    // Unobserved in the live pool, and announced rather than hidden.
+    const innerTruncated = [
+      {
+        id: 'T_open_1',
+        isResolved: false,
+        comments: {
+          nodes: [{ databaseId: 111 }],
+          pageInfo: { hasNextPage: true },
+        },
+      },
+    ]
+      .map((n) => JSON.stringify(n))
+      .join('\n');
+    const deepThread = runResolve({ THREADS_RAW_STUB: innerTruncated });
+    expect(deepThread.status).toBe(0);
+    expect(deepThread.out).toContain(
+      'carries more than 100 comments; a comment past that page is not mapped',
     );
     writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\r\n333\n999\n');
 
