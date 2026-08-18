@@ -5900,6 +5900,25 @@ describe('incremental-scope briefs', () => {
   it('a malformed incremental block degrades to full-scope briefs — chunk AND role', () => {
     for (const bad of [
       { anchor: 42 },
+      // A bad anchor with VALID lists — the only shape the anchor guard
+      // alone can reject. Every other case here degrades through the
+      // empty-lists exit as well, so deleting `typeof raw.anchor !== 'string'`
+      // left the suite green: the plan is `JSON.parse`d with an unchecked
+      // cast, and `anchor: 42` would render "since 42" into an agent's frame.
+      {
+        anchor: 42,
+        deltaFiles: ['src/changed.ts'],
+        interaction: [
+          { path: 'src/caller.ts', importsChanged: ['src/changed.ts'] },
+        ],
+      },
+      // …and an anchor that is a string but EMPTY, which the same guard's
+      // second conjunct covers.
+      {
+        anchor: '',
+        deltaFiles: ['src/changed.ts'],
+        interaction: [],
+      },
       // Valid anchor, but no scope list survives validation: rendering the
       // frame with zero bullets is not a degrade, it is a confusion.
       { anchor: 'abc1234def567890', deltaFiles: [], interaction: [] },
@@ -5911,7 +5930,12 @@ describe('incremental-scope briefs', () => {
         interaction: [{ path: 'src/caller.ts', importsChanged: [42] }],
       },
     ]) {
-      const mangled = { ...INCREMENTAL_PLAN, incremental: bad };
+      // Under `scope`, which is where the validator looks. Replacing
+      // `incremental` wholesale made every case exit at `!raw` before a
+      // single field guard ran, so `typeof raw.anchor !== 'string'` and the
+      // non-string edge filter were pinned by nothing — deleting the anchor
+      // guard left all 273 tests green.
+      const mangled = { ...INCREMENTAL_PLAN, incremental: { scope: bad } };
       expect(buildChunkAgentPrompt(mangled, 1)).not.toContain('INCREMENTAL');
       expect(buildRoleBrief(mangled, '2')).not.toContain('Incremental round');
     }
@@ -5967,6 +5991,65 @@ describe('incremental-scope briefs', () => {
     const p = buildRoleBrief(wide, '2');
     expect(p).toContain('(+10 more)'); // 40 entries − 30 cap
     expect(p).toContain('(+12 more)'); // 20 edges − 8 cap
+    // The markers alone do not pin the caps: their arithmetic is
+    // `items.length − CAP`, computed independently of the `.slice()` calls,
+    // so deleting the truncation leaves both markers correct while every
+    // entry floods the brief. Assert what was CUT.
+    expect(p).toContain('src/d29.ts'); // last kept
+    expect(p).not.toContain('src/d30.ts'); // first dropped
+    expect(p).not.toContain('src/d39.ts'); // and the tail
+    // …and the per-entry edges, whose cap is a different slice.
+    const seam = p.split('src/hub.ts')[1] ?? '';
+    expect(seam).toContain('src/d7.ts'); // last kept edge
+    expect(seam.split('(+12 more)')[0]).not.toContain('src/d8.ts');
+  });
+
+  it('a chunk-scoped role brief lists its own files UNCAPPED', () => {
+    // The namesake property of the sibling test, which its one-file-per-chunk
+    // fixture could never reach: no count came near the cap, so adding
+    // `.slice(0, 30)` to `chunkScopeBullets` left the whole suite green. A
+    // reverse-audit territory chunked by line budget holds far more than
+    // thirty small files, and the agent holding that chunk is their SOLE
+    // reviewer — a silent tail is scope nobody covers.
+    const many = Array.from({ length: 40 }, (_, i) => `src/d${i}.ts`);
+    const wide = {
+      ...INCREMENTAL_PLAN,
+      chunks: [
+        {
+          id: 1,
+          startLine: 1,
+          endLine: 400,
+          lines: 400,
+          chars: 16000,
+          maxLineChars: 80,
+          oversized: false,
+          files: many.map((path, i) => ({
+            path,
+            newStart: i * 10 + 1,
+            newEnd: i * 10 + 10,
+          })),
+        },
+      ],
+      incremental: {
+        scope: {
+          anchor: 'abc1234def567890',
+          deltaFiles: many,
+          interaction: [],
+        },
+      },
+    };
+    const brief = buildChunkAgentPrompt(wide, 1);
+    expect(brief).toContain('INCREMENTAL');
+    // Every one of the forty, including the ones past the whole-diff cap.
+    for (const path of [
+      'src/d0.ts',
+      'src/d29.ts',
+      'src/d30.ts',
+      'src/d39.ts',
+    ]) {
+      expect(brief).toContain(path);
+    }
+    expect(brief).not.toContain('more)');
   });
 
   it('an interaction entry whose edges are all EMPTY strings degrades away', () => {

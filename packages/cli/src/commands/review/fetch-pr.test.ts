@@ -14,7 +14,6 @@ import {
   isEmptyDiff,
   isCollapsedFromUpstream,
   resolveIncrementalAnchor,
-  containmentRuling,
   type AnchorProbe,
 } from './fetch-pr.js';
 import {
@@ -245,6 +244,7 @@ const producerMocks = vi.hoisted(() => ({
     (..._args: unknown[]): MergeBaseResult => ({
       sha: null,
       baseFetchFailed: false,
+      probeUnavailable: false,
     }),
   ),
   // Defaults to the REAL implementation (captured by the module mock below);
@@ -397,6 +397,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockImplementation(() => ({
       sha: null,
       baseFetchFailed: false,
+      probeUnavailable: false,
     }));
     producerMocks.buildDiffPlan.mockImplementation((...a: unknown[]) =>
       producerMocks.actualBuildDiffPlan(...a),
@@ -639,7 +640,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockImplementation((...args: unknown[]) => {
       const probe = args[3] as { fetch: (r: string, b: string) => boolean };
       const ok = probe.fetch('origin', 'v1.0');
-      return { sha: null, baseFetchFailed: !ok };
+      return { sha: null, baseFetchFailed: !ok, probeUnavailable: false };
     });
     const report = await reportFor({});
     expect(report.baseFetchFailed).toBe(true);
@@ -674,7 +675,11 @@ describe('fetch-pr report assembly', () => {
     });
     producerMocks.resolveMergeBase.mockImplementation((...args: unknown[]) => {
       const probe = args[3] as { fetch: (r: string, b: string) => boolean };
-      return { sha: null, baseFetchFailed: !probe.fetch('origin', 'v1.0') };
+      return {
+        sha: null,
+        baseFetchFailed: !probe.fetch('origin', 'v1.0'),
+        probeUnavailable: false,
+      };
     });
     await reportFor({});
     expect(checked).toContain('refs/remotes/origin/v1.0');
@@ -711,7 +716,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockImplementation((...args: unknown[]) => {
       const probe = args[3] as { fetch: (r: string, b: string) => boolean };
       probe.fetch('origin', 'v1.0');
-      return { sha: 'mb1', baseFetchFailed: false };
+      return { sha: 'mb1', baseFetchFailed: false, probeUnavailable: false };
     });
     await reportFor({});
     expect(fetched).toEqual([
@@ -737,6 +742,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: 'beef0000',
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     producerMocks.gitRaw.mockReturnValue(
       Buffer.from(makeDiff('src/huge.ts', 9000)),
@@ -1204,6 +1210,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     servesBothRanges();
     // Advertised stat large enough that an ungated collapse ratio WOULD fire
@@ -1226,7 +1233,6 @@ describe('fetch-pr report assembly', () => {
     expect(ruling(report)).toEqual({
       since: ANCHOR,
       effective: true,
-      diffBase: ANCHOR,
     });
     expect(report.diffPath).not.toBeNull();
     // The DISK payload, not just the report: a write unpaired from the text
@@ -1290,16 +1296,23 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     servesBothRanges(FULL_TWO, DELTA_A);
     const report = await reportFor({ since: ANCHOR });
     expect(ruling(report)).toEqual({
       since: ANCHOR,
       effective: true,
-      diffBase: ANCHOR,
     });
     expect(writtenDiff()).toBe(SLICE_A);
     expect(writtenDiff()).not.toContain('b.ts');
+    // The PLAN is built over the slice, not over the full range. The sibling
+    // test pins this only where the slice IS the full range, so planning over
+    // `fullText` while publishing the slice was indistinguishable there —
+    // and a plan describing hunks the published file does not contain sends
+    // every agent to line ranges that are not in their diff.
+    expect(report.diffLines).toBe(SLICE_A.trimEnd().split('\n').length);
+    expect(report.files.map((f: { path: string }) => f.path)).toEqual(['a.ts']);
     const scope = (report.incremental as { scope: Record<string, unknown> })
       .scope;
     expect(scope).toMatchObject({
@@ -1323,6 +1336,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     servesBothRanges(FULL_TWO, DELTA_A);
     producerMocks.readFileSync.mockImplementation((path?: unknown) => {
@@ -1360,6 +1374,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     servesBothRanges(FULL_TWO, DELTA_A);
     producerMocks.readFileSync.mockImplementation((path?: unknown) => {
@@ -1380,6 +1395,57 @@ describe('fetch-pr report assembly', () => {
     expect(writtenDiff()).toContain('a/b.ts');
   });
 
+  it('the restoration probe compares WHOLE tree entries, mode included', () => {
+    // Both existing fixtures return the SAME ls-tree entry for every ref, so
+    // two mutants survived the whole suite: dropping the equality
+    // (`return b !== null && h !== null`) marks every live delta file
+    // restored and slices its section out, and comparing only the oid half
+    // reads a `chmod +x` with unchanged bytes as a restoration — while the
+    // mode-only section IS in the PR's diff and would go unreviewed.
+    //
+    // Steered per REF, which is what the two-mock fixture cannot express.
+    const entries = (base: string, head: string) =>
+      producerMocks.gitOpt.mockImplementation((...args: string[]) => {
+        if (args[0] === 'cat-file' || args[0] === 'merge-base') return '';
+        if (args[0] === 'rev-parse') return ANCHOR;
+        if (args.includes('ls-tree')) {
+          return args.includes(BASE) ? base : head;
+        }
+        return null;
+      });
+
+    const restoredOf = async (base: string, head: string) => {
+      entries(base, head);
+      producerMocks.resolveMergeBase.mockReturnValue({
+        sha: BASE,
+        baseFetchFailed: false,
+        probeUnavailable: false,
+      });
+      servesBothRanges(FULL_TWO, DELTA_A);
+      const report = await reportFor({ since: ANCHOR });
+      const scope = (report.incremental as { scope?: { deltaFiles: string[] } })
+        .scope;
+      // `a.ts` out of deltaFiles ⇔ the probe called it restored.
+      return !(scope?.deltaFiles ?? []).includes('a.ts');
+    };
+
+    return (async () => {
+      // Identical entries — restored.
+      expect(await restoredOf('100644 blob dead', '100644 blob dead')).toBe(
+        true,
+      );
+      // Different OIDs — a live change, not a restoration.
+      expect(await restoredOf('100644 blob dead', '100644 blob beef')).toBe(
+        false,
+      );
+      // Same bytes, MODE flipped — `chmod +x`. Not a restoration: its
+      // mode-only section is in the PR's diff and owes a review.
+      expect(await restoredOf('100644 blob dead', '100755 blob dead')).toBe(
+        false,
+      );
+    })();
+  });
+
   it('stops the round when everything changed since the anchor was undone', async () => {
     // Every delta file restored and nothing imports them: there is genuinely
     // nothing to re-review. Same outcome as an empty delta \u2014 `upToDate`,
@@ -1396,6 +1462,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     servesBothRanges(FULL_TWO, DELTA_A);
     const report = await reportFor({ since: ANCHOR });
@@ -1421,6 +1488,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     servesBothRanges();
 
@@ -1458,7 +1526,6 @@ describe('fetch-pr report assembly', () => {
     expect(ruling(await reportFor({ since: ANCHOR }))).toEqual({
       since: ANCHOR,
       effective: true,
-      diffBase: ANCHOR,
     });
   });
 
@@ -1479,13 +1546,13 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     servesBothRanges();
     const report = await reportFor({ since: ['0'.repeat(40), 'abc1234'] });
     expect(ruling(report)).toEqual({
       since: 'abc1234',
       effective: true,
-      diffBase: ANCHOR,
     });
     // The probes ran against the LAST value, not the first or the join.
     expect(producerMocks.gitOpt.mock.calls).toContainEqual([
@@ -1515,6 +1582,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     servesBothRanges('');
     const report = await reportFor({ since: ANCHOR });
@@ -1529,6 +1597,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: true,
+      probeUnavailable: false,
     });
     expect((await reportFor({ since: ANCHOR })).emptyDiff).toBeUndefined();
   });
@@ -1551,6 +1620,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     const REVERT_DELTA = [
       'diff --git a/a.ts b/a.ts',
@@ -1566,7 +1636,6 @@ describe('fetch-pr report assembly', () => {
     expect(ruling(report)).toEqual({
       since: ANCHOR,
       effective: true,
-      diffBase: ANCHOR,
     });
     // The published bytes are the PR's own section for `a.ts`, so the
     // `-experiment/+original` pair the delta carried — the pair that would
@@ -1590,6 +1659,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     producerMocks.gitRaw.mockImplementation((...args: string[]) => {
       if (args.includes(`${BASE}..f00df00df00d`)) throw new Error('timed out');
@@ -1622,6 +1692,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     // Not a diff at all — a capture that returned an error stream, say. The
     // delta is read for one fact, the list of changed files, and a stream
@@ -1649,6 +1720,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: true,
+      probeUnavailable: false,
     });
     servesBothRanges();
     const report = await reportFor({ since: ANCHOR });
@@ -1681,9 +1753,25 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: null,
       baseFetchFailed: true,
+      probeUnavailable: false,
     });
     const transient = await reportFor({ since: ANCHOR });
     expect(ruling(transient)).toEqual({
+      since: ANCHOR,
+      effective: false,
+      reason: 'base-untrusted',
+    });
+
+    // The base fetch worked and the merge-base PROBE could not answer — a
+    // 128, or the 120s timeout a large long-lived PR under CI load reaches.
+    // Nothing about the histories was established, so this is infrastructure
+    // like the fetch failure above, not the deterministic shape below.
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: null,
+      baseFetchFailed: false,
+      probeUnavailable: true,
+    });
+    expect(ruling(await reportFor({ since: ANCHOR }))).toEqual({
       since: ANCHOR,
       effective: false,
       reason: 'base-untrusted',
@@ -1695,6 +1783,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: null,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     const permanent = await reportFor({ since: ANCHOR });
     expect(ruling(permanent)).toEqual({
@@ -1720,6 +1809,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     // Empty delta → upToDate; the full range is what gets partitioned.
     servesBothRanges(FULL_DIFF, '');
@@ -1756,6 +1846,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     servesBothRanges();
     const report = await reportFor({ since: 'f00df00df00d' });
@@ -1792,13 +1883,13 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     servesBothRanges();
     const report = await reportFor({ since: BASE });
     expect(ruling(report)).toEqual({
       since: BASE,
       effective: true,
-      diffBase: BASE,
     });
     // Exactly one capture: the delta arm read no second range.
     const ranges = producerMocks.gitRaw.mock.calls.filter((c) =>
@@ -1816,6 +1907,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     servesBothRanges();
     // The fault must land on ANCESTRY: a blanket error makes `cat-file`
@@ -1911,6 +2003,7 @@ describe('fetch-pr report assembly', () => {
       producerMocks.resolveMergeBase.mockReturnValue({
         sha: BASE,
         baseFetchFailed: false,
+        probeUnavailable: false,
       });
       servesBothRanges();
       const spy = vi
@@ -1936,27 +2029,32 @@ describe('fetch-pr report assembly', () => {
     }
   });
 
-  it("welds Agent 7's --base to the anchor the producer stamped", async () => {
-    // The only test that crosses the producer→consumer seam. This file never
-    // mentions `buildRoleBrief` and agent-prompt's own tests hand-build every
-    // report, so an asymmetric rename of `diffBase` — or a consumer guard
-    // that stops matching — ships with both suites green while Agent 7
-    // silently falls back to the merge base: its test-efficacy probe then
-    // recomputes `base..HEAD`, spending the round's budget reversing hunks an
-    // earlier round already reviewed and reporting survivors outside this
-    // round's diff. The PR's own comment concedes the reversion "left the
-    // whole suite green".
+  it("welds Agent 7's --base to the range the round actually PUBLISHED", async () => {
+    // The only test that crosses the producer→consumer seam, and slicing
+    // inverted what it must assert. Agent 7 recomputes its own diff as
+    // `base..HEAD`, so `--base` has to name the left side of the bytes the
+    // round published — and those are now sections of `merge-base..head`,
+    // not a capture of `anchor..head`. Welding the ANCHOR here would send
+    // the probe over hunks the round never reviewed while missing the ones
+    // it did: the exact error `diffBase` was introduced to prevent, arrived
+    // at from the other side.
+    //
+    // So the producer stops writing `diffBase` on a sliced round and the
+    // consumer falls back to `mergeBaseSha`, which is the correct answer.
+    // The fallback is not a degradation here — it is the answer. (A plan an
+    // older CLI wrote still carries `diffBase`, and the consumer still
+    // honours it, because a delta-range publish made it true there.)
     anchorIsValid();
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     servesBothRanges();
     const report = await reportFor({ since: ANCHOR });
     expect(ruling(report)).toEqual({
       since: ANCHOR,
       effective: true,
-      diffBase: ANCHOR,
     });
     // The REAL brief builder, over the REAL report the handler just wrote.
     // The probe block is gated on a PR number and a plan path — the shape
@@ -1966,8 +2064,8 @@ describe('fetch-pr report assembly', () => {
       '7',
       { planPath: '/tmp/plan.json' },
     );
-    expect(brief).toContain(`--base ${ANCHOR}`);
-    expect(brief).not.toContain(`--base ${BASE}`);
+    expect(brief).toContain(`--base ${BASE}`);
+    expect(brief).not.toContain(`--base ${ANCHOR}`);
   });
 
   it('reads collapsedFromUpstream off the FULL range on a delta round', async () => {
@@ -1981,6 +2079,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     servesBothRanges();
     // Advertised 900 against a full range of 4 changed lines: 4 × 4 ≤ 900,
@@ -2002,7 +2101,6 @@ describe('fetch-pr report assembly', () => {
     expect(ruling(report)).toEqual({
       since: ANCHOR,
       effective: true,
-      diffBase: ANCHOR,
     });
     // The slice of the PR's own diff, not the delta's re-capture of it.
     expect(writtenDiff()).toBe(FULL_DIFF);
@@ -2022,6 +2120,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     servesBothRanges();
     const report = await reportFor({ since: '' });
@@ -2044,6 +2143,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     producerMocks.gitRaw.mockImplementation((...args: string[]) => {
       if (args.includes(`${BASE}..f00df00df00d`)) throw new Error('timed out');
@@ -2069,6 +2169,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     servesBothRanges();
     producerMocks.buildDiffPlan.mockImplementation((text: unknown) => {
@@ -2094,6 +2195,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     servesBothRanges();
     producerMocks.writeFileSync.mockImplementation((path: unknown) => {
@@ -2126,6 +2228,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     servesBothRanges();
     for (const since of [false, 42, null]) {
@@ -2144,6 +2247,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     servesBothRanges();
     const report = await reportFor({ since: '0'.repeat(40) });
@@ -2162,6 +2266,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     producerMocks.gitRaw.mockImplementation((...args: string[]) =>
       args.includes(`${BASE}..f00df00df00d`)
@@ -2196,6 +2301,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     producerMocks.gitRaw.mockImplementation((...args: string[]) =>
       args.includes(`${BASE}..f00df00df00d`)
@@ -2219,6 +2325,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     // Two files, one in the delta, so the slice is a PROPER part of the full
     // range and "the partitioner refused the scoped diff" is a state that
@@ -2257,6 +2364,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     // Two files, one in the delta — see the sibling above for why the
     // one-file fixture cannot express a scoped-then-rescued round.
@@ -2312,6 +2420,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: null,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     servesBothRanges();
     producerMocks.buildDiffPlan.mockImplementation((text: unknown) => {
@@ -2349,6 +2458,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     servesBothRanges();
     producerMocks.buildDiffPlan.mockImplementation((text: unknown) => {
@@ -2378,6 +2488,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     servesBothRanges();
     // A large advertised stat, so the collapse ratio WOULD fire if the
@@ -2422,6 +2533,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     producerMocks.gitRaw.mockImplementation((...args: string[]) => {
       if (args.includes(`${ANCHOR}..f00df00df00d`)) {
@@ -2470,6 +2582,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     producerMocks.gitRaw.mockImplementation((...args: string[]) =>
       args.includes(`${BASE}..f00df00df00d`)
@@ -2920,772 +3033,6 @@ describe('resolveIncrementalAnchor', () => {
   });
 });
 
-describe('containmentRuling — the containment oracle', () => {
-  // The battery below reads the `ok` fact. `unverified` — the other half of
-  // the ruling — is asserted directly, in the cases that produce it.
-  const contained = (inner: string, outer: string) =>
-    containmentRuling(inner, outer).ok;
-
-  const sec = (file: string, hunks: Array<[number, number]>) =>
-    [
-      `diff --git a/${file} b/${file}`,
-      `--- a/${file}`,
-      `+++ b/${file}`,
-      // A PURE ADDITION: zero old-side lines, `count` new ones. The counts
-      // are declared truthfully so the fixture models a real capture:
-      // `parseDiff` closes a hunk STRUCTURALLY, at the next `@@` /
-      // `diff --git` header or EOF, and reads the declared counts only to
-      // compute `newEnd` — so a mismatched count does not truncate anything,
-      // it just misplaces the range the containment check then compares.
-      ...hunks.flatMap(([start, count]) => [
-        `@@ -${start},0 +${start},${count} @@`,
-        ...Array.from({ length: count }, (_, i) => `+line ${start + i}`),
-      ]),
-      '',
-    ].join('\n');
-
-  /**
-   * A covering section that ALSO deletes `deleted`.
-   *
-   * `sec` emits pure additions, so it deletes nothing, and a delta carrying a
-   * deletion is refused by the content rule before its ranges are ever
-   * compared. Tests that mean to measure the range arithmetic on a deletion
-   * hunk need an outer that performs the same deletion — which is also the
-   * only shape in which the PR's diff displays that line at all.
-   */
-  const secDeleting = (
-    file: string,
-    [start, count]: [number, number],
-    deleted: string[],
-    /**
-     * New-side junction the deletions sit at. Defaults to the hunk's own
-     * start; pass the delta's junction when modelling "the PR performs the
-     * same deletion", because sameness is (content, position) and not content
-     * alone — a `-X` displayed elsewhere in the file is no help to a comment
-     * anchored here.
-     */
-    junction: number = start,
-  ) => {
-    const lead = junction - start; // context lines before the deletions
-    const added = count - lead; // `+` lines after them
-    return [
-      `diff --git a/${file} b/${file}`,
-      `--- a/${file}`,
-      `+++ b/${file}`,
-      // Counts declared truthfully: old side is the leading context plus the
-      // deleted lines, new side is that context plus the added ones.
-      `@@ -${start},${lead + deleted.length} +${start},${count} @@`,
-      ...Array.from({ length: lead }, (_, i) => ` ctx ${start + i}`),
-      ...deleted.map((d) => `-${d}`),
-      ...Array.from({ length: added }, (_, i) => `+line ${junction + i}`),
-      '',
-    ].join('\n');
-  };
-
-  /**
-   * A delta section that DELETES `what`, wrapped in context.
-   *
-   * The shape `--unified=3` actually emits: the hunk is not `newCount === 0`,
-   * so a rule keyed on pure-deletion hunks never sees it, and its surviving
-   * new-side range is just the context a covering hunk contains for free.
-   */
-  const deletes = (file: string, at: number, what: string[]) =>
-    [
-      `diff --git a/${file} b/${file}`,
-      `--- a/${file}`,
-      `+++ b/${file}`,
-      `@@ -${at},${what.length + 2} +${at},2 @@`,
-      ' ctx before',
-      ...what.map((w) => `-${w}`),
-      ' ctx after',
-      '',
-    ].join('\n');
-
-  it('accepts a delta whose hunks sit inside the PR diff, per file', () => {
-    expect(contained(sec('a.ts', [[10, 3]]), sec('a.ts', [[1, 100]]))).toBe(
-      true,
-    );
-  });
-
-  it('discriminates BOTH boundary directions', () => {
-    // `s <= start && end <= e` — a mutant flipping either comparison accepts
-    // a delta carrying hunks GitHub's PR diff does not contain, and one
-    // comment anchored there 422s the whole review.
-    const outer = sec('a.ts', [[10, 10]]); // covers [10, 19]
-    // starts BELOW the covering hunk
-    expect(contained(sec('a.ts', [[1, 3]]), outer)).toBe(false);
-    // …including by exactly one line. The far-below fixture above kills a
-    // FLIPPED comparison but not a widened one: `s - 1 <= start` survived the
-    // whole suite, and a delta hunk starting one line above the covering hunk
-    // touches a line GitHub's PR diff does not display.
-    expect(contained(sec('a.ts', [[9, 2]]), outer)).toBe(false);
-    expect(contained(sec('a.ts', [[10, 2]]), outer)).toBe(true);
-    // starts inside, ends PAST it
-    expect(contained(sec('a.ts', [[12, 50]]), outer)).toBe(false);
-    // …including by exactly one line: a delta hunk whose last line sits one
-    // past the covering hunk is a line GitHub's PR diff does not display,
-    // and an anchored comment there 422s the entire review. Shared
-    // deletions need no slack — both captures share the head tree, so an
-    // identical junction is covered at equality.
-    // (`sec` takes [start, COUNT]: 12+9-1 = 20 is one past the outer's 19.)
-    expect(contained(sec('a.ts', [[12, 9]]), outer)).toBe(false);
-    expect(contained(sec('a.ts', [[12, 8]]), outer)).toBe(true);
-  });
-
-  it('records EVERY hunk of a section, not just the first', () => {
-    // A second hunk must be seen as a hunk. `parseDiff` closes hunks at the
-    // next header, so this does not test truncation — it tests that the loop
-    // over `section.ranges` reads every entry and not just the first.
-    const two = sec('a.ts', [
-      [10, 3],
-      [50, 2],
-    ]);
-    expect(contained(two, sec('a.ts', [[10, 3]]))).toBe(false);
-    expect(contained(two, sec('a.ts', [[1, 100]]))).toBe(true);
-  });
-
-  it('consumes the no-newline marker without spending a body line', () => {
-    // `\ No newline at end of file` is a marker, not content: it belongs to
-    // neither side, so counting it as a body line shifts the new-side cursor
-    // and every range after it. The most common real-world diff artifact
-    // there is.
-    const withMarker = [
-      'diff --git a/a.ts b/a.ts',
-      '--- a/a.ts',
-      '+++ b/a.ts',
-      // The marker lands MID-hunk, with a count still owed on the new side
-      // — the shape real git emits whenever a modification hunk's old side
-      // lacks a trailing newline. Spending the counts before it arrives
-      // routes the line through the outside-hunk skip and leaves the
-      // in-hunk branch unexercised, which is what the first cut did.
-      '@@ -1,1 +1,1 @@',
-      '-old',
-      '\\ No newline at end of file',
-      '+new',
-      '@@ -50,0 +50,1 @@',
-      '+later',
-      '',
-    ].join('\n');
-    // Both hunks are seen: covered by a wide outer, refused by a narrow one.
-    // The outer shares the `-old` deletion, so what is measured here is the
-    // marker's effect on hunk boundaries and not the content rule.
-    expect(
-      contained(withMarker, secDeleting('a.ts', [1, 100], ['old'], 1)),
-    ).toBe(true);
-    expect(
-      contained(withMarker, secDeleting('a.ts', [1, 10], ['old'], 1)),
-    ).toBe(false);
-  });
-
-  it('checks EVERY section of the delta, not just the first', () => {
-    // Every other fixture is single-file, so the loop over inner sections
-    // was unconstrained — a mutant reading only the first section accepts a
-    // delta whose SECOND file is absent from the PR's diff.
-    const twoFiles = `${sec('a.ts', [[10, 3]])}${sec('b.ts', [[10, 3]])}`;
-    expect(contained(twoFiles, sec('a.ts', [[1, 100]]))).toBe(false);
-    expect(
-      contained(
-        twoFiles,
-        `${sec('a.ts', [[1, 100]])}${sec('b.ts', [[1, 100]])}`,
-      ),
-    ).toBe(true);
-  });
-
-  it('scans EVERY covering hunk, not just the first', () => {
-    // A mutant testing only `covering[0]` survives while every outer is
-    // single-hunk; a real PR diff is many hunks per file.
-    const outer = sec('a.ts', [
-      [1, 5],
-      [100, 20],
-    ]);
-    expect(contained(sec('a.ts', [[105, 3]]), outer)).toBe(true);
-    expect(contained(sec('a.ts', [[50, 3]]), outer)).toBe(false);
-  });
-
-  it('keys coverage per FILE — a numerically-inside range in another file is not covered', () => {
-    // A pooled-ranges mutant (dropping the file key) accepts this shape: the
-    // delta's b.ts hunk falls numerically inside a.ts's full-range hunk.
-    expect(contained(sec('b.ts', [[10, 3]]), sec('a.ts', [[1, 100]]))).toBe(
-      false,
-    );
-  });
-
-  it('does not read added CONTENT as diff structure', () => {
-    // An added line shaped like a file header — an embedded diff fixture is
-    // exactly that — used to re-attribute every LATER hunk of the file:
-    // here the second hunk would be filed under `big.ts` and found covered
-    // by its [1,2000] range, so a delta carrying a hunk outside GitHub's PR
-    // diff published as the review scope. Structure is recognized only
-    // outside hunk bodies, as both sibling parsers in this file already do.
-    const spoofing = [
-      'diff --git a/x.ts b/x.ts',
-      '--- a/x.ts',
-      '+++ b/x.ts',
-      '@@ -1,2 +1,3 @@',
-      ' context',
-      '+++ b/big.ts',
-      ' context2',
-      '@@ -99,2 +99,4 @@',
-      ' keep',
-      '+undo per feedback',
-      '+second line',
-      ' keep2',
-      '',
-    ].join('\n');
-    // Both hunks belong to x.ts, so a PR diff that only touches big.ts
-    // cannot cover them however wide its range is.
-    expect(contained(spoofing, sec('big.ts', [[1, 2000]]))).toBe(false);
-    // …and against x.ts's own wide hunk they are covered.
-    expect(contained(spoofing, sec('x.ts', [[1, 200]]))).toBe(true);
-  });
-
-  it('counts deletions, so one displayed line clears only one', () => {
-    // Set membership let a SINGLE `-X` in the PR's diff clear ANY number of
-    // `-X` lines in the delta. A round that deletes two identical lines — a
-    // duplicated guard clause, a repeated import, a blank line — where the PR
-    // deletes one was accepted, and the second deletion is a line GitHub does
-    // not display.
-    const twice = deletes('a.ts', 6, ['return true;', 'return true;']);
-    expect(
-      contained(twice, secDeleting('a.ts', [1, 100], ['return true;'], 7)),
-    ).toBe(false);
-    expect(
-      contained(
-        twice,
-        secDeleting('a.ts', [1, 100], ['return true;', 'return true;'], 7),
-      ),
-    ).toBe(true);
-  });
-
-  it('refuses a delta section with nothing comparable against a covering one that has hunks', () => {
-    // A mode change, a pure rename, a binary replacement: no range and no
-    // deletion, so both containment loops iterate zero times and the section
-    // used to pass vacuously. An "undo per feedback" round that reverts round
-    // 1's `chmod +x` is exactly this shape, and the PR's own diff — which
-    // ends at the same head — shows no mode change at all.
-    const modeOnly = [
-      'diff --git a/m.sh b/m.sh',
-      'old mode 100755',
-      'new mode 100644',
-      '',
-    ].join('\n');
-    expect(contained(modeOnly, sec('m.sh', [[1, 100]]))).toBe(false);
-    // Still vacuous-true when the PR's section is equally contentless: two
-    // binary sections have nothing to compare on either side.
-    const binary = [
-      'diff --git a/i.png b/i.png',
-      'Binary files a/i.png and b/i.png differ',
-      '',
-    ].join('\n');
-    expect(contained(binary, binary)).toBe(true);
-  });
-
-  it('declines to rule when either capture decoded lossily', () => {
-    // Captures arrive decoded as UTF-8, and that decode is lossy: every byte
-    // git emitted that is not valid UTF-8 becomes one U+FFFD. Distinct bytes
-    // then compare EQUAL — two filenames differing only in an invalid byte
-    // share one map key, and two byte-distinct deleted lines match 1:1 — and
-    // nothing downstream can tell. Refusing to rule is the only honest answer.
-    // (Built from buffers: macOS rejects invalid-UTF-8 filenames outright, so
-    // no filesystem fixture can carry this shape.)
-    const bytes = (...parts: Array<string | number[]>) =>
-      Buffer.concat(
-        // No ternary: `Buffer.from` already accepts the whole
-        // `string | number[]` union, and a dead branch here invites a future
-        // edit to give one arm a different encoding — silently redefining the
-        // exact bytes these collision fixtures exist to carry.
-        parts.map((x) => Buffer.from(x)),
-      );
-    const nameA = bytes('data_', [0xe9], '.log').toString('utf8');
-    const nameB = bytes('data_', [0xf1], '.log').toString('utf8');
-    expect(nameA).toBe(nameB); // the collision itself
-
-    // Distinct files, one decoded key: the delta's hunks would be judged
-    // against the OTHER file's ranges.
-    expect(
-      containmentRuling(
-        deletes(nameA, 6, ['X']),
-        secDeleting(nameB, [1, 100], ['X'], 7),
-      ),
-    ).toEqual({ ok: false, unverified: true });
-
-    // Same path, byte-distinct deleted lines that decode identically — the
-    // count map cannot see the difference either.
-    const sentA = bytes('sentinel ', [0xff]).toString('utf8');
-    const sentB = bytes('sentinel ', [0xfe]).toString('utf8');
-    expect(
-      containmentRuling(
-        deletes('a.ts', 6, [sentA]),
-        secDeleting('a.ts', [1, 100], [sentB], 7),
-      ),
-    ).toEqual({ ok: false, unverified: true });
-
-    // ONE-SIDED, both directions. Every case above is lossy on both sides, so
-    // an `&&` in place of the `||` survives them all — and the difference
-    // matters: a lossy delta against a clean full capture would then be ruled
-    // `hunks-outside-pr-diff`, which asserts a PROVEN scope violation, rather
-    // than `containment-unverified`, which says the oracle could not read its
-    // input. The reachable shape is a file whose path carries an invalid byte,
-    // added after the anchor and deleted in the undo round: the delta capture
-    // carries it, the full capture nets it to nothing.
-    expect(
-      containmentRuling(
-        deletes(nameA, 6, ['X']),
-        secDeleting('a.ts', [1, 100], ['X'], 7),
-      ),
-    ).toEqual({ ok: false, unverified: true });
-    expect(
-      containmentRuling(
-        deletes('a.ts', 6, ['X']),
-        secDeleting(nameA, [1, 100], ['X'], 7),
-      ),
-    ).toEqual({ ok: false, unverified: true });
-  });
-
-  it('compares SHORT deleted lines by their whole content', () => {
-    // The collector strips exactly one marker character. Stripping two
-    // transforms both captures identically — so every equality this battery
-    // checks still holds — while collapsing distinct short deletions onto the
-    // empty string: `-a` and `-b` both become ``. The battery's own comment
-    // names "a blank line" as a shape it cares about, and no fixture supplied
-    // one.
-    expect(
-      contained(
-        deletes('a.ts', 6, ['a']),
-        secDeleting('a.ts', [1, 100], [''], 7),
-      ),
-    ).toBe(false);
-    // A genuinely blank deleted line is matched by a blank one.
-    expect(
-      contained(
-        deletes('a.ts', 6, ['']),
-        secDeleting('a.ts', [1, 100], [''], 7),
-      ),
-    ).toBe(true);
-  });
-
-  it('keys the deletion rule per FILE, not across the whole diff', () => {
-    // Every other deletion fixture is single-file, and the only cross-file
-    // test uses addition-only sections — so a mutant pooling all outer
-    // sections' deletions into one set survives. Real shape: round 1 moves
-    // line X from b.ts to a.ts, and the undo round deletes it from a.ts. The
-    // PR's own diff displays `-X` only in b.ts, so a comment anchored on the
-    // a.ts deletion hits a line GitHub does not show there.
-    const full = `${secDeleting('a.ts', [1, 100], [])}${secDeleting('b.ts', [1, 100], ['X'], 7)}`;
-    expect(contained(deletes('a.ts', 6, ['X']), full)).toBe(false);
-    // …and it is displayed where the PR actually deletes it.
-    expect(contained(deletes('b.ts', 6, ['X']), full)).toBe(true);
-  });
-
-  it('draws the deletion budget from the ENCLOSING hunk, not the whole file', () => {
-    // Held per file, a `-X` the PR displays in one hunk cleared a `-X` the
-    // delta performs thirty lines away in another — a line displayed nowhere
-    // near where the delta deletes it, so a comment anchored there still 422s.
-    // Locality is available (the shared head tree is the same fact the range
-    // check rests on), so the budget comes from the hunks that enclose.
-    const far = [
-      'diff --git a/a.ts b/a.ts',
-      '--- a/a.ts',
-      '+++ b/a.ts',
-      // encloses the delta's range but deletes nothing. Counts declared to
-      // match the body: 3 context + 1 changed + 9 context on each side.
-      '@@ -2,13 +2,13 @@',
-      ...Array.from({ length: 3 }, (_, i) => ` c${i}`),
-      '-edited',
-      '+edited2',
-      ...Array.from({ length: 9 }, (_, i) => ` d${i}`),
-      // deletes X, but nowhere near. Old side 1 + 1 + 8, new side 1 + 8.
-      '@@ -40,10 +40,9 @@',
-      ' e0',
-      '-X',
-      ...Array.from({ length: 8 }, (_, i) => ` e${i + 1}`),
-      '',
-    ].join('\n');
-    expect(contained(deletes('a.ts', 6, ['X']), far)).toBe(false);
-    // …and it IS accepted when the enclosing hunk is the one that deletes it.
-    expect(
-      contained(
-        deletes('a.ts', 6, ['X']),
-        secDeleting('a.ts', [1, 100], ['X'], 7),
-      ),
-    ).toBe(true);
-  });
-
-  it('starts the body scan AFTER the hunk header, not at the section metadata', () => {
-    // The scan begins at `diffStart` (the `@@` line's own index) precisely so
-    // the section's `--- a/<path>` metadata is not read as a deletion. Nothing
-    // pinned that: no inner fixture ever deleted content shaped like a
-    // stripped header. Two hunks, because a widened window also sweeps the
-    // inner section's own header and would otherwise cancel out.
-    const deletesHeaderShape = [
-      'diff --git a/a.ts b/a.ts',
-      '--- a/a.ts',
-      '+++ b/a.ts',
-      '@@ -6,3 +6,2 @@',
-      ' c',
-      '-- a/a.ts',
-      ' c2',
-      '@@ -20,3 +20,2 @@',
-      ' d',
-      '-- a/a.ts',
-      ' d2',
-      '',
-    ].join('\n');
-    void deletesHeaderShape;
-    // The attack shape: the delta deletes a line whose text is exactly what a
-    // stripped `--- a/<path>` header looks like, at the junction the outer
-    // hunk STARTS at — which is where a widened scan would record the outer's
-    // own header. The PR's diff deletes no such line, so this must be refused.
-    const innerAtJunctionOne = [
-      'diff --git a/a.ts b/a.ts',
-      '--- a/a.ts',
-      '+++ b/a.ts',
-      '@@ -1,2 +1,1 @@',
-      '-- a/a.ts',
-      ' keep',
-      '',
-    ].join('\n');
-    expect(contained(innerAtJunctionOne, sec('a.ts', [[1, 100]]))).toBe(false);
-  });
-
-  it('reads a deletion that ends the hunk body, with no trailing context', () => {
-    // Under `--unified=3`, deleting within three lines of EOF emits a hunk
-    // whose body ENDS in the `-` line. Every other deletion fixture here wraps
-    // its deletions in trailing context, so the body scan's trailing bound was
-    // pinned by nothing while its leading bound was.
-    const endsInDeletion = [
-      'diff --git a/a.ts b/a.ts',
-      '--- a/a.ts',
-      '+++ b/a.ts',
-      '@@ -8,3 +8,2 @@',
-      ' ctx',
-      ' ctx2',
-      '-X',
-      '',
-    ].join('\n');
-    // The PR displays no such deletion, so it must be refused — which only
-    // happens if the scan SAW the trailing `-X` at all.
-    expect(contained(endsInDeletion, sec('a.ts', [[1, 100]]))).toBe(false);
-    expect(
-      contained(endsInDeletion, secDeleting('a.ts', [1, 100], ['X'], 10)),
-    ).toBe(true);
-  });
-
-  it('refuses a delta WITH hunks against a same-file section that has none', () => {
-    // The mirror of the vacuous-pass case. `refuses hunk-less sections`
-    // anchors its mode/binary deltas against a DIFFERENT file, so
-    // `covering === undefined` refuses before the range loop is reached and
-    // the empty-covering path goes unexercised. Real shape: round 1 edits
-    // `m.sh` and chmods it, round 2 reverts only the content, so `base..head`
-    // nets to a mode-only section while the delta still carries a hunk.
-    const modeOnly = [
-      'diff --git a/m.sh b/m.sh',
-      'old mode 100755',
-      'new mode 100644',
-      '',
-    ].join('\n');
-    expect(contained(sec('m.sh', [[10, 3]]), modeOnly)).toBe(false);
-    expect(contained(deletes('m.sh', 6, ['X']), modeOnly)).toBe(false);
-  });
-
-  it("needs EVERY delta hunk's deletion displayed, not just one of them", () => {
-    // Round 1 chains edits and adds a duplicate X near a legitimately deleted
-    // twin; round 2's undo deletes both copies. The full capture is one merged
-    // hunk displaying `-X` once, the delta is two hunks deleting one each, and
-    // the second copy is displayed nowhere. Matching by content alone let the
-    // single displayed occurrence clear both.
-    const twoHunks = [
-      'diff --git a/a.ts b/a.ts',
-      '--- a/a.ts',
-      '+++ b/a.ts',
-      '@@ -7,3 +7,2 @@',
-      ' c1',
-      '-X',
-      ' c2',
-      '@@ -24,3 +23,2 @@',
-      ' d1',
-      '-X',
-      ' d2',
-      '',
-    ].join('\n');
-    // The PR displays `-X` at ONE of the two junctions (8), not both.
-    const oneX = secDeleting('a.ts', [1, 100], ['X'], 8);
-    expect(contained(twoHunks, oneX)).toBe(false);
-    // Both junctions displayed → both delta hunks are covered.
-    const bothX = [
-      'diff --git a/a.ts b/a.ts',
-      '--- a/a.ts',
-      '+++ b/a.ts',
-      '@@ -1,42 +1,40 @@',
-      // 7 context → cursor 8, where the delta's first `-X` sits; 16 more →
-      // cursor 24, where its second sits. New side 7+16+17 = 40, old side +2.
-      ...Array.from({ length: 7 }, (_, i) => ` p${i}`),
-      '-X',
-      ...Array.from({ length: 16 }, (_, i) => ` q${i}`),
-      '-X',
-      ...Array.from({ length: 17 }, (_, i) => ` r${i}`),
-      '',
-    ].join('\n');
-    expect(contained(twoHunks, bothX)).toBe(true);
-  });
-
-  it("does not let the no-newline marker shift a deletion's junction", () => {
-    // The marker belongs to neither side, so it must not advance the new-side
-    // cursor. If it did, every junction after it in the hunk would be off by
-    // one and would stop matching the PR's own — turning a legitimately
-    // displayed deletion into a refusal, silently, on the most common
-    // real-world diff artifact there is.
-    const withMarker = [
-      'diff --git a/a.ts b/a.ts',
-      '--- a/a.ts',
-      '+++ b/a.ts',
-      '@@ -6,4 +6,2 @@',
-      ' ctx',
-      '-gone',
-      '\\ No newline at end of file',
-      '-X',
-      ' ctx after',
-      '',
-    ].join('\n');
-    // Both deletions sit at junction 7: the marker spends no line.
-    const outer = [
-      'diff --git a/a.ts b/a.ts',
-      '--- a/a.ts',
-      '+++ b/a.ts',
-      '@@ -1,102 +1,100 @@',
-      ...Array.from({ length: 6 }, (_, i) => ` z${i}`),
-      '-gone',
-      '-X',
-      ...Array.from({ length: 94 }, (_, i) => ` y${i}`),
-      '',
-    ].join('\n');
-    expect(contained(withMarker, outer)).toBe(true);
-  });
-
-  it('ties a deleted line to the junction it was deleted at', () => {
-    // Content alone does not say WHERE. A single inner hunk against a single
-    // outer hunk, budget spent exactly once — so no amount of counting closes
-    // this — where the PR deletes `dup` near the top of the file and the delta
-    // deletes `dup` thirty lines down, at a junction the PR's diff never
-    // touches. Junctions are comparable for the same reason ranges are: both
-    // captures end at the same head tree.
-    const delta = deletes('a.ts', 30, ['dup']); // junction 31
-    expect(contained(delta, secDeleting('a.ts', [1, 100], ['dup'], 6))).toBe(
-      false,
-    );
-    expect(contained(delta, secDeleting('a.ts', [1, 100], ['dup'], 31))).toBe(
-      true,
-    );
-  });
-
-  it('accepts when the PR displays MORE occurrences than the delta deletes', () => {
-    // The battery pinned the under-supplied refusal and the exact match; the
-    // over-supplied accept was pinned nowhere, so rewriting the consume loop
-    // as an equality check survives. That mutant rules `hunks-outside-pr-diff`
-    // — a PROVEN violation that did not happen — on the ordinary shape where
-    // the PR deletes two identical lines and the `--since` round deletes only
-    // the one that came after the anchor, and that reason is never retried.
-    const one = deletes('a.ts', 6, ['dup']); // junction 7
-    const outerTwo = [
-      'diff --git a/a.ts b/a.ts',
-      '--- a/a.ts',
-      '+++ b/a.ts',
-      '@@ -1,102 +1,100 @@',
-      ...Array.from({ length: 6 }, (_, i) => ` m${i}`),
-      '-dup', // junction 7 — the one the delta also deletes
-      '-dup', // junction 7 as well: two deletions at the same place
-      ...Array.from({ length: 94 }, (_, i) => ` n${i}`),
-      '',
-    ].join('\n');
-    expect(contained(one, outerTwo)).toBe(true);
-  });
-
-  it('refuses a deletion the PR diff does not itself perform', () => {
-    // New-side ranges cannot see a deletion: what survives it on the new side
-    // is context, which a covering hunk contains for free. So a delta that
-    // removes a line the PR introduced after the merge base — the "undo per
-    // feedback" round — passed the range check outright, and the review scope
-    // became a diff whose content GitHub displays on neither side.
-    const delta = deletes('a.ts', 6, ['X1']);
-    // Same file, and a range wide enough to cover — only the deletion differs.
-    expect(contained(delta, secDeleting('a.ts', [1, 100], ['X1'], 7))).toBe(
-      true,
-    );
-    expect(
-      contained(delta, secDeleting('a.ts', [1, 100], ['unrelated'], 7)),
-    ).toBe(false);
-    // A PR diff that only adds lines deletes nothing, so it displays nothing
-    // to anchor a comment on.
-    expect(contained(delta, sec('a.ts', [[1, 100]]))).toBe(false);
-    // Every deleted line must be matched, not just one of them.
-    expect(
-      contained(
-        deletes('a.ts', 6, ['X1', 'X2']),
-        secDeleting('a.ts', [1, 100], ['X1'], 7),
-      ),
-    ).toBe(false);
-  });
-
-  it('pins the deletion junction in BOTH directions — no slack', () => {
-    // The junction is where deleted text used to sit. A slack constant here
-    // was invisible to the suite for two rounds: `end <= e`, `e + 1` and
-    // `e + 2` were all green. These two fix that in both directions.
-    const deletionAt = (line: number) =>
-      [
-        'diff --git a/a.ts b/a.ts',
-        '--- a/a.ts',
-        '+++ b/a.ts',
-        `@@ -${line},2 +${line},0 @@`,
-        '-gone',
-        '-gone2',
-        '',
-      ].join('\n');
-    // The outer performs the same deletion — otherwise the content rule
-    // refuses first and the junction arithmetic goes unmeasured.
-    const outer = secDeleting('a.ts', [1, 19], ['gone', 'gone2'], 19);
-    // covering hunk [1,19]: a junction AT its end is contained…
-    expect(contained(deletionAt(19), outer)).toBe(true);
-    // …one past it is not, and neither is two past.
-    expect(contained(deletionAt(20), outer)).toBe(false);
-    expect(contained(deletionAt(21), outer)).toBe(false);
-  });
-
-  it('refuses a deletion the PR diff does not share', () => {
-    // `+++ /dev/null` contributes no new-side range, so a deletion-only
-    // delta used to pass vacuously: an undo-per-feedback commit deleting a
-    // file the PR added is absent from the full range, and a finding
-    // anchored on it 422s the review.
-    const deletion = [
-      'diff --git a/gone.ts b/gone.ts',
-      'deleted file mode 100644',
-      '--- a/gone.ts',
-      '+++ /dev/null',
-      '@@ -1,2 +0,0 @@',
-      '-was here',
-      '-and here',
-      '',
-    ].join('\n');
-    expect(contained(deletion, sec('a.ts', [[1, 100]]))).toBe(false);
-    expect(contained(deletion, deletion)).toBe(true);
-  });
-
-  it('refuses hunk-less sections — mode, binary and rename', () => {
-    // git emits no `+++`/`@@` for these at all, so they were invisible to a
-    // hunk-only parser and passed vacuously.
-    const modeOnly = [
-      'diff --git a/script.sh b/script.sh',
-      'old mode 100644',
-      'new mode 100755',
-      '',
-    ].join('\n');
-    const binary = [
-      'diff --git a/logo.png b/logo.png',
-      'Binary files a/logo.png and b/logo.png differ',
-      '',
-    ].join('\n');
-    const rename = [
-      'diff --git a/old.ts b/new.ts',
-      'similarity index 100%',
-      'rename from old.ts',
-      'rename to new.ts',
-      '',
-    ].join('\n');
-    for (const delta of [modeOnly, binary, rename]) {
-      expect(contained(delta, sec('a.ts', [[1, 100]]))).toBe(false);
-      // …and the same section in the PR's own diff is contained.
-      expect(contained(delta, delta)).toBe(true);
-    }
-  });
-
-  it('rules containment on a non-ASCII path — the quotePath pin, from the oracle side', () => {
-    // git C-style-quotes such a path unless `core.quotePath=false` is pinned
-    // (it is, in PINNED_DIFF_CONFIG). Unquoted, the oracle rules normally;
-    // quoted, it cannot name the section and every --since round on a PR
-    // touching the file would refuse as `containment-unverified`.
-    const unquoted = sec('docs/架构.md', [[1, 3]]);
-    expect(contained(unquoted, sec('docs/架构.md', [[1, 100]]))).toBe(true);
-    const quoted = [
-      'diff --git "a/docs/\\346\\236\\266\\346\\236\\204.md" "b/docs/\\346\\236\\266\\346\\236\\204.md"',
-      '--- "a/docs/\\346\\236\\266\\346\\236\\204.md"',
-      '+++ "b/docs/\\346\\236\\266\\346\\236\\204.md"',
-      '@@ -1,0 +1,1 @@',
-      '+x',
-      '',
-    ].join('\n');
-    // And the quoted shape rules too: git quotes such a path even under
-    // `core.quotePath=false` when it holds a quote, a backslash or a
-    // control character, so the oracle unquotes rather than trusting the
-    // capture's config. The pin still matters (it keeps the common
-    // non-ASCII case unquoted end to end) and is asserted in diff-flags.
-    expect(contained(quoted, quoted)).toBe(true);
-  });
-
-  it('keys quote-bearing paths apart, not onto one shared bucket', () => {
-    // Two DIFFERENT files whose names both carry a quote: a keying
-    // regression that collapsed them onto one bucket would rule this
-    // contained and publish an unchecked scope.
-    const inner = [
-      'diff --git "a/we\\"ird.ts" "b/we\\"ird.ts"',
-      '--- "a/we\\"ird.ts"',
-      '+++ "b/we\\"ird.ts"',
-      '@@ -1,0 +1,1 @@',
-      '+x',
-      '',
-    ].join('\n');
-    const outer = [
-      'diff --git "a/oth\\"er.ts" "b/oth\\"er.ts"',
-      '--- "a/oth\\"er.ts"',
-      '+++ "b/oth\\"er.ts"',
-      '@@ -1,0 +1,50 @@',
-      ...Array.from({ length: 50 }, (_, i) => `+line ${i}`),
-      '',
-    ].join('\n');
-    expect(contained(inner, outer)).toBe(false);
-    expect(contained(inner, inner)).toBe(true);
-  });
-
-  it('names paths the shared parser can name — including a space and a quote', () => {
-    // The oracle reads sections out of `parseDiff`, which unquotes and knows
-    // the rename shapes, so paths that defeated a hand-rolled split are
-    // ordinary now: this is what moving off a private grammar buys.
-    const spacey = [
-      'diff --git a/my b/file.ts b/my b/file.ts',
-      '--- a/my b/file.ts',
-      '+++ b/my b/file.ts',
-      '@@ -1,0 +1,1 @@',
-      '+x',
-      '',
-    ].join('\n');
-    expect(contained(spacey, spacey)).toBe(true);
-  });
-
-  it('fails closed on a payload that is not a diff at all', () => {
-    // The remaining "could not rule" state: a capture that returned
-    // something with no sections in it. Refusing is right — an oracle that
-    // cannot read its input must not vouch for a scope.
-    const notADiff = 'fatal: bad revision\nsome other noise\n';
-    expect(containmentRuling(notADiff, notADiff)).toEqual({
-      ok: false,
-      unverified: true,
-    });
-    // Each side, alone. Feeding the garbage to BOTH arguments leaves the
-    // OUTER null-check pinned by nothing: a mutant dropping it survives, and
-    // the day it regressed `sectionsContained(inner, null)` would throw a
-    // TypeError out of `runFetchPr` — after the worktree exists and before
-    // any report is written — instead of degrading to
-    // `containment-unverified`.
-    const real = sec('a.ts', [[1, 3]]);
-    expect(containmentRuling(real, notADiff)).toEqual({
-      ok: false,
-      unverified: true,
-    });
-    expect(containmentRuling(notADiff, real)).toEqual({
-      ok: false,
-      unverified: true,
-    });
-  });
-});
-
 describe('isEmptyDiff', () => {
   // The SKILL acts on this by recommending the PR be closed as superseded, so
   // each guard is tested for the live PR it would otherwise close.
@@ -3985,6 +3332,7 @@ describe('fetch-pr diff identity (diffSha256)', () => {
     vi.mocked(resolveMergeBase).mockReturnValue({
       sha: 'base123',
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     vi.mocked(gitRaw).mockImplementation((...args: string[]) =>
       args.includes('diff') ? Buffer.from(diff) : Buffer.from(''),
@@ -4013,6 +3361,7 @@ describe('fetch-pr diff identity (diffSha256)', () => {
     vi.mocked(resolveMergeBase).mockReturnValue({
       sha: 'base123',
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     vi.mocked(gitRaw).mockImplementation((...args: string[]) =>
       args.includes('diff') ? (bytes as unknown as Buffer) : Buffer.from(''),
@@ -4034,6 +3383,7 @@ describe('fetch-pr diff identity (diffSha256)', () => {
     vi.mocked(resolveMergeBase).mockReturnValue({
       sha: null,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     const report = await reportFor();
     expect(report.diffSha256).toBeNull();
@@ -4062,6 +3412,7 @@ describe('fetch-pr run-session ledger wiring', () => {
     vi.mocked(resolveMergeBase).mockReturnValue({
       sha: null,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
     vi.mocked(gitRaw).mockImplementation(() => Buffer.from(''));
     producerMocks.readFileSync.mockImplementation(() => {

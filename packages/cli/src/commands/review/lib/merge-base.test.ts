@@ -12,6 +12,13 @@ function fakeGit(opts: {
   fetchOk?: boolean;
   refs?: string[];
   bases?: Record<string, string>;
+  /**
+   * Probes that could not ANSWER, keyed like `bases`. Exit 1 is the answer
+   * "no common ancestor"; anything else — 128, or no status from a kill —
+   * says nothing about the histories, and the two lead to opposite recovery
+   * flows.
+   */
+  unanswerable?: string[];
 }): GitProbe & { calls: string[] } {
   const calls: string[] = [];
   return {
@@ -26,7 +33,12 @@ function fakeGit(opts: {
     },
     mergeBase(a, b) {
       calls.push(`mergeBase ${a} ${b}`);
-      return opts.bases?.[`${a}..${b}`] ?? null;
+      const sha = opts.bases?.[`${a}..${b}`] ?? null;
+      if (sha) return { sha, status: 0 };
+      return {
+        sha: null,
+        status: (opts.unanswerable ?? []).includes(`${a}..${b}`) ? 128 : 1,
+      };
     },
   };
 }
@@ -38,7 +50,11 @@ describe('resolveMergeBase', () => {
       bases: { 'refs/remotes/origin/main..pr-head': 'aaa111' },
     });
     const r = resolveMergeBase('origin', 'main', 'pr-head', git);
-    expect(r).toEqual({ sha: 'aaa111', baseFetchFailed: false });
+    expect(r).toEqual({
+      sha: 'aaa111',
+      baseFetchFailed: false,
+      probeUnavailable: false,
+    });
     // It never had to consult the local branch.
     expect(git.calls).not.toContain('mergeBase main pr-head');
   });
@@ -76,7 +92,61 @@ describe('resolveMergeBase', () => {
     expect(resolveMergeBase('origin', 'main', 'pr-head', git)).toEqual({
       sha: 'stale1',
       baseFetchFailed: true,
+      probeUnavailable: false,
     });
+  });
+
+  it('separates "no common ancestor" from a probe that could not answer', () => {
+    // `gitOpt` collapsed every failure to a null sha, so a 128 or a kill —
+    // the 120s timeout a large long-lived PR under CI load reaches — was
+    // indistinguishable from git's definitive exit-1 "these histories share
+    // nothing". The caller keys the RETRY class on the difference: a probe
+    // that could not answer is infrastructure, and a re-run repeats exactly
+    // the component that failed.
+    const definitive = resolveMergeBase(
+      'origin',
+      'main',
+      'pr-head',
+      fakeGit({ refs: ['refs/remotes/origin/main'] }),
+    );
+    expect(definitive).toEqual({
+      sha: null,
+      baseFetchFailed: false,
+      probeUnavailable: false,
+    });
+
+    const unanswerable = resolveMergeBase(
+      'origin',
+      'main',
+      'pr-head',
+      fakeGit({
+        refs: ['refs/remotes/origin/main'],
+        unanswerable: ['refs/remotes/origin/main..pr-head'],
+      }),
+    );
+    expect(unanswerable).toEqual({
+      sha: null,
+      baseFetchFailed: false,
+      probeUnavailable: true,
+    });
+  });
+
+  it('an unanswerable probe on ONE candidate taints the whole resolution', () => {
+    // The tracking ref cannot answer and the local fallback says "no common
+    // ancestor". Reporting that as the definitive shape would file a
+    // transient failure under a reason the recovery flow never retries — the
+    // round has not established determinism, it has only heard one answer.
+    const r = resolveMergeBase(
+      'origin',
+      'main',
+      'pr-head',
+      fakeGit({
+        refs: ['refs/remotes/origin/main', 'main'],
+        unanswerable: ['refs/remotes/origin/main..pr-head'],
+      }),
+    );
+    expect(r.sha).toBeNull();
+    expect(r.probeUnavailable).toBe(true);
   });
 
   it('returns null when no candidate ref resolves', () => {
@@ -84,6 +154,7 @@ describe('resolveMergeBase', () => {
     expect(resolveMergeBase('origin', 'main', 'pr-head', git)).toEqual({
       sha: null,
       baseFetchFailed: false,
+      probeUnavailable: false,
     });
   });
 

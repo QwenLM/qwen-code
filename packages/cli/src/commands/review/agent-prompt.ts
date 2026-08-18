@@ -184,11 +184,6 @@ interface IncrementalScope {
 }
 
 /**
- * The per-file scope lists a whole-diff brief renders under its incremental
- * frame. Capped per class: past the cap the tail is counted, not listed —
- * the plan's own `incremental` block remains the complete record.
- */
-/**
  * The per-file scope bullets for ONE chunk's files — uncapped, because the
  * agent holding that chunk is the sole reviewer of those files and has no
  * other source for their class.
@@ -232,6 +227,15 @@ function cappedEdges(edges: readonly string[]): string {
   const rest = edges.length - SCOPE_EDGE_CAP;
   return shown.join(', ') + (rest > 0 ? ` (+${rest} more)` : '');
 }
+/**
+ * The per-file scope lists a whole-diff brief renders under its incremental
+ * frame. Capped per class: past the cap the tail is counted, not listed —
+ * the plan's own `incremental.scope` block remains the complete record.
+ *
+ * This doc used to sit above `chunkScopeBullets`, the function that is
+ * explicitly UNCAPPED, where hover picked it up and the cap rationale read
+ * as documentation of its own contradiction.
+ */
 function scopeFileLists(incremental: IncrementalScope): string[] {
   const cap = <T>(items: T[], render: (item: T) => string): string => {
     const shown = items.slice(0, SCOPE_LIST_CAP).map(render);
