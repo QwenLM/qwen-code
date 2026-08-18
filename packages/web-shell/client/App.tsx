@@ -104,7 +104,6 @@ import {
 } from './components/panels/EnvironmentPanel';
 import { ChatContextHeader } from './components/ChatContextHeader';
 import { WelcomeHeader } from './components/WelcomeHeader';
-import { NewSessionDotField } from './components/NewSessionDotField';
 import { ApprovalModeDialog } from './components/dialogs/ApprovalModeDialog';
 import { ResumeDialog } from './components/dialogs/ResumeDialog';
 import { DialogShell } from './components/dialogs/DialogShell';
@@ -949,6 +948,16 @@ export interface WebShellProps {
    * `true`/omitted still requires the capability to be satisfied.
    */
   fileUploadEnabled?: boolean;
+  /**
+   * Directory that drag-and-dropped files upload into, **relative to the
+   * workspace root**. Use a relative path WITHOUT a leading `/` — e.g.
+   * `'uploads'`, `'uploads/images'`, or omit it to upload into the
+   * workspace root (the default). A leading-slash path like `'/uploads'`
+   * is rejected by the daemon as outside the workspace. The directory
+   * (including intermediate components) is created automatically on upload
+   * when it does not exist.
+   */
+  fileUploadDirectory?: string;
   /** Additional @ mention categories shown alongside built-in files/extensions. */
   atProviders?: readonly WebShellAtProvider[];
   /** Icon URLs for custom composer tag kinds used by @ mention chips. */
@@ -1816,6 +1825,7 @@ export function App({
   atProviders,
   composerTagIcons,
   fileUploadEnabled,
+  fileUploadDirectory,
   renderToolHeaderExtra,
   renderWelcomeHeader,
   renderWelcomeFooter,
@@ -2075,6 +2085,7 @@ export function App({
       markdown,
       loadingPhrases,
       fileUploadEnabled,
+      fileUploadDirectory,
     }),
     [
       composerTagIcons,
@@ -2101,6 +2112,7 @@ export function App({
       markdown,
       loadingPhrases,
       fileUploadEnabled,
+      fileUploadDirectory,
     ],
   );
   const CustomFooter = renderFooter;
@@ -4101,6 +4113,9 @@ export function App({
       (!failedPromptRetry.admitted || failedPromptRetry.settled),
   );
   const streamingStateRef = useRef<DaemonStreamingState>(streamingState);
+  useEffect(() => {
+    streamingStateRef.current = streamingState;
+  }, [streamingState]);
   // Cleared in three places: the session-switch effect, the drain loop, and
   // handleCancel. Bumping drainGenerationRef at each clear site also cancels
   // any in-flight inline ! command whose ensureSessionForPrompt is resolving.
@@ -6123,6 +6138,8 @@ export function App({
     connection.capabilities?.features.includes(
       'session_mid_turn_message_query',
     ) === true;
+  const canInjectMidTurnMedia =
+    connection.capabilities?.features.includes('session_media') === true;
   const {
     queuedPrompts,
     queuedTexts,
@@ -6131,8 +6148,6 @@ export function App({
     editQueuedPrompt,
     editLastQueuedPrompt,
     clearQueuedPrompts,
-    restoreUnknownQueuedPrompt,
-    discardUnknownQueuedPrompt,
   } = useQueuedPrompts({
     connected,
     writeBlocked: sessionWriteBlocked,
@@ -6141,6 +6156,7 @@ export function App({
     clientId: connection.clientId,
     canMutateMidTurn,
     canQueryMidTurn,
+    canInjectMidTurnMedia,
     streamingState,
     sessionActions,
     store,
@@ -7032,10 +7048,6 @@ export function App({
       t,
     ],
   );
-
-  useEffect(() => {
-    streamingStateRef.current = streamingState;
-  }, [streamingState]);
 
   // Drop queued commands on a session switch so the drain never runs a
   // command against a different workspace's daemon (mirrors useQueuedPrompts).
@@ -8664,7 +8676,6 @@ export function App({
         shouldBlockComposerSubmit({
           connectionStatus: connectionRef.current.status,
           hasSession: Boolean(connectionRef.current.sessionId),
-          restartSseOnPrompt: Boolean(restartSseOnPrompt),
         })
       ) {
         pushToast('warning', t('editor.connectionDisconnected'));
@@ -9800,7 +9811,6 @@ export function App({
       runVisibleBtw,
       reconcileCatalogRename,
       requireActiveSessionForLocalCommand,
-      restartSseOnPrompt,
       resumeChatBottomFollow,
       selectedLanguage,
       setPendingModel,
@@ -10316,7 +10326,6 @@ export function App({
   const isDisabled =
     sessionWriteBlocked ||
     shouldDisableComposerInput({
-      catchingUp: Boolean(connection.catchingUp),
       pendingApproval: pendingApproval !== null,
       isPreparingPrompt,
     });
@@ -10344,7 +10353,6 @@ export function App({
       ? latestUserBlock
       : undefined;
   const composerPlaceholderInputState = {
-    catchingUp: Boolean(connection.catchingUp),
     isPreparingPrompt,
     isStreaming: streamingState !== 'idle',
   };
@@ -11576,10 +11584,6 @@ export function App({
                 .filter(Boolean)
                 .join(' ')}
             >
-              {isChatEmptyState &&
-                !showMissingSessionState &&
-                !activePanel &&
-                mainView === 'chat' && <NewSessionDotField />}
               {sidebarOptions.enabled &&
                 sidebarOptions.showCompactToggle &&
                 (!chatHeaderEnabled || isChatEmptyState) &&
@@ -12071,8 +12075,9 @@ export function App({
                   hasWelcomeMiddle
                     ? styles.chatViewWithWelcomeMiddle
                     : undefined,
-                  // Marker class (no declarations): keeps the ':not(...)'
-                  // exclusion in App.module.css matching.
+                  // Positioning hook: completes the compound selector in
+                  // App.module.css that keeps this wrap relative so the
+                  // absolutely-positioned bottom panels keep their anchor.
                   CustomFooter ? styles.chatViewWithCustomFooter : undefined,
                   activePanel ||
                   mainView !== 'chat' ||
@@ -12482,8 +12487,7 @@ export function App({
                           canMutateMidTurn={canMutateMidTurn}
                           onDelete={removeQueuedPrompt}
                           onEdit={editQueuedPrompt}
-                          onRestoreUnknown={restoreUnknownQueuedPrompt}
-                          onDiscardUnknown={discardUnknownQueuedPrompt}
+                          onImagePreview={openImagePanel}
                         />
                         {CustomComposerHeader && (
                           <div className={styles.composerHeader}>
@@ -12626,7 +12630,6 @@ export function App({
                           composerInput={composerInput}
                           composerInputVersion={composerInputVersion}
                           placeholderText={composerPlaceholderText}
-                          animatePlaceholder={isChatEmptyState}
                         />
                         {CustomComposerFooter && (
                           <CustomComposerFooter

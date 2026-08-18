@@ -11,6 +11,20 @@ export function attachmentUriForName(name: string): string {
   return `attachment:///${name}`;
 }
 
+export function daemonPromptImageToBlob(image: DaemonPromptImage): Blob {
+  const comma = image.data.indexOf(',');
+  const encoded =
+    image.data.startsWith('data:') && comma >= 0
+      ? image.data.slice(comma + 1)
+      : image.data;
+  const binary = atob(encoded);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return new Blob([bytes], {
+    type: image.mimeType ?? image.mediaType ?? image.media_type ?? 'image/*',
+  });
+}
+
 export function toDaemonPromptContent(
   text: string,
   images: readonly DaemonPromptImage[] = [],

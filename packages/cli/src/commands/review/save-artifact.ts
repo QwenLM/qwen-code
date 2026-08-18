@@ -31,6 +31,7 @@ import {
 } from './findings.js';
 import { EFFORT_LEVELS, type ReviewEffort } from './parse-args.js';
 import { REVIEWS_DIR } from './lib/paths.js';
+import { isSameFile } from './lib/same-file.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 
 interface PersistedVerdict extends ComposeReviewResult {
@@ -52,9 +53,10 @@ export interface SavedReviewArtifact {
   /** Absolute path of the written document. */
   path: string;
   /**
-   * The same path relative to the workspace root — the exact value
-   * `record_artifact` wants as `workspacePath`, so the skill copies it
-   * verbatim instead of re-deriving it from the absolute path.
+   * The same path relative to the workspace root. `record_artifact` now
+   * accepts the absolute `path` and stores this canonical form itself;
+   * keep emitting it so older runtimes and display surfaces can still
+   * use the root-relative locator.
    */
   workspacePath: string;
 }
@@ -119,14 +121,6 @@ function rejectSymlinkPath(root: string, path: string, label: string): void {
       throw new Error(`${label} must not traverse a symbolic link.`);
     }
   }
-}
-
-function sameFile(left: string, right: string): boolean {
-  if (left === right) return true;
-  if (!existsSync(left) || !existsSync(right)) return false;
-  const leftStat = statSync(left);
-  const rightStat = statSync(right);
-  return leftStat.dev === rightStat.dev && leftStat.ino === rightStat.ino;
 }
 
 function readText(path: string, label: string): string {
@@ -239,7 +233,43 @@ function validateVerdict(value: unknown): PersistedVerdict {
       'Composed verdict.deferredCount must be a non-negative integer.',
     );
   }
+  // Absent reads as "no trim", the same absence semantics the sibling count
+  // gets: a composed file written before the body budget shipped carries no
+  // `bodyTrim`, and a mid-upgrade save must not fail over a record of
+  // something that did not happen. A PRESENT value of the wrong shape is
+  // refused like every other field here.
+  const rawTrim = verdict['bodyTrim'] ?? {
+    sections: 0,
+    deferralList: false,
+    fold: false,
+    truncated: false,
+  };
+  const trim = object(rawTrim, 'Composed verdict.bodyTrim');
+  // No per-field tolerance for `fold`: every build that writes a `bodyTrim`
+  // at all writes all four fields (`git log -S bodyTrim` is this branch and
+  // nothing else), so a present record missing one is malformed, not old.
+  // The tolerance that IS owed lives above, on the object: a composed file
+  // from a CLI predating the budget carries no `bodyTrim`, and that absence
+  // is the truth rather than an error.
+  if (
+    typeof trim['sections'] !== 'number' ||
+    !Number.isInteger(trim['sections']) ||
+    trim['sections'] < 0 ||
+    typeof trim['deferralList'] !== 'boolean' ||
+    typeof trim['fold'] !== 'boolean' ||
+    typeof trim['truncated'] !== 'boolean'
+  ) {
+    throw new Error(
+      'Composed verdict.bodyTrim must carry a non-negative integer `sections` and boolean `deferralList` / `fold` / `truncated`.',
+    );
+  }
   return {
+    bodyTrim: {
+      sections: trim['sections'],
+      deferralList: trim['deferralList'],
+      fold: trim['fold'],
+      truncated: trim['truncated'],
+    },
     event: event(verdict['event'], 'Composed verdict.event'),
     body: string(verdict['body'], 'Composed verdict.body'),
     baseEvent: event(verdict['baseEvent'], 'Composed verdict.baseEvent'),
@@ -313,7 +343,7 @@ export function saveReviewArtifact(
     ['composed input', composedPath],
     ['Markdown report', reportPath],
   ] as const) {
-    if (sameFile(outputPath, inputPath)) {
+    if (isSameFile(outputPath, inputPath)) {
       throw new Error(`Output must not overwrite the ${label}.`);
     }
   }

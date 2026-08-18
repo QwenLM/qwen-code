@@ -787,6 +787,7 @@ describe('scheduled-task keepalive', () => {
       closeSession: async (id: string) => {
         closed.push(id);
       },
+      markSessionCatalogChanged: vi.fn(),
       updateSessionMetadata: () => {},
     };
     await updateCronTasks(workspace, () => [
@@ -801,6 +802,8 @@ describe('scheduled-task keepalive', () => {
     ka.stop();
     expect(closed).toContain('orphan-sess');
     expect(removeSpy).toHaveBeenCalledWith('orphan-sess');
+    // The persisted removal succeeded, so the catalog clock advances.
+    expect(rollbackBridge.markSessionCatalogChanged).toHaveBeenCalledTimes(1);
     removeSpy.mockRestore();
   });
 
@@ -825,6 +828,7 @@ describe('scheduled-task keepalive', () => {
       closeSession: async (id: string) => {
         closed.push(id);
       },
+      markSessionCatalogChanged: vi.fn(),
       updateSessionMetadata: () => {},
     };
     await updateCronTasks(workspace, () => [
@@ -838,6 +842,8 @@ describe('scheduled-task keepalive', () => {
     await ka.tick();
     ka.stop();
     expect(closed).toContain('our-orphan');
+    // The persisted removal succeeded, so the catalog clock advances.
+    expect(raceBridge.markSessionCatalogChanged).toHaveBeenCalledTimes(1);
     // The other process's sessionId is preserved.
     const tasks = await readCronTasks(workspace);
     expect(tasks[0]!.sessionId).toBe('other-sess');

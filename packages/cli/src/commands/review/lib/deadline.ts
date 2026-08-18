@@ -40,7 +40,13 @@
 // still bounds the run, and a broken environment variable must degrade to
 // today's behaviour, not wedge every budgeted review at round 1.
 
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { parsePositiveIntegerEnv } from '@qwen-code/qwen-code-core';
 import { promptRecordDir, runEpochMs } from './prompt-record.js';
@@ -151,6 +157,87 @@ interface RoundStamp {
 
 const STAMPS_FILE = 'budget-rounds.json';
 const STOP_FILE = 'budget-stop.json';
+
+/**
+ * Claim the retirement-degradation NOTE's slot for `round`, this run:
+ * `true` at most once per round per run, across PROCESSES — Step 3B
+ * builds each chunk in its own CLI process, and the claim file's atomic
+ * `wx` create is the inter-process exclusion a read-modify-write sidecar
+ * does not have (#9272: 24 concurrent builds all claimed one slot, and
+ * the JSON tore). One claim file per round, fenced to the run by its
+ * mtime against the plan's epoch — a previous run's claim must not
+ * silence this run's channel; the stale-claim remove-then-create window
+ * can double-print, which is the verbose side and accepted. Every other
+ * failure fails toward PRINTING: the note is the diagnostic, and silence
+ * is the only wrong answer here (#9206).
+ */
+export function claimRetirementDegradeNote(
+  planPath: string,
+  round: number | undefined,
+): boolean {
+  const dir = promptRecordDir(planPath);
+  const file = join(dir, `retirement-degrade-note-round-${round ?? 'x'}.json`);
+  try {
+    mkdirSync(dir, { recursive: true });
+  } catch {
+    // An uncreatable record dir is not a claim — the note must still
+    // print. A recursive mkdir throws EEXIST when the path exists but is
+    // NOT a directory, and the create's catch below reads only the `wx`
+    // EEXIST as "claimed already"; conflating the two silenced the note
+    // on every round of a run whose record path was a regular file
+    // (#9272).
+    return true;
+  }
+  // A previous-run claim must be reclaimed. Fence it by SHAPE and by its
+  // own `atMs` vs the strict plan epoch (#9272 — file mtimes are not
+  // reliable across runners, so the fence reads the claim's CONTENT).
+  // `recursive` so a directory occupant clears. A non-file, an
+  // unreadable/corrupt claim, and a readable claim older than the epoch
+  // are all NOT this run's claim and are removed; the absence case (no
+  // occupant) needs no removal.
+  try {
+    const st = statSync(file);
+    let stale: boolean;
+    if (!st.isFile()) {
+      stale = true;
+    } else {
+      try {
+        stale =
+          JSON.parse(readFileSync(file, 'utf8')).atMs <
+          statSync(planPath).mtimeMs;
+      } catch {
+        // Corrupt/unreadable content is not a claim — a torn concurrent
+        // write would otherwise sit at the path and EEXIST-silence the
+        // note forever (#9272).
+        stale = true;
+      }
+    }
+    if (stale) {
+      rmSync(file, { force: true, recursive: true });
+    }
+  } catch {
+    // Absent occupant — the create below is the claimant.
+  }
+  try {
+    writeFileSync(
+      file,
+      JSON.stringify({ round: round ?? null, atMs: Date.now() }),
+      { flag: 'wx' },
+    );
+    return true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') return true;
+    // EEXIST: claimed already this run — but only when the occupant is
+    // the claim FILE. A directory or other non-file at the claim path
+    // holds no claim, and treating it as one silences the NOTE forever —
+    // the only wrong answer here (#9272).
+    try {
+      return !statSync(file).isFile();
+    } catch {
+      return true;
+    }
+  }
+}
 
 // The run-epoch fence is shared with every other per-run artifact (the
 // prompt records, the transcripts, the session ledger) — one definition in
@@ -507,6 +594,11 @@ export interface BudgetStop {
  * a reword of the entry moves its key along with it.
  */
 export const BUDGET_STOP_PHRASE = 'review time budget';
+/** The Chinese pair — the marker's zh entries carry it, and the body-side
+ *  dedup must read BOTH languages: a relayed Chinese stop entry that only the
+ *  English phrase was checked against survived the splice and was rendered
+ *  under the whiffed-agent cause beside the structural stop line. */
+export const BUDGET_STOP_PHRASE_ZH = '评审时间预算';
 
 /**
  * The disclosure as structural parts, both languages: compose-review renders
@@ -547,6 +639,8 @@ export function budgetStopEntryZh(round: number | undefined): string {
  * orchestrator's relayed copy against the marker's by shared text.
  */
 export const ROUND_CAP_PHRASE = 'reverse-audit round cap';
+/** The Chinese pair, for the same bilingual-dedup reason as the budget one. */
+export const ROUND_CAP_PHRASE_ZH = '反审轮数上限';
 
 /**
  * The round-cap disclosure as structural parts, both languages — the

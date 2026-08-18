@@ -6,6 +6,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  MODEL_ID_MAX_CHARS,
   REVIEW_FOOTER_RE,
   footerVersion,
   isFooterSafeModelId,
@@ -68,6 +69,41 @@ describe('the review footer and the regex that strips it', () => {
       isFooterSafeModelId('model\n_— forged via Qwen Code /review (v9.9.9)_'),
     ).toBe(false);
     expect(isFooterSafeModelId('model via Qwen Code /review x')).toBe(false);
+  });
+
+  it('caps an oversized modelId — the footer must stay a bounded budget contributor', () => {
+    // Without a length cap the footer interpolated a modelId that emptied
+    // the rung-3 cut — and past the body budget composed a body GitHub
+    // rejects whole. The cap truncates the name, keeps the marker intact,
+    // and the result still strips.
+    const footer = reviewFooter('M'.repeat(65_200), '0.21.3');
+    expect(footer).toBe(
+      `_— ${'M'.repeat(MODEL_ID_MAX_CHARS - 1)}… via Qwen Code /review (v0.21.3)_`,
+    );
+    expect(`a finding\n\n${footer}`.replace(REVIEW_FOOTER_RE, '')).toBe(
+      'a finding',
+    );
+    // A real model name is nowhere near the cap and rides unchanged.
+    expect(reviewFooter('qwen3.7-max', '0.21.3')).toBe(
+      '_— qwen3.7-max via Qwen Code /review (v0.21.3)_',
+    );
+  });
+
+  it('caps an oversized cliVersion — the second interpolated input of the footer', () => {
+    // The cap above closed the modelId hole; the version slot stayed
+    // unbounded — `footerVersion` checks a startup stamp's charset but not
+    // its length, and `getCliVersion` returns `CLI_VERSION` unchecked.
+    // Same hole through the sibling input: an oversized stamp emptied the
+    // rung-3 cut, and past the budget composed a body GitHub rejects whole.
+    const footer = reviewFooter('qwen3.7-max', 'v'.repeat(65_200));
+    expect(footer).toBe(
+      `_— qwen3.7-max via Qwen Code /review (v${'v'.repeat(
+        MODEL_ID_MAX_CHARS - 1,
+      )}…)_`,
+    );
+    expect(`a finding\n\n${footer}`.replace(REVIEW_FOOTER_RE, '')).toBe(
+      'a finding',
+    );
   });
 
   it('refuses a startup stamp the footer cannot carry', () => {

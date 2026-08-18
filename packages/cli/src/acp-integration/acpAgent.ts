@@ -72,6 +72,7 @@ import {
   SessionTranscriptSnapshotUnavailableError,
   SessionTranscriptTooLargeError,
   encodeSessionTranscriptCursor,
+  isTurnResultRecordPayload,
   subagentGenerator,
   redactUrlCredentials,
   computeUniqueBranchTitle,
@@ -125,6 +126,7 @@ import {
   type WorkspaceRememberContextMode,
   type ChatRecord,
   type ToolInvocationGuard,
+  type TurnResultRecordPayload,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
@@ -178,6 +180,7 @@ import {
   ACP_EVENT_LOOP_STALL_RESTART_MS,
   CHANNEL_PROMPT_META_KEY,
 } from '@qwen-code/channel-base';
+import { observeAcpToolResultWire } from '../utils/tool-result-boundary-diagnostics.js';
 import { Readable, Writable } from 'node:stream';
 import { normalizeDisabledToolList } from '../config/normalizeDisabledTools.js';
 import { pipeline } from 'node:stream/promises';
@@ -414,6 +417,46 @@ const ACP_REASONING_EFFORT_NAMES: Record<ReasoningEffort, string> = {
 
 // Must be less than WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS (300s) in bridge.ts.
 const WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS = 295_000;
+
+const TURN_STATUS_SCAN_PAGE_LIMIT = 500;
+const TURN_STATUS_SCAN_MAX_PAGES = 10;
+
+async function findSettledTurnResult(
+  reader: SessionTranscriptReader,
+  sessionId: string,
+  promptId: string | undefined,
+  workspaceCwd: string,
+): Promise<TurnResultRecordPayload | undefined> {
+  let cursor: string | undefined;
+  for (let page = 0; page < TURN_STATUS_SCAN_MAX_PAGES; page++) {
+    const result = await reader.readPage(sessionId, {
+      ...(cursor !== undefined
+        ? { cursor }
+        : { direction: 'backward' as const }),
+      limit: TURN_STATUS_SCAN_PAGE_LIMIT,
+      maxBytes: SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
+    });
+    for (let i = result.records.length - 1; i >= 0; i--) {
+      const record = result.records[i]!;
+      if (record.type !== 'system' || record.subtype !== 'turn_result') {
+        continue;
+      }
+      const payload = record.systemPayload;
+      if (!isTurnResultRecordPayload(payload)) continue;
+      if (promptId === undefined || payload.promptId === promptId) {
+        return payload;
+      }
+    }
+    if (!result.hasMore || result.nextCursorState === undefined) {
+      return undefined;
+    }
+    cursor = encodeSessionTranscriptCursor(
+      result.nextCursorState,
+      workspaceCwd,
+    );
+  }
+  return undefined;
+}
 
 type AcpSessionProfileStage =
   | 'settings_load'
@@ -3301,7 +3344,10 @@ export async function runAcpAgent(
     let initializeRequestId: string | number | null | undefined;
     const pendingNewSessionRequestIds = new Set<string | number | null>();
     const stream = ndJsonStream(stdout, stdin, {
-      onMessageObserved: ({ direction, message }) => {
+      onMessageObserved: ({ direction, bytes, message }) => {
+        if (direction === 'sent') {
+          observeAcpToolResultWire(message, bytes);
+        }
         if (
           direction === 'received' &&
           'id' in message &&
@@ -11039,6 +11085,101 @@ class QwenAgent implements Agent {
               }
             : null,
         };
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionTurnStatus: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || !SESSION_ID_RE.test(sessionId)) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const rawPromptId = params['promptId'];
+        if (
+          rawPromptId !== undefined &&
+          (typeof rawPromptId !== 'string' || rawPromptId.length === 0)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing promptId',
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        const settings = loadSettingsCached(cwd);
+        return await runWithAcpRuntimeOutputDir(settings, cwd, async () => {
+          try {
+            await session.getConfig().getChatRecordingService()?.flush();
+          } catch {
+            // Read the last durable snapshot after a best-effort flush.
+          }
+          let reader: SessionTranscriptReader | undefined;
+          try {
+            reader = new SessionTranscriptReader(cwd);
+            const turnResult = await findSettledTurnResult(
+              reader,
+              sessionId,
+              typeof rawPromptId === 'string' ? rawPromptId : undefined,
+              cwd,
+            );
+            return {
+              v: 1,
+              sessionId,
+              turnResult: turnResult ?? null,
+            };
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+              // Transcript file not written yet (no settled turn
+              // persisted). Scoped to the read so an unrelated ENOENT
+              // (settings/runtime resolution) still surfaces.
+              return { v: 1, sessionId, turnResult: null };
+            }
+            if (
+              error instanceof SessionTranscriptSnapshotUnavailableError &&
+              reader
+            ) {
+              try {
+                const transcript = await fs.stat(
+                  reader.getSessionFilePath(sessionId),
+                );
+                if (transcript.size === 0) {
+                  return { v: 1, sessionId, turnResult: null };
+                }
+              } catch (statError) {
+                if ((statError as NodeJS.ErrnoException).code === 'ENOENT') {
+                  return { v: 1, sessionId, turnResult: null };
+                }
+              }
+            }
+            if (error instanceof InvalidSessionTranscriptCursorError) {
+              throw new RequestError(-32602, error.message, {
+                errorKind: 'invalid_transcript_cursor',
+              });
+            }
+            if (error instanceof SessionTranscriptSnapshotUnavailableError) {
+              throw new RequestError(-32010, error.message, {
+                errorKind: 'transcript_snapshot_unavailable',
+                sessionId,
+              });
+            }
+            if (error instanceof SessionTranscriptTooLargeError) {
+              throw new RequestError(-32011, error.message, {
+                errorKind: 'transcript_too_large',
+                sessionId,
+                snapshotSize: error.snapshotSize,
+                maxBytes: error.maxBytes,
+              });
+            }
+            if (error instanceof SessionTranscriptPageTooLargeError) {
+              throw new RequestError(-32012, error.message, {
+                errorKind: 'transcript_page_too_large',
+                sessionId,
+                pageBytes: error.pageBytes,
+                maxBytes: error.maxBytes,
+              });
+            }
+            throw error;
+          }
+        });
       }
       case SERVE_CONTROL_EXT_METHODS.sessionContinue: {
         const sessionId = params['sessionId'];
