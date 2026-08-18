@@ -337,7 +337,26 @@ export function redactStructuredOutputArgsForRecording(
  * Exported for tests.
  */
 export function buildRecordMessageFromHistoryParts(parts: Part[]): Part[] {
-  const thoughtPart = parts.find((part) => part.thought);
+  // Join every thought part the way `processStreamResponse` builds
+  // `thoughtContentPart`: a coalesced recovery turn carries one thought part
+  // per merged attempt, and keeping only the first would silently drop each
+  // continuation's thinking from the transcript. The first thoughtSignature
+  // wins, matching the per-stream derivation.
+  const thoughtText = parts
+    .filter((part) => part.thought)
+    .map((part) => (typeof part.text === 'string' ? part.text : ''))
+    .join('')
+    .trim();
+  let thoughtPart: Part | undefined;
+  if (thoughtText !== '') {
+    thoughtPart = { text: thoughtText, thought: true };
+    const thoughtSignature = parts.find(
+      (part) => part.thought && part.thoughtSignature,
+    )?.thoughtSignature;
+    if (thoughtSignature) {
+      thoughtPart.thoughtSignature = thoughtSignature;
+    }
+  }
   const contentText = parts
     .filter((part) => !part.thought && typeof part.text === 'string')
     .map((part) => part.text)
@@ -356,6 +375,45 @@ export function buildRecordMessageFromHistoryParts(parts: Part[]): Part[] {
     ...(contentText ? [{ text: contentText }] : []),
     ...functionCallParts,
   ];
+}
+
+/**
+ * Merge token usage across every deferred recovery attempt into one usage
+ * object for the single merged transcript record. That record replaces N
+ * per-attempt records, so it must carry the whole turn's output spend:
+ * output-side counts (`candidatesTokenCount`, `thoughtsTokenCount`) are
+ * summed across attempts — and `totalTokenCount` raised by the same amount —
+ * while prompt-side counts stay the final attempt's, since every attempt
+ * re-sends the same grown prompt and summing those would multiply-count the
+ * shared context.
+ *
+ * Exported for tests.
+ */
+export function mergeDeferredUsageMetadata(
+  records: ReadonlyArray<{ tokens?: GenerateContentResponseUsageMetadata }>,
+): GenerateContentResponseUsageMetadata | undefined {
+  const finalTokens = records[records.length - 1]?.tokens;
+  let extraCandidates = 0;
+  let extraThoughts = 0;
+  for (const record of records.slice(0, -1)) {
+    extraCandidates += record.tokens?.candidatesTokenCount ?? 0;
+    extraThoughts += record.tokens?.thoughtsTokenCount ?? 0;
+  }
+  const extraTotal = extraCandidates + extraThoughts;
+  if (extraTotal === 0) {
+    return finalTokens;
+  }
+  const merged: GenerateContentResponseUsageMetadata = { ...finalTokens };
+  if (extraCandidates > 0) {
+    merged.candidatesTokenCount =
+      (merged.candidatesTokenCount ?? 0) + extraCandidates;
+  }
+  if (extraThoughts > 0) {
+    merged.thoughtsTokenCount =
+      (merged.thoughtsTokenCount ?? 0) + extraThoughts;
+  }
+  merged.totalTokenCount = (merged.totalTokenCount ?? 0) + extraTotal;
+  return merged;
 }
 
 /**
@@ -3462,6 +3520,13 @@ export class GeminiChat {
             // The truncated turn's deferred record must follow history: the
             // escalated attempt replaces it wholesale, so discard the stash to
             // avoid persisting an output the live session threw away.
+            if (self.deferredMaxTokensRecords.length > 0) {
+              debugLogger.debug(
+                `[MAX_TOKENS_DEFER] Discarding ` +
+                  `${self.deferredMaxTokensRecords.length} deferred ` +
+                  `record(s) replaced by the escalated attempt`,
+              );
+            }
             self.deferredMaxTokensRecords.length = 0;
             // Signal UI to discard partial output
             yield {
@@ -3631,7 +3696,7 @@ export class GeminiChat {
                   yield event;
                   continue;
                 }
-                const fr = event.value.candidates?.[0]?.finishReason;
+                const fr = firstCandidateFinishReason(event.value);
                 if (fr) recoveryFinishReason = fr;
                 yield event;
               }
@@ -3694,13 +3759,25 @@ export class GeminiChat {
               coalescedPairs === successfulRecoveries &&
               mergedTurn?.role === 'model'
             ) {
+              debugLogger.debug(
+                `[MAX_TOKENS_DEFER] Flushing one merged record from ` +
+                  `${deferredRecords.length} deferred attempt(s) ` +
+                  `(coalescedPairs=${coalescedPairs})`,
+              );
               self.chatRecordingService?.recordAssistantTurn({
                 ...deferredRecords[deferredRecords.length - 1]!,
+                tokens: mergeDeferredUsageMetadata(deferredRecords),
                 message: buildRecordMessageFromHistoryParts(
                   mergedTurn.parts ?? [],
                 ),
               });
             } else {
+              debugLogger.debug(
+                `[MAX_TOKENS_DEFER] Flushing ${deferredRecords.length} ` +
+                  `deferred record(s) per-attempt (coalescedPairs=` +
+                  `${coalescedPairs}, successfulRecoveries=` +
+                  `${successfulRecoveries})`,
+              );
               for (const record of deferredRecords) {
                 self.chatRecordingService?.recordAssistantTurn(record);
               }
@@ -3988,6 +4065,10 @@ export class GeminiChat {
         if (self.deferredMaxTokensRecords.length > 0) {
           const stranded = self.deferredMaxTokensRecords;
           self.deferredMaxTokensRecords = [];
+          debugLogger.debug(
+            `[MAX_TOKENS_DEFER] Flushing ${stranded.length} stranded ` +
+              `deferred record(s) on abandoned/failed recovery`,
+          );
           for (const record of stranded) {
             try {
               self.chatRecordingService?.recordAssistantTurn(record);
@@ -4612,7 +4693,10 @@ export class GeminiChat {
     let hasFinishReason = false;
     // Finish-reason *value* seen anywhere in the stream, captured before the
     // `isToolResultContinuation` block below can delete it off the chunk. Used
-    // only to decide record deferral for the MAX_TOKENS recovery flow.
+    // only to decide record deferral for the MAX_TOKENS recovery flow — and
+    // only on non-tool-result streams: tool-result continuations defer based
+    // on the first-wins `deferredFinishReason` instead, because that is the
+    // value the outer loop's recovery-entry decision sees re-emitted.
     let observedFinishReason: FinishReason | undefined;
     const protocolTagDetector = new LeadingProtocolTagLeakDetector();
     let pendingProtocolParts: Part[] = [];
@@ -5153,13 +5237,28 @@ export class GeminiChat {
       } else if (
         recordDeferral === 'always' ||
         (recordDeferral === 'on-max-tokens' &&
-          observedFinishReason === FinishReason.MAX_TOKENS)
+          // The deferral decision must read the same finish reason the
+          // recovery-entry decision will see. On tool-result continuations
+          // the real finish chunks are stripped above and the outer loop only
+          // sees the re-emitted first-wins `deferredFinishReason` — so a
+          // `[MAX_TOKENS, STOP]` stream judged by last-wins
+          // `observedFinishReason` would record immediately here while
+          // recovery still activates, duplicating the turn on disk.
+          (isToolResultContinuation
+            ? deferredFinishReason
+            : observedFinishReason) === FinishReason.MAX_TOKENS)
       ) {
         // MAX_TOKENS output-recovery owns this turn: stash the record so the
         // recovery block can emit a single merged one matching coalesced
         // history. The append-only transcript cannot be coalesced after the
         // fact, so it must not be written here.
         this.deferredMaxTokensRecords.push(recordArgs);
+        debugLogger.debug(
+          `[MAX_TOKENS_DEFER] Deferring assistant record ` +
+            `(mode=${recordDeferral}, observed=${observedFinishReason}, ` +
+            `deferred=${deferredFinishReason}, stashed=` +
+            `${this.deferredMaxTokensRecords.length})`,
+        );
       } else {
         this.chatRecordingService?.recordAssistantTurn(recordArgs);
       }
