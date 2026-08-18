@@ -165,6 +165,7 @@ describe('GET /goals', () => {
         iterations: 0,
         setAt: 2000,
         hasActivePrompt: true,
+        snapshot: goals['s2'].snapshot,
       },
       {
         sessionId: 's1',
@@ -174,6 +175,7 @@ describe('GET /goals', () => {
         setAt: 1000,
         lastReason: 'two tests still fail',
         hasActivePrompt: false,
+        snapshot: goals['s1'].snapshot,
       },
     ]);
   });
@@ -199,6 +201,7 @@ describe('GET /goals', () => {
         iterations: 0,
         setAt: 1000,
         hasActivePrompt: false,
+        snapshot: activeGoal('keep going').snapshot,
       },
     ]);
 

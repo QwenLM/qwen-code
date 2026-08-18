@@ -39,6 +39,9 @@ import type {
   DaemonWorkspaceGitStatus,
   DaemonWorkspaceProvidersStatus,
   HeartbeatResult,
+  GoalControlRequest,
+  GoalSnapshotV2,
+  GoalStateResponse,
   PermissionResponse,
   PromptContentBlock,
   PromptResult,
@@ -89,6 +92,8 @@ export interface DaemonConnectionState {
   displayName?: string;
   /** Latest main-conversation model usage event. */
   tokenUsage?: DaemonTokenUsage;
+  /** Authoritative Goal v2 state for the current session. */
+  goalState?: GoalSnapshotV2;
   /** Current context-window occupancy, used with contextWindow for percentages. */
   tokenCount?: number;
   contextWindow?: number;
@@ -210,6 +215,8 @@ export type DaemonNoticeOperation =
   | 'load_tasks'
   | 'load_artifacts'
   | 'cancel_task'
+  | 'load_goal'
+  | 'control_goal'
   | 'clear_goal'
   | 'load_stats'
   | 'rewind_snapshots'
@@ -494,6 +501,8 @@ export interface DaemonSessionActions {
     taskId: string,
     kind: DaemonSessionTaskStatus['kind'],
   ): Promise<{ cancelled: boolean }>;
+  getGoal(): Promise<GoalStateResponse>;
+  controlGoal(request: GoalControlRequest): Promise<GoalStateResponse>;
   clearGoal(): Promise<{ cleared: boolean; condition?: string }>;
   getStats(): Promise<DaemonSessionStatsStatus>;
   loadArtifacts(): Promise<DaemonSessionArtifactsEnvelope>;

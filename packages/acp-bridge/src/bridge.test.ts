@@ -30412,10 +30412,13 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     const admission = bridge.enqueueMidTurnMessage(
       session.sessionId,
       'leftover',
+      { clientId: session.clientId },
+      'leftover-public',
+      { rejectIfIdle: true },
     );
     expect(admission).toEqual({
       accepted: true,
-      messageId: expect.any(String),
+      messageId: 'leftover-public',
     });
     releases[0]!();
     await t1;
@@ -30425,6 +30428,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       expect.objectContaining({
         promptId: admission.messageId,
         text: 'leftover',
+        originatorClientId: session.clientId,
       }),
     ]);
     releases[1]!();
@@ -30813,12 +30817,16 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       .catch(() => {});
     await new Promise((r) => setTimeout(r, 10));
 
-    const admission = bridge.enqueueMidTurnMessage(session.sessionId, 'hi', {
-      clientId: session.clientId,
-    });
+    const admission = bridge.enqueueMidTurnMessage(
+      session.sessionId,
+      'hi',
+      { clientId: session.clientId },
+      'public-mid-turn',
+      { rejectIfIdle: true },
+    );
     expect(admission).toEqual({
       accepted: true,
-      messageId: expect.any(String),
+      messageId: 'public-mid-turn',
     });
 
     // Subscribe before the drain so the live injection frame is captured. The
@@ -31666,6 +31674,31 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       ),
     ).toEqual({ accepted: true, messageId: 'steer-idle' });
     await vi.waitFor(() => expect(promptCalls).toBe(1));
+    await bridge.shutdown();
+  });
+
+  it('rejects a public enqueue on idle only when rejectIfIdle is set', async () => {
+    let promptCalls = 0;
+    const handle = makeChannel({
+      promptImpl: async () => {
+        promptCalls++;
+        return { stopReason: 'end_turn' };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'public message',
+        { clientId: session.clientId },
+        'public-idle',
+        { rejectIfIdle: true },
+      ),
+    ).toEqual({ accepted: false });
+    expect(promptCalls).toBe(0);
+    expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]);
     await bridge.shutdown();
   });
 

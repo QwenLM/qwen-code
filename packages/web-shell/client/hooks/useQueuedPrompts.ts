@@ -71,6 +71,9 @@ interface UseQueuedPromptsArgs {
    */
   canInjectMidTurnMedia: boolean;
   streamingState: DaemonStreamingState;
+  /** Keep ordinary submissions local until the Goal is paused, cleared, or the
+   * user explicitly inserts one into the current turn. */
+  holdQueuedPromptsLocally?: boolean;
   sessionActions: DaemonSessionActions;
   store: DaemonTranscriptStore;
   editorRef: RefBox<EditorHandle | null>;
@@ -79,6 +82,31 @@ interface UseQueuedPromptsArgs {
 }
 
 const MAX_COMPLETED_PROMPT_IDS = 100;
+
+function queueOwnerKey(
+  workspaceCwd: string | undefined,
+  sessionId: string | undefined,
+): string | undefined {
+  return sessionId ? `${workspaceCwd ?? ''}\u0000${sessionId}` : undefined;
+}
+
+function isLocallyHeldPrompt(prompt: QueuedPrompt): boolean {
+  return (
+    prompt.serverPromptId === undefined &&
+    prompt.serverState === undefined &&
+    prompt.midTurnState === undefined &&
+    prompt.admissionOutcome === undefined
+  );
+}
+
+function shouldStashPrompt(prompt: QueuedPrompt): boolean {
+  return (
+    isLocallyHeldPrompt(prompt) ||
+    (prompt.admissionOutcome === 'unknown' &&
+      prompt.payloadCompleteness !== 'summary-only' &&
+      prompt.payloadAvailable !== false)
+  );
+}
 
 /**
  * Merge a restored prompt's text into the editor content. Restoration paths
@@ -118,6 +146,7 @@ function areQueuedPromptsEqual(
       prompt.midTurnState === other.midTurnState &&
       prompt.midTurnMessageId === other.midTurnMessageId &&
       prompt.midTurnFailedAction === other.midTurnFailedAction &&
+      prompt.isInserting === other.isInserting &&
       prompt.isEditing === other.isEditing &&
       prompt.isRemoving === other.isRemoving &&
       prompt.payloadCompleteness === other.payloadCompleteness &&
@@ -223,6 +252,7 @@ export interface UseQueuedPromptsResult {
     onAdmitted?: () => void,
   ) => boolean;
   removeQueuedPrompt: (id: number) => void;
+  insertQueuedPrompt: (id: number) => Promise<void>;
   editQueuedPrompt: (id: number) => Promise<void>;
   editLastQueuedPrompt: () => boolean;
   clearQueuedPrompts: () => boolean;
@@ -240,6 +270,7 @@ export function useQueuedPrompts({
   canQueryMidTurn,
   canInjectMidTurnMedia,
   streamingState,
+  holdQueuedPromptsLocally = false,
   sessionActions,
   store,
   editorRef,
@@ -273,10 +304,15 @@ export function useQueuedPrompts({
       ownerTokenRef.current === token && token.snapshot.isCurrent(),
   );
   const queuedPromptsOwnerRef = useRef(ownerToken);
+  const heldPromptsByOwnerRef = useRef<Map<string, QueuedPrompt[]>>(new Map());
   const nextQueuedPromptIdRef = useRef(1);
   const latestSessionIdRef = useRef(sessionId);
   const latestWorkspaceCwdRef = useRef(workspaceCwd);
   const midTurnEnqueueAbortRef = useRef<AbortController | null>(null);
+  const explicitInsertAbortControllersRef = useRef(
+    new Map<AbortController, string | undefined>(),
+  );
+  const explicitInsertGenerationsRef = useRef<Map<number, number>>(new Map());
   const submitAbortControllersRef = useRef<Set<AbortController>>(new Set());
   const removingServerPromptIdsRef = useRef<Set<string>>(new Set());
   const displayedServerPromptIdsRef = useRef<Set<string>>(new Set());
@@ -289,6 +325,7 @@ export function useQueuedPrompts({
   const appendedBeforeResponsePromptIdsRef = useRef<Set<string>>(new Set());
   const removedBeforeResponsePromptIdsRef = useRef<Set<string>>(new Set());
   const latestStreamingStateRef = useRef(streamingState);
+  const holdQueuedPromptsLocallyRef = useRef(holdQueuedPromptsLocally);
   const refreshRequestSeqRef = useRef(0);
   /** Stale-response fence for `getMidTurnMessages` reconciliation calls. */
   const midTurnReconcileSeqRef = useRef(0);
@@ -310,6 +347,7 @@ export function useQueuedPrompts({
 
   latestSessionIdRef.current = sessionId;
   latestWorkspaceCwdRef.current = workspaceCwd;
+  holdQueuedPromptsLocallyRef.current = holdQueuedPromptsLocally;
   const streamingIdle = streamingState === 'idle';
   useLayoutEffect(() => {
     midTurnReconcileSeqRef.current += 1;
@@ -801,6 +839,24 @@ export function useQueuedPrompts({
 
   useEffect(() => {
     restoredPromptIdsRef.current = new Set();
+    const previousOwner = queuedPromptsOwnerRef.current;
+    const previousOwnerKey = queueOwnerKey(
+      previousOwner.workspaceCwd,
+      previousOwner.sessionId,
+    );
+    if (previousOwnerKey) {
+      const heldPrompts = queuedPromptsRef.current.filter(
+        (prompt) =>
+          shouldStashPrompt(prompt) &&
+          (!prompt.midTurnMessageId ||
+            !pendingMidTurnAdmissionsRef.current.has(prompt.midTurnMessageId)),
+      );
+      if (heldPrompts.length > 0) {
+        heldPromptsByOwnerRef.current.set(previousOwnerKey, heldPrompts);
+      } else {
+        heldPromptsByOwnerRef.current.delete(previousOwnerKey);
+      }
+    }
     const retainedAdmissions = [
       ...pendingMidTurnAdmissionsRef.current.entries(),
     ].filter(
@@ -825,7 +881,26 @@ export function useQueuedPrompts({
       restoreQueuedPromptsToEditorRef.current(interruptedPrompts);
     }
     queuedPromptsOwnerRef.current = ownerToken;
-    const retainedPrompts = retainedAdmissions.map(([, entry]) => entry.prompt);
+    const nextOwnerKey = queueOwnerKey(workspaceCwd, sessionId);
+    let heldPrompts = nextOwnerKey
+      ? (heldPromptsByOwnerRef.current.get(nextOwnerKey) ?? [])
+      : [];
+    if (
+      heldPrompts.length === 0 &&
+      nextOwnerKey &&
+      previousOwnerKey &&
+      previousOwner.sessionId === sessionId
+    ) {
+      heldPrompts = heldPromptsByOwnerRef.current.get(previousOwnerKey) ?? [];
+      heldPromptsByOwnerRef.current.delete(previousOwnerKey);
+      if (heldPrompts.length > 0) {
+        heldPromptsByOwnerRef.current.set(nextOwnerKey, heldPrompts);
+      }
+    }
+    const retainedPrompts = [
+      ...retainedAdmissions.map(([, entry]) => entry.prompt),
+      ...heldPrompts,
+    ];
     queuedPromptsRef.current = retainedPrompts;
     setQueuedPrompts(retainedPrompts);
     completionCallbacksRef.current = retainedCompletionCallbacks;
@@ -1225,7 +1300,8 @@ export function useQueuedPrompts({
 
   const fallbackToPendingPrompt = useCallback(
     (id: number) => {
-      if (writeBlockedRef.current) return;
+      const deferSubmission =
+        writeBlockedRef.current || holdQueuedPromptsLocallyRef.current;
       const current = queuedPromptsRef.current;
       const index = current.findIndex(
         (prompt) => prompt.id === id && prompt.midTurnState !== undefined,
@@ -1236,7 +1312,7 @@ export function useQueuedPrompts({
         midTurnState: undefined,
         midTurnMessageId: undefined,
         midTurnFailedAction: undefined,
-        serverState: 'submitting',
+        ...(deferSubmission ? {} : { serverState: 'submitting' as const }),
         isEditing: false,
         isRemoving: false,
       };
@@ -1244,7 +1320,7 @@ export function useQueuedPrompts({
       next[index] = prompt;
       queuedPromptsRef.current = next;
       setQueuedPrompts(next);
-      submitPendingPrompt(prompt);
+      if (!deferSubmission) submitPendingPrompt(prompt);
     },
     [submitPendingPrompt],
   );
@@ -1279,6 +1355,7 @@ export function useQueuedPrompts({
             image.media_type !== 'image/*',
         );
       const shouldInsertMidTurn =
+        !holdQueuedPromptsLocallyRef.current &&
         latestStreamingStateRef.current !== 'idle' &&
         (files?.length ?? 0) === 0 &&
         (imageList.length === 0 || canSendMidTurnMedia) &&
@@ -1399,9 +1476,29 @@ export function useQueuedPrompts({
                 return;
               }
               if (!pendingAdmissionStillOwned) return;
-              const next = queuedPromptsRef.current.filter(
+              const retained = queuedPromptsRef.current.filter(
                 (prompt) => prompt.midTurnMessageId !== midTurnMessageId,
               );
+              if (latestStreamingStateRef.current === 'idle') {
+                const shouldHold =
+                  holdQueuedPromptsLocallyRef.current ||
+                  writeBlockedRef.current;
+                const prompt: QueuedPrompt = {
+                  ...pendingAdmission,
+                  midTurnMessageId: undefined,
+                  admissionOutcome: undefined,
+                  ...(shouldHold ? {} : { serverState: 'submitting' }),
+                  onComplete,
+                  onAdmitted,
+                };
+                const next = [...retained, prompt];
+                queuedPromptsRef.current = next;
+                setQueuedPrompts(next);
+                if (shouldHold) return;
+                submitPendingPrompt(prompt);
+                return;
+              }
+              const next = retained;
               queuedPromptsRef.current = next;
               setQueuedPrompts(next);
               restoreQueuedPromptsToEditor(
@@ -1543,14 +1640,18 @@ export function useQueuedPrompts({
         onComplete,
         onAdmitted,
         payloadCompleteness: 'complete',
-        ...(shouldInsertMidTurn
-          ? {
-              midTurnState: 'submitting',
-            }
-          : { serverState: 'submitting' }),
+        ...(holdQueuedPromptsLocallyRef.current
+          ? {}
+          : shouldInsertMidTurn
+            ? {
+                midTurnState: 'submitting',
+              }
+            : { serverState: 'submitting' }),
       };
       queuedPromptsRef.current = [...queuedPromptsRef.current, prompt];
       setQueuedPrompts(queuedPromptsRef.current);
+
+      if (holdQueuedPromptsLocallyRef.current) return true;
 
       if (!shouldInsertMidTurn) {
         submitPendingPrompt(prompt);
@@ -1570,11 +1671,24 @@ export function useQueuedPrompts({
           if (index === -1) return;
           if (current[index]?.midTurnState === undefined) return;
           if (latestSessionIdRef.current !== targetSessionId) return;
-          if (!result.accepted || latestStreamingStateRef.current === 'idle') {
+          if (!result.accepted) {
             fallbackToPendingPrompt(prompt.id);
             return;
           }
+          if (latestStreamingStateRef.current === 'idle') {
+            const next = current.filter((item) => item.id !== prompt.id);
+            queuedPromptsRef.current = next;
+            setQueuedPrompts(next);
+            prompt.onAdmitted?.();
+            if (prompt.onComplete && result.messageId) {
+              settleCompletionCallback(result.messageId, prompt.onComplete);
+            }
+            return;
+          }
           prompt.onAdmitted?.();
+          if (prompt.onComplete && result.messageId) {
+            settleCompletionCallback(result.messageId, prompt.onComplete);
+          }
           const next = [...current];
           next[index] = {
             ...current[index]!,
@@ -1584,7 +1698,11 @@ export function useQueuedPrompts({
           queuedPromptsRef.current = next;
           setQueuedPrompts(next);
         })
-        .catch(() => {});
+        .catch(() => {
+          if (!isCurrentOwnerTokenRef.current(ownerToken)) return;
+          if (latestSessionIdRef.current !== targetSessionId) return;
+          fallbackToPendingPrompt(prompt.id);
+        });
       return true;
     },
     [
@@ -1603,8 +1721,6 @@ export function useQueuedPrompts({
 
   const { batches: midTurnInjectedBatches, consume: consumeMidTurnInjected } =
     useDaemonMidTurnInjected();
-  // Keep injection echoes ahead of idle handling for legacy daemons, whose
-  // local rows still fall back to the ordinary queue at the turn boundary.
   useEffect(() => {
     if (!sessionId || midTurnInjectedBatches.length === 0) return;
     const sessionBatches = midTurnInjectedBatches.filter(
@@ -1650,11 +1766,27 @@ export function useQueuedPrompts({
 
   useEffect(() => {
     if (streamingState !== 'idle' || writeBlocked) return;
-    const ctrl = midTurnEnqueueAbortRef.current;
-    if (ctrl && !canQueryMidTurn) {
-      ctrl.abort();
-      midTurnEnqueueAbortRef.current = null;
+    if (!canQueryMidTurn) {
+      const acceptedIds = new Set(
+        queuedPromptsRef.current
+          .filter(
+            (prompt) =>
+              prompt.midTurnState === 'queued' &&
+              !prompt.midTurnFailedAction &&
+              !prompt.isEditing &&
+              !prompt.isRemoving,
+          )
+          .map((prompt) => prompt.id),
+      );
+      if (acceptedIds.size > 0) {
+        const next = queuedPromptsRef.current.filter(
+          (prompt) => !acceptedIds.has(prompt.id),
+        );
+        queuedPromptsRef.current = next;
+        setQueuedPrompts(next);
+      }
     }
+    if (holdQueuedPromptsLocally) return;
     for (const prompt of queuedPromptsRef.current) {
       if (!prompt.midTurnFailedAction) continue;
       const next = queuedPromptsRef.current.filter(
@@ -1666,16 +1798,24 @@ export function useQueuedPrompts({
         restoreQueuedPromptsToEditor([prompt], prompt.sessionId);
       }
     }
-    if (!canQueryMidTurn) {
-      for (const prompt of queuedPromptsRef.current) {
-        if (
-          prompt.midTurnState &&
-          !prompt.midTurnFailedAction &&
-          !prompt.isEditing &&
-          !prompt.isRemoving
-        ) {
-          fallbackToPendingPrompt(prompt.id);
-        }
+    const localPrompts = queuedPromptsRef.current.filter(
+      (prompt) =>
+        isLocallyHeldPrompt(prompt) &&
+        !prompt.isEditing &&
+        !prompt.isRemoving &&
+        !prompt.isInserting,
+    );
+    if (localPrompts.length > 0) {
+      const localIds = new Set(localPrompts.map((prompt) => prompt.id));
+      const next = queuedPromptsRef.current.map((prompt) =>
+        localIds.has(prompt.id)
+          ? { ...prompt, serverState: 'submitting' as const }
+          : prompt,
+      );
+      queuedPromptsRef.current = next;
+      setQueuedPrompts(next);
+      for (const prompt of next) {
+        if (localIds.has(prompt.id)) submitPendingPrompt(prompt);
       }
     }
     if (!canQueryMidTurn) return;
@@ -1695,8 +1835,9 @@ export function useQueuedPrompts({
   }, [
     streamingState,
     writeBlocked,
+    holdQueuedPromptsLocally,
     canQueryMidTurn,
-    fallbackToPendingPrompt,
+    submitPendingPrompt,
     restoreQueuedPromptsToEditor,
     reconcileMidTurnMessages,
   ]);
@@ -1724,7 +1865,17 @@ export function useQueuedPrompts({
     (
       id: number,
       flags: Partial<
-        Pick<QueuedPrompt, 'isEditing' | 'isRemoving' | 'midTurnFailedAction'>
+        Pick<
+          QueuedPrompt,
+          | 'isEditing'
+          | 'isRemoving'
+          | 'isInserting'
+          | 'midTurnFailedAction'
+          | 'midTurnMessageId'
+          | 'admissionOutcome'
+          | 'payloadAvailable'
+          | 'serverState'
+        >
       >,
     ) => {
       const next = queuedPromptsRef.current.map((prompt) =>
@@ -1938,7 +2089,7 @@ export function useQueuedPrompts({
   const removeQueuedPrompt = useCallback(
     (id: number) => {
       const target = queuedPromptsRef.current.find((p) => p.id === id);
-      if (target?.admissionOutcome === 'unknown') return;
+      if (target?.admissionOutcome === 'unknown' || target?.isInserting) return;
       if (
         target?.serverState === 'submitting' ||
         target?.midTurnState === 'submitting'
@@ -1968,6 +2119,294 @@ export function useQueuedPrompts({
       );
     },
     [removeMidTurnPromptForAction, removeServerPromptForAction, t],
+  );
+
+  const insertQueuedPrompt = useCallback(
+    async (id: number) => {
+      const prompt = queuedPromptsRef.current.find((item) => item.id === id);
+      if (
+        !canMutateMidTurn ||
+        latestStreamingStateRef.current === 'idle' ||
+        !prompt ||
+        prompt.serverState !== undefined ||
+        prompt.serverPromptId !== undefined ||
+        prompt.midTurnState !== undefined ||
+        prompt.admissionOutcome === 'unknown' ||
+        prompt.isEditing ||
+        prompt.isRemoving ||
+        prompt.isInserting ||
+        (prompt.images?.length ?? 0) > 0 ||
+        (prompt.files?.length ?? 0) > 0 ||
+        (prompt.inputAnnotations?.length ?? 0) > 0 ||
+        isCommandPrompt(prompt.text)
+      ) {
+        return;
+      }
+
+      const messageId = canQueryMidTurn
+        ? `webui_${
+            typeof crypto !== 'undefined' &&
+            typeof crypto.randomUUID === 'function'
+              ? crypto.randomUUID()
+              : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+          }`
+        : undefined;
+      const targetSessionId = prompt.sessionId ?? latestSessionIdRef.current;
+      const promptOwnerKey = queueOwnerKey(
+        latestWorkspaceCwdRef.current,
+        targetSessionId,
+      );
+      const insertionOwnerToken = ownerTokenRef.current;
+      const insertionGeneration =
+        (explicitInsertGenerationsRef.current.get(prompt.id) ?? 0) + 1;
+      explicitInsertGenerationsRef.current.set(prompt.id, insertionGeneration);
+      const isCurrentInsertion = () =>
+        explicitInsertGenerationsRef.current.get(prompt.id) ===
+        insertionGeneration;
+      const finishInsertion = () => {
+        if (isCurrentInsertion()) {
+          explicitInsertGenerationsRef.current.delete(prompt.id);
+        }
+      };
+      const clearInsertionFlag = (
+        flags: Partial<
+          Pick<
+            QueuedPrompt,
+            | 'isInserting'
+            | 'midTurnMessageId'
+            | 'admissionOutcome'
+            | 'payloadAvailable'
+            | 'serverState'
+          >
+        > = { isInserting: false },
+      ) => {
+        setQueuedPromptFlags(prompt.id, flags);
+        if (!promptOwnerKey) return;
+        const stashed = heldPromptsByOwnerRef.current.get(promptOwnerKey);
+        if (!stashed) return;
+        heldPromptsByOwnerRef.current.set(
+          promptOwnerKey,
+          stashed.map((item) =>
+            item.id === prompt.id ? { ...item, ...flags } : item,
+          ),
+        );
+      };
+      const recoverAfterSettledInsert = (
+        flags: Partial<
+          Pick<
+            QueuedPrompt,
+            | 'isInserting'
+            | 'midTurnMessageId'
+            | 'admissionOutcome'
+            | 'payloadAvailable'
+            | 'serverState'
+          >
+        >,
+      ): boolean => {
+        const submitAtIdle =
+          isCurrentOwnerTokenRef.current(insertionOwnerToken) &&
+          queueOwnerKey(
+            latestWorkspaceCwdRef.current,
+            latestSessionIdRef.current,
+          ) === promptOwnerKey &&
+          (latestStreamingStateRef.current as DaemonStreamingState) ===
+            'idle' &&
+          !writeBlockedRef.current &&
+          !holdQueuedPromptsLocallyRef.current;
+        const nextFlags = {
+          ...flags,
+          ...(submitAtIdle ? { serverState: 'submitting' as const } : {}),
+        };
+        clearInsertionFlag(nextFlags);
+        finishInsertion();
+        if (submitAtIdle) {
+          const pendingPrompt = queuedPromptsRef.current.find(
+            (item) => item.id === prompt.id,
+          );
+          if (pendingPrompt) submitPendingPrompt(pendingPrompt);
+        }
+        return submitAtIdle;
+      };
+      setQueuedPromptFlags(prompt.id, {
+        isInserting: true,
+        isRemoving: false,
+        ...(messageId ? { midTurnMessageId: messageId } : {}),
+      });
+      const abort = new AbortController();
+      explicitInsertAbortControllersRef.current.set(abort, promptOwnerKey);
+      let result: Awaited<
+        ReturnType<typeof sessionActions.enqueueMidTurnMessage>
+      >;
+      try {
+        result = await sessionActions.enqueueMidTurnMessage(prompt.text, {
+          ...(messageId ? { messageId } : {}),
+          signal: abort.signal,
+        });
+      } catch (error) {
+        if (!isCurrentInsertion()) return;
+        if (abort.signal.aborted) {
+          recoverAfterSettledInsert({
+            isInserting: false,
+            midTurnMessageId: undefined,
+            admissionOutcome: undefined,
+            payloadAvailable: undefined,
+          });
+          return;
+        }
+        if (messageId) {
+          clearInsertionFlag({
+            isInserting: false,
+            midTurnMessageId: messageId,
+            admissionOutcome: 'unknown',
+            payloadAvailable: true,
+          });
+          finishInsertion();
+          if (
+            targetSessionId &&
+            queueOwnerKey(
+              latestWorkspaceCwdRef.current,
+              latestSessionIdRef.current,
+            ) === promptOwnerKey
+          ) {
+            const snapshot = await reconcileMidTurnMessages(
+              targetSessionId,
+            ).catch(() => undefined);
+            const reconciled =
+              snapshot !== undefined &&
+              (snapshot.messages.some(
+                (message) => message.messageId === messageId,
+              ) ||
+                snapshot.settledMessageIds.includes(messageId) ||
+                snapshot.promotedMessageIds.includes(messageId));
+            if (!reconciled) reportError(error, t('queue.admissionUnknown'));
+          }
+          return;
+        }
+        recoverAfterSettledInsert({
+          isInserting: false,
+          midTurnMessageId: undefined,
+          admissionOutcome: undefined,
+          payloadAvailable: undefined,
+        });
+        if (
+          queueOwnerKey(
+            latestWorkspaceCwdRef.current,
+            latestSessionIdRef.current,
+          ) === promptOwnerKey
+        ) {
+          reportError(error, t('queue.insertFailed'));
+        }
+        return;
+      } finally {
+        explicitInsertAbortControllersRef.current.delete(abort);
+      }
+      if (!isCurrentInsertion()) return;
+      if (!result.accepted) {
+        const submitted = recoverAfterSettledInsert({
+          isInserting: false,
+          midTurnMessageId: undefined,
+          admissionOutcome: undefined,
+          payloadAvailable: undefined,
+        });
+        if (
+          !abort.signal.aborted &&
+          !submitted &&
+          queueOwnerKey(
+            latestWorkspaceCwdRef.current,
+            latestSessionIdRef.current,
+          ) === promptOwnerKey
+        ) {
+          reportError(
+            new Error('Queued message was not accepted for insertion'),
+            t('queue.insertFailed'),
+          );
+        }
+        return;
+      }
+
+      const current = queuedPromptsRef.current;
+      const index = current.findIndex((item) => item.id === prompt.id);
+      const acceptedAtLegacyIdle =
+        queueOwnerKey(
+          latestWorkspaceCwdRef.current,
+          latestSessionIdRef.current,
+        ) === promptOwnerKey &&
+        (latestStreamingStateRef.current as DaemonStreamingState) === 'idle' &&
+        !canQueryMidTurn;
+      if (index === -1) {
+        if (promptOwnerKey) {
+          const stashed = heldPromptsByOwnerRef.current.get(promptOwnerKey);
+          if (stashed) {
+            heldPromptsByOwnerRef.current.set(
+              promptOwnerKey,
+              acceptedAtLegacyIdle
+                ? stashed.filter((item) => item.id !== prompt.id)
+                : stashed.map((item) =>
+                    item.id === prompt.id
+                      ? {
+                          ...item,
+                          midTurnState: 'queued' as const,
+                          midTurnMessageId: result.messageId ?? messageId,
+                          isInserting: false,
+                        }
+                      : item,
+                  ),
+            );
+          }
+        }
+        finishInsertion();
+        prompt.onAdmitted?.();
+        if (canQueryMidTurn && targetSessionId) {
+          await reconcileMidTurnMessages(targetSessionId).catch((error) => {
+            reportError(error, t('queue.insertFailed'));
+          });
+        }
+        return;
+      }
+      if (acceptedAtLegacyIdle) {
+        const next = current.filter((item) => item.id !== prompt.id);
+        queuedPromptsRef.current = next;
+        setQueuedPrompts(next);
+        finishInsertion();
+        prompt.onAdmitted?.();
+        return;
+      }
+      if (!current[index]!.isInserting) {
+        finishInsertion();
+        return;
+      }
+      const next = [...current];
+      next[index] = {
+        ...current[index]!,
+        serverPromptId: undefined,
+        serverState: undefined,
+        midTurnState: 'queued',
+        midTurnMessageId: result.messageId ?? messageId,
+        admissionOutcome: undefined,
+        payloadAvailable: undefined,
+        isInserting: false,
+      };
+      queuedPromptsRef.current = next;
+      setQueuedPrompts(next);
+      finishInsertion();
+      prompt.onAdmitted?.();
+
+      if (canQueryMidTurn && targetSessionId) {
+        await reconcileMidTurnMessages(targetSessionId).catch((error) => {
+          reportError(error, t('queue.insertFailed'));
+        });
+      }
+    },
+    [
+      canMutateMidTurn,
+      canQueryMidTurn,
+      reconcileMidTurnMessages,
+      reportError,
+      sessionActions,
+      setQueuedPromptFlags,
+      submitPendingPrompt,
+      t,
+    ],
   );
 
   const resolveUnknownQueuedPrompt = useCallback(
@@ -2035,7 +2474,7 @@ export function useQueuedPrompts({
       ) {
         return;
       }
-      if (target.isEditing || target.isRemoving) return;
+      if (target.isEditing || target.isRemoving || target.isInserting) return;
       if (target.midTurnState) {
         const removed = await removeMidTurnPromptForAction(
           target,
@@ -2081,6 +2520,7 @@ export function useQueuedPrompts({
       (target.midTurnState === 'queued' && !target.midTurnMessageId) ||
       target.isEditing ||
       target.isRemoving ||
+      target.isInserting ||
       target.payloadCompleteness === 'summary-only' ||
       target.admissionOutcome === 'unknown'
     ) {
@@ -2137,6 +2577,7 @@ export function useQueuedPrompts({
       (prompt) =>
         prompt.midTurnState === undefined &&
         prompt.serverState !== 'submitting' &&
+        !prompt.isInserting &&
         prompt.admissionOutcome !== 'unknown',
     );
     if (submittingPrompts.length > 0) {
@@ -2166,7 +2607,9 @@ export function useQueuedPrompts({
       const retainedIds = new Set(midTurnPrompts.map((prompt) => prompt.id));
       const retained = queuedPromptsRef.current.filter(
         (prompt) =>
-          retainedIds.has(prompt.id) || prompt.admissionOutcome === 'unknown',
+          retainedIds.has(prompt.id) ||
+          prompt.isInserting ||
+          prompt.admissionOutcome === 'unknown',
       );
       queuedPromptsRef.current = retained;
       setQueuedPrompts(retained);
@@ -2253,6 +2696,7 @@ export function useQueuedPrompts({
     queuedTexts,
     enqueuePrompt,
     removeQueuedPrompt,
+    insertQueuedPrompt,
     editQueuedPrompt,
     editLastQueuedPrompt,
     clearQueuedPrompts,

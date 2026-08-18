@@ -24,6 +24,7 @@ import type {
   DaemonSessionArtifactsEnvelope,
   DaemonTranscriptStore,
   DaemonCapabilities,
+  GoalControlRequest,
   DaemonBranchSessionResult,
   DaemonBranchedSession,
   DaemonSessionMediaReference,
@@ -42,6 +43,7 @@ import {
   mapReasoningControls,
   mapSessionContextReasoning,
   mapSupportedCommands,
+  selectGoalState,
 } from './mappers.js';
 import {
   daemonPromptImageToBlob,
@@ -164,6 +166,7 @@ export function getConnectionAfterSessionClear(
     delete next.displayName;
     delete next.tokenUsage;
     delete next.tokenCount;
+    delete next.goalState;
     // Drop the session-scoped raw snapshots (both carry the cleared
     // sessionId), which also makes the effect's canReuseSessionMetadata
     // check refetch fresh data for the next session.
@@ -515,6 +518,7 @@ export function createDaemonSessionActions({
         workspaceCwd: targetWorkspaceCwd,
         clientId: undefined,
         displayName: undefined,
+        goalState: undefined,
         error: undefined,
         errorStatus: undefined,
         missingSession: false,
@@ -1175,6 +1179,7 @@ export function createDaemonSessionActions({
           ...current,
           status: 'connected',
           sessionId: nextSession.sessionId,
+          goalState: undefined,
           ...(nextSession.clientId ? { clientId: nextSession.clientId } : {}),
           workspaceCwd: nextSession.workspaceCwd,
           error: undefined,
@@ -1229,6 +1234,7 @@ export function createDaemonSessionActions({
       clearActiveSessionState();
       setConnection((current) => ({
         ...current,
+        goalState: undefined,
         missingSession: false,
         error: undefined,
         errorStatus: undefined,
@@ -1760,6 +1766,74 @@ export function createDaemonSessionActions({
           'Clear goal failed',
           error,
           'clear_goal',
+        );
+      }
+    },
+
+    async getGoal() {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Load goal failed',
+        'load_goal',
+      );
+      try {
+        const response = await withActionTimeout(
+          session.goal(),
+          'Load goal timed out',
+        );
+        setConnection((current) =>
+          current.sessionId === session.sessionId
+            ? {
+                ...current,
+                goalState: selectGoalState(
+                  current.goalState,
+                  response.snapshot,
+                ),
+              }
+            : current,
+        );
+        return response;
+      } catch (error) {
+        throw dispatchActionError(
+          addNotice,
+          'Load goal failed',
+          error,
+          'load_goal',
+        );
+      }
+    },
+
+    async controlGoal(request: GoalControlRequest) {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Control goal failed',
+        'control_goal',
+      );
+      try {
+        const response = await withActionTimeout(
+          session.controlGoal(request),
+          'Control goal timed out',
+        );
+        setConnection((current) =>
+          current.sessionId === session.sessionId
+            ? {
+                ...current,
+                goalState: selectGoalState(
+                  current.goalState,
+                  response.snapshot,
+                ),
+              }
+            : current,
+        );
+        return response;
+      } catch (error) {
+        throw dispatchActionError(
+          addNotice,
+          'Control goal failed',
+          error,
+          'control_goal',
         );
       }
     },

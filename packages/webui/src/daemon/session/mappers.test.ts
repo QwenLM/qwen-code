@@ -13,6 +13,7 @@ import {
   getReplayTokenCount,
   getReplayTokenUsage,
   mapWorkspaceSkills,
+  selectGoalState,
   updateConnectionFromDaemonEvent,
 } from './mappers.js';
 import type { DaemonConnectionState } from './types.js';
@@ -250,6 +251,208 @@ describe('mapWorkspaceSkills', () => {
 });
 
 describe('updateConnectionFromDaemonEvent', () => {
+  it('updates and clears the authoritative Goal snapshot', () => {
+    const goal = {
+      goalId: 'goal-1',
+      revision: 2,
+      objective: 'ship safely',
+      status: 'active',
+      evidenceCursor: { recordId: 'record-1' },
+      turnCount: 3,
+      activeTimeMs: 4_000,
+      createdAt: 10,
+      updatedAt: 20,
+    };
+    const active = applyEvent(
+      { status: 'connected', workspaceCwd: '/workspace' },
+      {
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            _meta: { goalState: { v: 2, goal, activity: 'running' } },
+          },
+        },
+      } as DaemonEvent,
+    );
+    expect(active.goalState).toEqual({
+      v: 2,
+      goal,
+      activity: 'running',
+    });
+
+    const cleared = applyEvent(active, {
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          _meta: { goalState: { v: 2, goal: null, activity: 'idle' } },
+        },
+      },
+    } as DaemonEvent);
+    expect(cleared.goalState).toEqual({
+      v: 2,
+      goal: null,
+      activity: 'idle',
+    });
+  });
+
+  it('does not regress the same Goal to an older revision', () => {
+    const goal = {
+      goalId: 'goal-1',
+      revision: 7,
+      objective: 'newer objective',
+      status: 'paused' as const,
+      evidenceCursor: { recordId: 'record-1' },
+      turnCount: 3,
+      activeTimeMs: 4_000,
+      createdAt: 10,
+      updatedAt: 30,
+    };
+    const current: DaemonConnectionState = {
+      status: 'connected',
+      workspaceCwd: '/workspace',
+      goalState: { v: 2, goal, activity: 'idle' },
+    };
+    const next = applyEvent(current, {
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          _meta: {
+            goalState: {
+              v: 2,
+              activity: 'running',
+              goal: { ...goal, revision: 6, status: 'active', updatedAt: 20 },
+            },
+          },
+        },
+      },
+    } as DaemonEvent);
+
+    expect(next.goalState).toBe(current.goalState);
+  });
+
+  it('orders equal-revision Goal snapshots by updatedAt', () => {
+    const current = {
+      v: 2 as const,
+      activity: 'idle' as const,
+      goal: {
+        goalId: 'goal-1',
+        revision: 7,
+        objective: 'ship safely',
+        status: 'paused' as const,
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 3,
+        activeTimeMs: 4_000,
+        createdAt: 10,
+        updatedAt: 30,
+      },
+    };
+    const stale = {
+      ...current,
+      activity: 'running' as const,
+      goal: { ...current.goal, status: 'active' as const, updatedAt: 20 },
+    };
+
+    expect(selectGoalState(current, stale)).toBe(current);
+  });
+
+  it('does not resurrect a cleared Goal from a stale snapshot', () => {
+    const active = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: 'goal-1',
+        revision: 7,
+        objective: 'ship safely',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 3,
+        activeTimeMs: 4_000,
+        createdAt: 10,
+        updatedAt: 30,
+      },
+    };
+    const cleared = selectGoalState(active, {
+      v: 2,
+      goal: null,
+      activity: 'idle',
+    });
+
+    expect(selectGoalState(cleared, active)).toBe(cleared);
+  });
+
+  it('does not apply a delayed clear tombstone to a replacement Goal', () => {
+    const replacement = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: 'goal-h',
+        revision: 1,
+        objective: 'replacement',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-h' },
+        turnCount: 0,
+        activeTimeMs: 0,
+        createdAt: 40,
+        updatedAt: 50,
+      },
+    };
+    const current: DaemonConnectionState = {
+      status: 'connected',
+      workspaceCwd: '/workspace',
+      goalState: replacement,
+    };
+    const next = applyEvent(current, {
+      id: 2,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          _meta: {
+            goalState: {
+              v: 2,
+              goal: null,
+              activity: 'idle',
+              clearedGoal: {
+                goalId: 'goal-g',
+                revision: 4,
+                updatedAt: 30,
+              },
+            },
+          },
+        },
+      },
+    } as DaemonEvent);
+
+    expect(next.goalState).toBe(replacement);
+  });
+
+  it('ignores malformed Goal snapshots', () => {
+    const current: DaemonConnectionState = {
+      status: 'connected',
+      workspaceCwd: '/workspace',
+      goalState: { v: 2, goal: null, activity: 'idle' },
+    };
+    const next = applyEvent(current, {
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          _meta: { goalState: { v: 2, goal: {}, activity: 'running' } },
+        },
+      },
+    } as DaemonEvent);
+
+    expect(next.goalState).toBe(current.goalState);
+  });
+
   it('updates and clears the current git branch', () => {
     const changed = applyEvent(
       { status: 'connected', workspaceCwd: '/workspace', gitBranch: 'main' },

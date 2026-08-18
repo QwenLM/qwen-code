@@ -35,7 +35,8 @@ let latestOnSubmit:
   | ((
       text: string,
       images?: unknown,
-      commit?: () => void,
+      files?: unknown,
+      commitAccepted?: () => void,
       metadata?: unknown,
     ) => boolean)
   | undefined;
@@ -60,6 +61,8 @@ const setApprovalMode = vi.fn(async (mode: string) => ({ mode }));
 const setModel = vi.fn(async () => ({}) as any);
 const loadArtifacts = vi.fn(async () => ({ artifacts: [] }));
 const getTasks = vi.fn();
+const getGoal = vi.fn();
+const controlGoal = vi.fn();
 const daemonActions = {
   sendPrompt,
   submitPermission,
@@ -68,6 +71,8 @@ const daemonActions = {
   setModel,
   loadArtifacts,
   getTasks,
+  getGoal,
+  controlGoal,
 };
 const enqueuePrompt = vi.fn(() => true);
 const removeQueuedPrompt = vi.fn();
@@ -76,6 +81,7 @@ const editLastQueuedPrompt = vi.fn(() => false);
 const clearQueuedPrompts = vi.fn(() => false);
 let queuedPromptsMock: any[] = [];
 let queuedTextsMock: string[] = [];
+let ownerVersion = 0;
 
 const latestComposerCoreOptions = vi.hoisted(() => ({
   current: null as Record<string, unknown> | null,
@@ -117,7 +123,10 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   }),
   useWorkspaceEventSignals: () => ({ artifactsVersion: 0 }),
   useDaemonSessionOwnerGuard: () => ({
-    capture: () => ({ isCurrent: () => true }),
+    capture: () => {
+      const captured = ownerVersion;
+      return { isCurrent: () => ownerVersion === captured };
+    },
   }),
 }));
 
@@ -379,10 +388,13 @@ beforeEach(() => {
   sendPromptAdmit = undefined;
   queuedPromptsMock = [];
   queuedTextsMock = [];
+  ownerVersion = 0;
   sendPrompt.mockReset();
   loadArtifacts.mockReset();
   loadArtifacts.mockResolvedValue({ artifacts: [] });
   getTasks.mockReset();
+  getGoal.mockReset();
+  controlGoal.mockReset();
   sendPrompt.mockImplementation(async (_text: string, options?: any) => {
     sendPromptAdmit = options?.onAdmitted;
     return {} as any;
@@ -450,7 +462,375 @@ function testid(id: string): HTMLElement | null {
   return container!.querySelector(`[data-testid="${id}"]`);
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((done, fail) => {
+    resolve = done;
+    reject = fail;
+  });
+  return { promise, reject, resolve };
+}
+
 describe('ChatPane', () => {
+  it.each([
+    [
+      'images',
+      [{ data: 'image-data', media_type: 'image/png' }],
+      undefined,
+      undefined,
+    ],
+    ['files', undefined, [{ name: 'notes.txt' }], undefined],
+    [
+      'input annotations',
+      undefined,
+      undefined,
+      {
+        inputAnnotations: [
+          {
+            start: 15,
+            end: 22,
+            text: '@notes',
+            type: 'file',
+            data: { path: 'notes.txt' },
+          },
+        ],
+      },
+    ],
+  ])(
+    'rejects /goal with %s and preserves the draft',
+    (_kind, images, files, metadata) => {
+      const onError = vi.fn();
+      render({ onError });
+      let returned: boolean | undefined;
+
+      act(() => {
+        returned = latestOnSubmit!(
+          '/goal set inspect the attachment',
+          images,
+          files,
+          undefined,
+          metadata,
+        );
+      });
+
+      expect(returned).toBe(false);
+      expect(onError).toHaveBeenCalledWith(
+        expect.any(Error),
+        'Remove attachments before using /goal.',
+      );
+      expect(controlGoal).not.toHaveBeenCalled();
+      expect(transcriptDispatch).not.toHaveBeenCalled();
+    },
+  );
+
+  it('locks goal controls while the current snapshot refresh is in flight', async () => {
+    const current = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: 'goal-1',
+        revision: 5,
+        objective: 'ship it',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 1,
+        activeTimeMs: 10,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    };
+    connectionState.goalState = current;
+    let resolveGoal:
+      | ((value: { snapshot: typeof current }) => void)
+      | undefined;
+    getGoal.mockReturnValue(
+      new Promise((resolve) => {
+        resolveGoal = resolve;
+      }),
+    );
+    controlGoal.mockResolvedValue({ snapshot: current });
+    render();
+
+    const pause = container!.querySelector<HTMLButtonElement>(
+      '[data-testid="goal-status-strip"] button[aria-label="Pause goal"]',
+    );
+    if (!pause) throw new Error('pause control was not rendered');
+    act(() => pause.click());
+
+    expect(pause.disabled).toBe(true);
+    act(() => pause.click());
+    expect(getGoal).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveGoal?.({ snapshot: current });
+    });
+    expect(controlGoal).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not dispatch a Goal control after the pane session changes during refresh', async () => {
+    const current = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: 'goal-1',
+        revision: 5,
+        objective: 'ship it',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 1,
+        activeTimeMs: 10,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    };
+    const pendingGoal = deferred<{ snapshot: typeof current }>();
+    connectionState.goalState = current;
+    getGoal.mockReturnValueOnce(pendingGoal.promise);
+    render();
+
+    const pause = container!.querySelector<HTMLButtonElement>(
+      '[data-testid="goal-status-strip"] button[aria-label="Pause goal"]',
+    );
+    if (!pause) throw new Error('pause control was not rendered');
+    act(() => pause.click());
+    act(() => {
+      ownerVersion += 1;
+      connectionState = { ...connectionState, sessionId: 'sess-2' };
+      rerender();
+    });
+    await act(async () => pendingGoal.resolve({ snapshot: current }));
+
+    expect(controlGoal).not.toHaveBeenCalled();
+  });
+
+  it('releases Goal control busy state after a same-session reattach', async () => {
+    const current = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: 'goal-1',
+        revision: 5,
+        objective: 'ship it',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 1,
+        activeTimeMs: 10,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    };
+    const pendingControl = deferred<{ snapshot: typeof current }>();
+    connectionState.goalState = current;
+    getGoal.mockResolvedValue({ snapshot: current });
+    controlGoal.mockReturnValueOnce(pendingControl.promise);
+    render();
+
+    const pause = container!.querySelector<HTMLButtonElement>(
+      '[data-testid="goal-status-strip"] button[aria-label="Pause goal"]',
+    );
+    if (!pause) throw new Error('pause control was not rendered');
+    act(() => pause.click());
+    await vi.waitFor(() => expect(controlGoal).toHaveBeenCalledOnce());
+    act(() => {
+      ownerVersion += 1;
+      rerender();
+    });
+    await act(async () => pendingControl.resolve({ snapshot: current }));
+
+    expect(
+      container!.querySelector<HTMLButtonElement>(
+        '[data-testid="goal-status-strip"] button[aria-label="Pause goal"]',
+      )?.disabled,
+    ).toBe(false);
+  });
+
+  it('reports an edit failure after the edited Goal disappears', async () => {
+    const current = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: 'goal-1',
+        revision: 5,
+        objective: 'ship it',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 1,
+        activeTimeMs: 10,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    };
+    const pendingGoal = deferred<{
+      snapshot: { v: 2; activity: 'idle'; goal: null };
+    }>();
+    const onError = vi.fn();
+    connectionState.goalState = current;
+    getGoal.mockReturnValueOnce(pendingGoal.promise);
+    render({ onError });
+
+    act(() => {
+      container!
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="goal-status-strip"] button[aria-label="Edit goal"]',
+        )
+        ?.click();
+    });
+    const save = [
+      ...document.querySelectorAll<HTMLButtonElement>('button'),
+    ].find((button) => button.textContent === 'Save');
+    if (!save) throw new Error('save control was not rendered');
+    act(() => save.click());
+    act(() => {
+      connectionState = {
+        ...connectionState,
+        goalState: { v: 2, activity: 'idle', goal: null },
+      };
+      rerender({ onError });
+    });
+    await act(async () =>
+      pendingGoal.resolve({
+        snapshot: { v: 2, activity: 'idle', goal: null },
+      }),
+    );
+
+    expect(onError).toHaveBeenCalledWith(
+      expect.any(Error),
+      'Failed to edit the goal',
+    );
+  });
+
+  it.each(['resolve', 'reject'] as const)(
+    'ignores a stale Goal edit %s after the pane session changes',
+    async (outcome) => {
+      const goalA = {
+        v: 2 as const,
+        activity: 'running' as const,
+        goal: {
+          goalId: 'goal-a',
+          revision: 5,
+          objective: 'session A objective',
+          status: 'active' as const,
+          evidenceCursor: { recordId: 'record-a' },
+          turnCount: 1,
+          activeTimeMs: 10,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      };
+      const goalB = {
+        ...goalA,
+        goal: {
+          ...goalA.goal,
+          goalId: 'goal-b',
+          revision: 1,
+          objective: 'session B objective',
+        },
+      };
+      let resolveEdit!: (value: { snapshot: typeof goalA }) => void;
+      let rejectEdit!: (error: Error) => void;
+      const edit = new Promise<{ snapshot: typeof goalA }>(
+        (resolve, reject) => {
+          resolveEdit = resolve;
+          rejectEdit = reject;
+        },
+      );
+      connectionState.goalState = goalA;
+      getGoal.mockResolvedValue({ snapshot: goalA });
+      controlGoal.mockReturnValueOnce(edit);
+      render();
+
+      const editA = container!.querySelector<HTMLButtonElement>(
+        '[data-testid="goal-status-strip"] button[aria-label="Edit goal"]',
+      );
+      if (!editA) throw new Error('session A edit control was not rendered');
+      act(() => editA.click());
+      const saveA = [
+        ...document.querySelectorAll<HTMLButtonElement>('button'),
+      ].find((button) => button.textContent === 'Save');
+      if (!saveA) throw new Error('session A save control was not rendered');
+      act(() => saveA.click());
+      await vi.waitFor(() => expect(controlGoal).toHaveBeenCalledTimes(1));
+
+      act(() => {
+        ownerVersion += 1;
+        connectionState = {
+          ...connectionState,
+          sessionId: 'sess-2',
+          goalState: goalB,
+        };
+        rerender();
+      });
+      const editB = container!.querySelector<HTMLButtonElement>(
+        '[data-testid="goal-status-strip"] button[aria-label="Edit goal"]',
+      );
+      if (!editB) throw new Error('session B edit control was not rendered');
+      expect(editB.disabled).toBe(false);
+      act(() => editB.click());
+      expect(document.querySelector('textarea')).not.toBeNull();
+
+      await act(async () => {
+        if (outcome === 'resolve') resolveEdit({ snapshot: goalA });
+        else rejectEdit(new Error('session A edit failed'));
+        await Promise.resolve();
+      });
+
+      expect(document.querySelector('textarea')).not.toBeNull();
+      expect(document.querySelector('[role="alert"]')).toBeNull();
+    },
+  );
+
+  it('rejects a Goal edit when the same session replaces the goal', async () => {
+    const goalA = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: 'goal-a',
+        revision: 5,
+        objective: 'goal A',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-a' },
+        turnCount: 1,
+        activeTimeMs: 10,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    };
+    const goalB = {
+      ...goalA,
+      goal: { ...goalA.goal, goalId: 'goal-b', objective: 'goal B' },
+    };
+    const pendingGoal = deferred<{ snapshot: typeof goalB }>();
+    const onError = vi.fn();
+    connectionState.goalState = goalA;
+    getGoal.mockReturnValueOnce(pendingGoal.promise);
+    render({ onError });
+
+    act(() => {
+      container!
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="goal-status-strip"] button[aria-label="Edit goal"]',
+        )
+        ?.click();
+    });
+    const save = [
+      ...document.querySelectorAll<HTMLButtonElement>('button'),
+    ].find((button) => button.textContent === 'Save');
+    if (!save) throw new Error('save control was not rendered');
+    act(() => save.click());
+    act(() => {
+      connectionState = { ...connectionState, goalState: goalB };
+      rerender({ onError });
+    });
+    await act(async () => pendingGoal.resolve({ snapshot: goalB }));
+
+    expect(controlGoal).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledWith(
+      expect.any(Error),
+      'Failed to edit the goal',
+    );
+  });
+
   it('opens a pane monitor in the shared right panel', async () => {
     connectionState.capabilities = {
       features: ['session_monitor_tool_correlation'],
@@ -1657,6 +2037,7 @@ describe('ChatPane', () => {
   });
 
   it('enables mid-turn queue mutations only when advertised', () => {
+    queuedPromptsMock = [{ id: 1, text: 'queued next' }];
     connectionState.capabilities = {
       features: ['session_mid_turn_message_mutation'],
     };
@@ -1666,6 +2047,7 @@ describe('ChatPane', () => {
   });
 
   it('disables mid-turn queue mutations when not advertised', () => {
+    queuedPromptsMock = [{ id: 1, text: 'queued next' }];
     render();
     expect(testid('pane-queue')?.dataset.canMutateMidTurn).toBe('false');
   });

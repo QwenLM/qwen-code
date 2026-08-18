@@ -133,6 +133,18 @@ describe('removeInjectedFromQueue', () => {
     expect(next?.map((p) => p.text)).toEqual(['keep']);
   });
 
+  it('does not text-match an admission-unknown row without its id', () => {
+    const unknown = {
+      ...q('lost ack'),
+      midTurnState: undefined,
+      admissionOutcome: 'unknown' as const,
+    };
+
+    expect(
+      removeInjectedFromQueue([unknown], [batch('s', 'lost ack')], 's'),
+    ).toBeNull();
+  });
+
   it('never matches a file-bearing entry (files are not pushed mid-turn)', () => {
     const withFile = { ...q('with file'), files: [{ name: 'app.log' }] };
     const prompts = [withFile, q('with file')];
@@ -178,6 +190,19 @@ describe('removeInjectedFromQueue', () => {
     const next = removeInjectedFromQueue(
       [submitting],
       [batchWithIds('s', ['early injection'], ['mid-early'])],
+      's',
+    );
+    expect(next).toEqual([]);
+  });
+
+  it('matches an explicit insert before its admission response arrives', () => {
+    const inserting = {
+      text: 'early explicit insert',
+      isInserting: true,
+    };
+    const next = removeInjectedFromQueue(
+      [inserting],
+      [batch('s', 'early explicit insert')],
       's',
     );
     expect(next).toEqual([]);

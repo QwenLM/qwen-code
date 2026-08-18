@@ -20,9 +20,41 @@ export const GOAL_CLEAR_KEYWORDS: ReadonlySet<string> = new Set([
   'cancel',
 ]);
 
+export type ParsedWebShellGoalCommand =
+  | { kind: 'status' }
+  | { kind: 'set' | 'edit'; objective: string }
+  | { kind: 'pause' | 'resume' | 'clear' }
+  | { kind: 'error'; message: string };
+
 /** The argument of a `/goal …` command; `''` for a bare `/goal`. */
 export function goalArgOf(text: string): string {
   return text.replace(/^\/goal\b/i, '').trim();
+}
+
+/** Browser-side mirror of the CLI's Goal v3 command grammar. */
+export function parseWebShellGoalCommand(
+  text: string,
+): ParsedWebShellGoalCommand {
+  const input = goalArgOf(text);
+  if (!input) return { kind: 'status' };
+
+  const [head = '', ...tail] = input.split(/\s+/);
+  const keyword = head.toLowerCase();
+  const objective = tail.join(' ').trim();
+  if (keyword === 'set' || keyword === 'edit') {
+    return objective
+      ? { kind: keyword, objective }
+      : {
+          kind: 'error',
+          message: `/goal ${keyword} requires an objective.`,
+        };
+  }
+  if (tail.length === 0) {
+    if (keyword === 'pause') return { kind: 'pause' };
+    if (keyword === 'resume') return { kind: 'resume' };
+    if (GOAL_CLEAR_KEYWORDS.has(keyword)) return { kind: 'clear' };
+  }
+  return { kind: 'set', objective: input };
 }
 
 /**

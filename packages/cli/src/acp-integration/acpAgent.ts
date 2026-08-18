@@ -98,8 +98,14 @@ import {
   extractDaemonTraceContext,
   withDaemonSpan,
   emptyGoalSnapshot,
+  GoalConflictError,
+  GoalInvalidTransitionError,
   GoalPersistenceUnavailableError,
+  parseGoalControlRequest,
+  type GoalControlRequest,
+  type GoalRuntime,
   type GoalSnapshotV2,
+  type GoalStateResponse,
   type AgentParams,
   ApprovalMode,
   type Config,
@@ -417,6 +423,68 @@ const ACP_REASONING_EFFORT_NAMES: Record<ReasoningEffort, string> = {
 
 // Must be less than WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS (300s) in bridge.ts.
 const WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS = 295_000;
+
+function currentGoalSnapshot(
+  config: Config,
+  runtime?: GoalRuntime,
+): GoalSnapshotV2 {
+  try {
+    return (runtime ?? config.getGoalRuntime()).getSnapshot();
+  } catch {
+    return emptyGoalSnapshot();
+  }
+}
+
+function mapGoalControlError(
+  error: unknown,
+  config: Config,
+  runtime?: GoalRuntime,
+): RequestError {
+  if (error instanceof GoalConflictError) {
+    return new RequestError(-32009, error.message, {
+      errorKind: 'goal_conflict',
+      current: error.current,
+    });
+  }
+  if (error instanceof GoalInvalidTransitionError) {
+    return new RequestError(-32009, error.message, {
+      errorKind: 'goal_invalid_transition',
+      current: error.current,
+    });
+  }
+  return new RequestError(
+    -32603,
+    error instanceof Error ? error.message : 'Goal persistence failed',
+    {
+      errorKind: 'goal_persist_failed',
+      current: currentGoalSnapshot(config, runtime),
+    },
+  );
+}
+
+async function dispatchGoalControl(
+  config: Config,
+  request: GoalControlRequest,
+): Promise<GoalStateResponse> {
+  const requiresTrustedWorkspace =
+    request.action === 'create' ||
+    request.action === 'replace' ||
+    request.action === 'edit' ||
+    request.action === 'resume';
+  if (requiresTrustedWorkspace && !config.isTrustedFolder()) {
+    throw new RequestError(-32003, 'Workspace is not trusted.', {
+      errorKind: 'untrusted_workspace',
+      httpStatus: 403,
+    });
+  }
+  let runtime: GoalRuntime | undefined;
+  try {
+    runtime = await config.getGoalRuntimeReady();
+    return await runtime.dispatch(request);
+  } catch (error) {
+    throw mapGoalControlError(error, config, runtime);
+  }
+}
 
 const TURN_STATUS_SCAN_PAGE_LIMIT = 500;
 const TURN_STATUS_SCAN_MAX_PAGES = 10;
@@ -11047,6 +11115,28 @@ class QwenAgent implements Agent {
           condition: goal?.objective,
           snapshot: response.snapshot,
         };
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionGoalControl: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const request = parseGoalControlRequest(params['request']);
+        if (!request) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing Goal control request',
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        const response = await dispatchGoalControl(
+          session.getConfig(),
+          request,
+        );
+        return { snapshot: response.snapshot };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionGoalGet: {
         const sessionId = params['sessionId'];

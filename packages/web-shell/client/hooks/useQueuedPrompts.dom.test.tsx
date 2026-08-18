@@ -83,6 +83,7 @@ function mount(
   canMutateMidTurn = true,
   connected = false,
   writeBlocked = false,
+  holdQueuedPromptsLocally = false,
 ) {
   const editor = {
     getText: vi.fn(() => ''),
@@ -101,10 +102,12 @@ function mount(
     state,
     activeSessionId,
     blocked,
+    hold,
   }: {
     state: typeof streamingState;
     activeSessionId: string;
     blocked: boolean;
+    hold: boolean;
   }) {
     latest = useQueuedPrompts({
       connected,
@@ -117,6 +120,7 @@ function mount(
       canQueryMidTurn: false,
       canInjectMidTurnMedia: false,
       streamingState: state,
+      holdQueuedPromptsLocally: hold,
       sessionActions,
       store,
       editorRef: { current: editor as never },
@@ -128,21 +132,25 @@ function mount(
 
   let activeSessionId = 'session-1';
   let blocked = writeBlocked;
+  let held = holdQueuedPromptsLocally;
   const render = (
     state: typeof streamingState,
     nextSessionId = activeSessionId,
     replaceOwner = false,
     nextWriteBlocked = blocked,
+    nextHold = held,
   ) => {
     if (replaceOwner) sdk.ownerVersion += 1;
     activeSessionId = nextSessionId;
     blocked = nextWriteBlocked;
+    held = nextHold;
     act(() =>
       root.render(
         <Harness
           state={state}
           activeSessionId={activeSessionId}
           blocked={blocked}
+          hold={held}
         />,
       ),
     );
@@ -184,6 +192,392 @@ afterEach(() => {
 });
 
 describe('useQueuedPrompts default mid-turn insertion', () => {
+  it('holds Goal follow-ups locally until an explicit insert', async () => {
+    const { actions } = createActions();
+    vi.mocked(actions.enqueueMidTurnMessage).mockResolvedValue({
+      accepted: true,
+      messageId: 'inserted-1',
+    });
+    mount('responding', actions, true, false, false, true);
+
+    act(() => latest.enqueuePrompt('wait for explicit insert'));
+
+    expect(actions.submitPrompt).not.toHaveBeenCalled();
+    expect(actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
+    expect(latest.queuedPrompts).toMatchObject([
+      { text: 'wait for explicit insert' },
+    ]);
+
+    await act(async () => latest.insertQueuedPrompt(1));
+
+    expect(actions.enqueueMidTurnMessage).toHaveBeenCalledWith(
+      'wait for explicit insert',
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(latest.queuedPrompts).toMatchObject([
+      {
+        text: 'wait for explicit insert',
+        midTurnState: 'queued',
+        midTurnMessageId: 'inserted-1',
+      },
+    ]);
+  });
+
+  it('does not insert a held prompt between turns', async () => {
+    const { actions } = createActions();
+    mount('idle', actions, true, false, false, true);
+
+    act(() => latest.enqueuePrompt('wait for a running turn'));
+    await act(async () => latest.insertQueuedPrompt(1));
+
+    expect(actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
+    expect(latest.queuedPrompts).toMatchObject([
+      { text: 'wait for a running turn' },
+    ]);
+  });
+
+  it('does not insert a held prompt with input annotations', async () => {
+    const { actions } = createActions();
+    mount('responding', actions, true, false, false, true);
+
+    act(() =>
+      latest.enqueuePrompt(
+        'inspect this file',
+        undefined,
+        undefined,
+        undefined,
+        [
+          {
+            type: 'reference',
+            start: 8,
+            end: 17,
+            text: 'this file',
+            reference: {
+              id: 'file-1',
+              kind: 'data-table',
+              label: 'File',
+              value: '/tmp/a.ts',
+              serialized: 'this file',
+            },
+          },
+        ],
+      ),
+    );
+    await act(async () => latest.insertQueuedPrompt(1));
+
+    expect(actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
+    expect(latest.queuedPrompts).toHaveLength(1);
+  });
+
+  it('does not insert a held prompt with file attachments', async () => {
+    const { actions } = createActions();
+    mount('responding', actions, true, false, false, true);
+
+    act(() =>
+      latest.enqueuePrompt('inspect this file', undefined, [
+        {
+          name: 'a.ts',
+          media_type: 'text/typescript',
+          text: 'export {};',
+        },
+      ]),
+    );
+    await act(async () => latest.insertQueuedPrompt(1));
+
+    expect(actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
+    expect(latest.queuedPrompts).toMatchObject([
+      { text: 'inspect this file', files: [{ name: 'a.ts' }] },
+    ]);
+  });
+
+  it('preserves an accepted explicit insert across a session switch', async () => {
+    const { actions } = createActions();
+    const admission = deferred<{ accepted: boolean; messageId?: string }>();
+    vi.mocked(actions.enqueueMidTurnMessage).mockReturnValue(admission.promise);
+    const { render } = mount('responding', actions, true, false, false, true);
+
+    act(() => latest.enqueuePrompt('stay with session one'));
+    let insertPromise: Promise<void> | undefined;
+    act(() => {
+      insertPromise = latest.insertQueuedPrompt(1);
+    });
+    render('idle', 'session-2', true, false, true);
+    await act(async () => {
+      admission.resolve({ accepted: true, messageId: 'mid-1' });
+      await insertPromise;
+    });
+    render('responding', 'session-1', true, false, true);
+
+    expect(latest.queuedPrompts).toMatchObject([
+      {
+        text: 'stay with session one',
+        midTurnState: 'queued',
+        midTurnMessageId: 'mid-1',
+        isInserting: false,
+      },
+    ]);
+  });
+
+  it('locks edit and clear while an explicit insert is in flight', async () => {
+    const { actions } = createActions();
+    const admission = deferred<{ accepted: boolean; messageId?: string }>();
+    vi.mocked(actions.enqueueMidTurnMessage).mockReturnValue(admission.promise);
+    const { editor } = mount('responding', actions, true, false, false, true);
+
+    act(() => latest.enqueuePrompt('in flight'));
+    act(() => {
+      void latest.insertQueuedPrompt(1);
+    });
+    await act(async () => latest.editQueuedPrompt(1));
+    let consumed = false;
+    let cleared = false;
+    act(() => {
+      consumed = latest.editLastQueuedPrompt();
+      cleared = latest.clearQueuedPrompts();
+    });
+
+    expect(consumed).toBe(true);
+    expect(cleared).toBe(false);
+    expect(editor.setText).not.toHaveBeenCalled();
+    expect(latest.queuedPrompts).toMatchObject([
+      { text: 'in flight', isInserting: true },
+    ]);
+  });
+
+  it('keeps an explicit insert in flight when the turn becomes idle', () => {
+    const { actions } = createActions();
+    vi.mocked(actions.enqueueMidTurnMessage).mockReturnValue(
+      new Promise(() => undefined),
+    );
+    const { render } = mount('responding', actions, true, false, false, true);
+
+    act(() => latest.enqueuePrompt('in flight'));
+    act(() => {
+      void latest.insertQueuedPrompt(1);
+    });
+    const signal = vi.mocked(actions.enqueueMidTurnMessage).mock.calls[0]?.[1]
+      ?.signal;
+    render('idle', 'session-1', false, false, true);
+
+    expect(signal?.aborted).toBe(false);
+  });
+
+  it('does not resubmit a legacy explicit insert accepted as the turn becomes idle', async () => {
+    const { actions } = createActions();
+    const admission = deferred<{ accepted: boolean; messageId?: string }>();
+    vi.mocked(actions.enqueueMidTurnMessage).mockReturnValue(admission.promise);
+    const { render, reportError } = mount(
+      'responding',
+      actions,
+      true,
+      false,
+      false,
+      true,
+    );
+
+    act(() => latest.enqueuePrompt('submit after settle'));
+    let insertion!: Promise<void>;
+    act(() => {
+      insertion = latest.insertQueuedPrompt(1);
+    });
+    render('idle', 'session-1', false, false, false);
+    await act(async () => {
+      admission.resolve({ accepted: true, messageId: 'accepted-once' });
+      await insertion;
+    });
+
+    expect(reportError).not.toHaveBeenCalled();
+    expect(actions.submitPrompt).not.toHaveBeenCalled();
+    expect(latest.queuedPrompts).toEqual([]);
+  });
+
+  it('resubmits a legacy explicit insert after an idle transport failure', async () => {
+    const { actions } = createActions();
+    const admission = deferred<{ accepted: boolean; messageId?: string }>();
+    vi.mocked(actions.enqueueMidTurnMessage).mockReturnValue(admission.promise);
+    const { render, reportError } = mount(
+      'responding',
+      actions,
+      true,
+      false,
+      false,
+      true,
+    );
+
+    act(() => latest.enqueuePrompt('recover after failure'));
+    let insertion!: Promise<void>;
+    act(() => {
+      insertion = latest.insertQueuedPrompt(1);
+    });
+    render('idle', 'session-1', false, false, false);
+    await act(async () => {
+      admission.reject(new Error('connection lost'));
+      await insertion;
+    });
+
+    expect(reportError).toHaveBeenCalledOnce();
+    expect(actions.submitPrompt).toHaveBeenCalledWith(
+      'recover after failure',
+      expect.objectContaining({ sessionId: 'session-1' }),
+    );
+    expect(actions.submitPrompt).toHaveBeenCalledOnce();
+    expect(latest.queuedPrompts).toMatchObject([
+      { text: 'recover after failure', serverState: 'submitting' },
+    ]);
+  });
+
+  it('silently holds an explicit insert rejected while a Goal remains active', async () => {
+    const { actions } = createActions();
+    const admission = deferred<{ accepted: boolean; messageId?: string }>();
+    vi.mocked(actions.enqueueMidTurnMessage).mockReturnValue(admission.promise);
+    const { render, reportError } = mount(
+      'responding',
+      actions,
+      true,
+      false,
+      false,
+      true,
+    );
+
+    act(() => latest.enqueuePrompt('keep held'));
+    let insertion!: Promise<void>;
+    act(() => {
+      insertion = latest.insertQueuedPrompt(1);
+    });
+    render('idle', 'session-1', false, false, true);
+    await act(async () => {
+      admission.resolve({ accepted: false });
+      await insertion;
+    });
+
+    expect(reportError).toHaveBeenCalledOnce();
+    expect(actions.submitPrompt).not.toHaveBeenCalled();
+    expect(latest.queuedPrompts).toMatchObject([{ text: 'keep held' }]);
+    expect(latest.queuedPrompts[0]?.admissionOutcome).toBeUndefined();
+  });
+
+  it('lets an explicit insert settle into its source-session stash', async () => {
+    const { actions } = createActions();
+    const admission = deferred<{ accepted: boolean; messageId?: string }>();
+    vi.mocked(actions.enqueueMidTurnMessage).mockImplementation(
+      (_message, opts) => {
+        opts?.signal?.addEventListener(
+          'abort',
+          () => admission.reject(new DOMException('aborted', 'AbortError')),
+          { once: true },
+        );
+        return admission.promise;
+      },
+    );
+    const { render } = mount('responding', actions, true, false, false, true);
+
+    act(() => latest.enqueuePrompt('insert once'));
+    let insertion!: Promise<void>;
+    act(() => {
+      insertion = latest.insertQueuedPrompt(1);
+    });
+    const signal = vi.mocked(actions.enqueueMidTurnMessage).mock.calls[0]?.[1]
+      ?.signal;
+    render('idle', 'session-2', true, false, true);
+
+    await act(async () => {
+      if (!signal?.aborted) {
+        admission.resolve({ accepted: true, messageId: 'inserted-once' });
+      }
+      await insertion;
+    });
+    render('responding', 'session-1', true, false, true);
+
+    expect(signal?.aborted).toBe(false);
+    expect(latest.queuedPrompts).toMatchObject([
+      {
+        text: 'insert once',
+        midTurnState: 'queued',
+        midTurnMessageId: 'inserted-once',
+      },
+    ]);
+    expect(actions.submitPrompt).not.toHaveBeenCalled();
+  });
+
+  it('keeps one explicit insert in flight across an A-to-B-to-A switch', async () => {
+    const { actions } = createActions();
+    const admission = deferred<{ accepted: boolean; messageId?: string }>();
+    vi.mocked(actions.enqueueMidTurnMessage).mockImplementation(
+      (_message, opts) => {
+        opts?.signal?.addEventListener(
+          'abort',
+          () => admission.reject(new DOMException('aborted', 'AbortError')),
+          { once: true },
+        );
+        return admission.promise;
+      },
+    );
+    const { render } = mount('responding', actions, true, false, false, true);
+
+    act(() => latest.enqueuePrompt('insert exactly once'));
+    let insertion!: Promise<void>;
+    act(() => {
+      insertion = latest.insertQueuedPrompt(1);
+    });
+    const signal = vi.mocked(actions.enqueueMidTurnMessage).mock.calls[0]?.[1]
+      ?.signal;
+    render('responding', 'session-2', true, false, true);
+    render('responding', 'session-1', true, false, true);
+
+    expect(latest.queuedPrompts).toMatchObject([
+      { text: 'insert exactly once', isInserting: true },
+    ]);
+    await act(async () => latest.insertQueuedPrompt(1));
+    expect(actions.enqueueMidTurnMessage).toHaveBeenCalledTimes(1);
+
+    render('idle', 'session-1', false, false, true);
+    expect(signal?.aborted).toBe(false);
+    await act(async () => {
+      admission.resolve({ accepted: true, messageId: 'inserted-once' });
+      await insertion;
+    });
+    expect(actions.enqueueMidTurnMessage).toHaveBeenCalledTimes(1);
+    expect(actions.submitPrompt).not.toHaveBeenCalled();
+    expect(latest.queuedPrompts).toEqual([]);
+  });
+
+  it('submits locally held Goal follow-ups after the Goal stops', () => {
+    const { actions } = createActions();
+    const { render } = mount('responding', actions, true, false, false, true);
+
+    act(() => latest.enqueuePrompt('run after goal'));
+    expect(actions.submitPrompt).not.toHaveBeenCalled();
+
+    render('idle', 'session-1', false, false, false);
+
+    expect(actions.submitPrompt).toHaveBeenCalledWith(
+      'run after goal',
+      expect.objectContaining({ optimisticUserMessage: false }),
+    );
+  });
+
+  it('keeps locally held Goal follow-ups isolated across session switches', () => {
+    const { actions } = createActions();
+    const { render } = mount('responding', actions, true, false, false, true);
+
+    act(() => latest.enqueuePrompt('stay with session one'));
+    render('responding', 'session-2', true, false, true);
+    expect(latest.queuedPrompts).toEqual([]);
+
+    act(() => latest.enqueuePrompt('stay with session two'));
+    render('responding', 'session-1', true, false, true);
+    expect(latest.queuedPrompts).toMatchObject([
+      { text: 'stay with session one' },
+    ]);
+
+    render('responding', 'session-2', true, false, true);
+    expect(latest.queuedPrompts).toMatchObject([
+      { text: 'stay with session two' },
+    ]);
+    expect(actions.submitPrompt).not.toHaveBeenCalled();
+    expect(actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
+  });
+
   it('restores an unaccepted mid-turn prompt when its owner is replaced', () => {
     const { actions } = createActions();
     vi.mocked(actions.enqueueMidTurnMessage).mockReturnValue(
@@ -856,6 +1250,37 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     expect(actions.submitPrompt).not.toHaveBeenCalled();
   });
 
+  it('does not resend an explicit insert when its echo beats the admission ack', async () => {
+    const { actions } = createActions();
+    const admission = deferred<{ accepted: boolean; messageId?: string }>();
+    vi.mocked(actions.enqueueMidTurnMessage).mockReturnValue(admission.promise);
+    const { render } = mount('responding', actions, true, false, false, true);
+
+    act(() => latest.enqueuePrompt('explicit early injection'));
+    let insertion!: Promise<void>;
+    act(() => {
+      insertion = latest.insertQueuedPrompt(1);
+    });
+    sdk.batches = [
+      {
+        sessionId: 'session-1',
+        originatorClientId: 'client-1',
+        messages: ['explicit early injection'],
+      },
+    ];
+    render('responding');
+    expect(latest.queuedPrompts).toEqual([]);
+
+    await act(async () => {
+      admission.resolve({ accepted: true, messageId: 'mid-early' });
+      await insertion;
+    });
+    render('idle', 'session-1', false, false, false);
+
+    expect(latest.queuedPrompts).toEqual([]);
+    expect(actions.submitPrompt).not.toHaveBeenCalled();
+  });
+
   it('falls back to one ordinary submission when mid-turn admission fails', async () => {
     const { actions } = createActions();
     vi.mocked(actions.enqueueMidTurnMessage).mockResolvedValue({
@@ -878,6 +1303,70 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     ]);
   });
 
+  it('holds an idle admission rejection while a Goal is active', async () => {
+    const { actions } = createActions();
+    const admission = deferred<{ accepted: boolean }>();
+    vi.mocked(actions.enqueueMidTurnMessage).mockReturnValue(admission.promise);
+    const { render } = mount('responding', actions);
+
+    act(() => latest.enqueuePrompt('wait for the Goal'));
+    render('idle', 'session-1', false, false, true);
+    await act(async () => admission.resolve({ accepted: false }));
+
+    expect(actions.submitPrompt).not.toHaveBeenCalled();
+    expect(latest.queuedPrompts).toMatchObject([{ text: 'wait for the Goal' }]);
+    expect(latest.queuedPrompts[0]).not.toHaveProperty('serverState');
+
+    render('idle', 'session-1', false, false, false);
+    expect(actions.submitPrompt).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not resubmit a legacy explicit insert accepted after idle', async () => {
+    const { actions } = createActions();
+    const admission = deferred<{ accepted: boolean; messageId?: string }>();
+    vi.mocked(actions.enqueueMidTurnMessage).mockReturnValue(admission.promise);
+    const { render } = mount('responding', actions, true, false, false, true);
+
+    act(() => latest.enqueuePrompt('do not lose me'));
+    let insertion!: Promise<void>;
+    act(() => {
+      insertion = latest.insertQueuedPrompt(1);
+    });
+    render('idle', 'session-1', false, false, true);
+    await act(async () => {
+      admission.resolve({ accepted: true, messageId: 'legacy-accepted' });
+      await insertion;
+    });
+
+    expect(latest.queuedPrompts).toEqual([]);
+    expect(actions.submitPrompt).not.toHaveBeenCalled();
+
+    render('idle', 'session-1', false, false, false);
+    expect(latest.queuedPrompts).toEqual([]);
+    expect(actions.submitPrompt).not.toHaveBeenCalled();
+  });
+
+  it('does not hold a legacy insert accepted before Goal hold', async () => {
+    const { actions } = createActions();
+    vi.mocked(actions.enqueueMidTurnMessage).mockResolvedValue({
+      accepted: true,
+      messageId: 'accepted-before-idle',
+    });
+    const { render } = mount('responding', actions);
+
+    act(() => latest.enqueuePrompt('already accepted'));
+    await act(async () => {});
+    expect(latest.queuedPrompts).toMatchObject([
+      { midTurnMessageId: 'accepted-before-idle', midTurnState: 'queued' },
+    ]);
+
+    render('idle', 'session-1', false, false, true);
+    expect(latest.queuedPrompts).toEqual([]);
+    render('idle', 'session-1', false, false, false);
+
+    expect(actions.submitPrompt).not.toHaveBeenCalled();
+  });
+
   it('freezes mid-turn fallback while a session switch is preparing', async () => {
     const { actions } = createActions();
     const admission = deferred<{ accepted: boolean }>();
@@ -891,14 +1380,14 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
 
     expect(actions.submitPrompt).not.toHaveBeenCalled();
     expect(latest.queuedPrompts).toMatchObject([
-      { text: '留在当前会话', midTurnState: 'submitting' },
+      { text: '留在当前会话', midTurnState: undefined },
     ]);
 
     render('idle', 'session-1', false, false);
     expect(actions.submitPrompt).toHaveBeenCalledOnce();
   });
 
-  it('falls back once when the running turn ends before injection', async () => {
+  it('does not resubmit an accepted legacy message when the running turn ends', async () => {
     const { actions } = createActions();
     vi.mocked(actions.enqueueMidTurnMessage).mockResolvedValue({
       accepted: true,
@@ -913,34 +1402,52 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     render('idle');
     await act(async () => {});
 
-    expect(actions.submitPrompt).toHaveBeenCalledTimes(1);
-    expect(latest.queuedPrompts).toMatchObject([
-      { text: '继续处理', serverState: 'submitting' },
-    ]);
+    expect(actions.submitPrompt).not.toHaveBeenCalled();
+    expect(latest.queuedPrompts).toEqual([]);
   });
 
-  it('ignores a late admission result after idle fallback claimed the prompt', async () => {
+  it('does not resubmit a late accepted legacy admission at idle', async () => {
     const { actions } = createActions();
     const admission = deferred<{ accepted: boolean }>();
-    vi.mocked(actions.enqueueMidTurnMessage).mockReturnValue(admission.promise);
+    let signal: AbortSignal | undefined;
+    vi.mocked(actions.enqueueMidTurnMessage).mockImplementation(
+      (_message, options) => {
+        signal = options?.signal;
+        return admission.promise;
+      },
+    );
     const { render } = mount('responding', actions);
 
     act(() => {
       latest.enqueuePrompt('不要重复');
     });
     render('idle');
-    render('responding');
+    expect(signal?.aborted).toBe(false);
     await act(async () =>
       admission.resolve({ accepted: true, messageId: 'mid-late' }),
     );
 
-    expect(actions.submitPrompt).toHaveBeenCalledTimes(1);
+    expect(actions.submitPrompt).not.toHaveBeenCalled();
+    expect(latest.queuedPrompts).toEqual([]);
+  });
+
+  it('resubmits a legacy admission after a transport failure', async () => {
+    const { actions } = createActions();
+    vi.mocked(actions.enqueueMidTurnMessage).mockRejectedValue(
+      new Error('connection lost'),
+    );
+    mount('responding', actions);
+
+    act(() => latest.enqueuePrompt('do not lose me'));
+    await act(async () => {});
+
+    expect(actions.submitPrompt).toHaveBeenCalledWith(
+      'do not lose me',
+      expect.objectContaining({ sessionId: 'session-1' }),
+    );
+    expect(actions.submitPrompt).toHaveBeenCalledOnce();
     expect(latest.queuedPrompts).toMatchObject([
-      {
-        text: '不要重复',
-        serverState: 'submitting',
-        midTurnState: undefined,
-      },
+      { text: 'do not lose me', serverState: 'submitting' },
     ]);
   });
 

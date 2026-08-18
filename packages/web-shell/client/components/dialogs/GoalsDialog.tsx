@@ -5,14 +5,16 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import type { GoalControlRequest, GoalRecord } from '@qwen-code/sdk/daemon';
 import {
   useWorkspaceActions,
   type DaemonGoal,
 } from '@qwen-code/webui/daemon-react-sdk';
+import { Pause, Pencil, Play, Trash2 } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { DialogShell } from './DialogShell';
 import { formatRuntime } from '../../utils/formatRuntime';
-import { isGoalClearKeyword } from '../../utils/goalCondition';
+import { getGoalActiveTimeMs } from '../GoalStatusStrip';
 import styles from './GoalsDialog.module.css';
 
 /**
@@ -26,17 +28,26 @@ const RELOAD_INTERVAL_MS = 10_000;
 const TICK_INTERVAL_MS = 1000;
 
 interface GoalsDialogProps {
-  /** Send `/goal <condition>` into a brand-new session and switch to it. Setting
-   * a goal is not a pure write — the daemon registers the Stop hook AND kicks
-   * off the first turn — so it has to travel the prompt path, not a REST POST.
-   *
-   * Return `false` to report a failure this form must not treat as a creation —
-   * the condition stays in the box. Reserved for failures already surfaced
-   * elsewhere; throw to have the message rendered inline instead. */
+  /** Create a canonical Goal in a brand-new session and switch to it.
+   * Return `false` when session setup failed and the error was already shown;
+   * throw to render the control failure inline. */
   onCreateGoal: (condition: string) => boolean | void | Promise<boolean | void>;
   /** Open the session driving a goal — its transcript IS the goal's history. */
   onOpenSession: (sessionId: string) => void;
   onError: (error: unknown, fallback: string) => void;
+}
+
+function versionedRequest(
+  goal: GoalRecord,
+  action: 'edit' | 'pause' | 'resume' | 'clear',
+  objective?: string,
+): GoalControlRequest {
+  return {
+    action,
+    ...(action === 'edit' ? { objective: objective ?? goal.objective } : {}),
+    expectedGoalId: goal.goalId,
+    expectedRevision: goal.revision,
+  } as GoalControlRequest;
 }
 
 export function GoalsDialog({
@@ -51,9 +62,13 @@ export function GoalsDialog({
   /** Sessions the daemon could not probe; their goals are missing from `goals`. */
   const [droppedCount, setDroppedCount] = useState(0);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [busySessionId, setBusySessionId] = useState<string | null>(null);
+  const [busySessionIds, setBusySessionIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const busySessionIdsRef = useRef<Set<string>>(new Set());
 
   const [showForm, setShowForm] = useState(false);
+  const [editingGoal, setEditingGoal] = useState<DaemonGoal | null>(null);
   const [condition, setCondition] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
@@ -112,7 +127,9 @@ export function GoalsDialog({
   }, [reload]);
 
   // Only tick the elapsed column while something is actually elapsing.
-  const hasGoals = !!goals?.length;
+  const hasGoals = goals?.some(
+    ({ snapshot }) => snapshot.goal?.status === 'active',
+  );
   useEffect(() => {
     if (!hasGoals) return;
     const id = window.setInterval(() => setNow(Date.now()), TICK_INTERVAL_MS);
@@ -121,8 +138,24 @@ export function GoalsDialog({
 
   const resetForm = useCallback(() => {
     setCondition('');
+    setEditingGoal(null);
     setFormError(null);
     setShowForm(false);
+  }, []);
+
+  const setSessionBusy = useCallback((sessionId: string, busy: boolean) => {
+    const next = new Set(busySessionIdsRef.current);
+    if (busy) next.add(sessionId);
+    else next.delete(sessionId);
+    busySessionIdsRef.current = next;
+    if (mountedRef.current) setBusySessionIds(next);
+  }, []);
+
+  const openEdit = useCallback((goal: DaemonGoal) => {
+    setCondition(goal.snapshot.goal?.objective ?? '');
+    setEditingGoal(goal);
+    setFormError(null);
+    setShowForm(true);
   }, []);
 
   const handleSubmit = useCallback(async () => {
@@ -131,58 +164,78 @@ export function GoalsDialog({
       setFormError(t('goals.error.emptyCondition'));
       return;
     }
-    // No length cap: `/goal` accepts a condition of any length, and refusing
-    // one here that the daemon would accept only splits the two surfaces.
-    //
-    // The condition travels to the daemon as `/goal <condition>`, so a bare
-    // clear keyword arrives as a clear command: the fresh session would drop
-    // the goal the instant it was set, with nothing to show for it.
-    if (isGoalClearKeyword(trimmed)) {
-      setFormError(t('goals.error.clearKeyword', { word: trimmed }));
+    const editingSessionId = editingGoal?.sessionId;
+    if (editingSessionId && busySessionIdsRef.current.has(editingSessionId)) {
       return;
     }
+    if (editingSessionId) setSessionBusy(editingSessionId, true);
     setSubmitting(true);
     setFormError(null);
     try {
-      const created = await onCreateGoal(trimmed);
-      if (!mountedRef.current) return;
-      // No goal was started, and the caller already said why. Resetting here
-      // would close the form and drop the condition the user typed.
-      if (created === false) return;
+      if (editingGoal) {
+        const currentEditingGoal =
+          goals?.find((item) => item.sessionId === editingGoal.sessionId) ??
+          editingGoal;
+        const goal = currentEditingGoal.snapshot.goal;
+        if (!goal || goal.goalId !== editingGoal.snapshot.goal?.goalId) {
+          throw new Error(t('goals.error.goalUnavailable'));
+        }
+        await actions.controlGoal(
+          currentEditingGoal.sessionId,
+          versionedRequest(goal, 'edit', trimmed),
+        );
+      } else {
+        const created = await onCreateGoal(trimmed);
+        if (!mountedRef.current) return;
+        if (created === false) return;
+      }
+      await reload();
       resetForm();
     } catch (err) {
       if (!mountedRef.current) {
         // The page closed while the prompt was in flight, so the inline form
         // error has nowhere to render. Toast rather than swallow it.
-        onError(err, t('goals.error.createFailed'));
+        onError(err, t('goals.error.saveFailed'));
         return;
       }
+      if (editingGoal) await reload();
       setFormError(err instanceof Error ? err.message : String(err));
     } finally {
+      if (editingSessionId) setSessionBusy(editingSessionId, false);
       if (mountedRef.current) setSubmitting(false);
     }
-  }, [condition, onCreateGoal, onError, resetForm, t]);
+  }, [
+    actions,
+    condition,
+    editingGoal,
+    goals,
+    onCreateGoal,
+    onError,
+    reload,
+    resetForm,
+    setSessionBusy,
+    t,
+  ]);
 
-  const handleClear = useCallback(
-    async (goal: DaemonGoal) => {
-      const label =
-        goal.condition.length > 60
-          ? `${goal.condition.slice(0, 57)}…`
-          : goal.condition;
-      if (!window.confirm(t('goals.clearConfirm', { condition: label }))) {
-        return;
-      }
-      setBusySessionId(goal.sessionId);
+  const control = useCallback(
+    async (item: DaemonGoal, action: 'pause' | 'resume' | 'clear') => {
+      const goal = item.snapshot.goal;
+      if (!goal || busySessionIdsRef.current.has(item.sessionId)) return;
+      setSessionBusy(item.sessionId, true);
       try {
-        await actions.clearGoal(goal.sessionId);
+        await actions.controlGoal(
+          item.sessionId,
+          versionedRequest(goal, action),
+        );
         await reload();
       } catch (err) {
-        onError(err, t('goals.error.clearFailed'));
+        await reload();
+        onError(err, t(`goals.error.${action}Failed`));
       } finally {
-        if (mountedRef.current) setBusySessionId(null);
+        setSessionBusy(item.sessionId, false);
       }
     },
-    [actions, onError, reload, t],
+    [actions, onError, reload, setSessionBusy, t],
   );
 
   return (
@@ -208,6 +261,7 @@ export function GoalsDialog({
             className={styles.primaryButton}
             onClick={() => {
               setCondition('');
+              setEditingGoal(null);
               setFormError(null);
               setShowForm(true);
             }}
@@ -218,11 +272,15 @@ export function GoalsDialog({
       </div>
 
       {showForm && (
-        <DialogShell title={t('goals.new')} size="md" onClose={resetForm}>
+        <DialogShell
+          title={t(editingGoal ? 'goals.edit' : 'goals.new')}
+          size="md"
+          onClose={resetForm}
+        >
           <div className={styles.formFields}>
             <label className={styles.field}>
               <span className={styles.fieldLabel}>
-                {t('goals.condition')}
+                {t('goals.objective')}
                 <span className={styles.required}>*</span>
               </span>
               <textarea
@@ -260,7 +318,9 @@ export function GoalsDialog({
                 onClick={() => void handleSubmit()}
                 disabled={submitting}
               >
-                {submitting ? t('goals.creating') : t('goals.create')}
+                {submitting
+                  ? t('goals.saving')
+                  : t(editingGoal ? 'goals.save' : 'goals.create')}
               </button>
             </div>
           </div>
@@ -290,28 +350,69 @@ export function GoalsDialog({
           implicit role under `display: flex` in Safari. Without them a screen
           reader cannot announce "list, N items" or navigate goal by goal. */}
       <div className={styles.list} role="list">
-        {(goals ?? []).map((goal) => {
-          const busy = busySessionId === goal.sessionId;
+        {(goals ?? []).map((item) => {
+          const goal = item.snapshot.goal;
+          if (!goal) return null;
+          const busy = busySessionIds.has(item.sessionId);
+          const canPause = goal.status === 'active';
+          const canResume =
+            goal.status === 'paused' ||
+            goal.status === 'blocked' ||
+            goal.status === 'usage_limited';
           return (
-            <div key={goal.sessionId} className={styles.card} role="listitem">
+            <div key={item.sessionId} className={styles.card} role="listitem">
               <div className={styles.cardHeader}>
                 <span
-                  className={`${styles.statusDot} ${goal.hasActivePrompt ? styles.statusDotRunning : ''}`}
+                  className={`${styles.statusDot} ${item.snapshot.activity !== 'idle' ? styles.statusDotRunning : ''}`}
                   aria-hidden="true"
                 />
-                <div className={styles.cardTitle} title={goal.condition}>
-                  {goal.condition}
+                <div className={styles.cardTitle} title={goal.objective}>
+                  {goal.objective}
                 </div>
                 <div className={styles.cardMenu}>
                   <button
                     type="button"
                     className={styles.iconAction}
-                    onClick={() => void handleClear(goal)}
+                    onClick={() => openEdit(item)}
+                    disabled={busy}
+                    title={t('goal.edit')}
+                    aria-label={t('goal.edit')}
+                  >
+                    <Pencil size={15} aria-hidden="true" />
+                  </button>
+                  {canPause && (
+                    <button
+                      type="button"
+                      className={styles.iconAction}
+                      onClick={() => void control(item, 'pause')}
+                      disabled={busy}
+                      title={t('goal.pause')}
+                      aria-label={t('goal.pause')}
+                    >
+                      <Pause size={15} aria-hidden="true" />
+                    </button>
+                  )}
+                  {canResume && (
+                    <button
+                      type="button"
+                      className={styles.iconAction}
+                      onClick={() => void control(item, 'resume')}
+                      disabled={busy}
+                      title={t('goal.resume')}
+                      aria-label={t('goal.resume')}
+                    >
+                      <Play size={15} aria-hidden="true" />
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className={styles.iconAction}
+                    onClick={() => void control(item, 'clear')}
                     disabled={busy}
                     title={t('goals.clear')}
                     aria-label={t('goals.clear')}
                   >
-                    ✕
+                    <Trash2 size={15} aria-hidden="true" />
                   </button>
                 </div>
               </div>
@@ -327,30 +428,33 @@ export function GoalsDialog({
 
               <div className={styles.cardFooter}>
                 <span className={styles.statusPill}>
-                  {t(goal.hasActivePrompt ? 'goals.running' : 'goals.idle')}
+                  {t(`goal.status.${goal.status}`)}
+                </span>
+                <span className={styles.meta} data-testid="goal-activity">
+                  {t(`goal.activity.${item.snapshot.activity}`)}
                 </span>
                 <span className={styles.meta}>
-                  {goal.iterations > 0
-                    ? t(goal.iterations === 1 ? 'goal.turn' : 'goal.turns', {
-                        count: goal.iterations,
+                  {goal.turnCount > 0
+                    ? t(goal.turnCount === 1 ? 'goal.turn' : 'goal.turns', {
+                        count: goal.turnCount,
                       })
                     : t('goals.notYetEvaluated')}
                 </span>
                 <span className={styles.meta} data-testid="goal-elapsed">
-                  {formatRuntime(Math.max(0, now - goal.setAt))}
+                  {formatRuntime(getGoalActiveTimeMs(item.snapshot, now))}
                 </span>
                 <button
                   type="button"
                   className={styles.sessionLink}
-                  onClick={() => onOpenSession(goal.sessionId)}
+                  onClick={() => onOpenSession(item.sessionId)}
                   title={t('goals.openSessionHint')}
                   // The visible text is just the session's name, which says
                   // nothing about what activating it does. Name the action AND
                   // the target — the target stays in the accessible name so it
                   // still contains the visible label (WCAG 2.5.3).
-                  aria-label={`${t('goals.openSessionHint')}: ${goal.displayName || goal.sessionId}`}
+                  aria-label={`${t('goals.openSessionHint')}: ${item.displayName || item.sessionId}`}
                 >
-                  {goal.displayName || goal.sessionId}
+                  {item.displayName || item.sessionId}
                 </button>
               </div>
             </div>

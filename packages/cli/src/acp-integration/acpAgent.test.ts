@@ -222,6 +222,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   GoalPersistenceUnavailableError: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).GoalPersistenceUnavailableError,
+  parseGoalControlRequest: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).parseGoalControlRequest,
   normalizeEventPayload: vi.fn((payload: unknown) =>
     typeof payload === 'object' &&
     payload !== null &&
@@ -3887,6 +3890,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
       hasHooksForEvent: vi.fn().mockReturnValue(false),
+      isTrustedFolder: vi.fn().mockReturnValue(true),
     };
   }
 
@@ -9769,6 +9773,57 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       expectedGoalId: 'goal-1',
       expectedRevision: 1,
     });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('allows reducing Goal work in an untrusted workspace but rejects starting it', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const snapshot = goalSnapshot({ objective: 'ship it', turnCount: 1 });
+    const dispatch = vi.fn().mockResolvedValue({ snapshot });
+    Object.assign(innerConfig, {
+      isTrustedFolder: vi.fn().mockReturnValue(false),
+      getGoalRuntimeReady: vi.fn().mockResolvedValue({
+        getSnapshot: () => snapshot,
+        dispatch,
+      }),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionGoalControl, {
+        sessionId,
+        request: {
+          action: 'pause',
+          expectedGoalId: 'goal-1',
+          expectedRevision: 1,
+        },
+      }),
+    ).resolves.toEqual({ snapshot });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionGoalControl, {
+        sessionId,
+        request: { action: 'create', objective: 'new work' },
+      }),
+    ).rejects.toMatchObject({
+      code: -32003,
+      data: { errorKind: 'untrusted_workspace', httpStatus: 403 },
+    });
+    expect(dispatch).toHaveBeenCalledOnce();
 
     mockConnectionState.resolve();
     await agentPromise;

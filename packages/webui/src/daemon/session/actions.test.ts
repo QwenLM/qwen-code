@@ -27,6 +27,7 @@ describe('getConnectionAfterSessionClear', () => {
         clientId: 'client-a',
         displayName: 'Session A',
         tokenCount: 42,
+        goalState: { v: 2, goal: null, activity: 'idle' },
         commands: [commandInfo('old-command')],
         skills: ['old-skill'],
         supportedCommands: supportedCommandsStatus('session-a'),
@@ -53,6 +54,7 @@ describe('getConnectionAfterSessionClear', () => {
     expect(next).not.toHaveProperty('clientId');
     expect(next).not.toHaveProperty('displayName');
     expect(next).not.toHaveProperty('tokenCount');
+    expect(next).not.toHaveProperty('goalState');
     expect(next).not.toHaveProperty('supportedCommands');
     expect(next).not.toHaveProperty('context');
     // Workspace-scoped slash commands and skills survive a clear so skill-backed
@@ -169,6 +171,20 @@ describe('resolveSessionRestoreTimeouts', () => {
 });
 
 describe('createDaemonSessionActions', () => {
+  it('clears the previous Goal before starting a fresh session', async () => {
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        goalState: { v: 2, goal: null, activity: 'idle' },
+      },
+    });
+
+    await actions.newSession();
+
+    expect(getConnection().goalState).toBeUndefined();
+  });
+
   it('rejects a concurrent source-bound branch request', async () => {
     const source = createMockSession('session-a', 'client-a');
     const first = createDeferred<{
@@ -399,7 +415,11 @@ describe('createDaemonSessionActions', () => {
     const existingSession = createMockSession('session-a');
     const { actions, getConnection, pendingSessionLoadRef, sessionRef } =
       createActionsHarness({
-        connection: { status: 'connected', sessionId: 'session-a' },
+        connection: {
+          status: 'connected',
+          sessionId: 'session-a',
+          goalState: { v: 2, goal: null, activity: 'idle' },
+        },
         session: existingSession,
       });
 
@@ -419,6 +439,7 @@ describe('createDaemonSessionActions', () => {
       sessionId: 'session-b',
       requestTimeoutMs: 70_000,
     });
+    expect(getConnection().goalState).toBeUndefined();
   });
 
   it('carries the daemon-advertised restore budget into the load request', async () => {
@@ -1036,6 +1057,72 @@ describe('createDaemonSessionActions', () => {
 
     expect(onAdmissionStarted).not.toHaveBeenCalled();
     expect(session.submitPrompt).not.toHaveBeenCalled();
+  });
+
+  it('reads and controls the authoritative Goal through the session client', async () => {
+    const session = createMockSession('session-a');
+    const snapshot = {
+      v: 2 as const,
+      activity: 'idle' as const,
+      goal: null,
+    };
+    session.goal.mockResolvedValue({ snapshot });
+    session.controlGoal.mockResolvedValue({ snapshot });
+    const { actions, getConnection } = createActionsHarness({
+      connection: { status: 'connected', sessionId: 'session-a' },
+      session,
+    });
+    const request = { action: 'create' as const, objective: 'ship safely' };
+
+    await expect(actions.getGoal()).resolves.toEqual({ snapshot });
+    await expect(actions.controlGoal(request)).resolves.toEqual({ snapshot });
+
+    expect(session.goal).toHaveBeenCalledOnce();
+    expect(session.controlGoal).toHaveBeenCalledWith(request);
+    expect(getConnection().goalState).toBe(snapshot);
+  });
+
+  it('does not let delayed Goal responses regress the current revision', async () => {
+    const session = createMockSession('session-a');
+    const current = {
+      v: 2 as const,
+      activity: 'idle' as const,
+      goal: {
+        goalId: 'goal-1',
+        revision: 7,
+        objective: 'newer objective',
+        status: 'paused' as const,
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 3,
+        activeTimeMs: 4_000,
+        createdAt: 10,
+        updatedAt: 30,
+      },
+    };
+    const stale = {
+      ...current,
+      activity: 'running' as const,
+      goal: { ...current.goal, revision: 6, status: 'active' as const },
+    };
+    session.goal.mockResolvedValue({ snapshot: stale });
+    session.controlGoal.mockResolvedValue({ snapshot: stale });
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        goalState: current,
+      },
+      session,
+    });
+
+    await actions.getGoal();
+    await actions.controlGoal({
+      action: 'pause',
+      expectedGoalId: 'goal-1',
+      expectedRevision: 7,
+    });
+
+    expect(getConnection().goalState).toBe(current);
   });
 
   it('uploads prompt images and submits media references instead of base64', async () => {
@@ -1948,6 +2035,8 @@ function createMockSession(
     submitPrompt: vi.fn(async () => ({ promptId: 'prompt-1' })),
     supportedCommands: vi.fn(async () => supportedCommandsStatus(sessionId)),
     tasks: vi.fn(async () => ({ v: 1 as const, sessionId, tasks: [] })),
+    goal: vi.fn(),
+    controlGoal: vi.fn(),
   };
 }
 

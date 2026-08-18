@@ -123,6 +123,21 @@ describe('sendBridgeError session writer errors', () => {
     });
   });
 
+  it('maps an untrusted workspace bridge error to 403', () => {
+    const { response, status, json } = responseMock();
+    const error = Object.assign(new Error('Workspace is not trusted'), {
+      data: { errorKind: 'untrusted_workspace', httpStatus: 403 },
+    });
+
+    sendBridgeError(response, error);
+
+    expect(status).toHaveBeenCalledWith(403);
+    expect(json).toHaveBeenCalledWith({
+      error: 'Workspace is not trusted',
+      code: 'untrusted_workspace',
+    });
+  });
+
   it.each([
     ['invalid_session_media_reference', 400],
     ['session_media_gone', 410],
