@@ -196,6 +196,9 @@ describe('writeWorkflowSnapshot + listWorkflowSnapshots', () => {
       await fs.readFile(snapshotPath, 'utf8'),
     ) as Record<string, unknown>;
     delete parsed['events'];
+    delete parsed['phaseVisits'];
+    delete parsed['dispatches'];
+    delete parsed['description'];
     await fs.writeFile(snapshotPath, JSON.stringify(parsed), 'utf8');
 
     const list = await listWorkflowSnapshots(config);
@@ -315,7 +318,10 @@ describe('writeWorkflowSnapshot + listWorkflowSnapshots', () => {
 
   it('rejects traversal-shaped run ids without touching project files', async () => {
     const config = fakeConfig(projectDir);
-    const canary = path.join(projectDir, 'CANARY.txt');
+    // Extensionless on purpose: for input '../CANARY' an unguarded recursive
+    // rm targets <projectDir>/CANARY exactly, so bypassing the guard makes
+    // the read-back below fail instead of only the boolean assertion.
+    const canary = path.join(projectDir, 'CANARY');
     await fs.writeFile(canary, 'keep', 'utf8');
 
     await expect(deleteWorkflowSnapshot(config, '../CANARY')).resolves.toBe(

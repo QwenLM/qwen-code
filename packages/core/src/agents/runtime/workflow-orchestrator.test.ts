@@ -581,6 +581,74 @@ describe('WorkflowOrchestrator', () => {
     expect(dependsOn('after-pipeline')).toEqual(['after-parallel']);
   });
 
+  it('does not re-inject inherited tails from a fan-out branch that never dispatches', async () => {
+    const orchestrator = new WorkflowOrchestrator(
+      async (prompt) => `${prompt}`,
+    );
+    const queued: Array<{
+      id: string;
+      label?: string;
+      dependsOn: string[];
+    }> = [];
+
+    await orchestrator.run({
+      script: `
+        await agent('a', { label: 'a' });
+        const pending = parallel([
+          () => agent('b', { label: 'b' }),
+          () => 42,
+        ]);
+        await agent('m', { label: 'm' });
+        await pending;
+        await agent('z', { label: 'z' });
+      `,
+      args: undefined,
+      scheduler: new WorkflowDispatchScheduler(2),
+      emitter: {
+        dispatchQueued: (event) => queued.push(event),
+      },
+    });
+
+    const labelsById = new Map(queued.map((event) => [event.id, event.label]));
+    const dependsOn = (label: string) =>
+      queued
+        .find((event) => event.label === label)!
+        .dependsOn.map((id) => labelsById.get(id))
+        .sort();
+
+    expect(dependsOn('b')).toEqual(['a']);
+    expect(dependsOn('m')).toEqual(['a']);
+    // The no-dispatch branch must not re-inject the ancestor 'a' edge.
+    expect(dependsOn('z')).toEqual(['b', 'm']);
+  });
+
+  it('keeps inherited tails when no fan-out branch issues a dispatch', async () => {
+    const orchestrator = new WorkflowOrchestrator(async () => 'done');
+    const queued: Array<{
+      id: string;
+      label?: string;
+      dependsOn: string[];
+    }> = [];
+
+    await orchestrator.run({
+      script: `
+        await agent('before', { label: 'before' });
+        await parallel([() => 1, () => 2]);
+        await agent('after', { label: 'after' });
+      `,
+      args: undefined,
+      emitter: {
+        dispatchQueued: (event) => queued.push(event),
+      },
+    });
+
+    const labelById = new Map(
+      queued.map((event) => [event.id, event.label ?? event.id]),
+    );
+    const after = queued.find((event) => event.label === 'after');
+    expect(after?.dependsOn.map((id) => labelById.get(id))).toEqual(['before']);
+  });
+
   it('emitter subscriber errors do not break the run (defensive try/catch)', async () => {
     const orchestrator = new WorkflowOrchestrator(
       async (prompt) => `mock:${prompt}`,

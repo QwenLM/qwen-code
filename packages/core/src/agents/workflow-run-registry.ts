@@ -840,12 +840,15 @@ export class WorkflowRunRegistry {
    * a phase identical to the most recent entry is treated as the same
    * phase and not re-appended. `currentPhase` is set unconditionally.
    *
-   * @param runId  the run to update
-   * @param title  the phase title from the sandbox `phase()` call
+   * @param runId    the run to update
+   * @param rawTitle the phase title from the sandbox `phase()` call
    */
-  onPhaseStarted(runId: string, title: string, at = Date.now()): void {
+  onPhaseStarted(runId: string, rawTitle: string, at = Date.now()): void {
     const entry = this.entries.get(runId);
     if (!entry || !isActiveWorkflowStatus(entry.status)) return;
+    // Script-derived titles reach persisted snapshots and TUI rendering:
+    // normalize at this registry boundary like every sibling string.
+    const title = stripAnsiAndControl(rawTitle).slice(0, 200) || 'phase';
     entry.currentPhase = title;
     const last = entry.phases[entry.phases.length - 1];
     if (last !== title) {
@@ -971,8 +974,15 @@ export class WorkflowRunRegistry {
   /** Record one sandbox log line without forcing a TUI redraw per line. */
   onLogAppended(runId: string, line: string, at = Date.now()): void {
     const entry = this.entries.get(runId);
-    if (!entry || !isActiveWorkflowStatus(entry.status)) return;
-    const message = stripAnsiAndControl(line);
+    // Mirrors setRecentLogs's 'cancelled' allowance: a dialog cancel flips
+    // the status before the sandbox's run-end flush fires its last mirror
+    // lines, and the two persisted log projections must keep agreeing.
+    if (
+      !entry ||
+      (!isActiveWorkflowStatus(entry.status) && entry.status !== 'cancelled')
+    )
+      return;
+    const message = stripAnsiAndControl(line).slice(0, 4_096);
     if (entry.recentLogs.length === 100) {
       entry.recentLogs.shift();
       const firstLog = entry.events.findIndex((event) => event.type === 'log');
@@ -1070,7 +1080,9 @@ export class WorkflowRunRegistry {
     if (!isActiveWorkflowStatus(entry.status) && entry.status !== 'cancelled')
       return;
     const tail = logs.length > 100 ? logs.slice(-100) : Array.from(logs);
-    entry.recentLogs = tail.map(stripAnsiAndControl);
+    entry.recentLogs = tail.map((line) =>
+      stripAnsiAndControl(line).slice(0, 4_096),
+    );
     this.emitStatusChange(entry);
   }
 

@@ -2126,12 +2126,20 @@ function mergeFanoutTails(
   branchTails: readonly string[],
 ): string[] {
   const inherited = new Set(inheritedTails);
-  return Array.from(
-    new Set([
-      ...branchTails,
-      ...currentParentTails.filter((tail) => !inherited.has(tail)),
-    ]),
-  );
+  // A dispatching branch always ends on its fresh dispatch id; a branch that
+  // never dispatched still carries its inherited seed. Merging that seed back
+  // would re-inject ancestor ids as redundant transitive dependsOn edges —
+  // unless no branch dispatched at all, where the inherited tails must pass
+  // through unchanged (same contract as an empty fan-out).
+  const newBranchTails = branchTails.filter((tail) => !inherited.has(tail));
+  const merged =
+    newBranchTails.length > 0
+      ? [
+          ...newBranchTails,
+          ...currentParentTails.filter((tail) => !inherited.has(tail)),
+        ]
+      : currentParentTails;
+  return Array.from(new Set(merged));
 }
 
 /**

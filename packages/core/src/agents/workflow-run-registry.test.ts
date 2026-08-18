@@ -1285,6 +1285,84 @@ describe('WorkflowRunRegistry', () => {
     expect(r.get('wf_sanitized_logs')?.recentLogs).toEqual(['checks passed']);
   });
 
+  it('setRecentLogs truncates the mirrored tail to the persisted line cap', () => {
+    const r = new WorkflowRunRegistry();
+    r.register(reg('wf_long_mirrored_logs'));
+
+    r.setRecentLogs('wf_long_mirrored_logs', ['y'.repeat(5_000)]);
+
+    expect(r.get('wf_long_mirrored_logs')?.recentLogs?.[0]).toHaveLength(4_096);
+  });
+
+  it('onLogAppended keeps recentLogs and log events at the last 100 lines', () => {
+    const r = new WorkflowRunRegistry();
+    const entry = r.register(reg('wf_log_eviction'));
+    r.onPhaseStarted(entry.runId, 'Build', 1_000);
+
+    for (let i = 1; i <= 150; i++) {
+      r.onLogAppended(entry.runId, `line-${i}`, 1_000 + i);
+    }
+
+    expect(entry.recentLogs).toHaveLength(100);
+    expect(entry.recentLogs[0]).toBe('line-51');
+    expect(entry.recentLogs[99]).toBe('line-150');
+    const logEvents = entry.events.filter((event) => event.type === 'log');
+    expect(logEvents).toHaveLength(100);
+    expect(logEvents[0]).toMatchObject({ type: 'log', message: 'line-51' });
+    expect(logEvents[99]).toMatchObject({ type: 'log', message: 'line-150' });
+    // Non-log events survive the log eviction window.
+    expect(entry.events[0]).toMatchObject({ type: 'phase-started' });
+  });
+
+  it('onLogAppended truncates long lines like the sibling persisted strings', () => {
+    const r = new WorkflowRunRegistry();
+    const entry = r.register(reg('wf_long_log_line'));
+
+    r.onLogAppended(entry.runId, 'x'.repeat(5_000), 1_000);
+
+    expect(entry.recentLogs[0]).toHaveLength(4_096);
+    expect(entry.events.at(-1)).toMatchObject({
+      type: 'log',
+      message: 'x'.repeat(4_096),
+    });
+  });
+
+  it('onLogAppended after a cancel transition still reaches both projections', () => {
+    const r = new WorkflowRunRegistry();
+    const entry = r.register(reg('wf_late_cancel_log'));
+    r.onLogAppended(entry.runId, 'early line', 1_000);
+
+    r.cancel(entry.runId, 1_100);
+    r.onLogAppended(entry.runId, 'late line', 1_200);
+
+    expect(entry.recentLogs).toEqual(['early line', 'late line']);
+    expect(entry.events.filter((event) => event.type === 'log')).toEqual([
+      expect.objectContaining({ message: 'early line' }),
+      expect.objectContaining({ message: 'late line' }),
+    ]);
+  });
+
+  it('normalizes phase titles at the registry boundary', () => {
+    const r = new WorkflowRunRegistry();
+    const entry = r.register(reg('wf_phase_titles'));
+
+    r.onPhaseStarted(entry.runId, '\u001b[31mRed\u001b[0m phase', 1_000);
+    r.onPhaseStarted(entry.runId, 'x'.repeat(500), 1_100);
+    r.onPhaseStarted(entry.runId, '\u001b[2J', 1_200);
+
+    const titles = ['Red phase', 'x'.repeat(200), 'phase'];
+    expect(entry.phases).toEqual(titles);
+    expect(entry.currentPhase).toBe('phase');
+    expect(entry.phaseVisits.map((visit) => visit.title)).toEqual(titles);
+    expect(
+      entry.events.filter((event) => event.type === 'phase-started'),
+    ).toEqual([
+      expect.objectContaining({ title: 'Red phase' }),
+      expect.objectContaining({ title: 'x'.repeat(200) }),
+      expect.objectContaining({ title: 'phase' }),
+    ]);
+  });
+
   it('complete settles the entry and ignores subsequent transitions', () => {
     const r = new WorkflowRunRegistry();
     r.register(reg('wf_1'));
