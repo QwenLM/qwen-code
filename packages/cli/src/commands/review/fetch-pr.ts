@@ -242,8 +242,9 @@ type FetchPrResult = PlanReport & {
    * anchor), nothing to slice FROM and no re-run that would change it
    * (`containment-unverified` — an unreadable delta, or a successful
    * merge-base with no common ancestor), a base whose fetch or whose
-   * merge-base PROBE could not answer (`base-untrusted` — infrastructure,
-   * and retryable for that reason), a capture that threw
+   * probes could not answer (`base-untrusted` — the merge-base probe or a
+   * restoration probe; infrastructure, and retryable for that reason), a
+   * capture that threw
    * (`capture-failed`), or a partitioner that refused to tile
    * (`partition-failed`).
    *
@@ -527,22 +528,41 @@ function cleanStale(prNumber: string): void {
  * now, whose unreviewed deletion hunks sit in the PR diff under its pre-rename
  * name (dropping it loses them). Refusing costs a full review on the first
  * shape; dropping loses scope on the second, so the refusal wins.
+ *
+ * NULL is a third answer: git could not answer — an exit above 0, or a kill.
+ * The surface failing is not a verdict about the entry, and the caller demotes
+ * the round under a retryable reason rather than read it as "changed":
+ * folded together, one transient failure over a genuinely restored file
+ * became a deterministic lineage refusal — the exact conflation the
+ * {out, status} split in lib/git.ts was written to forbid.
  */
 function treeEntryUnchanged(
   baseSha: string,
   headSha: string,
   path: string,
-): boolean {
-  const at = (ref: string): string | null => {
-    const line = gitOpt(LITERAL_PATHSPECS, 'ls-tree', ref, '--', path);
-    if (line === null || line === '') return null;
+): boolean | null {
+  const at = (ref: string): { entry: string | null } | null => {
+    // `gitExit`, not `gitOpt`: exit 0 IS the answer — possibly empty, which
+    // means "no such entry in that tree". Any other status, a kill included,
+    // is the probe failing to answer.
+    const { out, status } = gitExit(
+      LITERAL_PATHSPECS,
+      'ls-tree',
+      ref,
+      '--',
+      path,
+    );
+    if (status !== 0) return null;
+    const line = out ?? '';
+    if (line === '') return { entry: null };
     const tab = line.indexOf('\t');
     const meta = (tab < 0 ? line : line.slice(0, tab)).split(' ');
-    return meta.length >= 3 ? `${meta[0]} ${meta[2]}` : null;
+    return { entry: meta.length >= 3 ? `${meta[0]} ${meta[2]}` : null };
   };
   const b = at(baseSha);
   const h = at(headSha);
-  return b !== null && h !== null && b === h;
+  if (b === null || h === null) return null;
+  return b.entry !== null && h.entry !== null && b.entry === h.entry;
 }
 
 async function runFetchPr(args: FetchPrArgs): Promise<void> {
@@ -1043,6 +1063,16 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
               ? 'containment-unverified'
               : 'capture-failed',
         );
+      } else if (delta.includes('\uFFFD') || fullText.includes('\uFFFD')) {
+        // A capture that does not decode cleanly names its files with
+        // collision-prone U+FFFD strings: two paths differing only in an
+        // invalid byte decode to the SAME name, and scope membership decided
+        // on the collided strings would republish a sibling's
+        // already-certified hunks (or widen over a file the anchor cleared).
+        // The containment battery this slicing retired refused the exact
+        // shape; the slice path fails closed the same way. The full-range
+        // BYTES stay raw, so the fallback loses nothing.
+        demote('containment-unverified');
       } else if (parseDiff(delta).files.length === 0) {
         // Non-empty bytes that name no file: the capture returned something
         // this parser cannot read (an error stream on stdout, a shape it does
@@ -1053,69 +1083,119 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         // is exactly `containment-unverified`.
         demote('containment-unverified');
       } else {
-        const ruling = computeIncrementalScope({
-          anchor: anchor.diffBase,
-          fullDiff: fullBytes,
-          deltaFiles: parseDiff(delta).files.map((f) => f.path),
-          restored: (path) =>
-            treeEntryUnchanged(mergeBaseSha, fetchedSha, path),
-          readWorktree: (rel) => {
-            try {
-              return readFileSync(join(wt, rel), 'utf8');
-            } catch {
-              return null;
-            }
-          },
-        });
-        if (ruling.kind === 'refuse') {
-          writeStderrLine(
-            `Incremental scope refused: ${ruling.detail} Reviewing the full range.`,
-          );
-          demote(ruling.reason);
-        } else if (ruling.kind === 'nothing-new') {
-          // Every changed file was undone and nothing imports them. That is
-          // the same state as an empty delta, and it takes the same exit.
-          writeStderrLine(`Nothing new since the anchor: ${ruling.detail}`);
-          anchor.incremental.upToDate = true;
-        } else if (publish(ruling.diff)) {
-          scopedDelta = true;
-          // `diffBase` is deliberately NOT written here. It exists so a
-          // consumer that recomputes its own diff uses the range the round
-          // published (Agent 7's test-efficacy probe welds it into `--base`),
-          // and under slicing that range is the MERGE BASE, not the anchor:
-          // the published bytes are sections of `merge-base..head`. Writing
-          // the anchor would send the probe over `anchor..HEAD` — hunks the
-          // round did not review, and missing the ones it did — which is the
-          // very error the field was added to prevent, inverted. The reader
-          // falls back to `report.mergeBaseSha`, which is the correct answer
-          // for a sliced round, and it keeps honouring the field on a plan an
-          // older CLI wrote, where a delta-range publish made it true.
-          anchor.incremental.scope = ruling.scope;
-          // The superseded full diff stays on disk beside the scoped one.
-          // ABSOLUTE, like `diffPathAbsolute` and for the same reason: agents
-          // read through `read_file`, which rejects a relative path, and they
-          // run inside `worktreePath` where a `.qwen/tmp/…` relative path
-          // resolves to nothing. Nothing reads it at this commit — say so
-          // rather than name a consumer, which is how the last round's docs
-          // came to certify a transfer that never happened.
-          try {
-            const fullPath = resolve(
-              tmpFile(`pr-${prNumber}`, 'diff-full.txt'),
-            );
-            writeFileSync(fullPath, fullBytes);
-            anchor.incremental.fullDiffPath = fullPath;
-          } catch (err) {
-            // A convenience artefact must never take the round with it.
-            writeStderrLine(
-              `Could not keep the full-range diff beside the scoped one ` +
-                `(${(err as Error).message}); steps that want the whole PR ` +
-                `will have to re-capture it.`,
-            );
+        const deltaSections = parseDiff(delta).files;
+        // Restoration, probed ONCE per file with the probe's exit status
+        // kept: `treeEntryUnchanged` answers null when git could not answer,
+        // and that third state is ruled on below — folded into "changed" it
+        // converted one transient ls-tree failure into a deterministic
+        // lineage refusal.
+        const restoredAt = new Map<string, boolean | null>();
+        const restored = (path: string): boolean | null => {
+          let v = restoredAt.get(path);
+          if (v === undefined) {
+            v = treeEntryUnchanged(mergeBaseSha, fetchedSha, path);
+            restoredAt.set(path, v);
           }
+          return v;
+        };
+        // A rename section names only its NEW side; when the target is
+        // RESTORED to the merge-base state it drops out of the live set, and
+        // the source's net-deletion hunks sit in the PR's own diff under no
+        // other name. The deleted source rides along so the lineage check
+        // below can see it. A LIVE target owes nothing extra — the rename's
+        // net hunks already sit under the new-side section, and adding the
+        // source would demand a section the full diff labels with the new
+        // name.
+        const deltaFiles: string[] = [];
+        for (const f of deltaSections) {
+          deltaFiles.push(f.path);
+          if (
+            f.renamedFrom &&
+            f.renamedFrom !== f.path &&
+            restored(f.path) === true
+          ) {
+            deltaFiles.push(f.renamedFrom);
+          }
+        }
+        const unanswerable = deltaFiles.filter((p) => restored(p) === null);
+        if (unanswerable.length > 0) {
+          // The surface failing, not the anchor: a probe against the base
+          // tree that could not answer is infrastructure, and the re-run
+          // repeats it — retryable like its merge-base sibling.
+          writeStderrLine(
+            `Incremental scope refused: a restoration probe could not ` +
+              `answer for ${unanswerable.length} file(s) ` +
+              `(${unanswerable.slice(0, 3).join(', ')}` +
+              `${unanswerable.length > 3 ? ', …' : ''}) — base-untrusted. ` +
+              `Reviewing the full range.`,
+          );
+          demote('base-untrusted');
         } else {
-          // The slice captured but could not be written: degrade like any
-          // other capture failure rather than scoping to a file nobody has.
-          demote('capture-failed');
+          const ruling = computeIncrementalScope({
+            anchor: anchor.diffBase,
+            fullDiff: fullBytes,
+            deltaFiles,
+            restored: (path) => restored(path) === true,
+            readWorktree: (rel) => {
+              try {
+                return readFileSync(join(wt, rel), 'utf8');
+              } catch {
+                return null;
+              }
+            },
+          });
+          if (ruling.kind === 'refuse') {
+            writeStderrLine(
+              `Incremental scope refused: ${ruling.detail} Reviewing the full range.`,
+            );
+            demote(ruling.reason);
+          } else if (ruling.kind === 'nothing-new') {
+            // Every changed file was undone and nothing imports them. That is
+            // the same state as an empty delta, and it takes the same exit.
+            writeStderrLine(`Nothing new since the anchor: ${ruling.detail}`);
+            anchor.incremental.upToDate = true;
+          } else if (publish(ruling.diff)) {
+            scopedDelta = true;
+            // `diffBase` is deliberately NOT written here. It exists so a
+            // consumer that recomputes its own diff uses the range the round
+            // published (Agent 7's test-efficacy probe welds it into
+            // `--base`), and under slicing that range is the MERGE BASE, not
+            // the anchor: the published bytes are sections of
+            // `merge-base..head`. Writing the anchor would send the probe
+            // over `anchor..HEAD` — hunks the round did not review, and
+            // missing the ones it did — which is the very error the field
+            // was added to prevent, inverted. The reader falls back to
+            // `report.mergeBaseSha`, which is the correct answer for a
+            // sliced round, and it keeps honouring the field on a plan an
+            // older CLI wrote, where a delta-range publish made it true.
+            anchor.incremental.scope = ruling.scope;
+            // The superseded full diff stays on disk beside the scoped one.
+            // ABSOLUTE, like `diffPathAbsolute` and for the same reason:
+            // agents read through `read_file`, which rejects a relative
+            // path, and they run inside `worktreePath` where a
+            // `.qwen/tmp/…` relative path resolves to nothing. Nothing reads
+            // it at this commit — say so rather than name a consumer, which
+            // is how the last round's docs came to certify a transfer that
+            // never happened.
+            try {
+              const fullPath = resolve(
+                tmpFile(`pr-${prNumber}`, 'diff-full.txt'),
+              );
+              writeFileSync(fullPath, fullBytes);
+              anchor.incremental.fullDiffPath = fullPath;
+            } catch (err) {
+              // A convenience artefact must never take the round with it.
+              writeStderrLine(
+                `Could not keep the full-range diff beside the scoped one ` +
+                  `(${(err as Error).message}); steps that want the whole ` +
+                  `PR will have to re-capture it.`,
+              );
+            }
+          } else {
+            // The slice captured but could not be written: degrade like any
+            // other capture failure rather than scoping to a file nobody has.
+            demote('capture-failed');
+          }
         }
       }
     }

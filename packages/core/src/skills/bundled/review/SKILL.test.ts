@@ -126,10 +126,18 @@ describe('bundled review skill', () => {
     expect(body).toContain(
       '**Whether a PLAN exists is a separate field: `diffPath`.**',
     );
-    // …and the re-run instruction, including the flag-replacement rule that
-    // keeps a second `--since` from reading as two anchors.
+    // …and the re-run instruction, carrying BOTH flags: a re-run with only
+    // `--since` can never pass the command's same-model gate — a missing
+    // certifier is a mismatch, not a pass (the gate refuses it as
+    // `cross-model-anchor`) — so the recovery this paragraph exists for is
+    // dead on every flow without the model beside the sha. Plus the
+    // flag-replacement rule that keeps a second `--since` from reading as
+    // two anchors.
     expect(body).toContain(
-      'REPLACING any `--since` it already carries, never appending a second one',
+      're-run the `fetch-pr` command from above with `--since <sha> --since-model <model>`',
+    );
+    expect(body).toContain(
+      'REPLACING any `--since` and any `--since-model` the command already carries',
     );
   });
 
@@ -145,12 +153,41 @@ describe('bundled review skill', () => {
     expect(body).toContain(
       'the component that failed — a base fetch, a merge-base probe, a capture — is re-run by the re-run',
     );
+    // The retryable set's MEMBERSHIP, not just the clause's existence:
+    // widening the parenthetical (say, with `partition-failed`) makes an
+    // orchestrator retry a deterministic refusal every round forever — the
+    // exact loop this test's own comment warns about.
+    expect(body).toContain(
+      '(`base-untrusted`, `capture-failed`: the anchor was never ruled invalid',
+    );
+    // The rules-load exception the deleted `baseFetchFailed: true` pin used
+    // to cover — still live: on a failed base fetch the unresolvable ref
+    // makes load-rules report "no rules found", indistinguishable from a
+    // repo with none, silently enforcing none.
+    expect(body).toContain(
+      'except when the fetch report recorded `baseFetchFailed: true`',
+    );
     // The ONE-exception paragraph this test used to pin named a shape the
     // CLI can no longer produce — `partition-failed` implies a base
     // resolved, because every publish site needs one — and the transient
     // shape it carved out now arrives as `base-untrusted`, already
     // retryable under the infrastructure clause above.
     expect(body).not.toContain('Retry that one, once.');
+  });
+
+  it('pins the per-reason descriptions the retry split rests on', () => {
+    // The FETCH-vs-containment distinction is load-bearing on retry: a
+    // flappy base fetch must stay retryable (`base-untrusted`) and a
+    // base-free cross-fork history deterministic (`containment-unverified`)
+    // — swapping the two sentences reclassifies one into the other, and the
+    // orchestrator stops retrying what it should retry. And
+    // `lineage-unfollowable` is a reason the CLI emits (the fetch-pr refuse
+    // tree), so it owes a recovery bullet like every other reason.
+    const body = skillBody();
+    expect(body).toContain('`lineage-unfollowable`');
+    expect(body).toContain(
+      'A base FETCH that failed is the other shape and reports `base-untrusted` instead',
+    );
   });
 
   it('records the range the round actually reviewed in provenance', () => {
@@ -168,6 +205,12 @@ describe('bundled review skill', () => {
     // the range that CLI published, so it stays authoritative there.
     expect(skillBody()).toContain(
       'honour the field when an older report still carries it',
+    );
+    // …and the discriminator that tells a writer the field is GONE on new
+    // reports — without it a provenance step improvises an anchor-scoped
+    // range the run never had.
+    expect(skillBody()).toContain(
+      'new reports carry no `incremental.diffBase`',
     );
   });
 

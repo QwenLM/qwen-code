@@ -194,6 +194,32 @@ describe('resolveMergeBase', () => {
     expect(r.probeUnavailable).toBe(true);
   });
 
+  it('a SUCCESSFUL fallback resolution sheds the probe taint', () => {
+    // The tracking-ref probe is killed and the local fallback ANSWERS: a
+    // resolved base IS the deterministic shape — the clamp ran against a
+    // real sha — so a later full-range capture failure is filed as
+    // `capture-failed`, not `base-untrusted`. The consumer tests the taint
+    // flag before `mergeBaseSha === null`, so stickiness riding into a
+    // success misnames the cause in the one field whose contract is "every
+    // reason names a CAUSE". Stickiness serves the no-ancestor question —
+    // no candidate answered — never a successful resolution.
+    const r = resolveMergeBase(
+      'origin',
+      'main',
+      'pr-head',
+      fakeGit({
+        refs: ['refs/remotes/origin/main', 'main'],
+        bases: { 'main..pr-head': 'ddd444' },
+        killed: ['refs/remotes/origin/main..pr-head'],
+      }),
+    );
+    expect(r).toEqual({
+      sha: 'ddd444',
+      baseFetchFailed: false,
+      probeUnavailable: false,
+    });
+  });
+
   it('returns null when no candidate ref resolves', () => {
     const git = fakeGit({ refs: [] });
     expect(resolveMergeBase('origin', 'main', 'pr-head', git)).toEqual({

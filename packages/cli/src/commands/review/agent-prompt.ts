@@ -302,6 +302,18 @@ function incrementalScopeOf(report: PlanReport): IncrementalScope | null {
           importsChanged: strings(e.importsChanged),
         }))
     : [];
+  // The SAME validity notion the roster applies
+  // (`incrementalInteractionPaths`): a partially corrupt delta list
+  // invalidates the block wholesale. The two consumers used to disagree —
+  // the roster widened on a list this function still filtered and narrowed
+  // with, so one plan told a chunk agent "interaction only" for a file the
+  // roster said it could not safely classify.
+  if (
+    !Array.isArray(raw.deltaFiles) ||
+    raw.deltaFiles.some((p) => typeof p !== 'string')
+  ) {
+    return null;
+  }
   const deltaFiles = strings(raw.deltaFiles);
   // Degrade-to-full-scope means DEGRADE: a block whose lists all failed
   // validation must not render an incremental frame with zero scope bullets.

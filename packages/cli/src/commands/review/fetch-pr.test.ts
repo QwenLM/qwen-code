@@ -239,6 +239,16 @@ const producerMocks = vi.hoisted(() => ({
   refExists: vi.fn((..._refs: unknown[]): boolean => false),
   releaseWorktree: vi.fn(() => ({ existed: false, freed: true })),
   gitOpt: vi.fn((..._args: string[]): string | null => null),
+  /**
+   * Per-test override for the status-preserving probe (`gitProbe`, imported
+   * as `gitExit`); null lets the default mapping run. The default cannot
+   * express the killed/spawn-failed shapes (no status at all, or an exit
+   * above 1), and a restoration probe that could not ANSWER is exactly that
+   * class.
+   */
+  gitProbeOverride: null as
+    | ((...args: string[]) => { out: string | null; status: number | null })
+    | null,
   gitRaw: vi.fn((..._args: string[]): Buffer => Buffer.from('')),
   resolveMergeBase: vi.fn(
     (..._args: unknown[]): MergeBaseResult => ({
@@ -330,6 +340,9 @@ vi.mock('./lib/git.js', () => ({
   // answer is the DEFINITIVE no (exit 1), which is what these fixtures mean.
   // A test that wants the git-surface-unavailable shape overrides this.
   gitProbe: (...args: string[]) => {
+    if (producerMocks.gitProbeOverride) {
+      return producerMocks.gitProbeOverride(...args);
+    }
     const out = producerMocks.gitOpt(...args);
     return { out, status: out === null ? 1 : 0 };
   },
@@ -393,6 +406,7 @@ describe('fetch-pr report assembly', () => {
       args[0] === 'rev-parse' ? 'f00df00df00d' : '',
     );
     producerMocks.gitOpt.mockImplementation(() => null);
+    producerMocks.gitProbeOverride = null;
     producerMocks.gitRaw.mockImplementation(() => Buffer.from(''));
     producerMocks.resolveMergeBase.mockImplementation(() => ({
       sha: null,
@@ -1182,6 +1196,56 @@ describe('fetch-pr report assembly', () => {
     ' three',
     '',
   ].join('\n');
+  /**
+   * A rename×restored history the two batteries below read:
+   *
+   *   base   { a.ts: A, q.ts: Q }
+   *   anchor { a.ts: A′ }            (round 1 edited a.ts, deleted q.ts)
+   *   head   { q.ts: Q }             (the fix round moved a.ts onto q.ts)
+   *
+   * `--find-renames` renders `anchor..head` as one rename section labelled
+   * with the NEW name, and the net `merge-base..head` diff renders the
+   * source as a plain deletion — the restored target contributes nothing on
+   * either side, so those hunks sit under no other name.
+   */
+  const DELTA_RENAME = [
+    'diff --git a/a.ts b/q.ts',
+    'similarity index 90%',
+    'rename from a.ts',
+    'rename to q.ts',
+    '--- a/a.ts',
+    '+++ b/q.ts',
+    '@@ -1,1 +1,1 @@',
+    '-A prime',
+    '+Q',
+    '',
+  ].join('\n');
+  const FULL_SOURCE_DELETED = [
+    'diff --git a/a.ts b/a.ts',
+    'deleted file mode 100644',
+    '--- a/a.ts',
+    '+++ /dev/null',
+    '@@ -1,1 +0,0 @@',
+    '-A prime',
+    '',
+  ].join('\n');
+  /** ls-tree steering for that history: q.ts restored (identical entries on
+   * both sides), a.ts present at base and absent at head (the `` answer is
+   * "no such entry" — an ANSWER, not a failure). */
+  function renameHistoryProbes() {
+    producerMocks.gitOpt.mockImplementation((...args: string[]) => {
+      if (args[0] === 'cat-file' || args[0] === 'merge-base') return '';
+      if (args[0] === 'rev-parse') return ANCHOR;
+      if (args.includes('ls-tree')) {
+        if (args.includes('q.ts')) return '100644 blob deadbeef\tq.ts';
+        if (args.includes('a.ts')) {
+          return args.includes(BASE) ? '100644 blob cafe\ta.ts' : '';
+        }
+        return '';
+      }
+      return null;
+    });
+  }
 
   /** Serve the delta for `ANCHOR..head` and the full range for `BASE..head`. */
   function servesBothRanges(full = FULL_DIFF, delta = DELTA_DIFF) {
@@ -1201,7 +1265,9 @@ describe('fetch-pr report assembly', () => {
         ? ''
         : args[0] === 'rev-parse'
           ? ANCHOR
-          : null,
+          : args.includes('ls-tree')
+            ? '' // answered: the entry is absent from that tree
+            : null,
     );
   }
 
@@ -1474,6 +1540,162 @@ describe('fetch-pr report assembly', () => {
     expect(writtenDiff()).toBe(FULL_TWO);
   });
 
+  it('keeps a restored rename TARGET\u2019s source-deletion hunks in scope', async () => {
+    // A rename section in the delta contributes only its NEW-side path, and
+    // a target restored to the merge-base state drops out of `deltaLive` —
+    // the lineage check used to pass vacuously there and the round stopped
+    // `nothing-new` while the source's net-deletion hunks, content no round
+    // ever saw, retired at the next re-anchor. The deleted source must ride
+    // beside the restored target's name so the check can see it.
+    renameHistoryProbes();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+      probeUnavailable: false,
+    });
+    servesBothRanges(FULL_SOURCE_DELETED, DELTA_RENAME);
+    const report = await reportFor({ since: ANCHOR });
+    expect(ruling(report)).toEqual({ since: ANCHOR, effective: true });
+    const scope = (report.incremental as { scope: Record<string, unknown> })
+      .scope;
+    expect(scope['deltaFiles']).toEqual(['a.ts']);
+    expect(scope['restoredFileCount']).toBe(1);
+    // Published is the source's own full-range deletion section.
+    expect(writtenDiff()).toBe(FULL_SOURCE_DELETED);
+  });
+
+  it('a LIVE rename target still scopes by its new name only', async () => {
+    // Control for the test above: when the target is NOT restored, the
+    // rename's net hunks sit under the new-side section and scoping is
+    // unchanged — the source's name must not be added then (it is absent at
+    // head, and would demand a section the full diff labels with the NEW
+    // name, refusing a round that scopes cleanly today).
+    producerMocks.gitOpt.mockImplementation((...args: string[]) => {
+      if (args[0] === 'cat-file' || args[0] === 'merge-base') return '';
+      if (args[0] === 'rev-parse') return ANCHOR;
+      if (args.includes('ls-tree')) {
+        // q.ts differs between base and head — a live change, no restoration.
+        if (args.includes('q.ts')) {
+          return args.includes(BASE)
+            ? '100644 blob dead\tq.ts'
+            : '100644 blob beef\tq.ts';
+        }
+        if (args.includes('a.ts')) {
+          return args.includes(BASE) ? '100644 blob cafe\ta.ts' : '';
+        }
+        return '';
+      }
+      return null;
+    });
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+      probeUnavailable: false,
+    });
+    const FULL_RENAME = [
+      'diff --git a/a.ts b/q.ts',
+      'similarity index 90%',
+      'rename from a.ts',
+      'rename to q.ts',
+      '--- a/a.ts',
+      '+++ b/q.ts',
+      '@@ -1,1 +1,1 @@',
+      '-A',
+      '+Q',
+      '',
+    ].join('\n');
+    servesBothRanges(FULL_RENAME, DELTA_RENAME);
+    const report = await reportFor({ since: ANCHOR });
+    expect(ruling(report)).toEqual({ since: ANCHOR, effective: true });
+    const scope = (report.incremental as { scope: Record<string, unknown> })
+      .scope;
+    expect(scope['deltaFiles']).toEqual(['q.ts']);
+    expect(scope['restoredFileCount']).toBe(0);
+    expect(writtenDiff()).toBe(FULL_RENAME);
+  });
+
+  it('files an unanswerable restoration probe as retryable infrastructure', async () => {
+    // One transient ls-tree failure (a timeout kill, a spawn failure) over a
+    // genuinely restored delta file must not read as "the entry changed":
+    // that puts the file in `deltaLive`, finds no section under its name,
+    // and refuses `lineage-unfollowable` — a DETERMINISTIC reason the
+    // recovery flow never retries — for what is a retryable infrastructure
+    // fault, the exact conflation the gitProbe {out, status} split exists
+    // to forbid. The unanswerable probe demotes to `base-untrusted`, the
+    // retryable class.
+    producerMocks.gitOpt.mockImplementation((...args: string[]) => {
+      if (args[0] === 'cat-file' || args[0] === 'merge-base') return '';
+      if (args[0] === 'rev-parse') return ANCHOR;
+      // The kill shape on the OLD seam as well: gitOpt null is what the
+      // pre-status probe saw on a kill (and what the default mapping files
+      // as exit 1), so the pre-fix code reads this exact fixture as
+      // "changed" and refuses lineage-unfollowable.
+      return null;
+    });
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+      probeUnavailable: false,
+    });
+    servesBothRanges(FULL_SOURCE_DELETED, DELTA_RENAME);
+    // The kill shape on the status-preserving seam: no status at all (the
+    // 120s timeout ends in SIGTERM — execFileSync throws with null status).
+    producerMocks.gitProbeOverride = (...args: string[]) => {
+      if (args.includes('ls-tree')) return { out: null, status: null };
+      const out = producerMocks.gitOpt(...args);
+      return { out, status: out === null ? 1 : 0 };
+    };
+    const report = await reportFor({ since: ANCHOR });
+    expect(ruling(report)).toEqual({
+      since: ANCHOR,
+      effective: false,
+      reason: 'base-untrusted',
+    });
+    // The round still reviews — the full range.
+    expect(report.diffPath).not.toBeNull();
+    expect(writtenDiff()).toBe(FULL_SOURCE_DELETED);
+  });
+
+  it('refuses to scope on a lossily decoded capture', async () => {
+    // The containment battery this slicing retired pinned it: invalid-UTF-8
+    // bytes decode onto U+FFFD, and two filenames differing only in such a
+    // byte COLLIDE — scope membership decided on the collided strings
+    // republishes a sibling's already-certified hunks. The scope ruling
+    // fails closed to `containment-unverified` (full review) instead; the
+    // round's published bytes stay raw, so nothing is lost by falling back.
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+      probeUnavailable: false,
+    });
+    const LOSSY = Buffer.concat([
+      Buffer.from('diff --git a/data_'),
+      Buffer.from([0xe9]),
+      Buffer.from('.log b/data_'),
+      Buffer.from([0xe9]),
+      Buffer.from('.log\n--- a/data_'),
+      Buffer.from([0xe9]),
+      Buffer.from('.log\n+++ b/data_'),
+      Buffer.from([0xe9]),
+      Buffer.from('.log\n@@ -1,1 +1,2 @@\n one\n+two\n'),
+    ]);
+    producerMocks.gitRaw.mockImplementation((...args: string[]) =>
+      args.includes(`${ANCHOR}..f00df00df00d`)
+        ? LOSSY
+        : args.includes(`${BASE}..f00df00df00d`)
+          ? LOSSY
+          : Buffer.from(''),
+    );
+    const report = await reportFor({ since: ANCHOR });
+    expect(ruling(report)).toEqual({
+      since: ANCHOR,
+      effective: false,
+      reason: 'containment-unverified',
+    });
+    expect(report.diffPath).not.toBeNull();
+  });
+
   it('refuses an anchor another identity certified, before touching history', async () => {
     // "Clean up to this sha" is the recorded identity's verdict, and this
     // command validates an anchor against the HISTORY, never against who
@@ -1541,7 +1763,9 @@ describe('fetch-pr report assembly', () => {
         ? ''
         : args[0] === 'rev-parse'
           ? ANCHOR // the full sha for the abbreviation
-          : null,
+          : args.includes('ls-tree')
+            ? '' // answered: the entry is absent from that tree
+            : null,
     );
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
@@ -1878,7 +2102,9 @@ describe('fetch-pr report assembly', () => {
         ? ''
         : args[0] === 'rev-parse'
           ? BASE // the anchor resolves to the merge base
-          : null,
+          : args.includes('ls-tree')
+            ? '' // answered: the entry is absent from that tree
+            : null,
     );
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,

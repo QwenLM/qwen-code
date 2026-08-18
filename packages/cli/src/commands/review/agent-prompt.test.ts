@@ -5929,6 +5929,18 @@ describe('incremental-scope briefs', () => {
         deltaFiles: [],
         interaction: [{ path: 'src/caller.ts', importsChanged: [42] }],
       },
+      // A PARTIALLY corrupt delta list — one valid entry beside junk —
+      // degrades wholesale, aligned with the roster's guard: the roster
+      // invalidates the block on any non-string entry ("no trustworthy
+      // delta list"), so the brief renderer must not keep narrowing briefs
+      // on a list the roster declared untrustworthy while it widens.
+      {
+        anchor: 'abc1234def567890',
+        deltaFiles: ['src/changed.ts', 42],
+        interaction: [
+          { path: 'src/caller.ts', importsChanged: ['src/changed.ts'] },
+        ],
+      },
     ]) {
       // Under `scope`, which is where the validator looks. Replacing
       // `incremental` wholesale made every case exit at `!raw` before a

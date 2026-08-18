@@ -96,6 +96,17 @@ export interface DiffFile {
   diffEnd: number;
   hunks: DiffHunk[];
   /**
+   * The old-side path of a rename section — what it was renamed FROM.
+   *
+   * Set only when rename detection rendered the section (the captures pin
+   * `--find-renames`), where `path` carries the NEW name alone. A delta
+   * whose rename target was restored to the merge-base state owes the
+   * source's net-deletion hunks a reviewer, and they sit in the PR's diff
+   * under this name — a scope decision that reads `path` alone cannot see
+   * them.
+   */
+  renamedFrom?: string;
+  /**
    * New-side line ranges the PR actually **wrote** — the `+` lines, coalesced.
    *
    * Distinct from `hunks`, which also span the three context lines git prints
@@ -377,6 +388,10 @@ export function parseDiff(diffText: string): {
     // Lua comments, for instance. Treating those as headers overwrites the
     // file's path and swallows the line from the add/remove counts.
     if (!curHunk) {
+      if (line.startsWith('rename from ')) {
+        cur.renamedFrom = unquote(line.slice('rename from '.length));
+        continue;
+      }
       if (line.startsWith('rename to ')) {
         // A rename states its new path outright, without an `a/`/`b/` prefix.
         cur.path = unquote(line.slice('rename to '.length));
