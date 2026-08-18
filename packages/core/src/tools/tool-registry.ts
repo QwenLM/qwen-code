@@ -5,10 +5,8 @@
  */
 
 import type { FunctionDeclaration } from '@google/genai';
-import { createHash } from 'node:crypto';
 import type {
   AnyDeclarativeTool,
-  DeferredToolPresentation,
   ToolResult,
   ToolResultDisplay,
   ToolInvocation,
@@ -42,13 +40,6 @@ export interface DeferredToolSummary {
   name: string;
   description: string;
   serverName?: string;
-}
-
-/** Returns the schema identity used to reject stale deferred presentations. */
-export function getFunctionSchemaFingerprint(
-  schema: FunctionDeclaration,
-): string {
-  return createHash('sha256').update(JSON.stringify(schema)).digest('hex');
 }
 
 const debugLogger = createDebugLogger('TOOL_REGISTRY');
@@ -210,13 +201,10 @@ export class ToolRegistry {
   // In-flight factory promises — ensures concurrent ensureTool() calls for the
   // same name share one promise instead of running the factory multiple times.
   private inflight: Map<string, Promise<AnyDeclarativeTool>> = new Map();
-  // Deferred tools that ToolSearch has loaded this session. Once revealed, a
-  // tool's schema is included in subsequent function-declaration lists even
-  // though it would normally be hidden.
+  // Deferred tools revealed for direct declaration in this session. Once
+  // revealed, a tool's schema is included in subsequent function-declaration
+  // lists even though it would normally be hidden.
   private revealedDeferred: Set<string> = new Set();
-  // Current-schema fingerprints that have been shown to the model through
-  // ToolSearch and are therefore eligible for deferred_tool_call proxy routing.
-  private proxySchemaPresentations: Map<string, string> = new Map();
   private config: Config;
   private mcpClientManager: McpClientManager;
 
@@ -477,7 +465,6 @@ export class ToolRegistry {
         // this a re-discovered tool of the same name would inherit
         // stale "revealed" state across the disconnect/reconnect.
         this.revealedDeferred.delete(tool.name);
-        this.proxySchemaPresentations.delete(tool.name);
       }
     }
   }
@@ -497,7 +484,6 @@ export class ToolRegistry {
         // checks reveal state) before the model has any way to know
         // the tool exists this session.
         this.revealedDeferred.delete(name);
-        this.proxySchemaPresentations.delete(name);
       }
     }
   }
@@ -627,7 +613,6 @@ export class ToolRegistry {
         // disconnect (would surface in declarations before any
         // ToolSearch call this session).
         this.revealedDeferred.delete(name);
-        this.proxySchemaPresentations.delete(name);
       }
     }
 
@@ -821,7 +806,7 @@ export class ToolRegistry {
   }
 
   /**
-   * Whether the discovery/proxy pair (tool_search + deferred_tool_call) is
+   * Whether the discovery/proxy pair (tool_search + tool_call) is
    * registered. The pair is registered or removed together (see Config tool
    * registration); the normalization boundary uses this to reject wrapper
    * calls in sessions where on-demand discovery is disabled.
@@ -843,49 +828,9 @@ export class ToolRegistry {
       tool &&
       tool.shouldDefer &&
       !tool.alwaysLoad &&
+      !this.revealedDeferred.has(name) &&
       !this.config.getVisibleTools().has(name)
     );
-  }
-
-  markProxySchemaPresented(presentation: DeferredToolPresentation): boolean {
-    const tool = this.tools.get(presentation.name);
-    if (!tool || !this.isProxyEligibleDeferredTool(presentation.name)) {
-      return false;
-    }
-    const currentFingerprint = getFunctionSchemaFingerprint(tool.schema);
-    if (currentFingerprint !== presentation.schemaFingerprint) {
-      return false;
-    }
-    this.proxySchemaPresentations.set(presentation.name, currentFingerprint);
-    return true;
-  }
-
-  hasPresentedProxySchema(name: string): boolean {
-    const tool = this.tools.get(name);
-    if (!tool) return false;
-    return (
-      this.proxySchemaPresentations.get(name) ===
-      getFunctionSchemaFingerprint(tool.schema)
-    );
-  }
-
-  clearProxySchemaPresentations(): void {
-    this.proxySchemaPresentations.clear();
-  }
-
-  getPresentedProxySchemas(): FunctionDeclaration[] {
-    const schemas: FunctionDeclaration[] = [];
-    for (const name of [...this.proxySchemaPresentations.keys()].sort()) {
-      const tool = this.tools.get(name);
-      if (
-        tool &&
-        this.proxySchemaPresentations.get(name) ===
-          getFunctionSchemaFingerprint(tool.schema)
-      ) {
-        schemas.push(tool.schema);
-      }
-    }
-    return schemas;
   }
 
   /**
@@ -914,14 +859,12 @@ export class ToolRegistry {
    */
   clearRevealedDeferredTools(): void {
     this.revealedDeferred.clear();
-    this.proxySchemaPresentations.clear();
   }
 
   /**
-   * Returns a lightweight summary of tools that are
-   * deferred from the initial function-declaration list. Used to describe the
-   * set of on-demand tools in the startup reminder so the model knows what is
-   * reachable via ToolSearch. `alwaysLoad` tools and tools listed in
+   * Returns a lightweight summary of tools that are deferred from the initial
+   * function-declaration list. Used to describe the on-demand catalog in the
+   * ToolSearch declaration. `alwaysLoad` tools and tools listed in
    * {@link Config.getVisibleTools} are excluded.
    */
   getDeferredToolSummary(): DeferredToolSummary[] {
@@ -941,7 +884,7 @@ export class ToolRegistry {
         });
       }
     });
-    // Stable order so the startup reminder text is deterministic across runs.
+    // Stable order so the ToolSearch catalog is deterministic across runs.
     summary.sort((a, b) => a.name.localeCompare(b.name));
     return summary;
   }

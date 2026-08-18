@@ -45,7 +45,6 @@ import type {
   ToolExecutionStatus,
   LoopTickResult,
   ToolArtifact,
-  DeferredToolPresentation,
   VisionBridgeResult,
   MemoryWriteCandidate,
   CronTaskDelivery,
@@ -352,17 +351,6 @@ import {
 } from './repeated-tool-failure-guard.js';
 
 const debugLogger = createDebugLogger('SESSION');
-// Staged on the Content instance by reference. Any structuredClone, spread,
-// or serialization between staging and commit drops the state — that fails
-// closed (authorization lost, the model re-searches), so keep hand-offs of
-// the staged message reference-preserving rather than adding a clone.
-const DEFERRED_TOOL_PRESENTATIONS = Symbol('deferredToolPresentations');
-type ContentWithDeferredToolPresentations = Content & {
-  [DEFERRED_TOOL_PRESENTATIONS]?: {
-    presentations: readonly DeferredToolPresentation[];
-    committed: boolean;
-  };
-};
 const permissionRequestTails = new WeakMap<
   AgentSideConnection,
   Promise<void>
@@ -494,7 +482,6 @@ type RunToolResult = {
   loopDetected?: boolean;
   repeatedToolFailureBatch?: RepeatedToolFailureBatch;
   memoryWriteCandidates?: MemoryWriteCandidate[];
-  deferredToolPresentations?: DeferredToolPresentation[];
 };
 
 type MidTurnDrainResult = {
@@ -4702,9 +4689,6 @@ export class Session implements SessionContext {
                     return { stopReason: sendResult.stopReason };
                   }
                   const responseStream = sendResult.responseStream;
-                  this.commitDeferredToolPresentationsForDeliveredMessage(
-                    nextMessage,
-                  );
                   nextMessage = null;
                   channelDeliveryResponseBlock =
                     beginChannelDeliveryResponseBlock(responseCapture);
@@ -5698,7 +5682,6 @@ export class Session implements SessionContext {
             preservedParts.length > 0
               ? { ...messageForPreservation, parts: preservedParts }
               : null;
-          this.reattachDeferredToolPresentations(nextMessage, preservedMessage);
           this.#preserveUnsentMessageHistory(
             preservedMessage,
             sendResult.stopReason === 'cancelled' ||
@@ -5714,7 +5697,6 @@ export class Session implements SessionContext {
         }
 
         const responseStream = sendResult.responseStream;
-        this.commitDeferredToolPresentationsForDeliveredMessage(nextMessage);
         nextMessage = null;
         channelDeliveryResponseBlock = beginChannelDeliveryResponseBlock(
           options.responseCapture,
@@ -6309,24 +6291,7 @@ export class Session implements SessionContext {
     const rawResponseStream = goalPermit
       ? await chat.sendMessageStream(model, request, promptId, goalPermit)
       : await chat.sendMessageStream(model, request, promptId);
-    const responseStream = (async function* () {
-      for await (const event of rawResponseStream) {
-        if (event.type === StreamEventType.COMPRESSED) {
-          // This wrapper consumes GeminiChat's raw stream directly, so it
-          // never passes through GeminiClient.sendMessageStream's history
-          // mutation handling. Run the same paired clear every other mutation
-          // runs: a registry-only clear would leave pending resumed
-          // presentations alive to drain via a later setTools() with
-          // fingerprint-only validation, authorizing schemas that this
-          // compression removed from active history.
-          geminiClient.clearProxySchemaPresentationsAfterHistoryMutation(
-            'acp-chat-compressed',
-          );
-        }
-        yield event;
-      }
-    })();
-    return { responseStream };
+    return { responseStream: rawResponseStream };
   }
 
   #preserveUnsentMessageHistory(
@@ -6334,13 +6299,6 @@ export class Session implements SessionContext {
     preserveFullMessage: boolean,
   ): void {
     if (!message) return;
-
-    // Preserved messages cross the same active-history boundary as messages
-    // accepted by sendMessageStream. Commit any ToolSearch presentation staged
-    // on the message before adding it to history so a later deferred call does
-    // not fail closed after cancellation, prompt supersession, or guard
-    // exhaustion.
-    this.commitDeferredToolPresentationsForDeliveredMessage(message);
 
     if (preserveFullMessage) {
       this.#getCurrentChat().addHistory(message);
@@ -6390,9 +6348,6 @@ export class Session implements SessionContext {
       ],
     };
     this.#preserveUnsentMessageHistory(message, true);
-    this.commitDeferredToolPresentations(
-      toolRun.deferredToolPresentations ?? [],
-    );
     await this.messageRewriter?.waitForPendingRewrites();
   }
 
@@ -6487,9 +6442,6 @@ export class Session implements SessionContext {
         },
         true,
       );
-      this.commitDeferredToolPresentations(
-        toolRun.deferredToolPresentations ?? [],
-      );
       await this.messageRewriter?.waitForPendingRewrites();
       recordDaemonLoopDetected(
         this.config,
@@ -6520,7 +6472,6 @@ export class Session implements SessionContext {
       };
     }
     const message: Content = { role: 'user', parts };
-    this.trackDeferredToolPresentationsForMessage(message, toolRun);
     return {
       message,
       hadMidTurnUserInput,
@@ -7342,9 +7293,6 @@ export class Session implements SessionContext {
                   beginChannelDeliveryResponseBlock(responseCapture);
                 const channelDeliveryCheckpoint =
                   channelDeliveryResponseBlock?.length ?? 0;
-                this.commitDeferredToolPresentationsForDeliveredMessage(
-                  nextMessage,
-                );
                 if (loopTick && turnCount === 1) {
                   // The block reached the model (the send started); commit it so
                   // the next tick can detect "unchanged". Deferring the commit
@@ -8020,9 +7968,6 @@ export class Session implements SessionContext {
             }
 
             const responseStream = sendResult.responseStream;
-            this.commitDeferredToolPresentationsForDeliveredMessage(
-              nextMessage,
-            );
             nextMessage = null;
             const messageDisplay = this.#createMessageDisplayDispatcher(
               ac.signal,
@@ -8685,36 +8630,19 @@ export class Session implements SessionContext {
         })),
         new Map(orderedRecords.map((record) => [record.callId, promptId])),
       );
-      const deliveredPresentations: DeferredToolPresentation[] = [];
       orderedRecords.forEach((record, index) => {
         const finalizedParts = finalized[index].responseParts;
-        const responseChanged =
-          finalizedParts.length !== record.responseParts.length ||
-          finalizedParts.some(
-            (part, partIndex) => part !== record.responseParts[partIndex],
-          );
-        const recordPresentations = responseChanged
-          ? undefined
-          : record.metadata.deferredToolPresentations;
-        if (recordPresentations) {
-          deliveredPresentations.push(...recordPresentations);
-        }
         this.config
           .getChatRecordingService()
           ?.recordToolResult(finalizedParts, {
             ...record.metadata,
             persistedOutputFiles: finalized[index].persistedOutputFiles,
             artifacts: finalized[index].artifacts,
-            deferredToolPresentations: recordPresentations,
           });
       });
       return {
         ...result,
         parts: finalized.flatMap((entry) => entry.responseParts),
-        deferredToolPresentations:
-          deliveredPresentations.length > 0
-            ? deliveredPresentations
-            : undefined,
         repeatedToolFailureBatch,
       };
     };
@@ -9249,85 +9177,6 @@ export class Session implements SessionContext {
     }
     await refreshMemoryIfNeeded();
     return result;
-  }
-
-  private commitDeferredToolPresentations(
-    presentations: readonly DeferredToolPresentation[],
-  ): void {
-    const toolRegistry = this.config.getToolRegistry();
-    for (const presentation of presentations) {
-      toolRegistry.markProxySchemaPresented(presentation);
-    }
-  }
-
-  /**
-   * Stage proxy presentations on the exact user message that carries their
-   * function responses. A ToolSearch result only unlocks deferred_tool_call
-   * after that message is accepted into the active model history; keeping the
-   * metadata off the session-global registry until delivery prevents dropped
-   * or aborted responses from authorizing a schema the model never saw.
-   */
-  private trackDeferredToolPresentationsForMessage(
-    message: Content | null,
-    toolRun: RunToolResult,
-  ): void {
-    const presentations = toolRun.deferredToolPresentations;
-    if (!message || !presentations || presentations.length === 0) {
-      return;
-    }
-    (message as ContentWithDeferredToolPresentations)[
-      DEFERRED_TOOL_PRESENTATIONS
-    ] = { presentations, committed: false };
-  }
-
-  /**
-   * Commit staged presentations after the associated message has crossed the
-   * active-history boundary. This preserves the same-batch rule: a batch that
-   * contains both tool_search and deferred_tool_call cannot self-authorize, but
-   * the next model turn can use the proxy once the ToolSearch response is part
-   * of history.
-   */
-  private commitDeferredToolPresentationsForDeliveredMessage(
-    message: Content | null,
-  ): void {
-    if (!message) {
-      return;
-    }
-    const stagedMessage = message as ContentWithDeferredToolPresentations;
-    const state = stagedMessage[DEFERRED_TOOL_PRESENTATIONS];
-    if (!state || state.committed) {
-      return;
-    }
-    state.committed = true;
-    delete stagedMessage[DEFERRED_TOOL_PRESENTATIONS];
-    this.commitDeferredToolPresentations(state.presentations);
-  }
-
-  /**
-   * The skipped-send preserve path rebuilds the preserved message from its
-   * parts, which drops the presentation symbol staged on the original
-   * message. Reattach it so the commit inside #preserveUnsentMessageHistory
-   * fires — but only when the preserved message still carries the staged
-   * message's functionResponse parts, so a path that drops the tool results
-   * keeps the schema fail-closed instead of authorizing it.
-   */
-  private reattachDeferredToolPresentations(
-    stagedMessage: Content | null,
-    preservedMessage: Content | null,
-  ): void {
-    if (!stagedMessage || !preservedMessage) return;
-    const state = (stagedMessage as ContentWithDeferredToolPresentations)[
-      DEFERRED_TOOL_PRESENTATIONS
-    ];
-    if (!state || state.committed) return;
-    const stagedParts = stagedMessage.parts ?? [];
-    const carriesStagedToolResult = (preservedMessage.parts ?? []).some(
-      (part) => 'functionResponse' in part && stagedParts.includes(part),
-    );
-    if (!carriesStagedToolResult) return;
-    (preservedMessage as ContentWithDeferredToolPresentations)[
-      DEFERRED_TOOL_PRESENTATIONS
-    ] = state;
   }
 
   /**
@@ -11293,9 +11142,6 @@ export class Session implements SessionContext {
                   ? new Error(toolResult.error.message)
                   : undefined,
               errorType: status === 'error' ? executionErrorType : undefined,
-              deferredToolPresentations: succeeded
-                ? toolResult.deferredToolPresentations
-                : undefined,
             },
           });
           if (succeeded && !nestedPermissionCancelled) {
@@ -11328,9 +11174,6 @@ export class Session implements SessionContext {
                     },
                   ]
                 : undefined,
-            deferredToolPresentations: succeeded
-              ? toolResult.deferredToolPresentations
-              : undefined,
           };
         } catch (e) {
           const error = e instanceof Error ? e : new Error(String(e));

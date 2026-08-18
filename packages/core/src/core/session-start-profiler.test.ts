@@ -134,7 +134,7 @@ describe('session-start-profiler', () => {
       extraHistoryLength: 3,
       historyLength: 4,
       snapshotEntryCount: 2,
-      deferredReminderCount: 1,
+      deferredToolCount: 1,
     });
 
     expect(records).toEqual([
@@ -151,7 +151,7 @@ describe('session-start-profiler', () => {
         extraHistoryLength: 3,
         historyLength: 4,
         snapshotEntryCount: 2,
-        deferredReminderCount: 1,
+        deferredToolCount: 1,
       },
     ]);
     expect(debugLoggerMock.debug).toHaveBeenCalledWith(
@@ -315,7 +315,7 @@ describe('session-start-profiler', () => {
     expect(records[0]).not.toHaveProperty('extraHistoryLength');
     expect(records[0]).not.toHaveProperty('historyLength');
     expect(records[0]).not.toHaveProperty('snapshotEntryCount');
-    expect(records[0]).not.toHaveProperty('deferredReminderCount');
+    expect(records[0]).not.toHaveProperty('deferredToolCount');
     expect(records[0]).not.toHaveProperty('failedStage');
   });
 
@@ -400,7 +400,7 @@ describe('session-start-profiler', () => {
         extraHistoryLength: 0,
         historyLength: 1,
         snapshotEntryCount: 0,
-        deferredReminderCount: 0,
+        deferredToolCount: 0,
       });
 
       const perfDir = join(runtimeDir, 'session-start-perf');

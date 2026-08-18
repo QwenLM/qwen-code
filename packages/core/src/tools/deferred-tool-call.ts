@@ -12,9 +12,9 @@ import { ToolErrorType } from './tool-error.js';
 /**
  * Provider-facing envelope for calling a hidden deferred tool.
  *
- * `name` is the real deferred tool name returned by `tool_search`; `arguments`
- * is passed through to that target after the scheduler validates that the
- * target schema was already presented in the current conversation.
+ * `name` is the real deferred tool name listed by `tool_search`; `arguments`
+ * is passed through to that target by the scheduler's shared normalization
+ * boundary.
  */
 export interface DeferredToolCallParams {
   name: string;
@@ -34,7 +34,7 @@ class DeferredToolCallInvocation extends BaseToolInvocation<
     // The shared normalization boundary rewrites the request to the real
     // target tool before build/execute, so this wrapper should never run.
     const message =
-      '`deferred_tool_call` is a transport wrapper and must be normalized by the scheduler before execution. Use `tool_search` to fetch a deferred tool schema, then call `deferred_tool_call` with that real target name.';
+      '`tool_call` is a transport wrapper and must be normalized by the scheduler before execution. Use `tool_search` when you need the target schema, then call `tool_call` with that real target name.';
     return {
       llmContent: `Error: ${message}`,
       returnDisplay: message,
@@ -57,7 +57,7 @@ export class DeferredToolCallTool extends BaseDeclarativeTool<
     super(
       ToolNames.DEFERRED_TOOL_CALL,
       ToolDisplayNames.DEFERRED_TOOL_CALL,
-      'Calls a deferred tool only after a successful direct tool_search call returned that target\'s full schema in the current active conversation. Call tool_search directly; never set name to "tool_search". If the schema is no longer visible, including after context compression or history replacement, call tool_search again before using this wrapper.',
+      'Invokes a deferred tool from the live tool_search catalog. Use tool_search first when the target schema or arguments are unknown. Call tool_search directly; never set name to "tool_search". Policy, permissions, hooks, validation, telemetry, and execution run against the real target tool.',
       Kind.Other,
       {
         type: 'object',
@@ -65,7 +65,7 @@ export class DeferredToolCallTool extends BaseDeclarativeTool<
           name: {
             type: 'string',
             description:
-              'Exact deferred tool name returned by tool_search in the current active conversation. Never use "tool_search".',
+              'Exact deferred tool name listed by tool_search. Never use "tool_search".',
           },
           arguments: {
             type: 'object',

@@ -58,7 +58,7 @@ export function withPermissionToolIdentity(
 }
 
 /**
- * Pure shape transform of a `deferred_tool_call` request into the request
+ * Pure shape transform of a `tool_call` request into the request
  * for its embedded target — no registry access, no eligibility checks.
  * Returns the request unchanged when it is not a well-formed proxy call.
  * Shared by the normalization boundary and by display/telemetry-only call
@@ -90,7 +90,7 @@ export function unwrapDeferredToolCallShape(
 }
 
 /**
- * Convert the stable provider-facing `deferred_tool_call` wrapper into the
+ * Convert the stable provider-facing `tool_call` wrapper into the
  * real deferred tool request used internally. Callers should run permissions,
  * validation, hooks, execution, and telemetry against the real target, while
  * function responses still use `providerName` so the provider sees the
@@ -112,7 +112,7 @@ export async function normalizeDeferredToolCallRequest(
     return {
       ok: false,
       error: new Error(
-        '`deferred_tool_call` is not available in this session. Call the intended tool directly by its real name.',
+        '`tool_call` is not available in this session. Call the intended tool directly by its real name.',
       ),
       providerName: ToolNames.DEFERRED_TOOL_CALL,
       errorType: ToolErrorType.TOOL_NOT_REGISTERED,
@@ -134,7 +134,7 @@ export async function normalizeDeferredToolCallRequest(
   const targetName = request.args['name'];
   if (typeof targetName !== 'string' || targetName.trim().length === 0) {
     return fail(
-      '`deferred_tool_call.name` must be the exact deferred tool name returned by tool_search.',
+      '`tool_call.name` must be the exact deferred tool name listed by tool_search.',
     );
   }
   // Resolve the attempted identity before validating target arguments so a
@@ -147,7 +147,7 @@ export async function normalizeDeferredToolCallRequest(
     Array.isArray(targetArgs)
   ) {
     return fail(
-      '`deferred_tool_call.arguments` must be an object matching the target tool schema returned by tool_search.',
+      '`tool_call.arguments` must be an object matching the target tool schema returned by tool_search.',
       ToolErrorType.INVALID_TOOL_PARAMS,
       canonicalTarget,
     );
@@ -155,7 +155,7 @@ export async function normalizeDeferredToolCallRequest(
 
   if (canonicalTarget === ToolNames.DEFERRED_TOOL_CALL) {
     return fail(
-      '`deferred_tool_call` cannot target itself. Use tool_search to fetch the real deferred tool schema, then call deferred_tool_call with that real target name.',
+      '`tool_call` cannot target itself. Use tool_search to fetch the real deferred tool schema, then call tool_call with that real target name.',
       ToolErrorType.INVALID_TOOL_PARAMS,
       canonicalTarget,
     );
@@ -189,19 +189,11 @@ export async function normalizeDeferredToolCallRequest(
   }
   if (!toolRegistry.isProxyEligibleDeferredTool(canonicalTarget)) {
     return fail(
-      `Tool "${canonicalTarget}" is not eligible for deferred_tool_call. Call directly if it is visible, or use tool_search for deferred tools.`,
+      `Tool "${canonicalTarget}" is not eligible for tool_call. Call directly if it is visible, or use tool_search for deferred tools.`,
       ToolErrorType.EXECUTION_DENIED,
       canonicalTarget,
     );
   }
-  if (!toolRegistry.hasPresentedProxySchema(canonicalTarget)) {
-    return fail(
-      `Schema for deferred tool "${canonicalTarget}" has not been fetched in the active context. Use tool_search first, then call deferred_tool_call on a later turn.`,
-      ToolErrorType.EXECUTION_DENIED,
-      canonicalTarget,
-    );
-  }
-
   return {
     ok: true,
     resolvedTool: targetTool,

@@ -740,16 +740,6 @@ export class MemoryPressureMonitor extends EventEmitter {
             // the subsequent clear_file_cache step. This removes the
             // implicit coupling between step ordering.
             this.coreConfig.getFileReadCache().clear();
-            // This path bypasses GeminiClient.setHistory, so it must honor
-            // the "any history mutation clears deferred-tool proxy
-            // presentations" invariant itself — via the same paired clear
-            // (registry presentations + pending resumed presentations) the
-            // client-level mutation paths run. Microcompaction cannot blank
-            // tool_search results today, but clearing keeps the idle path
-            // fail-closed if that ever changes.
-            client.clearProxySchemaPresentationsAfterHistoryMutation(
-              'idle-compact-history',
-            );
             const m = result.meta;
             debugLogger.debug(
               `[COMPACT_HISTORY] cleared ${m.toolsCleared} tool result(s) ` +

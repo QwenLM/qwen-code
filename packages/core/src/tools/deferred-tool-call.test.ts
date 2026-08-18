@@ -10,12 +10,16 @@ import { ToolErrorType } from './tool-error.js';
 import { ToolNames } from './tool-names.js';
 
 describe('DeferredToolCallTool', () => {
-  it('requires direct discovery in the current active conversation', () => {
+  it('describes the live-catalog bridge contract', () => {
     const schema = new DeferredToolCallTool().schema;
 
-    expect(schema.description).toContain('successful direct tool_search');
-    expect(schema.description).toContain('current active conversation');
-    expect(schema.description).toContain('after context compression');
+    expect(schema.description).toContain('live tool_search catalog');
+    expect(schema.description).toContain(
+      'Use tool_search first when the target schema or arguments are unknown',
+    );
+    expect(schema.description).toContain(
+      'Policy, permissions, hooks, validation, telemetry, and execution',
+    );
     expect(schema.description).toContain(
       'Call tool_search directly; never set name to "tool_search"',
     );

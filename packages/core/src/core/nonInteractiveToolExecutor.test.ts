@@ -167,64 +167,6 @@ describe('executeToolCall', () => {
     expect(recordToolResult).not.toHaveBeenCalled();
   });
 
-  it('can defer deferred tool presentation commits to the caller batch', async () => {
-    const request: ToolCallRequestInfo = {
-      callId: 'tool-search',
-      name: 'testTool',
-      args: {},
-      isClientInitiated: false,
-      prompt_id: 'prompt-search',
-    };
-    const presentation = {
-      name: 'deferred_tool',
-      schemaFingerprint: 'schema',
-    };
-    const markProxySchemaPresented = vi.fn().mockReturnValue(true);
-    Object.assign(mockToolRegistry, { markProxySchemaPresented });
-    vi.mocked(mockToolRegistry.getTool).mockReturnValue(mockTool);
-    executeFn.mockResolvedValue({
-      llmContent: '<functions>...</functions>',
-      returnDisplay: 'Loaded 1 tool',
-      deferredToolPresentations: [presentation],
-    } satisfies ToolResult);
-
-    const response = await executeToolCall(
-      mockConfig,
-      request,
-      abortController.signal,
-      { deferDeferredToolPresentationCommit: true },
-    );
-
-    expect(response.deferredToolPresentations).toEqual([presentation]);
-    expect(markProxySchemaPresented).not.toHaveBeenCalled();
-  });
-
-  it('preserves a completion consumer rejection', async () => {
-    const request: ToolCallRequestInfo = {
-      callId: 'tool-search-rejected',
-      name: 'testTool',
-      args: {},
-      isClientInitiated: false,
-      prompt_id: 'prompt-search',
-    };
-    const markProxySchemaPresented = vi.fn().mockReturnValue(true);
-    Object.assign(mockToolRegistry, { markProxySchemaPresented });
-    vi.mocked(mockToolRegistry.getTool).mockReturnValue(mockTool);
-    executeFn.mockResolvedValue({
-      llmContent: '<functions>...</functions>',
-      returnDisplay: 'Loaded 1 tool',
-      deferredToolPresentations: [
-        { name: 'deferred_tool', schemaFingerprint: 'schema' },
-      ],
-    } satisfies ToolResult);
-
-    await executeToolCall(mockConfig, request, abortController.signal, {
-      onAllToolCallsComplete: vi.fn().mockResolvedValue(false),
-    });
-
-    expect(markProxySchemaPresented).not.toHaveBeenCalled();
-  });
-
   it('runs the tool with the requested runtime content generator', async () => {
     const request: ToolCallRequestInfo = {
       callId: 'runtime-call',

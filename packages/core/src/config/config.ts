@@ -8485,8 +8485,8 @@ export class Config {
         { allowReservedName: true },
       );
       if (!deferredToolCallRegistered) {
-        // The pairing is intentional: tool_search cannot authorize schema
-        // use without deferred_tool_call. Warn because the consequence is
+        // The pairing is intentional: tool_search cannot provide a callable
+        // deferred route without tool_call. Warn because the consequence is
         // otherwise invisible — every deferred tool is eagerly revealed in
         // the declaration list instead.
         this.debugLogger.warn(

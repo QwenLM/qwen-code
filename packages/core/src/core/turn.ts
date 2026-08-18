@@ -16,7 +16,6 @@ import type {
 import { FinishReason } from './genai-compat.js';
 import type {
   ToolCallConfirmationDetails,
-  DeferredToolPresentation,
   ToolArtifact,
   ToolResultBoundaryArtifact,
   ToolResult,
@@ -168,12 +167,6 @@ export interface ToolCallResponseInfo {
   terminateTurn?: boolean;
   visionBridgeNotice?: string;
   artifacts?: ToolArtifact[];
-  /**
-   * Deferred tool schemas that were shown to the model by this response and
-   * can be committed after the response is accepted into the conversation.
-   * Used by ToolSearch + deferred_tool_call routing; not sent to the provider.
-   */
-  deferredToolPresentations?: DeferredToolPresentation[];
   boundaryArtifact?: ToolResultBoundaryArtifact;
 }
 

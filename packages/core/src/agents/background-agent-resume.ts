@@ -32,7 +32,6 @@ import type { ChatRecord } from '../services/chatRecordingService.js';
 import { buildOrderedUuidChain } from '../utils/conversation-chain.js';
 import {
   buildAvailableSkillsReminder,
-  buildDeferredToolsReminder,
   buildMcpServerInstructionsReminder,
   getInitialChatHistory,
 } from '../utils/environmentContext.js';
@@ -940,7 +939,6 @@ export class BackgroundAgentResumeService {
         : [
             ...(
               await getInitialChatHistory(bgConfig as Config, undefined, {
-                includeDeferredToolsReminder: false,
                 includeAvailableSkillsReminder: subagentWillHaveSkillTool(
                   target.subagentConfig,
                 ),
@@ -1652,9 +1650,6 @@ export class BackgroundAgentResumeService {
         const skills = await buildAvailableSkillsReminder(agentConfig);
         if (skills) reminders.push(skills.reminder);
       }
-
-      const deferredTools = buildDeferredToolsReminder(toolRegistry);
-      if (deferredTools) reminders.push(deferredTools);
     } catch (error) {
       debugLogger.warn(
         `[BackgroundAgentResume] Failed to build current fork capability reminder: ${

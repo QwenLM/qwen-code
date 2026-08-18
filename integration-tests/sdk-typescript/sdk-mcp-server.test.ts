@@ -82,7 +82,7 @@ const MCP_CALCULATE_SUM = 'mcp__sdk-calculator__calculate_sum';
 const MCP_REVERSE_STRING = 'mcp__sdk-calculator__reverse_string';
 const MCP_MAYBE_FAIL = 'mcp__sdk-error-test__maybe_fail';
 const MCP_DELAYED_RESPONSE = 'mcp__sdk-async__delayed_response';
-const DEFERRED_TOOL_CALL = 'deferred_tool_call';
+const DEFERRED_TOOL_CALL = 'tool_call';
 
 describe('SDK MCP Server Integration (E2E)', () => {
   let helper: SDKTestHelper;

@@ -530,7 +530,6 @@ export class AgentCore {
     const [envHistory] = hasInitialMessages
       ? [[]]
       : await getInitialChatHistory(this.runtimeContext, undefined, {
-          includeDeferredToolsReminder: false,
           includeAvailableSkillsReminder: hasSkillTool,
         });
 

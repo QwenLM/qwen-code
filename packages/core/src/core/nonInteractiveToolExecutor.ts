@@ -24,8 +24,6 @@ export interface ExecuteToolCallOptions {
   onToolResultFullTurnModel?: (model: string) => boolean;
   /** Direct calls record by default; aggregate callers can defer recording. */
   recordToolResult?: boolean;
-  /** Lets a larger provider batch commit presentation metadata atomically. */
-  deferDeferredToolPresentationCommit?: boolean;
   runtimeView?: RuntimeContentGeneratorView;
 }
 
@@ -56,8 +54,6 @@ export async function executeToolCall(
       },
       onToolCallsUpdate: options.onToolCallsUpdate,
       onToolResultFullTurnModel: options.onToolResultFullTurnModel,
-      deferDeferredToolPresentationCommit:
-        options.deferDeferredToolPresentationCommit,
       getPreferredEditor: () => undefined,
       onEditorClose: () => {},
     })

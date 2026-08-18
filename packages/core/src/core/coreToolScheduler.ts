@@ -1222,7 +1222,6 @@ interface CoreToolSchedulerOptions {
   outputUpdateHandler?: OutputUpdateHandler;
   onAllToolCallsComplete?: AllToolCallsCompleteHandler;
   onToolCallsUpdate?: ToolCallsUpdateHandler;
-  deferDeferredToolPresentationCommit?: boolean;
   getPreferredEditor: () => EditorType | undefined;
   onEditorClose: () => void;
   /**
@@ -1406,7 +1405,6 @@ export class CoreToolScheduler {
   private onEditorClose: () => void;
   private chatRecordingService?: ChatRecordingService;
   private onToolResultFullTurnModel?: (model: string) => boolean;
-  private deferDeferredToolPresentationCommit: boolean;
   private shouldObserveProducer: (callId: string) => boolean;
   private isFinalizingToolCalls = false;
   private postToolBatchEnabledForBatch = false;
@@ -1477,8 +1475,6 @@ export class CoreToolScheduler {
     this.onEditorClose = options.onEditorClose;
     this.chatRecordingService = options.chatRecordingService;
     this.onToolResultFullTurnModel = options.onToolResultFullTurnModel;
-    this.deferDeferredToolPresentationCommit =
-      options.deferDeferredToolPresentationCommit ?? false;
     this.shouldObserveProducer = options.shouldObserveProducer ?? (() => true);
   }
 
@@ -5152,7 +5148,6 @@ export class CoreToolScheduler {
             new Set([...(persistedOutputFiles ?? []), ...outputFiles]),
           );
         };
-        let deferredToolPresentations = toolResult.deferredToolPresentations;
         let contentLength: number | undefined =
           typeof content === 'string' ? content.length : undefined;
 
@@ -5251,9 +5246,6 @@ export class CoreToolScheduler {
           toolName,
           content,
         );
-        if (persisted.content !== content) {
-          deferredToolPresentations = undefined;
-        }
         content = persisted.content;
         mergePersistedOutputFiles(persisted.persistedOutputFiles);
 
@@ -5399,9 +5391,6 @@ export class CoreToolScheduler {
             { threshold: perToolMax, lines: perToolLines, keep: perToolKeep },
             promptIdForTruncation,
           );
-          if (truncated.content !== content) {
-            deferredToolPresentations = undefined;
-          }
           content = truncated.content;
           mergePersistedOutputFiles(
             truncated.outputFile
@@ -5465,9 +5454,6 @@ export class CoreToolScheduler {
                 },
                 promptIdForTruncation,
               );
-              if (recombined.content !== content) {
-                deferredToolPresentations = undefined;
-              }
               content = recombined.content;
               mergePersistedOutputFiles(
                 recombined.outputFile
@@ -5538,11 +5524,6 @@ export class CoreToolScheduler {
             ? { visionBridgeNotice: processedImages.visionBridgeNotice }
             : {}),
           ...(artifacts.length > 0 ? { artifacts } : {}),
-          ...(deferredToolPresentations
-            ? {
-                deferredToolPresentations,
-              }
-            : {}),
         };
         // After an APPROVED exit_plan_mode, swap the large `plan` argument
         // still sitting in the model turn's functionCall for a pointer to the
@@ -6156,9 +6137,6 @@ export class CoreToolScheduler {
           logToolCall(this.config, new ToolCallEvent(call));
         }
 
-        // Recording preserves schema-bound recovery metadata; it does not
-        // authorize proxy calls until the result is accepted here or later
-        // survives into a resumed active API history.
         this.recordToolResults(completedCalls);
 
         // The handler may not settle until the next model request starts
@@ -6167,11 +6145,8 @@ export class CoreToolScheduler {
         // schedule() — can stay held across a model round trip. Every settle
         // path is bounded (context accepted, delivery failed, or the send
         // promise settling), so this delays but cannot deadlock the queue.
-        const completionAccepted = this.onAllToolCallsComplete
-          ? (await this.onAllToolCallsComplete(completedCalls)) !== false
-          : true;
-        if (completionAccepted && !this.deferDeferredToolPresentationCommit) {
-          this.commitDeferredToolPresentations(completedCalls);
+        if (this.onAllToolCallsComplete) {
+          await this.onAllToolCallsComplete(completedCalls);
         }
       } finally {
         try {
@@ -6275,11 +6250,6 @@ export class CoreToolScheduler {
 
     return completedCalls.map((call, index) => {
       const responseParts = finalized[index].responseParts;
-      const responseChanged =
-        responseParts.length !== call.response.responseParts.length ||
-        responseParts.some(
-          (part, partIndex) => part !== call.response.responseParts[partIndex],
-        );
       return {
         ...call,
         response: {
@@ -6288,7 +6258,6 @@ export class CoreToolScheduler {
           persistedOutputFiles: finalized[index].persistedOutputFiles,
           artifacts: finalized[index].artifacts,
           contentLength: toolResponseTextLength(responseParts),
-          ...(responseChanged ? { deferredToolPresentations: undefined } : {}),
         },
       };
     });
@@ -6310,7 +6279,6 @@ export class CoreToolScheduler {
           : {}),
         error: call.response.error,
         errorType: call.response.errorType,
-        deferredToolPresentations: call.response.deferredToolPresentations,
       };
       const goalContext = call.request.goalContext;
       if (!goalContext) {
@@ -6349,25 +6317,6 @@ export class CoreToolScheduler {
           error instanceof Error ? error.message : String(error)
         }`,
       );
-    }
-  }
-
-  /**
-   * Commit deferred tool schemas that were actually delivered to the model in
-   * successful tool results. `tool_search` returns schema-bound presentation
-   * metadata on its ToolResult;
-   * once the result has been accepted into the conversation flow, the registry
-   * can allow later `deferred_tool_call` requests to route to those real tools.
-   */
-  private commitDeferredToolPresentations(
-    completedCalls: CompletedToolCall[],
-  ): void {
-    for (const call of completedCalls) {
-      if (call.status !== 'success') continue;
-      for (const presentation of call.response.deferredToolPresentations ??
-        []) {
-        this.toolRegistry.markProxySchemaPresented(presentation);
-      }
     }
   }
 

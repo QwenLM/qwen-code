@@ -7786,7 +7786,7 @@ describe('Server Config (config.ts)', () => {
       expect(webSearchNotices()).toHaveLength(1);
     });
 
-    it('registers deferred_tool_call only for the main session registry', async () => {
+    it('registers tool_call only for the main session registry', async () => {
       const config = new Config(baseParams);
       await config.initialize();
 
@@ -7836,7 +7836,7 @@ describe('Server Config (config.ts)', () => {
       expect(registeredNames).toContain(ToolNames.DEFERRED_TOOL_CALL);
     });
 
-    it('does not register deferred_tool_call when tool_search is disabled', async () => {
+    it('does not register tool_call when tool_search is disabled', async () => {
       const config = new Config({
         ...baseParams,
         disabledTools: [ToolNames.TOOL_SEARCH],
@@ -7859,7 +7859,7 @@ describe('Server Config (config.ts)', () => {
       ['disabled', { disabledTools: [ToolNames.DEFERRED_TOOL_CALL] }],
       ['denied', { permissions: { deny: [ToolNames.DEFERRED_TOOL_CALL] } }],
     ] satisfies Array<[string, Partial<ConfigParameters>]>)(
-      'rolls back tool_search when deferred_tool_call is %s',
+      'rolls back tool_search when tool_call is %s',
       async (_reason, params) => {
         const config = new Config({
           ...baseParams,

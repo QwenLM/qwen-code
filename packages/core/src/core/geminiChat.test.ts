@@ -11757,11 +11757,9 @@ describe('GeminiChat', async () => {
       expect(chat.getHistory()).toEqual([startupReminder]);
     });
 
-    it('preserves a mid-history MCP added-tool reminder when a later prompt fails', () => {
-      // drainPendingAddedMcpToolsReminder injects a system-reminder user
-      // entry; if the following prompt fails, popping it must NOT also pop
-      // the reminder — the announcement can't be re-queued (the tool is
-      // already in announcedDeferredToolNames) so it would be lost forever.
+    it('preserves a mid-history capability reminder when a later prompt fails', () => {
+      // Capability updates may inject a system-reminder user entry. If the
+      // following prompt fails, popping it must not also pop that reminder.
       const mcpReminder: Content = {
         role: 'user',
         parts: [
@@ -12094,7 +12092,7 @@ describe('GeminiChat', async () => {
             {
               functionCall: {
                 id: 'call_crash_before_reminder',
-                name: 'deferred_tool_call',
+                name: 'tool_call',
                 args: {},
               },
             },

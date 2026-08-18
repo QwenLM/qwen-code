@@ -2427,7 +2427,7 @@ export default {
   'toolDisplayName.Monitor': 'Monitor',
   'toolDisplayName.NotebookEdit': 'Edita notebook',
   'toolDisplayName.ToolSearch': "Cerca d'eines",
-  'toolDisplayName.DeferredToolCall': "Crida d'eina diferida",
+  'toolDisplayName.ToolCall': "Crida d'eina",
   'toolDisplayName.EnterWorktree': "Entra a l'arbre de treball",
   'toolDisplayName.ExitWorktree': "Surt de l'arbre de treball",
   'toolDisplayName.Workflow': 'Flux de treball',

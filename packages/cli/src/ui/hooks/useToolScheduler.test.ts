@@ -50,7 +50,6 @@ const mockToolRegistry = {
   getTool: vi.fn(),
   ensureTool: vi.fn(async (name: string) => mockToolRegistry.getTool(name)),
   getAllToolNames: vi.fn(() => ['mockTool', 'anotherTool']),
-  markProxySchemaPresented: vi.fn(),
 };
 
 const mockConfig = {
@@ -277,7 +276,6 @@ describe('useReactToolScheduler', () => {
 
     mockToolRegistry.getTool.mockClear();
     mockToolRegistry.ensureTool.mockClear();
-    mockToolRegistry.markProxySchemaPresented.mockClear();
     (mockTool.execute as Mock).mockClear();
     (mockToolRequiresConfirmation.execute as Mock).mockClear();
     (mockToolRequiresConfirmation.getConfirmationDetails as Mock).mockClear();
@@ -368,52 +366,6 @@ describe('useReactToolScheduler', () => {
       }),
     ]);
     expect(result.current[0]).toEqual([]);
-  });
-
-  it('defers deferred schema commits to the interactive delivery path', async () => {
-    const presentation = {
-      name: 'mcp__weather__forecast',
-      schemaFingerprint: 'forecast-schema',
-    };
-    const toolSearch = new MockTool({
-      name: 'tool_search',
-      execute: vi.fn().mockResolvedValue({
-        llmContent: '<functions>forecast</functions>',
-        returnDisplay: 'Loaded 1 tool',
-        deferredToolPresentations: [presentation],
-      }),
-    });
-    mockToolRegistry.getTool.mockReturnValue(toolSearch);
-
-    const { result } = renderScheduler();
-    act(() => {
-      result.current[1](
-        {
-          callId: 'tool-search-deferred-commit',
-          name: 'tool_search',
-          args: { query: 'forecast' },
-          isClientInitiated: false,
-          prompt_id: 'prompt-tool-search-deferred-commit',
-        },
-        new AbortController().signal,
-      );
-    });
-    await act(async () => {
-      await vi.runAllTimersAsync();
-    });
-    await act(async () => {
-      await vi.runAllTimersAsync();
-    });
-
-    expect(onComplete).toHaveBeenCalledWith([
-      expect.objectContaining({
-        status: 'success',
-        response: expect.objectContaining({
-          deferredToolPresentations: [presentation],
-        }),
-      }),
-    ]);
-    expect(mockToolRegistry.markProxySchemaPresented).not.toHaveBeenCalled();
   });
 
   it('resolves full-turn tool calls against the exact model runtime', async () => {

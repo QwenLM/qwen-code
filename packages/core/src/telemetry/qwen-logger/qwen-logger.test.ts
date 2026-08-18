@@ -652,7 +652,7 @@ describe('QwenLogger', () => {
         decision: undefined,
         duration_ms: 10,
         tool_type: 'native',
-        'tool.provider_name': 'deferred_tool_call',
+        'tool.provider_name': 'tool_call',
       } as unknown as ToolCallEvent;
 
       logger.logToolCallEvent(event);
@@ -662,7 +662,7 @@ describe('QwenLogger', () => {
           name: 'tool_call#cron_create',
           properties: expect.objectContaining({
             tool_name: 'cron_create',
-            'tool.provider_name': 'deferred_tool_call',
+            'tool.provider_name': 'tool_call',
           }),
         }),
       );

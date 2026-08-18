@@ -633,7 +633,7 @@ describe('AgentCore.prepareTools', () => {
     );
   });
 
-  it('filters deferred_tool_call from inline subagent declarations', async () => {
+  it('filters tool_call from inline subagent declarations', async () => {
     const inlineWrapper = {
       name: ToolNames.DEFERRED_TOOL_CALL,
       description: 'stable deferred tool proxy',

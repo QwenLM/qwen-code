@@ -791,7 +791,7 @@ describe('ci flaky rerun patrol', () => {
       [
         'Failed Tests 1',
         'FAIL toolFormatting.test.ts > translates every tool',
-        "AssertionError: expected ['deferred_tool_call'] to deeply equal []",
+        "AssertionError: expected ['tool_call'] to deeply equal []",
         ...Array.from(
           { length: 200 },
           () => 'TypeError: fetch failed (expected by this passing test)',
@@ -799,7 +799,7 @@ describe('ci flaky rerun patrol', () => {
         'Cleaning up orphan processes',
       ].join('\n'),
     );
-    expect(evidence).toContain("expected ['deferred_tool_call']");
+    expect(evidence).toContain("expected ['tool_call']");
   });
 
   it('keeps the primary failure when later summary lines fill the limit', () => {
@@ -807,7 +807,7 @@ describe('ci flaky rerun patrol', () => {
       [
         'Failed Tests 1',
         'FAIL toolFormatting.test.ts > translates every tool',
-        "AssertionError: expected ['deferred_tool_call'] to deeply equal []",
+        "AssertionError: expected ['tool_call'] to deeply equal []",
         ...Array.from(
           { length: 200 },
           (_, index) => `npm error cleanup noise ${index}`,
@@ -815,6 +815,6 @@ describe('ci flaky rerun patrol', () => {
       ].join('\n'),
     );
     expect(evidence.split('\n')).toHaveLength(120);
-    expect(evidence).toContain("expected ['deferred_tool_call']");
+    expect(evidence).toContain("expected ['tool_call']");
   });
 });

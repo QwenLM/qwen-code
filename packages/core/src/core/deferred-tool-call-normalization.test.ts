@@ -9,10 +9,7 @@ import { ApprovalMode, Config } from '../config/config.js';
 import { MockTool } from '../test-utils/mock-tool.js';
 import { ToolErrorType } from '../tools/tool-error.js';
 import { ToolNames } from '../tools/tool-names.js';
-import {
-  getFunctionSchemaFingerprint,
-  ToolRegistry,
-} from '../tools/tool-registry.js';
+import { ToolRegistry } from '../tools/tool-registry.js';
 import type { ToolCallRequestInfo } from './turn.js';
 import {
   formatPermissionToolIdentity,
@@ -84,11 +81,6 @@ describe('normalizeDeferredToolCallRequest', () => {
       shouldDefer: true,
     });
     registry.registerTool(target);
-    registry.markProxySchemaPresented({
-      name: ToolNames.CRON_CREATE,
-      schemaFingerprint: getFunctionSchemaFingerprint(target.schema),
-    });
-
     const result = await normalizeDeferredToolCallRequest(
       request(ToolNames.DEFERRED_TOOL_CALL, {
         name: ToolNames.CRON_CREATE,
@@ -116,11 +108,6 @@ describe('normalizeDeferredToolCallRequest', () => {
       shouldDefer: true,
     });
     registry.registerTool(target);
-    registry.markProxySchemaPresented({
-      name: ToolNames.AGENT,
-      schemaFingerprint: getFunctionSchemaFingerprint(target.schema),
-    });
-
     const result = await normalizeDeferredToolCallRequest(
       request(ToolNames.DEFERRED_TOOL_CALL, {
         name: 'task',
@@ -276,7 +263,29 @@ describe('normalizeDeferredToolCallRequest', () => {
     }
   });
 
-  it('rejects a deferred target whose schema was not presented', async () => {
+  it('rejects a deferred target that is declared directly', async () => {
+    const registry = createRegistry();
+    registry.registerTool(
+      new MockTool({ name: ToolNames.CRON_CREATE, shouldDefer: true }),
+    );
+    registry.revealDeferredTool(ToolNames.CRON_CREATE);
+
+    const result = await normalizeDeferredToolCallRequest(
+      request(ToolNames.DEFERRED_TOOL_CALL, {
+        name: ToolNames.CRON_CREATE,
+        arguments: {},
+      }),
+      registry,
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errorType).toBe(ToolErrorType.EXECUTION_DENIED);
+      expect(result.error.message).toContain('Call directly');
+    }
+  });
+
+  it('targets a live eligible deferred tool directly', async () => {
     const registry = createRegistry();
     registry.registerTool(
       new MockTool({ name: ToolNames.CRON_CREATE, shouldDefer: true }),
@@ -290,10 +299,10 @@ describe('normalizeDeferredToolCallRequest', () => {
       registry,
     );
 
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.errorType).toBe(ToolErrorType.EXECUTION_DENIED);
-      expect(result.error.message).toContain('has not been fetched');
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.request.name).toBe(ToolNames.CRON_CREATE);
+      expect(result.request.providerName).toBe(ToolNames.DEFERRED_TOOL_CALL);
     }
   });
 
@@ -415,10 +424,10 @@ describe('permission tool identity', () => {
     };
 
     expect(formatPermissionToolIdentity(proxyRequest)).toBe(
-      '"cron_create" via "deferred_tool_call"',
+      '"cron_create" via "tool_call"',
     );
     expect(withPermissionToolIdentity('policy says no', proxyRequest)).toBe(
-      'policy says no (tool "cron_create" via "deferred_tool_call")',
+      'policy says no (tool "cron_create" via "tool_call")',
     );
   });
 });

@@ -29,7 +29,6 @@ import {
   type GeminiErrorEventValue,
   type GoalTurnPermit,
   type SteerInput,
-  type DeferredToolPresentation,
   GeminiEventType as ServerGeminiEventType,
   SendMessageType,
   createDebugLogger,
@@ -4802,18 +4801,8 @@ export const useGeminiStream = (
       const responsesToSend = finalizedResponses.flatMap(
         (entry) => entry.responseParts,
       );
-      const deliveredDeferredToolPresentations: DeferredToolPresentation[] = [];
       orderedResponses.forEach(({ request, response, status }, index) => {
         const finalizedParts = finalizedResponses[index].responseParts;
-        const responseChanged =
-          finalizedParts.length !== response.responseParts.length ||
-          finalizedParts.some(
-            (part, partIndex) => part !== response.responseParts[partIndex],
-          );
-        const deferredToolPresentations =
-          status === 'success' && !responseChanged
-            ? response.deferredToolPresentations
-            : undefined;
         const goalContext = request.goalContext;
         config.getChatRecordingService?.()?.recordToolResult?.(
           finalizedParts,
@@ -4826,7 +4815,6 @@ export const useGeminiStream = (
             artifacts: finalizedResponses[index].artifacts,
             error: response.error,
             errorType: response.errorType,
-            deferredToolPresentations,
             executionStatus: response.executionStatus,
           },
           goalContext
@@ -4839,17 +4827,7 @@ export const useGeminiStream = (
               : { goalContext: { ...goalContext } }
             : undefined,
         );
-        if (deferredToolPresentations) {
-          deliveredDeferredToolPresentations.push(...deferredToolPresentations);
-        }
       });
-
-      const commitDeferredToolPresentations = () => {
-        const toolRegistry = config.getToolRegistry();
-        for (const presentation of deliveredDeferredToolPresentations) {
-          toolRegistry.markProxySchemaPresented(presentation);
-        }
-      };
 
       if (continuationWasCancelled()) {
         markToolsAsSubmitted(
@@ -4947,10 +4925,6 @@ export const useGeminiStream = (
       );
       if (terminatesGoalTurn && toolGoalBinding) {
         geminiClient.addHistory({ role: 'user', parts: responsesToSend });
-        // Tool results cross the active-history boundary here without a
-        // follow-up submitQuery, so commit staged ToolSearch presentations
-        // like the other early-return preservation paths do.
-        commitDeferredToolPresentations();
         let goalFinishFailed = false;
         try {
           await config.getChatRecordingService()?.flush();
@@ -5127,7 +5101,6 @@ export const useGeminiStream = (
       if (backgroundLaunchExhaustedCapacity) {
         if (geminiClient) {
           geminiClient.addHistory({ role: 'user', parts: responsesToSend });
-          commitDeferredToolPresentations();
         }
         if (toolGoalBinding) {
           await failClosedGoalTurn(
@@ -5212,7 +5185,6 @@ export const useGeminiStream = (
         steerInput: drainedSteer,
         onContextAccepted: () => {
           drainedSteer?.accept();
-          commitDeferredToolPresentations();
           settleAcceptance(true);
         },
         onAdmissionFailed: () => {

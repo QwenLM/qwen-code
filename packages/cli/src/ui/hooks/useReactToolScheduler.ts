@@ -205,7 +205,6 @@ export function useReactToolScheduler(
         getPreferredEditor,
         onEditorClose,
         onToolResultFullTurnModel,
-        deferDeferredToolPresentationCommit: true,
       }),
     [
       config,
