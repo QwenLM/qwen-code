@@ -27,7 +27,7 @@ describe('OmniClipAudioTool', () => {
   let inputPath: string;
   let outputDir: string;
 
-  const tool = new OmniClipAudioTool();
+  const tool = new OmniClipAudioTool({});
 
   const probe = (result: Partial<MediaProbeResult>): void => {
     mocks.probeMediaMetadata.mockResolvedValue(result as MediaProbeResult);

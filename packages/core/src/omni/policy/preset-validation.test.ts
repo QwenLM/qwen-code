@@ -35,10 +35,10 @@ describe('omni-fixed-policies-preset.json', () => {
 
     const tools = [
       new OmniDownsampleImageTool(),
-      new OmniDownscaleVideoTool(),
-      new OmniDownsampleAudioTool(),
-      new OmniExtractKeyframesTool(),
-      new OmniExtractAudioTool(),
+      new OmniDownscaleVideoTool({}),
+      new OmniDownsampleAudioTool({}),
+      new OmniExtractKeyframesTool({}),
+      new OmniExtractAudioTool({}),
       new OmniTranscribeAudioTool(),
       new OmniOcrImageTool(),
     ];
