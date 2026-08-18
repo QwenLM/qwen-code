@@ -315,7 +315,10 @@ function pipelineExcludeArgs(): string[] {
         // Forward slashes: git's config parser reads backslashes as escapes.
         .split(sep)
         .join('/');
-      writeFileSync(file, 'node_modules/\ndist/\n', { flag: 'wx' });
+      writeFileSync(file, 'node_modules/\ndist/\n', {
+        flag: 'wx',
+        mode: 0o600,
+      });
       pipelineExcludesFile = file;
     } catch {
       // No tmp file: fall back to the commit's own ignore rules, which cover
@@ -547,6 +550,30 @@ export function worktreeResidue(cwd: string, cap = 12): WorktreeResidue {
         blind.join(', '),
     };
   }
+  // The other way this oracle goes blind, and the one the scratch tree's reset
+  // already refuses to certify around: `skip-worktree` and `assume-unchanged`
+  // make git ignore a TRACKED file's working copy, so an edited file answers
+  // `status` as clean. A reader told "clean" about a tree carrying a mutant is
+  // the #9207 failure with the tripwire's own signature on it.
+  const bits = spawnSync('git', ['-c', 'core.fsmonitor=', 'ls-files', '-v'], {
+    cwd,
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+    env: sanitizedGitEnv(),
+  });
+  if (
+    typeof bits.stdout === 'string' &&
+    bits.status === 0 &&
+    bits.stdout.split('\n').some((line) => /^[a-zS]/.test(line))
+  ) {
+    return {
+      paths: paths.slice(0, cap),
+      total: paths.length,
+      unmeasured:
+        'the index carries skip-worktree or assume-unchanged bits, so `git ' +
+        'status` cannot see edits to the tracked files they cover',
+    };
+  }
   return { paths: paths.slice(0, cap), total: paths.length };
 }
 
@@ -700,6 +727,9 @@ function removeUnownedNodeModules(
   owned: Set<string>,
   done: DependencyFarm,
 ): void {
+  // Symlinked directories that resolve back inside the tree, judged after the
+  // walk — see the branch that fills this.
+  const inTreeLinks: string[] = [];
   const walk = (dir: string): void => {
     let entries: Dirent[];
     try {
@@ -751,10 +781,9 @@ function removeUnownedNodeModules(
           const root = realpathSync(tree);
           if (
             (real === root || real.startsWith(root + sep)) &&
-            statSync(full).isDirectory() &&
-            holdsNodeModules(real)
+            statSync(full).isDirectory()
           ) {
-            done.failed++;
+            inTreeLinks.push(real);
           }
         } catch {
           // Dangling or unreadable: nothing resolvable to hide anything.
@@ -766,6 +795,14 @@ function removeUnownedNodeModules(
     }
   };
   walk(tree);
+  // Now that the walk has wiped what it could reach: a link still leading to a
+  // `node_modules` this call neither owns nor deleted is dependency state that
+  // survives every rebuild, and the caller says so rather than the tree hiding
+  // it. Owned farms are the ones this call just re-linked.
+  for (const real of inTreeLinks) {
+    if (owned.has(real)) continue;
+    if (holdsNodeModules(real, owned)) done.failed++;
+  }
 }
 
 /**
@@ -776,7 +813,7 @@ function removeUnownedNodeModules(
  * and the walk must not follow it (the farm's own entries are links out of the
  * tree), so the honest answer is a counted failure rather than silence.
  */
-function holdsNodeModules(dir: string): boolean {
+function holdsNodeModules(dir: string, owned: Set<string>): boolean {
   let entries: Dirent[];
   try {
     entries = readdirSync(dir, { withFileTypes: true });
@@ -784,10 +821,16 @@ function holdsNodeModules(dir: string): boolean {
     return false;
   }
   for (const entry of entries) {
-    if (entry.name.toLowerCase() === 'node_modules') return true;
+    const full = join(dir, entry.name);
+    // A farm this call owns is not hidden dependency state — it is the
+    // dependency state, re-linked moments ago.
+    if (entry.name.toLowerCase() === 'node_modules') {
+      if (!owned.has(full)) return true;
+      continue;
+    }
     if (entry.isSymbolicLink() || !entry.isDirectory()) continue;
     if (entry.name === '.git') continue;
-    if (holdsNodeModules(join(dir, entry.name))) return true;
+    if (holdsNodeModules(full, owned)) return true;
   }
   return false;
 }

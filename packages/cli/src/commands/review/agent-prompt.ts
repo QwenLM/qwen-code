@@ -2858,7 +2858,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
   if (residue.unmeasured) {
     writeStderrLine(
       `warning: could not measure whether the review worktree is clean (git status failed: ` +
-        `${residue.unmeasured}). Every brief built by this call says so; an unmeasured tree is ` +
+        `${inertPath(residue.unmeasured)}). Every brief built by this call says so; an unmeasured tree is ` +
         'not a clean one.',
     );
   }

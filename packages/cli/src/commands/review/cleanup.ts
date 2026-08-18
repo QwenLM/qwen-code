@@ -31,6 +31,7 @@ import {
   reviewLeaseHeldByAnotherSession,
   reviewLeasePath,
 } from '../../services/review-worktree-lease.js';
+import { sanitizedGitEnv } from './lib/worktree.js';
 import { currentUser, getGhHost, ghApiAll, setGhHost } from './lib/gh.js';
 import { parseReceiptIds } from './lib/receipt.js';
 import { refExists, releaseWorktree } from './lib/git.js';
@@ -397,6 +398,28 @@ function auditPrWrites(target: string, prNumber: string): void {
  * review's own `<worktree>-scratch-` prefix is a much narrower thing than any
  * string that matches a glob.
  */
+/**
+ * The first ancestor of `dir` (itself included) that is a symlink, or null.
+ *
+ * `lstat` refuses to dereference only the LAST component, so checking the
+ * directory a sweep is about to walk says nothing about the path it hangs
+ * from: a link one hop higher (`.qwen` over `.qwen/tmp`) resolves silently and
+ * every delete below lands wherever it points. The walk stops at the
+ * filesystem root, and a path that cannot be read at all answers null — an
+ * absent temp dir is the ordinary case, not a hazard.
+ */
+function redirectedAncestor(dir: string): string | null {
+  try {
+    for (let cur = resolve(dir); ; cur = dirname(cur)) {
+      if (lstatSync(cur).isSymbolicLink()) return cur;
+      const up = dirname(cur);
+      if (up === cur) return null;
+    }
+  } catch {
+    return null;
+  }
+}
+
 function scratchWorktreesOf(worktree: string): {
   paths: string[];
   failed: boolean;
@@ -427,30 +450,8 @@ function scratchWorktreesOf(worktree: string): {
   // probes, `git worktree remove`, `releaseWorktree`'s recursive `rmSync` —
   // would run inside wherever that link points. Refusing the whole family is the
   // only answer that scopes: one entry cannot be trusted more than its parent.
-  // Every ancestor, not just the immediate parent: `lstat` refuses to
-  // dereference only the LAST component, so a symlink one hop higher
-  // (`.qwen` above `.qwen/tmp`) resolves silently and redirects the same
-  // deletes. The walk stops at the filesystem root.
-  try {
-    for (let dir = parent; ; dir = dirname(dir)) {
-      if (lstatSync(dir).isSymbolicLink()) {
-        writeStderrLine(
-          `Refusing to sweep scratch worktrees: ${dir} is a symlink ` +
-            '(every delete below it would land wherever it points)',
-        );
-        return { paths: [], failed: true };
-      }
-      const up = dirname(dir);
-      if (up === dir) break;
-    }
-    if (!lstatSync(parent).isDirectory()) {
-      writeStderrLine(
-        `Refusing to sweep scratch worktrees: ${parent} is not a directory`,
-      );
-      return { paths: [], failed: true };
-    }
-  } catch {
-    return { paths: [], failed: false };
+  if (redirectedAncestor(parent) !== null) {
+    return { paths: [], failed: true };
   }
   return {
     paths: entries
@@ -462,6 +463,20 @@ function scratchWorktreesOf(worktree: string): {
 }
 
 export function runCleanup(target: string): void {
+  // Before anything is deleted: the whole temp dir hangs off one path, and a
+  // symlink anywhere above it redirects EVERY sweep below — the scratch family,
+  // the base-tree lock, the side files. The scratch sweep alone used to answer
+  // this, which announced the hazard and then kept deleting under it.
+  const redirected = redirectedAncestor(REVIEW_TMP_DIR);
+  if (redirected !== null) {
+    writeStderrLine(
+      `Refusing to clean: ${redirected} is a symlink, so every delete under ` +
+        `${REVIEW_TMP_DIR} would land wherever it points. Remove the link by ` +
+        'hand, then re-run.',
+    );
+    process.exitCode = 1;
+    return;
+  }
   let removedAny = false;
   // Tracked separately from `removedAny`, because a failure is neither. Without
   // it, a run that could not delete something goes on to announce "Nothing to
@@ -546,7 +561,10 @@ export function runCleanup(target: string): void {
           removedAny = true;
         } catch (err) {
           // `force` suppresses ENOENT, not EACCES/EBUSY — and a link left at a
-          // family path still wedges the next review's `worktree add`.
+          // family path still wedges the next review's `worktree add`, which is
+          // the same "something that should be gone is still there" the three
+          // sibling branches hold the lease for.
+          failedDestruction = true;
           writeStderrLine(
             `Failed to remove ${label} link ${path}: ${(err as Error).message}`,
           );
@@ -619,7 +637,13 @@ export function runCleanup(target: string): void {
     const branch = reviewBranch(prNumber);
     if (refExists(branch)) {
       try {
-        execFileSync('git', ['branch', '-D', branch], { stdio: 'pipe' });
+        execFileSync('git', ['branch', '-D', branch], {
+          stdio: 'pipe',
+          // The CHECK that gates this delete resolves the real repository
+          // (`refExists` goes through the sanitized helpers); an exported
+          // `GIT_DIR` here would verify one repo and delete in another.
+          env: sanitizedGitEnv(),
+        });
         writeStdoutLine(`Deleted ref: ${branch}`);
         removedAny = true;
       } catch (err) {

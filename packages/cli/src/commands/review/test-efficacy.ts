@@ -225,14 +225,34 @@ export function committedSymlinkProbes(
   probes: string[],
 ): Set<string> {
   if (probes.length === 0) return new Set();
-  const r = spawnSync('git', ['ls-files', '-s', '-z', '--', ...probes], {
-    cwd: tree,
-    encoding: 'utf8',
-    maxBuffer: 64 * 1024 * 1024,
-    env: sanitizedGitEnv(),
-  });
+  // `:(literal)` on every pathspec: a probe filename may itself begin with
+  // pathspec MAGIC (`:(literal)x.test.ts` is a legal name a PR can commit), and
+  // git would then parse the name as a directive and match a different blob —
+  // so the symlink this function exists to catch would not be found under the
+  // name the caller holds. The prefix says "the rest is a literal path".
+  const r = spawnSync(
+    'git',
+    [
+      '-c',
+      'core.fsmonitor=',
+      'ls-files',
+      '-s',
+      '-z',
+      '--',
+      ...probes.map((probe) => `:(literal)${probe}`),
+    ],
+    {
+      cwd: tree,
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+      env: sanitizedGitEnv(),
+    },
+  );
   if (r.error || r.status !== 0 || typeof r.stdout !== 'string') {
-    return new Set();
+    // A pathspec git refuses is not an answer of "no symlinks": the caller
+    // would run every probe it just failed to vet. An empty set is only
+    // honest when git answered.
+    return new Set(probes);
   }
   const linked = new Set<string>();
   for (const rec of r.stdout.split('\0')) {

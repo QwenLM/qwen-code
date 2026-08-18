@@ -149,7 +149,10 @@ describe('runCleanup', () => {
     expect(mocks.execFileSync).toHaveBeenCalledWith(
       'git',
       ['branch', '-D', 'qwen-review/pr-123'],
-      { stdio: 'pipe' },
+      // The env is sanitized: the check that gates this delete resolves the
+      // real repository, so the delete must not follow an exported `GIT_DIR`
+      // into another one.
+      expect.objectContaining({ stdio: 'pipe', env: expect.any(Object) }),
     );
     expect(mocks.writeStderrLine).toHaveBeenCalledWith(
       expect.stringContaining('Failed to delete branch qwen-review/pr-123'),
@@ -407,9 +410,15 @@ describe('runCleanup', () => {
     // to wedge the next review's `worktree add`. Both shapes are unlinked
     // the way the scratch family's always were.
     mocks.execFileSync.mockReturnValue(Buffer.from(''));
-    mocks.lstatSync.mockReturnValue({
-      isSymbolicLink: () => true,
-      isDirectory: () => false,
+    // The family paths are links; their ANCESTORS are ordinary directories —
+    // a symlink above the temp dir refuses the whole clean, which is a
+    // different test.
+    mocks.lstatSync.mockImplementation(((p: string) => ({
+      isSymbolicLink: () => String(p).includes('review-pr-'),
+      isDirectory: () => !String(p).includes('review-pr-'),
+    })) as unknown as () => {
+      isSymbolicLink: () => boolean;
+      isDirectory: () => boolean;
     });
 
     runCleanup('pr-123');
@@ -453,6 +462,29 @@ describe('runCleanup', () => {
     expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
       expect.stringContaining('Nothing to clean'),
     );
+    expect(mocks.clearReviewWorktreeLease).not.toHaveBeenCalled();
+  });
+
+  it('refuses to clean anything when the temp dir hangs off a symlink', () => {
+    // The scratch sweep alone used to answer this: it announced the hazard and
+    // the same function kept deleting under it — the base-tree lock and every
+    // side file, all resolved through the same redirected ancestor.
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    mocks.lstatSync.mockImplementation(((p: string) => ({
+      isSymbolicLink: () => String(p) === '/repo/.qwen',
+      isDirectory: () => String(p) !== '/repo/.qwen',
+    })) as unknown as () => {
+      isSymbolicLink: () => boolean;
+      isDirectory: () => boolean;
+    });
+
+    runCleanup('pr-123');
+
+    expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('Refusing to clean'),
+    );
+    expect(mocks.rmSync).not.toHaveBeenCalled();
+    expect(mocks.releaseWorktree).not.toHaveBeenCalled();
     expect(mocks.clearReviewWorktreeLease).not.toHaveBeenCalled();
   });
 

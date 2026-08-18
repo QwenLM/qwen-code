@@ -38,6 +38,7 @@ import {
   reviewLeaseHeldByAnotherSession,
   reviewLeasePath,
 } from '../../services/review-worktree-lease.js';
+import { sanitizedGitEnv } from './lib/worktree.js';
 import { ensureAuthenticated, gh, setGhHost } from './lib/gh.js';
 import type { ReviewEffort } from './parse-args.js';
 import {
@@ -585,7 +586,13 @@ function cleanStale(prNumber: string): void {
   const ref = reviewBranch(prNumber);
   if (refExists(ref)) {
     tryRemove(() =>
-      execFileSync('git', ['branch', '-D', ref], { stdio: 'pipe' }),
+      execFileSync('git', ['branch', '-D', ref], {
+        stdio: 'pipe',
+        // Same reason as every other git spawn in this pipeline: a delete must
+        // land in the repository the caller named, not the one the shell's
+        // `GIT_DIR` points at.
+        env: sanitizedGitEnv(),
+      }),
     );
   }
 }
@@ -700,7 +707,13 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     } catch (err) {
       // Roll back the fetched ref so the next run starts clean.
       tryRemove(() =>
-        execFileSync('git', ['branch', '-D', ref], { stdio: 'pipe' }),
+        execFileSync('git', ['branch', '-D', ref], {
+          stdio: 'pipe',
+          // Same reason as every other git spawn in this pipeline: a delete must
+          // land in the repository the caller named, not the one the shell's
+          // `GIT_DIR` points at.
+          env: sanitizedGitEnv(),
+        }),
       );
       throw new Error(
         `Failed to fetch PR #${prNumber} metadata: ${(err as Error).message}`,
@@ -713,7 +726,13 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       git('worktree', 'add', wt, ref);
     } catch (err) {
       tryRemove(() =>
-        execFileSync('git', ['branch', '-D', ref], { stdio: 'pipe' }),
+        execFileSync('git', ['branch', '-D', ref], {
+          stdio: 'pipe',
+          // Same reason as every other git spawn in this pipeline: a delete must
+          // land in the repository the caller named, not the one the shell's
+          // `GIT_DIR` points at.
+          env: sanitizedGitEnv(),
+        }),
       );
       throw new Error(
         `Failed to create worktree at ${wt}: ${(err as Error).message}`,

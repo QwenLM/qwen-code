@@ -414,6 +414,46 @@ describe('worktreeResidue — the blind sets', () => {
   );
 });
 
+describe('worktreeResidue — index bits', () => {
+  let repo: string;
+  let gitIsolation: ReturnType<typeof isolateHostGitConfig>;
+  const git = (cwd: string, ...args: string[]) =>
+    execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+
+  beforeEach(() => {
+    gitIsolation = isolateHostGitConfig();
+    repo = mkdtempSync(join(tmpdir(), 'qwen-bits-'));
+    git(repo, 'init', '-q', '-b', 'main');
+    git(repo, 'config', 'user.email', 't@t.t');
+    git(repo, 'config', 'user.name', 't');
+    writeFileSync(join(repo, 'a.ts'), 'export const x = 1;\n');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-qm', 'head');
+  });
+
+  afterEach(() => {
+    rmSync(repo, { recursive: true, force: true });
+    gitIsolation.dispose();
+  });
+
+  it.each(['--skip-worktree', '--assume-unchanged'])(
+    'reports UNMEASURED when %s hides a tracked edit',
+    (bit) => {
+      // `git status` answers clean for a file carrying either bit, however
+      // edited it is — so a reader would be told the shared tree is pristine
+      // while it carries a mutant. The scratch tree's reset already refuses to
+      // certify around this; the reader-side oracle owes the same answer.
+      const wt = join(repo, 'wt');
+      git(repo, 'worktree', 'add', '--detach', '-q', wt, 'HEAD');
+      git(wt, 'update-index', bit, 'a.ts');
+      writeFileSync(join(wt, 'a.ts'), 'MUTANT\n');
+
+      expect(git(wt, 'status', '--porcelain')).toBe(''); // the blindness
+      expect(worktreeResidue(wt).unmeasured).toBeTruthy();
+    },
+  );
+});
+
 describe('exposeDependencies', () => {
   // Every fixture here mkdtemps; without this they accumulated in $TMPDIR on
   // every local and CI run, unlike the block above which cleans up.

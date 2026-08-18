@@ -428,7 +428,7 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
   const sharedTreeResidue = residue.paths;
   const residueNote = residue.unmeasured
     ? ` NOTE: whether the shared review worktree is clean could not be measured (git status ` +
-      `failed: ${residue.unmeasured}). An unmeasured tree is not a clean one — if a later read ` +
+      `failed: ${inertPath(residue.unmeasured)}). An unmeasured tree is not a clean one — if a later read ` +
       'of it surprises you, check the path against `git show HEAD:<path>` before believing it.'
     : sharedTreeResidue.length > 0
       ? ` WARNING: the shared review worktree is NOT clean — ${sharedTreeResidue
