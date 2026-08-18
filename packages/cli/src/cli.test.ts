@@ -108,7 +108,7 @@ describe('resolveBootstrapRoute', () => {
   it('routes top-level help, version, serve, and mcp correctly', async () => {
     expect(resolveBootstrapRoute(['--help'])).toBe('help');
     expect(resolveBootstrapRoute(['--version'])).toBe('version');
-    expect(resolveBootstrapRoute(['mcp', '--version'])).toBe('version');
+    expect(resolveBootstrapRoute(['mcp', '--version'])).toBe('mcp');
     expect(resolveBootstrapRoute(['serve', '--help'])).toBe('serve');
     expect(resolveBootstrapRoute(['mcp', '--help'])).toBe('mcp');
   });
@@ -238,12 +238,33 @@ describe('resolveBootstrapRoute', () => {
     expect(resolveBootstrapRoute(['--help=true', '-v'])).toBe('default');
     expect(resolveBootstrapRoute(['--help=true', '--version'])).toBe('default');
     expect(resolveBootstrapRoute(['--h', '-v'])).toBe('default');
+    // yargs-parser expands short-option clusters letter-by-letter, so any
+    // cluster containing `h` (including the `-h=true` `=`-form) sets the
+    // help flag and wins over version on the full parser in every ordering.
+    expect(resolveBootstrapRoute(['-dh', '-v'])).toBe('default');
+    expect(resolveBootstrapRoute(['-help', '-v'])).toBe('default');
+    expect(resolveBootstrapRoute(['-sh', '--version'])).toBe('default');
+    expect(resolveBootstrapRoute(['-h=true', '-v'])).toBe('default');
+    expect(resolveBootstrapRoute(['-v', '-dh'])).toBe('default');
     // Conservative demotion: `--help=false -v` prints the version even on
     // the full parser, but the slow path reaches the same output.
     expect(resolveBootstrapRoute(['--help=false', '-v'])).toBe('default');
     // Version still wins when no help state is possible.
     expect(resolveBootstrapRoute(['--model', '-v'])).toBe('version');
-    expect(resolveBootstrapRoute(['mcp', '--version'])).toBe('version');
+  });
+
+  it('keeps command-prefixed version argv off the version fast path', () => {
+    // Command builders disable version via `.version(false)` (mcp, hooks,
+    // extensions, channel, review, auth, sessions), so an exact `-v` /
+    // `--version` token after a command must stay on the slow path, which
+    // owns those argv shapes.
+    expect(resolveBootstrapRoute(['mcp', '--version'])).toBe('mcp');
+    expect(resolveBootstrapRoute(['mcp', 'list', '--version'])).toBe('mcp');
+    expect(resolveBootstrapRoute(['mcp', '-v'])).toBe('mcp');
+    // Version still wins for top-level argv with no command prefix.
+    expect(resolveBootstrapRoute(['--model', '-v'])).toBe('version');
+    expect(resolveBootstrapRoute(['-v'])).toBe('version');
+    expect(resolveBootstrapRoute(['--version'])).toBe('version');
   });
 
   it('demotes unrecognized short-option clusters to the slow path', () => {

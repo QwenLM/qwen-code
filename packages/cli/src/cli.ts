@@ -195,12 +195,19 @@ function normalizeMcpFastPathArgv(argv: readonly string[]): readonly string[] {
 // Help states the exact-token scanner cannot see: yargs pops a trailing
 // positional literally named `help` into the help flag before deciding
 // between help and version (help wins in every ordering), `--help=*` reaches
-// the same flag through the parsed-value truthiness check, and `--h`
-// resolves through the h→help alias. When any of these is possible, the
-// version fast path must demote to the slow path, which prints exactly what
-// the full parser prints.
+// the same flag through the parsed-value truthiness check, `--h` resolves
+// through the h→help alias, any short-option cluster containing `h`
+// (`-dh`, `-help`, `-h=true`) sets the help flag after yargs-parser expands
+// it letter-by-letter. When any of these is possible, the version fast path
+// must demote to the slow path, which prints exactly what the full parser
+// prints.
 function helpStatePossible(argv: readonly string[]): boolean {
-  return argv.some((token) => token === 'help' || token.startsWith('--h'));
+  return argv.some(
+    (token) =>
+      token === 'help' ||
+      token.startsWith('--h') ||
+      (token.startsWith('-') && !token.startsWith('--') && token.includes('h')),
+  );
 }
 
 export function resolveBootstrapRoute(
@@ -216,7 +223,12 @@ export function resolveBootstrapRoute(
     return 'help';
   }
 
+  // Command-prefixed argv is excluded: command builders disable version via
+  // `.version(false)` (mcp, hooks, extensions, channel, review, auth,
+  // sessions), so `qwen mcp --version` must not hit the version fast path —
+  // the full parser owns those argv shapes.
   if (
+    firstPositional === undefined &&
     !hasFlag(argv, '--help', '-h') &&
     !helpStatePossible(argv) &&
     hasFlag(argv, '--version', '-v')
