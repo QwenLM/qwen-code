@@ -237,8 +237,11 @@ export function useMessagesFromBlocks(
     () => getPendingBackgroundAgentKey(reconciledMessages),
     [reconciledMessages],
   );
-  const pendingPermissionCallIds = useMemo(
-    () => getPendingPermissionCallIds(blocks),
+  // A stable primitive key for the effect dependency: the Set's identity
+  // changes on every transcript delta, which would re-run the reconciliation
+  // effect on each streamed update and defeat the retry backoff.
+  const pendingPermissionKey = useMemo(
+    () => [...getPendingPermissionCallIds(blocks)].sort().join('|'),
     [blocks],
   );
   const backgroundAgentNotificationKey = useMemo(
@@ -308,7 +311,13 @@ export function useMessagesFromBlocks(
     const cachedRound = reconciliationRequestRef.current;
     // Agents still under approval have not spawned their subagent session
     // yet: exclude them so the 404 probe cannot accumulate missing-agent
-    // misses and paint a failure while the dialog is unanswered.
+    // misses and paint a failure while the dialog is unanswered. Rebuild the
+    // membership from the stable key — the effect depends on the key, not the
+    // Set, so a transcript delta with unchanged permission content does not
+    // re-run this effect.
+    const pendingPermissionCallIds = new Set(
+      pendingPermissionKey ? pendingPermissionKey.split('|') : [],
+    );
     const callIds = pendingBackgroundAgentKey
       .split('|')
       .filter((callId) => !pendingPermissionCallIds.has(callId));
@@ -498,7 +507,7 @@ export function useMessagesFromBlocks(
     connection.sessionId,
     connection.status,
     pendingBackgroundAgentKey,
-    pendingPermissionCallIds,
+    pendingPermissionKey,
     reconciliationAttempt,
     workspace.client,
   ]);

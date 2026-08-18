@@ -686,6 +686,149 @@ describe('background agent task reconciliation', () => {
     vi.useRealTimers();
   });
 
+  it('probes only the healthy agent while a sibling launch approval is pending', async () => {
+    vi.useFakeTimers();
+    hookState.blocks = [
+      baseBlock({
+        id: 'perm-agent-a',
+        kind: 'permission',
+        requestId: 'req-a',
+        sessionId: 'session-1',
+        title: 'Launch agent A',
+        options: [{ optionId: 'proceed_once', label: 'Allow', raw: {} }],
+        toolCall: {
+          toolCallId: 'agent-call-a',
+          kind: 'other',
+          status: 'pending',
+          title: 'Launch agent A',
+          rawInput: { run_in_background: true },
+        },
+        preview: { kind: 'generic' as const },
+      }),
+      baseBlock({
+        id: 'agent-a',
+        kind: 'tool',
+        toolCallId: 'agent-call-a',
+        title: 'Agent',
+        status: 'in_progress',
+        toolName: 'agent',
+        rawInput: { run_in_background: true },
+        rawOutput: { type: 'task_execution', status: 'background' },
+      }),
+      baseBlock({
+        id: 'agent-b',
+        kind: 'tool',
+        toolCallId: 'agent-call-b',
+        title: 'Agent',
+        status: 'in_progress',
+        toolName: 'agent',
+        rawInput: { run_in_background: true },
+        rawOutput: { type: 'task_execution', status: 'background' },
+      }),
+    ];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockResolvedValue({
+      status: 'running',
+      sessionId: 'sub-agent-b',
+    });
+    const { render, unmount } = mountStatusConsumer({ allTools: true });
+
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalled(),
+    );
+    // Exclusion is per callId: the healthy sibling keeps probing while the
+    // approved agent is skipped.
+    const probed = hookState.resolveSubagentSession.mock.calls.map(
+      (call) => call[1],
+    );
+    expect(probed).toContain('agent-call-b');
+    expect(probed).not.toContain('agent-call-a');
+
+    await act(async () => unmount());
+    vi.useRealTimers();
+  });
+
+  it('resets accumulated missing-agent misses when an approval engages', async () => {
+    vi.useFakeTimers();
+    // Phase 1: no permission yet — one probe fires and 404s (miss 1).
+    hookState.blocks = [
+      baseBlock({
+        id: 'agent-a',
+        kind: 'tool',
+        toolCallId: 'agent-call-a',
+        title: 'Agent',
+        status: 'in_progress',
+        toolName: 'agent',
+        rawInput: { run_in_background: true },
+        rawOutput: { type: 'task_execution', status: 'background' },
+      }),
+    ];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockRejectedValue(
+      new DaemonHttpError(
+        404,
+        { code: 'session_not_found', toolCallId: 'agent-call-a' },
+        'not found',
+      ),
+    );
+    const { container, render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1),
+    );
+    expect(container.textContent).toBe('pending');
+
+    // Phase 2: the launch approval arrives — exclusion engages and must reset
+    // the accumulated miss, so no further probe fires while it is open.
+    hookState.blocks = [
+      baseBlock({
+        id: 'perm-agent-a',
+        kind: 'permission',
+        requestId: 'req-a',
+        sessionId: 'session-1',
+        title: 'Launch agent A',
+        options: [{ optionId: 'proceed_once', label: 'Allow', raw: {} }],
+        toolCall: {
+          toolCallId: 'agent-call-a',
+          kind: 'other',
+          status: 'pending',
+          title: 'Launch agent A',
+          rawInput: { run_in_background: true },
+        },
+        preview: { kind: 'generic' as const },
+      }),
+      hookState.blocks[0],
+    ];
+    await act(async () => render());
+    expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1);
+
+    // Phase 3: the approval resolves — probing resumes with a fresh grace;
+    // the pre-exclusion miss must not carry over, so the second post-approval
+    // 404 still leaves the card pending, and a third marks it failed.
+    hookState.blocks = [
+      {
+        ...hookState.blocks[0],
+        resolved: 'selected:proceed_once',
+      },
+      hookState.blocks[1],
+    ];
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2),
+    );
+    expect(container.textContent).toBe('pending');
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    await vi.waitFor(() => {
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(3);
+      expect(container.textContent).toBe('failed');
+    });
+
+    await act(async () => unmount());
+    vi.useRealTimers();
+  });
+
   it('gives a session-level 404 the same grace as a missing agent', async () => {
     vi.useFakeTimers();
     hookState.blocks = [backgroundAgentBlock('agent-call')];
