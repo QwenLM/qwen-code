@@ -301,8 +301,7 @@ describe('persistedAnchorSha', () => {
           foreign: false,
           author: null,
         } as unknown as Parameters<typeof persistRecoveredLedger>[1],
-        false,
-        true,
+        { noOwnReview: false, identityKnown: true },
       );
       // The guard kept round 6 — so the anchor on disk is round 6's, not the
       // round-5 one this run recovered.
