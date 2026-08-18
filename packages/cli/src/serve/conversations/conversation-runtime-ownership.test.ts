@@ -21,6 +21,47 @@ import {
 } from '../live/discovery.js';
 import { LIVE_HOST_PROTOCOL_VERSION } from '../live/types.js';
 
+const recordReadFailure = vi.hoisted(() => ({
+  path: undefined as string | undefined,
+  operation: undefined as 'open' | 'readFile' | undefined,
+  code: undefined as string | undefined,
+  injected: false,
+}));
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    open: vi.fn(async (...args: Parameters<typeof actual.open>) => {
+      const matches = String(args[0]) === recordReadFailure.path;
+      if (
+        matches &&
+        !recordReadFailure.injected &&
+        recordReadFailure.operation === 'open'
+      ) {
+        recordReadFailure.injected = true;
+        throw Object.assign(new Error(recordReadFailure.code), {
+          code: recordReadFailure.code,
+        });
+      }
+      const handle = await actual.open(...args);
+      if (
+        matches &&
+        !recordReadFailure.injected &&
+        recordReadFailure.operation === 'readFile'
+      ) {
+        recordReadFailure.injected = true;
+        vi.spyOn(handle, 'readFile').mockRejectedValueOnce(
+          Object.assign(new Error(recordReadFailure.code), {
+            code: recordReadFailure.code,
+          }),
+        );
+      }
+      return handle;
+    }),
+  };
+});
+
 const temporaryDirectories: string[] = [];
 const childProcesses = new Set<ChildProcess>();
 const currentNonce = 'conversation_owner_nonce_current_01';
@@ -39,7 +80,47 @@ async function readRecord(stableBaseDir: string) {
   ) as { version: number; pid: number; instanceNonce: string };
 }
 
+function failRecordReadOnce(
+  recordPath: string,
+  operation: 'open' | 'readFile',
+  code: string,
+): void {
+  recordReadFailure.path = recordPath;
+  recordReadFailure.operation = operation;
+  recordReadFailure.code = code;
+  recordReadFailure.injected = false;
+}
+
+async function writeForeignRecord(
+  stableBaseDir: string,
+  kind: 'ownership' | 'Live discovery',
+): Promise<string> {
+  if (kind === 'ownership') {
+    const previous = createConversationRuntimeOwnership({
+      stableBaseDir,
+      pid: 999_998,
+      instanceNonce: 'conversation_owner_nonce_read_failure',
+      isProcessAlive: () => false,
+    });
+    await previous.acquire();
+    return getConversationRuntimeOwnerPath(stableBaseDir);
+  }
+  await fs.mkdir(stableBaseDir, { recursive: true, mode: 0o700 });
+  await writeLiveDiscoveryFile(stableBaseDir, {
+    url: 'http://127.0.0.1:3210',
+    protocolVersion: LIVE_HOST_PROTOCOL_VERSION,
+    pid: 999_997,
+    instanceNonce: 'legacy_live_owner_nonce_read_failure',
+  });
+  return getLiveDiscoveryPath(stableBaseDir);
+}
+
 afterEach(async () => {
+  vi.restoreAllMocks();
+  recordReadFailure.path = undefined;
+  recordReadFailure.operation = undefined;
+  recordReadFailure.code = undefined;
+  recordReadFailure.injected = false;
   for (const child of childProcesses) {
     child.kill('SIGKILL');
   }
@@ -312,6 +393,58 @@ try {
     await ownership.acquire();
     expect(wait).toHaveBeenCalledOnce();
   });
+
+  it.each([
+    ['ownership', 'open'],
+    ['ownership', 'readFile'],
+    ['Live discovery', 'open'],
+    ['Live discovery', 'readFile'],
+  ] as const)(
+    'recovers after a transient %s record %s failure',
+    async (kind, operation) => {
+      const stableBaseDir = await temporaryStableBase();
+      const recordPath = await writeForeignRecord(stableBaseDir, kind);
+      const ownership = createConversationRuntimeOwnership({
+        stableBaseDir,
+        pid: process.pid,
+        instanceNonce: currentNonce,
+        isProcessAlive: () => false,
+        handoffGraceMs: 0,
+      });
+
+      failRecordReadOnce(
+        recordPath,
+        operation,
+        operation === 'open' ? 'EMFILE' : 'EIO',
+      );
+      await expect(ownership.acquire()).rejects.toMatchObject({
+        code: 'conversation_runtime_unavailable',
+        retryable: true,
+      });
+
+      await expect(ownership.acquire()).resolves.toEqual({ reclaimed: true });
+    },
+  );
+
+  it.each(['ownership', 'Live discovery'] as const)(
+    'treats an ELOOP opening the %s record as terminal compromise',
+    async (kind) => {
+      const stableBaseDir = await temporaryStableBase();
+      const recordPath = await writeForeignRecord(stableBaseDir, kind);
+      const ownership = createConversationRuntimeOwnership({
+        stableBaseDir,
+        pid: process.pid,
+        instanceNonce: currentNonce,
+        isProcessAlive: () => false,
+      });
+
+      failRecordReadOnce(recordPath, 'open', 'ELOOP');
+      await expect(ownership.acquire()).rejects.toMatchObject({
+        code: 'conversation_runtime_ownership_compromised',
+        retryable: false,
+      });
+    },
+  );
 
   it('rejects an active foreign legacy Live owner before writing its record', async () => {
     const stableBaseDir = await temporaryStableBase();

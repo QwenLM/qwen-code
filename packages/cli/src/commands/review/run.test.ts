@@ -670,15 +670,115 @@ describe('review run (handler)', () => {
       return opts.env['QWEN_CODE_CLI'];
     }
 
-    it('blanks an inherited entry that points at a DIFFERENT build', async () => {
+    /** Pin argv[1] to a controlled entry — the value the child gets stamped. */
+    function asEntry(name: string, contents: string, mode: number): string {
+      const entry = join(dir, name);
+      writeFileSync(entry, contents, { mode });
+      return entry;
+    }
+
+    it('replaces an inherited entry that points at a DIFFERENT build', async () => {
       // The dogfooded failure: a review launched from inside a parent Qwen
       // session ran the parent's install for every skill subcommand.
-      process.env['QWEN_CODE_CLI'] = process.execPath; // real file, ≠ argv[1]
-      armChild(0, { event: 'COMMENT', verdictLine: 'Verdict: Comment' });
-      await runHandler();
+      const bundle = asEntry('cli.js', '#!/usr/bin/env node\n', 0o755);
+      const origArgv1 = process.argv[1];
+      process.argv[1] = bundle;
+      try {
+        process.env['QWEN_CODE_CLI'] = process.execPath; // real file, ≠ argv[1]
+        armChild(0, { event: 'COMMENT', verdictLine: 'Verdict: Comment' });
+        await runHandler();
 
-      // '' counts as unset in stampCliEntryEnv: the child re-stamps its own.
-      expect(childEnvValue()).toBe('');
+        // Not '': the child cannot be relied on to re-stamp (see the bundle
+        // case below), so name the entry this command is about to re-enter.
+        expect(childEnvValue()).toBe(bundle);
+      } finally {
+        process.argv[1] = origArgv1;
+      }
+    });
+
+    it("stamps this build's entry when NOTHING was inherited", async () => {
+      // `node dist/cli.js review run <pr>`: cli.ts stamps a derived
+      // `../index.js`, which does not exist beside the bundle, so the slot
+      // arrives unset and the child — itself a bundle launch — does not stamp
+      // it either. Measured on PR #9113: `"${QWEN_CODE_CLI:-qwen}" review
+      // match-remote` reached an older global install off PATH and came back
+      // `Unknown arguments: owner, repo, host, match-remote`.
+      const bundle = asEntry('cli.js', '#!/usr/bin/env node\n', 0o755);
+      const origArgv1 = process.argv[1];
+      process.argv[1] = bundle;
+      try {
+        delete process.env['QWEN_CODE_CLI'];
+        armChild(0, { event: 'COMMENT', verdictLine: 'Verdict: Comment' });
+        await runHandler();
+
+        expect(childEnvValue()).toBe(bundle);
+      } finally {
+        process.argv[1] = origArgv1;
+      }
+    });
+
+    it.skipIf(process.platform === 'win32')(
+      'keeps the bare-`qwen` fallback when a shell could not exec this build',
+      async () => {
+        // A stamp the consumer's spawn filter would blank is worse than none:
+        // `${QWEN_CODE_CLI:-qwen}` falls back on empty, but a set-and-unusable
+        // path dies on exit 126 for every subcommand in the review.
+        const bundle = asEntry('cli.js', 'const x = 1;\n', 0o644);
+        const origArgv1 = process.argv[1];
+        process.argv[1] = bundle;
+        try {
+          delete process.env['QWEN_CODE_CLI'];
+          armChild(0, { event: 'COMMENT', verdictLine: 'Verdict: Comment' });
+          await runHandler();
+
+          expect(childEnvValue()).toBe('');
+        } finally {
+          process.argv[1] = origArgv1;
+        }
+      },
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'writes the fallback for a tsx dev entry — a 0644 .ts is not execable',
+      async () => {
+        // `npm run dev -- review run <pr>`: under tsx, argv[1] is the
+        // source `index.ts` (mode 0644, shebang and all). An extension
+        // allowlist answered "usable" for it — every skill subcommand then
+        // died on exit 126 — where the positive-evidence gate sees a file a
+        // shell cannot exec and preserves the bare-`qwen` fallback.
+        const entry = asEntry('index.ts', '#!/usr/bin/env node\n', 0o644);
+        const origArgv1 = process.argv[1];
+        process.argv[1] = entry;
+        try {
+          delete process.env['QWEN_CODE_CLI'];
+          armChild(0, { event: 'COMMENT', verdictLine: 'Verdict: Comment' });
+          await runHandler();
+
+          expect(childEnvValue()).toBe('');
+        } finally {
+          process.argv[1] = origArgv1;
+        }
+      },
+    );
+
+    it('writes the fallback when argv[1] is a DIRECTORY', async () => {
+      // `node packages/cli` resolves argv[1] to the package DIRECTORY. A
+      // directory passes an X_OK probe (search permission) and carries no
+      // script extension, so only the regular-file check can refuse it —
+      // exec'ing it dies on exit 126 on every subcommand.
+      const pkgDir = join(dir, 'pkgdir');
+      mkdirSync(pkgDir);
+      const origArgv1 = process.argv[1];
+      process.argv[1] = pkgDir;
+      try {
+        delete process.env['QWEN_CODE_CLI'];
+        armChild(0, { event: 'COMMENT', verdictLine: 'Verdict: Comment' });
+        await runHandler();
+
+        expect(childEnvValue()).toBe('');
+      } finally {
+        process.argv[1] = origArgv1;
+      }
     });
 
     it('preserves an inherited entry that IS this build', async () => {
@@ -691,12 +791,19 @@ describe('review run (handler)', () => {
       expect(childEnvValue()).toBe(process.argv[1]);
     });
 
-    it('blanks an inherited entry that does not resolve', async () => {
-      process.env['QWEN_CODE_CLI'] = join(dir, 'no-such-qwen');
-      armChild(0, { event: 'COMMENT', verdictLine: 'Verdict: Comment' });
-      await runHandler();
+    it('replaces an inherited entry that does not resolve', async () => {
+      const bundle = asEntry('cli.js', '#!/usr/bin/env node\n', 0o755);
+      const origArgv1 = process.argv[1];
+      process.argv[1] = bundle;
+      try {
+        process.env['QWEN_CODE_CLI'] = join(dir, 'no-such-qwen');
+        armChild(0, { event: 'COMMENT', verdictLine: 'Verdict: Comment' });
+        await runHandler();
 
-      expect(childEnvValue()).toBe('');
+        expect(childEnvValue()).toBe(bundle);
+      } finally {
+        process.argv[1] = origArgv1;
+      }
     });
 
     it('preserves a sibling entry in the same package root (npm layout)', async () => {
