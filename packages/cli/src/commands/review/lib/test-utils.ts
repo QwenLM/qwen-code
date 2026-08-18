@@ -58,6 +58,30 @@ export function seedParseArgs(dir: string, effort: unknown): void {
 }
 
 /**
+ * A diff adding `n` lines to a new file, shaped like real source: top-level
+ * declarations separated by blank lines, so the planner has somewhere to cut.
+ */
+export function makeDiff(path: string, n: number): string {
+  const body: string[] = [];
+  while (body.length < n) {
+    body.push(`+function f${body.length}() {`);
+    for (let k = 0; k < 8 && body.length < n; k++)
+      body.push(`+  const x = ${k};`);
+    body.push('+}');
+    body.push('+');
+  }
+  body.length = n;
+  return [
+    `diff --git a/${path} b/${path}`,
+    '--- /dev/null',
+    `+++ b/${path}`,
+    `@@ -0,0 +1,${n} @@`,
+    ...body,
+    '',
+  ].join('\n');
+}
+
+/**
  * The fs calls the fixture builders make. Callers hand over their own
  * bindings: the parse-args suite mocks `node:fs` for the whole file, so
  * bindings this module imported itself would write into the mock instead of

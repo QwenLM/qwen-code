@@ -5,7 +5,36 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { toDaemonPromptContent } from './promptContent.js';
+import {
+  daemonPromptImageToBlob,
+  toDaemonPromptContent,
+} from './promptContent.js';
+
+describe('daemonPromptImageToBlob', () => {
+  it('decodes raw base64 image data', async () => {
+    const blob = daemonPromptImageToBlob({
+      data: 'AQID',
+      mimeType: 'image/png',
+    });
+
+    expect(blob.type).toBe('image/png');
+    expect(new Uint8Array(await blob.arrayBuffer())).toEqual(
+      Uint8Array.of(1, 2, 3),
+    );
+  });
+
+  it('strips a data URI prefix before decoding', async () => {
+    const blob = daemonPromptImageToBlob({
+      data: 'data:image/jpeg;base64,BAUG',
+      media_type: 'image/jpeg',
+    });
+
+    expect(blob.type).toBe('image/jpeg');
+    expect(new Uint8Array(await blob.arrayBuffer())).toEqual(
+      Uint8Array.of(4, 5, 6),
+    );
+  });
+});
 
 describe('toDaemonPromptContent', () => {
   it('keeps text prompts as the first daemon content block', () => {

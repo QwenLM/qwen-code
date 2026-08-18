@@ -1285,6 +1285,205 @@ describe('the ledger marker on the body that reaches GitHub', () => {
       { id: 'R1-1', sev: 'S', file: 'real.ts', line: 1, title: 'the real one' },
     ]);
   });
+
+  // The anchor pair (`sha` + `model`) rides only on a CLEAN round — any cap
+  // withholds it — and "clean" is recomputed here from the harness's
+  // transcripts. Asserting the posted anchor therefore needs the covered
+  // fixture compose-review.test.ts owns: chunks read by agents launched with
+  // the CLI's recorded prompts, the test-matrix roster entry, Steps 4/5 on
+  // record. Kept local so this suite's wire assertion stands on its own.
+  const SESSION = 'SUBM';
+
+  function coveredPlanAt(prNumber: number, fetchedSha: string): string {
+    const diffPath = join(dir, 'covered-diff.diff');
+    writeFileSync(diffPath, 'diff --git a/a.ts b/a.ts\n@@ -0,0 +1 @@\n+x\n');
+    const planPath = join(dir, 'covered-plan.json');
+    writeFileSync(
+      planPath,
+      JSON.stringify({
+        diffPathAbsolute: diffPath,
+        fetchedSha,
+        prNumber,
+        srcDiffLines: 5000,
+        diffLines: 5000,
+        files: [
+          { path: 'a.ts', kind: 'source', removedLines: 0, heavy: false },
+        ],
+        chunks: [
+          {
+            id: 1,
+            startLine: 1,
+            endLine: 100,
+            files: [{ path: 'src/a.ts', newStart: 1, newEnd: 80 }],
+          },
+          {
+            id: 2,
+            startLine: 101,
+            endLine: 200,
+            files: [{ path: 'src/b.ts', newStart: 1, newEnd: 90 }],
+          },
+        ],
+      }),
+    );
+    const sub = join(dir, 'subagents', SESSION);
+    mkdirSync(sub, { recursive: true });
+    const transcript = (id: string, launch: string, reads: string[]) => {
+      const base = {
+        agentId: id,
+        agentName: 'general-purpose',
+        sessionId: SESSION,
+      };
+      const lines: object[] = [
+        {
+          ...base,
+          type: 'user',
+          message: { role: 'user', parts: [{ text: launch }] },
+        },
+      ];
+      for (const readPath of reads) {
+        lines.push(
+          {
+            ...base,
+            type: 'assistant',
+            message: {
+              role: 'model',
+              parts: [
+                {
+                  functionCall: {
+                    name: 'read_file',
+                    args: { file_path: readPath },
+                  },
+                },
+              ],
+            },
+          },
+          {
+            ...base,
+            type: 'tool_result',
+            message: {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    name: 'read_file',
+                    response: { output: 'ok' },
+                  },
+                },
+              ],
+            },
+          },
+        );
+      }
+      lines.push({
+        ...base,
+        type: 'assistant',
+        message: { role: 'model', parts: [{ text: 'No issues found.' }] },
+      });
+      writeFileSync(
+        join(sub, `agent-${id}.jsonl`),
+        lines.map((l) => JSON.stringify(l)).join('\n') + '\n',
+      );
+    };
+    const d = promptRecordDir(planPath);
+    mkdirSync(d, { recursive: true });
+    const build = (
+      key: string,
+      id: string,
+      launch: string,
+      reads: string[],
+    ) => {
+      // Match production (`prompt-record.ts`): the record filename is the
+      // percent-encoded key — a no-op for today's role keys, but a future
+      // one `encodeURIComponent` transforms would otherwise be written to a
+      // name the reader never looks for.
+      writeFileSync(join(d, `${encodeURIComponent(key)}.txt`), launch);
+      const brief = briefPath(planPath, key);
+      writeFileSync(brief, `The ${key} brief.`);
+      transcript(id, launch, [...reads, brief]);
+    };
+    const chunkPrompt = (chunk: number) =>
+      `You are reviewing chunk ${chunk} of 2.\n` +
+      `read_file(file_path="${briefPath(planPath, `chunk-${chunk}`)}")\n` +
+      `read_file(file_path="${diffPath}", offset=${(chunk - 1) * 100}, limit=100)`;
+    build('chunk-1', 'a1', chunkPrompt(1), [diffPath, diffPath]);
+    build('chunk-2', 'a2', chunkPrompt(2), [diffPath, diffPath]);
+    build(
+      'test-matrix',
+      'tm',
+      `You are the test-coverage matrix agent.\n` +
+        `read_file(file_path="${briefPath(planPath, 'test-matrix')}")\n` +
+        `read_file(file_path="${diffPath}")`,
+      [diffPath, diffPath],
+    );
+    build(
+      'verify',
+      'v1',
+      `You are review agent \`verify\`.\n` +
+        `read_file(file_path="${briefPath(planPath, 'verify')}")\n` +
+        `read_file(file_path="${diffPath}")`,
+      [diffPath, diffPath],
+    );
+    build(
+      'reverse-audit',
+      'r1',
+      `You are review agent \`reverse-audit\`.\n` +
+        `read_file(file_path="${briefPath(planPath, 'reverse-audit')}")\n` +
+        `read_file(file_path="${diffPath}")`,
+      [diffPath, diffPath],
+    );
+    // Transcripts must postdate the plan — the stale filter is the plan's mtime.
+    const old = new Date(2020, 0, 1);
+    utimesSync(planPath, old, old);
+    return planPath;
+  }
+
+  it('injects the session model into the posted marker — QWEN_CODE_MODEL reaches the wire (wiring)', () => {
+    // The certifying identity must be the model the runtime published for
+    // the session — Config publishes it per session, the shell tool injects
+    // it into this subprocess — superseding the id the state JSON typed.
+    // Dropping the runtime argument from runSubmit's compose call keeps
+    // every other suite green while the POSTED marker's `model` silently
+    // falls back to the typed id: the exact silent substitution this wiring
+    // exists to catch. Mirrors the
+    // compose-review handler's wiring test at the one boundary whose body
+    // reaches GitHub.
+    const planPath = coveredPlanAt(6771, 'deadbeef00112233');
+    const review = file('wire-model.json', {
+      commit_id: 'abc',
+      comments: [],
+      state: { modelId: 'typed-by-the-model', planPath },
+    });
+    const prevDir = process.env['QWEN_CODE_PROJECT_DIR'];
+    const prevSession = process.env['QWEN_CODE_SESSION_ID'];
+    const prevModel = process.env['QWEN_CODE_MODEL'];
+    // Cleared, not just saved: the boundary PREFERS the qualified identity
+    // over the bare id, so an ambient one — which this PR's own Config now
+    // publishes, and the shell tool injects into every subprocess — would
+    // override the model this test sets. Running the suite inside a Qwen
+    // Code session is the dogfooding path, so the ambient value is the
+    // normal case, not the exotic one.
+    const prevIdentity = process.env['QWEN_CODE_MODEL_IDENTITY'];
+    delete process.env['QWEN_CODE_MODEL_IDENTITY'];
+    process.env['QWEN_CODE_PROJECT_DIR'] = dir;
+    process.env['QWEN_CODE_SESSION_ID'] = SESSION;
+    process.env['QWEN_CODE_MODEL'] = 'the-session-model';
+    try {
+      runSubmit(authorized({ review }));
+      const ledger = parseLedger(posted().body);
+      expect(ledger?.sha).toBe('deadbeef00112233');
+      expect(ledger?.model).toBe('the-session-model');
+    } finally {
+      for (const [key, prev] of [
+        ['QWEN_CODE_PROJECT_DIR', prevDir],
+        ['QWEN_CODE_SESSION_ID', prevSession],
+        ['QWEN_CODE_MODEL', prevModel],
+        ['QWEN_CODE_MODEL_IDENTITY', prevIdentity],
+      ] as const) {
+        if (prev === undefined) delete process.env[key];
+        else process.env[key] = prev;
+      }
+    }
+  });
 });
 
 // Six findings from the repo's own `/review` bot on this pull request. These are its.

@@ -1225,6 +1225,11 @@ const EN: Messages = {
   'turnOutputs.fileCount': (v) => `${v?.count ?? 0} files`,
   'turnOutputs.openFileTree': 'Open file tree',
   'turnOutputs.closeFileTree': 'Close file tree',
+  'turnOutputs.artifactMissing': 'File not found in the workspace',
+  'turnOutputs.artifactUnavailable': (v) =>
+    v?.path
+      ? `File not found in the workspace · ${v.path}`
+      : 'File not found in the workspace',
   'sidebar.label': 'Workspace sidebar',
   'sidebar.toggleMenu': 'Toggle menu',
   'sidebar.newChat': 'New chat',
@@ -1424,7 +1429,6 @@ const EN: Messages = {
   'queue.imageCount': (v) => `(+${v?.count ?? 0} images)`,
   'queue.fileCount': (v) => `(+${v?.count ?? 0} files)`,
   'queue.more': (v) => `... (+${v?.count ?? 0} more)`,
-  'midTurn.inserted': (v) => `Inserted message: ${v?.message ?? ''}`,
   'help.builtIn': 'Built-in commands',
   'help.commandCount': (v) => `${v?.count ?? 0} commands`,
   'help.commandMeta.builtIn': 'built-in',
@@ -2915,6 +2919,23 @@ const EN: Messages = {
   'settings.alsoModifiedIn': (v) => `(Also modified in ${v?.scope ?? ''})`,
   'settings.invalidNumber': 'Invalid number',
   'settings.requiresRestart': 'This change requires a restart to take effect.',
+  'settings.localControl.title': 'Local Control',
+  'settings.localControl.description':
+    'Continue this Qwen Code session from a phone on the same trusted network.',
+  'settings.localControl.on': 'On',
+  'settings.localControl.off': 'Off',
+  'settings.localControl.network': 'Local network',
+  'settings.localControl.selectNetwork': 'Choose a network',
+  'settings.localControl.qr': 'Local Control QR code',
+  'settings.localControl.enable': 'Turn on Local Control',
+  'settings.localControl.disable': 'Disconnect phone access',
+  'settings.localControl.encrypted': 'Encrypted',
+  'settings.localControl.unencrypted':
+    'Unencrypted — trusted networks only; re-enable after network changes',
+  'settings.localControl.awake': 'This Mac will stay awake',
+  'settings.localControl.maySleep': 'This Mac may sleep',
+  'settings.localControl.urlRedacted':
+    'The pairing URL is not shown here because this daemon has no bearer token. It was printed to the terminal where the daemon is running — pair from there.',
   'settings.models.title': 'Models',
   'settings.models.add': '+ Add Model',
   'settings.models.setCurrent': 'Set current',
@@ -4166,6 +4187,11 @@ const ZH: Messages = {
   'turnOutputs.fileCount': (v) => `${v?.count ?? 0} 个文件`,
   'turnOutputs.openFileTree': '打开文件树',
   'turnOutputs.closeFileTree': '关闭文件树',
+  'turnOutputs.artifactMissing': '工作区中未找到该文件',
+  'turnOutputs.artifactUnavailable': (v) =>
+    v?.path
+      ? `工作区中未找到该文件 · ${v.path}`
+      : '工作区中未找到该文件',
   'sidebar.label': '工作区侧边栏',
   'sidebar.toggleMenu': '切换菜单',
   'sidebar.newChat': '新对话',
@@ -4349,7 +4375,6 @@ const ZH: Messages = {
   'queue.imageCount': (v) => `（+${v?.count ?? 0} 张图片）`,
   'queue.fileCount': (v) => `（+${v?.count ?? 0} 个文件）`,
   'queue.more': (v) => `...（还有 ${v?.count ?? 0} 条）`,
-  'midTurn.inserted': (v) => `已插入消息：${v?.message ?? ''}`,
   'help.builtIn': '内置命令',
   'help.commandCount': (v) => `${v?.count ?? 0} 个命令`,
   'help.commandMeta.builtIn': '内置',
@@ -5728,6 +5753,23 @@ const ZH: Messages = {
   'settings.alsoModifiedIn': (v) => `（同时在${v?.scope ?? ''}中修改）`,
   'settings.invalidNumber': '无效数字',
   'settings.requiresRestart': '此更改需要重启后才能生效。',
+  'settings.localControl.title': '本地控制',
+  'settings.localControl.description':
+    '通过同一受信任网络中的手机继续当前 Qwen Code 会话。',
+  'settings.localControl.on': '已开启',
+  'settings.localControl.off': '关闭',
+  'settings.localControl.network': '本地网络',
+  'settings.localControl.selectNetwork': '选择网络',
+  'settings.localControl.qr': '本地控制二维码',
+  'settings.localControl.enable': '开启本地控制',
+  'settings.localControl.disable': '断开手机访问',
+  'settings.localControl.encrypted': '已加密',
+  'settings.localControl.unencrypted':
+    '未加密，仅限受信任网络；网络变化后请重新启用',
+  'settings.localControl.awake': '这台 Mac 将保持唤醒',
+  'settings.localControl.maySleep': '这台 Mac 可能进入睡眠',
+  'settings.localControl.urlRedacted':
+    '由于该守护进程未配置 bearer token，配对 URL 不在此显示。它已打印到运行守护进程的终端，请到该终端获取配对 URL 完成配对。',
   'settings.models.title': '模型',
   'settings.models.add': '+ 增加模型',
   'settings.models.setCurrent': '设为当前',
