@@ -129,6 +129,7 @@ const KNOWN_RECORD_SUBTYPES = new Set([
   'branch_checkpoint',
   'goal_state',
   'goal_runtime',
+  'turn_result',
   ...ARTIFACT_RECORD_SUBTYPES,
 ]);
 
