@@ -91,15 +91,28 @@ export function severityOf(
  * accept, and a shape they accept must read back, not garble or null.
  */
 export function carriedClaimLine(body: string): string | null {
+  const rest = markerStrippedBody(body);
+  return rest === null ? null : rest.split('\n')[0].trim();
+}
+
+/**
+ * The WHOLE body past the severity marker (and any colon/whitespace right
+ * after it) — the multi-line form of the readback strip above, and the same
+ * ONE statement: `carriedClaimLine` is its first line, and the floor
+ * enforcement's moved-record title is its collapsed whole. A second
+ * restatement of the marker slice in either consumer is the drift class
+ * this file's header exists to prevent. Null when the body opens with
+ * neither marker.
+ */
+export function markerStrippedBody(body: string): string | null {
   const sev = severityOf({ body });
   if (!sev) return null;
   const marker = sev === 'critical' ? CRITICAL_PREFIX : SUGGESTION_PREFIX;
-  const rest = body
+  return body
     .replace(LEADING_INVISIBLE_RE, '')
     .slice(marker.length)
     .replace(LEADING_INVISIBLE_RE, '')
     .replace(/^\s*[:：]?\s*/, '');
-  return rest.split(/\r\n?|\n/)[0].trim();
 }
 
 /** How many drafted comments open with each severity marker. */
