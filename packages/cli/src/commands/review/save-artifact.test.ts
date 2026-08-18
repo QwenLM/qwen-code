@@ -67,6 +67,8 @@ const verdict = {
   // Non-zero on purpose: the copy test then proves passthrough, not just
   // the validator's absent-means-zero default.
   deferredCount: 2,
+  // Non-empty for the same reason — absent defaults to [].
+  floorEnforced: [1],
   // Also non-default on purpose, for the same reason.
   bodyTrim: { sections: 2, deferralList: true, fold: true, truncated: true },
   lowSignal: { agents: 4, srcDiffLines: 120 },
@@ -306,6 +308,29 @@ describe('saveReviewArtifact', () => {
   );
 
   it.each([
+    ['a string', 'junk'],
+    ['a negative index', [-1]],
+    ['a fraction', [1.5]],
+  ])(
+    'refuses a present floorEnforced of the wrong shape (%s)',
+    (_label, bad) => {
+      // Same discipline as deferredCount: the absence default must not
+      // swallow a PRESENT malformed value into the durable artifact.
+      const paths = fixture();
+      writeJson(paths.composed, { ...verdict, floorEnforced: bad });
+
+      expect(() =>
+        saveReviewArtifact({
+          ...paths,
+          target: 'local',
+          effort: 'medium',
+        }),
+      ).toThrow(/floorEnforced/);
+      expect(existsSync(paths.out)).toBe(false);
+    },
+  );
+
+  it.each([
     ['not an object', 'trimmed'],
     [
       'a negative section count',
@@ -364,6 +389,28 @@ describe('saveReviewArtifact', () => {
       expect(existsSync(paths.out)).toBe(false);
     },
   );
+
+  it('reads an absent or null floorEnforced as empty — a pre-enforcement composed file must still save', () => {
+    // Null rides the same absence semantics as the sibling deferredCount
+    // pair — an undefined-only check would refuse a composed file that
+    // wrote null, breaking the backward compatibility this field promises.
+    const paths = fixture();
+    const { floorEnforced: _absent, ...preEnforcement } = verdict;
+    for (const composed of [
+      preEnforcement,
+      { ...verdict, floorEnforced: null },
+    ]) {
+      writeJson(paths.composed, composed);
+      saveReviewArtifact({
+        ...paths,
+        target: 'local',
+        effort: 'medium',
+      });
+      const saved = JSON.parse(readFileSync(paths.out, 'utf8'));
+      expect(saved.verdict.floorEnforced).toEqual([]);
+      rmSync(paths.out, { force: true });
+    }
+  });
 
   it('reads an absent or null bodyTrim as untrimmed — a pre-budget composed file must still save', () => {
     const paths = fixture();
