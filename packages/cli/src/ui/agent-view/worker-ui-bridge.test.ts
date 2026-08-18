@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2026 Google LLC
+ * Copyright 2026 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
 import { describe, it, expect, vi } from 'vitest';
@@ -219,6 +219,38 @@ describe('answerAgentViewPendingToolCall', () => {
     ).resolves.toBe(true);
 
     expect(onConfirm).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+  });
+
+  it('fails closed: only explicit affirmative words approve tool confirmations', async () => {
+    for (const text of ['stop', "don't delete that", 'yes but wait']) {
+      const onConfirm = vi.fn(async () => {});
+      const pendingCall = {
+        status: 'awaiting_approval',
+        request: { callId: 'call-4', name: 'Bash' },
+        confirmationDetails: {
+          type: 'exec',
+          title: 'Run command?',
+          prompt: 'Run command?',
+          command: 'rm -rf build',
+          rootCommand: 'rm',
+          onConfirm,
+        },
+      } as unknown as WaitingToolCall;
+
+      await expect(
+        answerAgentViewPendingToolCall(
+          {
+            type: 'answer',
+            sequence: 1,
+            text,
+            at: '2026-07-17T00:00:00.000Z',
+          },
+          [pendingCall],
+        ),
+      ).resolves.toBe(true);
+
+      expect(onConfirm).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+    }
   });
 
   it('answers nested Agent pending confirmations', async () => {

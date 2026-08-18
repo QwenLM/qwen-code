@@ -244,6 +244,7 @@ import { useAttentionNotifications } from './hooks/useAttentionNotifications.js'
 import { buildTerminalNotification } from './hooks/useTerminalNotification.js';
 import { useContextualTips } from './hooks/useContextualTips.js';
 import { detachCurrentSessionToAgentView } from '../agent-view/managed-detach.js';
+import { buildCurrentQwenCliArgv } from '../agent-view/current-cli-argv.js';
 import {
   isAgentViewWorkerEnv,
   readAgentViewWorkerControlEvents,
@@ -4206,17 +4207,6 @@ export const AppContainer = (props: AppContainerProps) => {
       }
 
       if (
-        key.ctrl &&
-        key.name === 'z' &&
-        isAgentViewWorkerEnv() &&
-        !embeddedShellFocused &&
-        !dialogsVisibleRef.current
-      ) {
-        void detachAgentViewSession();
-        return;
-      }
-
-      if (
         key.name === 'left' &&
         !key.ctrl &&
         !key.meta &&
@@ -5086,11 +5076,17 @@ export function runAgentViewRosterCommand(
   cwd: string,
   spawn: SpawnSyncFn = spawnSync,
 ): number {
-  const entrypoint = process.argv[1];
-  if (!entrypoint) {
+  let argv: string[];
+  try {
+    argv = buildCurrentQwenCliArgv(['agents', '--cwd', cwd]);
+  } catch {
     return 1;
   }
-  const result = spawn(process.execPath, [entrypoint, 'agents', '--cwd', cwd], {
+  const [command, ...commandArgs] = argv;
+  if (!command) {
+    return 1;
+  }
+  const result = spawn(command, commandArgs, {
     stdio: 'inherit',
     env: {
       ...process.env,

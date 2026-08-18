@@ -14,6 +14,7 @@ import {
   formatMessageCount,
   truncateText,
 } from '../utils/sessionPickerUtils.js';
+import { stripUnsafeCharacters } from '../utils/textUtils.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { t } from '../../i18n/index.js';
 import { SessionPreview } from './SessionPreview.js';
@@ -142,7 +143,10 @@ function SessionListItemView({
       : undefined;
   const agentViewMeta =
     session.agentViewManaged && session.agentViewLastResult
-      ? truncateText(session.agentViewLastResult, maxPromptWidth)
+      ? truncateText(
+          stripUnsafeCharacters(session.agentViewLastResult),
+          maxPromptWidth,
+        )
       : undefined;
 
   const showUpIndicator = isFirst && showScrollUp;
@@ -588,7 +592,9 @@ function ManagedAgentViewSessionPreview({
     >
       <Text bold>{session.customTitle ?? session.prompt}</Text>
       {session.agentViewLastResult ? (
-        <Text color={theme.text.secondary}>{session.agentViewLastResult}</Text>
+        <Text color={theme.text.secondary}>
+          {stripUnsafeCharacters(session.agentViewLastResult)}
+        </Text>
       ) : null}
       <Text color={theme.text.secondary}>
         {MANAGED_AGENT_VIEW_RESUME_MESSAGE}

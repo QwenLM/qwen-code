@@ -274,16 +274,21 @@ function toToolConfirmationOutcome(
     return ToolConfirmationOutcome.ProceedOnce;
   }
 
+  // Fail closed for approval decisions: only explicit positive tokens
+  // approve, so refusal phrasings outside a fixed vocabulary ("stop",
+  // "wait", "don't delete that", ...) can never approve the pending action.
   const normalized = text?.trim().toLowerCase();
   if (
-    normalized === 'n' ||
-    normalized === 'no' ||
-    normalized === 'deny' ||
-    normalized === 'cancel'
+    normalized === 'y' ||
+    normalized === 'yes' ||
+    normalized === 'ok' ||
+    normalized === 'approve' ||
+    normalized === 'allow' ||
+    normalized === 'proceed'
   ) {
-    return ToolConfirmationOutcome.Cancel;
+    return ToolConfirmationOutcome.ProceedOnce;
   }
-  return ToolConfirmationOutcome.ProceedOnce;
+  return ToolConfirmationOutcome.Cancel;
 }
 
 function getAgentViewAnswerPayload(

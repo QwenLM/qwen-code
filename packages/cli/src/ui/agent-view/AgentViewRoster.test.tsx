@@ -373,7 +373,9 @@ describe('AgentViewRoster', () => {
 
     expect(onPromptChange).not.toHaveBeenCalled();
     expect(onPeekPromptChange).toHaveBeenCalledWith('x');
-    expect(onSubmitPeekPrompt).not.toHaveBeenCalled();
+    // The typed peek text accumulates imperatively, so Enter submits it even
+    // before React re-renders with the new peekPrompt prop.
+    expect(onSubmitPeekPrompt).toHaveBeenCalledWith('x');
   });
 
   it('submits a non-empty peek prompt on Enter', () => {
@@ -560,6 +562,43 @@ describe('AgentViewRoster', () => {
     expect(output).toContain('peeked row');
     expect(output).toContain('reply');
     expect(output).not.toContain('send follow-up to alpha');
+  });
+
+  it('inserts pasted text that reads like a control key instead of executing it', () => {
+    const onPromptChange = vi.fn();
+
+    renderRoster({
+      prompt: 'abc',
+      onPromptChange,
+    });
+
+    // A multi-codepoint chunk is a paste; the literal word "delete" must
+    // land in the buffer instead of deleting a character.
+    press('delete', {});
+
+    expect(onPromptChange).toHaveBeenLastCalledWith('abcdelete');
+  });
+
+  it('locks Ctrl+X and Enter to the peeked session while a peek is open', () => {
+    const onStopOrRemoveSelected = vi.fn();
+    const onAttachSelected = vi.fn();
+
+    renderRoster({
+      rows: [row('beta'), row('alpha')],
+      selectedIndex: 0,
+      peekPanel: {
+        title: 'alpha',
+        lines: ['Result: ready'],
+      },
+      onStopOrRemoveSelected,
+      onAttachSelected,
+    });
+
+    press('x', { ctrl: true });
+    expect(onStopOrRemoveSelected).toHaveBeenCalledWith('alpha');
+
+    press('', { return: true });
+    expect(onAttachSelected).toHaveBeenCalledWith('alpha');
   });
 });
 

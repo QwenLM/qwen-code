@@ -31,6 +31,7 @@ import { showResumeSessionPickerItem } from '../ui/components/StandaloneSessionP
 import type { AgentRosterRow } from '../ui/agent-view/roster-model.js';
 import { buildAgentRosterRows } from '../ui/agent-view/roster-model.js';
 import { getAuthTypeFromEnv } from '../utils/modelConfigUtils.js';
+import { stripUnsafeCharacters } from '../ui/utils/textUtils.js';
 import { writeStdoutLine } from '../utils/stdioHelpers.js';
 import { getCliVersion } from '../utils/version.js';
 import {
@@ -339,7 +340,11 @@ function formatRosterRowsText(rows: AgentRosterRow[]): string {
   }
   return rows
     .map((row) => {
-      const summary = row.summary ? ` ${row.summary}` : '';
+      // Non-TTY output has no ink sanitize-ansi protection, so untrusted
+      // session text must be stripped here.
+      const summary = row.summary
+        ? ` ${stripUnsafeCharacters(row.summary)}`
+        : '';
       return `${row.sessionId} ${row.stateLabel} ${row.aliveIndicator} ${row.cwd} ${row.ageLabel}${summary}`;
     })
     .join('\n');
@@ -602,11 +607,19 @@ function formatPeekPanel(value: unknown): AgentViewPeekPanel {
   const activity = isActivity(value['activity'])
     ? value['activity']
     : undefined;
+  // Activity fields carry untrusted worker/model output; strip unsafe
+  // control sequences before they reach the operator's terminal.
   const lines = [
-    activity?.waitingFor ? `Waiting: ${activity.waitingFor}` : undefined,
+    activity?.waitingFor
+      ? `Waiting: ${stripUnsafeCharacters(activity.waitingFor)}`
+      : undefined,
     activity?.queuedPromptCount ? formatQueuedPromptLine(activity) : undefined,
-    activity?.lastResult ? `Result: ${activity.lastResult}` : undefined,
-    activity?.summary ? `Summary: ${activity.summary}` : undefined,
+    activity?.lastResult
+      ? `Result: ${stripUnsafeCharacters(activity.lastResult)}`
+      : undefined,
+    activity?.summary
+      ? `Summary: ${stripUnsafeCharacters(activity.summary)}`
+      : undefined,
   ].filter((line): line is string => Boolean(line));
 
   return {
@@ -617,7 +630,7 @@ function formatPeekPanel(value: unknown): AgentViewPeekPanel {
 
 function formatQueuedPromptLine(activity: AgentViewActivityFile): string {
   const preview = activity.queuedPromptPreview?.trim();
-  const suffix = preview ? `: ${preview}` : '';
+  const suffix = preview ? `: ${stripUnsafeCharacters(preview)}` : '';
   return `Waiting for response${suffix}`;
 }
 

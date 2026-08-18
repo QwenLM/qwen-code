@@ -198,6 +198,9 @@ export function AgentViewApp({
   const dispatch = useCallback(
     (attach: boolean, promptOverride?: string) => {
       if (dispatchInFlightRef.current) {
+        // The roster already cleared its buffer before calling onDispatch;
+        // restore the text here or the typed prompt exists nowhere.
+        setPrompt(promptOverride ?? prompt);
         setNotice({
           lines: ['Starting session...'],
         });
@@ -353,18 +356,23 @@ export function AgentViewApp({
     [actions, currentRows, peekPrompt, peekReplyTarget, refreshRows],
   );
 
-  const attachSelected = useCallback(() => {
-    const row = visibleRows[selectedIndex];
-    if (!row) return;
-    if (!row.actions.canAttach) {
-      setNotice({
-        lines: ['This session is not attachable right now.'],
-      });
-      return;
-    }
-    setSelectedSessionId(row.sessionId);
-    onAttachRequested?.(row.sessionId);
-  }, [onAttachRequested, selectedIndex, visibleRows]);
+  const attachSelected = useCallback(
+    (sessionId?: string) => {
+      const row = sessionId
+        ? visibleRows.find((item) => item.sessionId === sessionId)
+        : visibleRows[selectedIndex];
+      if (!row) return;
+      if (!row.actions.canAttach) {
+        setNotice({
+          lines: ['This session is not attachable right now.'],
+        });
+        return;
+      }
+      setSelectedSessionId(row.sessionId);
+      onAttachRequested?.(row.sessionId);
+    },
+    [onAttachRequested, selectedIndex, visibleRows],
+  );
 
   const peekSelected = useCallback(() => {
     const row = visibleRows[selectedIndex];
@@ -440,64 +448,69 @@ export function AgentViewApp({
     [actions, prompt, refreshRows, selectedIndex, visibleRows],
   );
 
-  const stopOrRemoveSelected = useCallback(() => {
-    const row = visibleRows[selectedIndex];
-    if (!row) return;
-    const now = Date.now();
-    const pendingStop = lastStopRequestRef.current;
-    const remove =
-      pendingStop?.sessionId === row.sessionId &&
-      now - pendingStop.at <= STOP_REMOVE_CONFIRM_MS;
-    const showRemoveHint = (message: string) => {
-      const hintAt = Date.now();
-      lastStopRequestRef.current = { sessionId: row.sessionId, at: hintAt };
-      if (stopRemoveTimerRef.current) {
-        clearTimeout(stopRemoveTimerRef.current);
-      }
-      stopRemoveTimerRef.current = setTimeout(() => {
-        const current = lastStopRequestRef.current;
-        if (current?.sessionId === row.sessionId && current.at === hintAt) {
-          lastStopRequestRef.current = undefined;
-          setNotice(undefined);
+  const stopOrRemoveSelected = useCallback(
+    (sessionId?: string) => {
+      const row = sessionId
+        ? visibleRows.find((item) => item.sessionId === sessionId)
+        : visibleRows[selectedIndex];
+      if (!row) return;
+      const now = Date.now();
+      const pendingStop = lastStopRequestRef.current;
+      const remove =
+        pendingStop?.sessionId === row.sessionId &&
+        now - pendingStop.at <= STOP_REMOVE_CONFIRM_MS;
+      const showRemoveHint = (message: string) => {
+        const hintAt = Date.now();
+        lastStopRequestRef.current = { sessionId: row.sessionId, at: hintAt };
+        if (stopRemoveTimerRef.current) {
+          clearTimeout(stopRemoveTimerRef.current);
         }
-      }, STOP_REMOVE_CONFIRM_MS);
-      setNotice({ lines: [message] });
-    };
-    lastStopRequestRef.current = remove
-      ? undefined
-      : { sessionId: row.sessionId, at: now };
-    if (remove && stopRemoveTimerRef.current) {
-      clearTimeout(stopRemoveTimerRef.current);
-      stopRemoveTimerRef.current = undefined;
-    }
-    if (!remove) {
-      showRemoveHint('Stopped. Press Ctrl+X again to remove.');
-    }
-    void (async () => {
-      try {
-        if (remove) {
-          await actions.removeSession(row.sessionId);
-        } else {
-          await actions.stopSession(row.sessionId);
-        }
-        await refreshRows();
-        if (remove) {
-          setNotice({ lines: ['Removed.'] });
-        }
-      } catch (error) {
-        if (!remove) {
-          lastStopRequestRef.current = undefined;
-          if (stopRemoveTimerRef.current) {
-            clearTimeout(stopRemoveTimerRef.current);
-            stopRemoveTimerRef.current = undefined;
+        stopRemoveTimerRef.current = setTimeout(() => {
+          const current = lastStopRequestRef.current;
+          if (current?.sessionId === row.sessionId && current.at === hintAt) {
+            lastStopRequestRef.current = undefined;
+            setNotice(undefined);
           }
-        }
-        setNotice({
-          lines: [error instanceof Error ? error.message : String(error)],
-        });
+        }, STOP_REMOVE_CONFIRM_MS);
+        setNotice({ lines: [message] });
+      };
+      lastStopRequestRef.current = remove
+        ? undefined
+        : { sessionId: row.sessionId, at: now };
+      if (remove && stopRemoveTimerRef.current) {
+        clearTimeout(stopRemoveTimerRef.current);
+        stopRemoveTimerRef.current = undefined;
       }
-    })();
-  }, [actions, refreshRows, selectedIndex, visibleRows]);
+      if (!remove) {
+        showRemoveHint('Stopped. Press Ctrl+X again to remove.');
+      }
+      void (async () => {
+        try {
+          if (remove) {
+            await actions.removeSession(row.sessionId);
+          } else {
+            await actions.stopSession(row.sessionId);
+          }
+          await refreshRows();
+          if (remove) {
+            setNotice({ lines: ['Removed.'] });
+          }
+        } catch (error) {
+          if (!remove) {
+            lastStopRequestRef.current = undefined;
+            if (stopRemoveTimerRef.current) {
+              clearTimeout(stopRemoveTimerRef.current);
+              stopRemoveTimerRef.current = undefined;
+            }
+          }
+          setNotice({
+            lines: [error instanceof Error ? error.message : String(error)],
+          });
+        }
+      })();
+    },
+    [actions, refreshRows, selectedIndex, visibleRows],
+  );
 
   const toggleGroupMode = useCallback(() => {
     setGroupMode((current) => (current === 'state' ? 'directory' : 'state'));
@@ -604,11 +617,12 @@ export function AgentViewApp({
 }
 
 function getReplyTarget(row: AgentRosterRow): ReplyTarget | undefined {
-  if (!row.actions.canReply) {
+  // canReply and needsBlockingAnswer are mutually exclusive in deriveActions;
+  // a blocking approval (e.g. 'Waiting: Edit') is only reachable through the
+  // answer path, so it must not be gated out by canReply.
+  if (!row.actions.canReply && !row.actions.needsBlockingAnswer) {
     return undefined;
   }
-  // Queued prompts normally block replies, but a blocking approval (e.g.
-  // 'Waiting: Edit') still needs an answer even while follow-ups are queued.
   if (
     (row.queuedPromptCount ?? 0) > 0 &&
     !(row.waitingFor && row.waitingFor !== 'response')

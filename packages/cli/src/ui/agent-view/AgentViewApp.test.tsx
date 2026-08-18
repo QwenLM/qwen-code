@@ -142,6 +142,8 @@ describe('AgentViewApp', () => {
     await waitForFrame(lastFrame, 'Timed out');
     // The failure itself must be visible, not just the restored prompt.
     expect(lastFrame()).toContain('Timed out waiting for Agent View');
+    // The prompt must actually survive the failed dispatch.
+    expect(lastFrame()).toContain('> ship it');
   });
 
   it('keeps a successful dispatch when the row refresh fails', async () => {
@@ -212,9 +214,13 @@ describe('AgentViewApp', () => {
             stateGroup: 'needs_input',
             taskState: 'waiting',
             inputState: 'permission',
+            waitingFor: 'Edit',
             actions: {
               ...row('session-1').actions,
-              canReply: true,
+              // Production shape: deriveActions makes canReply and
+              // needsBlockingAnswer mutually exclusive; the answer path must
+              // still be reachable.
+              canReply: false,
               needsBlockingAnswer: true,
             },
           }),

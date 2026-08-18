@@ -27,6 +27,7 @@ import type { LoadedSettings } from '../../config/settings.js';
 import { BuiltinCommandLoader } from '../../services/BuiltinCommandLoader.js';
 import type { AgentRosterGroupMode, AgentRosterRow } from './roster-model.js';
 import { FOCUS_IN, FOCUS_OUT } from '../hooks/useFocus.js';
+import { stripUnsafeCharacters } from '../utils/textUtils.js';
 
 export interface AgentViewHeaderInfo {
   version: string;
@@ -53,11 +54,11 @@ export interface AgentViewRosterProps {
   onPeekPromptChange: (prompt: string) => void;
   onDispatch: (attach: boolean, prompt: string) => void;
   onSubmitPeekPrompt: (promptOverride?: string) => void;
-  onAttachSelected: () => void;
+  onAttachSelected: (sessionId?: string) => void;
   onPeekSelected: () => void;
   onTogglePinSelected: () => void;
   onRenameSelected: (displayName: string) => void;
-  onStopOrRemoveSelected: () => void;
+  onStopOrRemoveSelected: (sessionId?: string) => void;
   onToggleGroupMode: () => void;
   onShowHelp: () => void;
   onInterrupt: () => void;
@@ -162,6 +163,13 @@ export function AgentViewRoster({
   const sessionPeekActive = Boolean(
     peekPanel && peekRow && peekPanel.title === peekRow.sessionId,
   );
+  // Ink can emit multiple input events within one tick before React
+  // re-renders; an imperative mirror keeps peek accumulation from reading a
+  // stale prop on the second event.
+  const peekPromptRef = useRef(peekPrompt);
+  useEffect(() => {
+    peekPromptRef.current = peekPrompt;
+  }, [peekPrompt]);
 
   useInput((input, key) => {
     // The roster uses ink's raw useInput, which bypasses KeypressContext's
@@ -194,7 +202,12 @@ export function AgentViewRoster({
     }
 
     if (isCtrlInput(input, key, 'x', '\x18') && rows.length > 0) {
-      onStopOrRemoveSelected();
+      // While a session peek is open the footer directs actions at the
+      // peeked session, so Ctrl+X must not hit whichever row the selection
+      // happens to sit on.
+      onStopOrRemoveSelected(
+        sessionPeekActive ? peekRow?.sessionId : undefined,
+      );
       return;
     }
 
@@ -245,7 +258,7 @@ export function AgentViewRoster({
 
     if (sessionPeekActive && !peekInputActive) {
       if (isReturn && rows.length > 0) {
-        onAttachSelected();
+        onAttachSelected(peekRow?.sessionId);
       } else if (input === ' ') {
         onCancel();
       }
@@ -254,7 +267,7 @@ export function AgentViewRoster({
 
     if (isReturn) {
       if (peekInputActive) {
-        const submittedPeekPrompt = `${peekPrompt}${returnPrefix}`;
+        const submittedPeekPrompt = `${peekPromptRef.current}${returnPrefix}`;
         if (submittedPeekPrompt.trim()) {
           onSubmitPeekPrompt(submittedPeekPrompt);
         } else if (rows.length > 0) {
@@ -295,7 +308,9 @@ export function AgentViewRoster({
       if (peekInputActive) {
         // Delete one code point so astral characters (emoji) are not split
         // into lone surrogates.
-        onPeekPromptChange(Array.from(peekPrompt).slice(0, -1).join(''));
+        const next = Array.from(peekPromptRef.current).slice(0, -1).join('');
+        peekPromptRef.current = next;
+        onPeekPromptChange(next);
       } else {
         promptInput.handleBufferKey(input, key);
       }
@@ -304,7 +319,9 @@ export function AgentViewRoster({
 
     if (input && !key.ctrl && !key.meta) {
       if (peekInputActive) {
-        onPeekPromptChange(`${peekPrompt}${input}`);
+        const next = `${peekPromptRef.current}${input}`;
+        peekPromptRef.current = next;
+        onPeekPromptChange(next);
       } else {
         promptInput.handleBufferKey(input, key);
       }
@@ -628,7 +645,10 @@ function toTextBufferKey(input: string, key: RosterInputKey): Key {
     ctrl: Boolean(key.ctrl),
     meta: Boolean(key.meta),
     shift: Boolean(key.shift),
-    paste: false,
+    // A multi-codepoint chunk is a paste: route it through the insert path
+    // so text literally reading "delete"/"backspace"/... is not executed as
+    // that control key.
+    paste: Array.from(input).length > 1,
     sequence: input,
   };
 }
@@ -869,7 +889,7 @@ function getSessionPeekLines(
   // Error-shaped panels (peek load / reply failures) take precedence over
   // the row's possibly stale activity fields.
   if (panel.error) {
-    return panel.lines;
+    return panel.lines.map(stripUnsafeCharacters);
   }
   // Render from the structured row fields; never re-parse rendered text.
   // The blocking-wait line is shown alongside (not replaced by) the queued
@@ -1012,7 +1032,9 @@ function formatRowOutput(row: AgentRosterRow): string {
 }
 
 function cleanRowText(value: string | undefined): string | undefined {
-  const text = value?.trim();
+  // Worker/model output is untrusted; strip unsafe control sequences before
+  // rendering it into the operator's terminal.
+  const text = value ? stripUnsafeCharacters(value).trim() : undefined;
   return text ? text : undefined;
 }
 
