@@ -89,10 +89,12 @@ export async function readAgentViewRoster(
 export async function readAgentViewRosterForWrite(
   options: StoreOptions = {},
 ): Promise<AgentViewRosterFile> {
-  const raw = await readJsonRecordForWrite(
-    getAgentViewStorePaths(options).rosterPath,
-  );
-  return normalizeRoster(raw);
+  // Roster pins exist nowhere else: a corrupt-but-present file must fail
+  // closed exactly like readAgentViewRosterStrict, or the mutation would
+  // write back an emptied roster and silently drop every other session's
+  // pin. ENOENT still reads as an empty roster so first-dispatch creation
+  // works.
+  return readAgentViewRosterStrict(options);
 }
 
 /**
@@ -132,6 +134,21 @@ export async function readAgentViewRosterStrict(
     throw new Error(
       `Agent View roster at ${rosterPath} has no sessions array.`,
     );
+  }
+  // A declared-but-unreadable pin (e.g. "true" as a string) must not be
+  // silently coerced away by normalizeRosterEntry: the hibernation pin
+  // checks test truthiness, so failing open here would void the very
+  // keep-alive opt-out this reader exists to protect.
+  for (const entry of parsed['sessions']) {
+    if (
+      isRecord(entry) &&
+      'pinned' in entry &&
+      typeof entry['pinned'] !== 'boolean'
+    ) {
+      throw new Error(
+        `Agent View roster at ${rosterPath} has a non-boolean pinned field.`,
+      );
+    }
   }
   const roster = normalizeRoster(parsed);
   if (roster.sessions.length !== parsed['sessions'].length) {

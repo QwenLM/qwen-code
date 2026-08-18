@@ -3005,7 +3005,8 @@ describe('Agent View supervisor process helpers', () => {
       sessionId: result.sessionId,
       removed: true,
     });
-    expect(hosts[0]?.killedWith).toBe('SIGTERM');
+    expect(hosts[0]?.killedWith).toBeUndefined();
+    expect(hosts[0]?.shutdowns).toBe(1);
     await expect(readAgentViewRoster({ globalDir })).resolves.toMatchObject({
       sessions: [],
     });
@@ -3316,6 +3317,10 @@ describe('Agent View supervisor process helpers', () => {
     gatedHost!.shutdown = async () => {
       gateReached();
       await gate;
+      // The sweep now confirms the exit before the hibernated verdict: the
+      // gated drain must settle the exit like a real drain completing.
+      gatedHost!.shutdowns += 1;
+      gatedHost!.resolveExit(0);
     };
 
     const sweep = handler.hibernateIdleSessions();

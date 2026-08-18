@@ -1024,7 +1024,7 @@ class AgentViewSupervisorProcessHandler
       requireSessionId(params),
       store,
     );
-    await this.workers.killSession(sessionId, 'SIGTERM');
+    await this.workers.retireSession(sessionId);
     // Patch only the fields remove owns: re-asserting a whole snapshot
     // read before the kill would clobber verdicts the kill path queued.
     await patchAgentViewSessionState(
@@ -1284,6 +1284,10 @@ class AgentViewSupervisorProcessHandler
             return false;
           }
           await this.workers.shutdownHost(snapshot.sessionId, host);
+          // Confirm the exit before the verdict: the shutdown RPC resolves
+          // when the drain starts, and a wake landing inside the drain
+          // window must find a worker that is actually gone.
+          await host.exited.catch(() => {});
           return markSessionHibernated(snapshot.state, this.store);
         },
       );
@@ -1828,8 +1832,39 @@ class WorkerRegistry {
     signal: NodeJS.Signals = 'SIGTERM',
   ): Promise<void> {
     const host = await this.getOrReconnectSessionHost(sessionId);
-    const generation = this.bootGeneration.get(sessionId);
     host?.kill(signal);
+    this.dropSessionHost(sessionId, host);
+    if (!host) {
+      await this.killStoredWorkerPids(sessionId, signal);
+      this.onHostReleased(sessionId);
+    }
+    await markStoppedSession(sessionId, this.store, 'exited');
+  }
+
+  /**
+   * Tear a session down with the full shutdown discipline (SIGKILL
+   * escalation + exit wait) before recording its terminal verdict. A bare
+   * SIGTERM can leave a draining worker holding the per-session socket
+   * lock, and once the 'exited' verdict lands no later signalling path
+   * reaches the straggler — the next launch would fail with EADDRINUSE.
+   */
+  async retireSession(sessionId: string): Promise<void> {
+    const host = await this.getOrReconnectSessionHost(sessionId);
+    this.dropSessionHost(sessionId, host);
+    if (host) {
+      await shutdownPtyHost(host);
+      await host.exited.catch(() => {});
+    } else {
+      await this.killStoredWorkerPids(sessionId, 'SIGTERM');
+    }
+    await markStoppedSession(sessionId, this.store, 'exited');
+  }
+
+  private dropSessionHost(
+    sessionId: string,
+    host: AgentViewPtyHostHandle | undefined,
+  ): void {
+    const generation = this.bootGeneration.get(sessionId);
     this.rejectPendingWorkerReady(
       sessionId,
       new AgentViewSessionStoppedError(sessionId, 'worker'),
@@ -1839,11 +1874,7 @@ class WorkerRegistry {
     if (host && this.ptyHosts.get(sessionId) === host) {
       this.ptyHosts.delete(sessionId);
       this.onHostReleased(sessionId);
-    } else if (!host) {
-      await this.killStoredWorkerPids(sessionId, signal);
-      this.onHostReleased(sessionId);
     }
-    await markStoppedSession(sessionId, this.store, 'exited');
   }
 
   terminateSession(sessionId: string, signal: NodeJS.Signals): void {
@@ -1878,6 +1909,10 @@ class WorkerRegistry {
     await Promise.allSettled(
       entries.map(async ([sessionId, host]) => {
         await this.shutdownHost(sessionId, host);
+        // Confirm the worker is actually dead before the verdict: the
+        // shutdown RPC resolves when the drain starts, and a still-draining
+        // worker survives the daemon exit holding the per-session socket.
+        await host.exited.catch(() => {});
         await markStoppedSession(sessionId, this.store, 'exited');
       }),
     );
@@ -2098,6 +2133,13 @@ class WorkerRegistry {
     const existingHost = this.ptyHosts.get(sessionId);
     if (existingHost) {
       await this.retirePredecessorHost(existingHost);
+      if (this.ptyHosts.get(sessionId) === existingHost) {
+        // Release the registry entry before launching: the graceful-stop
+        // fallback timer matches the registered host, and a stale match
+        // mid-respawn would record an 'exited' verdict for the replacement
+        // (the revive path releases its entry the same way).
+        this.ptyHosts.delete(sessionId);
+      }
     } else {
       // No in-memory host: a persisted worker process may still be running
       // (e.g. a graceful-stop straggler after a supervisor restart), so
@@ -2461,12 +2503,20 @@ class WorkerRegistry {
         return;
       }
       // Ctrl+X asks the worker to stop first; this is the timeout backstop.
-      host.kill('SIGTERM');
       this.ptyHosts.delete(sessionId);
       // Preserve undelivered prompt/answer controls (and the persisted marker)
       // for the replacement worker — matching scheduleStoredStopFallback.
       this.preserveQueuedInputControls(sessionId);
-      void markStoppedSession(sessionId, this.store, 'exited')
+      // Confirm the exit before the verdict: this backstop fires exactly
+      // when the worker ignored the soft stop, so a bare SIGTERM followed
+      // by an immediate 'exited' mark would leave a still-draining worker
+      // holding the session socket with no signalling path able to reach
+      // it. Shutdown with SIGKILL escalation instead.
+      void (async () => {
+        await shutdownPtyHost(host);
+        await host.exited.catch(() => {});
+        await markStoppedSession(sessionId, this.store, 'exited');
+      })()
         .catch(() => {})
         .finally(() => {
           this.onChanged();
@@ -3181,7 +3231,12 @@ async function applyWorkerEvent(
   if (
     (state.sessionState === 'stopped' ||
       state.processState === 'exited' ||
-      state.processState === 'hibernated') &&
+      state.processState === 'hibernated' ||
+      // The hibernation sweep's point of no return: a straggler event must
+      // not flip the record back to 'alive' once the sweep has committed
+      // to hibernating (hibernation does not rotate the worker token, so
+      // the event still authenticates).
+      state.processState === 'hibernating') &&
     (event.type === 'ready' || event.type === 'state')
   ) {
     // A buffered/in-flight event from a dead worker must not clobber the
@@ -3211,7 +3266,8 @@ async function applyWorkerEvent(
       if (
         (existing.sessionState === 'stopped' ||
           existing.processState === 'exited' ||
-          existing.processState === 'hibernated') &&
+          existing.processState === 'hibernated' ||
+          existing.processState === 'hibernating') &&
         (event.type === 'ready' || event.type === 'state')
       ) {
         return undefined;
@@ -3276,6 +3332,7 @@ async function applyWorkerEvent(
     nextSessionState: sessionState,
     existingActivity,
     activityPatch,
+    hasPendingInputControl,
   })
     ? now
     : (existingActivity?.lastActivityAt ?? now);
@@ -3380,15 +3437,24 @@ function shouldAdvanceActivityTime({
   nextSessionState,
   existingActivity,
   activityPatch,
+  hasPendingInputControl = false,
 }: {
   event: AgentViewWorkerEvent;
   previousState: AgentViewSessionStateFile;
   nextSessionState: AgentViewSessionStateFile['sessionState'];
   existingActivity: AgentViewActivityFile | undefined;
   activityPatch: Partial<AgentViewActivityFile>;
+  hasPendingInputControl?: boolean;
 }): boolean {
   if (!existingActivity) {
     return true;
+  }
+  // While an input control is still queued the marker dequeue is
+  // deliberately suppressed; advancing lastActivityAt here would poison the
+  // wall-clock evidence shouldClearStalePendingPrompt trusts to declare the
+  // queued-prompt marker drained.
+  if (hasPendingInputControl && hasPendingPrompt(existingActivity)) {
+    return false;
   }
   if (event.type === 'ready') {
     return true;
@@ -3674,7 +3740,11 @@ function parseWorkerEvent(
     }
     const cwd = stringParam(params, 'cwd');
     const summary = stringParam(params, 'summary');
-    const waitingFor = stringParam(params, 'waitingFor');
+    const waitingForRaw = stringParam(params, 'waitingFor');
+    // Normalize case at ingest: the dequeue gates and the presentation
+    // layer compare waitingFor case-insensitively, so every consumer must
+    // see the same casing.
+    const waitingFor = waitingForRaw?.toLowerCase();
     const inputKind = inputKindValue(params['inputKind']);
     const lastResult = stringParam(params, 'lastResult');
     const at = stringParam(params, 'at');
