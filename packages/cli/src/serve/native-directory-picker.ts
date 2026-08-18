@@ -5,6 +5,8 @@
  */
 
 import { execFile } from 'node:child_process';
+import { accessSync, constants, statSync } from 'node:fs';
+import { delimiter, join } from 'node:path';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
@@ -15,6 +17,34 @@ const execFileAsync = promisify(execFile);
 const PICKER_TIMEOUT_MS = 300_000;
 
 export class NativeDirectoryPickerUnavailableError extends Error {}
+
+// Startup probe so `/capabilities` can omit the picker feature on headless
+// hosts and clients hide the Browse affordance instead of surfacing a
+// guaranteed `cannot open display` failure.
+export function isNativeDirectoryPickerAvailable(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): boolean {
+  if (process.platform === 'darwin' || process.platform === 'win32') {
+    return true;
+  }
+  if (process.platform !== 'linux') return false;
+  if (!env['DISPLAY'] && !env['WAYLAND_DISPLAY']) return false;
+  return (env['PATH'] ?? '')
+    .split(delimiter)
+    .some((dir) => dir !== '' && isExecutableFile(join(dir, 'zenity')));
+}
+
+function isExecutableFile(file: string): boolean {
+  try {
+    // A directory passes an X_OK probe (search permission) but cannot be
+    // exec'd, so it must not count as an installed zenity.
+    if (!statSync(file).isFile()) return false;
+    accessSync(file, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export async function pickNativeDirectory(
   signal?: AbortSignal,

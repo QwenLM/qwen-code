@@ -4,6 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { execFileAsyncMock } = vi.hoisted(() => ({
@@ -22,8 +25,21 @@ vi.mock('node:child_process', async (importOriginal) => {
   };
 });
 
-const { pickNativeDirectory, NativeDirectoryPickerUnavailableError } =
-  await import('./native-directory-picker.js');
+const {
+  pickNativeDirectory,
+  isNativeDirectoryPickerAvailable,
+  NativeDirectoryPickerUnavailableError,
+} = await import('./native-directory-picker.js');
+
+const zenityDir = mkdtempSync(join(tmpdir(), 'picker-zenity-'));
+writeFileSync(join(zenityDir, 'zenity'), '#!/bin/sh\nexit 0\n');
+chmodSync(join(zenityDir, 'zenity'), 0o755);
+const emptyDir = mkdtempSync(join(tmpdir(), 'picker-empty-'));
+const nonExecutableZenityDir = mkdtempSync(join(tmpdir(), 'picker-nonexec-'));
+writeFileSync(join(nonExecutableZenityDir, 'zenity'), '#!/bin/sh\nexit 0\n');
+chmodSync(join(nonExecutableZenityDir, 'zenity'), 0o644);
+const zenityDirectoryEntryDir = mkdtempSync(join(tmpdir(), 'picker-subdir-'));
+mkdirSync(join(zenityDirectoryEntryDir, 'zenity'));
 
 function setPlatform(platform: NodeJS.Platform) {
   vi.spyOn(process, 'platform', 'get').mockReturnValue(platform);
@@ -187,5 +203,67 @@ describe('pickNativeDirectory', () => {
       expect.any(Array),
       { timeout: 300_000, signal: controller.signal },
     );
+  });
+});
+
+describe('isNativeDirectoryPickerAvailable', () => {
+  it('is available on macOS and Windows regardless of env', () => {
+    setPlatform('darwin');
+    expect(isNativeDirectoryPickerAvailable({})).toBe(true);
+    setPlatform('win32');
+    expect(isNativeDirectoryPickerAvailable({})).toBe(true);
+  });
+
+  it('is unavailable on unsupported platforms', () => {
+    setPlatform('aix');
+    expect(
+      isNativeDirectoryPickerAvailable({ DISPLAY: ':0', PATH: zenityDir }),
+    ).toBe(false);
+  });
+
+  it('requires a display on Linux', () => {
+    setPlatform('linux');
+    expect(isNativeDirectoryPickerAvailable({ PATH: zenityDir })).toBe(false);
+  });
+
+  it('requires an executable zenity on PATH on Linux', () => {
+    setPlatform('linux');
+    expect(
+      isNativeDirectoryPickerAvailable({ DISPLAY: ':0', PATH: emptyDir }),
+    ).toBe(false);
+    expect(
+      isNativeDirectoryPickerAvailable({ DISPLAY: ':0', PATH: zenityDir }),
+    ).toBe(true);
+    expect(
+      isNativeDirectoryPickerAvailable({
+        WAYLAND_DISPLAY: 'wayland-0',
+        PATH: zenityDir,
+      }),
+    ).toBe(true);
+  });
+
+  it('rejects a zenity without the executable bit on Linux', () => {
+    setPlatform('linux');
+    expect(
+      isNativeDirectoryPickerAvailable({
+        DISPLAY: ':0',
+        PATH: nonExecutableZenityDir,
+      }),
+    ).toBe(false);
+  });
+
+  it('rejects a directory named zenity on PATH on Linux', () => {
+    setPlatform('linux');
+    expect(
+      isNativeDirectoryPickerAvailable({
+        DISPLAY: ':0',
+        PATH: zenityDirectoryEntryDir,
+      }),
+    ).toBe(false);
+  });
+
+  it('requires PATH to be set on Linux', () => {
+    setPlatform('linux');
+    expect(isNativeDirectoryPickerAvailable({ DISPLAY: ':0' })).toBe(false);
   });
 });

@@ -66,6 +66,7 @@ import {
   SERVE_CAPABILITY_REGISTRY,
   type ServeProtocolVersion,
 } from './capabilities.js';
+import { isNativeDirectoryPickerAvailable } from './native-directory-picker.js';
 import type {
   CancelNotification,
   PromptRequest,
@@ -754,6 +755,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_display_name',
   'scratch_workspace_registration',
   'workspace_runtime_removal',
+  'native_directory_picker',
   'workspace_qualified_rest_core',
   'workspace_qualified_voice',
   'workspace_qualified_memory',
@@ -3053,6 +3055,24 @@ describe('createServeApp', () => {
           );
           continue;
         }
+        if (feature === 'native_directory_picker') {
+          expect(predicate({ nativeDirectoryPickerAvailable: true })).toBe(
+            true,
+          );
+          expect(predicate({ nativeDirectoryPickerAvailable: false })).toBe(
+            false,
+          );
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              nativeDirectoryPickerAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
         if (feature === 'workspace_trust_hot_reload') {
           expect(predicate({ workspaceTrustHotReloadAvailable: true })).toBe(
             true,
@@ -3899,6 +3919,9 @@ describe('createServeApp', () => {
             sessionGenerationAvailable: true,
             workspaceGenerationAvailable: true,
             acpHttpEnabled: true,
+            // Mirror the server.ts probe so the expectation matches on both
+            // GUI and headless hosts.
+            nativeDirectoryPickerAvailable: isNativeDirectoryPickerAvailable(),
           }),
         );
         expect(res.body.modelServices).toEqual([]);

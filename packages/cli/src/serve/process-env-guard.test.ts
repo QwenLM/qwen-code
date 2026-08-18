@@ -143,6 +143,14 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/native-directory-picker.ts',
+    {
+      reason:
+        'The native directory picker availability probe defaults to the daemon process environment when no explicit environment is supplied.',
+      accesses: { whole: 1 },
+    },
+  ],
+  [
     'packages/cli/src/serve/run-qwen-serve.ts',
     {
       reason:
