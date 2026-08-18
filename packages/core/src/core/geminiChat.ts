@@ -1876,6 +1876,7 @@ export class GeminiChat {
     const { maxRecentImages, imagePayloadThreshold } = resolveCompactionTuning(
       this.config.getChatCompression(),
     );
+    let replaced: ReturnType<typeof replaceImagePayloadsInPlace> = [];
     if (countAllInlineImages(curatedHistory) >= imagePayloadThreshold) {
       const skipEntry = currentUserContent
         ? curatedHistory.find(
@@ -1885,24 +1886,28 @@ export class GeminiChat {
                 currentUserContent.parts?.some((p) => c.parts?.includes(p))),
           )
         : undefined;
-      const replaced = replaceImagePayloadsInPlace(
+      replaced = replaceImagePayloadsInPlace(
         curatedHistory,
         this.imagePayloadStore,
         skipEntry,
       );
-      const requestHistory = curatedHistory.map(copyContentContainer);
-      const reattachParts = buildReattachParts(replaced, maxRecentImages);
-      if (reattachParts.length > 0) {
-        const last = requestHistory.at(-1);
-        if (last?.role === 'user') {
-          last.parts = [...(last.parts ?? []), ...reattachParts];
-        } else {
-          requestHistory.push({ role: 'user', parts: reattachParts });
-        }
-      }
-      return requestHistory;
     }
-    return curatedHistory.map(copyContentContainer);
+    const requestHistory = curatedHistory.map(copyContentContainer);
+    const reattachParts = buildReattachParts(
+      replaced,
+      maxRecentImages,
+      requestHistory,
+      this.imagePayloadStore,
+    );
+    if (reattachParts.length > 0) {
+      const last = requestHistory.at(-1);
+      if (last?.role === 'user') {
+        last.parts = [...(last.parts ?? []), ...reattachParts];
+      } else {
+        requestHistory.push({ role: 'user', parts: reattachParts });
+      }
+    }
+    return requestHistory;
   }
 
   private getRequestHistoryForRoute(

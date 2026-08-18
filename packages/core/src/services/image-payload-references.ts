@@ -87,7 +87,8 @@ export function replaceImagePayloadsInPlace(
       ) {
         const stored = store.put(part);
         replaced.push(stored);
-        content.parts[i] = { text: imageReferenceText(stored) };
+        part.text = imageReferenceText(stored);
+        part.inlineData = undefined;
         continue;
       }
       const nested = getFunctionResponseParts(part);
@@ -100,7 +101,8 @@ export function replaceImagePayloadsInPlace(
         ) {
           const stored = store.put(inner);
           replaced.push(stored);
-          nested[j] = { text: imageReferenceText(stored) };
+          inner.text = imageReferenceText(stored);
+          inner.inlineData = undefined;
         }
       }
     }
@@ -116,18 +118,41 @@ export function replaceImagePayloadsInPlace(
 export function buildReattachParts(
   replaced: StoredImagePayload[],
   maxRecentImages: number,
+  referencedContents: Content[] = [],
+  store?: ImagePayloadStore,
 ): Part[] {
-  if (maxRecentImages <= 0 || replaced.length === 0) return [];
-  const recent: StoredImagePayload[] = [];
-  const seen = new Set<string>();
-  for (let i = replaced.length - 1; i >= 0; i--) {
-    const img = replaced[i]!;
-    if (seen.has(img.id)) continue;
-    seen.add(img.id);
-    recent.push(img);
-    if (recent.length === maxRecentImages) break;
+  const inlineIds = collectInlineImageIds(referencedContents);
+  const last = referencedContents.at(-1);
+  const lastReferencedIds = collectReferencedImageIds(
+    last?.role === 'user' ? [last] : [],
+  );
+  const candidates: CollectedImage[] = replaced
+    .filter(
+      (image) => !inlineIds.has(image.id) && !lastReferencedIds.has(image.id),
+    )
+    .map((stored) => ({ stored }));
+
+  if (store) {
+    for (const id of collectReferencedImageIds(referencedContents)) {
+      if (inlineIds.has(id) || lastReferencedIds.has(id)) continue;
+      const stored = store.get(id);
+      if (stored) candidates.push({ stored });
+    }
   }
-  recent.reverse();
+
+  const recent = recentUniqueImages(candidates, maxRecentImages).map(
+    ({ stored }) => stored,
+  );
+  if (store) {
+    for (const id of lastReferencedIds) {
+      if (inlineIds.has(id) || recent.some((image) => image.id === id)) {
+        continue;
+      }
+      const stored = store.get(id);
+      if (stored) recent.push(stored);
+    }
+  }
+  if (recent.length === 0) return [];
   return [
     {
       text:
@@ -147,7 +172,9 @@ export function prepareImagePayloadsForRequest(
     store: ImagePayloadStore;
   },
 ): Content[] {
-  const referencedIds = collectReferencedImageIds(contents.at(-1));
+  const referencedIds = collectReferencedImageIds(
+    contents.at(-1) ? [contents.at(-1)!] : [],
+  );
   const collected: CollectedImage[] = [];
   const transformed = contents.map((content, index) => {
     if (index === options.preserveImagePartsForContentIndex) {
@@ -243,15 +270,42 @@ function transformPart(
   return part;
 }
 
-function collectReferencedImageIds(content: Content | undefined): Set<string> {
+function collectInlineImageIds(contents: Content[]): Set<string> {
   const ids = new Set<string>();
-  for (const part of content?.parts ?? []) {
-    const text = part.text;
-    if (!text) continue;
-    for (const match of text.matchAll(IMAGE_REFERENCE_PATTERN)) {
-      const id = match[1];
-      if (id) ids.add(id.toLowerCase());
+  for (const content of contents) {
+    for (const part of content.parts ?? []) {
+      if (
+        part.inlineData?.mimeType?.startsWith('image/') &&
+        part.inlineData.data
+      ) {
+        ids.add(imagePartToStoredPayload(part).id);
+      }
+      for (const inner of getFunctionResponseParts(part) ?? []) {
+        if (
+          inner.inlineData?.mimeType?.startsWith('image/') &&
+          inner.inlineData.data
+        ) {
+          ids.add(imagePartToStoredPayload(inner).id);
+        }
+      }
     }
+  }
+  return ids;
+}
+
+function collectReferencedImageIds(contents: Content[]): Set<string> {
+  const ids = new Set<string>();
+  const collect = (parts: Part[] | undefined): void => {
+    for (const part of parts ?? []) {
+      for (const match of part.text?.matchAll(IMAGE_REFERENCE_PATTERN) ?? []) {
+        const id = match[1];
+        if (id) ids.add(id.toLowerCase());
+      }
+      collect(getFunctionResponseParts(part));
+    }
+  };
+  for (const content of contents) {
+    collect(content.parts);
   }
   return ids;
 }

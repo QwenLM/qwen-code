@@ -2584,6 +2584,47 @@ describe('GeminiChat', async () => {
       });
     });
 
+    it('reattaches stored image markers on later below-threshold requests', async () => {
+      vi.mocked(mockConfig.getChatCompression).mockReturnValue({
+        maxRecentImagesToRetain: 1,
+        imagePayloadThreshold: 1,
+      });
+      chat.setHistory([
+        {
+          role: 'user',
+          parts: [{ inlineData: { mimeType: 'image/png', data: 'old-shot' } }],
+        },
+        { role: 'model', parts: [{ text: 'I see the image' }] },
+      ]);
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streamResponse(stopResponse([{ text: 'response' }])),
+      );
+
+      for (const [message, promptId] of [
+        ['first question', 'prompt-id-image-refs-first'],
+        ['second question', 'prompt-id-image-refs-second'],
+      ] as const) {
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message },
+          promptId,
+        );
+        for await (const _ of stream) {
+          // consume stream
+        }
+      }
+
+      const durable = JSON.stringify(chat.getHistory());
+      expect(durable).toMatch(/Image #[a-f0-9]{12}/);
+      expect(durable).not.toContain('"data":"old-shot"');
+      const secondRequest = vi.mocked(
+        mockContentGenerator.generateContentStream,
+      ).mock.calls[1]?.[0];
+      expect(JSON.stringify(secondRequest?.contents)).toContain(
+        '"data":"old-shot"',
+      );
+    });
+
     it('coalesces startup reminders with the first user prompt for provider requests', async () => {
       chat.setHistory([
         {

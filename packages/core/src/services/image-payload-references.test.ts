@@ -270,6 +270,43 @@ describe('replaceImagePayloadsInPlace', () => {
     expect(JSON.stringify(contents)).toContain('"data":"current-shot"');
     expect(JSON.stringify(contents)).not.toContain('"data":"old-shot"');
   });
+
+  it('rewrites shared top-level and nested Part objects', () => {
+    const store = new InMemoryImagePayloadStore();
+    const topLevel: Part = {
+      inlineData: { mimeType: 'image/png', data: 'top-level' },
+    };
+    const nested: Part = {
+      inlineData: { mimeType: 'image/png', data: 'nested' },
+    };
+    const durable: Content[] = [
+      { role: 'user', parts: [topLevel] },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'call-1',
+              name: 'screenshot',
+              response: {},
+              parts: [nested],
+            },
+          },
+        ],
+      },
+    ];
+    const curated: Content[] = durable.map((content) => ({
+      ...content,
+      parts: [...(content.parts ?? [])],
+    }));
+
+    replaceImagePayloadsInPlace(curated, store);
+
+    expect(JSON.stringify(durable)).not.toContain('"data":');
+    expect(JSON.stringify(durable).match(/Image #[a-f0-9]{12}/g)).toHaveLength(
+      2,
+    );
+  });
 });
 
 describe('buildReattachParts', () => {
@@ -295,5 +332,52 @@ describe('buildReattachParts', () => {
     const store = new InMemoryImagePayloadStore();
     const replaced = replaceImagePayloadsInPlace([toolImageTurn('a')], store);
     expect(buildReattachParts(replaced, 0)).toEqual([]);
+  });
+
+  it('resolves stored markers even when the current replacement pass is empty', () => {
+    const store = new InMemoryImagePayloadStore();
+    const contents = [
+      toolImageTurn('a'),
+      toolImageTurn('b'),
+      toolImageTurn('c'),
+      { role: 'user', parts: [{ text: 'continue' }] },
+    ];
+    replaceImagePayloadsInPlace(contents, store);
+
+    const parts = buildReattachParts([], 2, contents, store);
+
+    expect(
+      parts
+        .filter((part) => part.inlineData)
+        .map((part) => part.inlineData?.data),
+    ).toEqual(['b', 'c']);
+  });
+
+  it('reattaches a marker in the current user turn outside the recency cap', () => {
+    const store = new InMemoryImagePayloadStore();
+    const contents = [toolImageTurn('current')];
+    replaceImagePayloadsInPlace(contents, store);
+
+    const parts = buildReattachParts([], 0, contents, store);
+
+    expect(parts.at(-1)?.inlineData?.data).toBe('current');
+  });
+
+  it('does not reattach an image that is already inline', () => {
+    const store = new InMemoryImagePayloadStore();
+    const markerContents = [toolImageTurn('same')];
+    replaceImagePayloadsInPlace(markerContents, store);
+    const marker = markerContents[0]!.parts![0]!;
+    const referencedContents: Content[] = [
+      {
+        role: 'user',
+        parts: [
+          marker,
+          { inlineData: { mimeType: 'image/png', data: 'same' } },
+        ],
+      },
+    ];
+
+    expect(buildReattachParts([], 1, referencedContents, store)).toEqual([]);
   });
 });
