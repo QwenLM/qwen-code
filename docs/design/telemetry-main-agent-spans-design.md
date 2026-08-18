@@ -35,6 +35,8 @@ The lifecycle deliberately uses terminal state plus idempotent finalization rath
 
 Successful and cancelled GenAI spans leave OpenTelemetry status `UNSET`. Failed spans set status `ERROR`, write a bounded and sanitized status description, and include a low-cardinality `error.type`. This applies to interaction, LLM, tool, tool-execution, hook, and subagent spans.
 
+For headless JSON Schema runs, the missing-output contract belongs to the user-origin `UserQuery` or `Retry` invocation and follows that owner across tool continuations. Automatic Cron, Notification, Teammate, and runtime Goal drain invocations may complete with plain text without being individually mislabeled `structured_output_missing`; the headless runner remains the authority for the session-level final verdict.
+
 ## Compatibility
 
 The longer lifecycle changes `interaction.duration_ms`: it now includes tool execution and approval wait time. Retry and Goal messages create additional interaction spans. CLI interactions remain trace roots, while ACP and daemon interactions continue to honor an explicit inbound parent context.
