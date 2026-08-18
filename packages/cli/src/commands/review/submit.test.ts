@@ -20,7 +20,10 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { reviewWriteAuthorization } from './lib/authorization.js';
+import {
+  recordedSeverityFloor,
+  reviewWriteAuthorization,
+} from './lib/authorization.js';
 import { join } from 'node:path';
 import { promptRecordDir, briefPath } from './lib/prompt-record.js';
 import { parseLedger } from './lib/ledger.js';
@@ -192,6 +195,241 @@ describe('authorization — URL-shaped host and repo binding at the submit call 
       ...over,
     } as never);
   }
+
+  let floorSeq = 0;
+  /** A fresh record + optional plan, driven through the shared recovery. */
+  function recoverFloor(line: string, opts: Record<string, unknown> = {}) {
+    const argsFile = join(dir, `floor-args-${floorSeq++}.txt`);
+    writeFileSync(argsFile, `${line}\n`);
+    return recordedSeverityFloor({
+      callerPr: 123,
+      skillArgs: argsFile,
+      ...opts,
+    } as never);
+  }
+  function floorPlan(contents: Record<string, unknown>): string {
+    const p = join(dir, `floor-plan-${floorSeq++}.json`);
+    writeFileSync(p, JSON.stringify(contents));
+    return p;
+  }
+
+  it('recovers the recorded floor only when the record DECIDED one', () => {
+    // A default-resolved `auto` is not an operator decision — letting it
+    // outrank the state's floor would stand enforcement down over a record
+    // that recorded no floor at all. An invalid configured value is
+    // discarded by the parser and must read the same way. An explicit
+    // `--severity-floor auto` IS a decision (parse-args pins its source as
+    // explicit) — conflating it with the default-resolved auto would let a
+    // drifted state floor stand over the operator's recorded posture.
+    expect(recoverFloor('123 --comment --severity-floor critical')).toEqual({
+      floor: 'critical',
+      source: 'explicit',
+    });
+    expect(recoverFloor('123 --comment')).toBeUndefined();
+    expect(
+      recoverFloor('123 --comment', { defaultSeverityFloor: 'critical' }),
+    ).toEqual({ floor: 'critical', source: 'configured' });
+    expect(
+      recoverFloor('123 --comment', { defaultSeverityFloor: 'crtical' }),
+    ).toBeUndefined();
+    expect(recoverFloor('123 --severity-floor auto')).toEqual({
+      floor: 'auto',
+      source: 'explicit',
+    });
+  });
+
+  it('binds the recovery to the full recorded identity — number, repo, host', () => {
+    // The record is last-writer-wins across /review invocations, so another
+    // PR's — or the same number in another repo, or on another host —
+    // recovers nothing; the bar is the one the --comment authorisation
+    // applies to the same record.
+    expect(recoverFloor('999 --severity-floor critical')).toBeUndefined();
+    expect(
+      recoverFloor(
+        'https://github.com/o/r/pull/123 --severity-floor critical',
+        {
+          callerRepo: 'o/r',
+        },
+      ),
+    ).toEqual({ floor: 'critical', source: 'explicit' });
+    expect(
+      recoverFloor(
+        'https://github.com/other/repo/pull/123 --severity-floor critical',
+        { callerRepo: 'o/r' },
+      ),
+    ).toBeUndefined();
+    // An UNKNOWN identity repo cannot check a URL record's repo bar, so it
+    // recovers nothing — skipping the comparison let another repo's record
+    // bind on number and host alone.
+    expect(
+      recoverFloor(
+        'https://github.com/other/repo/pull/123 --severity-floor critical',
+        {},
+      ),
+    ).toBeUndefined();
+    expect(
+      recoverFloor(
+        'https://ghe.corp.example/o/r/pull/123 --severity-floor critical',
+        { callerRepo: 'o/r' },
+      ),
+    ).toBeUndefined();
+    // The caller's CLI-typed pr outranks the plan's — the plan's path is
+    // model-written, and a parseable-but-wrong plan must not choose which
+    // identity the operator's record is tested against.
+    expect(
+      recoverFloor('456 --severity-floor critical', {
+        planPath: floorPlan({ prNumber: 123 }),
+        callerPr: 456,
+      }),
+    ).toEqual({ floor: 'critical', source: 'explicit' });
+    expect(
+      recoverFloor('123 --severity-floor critical', {
+        planPath: floorPlan({ prNumber: 123 }),
+        callerPr: 456,
+      }),
+    ).toBeUndefined();
+    // Digit-string plan numbers fill a caller-less identity like their
+    // numeric siblings — the shape every other plan reader tolerates.
+    expect(
+      recoverFloor('123 --severity-floor critical', {
+        planPath: floorPlan({ prNumber: '123' }),
+        callerPr: undefined,
+      }),
+    ).toEqual({ floor: 'critical', source: 'explicit' });
+    // The plan's ownerRepo binds a URL record even without a caller repo.
+    expect(
+      recoverFloor(
+        'https://github.com/other/repo/pull/123 --severity-floor critical',
+        { planPath: floorPlan({ prNumber: 123, ownerRepo: 'o/r' }) },
+      ),
+    ).toBeUndefined();
+    // Absent record and plan-less caller both fail open, never throw.
+    expect(
+      recordedSeverityFloor({
+        callerPr: 123,
+        skillArgs: join(dir, 'no-such-record.txt'),
+      }),
+    ).toBeUndefined();
+    expect(
+      recordedSeverityFloor({ skillArgs: join(dir, 'no-such-record.txt') }),
+    ).toBeUndefined();
+    // The URL branch's OWN number check: a URL record of another PR in the
+    // right repo must not bind — the number bar exists per target shape.
+    expect(
+      recoverFloor(
+        'https://github.com/o/r/pull/999 --severity-floor critical',
+        {
+          callerRepo: 'o/r',
+        },
+      ),
+    ).toBeUndefined();
+    // The caller's host recovers a matching Enterprise record…
+    expect(
+      recoverFloor(
+        'https://ghe.corp.example/o/r/pull/123 --severity-floor critical',
+        { callerRepo: 'o/r', callerHost: 'ghe.corp.example' },
+      ),
+    ).toEqual({ floor: 'critical', source: 'explicit' });
+    // …and the CALLER's identity outranks the plan's on every axis — repo:
+    // a mis-transcribed planPath naming another repo must not stand the
+    // CLI-typed repo's bar down…
+    expect(
+      recoverFloor(
+        'https://github.com/other/repo/pull/123 --severity-floor critical',
+        {
+          planPath: floorPlan({ prNumber: 123, ownerRepo: 'o/r' }),
+          callerRepo: 'other/repo',
+        },
+      ),
+    ).toEqual({ floor: 'critical', source: 'explicit' });
+    // …and host: NEVER plan-filled. An absent caller host IS github.com by
+    // the gate's own rule, so there is no gap for the plan to fill — with
+    // mandatory caller pr/repo flags, a gap-read here handed the
+    // model-pathed plan the one identity axis nothing else pinned, and a
+    // plan carrying a foreign host silently stood the recovery down on the
+    // common no---host github.com invocation.
+    expect(
+      recoverFloor(
+        'https://ghe.corp.example/o/r/pull/123 --severity-floor critical',
+        {
+          planPath: floorPlan({
+            prNumber: 123,
+            ownerRepo: 'o/r',
+            host: 'ghe.corp.example',
+          }),
+          callerRepo: 'o/r',
+          callerHost: 'github.com',
+        },
+      ),
+    ).toBeUndefined();
+    expect(
+      recoverFloor(
+        'https://ghe.corp.example/o/r/pull/123 --severity-floor critical',
+        {
+          planPath: floorPlan({
+            prNumber: 123,
+            ownerRepo: 'o/r',
+            host: 'ghe.corp.example',
+          }),
+          callerRepo: 'o/r',
+        },
+      ),
+    ).toBeUndefined();
+    // And the inverse of the reported hole: a github.com record binds on
+    // the no---host invocation even when a foreign plan host tries to
+    // stand it down.
+    expect(
+      recoverFloor(
+        'https://github.com/o/r/pull/123 --severity-floor critical',
+        {
+          planPath: floorPlan({
+            prNumber: 123,
+            ownerRepo: 'o/r',
+            host: 'ghe.corp.example',
+          }),
+          callerRepo: 'o/r',
+        },
+      ),
+    ).toEqual({ floor: 'critical', source: 'explicit' });
+    // A plan that parses but names no PR falls back to the caller's pr —
+    // the diff-only/local plan shape must not suppress the fallback.
+    expect(
+      recoverFloor('123 --severity-floor critical', {
+        planPath: floorPlan({}),
+        callerPr: 123,
+      }),
+    ).toEqual({ floor: 'critical', source: 'explicit' });
+    // A corrupt plan file reads as no plan (the catch's documented
+    // contract) — never a throw out of the recovery.
+    const corrupt = join(dir, 'floor-plan-corrupt.json');
+    writeFileSync(corrupt, '{"prNumber": 123, ');
+    expect(
+      recoverFloor('123 --severity-floor critical', {
+        planPath: corrupt,
+        callerPr: 123,
+      }),
+    ).toEqual({ floor: 'critical', source: 'explicit' });
+  });
+
+  it('ignores the skillArgs seam whenever a session id is present', () => {
+    // The seam is the tests' door only; in a real run (session id exported)
+    // a model-visible --skill-args must not point the recovery at a
+    // model-writable record — a forged same-number record carrying
+    // --severity-floor suggestion would override the operator's verbatim
+    // posture on the write itself.
+    const argsFile = join(dir, 'seam-args.txt');
+    writeFileSync(argsFile, '123 --severity-floor critical\n');
+    const prev = process.env['QWEN_CODE_SESSION_ID'];
+    process.env['QWEN_CODE_SESSION_ID'] = 'floor-sess';
+    try {
+      expect(
+        recordedSeverityFloor({ callerPr: 123, skillArgs: argsFile }),
+      ).toBeUndefined();
+    } finally {
+      if (prev === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
+      else process.env['QWEN_CODE_SESSION_ID'] = prev;
+    }
+  });
 
   it('binds the repo of a URL-shaped authorisation', () => {
     expect(authFor('https://github.com/o/r/pull/123 --comment').ok).toBe(true);
@@ -961,6 +1199,34 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     expect(process.exitCode).toBeUndefined();
   });
 
+  it('the review.severityFloor setting reaches enforcement through the handler', async () => {
+    // The setting→opts hop is the residual wiring leg: the end-to-end floor
+    // test drives runSubmit directly with the opt, so dropping the
+    // handler's `defaultSeverityFloor: review.severityFloor` line left the
+    // suite green while production ignored the configured floor.
+    reviewSettingsMock.mockReturnValue({
+      attribution: true,
+      severityFloor: 'critical',
+    });
+    const review = file('handler-floor.json', {
+      ...REVIEW,
+      comments: [
+        { path: 'a.ts', line: 3, body: '**[Critical]** boom' },
+        { path: 'b.ts', line: 7, body: '**[Suggestion]** tidy this' },
+      ],
+    });
+    await submitCommand.handler?.(
+      args({
+        review,
+        skillArgs: file('handler-floor-args.txt', '6771 --comment'),
+      }) as never,
+    );
+    expect(ghMock).toHaveBeenCalledOnce();
+    const sent = JSON.parse(ghMock.mock.calls[0][0] as string);
+    expect(sent.comments).toHaveLength(1);
+    expect(sent.body).toContain('floor enforcement');
+  });
+
   it('without the flag or the setting the handler refuses — and workspace settings cannot supply it', async () => {
     // The mock answers a flag-less loadSettings call with a polluted view
     // that carries comment:true; the handler's skipWorkspaceSettings flag
@@ -1049,7 +1315,341 @@ describe('payload consistency — refuse before GitHub sees it', () => {
       expect(text).not.toContain('via Qwen Code /review');
       expect(text).not.toContain('qwen3.7-max');
     }
-    expect(inline).toBe('**[Suggestion]** tidy');
+    // The severity prefix goes with the footer: it is the same template. In
+    // their place rides the invisible marker presubmit dedups on.
+    expect(inline).toBe('tidy\n\n<!-- qwen-review suggestion -->');
+  });
+
+  it('attribution off strips a forged footer even when text follows it', () => {
+    // The trailing strip leaves a footer that has text after it — and in
+    // this mode that surviving line is the only attribution the post would
+    // carry.
+    const review = file('forged-mid-body.json', {
+      ...REVIEW,
+      comments: [
+        {
+          path: 'a.ts',
+          line: 12,
+          body: '**[Suggestion]** null deref\n\n_— qwen3.7-max via Qwen Code /review (v0.21.3)_\n\nUpdate: also reproduced on the empty list',
+        },
+      ],
+    });
+
+    runSubmit(authorized({ review }), '0.21.3', { attribution: false });
+
+    const inline = posted().comments[0].body as string;
+    expect(inline).not.toContain('via Qwen Code /review');
+    expect(inline).not.toContain('qwen3.7-max');
+    expect(inline).toContain('null deref');
+    expect(inline).toContain('Update: also reproduced on the empty list');
+  });
+
+  it('attribution off posts exactly what the invisibility gate validated', () => {
+    // The gate validates stripReviewFooter(stripForUnattributedPost(body)),
+    // but the post leg ran stripForUnattributedPost(body) only. A trailing
+    // forged footer the fixpoint chain EXPOSES — the stacked marker after
+    // it strips away — and that exceeds the anywhere-strips' caps survives
+    // the chain; only the trailing strip removes it. The gate saw a clean
+    // body while the post carried the visible forged attribution.
+    const review = file('gate-post-asymmetry.json', {
+      ...REVIEW,
+      comments: [
+        {
+          path: 'a.ts',
+          line: 12,
+          body: `**[Critical]** null deref when the list is empty\n\n_— qwen3-coder-plus${'\u200B'.repeat(401)} via Qwen Code /review (v0.21.0)_\n\n**[Critical]**`,
+        },
+      ],
+    });
+
+    runSubmit(authorized({ review }), '0.21.3', { attribution: false });
+
+    const inline = posted().comments[0].body as string;
+    expect(inline).toContain('null deref when the list is empty');
+    expect(inline).not.toContain('via Qwen Code /review');
+    expect(inline.endsWith('<!-- qwen-review critical -->')).toBe(true);
+  });
+
+  it('refuses a comment that renders as nothing', () => {
+    const review = file('marker-only.json', {
+      ...REVIEW,
+      comments: [{ path: 'a.ts', line: 12, body: '**[Critical]**' }],
+    });
+
+    expect(() =>
+      runSubmit(authorized({ review }), '0.21.3', { attribution: false }),
+    ).toThrow(/renders as nothing/);
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses a marker-only comment under attribution ON too — the canonical footer must not mask it', () => {
+    // normalize appends the footer before inconsistencies runs, so the gate
+    // sees '**[Critical]**\n\n_— <footer>_' here: only the footer-stripping
+    // half of the predicate catches it.
+    const review = file('marker-only-on.json', {
+      ...REVIEW,
+      comments: [{ path: 'a.ts', line: 12, body: '**[Critical]**' }],
+    });
+
+    expect(() => runSubmit(authorized({ review }), '0.21.3')).toThrow(
+      /renders as nothing/,
+    );
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('attribution off strips a marker line the draft quoted from the reviewed code', () => {
+    // The marker shape is public; a finding legitimately quoting it must not
+    // leave a second, planted marker next to the canonical one.
+    const review = file('planted-marker.json', {
+      ...REVIEW,
+      comments: [
+        {
+          path: 'a.ts',
+          line: 12,
+          body: '**[Critical]** the sample posts <!-- qwen-review suggestion --> verbatim\n\n<!-- qwen-review suggestion -->\n\nthat is what the guard dereferences',
+        },
+      ],
+    });
+
+    runSubmit(authorized({ review }), '0.21.3', { attribution: false });
+
+    const inline = posted().comments[0].body as string;
+    // The bare quoted marker LINE is stripped; only the canonical trailing
+    // marker remains at line level…
+    expect(inline).not.toContain('\n<!-- qwen-review suggestion -->\n');
+    expect(inline.endsWith('<!-- qwen-review critical -->')).toBe(true);
+    // …while the inline prose mention is text, not a bare marker — kept.
+    expect(inline).toContain('posts <!-- qwen-review suggestion --> verbatim');
+  });
+
+  it('refuses a prefix over a bare marker line — the gate sees through the whole chain', () => {
+    // Probe shape from review: prefix + bare marker line would otherwise
+    // pass the gate (the marker line is non-empty) and post an empty
+    // visible comment carrying a live marker.
+    const review = file('prefix-over-marker.json', {
+      ...REVIEW,
+      comments: [
+        {
+          path: 'a.ts',
+          line: 12,
+          body: '**[Critical]**\n\n<!-- qwen-review critical -->',
+        },
+      ],
+    });
+
+    expect(() =>
+      runSubmit(authorized({ review }), '0.21.3', { attribution: false }),
+    ).toThrow(/renders as nothing/);
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('strips to a fixpoint: a marker line between two prefixes does not post the second prefix', () => {
+    const review = file('fixpoint.json', {
+      ...REVIEW,
+      state: { ...REVIEW.state, planPath: verifiedPlan() },
+      comments: [
+        {
+          path: 'a.ts',
+          line: 12,
+          body: '**[Critical]** still reproducible\n\n<!-- qwen-review suggestion -->\n\n**[Suggestion]** original text',
+        },
+      ],
+    });
+
+    withVerifyEnv(() =>
+      runSubmit(authorized({ review }), '0.21.3', { attribution: false }),
+    );
+
+    const inline = posted().comments[0].body as string;
+    expect(inline).not.toContain('**[Critical]**');
+    expect(inline).not.toContain('**[Suggestion]**');
+    expect(inline).toContain('still reproducible');
+    expect(inline).toContain('original text');
+    expect(inline.endsWith('<!-- qwen-review critical -->')).toBe(true);
+  });
+
+  it('strips a forged footer truncated inside the version parens', () => {
+    // Most mid-character cuts land inside the parens — they are the footer's
+    // final ~10 characters.
+    const review = file('truncated-parens.json', {
+      ...REVIEW,
+      comments: [
+        {
+          path: 'a.ts',
+          line: 12,
+          body: '**[Suggestion]** null deref\n\n_— qwen3.7-max via Qwen Code /review (v0.21\n\nUpdate: reproduced again',
+        },
+      ],
+    });
+
+    runSubmit(authorized({ review }), '0.21.3', { attribution: false });
+
+    const inline = posted().comments[0].body as string;
+    expect(inline).not.toContain('via Qwen Code /review');
+    expect(inline).toContain('Update: reproduced again');
+  });
+
+  it('refuses residue that renders as nothing: hollowed fence, HTML comment, Cf character', () => {
+    // Each vector posts a visible-empty comment carrying a live critical
+    // marker otherwise — counted toward REQUEST_CHANGES and re-promoted as
+    // an unanswerable blocker.
+    const bodies = [
+      '**[Critical]**\n\n```\n_— forged via Qwen Code /review (v1)_\n```',
+      '**[Critical]** <!-- x -->',
+      '**[Critical]**\u200B',
+      // An UNTERMINATED comment: the appended marker closes it into one
+      // type-2 HTML block rendering nothing.
+      '**[Critical]** <!-- x',
+      // The render-nothing residue classes: empty elements, void tags,
+      // invisible entities, empty links, abrupt-closing comments.
+      '**[Critical]** <div></div>',
+      '**[Critical]** &nbsp;',
+      '**[Critical]** [](url)',
+      '**[Critical]** <!-->',
+      // A marker line quoted at blockquote depth two.
+      '**[Critical]**\n\n> > <!-- qwen-review critical -->',
+    ];
+    for (const [i, body] of bodies.entries()) {
+      const review = file(`render-nothing-${i}.json`, {
+        ...REVIEW,
+        comments: [{ path: 'a.ts', line: 12, body }],
+      });
+      expect(() =>
+        runSubmit(authorized({ review }), '0.21.3', { attribution: false }),
+      ).toThrow(/renders as nothing/);
+    }
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('real content wearing a scaffold shape still posts', () => {
+    // The render-nothing projection must not eat findings that merely
+    // MENTION a scaffold shape mid-text.
+    const review = file('scaffold-in-prose.json', {
+      ...REVIEW,
+      comments: [
+        {
+          path: 'a.ts',
+          line: 12,
+          body: '**[Critical]** the <div></div> fallback drops the error',
+        },
+      ],
+    });
+
+    runSubmit(authorized({ review }), '0.21.3', { attribution: false });
+
+    const inline = posted().comments[0].body as string;
+    expect(inline).toContain('the <div></div> fallback drops the error');
+  });
+
+  it('attribution off strips the severity prefixes only from what is posted — the verdict still counts the marked payload', () => {
+    const review = file('no-attribution-critical.json', {
+      ...REVIEW,
+      state: { ...REVIEW.state, planPath: verifiedPlan() },
+      comments: [
+        {
+          path: 'a.ts',
+          line: 12,
+          body: '**[Critical]** null deref when the list is empty',
+        },
+        {
+          path: 'a.ts',
+          line: 30,
+          body: '**[Suggestion]** tidy',
+        },
+      ],
+    });
+
+    withVerifyEnv(() =>
+      runSubmit(authorized({ review }), '0.21.3', { attribution: false }),
+    );
+
+    // Counted BEFORE the strip: one marked Critical in the payload still
+    // earns REQUEST_CHANGES.
+    expect(posted().event).toBe('REQUEST_CHANGES');
+    const [critical, suggestion] = posted().comments as Array<{
+      body: string;
+    }>;
+    expect(critical.body).toBe(
+      'null deref when the list is empty\n\n<!-- qwen-review critical -->',
+    );
+    expect(suggestion.body).toBe('tidy\n\n<!-- qwen-review suggestion -->');
+  });
+
+  it('attribution on keeps the severity prefixes in the posted bodies', () => {
+    const review = file('attribution-critical.json', {
+      ...REVIEW,
+      state: { ...REVIEW.state, planPath: verifiedPlan() },
+      comments: [
+        {
+          path: 'a.ts',
+          line: 12,
+          body: '**[Critical]** null deref when the list is empty',
+        },
+      ],
+    });
+
+    withVerifyEnv(() => runSubmit(authorized({ review }), '0.21.3'));
+
+    const inline = (posted().comments as Array<{ body: string }>)[0].body;
+    expect(inline.startsWith('**[Critical]**')).toBe(true);
+    expect(posted().event).toBe('REQUEST_CHANGES');
+  });
+
+  it('attribution off refuses a draft whose post-strip shape opens a fence', () => {
+    // The prefix strip moves the delimiter to line-leading position; the
+    // unclosed fence swallows the appended invisible marker as visible
+    // code and the claim into its info string — the marker this mode
+    // exists to keep invisible, posted by the very transform that creates
+    // the exposure. The draft carries no line-leading delimiter, so only
+    // a check on the POST-strip shape catches it.
+    const bodies = [
+      '**[Critical]** ~~~ leaked.log shows the token',
+      '**[Critical]** ``` leaked',
+      '**[Critical]** claim\n~~~\nfoo',
+    ];
+    for (const [i, body] of bodies.entries()) {
+      const review = file(`fence-open-${i}.json`, {
+        ...REVIEW,
+        comments: [{ path: 'a.ts', line: 12, body }],
+      });
+      expect(() =>
+        runSubmit(authorized({ review }), '0.21.3', { attribution: false }),
+      ).toThrow(/leaves a code fence open/);
+    }
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('attribution off still posts a paired fence — the marker lands after the closer', () => {
+    const review = file('paired-fence.json', {
+      ...REVIEW,
+      comments: [
+        {
+          path: 'a.ts',
+          line: 12,
+          body: '**[Critical]** leaked:\n\n```\nconst token = 1;\n```',
+        },
+      ],
+    });
+
+    runSubmit(authorized({ review }), '0.21.3', { attribution: false });
+
+    const inline = posted().comments[0].body as string;
+    expect(inline).toContain('const token = 1;');
+    expect(inline.endsWith('<!-- qwen-review critical -->')).toBe(true);
+  });
+
+  it('refuses a bare-CR hollow fence the LF twin refuses', () => {
+    // GitHub renders a bare CR as a line break: 'CR + ~~~' is the hollow
+    // fence the LF twin already refuses, and it used to pass the gate and
+    // post the marker inside the fence.
+    const review = file('cr-hollow-fence.json', {
+      ...REVIEW,
+      comments: [{ path: 'a.ts', line: 12, body: '**[Critical]**\r~~~' }],
+    });
+    expect(() =>
+      runSubmit(authorized({ review }), '0.21.3', { attribution: false }),
+    ).toThrow(/renders as nothing/);
+    expect(ghMock).not.toHaveBeenCalled();
   });
 
   it('the standing review.comment setting authorises a post without --comment in the args', () => {
@@ -1129,7 +1729,12 @@ describe('payload consistency — refuse before GitHub sees it', () => {
 
     runSubmit(authorized({ review }), '0.21.3', { attribution: false });
 
-    expect(posted().comments[0].body).toBe(body);
+    // Attribution-off also strips the severity prefix and appends the
+    // comment marker; the assertion is on the rest of the body reaching
+    // GitHub byte-for-byte.
+    expect(posted().comments[0].body).toBe(
+      `${body.slice('**[Suggestion]** '.length)}\n\n<!-- qwen-review suggestion -->`,
+    );
   });
 
   it('counts the blockers it is actually carrying, not the ones it was told about', () => {
@@ -1323,6 +1928,353 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     expect(sent.body).toContain(
       '- `a.ts:1 — [review] tighten the retry backoff`',
     );
+  });
+
+  it('floor enforcement removes drafted Suggestions from the posted set', () => {
+    // The posture SKILL Step 6 resolves in prose, enforced in code: under a
+    // resolved critical floor, a Suggestion the drafted set did NOT defer is
+    // moved into the body's deferral list by compose-review, and this — the
+    // one boundary that posts — must remove it from what GitHub receives, or
+    // the review would post inline comments its own body says were deferred.
+    const review = file('floor-enforced.json', {
+      ...REVIEW,
+      state: {
+        ...REVIEW.state,
+        planPath: verifiedPlan(),
+        severityFloor: 'critical',
+      },
+      comments: [
+        { path: 'a.ts', line: 3, body: '**[Critical]** boom' },
+        { path: 'b.ts', line: 7, body: '**[Suggestion]** tidy this' },
+      ],
+    });
+
+    withVerifyEnv(() => runSubmit(authorized({ review })));
+    expect(ghMock).toHaveBeenCalledOnce();
+    const sent = JSON.parse(ghMock.mock.calls[0][0] as string);
+    // The Suggestion did not post inline; the Critical did, and still blocks.
+    expect(sent.comments).toHaveLength(1);
+    expect(sent.comments[0].path).toBe('a.ts');
+    expect(sent.event).toBe('REQUEST_CHANGES');
+    // The finding is not lost: the body carries the disclosure and the entry.
+    expect(sent.body).toContain('floor enforcement');
+    expect(sent.body).toContain('- `b.ts:7 — [review] tidy this`');
+    // Both operator channels say the override happened.
+    expect(
+      writeStderrSpy.mock.calls.some((c) =>
+        String(c[0]).includes('Floor enforcement'),
+      ),
+    ).toBe(true);
+    const out = JSON.parse(writeStdoutSpy.mock.calls.at(-1)![0] as string) as {
+      inlineComments: number;
+      floorEnforced: number;
+    };
+    expect(out.inlineComments).toBe(1);
+    expect(out.floorEnforced).toBe(1);
+  });
+
+  it('reports floor enforcement in the dry run, not only after the write', () => {
+    // The sibling field cappedBy has exactly this seam test; the dry run is
+    // the operator's preview, and a preview that omits the override invites
+    // posting a set the operator never saw described.
+    const review = file('floor-dry.json', {
+      ...REVIEW,
+      state: {
+        ...REVIEW.state,
+        planPath: verifiedPlan(),
+        severityFloor: 'critical',
+      },
+      comments: [
+        { path: 'a.ts', line: 3, body: '**[Critical]** boom' },
+        { path: 'b.ts', line: 7, body: '**[Suggestion]** tidy this' },
+      ],
+    });
+
+    withVerifyEnv(() => runSubmit(authorized({ review, dryRun: true })));
+    expect(ghMock).not.toHaveBeenCalled();
+    const out = JSON.parse(writeStdoutSpy.mock.calls.at(-1)![0] as string) as {
+      posted: boolean;
+      wouldPost: boolean;
+      floorEnforced: number;
+    };
+    expect(out.posted).toBe(false);
+    expect(out.wouldPost).toBe(true);
+    expect(out.floorEnforced).toBe(1);
+    expect(
+      writeStderrSpy.mock.calls.some((c) =>
+        String(c[0]).includes('Floor enforcement'),
+      ),
+    ).toBe(true);
+  });
+
+  it("the recorded floor outranks the state's transcription", () => {
+    // The state's severityFloor is a model-written copy of the operator's
+    // policy; the gate's args re-parse recovers the verbatim one. A state
+    // claiming `suggestion` (posture off) while the record says
+    // `--severity-floor critical` must enforce — the copy does not get to
+    // stand enforcement down.
+    // No withVerifyEnv: it exports a session id, which (correctly) disables
+    // the skillArgs test seam this test authorises through. The explicit
+    // recorded floor needs no plan or round either — enforcement at
+    // `critical` fires at any round, and the missing-plan caps only soften
+    // the event, which this test does not assert.
+    const review = file('floor-recorded.json', {
+      ...REVIEW,
+      state: {
+        ...REVIEW.state,
+        severityFloor: 'suggestion',
+      },
+      comments: [
+        { path: 'a.ts', line: 3, body: '**[Critical]** boom' },
+        { path: 'b.ts', line: 7, body: '**[Suggestion]** tidy this' },
+      ],
+    });
+
+    runSubmit(
+      args({
+        review,
+        skillArgs: file(
+          'floor-args.txt',
+          '6771 --comment --severity-floor critical',
+        ),
+      }),
+    );
+    expect(ghMock).toHaveBeenCalledOnce();
+    const sent = JSON.parse(ghMock.mock.calls[0][0] as string);
+    expect(sent.comments).toHaveLength(1);
+    expect(sent.body).toContain('floor enforcement');
+    expect(
+      writeStderrSpy.mock.calls.some((c) =>
+        String(c[0]).includes('verbatim record outranks'),
+      ),
+    ).toBe(true);
+    // The note names its TRUE source: this one came from the flag.
+    expect(
+      writeStderrSpy.mock.calls.some((c) =>
+        String(c[0]).includes('the recorded `--severity-floor` flag'),
+      ),
+    ).toBe(true);
+  });
+
+  it('does not fire the override note when the recovered floor equals the state', () => {
+    // The equality guard is the only thing keeping a recovered-but-identical
+    // floor from emitting the "record outranks state" note on every
+    // non-drifted enforced post — a wrong claim on exactly the operator
+    // audit channel this feature builds. The comparison is NORMALISED: a
+    // case-drifted transcription of the same floor is agreement too.
+    for (const stateFloor of ['critical', 'CRITICAL']) {
+      ghMock.mockClear();
+      writeStderrSpy.mockClear();
+      const review = file(`floor-equal-${stateFloor}.json`, {
+        ...REVIEW,
+        state: { ...REVIEW.state, severityFloor: stateFloor },
+        comments: [
+          { path: 'a.ts', line: 3, body: '**[Critical]** boom' },
+          { path: 'b.ts', line: 7, body: '**[Suggestion]** tidy this' },
+        ],
+      });
+
+      runSubmit(
+        args({
+          review,
+          skillArgs: file(
+            `floor-equal-args-${stateFloor}.txt`,
+            '6771 --comment --severity-floor critical',
+          ),
+        }),
+      );
+      expect(ghMock).toHaveBeenCalledOnce();
+      expect(
+        JSON.parse(ghMock.mock.calls[0][0] as string).comments,
+      ).toHaveLength(1);
+      expect(
+        writeStderrSpy.mock.calls.some((c) =>
+          String(c[0]).includes('verbatim record outranks'),
+        ),
+      ).toBe(false);
+    }
+  });
+
+  it('a recorded explicit auto outranks a drifted critical — and does not enforce at round 1', () => {
+    // An explicit `--severity-floor auto` is a real operator decision; a
+    // maintainer conflating it with the default-resolved auto would let the
+    // drifted state 'critical' stand and withhold findings the operator's
+    // recorded policy posts at rounds ≤ 5.
+    const review = file('floor-auto.json', {
+      ...REVIEW,
+      state: { ...REVIEW.state, severityFloor: 'critical' },
+      comments: [
+        { path: 'a.ts', line: 3, body: '**[Critical]** boom' },
+        { path: 'b.ts', line: 7, body: '**[Suggestion]** tidy this' },
+      ],
+    });
+
+    runSubmit(
+      args({
+        review,
+        skillArgs: file(
+          'floor-auto-args.txt',
+          '6771 --comment --severity-floor auto',
+        ),
+      }),
+    );
+    expect(ghMock).toHaveBeenCalledOnce();
+    expect(JSON.parse(ghMock.mock.calls[0][0] as string).comments).toHaveLength(
+      2,
+    );
+    expect(
+      writeStderrSpy.mock.calls.some((c) =>
+        String(c[0]).includes('verbatim record outranks'),
+      ),
+    ).toBe(true);
+  });
+
+  it('the recovery also runs under --user-authorized — the report-first flow', () => {
+    // The sanctioned report-first → user-publishes flow carries a parseable
+    // record on disk; skipping recovery there left that flow's enforcement
+    // decided by exactly the transcription enforcement distrusts.
+    const review = file('floor-ua.json', {
+      ...REVIEW,
+      state: { ...REVIEW.state, severityFloor: 'suggestion' },
+      comments: [
+        { path: 'a.ts', line: 3, body: '**[Critical]** boom' },
+        { path: 'b.ts', line: 7, body: '**[Suggestion]** tidy this' },
+      ],
+    });
+
+    runSubmit(
+      authorized({
+        review,
+        // The recorded host rides along: a bare-number recording carries no
+        // platform evidence, and the user-authorized fast path now refuses
+        // one outright (it cannot prove the target is not Aone). The floor
+        // recovery under test is unchanged by it — the record still names
+        // this PR and carries the operator's explicit floor.
+        skillArgs: file(
+          'floor-ua-args.txt',
+          '6771 --host github.com --severity-floor critical',
+        ),
+      }),
+    );
+    expect(ghMock).toHaveBeenCalledOnce();
+    const sent = JSON.parse(ghMock.mock.calls[0][0] as string);
+    expect(sent.comments).toHaveLength(1);
+    expect(sent.body).toContain('floor enforcement');
+  });
+
+  it('overrides in BOTH directions — a recorded posture-off outranks a drifted critical', () => {
+    // Direction-independence: an enforcement-direction-only condition would
+    // let a drifted state 'critical' stand over the operator's recorded
+    // `--severity-floor suggestion`, silently inverting a posture-off
+    // decision — findings the operator explicitly chose to post inline
+    // would be withheld.
+    const review = file('floor-reverse.json', {
+      ...REVIEW,
+      state: { ...REVIEW.state, severityFloor: 'critical' },
+      comments: [
+        { path: 'a.ts', line: 3, body: '**[Critical]** boom' },
+        { path: 'b.ts', line: 7, body: '**[Suggestion]** tidy this' },
+      ],
+    });
+
+    runSubmit(
+      args({
+        review,
+        skillArgs: file(
+          'floor-reverse-args.txt',
+          '6771 --comment --severity-floor suggestion',
+        ),
+      }),
+    );
+    expect(ghMock).toHaveBeenCalledOnce();
+    const sent = JSON.parse(ghMock.mock.calls[0][0] as string);
+    expect(sent.comments).toHaveLength(2);
+    expect(sent.body).not.toContain('floor enforcement');
+    expect(
+      writeStderrSpy.mock.calls.some((c) =>
+        String(c[0]).includes('verbatim record outranks'),
+      ),
+    ).toBe(true);
+  });
+
+  it('the configured-setting floor leg reaches enforcement end to end', () => {
+    // The `review.severityFloor` setting travels runSubmit opts →
+    // authorization gate → parseReviewArgs defaults → recordedSeverityFloor.
+    // The sibling defaultComment leg has exactly this wiring-regression test;
+    // deleting any link in the new chain must fail here.
+    const review = file('floor-configured.json', {
+      ...REVIEW,
+      state: { ...REVIEW.state },
+      comments: [
+        { path: 'a.ts', line: 3, body: '**[Critical]** boom' },
+        { path: 'b.ts', line: 7, body: '**[Suggestion]** tidy this' },
+      ],
+    });
+
+    runSubmit(
+      args({
+        review,
+        skillArgs: file('floor-configured-args.txt', '6771 --comment'),
+      }),
+      'unknown',
+      { defaultSeverityFloor: 'critical' },
+    );
+    expect(ghMock).toHaveBeenCalledOnce();
+    const sent = JSON.parse(ghMock.mock.calls[0][0] as string);
+    expect(sent.comments).toHaveLength(1);
+    expect(sent.body).toContain('floor enforcement');
+    // Setting-sourced: the note must name the setting, never a flag the
+    // operator did not type.
+    expect(
+      writeStderrSpy.mock.calls.some((c) =>
+        String(c[0]).includes(
+          'setting resolved against the recorded invocation',
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      writeStderrSpy.mock.calls.some((c) =>
+        String(c[0]).includes('the recorded `--severity-floor` flag'),
+      ),
+    ).toBe(false);
+  });
+
+  it('reroutes an unusable-line Suggestion instead of refusing the whole post', () => {
+    // The removal runs BEFORE the consistency gate on purpose: a rerouted
+    // comment is no longer posting, so its unusable line is no longer the
+    // gate's business. Ordered the other way, the gate's wholesale refusal
+    // would take the Critical down with it — the all-or-nothing harm the
+    // 422 doctrine exists to prevent.
+    const review = file('floor-bad-lines.json', {
+      ...REVIEW,
+      state: { ...REVIEW.state, severityFloor: 'critical' },
+      comments: [
+        { path: 'a.ts', line: 3, body: '**[Critical]** boom' },
+        { path: 'b.ts', line: 0, body: '**[Suggestion]** zero-line anchor' },
+        { path: 'c.ts', body: '**[Suggestion]** no line at all' },
+      ],
+    });
+
+    runSubmit(authorized({ review }));
+    expect(ghMock).toHaveBeenCalledOnce();
+    const sent = JSON.parse(ghMock.mock.calls[0][0] as string);
+    expect(sent.comments).toHaveLength(1);
+    expect(sent.comments[0].path).toBe('a.ts');
+    expect(sent.body).toContain('zero-line anchor');
+    expect(sent.body).toContain('no line at all');
+    expect(sent.body).toContain('floor enforcement');
+    // The report channels count the MOVED comments, not the post-removal
+    // remainder — the only shape where the two differ (2 moved, 1 remains),
+    // so a count-source regression is visible only here.
+    expect(
+      writeStderrSpy.mock.calls.some((c) =>
+        String(c[0]).includes('2 Suggestion comment(s)'),
+      ),
+    ).toBe(true);
+    const out = JSON.parse(writeStdoutSpy.mock.calls.at(-1)![0] as string) as {
+      floorEnforced: number;
+    };
+    expect(out.floorEnforced).toBe(2);
   });
 
   it('rejects a line that is not a positive whole number', () => {
