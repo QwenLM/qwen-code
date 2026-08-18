@@ -1221,6 +1221,9 @@ const EN: Messages = {
   'turnOutputs.preview': 'Preview',
   'turnOutputs.collapseFiles': 'Collapse files',
   'turnOutputs.showMoreFiles': (v) => `Show ${v?.count ?? 0} more files`,
+  'turnOutputs.collapseArtifacts': 'Collapse artifacts',
+  'turnOutputs.showMoreArtifacts': (v) =>
+    `Show ${v?.count ?? 0} more artifacts`,
   'turnOutputs.previousTurn': 'Previous turn',
   'turnOutputs.fileCount': (v) => `${v?.count ?? 0} files`,
   'turnOutputs.openFileTree': 'Open file tree',
@@ -4183,6 +4186,8 @@ const ZH: Messages = {
   'turnOutputs.preview': '预览',
   'turnOutputs.collapseFiles': '收起文件',
   'turnOutputs.showMoreFiles': (v) => `再展示 ${v?.count ?? 0} 个文件`,
+  'turnOutputs.collapseArtifacts': '收起产物',
+  'turnOutputs.showMoreArtifacts': (v) => `再展示 ${v?.count ?? 0} 个产物`,
   'turnOutputs.previousTurn': '上轮对话',
   'turnOutputs.fileCount': (v) => `${v?.count ?? 0} 个文件`,
   'turnOutputs.openFileTree': '打开文件树',

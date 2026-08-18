@@ -437,7 +437,7 @@ describe('RecordArtifactTool', () => {
     expect(String(result.llmContent)).not.toContain('Recorded artifact');
   });
 
-  it('rejects a directory workspacePath', async () => {
+  it('rejects an empty directory workspacePath', async () => {
     const ws = await workspace();
     await mkdir(path.join(ws.cwd, 'reports'));
 
@@ -449,7 +449,50 @@ describe('RecordArtifactTool', () => {
       .execute(signal);
 
     expect(result.error?.type).toBe(ToolErrorType.TARGET_IS_DIRECTORY);
+    expect(result.artifacts).toBeUndefined();
     expect(String(result.llmContent)).not.toContain('Recorded artifact');
+    expect(String(result.llmContent)).toContain('no recordable files');
+  });
+
+  it('expands a directory workspacePath into per-file artifacts', async () => {
+    const ws = await workspace();
+    await ws.write('reports/a.xlsx', 'xlsx');
+    await ws.write('reports/b.docx', 'docx');
+    await ws.write('reports/.hidden.xlsx', 'hidden');
+    await ws.write('reports/~$lock.xlsx', 'lock');
+    await ws.write('reports/nested/c.pptx', 'pptx');
+
+    const result = await ws.tool
+      .build({
+        title: 'Daily reports',
+        workspacePath: 'reports',
+      })
+      .execute(signal);
+
+    expect(result.error).toBeUndefined();
+    expect(String(result.llmContent)).toContain('Expanded directory');
+    expect(String(result.llmContent)).not.toContain('Recorded artifact');
+    expect(String(result.llmContent)).toContain('reports/a.xlsx');
+    expect(result.artifacts).toMatchObject([
+      {
+        title: 'a.xlsx',
+        storage: 'workspace',
+        workspacePath: 'reports/a.xlsx',
+        description: 'Daily reports',
+      },
+      {
+        title: 'b.docx',
+        storage: 'workspace',
+        workspacePath: 'reports/b.docx',
+        description: 'Daily reports',
+      },
+      {
+        title: 'c.pptx',
+        storage: 'workspace',
+        workspacePath: 'reports/nested/c.pptx',
+        description: 'Daily reports',
+      },
+    ]);
   });
 
   it('rejects a workspace-relative path that escapes the execution directory', () => {

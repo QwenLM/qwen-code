@@ -114,6 +114,7 @@ describe('TurnOutputs helpers', () => {
     ['audio', FileAudioIcon],
     ['pdf', FileTextIcon],
     ['notebook', NotebookTabsIcon],
+    ['document', FileTextIcon],
   ])('selects the Lucide icon for %s artifacts', (kind, icon) => {
     expect(getArtifactFormatIcon(kind)).toBe(icon);
   });

@@ -1919,6 +1919,7 @@ describe('SessionArtifactStore', () => {
       { title: 'Page', workspacePath: 'reports/index.html' },
       { title: 'Image', workspacePath: 'screenshots/app.png' },
       { title: 'Notebook', workspacePath: 'analysis/run.ipynb' },
+      { title: 'Sheet', workspacePath: 'data/table.xlsx' },
       { title: 'Unknown file', workspacePath: 'artifacts/blob.unknown' },
       { title: 'Managed item', managedId: 'ext-123' },
     ]);
@@ -1927,9 +1928,111 @@ describe('SessionArtifactStore', () => {
       'html',
       'image',
       'notebook',
+      'document',
       'file',
       'other',
     ]);
+  });
+
+  it('expands a directory workspacePath into per-file artifacts', async () => {
+    const dir = path.join(workspace, 'scheduler_timeline_daily');
+    await fs.mkdir(path.join(dir, 'nested'), { recursive: true });
+    await fs.writeFile(path.join(dir, 'day1.xlsx'), 'xlsx-1');
+    await fs.writeFile(path.join(dir, 'day2.xlsx'), 'xlsx-2');
+    await fs.writeFile(path.join(dir, '.hidden.xlsx'), 'hidden');
+    await fs.writeFile(path.join(dir, '~$lock.xlsx'), 'lock');
+    await fs.writeFile(path.join(dir, 'nested', 'day3.xlsx'), 'xlsx-3');
+
+    const store = new SessionArtifactStore({
+      sessionId: 's-dir-expand',
+      workspaceCwd: workspace,
+    });
+    const result = await store.upsertMany(
+      [
+        {
+          title: '调度实例时间线数据 - 按天拆分 (17个Excel文件)',
+          kind: 'file',
+          workspacePath: 'scheduler_timeline_daily',
+          toolCallId: 'call-1',
+        },
+      ],
+      { strict: true },
+    );
+
+    expect(
+      result.changes.map((change) => change.artifact?.workspacePath),
+    ).toEqual([
+      'scheduler_timeline_daily/day1.xlsx',
+      'scheduler_timeline_daily/day2.xlsx',
+      'scheduler_timeline_daily/nested/day3.xlsx',
+    ]);
+    expect(result.changes.map((change) => change.artifact?.kind)).toEqual([
+      'document',
+      'document',
+      'document',
+    ]);
+    expect(result.changes.map((change) => change.artifact?.title)).toEqual([
+      'day1.xlsx',
+      'day2.xlsx',
+      'day3.xlsx',
+    ]);
+    expect(
+      result.changes.every(
+        (change) =>
+          change.artifact?.description ===
+          '调度实例时间线数据 - 按天拆分 (17个Excel文件)',
+      ),
+    ).toBe(true);
+    expect(
+      result.changes.every(
+        (change) => change.artifact?.toolCallId === 'call-1',
+      ),
+    ).toBe(true);
+
+    const listed = await store.list();
+    expect(
+      listed.artifacts.some(
+        (artifact) => artifact.workspacePath === 'scheduler_timeline_daily',
+      ),
+    ).toBe(false);
+  });
+
+  it('rejects an empty directory workspacePath', async () => {
+    await fs.mkdir(path.join(workspace, 'empty-dir'));
+    const store = new SessionArtifactStore({
+      sessionId: 's-dir-empty',
+      workspaceCwd: workspace,
+    });
+
+    await expect(
+      store.upsertMany([{ title: 'Empty', workspacePath: 'empty-dir' }], {
+        strict: true,
+      }),
+    ).rejects.toMatchObject({ field: 'workspacePath' });
+  });
+
+  it('caps expanded directory files and warns', async () => {
+    const dir = path.join(workspace, 'many-files');
+    await fs.mkdir(dir);
+    await Promise.all(
+      Array.from({ length: 105 }, (_, index) =>
+        fs.writeFile(
+          path.join(dir, `f${String(index).padStart(3, '0')}.txt`),
+          'x',
+        ),
+      ),
+    );
+
+    const store = new SessionArtifactStore({
+      sessionId: 's-dir-cap',
+      workspaceCwd: workspace,
+    });
+    const result = await store.upsertMany([
+      { title: 'Many', workspacePath: 'many-files' },
+    ]);
+
+    expect(result.changes).toHaveLength(100);
+    expect(result.warnings?.[0]).toMatch(/more than 100/);
   });
 
   it('rejects unsafe display markup in title and description', async () => {

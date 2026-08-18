@@ -209,6 +209,11 @@ export {
   resolveBoundWorkspaceRoot,
   toCanonicalWorkspaceArtifactPath,
 } from './utils/workspace-artifact-path.js';
+export {
+  MAX_DIRECTORY_ARTIFACT_FILES,
+  collectRecordableWorkspaceFiles,
+  isOfficeDocumentExtension,
+} from './utils/workspace-artifact-directory.js';
 export type {
   ArtifactTool,
   ArtifactToolParams,

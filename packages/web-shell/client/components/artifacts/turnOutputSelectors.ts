@@ -4,7 +4,7 @@ import type {
   TurnOutputFileChange,
   TurnOutputScheduledTask,
 } from './TurnOutputs';
-import { isSamePath, normalizePath } from './artifactUtils';
+import { isSamePath, normalizePath, stripWorkspacePath } from './artifactUtils';
 
 function getToolCallIds(tool: ACPToolCall): string[] {
   const ids = new Set<string>();
@@ -101,7 +101,7 @@ function getRecordArtifactTurnIds(
     if (
       reference.workspacePath &&
       artifact.workspacePath &&
-      isSameWorkspacePath(
+      isSameWorkspacePathOrChild(
         reference.workspacePath,
         artifact.workspacePath,
         workspaceCwd,
@@ -495,4 +495,20 @@ function isSameWorkspacePath(
   workspaceCwd?: string,
 ) {
   return isSamePath(left, right, workspaceCwd);
+}
+
+function isSameWorkspacePathOrChild(
+  parent: string,
+  child: string,
+  workspaceCwd?: string,
+) {
+  if (isSamePath(parent, child, workspaceCwd)) {
+    return true;
+  }
+  const normalizedParent = stripWorkspacePath(parent, workspaceCwd);
+  const normalizedChild = stripWorkspacePath(child, workspaceCwd);
+  return (
+    Boolean(normalizedParent) &&
+    normalizedChild.startsWith(`${normalizedParent}/`)
+  );
 }

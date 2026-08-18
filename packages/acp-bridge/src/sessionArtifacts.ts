@@ -9,8 +9,11 @@ import { constants as fsConstants, promises as fs, type Stats } from 'node:fs';
 import type { FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import {
+  collectRecordableWorkspaceFiles,
+  isOfficeDocumentExtension,
   isPrototypeMetadataKey,
   isReservedWorkspaceMetadataKey,
+  MAX_DIRECTORY_ARTIFACT_FILES,
   metadataBudgetBytes,
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
   stableSessionArtifactId,
@@ -37,6 +40,7 @@ export type DaemonSessionArtifactKind =
   | 'audio'
   | 'pdf'
   | 'notebook'
+  | 'document'
   | 'other';
 
 export type DaemonSessionArtifactStorage =
@@ -328,13 +332,19 @@ export class SessionArtifactStore {
       const warningDetails: SessionArtifactWarningDetail[] = [];
       for (const input of inputs) {
         try {
-          normalizedResults.push(
-            await this.normalizeInput(
-              input,
-              ++this.receivedSeq,
-              options.trustedPublisher === true,
-            ),
-          );
+          const expanded = await this.expandWorkspaceDirectoryInput(input);
+          if (expanded.warning) {
+            warnings.push(expanded.warning);
+          }
+          for (const item of expanded.inputs) {
+            normalizedResults.push(
+              await this.normalizeInput(
+                item,
+                ++this.receivedSeq,
+                options.trustedPublisher === true,
+              ),
+            );
+          }
         } catch (error) {
           if (validationStrict) {
             throw error;
@@ -1249,6 +1259,71 @@ export class SessionArtifactStore {
       existing.clientId,
       options?.clientId,
     );
+  }
+
+  private async expandWorkspaceDirectoryInput(
+    input: SessionArtifactInput,
+  ): Promise<{ inputs: SessionArtifactInput[]; warning?: string }> {
+    const workspacePath = input.workspacePath?.trim();
+    if (!workspacePath) {
+      return { inputs: [input] };
+    }
+    const realWorkspace = await this.getRealWorkspaceCwdForValidation();
+    const normalizedPath = normalizeWorkspacePath(workspacePath, realWorkspace);
+    const absolutePath = path.resolve(realWorkspace, normalizedPath);
+    let stat: Stats;
+    try {
+      stat = await fs.lstat(absolutePath);
+    } catch (error) {
+      if (isNotFoundError(error)) {
+        return { inputs: [input] };
+      }
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new SessionArtifactValidationError(
+        `workspacePath could not be inspected: ${reason}`,
+        'workspacePath',
+      );
+    }
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      return { inputs: [input] };
+    }
+
+    const collected = await collectRecordableWorkspaceFiles(
+      absolutePath,
+      normalizedPath,
+      realWorkspace,
+    );
+    if (collected.files.length === 0) {
+      throw new SessionArtifactValidationError(
+        'workspacePath is a directory with no recordable files',
+        'workspacePath',
+      );
+    }
+
+    const parentTitle = input.title?.trim() ?? '';
+    const parentDescription = input.description?.trim();
+    return {
+      inputs: collected.files.map((filePath) => {
+        const title = path.posix.basename(filePath);
+        const description =
+          parentDescription ||
+          (parentTitle && parentTitle !== title ? parentTitle : undefined);
+        return {
+          ...input,
+          title,
+          workspacePath: filePath,
+          kind: undefined,
+          mimeType: undefined,
+          sizeBytes: undefined,
+          ...(description ? { description } : { description: undefined }),
+        };
+      }),
+      ...(collected.truncated
+        ? {
+            warning: `workspacePath "${normalizedPath}" contained more than ${MAX_DIRECTORY_ARTIFACT_FILES} files; recorded the first ${MAX_DIRECTORY_ARTIFACT_FILES}`,
+          }
+        : {}),
+    };
   }
 
   private async normalizeInput(
@@ -2356,6 +2431,7 @@ function normalizeKind(kind: unknown): DaemonSessionArtifactKind {
     kind === 'audio' ||
     kind === 'pdf' ||
     kind === 'notebook' ||
+    kind === 'document' ||
     kind === 'other'
   ) {
     return kind;
@@ -2835,6 +2911,7 @@ function inferKind(input: {
   if (['.mp3', '.wav', '.m4a', '.ogg'].includes(ext)) return 'audio';
   if (ext === '.pdf') return 'pdf';
   if (ext === '.ipynb') return 'notebook';
+  if (isOfficeDocumentExtension(ext)) return 'document';
   return input.workspacePath ? 'file' : 'other';
 }
 
@@ -2868,60 +2945,58 @@ async function getWorkspaceStatus(
       if (!isSameFile(preOpenStat, stat)) {
         return { status: 'missing', escaped: true };
       }
-      if (stat.isFile()) {
-        const expectedMtimeMs =
-          typeof expected?.mtimeMs === 'number' ? expected.mtimeMs : undefined;
-        const expectedSha256 =
-          typeof expected?.sha256 === 'string' ? expected.sha256 : undefined;
-        const unchanged =
-          expected?.sizeBytes === stat.size && expectedMtimeMs === stat.mtimeMs;
-        const sizeChanged =
-          expected?.sizeBytes !== undefined && expected.sizeBytes !== stat.size;
-        if (sizeChanged) {
-          return {
-            status: 'changed',
-            sizeBytes: stat.size,
-            mtimeMs: stat.mtimeMs,
-          };
-        }
-        if (unchanged) {
-          return {
-            status: 'available',
-            sizeBytes: stat.size,
-            mtimeMs: stat.mtimeMs,
-          };
-        }
-        if (stat.size > MAX_WORKSPACE_HASH_BYTES) {
-          return {
-            status: expectedSha256 ? 'changed' : 'available',
-            sizeBytes: stat.size,
-            mtimeMs: stat.mtimeMs,
-          };
-        }
-        if (!options.hashContent) {
-          return {
-            status: expectedSha256 ? 'changed' : 'available',
-            sizeBytes: stat.size,
-            mtimeMs: stat.mtimeMs,
-          };
-        }
-        const sha256 = await hashFile(handle);
-        if (expectedSha256 && sha256 !== expectedSha256) {
-          return {
-            status: 'changed',
-            sizeBytes: stat.size,
-            mtimeMs: stat.mtimeMs,
-          };
-        }
+      if (!stat.isFile()) {
+        throw new Error('path is not a regular file');
+      }
+      const expectedMtimeMs =
+        typeof expected?.mtimeMs === 'number' ? expected.mtimeMs : undefined;
+      const expectedSha256 =
+        typeof expected?.sha256 === 'string' ? expected.sha256 : undefined;
+      const unchanged =
+        expected?.sizeBytes === stat.size && expectedMtimeMs === stat.mtimeMs;
+      const sizeChanged =
+        expected?.sizeBytes !== undefined && expected.sizeBytes !== stat.size;
+      if (sizeChanged) {
+        return {
+          status: 'changed',
+          sizeBytes: stat.size,
+          mtimeMs: stat.mtimeMs,
+        };
+      }
+      if (unchanged) {
         return {
           status: 'available',
           sizeBytes: stat.size,
           mtimeMs: stat.mtimeMs,
-          sha256,
+        };
+      }
+      if (stat.size > MAX_WORKSPACE_HASH_BYTES) {
+        return {
+          status: expectedSha256 ? 'changed' : 'available',
+          sizeBytes: stat.size,
+          mtimeMs: stat.mtimeMs,
+        };
+      }
+      if (!options.hashContent) {
+        return {
+          status: expectedSha256 ? 'changed' : 'available',
+          sizeBytes: stat.size,
+          mtimeMs: stat.mtimeMs,
+        };
+      }
+      const sha256 = await hashFile(handle);
+      if (expectedSha256 && sha256 !== expectedSha256) {
+        return {
+          status: 'changed',
+          sizeBytes: stat.size,
+          mtimeMs: stat.mtimeMs,
         };
       }
       return {
         status: 'available',
+        sizeBytes: stat.size,
+        mtimeMs: stat.mtimeMs,
+        sha256,
       };
     } finally {
       await handle.close();

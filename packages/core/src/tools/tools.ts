@@ -464,6 +464,7 @@ export type ToolArtifactKind =
   | 'audio'
   | 'pdf'
   | 'notebook'
+  | 'document'
   | 'other';
 
 export type ToolResultArtifactState = 'undecided' | 'none' | 'reusable';

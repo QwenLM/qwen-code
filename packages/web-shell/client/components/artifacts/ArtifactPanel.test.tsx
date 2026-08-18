@@ -789,6 +789,13 @@ describe('ArtifactPanel code review artifacts', () => {
     // The regression the early `return` in the dispatch can cause: an
     // artifact WITHOUT the code_review metadata must keep reaching the
     // generic file preview, not the dedicated renderer.
+    mockWorkspaceActions.stat.mockResolvedValue({
+      kind: 'stat',
+      path: '.qwen/reviews/review.json',
+      type: 'file',
+      sizeBytes: 2,
+      modifiedMs: 1,
+    });
     mockWorkspaceActions.readWorkspaceFile.mockResolvedValue({
       content: '{}',
       truncated: false,
