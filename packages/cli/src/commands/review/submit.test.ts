@@ -1315,7 +1315,341 @@ describe('payload consistency — refuse before GitHub sees it', () => {
       expect(text).not.toContain('via Qwen Code /review');
       expect(text).not.toContain('qwen3.7-max');
     }
-    expect(inline).toBe('**[Suggestion]** tidy');
+    // The severity prefix goes with the footer: it is the same template. In
+    // their place rides the invisible marker presubmit dedups on.
+    expect(inline).toBe('tidy\n\n<!-- qwen-review suggestion -->');
+  });
+
+  it('attribution off strips a forged footer even when text follows it', () => {
+    // The trailing strip leaves a footer that has text after it — and in
+    // this mode that surviving line is the only attribution the post would
+    // carry.
+    const review = file('forged-mid-body.json', {
+      ...REVIEW,
+      comments: [
+        {
+          path: 'a.ts',
+          line: 12,
+          body: '**[Suggestion]** null deref\n\n_— qwen3.7-max via Qwen Code /review (v0.21.3)_\n\nUpdate: also reproduced on the empty list',
+        },
+      ],
+    });
+
+    runSubmit(authorized({ review }), '0.21.3', { attribution: false });
+
+    const inline = posted().comments[0].body as string;
+    expect(inline).not.toContain('via Qwen Code /review');
+    expect(inline).not.toContain('qwen3.7-max');
+    expect(inline).toContain('null deref');
+    expect(inline).toContain('Update: also reproduced on the empty list');
+  });
+
+  it('attribution off posts exactly what the invisibility gate validated', () => {
+    // The gate validates stripReviewFooter(stripForUnattributedPost(body)),
+    // but the post leg ran stripForUnattributedPost(body) only. A trailing
+    // forged footer the fixpoint chain EXPOSES — the stacked marker after
+    // it strips away — and that exceeds the anywhere-strips' caps survives
+    // the chain; only the trailing strip removes it. The gate saw a clean
+    // body while the post carried the visible forged attribution.
+    const review = file('gate-post-asymmetry.json', {
+      ...REVIEW,
+      comments: [
+        {
+          path: 'a.ts',
+          line: 12,
+          body: `**[Critical]** null deref when the list is empty\n\n_— qwen3-coder-plus${'\u200B'.repeat(401)} via Qwen Code /review (v0.21.0)_\n\n**[Critical]**`,
+        },
+      ],
+    });
+
+    runSubmit(authorized({ review }), '0.21.3', { attribution: false });
+
+    const inline = posted().comments[0].body as string;
+    expect(inline).toContain('null deref when the list is empty');
+    expect(inline).not.toContain('via Qwen Code /review');
+    expect(inline.endsWith('<!-- qwen-review critical -->')).toBe(true);
+  });
+
+  it('refuses a comment that renders as nothing', () => {
+    const review = file('marker-only.json', {
+      ...REVIEW,
+      comments: [{ path: 'a.ts', line: 12, body: '**[Critical]**' }],
+    });
+
+    expect(() =>
+      runSubmit(authorized({ review }), '0.21.3', { attribution: false }),
+    ).toThrow(/renders as nothing/);
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses a marker-only comment under attribution ON too — the canonical footer must not mask it', () => {
+    // normalize appends the footer before inconsistencies runs, so the gate
+    // sees '**[Critical]**\n\n_— <footer>_' here: only the footer-stripping
+    // half of the predicate catches it.
+    const review = file('marker-only-on.json', {
+      ...REVIEW,
+      comments: [{ path: 'a.ts', line: 12, body: '**[Critical]**' }],
+    });
+
+    expect(() => runSubmit(authorized({ review }), '0.21.3')).toThrow(
+      /renders as nothing/,
+    );
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('attribution off strips a marker line the draft quoted from the reviewed code', () => {
+    // The marker shape is public; a finding legitimately quoting it must not
+    // leave a second, planted marker next to the canonical one.
+    const review = file('planted-marker.json', {
+      ...REVIEW,
+      comments: [
+        {
+          path: 'a.ts',
+          line: 12,
+          body: '**[Critical]** the sample posts <!-- qwen-review suggestion --> verbatim\n\n<!-- qwen-review suggestion -->\n\nthat is what the guard dereferences',
+        },
+      ],
+    });
+
+    runSubmit(authorized({ review }), '0.21.3', { attribution: false });
+
+    const inline = posted().comments[0].body as string;
+    // The bare quoted marker LINE is stripped; only the canonical trailing
+    // marker remains at line level…
+    expect(inline).not.toContain('\n<!-- qwen-review suggestion -->\n');
+    expect(inline.endsWith('<!-- qwen-review critical -->')).toBe(true);
+    // …while the inline prose mention is text, not a bare marker — kept.
+    expect(inline).toContain('posts <!-- qwen-review suggestion --> verbatim');
+  });
+
+  it('refuses a prefix over a bare marker line — the gate sees through the whole chain', () => {
+    // Probe shape from review: prefix + bare marker line would otherwise
+    // pass the gate (the marker line is non-empty) and post an empty
+    // visible comment carrying a live marker.
+    const review = file('prefix-over-marker.json', {
+      ...REVIEW,
+      comments: [
+        {
+          path: 'a.ts',
+          line: 12,
+          body: '**[Critical]**\n\n<!-- qwen-review critical -->',
+        },
+      ],
+    });
+
+    expect(() =>
+      runSubmit(authorized({ review }), '0.21.3', { attribution: false }),
+    ).toThrow(/renders as nothing/);
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('strips to a fixpoint: a marker line between two prefixes does not post the second prefix', () => {
+    const review = file('fixpoint.json', {
+      ...REVIEW,
+      state: { ...REVIEW.state, planPath: verifiedPlan() },
+      comments: [
+        {
+          path: 'a.ts',
+          line: 12,
+          body: '**[Critical]** still reproducible\n\n<!-- qwen-review suggestion -->\n\n**[Suggestion]** original text',
+        },
+      ],
+    });
+
+    withVerifyEnv(() =>
+      runSubmit(authorized({ review }), '0.21.3', { attribution: false }),
+    );
+
+    const inline = posted().comments[0].body as string;
+    expect(inline).not.toContain('**[Critical]**');
+    expect(inline).not.toContain('**[Suggestion]**');
+    expect(inline).toContain('still reproducible');
+    expect(inline).toContain('original text');
+    expect(inline.endsWith('<!-- qwen-review critical -->')).toBe(true);
+  });
+
+  it('strips a forged footer truncated inside the version parens', () => {
+    // Most mid-character cuts land inside the parens — they are the footer's
+    // final ~10 characters.
+    const review = file('truncated-parens.json', {
+      ...REVIEW,
+      comments: [
+        {
+          path: 'a.ts',
+          line: 12,
+          body: '**[Suggestion]** null deref\n\n_— qwen3.7-max via Qwen Code /review (v0.21\n\nUpdate: reproduced again',
+        },
+      ],
+    });
+
+    runSubmit(authorized({ review }), '0.21.3', { attribution: false });
+
+    const inline = posted().comments[0].body as string;
+    expect(inline).not.toContain('via Qwen Code /review');
+    expect(inline).toContain('Update: reproduced again');
+  });
+
+  it('refuses residue that renders as nothing: hollowed fence, HTML comment, Cf character', () => {
+    // Each vector posts a visible-empty comment carrying a live critical
+    // marker otherwise — counted toward REQUEST_CHANGES and re-promoted as
+    // an unanswerable blocker.
+    const bodies = [
+      '**[Critical]**\n\n```\n_— forged via Qwen Code /review (v1)_\n```',
+      '**[Critical]** <!-- x -->',
+      '**[Critical]**\u200B',
+      // An UNTERMINATED comment: the appended marker closes it into one
+      // type-2 HTML block rendering nothing.
+      '**[Critical]** <!-- x',
+      // The render-nothing residue classes: empty elements, void tags,
+      // invisible entities, empty links, abrupt-closing comments.
+      '**[Critical]** <div></div>',
+      '**[Critical]** &nbsp;',
+      '**[Critical]** [](url)',
+      '**[Critical]** <!-->',
+      // A marker line quoted at blockquote depth two.
+      '**[Critical]**\n\n> > <!-- qwen-review critical -->',
+    ];
+    for (const [i, body] of bodies.entries()) {
+      const review = file(`render-nothing-${i}.json`, {
+        ...REVIEW,
+        comments: [{ path: 'a.ts', line: 12, body }],
+      });
+      expect(() =>
+        runSubmit(authorized({ review }), '0.21.3', { attribution: false }),
+      ).toThrow(/renders as nothing/);
+    }
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('real content wearing a scaffold shape still posts', () => {
+    // The render-nothing projection must not eat findings that merely
+    // MENTION a scaffold shape mid-text.
+    const review = file('scaffold-in-prose.json', {
+      ...REVIEW,
+      comments: [
+        {
+          path: 'a.ts',
+          line: 12,
+          body: '**[Critical]** the <div></div> fallback drops the error',
+        },
+      ],
+    });
+
+    runSubmit(authorized({ review }), '0.21.3', { attribution: false });
+
+    const inline = posted().comments[0].body as string;
+    expect(inline).toContain('the <div></div> fallback drops the error');
+  });
+
+  it('attribution off strips the severity prefixes only from what is posted — the verdict still counts the marked payload', () => {
+    const review = file('no-attribution-critical.json', {
+      ...REVIEW,
+      state: { ...REVIEW.state, planPath: verifiedPlan() },
+      comments: [
+        {
+          path: 'a.ts',
+          line: 12,
+          body: '**[Critical]** null deref when the list is empty',
+        },
+        {
+          path: 'a.ts',
+          line: 30,
+          body: '**[Suggestion]** tidy',
+        },
+      ],
+    });
+
+    withVerifyEnv(() =>
+      runSubmit(authorized({ review }), '0.21.3', { attribution: false }),
+    );
+
+    // Counted BEFORE the strip: one marked Critical in the payload still
+    // earns REQUEST_CHANGES.
+    expect(posted().event).toBe('REQUEST_CHANGES');
+    const [critical, suggestion] = posted().comments as Array<{
+      body: string;
+    }>;
+    expect(critical.body).toBe(
+      'null deref when the list is empty\n\n<!-- qwen-review critical -->',
+    );
+    expect(suggestion.body).toBe('tidy\n\n<!-- qwen-review suggestion -->');
+  });
+
+  it('attribution on keeps the severity prefixes in the posted bodies', () => {
+    const review = file('attribution-critical.json', {
+      ...REVIEW,
+      state: { ...REVIEW.state, planPath: verifiedPlan() },
+      comments: [
+        {
+          path: 'a.ts',
+          line: 12,
+          body: '**[Critical]** null deref when the list is empty',
+        },
+      ],
+    });
+
+    withVerifyEnv(() => runSubmit(authorized({ review }), '0.21.3'));
+
+    const inline = (posted().comments as Array<{ body: string }>)[0].body;
+    expect(inline.startsWith('**[Critical]**')).toBe(true);
+    expect(posted().event).toBe('REQUEST_CHANGES');
+  });
+
+  it('attribution off refuses a draft whose post-strip shape opens a fence', () => {
+    // The prefix strip moves the delimiter to line-leading position; the
+    // unclosed fence swallows the appended invisible marker as visible
+    // code and the claim into its info string — the marker this mode
+    // exists to keep invisible, posted by the very transform that creates
+    // the exposure. The draft carries no line-leading delimiter, so only
+    // a check on the POST-strip shape catches it.
+    const bodies = [
+      '**[Critical]** ~~~ leaked.log shows the token',
+      '**[Critical]** ``` leaked',
+      '**[Critical]** claim\n~~~\nfoo',
+    ];
+    for (const [i, body] of bodies.entries()) {
+      const review = file(`fence-open-${i}.json`, {
+        ...REVIEW,
+        comments: [{ path: 'a.ts', line: 12, body }],
+      });
+      expect(() =>
+        runSubmit(authorized({ review }), '0.21.3', { attribution: false }),
+      ).toThrow(/leaves a code fence open/);
+    }
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('attribution off still posts a paired fence — the marker lands after the closer', () => {
+    const review = file('paired-fence.json', {
+      ...REVIEW,
+      comments: [
+        {
+          path: 'a.ts',
+          line: 12,
+          body: '**[Critical]** leaked:\n\n```\nconst token = 1;\n```',
+        },
+      ],
+    });
+
+    runSubmit(authorized({ review }), '0.21.3', { attribution: false });
+
+    const inline = posted().comments[0].body as string;
+    expect(inline).toContain('const token = 1;');
+    expect(inline.endsWith('<!-- qwen-review critical -->')).toBe(true);
+  });
+
+  it('refuses a bare-CR hollow fence the LF twin refuses', () => {
+    // GitHub renders a bare CR as a line break: 'CR + ~~~' is the hollow
+    // fence the LF twin already refuses, and it used to pass the gate and
+    // post the marker inside the fence.
+    const review = file('cr-hollow-fence.json', {
+      ...REVIEW,
+      comments: [{ path: 'a.ts', line: 12, body: '**[Critical]**\r~~~' }],
+    });
+    expect(() =>
+      runSubmit(authorized({ review }), '0.21.3', { attribution: false }),
+    ).toThrow(/renders as nothing/);
+    expect(ghMock).not.toHaveBeenCalled();
   });
 
   it('the standing review.comment setting authorises a post without --comment in the args', () => {
@@ -1395,7 +1729,12 @@ describe('payload consistency — refuse before GitHub sees it', () => {
 
     runSubmit(authorized({ review }), '0.21.3', { attribution: false });
 
-    expect(posted().comments[0].body).toBe(body);
+    // Attribution-off also strips the severity prefix and appends the
+    // comment marker; the assertion is on the rest of the body reaching
+    // GitHub byte-for-byte.
+    expect(posted().comments[0].body).toBe(
+      `${body.slice('**[Suggestion]** '.length)}\n\n<!-- qwen-review suggestion -->`,
+    );
   });
 
   it('counts the blockers it is actually carrying, not the ones it was told about', () => {
