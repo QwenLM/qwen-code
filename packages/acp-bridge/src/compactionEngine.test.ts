@@ -1129,6 +1129,100 @@ describe('TurnBoundaryCompactionEngine', () => {
     const markerOf = (snap: { liveJournal: BridgeEvent[] }) =>
       snap.liveJournal.find((e) => e.type === 'history_truncated');
 
+    it('keeps an independent summary journal without nested subagent updates', () => {
+      const engine = new TurnBoundaryCompactionEngine({
+        maxJournalEvents: 2,
+        maxJournalBytes: 512,
+      });
+      engine.ingest(makeToolCall(1, 'agent-1', 'running'));
+      for (let i = 2; i <= 100; i++) {
+        engine.ingest(
+          makeTextChunkWithParent(i, `nested-${i}`, 'agent-1'),
+          1024 * 1024,
+        );
+      }
+      engine.ingest(makeToolCallUpdate(101, 'agent-1', 'completed'));
+
+      const full = engine.snapshot();
+      expect(markerOf(full)).toBeDefined();
+      expect(full.lastEventId).toBe(101);
+
+      const summary = engine.snapshot('summary');
+      expect(markerOf(summary)).toBeUndefined();
+      expect(summary.liveJournal.map((event) => event.id)).toEqual([1, 101]);
+      expect(summary.lastEventId).toBe(101);
+
+      engine.ingest(makeTurnComplete(102));
+      expect(engine.snapshot('summary').liveJournal).toEqual([]);
+      expect(extractTexts(engine.snapshot().compactedTurns).join('')).toBe(
+        Array.from({ length: 99 }, (_, index) => `nested-${index + 2}`).join(
+          '',
+        ),
+      );
+    });
+
+    it('retains nested usage frames in the summary journal', () => {
+      const engine = new TurnBoundaryCompactionEngine();
+      const usage = makeTextChunkWithParent(1, '', 'agent-1');
+      (
+        usage.data as { update: { _meta: Record<string, unknown> } }
+      ).update._meta['usage'] = { inputTokens: 10, outputTokens: 2 };
+      engine.ingest(usage);
+      engine.ingest(makeTextChunkWithParent(2, 'nested detail', 'agent-1'));
+
+      expect(
+        engine.snapshot('summary').liveJournal.map((event) => event.id),
+      ).toEqual([1]);
+    });
+
+    it('excludes parented tool frames from the summary journal under cap pressure', () => {
+      const engine = new TurnBoundaryCompactionEngine({
+        maxJournalEvents: 2,
+      });
+      engine.ingest(makeToolCall(1, 'agent-1', 'pending'));
+      for (let i = 2; i <= 5; i++) {
+        engine.ingest(
+          makeToolCallUpdate(i, `sub-tool-${i}`, 'in_progress', {
+            _meta: { parentToolCallId: 'agent-1' },
+          }),
+        );
+      }
+      engine.ingest(makeToolCallUpdate(6, 'agent-1', 'completed'));
+
+      const full = engine.snapshot();
+      expect(markerOf(full)).toBeDefined();
+      expect(
+        full.liveJournal
+          .filter((event) => event.type !== 'history_truncated')
+          .map((event) => event.id),
+      ).toEqual([5, 6]);
+
+      const summary = engine.snapshot('summary');
+      expect(markerOf(summary)).toBeUndefined();
+      expect(summary.liveJournal.map((event) => event.id)).toEqual([1, 6]);
+    });
+
+    it('keeps self-parented tool frames in the summary journal like the UI normalizer', () => {
+      // normalizeToolUpdate drops parentToolCallId === toolCallId, so the
+      // main transcript renders such a frame as a ROOT tool block; the
+      // summary journal must agree or a mid-turn refresh drops the block.
+      const engine = new TurnBoundaryCompactionEngine();
+      engine.ingest(
+        makeToolCall(1, 'self-tool', 'pending', {
+          _meta: { parentToolCallId: 'self-tool' },
+        }),
+      );
+      engine.ingest(
+        makeToolCallUpdate(2, 'self-tool', 'completed', {
+          _meta: { parentToolCallId: 'self-tool' },
+        }),
+      );
+
+      expect(
+        engine.snapshot('summary').liveJournal.map((event) => event.id),
+      ).toEqual([1, 2]);
+    });
+
     it('keeps a long compatible text stream below the event cap', () => {
       const engine = new TurnBoundaryCompactionEngine({
         maxJournalEvents: 3,
@@ -1287,6 +1381,64 @@ describe('TurnBoundaryCompactionEngine', () => {
         recordId: 'record-anchor',
       });
     });
+
+    it('summary marker ignores recordIds from excluded nested events', () => {
+      const engine = new TurnBoundaryCompactionEngine({
+        maxJournalEvents: 2,
+      });
+      const root = makeTextChunk(1, 'root');
+      (root.data as { update: Record<string, unknown> }).update['_meta'] = {
+        'qwen.session.recordId': 'root-record',
+      };
+      const nested = makeTextChunkWithParent(2, 'nested', 'agent-1');
+      (
+        nested.data as { update: { _meta: Record<string, unknown> } }
+      ).update._meta['qwen.session.recordId'] = 'nested-record';
+      engine.ingest(root);
+      engine.ingest(nested);
+      engine.ingest(makeUserMessage(3, 'a'));
+      engine.ingest(makeUserMessage(4, 'b'));
+
+      expect(markerOf(engine.snapshot())?.data).toMatchObject({
+        recordId: 'nested-record',
+      });
+      expect(markerOf(engine.snapshot('summary'))?.data).toMatchObject({
+        recordId: 'root-record',
+      });
+    });
+
+    it.each(['seed', 'seedReplayEvents'] as const)(
+      '%s derives the summary marker anchor from root events',
+      (method) => {
+        const engine = new TurnBoundaryCompactionEngine({
+          maxJournalEvents: 2,
+        });
+        const root = makeTextChunk(1, 'root');
+        (root.data as { update: Record<string, unknown> }).update['_meta'] = {
+          'qwen.session.recordId': 'root-record',
+        };
+        const nested = makeTextChunkWithParent(2, 'nested', 'agent-1');
+        (
+          nested.data as { update: { _meta: Record<string, unknown> } }
+        ).update._meta['qwen.session.recordId'] = 'nested-record';
+
+        if (method === 'seed') {
+          engine.seed({ compactedTurns: [root, nested], lastEventId: 2 });
+        } else {
+          engine.seedReplayEvents([root, nested]);
+        }
+        engine.ingest(makeUserMessage(3, 'a'));
+        engine.ingest(makeUserMessage(4, 'b'));
+        engine.ingest(makeUserMessage(5, 'c'));
+
+        expect(markerOf(engine.snapshot())?.data).toMatchObject({
+          recordId: 'nested-record',
+        });
+        expect(markerOf(engine.snapshot('summary'))?.data).toMatchObject({
+          recordId: 'root-record',
+        });
+      },
+    );
 
     it('seeded engine stamps marker with recordId observed on post-seed ingest', () => {
       // A seed resets activeRecordId; subsequent ingest must rebuild it.
@@ -1858,6 +2010,51 @@ describe('TurnBoundaryCompactionEngine', () => {
         maxBytes: 32 * 1024 * 1024,
       });
     });
+
+    it('accepts growth from the summary journal once it breaches alone', () => {
+      // Nested frames pressure only the full journal, so an early refusal
+      // evicts a root frame from the full journal while the summary journal
+      // retains it. The journals then diverge, and a later root append that
+      // breaches the summary journal must compute its growth decision from
+      // the summary journal's own tail — not the full journal's.
+      let clockMs = 1_000_000;
+      const asks: Array<{ maxEvents: number; maxBytes: number }> = [];
+      const grants: Array<{ maxEvents: number; maxBytes: number } | undefined> =
+        [
+          undefined, // first breach (full journal): refuse
+          { maxEvents: 100, maxBytes: 120 }, // second breach (full): accept
+          { maxEvents: 100, maxBytes: 140 }, // third breach (summary): accept
+        ];
+      const engine = new TurnBoundaryCompactionEngine({
+        maxJournalEvents: 100,
+        maxJournalBytes: 100,
+        now: () => clockMs,
+        onJournalGrowth: (current) => {
+          asks.push({ ...current });
+          return grants.shift();
+        },
+      });
+      engine.ingest(makeUserMessage(1, 'root-1'), 70);
+      engine.ingest(makeTextChunkWithParent(2, 'nested', 'agent-1'), 60);
+      // Past the refusal throttle: the new breach gets a fresh ask.
+      clockMs += 10_000;
+      engine.ingest(makeUserMessage(3, 'root-2'), 60);
+
+      // The third ask reports the caps grown by the full journal's grant,
+      // proving the summary breach was consulted separately after it.
+      expect(asks).toEqual([
+        { maxEvents: 100, maxBytes: 100 },
+        { maxEvents: 100, maxBytes: 100 },
+        { maxEvents: 100, maxBytes: 120 },
+      ]);
+      expect(engine.journalLimits()).toEqual({
+        maxEvents: 100,
+        maxBytes: 140,
+      });
+      const summary = engine.snapshot('summary');
+      expect(markerOf(summary)).toBeUndefined();
+      expect(summary.liveJournal.map((event) => event.id)).toEqual([1, 3]);
+    });
   });
 
   describe('multi-turn sessions', () => {
@@ -2210,6 +2407,40 @@ describe('transcript record provenance compaction', () => {
     expect(updateOf(toolEvent!)['_meta']).toMatchObject({
       qwenTranscript: {
         sourceRecordIds: ['start-record', 'result-record'],
+      },
+    });
+  });
+
+  it('preserves a replay branch anchor while merging text chunks', () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    const first = withSources(makeTextChunk(1, 'one '), ['assistant-record']);
+    const firstUpdate = updateOf(first);
+    firstUpdate['_meta'] = {
+      qwenTranscript: {
+        sourceRecordIds: ['assistant-record'],
+        branchRecordId: 'checkpoint-record',
+      },
+    };
+    engine.ingest(first);
+    engine.ingest(withSources(makeTextChunk(2, 'two'), ['assistant-record']));
+    engine.ingest(makeTurnComplete(3));
+
+    const textEvents = engine
+      .snapshot()
+      .compactedTurns.filter(
+        (event) =>
+          event.type === 'session_update' &&
+          updateOf(event)['sessionUpdate'] === 'agent_message_chunk',
+      );
+    expect(textEvents).toHaveLength(1);
+    const textEvent = textEvents[0]!;
+    expect((updateOf(textEvent)['content'] as { text: string }).text).toBe(
+      'one two',
+    );
+    expect(updateOf(textEvent!)['_meta']).toMatchObject({
+      qwenTranscript: {
+        sourceRecordIds: ['assistant-record'],
+        branchRecordId: 'checkpoint-record',
       },
     });
   });

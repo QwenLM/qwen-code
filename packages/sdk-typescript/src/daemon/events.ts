@@ -5,6 +5,7 @@
  */
 
 import type {
+  DaemonBranchPoint,
   DaemonEvent,
   DaemonErrorKind,
   DaemonMcpTransport,
@@ -814,6 +815,7 @@ export interface DaemonTurnCompleteData {
   sessionId: string;
   stopReason: string;
   promptId?: string;
+  branchPoint?: DaemonBranchPoint;
   [key: string]: unknown;
 }
 
@@ -822,6 +824,7 @@ export interface DaemonTurnErrorData {
   message: string;
   code?: string;
   errorKind?: DaemonErrorKind | (string & {});
+  loopType?: string;
   promptId?: string;
   [key: string]: unknown;
 }

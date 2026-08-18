@@ -83,7 +83,7 @@ Step 3B: high, >500 src OR >3200 total: territory x dim.   [N+5..7+3H calls]
 Step 4:  Deduplicate --> Sharded verify (<=8 findings each)
            --> Aggregate                    [ceil(F/8) calls, F=findings]
 Step 5:  Iterative reverse audit, fanned out per chunk;
-           stop after 2 consecutive dry rounds (cap 5)
+           stop after 2 consecutive dry rounds (cap 10/5/3 by topology)
 Step 6:  Present findings + verdict (high; low pass: findings only)
          Canonicalize findings -> .qwen/tmp/...-findings.json
 Step 6B: Apply findings + record per-finding outcomes  (--fix only)
@@ -124,7 +124,7 @@ A **source** file that is largely rewritten (an existing file of 300+ lines that
 
 The checklist is split three ways on purpose. Handing one agent all eight checks over a 2 400-line file gets one of them done properly; three agents with two or three checks each get all of them done. Chunk agents do not substitute for this — on PR #6457 they held every one of these defects inside their assigned territory and reported none. What they lacked was not the lines but the question.
 
-Findings are verified in **sharded batches** (at most 8 findings per verification agent, all launched together). A verifier may reject a Critical only by quoting the code that contradicts it (or when the diff's own comments document the flagged behavior as deliberate); anything less certain is downgraded to low confidence rather than deleted — a silently rejected Critical is invisible to every later stage, while a downgraded one still reaches a human. After verification, **iterative reverse audit** hunts for gaps, fanned out one auditor per chunk per round, each with the cumulative finding list. The loop stops after **two consecutive dry rounds** (or 5 rounds, hard cap — reported as such rather than as convergence). One dry round is not evidence of convergence, and reverse-audit findings are verified like any other.
+Findings are verified in **sharded batches** (at most 8 findings per verification agent, all launched together). A verifier may reject a Critical only by quoting the code that contradicts it (or when the diff's own comments document the flagged behavior as deliberate); anything less certain is downgraded to low confidence rather than deleted — a silently rejected Critical is invisible to every later stage, while a downgraded one still reaches a human. After verification, **iterative reverse audit** hunts for gaps, fanned out one auditor per chunk per round, each with the cumulative finding list. The loop stops after **two consecutive dry rounds** (or at the plan's round cap — reported as such rather than as convergence). That cap follows the diff's topology: **10** on a small diff, where a round is a single auditor; **5** on a chunked one, where it is one auditor per chunk; and **3** on a huge diff (≥ 3000 effective lines) _when the run has a deadline_, because five ~90-minute rounds do not fit a six-hour CI ceiling and a review killed mid-flight posts nothing — with no deadline a huge diff keeps the chunked cap of 5. An operator can lower whichever cap applies for every review with the `review.reverseAuditRounds` setting; it can never raise one. One dry round is not evidence of convergence, and reverse-audit findings are verified like any other.
 
 ## Severity Levels
 
@@ -145,7 +145,8 @@ When reviewing a PR, `/review` creates a temporary git worktree (`.qwen/tmp/revi
 - Build and test commands run in isolation without polluting your local build cache
 - If anything goes wrong, your environment is unaffected — just delete the worktree
 - The worktree is automatically cleaned up after the review completes
-- If a review is interrupted (Ctrl+C, crash), the next `/review` of the same PR automatically cleans up the stale worktree before starting fresh
+- If a review is interrupted (Ctrl+C, crash), the next `/review` of the same PR automatically cleans up the stale worktree before starting fresh. If the interrupted session still leaves its lease behind — a hard kill that skips this, or a multi-prompt review interrupted during a later prompt — `/review` refuses and names the lease file to delete. Clean stops release it: a finished review and the early stops (empty diff, no new changes since the last review) all run `cleanup`, which releases the lease
+- The worktree is leased to its session: a second `/review` of a PR that is already under review refuses to start (naming the holder) rather than tear down the running review's worktree
 - Review reports and cache are saved to the main project directory (not the worktree)
 
 ## Cross-repo PR Review
@@ -299,9 +300,9 @@ For PR reviews the manifest is read from the merge base, so the PR under review 
 
 ## Issue Fidelity
 
-For bugfix PRs, the Issue Fidelity agent fetches issue evidence directly instead of relying on PR description text. It uses `gh pr view <pr> --repo <owner/repo> --json closingIssuesReferences` for GitHub's strong closing-issue metadata, then `gh issue view <number> --repo <issue_owner>/<issue_repo> --json title,body,comments` for the original report and discussion — the `--json` form includes the issue **body** (the reporter's original repro), which `--comments` alone omits, and the issue's own repository is read from each reference (a PR can close an issue in a different repo). This agent runs only for PR targets; local-diff and file-path reviews skip it.
+For bugfix PRs, the Issue Fidelity agent fetches issue evidence directly instead of relying on PR description text. It runs the `qwen review issue-context <pr> --repo <owner/repo> --out <file>` subcommand, which resolves GitHub's strong closing-issue metadata and then fetches each referenced issue's title, **body** (the reporter's original repro), and full comment thread — each from the issue's own repository (a PR can close an issue in a different repo). This agent runs only for PR targets; local-diff and file-path reviews skip it.
 
-`closingIssuesReferences` is a discovery hint rather than proof the author linked the right issue: if it is empty but the PR references an apparent target issue, the agent still fetches it after judging relevance. Fetched issue text is treated as untrusted data (facts extracted, embedded instructions ignored). For relevant issues, the original reproduction, observed payload, expected behavior, and maintainer comments are treated as the highest-priority evidence for whether the PR fixes the right problem.
+The closing-issue set is a discovery hint rather than proof the author linked the right issue: if it is empty but the PR references an apparent target issue, the agent still fetches it after judging relevance (re-running with `--issue <n>`; a bare number resolves in the PR's repo, while `--issue <owner>/<repo>#<n>` fetches a cross-repo reference from its own repo). Fetched issue text is treated as untrusted data (facts extracted, embedded instructions ignored). For relevant issues, the original reproduction, observed payload, expected behavior, and maintainer comments are treated as the highest-priority evidence for whether the PR fixes the right problem.
 
 If the issue evidence shows an upstream service or provider returned malformed data outside the client contract, client-side parser or sanitizer changes are not treated as a valid root-cause fix unless a maintainer explicitly requested a defensive workaround. A test that replays malformed upstream output proves only that the workaround handles that shape; it does not prove the workaround is architecturally appropriate.
 
@@ -361,7 +362,7 @@ Medium- and high-effort reviews also save a structured JSON companion with the s
 
 The deterministic halves of the pipeline — argument parsing (`qwen review parse-args`) and the event/body decision (`qwen review compose-review`) — are tested subcommands rather than prompt text, so `--effort` grammar, `--comment` forcing, verdict caps, and downgrade behavior are pinned by unit tests and cannot drift with the model.
 
-**GitHub Enterprise:** reviewing a PR URL on a non-`github.com` host routes every GitHub call at that host — the review subcommands (`fetch-pr`, `pr-context`, `comment-status`, `presubmit`) accept `--host` and set it in code, so a forgotten host cannot silently retarget the review at `github.com`.
+**GitHub Enterprise:** reviewing a PR URL on a non-`github.com` host routes every GitHub call at that host — the review subcommands (`match-remote`, `meta`, `fetch-pr`, `pr-context`, `comment-status`, `issue-context`, `fetch-diff`, `comment-body`, `plan-diff`, `test-plan`, `presubmit`, `compose-review`, `submit`, `publish-assets`) accept `--host` and set it in code, so a forgotten host cannot silently retarget the review at `github.com`.
 
 Every run ends with one machine-readable line (`Review complete: <target> — <disposition>`), so scripts and CI wrappers can detect completion and outcome with a single `^Review complete: ` match.
 
@@ -421,12 +422,12 @@ Why the floors are where they are: on a nine-line typo fix, six inline walks are
 
 The high-effort pipeline bounds each stage (shard size, audit rounds), but total calls scale with findings — `ceil(F/8)` verification shards — and, under 3B, with chunk count (reverse audit runs per chunk per round). Typical 3A profile:
 
-| Stage                            | LLM calls                      | Notes                                                                                                          |
-| -------------------------------- | ------------------------------ | -------------------------------------------------------------------------------------------------------------- |
-| Review agents (Step 3)           | 14 (+0-2)                      | Run in parallel; cross-repo skips Agents 1c and 7 (12), local/file skips Agent 0 (13)                          |
-| Sharded verification (Step 4)    | ceil(F/8)                      | F = findings; at most 8 per verification agent, launched together                                              |
-| Iterative reverse audit (Step 5) | 2-5 (3A); rounds × chunks (3B) | Two consecutive dry rounds to stop (cap 5); 3B fans out one auditor per chunk per round                        |
-| **Total**                        | **~17-23 (~15-22)**            | 3A same-repo: ~17-23 (typical ~17-19); cross-repo or local/file: ~15-22; 3B scales with chunks (see DESIGN.md) |
+| Stage                            | LLM calls                       | Notes                                                                                                                                                                                               |
+| -------------------------------- | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Review agents (Step 3)           | 14 (+0-2)                       | Run in parallel; cross-repo skips Agents 1c and 7 (12), local/file skips Agent 0 (13)                                                                                                               |
+| Sharded verification (Step 4)    | ceil(F/8)                       | F = findings; at most 8 per verification agent, launched together                                                                                                                                   |
+| Iterative reverse audit (Step 5) | 2-10 (3A); rounds × chunks (3B) | Two consecutive dry rounds to stop; the cap follows the topology — 10 on a small diff, 5 on a chunked one, 3 on a huge one when the run has a deadline. 3B fans out one auditor per chunk per round |
+| **Total**                        | **~17-28 (~15-27)**             | 3A same-repo: ~17-28 (typical ~17-19); cross-repo or local/file: ~15-27; 3B scales with chunks (see DESIGN.md)                                                                                      |
 
 Most PRs converge to the lower end of the range; the caps prevent runaway cost on pathological cases. At `--effort low` the review runs entirely inline — **0 subagent calls** — walking the diff once per angle instead of once in total.
 

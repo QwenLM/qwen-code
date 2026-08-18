@@ -287,27 +287,30 @@ function createRemotePtyHostHandle({
       const allowedSignal = killSignalValue(signal);
       void callAgentViewPtyHost(socketPath, authToken, 'kill', {
         signal: allowedSignal,
-      }).catch(() => {
-        child?.kill(allowedSignal);
-      });
-      // Only SIGKILL cannot be trapped, so it is the only kill that
-      // guarantees the worker is gone — resolve the exit tracker immediately
-      // for it. SIGINT/SIGTERM can be trapped and survived (the server-side
-      // kill op, unlike shutdown, has no SIGKILL escalation), so let the
-      // remote exit poller observe whether the worker actually exits.
-      if (!child && allowedSignal === 'SIGKILL') {
-        exitTracker.resolve({ exitCode: 1 });
-      }
+      }).then(
+        () => {
+          // Only SIGKILL cannot be trapped, so once the RPC has landed it is
+          // the only kill that guarantees the worker is gone — settle then,
+          // not before: an RPC that never lands must leave the exit poller
+          // running, exactly like the trappable SIGINT/SIGTERM cases.
+          if (!child && allowedSignal === 'SIGKILL') {
+            exitTracker.resolve({ exitCode: 1 });
+          }
+        },
+        () => {
+          child?.kill(allowedSignal);
+        },
+      );
     },
     shutdown(): void {
       void callAgentViewPtyHost(socketPath, authToken, 'shutdown').catch(() => {
         child?.kill('SIGTERM');
       });
       attachSocket?.destroy();
-      // No immediate exit verdict here: a reconnected handle cannot observe
-      // the server-side drain itself, and shutdown (unlike SIGKILL) can be
-      // survived. Resolving now would forge an exit for a still-running
-      // worker; the remote exit poller reports the real outcome.
+      // No exit verdict when the RPC lands: the server-side shutdown op
+      // returns once the drain starts, and that drain can be survived.
+      // Resolving here would forge an exit for a still-running worker;
+      // the remote exit poller reports the real outcome.
     },
     dispose(): void {
       void callAgentViewPtyHost(socketPath, authToken, 'shutdown').catch(() => {

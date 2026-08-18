@@ -7809,6 +7809,17 @@ describe('Server Config (config.ts)', () => {
     it('should return the default threshold', () => {
       const config = new Config(baseParams);
       expect(config.getTruncateToolOutputThreshold()).toBe(25_000);
+      expect(config.isTruncateToolOutputThresholdExplicit()).toBe(false);
+    });
+
+    it('treats a null runtime threshold as unset', () => {
+      const config = new Config({
+        ...baseParams,
+        truncateToolOutputThreshold: null as unknown as number,
+      });
+
+      expect(config.getTruncateToolOutputThreshold()).toBe(25_000);
+      expect(config.isTruncateToolOutputThresholdExplicit()).toBe(false);
     });
 
     it('should use a custom truncateToolOutputThreshold if provided', () => {
@@ -7829,6 +7840,21 @@ describe('Server Config (config.ts)', () => {
       expect(config.getTruncateToolOutputThreshold()).toBe(
         Number.POSITIVE_INFINITY,
       );
+    });
+
+    it.each([
+      [25_000, 25_000],
+      [10_000, 10_000],
+      [100_000, 100_000],
+      [-1, Number.POSITIVE_INFINITY],
+    ])('tracks an explicit threshold of %s', (threshold, expectedThreshold) => {
+      const config = new Config({
+        ...baseParams,
+        truncateToolOutputThreshold: threshold,
+      });
+
+      expect(config.getTruncateToolOutputThreshold()).toBe(expectedThreshold);
+      expect(config.isTruncateToolOutputThresholdExplicit()).toBe(true);
     });
   });
 

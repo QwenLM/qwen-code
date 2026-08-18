@@ -683,6 +683,35 @@ describe('Agent View PTY host process server', () => {
     await expect(connected.exited).resolves.toEqual({ exitCode: 1 });
   });
 
+  it('keeps exited pending when the kill or shutdown RPC never lands', async () => {
+    const host = fakeHost();
+    const socketPath = shortSocketPath();
+    const server = createAgentViewPtyHostServer(host, socketPath);
+    await server.listen();
+
+    const connected = await connectAgentViewPtyHostProcess(
+      createLaunch('session-1'),
+      socketPath,
+    );
+
+    const notSettledWithin = (ms: number) =>
+      Promise.race([
+        connected.exited.then(() => true),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), ms)),
+      ]);
+
+    await server.close();
+
+    // A lost RPC must not settle the tracker: the host may still be alive
+    // holding the socket lock, and only the exit poller may declare it dead.
+    connected.kill('SIGKILL');
+    expect(await notSettledWithin(100)).toBe(false);
+    // shutdown is optional on the handle type; the connected handle always
+    // provides it.
+    connected.shutdown?.();
+    expect(await notSettledWithin(100)).toBe(false);
+  });
+
   it('defaults a signal-less kill to SIGTERM instead of node-pty SIGHUP', async () => {
     const host = fakeHost();
     const socketPath = shortSocketPath();

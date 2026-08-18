@@ -432,18 +432,22 @@ export function runSubmit(
     // report, and the user can ask for them to be posted.
     // The advice must match the refusal class, or it misdirects the retry:
     // the gate refuses either because comment was never requested (its `why`
-    // carries `` `--comment` was ``) or because the recorded arguments do not
-    // bind this target. `--comment` cannot fix the second class — the flag
-    // stands in for nothing a target binding needs, and the `review.comment`
-    // setting already stood in for the flag on exactly those refusals — so
-    // advising it there buys the futile retry loop authorization.ts's refusal
-    // wording exists to prevent.
+    // carries `` `--comment` was ``) or because nothing recorded authorises
+    // this target — a binding miss, or no recorded arguments at all. The
+    // second arm's preamble stays neutral ("Nothing recorded…") because a
+    // setting-driven missing-args refusal lands here too, and "The recorded
+    // arguments do not bind" would contradict its `why` ("no review
+    // arguments were recorded"). `--comment` cannot fix the second class —
+    // the flag stands in for nothing a target binding needs, and the
+    // `review.comment` setting already stood in for the flag on exactly
+    // those refusals — so advising it there buys the futile retry loop
+    // authorization.ts's refusal wording exists to prevent.
     const advice = auth.why.includes('`--comment` was')
       ? `This is the correct outcome of a review the user did not ask to ` +
         `publish — report the findings in the terminal and stop. Re-run with ` +
         `\`--comment\`, or pass --user-authorized only after the user has ` +
         `asked, in a message they typed, for this review to be published.`
-      : `The recorded arguments do not bind this target — report the ` +
+      : `Nothing recorded authorises binding this target — report the ` +
         `findings in the terminal and stop. Posting to this pull request ` +
         `needs a review invoked naming it, or --user-authorized after the ` +
         `user has asked, in a message they typed, for this review to be ` +
