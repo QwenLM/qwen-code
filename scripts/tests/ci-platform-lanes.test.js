@@ -64,6 +64,35 @@ describe('platform lanes — triggers', () => {
     });
   }
 
+  for (const lane of LANES) {
+    it(`${lane}'s steps are gated for every trigger it now has`, () => {
+      // The first thing the revived triggers hit was not a test failure but
+      // the lane's own plumbing: a `verify-checkout-head` step written when
+      // this lane ran in the merge queue alone, with `expected_sha` naming
+      // only `github.event.merge_group.head_sha`. On a pull request that
+      // input is empty and the step fails the lane before a single test
+      // runs. A step whose inputs name one event must be gated to that
+      // event — for every step in a job that now runs on four.
+      for (const step of ci.jobs[lane].steps ?? []) {
+        const inputs = JSON.stringify(step.with ?? {});
+        const gate = String(step.if ?? '');
+        for (const [context, event] of [
+          ['github.event.merge_group', "'merge_group'"],
+          ['github.event.pull_request', "'pull_request'"],
+        ]) {
+          if (!inputs.includes(context)) continue;
+          const guarded =
+            inputs.includes(`github.event_name == ${event}`) ||
+            gate.includes(`github.event_name == ${event}`);
+          expect(
+            guarded,
+            `${lane} step "${step.name}" reads ${context} on every trigger`,
+          ).toBe(true);
+        }
+      }
+    });
+  }
+
   it('keeps a nightly run to exactly the two lanes', () => {
     // A `schedule:` trigger fires the whole workflow. Every other job must
     // therefore either exclude `schedule` outright or gate on an event

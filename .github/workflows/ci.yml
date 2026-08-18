@@ -1012,11 +1012,17 @@ jobs:
       # Same stale-checkout guard as the Ubuntu gate: this job now runs on ECS,
       # so fail loud if the checkout lacks the merge-queue head rather than
       # silently testing the wrong tree into a merge.
+      # Written when this lane ran in the merge queue alone, so its expected
+      # SHA named only the queue's event: on any other trigger the input is
+      # empty and the step fails the whole lane before a single test runs.
+      # That is what the revived triggers hit first. Same event-aware shape as
+      # the Ubuntu gate now, and skipped where there is no head to verify —
+      # the scheduled and dispatch runs check out a branch by name.
       - name: 'Verify checkout includes expected head commit'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}"
         uses: './.github/actions/verify-checkout-head'
         with:
-          expected_sha: '${{ github.event.merge_group.head_sha }}'
+          expected_sha: "${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}"
 
       # Avoid setup-node downloads on ECS, where nodejs.org may be unreachable
       # through the egress proxy; reuse the machine's Node instead.
