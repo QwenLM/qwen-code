@@ -94,6 +94,22 @@ if [[ -s "${WORKDIR}/handoff.md" && -n "$(git status --porcelain)" ]]; then
   exit 1
 fi
 
+# The committed sibling of the brake violation above: the round HAS a commit
+# beside handoff.md. Both guards it would otherwise fall through miss it —
+# the dirty check sees a clean tree, and the no-commit handoff branch below
+# requires an unchanged ref — so it would reach the structural checks, where
+# reject_fix defaults to retryable and the repair pass deletes
+# handoff.md and may commit AGAIN against the brake's stop. Non-retryable
+# under its OWN outcome (the report step gives this shape its own honest
+# headline), same reasoning as the dirty guard.
+if [[ -s "${WORKDIR}/handoff.md" && "${committed_rc:-0}" -eq 1 ]]; then
+  echo "❌ Agent wrote handoff.md but the round HAS a commit — a brake violation:"
+  git log --oneline "origin/${BRANCH}..${BRANCH}"
+  sed 's/::/;;/g' "${WORKDIR}/handoff.md"
+  echo "outcome=committed_handoff" >> "${GITHUB_OUTPUT}"
+  exit 1
+fi
+
 # No-commit brake handoff, classified BEFORE the structural checks below:
 # those judge the PR's OWN diff (core rebuild, schema freshness, contracts)
 # and reject_fix on failure, and the growth brake fires on exactly the red

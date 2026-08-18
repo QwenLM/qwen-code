@@ -14162,11 +14162,12 @@ exit 1
       expect(statusStep).toContain('^[0-9]+$');
     }
     // Tells a round that published a report from one that died before it.
-    // handoff publishes one too (the handoff note + eval marker), so it
-    // reads "finished", never "ended without publishing a report" above its
-    // own report.
+    // handoff publishes one too (the handoff note + eval marker), and so do
+    // the two brake-violation rejections (their note + marker post from the
+    // report step), so all five read "finished", never "ended without
+    // publishing a report" above their own report.
     expect(finalizeStatusCommentStep).toContain(
-      '[[ "${OUTCOME:-}" == \'fixed\' || "${OUTCOME:-}" == \'noop\' || "${OUTCOME:-}" == \'handoff\' || "${OUTCOME:-}" == \'dirty_handoff\' ]]',
+      '[[ "${OUTCOME:-}" == \'fixed\' || "${OUTCOME:-}" == \'noop\' || "${OUTCOME:-}" == \'handoff\' || "${OUTCOME:-}" == \'dirty_handoff\' || "${OUTCOME:-}" == \'committed_handoff\' ]]',
     );
     expect(finalizeStatusCommentStep).toContain(
       'ended without publishing a report',
@@ -18051,17 +18052,23 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(nothing.outputs).toContain('outcome=failed');
 
     // Pins the guard's committed-side clause: with a round commit present,
-    // the handoff branch must NOT fire even though handoff.md exists — the
-    // round falls through to the address-summary gate instead. Deleting the
-    // `git diff --quiet` clause flips this to exit 0 / outcome=handoff,
-    // skipping every structural check on the committed diff.
+    // the no-commit handoff branch must NOT fire — the round is a brake
+    // VIOLATION (the brake says commit nothing), classified
+    // outcome=committed_handoff before the structural checks. Falling
+    // through to them would reject retryable=true, and the repair pass
+    // deletes handoff.md and may commit again against the brake. Deleting
+    // the committed-side guard flips this to outcome=handoff, skipping every
+    // structural check on the committed diff; routing it through the checks
+    // instead flips it to outcome=failed with retryable left unset ONLY if
+    // the fixture trips nothing — the shape this pin exists to prevent.
     const committedWithHandoff = runGate({
       agentCommit: true,
       workdirFiles: { 'handoff.md': 'needs a maintainer decision\n' },
     });
     expect(committedWithHandoff.status).toBe(1);
-    expect(committedWithHandoff.outputs).toContain('outcome=failed');
+    expect(committedWithHandoff.outputs).toContain('outcome=committed_handoff');
     expect(committedWithHandoff.outputs).not.toContain('outcome=handoff');
+    expect(committedWithHandoff.outputs).not.toContain('retryable');
 
     // The handoff note is agent-written and lands in the privileged job's
     // step log: a line-start `::` would parse as a workflow command, so the
@@ -18074,7 +18081,11 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(neutralized.outputs).toContain('outcome=handoff');
     expect(neutralized.stdout).toContain(';;error;;forged');
     expect(neutralized.stdout).not.toContain('::error::forged');
-  });
+    // Eight runGate arms, each a fixture repo plus a full gate-script
+    // replay under bash — this outgrows the 5s default on slow runners
+    // (it timed out at ~6.4s on the PR head); the suite's convention is
+    // an explicit per-test budget for tests that spawn subprocesses.
+  }, 30000);
 
   it('rejects a handoff written over a dirty workspace, non-retryably', () => {
     // A handoff claims the round deliberately changed NOTHING; dirt beside

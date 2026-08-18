@@ -7107,6 +7107,18 @@ jobs:
                   # Wording guard: no "🤖 AutoFix stopped" prefix, same
                   # reason as the handoff branch above.
                   HEADLINE="🤖 AutoFix rejected this round — the agent wrote a handoff but left a dirty workspace, violating the brake's commit-nothing stop (round ${MARK_ROUND}/${MAX_ROUNDS}). Nothing was committed; the uncommitted work was discarded with the runner. The handoff note below names what the agent stopped on, and the run log lists the dirty files. The loop stays engaged and still picks up new feedback and base conflicts, but will not retry this item on its own."
+                elif [[ "${OUTCOME:-}" == 'committed_handoff' ]]; then
+                  # The committed sibling of the dirty-handoff violation:
+                  # the round HAS a commit beside handoff.md. The gate
+                  # rejected it non-retryably under its own outcome, so the
+                  # repair pass never engages and the handoff note survives
+                  # to be posted. The runner-side commit was NOT pushed —
+                  # only 'Push and report' (fixed/noop) publishes — so it is
+                  # discarded with the runner, the same committed_rc the
+                  # failure.md "commit discarded" wording keys on.
+                  # Wording guard: no "🤖 AutoFix stopped" prefix, same
+                  # reason as the handoff branch above.
+                  HEADLINE="🤖 AutoFix rejected this round — the agent wrote a handoff but the round HAS a commit, violating the brake's commit-nothing stop (round ${MARK_ROUND}/${MAX_ROUNDS}). The commit was NOT pushed and is discarded with the runner; the run log lists it. The handoff note below names what the agent stopped on. The loop stays engaged and still picks up new feedback and base conflicts, but will not retry this item on its own."
                 else
                 # The gate ran and rejected the agent's fix (a build/test
                 # failure). Before handing to a human, check whether the PR is
@@ -7514,11 +7526,12 @@ jobs:
           if [[ "${ROUND_DISPLAY}" =~ ^[0-9]+$ ]]; then
             ROUND_DISPLAY="$((ROUND_DISPLAY + 1))"
           fi
-          # 'fixed'/'noop'/'handoff'/'dirty_handoff' are the outcomes that
-          # published a round report — handoff and the dirty-handoff
-          # rejection post their note + eval marker from the report step;
-          # anything else means the round stopped before publishing one.
-          if [[ "${OUTCOME:-}" == 'fixed' || "${OUTCOME:-}" == 'noop' || "${OUTCOME:-}" == 'handoff' || "${OUTCOME:-}" == 'dirty_handoff' ]]; then
+          # 'fixed'/'noop'/'handoff'/'dirty_handoff'/'committed_handoff' are
+          # the outcomes that published a round report — handoff and the two
+          # brake-violation rejections post their note + eval marker from the
+          # report step; anything else means the round stopped before
+          # publishing one.
+          if [[ "${OUTCOME:-}" == 'fixed' || "${OUTCOME:-}" == 'noop' || "${OUTCOME:-}" == 'handoff' || "${OUTCOME:-}" == 'dirty_handoff' || "${OUTCOME:-}" == 'committed_handoff' ]]; then
             EN="$(printf '✅ **AutoFix round %s finished** — [view run](%s). See this round'"'"'s report below.' "${ROUND_DISPLAY}" "${RUN_URL}")"
             ZH="$(printf '✅ **AutoFix 第 %s 轮已完成** —— [查看运行](%s)。本轮报告见下方。' "${ROUND_DISPLAY}" "${RUN_URL}")"
           else
