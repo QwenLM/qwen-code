@@ -642,6 +642,7 @@ vi.mock('./components/ChatEditor', async () => {
               customization.fileUploadEnabled === undefined
                 ? undefined
                 : String(customization.fileUploadEnabled),
+            'data-file-upload-directory': customization.fileUploadDirectory,
           },
           React.createElement(
             'button',
@@ -20177,5 +20178,19 @@ describe('fileUploadEnabled customization plumbing', () => {
     const { container } = renderApp({});
     const composer = container.querySelector('[data-web-shell-composer]');
     expect(composer?.hasAttribute('data-file-upload-enabled')).toBe(false);
+  });
+
+  it('reaches the composer customization with the upload directory', () => {
+    const { container } = renderApp({ fileUploadDirectory: 'uploads' });
+    const composer = container.querySelector('[data-web-shell-composer]');
+    expect(composer?.getAttribute('data-file-upload-directory')).toBe(
+      'uploads',
+    );
+  });
+
+  it('leaves the upload directory unset when the prop is omitted', () => {
+    const { container } = renderApp({});
+    const composer = container.querySelector('[data-web-shell-composer]');
+    expect(composer?.hasAttribute('data-file-upload-directory')).toBe(false);
   });
 });

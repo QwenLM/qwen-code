@@ -352,6 +352,17 @@ export interface WorkspaceFileSystem {
     p: ResolvedPath,
     data: Buffer,
   ): Promise<{ sizeBytes: number; hash: ContentHash }>;
+  /**
+   * Create a directory at `p` (already resolved within the workspace).
+   * `recursive: true` also creates missing intermediate components; every
+   * created component is re-checked with `lstat` right after `mkdir` and
+   * each parent is re-checked before the next `mkdir`, so a symlink
+   * swapped in mid-creation is rejected (`symlink_escape`) rather than
+   * followed. An existing directory is left untouched; an existing
+   * non-directory or symlink at `p` is rejected. Directories are created
+   * at `0o755` (modulo the process umask).
+   */
+  mkdir(p: ResolvedPath, opts?: { recursive?: boolean }): Promise<void>;
 }
 
 /**
@@ -1604,6 +1615,37 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
     }
   }
 
+  async mkdir(p: ResolvedPath, opts?: { recursive?: boolean }): Promise<void> {
+    const start = performance.now();
+    try {
+      this.deps.generationGuard?.assertOpen();
+      assertTrustedForIntent(this.deps.trusted, 'write');
+      const out = await this.deps.pathLocks.runExclusive(
+        p as string,
+        async () => {
+          await ensureResolvedDirectory(p as string, {
+            recursive: opts?.recursive ?? false,
+            assertGenerationOpen: () => this.deps.generationGuard?.assertOpen(),
+          });
+          this.deps.generationGuard?.assertOpen();
+          const verdict = this.ignoreVerdict(p, 'directory');
+          this.deps.audit.recordAccess(this.deps.ctx, {
+            intent: 'write',
+            absolute: p,
+            durationMs: performance.now() - start,
+            sizeBytes: 0,
+            operation: 'mkdir',
+            matchedIgnore: verdict.ignored ? verdict.category : undefined,
+          });
+          return undefined;
+        },
+      );
+      return out;
+    } catch (err) {
+      throw this.recordAndWrap(err, 'write', p as string);
+    }
+  }
+
   /**
    * Coerce an arbitrary thrown value into an `FsError`, emit the
    * matching `fs.denied` audit event, and return the typed error
@@ -2337,6 +2379,97 @@ async function atomicWriteTextResolvedFile(
     newFileModeBits: input.newFileModeBits,
     assertGenerationOpen: input.assertGenerationOpen,
   });
+}
+
+/**
+ * Ensure `target` exists as a real directory (never a symlink). With
+ * `recursive`, walk up to the deepest existing ancestor and create each
+ * missing component one at a time, verifying with `lstat` immediately after
+ * each `mkdir` — and checking each component's parent before the next
+ * `mkdir` — so a symlink swapped in mid-creation is rejected instead of
+ * followed. `target` must already be resolved within the workspace; the
+ * caller holds the path lock.
+ */
+async function ensureResolvedDirectory(
+  target: string,
+  opts: {
+    recursive: boolean;
+    assertGenerationOpen: () => void;
+  },
+): Promise<void> {
+  const assertRealDirectory = async (p: string): Promise<void> => {
+    const st = await fsp.lstat(p);
+    if (st.isSymbolicLink()) {
+      throw new FsError('symlink_escape', `directory path is a symlink: ${p}`, {
+        hint: 're-resolve the target after detecting symlink swaps',
+      });
+    }
+    if (!st.isDirectory()) {
+      throw new FsError(
+        'parse_error',
+        `path exists and is not a directory: ${p}`,
+      );
+    }
+  };
+  // `lstat` does not follow the FINAL component, so the per-component
+  // re-check above cannot see a symlink swapped into an intermediate
+  // ancestor mid-creation; reject one before the next `mkdir` would
+  // create through it.
+  const assertParentNotSymlink = async (p: string): Promise<void> => {
+    const parent = path.dirname(p);
+    const st = await fsp.lstat(parent);
+    if (st.isSymbolicLink()) {
+      throw new FsError(
+        'symlink_escape',
+        `directory parent is a symlink: ${parent}`,
+        { hint: 're-resolve the target after detecting symlink swaps' },
+      );
+    }
+  };
+  try {
+    await assertRealDirectory(target);
+    return;
+  } catch (err) {
+    if (isFsError(err)) throw err;
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+  if (!opts.recursive) {
+    opts.assertGenerationOpen();
+    await assertParentNotSymlink(target);
+    try {
+      await fsp.mkdir(target, { mode: 0o755 });
+    } catch (err) {
+      // Lost a create race; the winner may be a directory we can reuse.
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+    }
+    await assertRealDirectory(target);
+    return;
+  }
+  const missing: string[] = [];
+  let current = target;
+  while (true) {
+    try {
+      await assertRealDirectory(current);
+      break;
+    } catch (err) {
+      if (isFsError(err)) throw err;
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      missing.push(current);
+      const parent = path.dirname(current);
+      if (parent === current) throw err;
+      current = parent;
+    }
+  }
+  for (const entry of missing.reverse()) {
+    opts.assertGenerationOpen();
+    await assertParentNotSymlink(entry);
+    try {
+      await fsp.mkdir(entry, { mode: 0o755 });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+    }
+    await assertRealDirectory(entry);
+  }
 }
 
 /**

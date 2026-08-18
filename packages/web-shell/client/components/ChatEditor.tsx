@@ -1506,9 +1506,12 @@ export const ChatEditor = memo(
       builtinAtProviders: contextBuiltinAtProviders,
       atProviders: contextAtProviders,
       fileUploadEnabled,
+      fileUploadDirectory,
     } = useWebShellCustomization();
-    // Props win when set (main composer). Split-view ChatPane omits them and
-    // falls back to the App-level customization context.
+    // At-mention provider props win when set (main composer). Split-view
+    // ChatPane omits them and falls back to the App-level customization
+    // context. (Unlike the providers, file upload control comes ONLY from
+    // the customization context — no prop override exists.)
     const resolvedBuiltinAtProviders =
       builtinAtProviders ?? contextBuiltinAtProviders;
     const resolvedAtProviders = atProviders ?? contextAtProviders;
@@ -1601,6 +1604,7 @@ export const ChatEditor = memo(
       onCycleMode,
       onToggleShortcuts,
       disabled,
+      fileDragEnabled: fileUploadEnabled !== false,
       placeholderText,
       commands,
       skills,
@@ -1749,6 +1753,13 @@ export const ChatEditor = memo(
           event.preventDefault();
           return;
         }
+        if (fileUploadEnabled === false) {
+          // Host force-disables file drag-in entirely: cancel the drop so
+          // the browser cannot navigate to the file, but ingest nothing on
+          // any lane (the image lane is gated off too).
+          event.preventDefault();
+          return;
+        }
         if (
           !uploadEnabled ||
           files.length === 0 ||
@@ -1760,12 +1771,14 @@ export const ChatEditor = memo(
         clearImageDragState();
         event.preventDefault();
         event.stopPropagation();
-        uploadFiles(files, '.', insertUploadReference);
+        uploadFiles(files, fileUploadDirectory ?? '.', insertUploadReference);
       },
       [
         core.imageTransferHandlers,
         clearImageDragState,
         disabled,
+        fileUploadEnabled,
+        fileUploadDirectory,
         uploadEnabled,
         uploadFiles,
         insertUploadReference,
