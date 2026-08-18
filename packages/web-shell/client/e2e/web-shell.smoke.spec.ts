@@ -851,7 +851,7 @@ test('anchors the empty mobile composer to the chat pane across the breakpoint @
   await expect
     .poll(() => emptyMobileComposerLayout(page))
     .toMatchObject({
-      chatViewPosition: 'relative',
+      chatViewPosition: 'static',
       footerPosition: 'relative',
     });
   const wideLayout = await emptyMobileComposerLayout(page);

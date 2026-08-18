@@ -272,4 +272,133 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
       '/qwen/memories/user/role.md',
     ]);
   });
+
+  it('bounds the model manifest by UTF-8 bytes', async () => {
+    const largeDocs = Array.from({ length: 200 }, (_, index) => ({
+      ...docs[0],
+      filePath: `/tmp/bounded-${index}.md`,
+      relativePath: `bounded-${index}.md`,
+      filename: `bounded-${index}.md`,
+      description: `${'界'.repeat(511)}😀${'x'.repeat(2_000)}`,
+      mtimeMs: index,
+    }));
+    vi.mocked(runSideQuery).mockImplementation(async (_config, options) => {
+      const error = options.validate?.({
+        selected_memories: ['/tmp/bounded-199.md'],
+      });
+      if (error) {
+        throw new Error(error);
+      }
+      return { selected_memories: [] };
+    });
+
+    await expect(
+      selectRelevantAutoMemoryDocumentsByModel(
+        mockConfig,
+        'semantic-only request',
+        largeDocs,
+        5,
+      ),
+    ).rejects.toThrow('Recall selector returned unknown file path');
+
+    const content = vi.mocked(runSideQuery).mock.calls[0]![1].contents[0];
+    const text = content?.parts?.[0]?.text ?? '';
+    const manifest = text.split('Available memories:\n')[1] ?? '';
+    expect(manifest).toContain('/tmp/bounded-0.md');
+    expect(manifest).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+    expect(manifest).not.toContain('x');
+    expect(Buffer.byteLength(manifest, 'utf8')).toBeLessThanOrEqual(25_000);
+  });
+
+  it('keeps fitting documents after an overflowing manifest entry', async () => {
+    const largeDocs = Array.from({ length: 16 }, (_, index) => ({
+      ...docs[0],
+      filePath: `/tmp/large-${index}.md`,
+      description: '界'.repeat(512),
+    }));
+    const shortDoc = {
+      ...docs[1],
+      filePath: '/tmp/short-after-overflow.md',
+      description: 'short',
+    };
+    vi.mocked(runSideQuery).mockImplementation(async (_config, options) => {
+      const result = { selected_memories: [shortDoc.filePath] };
+      const error = options.validate?.(result);
+      if (error) throw new Error(error);
+      return result;
+    });
+
+    await expect(
+      selectRelevantAutoMemoryDocumentsByModel(
+        mockConfig,
+        'check memory',
+        [...largeDocs, shortDoc],
+        5,
+      ),
+    ).resolves.toEqual([shortDoc]);
+
+    const content = vi.mocked(runSideQuery).mock.calls[0]![1].contents[0];
+    expect(content?.parts?.[0]?.text).toContain(shortDoc.filePath);
+    expect(content?.parts?.[0]?.text).not.toContain('/tmp/large-15.md');
+  });
+
+  it('keeps interleaved recent candidates inside a full manifest', async () => {
+    const lexicalDocs = Array.from({ length: 180 }, (_, index) => ({
+      ...docs[0],
+      filePath: `/tmp/lexical-${index}.md`,
+      description: 'lexical candidate '.repeat(6),
+    }));
+    const recentDocs = Array.from({ length: 20 }, (_, index) => ({
+      ...docs[1],
+      filePath: `/tmp/recent-${index}.md`,
+      description: 'recent candidate '.repeat(6),
+    }));
+    const candidates = lexicalDocs
+      .slice(0, recentDocs.length)
+      .flatMap((doc, index) => [doc, recentDocs[index]!]);
+    candidates.push(...lexicalDocs.slice(recentDocs.length));
+    const recentTarget = recentDocs.at(-1)!;
+    vi.mocked(runSideQuery).mockImplementation(async (_config, options) => {
+      const result = { selected_memories: [recentTarget.filePath] };
+      const error = options.validate?.(result);
+      if (error) throw new Error(error);
+      return result;
+    });
+
+    await expect(
+      selectRelevantAutoMemoryDocumentsByModel(
+        mockConfig,
+        'common project query',
+        candidates,
+        5,
+      ),
+    ).resolves.toEqual([recentTarget]);
+  });
+
+  it('does not let long descriptions starve lexical-first candidates', async () => {
+    const longDocs = Array.from({ length: 20 }, (_, index) => ({
+      ...docs[0],
+      filePath: `/tmp/recent-${index}.md`,
+      description: '界'.repeat(512),
+    }));
+    const lexicalDoc = {
+      ...docs[1],
+      filePath: '/tmp/lexical-target.md',
+    };
+    vi.mocked(runSideQuery).mockResolvedValue({
+      selected_memories: [lexicalDoc.filePath],
+    });
+
+    await expect(
+      selectRelevantAutoMemoryDocumentsByModel(
+        mockConfig,
+        'find the lexical target',
+        [lexicalDoc, ...longDocs],
+        5,
+      ),
+    ).resolves.toEqual([lexicalDoc]);
+
+    const content = vi.mocked(runSideQuery).mock.calls[0]![1].contents[0];
+    expect(content?.parts?.[0]?.text).toContain(lexicalDoc.filePath);
+  });
 });

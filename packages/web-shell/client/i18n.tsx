@@ -1225,6 +1225,11 @@ const EN: Messages = {
   'turnOutputs.fileCount': (v) => `${v?.count ?? 0} files`,
   'turnOutputs.openFileTree': 'Open file tree',
   'turnOutputs.closeFileTree': 'Close file tree',
+  'turnOutputs.artifactMissing': 'File not found in the workspace',
+  'turnOutputs.artifactUnavailable': (v) =>
+    v?.path
+      ? `File not found in the workspace · ${v.path}`
+      : 'File not found in the workspace',
   'sidebar.label': 'Workspace sidebar',
   'sidebar.toggleMenu': 'Toggle menu',
   'sidebar.newChat': 'New chat',
@@ -4182,6 +4187,11 @@ const ZH: Messages = {
   'turnOutputs.fileCount': (v) => `${v?.count ?? 0} 个文件`,
   'turnOutputs.openFileTree': '打开文件树',
   'turnOutputs.closeFileTree': '关闭文件树',
+  'turnOutputs.artifactMissing': '工作区中未找到该文件',
+  'turnOutputs.artifactUnavailable': (v) =>
+    v?.path
+      ? `工作区中未找到该文件 · ${v.path}`
+      : '工作区中未找到该文件',
   'sidebar.label': '工作区侧边栏',
   'sidebar.toggleMenu': '切换菜单',
   'sidebar.newChat': '新对话',
