@@ -417,7 +417,39 @@ safe rather than as reasons a gate is unnecessary later:
 - **Same-uid is the boundary either way.** Directory `0700` is the whole access model, exactly
   as in Claude Code's cross-session messaging, which ships with no inbound gate at all.
 
-### 2.6 Format neutrality
+### 2.6 Responsiveness without push
+
+The obvious objection to a fetch-based contract is that an idle interactive session never
+fetches: it sits at a prompt with no turn boundary, so a question addressed to it is never
+answered. That objection is real and it is not an argument for push.
+
+> **Responsiveness is a property of how often a participant chooses to look. It is not a
+> property of the transport.**
+
+Looking is cheap — one `readdir` plus a few small reads, the same cost as `sessions ps`. So a
+participant can look often enough to be indistinguishable from being pushed to, while
+retaining the property that makes the fetch contract work: it chose the moment.
+
+| Participant    | Looks                                    | Practical latency |
+| -------------- | ---------------------------------------- | ----------------- |
+| Qwen, mid-work | At each turn boundary                    | One tool round    |
+| Qwen, idle     | Background timer (~5 s) + a footer badge | Seconds           |
+| Foreign agent  | Whenever it runs the command             | Its own loop      |
+
+The idle row is a timer, not a socket. No door is opened, nothing can arrive unbidden, and
+the reasoning in §2.5 is untouched — which is why this closes the gap without reintroducing
+the machinery push would need.
+
+Two consequences worth stating:
+
+- **Push buys nothing in v1, not even latency.** A five-second idle check is below the
+  threshold at which a human notices, and a busy session is already at one tool round. Push
+  becomes interesting only for sub-second coordination, which no workflow here has asked for.
+- **The latency floor is per-participant and visible.** A foreign agent that looks once per
+  turn is slower than a Qwen session on a timer. That is a real difference, and the board
+  records `last seen`, so it is observable rather than mysterious.
+
+### 2.7 Format neutrality
 
 `SwarmTask` — `id`, `subject`, `description`, `owner`, `status`, `blocks`, `blockedBy`,
 `metadata` — contains nothing vendor-specific. Dependencies are already modelled.
@@ -434,6 +466,46 @@ prior rulings against heterogeneity (fleet §6, #8718, `coordinate/SKILL.md`, th
 closure) all target **hosting other vendors' CLI processes and terminals** — becoming
 herdr. Publishing a format is not that: we host nothing, own no lifecycle, and grant no
 permissions.
+
+### 2.8 What a board is, on disk
+
+One root, one directory per board. This resolves the split-root wart (§7.1) rather than
+documenting it, and it has to be settled before the CLI ships, because that is when the
+layout becomes something a foreign agent reads.
+
+```
+~/.qwen/boards/{board}/
+    tasks/{id}.json
+    asks/{id}.json
+    decisions/{id}.json
+    participants/{name}.json
+```
+
+**Scope.** A board is named. The default name derives from the project directory, so a
+single-repo team works without anyone naming anything; an explicit `--board` overrides it,
+which is what makes the cross-workspace case expressible at all — an api-repo session and a
+web-repo session share a board precisely because the board is not the directory.
+
+**Participants.** `participants/{name}.json` records `{ pid, sessionId, cwd, kind, joinedAt }`.
+The name is the address (§3.2). This does not duplicate the machine-wide registry shipped by
+#8969: that one is keyed by pid and answers "what is alive", this one is keyed by name and
+answers "who is on this board". Liveness is read from the former, so a participant record
+never has to be heartbeated.
+
+**Name claiming.** Names are self-declared, so they collide. Writing the participant file is
+the claim; a taken name gets a suffix, reusing `generateUniqueTeammateName`, which already
+does exactly this for teammates. A name whose holder is dead (machine registry says the pid
+is gone) is reclaimable — otherwise a crash loop would exhaust every reasonable name.
+
+**`kind`.** `interactive` | `daemon` | `spawned` | `foreign`. It is not decoration: it is what
+distinguishes a spawned teammate, for whom assignment binds directly, from an independent
+participant, for whom it does not (§3.2) — and it is the field §7.2 needs so a daemon session
+can register on the same terms as any other.
+
+**Retention.** Answered asks, resolved decisions and completed tasks accumulate. `qwen board
+prune` removes settled items past a retention window. Deliberately manual in v1: automatic
+deletion of a record another participant may still be reading is a concurrency problem worth
+not having yet.
 
 ## 3. Flows
 
@@ -567,9 +639,15 @@ qwen ask      <name> "<q>" | list [--wait] | answer <id> "<a>"
 qwen decision list [--wait] | raise --kind … --about <task> | resolve <id> --approve|--reject
 ```
 
-`--json` everywhere for machine consumption. `--wait` blocks by polling — no socket involved.
-Fail-open when there is no board, following #9047's herdr reporter: absent context is silence,
-not an error.
+`--json` everywhere for machine consumption. Fail-open when there is no board, following
+#9047's herdr reporter: absent context is silence, not an error.
+
+`--wait` blocks by polling — no socket involved — and needs a bounded contract, because a
+foreign agent that runs it is blocking its own turn: default timeout 30 s, explicit
+`--timeout` to raise it, exit status distinguishing "found" from "timed out" so a caller can
+branch without parsing. `fs.watch` is the obvious later optimisation and changes no
+semantics; it is not v1 because its behaviour differs across platforms and network
+filesystems, and polling a directory this small is not the bottleneck.
 
 This is the stage that satisfies the requirement, and it is worth stating why it is only ~350
 lines: the board, the lock protocol and the claim semantics already exist (§1.1). What is new
@@ -617,15 +695,12 @@ and the CLI/MCP surface.
 
 Recorded rather than deleted, so they are not relitigated.
 
-**1. Split storage roots — consolidate before the CLI ships (Stage 2).**
-Team config and inboxes live under `~/.qwen/teams/{team}/`, tasks under
-`~/.qwen/tasks/{team}/` (`teamHelpers.ts:69`): one board's state across two roots. Ugly, but
-consolidating is a data migration with no functional benefit while the layout is internal,
-and §2.6 makes no format promise in v1, so nothing outside can observe the split. The
-trigger is concrete rather than "someday": **consolidate before the board surface ships**
-(Stage 2), because that is the moment the layout becomes something a foreign agent reads.
-The merged registry already carries `schemaVersion`, so versioned layout change is
-anticipated.
+**1. Split storage roots — resolved by the layout in §2.8.**
+Team config and inboxes lived under `~/.qwen/teams/{team}/`, tasks under
+`~/.qwen/tasks/{team}/` (`teamHelpers.ts:69`): one board's state across two roots. §2.8
+consolidates to `~/.qwen/boards/{board}/`, and the deadline is Stage 2 rather than "someday" —
+the CLI is the moment an outsider first reads the layout. The merged registry already carries
+`schemaVersion`, so a versioned move is anticipated rather than novel.
 
 **2. Daemon sessions register — yes, and it needs a `kind` field.**
 Today only `startInteractiveUI.tsx` calls `registerSession`, and the merged
