@@ -20138,6 +20138,316 @@ describe('createAcpSessionBridge', () => {
     });
   });
 
+  describe('session catalog version clock', () => {
+    it('starts stable at revision zero and differs across bridge instances', () => {
+      const a = makeBridge();
+      const b = makeBridge();
+      const va = a.getSessionCatalogVersion();
+      expect(va.revision).toBe(0);
+      expect(a.getSessionCatalogVersion()).toEqual(va);
+      expect(b.getSessionCatalogVersion().generation).not.toBe(va.generation);
+    });
+
+    it('returns immutable value snapshots', () => {
+      const bridge = makeBridge();
+      const v0 = bridge.getSessionCatalogVersion();
+      bridge.markSessionCatalogChanged();
+      expect(v0).toEqual({ generation: expect.any(String), revision: 0 });
+      expect(bridge.getSessionCatalogVersion().revision).toBe(1);
+    });
+
+    it('advances on live registration and removal', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const v0 = bridge.getSessionCatalogVersion();
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const v1 = bridge.getSessionCatalogVersion();
+      expect(v1.revision).toBeGreaterThan(v0.revision);
+
+      await bridge.closeSession(session.sessionId);
+      expect(bridge.getSessionCatalogVersion().revision).toBeGreaterThan(
+        v1.revision,
+      );
+      await bridge.shutdown();
+    });
+
+    it('advances through the lifecycle choke point even when the host callback throws', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+        sessionLifecycle: () => {
+          throw new Error('host listener boom');
+        },
+      });
+      const v0 = bridge.getSessionCatalogVersion();
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const v1 = bridge.getSessionCatalogVersion();
+      expect(v1.revision).toBeGreaterThan(v0.revision);
+      await bridge.closeSession(session.sessionId);
+      expect(bridge.getSessionCatalogVersion().revision).toBeGreaterThan(
+        v1.revision,
+      );
+      await bridge.shutdown();
+    });
+
+    it('advances on an actual rename but not on a no-op rename', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const v0 = bridge.getSessionCatalogVersion();
+
+      bridge.updateSessionMetadata(session.sessionId, {
+        displayName: 'Renamed session',
+      });
+      const v1 = bridge.getSessionCatalogVersion();
+      expect(v1.revision).toBeGreaterThan(v0.revision);
+
+      bridge.updateSessionMetadata(session.sessionId, {
+        displayName: 'Renamed session',
+      });
+      expect(bridge.getSessionCatalogVersion().revision).toBe(v1.revision);
+      await bridge.shutdown();
+    });
+
+    it('advances on child automatic title notifications for known sessions only', async () => {
+      let capturedConn: AgentSideConnection | undefined;
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const fakeAgent = new FakeAgent();
+        capturedConn = new AgentSideConnection(() => fakeAgent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const v0 = bridge.getSessionCatalogVersion();
+
+      await capturedConn!.extNotification('qwen/notify/session/title-update', {
+        sessionId: session.sessionId,
+        title: 'Auto title',
+      });
+      // The notification is processed asynchronously after the write
+      // resolves; wait for the mark instead of assuming same-tick handling.
+      await vi.waitFor(() =>
+        expect(bridge.getSessionCatalogVersion().revision).toBe(
+          v0.revision + 1,
+        ),
+      );
+
+      // Unknown-session and malformed notifications are dropped before the
+      // mark. A trailing valid notification is processed after them
+      // (in-order connection), so the total staying at exactly +2 proves
+      // neither invalid notification advanced the clock.
+      await capturedConn!.extNotification('qwen/notify/session/title-update', {
+        sessionId: 'missing-session',
+        title: 'Nobody',
+      });
+      await capturedConn!.extNotification('qwen/notify/session/title-update', {
+        sessionId: session.sessionId,
+        title: '',
+      });
+      await capturedConn!.extNotification('qwen/notify/session/title-update', {
+        sessionId: session.sessionId,
+        title: 'Second title',
+      });
+      await vi.waitFor(() =>
+        expect(
+          bridge.getSessionCatalogVersion().revision,
+        ).toBeGreaterThanOrEqual(v0.revision + 2),
+      );
+      // Let any erroneously queued processing settle so a wrongful extra
+      // mark cannot hide behind an early waitFor return.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(bridge.getSessionCatalogVersion().revision).toBe(v0.revision + 2);
+      await bridge.shutdown();
+    });
+
+    it('advances on live worktree updates for existing entries only', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const worktree = { slug: 'wt', path: '/tmp/wt', branch: 'wt-branch' };
+      const v0 = bridge.getSessionCatalogVersion();
+
+      bridge.setSessionWorktree(session.sessionId, worktree);
+      const v1 = bridge.getSessionCatalogVersion();
+      expect(v1.revision).toBeGreaterThan(v0.revision);
+
+      bridge.setSessionWorktree('missing-session', worktree);
+      expect(bridge.getSessionCatalogVersion().revision).toBe(v1.revision);
+      await bridge.shutdown();
+    });
+
+    it('advances on a persisted-only branch without a live registration', async () => {
+      const handle = makeChannel({
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionBranch) {
+            return { newSessionId: 'branch-persisted-only', title: 'Branch' };
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const liveBefore = bridge.listWorkspaceSessions(WS_A).length;
+      const v0 = bridge.getSessionCatalogVersion();
+
+      const result = await bridge.branchSession(session.sessionId, {
+        atRecordId: '11111111-1111-4111-8111-111111111111',
+      });
+      expect(result.sessionId).toBe('branch-persisted-only');
+      expect(bridge.getSessionCatalogVersion().revision).toBeGreaterThan(
+        v0.revision,
+      );
+      // The committed fork was never restored as a live session.
+      expect(bridge.listWorkspaceSessions(WS_A)).toHaveLength(liveBefore);
+      await bridge.shutdown();
+    });
+
+    it('still advances when a committed branch fails to restore', async () => {
+      const handle = makeChannel({
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionBranch) {
+            return { newSessionId: 'branch-restore-fails' };
+          }
+          return {};
+        },
+        loadSessionImpl: () => {
+          throw new Error('restore boom');
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const v0 = bridge.getSessionCatalogVersion();
+
+      // The ACP transport sanitizes handler errors into a generic
+      // RequestError, so assert only that the restore-driven branch fails.
+      await expect(
+        bridge.branchSession(session.sessionId, {}),
+      ).rejects.toThrow();
+      expect(bridge.getSessionCatalogVersion().revision).toBeGreaterThan(
+        v0.revision,
+      );
+      await bridge.shutdown();
+    });
+
+    it('does not advance on a failed branch mutation', async () => {
+      const handle = makeChannel({
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionBranch) {
+            throw new Error('branch boom');
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const v0 = bridge.getSessionCatalogVersion();
+
+      // The ACP transport sanitizes handler errors into a generic
+      // RequestError, so assert only that the mutation fails.
+      await expect(
+        bridge.branchSession(session.sessionId, {
+          atRecordId: '11111111-1111-4111-8111-111111111111',
+        }),
+      ).rejects.toThrow();
+      expect(bridge.getSessionCatalogVersion().revision).toBe(v0.revision);
+      await bridge.shutdown();
+    });
+
+    it('does not advance on prompt start/settle, attach/detach, or heartbeat', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const v0 = bridge.getSessionCatalogVersion();
+
+      await bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
+
+      const reattached = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(reattached.sessionId).toBe(session.sessionId);
+
+      bridge.recordHeartbeat(session.sessionId);
+      // Detach the second client only — the spawn owner keeps the session
+      // live, so no removal mark fires here.
+      await bridge.detachClient(reattached.sessionId, reattached.clientId);
+      expect(bridge.sessionCount).toBe(1);
+
+      expect(bridge.getSessionCatalogVersion().revision).toBe(v0.revision);
+      await bridge.shutdown();
+    });
+
+    it('does not advance on permission-wait transitions', async () => {
+      let capturedConn: AgentSideConnection | undefined;
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const fakeAgent = new FakeAgent();
+        capturedConn = new AgentSideConnection(() => fakeAgent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const v0 = bridge.getSessionCatalogVersion();
+
+      const respPromise = (
+        capturedConn as unknown as {
+          requestPermission(p: unknown): Promise<unknown>;
+        }
+      ).requestPermission({
+        sessionId: session.sessionId,
+        toolCall: { toolCallId: 'tc-1', title: 'rm -rf /' },
+        options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
+      });
+      await vi.waitFor(() =>
+        expect(
+          bridge.getSessionSummary(session.sessionId).isWaitingForPermission,
+        ).toBe(true),
+      );
+      expect(bridge.getSessionCatalogVersion().revision).toBe(v0.revision);
+
+      const pending = bridge.getSessionSummary(session.sessionId)
+        .pendingInteractions?.[0];
+      expect(pending).toBeDefined();
+      bridge.respondToPermission(pending!.requestId, {
+        outcome: { outcome: 'selected', optionId: 'allow' },
+      });
+      await respPromise;
+      await vi.waitFor(() =>
+        expect(
+          bridge.getSessionSummary(session.sessionId).isWaitingForPermission,
+        ).toBe(false),
+      );
+      expect(bridge.getSessionCatalogVersion().revision).toBe(v0.revision);
+      await bridge.shutdown();
+    });
+  });
+
   describe('getSessionSummary', () => {
     it('returns the live summary for a known session id', async () => {
       const factory: ChannelFactory = async () => makeChannel().channel;

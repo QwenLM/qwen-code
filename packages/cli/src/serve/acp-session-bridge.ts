@@ -85,6 +85,7 @@ export type {
   BridgePromptContentBlock,
   BridgeSessionSummary,
   BridgeTurnStatus,
+  BridgeSessionCatalogVersion,
   SessionMetadataUpdate,
   BridgeClientRequestContext,
   BridgeHeartbeatResult,
