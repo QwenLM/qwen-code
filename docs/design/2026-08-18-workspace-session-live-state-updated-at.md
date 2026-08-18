@@ -313,24 +313,35 @@ live `updatedAt` makes that movement observable in activity-based ordering but
 does not introduce a stronger pagination guarantee. Clients that require a
 fresh first page reload it after an activity change.
 
-One movement mode is new. Before this change an activity key came from
-transcript mtime alone and could only advance, so a row could be skipped between
-pages but never repeated. A live watermark that leads mtime is not durable: when
-the live entry retires mid-pass the row's key falls back to mtime, so a page
-whose cursor was encoded from the higher watermark would admit that row again.
-The same regression applies to a live-only row that persists mid-pass, because
-its emitted key was the watermark while its persisted key is the first flush's
-mtime.
+One movement mode is new to the activity dimension. Before this change the
+activity component of a cursor key came from transcript mtime alone and could
+only advance; the organized key's pin dimension could already flip mid-pass
+(the organization snapshot is re-read per page request), so an emitted
+persisted row could already repeat after an unpin, but the activity component
+itself never moved backward. A live watermark that leads mtime is not durable:
+when the live entry retires mid-pass the row's key falls back to mtime, so a
+page whose cursor was encoded from the higher watermark would admit that row
+again. The same regression applies to a live-only row that persists mid-pass,
+because its emitted key was the watermark while its persisted key is the first
+flush's mtime.
 
 The activity cursor therefore carries the identities of rows already emitted at
 a live-derived key, and the after-cursor filter excludes them for the rest of
-the pass, so within one pass a session is returned at most once. The list stays
-bounded and self-pruning: an identity is dropped once its persisted key alone
-can no longer pass the strictly-older filter, or once the row leaves the
-filtered collection while not live. Past a 64-identity cap the identities with
-the highest persisted keys are dropped first — they leave the re-admission
-window soonest — and a dropped identity degrades to an at-most-once duplicate
-instead of failing the pass. Cursors minted before the field existed remain
+the pass, so live-derived key movement returns a session at most once per pass.
+The carry covers only rows the mechanism saw: a persisted-only row emitted
+before its pin state changes is never carried, so an unpin between fetches
+keeps the pre-existing organized-view repetition mode, and callers that
+accumulate pages key rows by `sessionId`. The third activity-keyed cursor, the
+live-only list, needs no carry: the first watermark advance floors at
+`createdAt`, so a live key never moves backward. The list stays bounded and
+self-pruning: an identity absent from the filtered collection is retained —
+absence can be transient under the short-TTL persisted snapshot or mid-pass
+group movement — while an identity whose row is present is dropped once its
+persisted key alone can no longer pass the strictly-older filter under either
+pin state. Past a 64-identity cap the identities with the highest persisted
+keys are dropped first — they leave the re-admission window soonest — and a
+dropped identity degrades to an at-most-once duplicate instead of failing the
+pass. Cursors minted before the field existed remain
 valid, and the field is omitted when empty, so the cursor shape is unchanged
 whenever no live-derived key was emitted. Cross-pass guarantees are unchanged:
 a new pass is a new snapshot, and clients that require a fresh view reload from
@@ -341,7 +352,8 @@ the first page.
 The server implementation should make the smallest possible change:
 
 1. Add `lastTurnEndedAtMs?: number` to `SessionEntry`.
-2. Add one internal helper that advances the field monotonically.
+2. Add one internal helper that advances the field monotonically, flooring
+   the first advance at the entry's `createdAt`.
 3. In `publishPromptTerminal`, compute the existing running-state gate before
    broadcasting and advance only after the duplicate latch succeeds.
 4. Project `new Date(lastTurnEndedAtMs).toISOString()` from
@@ -463,18 +475,18 @@ servers, pagination boundaries, and sessions missing from the current page.
 
 The route's HTTP failure semantics do not change.
 
-| Condition                                                                 | Result                                                                                    |
-| ------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| No running terminal in current live generation                            | Session item omits `updatedAt`                                                            |
-| Wall clock does not advance between terminals                             | Logical `+1ms` preserves strict monotonicity                                              |
-| Wall clock moves backward                                                 | Per-entry monotonicity prevents a live timestamp regression                               |
-| Wall clock jumps forward and is later corrected                           | The watermark may remain in the future until time catches up or the live entry disappears |
-| Recorder is degraded or later flush fails                                 | Watermark still represents terminal activity; no durability claim                         |
-| Duplicate or late terminal                                                | Existing latch suppresses another timestamp advance                                       |
-| Queued prompt never runs                                                  | No timestamp advance or required recency confirmation                                     |
-| Session disappears after terminal                                         | Live row disappears; persisted catalog remains authoritative                              |
-| Daemon/runtime replacement                                                | New catalog generation and initially absent live watermark                                |
-| Client awaiting running-turn recency receives an invalid or missing field | Ignore it and retain existing fallback behavior                                           |
+| Condition                                                                 | Result                                                                                               |
+| ------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| No running terminal in current live generation                            | Session item omits `updatedAt`                                                                       |
+| Wall clock does not advance between terminals                             | Logical `+1ms` preserves strict monotonicity                                                         |
+| Wall clock moves backward                                                 | Per-entry monotonicity prevents a live timestamp regression; the first advance floors at `createdAt` |
+| Wall clock jumps forward and is later corrected                           | The watermark may remain in the future until time catches up or the live entry disappears            |
+| Recorder is degraded or later flush fails                                 | Watermark still represents terminal activity; no durability claim                                    |
+| Duplicate or late terminal                                                | Existing latch suppresses another timestamp advance                                                  |
+| Queued prompt never runs                                                  | No timestamp advance or required recency confirmation                                                |
+| Session disappears after terminal                                         | Live row disappears; persisted catalog remains authoritative                                         |
+| Daemon/runtime replacement                                                | New catalog generation and initially absent live watermark                                           |
+| Client awaiting running-turn recency receives an invalid or missing field | Ignore it and retain existing fallback behavior                                                      |
 
 No new logging is required on the high-frequency route. Existing route latency
 and request-count telemetry is sufficient. The implementation may add no

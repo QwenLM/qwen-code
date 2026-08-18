@@ -647,17 +647,16 @@ function compareOrganizedCursorKeys(
  * pass.
  *
  * The list stays bounded. An identity is dropped once its persisted key alone
- * can no longer pass the key filter (`reenters`), or once the row left the
- * filtered collection while not live. Past MAX_EMITTED_CURSOR_SESSION_IDS the
- * identities with the highest persisted keys are dropped first — they leave
- * the re-admission window soonest — and a dropped identity degrades to an
- * at-most-once duplicate instead of failing the pass.
+ * can no longer pass the key filter (`reenters`). Past
+ * MAX_EMITTED_CURSOR_SESSION_IDS the identities with the highest persisted
+ * keys are dropped first — they leave the re-admission window soonest — and a
+ * dropped identity degrades to an at-most-once duplicate instead of failing
+ * the pass.
  */
 function nextEmittedSessionIds(options: {
   carried: ReadonlySet<string>;
   page: readonly BridgeSessionSummary[];
   liveSessionIds: ReadonlySet<string>;
-  liveListUnavailable: boolean;
   listedById: ReadonlyMap<string, BridgeSessionSummary>;
   persistedTimeById: ReadonlyMap<string, number>;
   reenters: (row: BridgeSessionSummary, persistedTime: number) => boolean;
@@ -672,16 +671,12 @@ function nextEmittedSessionIds(options: {
   for (const sessionId of candidates) {
     const row = options.listedById.get(sessionId);
     if (!row) {
-      // Absent from the filtered collection. A still-live row (organized
-      // live-only rows are first-page insertions) may persist into it later;
-      // when the live list is unavailable that cannot be ruled out either.
-      // Anything else cannot be emitted again within this pass.
-      if (
-        options.liveSessionIds.has(sessionId) ||
-        options.liveListUnavailable
-      ) {
-        kept.push({ sessionId, persistedTime: Number.NEGATIVE_INFINITY });
-      }
+      // Absent from the filtered collection — but absence can be transient:
+      // the persisted snapshot is a short-TTL cache that can predate a
+      // live-only row's first flush, group membership can move mid-pass, and
+      // the live list can be unavailable. Retain the identity until a
+      // persisted floor rules re-admission out; the cap bounds the list.
+      kept.push({ sessionId, persistedTime: Number.NEGATIVE_INFINITY });
       continue;
     }
     const persistedTime = options.persistedTimeById.get(sessionId);
@@ -903,17 +898,23 @@ async function listOrganizedWorkspaceSessionsForResponse(
       carried: emittedBeforePage,
       page,
       liveSessionIds,
-      liveListUnavailable: liveMergeFailed,
       listedById: new Map(
         filtered.map((session) => [session.sessionId, session]),
       ),
       persistedTimeById,
+      // `isPinned` is re-read from the organization snapshot on every page
+      // request, so a pin flip between fetches can move the persisted key
+      // across the pinned/unpinned blocks. Keep the identity while the key
+      // could re-enter under either state.
       reenters: (row, persistedTime) =>
-        compareOrganizedCursorKeys(boundary, {
-          isPinned: row.isPinned === true,
-          activityTime: persistedTime,
-          sessionId: row.sessionId,
-        }) < 0,
+        [true, false].some(
+          (isPinned) =>
+            compareOrganizedCursorKeys(boundary, {
+              isPinned,
+              activityTime: persistedTime,
+              sessionId: row.sessionId,
+            }) < 0,
+        ),
     });
     nextCursor = encodeOrganizedCursor(
       boundary,
@@ -1055,7 +1056,6 @@ async function listWorkspaceSessionsByMetadataForResponse(
       carried: emittedBeforePage,
       page,
       liveSessionIds,
-      liveListUnavailable: liveMergeFailed,
       listedById: new Map(
         matches.map((session) => [session.sessionId, session]),
       ),

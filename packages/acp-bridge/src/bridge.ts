@@ -1977,9 +1977,18 @@ function rememberEnrichedTerminalTurnStatus(
  * wall-clock millisecond or the clock moves backward; it is not a duration.
  * A forward clock jump therefore stays until wall time catches up — correcting
  * it downward would break the monotonicity clients order rows by.
+ *
+ * The first advance floors at `createdAt`: rows without a watermark are keyed
+ * by `createdAt`, and the live-only session cursor carries no emitted-identity
+ * list, so a first watermark behind `createdAt` (wall-clock rollback between
+ * creation and the first terminal) would move an already-emitted row's key
+ * backward mid-pass and let the strictly-older filter return it twice.
  */
 function advanceTurnActivity(entry: SessionEntry): void {
-  const previous = entry.lastTurnEndedAtMs;
+  const createdAtMs = Date.parse(entry.createdAt);
+  const previous =
+    entry.lastTurnEndedAtMs ??
+    (Number.isFinite(createdAtMs) ? createdAtMs : undefined);
   entry.lastTurnEndedAtMs =
     previous === undefined ? Date.now() : Math.max(Date.now(), previous + 1);
 }

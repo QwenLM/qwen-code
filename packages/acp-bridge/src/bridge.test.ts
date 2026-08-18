@@ -17750,13 +17750,14 @@ describe('createAcpSessionBridge', () => {
     it('stays strictly increasing under a pinned clock and tracks wall time once it advances', async () => {
       // Pinning Date.now is what actually exercises the logical +1ms
       // tie-breaker: with real time the assertion would pass on wall-clock
-      // movement alone.
+      // movement alone. The pinned instant is far in the future so it stays
+      // ahead of the entry's real createdAt, which floors the first advance.
       const handle = makeChannel({});
       const bridge = makeBridge({ channelFactory: async () => handle.channel });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       const nowSpy = vi
         .spyOn(Date, 'now')
-        .mockReturnValue(Date.parse('2026-08-18T08:00:00.000Z'));
+        .mockReturnValue(Date.parse('2126-08-18T08:00:00.000Z'));
       try {
         const values: string[] = [];
         for (const text of ['one', 'two', 'three']) {
@@ -17767,22 +17768,51 @@ describe('createAcpSessionBridge', () => {
           values.push(watermarkOf(bridge, session.sessionId)!);
         }
         expect(values).toEqual([
-          '2026-08-18T08:00:00.000Z',
-          '2026-08-18T08:00:00.001Z',
-          '2026-08-18T08:00:00.002Z',
+          '2126-08-18T08:00:00.000Z',
+          '2126-08-18T08:00:00.001Z',
+          '2126-08-18T08:00:00.002Z',
         ]);
 
         // The wall-clock half of the max needs pinning too: turns are seconds
         // apart in production, so a watermark that kept adding the logical
         // millisecond instead of reading the clock would report a just-active
         // session as minutes stale and rank it below quieter rows.
-        nowSpy.mockReturnValue(Date.parse('2026-08-18T08:05:00.000Z'));
+        nowSpy.mockReturnValue(Date.parse('2126-08-18T08:05:00.000Z'));
         await bridge.sendPrompt(session.sessionId, {
           sessionId: session.sessionId,
           prompt: [{ type: 'text', text: 'four' }],
         });
         expect(watermarkOf(bridge, session.sessionId)).toBe(
-          '2026-08-18T08:05:00.000Z',
+          '2126-08-18T08:05:00.000Z',
+        );
+      } finally {
+        nowSpy.mockRestore();
+      }
+
+      await bridge.shutdown();
+    });
+
+    it('floors the first watermark at createdAt under a wall-clock rollback', async () => {
+      const handle = makeChannel({});
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const createdAtMs = Date.parse(
+        bridge.getSessionSummary(session.sessionId).createdAt,
+      );
+      // Live-only session cursors key rows by `updatedAt ?? createdAt` and
+      // carry no emitted-identity list, so a first watermark behind
+      // `createdAt` would move an already-emitted row's key backward
+      // mid-pass. Pin the clock before creation time to force the rollback.
+      const nowSpy = vi
+        .spyOn(Date, 'now')
+        .mockReturnValue(createdAtMs - 10_000);
+      try {
+        await bridge.sendPrompt(session.sessionId, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'rolled back' }],
+        });
+        expect(Date.parse(watermarkOf(bridge, session.sessionId)!)).toBe(
+          createdAtMs + 1,
         );
       } finally {
         nowSpy.mockRestore();
@@ -17963,7 +17993,7 @@ describe('createAcpSessionBridge', () => {
       // the recorded watermark, not when the deadline fires.
       const nowSpy = vi
         .spyOn(Date, 'now')
-        .mockReturnValue(Date.parse('2026-08-18T10:00:00.000Z'));
+        .mockReturnValue(Date.parse('2126-08-18T10:00:00.000Z'));
       try {
         await expect(
           bridge.sendPrompt(
@@ -17980,7 +18010,7 @@ describe('createAcpSessionBridge', () => {
           expect(terminalCount(events, 'prompt-a')).toBe(1),
         );
         expect(watermarkOf(bridge, session.sessionId)).toBe(
-          '2026-08-18T10:00:00.000Z',
+          '2126-08-18T10:00:00.000Z',
         );
 
         // The agent's own result lands after the raced promise already
@@ -17990,7 +18020,7 @@ describe('createAcpSessionBridge', () => {
         await new Promise((r) => setTimeout(r, 40));
         expect(terminalCount(events, 'prompt-a')).toBe(1);
         expect(watermarkOf(bridge, session.sessionId)).toBe(
-          '2026-08-18T10:00:00.000Z',
+          '2126-08-18T10:00:00.000Z',
         );
       } finally {
         nowSpy.mockRestore();
@@ -18005,7 +18035,7 @@ describe('createAcpSessionBridge', () => {
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       const nowSpy = vi
         .spyOn(Date, 'now')
-        .mockReturnValue(Date.parse('2026-08-18T08:00:00.000Z'));
+        .mockReturnValue(Date.parse('2126-08-18T08:00:00.000Z'));
       try {
         const settle = (text: string) =>
           bridge.sendPrompt(session.sessionId, {
@@ -18014,19 +18044,19 @@ describe('createAcpSessionBridge', () => {
           });
         await settle('before the jump');
 
-        nowSpy.mockReturnValue(Date.parse('2026-08-18T09:00:00.000Z'));
+        nowSpy.mockReturnValue(Date.parse('2126-08-18T09:00:00.000Z'));
         await settle('during the jump');
         expect(watermarkOf(bridge, session.sessionId)).toBe(
-          '2026-08-18T09:00:00.000Z',
+          '2126-08-18T09:00:00.000Z',
         );
 
         // Time is corrected back an hour. The watermark stays ahead of wall
         // time rather than rewinding: clients order rows by this value, so a
         // decrease would reshuffle a catalog that nothing actually changed.
-        nowSpy.mockReturnValue(Date.parse('2026-08-18T08:00:01.000Z'));
+        nowSpy.mockReturnValue(Date.parse('2126-08-18T08:00:01.000Z'));
         await settle('after the correction');
         expect(watermarkOf(bridge, session.sessionId)).toBe(
-          '2026-08-18T09:00:00.001Z',
+          '2126-08-18T09:00:00.001Z',
         );
       } finally {
         nowSpy.mockRestore();

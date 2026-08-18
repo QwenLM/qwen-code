@@ -15915,6 +15915,20 @@ describe('createServeApp', () => {
         prompt: 'persisted 2',
         mtime: new Date('2026-05-17T12:03:00.000Z'),
       });
+      await writeStoredSession({
+        sessionId: '550e8400-e29b-41d4-a716-446655460003',
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T11:00:00.000Z',
+        prompt: 'persisted 3',
+        mtime: new Date('2026-05-17T12:02:00.000Z'),
+      });
+      await writeStoredSession({
+        sessionId: '550e8400-e29b-41d4-a716-446655460004',
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T11:00:00.000Z',
+        prompt: 'persisted 4',
+        mtime: new Date('2026-05-17T12:01:00.000Z'),
+      });
       let liveEntries = [
         {
           sessionId: liveId,
@@ -15946,6 +15960,8 @@ describe('createServeApp', () => {
 
       // The live entry retires before the next fetch; the row's key falls
       // back to its mtime, which sorts behind the page-1 cursor boundary.
+      // Three pages, so the identity must survive an intermediate cursor:
+      // page 2 re-encodes a non-empty carried set instead of minting one.
       liveEntries = [];
       const page2 = await host(
         request(app).get(
@@ -15959,12 +15975,41 @@ describe('createServeApp', () => {
       expect(page2.status).toBe(200);
       expect(
         page2.body.sessions.map((s: { sessionId: string }) => s.sessionId),
-      ).toEqual(['550e8400-e29b-41d4-a716-446655460002']);
-      expect(page2.body.nextCursor).toBeUndefined();
-      const allRetireIds = [...page1.body.sessions, ...page2.body.sessions].map(
-        (session: { sessionId: string }) => session.sessionId,
+      ).toEqual([
+        '550e8400-e29b-41d4-a716-446655460002',
+        '550e8400-e29b-41d4-a716-446655460003',
+      ]);
+      expect(page2.body.nextCursor).toBeDefined();
+      const page2Cursor = JSON.parse(
+        Buffer.from(page2.body.nextCursor as string, 'base64url').toString(
+          'utf8',
+        ),
+      ) as { emitted?: string[] };
+      // The retired row's persisted floor still re-enters under the page-2
+      // boundary; dropping it from the re-encoded cursor would let page 3
+      // re-admit it.
+      expect(page2Cursor.emitted).toContain(liveId);
+
+      const page3 = await host(
+        request(app).get(
+          `/workspace/${encodeURIComponent(
+            WS_BOUND,
+          )}/sessions?view=organized&size=2&cursor=${encodeURIComponent(
+            page2.body.nextCursor as string,
+          )}`,
+        ),
       );
-      expect(new Set(allRetireIds).size).toBe(3);
+      expect(page3.status).toBe(200);
+      expect(
+        page3.body.sessions.map((s: { sessionId: string }) => s.sessionId),
+      ).toEqual(['550e8400-e29b-41d4-a716-446655460004']);
+      expect(page3.body.nextCursor).toBeUndefined();
+      const allRetireIds = [
+        ...page1.body.sessions,
+        ...page2.body.sessions,
+        ...page3.body.sessions,
+      ].map((session: { sessionId: string }) => session.sessionId);
+      expect(new Set(allRetireIds).size).toBe(5);
     });
 
     it('does not repeat an organized live-only row that persists between pages', async () => {
@@ -16031,6 +16076,18 @@ describe('createServeApp', () => {
         workspaceCwd: WS_BOUND,
         archiveStates: ['active'],
       });
+      // Prove the flushed row reached the persisted scan page 2 will read:
+      // were the invalidation to silently no-op, page 2 would be served the
+      // pre-flush snapshot and pass without exercising the carried exclusion.
+      const probe = await host(
+        request(app).get(
+          `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?view=organized&size=3`,
+        ),
+      );
+      expect(probe.status).toBe(200);
+      expect(
+        probe.body.sessions.map((s: { sessionId: string }) => s.sessionId),
+      ).toContain(liveOnlyId);
       const page2 = await host(
         request(app).get(
           `/workspace/${encodeURIComponent(
@@ -16045,6 +16102,273 @@ describe('createServeApp', () => {
         page2.body.sessions.map((s: { sessionId: string }) => s.sessionId),
       ).toEqual(['550e8400-e29b-41d4-a716-446655470002']);
       expect(page2.body.nextCursor).toBeUndefined();
+    });
+
+    it('retains a carried identity whose first flush has not reached the cached scan', async () => {
+      // Page 1 emits a live-only row at its watermark; the row then retires
+      // and its first flush lands on disk, but page 2 is served the pre-flush
+      // TTL-cached snapshot, so the row is absent from the collection while
+      // not live. The identity must survive that transient absence, or the
+      // fresh page-3 scan would re-admit the row at its flushed mtime.
+      const liveOnlyId = '550e8400-e29b-41d4-a716-4466554a0000';
+      const persistedRows = [
+        ['550e8400-e29b-41d4-a716-4466554a0001', '2026-05-17T12:04:00.000Z'],
+        ['550e8400-e29b-41d4-a716-4466554a0002', '2026-05-17T12:03:00.000Z'],
+        ['550e8400-e29b-41d4-a716-4466554a0003', '2026-05-17T12:02:00.000Z'],
+        ['550e8400-e29b-41d4-a716-4466554a0004', '2026-05-17T12:01:30.000Z'],
+      ] as const;
+      for (const [sessionId, mtime] of persistedRows) {
+        await writeStoredSession({
+          sessionId,
+          cwd: WS_BOUND,
+          timestamp: '2026-05-17T11:00:00.000Z',
+          prompt: 'persisted',
+          mtime: new Date(mtime),
+        });
+      }
+      let liveEntries = [
+        {
+          sessionId: liveOnlyId,
+          workspaceCwd: WS_BOUND,
+          createdAt: '2026-05-17T11:59:00.000Z',
+          updatedAt: '2026-05-17T12:05:00.000Z',
+          clientCount: 1,
+          hasActivePrompt: false,
+        },
+      ];
+      const bridge = fakeBridge({ listImpl: () => liveEntries });
+
+      const page1 = await listWorkspaceSessionsForResponse(bridge, WS_BOUND, {
+        view: 'organized',
+        size: 2,
+      });
+      expect(page1.sessions.map((row) => row.sessionId)).toEqual([
+        liveOnlyId,
+        persistedRows[0][0],
+      ]);
+
+      // Retire and flush WITHOUT invalidating: page 2 must read the stale
+      // pre-flush snapshot, where the carried row is absent and not live.
+      liveEntries = [];
+      await writeStoredSession({
+        sessionId: liveOnlyId,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T11:59:00.000Z',
+        prompt: 'flushed after close',
+        mtime: new Date('2026-05-17T12:00:30.000Z'),
+      });
+      const page2 = await listWorkspaceSessionsForResponse(bridge, WS_BOUND, {
+        view: 'organized',
+        size: 2,
+        cursor: page1.nextCursor!,
+      });
+      expect(page2.sessions.map((row) => row.sessionId)).toEqual([
+        persistedRows[1][0],
+        persistedRows[2][0],
+      ]);
+      expect(page2.nextCursor).toBeDefined();
+      const page2Cursor = JSON.parse(
+        Buffer.from(page2.nextCursor!, 'base64url').toString('utf8'),
+      ) as { emitted?: string[] };
+      expect(page2Cursor.emitted).toContain(liveOnlyId);
+
+      // Page 3 reads a fresh scan that contains the flushed row behind the
+      // pass boundary; the carried identity must keep it excluded.
+      invalidateWorkspaceSessionListCache({
+        runtimeBaseDir: new Storage(WS_BOUND).getRuntimeBaseDir(),
+        workspaceCwd: WS_BOUND,
+        archiveStates: ['active'],
+      });
+      const probe = await listWorkspaceSessionsForResponse(bridge, WS_BOUND, {
+        view: 'organized',
+        size: 6,
+      });
+      expect(probe.sessions.map((row) => row.sessionId)).toContain(liveOnlyId);
+      const page3 = await listWorkspaceSessionsForResponse(bridge, WS_BOUND, {
+        view: 'organized',
+        size: 2,
+        cursor: page2.nextCursor!,
+      });
+      expect(page3.sessions.map((row) => row.sessionId)).toEqual([
+        persistedRows[3][0],
+      ]);
+      expect(page3.nextCursor).toBeUndefined();
+    });
+
+    it('retains a carried identity across a mid-pass live-list failure', async () => {
+      // Page 1 emits a live-only row; the live list then becomes unavailable
+      // for the rest of the pass while the row's first flush lands behind the
+      // boundary. Liveness of the absent carried row cannot be ruled out, so
+      // the identity is retained and the failed merge is surfaced.
+      const liveOnlyId = '550e8400-e29b-41d4-a716-4466554c0000';
+      const persistedRows = [
+        ['550e8400-e29b-41d4-a716-4466554c0001', '2026-05-17T12:04:00.000Z'],
+        ['550e8400-e29b-41d4-a716-4466554c0002', '2026-05-17T12:03:00.000Z'],
+        ['550e8400-e29b-41d4-a716-4466554c0003', '2026-05-17T12:02:00.000Z'],
+        ['550e8400-e29b-41d4-a716-4466554c0004', '2026-05-17T12:01:00.000Z'],
+      ] as const;
+      for (const [sessionId, mtime] of persistedRows) {
+        await writeStoredSession({
+          sessionId,
+          cwd: WS_BOUND,
+          timestamp: '2026-05-17T11:00:00.000Z',
+          prompt: 'persisted',
+          mtime: new Date(mtime),
+        });
+      }
+      let liveListAvailable = true;
+      const liveEntries = [
+        {
+          sessionId: liveOnlyId,
+          workspaceCwd: WS_BOUND,
+          createdAt: '2026-05-17T11:59:00.000Z',
+          updatedAt: '2026-05-17T12:05:00.000Z',
+          clientCount: 1,
+          hasActivePrompt: false,
+        },
+      ];
+      const bridge = fakeBridge({
+        listImpl: () => {
+          if (!liveListAvailable) {
+            throw new Error('bridge unavailable mid-pass');
+          }
+          return liveEntries;
+        },
+      });
+
+      const page1 = await listWorkspaceSessionsForResponse(bridge, WS_BOUND, {
+        view: 'organized',
+        size: 2,
+      });
+      expect(page1.sessions.map((row) => row.sessionId)).toEqual([
+        liveOnlyId,
+        persistedRows[0][0],
+      ]);
+
+      liveListAvailable = false;
+      const page2 = await listWorkspaceSessionsForResponse(bridge, WS_BOUND, {
+        view: 'organized',
+        size: 2,
+        cursor: page1.nextCursor!,
+      });
+      expect(page2.liveMergeFailed).toBe(true);
+      expect(page2.sessions.map((row) => row.sessionId)).toEqual([
+        persistedRows[1][0],
+        persistedRows[2][0],
+      ]);
+      expect(page2.nextCursor).toBeDefined();
+
+      await writeStoredSession({
+        sessionId: liveOnlyId,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T11:59:00.000Z',
+        prompt: 'flushed after failure',
+        mtime: new Date('2026-05-17T12:00:30.000Z'),
+      });
+      invalidateWorkspaceSessionListCache({
+        runtimeBaseDir: new Storage(WS_BOUND).getRuntimeBaseDir(),
+        workspaceCwd: WS_BOUND,
+        archiveStates: ['active'],
+      });
+      const page3 = await listWorkspaceSessionsForResponse(bridge, WS_BOUND, {
+        view: 'organized',
+        size: 2,
+        cursor: page2.nextCursor!,
+      });
+      expect(page3.liveMergeFailed).toBe(true);
+      expect(page3.sessions.map((row) => row.sessionId)).toEqual([
+        persistedRows[3][0],
+      ]);
+      expect(page3.nextCursor).toBeUndefined();
+    });
+
+    it('does not repeat an organized row unpinned between page fetches', async () => {
+      // Page 1 emits a pinned live row whose persisted floor sits far behind
+      // the unpinned boundary. `reenters` must hold the identity under both
+      // pin states: an unpin between fetches re-keys the row into the
+      // unpinned block behind the boundary, where the strictly-older filter
+      // would re-admit it.
+      const pinnedId = '550e8400-e29b-41d4-a716-4466554d0000';
+      await writeStoredSession({
+        sessionId: pinnedId,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T11:00:00.000Z',
+        prompt: 'pinned row',
+        mtime: new Date('2026-05-17T12:00:00.000Z'),
+      });
+      const unpinnedRows = [
+        ['550e8400-e29b-41d4-a716-4466554d0001', '2026-05-17T12:04:00.000Z'],
+        ['550e8400-e29b-41d4-a716-4466554d0002', '2026-05-17T12:03:00.000Z'],
+        ['550e8400-e29b-41d4-a716-4466554d0003', '2026-05-17T12:02:00.000Z'],
+      ] as const;
+      for (const [sessionId, mtime] of unpinnedRows) {
+        await writeStoredSession({
+          sessionId,
+          cwd: WS_BOUND,
+          timestamp: '2026-05-17T11:00:00.000Z',
+          prompt: 'unpinned row',
+          mtime: new Date(mtime),
+        });
+      }
+      let liveEntries = [
+        {
+          sessionId: pinnedId,
+          workspaceCwd: WS_BOUND,
+          createdAt: '2026-05-17T11:00:00.000Z',
+          updatedAt: '2026-05-17T12:05:00.000Z',
+          clientCount: 1,
+          hasActivePrompt: false,
+        },
+      ];
+      const bridge = fakeBridge({ listImpl: () => liveEntries });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, boundWorkspace: WS_BOUND },
+      );
+      const host = (req: request.Test): request.Test =>
+        req.set('Host', `127.0.0.1:${baseOpts.port}`);
+      const pin = await host(
+        request(app).patch(`/session/${pinnedId}/organization`),
+      ).send({ isPinned: true });
+      expect(pin.status).toBe(200);
+
+      const page1 = await host(
+        request(app).get(
+          `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?view=organized&size=2`,
+        ),
+      );
+      expect(page1.status).toBe(200);
+      expect(
+        page1.body.sessions.map((s: { sessionId: string }) => s.sessionId),
+      ).toEqual([pinnedId, unpinnedRows[0][0]]);
+
+      // The row retires and the user unpins it between fetches, re-keying it
+      // behind the unpinned page-1 boundary.
+      liveEntries = [];
+      const unpin = await host(
+        request(app).patch(`/session/${pinnedId}/organization`),
+      ).send({ isPinned: false });
+      expect(unpin.status).toBe(200);
+
+      const page2 = await host(
+        request(app).get(
+          `/workspace/${encodeURIComponent(
+            WS_BOUND,
+          )}/sessions?view=organized&size=2&cursor=${encodeURIComponent(
+            page1.body.nextCursor as string,
+          )}`,
+        ),
+      );
+      expect(page2.status).toBe(200);
+      expect(
+        page2.body.sessions.map((s: { sessionId: string }) => s.sessionId),
+      ).toEqual([unpinnedRows[1][0], unpinnedRows[2][0]]);
+      expect(page2.body.nextCursor).toBeUndefined();
+      const allIds = [...page1.body.sessions, ...page2.body.sessions].map(
+        (session: { sessionId: string }) => session.sessionId,
+      );
+      expect(new Set(allIds).size).toBe(4);
     });
 
     it('caps the carried emitted identities and degrades the overflow to at-most-once duplicates', async () => {
@@ -16871,6 +17195,16 @@ describe('createServeApp', () => {
           workspaceCwd: WS_BOUND,
           archiveStates: ['active'],
         });
+        // Prove the flushed row reached the persisted scan page 2 will read;
+        // a silently no-op invalidation would otherwise pass this test
+        // without exercising the carried exclusion.
+        const probe = await listWorkspaceSessionsForResponse(bridge, WS_BOUND, {
+          parentSessionId: PARENT,
+          size: 5,
+        });
+        expect(probe.sessions.map((row) => row.sessionId)).toContain(
+          liveOnlyChild,
+        );
         const page2 = await listWorkspaceSessionsForResponse(bridge, WS_BOUND, {
           parentSessionId: PARENT,
           size: 1,
