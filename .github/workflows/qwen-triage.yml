@@ -2588,9 +2588,44 @@ jobs:
           WS="${GITHUB_WORKSPACE:?}"
           # Refuse to run anywhere unexpected: a wipe pointed at the wrong
           # path by a mangled env is far worse than a skipped wipe, and
-          # this job cannot proceed safely without it either way.
+          # this job cannot proceed safely without it either way. This is
+          # the guard from qwen-code-pr-review.yml's checkout heal (#9220),
+          # backported per #9265: measured on main, the bare denylist let
+          # non-canonical spellings of the guarded roots through (/home/,
+          # /home/., //usr, /root/, /var/ all reached the rm).
+          # Canonicalize before matching: the kernel resolves non-canonical
+          # spellings to the guarded roots (`/home/.` -> /home, `//usr` ->
+          # /usr), so a raw string match lets them slip past the case arms.
+          WS="$(realpath -m -- "$WS" 2>/dev/null)" || { echo "::error::refusing to wipe: realpath unavailable, cannot canonicalize ${GITHUB_WORKSPACE}"; exit 1; }
+          # Trailing slashes slip past the exact-match case arms below
+          # (`/home/` would pass the guard and reach the rm); realpath strips
+          # them too; keep the guard whole if the path reaches this point with
+          # trailing slashes.
+          while [ "${WS%/}" != "$WS" ]; do WS="${WS%/}"; done
+          case "$WS" in
+            ..|../*|*/..|*/../*) echo "::error::refusing to wipe path containing '..': ${WS}"; exit 1 ;;
+          esac
           case "$WS" in
             /|/home|/root|/usr*|/etc*|/var|"") echo "::error::refusing to wipe suspicious workspace path: ${WS}"; exit 1 ;;
+          esac
+          # A denylist can only enumerate known roots — the allowlist closes
+          # every other one (/tmp, /opt, ...): only a directory inside the
+          # runner workspace may be wiped. RUNNER_WORKSPACE is set in every
+          # step env, and for container steps the runner translates it —
+          # together with GITHUB_WORKSPACE — to the container path, so the
+          # allowlist holds inside this job's container as well.
+          RWS="${RUNNER_WORKSPACE:?}"
+          RWS="$(realpath -m -- "$RWS" 2>/dev/null)" || { echo "::error::refusing to wipe: realpath unavailable, cannot canonicalize ${RUNNER_WORKSPACE}"; exit 1; }
+          # Mirror the WS strip before building the allowlist pattern; "/"
+          # stripped empty would match every path instead.
+          while [ "${RWS%/}" != "$RWS" ]; do RWS="${RWS%/}"; done
+          if [ -z "$RWS" ]; then echo "::error::refusing to wipe: runner workspace resolved to /"; exit 1; fi
+          case "$RWS" in
+            ..|../*|*/..|*/../*) echo "::error::refusing runner workspace path containing '..': ${RWS}"; exit 1 ;;
+          esac
+          case "$WS" in
+            "$RWS"/*) ;;
+            *) echo "::error::refusing to wipe workspace outside the runner workspace: ${WS} (runner workspace: ${RWS})"; exit 1 ;;
           esac
           # Contents, not the directory itself: the runner owns the mount
           # point. Dotfiles included — a planted .npmrc or .git is exactly
@@ -3518,9 +3553,30 @@ jobs:
         if: "always() && needs.authorize.outputs.verify_trust == 'external'"
         run: |-
           set -uo pipefail
+          # Same guard as the pre-run wipe above (canonicalize, strip
+          # trailing slashes, denylist, RUNNER_WORKSPACE allowlist) — this
+          # copy predates the checkout-heal hardening and never received it
+          # (#9265). See that step's comments for what each layer catches;
+          # the suite pins this copy's behavior on its own.
           WS="${GITHUB_WORKSPACE:?}"
+          WS="$(realpath -m -- "$WS" 2>/dev/null)" || { echo "::error::refusing to wipe: realpath unavailable, cannot canonicalize ${GITHUB_WORKSPACE}"; exit 1; }
+          while [ "${WS%/}" != "$WS" ]; do WS="${WS%/}"; done
+          case "$WS" in
+            ..|../*|*/..|*/../*) echo "::error::refusing to wipe path containing '..': ${WS}"; exit 1 ;;
+          esac
           case "$WS" in
             /|/home|/root|/usr*|/etc*|/var|"") echo "::error::refusing to wipe suspicious workspace path: ${WS}"; exit 1 ;;
+          esac
+          RWS="${RUNNER_WORKSPACE:?}"
+          RWS="$(realpath -m -- "$RWS" 2>/dev/null)" || { echo "::error::refusing to wipe: realpath unavailable, cannot canonicalize ${RUNNER_WORKSPACE}"; exit 1; }
+          while [ "${RWS%/}" != "$RWS" ]; do RWS="${RWS%/}"; done
+          if [ -z "$RWS" ]; then echo "::error::refusing to wipe: runner workspace resolved to /"; exit 1; fi
+          case "$RWS" in
+            ..|../*|*/..|*/../*) echo "::error::refusing runner workspace path containing '..': ${RWS}"; exit 1 ;;
+          esac
+          case "$WS" in
+            "$RWS"/*) ;;
+            *) echo "::error::refusing to wipe workspace outside the runner workspace: ${WS} (runner workspace: ${RWS})"; exit 1 ;;
           esac
           find "$WS" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
           echo "Workspace wiped after external code (deny-by-default cleanup for the next pool job)." >> "$GITHUB_STEP_SUMMARY"

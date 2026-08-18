@@ -24,8 +24,11 @@ import {
   reviewLeaseHeldByAnotherSession,
 } from '../../services/review-worktree-lease.js';
 import { classifyHeavy } from './lib/heavy.js';
+import { DEADLINE_ENV } from './lib/deadline.js';
+import type { MergeBaseResult } from './lib/merge-base.js';
 import { buildRoleBrief } from './agent-prompt.js';
 import { PARSE_ARGS_REPORT, worktreePath } from './lib/paths.js';
+import { makeDiff } from './lib/test-utils.js';
 
 describe('classifyHeavy', () => {
   it('flags a substantially rewritten existing file', () => {
@@ -238,7 +241,7 @@ const producerMocks = vi.hoisted(() => ({
   gitOpt: vi.fn((..._args: string[]): string | null => null),
   gitRaw: vi.fn((..._args: string[]): Buffer => Buffer.from('')),
   resolveMergeBase: vi.fn(
-    (): { sha: string | null; baseFetchFailed: boolean } => ({
+    (): MergeBaseResult => ({
       sha: null,
       baseFetchFailed: false,
     }),
@@ -339,10 +342,10 @@ describe('fetch-pr report assembly', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     // clearAllMocks resets call history but NOT implementations, so a
-    // mockReturnValue a prior test set on readFileSync would leak into a test
-    // that relies on the default. Re-assert the default (no prior report →
-    // ENOENT) here so every test starts from a known state regardless of
-    // order.
+    // mockReturnValue a prior test set would leak into a test that relies on
+    // the default. Re-assert the defaults (no prior report → ENOENT, no
+    // merge base → no diff) here so every test starts from a known state
+    // regardless of order.
     producerMocks.readFileSync.mockImplementation(() => {
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
     });
@@ -396,19 +399,43 @@ describe('fetch-pr report assembly', () => {
     }
   });
 
+  /**
+   * The identity these fixtures run as, on both sides of the same-model gate.
+   *
+   * A `--since` anchor is used only when `--since-model` matches the running
+   * identity, so a test about ancestry or scoping has to agree on WHO
+   * certified the anchor before it can be about anything else. Supplied by
+   * default here rather than repeated in thirty call sites; the tests that
+   * are ABOUT the gate pass their own `sinceModel` and set their own env.
+   */
+  const CERTIFIER = 'fixture-model@1a2b3c4d';
+
   async function reportFor(extraArgs: Record<string, unknown>) {
     const handler = fetchPrCommand.handler;
     if (!handler) throw new Error('fetch-pr handler missing');
-    await handler({
-      _: [],
-      $0: 'qwen',
-      pr_number: '42',
-      owner_repo: 'acme/widgets',
-      remote: 'origin',
-      out: '/tmp/fetch-report.json',
-      maxChunkLines: 400,
-      ...extraArgs,
-    } as unknown as Parameters<typeof handler>[0]);
+    const savedIdentity = process.env['QWEN_CODE_MODEL_IDENTITY'];
+    process.env['QWEN_CODE_MODEL_IDENTITY'] = CERTIFIER;
+    try {
+      await handler({
+        _: [],
+        $0: 'qwen',
+        pr_number: '42',
+        owner_repo: 'acme/widgets',
+        remote: 'origin',
+        out: '/tmp/fetch-report.json',
+        maxChunkLines: 400,
+        ...(extraArgs['since'] !== undefined && !('sinceModel' in extraArgs)
+          ? { sinceModel: CERTIFIER }
+          : {}),
+        ...extraArgs,
+      } as unknown as Parameters<typeof handler>[0]);
+    } finally {
+      if (savedIdentity === undefined) {
+        delete process.env['QWEN_CODE_MODEL_IDENTITY'];
+      } else {
+        process.env['QWEN_CODE_MODEL_IDENTITY'] = savedIdentity;
+      }
+    }
     // findLast, not find: a test that drives two rounds must read the report
     // the SECOND one wrote, or it asserts against the first round's state.
     const call = producerMocks.writeFileSync.mock.calls.findLast(
@@ -438,6 +465,39 @@ describe('fetch-pr report assembly', () => {
   it('carries --host into the report for the cleanup audit to reuse', async () => {
     const report = await reportFor({ host: 'ghe.example.com' });
     expect(report.host).toBe('ghe.example.com');
+  });
+
+  it('records the round cap its capture wiring writes — huge tier only with a clock (#9256)', async () => {
+    // plan-diff and capture-local pin this wiring in their own handlers; the
+    // fetch-pr side had no assertion because this harness steers the lightest
+    // real path (no merge base → no diff). Override the two mocks that steer
+    // it into a real diff instead: a resolvable merge base and a raw diff
+    // buffer. A handler that forgot the deadline read — or the capture-time
+    // tier call — would keep every budget unit test green and this one red.
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: 'beef0000',
+      baseFetchFailed: false,
+    });
+    producerMocks.gitRaw.mockReturnValue(
+      Buffer.from(makeDiff('src/huge.ts', 9000)),
+    );
+
+    const before = process.env[DEADLINE_ENV];
+    try {
+      delete process.env[DEADLINE_ENV];
+      producerMocks.writeFileSync.mockClear();
+      const noClock = await reportFor({});
+      expect(noClock.srcDiffLines).toBeGreaterThanOrEqual(3000);
+      expect(noClock.budget.reverseAuditRounds).toBe(5);
+
+      process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 7200);
+      producerMocks.writeFileSync.mockClear();
+      const withClock = await reportFor({});
+      expect(withClock.budget.reverseAuditRounds).toBe(3);
+    } finally {
+      if (before === undefined) delete process.env[DEADLINE_ENV];
+      else process.env[DEADLINE_ENV] = before;
+    }
   });
 
   // The lease is also a lock (#9205): a concurrent same-PR fetch-pr used to
@@ -906,6 +966,61 @@ describe('fetch-pr report assembly', () => {
       BASE,
       ANCHOR,
     ]);
+  });
+
+  it('refuses an anchor another identity certified, before touching history', async () => {
+    // "Clean up to this sha" is the recorded identity's verdict, and this
+    // command validates an anchor against the HISTORY, never against who
+    // certified it — so a cross-model anchor is ancestrally perfect and
+    // still scopes the round past code it never reviewed.
+    //
+    // The gate lives here because every prompt-text version of it was wrong:
+    // `{{model}}` interpolates the BARE `config.getModel()` while every
+    // identity the CLI writes is provider-qualified, so two providers
+    // exposing one model name passed each other's gate.
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    servesBothRanges();
+
+    // Same model NAME, different provider — the case the digest exists for.
+    const other = await reportFor({
+      since: ANCHOR,
+      sinceModel: 'fixture-model@9f8e7d6c',
+    });
+    expect(other.incremental).toEqual({
+      since: ANCHOR,
+      effective: false,
+      reason: 'cross-model-anchor',
+    });
+    // Refused before the history was consulted at all: no probe ran for it.
+    expect(producerMocks.gitOpt.mock.calls).not.toContainEqual([
+      'cat-file',
+      '-e',
+      ANCHOR,
+    ]);
+    // The round still reviews — the full range.
+    expect(other.diffPath).not.toBeNull();
+
+    // An anchor nobody certified (a cache written before the field) is a
+    // mismatch, not a pass.
+    expect(
+      (await reportFor({ since: ANCHOR, sinceModel: undefined })).incremental,
+    ).toEqual({
+      since: ANCHOR,
+      effective: false,
+      reason: 'cross-model-anchor',
+    });
+
+    // …and the matching identity scopes, which is what makes the refusals
+    // above about the gate rather than about the anchor.
+    expect((await reportFor({ since: ANCHOR })).incremental).toEqual({
+      since: ANCHOR,
+      effective: true,
+      diffBase: ANCHOR,
+    });
   });
 
   it('takes the LAST value of a repeated --since, and expands an abbreviation', async () => {
