@@ -1,6 +1,9 @@
 import { fork } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { channelSelectionNames } from './channel-selection.js';
 import type { ServeChannelSelection } from './types.js';
 import {
@@ -222,6 +225,11 @@ export interface CreateChannelWorkerSupervisorOptions {
    * daemon base env.
    */
   workerBaseEnv?: Readonly<NodeJS.ProcessEnv>;
+  /**
+   * PEM cert the worker must additionally trust when calling the daemon
+   * over a self-signed TLS listener. Injected via NODE_EXTRA_CA_CERTS.
+   */
+  tlsCaCertPath?: string;
   startupTimeoutMs?: number;
   spawnWorker?: SpawnChannelWorker;
   onExit?: (snapshot: ChannelWorkerSnapshot) => void;
@@ -372,11 +380,37 @@ function hasObservedExit(snapshot: ChannelWorkerSnapshot): boolean {
   return snapshot.exitCode !== undefined || snapshot.signal !== undefined;
 }
 
+const NODE_EXTRA_CA_CERTS_ENV = 'NODE_EXTRA_CA_CERTS';
+
+function resolveWorkerCaCertPath(
+  daemonCertPath: string,
+  existing: string | undefined,
+): string {
+  if (!existing || existing === daemonCertPath) return daemonCertPath;
+  try {
+    // NODE_EXTRA_CA_CERTS takes a single file; merge so an operator-set CA
+    // (e.g. corporate proxy) keeps working alongside the daemon cert.
+    const combined = [
+      fs.readFileSync(existing, 'utf8').trimEnd(),
+      fs.readFileSync(daemonCertPath, 'utf8').trimEnd(),
+    ].join('\n');
+    const combinedPath = path.join(
+      os.tmpdir(),
+      `qwen-worker-ca-${process.pid}.pem`,
+    );
+    fs.writeFileSync(combinedPath, `${combined}\n`, { mode: 0o600 });
+    return combinedPath;
+  } catch {
+    return daemonCertPath;
+  }
+}
+
 function createWorkerEnv(opts: {
   daemonUrl: string;
   daemonToken?: string;
   workspace: string;
   baseEnv?: Readonly<NodeJS.ProcessEnv>;
+  tlsCaCertPath?: string;
 }): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...(opts.baseEnv ?? process.env) };
   env['QWEN_CODE_NO_RELAUNCH'] = 'true';
@@ -384,6 +418,12 @@ function createWorkerEnv(opts: {
   // the ACP channel fallback reports channel=daemon in usage statistics
   // (see cli/src/config/acp-channel-fallback.ts).
   env['QWEN_CODE_SERVE'] = '1';
+  if (opts.tlsCaCertPath) {
+    env[NODE_EXTRA_CA_CERTS_ENV] = resolveWorkerCaCertPath(
+      opts.tlsCaCertPath,
+      env[NODE_EXTRA_CA_CERTS_ENV],
+    );
+  }
   env[CHANNEL_DAEMON_WORKER_SENTINEL] = randomUUID();
   env[QWEN_DAEMON_URL_ENV] = opts.daemonUrl;
   env[QWEN_DAEMON_WORKSPACE_ENV] = opts.workspace;
@@ -791,6 +831,7 @@ export function createChannelWorkerSupervisor(
       workspace: opts.workspace,
       ...(opts.daemonToken ? { daemonToken: opts.daemonToken } : {}),
       ...(opts.workerBaseEnv ? { baseEnv: opts.workerBaseEnv } : {}),
+      ...(opts.tlsCaCertPath ? { tlsCaCertPath: opts.tlsCaCertPath } : {}),
     });
     const promptAuthorization = env[CHANNEL_DAEMON_WORKER_SENTINEL]!;
     registerChannelWorkerPromptAuthorization(

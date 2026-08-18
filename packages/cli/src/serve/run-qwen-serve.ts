@@ -670,7 +670,9 @@ function workspaceRuntimeEffectiveEnv(
 export function formatChannelWorkerDaemonUrl(
   host: string,
   port: number,
+  tls = false,
 ): string {
+  const scheme = tls ? 'https' : 'http';
   const normalized = host.trim().toLowerCase();
   if (
     normalized === '' ||
@@ -678,9 +680,9 @@ export function formatChannelWorkerDaemonUrl(
     normalized === '::' ||
     normalized === '[::]'
   ) {
-    return `http://127.0.0.1:${port}`;
+    return `${scheme}://127.0.0.1:${port}`;
   }
-  return `http://${formatHostForUrl(host)}:${port}`;
+  return `${scheme}://${formatHostForUrl(host)}:${port}`;
 }
 
 /**
@@ -7122,8 +7124,10 @@ async function runQwenServeImpl(
                 daemonUrl: formatChannelWorkerDaemonUrl(
                   opts.hostname,
                   actualPort,
+                  tlsOptions !== undefined,
                 ),
                 ...(token ? { daemonToken: token } : {}),
+                ...(tlsOptions ? { workerTlsCaCertPath: opts.tlsCert } : {}),
               },
               onReady: (snapshot) => {
                 if (runtimeStartupError !== undefined) return;

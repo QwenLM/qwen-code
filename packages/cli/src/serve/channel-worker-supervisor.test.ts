@@ -1,4 +1,7 @@
 import { EventEmitter } from 'node:events';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ChannelWebhookTask } from '@qwen-code/channel-base';
 import {
@@ -275,6 +278,72 @@ describe('createChannelWorkerSupervisor', () => {
     expect(
       isChannelWorkerPromptAuthorized(promptAuthorization, '/workspace'),
     ).toBe(false);
+  });
+
+  it('injects NODE_EXTRA_CA_CERTS when the daemon serves TLS', async () => {
+    const child = new FakeChild();
+    const spawnWorker = vi.fn(
+      (_execPath: string, _argv: string[], _options: unknown) => child,
+    );
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'https://127.0.0.1:4170',
+      tlsCaCertPath: '/certs/daemon.pem',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      workerBaseEnv: {},
+      spawnWorker,
+    });
+
+    const started = supervisor.start();
+    child.emit('message', {
+      type: 'ready',
+      pid: 54321,
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+    });
+    await started;
+
+    const env = (spawnWorker.mock.calls[0]![2] as { env: NodeJS.ProcessEnv })
+      .env;
+    expect(env['NODE_EXTRA_CA_CERTS']).toBe('/certs/daemon.pem');
+  });
+
+  it('merges an operator-set NODE_EXTRA_CA_CERTS with the daemon cert', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-ca-merge-'));
+    const operatorCa = path.join(dir, 'operator.pem');
+    const daemonCa = path.join(dir, 'daemon.pem');
+    fs.writeFileSync(operatorCa, 'OP-CERT\n');
+    fs.writeFileSync(daemonCa, 'DAEMON-CERT\n');
+    const child = new FakeChild();
+    const spawnWorker = vi.fn(
+      (_execPath: string, _argv: string[], _options: unknown) => child,
+    );
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'https://127.0.0.1:4170',
+      tlsCaCertPath: daemonCa,
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      workerBaseEnv: { NODE_EXTRA_CA_CERTS: operatorCa },
+      spawnWorker,
+    });
+
+    const started = supervisor.start();
+    child.emit('message', {
+      type: 'ready',
+      pid: 54321,
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+    });
+    await started;
+
+    const env = (spawnWorker.mock.calls[0]![2] as { env: NodeJS.ProcessEnv })
+      .env;
+    const combined = fs.readFileSync(env['NODE_EXTRA_CA_CERTS']!, 'utf8');
+    expect(combined).toContain('OP-CERT');
+    expect(combined).toContain('DAEMON-CERT');
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 
   it('ignores non-ready IPC messages before the ready message', async () => {

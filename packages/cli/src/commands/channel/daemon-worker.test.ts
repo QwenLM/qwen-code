@@ -1332,18 +1332,42 @@ describe('runChannelDaemonWorker', () => {
     ).rejects.toThrow('Channel "missing" not found in settings.');
   });
 
-  it('rejects daemon URLs that are not http loopback URLs', async () => {
+  it('rejects daemon URLs that are not http(s) loopback URLs', async () => {
     const sdk = createSdk();
 
-    await expect(
-      runChannelDaemonWorker({
-        daemonUrl: 'http://attacker.example:4170',
-        workspace: '/workspace',
-        selection: { mode: 'names', names: ['telegram'] },
-        loadDaemonSdk: async () => sdk,
-      }),
-    ).rejects.toThrow('QWEN_DAEMON_URL must use an http loopback URL.');
+    for (const daemonUrl of [
+      'http://attacker.example:4170',
+      'https://attacker.example:4170',
+    ]) {
+      await expect(
+        runChannelDaemonWorker({
+          daemonUrl,
+          workspace: '/workspace',
+          selection: { mode: 'names', names: ['telegram'] },
+          loadDaemonSdk: async () => sdk,
+        }),
+      ).rejects.toThrow('QWEN_DAEMON_URL must use an http(s) loopback URL.');
+    }
     expect(sdk.DaemonClient).not.toHaveBeenCalled();
+  });
+
+  it('accepts https loopback daemon URLs for TLS daemons', async () => {
+    const sdk = createSdk();
+    mockLoadChannelsConfig.mockReturnValueOnce({
+      telegram: { type: 'telegram' },
+    });
+    mockParseConfiguredChannels.mockResolvedValueOnce([parsedTelegram]);
+
+    await runChannelDaemonWorker({
+      daemonUrl: 'https://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'all' },
+      loadDaemonSdk: async () => sdk,
+    });
+
+    expect(sdk.DaemonClient).toHaveBeenCalledWith({
+      baseUrl: 'https://127.0.0.1:4170',
+    });
   });
 
   it('fails fast when no channels are configured', async () => {

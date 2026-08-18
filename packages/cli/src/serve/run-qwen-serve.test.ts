@@ -1133,6 +1133,15 @@ describe('formatChannelWorkerDaemonUrl', () => {
     );
     expect(isLoopbackBind('127.0.0.2')).toBe(true);
   });
+
+  it('uses https when the daemon serves TLS', () => {
+    expect(formatChannelWorkerDaemonUrl('0.0.0.0', 4170, true)).toBe(
+      'https://127.0.0.1:4170',
+    );
+    expect(formatChannelWorkerDaemonUrl('::1', 4170, true)).toBe(
+      'https://[::1]:4170',
+    );
+  });
 });
 
 /**
