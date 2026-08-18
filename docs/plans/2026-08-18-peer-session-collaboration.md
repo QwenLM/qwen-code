@@ -26,11 +26,11 @@ the in-process bottleneck is removed. The file plane is already cross-process sa
 
 ### 0.1 Three planes
 
-| Plane            | Medium                            | Authority                       | If it is unavailable                    |
-| ---------------- | --------------------------------- | ------------------------------- | --------------------------------------- |
-| **Coordination** | Files + `proper-lockfile`         | **Authoritative**               | Collaboration stops                     |
-| **Discovery**    | `~/.qwen/sessions/<pid>.json`     | Advisory (liveness hint)        | Peers must be named explicitly          |
-| **Transport**    | UNIX domain socket per session    | **Optimization only**           | Delivery falls back to inbox polling    |
+| Plane            | Medium                         | Authority                | If it is unavailable                 |
+| ---------------- | ------------------------------ | ------------------------ | ------------------------------------ |
+| **Coordination** | Files + `proper-lockfile`      | **Authoritative**        | Collaboration stops                  |
+| **Discovery**    | `~/.qwen/sessions/<pid>.json`  | Advisory (liveness hint) | Peers must be named explicitly       |
+| **Transport**    | UNIX domain socket per session | **Optimization only**    | Delivery falls back to inbox polling |
 
 The transport tier being non-load-bearing is the property that makes this design safe to
 ship incrementally, and it is inherited from a fact already true in the code: the leader
@@ -38,13 +38,13 @@ already polls its own inbox, so teammate→leader messaging needs no socket for 
 
 ### 0.2 Settled product decisions
 
-| Decision            | Choice                                                                                                   | Rejected alternative and why                                                                                              |
-| ------------------- | -------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| **Topology**        | Peer. `leader` is a **role** — transferable, and validly empty                                            | Owner-leader: makes an independently started session a second-class observer, which is the exact case this design exists for |
-| **Membership**      | Two entrances: `spawn` (existing) and `join` (new). Neither is privileged                                 | Spawn-only: the current `TeamManager.ts:312` constraint, and the reason no running session can ever participate               |
-| **Consent**         | Receiver-side gate with approval-mode parity, fail-closed ([#8730](https://github.com/QwenLM/qwen-code/pull/8730)) | Sender-side authorization: `from` is unauthenticatable on this transport (§2.5), so only the receiver can decide safely       |
-| **Write conflicts** | Out of scope by construction: peers collaborate **across** workspaces                                     | Path-claim protocol: a joined peer's permissions were fixed by whoever started it; no member can demote another               |
-| **Heterogeneity**   | Format stays vendor-neutral (it already is), but **v1 publishes no compatibility promise**                | Either designing *for* foreign agents (premature) or actively excluding them (costs work, buys nothing)                       |
+| Decision            | Choice                                                                                                             | Rejected alternative and why                                                                                                 |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------- |
+| **Topology**        | Peer. `leader` is a **role** — transferable, and validly empty                                                     | Owner-leader: makes an independently started session a second-class observer, which is the exact case this design exists for |
+| **Membership**      | Two entrances: `spawn` (existing) and `join` (new). Neither is privileged                                          | Spawn-only: the current `TeamManager.ts:312` constraint, and the reason no running session can ever participate              |
+| **Consent**         | Receiver-side gate with approval-mode parity, fail-closed ([#8730](https://github.com/QwenLM/qwen-code/pull/8730)) | Sender-side authorization: `from` is unauthenticatable on this transport (§2.5), so only the receiver can decide safely      |
+| **Write conflicts** | Out of scope by construction: peers collaborate **across** workspaces                                              | Path-claim protocol: a joined peer's permissions were fixed by whoever started it; no member can demote another              |
+| **Heterogeneity**   | Format stays vendor-neutral (it already is), but **v1 publishes no compatibility promise**                         | Either designing _for_ foreign agents (premature) or actively excluding them (costs work, buys nothing)                      |
 
 Two consequences worth stating plainly:
 
@@ -95,18 +95,18 @@ holder's lock self-clears after the 5 s stale window, which also bounds recovery
 
 ### 1.2 Exactly two code paths pin it to one process
 
-| Site                        | What it does                                       | Consequence                                        |
-| --------------------------- | -------------------------------------------------- | -------------------------------------------------- |
-| `send-message.ts:221`       | Route 2 requires `this.config.getTeamManager()`     | Teammate addressing needs an in-process object      |
-| `TeamManager.ts:312`        | `this.teamFile.members.push(member)` — inside spawn | **Membership is only obtainable by being spawned**  |
+| Site                  | What it does                                        | Consequence                                        |
+| --------------------- | --------------------------------------------------- | -------------------------------------------------- |
+| `send-message.ts:221` | Route 2 requires `this.config.getTeamManager()`     | Teammate addressing needs an in-process object     |
+| `TeamManager.ts:312`  | `this.teamFile.members.push(member)` — inside spawn | **Membership is only obtainable by being spawned** |
 
-Route 1 (`task_id`, background tasks) already does *not* go through `TeamManager`. The
+Route 1 (`task_id`, background tasks) already does _not_ go through `TeamManager`. The
 in-process binding is not architectural; it is two call sites.
 
 ### 1.3 There is no discovery of any kind
 
 - `list_agents` reads `config.getBackgroundTaskRegistry()` — process-local. Its own empty
-  message says so: *"No background agents are available in **this session**."*
+  message says so: _"No background agents are available in **this session**."_
 - `SessionService.listSessions()` enumerates **persisted transcripts** (mtime cursors,
   pagination, JSONL), not live processes. It is deliberately never deleted, so its
   presence carries no liveness signal.
@@ -117,11 +117,11 @@ Nothing in the product can answer "which Qwen sessions are running right now."
 
 ### 1.4 Multi-process agent hosting already ships, twice
 
-| Component                                          | Provides                                                                                                                     |
-| -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| `serve/create-sub-session.ts`                      | Daemon spawns a **fresh top-level sub-session**, runs a prompt, returns a result. `promptId` correlation on the event stream, concurrency slots, idle reaping, transcript persistence, abort via composed `AbortSignal` |
-| `serve/channel-worker-*.ts` (9,595 LOC)            | `fork()`, heartbeats, startup timeout, kill/stop grace, token + workspace env isolation, external tool guard, delivery/webhook IPC, diagnostics, worker groups |
-| `acp-bridge/spawnChannel.ts` + `child-heap-policy.ts` | Per-child `--max-old-space-size` derived from system memory (50 %, capped 16 GB), `ProcessRegistry`, stderr forwarding with credential redaction |
+| Component                                             | Provides                                                                                                                                                                                                                |
+| ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `serve/create-sub-session.ts`                         | Daemon spawns a **fresh top-level sub-session**, runs a prompt, returns a result. `promptId` correlation on the event stream, concurrency slots, idle reaping, transcript persistence, abort via composed `AbortSignal` |
+| `serve/channel-worker-*.ts` (9,595 LOC)               | `fork()`, heartbeats, startup timeout, kill/stop grace, token + workspace env isolation, external tool guard, delivery/webhook IPC, diagnostics, worker groups                                                          |
+| `acp-bridge/spawnChannel.ts` + `child-heap-policy.ts` | Per-child `--max-old-space-size` derived from system memory (50 %, capped 16 GB), `ProcessRegistry`, stderr forwarding with credential redaction                                                                        |
 
 The per-child heap budget also disposes of the "N teammates share one 4 GB heap" concern
 that motivates in-process teammate caps: independent processes do not share a heap.
@@ -132,44 +132,61 @@ Residency and in-flight inbound messaging are genuinely new semantics, not wirin
 
 ### 1.5 The cross-session stack was written, then lapsed
 
-[#8724](https://github.com/QwenLM/qwen-code/issues/8724) — *"let Qwen Code sessions on the
-same machine message each other"* — is **open**. Its implementation is not.
+[#8724](https://github.com/QwenLM/qwen-code/issues/8724) — _"let Qwen Code sessions on the
+same machine message each other"_ — is **open**. Its implementation is not.
 
-| PR                                                             | Scope                                                              | Outcome                     |
-| -------------------------------------------------------------- | ------------------------------------------------------------------ | --------------------------- |
-| [#8728](https://github.com/QwenLM/qwen-code/pull/8728)          | Liveness registry `~/.qwen/sessions/<pid>.json` + `qwen sessions ps` | **Closed, not merged** 8/12 |
-| [#8730](https://github.com/QwenLM/qwen-code/pull/8730)          | UDS inbox + inbound gate + `/peers` (+7,018/−74, 57 files)          | **Closed, not merged** 8/12 |
-| PR 3, PR 4                                                      | Send side; broadcast removal                                        | Never submitted             |
+| PR                                                     | Scope                                                                | Outcome                     |
+| ------------------------------------------------------ | -------------------------------------------------------------------- | --------------------------- |
+| [#8728](https://github.com/QwenLM/qwen-code/pull/8728) | Liveness registry `~/.qwen/sessions/<pid>.json` + `qwen sessions ps` | **Closed, not merged** 8/12 |
+| [#8730](https://github.com/QwenLM/qwen-code/pull/8730) | UDS inbox + inbound gate + `/peers` (+7,018/−74, 57 files)           | **Closed, not merged** 8/12 |
+| PR 3, PR 4                                             | Send side; broadcast removal                                         | Never submitted             |
 
 Neither closure was a design rejection:
 
-- #8730 was closed **voluntarily** to shrink the review surface — *"Nothing here is
+- #8730 was closed **voluntarily** to shrink the review surface — _"Nothing here is
   abandoned and nothing is lost — the branch stays, and this PR gets reopened once #8728
-  lands."*
+  lands."_
 - #8728 was then closed because automated fixes bloated it — `session-registry.ts` went
-  **379 → 1,235 lines**, and *"several of the remaining Critical findings are in code
+  **379 → 1,235 lines**, and _"several of the remaining Critical findings are in code
   those fixes added rather than in the original change. Patching further is not
-  converging."* The author stated it would return rebased at roughly its original size.
+  converging."_ The author stated it would return rebased at roughly its original size.
 
 The branch `feat/cross-session-inbox` still exists. None of this code is in the tree:
 `packages/core/src/ipc/`, `packages/cli/src/peerMessaging/`, `utils/process-liveness.ts`
 are all absent.
 
-### 1.6 6,186 lines of unwired supervisor
+### 1.6 A native supervisor and PTY layer is being built right now
 
 `packages/cli/src/agent-view/` — `supervisor-server.ts`, `supervisor-client.ts`,
 `supervisor-store.ts`, `supervisor-process.ts`, `supervisor-runner.ts`,
-`terminal-bridge.ts`, `protocol.ts` — has **zero references outside itself**.
+`terminal-bridge.ts`, `protocol.ts` — 6,186 lines, with **zero references elsewhere in
+`main`**. That reads as dead code and is not. It landed in
+[#7799](https://github.com/QwenLM/qwen-code/pull/7799) (2026-08-01) as the base of a
+five-PR series whose remaining four are open, non-draft, and actively maintained:
+
+| PR                                                                       | Files touched under `agent-view/` |
+| ------------------------------------------------------------------------ | --------------------------------- |
+| [#7800](https://github.com/QwenLM/qwen-code/pull/7800) PTY workers       | 11                                |
+| [#7801](https://github.com/QwenLM/qwen-code/pull/7801) session lifecycle | 17, incl. `protocol.ts`           |
+| [#7802](https://github.com/QwenLM/qwen-code/pull/7802) commands          | 6, incl. `supervisor-runner.ts`   |
+| [#7803](https://github.com/QwenLM/qwen-code/pull/7803) roster UI         | 0 — depends on the stack          |
+
+The consumers are in the pending PRs. A tree-only reachability check cannot see them, and
+concluding "unreferenced in `main`" means "abandoned" is a mistake this document made in
+its first revision.
+
+**This is a live conflict with §4, not a detail.** That series builds natively the terminal
+and supervisor layer §4 says to leave to herdr. Both positions cannot hold. See §7.6.
 
 (Distinct from `packages/cli/src/ui/components/agent-view/` — `AgentTabBar`,
-`AgentChatView`, `AgentComposer` — which is live and is reused unchanged by this design.)
+`AgentChatView`, `AgentComposer` — which is live in `main` and is reused unchanged here.)
 
 ### 1.7 One bug class, one root cause
 
-| Issue                                                        | Redundant paths for one semantic                                                    |
-| ------------------------------------------------------------ | ------------------------------------------------------------------------------------- |
-| [#9276](https://github.com/QwenLM/qwen-code/issues/9276) (open) | Control and content share `send_message`, split by an optional single-value enum `type` |
-| [#9282](https://github.com/QwenLM/qwen-code/issues/9282) (fixed by #9289) | Assignment via auto-claim scan **or** explicit owner; only the first was delivered      |
+| Issue                                                                     | Redundant paths for one semantic                                                                   |
+| ------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| [#9276](https://github.com/QwenLM/qwen-code/issues/9276) (open)           | Control and content share `send_message`, split by an optional single-value enum `type`            |
+| [#9282](https://github.com/QwenLM/qwen-code/issues/9282) (fixed by #9289) | Assignment via auto-claim scan **or** explicit owner; only the first was delivered                 |
 | [#9283](https://github.com/QwenLM/qwen-code/issues/9283) (fixed by #9284) | Reporting via runtime auto-forward **or** explicit `send_message`; prompts described the wrong one |
 
 Each defect sits on a seam between two overlapping paths where neither is authoritative.
@@ -214,10 +231,10 @@ makes them irrelevant rather than requiring a new type.
 
 Two entrances, one member record:
 
-| Entrance  | Who writes the record | Identity source                | Lifecycle owner |
-| --------- | --------------------- | ------------------------------ | --------------- |
-| `spawn`   | The spawning session  | Derived from the spawn (today) | The spawner     |
-| `join`    | The joining session   | Registry record + declared name | **Itself**      |
+| Entrance | Who writes the record | Identity source                 | Lifecycle owner |
+| -------- | --------------------- | ------------------------------- | --------------- |
+| `spawn`  | The spawning session  | Derived from the spawn (today)  | The spawner     |
+| `join`   | The joining session   | Registry record + declared name | **Itself**      |
 
 `team_leave` is required, and must release owned tasks — the existing
 `unassignTeammateTasks` / `releaseOwnedTask` already implement this.
@@ -246,13 +263,13 @@ The receive-side gate is the security boundary. Its rule is **approval-mode pari
 message auto-delivers only when acting on it cannot do more than the sender could already
 have done itself.
 
-| Receiver                                | Sender asserts | Result     |
-| --------------------------------------- | -------------- | ---------- |
-| prompting (DEFAULT / AUTO_EDIT / AUTO / PLAN) | anything  | accept     |
-| YOLO                                    | YOLO           | accept     |
-| YOLO                                    | prompting      | **hold**   |
-| YOLO                                    | nothing        | **hold**   |
-| unreadable                              | anything       | **hold**   |
+| Receiver                                      | Sender asserts | Result   |
+| --------------------------------------------- | -------------- | -------- |
+| prompting (DEFAULT / AUTO_EDIT / AUTO / PLAN) | anything       | accept   |
+| YOLO                                          | YOLO           | accept   |
+| YOLO                                          | prompting      | **hold** |
+| YOLO                                          | nothing        | **hold** |
+| unreadable                                    | anything       | **hold** |
 
 A prompting receiver may accept freely because every consequential action still faces its
 own gate — the message is a suggestion, not an execution. A YOLO receiver has no backstop.
@@ -267,8 +284,8 @@ Three defenses must agree, because any two leave the gap open:
 3. **Classifier rule** — a `<cross_session_message>` never establishes user intent, and a
    request to perform something the sender says it was denied is blocked outright.
 
-That third clause targets the cheapest bypass in the whole design: *get denied, then ask a
-second session to do it.*
+That third clause targets the cheapest bypass in the whole design: _get denied, then ask a
+second session to do it._
 
 **Stated limitation, not a gap:** `from` is **not authenticated**. Node cannot read
 `SO_PEERCRED` without a native addon. Access control is filesystem permissions — directory
@@ -315,8 +332,8 @@ background tasks.
 `team_join(team, as)` → verify team exists → write member record → register in the board.
 No spawner involved. `team_leave` releases owned tasks.
 
-Consent applies to *messages*, not to joining: joining is self-initiated, so there is no
-third party to authorize. What must be gated is a peer being able to *pull* another
+Consent applies to _messages_, not to joining: joining is self-initiated, so there is no
+third party to authorize. What must be gated is a peer being able to _pull_ another
 session in — so v1 has **no remote-join**. A session joins itself, or a human joins it.
 
 ### 3.3 Work
@@ -361,16 +378,16 @@ released after the 5 s lock stale window. No peer's death blocks any other peer.
 
 ## 4. Explicit non-goals
 
-| Not building                              | Because                                                                          |
-| ----------------------------------------- | -------------------------------------------------------------------------------- |
-| PTY attach, terminal multiplexing, panes  | herdr does this for 17+ CLIs, Apache-2.0. See §8                                  |
-| Hosting other vendors' processes          | That is becoming herdr. We publish a format; we host nothing                      |
-| A new roster UI                           | `ui/components/agent-view/` exists and is reused                                  |
-| Remote / SSH / cross-machine              | Same-uid filesystem permissions **are** the security model. Off-machine voids it  |
-| Broadcast (`to: "*"`)                     | #8724 removes it rather than extending it to N processes                          |
-| Same-checkout multi-writer                | A joined peer's permissions were fixed by whoever started it; no member can demote another |
-| Central completion guarantee              | Peers decide what to claim. Unclaimed work stays visible on the board, not forced |
-| Windows in the first cut                  | Follows #8724. The IPC path is abstracted so named pipes can be added             |
+| Not building                             | Because                                                                                    |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------ |
+| PTY attach, terminal multiplexing, panes | herdr does this for 17+ CLIs, Apache-2.0. See §8                                           |
+| Hosting other vendors' processes         | That is becoming herdr. We publish a format; we host nothing                               |
+| A new roster UI                          | `ui/components/agent-view/` exists and is reused                                           |
+| Remote / SSH / cross-machine             | Same-uid filesystem permissions **are** the security model. Off-machine voids it           |
+| Broadcast (`to: "*"`)                    | #8724 removes it rather than extending it to N processes                                   |
+| Same-checkout multi-writer               | A joined peer's permissions were fixed by whoever started it; no member can demote another |
+| Central completion guarantee             | Peers decide what to claim. Unclaimed work stays visible on the board, not forced          |
+| Windows in the first cut                 | Follows #8724. The IPC path is abstracted so named pipes can be added                      |
 
 ## 5. Build plan
 
@@ -402,9 +419,11 @@ Stages 1 and 2 are independent and may run in parallel.
   number as a second absolute, so lowering the cap left it instructing a spawn that throws.
 - Close [#9287](https://github.com/QwenLM/qwen-code/pull/9287) /
   [#9288](https://github.com/QwenLM/qwen-code/pull/9288) — superseded by merged #9284 / #9289.
-- Delete `packages/cli/src/agent-view/` (§1.6) and close
-  [#8869](https://github.com/QwenLM/qwen-code/pull/8869). Not because independent sessions
-  are rejected, but because **they are not built that way** here.
+- Close [#8869](https://github.com/QwenLM/qwen-code/pull/8869) (done). Not because
+  independent sessions are rejected, but because that particular supervisor is a second
+  implementation of infrastructure the daemon already ships.
+- Do **not** touch `packages/cli/src/agent-view/`. It is the base of the open #7800–#7803
+  series (§1.6), and its disposition is a product question (§7.6), not cleanup.
 
 ### Stage 1 — discovery
 
@@ -456,30 +475,30 @@ and no promise attached.
 
 ### Reuse ledger
 
-| Reused unchanged                                | LOC     |
-| ----------------------------------------------- | ------- |
-| `tasks.ts` — claim, ownership, dependencies      | 1,050   |
-| `mailbox.ts` — inboxes, locks                    | 361     |
-| `teamHelpers.ts` — path and liveness helpers     | 378     |
-| `ui/components/agent-view/` — tabs, chat, composer | live  |
-| `agentHistoryAdapter.ts`                         | ~180    |
-| Daemon sub-session spawn + correlation           | ships   |
-| **Written but unmerged** (#8728 + #8730)         | ~7,000  |
+| Reused unchanged                                   | LOC    |
+| -------------------------------------------------- | ------ |
+| `tasks.ts` — claim, ownership, dependencies        | 1,050  |
+| `mailbox.ts` — inboxes, locks                      | 361    |
+| `teamHelpers.ts` — path and liveness helpers       | 378    |
+| `ui/components/agent-view/` — tabs, chat, composer | live   |
+| `agentHistoryAdapter.ts`                           | ~180   |
+| Daemon sub-session spawn + correlation             | ships  |
+| **Written but unmerged** (#8728 + #8730)           | ~7,000 |
 
 Genuinely new: `team_join` / `team_leave`, the wake-path consolidation, correlation IDs,
 and the CLI/MCP surface.
 
 ## 6. Risks
 
-| Risk                                                             | Mitigation                                                                                     |
-| ---------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| **Automated fixes bloat a PR until it is unreviewable**           | The documented cause of #8728's death. `/takeover stop` early; keep every stage small           |
-| **The board format becomes a de-facto public contract**           | Neutral by construction, but undocumented externally and unpromised in v1 (§2.6)                |
-| **Unauthenticated `from`**                                        | Not solvable without a native addon. Stated in the module header; receiver-side authorization is built on it |
-| **Prompt injection via peer message**                             | Three agreeing defenses (§2.5); the "denied elsewhere" clause is tested explicitly              |
-| **Peers writing the same checkout**                               | Out of scope by construction (§0.2). Cross-workspace is the supported shape                     |
-| **Stage 2 touches `TeamManager` broadly**                         | `coordination-harness.test.ts` (751 LOC) is the existing regression net                         |
-| **Work stalls unclaimed**                                         | Accepted. The board is durable and visible; no central scheduler is promised                    |
+| Risk                                                    | Mitigation                                                                                                   |
+| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| **Automated fixes bloat a PR until it is unreviewable** | The documented cause of #8728's death. `/takeover stop` early; keep every stage small                        |
+| **The board format becomes a de-facto public contract** | Neutral by construction, but undocumented externally and unpromised in v1 (§2.6)                             |
+| **Unauthenticated `from`**                              | Not solvable without a native addon. Stated in the module header; receiver-side authorization is built on it |
+| **Prompt injection via peer message**                   | Three agreeing defenses (§2.5); the "denied elsewhere" clause is tested explicitly                           |
+| **Peers writing the same checkout**                     | Out of scope by construction (§0.2). Cross-workspace is the supported shape                                  |
+| **Stage 2 touches `TeamManager` broadly**               | `coordination-harness.test.ts` (751 LOC) is the existing regression net                                      |
+| **Work stalls unclaimed**                               | Accepted. The board is durable and visible; no central scheduler is promised                                 |
 
 ## 7. Open questions
 
@@ -495,6 +514,15 @@ and the CLI/MCP surface.
    practice, or does the workflow demand invitations — which would need an accept path?
 5. **Re-engagement.** #8724's author stated the work would return. The fastest path is to
    ask rather than to reimplement. Who reaches out?
+6. **The #7799–#7803 series versus §4.** This is the largest unresolved question here, and
+   it is a product decision rather than a technical one. That series is building a native
+   supervisor, PTY workers, session lifecycle and roster UI — precisely the terminal layer
+   §4 argues to leave to herdr, on the grounds that herdr already covers 17+ CLIs and
+   measured faster (§8). Four open PRs totalling roughly 24,000 additions are the strongest
+   evidence that the project does not actually hold §4's position. Either §4 is wrong and
+   this document should treat that series as the terminal plane it composes with, or the
+   series should be reconsidered against §8. Deciding by attrition — letting the PRs age
+   out — is the one outcome that costs the most and settles nothing.
 
 ## 8. Relationship to herdr
 
@@ -523,13 +551,13 @@ right shape of integration and is compatible with everything here.
 
 ## 9. Disposition of existing work
 
-| Item                          | Disposition                                                                      |
-| ----------------------------- | -------------------------------------------------------------------------------- |
-| #8724 (umbrella, open)        | **Adopt as this design's tracking issue.** Extend scope from messaging to collaboration |
-| #8728 / #8730                 | Revive. Stages 1 and 4. Re-engage the author first                                |
-| #8718 (closed not-planned)    | Leave closed. Post a correction: the recorded rationale rebuts a position the fleet plan never held (it ruled heterogeneous CLIs permanently out of scope), and the real reasons were sequencing, review capacity, and no measured win |
-| #8869 (Stage 1B draft)        | Close. Superseded                                                                 |
-| `agent-view/` (6,186 LOC)     | Delete (Stage 0)                                                                  |
-| #9276                         | Fix in Stage 0. Blocks the only supported path today                              |
-| #9287 / #9288                 | Close as superseded by #9284 / #9289                                              |
-| Fleet architecture doc ([#8719](https://github.com/QwenLM/qwen-code/pull/8719)) | Stays closed. Superseded by this document; it never landed in the repository |
+| Item                                                                            | Disposition                                                                                                                                                                                                                            |
+| ------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| #8724 (umbrella, open)                                                          | **Adopt as this design's tracking issue.** Extend scope from messaging to collaboration                                                                                                                                                |
+| #8728 / #8730                                                                   | Revive. Stages 1 and 4. Re-engage the author first                                                                                                                                                                                     |
+| #8718 (closed not-planned)                                                      | Leave closed. Post a correction: the recorded rationale rebuts a position the fleet plan never held (it ruled heterogeneous CLIs permanently out of scope), and the real reasons were sequencing, review capacity, and no measured win |
+| #8869 (Stage 1B draft)                                                          | Close. Superseded                                                                                                                                                                                                                      |
+| `agent-view/` (6,186 LOC)                                                       | **Leave in place.** Base of the open #7800–#7803 series; disposition depends on §7.6                                                                                                                                                   |
+| #9276                                                                           | Fix in Stage 0. Blocks the only supported path today                                                                                                                                                                                   |
+| #9287 / #9288                                                                   | Close as superseded by #9284 / #9289                                                                                                                                                                                                   |
+| Fleet architecture doc ([#8719](https://github.com/QwenLM/qwen-code/pull/8719)) | Stays closed. Superseded by this document; it never landed in the repository                                                                                                                                                           |
