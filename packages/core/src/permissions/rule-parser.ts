@@ -675,6 +675,97 @@ export function buildHumanReadableRuleLabel(rules: string[]): string {
 const SHELL_OPERATORS = ['&&', '||', ';;', '|&', '|', ';', '&', '\n'];
 
 /**
+ * Collect the heredoc delimiters opened on one line (`<<EOF`, `<<-'PY'`,
+ * `<<"TAG"` all count; `<<<` here-strings do not). Quoted regions are ignored
+ * so `echo "<<EOF"` does not start one.
+ */
+function getHeredocDelimiters(line: string): string[] {
+  const delimiters: string[] = [];
+  let inSingle = false;
+  let inDouble = false;
+  let escaped = false;
+
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]!;
+
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\' && !inSingle) {
+      escaped = true;
+      continue;
+    }
+    if (ch === "'" && !inDouble) {
+      inSingle = !inSingle;
+      continue;
+    }
+    if (ch === '"' && !inSingle) {
+      inDouble = !inDouble;
+      continue;
+    }
+    if (inSingle || inDouble || ch !== '<' || line[i + 1] !== '<') {
+      continue;
+    }
+    if (line[i + 2] === '<') {
+      i += 2;
+      continue;
+    }
+
+    let wordStart = i + 2;
+    if (line[wordStart] === '-') wordStart++;
+    while (line[wordStart] === ' ' || line[wordStart] === '\t') {
+      wordStart++;
+    }
+
+    const quote = line[wordStart];
+    const quoted = quote === "'" || quote === '"';
+    if (quoted) wordStart++;
+
+    let wordEnd = wordStart;
+    while (wordEnd < line.length) {
+      const wordCh = line[wordEnd]!;
+      if (quoted ? wordCh === quote : !/[A-Za-z0-9_./-]/.test(wordCh)) {
+        break;
+      }
+      wordEnd++;
+    }
+
+    if (wordEnd > wordStart) {
+      delimiters.push(line.slice(wordStart, wordEnd));
+    }
+    i = wordEnd;
+  }
+  return delimiters;
+}
+
+/**
+ * Remove heredoc bodies line by line, keeping the line that opens them.
+ * Heredoc bodies are stdin, not commands: anything between the opening line
+ * and the delimiter line must survive splitting untouched instead of being
+ * evaluated as shell segments of its own.
+ */
+export function stripHeredocBodies(command: string): string {
+  const lines = command.split('\n');
+  const kept: string[] = [];
+  const pendingDelimiters: string[] = [];
+
+  for (const line of lines) {
+    if (pendingDelimiters.length > 0) {
+      if (line.trim() === pendingDelimiters[0]) {
+        pendingDelimiters.shift();
+      }
+      continue;
+    }
+
+    kept.push(line);
+    pendingDelimiters.push(...getHeredocDelimiters(line));
+  }
+
+  return kept.join('\n');
+}
+
+/**
  * Count the consecutive backslashes immediately before `index`.
  *
  * An odd count means the character at `index` is itself escaped, so it is a
@@ -834,11 +925,12 @@ export function splitCompoundCommandSegments(
  *   "git status & rm -rf /"  → ["git status", "rm -rf /"]  (async operator)
  *   "build &> log.txt"       → ["build &> log.txt"]  (redirection, not async)
  *   "x=$(( a & b ))"         → ["x=$(( a & b ))"]  (arithmetic, not async)
+ *   "python - <<'PY'\nimport os\nPY"  → ["python - <<'PY'"]  (heredoc body is stdin)
  */
 export function splitCompoundCommand(command: string): string[] {
-  const commands = splitCompoundCommandSegments(command).map(
-    (segment) => segment.command,
-  );
+  const commands = splitCompoundCommandSegments(
+    stripHeredocBodies(command),
+  ).map((segment) => segment.command);
   return commands.length > 0 ? commands : [command];
 }
 

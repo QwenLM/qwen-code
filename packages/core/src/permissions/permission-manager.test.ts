@@ -468,6 +468,28 @@ describe('splitCompoundCommand', () => {
     expect(splitCompoundCommand('a && b && c')).toEqual(['a', 'b', 'c']);
   });
 
+  it('keeps a heredoc command as one segment', async () => {
+    expect(
+      splitCompoundCommand(
+        "python - <<'PY'\nimport os\nprint(os.getcwd())\nPY",
+      ),
+    ).toEqual(["python - <<'PY'"]);
+  });
+
+  it('does not split inside a heredoc body', async () => {
+    expect(
+      splitCompoundCommand(
+        'cat <<EOF && echo hi\nbody; with && ops\nEOF\necho done',
+      ),
+    ).toEqual(['cat <<EOF', 'echo hi', 'echo done']);
+  });
+
+  it('handles the tab-stripping heredoc variant', async () => {
+    expect(splitCompoundCommand('python <<-PY\n\timport os\n\tPY')).toEqual([
+      'python <<-PY',
+    ]);
+  });
+
   it('handles mixed operators', async () => {
     expect(splitCompoundCommand('a && b | c; d')).toEqual(['a', 'b', 'c', 'd']);
   });
@@ -1778,6 +1800,22 @@ describe('PermissionManager', () => {
           command: 'npm install',
         }),
       ).toBe('ask');
+    });
+
+    it('matches an allow prefix rule against a whole heredoc command', async () => {
+      // #9381: the heredoc body is stdin, not shell segments; without stripping
+      // it, each body line fell through to per-line evaluation and the prefix
+      // rule could never match.
+      const pm2 = new PermissionManager(
+        makeConfig({ permissionsAllow: ['Bash(python *)'] }),
+      );
+      pm2.initialize();
+      expect(
+        await pm2.evaluate({
+          toolName: 'run_shell_command',
+          command: "python - <<'PY'\nimport os\nprint(os.getcwd())\nPY",
+        }),
+      ).toBe('allow');
     });
 
     // Regression coverage for issue #4093: command substitution must never
