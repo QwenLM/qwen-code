@@ -12034,7 +12034,7 @@ describe('createServeApp', () => {
     );
 
     it.each(['load', 'resume'] as const)(
-      'keys the %s shared guard on the persisted session id spelling',
+      'keys the %s shared guard on both the request and persisted session id spellings',
       async (action) => {
         const sessionId = '550e8400-e29b-41d4-a716-446655440144';
         const storageSessionId = sessionId.toUpperCase();
@@ -12062,11 +12062,11 @@ describe('createServeApp', () => {
             .send({});
 
           expect(res.status).toBe(200);
-          // The exclusive batch delete locks the raw caller ids, so the
-          // restore guard must contend on the persisted spelling (uppercase
-          // here) rather than the normalized request id.
+          // The exclusive batch delete locks the raw caller ids, whose
+          // spelling may be either the request id or the persisted one —
+          // the restore guard must contend on both.
           expect(runSharedMany).toHaveBeenCalledWith(
-            [storageSessionId],
+            [sessionId, storageSessionId],
             expect.any(Function),
           );
         } finally {
@@ -12099,6 +12099,10 @@ describe('createServeApp', () => {
           .mockImplementation(async (candidateId) =>
             candidateId === storageSessionId ? 'conflict' : undefined,
           );
+        const runSharedMany = vi.spyOn(
+          SessionArchiveCoordinator.prototype,
+          'runSharedMany',
+        );
         const app = createServeApp(
           { ...baseOpts, workspace: WS_BOUND },
           undefined,
@@ -12117,9 +12121,13 @@ describe('createServeApp', () => {
             'Delete the session with POST /sessions/delete',
           );
           expect(getSessionLocation).toHaveBeenCalledWith(storageSessionId);
+          // The pre-guard conversion must fire before the guard is entered,
+          // so the shared guard never runs.
+          expect(runSharedMany).not.toHaveBeenCalled();
           expect(bridge.loadCalls).toEqual([]);
           expect(bridge.resumeCalls).toEqual([]);
         } finally {
+          runSharedMany.mockRestore();
           getSessionLocation.mockRestore();
           findSessionId.mockRestore();
         }
@@ -12163,6 +12171,10 @@ describe('createServeApp', () => {
             'Delete the session with POST /sessions/delete',
           );
           expect(getSessionLocation).toHaveBeenCalledWith(storageSessionId);
+          // The in-guard conversion requires the TOCTOU re-resolve inside
+          // the guard: pre-guard resolution succeeds, the in-guard one
+          // rejects — dropping the re-resolve would leave this green.
+          expect(findSessionId).toHaveBeenCalledTimes(2);
           expect(bridge.loadCalls).toEqual([]);
           expect(bridge.resumeCalls).toEqual([]);
         } finally {

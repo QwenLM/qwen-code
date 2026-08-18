@@ -452,7 +452,7 @@ ACP child guard再次检查所有真正开始的turn，覆盖HTTP route之外的
 - Modify: `packages/cli/src/serve/live/live-task-service.ts`及现有caller tests，只把旧source adapter调用改为传入existence-aware SessionService store；不在PR2A迁移Live task的创建或restore语义。
 - Modify: `packages/cli/src/serve/session-id-admission.ts`及test，让case-only duplicate resolver结果按persisted UUID conflict处理，而不是被外层catch误映射为临时`session_id_admission_unavailable`；该适配只改变重复持久化ID的fail-closed分类，不改变I/O失败的retryable unavailable语义。
 - Modify: `packages/core/src/services/sessionService.ts`及test，让case-insensitive persisted-ID resolver无论exact lowercase文件是否存在都扫描active/archived候选；单一candidate返回authoritative spelling，仅大小写不同的多个candidate抛typed conflict。同一文件新增`readCreationMetadataIfReadable()`，把creation metadata读取与existence state绑定，corrupt metadata fail closed。
-- Create: `packages/core/src/utils/jsonl-utils.ts`及test，新增`readLinesWithIntegrity()` fail-closed reader，供`readCreationMetadataIfReadable()`区分missing与corrupt transcript；不新增其他core util。
+- Modify: `packages/core/src/utils/jsonl-utils.ts`及test，新增`readLinesWithIntegrity()` fail-closed reader，供`readCreationMetadataIfReadable()`区分missing与corrupt transcript；不新增其他core util。
 - Modify: `packages/cli/src/serve/server/error-response.ts`及test，把core `SessionIdCaseConflictError`映射为与`SessionConflictError`相同的无path 409 `session_conflict`形状，作为routes/dispatch翻译之后的defense-in-depth。
 
 PR2A跨到`packages/core`的生产改动只允许`SessionService`既有case-insensitive resolver的唯一性收紧及`readCreationMetadataIfReadable()`，外加`jsonl-utils.ts`的`readLinesWithIntegrity()`。第二个core文件的重审计结论：creation metadata的integrity判定属于core fail-closed边界，CLI routes/dispatch在classify前无法用空读区分missing与corrupt，因此与resolver同属PR2A而不是留给PR2B containment。除此之外不增加core field、setter或新service；PR2A的core生产改动止于这两个文件。
@@ -567,6 +567,7 @@ npx vitest run \
   src/utils/conversation-directory-identity.test.ts \
   src/serve/session-id-admission.test.ts \
   src/serve/acp-http/transport.test.ts \
+  src/serve/acp-http/dispatch-error.test.ts \
   src/serve/multi-workspace-sessions.test.ts \
   src/serve/server/error-response.test.ts \
   src/serve/live/live-task-service.test.ts \
@@ -593,17 +594,28 @@ npx vitest run \
   src/serve/conversations/conversation-runtime-manager.test.ts \
   src/serve/conversations/session-source.test.ts \
   src/serve/conversations/conversation-workspace.test.ts \
+  src/serve/conversations/conversation-runtime-activity.test.ts \
   src/serve/server/error-response.test.ts \
   src/config/config.test.ts \
   src/acp-integration/acpAgent.test.ts \
+  src/acp-integration/acpAgent.worktree.test.ts \
   src/acp-integration/session/Session.test.ts \
+  src/acp-integration/session/Session.worktree.test.ts \
   src/acp-integration/session/SubAgentTracker.test.ts \
   src/acp-integration/session/permissionUtils.test.ts \
   src/serve/server/session-archive.test.ts \
+  src/serve/acp-http/transport.test.ts \
   src/serve/routes/workspace-management.test.ts \
   src/serve/live/live-task-service.test.ts \
   src/serve/create-sub-session.test.ts \
   src/serve/multi-workspace-sessions.test.ts \
+  src/nonInteractiveCliCommands.test.ts \
+  src/ui/commands/clearCommand.test.ts \
+  src/ui/commands/directoryCommand.test.tsx \
+  src/ui/commands/languageCommand.test.ts \
+  src/ui/commands/importConfigCommand.test.ts \
+  src/ui/commands/modelCommand.test.ts \
+  src/ui/commands/effort-command.test.ts \
   src/serve/server.test.ts
 
 cd ../core

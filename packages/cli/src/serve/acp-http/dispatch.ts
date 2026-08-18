@@ -1826,11 +1826,12 @@ export class AcpDispatcher {
             },
           );
           try {
-            // Batch delete locks its exclusive guard on the raw caller ids,
-            // so key this shared guard on the resolved persisted spelling
-            // too (parity with the REST restore handler) — otherwise a
-            // delete of the uppercase-spelled file proceeds while restore
-            // still holds the normalized request id.
+            // Batch delete locks its exclusive guard on the raw caller
+            // ids, whose spelling may be either the request id or the
+            // persisted one — so this shared guard locks both (parity
+            // with the REST restore handler), otherwise a delete under
+            // the other spelling never collides and can unlink the
+            // transcript mid-restore on a case-insensitive filesystem.
             const guardSessionService = new SessionService(cwd, {
               runtimeBaseDir: sessionRuntime.sessionRuntimeBaseDir,
             });
@@ -1850,7 +1851,7 @@ export class AcpDispatcher {
               throw error;
             }
             const restored = await this.archiveCoordinator.runSharedMany(
-              [persistedGuardId ?? sessionId],
+              [...new Set([sessionId, persistedGuardId ?? sessionId])],
               async () => {
                 assertGenerationOpen?.();
                 const sessionService = new SessionService(cwd, {
