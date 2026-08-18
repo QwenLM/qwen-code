@@ -14,6 +14,20 @@ const { ghMock, ensureAuthenticatedMock, setGhHostMock, writeStdoutLineMock } =
     writeStdoutLineMock: vi.fn(),
   }));
 
+// Steers ONLY the platform kind; 'github' (the default) delegates to the
+// real registry so every pre-existing test keeps its real detection path.
+const { readerKindMock, aoneAuthMock, aoneResolveRepoMock } = vi.hoisted(
+  () => ({
+    readerKindMock: vi.fn((): 'github' | 'aone' => 'github'),
+    aoneAuthMock: vi.fn(),
+    aoneResolveRepoMock: vi.fn(() => ({
+      host: 'gitlab.alibaba-inc.com',
+      owner: 'maxcompute',
+      repo: 'odps_src',
+    })),
+  }),
+);
+
 vi.mock('./lib/gh.js', async (importOriginal) => {
   const actual = (await importOriginal()) as Record<string, unknown>;
   return {
@@ -21,6 +35,39 @@ vi.mock('./lib/gh.js', async (importOriginal) => {
     gh: ghMock,
     ensureAuthenticated: ensureAuthenticatedMock,
     setGhHost: setGhHostMock,
+  };
+});
+
+vi.mock('./lib/platform/registry.js', async (importOriginal) => {
+  const actual =
+    (await importOriginal()) as typeof import('./lib/platform/registry.js');
+  return {
+    ...actual,
+    getPlatformReader: (
+      hint?: Parameters<typeof actual.getPlatformReader>[0],
+    ) =>
+      readerKindMock() === 'aone'
+        ? {
+            kind: 'aone' as const,
+            ensureAuthenticated: aoneAuthMock,
+            resolveRepo: () => aoneResolveRepoMock(),
+            getPrMeta: (n: number) => ({
+              number: n,
+              headSha: 'sha-aone',
+              webUrl: 'https://code.alibaba-inc.com/g/p/codereview/' + n,
+            }),
+            getClosingIssues: () => [],
+            getIssue: () => {
+              throw new Error('not used');
+            },
+            fetchDiff: () => '',
+            getCommentBody: () => '',
+            fetchHeadRefSpec: (n: number) => `refs/merge-requests/${n}/head`,
+            getFetchMeta: () => {
+              throw new Error('not used');
+            },
+          }
+        : actual.getPlatformReader(hint),
   };
 });
 
@@ -196,6 +243,94 @@ describe('runMeta', () => {
     );
     expect(() => runMeta({ repo: 'o/r/extra' })).toThrow(TypeError);
     expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  describe('no-default-host guard on a non-GitHub platform', () => {
+    beforeEach(() => {
+      readerKindMock.mockReturnValue('aone');
+    });
+
+    afterEach(() => {
+      readerKindMock.mockReturnValue('github');
+    });
+
+    it('throws a usage error when --repo is given without --host', () => {
+      expect(() => runMeta({ prNumber: 1, repo: 'g/p' })).toThrow(
+        /--repo on a aone target needs --host/,
+      );
+      expect(() => runMeta({ prNumber: 1, repo: 'g/p' })).toThrow(TypeError);
+    });
+
+    it('an operator-exported GH_HOST does NOT bypass the guard', () => {
+      // The gate is the FLAG, not the resolved value: resolveGhHost
+      // inherits GH_HOST, and a standard GHE export beside an Aone target
+      // must not emit `platform: 'aone'` beside a non-Aone host.
+      process.env['GH_HOST'] = 'ghe.example.com';
+      expect(() => runMeta({ prNumber: 1, repo: 'g/p' })).toThrow(
+        /--repo on a aone target needs --host/,
+      );
+    });
+
+    it('an EMPTY-STRING --host is a missing flag (env must not bypass)', () => {
+      // resolveGhHost treats '' as unset and falls through to GH_HOST; the
+      // guard must treat it like an omitted flag, not a provided host.
+      process.env['GH_HOST'] = 'ghe.example.com';
+      expect(() => runMeta({ prNumber: 1, repo: 'g/p', host: '' })).toThrow(
+        /--repo on a aone target needs --host/,
+      );
+    });
+
+    it('fires before the auth gate — `a1 auth login` cannot fix the invocation', () => {
+      expect(() => runMeta({ prNumber: 1, repo: 'g/p' })).toThrow(TypeError);
+      expect(aoneAuthMock).not.toHaveBeenCalled();
+    });
+
+    it('succeeds with an explicit Aone --host', () => {
+      const result = runMeta({
+        prNumber: 7,
+        repo: 'g/p',
+        host: 'gitlab.alibaba-inc.com',
+      });
+      expect(result).toEqual({
+        platform: 'aone',
+        host: 'gitlab.alibaba-inc.com',
+        ownerRepo: 'g/p',
+        number: 7,
+        headSha: 'sha-aone',
+        webUrl: 'https://code.alibaba-inc.com/g/p/codereview/7',
+      });
+      expect(aoneAuthMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('discovery branch (no --repo) on a non-GitHub platform', () => {
+    beforeEach(() => {
+      readerKindMock.mockReturnValue('aone');
+    });
+
+    afterEach(() => {
+      readerKindMock.mockReturnValue('github');
+    });
+
+    it('an ambient GH_HOST does NOT veto a valid Aone discovery', () => {
+      // The Aone reader never routes a gh call, so an operator's standard
+      // GHE export beside an Aone-origin clone must not override the
+      // discovered host — before the fix, HOSTNAME_RE vetoed the valid
+      // invocation at the underscore env value.
+      process.env['GH_HOST'] = 'ghe_internal';
+      const result = runMeta({ prNumber: 7 });
+      expect(result.platform).toBe('aone');
+      expect(result.host).toBe('gitlab.alibaba-inc.com');
+      expect(result.ownerRepo).toBe('maxcompute/odps_src');
+    });
+
+    it('an explicit --host still steers routing on discovery', () => {
+      // The reported host stays the discovered one; the flag routes the gh
+      // surface (the discovery branch's documented precedence).
+      const result = runMeta({ prNumber: 7, host: 'code.alibaba-inc.com' });
+      expect(result.host).toBe('gitlab.alibaba-inc.com');
+      expect(setGhHostMock).toHaveBeenCalledWith('code.alibaba-inc.com');
+    });
   });
 });
 

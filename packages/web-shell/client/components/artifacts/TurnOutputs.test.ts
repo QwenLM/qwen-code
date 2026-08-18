@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import {
+  canOpenWorkspaceArtifact,
   getArtifactFormatIcon,
   getArtifactPreviewContent,
   getFileChangePreviewContent,
+  getWorkspaceArtifactOpenBlockReason,
   isDownloadableReviewFilePath,
   isRenderedFilePath,
   type TurnOutputFileChange,
@@ -119,5 +121,58 @@ describe('TurnOutputs helpers', () => {
   it('uses the existing document icon for unsupported artifact kinds', () => {
     expect(getArtifactFormatIcon('other')).toBeUndefined();
     expect(getArtifactFormatIcon('future-format')).toBeUndefined();
+  });
+
+  it('disables opening missing workspace artifacts and names the recorded path', () => {
+    const missing = {
+      id: 'missing-1',
+      kind: 'file',
+      storage: 'workspace',
+      status: 'missing',
+      title: 'Missing report',
+      workspacePath: 'w/agent/report.csv',
+    } as DaemonSessionArtifact;
+    const available = {
+      ...missing,
+      id: 'available-1',
+      status: 'available',
+      workspacePath: 'report.csv',
+    } as DaemonSessionArtifact;
+    const t = (key: string, vars?: Record<string, string | number>) =>
+      key === 'turnOutputs.artifactUnavailable' && vars?.path
+        ? `File not found in the workspace · ${vars.path}`
+        : key;
+
+    expect(canOpenWorkspaceArtifact(missing)).toBe(false);
+    expect(canOpenWorkspaceArtifact(available)).toBe(true);
+    expect(
+      canOpenWorkspaceArtifact({
+        ...missing,
+        status: 'blocked',
+      } as DaemonSessionArtifact),
+    ).toBe(false);
+    expect(getWorkspaceArtifactOpenBlockReason(missing, t)).toBe(
+      'File not found in the workspace · w/agent/report.csv',
+    );
+    expect(getWorkspaceArtifactOpenBlockReason(available, t)).toBeUndefined();
+  });
+
+  it('names a missing workspace artifact even without a recorded path', () => {
+    const missing = {
+      id: 'missing-2',
+      kind: 'file',
+      storage: 'workspace',
+      status: 'missing',
+      title: 'Legacy missing',
+    } as DaemonSessionArtifact;
+    const t = (key: string) =>
+      key === 'turnOutputs.artifactMissing'
+        ? 'File not found in the workspace'
+        : key;
+
+    expect(canOpenWorkspaceArtifact(missing)).toBe(false);
+    expect(getWorkspaceArtifactOpenBlockReason(missing, t)).toBe(
+      'File not found in the workspace',
+    );
   });
 });
