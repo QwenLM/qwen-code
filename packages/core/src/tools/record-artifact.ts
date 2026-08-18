@@ -557,19 +557,26 @@ function hasLegacyPathField(params: RecordArtifactParams): boolean {
 }
 
 function isRedirectorRoutedPath(value: string): boolean {
-  const slashes = value.replace(/\//g, '\\');
+  // NT junctions often readlink as `\??\UNC\host\share`. Treat that as `\\?\`.
+  const slashes = value.replace(/\//g, '\\').replace(/^\\\?\?\\/, '\\\\?\\');
+  if (/\\Device\\Mup\\/i.test(slashes)) {
+    return true;
+  }
+  // On POSIX, `//repo/file` is a local absolute path, not SMB.
+  const posixDoubleSlash =
+    process.platform !== 'win32' &&
+    !value.includes('\\') &&
+    /^\/\//.test(value);
   if (
-    /^\\\\[^\\?]+(?:\\|$)/.test(slashes) ||
-    /^\\\\\?\\[Uu][Nn][Cc]\\/.test(slashes)
+    !posixDoubleSlash &&
+    (/^\\\\[^\\?]+(?:\\|$)/.test(slashes) ||
+      /^\\\\\?\\[Uu][Nn][Cc]\\/.test(slashes))
   ) {
     return true;
   }
   // `\\?\C:\...` is a local drive; every other `\\?\` form (UNC, Mup,
   // GLOBALROOT, Volume GUID) can leave the machine via the redirector.
-  if (/^\\\\\?\\/.test(slashes) && !/^\\\\\?\\[A-Za-z]:\\/.test(slashes)) {
-    return true;
-  }
-  return /GLOBALROOT\\Device\\Mup\\/i.test(slashes);
+  return /^\\\\\?\\/.test(slashes) && !/^\\\\\?\\[A-Za-z]:\\/.test(slashes);
 }
 
 function isForeignWindowsAbsolute(value: string): boolean {
@@ -623,7 +630,7 @@ async function resolveExistingDir(dir: string): Promise<string> {
  */
 function tryResolveForContainment(absolutePath: string): string | undefined {
   const resolved = path.resolve(absolutePath);
-  if (pointsAtRedirector(resolved)) {
+  if (pathHasRedirectorHop(resolved)) {
     return undefined;
   }
   try {
@@ -631,7 +638,7 @@ function tryResolveForContainment(absolutePath: string): string | undefined {
   } catch {
     try {
       const parent = path.dirname(resolved);
-      if (pointsAtRedirector(parent)) {
+      if (pathHasRedirectorHop(parent)) {
         return undefined;
       }
       return path.join(realpathSync(parent), path.basename(resolved));
@@ -641,16 +648,56 @@ function tryResolveForContainment(absolutePath: string): string | undefined {
   }
 }
 
-function pointsAtRedirector(absolutePath: string): boolean {
+const REDIRECTOR_HOP_LIMIT = 8;
+
+function pathHasRedirectorHop(absolutePath: string): boolean {
   if (isRedirectorRoutedPath(absolutePath)) {
     return true;
   }
-  try {
-    if (lstatSync(absolutePath).isSymbolicLink()) {
-      return isRedirectorRoutedPath(readlinkSync(absolutePath));
+  const resolved = path.resolve(absolutePath);
+  const root = path.parse(resolved).root;
+  const relative = path.relative(root, resolved);
+  if (!relative || relative.startsWith('..')) {
+    return symlinkChainHitsRedirector(resolved);
+  }
+  let acc = root;
+  for (const segment of relative.split(path.sep).filter(Boolean)) {
+    acc = path.join(acc, segment);
+    if (isRedirectorRoutedPath(acc) || symlinkChainHitsRedirector(acc)) {
+      return true;
     }
-  } catch {
-    // Missing path: let the caller decide from realpath/lstat.
+  }
+  return false;
+}
+
+function symlinkChainHitsRedirector(absolutePath: string): boolean {
+  let current = absolutePath;
+  for (let hop = 0; hop < REDIRECTOR_HOP_LIMIT; hop++) {
+    let lst;
+    try {
+      lst = lstatSync(current);
+    } catch {
+      return false;
+    }
+    if (!lst.isSymbolicLink()) {
+      return false;
+    }
+    let target: string;
+    try {
+      target = readlinkSync(current);
+    } catch {
+      return false;
+    }
+    if (isRedirectorRoutedPath(target)) {
+      return true;
+    }
+    const next = path.isAbsolute(target)
+      ? target
+      : path.resolve(path.dirname(current), target);
+    if (isRedirectorRoutedPath(next)) {
+      return true;
+    }
+    current = next;
   }
   return false;
 }
@@ -723,6 +770,13 @@ async function inspectWorkspaceCandidate(
   cwd: string,
   root: string,
 ): Promise<WorkspaceLocatorResult> {
+  if (pathHasRedirectorHop(candidate)) {
+    return locatorFailure(
+      ToolErrorType.PATH_NOT_IN_WORKSPACE,
+      `Failed to record artifact: "${rawPath}" resolves outside the workspace.\n${WORKSPACE_PATH_HINT}`,
+    );
+  }
+
   let lst;
   try {
     lst = await fs.lstat(candidate);
@@ -740,26 +794,6 @@ async function inspectWorkspaceCandidate(
       ToolErrorType.TARGET_IS_DIRECTORY,
       `Failed to record artifact: "${candidate}" is a directory, not a file.\n${WORKSPACE_PATH_HINT}`,
     );
-  }
-
-  if (lst.isSymbolicLink()) {
-    let target: string;
-    try {
-      target = await fs.readlink(candidate);
-    } catch (error) {
-      return pathInspectFailure(
-        error,
-        candidate,
-        rawPath,
-        `Failed to record artifact: could not resolve "${rawPath}" (${error instanceof Error ? error.message : String(error)}).`,
-      );
-    }
-    if (isRedirectorRoutedPath(target)) {
-      return locatorFailure(
-        ToolErrorType.PATH_NOT_IN_WORKSPACE,
-        `Failed to record artifact: "${rawPath}" resolves outside the workspace.\n${WORKSPACE_PATH_HINT}`,
-      );
-    }
   }
 
   let resolved: string;

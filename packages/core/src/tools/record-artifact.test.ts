@@ -157,6 +157,27 @@ describe('RecordArtifactTool', () => {
     expect(String(result.llmContent)).toContain('workspacePath: report.csv');
   });
 
+  it('accepts a POSIX double-slash absolute locator inside the workspace', async () => {
+    if (process.platform === 'win32') {
+      return;
+    }
+    const ws = await workspace();
+    await ws.write('report.csv', 'a,b\n');
+    const doubled = `/${path.join(ws.cwd, 'report.csv')}`;
+
+    const result = await ws.tool
+      .build({
+        title: 'Double slash',
+        workspacePath: doubled,
+      })
+      .execute(signal);
+
+    expect(result.error).toBeUndefined();
+    expect(result.artifacts?.[0]).toMatchObject({
+      workspacePath: 'report.csv',
+    });
+  });
+
   it('accepts a long absolute locator when the canonical path is short', async () => {
     const deep = Array.from({ length: 50 }, () => 'dddddddddd').join(path.sep);
     const ws = await workspace(deep);
@@ -453,12 +474,16 @@ describe('RecordArtifactTool', () => {
   it('rejects UNC locators before resolving them', () => {
     const tool = makeTool();
 
-    for (const workspacePath of [
+    const locators = [
       '\\\\attacker.example\\share\\report.csv',
-      '//attacker.example/share/report.csv',
       '\\\\?\\UNC\\attacker.example\\share\\report.csv',
+      '\\??\\UNC\\attacker.example\\share\\report.csv',
       '\\\\?\\GLOBALROOT\\Device\\Mup\\attacker.example\\share\\report.csv',
-    ]) {
+    ];
+    if (process.platform === 'win32') {
+      locators.push('//attacker.example/share/report.csv');
+    }
+    for (const workspacePath of locators) {
       expect(() =>
         tool.build({
           title: 'UNC',
@@ -551,6 +576,50 @@ describe('RecordArtifactTool', () => {
       .build({
         title: 'UNC link',
         workspacePath: 'report.csv',
+      })
+      .execute(signal);
+
+    expect(result.artifacts).toBeUndefined();
+    expect(result.error?.type).toBe(ToolErrorType.PATH_NOT_IN_WORKSPACE);
+    expect(String(result.llmContent)).not.toContain('Recorded artifact');
+  });
+
+  it('rejects a UNC target reached through an intermediate directory symlink', async () => {
+    const ws = await workspace();
+    try {
+      await symlink('\\\\attacker.example\\share', path.join(ws.cwd, 'docs'));
+    } catch {
+      return;
+    }
+
+    const result = await ws.tool
+      .build({
+        title: 'UNC dir',
+        workspacePath: 'docs/q3.csv',
+      })
+      .execute(signal);
+
+    expect(result.artifacts).toBeUndefined();
+    expect(result.error?.type).toBe(ToolErrorType.PATH_NOT_IN_WORKSPACE);
+    expect(String(result.llmContent)).not.toContain('Recorded artifact');
+  });
+
+  it('rejects a two-hop symlink chain that ends at a UNC path', async () => {
+    const ws = await workspace();
+    try {
+      await symlink(
+        '\\\\attacker.example\\share\\x.csv',
+        path.join(ws.cwd, 'b.csv'),
+      );
+      await symlink('b.csv', path.join(ws.cwd, 'a.csv'));
+    } catch {
+      return;
+    }
+
+    const result = await ws.tool
+      .build({
+        title: 'UNC chain',
+        workspacePath: 'a.csv',
       })
       .execute(signal);
 
