@@ -3289,10 +3289,20 @@ function composeReviewBody(
   clauses.push(...continuityBlock);
 
   // 7. Body Criticals — on a COMMENT that stands where a REQUEST_CHANGES
-  //    would have been: the presubmit carve-out, and the unverified-blockers
-  //    cap. Either way the body copy is the ONLY copy of an unanchorable
+  //    would have been. The body copy is the ONLY copy of an unanchorable
   //    blocker, and softening the event must never erase it.
-  if (downgradedFrom === 'Request changes' || criticalsUnverified) {
+  //
+  //    DERIVED, not enumerated. The condition was a list of the two
+  //    softening flags known when it was written — the presubmit carve-out
+  //    and `criticalsUnverified` — and a third path shipped past it: the
+  //    findings-file `— [unverified]` tag softens a Request changes at the
+  //    event line above while setting NEITHER flag, so a run whose coverage
+  //    was proven posted a 239-character body carrying the opener and the
+  //    tag disclosure and no blocker at all. `baseEvent` is the row before
+  //    every cap and downgrade, so this comparison asks the question the
+  //    clause is actually about, and answers it for softening paths that do
+  //    not exist yet.
+  if (baseEvent === 'REQUEST_CHANGES' && event === 'COMMENT') {
     clauses.push(...bodyCriticalBlock);
   }
 

@@ -3574,6 +3574,37 @@ describe('the Step 4/5 gate — verify and reverse audit must have run (high eff
     expect(r.body).toContain('**[Critical]** whole-PR blocker X');
   });
 
+  it('keeps the body Criticals when the FINDINGS-TAG cap softens the event', () => {
+    // The third softening path, and the one the enumerated condition missed:
+    // coverage is proven and the verifier ran, so `criticalsUnverified` is
+    // false and no presubmit downgrade fired — the cap comes from the
+    // findings file still carrying `— [unverified]` at compose time. The
+    // posted body was 239 characters of opener and disclosure with the
+    // blocker — its only copy — nowhere in it.
+    const findings = join(dir, 'qwen-review-findings-tag.md');
+    writeFileSync(
+      findings,
+      '- **File:** src/pay.ts:42\n' +
+        '- **Issue:** off-by-one in the retry cap\n' +
+        '- **Severity:** Critical — [unverified]\n',
+    );
+    const r = composeReview({
+      planPath: coveredPlan(['verify', 'reverse-audit']),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      bodyCriticals: ['whole-PR blocker X'],
+      findingsPath: findings,
+    });
+    expect(r.baseEvent).toBe('REQUEST_CHANGES');
+    expect(r.event).toBe('COMMENT');
+    // Neither flag the old condition listed is set on this path.
+    expect(r.downgradedFrom).toBeNull();
+    expect(r.cappedBy).toContain('findings-unverified-at-compose');
+    expect(r.body).toContain('**[Critical]** whole-PR blocker X');
+  });
+
   it('a mixed review keeps its Request changes — the deterministic blocker is confirmed with or without a verifier', () => {
     // One [build] Critical (pre-confirmed) beside one non-deterministic
     // Critical with the verifier absent: softening the whole event would
