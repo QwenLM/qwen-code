@@ -3062,6 +3062,49 @@ describe('createChannelManagementService', () => {
     expect(result).not.toHaveProperty('statePersistFailedWorkspaces');
   });
 
+  it('unions the manager disable loss into the remove result (R18-2)', async () => {
+    const { service, manager } = setup({ committedNames: ['bot'] });
+    // Mirrors the stop() R17-4 union: a disable routed through the
+    // names-mode commit clears committed names' persisted stopped records,
+    // and a clear failure rides statePersisted / statePersistFailedWorkspaces
+    // on the disable result. remove() used to read only recordStopForName's
+    // own write failures, so a sibling workspace's surviving record trimmed
+    // the committed selection on the next reload-op with no loss signal
+    // (R18-2).
+    vi.mocked(manager.setChannelEnabled).mockResolvedValueOnce({
+      changed: true,
+      statePersisted: false,
+      statePersistFailedWorkspaces: ['/ws/other'],
+    });
+
+    const result = await service.remove('bot', { expectedRevision: 'rev-1' });
+
+    expect(result.instance.name).toBe('bot');
+    expect(result.statePersisted).toBe(false);
+    expect(result.statePersistFailedWorkspaces).toEqual(['/ws/other']);
+  });
+
+  it('dedupes overlapping loss attribution on the remove result (R18-2)', async () => {
+    const { service, manager } = setup({ committedNames: ['bot'] });
+    // Both loss sources name the SAME workspace (the correlated disk
+    // condition): the manager's clear failure and this name's own record
+    // write failure. The union must dedupe, or the retry handle lists one
+    // workspace twice. Mirrors stop()'s R17-4 dedupe test.
+    vi.mocked(manager.setChannelEnabled).mockResolvedValueOnce({
+      changed: true,
+      statePersisted: false,
+      statePersistFailedWorkspaces: [WORKSPACE],
+    });
+    mockChannelStateStoreSet.mockImplementationOnce(() => {
+      throw new Error('disk full');
+    });
+
+    const result = await service.remove('bot', { expectedRevision: 'rev-1' });
+
+    expect(result.statePersisted).toBe(false);
+    expect(result.statePersistFailedWorkspaces).toEqual([WORKSPACE]);
+  });
+
   it('persists the stop when remove() fails with a confirmed-dead disable (R17-6)', async () => {
     const { service, manager, store } = setup({ committedNames: ['bot'] });
     // The per-channel disable via applySelection stopped the worker

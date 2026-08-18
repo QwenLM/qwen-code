@@ -755,11 +755,24 @@ export function createChannelManagementService(
           // retry handle — a re-issued remove finds the group already
           // cleared and can never re-record, so the next `--channel all`
           // resurrects exactly the channels #8975 must keep stopped
-          // (R17-2).
-          stopPersistFailedWorkspaces = recordStopForName(
-            name,
-            stopped.stoppedChannels,
-          );
+          // (R17-2). Union BOTH loss sources exactly like stop()'s
+          // success path (R17-4): this name's own record write AND the
+          // manager's disable result — a disable routed through the
+          // names-mode commit clears committed names' persisted `stopped`
+          // records, and a clear failure rides `statePersisted` /
+          // `statePersistFailedWorkspaces` on the disable result. Reading
+          // only recordStopForName's own write failures drops that
+          // signal, so a sibling workspace's surviving record trims the
+          // committed selection on the next reload-op with no loss
+          // signal ever emitted (R18-2).
+          stopPersistFailedWorkspaces = [
+            ...new Set([
+              ...(stopped.statePersisted === false
+                ? (stopped.statePersistFailedWorkspaces ?? [])
+                : []),
+              ...recordStopForName(name, stopped.stoppedChannels),
+            ]),
+          ];
         } catch (error) {
           // A failed stop can still have torn down channels (lease release
           // can fail after a successful tear-down): the manager carries the
