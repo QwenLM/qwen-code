@@ -15641,9 +15641,14 @@ exit 1
         'if [[ "$query" == *"reviewThreads(first:100, after:\\$endCursor)"* ]]; then',
         '  [[ " $* " == *" --paginate "* ]] || exit 3',
         '  printf \'%s\' "$THREADS_RAW_STUB"',
-        '  # Real gh writes the reason to stderr; the workflow folds its tail',
-        '  # into the warning, so the stub must produce one to assert on.',
-        '  [[ "${THREADS_FETCH_EXIT:-0}" == 0 ]] || echo "threads-fetch stub failure" >&2',
+        '  if [[ "${THREADS_FETCH_EXIT:-0}" != 0 ]]; then',
+        "    # On a failing page real gh skips --jq and appends that page's raw",
+        '    # response body to stdout, after the good nodes.',
+        '    [[ -z "${THREADS_ERROR_BODY_STUB:-}" ]] || printf \'\\n%s\' "$THREADS_ERROR_BODY_STUB"',
+        '    # Real gh writes the reason to stderr; the workflow folds its tail',
+        '    # into the warning, so the stub must produce one to assert on.',
+        '    printf \'%s\\n\' "${THREADS_STDERR_STUB:-threads-fetch stub failure}" >&2',
+        '  fi',
         '  exit "${THREADS_FETCH_EXIT:-0}"',
         'fi',
         'if [[ "$query" == *PullRequestReviewThread* ]]; then',
@@ -15769,6 +15774,12 @@ exit 1
     // (an $endCursor variable plus pageInfo), or the stub gh exits 3.
     expect(block).toContain('--paginate');
     expect(block).toContain('reviewThreads(first:100, after:$endCursor)');
+    // Field order, not just presence: gh's cursor scanner carries its flags
+    // across pageInfo objects and breaks at the first one yielding both
+    // fields, so pageInfo{endCursor hasNextPage} would break on the outer
+    // endCursor with hasNextPage already true from the last inner page — gh
+    // then stops after page one with exit 0 and no warning, restoring the
+    // oldest-hundred bug silently. Do not "fix" this pin by reordering it.
     expect(block).toContain('pageInfo{hasNextPage endCursor}');
 
     const matching = runResolve();
@@ -15946,6 +15957,49 @@ exit 1
     // …and carries gh's own stderr, the only text that separates a transient
     // rate limit (back off) from an expired PAT (rotate credentials).
     expect(partialFetch.out).toContain('threads-fetch stub failure');
+
+    // …and the failing page's own response body, which gh appends to stdout
+    // after the good nodes (it skips --jq on an error response), must not
+    // survive the slurp as a stray thread: both consumers below iterate
+    // .comments.nodes[], so a stray element exits 5 and — under errexit —
+    // aborts this step AFTER a good push, dropping the report and markers.
+    for (const errorBody of [
+      '{"message": "API rate limit exceeded for user \'x\'."}',
+      '{"data": null, "errors": [{"message": "Something went wrong while executing your query."}]}',
+    ]) {
+      const poisoned = runResolve({
+        THREADS_FETCH_EXIT: '1',
+        THREADS_ERROR_BODY_STUB: errorBody,
+      });
+      expect(poisoned.status).toBe(0);
+      expect(poisoned.resolved).toEqual(['resolve:T_open_1']);
+      // 4 stub threads, not 5: the error body was dropped, not counted.
+      expect(poisoned.out).toContain(
+        'review-thread pagination did not complete; 4 thread(s) fetched',
+      );
+    }
+
+    // The folded reason must land ON the annotation. Actions parses workflow
+    // commands line by line, and gh's stderr for a secondary rate limit spans
+    // two lines, so an unflattened fold keeps only the first — cutting off
+    // the very words that separate a back-off from a credential rotation.
+    const multiLineReason = runResolve({
+      THREADS_FETCH_EXIT: '1',
+      THREADS_STDERR_STUB:
+        "gh: API rate limit exceeded for user 'x'.\nYou have exceeded a secondary rate limit. Please wait a few minutes.",
+    });
+    expect(multiLineReason.status).toBe(0);
+    const paginationWarning = multiLineReason.out
+      .split('\n')
+      .find((line) =>
+        line.includes('review-thread pagination did not complete'),
+      );
+    expect(paginationWarning).toContain(
+      "gh: API rate limit exceeded for user 'x'.",
+    );
+    expect(paginationWarning).toContain(
+      'You have exceeded a secondary rate limit.',
+    );
 
     // The residual cap the fix does NOT close: a thread carrying more than
     // 100 comments still truncates, so a comment past that page is unmapped.
