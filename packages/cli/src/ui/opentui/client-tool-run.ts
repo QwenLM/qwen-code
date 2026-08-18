@@ -24,6 +24,7 @@ import {
   type ToolCallRequestInfo,
 } from '@qwen-code/qwen-code-core';
 import {
+  extractFileDiff,
   renderResultDisplay,
   type OpenTuiStreamEvent,
 } from './event-adapter.js';
@@ -108,16 +109,16 @@ export async function* clientToolEvents(
   });
 
   for (const call of completed) {
-    const argsObj = (call.request.args ?? {}) as Record<string, unknown>;
-    const fileContent =
-      call.request.name === 'write_file' &&
-      typeof argsObj['content'] === 'string'
-        ? (argsObj['content'] as string)
-        : null;
-    const display =
-      fileContent ?? renderResultDisplay(call.response?.resultDisplay);
-    if (display) {
-      yield { type: 'tool-result', id: call.request.callId, display };
+    // FileDiff results ride as structured payloads so the tool card renders
+    // colored diff lines (ink DiffResultRenderer parity).
+    const diff = extractFileDiff(call.response?.resultDisplay);
+    if (diff) {
+      yield { type: 'tool-result', id: call.request.callId, display: '', diff };
+    } else {
+      const display = renderResultDisplay(call.response?.resultDisplay);
+      if (display) {
+        yield { type: 'tool-result', id: call.request.callId, display };
+      }
     }
     const failed = call.status === 'error' || call.status === 'cancelled';
     yield {

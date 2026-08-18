@@ -9,8 +9,9 @@
  *  4. flicker-free rendering (cell diff + DEC 2026, handled by the renderer)
  */
 import { MouseButton } from '@opentui/core';
-import type { MouseEvent , ScrollBoxRenderable } from '@opentui/core';
+import type { MouseEvent, ScrollBoxRenderable } from '@opentui/core';
 import { findUrlAtRow, readBufferRow } from './link-click.js';
+import { renderDiffBody, type DiffLine } from './diff-render.js';
 import { C, SYNTAX, applyThemeMode, applyOpenTuiTheme } from './theme.js';
 import { detectInitialThemeMode } from './theme-auto.js';
 import { getActiveOpenTuiTheme } from './theme-parity.js';
@@ -42,11 +43,11 @@ import {
 } from './live-session-model.js';
 import { formatDuration } from '../utils/displayUtils.js';
 import {
-  ApprovalMode,
   Logger,
   MessageSenderType,
   ToolConfirmationOutcome,
   openBrowserSecurely,
+  type ApprovalMode,
   type Config,
   type ToolCallConfirmationDetails,
 } from '@qwen-code/qwen-code-core';
@@ -596,6 +597,14 @@ function buildBanner(config: Config | undefined, width: number) {
   );
 }
 
+// Cap the confirmation body (diff/command/plan) so a long payload can't
+// push the option list off-screen.
+const CONFIRM_BODY_MAX_LINES = 12;
+
+// One rendered confirmation body line = a row of colored spans, so a dim
+// line-number gutter can sit next to normally colored content.
+type ConfirmBodyLine = DiffLine;
+
 function App({
   events,
   config,
@@ -786,19 +795,19 @@ function App({
   }, []);
   const reverseSearchRef = useRef<number>(-1);
   const reverseQueryRef = useRef<string>('');
-  const approvalModeRef = useRef(approvalMode);
-  useEffect(() => {
-    approvalModeRef.current = approvalMode;
-  }, [approvalMode]);
+  // Tool approval dialog (ink ToolConfirmationMessage parity): body +
+  // question + radio options resolving to a ToolConfirmationOutcome.
   const [confirmReq, setConfirmReq] = useState<{
-    names: string;
-    resolve: (b: boolean) => void;
+    question: string;
+    body: ConfirmBodyLine[];
+    options: Array<{ label: string; outcome: ToolConfirmationOutcome }>;
+    resolve: (outcome: ToolConfirmationOutcome) => void;
   } | null>(null);
+  const [confirmSel, setConfirmSel] = useState(0);
   // Waiting (awaiting_approval) scheduler calls by callId — consumed by the
   // approval-mode switch auto-approve path (handleApprovalModeChange parity).
   const pendingApprovalsRef = useRef(new Map<string, WaitingCallInfo>());
-  // callId owning the currently visible confirm/question dialog (null when
-  // the dialog is the DEFAULT-mode batch confirm).
+  // callId owning the currently visible confirm/question dialog.
   const approvalDialogCallIdRef = useRef<string | null>(null);
   // ask_user_question dialog (scheduler awaiting_approval parity).
   const [questionReq, setQuestionReq] = useState<{
@@ -1216,7 +1225,7 @@ function App({
       return;
     }
     if (confirmReq) {
-      confirmReq.resolve(false);
+      confirmReq.resolve(ToolConfirmationOutcome.Cancel);
       setConfirmReq(null);
       return;
     }
@@ -1342,12 +1351,30 @@ function App({
       return; // dialog open: swallow everything else
     }
     if (confirmReq) {
-      if (key.name === 'y') {
-        confirmReq.resolve(true);
+      // Original RadioButtonSelect parity: ↑↓ + Enter + digit keys select
+      // directly; y/n/esc kept as shortcuts from the old bare y/n prompt.
+      const opts = confirmReq.options;
+      const resolveWith = (outcome: ToolConfirmationOutcome) => {
+        confirmReq.resolve(outcome);
         setConfirmReq(null);
+      };
+      if (key.name === 'up') {
+        setConfirmSel((s) => (s + opts.length - 1) % opts.length);
+      } else if (key.name === 'down') {
+        setConfirmSel((s) => (s + 1) % opts.length);
+      } else if (key.name === 'return' || key.name === 'enter') {
+        const opt = opts[confirmSel] ?? opts[0];
+        if (opt) resolveWith(opt.outcome);
+      } else if (key.name && /^[1-9]$/.test(key.name)) {
+        const opt = opts[parseInt(key.name, 10) - 1];
+        if (opt) resolveWith(opt.outcome);
+      } else if (key.name === 'y') {
+        const allow = opts.find(
+          (o) => o.outcome !== ToolConfirmationOutcome.Cancel,
+        );
+        if (allow) resolveWith(allow.outcome);
       } else if (key.name === 'n' || key.name === 'escape') {
-        confirmReq.resolve(false);
-        setConfirmReq(null);
+        resolveWith(ToolConfirmationOutcome.Cancel);
       }
       return;
     }
@@ -1542,6 +1569,184 @@ function App({
     return deduped.reverse();
   }, [items, diskHistory]);
 
+  // ink ToolConfirmationMessage parity: per-type question + body + radio
+  // options ("Yes, allow once" / "Always allow ..." / "No, suggest changes
+  // (esc)") instead of the old bare y/n prompt.
+  const buildToolConfirmDialog = useCallback(
+    (
+      details: ToolCallConfirmationDetails,
+    ): {
+      question: string;
+      body: ConfirmBodyLine[];
+      options: Array<{ label: string; outcome: ToolConfirmationOutcome }>;
+    } => {
+      const showAlways =
+        (config?.isTrustedFolder() ?? false) &&
+        !('hideAlwaysAllow' in details && details.hideAlwaysAllow === true);
+      const plainLines = (text: string, color: string): ConfirmBodyLine[] =>
+        text.split('\n').map((line) => [{ text: line, color }]);
+      const blankLine = (): ConfirmBodyLine => [{ text: ' ', color: C.dim }];
+      const capBody = (lines: ConfirmBodyLine[]): ConfirmBodyLine[] =>
+        lines.length > CONFIRM_BODY_MAX_LINES
+          ? [
+              ...lines.slice(0, CONFIRM_BODY_MAX_LINES),
+              [
+                {
+                  text: `… ${lines.length - CONFIRM_BODY_MAX_LINES} more lines`,
+                  color: C.dim,
+                },
+              ],
+            ]
+          : lines;
+      const alwaysOptions = showAlways
+        ? [
+            {
+              label: 'Always allow in this project',
+              outcome: ToolConfirmationOutcome.ProceedAlwaysProject,
+            },
+            {
+              label: 'Always allow for this user',
+              outcome: ToolConfirmationOutcome.ProceedAlwaysUser,
+            },
+          ]
+        : [];
+      const options: Array<{
+        label: string;
+        outcome: ToolConfirmationOutcome;
+      }> = [];
+      let question: string;
+      let body: ConfirmBodyLine[];
+      let cancelLabel = 'No, suggest changes (esc)';
+      switch (details.type) {
+        case 'edit': {
+          question = 'Apply this change?';
+          // ink parity: warnings above the diff; the file name already shows
+          // in the tool-call header, so the body is the diff itself.
+          const warnings = details.warnings ?? [];
+          body = warnings.map((warning) => [
+            { text: `⚠ ${warning}`, color: C.yellow },
+          ]);
+          if (warnings.length > 0) body.push(blankLine());
+          body.push(...capBody(renderDiffBody(details.fileDiff)));
+          options.push({
+            label: 'Yes, allow once',
+            outcome: ToolConfirmationOutcome.ProceedOnce,
+          });
+          if (showAlways)
+            options.push({
+              label: 'Yes, allow always',
+              outcome: ToolConfirmationOutcome.ProceedAlways,
+            });
+          break;
+        }
+        case 'exec': {
+          question = `Allow execution of: '${details.rootCommand}'?`;
+          body = capBody(plainLines(details.command, C.purple));
+          const warnings = details.warnings ?? [];
+          if (warnings.length > 0) {
+            body.push(blankLine());
+            for (const warning of warnings)
+              body.push([{ text: `⚠ ${warning}`, color: C.yellow }]);
+          }
+          options.push(
+            {
+              label: 'Yes, allow once',
+              outcome: ToolConfirmationOutcome.ProceedOnce,
+            },
+            ...alwaysOptions,
+          );
+          break;
+        }
+        case 'info': {
+          question = 'Do you want to proceed?';
+          body = capBody(plainLines(details.prompt, C.purple));
+          const urls = details.urls ?? [];
+          if (
+            urls.length > 0 &&
+            !(urls.length === 1 && urls[0] === details.prompt)
+          ) {
+            body.push([{ text: 'URLs to fetch:', color: C.text }]);
+            for (const url of urls)
+              body.push([{ text: ` - ${url}`, color: C.purple }]);
+          }
+          options.push(
+            {
+              label: 'Yes, allow once',
+              outcome: ToolConfirmationOutcome.ProceedOnce,
+            },
+            ...alwaysOptions,
+          );
+          break;
+        }
+        case 'mcp':
+          question = `Allow execution of MCP tool "${details.toolName}" from server "${details.serverName}"?`;
+          body = [
+            [{ text: `MCP Server: ${details.serverName}`, color: C.purple }],
+            [{ text: `Tool: ${details.toolName}`, color: C.purple }],
+          ];
+          options.push(
+            {
+              label: 'Yes, allow once',
+              outcome: ToolConfirmationOutcome.ProceedOnce,
+            },
+            ...alwaysOptions,
+          );
+          break;
+        case 'plan':
+          question = details.title;
+          body = capBody(plainLines(details.plan, C.text));
+          cancelLabel = 'No, keep planning (esc)';
+          options.push(
+            {
+              label: `Yes, restore previous mode (${details.prePlanMode ?? 'default'})`,
+              outcome: ToolConfirmationOutcome.RestorePrevious,
+            },
+            {
+              label: 'Yes, and auto-accept edits',
+              outcome: ToolConfirmationOutcome.ProceedAlways,
+            },
+            {
+              label: 'Yes, and manually approve edits',
+              outcome: ToolConfirmationOutcome.ProceedOnce,
+            },
+          );
+          break;
+        default:
+          // ask_user_question renders as the question dialog upstream of
+          // this builder; anything unexpected gets a bare allow/deny.
+          question = details.title || 'Do you want to proceed?';
+          body = [];
+          options.push({
+            label: 'Yes, allow once',
+            outcome: ToolConfirmationOutcome.ProceedOnce,
+          });
+      }
+      options.push({
+        label: cancelLabel,
+        outcome: ToolConfirmationOutcome.Cancel,
+      });
+      // Auto Mode classifier-unavailable fallback (ink parity): warning
+      // banner above the body + a "switch to Default" option inserted just
+      // before Cancel.
+      if (details.autoModeFallback) {
+        body = [
+          [{ text: `⚠ ${details.autoModeFallback.message}`, color: C.yellow }],
+          blankLine(),
+          ...body,
+        ];
+        const cancelIndex = options.findIndex(
+          (o) => o.outcome === ToolConfirmationOutcome.Cancel,
+        );
+        options.splice(cancelIndex === -1 ? options.length : cancelIndex, 0, {
+          label: 'Switch to Default Mode and allow once (recommended)',
+          outcome: ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault,
+        });
+      }
+      return { question, body, options };
+    },
+    [config],
+  );
+
   // Scheduler awaiting_approval parity, shared by the live turn and the
   // client-initiated command tools (/restore, /setup-github).
   const handleSchedulerWaitingCall = useCallback(
@@ -1549,7 +1754,7 @@ function App({
       name: string;
       confirmationDetails: ToolCallConfirmationDetails;
     }) => {
-      const { name, confirmationDetails } = call;
+      const { confirmationDetails } = call;
       if (confirmationDetails.type === 'ask_user_question') {
         const details = confirmationDetails;
         qAnswersRef.current = {};
@@ -1572,19 +1777,16 @@ function App({
           },
         });
       } else {
+        setConfirmSel(0);
         setConfirmReq({
-          names: `${name} needs approval`,
-          resolve: (ok) => {
-            void confirmationDetails.onConfirm(
-              ok
-                ? ToolConfirmationOutcome.ProceedOnce
-                : ToolConfirmationOutcome.Cancel,
-            );
+          ...buildToolConfirmDialog(confirmationDetails),
+          resolve: (outcome) => {
+            void confirmationDetails.onConfirm(outcome);
           },
         });
       }
     },
-    [],
+    [buildToolConfirmDialog],
   );
 
   const startLiveTurn = useCallback(
@@ -1611,18 +1813,6 @@ function App({
             {
               ...(options?.modelOverride
                 ? { modelOverride: options.modelOverride }
-                : {}),
-              ...(approvalModeRef.current === ApprovalMode.DEFAULT
-                ? {
-                    confirmBatch: (reqs: Array<{ name: string }>) =>
-                      new Promise<boolean>((resolve) => {
-                        approvalDialogCallIdRef.current = null;
-                        setConfirmReq({
-                          names: reqs.map((r) => r.name).join(', '),
-                          resolve,
-                        });
-                      }),
-                  }
                 : {}),
               drainSteering,
               onWaitingCall: ({ callId, name, confirmationDetails }) => {
@@ -1661,15 +1851,12 @@ function App({
                     },
                   });
                 } else {
+                  setConfirmSel(0);
                   setConfirmReq({
-                    names: `${name} needs approval`,
-                    resolve: (ok) => {
+                    ...buildToolConfirmDialog(confirmationDetails),
+                    resolve: (outcome) => {
                       settleWaitingCall();
-                      void confirmationDetails.onConfirm(
-                        ok
-                          ? ToolConfirmationOutcome.ProceedOnce
-                          : ToolConfirmationOutcome.Cancel,
-                      );
+                      void confirmationDetails.onConfirm(outcome);
                     },
                   });
                 }
@@ -1716,7 +1903,7 @@ function App({
         }
       })();
     },
-    [config, applyEvent, drainSteering],
+    [config, applyEvent, drainSteering, buildToolConfirmDialog],
   );
   startLiveTurnRef.current = startLiveTurn;
 
@@ -2307,18 +2494,27 @@ function App({
             </box>
           )}
           {confirmReq && (
-            <box
-              flexDirection="column"
-              border
-              borderColor={C.yellow}
-              paddingLeft={1}
-              paddingRight={1}
-              marginTop={1}
-            >
-              <text fg={C.yellow} attributes={1}>
-                {`Approve tool: ${confirmReq.names}?`}
-              </text>
-              <text fg={C.dim}>{'press y to approve · n / esc to cancel'}</text>
+            // ink ToolConfirmationMessage parity: no border — body, blank
+            // line, question, blank line, then numbered radio options with
+            // the selected row in success green.
+            <box flexDirection="column" paddingLeft={1} marginTop={1}>
+              {confirmReq.body.map((spans, i) => (
+                <box key={`${i}`} flexDirection="row">
+                  {spans.map((span, j) => (
+                    <text key={`${j}`} fg={span.color}>
+                      {span.text}
+                    </text>
+                  ))}
+                </box>
+              ))}
+              <text> </text>
+              <text fg={C.text}>{confirmReq.question}</text>
+              <text> </text>
+              {confirmReq.options.map((o, i) => (
+                <text key={o.label} fg={confirmSel === i ? C.green : C.text}>
+                  {`${confirmSel === i ? '›' : ' '} ${i + 1}. ${o.label}`}
+                </text>
+              ))}
             </box>
           )}
           {actionConfirmReq && (
@@ -2405,7 +2601,11 @@ function App({
             }}
             placeholder="Type your message or @path/to/file"
             focus={
-              !dialog && !questionReq && !actionConfirmReq && !shellConfirmReq
+              !dialog &&
+              !questionReq &&
+              !confirmReq &&
+              !actionConfirmReq &&
+              !shellConfirmReq
             }
             composerHandle={composerHandle}
           />

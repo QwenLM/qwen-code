@@ -17,7 +17,7 @@ import {
   transcribeSession,
   type TranscriptResult,
 } from './transcript-adapter.js';
-import type { StreamEvent } from '../model/streaming-model.js';
+import type { OpenTuiStreamEvent } from './event-adapter.js';
 
 export interface ResumableSession {
   conversation: { messages: readonly unknown[] };
@@ -50,7 +50,7 @@ function transcribe(
 export function resumeEventsFromSession(
   sessionData: ResumableSession,
   config?: Config,
-): StreamEvent[] {
+): OpenTuiStreamEvent[] {
   return transcribe(sessionData, config).events;
 }
 
@@ -65,7 +65,7 @@ export function resumeUserPromptsFromSession(
 /** Neutral resume events for the config's resumed session, if any. */
 export function resumeEventsFromConfig(
   config: Config,
-): StreamEvent[] | undefined {
+): OpenTuiStreamEvent[] | undefined {
   const sessionData = config.getResumedSessionData();
   if (!sessionData) return undefined;
   return resumeEventsFromSession(sessionData, config);

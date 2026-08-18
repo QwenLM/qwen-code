@@ -35,7 +35,15 @@ import type { StreamEvent } from '../model/streaming-model.js';
 export type OpenTuiStreamEvent =
   | StreamEvent
   | { type: 'tool-args'; id: string; args: string }
-  | { type: 'tool-result'; id: string; display: string }
+  | {
+      type: 'tool-result';
+      id: string;
+      display: string;
+      /** Structured FileDiff payload: rendered as colored diff lines in the
+       * tool card instead of the flattened `display` text (ink
+       * DiffResultRenderer parity). */
+      diff?: { fileDiff: string; fileName: string };
+    }
   | { type: 'confirm'; id: string; tool: string; title: string }
   /**
    * Turn segmentation marker (core `finished` / one-shot notices): closes
@@ -70,6 +78,19 @@ export function formatToolArgs(
 ): string | undefined {
   if (!args || Object.keys(args).length === 0) return undefined;
   return JSON.stringify(args);
+}
+
+/** Narrows a ToolResultDisplay to its FileDiff shape, if it is one. */
+export function extractFileDiff(
+  display: unknown,
+): { fileDiff: string; fileName: string } | null {
+  if (typeof display !== 'object' || display === null) return null;
+  const o = display as Record<string, unknown>;
+  if (typeof o['fileDiff'] !== 'string') return null;
+  return {
+    fileDiff: o['fileDiff'],
+    fileName: typeof o['fileName'] === 'string' ? o['fileName'] : '',
+  };
 }
 
 /** Stringifies a ToolResultDisplay (string | FileDiff | structured) losslessly. */
@@ -234,8 +255,13 @@ export function createEventMapper(
           resultDisplay?: unknown;
           executionStatus?: string;
         };
-        const display = renderResultDisplay(v.resultDisplay);
-        if (display) out.push({ type: 'tool-result', id: v.callId, display });
+        const diff = extractFileDiff(v.resultDisplay);
+        if (diff) {
+          out.push({ type: 'tool-result', id: v.callId, display: '', diff });
+        } else {
+          const display = renderResultDisplay(v.resultDisplay);
+          if (display) out.push({ type: 'tool-result', id: v.callId, display });
+        }
         const cancelled = v.executionStatus === 'cancelled';
         const failed = v.error !== undefined || v.executionStatus === 'error';
         out.push({

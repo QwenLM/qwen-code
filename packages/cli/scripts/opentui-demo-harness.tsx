@@ -7,11 +7,14 @@
  * secrets.QWEN_API_KEY is unavailable. Exits cleanly on its own — the runner
  * treats timed-out captures as failures.
  *
- * Run with: bun scripts/tui-parity/fixtures/opentui-demo-harness.tsx
+ * Lives under packages/cli (like the other opentui parity scripts) so bun
+ * resolves @opentui/* from the workspace's node_modules.
+ *
+ * Run with: bun packages/cli/scripts/opentui-demo-harness.tsx
  */
 import { createCliRenderer } from '@opentui/core';
 import { createRoot } from '@opentui/react';
-import { App } from '../../../packages/cli/src/ui/opentui/backend.js';
+import { App } from '../src/ui/opentui/backend.js';
 
 const DEMO_RUN_MS = 20000;
 

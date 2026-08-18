@@ -15,7 +15,11 @@
  */
 
 import { readFileSync } from 'node:fs';
-import type { StreamEvent } from '../model/streaming-model.js';
+import {
+  extractFileDiff,
+  renderResultDisplay,
+  type OpenTuiStreamEvent,
+} from './event-adapter.js';
 
 interface SessionPart {
   text?: string;
@@ -34,14 +38,14 @@ export interface TranscribeOptions {
 }
 
 export interface TranscriptResult {
-  events: StreamEvent[];
+  events: OpenTuiStreamEvent[];
   prompts: string[];
 }
 
 export function transcriptToEvents(
   jsonl: string,
   opts: TranscribeOptions = {},
-): StreamEvent[] {
+): OpenTuiStreamEvent[] {
   return transcribeSession(jsonl, opts).events;
 }
 
@@ -49,7 +53,7 @@ export function transcribeSession(
   jsonl: string,
   opts: TranscribeOptions = {},
 ): TranscriptResult {
-  const events: StreamEvent[] = [];
+  const events: OpenTuiStreamEvent[] = [];
   const prompts: string[] = [];
   let toolSeq = 0;
   for (const line of jsonl.split('\n')) {
@@ -94,11 +98,19 @@ export function transcribeSession(
       const r = o.toolCallResult ?? {};
       const id = r.callId ?? `tool-${++toolSeq}`;
       if (r.resultDisplay) {
-        events.push({
-          type: 'tool-output',
-          id,
-          delta: String(r.resultDisplay),
-        });
+        // FileDiff results ride as structured payloads (colored diff lines in
+        // the tool card); everything else flattens to display text. Bare
+        // `String(obj)` would render "[object Object]".
+        const diff = extractFileDiff(r.resultDisplay);
+        if (diff) {
+          events.push({ type: 'tool-result', id, display: '', diff });
+        } else {
+          events.push({
+            type: 'tool-output',
+            id,
+            delta: renderResultDisplay(r.resultDisplay),
+          });
+        }
       }
       const ok = (r.status ?? 'success') !== 'error';
       events.push({
@@ -141,6 +153,6 @@ export function transcribeSession(
   return { events, prompts };
 }
 
-export function loadTranscriptEvents(path: string): StreamEvent[] {
+export function loadTranscriptEvents(path: string): OpenTuiStreamEvent[] {
   return transcriptToEvents(readFileSync(path, 'utf8'));
 }

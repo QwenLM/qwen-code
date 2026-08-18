@@ -73,6 +73,27 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
     ).toEqual([{ type: 'tool-end', id: 'c1', success: true, summary: 'ok' }]);
   });
 
+  it('carries FileDiff resultDisplay as a structured diff payload', () => {
+    const map = createEventMapper();
+    const fileDiff = '@@ -1,1 +1,1 @@\n-old\n+new';
+    const out = map({
+      type: 'tool_call_response',
+      value: {
+        callId: 'c1',
+        resultDisplay: { fileDiff, fileName: 'a.txt' },
+      },
+    } as unknown as AnyEv);
+    expect(out).toEqual([
+      {
+        type: 'tool-result',
+        id: 'c1',
+        display: '',
+        diff: { fileDiff, fileName: 'a.txt' },
+      },
+      { type: 'tool-end', id: 'c1', success: true, summary: 'ok' },
+    ]);
+  });
+
   describe('finished (premature-done fix)', () => {
     it('maps finished(STOP) to a segment marker, not done', () => {
       const map = createEventMapper();

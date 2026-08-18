@@ -233,6 +233,7 @@ export const OPEN_TUI_COMMAND_ROUTES: readonly CommandRouteSpec[] = [
     results: ['dialog', 'message'],
     dialogs: ['approval-mode'],
   },
+  { name: 'advisor', results: ['message'] },
   {
     name: 'auth',
     altNames: ['connect', 'login'],

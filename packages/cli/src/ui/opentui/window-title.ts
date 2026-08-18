@@ -20,7 +20,7 @@ import type { LoadedSettings } from '../../config/settings.js';
 import {
   computeWindowTitle,
   writeTerminalTitle,
-} from '../../utils/windowTitle.js';
+} from '../utils/windowTitle.js';
 
 const write = (value: string) => {
   try {

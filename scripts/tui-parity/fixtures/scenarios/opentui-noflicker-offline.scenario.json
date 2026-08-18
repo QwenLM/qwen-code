@@ -22,7 +22,7 @@
       ]
     },
     "fixed": {
-      "argv": ["bun", "scripts/tui-parity/fixtures/opentui-demo-harness.tsx"]
+      "argv": ["bun", "packages/cli/scripts/opentui-demo-harness.tsx"]
     }
   },
   "thresholds": {

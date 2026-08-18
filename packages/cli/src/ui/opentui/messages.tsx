@@ -26,8 +26,9 @@
 
 import { MouseButton } from '@opentui/core';
 import { useRenderer } from '@opentui/react';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { C, SYNTAX } from './theme.js';
+import { renderDiffBody } from './diff-render.js';
 import { TOOL_DISPLAY_BY_NAME } from '../utils/tool-display-map.js';
 import type { LiveHistoryItem, LiveToolItem } from './live-session-model.js';
 
@@ -298,6 +299,13 @@ function ToolCard({ item, expanded, onToggle }: ToolCardProps) {
         ? ' · rejected'
         : '';
   const description = `${toolCardDescription(item.tool, item.args)}${suffix}${confirmLabel}`;
+  // FileDiff results render as colored gutter+diff lines (ink
+  // DiffResultRenderer parity), always visible like the original — not
+  // gated behind the click-to-expand output block.
+  const diffLines = useMemo(
+    () => (item.diff ? renderDiffBody(item.diff.fileDiff) : null),
+    [item.diff],
+  );
 
   return (
     <box flexDirection="column">
@@ -331,6 +339,19 @@ function ToolCard({ item, expanded, onToggle }: ToolCardProps) {
           </text>
         </box>
       </box>
+      {diffLines && (
+        <box paddingLeft={STATUS_INDICATOR_WIDTH} flexDirection="column">
+          {diffLines.map((spans, i) => (
+            <box key={`${i}`} flexDirection="row">
+              {spans.map((span, j) => (
+                <text key={`${j}`} fg={span.color} {...selectionProps()}>
+                  {span.text}
+                </text>
+              ))}
+            </box>
+          ))}
+        </box>
+      )}
       {item.args && expanded && (
         <box paddingLeft={STATUS_INDICATOR_WIDTH}>
           <text fg={C.dim} {...selectionProps()}>

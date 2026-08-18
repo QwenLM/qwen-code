@@ -20,6 +20,9 @@ export type ToolConfirmState = 'pending' | 'approved' | 'rejected';
 export type LiveToolItem = Extract<HistoryItem, { kind: 'tool' }> & {
   args?: string;
   confirm?: ToolConfirmState;
+  /** Structured FileDiff result: the card renders colored diff lines inline
+   * (ink DiffResultRenderer parity) instead of the flattened output text. */
+  diff?: { fileDiff: string; fileName: string };
 };
 
 export type LiveThinkingItem = Extract<HistoryItem, { kind: 'thinking' }> & {
@@ -141,7 +144,9 @@ export function foldLiveEvent(
       if (i >= 0) {
         const t = items[i] as LiveToolItem;
         const delta = ev.type === 'tool-output' ? ev.delta : ev.display;
-        items[i] = { ...t, output: t.output + delta };
+        const next: LiveToolItem = { ...t, output: t.output + delta };
+        if (ev.type === 'tool-result' && ev.diff) next.diff = ev.diff;
+        items[i] = next;
       }
       return items;
     }

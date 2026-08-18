@@ -39,6 +39,7 @@ import {
 import type { Part, PartListUnion } from '@google/genai';
 import {
   createEventMapper,
+  extractFileDiff,
   renderResultDisplay,
   type OpenTuiStreamEvent,
 } from './event-adapter.js';
@@ -57,13 +58,6 @@ interface LooseCompletedCall {
 export interface LivePromptOptions {
   /** Per-turn model override (submit_prompt's modelOverride parity). */
   modelOverride?: string;
-  /**
-   * DEFAULT-mode parity: asked once per tool batch before scheduling.
-   * Resolve true to execute, false to feed the model a cancellation.
-   */
-  confirmBatch?: (
-    reqs: Array<{ callId: string; name: string; args?: unknown }>,
-  ) => Promise<boolean>;
   /**
    * "Enter to steer" parity: called at each tool boundary (after tools ran,
    * before their results go back to the model). Returned texts are appended
@@ -280,27 +274,6 @@ export async function* livePromptEvents(
     }
     if (pending.length === 0 || abort.aborted) return;
 
-    if (options?.confirmBatch) {
-      const approved = await options.confirmBatch(pending);
-      if (!approved) {
-        for (const r of pending)
-          yield {
-            type: 'tool-end',
-            id: r.callId,
-            success: false,
-            summary: 'cancelled',
-          };
-        nextPrompt = pending.map((r) => ({
-          functionResponse: {
-            name: r.name,
-            id: r.callId,
-            response: { error: 'Tool execution cancelled by user.' },
-          },
-        }));
-        continue;
-      }
-    }
-
     // Live output bridge (ink outputUpdateHandler parity): scheduler output
     // chunks are mapped to neutral events and yielded WHILE the tools run.
     const live = createEventQueue<OpenTuiStreamEvent>();
@@ -400,17 +373,22 @@ export async function* livePromptEvents(
     const responseParts: Part[] = [];
     for (const call of completed) {
       const resp = call.response;
-      // For write_file show the written content (highlighted by <code>) like
-      // the original, not the raw unified diff.
-      const argsObj = (call.request.args ?? {}) as Record<string, unknown>;
-      const fileContent =
-        call.request.name === 'write_file' &&
-        typeof argsObj['content'] === 'string'
-          ? (argsObj['content'] as string)
-          : null;
-      const display = fileContent ?? renderResultDisplay(resp?.resultDisplay);
-      if (display)
-        yield { type: 'tool-result', id: call.request.callId, display };
+      // FileDiff results ride as structured payloads so the tool card renders
+      // colored diff lines (ink DiffResultRenderer parity) instead of the
+      // flattened unified-diff text.
+      const diff = extractFileDiff(resp?.resultDisplay);
+      if (diff) {
+        yield {
+          type: 'tool-result',
+          id: call.request.callId,
+          display: '',
+          diff,
+        };
+      } else {
+        const display = renderResultDisplay(resp?.resultDisplay);
+        if (display)
+          yield { type: 'tool-result', id: call.request.callId, display };
+      }
       const failed = call.status === 'error' || call.status === 'cancelled';
       yield {
         type: 'tool-end',

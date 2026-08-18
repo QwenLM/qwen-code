@@ -17,10 +17,8 @@ import {
   resumeEventsFromConfig,
   resumeEventsFromSession,
 } from './resume-session.js';
-import {
-  initialStreamingState,
-  reduceStreamEvents,
-} from '../model/streaming-model.js';
+import { foldLiveEvent } from './live-session-model.js';
+import type { OpenTuiStreamEvent } from './event-adapter.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 
 const CALL_ID = 'call_1bd0c3272fc749f6a25cd2c8';
@@ -83,28 +81,66 @@ describe('opentui resume mapping', () => {
     ]);
   });
 
+  it('carries FileDiff tool results as structured diff events', () => {
+    const fileDiff = '@@ -1,1 +1,1 @@\n-old\n+new';
+    const events: OpenTuiStreamEvent[] = resumeEventsFromSession({
+      conversation: {
+        messages: [
+          {
+            type: 'assistant',
+            message: {
+              role: 'model',
+              parts: [{ functionCall: { id: 'c1', name: 'edit', args: {} } }],
+            },
+          },
+          {
+            type: 'tool_result',
+            message: {
+              role: 'user',
+              parts: [{ functionResponse: { id: 'c1', name: 'edit' } }],
+            },
+            toolCallResult: {
+              callId: 'c1',
+              status: 'success',
+              resultDisplay: { fileDiff, fileName: 'a.txt' },
+            },
+          },
+        ],
+      },
+    });
+    // Never the "[object Object]" the previous String() flattening produced.
+    expect(events).toContainEqual({
+      type: 'tool-result',
+      id: 'c1',
+      display: '',
+      diff: { fileDiff, fileName: 'a.txt' },
+    });
+  });
+
   it('folds the replay into render-ready history items', () => {
     const events = resumeEventsFromSession({
       conversation: { messages: sampleMessages() },
     });
-    const state = reduceStreamEvents(initialStreamingState, events);
+    const items = events.reduce(
+      (acc, ev) => foldLiveEvent(acc, ev),
+      [] as ReturnType<typeof foldLiveEvent>,
+    );
 
-    expect(state.items.map((it) => it.kind)).toEqual([
+    expect(items.map((it) => it.kind)).toEqual([
       'user',
       'thinking',
       'tool',
       'assistant',
     ]);
-    const tool = state.items[2];
+    const tool = items[2];
     if (tool.kind !== 'tool') throw new Error('expected tool item');
     expect(tool.done).toBe(true);
     expect(tool.output).toBe('# README\nhello');
-    const thought = state.items[1];
+    const thought = items[1];
     if (thought.kind !== 'thinking') throw new Error('expected thinking item');
     expect(thought.done).toBe(true);
     // Replay must leave the composer ready, not "streaming".
-    expect(state.streaming).toBe(false);
-    expect(state.done).toBe(true);
+    expect(events[events.length - 1]).toEqual({ type: 'done' });
   });
 
   it('marks errored tool results as failed', () => {
