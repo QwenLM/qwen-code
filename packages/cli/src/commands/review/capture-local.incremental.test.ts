@@ -167,6 +167,57 @@ describe('capture-local — incremental local rounds', () => {
     ).toContain('bystander');
   });
 
+  it('an attribute flip refuses the anchor — including with NO worktree change', () => {
+    // What a round READS is the rendering. `binary` turns a file's section
+    // into "Binary files … differ", so a round can end clean having read no
+    // content of it at all; drop the attribute and the same bytes render as
+    // text nobody has reviewed. The `<mode>:<blob>` identity cannot see that.
+    //
+    // The second half is why this needs its own digest rather than a file
+    // entry: `.git/info/attributes` is not in the worktree, so the delta is
+    // EMPTY and the round would report "no changes since the last local
+    // review round" over a capture whose diff had just become readable.
+    seedDirtyTree();
+    write('.gitattributes', `${CHANGED} binary\n`);
+    const cachePath = promoteCandidate(capture(), 'model-a');
+
+    // (a) a tracked attributes file changes.
+    write('.gitattributes', '\n');
+    const viaWorktree = capture({ cache: cachePath, model: 'model-a' });
+    expect(viaWorktree.incremental).toBeUndefined();
+    expect(stderrLines.join('\n')).toContain('attribute state');
+
+    // (b) the SAME flip through `.git/info/attributes`, which no file
+    // identity covers: nothing in the worktree moves at all.
+    write('.gitattributes', `${CHANGED} binary\n`);
+    const cache2 = promoteCandidate(capture(), 'model-a');
+    mkdirSync(join(repo, '.git', 'info'), { recursive: true });
+    writeFileSync(join(repo, '.git', 'info', 'attributes'), '* -diff\n');
+    const viaInfo = capture({ cache: cache2, model: 'model-a' });
+    expect(viaInfo.incremental).toBeUndefined();
+    expect(stderrLines.join('\n')).toContain('attribute state');
+  });
+
+  it('a cache written before the attribute digest is refused, not trusted', () => {
+    // Reading an absent digest as "no attribute state" would compare it equal
+    // to a repository that genuinely has none — the same hole by another
+    // route. One full round after an upgrade is the price.
+    seedDirtyTree();
+    const cachePath = promoteCandidate(capture(), 'model-a');
+    const cache = JSON.parse(readFileSync(cachePath, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    delete cache['attrId'];
+    writeFileSync(cachePath, JSON.stringify(cache));
+    expect(
+      capture({ cache: cachePath, model: 'model-a' }).incremental,
+    ).toBeUndefined();
+    expect(stderrLines.join('\n')).toContain(
+      'predates the attribute-state digest',
+    );
+  });
+
   it('an identical state under the same model and HEAD yields 0 chunks and says so', () => {
     seedDirtyTree();
     const cachePath = promoteCandidate(capture(), 'model-a');

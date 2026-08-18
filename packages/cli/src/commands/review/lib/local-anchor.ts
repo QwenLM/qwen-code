@@ -48,6 +48,18 @@ export interface LocalCacheCandidate {
   files: Record<string, string>;
   /** Content-addressed id of the whole reviewed state, for display and logs. */
   stateId: string;
+  /**
+   * Digest of the attribute state that decided how these files RENDERED —
+   * see `attributeStateId`. Separate from `stateId` because two of its three
+   * sources are not in the worktree at all, so a move in them leaves every
+   * file identity standing still.
+   *
+   * Optional only for caches written before the field. Reading one back as
+   * "no attribute state" and comparing it equal would be the hole; the gate
+   * treats an absent digest as a mismatch, which costs one full round after
+   * an upgrade.
+   */
+  attrId?: string;
 }
 
 /**
@@ -158,6 +170,83 @@ export function hashWorktreeFiles(
   return out;
 }
 
+/**
+ * A digest of everything that decides how `git diff` RENDERS the captured
+ * files — which is what a round actually reads.
+ *
+ * The per-file identity above is `<mode>:<blob>` (link text for symlinks) and
+ * cannot see this: `binary`, `-diff` and `text` change a section from readable
+ * hunks into "Binary files … differ" while every byte and mode stands still.
+ * A round that read only a binary marker, then a round where the attribute is
+ * gone, would compare equal file-for-file and slice the newly-readable section
+ * out of scope — so the first round that CAN read the file never does.
+ *
+ * Three sources, and only the first is in the worktree:
+ *
+ *   - every `.gitattributes` governing a captured path (root and ancestors),
+ *   - `.git/info/attributes`, which is per-checkout and not tracked,
+ *   - `core.attributesFile`, which is per-user and can sit anywhere.
+ *
+ * The last two are why this cannot be folded into the file map: they flip the
+ * rendering with ZERO worktree change, so a delta computed from file
+ * identities is empty and the round reports "no changes" over a capture whose
+ * diff now contains text nobody read.
+ *
+ * Absent files contribute a fixed marker rather than nothing, so their later
+ * APPEARANCE moves the digest. Unreadable ones contribute their error state
+ * for the same reason — a file that cannot be read is not a file that is not
+ * there, and both must differ from "read, and empty".
+ */
+export function attributeStateId(
+  repoRoot: string,
+  paths: readonly string[],
+): string {
+  // `.` when the caller has no root to give: every read below is then
+  // relative to the process cwd, which is where a rootless caller's files
+  // are anyway. Crashing instead would take the whole capture down over a
+  // digest, and the digest's job is to make a round MORE conservative.
+  const root = repoRoot && repoRoot !== '' ? repoRoot : '.';
+  const h = createHash('sha256');
+  const read = (abs: string): string => {
+    try {
+      return `f:${readFileSync(abs, 'utf8')}`;
+    } catch (err) {
+      return (err as { code?: string }).code === 'ENOENT'
+        ? 'absent'
+        : 'unreadable';
+    }
+  };
+  for (const rel of governingAttributeFiles(paths)) {
+    h.update(`\0${rel}\0${read(join(root, rel))}`);
+  }
+  h.update(`\0info\0${read(join(root, '.git', 'info', 'attributes'))}`);
+  // Per-user and outside the repo. `git config --get` answers null when unset,
+  // which is itself part of the state: setting one later must move the digest.
+  const configured = gitOpt(
+    '-C',
+    root,
+    'config',
+    '--get',
+    'core.attributesFile',
+  );
+  h.update(
+    `\0core\0${configured === null ? 'unset' : `${configured}\0${read(configured)}`}`,
+  );
+  return h.digest('hex');
+}
+
+/** `.gitattributes` at the root and in every ancestor of every path. */
+function governingAttributeFiles(paths: readonly string[]): string[] {
+  const out = new Set<string>(['.gitattributes']);
+  for (const p of paths) {
+    const parts = p.split('/');
+    for (let i = 1; i < parts.length; i++) {
+      out.add(`${parts.slice(0, i).join('/')}/.gitattributes`);
+    }
+  }
+  return [...out].sort();
+}
+
 /** One id for the whole state: order-independent, HEAD included. */
 export function stateIdOf(
   headSha: string | null,
@@ -192,6 +281,7 @@ export function readLocalCache(path: string): LocalReviewCache | null {
     headSha?: unknown;
     files?: unknown;
     stateId?: unknown;
+    attrId?: unknown;
     lastModelId?: unknown;
   };
   if (
@@ -226,6 +316,7 @@ export function readLocalCache(path: string): LocalReviewCache | null {
     headSha: c.headSha as string | null,
     files,
     stateId: c.stateId,
+    ...(typeof c.attrId === 'string' ? { attrId: c.attrId } : {}),
     ...(typeof c.lastModelId === 'string'
       ? { lastModelId: c.lastModelId }
       : {}),
