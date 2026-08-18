@@ -17690,6 +17690,260 @@ describe('createAcpSessionBridge', () => {
     });
   });
 
+  describe('live activity watermark (summary updatedAt)', () => {
+    const watermarkOf = (
+      bridge: ReturnType<typeof makeBridge>,
+      sessionId: string,
+    ) => bridge.getSessionSummary(sessionId).updatedAt;
+
+    const collectEvents = (
+      bridge: ReturnType<typeof makeBridge>,
+      sessionId: string,
+      events: BridgeEvent[],
+    ) => {
+      const sub = (async () => {
+        for await (const ev of bridge.subscribeEvents(sessionId)) {
+          events.push(ev);
+        }
+      })();
+      sub.catch(() => {});
+      return sub;
+    };
+
+    const terminalCount = (events: BridgeEvent[], promptId: string) =>
+      events.filter(
+        (e) =>
+          (e.type === 'turn_complete' || e.type === 'turn_error') &&
+          e.promptId === promptId,
+      ).length;
+
+    it('is absent until a running prompt settles, then advances per running terminal', async () => {
+      const handle = makeChannel({});
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      // A freshly spawned entry has observed no terminal, so the field must
+      // stay off the wire rather than claiming activity at creation time.
+      expect(watermarkOf(bridge, session.sessionId)).toBeUndefined();
+
+      await bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'first' }],
+      });
+      const first = watermarkOf(bridge, session.sessionId);
+      // Present as soon as the prompt call settles — no polling window between
+      // the terminal and the summary carrying it.
+      expect(first).toBeDefined();
+      expect(Number.isNaN(Date.parse(first!))).toBe(false);
+
+      await bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'second' }],
+      });
+      expect(
+        Date.parse(watermarkOf(bridge, session.sessionId)!),
+      ).toBeGreaterThan(Date.parse(first!));
+
+      await bridge.shutdown();
+    });
+
+    it('stays strictly increasing when the wall clock does not advance', async () => {
+      // Pinning Date.now is what actually exercises the logical +1ms
+      // tie-breaker: with real time the assertion would pass on wall-clock
+      // movement alone.
+      const handle = makeChannel({});
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const nowSpy = vi
+        .spyOn(Date, 'now')
+        .mockReturnValue(Date.parse('2026-08-18T08:00:00.000Z'));
+      try {
+        const values: string[] = [];
+        for (const text of ['one', 'two', 'three']) {
+          await bridge.sendPrompt(session.sessionId, {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text }],
+          });
+          values.push(watermarkOf(bridge, session.sessionId)!);
+        }
+        expect(values).toEqual([
+          '2026-08-18T08:00:00.000Z',
+          '2026-08-18T08:00:00.001Z',
+          '2026-08-18T08:00:00.002Z',
+        ]);
+      } finally {
+        nowSpy.mockRestore();
+      }
+
+      await bridge.shutdown();
+    });
+
+    it('does not advance for a queued-only terminal or a heartbeat', async () => {
+      let releaseBlocker: (() => void) | undefined;
+      const blocked = new Promise<void>((r) => {
+        releaseBlocker = r;
+      });
+      const handle = makeChannel({
+        promptImpl: async (req: PromptRequest) => {
+          if ((req.prompt[0] as { text?: string }).text === 'blocker') {
+            await blocked;
+          }
+          return { stopReason: 'end_turn' } as PromptResponse;
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const events: BridgeEvent[] = [];
+      collectEvents(bridge, session.sessionId, events);
+
+      const blocker = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'blocker' }],
+        },
+        undefined,
+        { promptId: 'prompt-a' },
+      );
+      const queued = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'never runs' }],
+        },
+        undefined,
+        { promptId: 'prompt-b' },
+      );
+      queued.catch(() => {});
+      await new Promise((r) => setTimeout(r, 20));
+
+      // Admission and an in-flight running prompt are not terminals.
+      expect(watermarkOf(bridge, session.sessionId)).toBeUndefined();
+      expect(bridge.removePendingPrompt(session.sessionId, 'prompt-b')).toEqual(
+        {
+          removed: true,
+        },
+      );
+      // Wait for the victim's formal terminal to actually land, otherwise the
+      // assertion below would pass simply because nothing happened yet.
+      await vi.waitFor(() => expect(terminalCount(events, 'prompt-b')).toBe(1));
+      // It published a cancelled terminal but never ran, so it is not
+      // conversation activity.
+      expect(watermarkOf(bridge, session.sessionId)).toBeUndefined();
+
+      releaseBlocker!();
+      await expect(blocker).resolves.toEqual({ stopReason: 'end_turn' });
+      await expect(queued).rejects.toMatchObject({ name: 'AbortError' });
+      const afterRunningTerminal = watermarkOf(bridge, session.sessionId);
+      expect(afterRunningTerminal).toBeDefined();
+
+      bridge.recordHeartbeat(session.sessionId);
+      // Liveness signals stay separate from conversation activity, otherwise
+      // an idle but connected session would keep reordering.
+      expect(watermarkOf(bridge, session.sessionId)).toBe(afterRunningTerminal);
+
+      await bridge.shutdown();
+    });
+
+    it('advances exactly once when a running prompt is cancelled', async () => {
+      let observeCancel!: () => void;
+      const cancelObserved = new Promise<void>((r) => {
+        observeCancel = r;
+      });
+      const handle = makeChannel({
+        promptImpl: async () => {
+          await cancelObserved;
+          return { stopReason: 'cancelled' } as PromptResponse;
+        },
+        cancelImpl: () => observeCancel(),
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const events: BridgeEvent[] = [];
+      collectEvents(bridge, session.sessionId, events);
+
+      const running = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'cancel me' }],
+        },
+        undefined,
+        { promptId: 'prompt-a' },
+      );
+      running.catch(() => {});
+      await new Promise((r) => setTimeout(r, 20));
+      expect(watermarkOf(bridge, session.sessionId)).toBeUndefined();
+
+      await bridge.cancelSession(session.sessionId).catch(() => {});
+      await vi.waitFor(() => expect(terminalCount(events, 'prompt-a')).toBe(1));
+      const afterCancel = watermarkOf(bridge, session.sessionId);
+      expect(afterCancel).toBeDefined();
+
+      // A cancellation is one terminal, so it is one advance.
+      await new Promise((r) => setTimeout(r, 30));
+      expect(terminalCount(events, 'prompt-a')).toBe(1);
+      expect(watermarkOf(bridge, session.sessionId)).toBe(afterCancel);
+
+      await bridge.shutdown();
+    });
+
+    it('advances once when a running prompt fails', async () => {
+      // An error terminal is still a running attempt that settled, so recency
+      // moves even though the turn produced no result.
+      const handle = makeChannel({
+        promptImpl: async () => {
+          throw new Error('agent blew up');
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const events: BridgeEvent[] = [];
+      collectEvents(bridge, session.sessionId, events);
+
+      await expect(
+        bridge.sendPrompt(
+          session.sessionId,
+          {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: 'boom' }],
+          },
+          undefined,
+          { promptId: 'prompt-a' },
+        ),
+      ).rejects.toBeDefined();
+
+      await vi.waitFor(() => expect(terminalCount(events, 'prompt-a')).toBe(1));
+      const afterError = watermarkOf(bridge, session.sessionId);
+      expect(afterError).toBeDefined();
+
+      await new Promise((r) => setTimeout(r, 30));
+      expect(terminalCount(events, 'prompt-a')).toBe(1);
+      expect(watermarkOf(bridge, session.sessionId)).toBe(afterError);
+
+      await bridge.shutdown();
+    });
+
+    it('keeps turn activity out of the session catalog version', async () => {
+      const handle = makeChannel({});
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const before = bridge.getSessionCatalogVersion();
+
+      await bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'settle' }],
+      });
+
+      expect(watermarkOf(bridge, session.sessionId)).toBeDefined();
+      // Advancing the version here would make every live-state poll observe a
+      // mismatch and reload the catalog this field exists to avoid.
+      expect(bridge.getSessionCatalogVersion()).toEqual(before);
+
+      await bridge.shutdown();
+    });
+  });
+
   describe('cancelSession', () => {
     it('cancels an admitted prompt before agent dispatch', async () => {
       const events: BridgeEvent[] = [];

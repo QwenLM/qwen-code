@@ -380,10 +380,37 @@ function toSummary(item: {
 }
 
 /**
+ * Picks the later of a live and a persisted activity timestamp. The two have
+ * different authorities — the live value is the bridge's running-turn terminal
+ * watermark, the persisted value is the transcript's mtime — and the recorder
+ * writes asynchronously, so an mtime can land a few milliseconds after the
+ * terminal that produced the live value. Preferring either source blindly would
+ * move the row backward in activity order. An absent or unparseable candidate
+ * never displaces a valid one.
+ */
+function laterActivityTimestamp(
+  live: string | undefined,
+  persisted: string | undefined,
+): string | undefined {
+  const liveTime = live === undefined ? Number.NaN : Date.parse(live);
+  const persistedTime =
+    persisted === undefined ? Number.NaN : Date.parse(persisted);
+  const liveValid = Number.isFinite(liveTime);
+  const persistedValid = Number.isFinite(persistedTime);
+  if (liveValid && persistedValid) {
+    return liveTime >= persistedTime ? live : persisted;
+  }
+  if (liveValid) return live;
+  if (persistedValid) return persisted;
+  return live ?? persisted;
+}
+
+/**
  * Merges a live session's summary onto its persisted counterpart for a session
  * that exists in both. The persisted record owns identity/immutable facts
  * (`createdAt`, `parentSessionId` lineage) while the live entry owns volatile
- * state (`clientCount`, `hasActivePrompt`, a fresher `displayName`/`updatedAt`).
+ * state (`clientCount`, `hasActivePrompt`, a fresher `displayName`). `updatedAt`
+ * is the one field neither side owns outright: the later valid value wins.
  * Shared by all three list paths (default, organized, metadata-filtered) so the merge
  * rule lives in one place.
  */
@@ -402,7 +429,7 @@ function mergeLiveSessionSummary(
     sourceType: existing.sourceType ?? live.sourceType,
     sourceId:
       existing.sourceType !== undefined ? existing.sourceId : live.sourceId,
-    updatedAt: live.updatedAt ?? existing.updatedAt,
+    updatedAt: laterActivityTimestamp(live.updatedAt, existing.updatedAt),
     clientCount: live.clientCount,
     hasActivePrompt: live.hasActivePrompt,
     isArchived: false,

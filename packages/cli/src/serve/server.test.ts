@@ -14497,6 +14497,49 @@ describe('createServeApp', () => {
       }
     });
 
+    it('merges the later valid activity timestamp for a session that is both live and persisted', async () => {
+      // The bridge watermark and the transcript mtime are different
+      // authorities. Preferring the live value blindly would move the row
+      // backward whenever an asynchronous transcript write lands afterwards.
+      const id = '550e8400-e29b-41d4-a716-446655441001';
+      await writeStoredSession({
+        sessionId: id,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'stored prompt',
+        mtime: new Date('2026-05-17T12:00:05.000Z'),
+      });
+      const liveSummary = (updatedAt: string | undefined) => ({
+        sessionId: id,
+        workspaceCwd: WS_BOUND,
+        createdAt: '2026-05-17T12:00:00.000Z',
+        ...(updatedAt !== undefined ? { updatedAt } : {}),
+        clientCount: 1,
+        hasActivePrompt: false,
+      });
+      const activityOf = async (updatedAt: string | undefined) => {
+        const result = await listWorkspaceSessionsForResponse(
+          fakeBridge({ listImpl: () => [liveSummary(updatedAt)] }),
+          WS_BOUND,
+        );
+        return result.sessions.find((s) => s.sessionId === id)?.updatedAt;
+      };
+
+      // Live terminal newer than the mtime: the live value wins.
+      expect(await activityOf('2026-05-17T12:00:09.000Z')).toBe(
+        '2026-05-17T12:00:09.000Z',
+      );
+      // Persisted write newer than the terminal: no regression.
+      expect(await activityOf('2026-05-17T12:00:01.000Z')).toBe(
+        '2026-05-17T12:00:05.000Z',
+      );
+      // An absent or unparseable live value never displaces a valid one.
+      expect(await activityOf(undefined)).toBe('2026-05-17T12:00:05.000Z');
+      expect(await activityOf('not-a-timestamp')).toBe(
+        '2026-05-17T12:00:05.000Z',
+      );
+    });
+
     it.each(['abc', '-1', 'Infinity', '9007199254740992', '   '])(
       '400 invalid_cursor when cursor is not valid: %s',
       async (cursor) => {

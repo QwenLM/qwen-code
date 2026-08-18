@@ -1311,6 +1311,14 @@ export interface DaemonSessionLiveState {
   hasActivePrompt: boolean;
   isWaitingForPermission: boolean;
   isWaitingForUserQuestion: boolean;
+  /**
+   * Daemon-observed activity watermark: the newest terminal of a prompt that
+   * reached the running state in the current bridge, as an ISO timestamp.
+   * Absent before the first such terminal and after a bridge or runtime
+   * replacement. It is not proof that the transcript was flushed, so clients
+   * treat it as recency for ordering only.
+   */
+  updatedAt?: string;
 }
 
 export interface DaemonWorkspaceSessionLiveState {
