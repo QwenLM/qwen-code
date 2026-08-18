@@ -1893,7 +1893,7 @@ jobs:
             # swallowing the 中文说明 <details> block appended below
             # (|| true: iconv -c exits 1 when it discards a byte, which
             # under set -eo pipefail would drop the whole comment post).
-            DETAIL="$(head -c 1500 "${WORKDIR}/failure.md" | iconv -f utf-8 -t utf-8 -c | sed -e 's/<!--/<!\\-\\-/g' -e 's/<details/＜details/g' -e 's/<\/details/＜\/details/g' -e 's/<summary/＜summary/g' || true)"
+            DETAIL="$(head -c 1500 "${WORKDIR}/failure.md" | iconv -f utf-8 -t utf-8 -c | sed -e 's/<!--/<!\\-\\-/g' -e 's/<[dD][eE][tT][aA][iI][lL][sS]/＜details/g' -e 's/<\/[dD][eE][tT][aA][iI][lL][sS]/＜\/details/g' -e 's/<[sS][uU][mM][mM][aA][rR][yY]/＜summary/g' || true)"
             LABEL_ARGS=(--remove-label 'autofix/in-progress' --add-label 'autofix/skip')
           elif [[ "${PUBLISH_OUTCOME}" == 'failure' ]]; then
             REASON='the issue will require the `autofix/approved` label to be re-added before any future automated attempt.'
@@ -1912,7 +1912,7 @@ jobs:
           # handoff keeps a pathological translation from breaking markup.
           ZH_DETAIL=''
           if [[ -s "${WORKDIR}/failure.zh.md" ]]; then
-            ZH_DETAIL="$(head -c 3000 "${WORKDIR}/failure.zh.md" | iconv -f utf-8 -t utf-8 -c | sed -e 's/<!--/<!\\-\\-/g' -e 's/<details/＜details/g' -e 's/<\/details/＜\/details/g' -e 's/<summary/＜summary/g' || true)"
+            ZH_DETAIL="$(head -c 3000 "${WORKDIR}/failure.zh.md" | iconv -f utf-8 -t utf-8 -c | sed -e 's/<!--/<!\\-\\-/g' -e 's/<[dD][eE][tT][aA][iI][lL][sS]/＜details/g' -e 's/<\/[dD][eE][tT][aA][iI][lL][sS]/＜\/details/g' -e 's/<[sS][uU][mM][mM][aA][rR][yY]/＜summary/g' || true)"
           fi
           BODY="🤖 Withdrawing the claim above — the automated fix attempt did not succeed; ${REASON}
 
@@ -6991,7 +6991,7 @@ jobs:
               # this step's `set -eo pipefail` would abort before the marker and
               # the gh pr comment - hence the `|| true`, same as the sibling
               # publish site below.
-              API_ERROR_DETAIL="$(head -n 1 "${WORKDIR}/agent-api-error" | sed -e 's/<!--/<!\\-\\-/g' -e 's/<details/＜details/g' -e 's/<\/details/＜\/details/g' -e 's/<summary/＜summary/g' | cut -c1-200 | iconv -f utf-8 -t utf-8 -c || true)"
+              API_ERROR_DETAIL="$(head -n 1 "${WORKDIR}/agent-api-error" | sed -e 's/<!--/<!\\-\\-/g' -e 's/<[dD][eE][tT][aA][iI][lL][sS]/＜details/g' -e 's/<\/[dD][eE][tT][aA][iI][lL][sS]/＜\/details/g' -e 's/<[sS][uU][mM][mM][aA][rR][yY]/＜summary/g' | cut -c1-200 | iconv -f utf-8 -t utf-8 -c || true)"
             fi
             if [[ -s "${WORKDIR}/agent-api-error-kind" ]]; then
               API_ERROR_KIND="$(head -n 1 "${WORKDIR}/agent-api-error-kind" | tr -cd 'a-z')"
@@ -7395,7 +7395,7 @@ jobs:
                 # mid-size summary whose mandated tail straddles the 1500-byte
                 # cut leaves a live severed <details> opener that swallows the
                 # 中文说明 wrapper this step appends below.
-                head -c 1500 "${DETAIL_FILE}" | iconv -f utf-8 -t utf-8 -c | sed -e 's/<!--/<!\\-\\-/g' -e 's/<details/＜details/g' -e 's/<\/details/＜\/details/g' -e 's/<summary/＜summary/g' || true
+                head -c 1500 "${DETAIL_FILE}" | iconv -f utf-8 -t utf-8 -c | sed -e 's/<!--/<!\\-\\-/g' -e 's/<[dD][eE][tT][aA][iI][lL][sS]/＜details/g' -e 's/<\/[dD][eE][tT][aA][iI][lL][sS]/＜\/details/g' -e 's/<[sS][uU][mM][mM][aA][rR][yY]/＜summary/g' || true
               else
                 echo "AutoFix failed before producing a verified commit (the run crashed or timed out before it could explain why)."
               fi
@@ -7461,7 +7461,7 @@ jobs:
                 # forbids HTML in failure.zh.md), but must not be able to open
                 # or close a <details>/<summary> that swallows the closing tag
                 # the workflow emits below.
-                head -c 3000 "${WORKDIR}/failure.zh.md" | iconv -f utf-8 -t utf-8 -c | sed -e 's/<!--/<!\\-\\-/g' -e 's/<details/＜details/g' -e 's/<\/details/＜\/details/g' -e 's/<summary/＜summary/g' || true
+                head -c 3000 "${WORKDIR}/failure.zh.md" | iconv -f utf-8 -t utf-8 -c | sed -e 's/<!--/<!\\-\\-/g' -e 's/<[dD][eE][tT][aA][iI][lL][sS]/＜details/g' -e 's/<\/[dD][eE][tT][aA][iI][lL][sS]/＜\/details/g' -e 's/<[sS][uU][mM][mM][aA][rR][yY]/＜summary/g' || true
               fi
               if [[ -s "${WORKDIR}/gate-rejection.md" ]]; then
                 echo

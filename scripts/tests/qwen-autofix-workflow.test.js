@@ -14091,9 +14091,15 @@ exit 1
     );
     // Wrapper-defense escaping: a pathological translation quoting markup
     // must not be able to open or close a <details>/<summary> of its own.
-    expect(reviewAddressReportStep).toContain('s/<details/＜details/g');
-    expect(reviewAddressReportStep).toContain('s/<\\/details/＜\\/details/g');
-    expect(reviewAddressReportStep).toContain('s/<summary/＜summary/g');
+    expect(reviewAddressReportStep).toContain(
+      's/<[dD][eE][tT][aA][iI][lL][sS]/＜details/g',
+    );
+    expect(reviewAddressReportStep).toContain(
+      's/<\\/[dD][eE][tT][aA][iI][lL][sS]/＜\\/details/g',
+    );
+    expect(reviewAddressReportStep).toContain(
+      's/<[sS][uU][mM][mM][aA][rR][yY]/＜summary/g',
+    );
     // Pin the FULL sanitization pipeline, anchored on the zh excerpt. The
     // three tag substitutions above were pinned only for THIS lane and the
     // `<!--` expression for NEITHER: dropping `-e 's/<!--/…'` from both zh
@@ -14101,7 +14107,7 @@ exit 1
     // (mutation-verified) — the exact false-green class the nine-site count
     // test documents. Both lanes share the identical pipeline.
     const zhPipeline =
-      "head -c 3000 \"${WORKDIR}/failure.zh.md\" | iconv -f utf-8 -t utf-8 -c | sed -e 's/<!--/<!\\\\-\\\\-/g' -e 's/<details/＜details/g' -e 's/<\\/details/＜\\/details/g' -e 's/<summary/＜summary/g' || true";
+      "head -c 3000 \"${WORKDIR}/failure.zh.md\" | iconv -f utf-8 -t utf-8 -c | sed -e 's/<!--/<!\\\\-\\\\-/g' -e 's/<[dD][eE][tT][aA][iI][lL][sS]/＜details/g' -e 's/<\\/[dD][eE][tT][aA][iI][lL][sS]/＜\\/details/g' -e 's/<[sS][uU][mM][mM][aA][rR][yY]/＜summary/g' || true";
     expect(reviewAddressReportStep).toContain(zhPipeline);
     // The eval markers stay AFTER the closing tag: the next scan parses them
     // out of the raw comment body.
@@ -14242,7 +14248,7 @@ exit 1
     // contract-violating `<details` in the excerpt the same way the PR-lane
     // DETAIL_FILE site is.
     const wrapperDefensePipeline =
-      "iconv -f utf-8 -t utf-8 -c | sed -e 's/<!--/<!\\\\-\\\\-/g' -e 's/<details/＜details/g' -e 's/<\\/details/＜\\/details/g' -e 's/<summary/＜summary/g' || true";
+      "iconv -f utf-8 -t utf-8 -c | sed -e 's/<!--/<!\\\\-\\\\-/g' -e 's/<[dD][eE][tT][aA][iI][lL][sS]/＜details/g' -e 's/<\\/[dD][eE][tT][aA][iI][lL][sS]/＜\\/details/g' -e 's/<[sS][uU][mM][mM][aA][rR][yY]/＜summary/g' || true";
     expect(withdrawClaimStep).toContain(
       'DETAIL="$(head -c 1500 "${WORKDIR}/failure.md" | ' +
         wrapperDefensePipeline +
@@ -14261,7 +14267,7 @@ exit 1
     // agent stdout (which can echo contributor-authored comment text) would
     // close the wrapper early, so it needs the same four substitutions.
     expect(reviewAddressReportStep).toContain(
-      "API_ERROR_DETAIL=\"$(head -n 1 \"${WORKDIR}/agent-api-error\" | sed -e 's/<!--/<!\\\\-\\\\-/g' -e 's/<details/＜details/g' -e 's/<\\/details/＜\\/details/g' -e 's/<summary/＜summary/g' | cut -c1-200 | iconv -f utf-8 -t utf-8 -c || true)\"",
+      "API_ERROR_DETAIL=\"$(head -n 1 \"${WORKDIR}/agent-api-error\" | sed -e 's/<!--/<!\\\\-\\\\-/g' -e 's/<[dD][eE][tT][aA][iI][lL][sS]/＜details/g' -e 's/<\\/[dD][eE][tT][aA][iI][lL][sS]/＜\\/details/g' -e 's/<[sS][uU][mM][mM][aA][rR][yY]/＜summary/g' | cut -c1-200 | iconv -f utf-8 -t utf-8 -c || true)\"",
     );
     // The two branch-selected Chinese section labels inside the block must
     // sit under THEIR branches — the same wrong-label-on-the-decision-
@@ -14299,13 +14305,18 @@ exit 1
         'head -c 3000 "${WORKDIR}/failure.zh.md"',
       ),
     );
+    expect(reviewAddressReportStep.indexOf("echo '<details>'")).toBeLessThan(
+      reviewAddressReportStep.indexOf("echo '<summary>中文说明</summary>'"),
+    );
+    expect(
+      reviewAddressReportStep.indexOf("echo '<summary>中文说明</summary>'"),
+    ).toBeLessThan(reviewAddressReportStep.indexOf('echo "${HEADLINE_ZH}"'));
+    expect(
+      reviewAddressReportStep.indexOf('echo "${HEADLINE_ZH}"'),
+    ).toBeLessThan(reviewAddressReportStep.indexOf("echo '</details>'"));
     expect(
       reviewAddressReportStep.indexOf("echo '<summary>中文说明</summary>'"),
     ).toBeLessThan(reviewAddressReportStep.indexOf("echo '</details>'"));
-    // The develop-issue withdraw comment carries the same block, running
-    // the identical zh pipeline (pinned above for the PR lane).
-    expect(withdrawClaimStep).toContain(zhPipeline);
-    expect(withdrawClaimStep).toContain('<summary>中文说明</summary>');
     // The English body must SURVIVE the zh append (a future edit rewriting
     // `BODY="${BODY}` to `BODY="` ships green without this pin, dropping
     // the withdrawal reason and excerpt whenever failure.zh.md exists —
@@ -14326,6 +14337,14 @@ exit 1
     );
     expect(withdrawClaimStep).toMatch(
       /REASON='the issue will require the `autofix\/approved` label to be re-added before any future automated attempt\.'\n\s*REASON_ZH='该 issue 需要重新添加 `autofix\/approved` 标签才能再次自动尝试。'/,
+    );
+    // Branches 2 and 3 carry IDENTICAL REASON text, so both pairing pins
+    // above are satisfied by branch 2's first occurrence — nothing pins
+    // branch 3's REASON_ZH unless it is keyed on its unique neighbour (its
+    // DETAIL differs); swapping in branch 1's value shipped green
+    // (mutation-verified).
+    expect(withdrawClaimStep).toMatch(
+      /REASON_ZH='该 issue 需要重新添加[^']*'\n\s*DETAIL='The run failed before producing a verified fix\.'/,
     );
     expect(withdrawClaimStep).toContain('ZH_BLOCK="${REASON_ZH}"');
     expect(withdrawClaimStep).toContain(
