@@ -1569,3 +1569,68 @@ describe('parse-args warns when the bundle is not built from these sources', () 
     expect(writeStdoutLine).toHaveBeenCalled();
   });
 });
+
+describe('--resume', () => {
+  it('is effective on a PR target', () => {
+    const r = parseReviewArgs('6711 --resume');
+    expect(r.resume).toEqual({ requested: true, effective: true });
+    expect(r.warnings).toEqual([]);
+  });
+
+  it('is effective on a PR URL target', () => {
+    const r = parseReviewArgs(
+      'https://github.com/QwenLM/qwen-code/pull/6711 --resume',
+    );
+    expect(r.resume).toEqual({ requested: true, effective: true });
+  });
+
+  it('is ignored with a warning on a local target', () => {
+    const r = parseReviewArgs('--resume');
+    expect(r.resume).toEqual({ requested: true, effective: false });
+    expect(r.warnings.some((w) => w.includes('`--resume`'))).toBe(true);
+  });
+
+  it('is ignored with a warning on a FILE target too', () => {
+    // The other member of the `!isPr` class, which SKILL.md names alongside
+    // local. A gate written as `target.type !== 'local'` reports the flag
+    // effective here — on a target shape with no `fetch-pr` call to consume
+    // it — and every local-target test stays green.
+    const r = parseReviewArgs('src/foo.ts --resume');
+    expect(r.resume).toEqual({ requested: true, effective: false });
+    expect(r.warnings.some((w) => w.includes('`--resume`'))).toBe(true);
+  });
+
+  it('is absent by default', () => {
+    const r = parseReviewArgs('6711');
+    expect(r.resume).toEqual({ requested: false, effective: false });
+  });
+
+  it('keeps an explicit effort untouched on the EFFECTIVE path', () => {
+    // The missing corner of the matrix: the other three cells are covered,
+    // and this is the one an effort-forcing mutation on the effective path
+    // would slip through — the shape the sibling `--comment` bug took when
+    // it shipped.
+    const r = parseReviewArgs('6711 --resume --effort low');
+    expect(r.resume).toEqual({ requested: true, effective: true });
+    expect(r.effort).toBe('low');
+    expect(r.effortSource).toBe('explicit');
+  });
+
+  it('does not change the effort resolution', () => {
+    const r = parseReviewArgs('6711 --resume');
+    expect(r.effort).toBe('high'); // the PR default, not a resume effect
+    expect(r.effortSource).toBe('default');
+  });
+
+  it('an IGNORED --resume must not change the effort either', () => {
+    // The sibling `--comment` has this test because the bug shipped once:
+    // a flag ignored for the target still forced the level.
+    const r = parseReviewArgs('--resume --effort low');
+    expect(r.resume).toEqual({ requested: true, effective: false });
+    expect(r.effort).toBe('low');
+    expect(r.effortSource).toBe('explicit');
+    const d = parseReviewArgs('--resume');
+    expect(d.effort).toBe('medium'); // the local default, untouched
+    expect(d.effortSource).toBe('default');
+  });
+});
