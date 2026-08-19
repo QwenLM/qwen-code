@@ -46,6 +46,14 @@ export type DiagnosticLineSink = (
  */
 export interface PromptLedgerSink {
   appendSync(sessionId: string, record: PromptLedgerRecord): void;
+  /**
+   * Uuid of the transcript's last record right now, or `undefined` when
+   * there is no transcript evidence (fresh session, unreadable file). The
+   * bridge stamps it into the `in_flight` record at admission as the
+   * dispatch marker; best-effort — a failure or absence only degrades
+   * cold-load reconciliation back to its marker-less evidence chain.
+   */
+  transcriptTailUuid?(sessionId: string): string | undefined;
 }
 
 export interface BridgeFreshSessionAdmissionContext {

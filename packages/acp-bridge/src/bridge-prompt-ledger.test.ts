@@ -72,6 +72,78 @@ describe('bridge prompt terminal ledger writes', () => {
     }
   });
 
+  it('stamps the dispatch marker from the sink into the in_flight record', async () => {
+    const handle = makeChannel();
+    const records: PromptLedgerRecord[] = [];
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      promptLedger: {
+        appendSync: (_sessionId, record) => {
+          records.push(record);
+        },
+        transcriptTailUuid: () => 'tail-at-admission',
+      },
+    });
+    try {
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'hello' }],
+        },
+        undefined,
+        { promptId: 'p-marker' },
+      );
+      expect(records).toContainEqual({
+        v: 1,
+        promptId: 'p-marker',
+        state: 'in_flight',
+        tailUuid: 'tail-at-admission',
+        at: expect.any(Number),
+      });
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
+  it('keeps admitting when the dispatch marker lookup fails', async () => {
+    const handle = makeChannel();
+    const records: PromptLedgerRecord[] = [];
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      promptLedger: {
+        appendSync: (_sessionId, record) => {
+          records.push(record);
+        },
+        transcriptTailUuid: () => {
+          throw new Error('transcript unreadable');
+        },
+      },
+    });
+    try {
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const result = await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'hello' }],
+        },
+        undefined,
+        { promptId: 'p-no-marker' },
+      );
+      expect(result.stopReason).toBe('end_turn');
+      expect(records).toContainEqual({
+        v: 1,
+        promptId: 'p-no-marker',
+        state: 'in_flight',
+        at: expect.any(Number),
+      });
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
   it('persists the daemon_shutdown error terminal when shutdown flushes a pending prompt', async () => {
     const handle = makeChannel({
       promptImpl: () => new Promise(() => {}),

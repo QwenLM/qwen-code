@@ -27,6 +27,27 @@ function ledgerPath(name: string): string {
 }
 
 describe('appendPromptLedgerRecord + readPromptLedgerRecords', () => {
+  it('round-trips the in_flight dispatch marker, dropping invalid ones', () => {
+    const filePath = ledgerPath('marker');
+    appendPromptLedgerRecord(filePath, {
+      v: 1,
+      promptId: 'p1',
+      state: 'in_flight',
+      tailUuid: 'rec-tail',
+      at: 1,
+    });
+    // A non-string marker on disk must be dropped, not fatal.
+    writeFileSync(
+      filePath,
+      `${JSON.stringify({ v: 1, promptId: 'p2', state: 'in_flight', tailUuid: 42, at: 2 })}\n`,
+      { flag: 'a' },
+    );
+    expect(readPromptLedgerRecords(filePath)).toEqual([
+      { v: 1, promptId: 'p1', state: 'in_flight', tailUuid: 'rec-tail', at: 1 },
+      { v: 1, promptId: 'p2', state: 'in_flight', at: 2 },
+    ]);
+  });
+
   it('round-trips in_flight and terminal records in order', () => {
     const filePath = ledgerPath('roundtrip');
     appendPromptLedgerRecord(filePath, {

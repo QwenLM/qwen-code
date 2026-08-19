@@ -35,12 +35,13 @@ Records are single-line JSON objects, append-only:
 
 ```json
 {"v":1,"promptId":"...","state":"in_flight","at":1692000000000}
+{"v":1,"promptId":"...","state":"in_flight","tailUuid":"rec-uuid","at":1692000000000}
 {"v":1,"promptId":"...","terminal":"completed","stopReason":"stop","at":1692000000123}
 {"v":1,"promptId":"...","terminal":"error","code":"daemon_shutdown","at":1692000000456}
 {"v":1,"promptId":"...","terminal":"interrupted","code":"daemon_lost","at":1692000000789}
 ```
 
-`terminal` is one of `completed | cancelled | error | interrupted`. `code` carries the flush origin (`daemon_shutdown`, `session_killed`, `channel_closed`, `session_closed`) or the normalized turn error code; `stopReason` carries the agent stop reason when present.
+`terminal` is one of `completed | cancelled | error | interrupted`. `code` carries the flush origin (`daemon_shutdown`, `session_killed`, `channel_closed`, `session_closed`) or the normalized turn error code; `stopReason` carries the agent stop reason when present. `tailUuid` (in_flight only) is the dispatch marker: the uuid of the transcript's last record at admission, best-effort (absent when the transcript is missing/unreadable or for records written before the marker existed).
 
 The reader (`readPromptLedgerRecords`) tolerates torn tails: lines that fail structural validation are dropped, a missing file reads as empty. The writer (`appendPromptLedgerRecord`) seals a torn tail before appending: if the file is non-empty and its last byte is not `\n` (a crash mid-append), a newline is appended first so the next record cannot fuse with the torn fragment — without the seal, one torn tail plus one fresh append loses both records.
 
@@ -50,7 +51,7 @@ The reader (`readPromptLedgerRecords`) tolerates torn tails: lines that fail str
 
 All writes go through the module-level `appendPromptLedgerBestEffort` helper: any failure is logged via `writeStderrLine` and swallowed. A ledger problem must never block prompt execution or terminal flush.
 
-1. **Admission** — when `sendPrompt` pushes onto `pendingPromptList`, an `in_flight` record is appended synchronously (write-ahead: the in_flight fact must be on disk before the prompt can produce a terminal).
+1. **Admission** — when `sendPrompt` pushes onto `pendingPromptList`, an `in_flight` record is appended synchronously (write-ahead: the in_flight fact must be on disk before the prompt can produce a terminal). Before the append, the bridge asks the sink for the transcript's last record uuid (`transcriptTailUuid`, best-effort) and stamps it as `tailUuid` — the dispatch marker that binds cold-load evidence to this admission (see step 5 below).
 2. **Terminal** — immediately after the `terminalPublished` latch is set inside `publishPromptTerminal`, the terminal record is appended. Because all four `flushPromptTerminals` scenarios (`channel_closed`, `closeSession`/`session_closed`, `killSession`/`session_killed`, `bridge.shutdown`/`daemon_shutdown`) funnel unfinished prompts through `publishPromptTerminal`, one write point covers graceful shutdown too. `daemon_shutdown` persistence therefore precedes process exit without any extra sync path beyond the append being synchronous (`appendFileSync`).
 
 ### Layering
@@ -58,7 +59,7 @@ All writes go through the module-level `appendPromptLedgerBestEffort` helper: an
 `acp-bridge` must gain no new core coupling for the ledger (the ledger module stays dependency-free beyond `node:fs`), and the bridge cannot know the serve-layer storage layout. `BridgeOptions` therefore gains an optional injected sink:
 
 ```ts
-promptLedger?: PromptLedgerSink;   // { appendSync(sessionId, record): void }
+promptLedger?: PromptLedgerSink;   // { appendSync, transcriptTailUuid? }
 ```
 
 `run-qwen-serve.ts` assembles it (`createPromptLedgerSink(workspaceCwd, sessionRuntimeBaseDir)`, backed by `SessionService.getPromptLedgerPath`) and injects it at the three bridge construction sites (primary, secondary, websocket-workspace — the latter skips live-conversation entries, which have no transcript to reconcile against). Reading, reconciliation, and HTTP exposure live in `packages/cli/src/serve/prompt-terminal-ledger.ts`, which may import core.
@@ -73,7 +74,8 @@ Algorithm (every step that cannot attribute the tail with confidence returns wit
 2. **Multiple dangling ids → return.** Under FIFO admission the visible transcript tail belongs to the _oldest_ running prompt, but with several prompts dangling the tail's owner cannot be verified (the queued ones never wrote a turn). Synthesizing a terminal for any of them — including the newest — could attribute an earlier prompt's turn to the wrong id, so they all stay `unknown` (omitted from `promptTerminals`).
 3. Let `target` be the oldest dangling id. **Attribution guard**: walking the ledger forward, skip the `in_flight` records of prompts that have settled (a terminal record exists for them); the last remaining `in_flight` record must be `target`'s own admission. Skipping settled prompts matters for `[A if, B if, B cancelled]` (B queued, then cancelled while A still ran): the tail belongs to A even though B's `in_flight` line is the later record — a naive "last in_flight must match target" guard would wrongly veto A with B's settled admission. In `[if p1, if p2, term p1]` (valid interleave: p1 settled while p2 runs, daemon dies) the guard passes and p2 is attributed the tail.
 4. Load the transcript (`loadSession`); failure or `undefined` → return.
-5. **Attribution evidence** (four checks, each closing a concrete wrong-terminal class):
+5. **Attribution evidence** (five checks, each closing a concrete wrong-terminal class):
+   - **Dispatch marker**: when the target's `in_flight` record carries `tailUuid`, the projection must contain that record AND at least one visible write (non-`system`, with a `message`) after it. The transcript is append-only, so anything after the marker postdates admission — an identity/ordering check immune to clock skew. A marker absent from the projection, or present with no visible write beyond it, fails closed. Records without a marker (legacy, or capture failure) fall through to the temporal chain below.
    - **Projection-consistent temporal evidence**: the last transcript write that actually enters the api history the verdict runs on (non-`system` records with a `message`, mirroring `SessionApiHistoryAccumulator`) must be strictly after `target`'s `in_flight` `at`. Measuring the raw stream instead would let evidence the verdict never sees — a post-admission `ui_telemetry`/`custom_title`/… record — pass the check for a prompt that never reached the model. An empty message list (or system-only tail) fails the same check. Equality is vetoed too: both clocks are 1 ms-granularity `Date.now()` reads, so a write landing in the admission millisecond cannot be attributed.
    - **Compression fence**: a `chat_compression` record carrying a `compressedHistory` written at or after `target`'s admission → return. The accumulator swaps the whole history for the compressed snapshot, so the verdict's projection no longer carries `target`'s turn and nothing may be attributed.
    - **FIFO evidence**: the visible tail must be strictly after every _other_ prompt's settled terminal `at` (same-millisecond equality is vetoed, for the same clock-collision reason as above). Under FIFO admission `target`'s turn can only start after every predecessor settled, so an older tail belongs to that predecessor's turn. This closes the queued-never-dispatched class (`[A if, B if(queued), A term]` — A's tail predates A's own terminal, so B gets nothing) and the stale-dangling class left by restore paths that skip reconciliation (a later prompt's completed tail predates its own terminal, so the stale prompt gets nothing).
@@ -85,7 +87,7 @@ Algorithm (every step that cannot attribute the tail with confidence returns wit
 7. **TOCTOU fence**: re-read the ledger immediately before the append; any change since the step-1 snapshot (the ledger is append-only, so an unchanged record count proves it) → return. A prompt admitted while `loadSession` ran appends its `in_flight` after the snapshot, and the visible tail the verdict was computed from may now belong to it — the verdict must not be stamped onto the old dangling id.
 8. Append best-effort; an append failure leaves the prompt `unknown`.
 
-**Residual attribution risk.** Every guard reasons over wall-clock ordering across two stores, and transcript records carry no `promptId`; classes that break that ordering can still pass all guards. Known residuals are listed here for future structural work (e.g. persisting a transcript-tail marker in the `in_flight` record at admission so evidence binds to the target): a predecessor whose best-effort admission append failed leaves no ledger trace, so its queued successor can inherit its tail; a backward wall-clock step between a settled prompt's final write and its terminal append defeats the `<=` comparisons; and a tail consisting solely of injected non-model user records (system reminders) classifies as `none` and could synthesize `completed` for a prompt that consumed zero model tokens.
+**Residual attribution risk.** The dispatch marker binds evidence to the target by identity, closing the ordering-breakage classes wherever it is present: a recordless predecessor's tail predates the successor's marker, a backward clock step cannot fake record order, and a system-reminder-only tail contains no visible write beyond the marker. Residuals survive only on marker-less admissions — legacy `in_flight` records written before the marker existed, marker capture failure (unreadable transcript, or a final record larger than the 64 KiB tail window), which fall back to the temporal evidence chain and its documented classes (recordless-predecessor inheritance, backward clock steps, non-model-record tails). Ledger records written before this change never gain a marker retroactively; they stay on the temporal chain permanently.
 
 ### Load response
 
@@ -121,13 +123,14 @@ Records contain only `v`, `promptId`, `state`/`terminal`, `code`, `stopReason`, 
 
 - No verdict is ever synthesized without ledger evidence of an in-flight admission.
 - A verdict requires both a readable transcript tail and a passing attribution guard.
+- When the admission carries a dispatch marker, at least one visible write must land beyond it (identity-based attribution, immune to clock skew); a missing marker or no write beyond it appends nothing.
 - Multiple dangling prompts never receive a synthesized terminal; their tails cannot be attributed.
 - The temporal evidence is measured on the same projection the verdict uses: the last write that enters the api history must be strictly after the target's admission (same-millisecond equality is vetoed — both clocks are 1 ms-granularity `Date.now()` reads), otherwise the tail belongs to an earlier turn and nothing is appended.
 - A compression checkpoint written at or after the target's admission voids the evidence chain (nothing appended).
 - The visible tail must be strictly after every other prompt's settled terminal (FIFO evidence); otherwise it belongs to that prompt's turn.
 - A `prompt_deadline_exceeded` terminal of another prompt voids the evidence chain: the deadline path releases the FIFO while the wedged agent may keep writing, so that terminal does not fence its turn's writes. The veto is unconditional and permanent (missing terminals over wrong ones).
 - The verdict is re-checked against the ledger immediately before the append (TOCTOU fence): any record landed during the reconciliation window voids the verdict.
-- Residual ordering-breakage classes (recordless predecessors, backward clock steps, non-model-record tails) are documented under "Residual attribution risk"; they can only degrade attribution quality under compound failures and are tracked for structural follow-up.
+- Residual ordering-breakage classes (recordless predecessors, backward clock steps, non-model-record tails) survive only on marker-less admissions (legacy records, capture failure); they are documented under "Residual attribution risk" and can only degrade attribution quality under compound failures.
 - A model tail holding any tool call (id or not) is treated as interrupted, never as a clean completion.
 - Everything downstream of the guard (ledger read failure, transcript read failure, append failure) degrades to "no terminal emitted", never to a wrong terminal.
 - Ledger write failures never affect prompt execution or shutdown flush; ledger move failures never block archive/unarchive (warn-only).

@@ -5,6 +5,7 @@
  */
 
 import type { Content } from '@google/genai';
+import { closeSync, openSync, readSync, statSync } from 'node:fs';
 import {
   buildApiHistoryFromConversation,
   detectTurnInterruption,
@@ -45,7 +46,59 @@ export function createPromptLedgerSink(
         record,
       );
     },
+    transcriptTailUuid(sessionId) {
+      return readTranscriptTailUuid(
+        sessionService.getSessionTranscriptPath(sessionId),
+      );
+    },
   };
+}
+
+/**
+ * Byte window for the dispatch-marker read: only the trailing record
+ * matters, so the hot admission path never reads (or JSON-parses) a whole
+ * multi-megabyte transcript. A final record larger than the window (or a
+ * torn tail) simply yields no marker — admission and reconciliation both
+ * degrade to the marker-less evidence chain.
+ */
+const TRANSCRIPT_TAIL_BYTES = 64 * 1024;
+
+/**
+ * Uuid of the transcript's last record, or `undefined` without readable
+ * evidence (missing file, empty file, torn/corrupt tail). Best-effort by
+ * contract: any failure maps to "no marker", never to an admission error.
+ */
+export function readTranscriptTailUuid(
+  transcriptPath: string,
+): string | undefined {
+  let contents: string;
+  try {
+    const size = statSync(transcriptPath).size;
+    if (size === 0) return undefined;
+    const windowBytes = Math.min(size, TRANSCRIPT_TAIL_BYTES);
+    const buffer = Buffer.alloc(windowBytes);
+    const fd = openSync(transcriptPath, 'r');
+    try {
+      readSync(fd, buffer, 0, windowBytes, size - windowBytes);
+    } finally {
+      closeSync(fd);
+    }
+    contents = buffer.toString('utf8');
+  } catch {
+    return undefined;
+  }
+  const lines = contents.split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i];
+    if (line === undefined || line.length === 0) continue;
+    try {
+      const uuid = (JSON.parse(line) as { uuid?: unknown }).uuid;
+      return typeof uuid === 'string' && uuid.length > 0 ? uuid : undefined;
+    } catch {
+      return undefined; // Torn or corrupt final line: no reliable marker.
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -59,13 +112,16 @@ export function createPromptLedgerSink(
  * - the verdict is appended back to the ledger so the response (and every
  *   later load) sees it.
  *
- * Attribution is guarded three ways (each mirrors a concrete wrong-terminal
- * probe; see the design doc): the temporal evidence is measured on the same
- * projection the verdict uses, a compression checkpoint after the target's
- * admission voids the evidence chain, and under FIFO admission the visible
- * tail must be strictly newer than every other prompt's settled terminal
- * (a same-millisecond tail, and any tail behind a `prompt_deadline_exceeded`
- * terminal whose wedged turn may still be writing, cannot be attributed).
+ * Attribution is guarded four ways (each mirrors a concrete wrong-terminal
+ * probe; see the design doc): the dispatch marker (when admission recorded
+ * the transcript tail uuid, the target must have written a visible record
+ * beyond it — an identity check immune to clock skew), the temporal
+ * evidence measured on the same projection the verdict uses, a compression
+ * checkpoint after the target's admission voiding the evidence chain, and
+ * under FIFO admission the visible tail being strictly newer than every
+ * other prompt's settled terminal (a same-millisecond tail, and any tail
+ * behind a `prompt_deadline_exceeded` terminal whose wedged turn may still
+ * be writing, cannot be attributed).
  *
  * Fail-closed invariant: when the outcome cannot be attributed with
  * confidence, nothing is appended and the prompt stays "unknown" — a
@@ -125,6 +181,27 @@ export async function reconcileDanglingPromptTerminals(
   }
   if (resumed === undefined) return;
   const messages = resumed.conversation.messages;
+  // Dispatch marker evidence: when admission recorded the transcript tail
+  // uuid, the target's turn must have written at least one visible record
+  // beyond it (the transcript is append-only, so anything after the marker
+  // postdates admission). This is an identity/ordering check immune to
+  // clock skew; a marker missing from the projection, or present with no
+  // visible write after it, fails closed.
+  const admissionMarker = targetAdmission.tailUuid;
+  if (admissionMarker !== undefined) {
+    const markerIndex = messages.findIndex(
+      (record) => record.uuid === admissionMarker,
+    );
+    let wroteAfterMarker = false;
+    for (let i = markerIndex + 1; i < messages.length; i++) {
+      const record = messages[i];
+      if (record === undefined || record.type === 'system') continue;
+      if (!record.message || record.subtype === 'realtime_message') continue;
+      wroteAfterMarker = true;
+      break;
+    }
+    if (markerIndex < 0 || !wroteAfterMarker) return;
+  }
   // Projection-consistent temporal evidence: only records that actually
   // enter the api history the verdict runs on can prove the target's turn
   // wrote anything. System records (ui_telemetry, custom_title, ...) stay

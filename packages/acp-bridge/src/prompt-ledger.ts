@@ -40,6 +40,14 @@ export interface PromptLedgerInFlightRecord {
   promptId: string;
   state: 'in_flight';
   at: number;
+  /**
+   * Dispatch marker: uuid of the transcript's last record at admission.
+   * The transcript is append-only, so any record after this marker was
+   * written after admission — reconciliation requires at least one visible
+   * write beyond it before attributing an outcome (an identity check immune
+   * to clock skew; absent for records written before the marker existed).
+   */
+  tailUuid?: string;
 }
 
 export type PromptLedgerTerminalState =
@@ -118,7 +126,16 @@ function coercePromptLedgerRecord(
   if (record['v'] !== 1 || typeof promptId !== 'string') return undefined;
   if (typeof at !== 'number' || !Number.isFinite(at)) return undefined;
   if (record['state'] === 'in_flight') {
-    return { v: 1, promptId, state: 'in_flight', at };
+    const tailUuid = record['tailUuid'];
+    return {
+      v: 1,
+      promptId,
+      state: 'in_flight',
+      ...(typeof tailUuid === 'string' && tailUuid.length > 0
+        ? { tailUuid }
+        : {}),
+      at,
+    };
   }
   const terminal = record['terminal'];
   if (

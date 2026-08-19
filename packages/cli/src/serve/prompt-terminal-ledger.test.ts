@@ -18,6 +18,7 @@ import {
 import {
   createPromptLedgerSink,
   readRecentPromptTerminals,
+  readTranscriptTailUuid,
   reconcileDanglingPromptTerminals,
   withPromptTerminals,
 } from './prompt-terminal-ledger.js';
@@ -440,6 +441,89 @@ describe('reconcileDanglingPromptTerminals', () => {
     );
 
     expect(readPromptLedgerRecords(fixture.ledgerPath)).toHaveLength(3);
+  });
+
+  it('attributes the outcome when a visible write lands beyond the dispatch marker', async () => {
+    const fixture = makeFixture();
+    // The admission marker points at u1: a1 was written after admission,
+    // so the clean tail can be attributed to p1.
+    writeLedger(fixture, [
+      {
+        v: 1,
+        promptId: 'p1',
+        state: 'in_flight',
+        tailUuid: 'u1',
+        at: RECORD_BASE_MS - 1000,
+      },
+    ]);
+    writeTranscript(fixture, [
+      record(fixture, 'u1', null, 'p1 question'),
+      record(fixture, 'a1', 'u1', 'p1 answer'),
+    ]);
+
+    await reconcileDanglingPromptTerminals(
+      fixture.sessionService,
+      fixture.sessionId,
+    );
+
+    const records = readPromptLedgerRecords(fixture.ledgerPath);
+    expect(records).toHaveLength(2);
+    expect(records[1]).toEqual(
+      expect.objectContaining({ promptId: 'p1', terminal: 'completed' }),
+    );
+  });
+
+  it('stays fail-closed when nothing was written beyond the dispatch marker', async () => {
+    const fixture = makeFixture();
+    // The marker is the transcript's last record: the admitted turn never
+    // wrote anything visible, so no outcome may be synthesized even though
+    // every temporal guard passes.
+    writeLedger(fixture, [
+      {
+        v: 1,
+        promptId: 'p1',
+        state: 'in_flight',
+        tailUuid: 'a1',
+        at: RECORD_BASE_MS - 1000,
+      },
+    ]);
+    writeTranscript(fixture, [
+      record(fixture, 'u1', null, 'p1 question'),
+      record(fixture, 'a1', 'u1', 'p1 answer'),
+    ]);
+
+    await reconcileDanglingPromptTerminals(
+      fixture.sessionService,
+      fixture.sessionId,
+    );
+
+    expect(readPromptLedgerRecords(fixture.ledgerPath)).toHaveLength(1);
+  });
+
+  it('stays fail-closed when the dispatch marker is absent from the transcript', async () => {
+    const fixture = makeFixture();
+    // A marker that the projection does not contain (e.g. a restore that
+    // rewrote the transcript) cannot prove any write postdates admission.
+    writeLedger(fixture, [
+      {
+        v: 1,
+        promptId: 'p1',
+        state: 'in_flight',
+        tailUuid: 'gone-uuid',
+        at: RECORD_BASE_MS - 1000,
+      },
+    ]);
+    writeTranscript(fixture, [
+      record(fixture, 'u1', null, 'p1 question'),
+      record(fixture, 'a1', 'u1', 'p1 answer'),
+    ]);
+
+    await reconcileDanglingPromptTerminals(
+      fixture.sessionService,
+      fixture.sessionId,
+    );
+
+    expect(readPromptLedgerRecords(fixture.ledgerPath)).toHaveLength(1);
   });
 
   it('stays fail-closed when the visible tail shares a millisecond with the FIFO clocks', async () => {
@@ -912,5 +996,38 @@ describe('createPromptLedgerSink', () => {
     expect(readPromptLedgerRecords(fixture.ledgerPath)).toEqual([
       { v: 1, promptId: 'p1', state: 'in_flight', at: 1 },
     ]);
+  });
+
+  it('reads the transcript tail uuid through the same path layout', () => {
+    const fixture = makeFixture();
+    const sink = createPromptLedgerSink(
+      fixture.workspaceDir,
+      fixture.runtimeBaseDir,
+    );
+    expect(sink.transcriptTailUuid?.(fixture.sessionId)).toBeUndefined();
+    writeTranscript(fixture, [
+      record(fixture, 'u1', null, 'question'),
+      record(fixture, 'a1', 'u1', 'answer'),
+    ]);
+    expect(sink.transcriptTailUuid?.(fixture.sessionId)).toBe('a1');
+  });
+});
+
+describe('readTranscriptTailUuid', () => {
+  it('returns the last record uuid, degrading on missing or torn evidence', () => {
+    const fixture = makeFixture();
+    expect(readTranscriptTailUuid(fixture.transcriptPath)).toBeUndefined();
+    writeTranscript(fixture, [
+      record(fixture, 'u1', null, 'question'),
+      record(fixture, 'a1', 'u1', 'answer'),
+    ]);
+    expect(readTranscriptTailUuid(fixture.transcriptPath)).toBe('a1');
+    // A crash mid-append leaves a truncated final line: no reliable marker.
+    writeFileSync(
+      fixture.transcriptPath,
+      '{"uuid":"u1"}\n{"uuid":"a1","text":"answ',
+      'utf8',
+    );
+    expect(readTranscriptTailUuid(fixture.transcriptPath)).toBeUndefined();
   });
 });

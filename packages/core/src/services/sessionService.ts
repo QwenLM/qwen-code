@@ -632,6 +632,15 @@ export class SessionService {
     return this.getPromptLedgerPathForState(sessionId, 'active');
   }
 
+  /**
+   * Returns the absolute path to the active session transcript
+   * (append-only JSONL). The file may not exist yet — consumers must
+   * treat ENOENT as "no transcript evidence".
+   */
+  getSessionTranscriptPath(sessionId: string): string {
+    return this.getSessionFilePath(sessionId, 'active');
+  }
+
   getWorktreeSessionPathForArchiveState(
     sessionId: string,
     state: SessionArchiveState,
