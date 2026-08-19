@@ -257,6 +257,10 @@ export function ChatPane({
   const store = useTranscriptStore();
   const streamingState = useStreamingState();
   const [goalControlBusy, setGoalControlBusy] = useState(false);
+  const goalControlOpSeqRef = useRef(0);
+  const goalControlOwnerRef = useRef<
+    { opId: number; sessionId: string | undefined } | undefined
+  >(undefined);
   const [goalEditOpen, setGoalEditOpen] = useState(false);
   const [goalEditError, setGoalEditError] = useState<string | null>(null);
   const connectionRef = useRef(connection);
@@ -267,7 +271,17 @@ export function ChatPane({
     ? undefined
     : connection.goalState;
   useEffect(() => {
-    setGoalControlBusy(false);
+    const owner = goalControlOwnerRef.current;
+    // Release the busy latch only when no control operation owns it, or when
+    // its owner belongs to a session we have left (that operation's `finally`
+    // can no longer release it here). Releasing it while an operation is still
+    // in flight — which a server-side goal replacement would otherwise do —
+    // re-enables the strip and lets a second control dispatch against the same
+    // expected revision, so one of the two loses with a 409.
+    if (!owner || owner.sessionId !== connection.sessionId) {
+      goalControlOwnerRef.current = undefined;
+      setGoalControlBusy(false);
+    }
     setGoalEditOpen(false);
     setGoalEditError(null);
   }, [
@@ -601,6 +615,8 @@ export function ChatPane({
       const busyOwner = sessionOwnerGuard.capture();
       const busySessionId = connectionRef.current.sessionId;
       const expectedGoalId = connectionRef.current.goalState?.goal?.goalId;
+      const opId = ++goalControlOpSeqRef.current;
+      goalControlOwnerRef.current = { opId, sessionId: busySessionId };
       setGoalControlBusy(true);
       try {
         const snapshot = (await actions.getGoal()).snapshot;
@@ -643,8 +659,13 @@ export function ChatPane({
           throw error;
         }
       } finally {
-        if (connectionRef.current.sessionId === busySessionId) {
-          setGoalControlBusy(false);
+        // A newer operation (or a session change) owns the latch now; leave it
+        // to whoever owns it rather than releasing it under them.
+        if (goalControlOwnerRef.current?.opId === opId) {
+          goalControlOwnerRef.current = undefined;
+          if (connectionRef.current.sessionId === busySessionId) {
+            setGoalControlBusy(false);
+          }
         }
       }
     },
@@ -692,6 +713,18 @@ export function ChatPane({
         return false;
       if (admissionPayloadLocked) return false;
       if (/^\/goal(?:\s|$)/i.test(trimmed)) {
+        // The same guard App.tsx applies before any slash handling: a control
+        // that cannot reach the daemon must leave the text in the composer
+        // instead of consuming it, appending a transcript entry, and failing
+        // later at `requireSessionForAction` with only a toast.
+        if (
+          shouldBlockComposerSubmit({
+            connectionStatus: connection.status,
+            hasSession: Boolean(connection.sessionId),
+          })
+        ) {
+          return false;
+        }
         if (
           (images?.length ?? 0) > 0 ||
           (files?.length ?? 0) > 0 ||

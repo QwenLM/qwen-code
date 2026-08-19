@@ -459,6 +459,41 @@ describe('GoalsDialog', () => {
     expect(document.querySelector('textarea')).toBeNull();
   });
 
+  it('cannot be dismissed while a submit is in flight', async () => {
+    // The submit outlives the form it was started from: its success arm calls
+    // resetForm() and its failure arm renders an error, both against whatever
+    // form is open when it settles. Closing mid-flight would hand those to the
+    // next goal's form and lose the objective typed into it.
+    let settleCreate: ((created: boolean) => void) | undefined;
+    const onCreateGoal = vi.fn(
+      () =>
+        new Promise<boolean>((resolve) => {
+          settleCreate = resolve;
+        }),
+    );
+    await mount([], { onCreateGoal });
+
+    click(findButton('New goal'));
+    setTextarea('ship it');
+    click(findButton('Set goal'));
+    await flush();
+
+    expect(document.querySelector('button[aria-label="Close"]')).toBeNull();
+    act(() => {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      );
+    });
+    await flush();
+    expect(document.querySelector('textarea')?.value).toBe('ship it');
+
+    await act(async () => {
+      settleCreate?.(true);
+      await flush();
+    });
+    expect(document.querySelector('textarea')).toBeNull();
+  });
+
   it('submits an edit with the latest polled goal revision', async () => {
     await mount([baseGoal()]);
 

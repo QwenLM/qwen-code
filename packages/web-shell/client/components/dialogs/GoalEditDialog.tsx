@@ -20,9 +20,18 @@ export function GoalEditDialog({
 }: GoalEditDialogProps) {
   const { t } = useI18n();
   const [value, setValue] = useState(objective);
+  const [edited, setEdited] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
 
-  useEffect(() => setValue(objective), [objective]);
+  // Both mount sites pass live Goal state, so the objective changes under an
+  // open dialog whenever another client edits the Goal or a failed save
+  // refreshes the snapshot. Adopt those refreshes only while the field is
+  // still pristine: once the user has typed, the textarea holds the only copy
+  // of that draft.
+  useEffect(() => {
+    if (edited) return;
+    setValue(objective);
+  }, [objective, edited]);
 
   const submit = () => {
     if (saving) return;
@@ -50,7 +59,10 @@ export function GoalEditDialog({
             value={value}
             rows={4}
             disabled={saving}
-            onChange={(event) => setValue(event.target.value)}
+            onChange={(event) => {
+              setEdited(true);
+              setValue(event.target.value);
+            }}
           />
         </label>
         {(localError || error) && (

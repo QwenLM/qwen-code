@@ -275,6 +275,10 @@ export function GoalsDialog({
         <DialogShell
           title={t(editingGoal ? 'goals.edit' : 'goals.new')}
           size="md"
+          // A submit that outlives its form applies `resetForm()`/`setFormError`
+          // to whatever form is open when it settles, so closing mid-flight
+          // would dismiss (or misattribute an error to) the next goal's form.
+          dismissible={!submitting}
           onClose={resetForm}
         >
           <div className={styles.formFields}>

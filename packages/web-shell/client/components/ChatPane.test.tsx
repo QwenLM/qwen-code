@@ -54,6 +54,7 @@ let sendPromptAdmit: (() => void) | undefined;
 const clearFollowup = vi.fn();
 const insertText = vi.fn();
 const transcriptDispatch = vi.fn();
+const appendLocalUserMessage = vi.fn();
 const sendPrompt = vi.fn(async () => ({}) as any);
 const submitPermission = vi.fn(async () => true);
 const cancel = vi.fn(async () => {});
@@ -112,6 +113,7 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   }),
   useTranscriptStore: () => ({
     dispatch: transcriptDispatch,
+    appendLocalUserMessage,
   }),
   usePromptStatus: () => 'idle',
   useOptionalWorkspace: () => undefined,
@@ -412,6 +414,7 @@ beforeEach(() => {
   editLastQueuedPrompt.mockClear();
   clearQueuedPrompts.mockClear();
   transcriptDispatch.mockClear();
+  appendLocalUserMessage.mockClear();
   catalogController.invalidateWorkspace.mockClear();
   catalogController.promptAdmitted.mockClear();
   catalogController.promptAdmissionUncertain.mockClear();
@@ -523,6 +526,85 @@ describe('ChatPane', () => {
       expect(transcriptDispatch).not.toHaveBeenCalled();
     },
   );
+
+  it('preserves a /goal command the pane connection cannot deliver', () => {
+    // App.tsx applies the broken-connection guard before any slash handling and
+    // keeps the text in the composer. Without the same ordering here the branch
+    // consumes the text, writes a transcript entry, and only then fails inside
+    // `requireSessionForAction` — the typed control is gone.
+    const onError = vi.fn();
+    connectionState = { ...connectionState, status: 'error' };
+    render({ onError });
+    let returned: boolean | undefined;
+
+    act(() => {
+      returned = latestOnSubmit!('/goal pause');
+    });
+
+    expect(returned).toBe(false);
+    expect(controlGoal).not.toHaveBeenCalled();
+    expect(getGoal).not.toHaveBeenCalled();
+    expect(appendLocalUserMessage).not.toHaveBeenCalled();
+  });
+
+  it('keeps goal controls locked when the goal is replaced mid-control', async () => {
+    const goalA = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: 'goal-a',
+        revision: 5,
+        objective: 'ship it',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 1,
+        activeTimeMs: 10,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    };
+    const goalB = {
+      ...goalA,
+      goal: {
+        ...goalA.goal,
+        goalId: 'goal-b',
+        revision: 1,
+        objective: 'replaced by another client',
+        updatedAt: 2,
+      },
+    };
+    const pendingControl = deferred<{ snapshot: typeof goalA }>();
+    connectionState.goalState = goalA;
+    getGoal.mockResolvedValue({ snapshot: goalA });
+    controlGoal.mockReturnValueOnce(pendingControl.promise);
+    render();
+
+    const pause = container!.querySelector<HTMLButtonElement>(
+      '[data-testid="goal-status-strip"] button[aria-label="Pause goal"]',
+    );
+    if (!pause) throw new Error('pause control was not rendered');
+    act(() => pause.click());
+    await vi.waitFor(() => expect(controlGoal).toHaveBeenCalledOnce());
+
+    // Another client replaces the goal while the pause is still in flight.
+    act(() => {
+      connectionState = { ...connectionState, goalState: goalB };
+      rerender();
+    });
+    const pauseAfterReplace = container!.querySelector<HTMLButtonElement>(
+      '[data-testid="goal-status-strip"] button[aria-label="Pause goal"]',
+    );
+    expect(pauseAfterReplace?.disabled).toBe(true);
+    act(() => pauseAfterReplace?.click());
+    expect(controlGoal).toHaveBeenCalledOnce();
+
+    await act(async () => pendingControl.resolve({ snapshot: goalB }));
+    expect(
+      container!.querySelector<HTMLButtonElement>(
+        '[data-testid="goal-status-strip"] button[aria-label="Pause goal"]',
+      )?.disabled,
+    ).toBe(false);
+  });
 
   it('locks goal controls while the current snapshot refresh is in flight', async () => {
     const current = {
