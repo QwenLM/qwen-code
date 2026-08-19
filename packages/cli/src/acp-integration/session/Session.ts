@@ -170,7 +170,10 @@ import {
   promptIdContext,
   todoWorkChainContext,
   dedupeToolCallsById,
+  getFunctionCallFingerprint,
   getProviderToolCallId,
+  isReplayOfHandledToolCall,
+  recordHandledToolCall,
   parsePositiveIntegerEnv,
   DEFAULT_TOKEN_LIMIT,
   hasImageParts,
@@ -479,7 +482,6 @@ function getAbortAwareEndTurnStopReason(
 type RunToolResult = {
   parts: Part[];
   stopAfterPermissionCancel: boolean;
-  repeatedDuplicateProviderToolCall?: boolean;
   loopDetected?: boolean;
   repeatedToolFailureBatch?: RepeatedToolFailureBatch;
   memoryWriteCandidates?: MemoryWriteCandidate[];
@@ -3579,6 +3581,13 @@ export class Session implements SessionContext {
       return false;
     }
 
+    // Deliberate twin divergence: the TUI twin (isUserTextContent in
+    // packages/cli/src/ui/utils/historyMapping.ts) excludes microcompaction
+    // media-clear placeholders ('[Old inline media cleared: ...]') from the
+    // rewind prompt count because a cleared media-only entry never produced
+    // a TUI user turn. Here the placeholders MUST stay counted: ACP rewind
+    // maps against per-prompt file-history snapshots, which ARE created for
+    // media-only prompts. Do not mirror that exclusion into this twin.
     return content.parts.some((part) => 'text' in part && part.text);
   }
 
@@ -6603,13 +6612,6 @@ export class Session implements SessionContext {
       debugLogger.debug('Stopping ACP turn after daemon loop detection.');
       return { message: null, hadMidTurnUserInput: false };
     }
-    if (toolRun.repeatedDuplicateProviderToolCall) {
-      this.todoStopGuard.suspend();
-      debugLogger.debug(
-        'Stopping ACP turn after dropping repeated duplicate provider tool-call response.',
-      );
-      return { message: null, hadMidTurnUserInput: false };
-    }
     const drained = await this.#drainMidTurnInput(abortSignal, {
       watchQueuedPrompt: toolLoopState.repeatedToolFailureMode !== 'off',
       onFullTurnModel,
@@ -8948,27 +8950,50 @@ export class Session implements SessionContext {
     };
     type Batch = ExecutableBatch | DuplicateBatch;
     const batches: Batch[] = [];
-    const handledProviderToolCallIds = new Set(
-      this.#getCurrentChat().getHistoryFunctionResponseIds(),
+    // The accessor returns a fresh map per call; copy anyway so a future
+    // cached accessor cannot turn per-batch recording into shared-state
+    // mutation.
+    const handledToolCallFingerprints = new Map(
+      this.#getCurrentChat().getHistoryToolCallFingerprints(),
     );
+    const isReplayOfHandledCall = (fc: FunctionCall): boolean => {
+      const providerCallId = getProviderToolCallId(fc) ?? fc.id;
+      return providerCallId
+        ? isReplayOfHandledToolCall(
+            handledToolCallFingerprints,
+            providerCallId,
+            getFunctionCallFingerprint(fc),
+          )
+        : false;
+    };
     const repeatedDuplicateCall = findRepeatedDuplicateProviderToolCall(
       dedupedFunctionCalls,
       (fc) => getProviderToolCallId(fc) ?? fc.id,
-      handledProviderToolCallIds,
+      isReplayOfHandledCall,
       this.duplicateProviderToolCallResponseIds,
     );
     if (repeatedDuplicateCall) {
       const providerCallId =
         getProviderToolCallId(repeatedDuplicateCall) ??
         repeatedDuplicateCall.id;
-      debugLogger.debug(
-        `[Session.runToolCalls] Dropping batch after repeated duplicate provider tool-call id: ` +
-          `${providerCallId} (tool: ${repeatedDuplicateCall.name ?? 'unknown_tool'})`,
-      );
+      const message =
+        `Stopping ACP turn after repeated duplicate provider tool-call id: ` +
+        `${providerCallId} (tool: ${repeatedDuplicateCall.name ?? 'unknown_tool'}).`;
+      if (toolLoopState) {
+        recordDaemonLoopDetected(
+          this.config,
+          promptId,
+          LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+          message,
+          toolLoopState,
+        );
+      } else {
+        debugLogger.warn(message);
+      }
       return await finalizeRunToolResult({
         parts: [],
         stopAfterPermissionCancel: false,
-        repeatedDuplicateProviderToolCall: true,
+        loopDetected: true,
       });
     }
 
@@ -9058,7 +9083,7 @@ export class Session implements SessionContext {
     for (const fc of dedupedFunctionCalls) {
       const providerCallId = getProviderToolCallId(fc) ?? fc.id;
       if (providerCallId) {
-        if (handledProviderToolCallIds.has(providerCallId)) {
+        if (isReplayOfHandledCall(fc)) {
           const callId = executionCallIds.get(fc)!;
           pushDuplicateBatch(fc, {
             callId,
@@ -9070,7 +9095,11 @@ export class Session implements SessionContext {
           });
           continue;
         }
-        handledProviderToolCallIds.add(providerCallId);
+        recordHandledToolCall(
+          handledToolCallFingerprints,
+          providerCallId,
+          getFunctionCallFingerprint(fc),
+        );
       }
 
       // Canonical names match core's isToolCallConcurrencySafe predicate,
@@ -9358,7 +9387,6 @@ export class Session implements SessionContext {
             return await finalizeRunToolResult({
               parts,
               stopAfterPermissionCancel: true,
-              repeatedDuplicateProviderToolCall: false,
               memoryWriteCandidates,
             });
           }
@@ -9396,7 +9424,6 @@ export class Session implements SessionContext {
               return await finalizeRunToolResult({
                 parts,
                 stopAfterPermissionCancel: true,
-                repeatedDuplicateProviderToolCall: false,
                 memoryWriteCandidates,
               });
             }
@@ -9406,7 +9433,6 @@ export class Session implements SessionContext {
       return await finalizeRunToolResult({
         parts,
         stopAfterPermissionCancel: false,
-        repeatedDuplicateProviderToolCall: false,
         memoryWriteCandidates,
       });
     } finally {
