@@ -1126,6 +1126,7 @@ describe('createDaemonSessionActions', () => {
   });
 
   it('uploads prompt images and submits media references instead of base64', async () => {
+    const onAdmissionStarted = vi.fn();
     const session = createMockSession('session-a');
     const { actions } = createActionsHarness({
       session,
@@ -1143,6 +1144,7 @@ describe('createDaemonSessionActions', () => {
 
     await actions.submitPrompt('look', {
       images: [{ data: 'AQID', mimeType: 'image/png' }],
+      onAdmissionStarted,
     });
 
     expect(session.uploadMedia).toHaveBeenCalledWith(
@@ -1161,6 +1163,10 @@ describe('createDaemonSessionActions', () => {
         },
       ],
     });
+    expect(onAdmissionStarted).toHaveBeenCalledOnce();
+    expect(onAdmissionStarted.mock.invocationCallOrder[0]).toBeLessThan(
+      session.submitPrompt.mock.invocationCallOrder[0]!,
+    );
   });
 
   it('keeps images without a concrete mime type inline instead of uploading', async () => {
@@ -1214,7 +1220,7 @@ describe('createDaemonSessionActions', () => {
     });
 
     await expect(
-      actions.sendPrompt('look', {
+      actions.submitPrompt('look', {
         images: [{ data: 'AQID', mimeType: 'image/png' }],
         onAdmissionStarted,
       }),
@@ -1680,6 +1686,7 @@ describe('createDaemonSessionActions', () => {
   });
 
   it('preserves ambiguous stable-id admission failures for reconciliation', async () => {
+    const onAdmissionStarted = vi.fn();
     const session = {
       ...createMockSession('session-a'),
       enqueueMidTurnMessage: vi
@@ -1689,14 +1696,31 @@ describe('createDaemonSessionActions', () => {
     const { actions } = createActionsHarness({ session });
 
     await expect(
-      actions.enqueueMidTurnMessage('follow up', { messageId: 'stable-id' }),
+      actions.enqueueMidTurnMessage('follow up', {
+        messageId: 'stable-id',
+        onAdmissionStarted,
+      }),
     ).rejects.toThrow('response lost');
+    expect(onAdmissionStarted).toHaveBeenCalledOnce();
     // The stable id must reach the session client verbatim: the daemon's
     // messageId-keyed idempotency and the reconciliation rings never match
     // if this hop drops the option.
     expect(session.enqueueMidTurnMessage).toHaveBeenCalledWith('follow up', {
       messageId: 'stable-id',
     });
+  });
+
+  it('does not mark a stable-id admission started without a session', async () => {
+    const onAdmissionStarted = vi.fn();
+    const { actions } = createActionsHarness();
+
+    await expect(
+      actions.enqueueMidTurnMessage('follow up', {
+        messageId: 'stable-id',
+        onAdmissionStarted,
+      }),
+    ).resolves.toEqual({ accepted: false });
+    expect(onAdmissionStarted).not.toHaveBeenCalled();
   });
 
   it('keeps legacy mid-turn admission failures best-effort', async () => {

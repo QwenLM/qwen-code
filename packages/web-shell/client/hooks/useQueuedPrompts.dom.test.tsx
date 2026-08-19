@@ -453,7 +453,8 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     expect(reportError).toHaveBeenCalledOnce();
     expect(actions.submitPrompt).not.toHaveBeenCalled();
     expect(latest.queuedPrompts).toMatchObject([{ text: 'keep held' }]);
-    expect(latest.queuedPrompts[0]?.admissionOutcome).toBeUndefined();
+    expect(latest.queuedPrompts[0]?.midTurnState).toBeUndefined();
+    expect(latest.queuedPrompts[0]?.isInserting).toBe(false);
   });
 
   it('lets an explicit insert settle into its source-session stash', async () => {
@@ -1004,7 +1005,7 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     expect(latest.queuedPrompts).toEqual([]);
   });
 
-  it('restores image-only payloads exactly once after definite rejection', async () => {
+  it('restores image-only payloads when submission never starts', async () => {
     const { actions, pendingSubmit } = createActions();
     const { editor } = mount('responding', actions);
     const images = [{ data: 'cG5n', media_type: 'image/png' }];
@@ -1017,11 +1018,10 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
 
     expect(latest.queuedPrompts).toEqual([]);
     expect(editor.setText).not.toHaveBeenCalled();
-    expect(editor.restoreImages).toHaveBeenCalledOnce();
     expect(editor.restoreImages).toHaveBeenCalledWith(images);
   });
 
-  it('does not change an existing draft when restoring image-only payloads', async () => {
+  it('restores image-only payloads alongside an existing draft', async () => {
     const { actions, pendingSubmit } = createActions();
     const { editor } = mount('responding', actions);
     vi.mocked(editor.getText).mockReturnValue('current draft');
@@ -1072,52 +1072,29 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     expect(editor.restoreInputAnnotations).not.toHaveBeenCalled();
   });
 
-  it('restores an uncertain local payload only after an explicit action', async () => {
+  it('drops a dispatched payload and refreshes from the backend', async () => {
     const { actions, pendingSubmit } = createActions();
-    const { editor, reportError } = mount('responding', actions);
+    const { editor, reportError } = mount('responding', actions, true, true);
     const images = [{ data: 'cG5n', media_type: 'image/png' }];
 
     act(() => latest.enqueuePrompt('', images));
+    vi.mocked(actions.submitPrompt).mock.calls[0]?.[1]?.onAdmissionStarted?.();
     await act(async () => {
       pendingSubmit.reject(new TypeError('network disconnected'));
       await Promise.resolve();
     });
 
-    expect(latest.queuedPrompts).toMatchObject([
-      {
-        text: '',
-        images,
-        admissionOutcome: 'unknown',
-        serverState: undefined,
-        payloadAvailable: true,
-      },
-    ]);
+    expect(latest.queuedPrompts).toEqual([]);
     expect(editor.restoreImages).not.toHaveBeenCalled();
     expect(actions.submitPrompt).toHaveBeenCalledTimes(1);
+    expect(actions.getPendingPrompts).toHaveBeenCalledTimes(2);
     expect(reportError).toHaveBeenCalledWith(
       expect.any(TypeError),
-      t('queue.admissionUnknown'),
+      t('queue.queueFailed'),
     );
-
-    act(() => {
-      expect(latest.restoreUnknownQueuedPrompt(1)).toBe(true);
-    });
-    expect(editor.restoreImages).toHaveBeenCalledOnce();
-    expect(editor.restoreImages).toHaveBeenCalledWith(images);
-    expect(latest.queuedPrompts).toMatchObject([
-      {
-        text: '',
-        images: undefined,
-        admissionOutcome: 'unknown',
-        payloadAvailable: false,
-      },
-    ]);
-    expect(latest.restoreUnknownQueuedPrompt(1)).toBe(false);
-    expect(editor.restoreImages).toHaveBeenCalledOnce();
-    expect(actions.submitPrompt).toHaveBeenCalledTimes(1);
   });
 
-  it('restores queued input annotations with the local payload', async () => {
+  it('restores queued input annotations when submission never starts', async () => {
     const { actions, pendingSubmit } = createActions();
     const { editor } = mount('responding', actions);
     const inputAnnotations = [
@@ -1143,40 +1120,11 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
       pendingSubmit.reject(new TypeError('response lost'));
       await Promise.resolve();
     });
-    act(() => {
-      expect(latest.restoreUnknownQueuedPrompt(1)).toBe(true);
-    });
-
+    expect(latest.queuedPrompts).toEqual([]);
+    expect(editor.setText).toHaveBeenCalledWith('@file.ts\n\nfix it');
     expect(editor.restoreInputAnnotations).toHaveBeenCalledWith(
       inputAnnotations,
     );
-  });
-
-  it('discards an uncertain local payload without sending it again', async () => {
-    const { actions, pendingSubmit } = createActions();
-    const { editor } = mount('responding', actions);
-    const images = [{ data: 'cG5n', media_type: 'image/png' }];
-
-    act(() => latest.enqueuePrompt('describe', images));
-    await act(async () => {
-      pendingSubmit.reject(new TypeError('network disconnected'));
-      await Promise.resolve();
-    });
-    act(() => {
-      expect(latest.discardUnknownQueuedPrompt(1)).toBe(true);
-    });
-
-    expect(editor.setText).not.toHaveBeenCalled();
-    expect(editor.restoreImages).not.toHaveBeenCalled();
-    expect(latest.queuedPrompts).toMatchObject([
-      {
-        text: '',
-        images: undefined,
-        admissionOutcome: 'unknown',
-        payloadAvailable: false,
-      },
-    ]);
-    expect(actions.submitPrompt).toHaveBeenCalledTimes(1);
   });
 
   it('keeps an accepted message queued until its injection event', async () => {
@@ -1764,7 +1712,7 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     expect(actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
   });
 
-  it('retains mid-turn rows and marks in-flight admissions unknown on clear', async () => {
+  it('retains mid-turn rows and drops in-flight pending admissions on clear', async () => {
     const { actions } = createActions();
     vi.mocked(actions.enqueueMidTurnMessage).mockResolvedValue({
       accepted: true,
@@ -1782,11 +1730,6 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     act(() => latest.clearQueuedPrompts());
 
     expect(latest.queuedPrompts).toMatchObject([
-      {
-        text: '普通排队',
-        admissionOutcome: 'unknown',
-        payloadAvailable: true,
-      },
       { text: '中途消息', midTurnState: 'queued', midTurnMessageId: 'mid-1' },
     ]);
     expect(actions.removeMidTurnMessage).not.toHaveBeenCalled();
@@ -1802,9 +1745,7 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
       ]),
     );
     act(() => latest.clearQueuedPrompts());
-    expect(latest.queuedPrompts[0]).toMatchObject({
-      admissionOutcome: 'unknown',
-    });
+    expect(latest.queuedPrompts).toEqual([]);
 
     await act(async () => {
       pendingSubmit.resolve({

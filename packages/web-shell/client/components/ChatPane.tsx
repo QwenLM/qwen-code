@@ -561,8 +561,6 @@ export function ChatPane({
     editQueuedPrompt,
     editLastQueuedPrompt,
     clearQueuedPrompts,
-    restoreUnknownQueuedPrompt,
-    discardUnknownQueuedPrompt,
   } = useQueuedPrompts({
     connected: connection.status === 'connected',
     sessionId: connection.sessionId,
@@ -1233,8 +1231,6 @@ export function ChatPane({
               onDelete={removeQueuedPrompt}
               onInsert={insertQueuedPrompt}
               onEdit={editQueuedPrompt}
-              onRestoreUnknown={restoreUnknownQueuedPrompt}
-              onDiscardUnknown={discardUnknownQueuedPrompt}
               onImagePreview={handleImagePreview}
             />
             {liveGoalSnapshot?.goal && (

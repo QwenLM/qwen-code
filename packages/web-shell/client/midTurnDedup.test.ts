@@ -17,7 +17,6 @@ interface Item {
   files?: unknown[];
   midTurnState?: 'submitting' | 'queued';
   midTurnMessageId?: string;
-  admissionOutcome?: 'unknown';
 }
 
 let nextId = 1;
@@ -115,34 +114,21 @@ describe('removeInjectedFromQueue', () => {
     expect(next?.map((p) => p.text)).toEqual(['keep']);
   });
 
-  it('removes an admission-unknown image row on a strict id match', () => {
-    // A row whose admission response was lost is re-added with
-    // `admissionOutcome: 'unknown'` and NO `midTurnState` (useQueuedPrompts
-    // catch path). When the daemon later drains it, the strict-id pass must
-    // still match — mirroring `applyMidTurnSnapshot`'s membership filter.
-    const unknown = {
-      ...q('lost ack', [{ data: 'x' }]),
+  it('removes an in-flight explicit insert on a strict id match', () => {
+    // An explicitly inserted row carries no `midTurnState` until its admission
+    // response lands, so the strict-id pass must reach it through
+    // `isInserting` — otherwise the injection echo leaves it queued twice.
+    const inserting = {
+      ...q('explicit insert', [{ data: 'x' }]),
       midTurnState: undefined,
-      admissionOutcome: 'unknown' as const,
+      isInserting: true,
     };
     const next = removeInjectedFromQueue(
-      [unknown, q('keep')],
-      [batchWithIds('s', ['lost ack'], [unknown.midTurnMessageId!])],
+      [inserting, q('keep')],
+      [batchWithIds('s', ['explicit insert'], [inserting.midTurnMessageId!])],
       's',
     );
     expect(next?.map((p) => p.text)).toEqual(['keep']);
-  });
-
-  it('does not text-match an admission-unknown row without its id', () => {
-    const unknown = {
-      ...q('lost ack'),
-      midTurnState: undefined,
-      admissionOutcome: 'unknown' as const,
-    };
-
-    expect(
-      removeInjectedFromQueue([unknown], [batch('s', 'lost ack')], 's'),
-    ).toBeNull();
   });
 
   it('never matches a file-bearing entry (files are not pushed mid-turn)', () => {
