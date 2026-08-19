@@ -225,13 +225,45 @@ describe('pathRulesFor — scoped, or it is noise', () => {
     // withdrawn for.
     ['packages/sdk-core-v2/README.md', true],
     ['packages/sdk-v2/README.md', true],
-    ['sdks/go/README.md', true],
     ['lib/sdk-go/README.md', true],
+    ['libs/sdk-go/README.md', true],
     ['docs/users/features/sdk-notes/overview.md', false],
     ['docs/users/sdk/quickstart.md', false],
     ['examples/sdk/README.md', false],
     ['test/fixtures/sdk-python/README.md', false],
     ['vendor/sdk-go/notes.md', false],
+    // R3: the members and boundaries a narrowing or a widening would flip.
+    // Genre plurals, both the directory and the stem form.
+    ['docs/api/releases/2026-08.md', false],
+    ['docs/api/releases-notes.md', false],
+    // Every remaining member of the closed meta/agent-context set.
+    ['docs/api/LICENSE.md', false],
+    ['docs/api/LICENCE.md', false],
+    ['docs/developers/CODE_OF_CONDUCT.md', false],
+    ['docs/api/code-of-conduct.md', false],
+    ['packages/sdk-typescript/SUPPORT.md', false],
+    ['docs/api/AUTHORS.md', false],
+    ['docs/api/GOVERNANCE.md', false],
+    ['docs/developers/CLAUDE.md', false],
+    // The section TERMINATOR: both location branches match a directory, so a
+    // dropped `/` would revive governance-by-filename — the withdrawn branch.
+    ['docs/api.md', false],
+    ['docs/protocol.md', false],
+    ['docs/developers.md', false],
+    ['sdk-notes.md', false],
+    ['packages/sdk-go.md', false],
+    // Case-insensitivity of the SDK branch, and the space member of the stem
+    // separator class — both flip nothing without a row of their own.
+    ['SDK-GO/README.md', true],
+    ['docs/api/release notes.md', false],
+    // Trees whose prose the diff's author does not own, even when they carry a
+    // whole reference section.
+    ['vendor/some-lib/docs/api/reference.md', false],
+    ['third_party/docs/protocols/frames.md', false],
+    ['test/fixtures/docs/reference/sample.md', false],
+    ['node_modules/pkg/docs/api/x.md', false],
+    // …while a package-local reference section is an ordinary monorepo shape.
+    ['packages/foo/docs/api/routes.md', true],
   ])('%s → governed by a rule: %s', (path, governed) => {
     expect(PATH_RULES.some((r) => r.matches(path))).toBe(governed);
   });
@@ -997,7 +1029,9 @@ describe('pathRulesFor — the consumer-facing contract documentation rule', () 
     expect(out).toContain('A statement the code cannot satisfy');
     // The important one: the wrong lines are the ones the diff did NOT touch.
     expect(out).toContain('Prose this change silently falsified');
-    expect(out).toContain('the wrong lines are the ones the diff did');
+    expect(out).toContain(
+      'the wrong lines are the ones the diff did **not** touch',
+    );
     expect(out).toContain('A guarantee wider than the code');
   });
 
@@ -1013,6 +1047,10 @@ describe('pathRulesFor — the consumer-facing contract documentation rule', () 
     expect(out).toContain('not statements that are missing');
     // Roadmap text the document itself marks as such is exempt.
     expect(out).toContain('not yet implemented');
+    // And the last two bullets, which had no pin: unfalsifiable adjectives, and
+    // a claim about a system this repository does not contain.
+    expect(out).toContain('are not falsifiable and are not defects');
+    expect(out).toContain('outside this repository');
   });
 
   it('keeps the scoping and precision discipline of the other rules', () => {

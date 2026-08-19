@@ -221,6 +221,15 @@ const NON_CONTRACT_STEM = new RegExp(
  */
 const NON_CONTRACT_FILE =
   /^(?:contributing|roadmap|code[-_]of[-_]conduct|license|licence|authors|governance|support|qwen|agents|claude)$/i;
+/**
+ * Trees whose prose the author of a diff does not own. A vendored library or a
+ * doc-shaped fixture can carry a whole reference section, and the location
+ * branches would govern it — findings against third-party prose are noise the
+ * author cannot act on. Another closed, conventional set, for the same reason
+ * the meta filenames above are one.
+ */
+const NOT_OURS =
+  /(?:^|\/)(?:vendor|vendors|third[-_]party|node_modules|fixtures|__fixtures__)\//i;
 
 const CONTRACT_DOCS: PathRule = {
   title: 'Consumer-facing contract documentation',
@@ -253,6 +262,7 @@ const CONTRACT_DOCS: PathRule = {
   // residue is tokens, not false findings.
   matches: (p) => {
     if (!/\.(?:mdx?|markdown|mdown)$/i.test(p)) return false;
+    if (NOT_OURS.test(p)) return false;
     if (NON_CONTRACT_DIR.test(p)) return false;
     // Extension-stripped: `NON_CONTRACT_FILE` matches a whole stem, so the
     // strip is what decides `docs/api/CONTRIBUTING.md`.
@@ -260,6 +270,11 @@ const CONTRACT_DOCS: PathRule = {
     if (NON_CONTRACT_FILE.test(stem)) return false;
     if (NON_CONTRACT_STEM.test(stem)) return false;
     return (
+      // Any depth on purpose: a package-local reference section
+      // (`packages/foo/docs/api/`) is an ordinary monorepo shape. What that
+      // admits and should not — a vendored or fixture tree carrying its own
+      // docs section — is answered by `NOT_OURS` above rather than by anchoring
+      // this branch, which would drop the package-local case with it.
       /(?:^|\/)docs\/(?:developers?|apis?|references?|protocols?)\//i.test(p) ||
       // Anchored to a package root: an `sdk*` segment at any depth also matched
       // `docs/users/sdk/quickstart.md` and `examples/sdk/README.md`, which is
