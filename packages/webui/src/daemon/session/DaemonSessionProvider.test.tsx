@@ -1676,6 +1676,66 @@ describe('DaemonSessionProvider', () => {
     expect(connection?.goalState?.goal).toBeNull();
   });
 
+  it('keeps a known Goal state when the session-load Goal request fails', async () => {
+    // Only the fresh-connection branch synthesizes an idle snapshot; once a
+    // state is known, a transient `goal()` failure must not replace a live goal
+    // with idle — that would drop the strip and the composer gating while the
+    // daemon still considers the goal live.
+    const pendingGoal = createDeferred<GoalStateResponse>();
+    const knownGoal: GoalStateResponse['snapshot'] = {
+      v: 2,
+      activity: 'running',
+      goal: {
+        goalId: 'goal-known',
+        revision: 2,
+        objective: 'keep me',
+        status: 'active',
+        evidenceCursor: { recordId: 'goal-record' },
+        turnCount: 1,
+        activeTimeMs: 10,
+        createdAt: 1234,
+        updatedAt: 2345,
+      },
+    };
+    sdkMocks.sessions.push(
+      createMockSession({
+        goal: vi.fn(() => pendingGoal.promise),
+        controlGoal: vi.fn(async () => ({ snapshot: knownGoal })),
+      }),
+    );
+    let connection: DaemonConnectionState | undefined;
+    let actions: DaemonSessionActions | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      actions = useDaemonActions();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: false,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    await act(async () => {
+      await actions?.controlGoal({
+        action: 'resume',
+        expectedGoalId: 'goal-known',
+        expectedRevision: 1,
+      });
+    });
+    expect(connection?.goalState).toBe(knownGoal);
+
+    pendingGoal.reject(new Error('goal route unavailable'));
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(connection?.goalState).toBe(knownGoal);
+  });
+
   it('releases unknown Goal state when the session-load Goal request fails', async () => {
     sdkMocks.sessions.push(
       createMockSession({
