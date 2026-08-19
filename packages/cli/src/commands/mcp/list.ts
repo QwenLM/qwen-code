@@ -26,7 +26,11 @@ const COLOR_GREEN = '\u001b[32m';
 const COLOR_YELLOW = '\u001b[33m';
 const COLOR_RED = '\u001b[31m';
 const RESET_COLOR = '\u001b[0m';
-const MCP_CONNECT_TIMEOUT_MS = 5000;
+// Stdio `createMcpClient` spends up to 5s on `server/discover` before
+// falling back to `initialize`. The list probe must keep leftover
+// budget for that handshake, or silent legacy servers time out as
+// Disconnected after R13-1 started sharing the session factory.
+const MCP_CONNECT_TIMEOUT_MS = 10_000;
 
 interface McpConnectionResult {
   status: MCPServerStatus;

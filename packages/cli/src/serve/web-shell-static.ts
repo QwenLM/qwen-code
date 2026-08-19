@@ -47,7 +47,10 @@ export function loopbackSandboxOrigins(
 ): string[] {
   const port = portFromHostHeader(hostHeader);
   const suffix = port ? `:${port}` : '';
-  const hosts = ['localhost', '127.0.0.1', '[::1]'] as const;
+  // CSP host-sources and Permissions-Policy origins reject bracketed
+  // IPv6 (`http://[::1]:<port>`). The sandbox iframe aliases `[::1]`
+  // to `localhost`, so those two hosts are enough.
+  const hosts = ['localhost', '127.0.0.1'] as const;
   return (['http', 'https'] as const).flatMap((scheme) =>
     hosts.map((host) => `${scheme}://${host}${suffix}`),
   );

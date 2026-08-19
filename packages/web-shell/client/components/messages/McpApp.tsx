@@ -69,6 +69,11 @@ export function resolveMcpAppSandboxUrl(
     ) {
       return undefined;
     }
+    // CSP cannot allow `http://[::1]:<port>`. Always rewrite IPv6
+    // loopback onto localhost before checking same-origin swap.
+    if (sandbox.hostname === '[::1]') {
+      sandbox.hostname = 'localhost';
+    }
     if (sandbox.origin === host.origin) {
       const alias = loopbackCrossOriginHostname(sandbox.hostname);
       if (alias) sandbox.hostname = alias;

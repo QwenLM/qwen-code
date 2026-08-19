@@ -20,18 +20,20 @@ describe('Web Shell sandbox framing', () => {
     expect(loopbackSandboxOrigins('127.0.0.1:4170')).toEqual([
       'http://localhost:4170',
       'http://127.0.0.1:4170',
-      'http://[::1]:4170',
       'https://localhost:4170',
       'https://127.0.0.1:4170',
-      'https://[::1]:4170',
     ]);
+    expect(loopbackSandboxOrigins('127.0.0.1:4170').join(' ')).not.toContain(
+      '[::1]',
+    );
   });
 
   it('allows only the daemon loopback port in frame-src', () => {
     const csp = buildWebShellCsp([], loopbackSandboxOrigins('localhost:4170'));
     expect(csp).toContain(
-      'frame-src http://localhost:4170 http://127.0.0.1:4170 http://[::1]:4170 https://localhost:4170 https://127.0.0.1:4170 https://[::1]:4170',
+      'frame-src http://localhost:4170 http://127.0.0.1:4170 https://localhost:4170 https://127.0.0.1:4170',
     );
+    expect(csp).not.toContain('[::1]');
     expect(csp).not.toContain('http://localhost:*');
     expect(csp).not.toContain('http://127.0.0.1:*');
   });
@@ -44,7 +46,8 @@ describe('Web Shell sandbox framing', () => {
     expect(policy).toContain('microphone=(self)');
     expect(policy).toContain('geolocation=()');
     expect(policy).toContain(
-      'clipboard-write=(self "http://localhost:4170" "http://127.0.0.1:4170" "http://[::1]:4170" "https://localhost:4170" "https://127.0.0.1:4170" "https://[::1]:4170")',
+      'clipboard-write=(self "http://localhost:4170" "http://127.0.0.1:4170" "https://localhost:4170" "https://127.0.0.1:4170")',
     );
+    expect(policy).not.toContain('[::1]');
   });
 });

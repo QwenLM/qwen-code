@@ -56,6 +56,17 @@ describe('MCP App host helpers', () => {
     );
   });
 
+  it('aliases a cross-origin [::1] daemon onto localhost for CSP', () => {
+    expect(
+      resolveMcpAppSandboxUrl(
+        'http://[::1]:4170',
+        'http://localhost:4170/session/demo',
+      ),
+    ).toBe(
+      'http://localhost:4170/mcp-app-sandbox?hostOrigin=http%3A%2F%2Flocalhost%3A4170',
+    );
+  });
+
   it('keeps a localhost sandbox on localhost instead of guessing 127.0.0.1', () => {
     expect(
       resolveMcpAppSandboxUrl(

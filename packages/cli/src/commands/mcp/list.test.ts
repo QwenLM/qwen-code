@@ -197,6 +197,9 @@ describe('mcp list command', () => {
       'mcp-test-client',
       expect.objectContaining({ httpUrl: 'https://example.com/http' }),
     );
+    expect(mockClient.connect).toHaveBeenCalledWith(mockTransport, {
+      timeout: 10_000,
+    });
   });
 
   it('should display disconnected status when connection fails', async () => {
@@ -232,7 +235,7 @@ describe('mcp list command', () => {
       mockClient.connect.mockImplementation(() => new Promise(() => {}));
 
       const listPromise = listMcpServers();
-      await vi.advanceTimersByTimeAsync(4999);
+      await vi.advanceTimersByTimeAsync(9999);
       expect(mockTransport.close).not.toHaveBeenCalled();
 
       await vi.advanceTimersByTimeAsync(1);
@@ -241,7 +244,7 @@ describe('mcp list command', () => {
       expect(mockTransport.close).toHaveBeenCalledOnce();
       expect(mockWriteStdoutLine).toHaveBeenCalledWith(
         expect.stringContaining(
-          'slow-server: https://example.com/sse (sse) - Disconnected (timed out after 5000ms)',
+          'slow-server: https://example.com/sse (sse) - Disconnected (timed out after 10000ms)',
         ),
       );
     } finally {
