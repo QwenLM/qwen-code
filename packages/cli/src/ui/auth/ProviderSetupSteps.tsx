@@ -331,6 +331,93 @@ function resplitCustomModelIdsText(
 }
 
 /**
+ * Where the caret should sit in a re-derived buffer, given where it sat in the
+ * old one.
+ *
+ * R9-1: a flat `Math.min(caret, cpLen(next))` clamp is only correct when the
+ * re-derive removed text AFTER the caret. `resplitCustomModelIdsText` also
+ * removes segments from BEFORE it — a built-in id the endpoint turned out not
+ * to serve, or a recommendation that moved to its checkbox — and then the
+ * clamp strands the caret in a different segment than the one the user was
+ * editing. Measured: typing `MiniMax-M3,my-depoy`, arrowing back to offset 17
+ * to fix the second id, then having discovery prune `MiniMax-M3`, reseeds at
+ * `min(17, 8) = 8` — the end of the buffer — so the correction keystroke lands
+ * after `y` and Enter installs `my-depoyl`.
+ *
+ * So anchor on the SEGMENT, not on the offset. Segments that survive a
+ * re-derive are kept verbatim and deduplicated (see
+ * `resplitCustomModelIdsText`), which makes an exact string match an
+ * unambiguous identity for them.
+ *
+ * Exported for the tests: the failure is one offset deep inside a component
+ * that only shows it three keystrokes later, so it is worth pinning directly
+ * as well as through the step.
+ */
+export function remapCaretAcrossResplit(
+  previousText: string,
+  nextText: string,
+  caret: number,
+): number {
+  const nextLength = cpLen(nextText);
+  const clamped = Math.max(0, Math.min(caret, cpLen(previousText)));
+  const previous = commaSegmentsWithOffsets(previousText);
+  const next = commaSegmentsWithOffsets(nextText);
+
+  // The segment the caret sits in: the last one that starts at or before it.
+  // `<=`, not `<`, so a caret resting at a segment's very start belongs to
+  // that segment rather than to the end of the one before it.
+  let index = 0;
+  for (let i = 0; i < previous.length; i++) {
+    if (previous[i].start <= clamped) {
+      index = i;
+    }
+  }
+
+  // A caret in a trailing segment that carries no id yet is a user who just
+  // typed the separator and is about to type the next id. There is no segment
+  // to anchor to, and the re-derive appends the ids it reclaimed in front of
+  // that trailing separator, so the position they are typing at is the end.
+  // (This is the R6-1 case, and the end is where R6-1 put it.)
+  if (
+    previous[index].text.trim().length === 0 &&
+    index === previous.length - 1
+  ) {
+    return nextLength;
+  }
+
+  const within = clamped - previous[index].start;
+  // Walk back from the caret's own segment: if it survived, reinstate the
+  // exact position inside it; otherwise fall in at the end of the nearest
+  // surviving segment ahead of it, which is the closest the user's editing
+  // context still exists. Nothing survived in front of it — every id they had
+  // moved to a checkbox — leaves only the end of the new text.
+  for (let i = index; i >= 0; i--) {
+    const match = next.find((segment) => segment.text === previous[i].text);
+    if (!match) {
+      continue;
+    }
+    const end = match.start + cpLen(match.text);
+    return i === index ? Math.min(match.start + within, end) : end;
+  }
+  return nextLength;
+}
+
+/** Comma-separated segments with their code-point start offsets. */
+function commaSegmentsWithOffsets(
+  text: string,
+): Array<{ text: string; start: number }> {
+  const segments: Array<{ text: string; start: number }> = [];
+  let start = 0;
+  for (const part of text.split(',')) {
+    segments.push({ text: part, start });
+    // +1 for the comma that followed it. The last entry overshoots, harmlessly:
+    // nothing reads a start past the end of the text.
+    start += cpLen(part) + 1;
+  }
+  return segments;
+}
+
+/**
  * Inline note about where the recommendations came from. Discovery is a
  * best-effort enrichment, so a failure reads as a footnote, not an error —
  * the list below it works either way.
@@ -435,12 +522,24 @@ function ModelIdsStep({
   // the end of the re-derived text on the premise that what is left is the
   // segment still being typed; that premise fails the moment the user arrows
   // back to fix an earlier segment. Carry the live caret out of the input
-  // instead and reinstate it, clamped to the shorter text.
-  const modelIdsCaretRef = useRef(0);
+  // instead and reinstate it — through `remapCaretAcrossResplit`, which
+  // anchors it to the segment it was in rather than to a flat offset (R9-1).
+  //
+  // R8-1: seeded at the END of the buffer, not at 0. `ModelIdsStep` mounts
+  // fresh whenever the user Escs to an earlier step and comes back — a new
+  // `useRef`, and a `TextInput` that reports its seeded offset before the
+  // re-derive runs — so a 0 here is indistinguishable from a caret genuinely
+  // at the front, and the clamp below would send the rest of a half-typed id
+  // to the front of the buffer exactly as R6-1 did. The end is also simply
+  // the right place to resume: re-entering a step with your ids already in
+  // the field should put the cursor after them, not in front of them.
+  const [modelIdsInputCursorOffset, setModelIdsInputCursorOffset] = useState(
+    () => cpLen(customModelIdsText),
+  );
+  const modelIdsCaretRef = useRef(modelIdsInputCursorOffset);
   const handleModelIdsCursorChange = useCallback((offset: number) => {
     modelIdsCaretRef.current = offset;
   }, []);
-  const [modelIdsInputCursorOffset, setModelIdsInputCursorOffset] = useState(0);
   if (derivedModelsRevision !== recommendedModelsRevision) {
     setDerivedModelsRevision(recommendedModelsRevision);
     const nextCustomModelIdsText = resplitCustomModelIdsText(
@@ -453,7 +552,11 @@ function ModelIdsStep({
       setCustomModelIdsText(nextCustomModelIdsText);
       setModelIdsInputKey((key) => key + 1);
       setModelIdsInputCursorOffset(
-        Math.min(modelIdsCaretRef.current, cpLen(nextCustomModelIdsText)),
+        remapCaretAcrossResplit(
+          customModelIdsText,
+          nextCustomModelIdsText,
+          modelIdsCaretRef.current,
+        ),
       );
     }
     setSelectedRecommendationKeys(

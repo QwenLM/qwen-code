@@ -10,7 +10,10 @@ import { act, useState } from 'react';
 import { AuthType } from '@qwen-code/qwen-code-core';
 import type { KeypressHandler, Key } from '../contexts/KeypressContext.js';
 import { useKeypress } from '../hooks/useKeypress.js';
-import { ProviderSetupSteps } from './ProviderSetupSteps.js';
+import {
+  ProviderSetupSteps,
+  remapCaretAcrossResplit,
+} from './ProviderSetupSteps.js';
 import type { ProviderSetupFlow } from './useProviderSetupFlow.js';
 
 type UseKeypressMockOptions = { isActive: boolean };
@@ -680,6 +683,137 @@ describe('ProviderSetupSteps', () => {
     unmount();
   });
 
+  it('resumes at the end of the buffer when the step is re-entered mid-id', async () => {
+    // R8-1: `ModelIdsStep` mounts fresh whenever the user Escs to an earlier
+    // step and comes back — a new caret ref, and a `TextInput` that reports
+    // its seeded 0 before the re-derive runs. The old clamp trusted that 0,
+    // so a re-derive landing on the fresh mount sent the rest of a half-typed
+    // id to the FRONT of the buffer and Enter installed `ondsec` where
+    // `second` was meant. This renders the re-entry directly: a fresh mount
+    // whose buffer already holds the in-progress id.
+    let swapFlow!: (next: ProviderSetupFlow) => void;
+    function FlowHarness({ first }: { first: ProviderSetupFlow }) {
+      const [flow, setFlow] = useState(first);
+      swapFlow = setFlow;
+      return <ProviderSetupSteps flow={flow} />;
+    }
+
+    // Re-entered with `sec` already typed and `X-discovered` checked off the
+    // first pair's list.
+    const before = createModelIdsFlow({ modelIds: 'sec, X-discovered' });
+    const beforeState = before.state as unknown as Record<string, unknown>;
+    beforeState['recommendedModels'] = [{ id: 'X-discovered' }];
+    beforeState['discoveryStatus'] = 'success';
+    beforeState['recommendedModelsRevision'] = 0;
+
+    const { lastFrame, unmount } = renderWithProviders(
+      <FlowHarness first={before} />,
+    );
+    expect(lastFrame() ?? '').toContain('sec');
+
+    // The second key/region's list does not offer `X-discovered`, so it falls
+    // back into the buffer and the input remounts as `sec, X-discovered`.
+    const submitModelIds = vi.fn();
+    const after = createModelIdsFlow({
+      modelIds: 'sec, X-discovered',
+      submitModelIds,
+    });
+    const afterState = after.state as unknown as Record<string, unknown>;
+    afterState['recommendedModels'] = [{ id: 'MiniMax-M2.7' }];
+    afterState['discoveryStatus'] = 'success';
+    afterState['recommendedModelsRevision'] = 1;
+
+    await act(async () => {
+      swapFlow(after);
+    });
+    expect(lastFrame() ?? '').toContain('sec, X-discovered');
+
+    // Finishing the id must extend `sec`, not prefix it.
+    for (const char of 'ond') {
+      await act(async () => {
+        pressLatestKey(char, char);
+      });
+    }
+    await act(async () => {
+      pressLatestKey('return');
+    });
+
+    expect(submitModelIds).toHaveBeenCalledWith({
+      modelIds: ['second', 'X-discovered'],
+    });
+    unmount();
+  });
+
+  it('keeps the caret in its own segment when a swap removes text before it', async () => {
+    // R9-1: R7-1 carried the live caret across the remount, but reinstated it
+    // as a raw offset. `resplitCustomModelIdsText` also removes segments from
+    // BEFORE the caret — here a built-in the endpoint turns out not to serve —
+    // and the flat clamp then strands the caret in a different segment than
+    // the one being edited: `min(17, 8) = 8`, the end of the buffer, so the
+    // correction lands after `y` and Enter installs `my-depoyl`.
+    let swapFlow!: (next: ProviderSetupFlow) => void;
+    function FlowHarness({ first }: { first: ProviderSetupFlow }) {
+      const [flow, setFlow] = useState(first);
+      swapFlow = setFlow;
+      return <ProviderSetupSteps flow={flow} />;
+    }
+
+    const before = createModelIdsFlow({ modelIds: '' });
+    const beforeState = before.state as unknown as Record<string, unknown>;
+    beforeState['discoveryStatus'] = 'loading';
+    beforeState['recommendedModelsRevision'] = 0;
+
+    const { lastFrame, unmount } = renderWithProviders(
+      <FlowHarness first={before} />,
+    );
+
+    const typed = 'MiniMax-M3,my-depoy';
+    for (const char of typed) {
+      await act(async () => {
+        pressLatestKey(char, char);
+      });
+    }
+    expect(lastFrame() ?? '').toContain(typed);
+
+    // Arrow back between `my-dep` and `oy` — offset 17, inside the SECOND
+    // segment.
+    for (let i = typed.length; i > 'MiniMax-M3,my-dep'.length; i--) {
+      await act(async () => {
+        pressLatestKey('left');
+      });
+    }
+
+    // Discovery answers: the endpoint does not serve `MiniMax-M3`, so the
+    // prune drops it from both the ids and the buffer, taking 11 code points
+    // from in FRONT of the caret.
+    const submitModelIds = vi.fn();
+    const after = createModelIdsFlow({
+      modelIds: 'my-depoy',
+      submitModelIds,
+    });
+    const afterState = after.state as unknown as Record<string, unknown>;
+    afterState['recommendedModels'] = [{ id: 'qwen3-coder-plus' }];
+    afterState['discoveryStatus'] = 'success';
+    afterState['recommendedModelsRevision'] = 1;
+
+    await act(async () => {
+      swapFlow(after);
+    });
+    expect(lastFrame() ?? '').toContain('my-depoy');
+
+    await act(async () => {
+      pressLatestKey('l', 'l');
+    });
+    await act(async () => {
+      pressLatestKey('return');
+    });
+
+    expect(submitModelIds).toHaveBeenCalledWith({
+      modelIds: ['my-deploy'],
+    });
+    unmount();
+  });
+
   it('drops a typed built-in id the new list no longer offers', async () => {
     // R6-2: `applyDiscoveredModels` prunes a built-in id the endpoint does not
     // serve "whether it was checked by default or typed" — but a typed one
@@ -837,5 +971,52 @@ describe('ProviderSetupSteps', () => {
 
     expect(submitModelIds).toHaveBeenCalledTimes(1);
     unmount();
+  });
+});
+
+describe('remapCaretAcrossResplit', () => {
+  // The step tests above only see this three keystrokes later, as a garbled
+  // model id. These pin the mapping itself, including the arms no realistic
+  // step scenario reaches twice.
+  it('reinstates the offset inside the segment the caret was in', () => {
+    // `MiniMax-M3,` (11) is removed from in front of the caret, so a flat
+    // clamp would give `min(17, 8) = 8` — the end — instead of 6.
+    expect(remapCaretAcrossResplit('MiniMax-M3,my-depoy', 'my-depoy', 17)).toBe(
+      6,
+    );
+  });
+
+  it('follows a segment that moved further back in the buffer', () => {
+    expect(remapCaretAcrossResplit('a,my-depoy', 'kept-a, x,my-depoy', 8)).toBe(
+      16,
+    );
+  });
+
+  it('falls in at the end of the nearest surviving segment ahead of it', () => {
+    // The caret's own segment moved out to a checkbox. `keep` is the closest
+    // context that still exists, so the caret lands after it rather than
+    // somewhere inside an id the user was not editing.
+    expect(remapCaretAcrossResplit('keep,gone', 'keep', 7)).toBe(4);
+  });
+
+  it('goes to the end when nothing in front of the caret survived', () => {
+    expect(remapCaretAcrossResplit('gone,also-gone', 'picked-up', 2)).toBe(9);
+  });
+
+  it('puts a caret in an empty trailing segment at the end of the new text', () => {
+    // R6-1: the user typed the separator and is about to type the next id.
+    // The re-derive appends what it reclaimed in front of that separator, so
+    // the position they are typing at is the end.
+    expect(remapCaretAcrossResplit('a,', 'a, reclaimed,', 2)).toBe(13);
+  });
+
+  it('counts in code points, not UTF-16 units', () => {
+    // `🙂` is one code point and two UTF-16 units; an offset measured in units
+    // would land inside the emoji.
+    expect(remapCaretAcrossResplit('🙂🙂,tail', 'tail', 4)).toBe(1);
+  });
+
+  it('clamps a caret past the end of the old text', () => {
+    expect(remapCaretAcrossResplit('abc', 'abc', 99)).toBe(3);
   });
 });
