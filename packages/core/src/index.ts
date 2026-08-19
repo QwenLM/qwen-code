@@ -562,6 +562,7 @@ export * from './utils/getFolderStructure.js';
 export * from './utils/git-branches.js';
 export * from './utils/gitDiff.js';
 export * from './utils/gitDirect.js';
+export * from './utils/git-ignore.js';
 export * from './utils/gitIgnoreParser.js';
 export * from './utils/gitUtils.js';
 export * from './utils/github-prs.js';

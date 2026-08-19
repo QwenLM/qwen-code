@@ -1154,7 +1154,10 @@ describe('ChatPane', () => {
     streamingStateValue = 'idle';
     rerender();
 
-    expect(catalogController.turnCompleted).toHaveBeenCalledWith('/w');
+    expect(catalogController.turnCompleted).toHaveBeenCalledWith(
+      '/w',
+      'sess-1',
+    );
   });
 
   it('does not duplicate turn completion owned by the outer session', () => {
@@ -1188,7 +1191,10 @@ describe('ChatPane', () => {
     streamingStateValue = 'idle';
     rerender();
 
-    expect(catalogController.turnCompleted).toHaveBeenCalledWith('/w');
+    expect(catalogController.turnCompleted).toHaveBeenCalledWith(
+      '/w',
+      'sess-late',
+    );
   });
 
   it('captures a pane workspace that becomes available mid-turn', () => {
@@ -1202,9 +1208,13 @@ describe('ChatPane', () => {
     rerender();
 
     expect(catalogController.turnCompleted).toHaveBeenCalledTimes(1);
-    expect(catalogController.turnCompleted).toHaveBeenCalledWith('/secondary');
+    expect(catalogController.turnCompleted).toHaveBeenCalledWith(
+      '/secondary',
+      'sess-1',
+    );
     expect(catalogController.turnCompleted).not.toHaveBeenCalledWith(
       '/primary',
+      'sess-1',
     );
   });
 
