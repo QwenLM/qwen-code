@@ -16273,7 +16273,17 @@ exit 1
       ].join('\n'),
     );
     chmodSync(join(bin, 'gh'), 0o755);
-    const runBlock = () =>
+    // The threads fetch is hoisted above the reply block (shared with the
+    // resolve block). One thread holds root comment 100 with a reply 222, so
+    // a reply aimed at the REPLY id 222 must be remapped to root 100 —
+    // GitHub rejects a reply whose target is itself a reply. 444 is in no
+    // thread, which exercises the fall-back to the id as given. The nodes
+    // omit author/body on purpose: the idempotence gate must tolerate a
+    // threads view without them (pre-existing shape) and post as before.
+    const DEFAULT_THREADS = [
+      { comments: { nodes: [{ databaseId: 100 }, { databaseId: 222 }] } },
+    ];
+    const runBlock = (threads = DEFAULT_THREADS) =>
       execFileSync('bash', ['-c', `set -uo pipefail\n${block}`], {
         env: {
           ...process.env,
@@ -16282,14 +16292,8 @@ exit 1
           REPO: 'QwenLM/qwen-code',
           PR: '7731',
           REPLIED_LOG: repliedLog,
-          // The threads fetch is hoisted above the reply block (shared with the
-          // resolve block). One thread holds root comment 100 with a reply 222,
-          // so a reply aimed at the REPLY id 222 must be remapped to root 100 —
-          // GitHub rejects a reply whose target is itself a reply. 444 is in no
-          // thread, which exercises the fall-back to the id as given.
-          THREADS_JSON: JSON.stringify([
-            { comments: { nodes: [{ databaseId: 100 }, { databaseId: 222 }] } },
-          ]),
+          AUTOFIX_BOT: 'qwen-code-dev-bot',
+          THREADS_JSON: JSON.stringify(threads),
         },
         encoding: 'utf8',
       });
@@ -16351,6 +16355,71 @@ exit 1
     out = runBlock();
     expect(readFileSync(repliedLog, 'utf8').trim()).toBe('');
     expect(out).toContain('replied on 0 thread');
+
+    // Idempotence: a crash-and-rerun of the round, a same-run repair, or a
+    // later round re-declining the same finding regenerates the same
+    // disposition — the reply must not land twice on one thread (#9296,
+    // where one identical reply was posted three times). The match is on
+    // the bot login plus the exact NEUTRALISED body, so a CHANGED body —
+    // new information from a later round — still posts.
+    writeFileSync(repliedLog, '');
+    rmSync(join(dir, 'resolved-comments.txt'), { force: true });
+    writeFileSync(
+      join(dir, 'comment-replies.json'),
+      JSON.stringify([
+        { id: 222, body: 'Deferred — follow-up.\n\n中文:已延后。' },
+        { id: 222, body: 'Changed reason — new round.' },
+      ]),
+    );
+    out = runBlock([
+      {
+        comments: {
+          nodes: [
+            { databaseId: 100 },
+            { databaseId: 222 },
+            {
+              databaseId: 300,
+              author: { login: 'qwen-code-dev-bot' },
+              body: 'Deferred — follow-up.\n\n中文:已延后。',
+            },
+          ],
+        },
+      },
+    ]);
+    const deduped = readFileSync(repliedLog, 'utf8').trim().split('\n');
+    expect(deduped).toHaveLength(1);
+    expect(deduped[0]).toContain('pulls/7731/comments/100/replies');
+    expect(deduped[0]).toContain('body=Changed reason');
+    expect(out).toContain('identical bot reply already on the thread');
+    expect(out).toContain('replied on 1 thread');
+
+    // The gate compares against the bot login: the same body last posted by
+    // a HUMAN (e.g. the reviewer quoting the bot) is not a duplicate.
+    writeFileSync(repliedLog, '');
+    writeFileSync(
+      join(dir, 'comment-replies.json'),
+      JSON.stringify([
+        { id: 222, body: 'Deferred — follow-up.\n\n中文:已延后。' },
+      ]),
+    );
+    out = runBlock([
+      {
+        comments: {
+          nodes: [
+            { databaseId: 100 },
+            { databaseId: 222 },
+            {
+              databaseId: 300,
+              author: { login: 'wenshao' },
+              body: 'Deferred — follow-up.\n\n中文:已延后。',
+            },
+          ],
+        },
+      },
+    ]);
+    const humanEcho = readFileSync(repliedLog, 'utf8').trim().split('\n');
+    expect(humanEcho).toHaveLength(1);
+    expect(out).toContain('replied on 1 thread');
     rmSync(dir, { recursive: true, force: true });
   });
 

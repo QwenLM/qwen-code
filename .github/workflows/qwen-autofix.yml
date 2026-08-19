@@ -6288,7 +6288,7 @@ jobs:
                 query($owner:String!,$name:String!,$pr:Int!){
                   repository(owner:$owner,name:$name){
                     pullRequest(number:$pr){
-                      reviewThreads(first:100){nodes{id isResolved comments(first:100){nodes{databaseId}}} pageInfo{hasNextPage}}
+                      reviewThreads(first:100){nodes{id isResolved comments(first:100){nodes{databaseId author{login} body}}} pageInfo{hasNextPage}}
                     }
                   }
                 }' --jq '(.data.repository.pullRequest.reviewThreads // {nodes:[]})' 2> /dev/null || echo '{"nodes":[]}')"
@@ -6388,6 +6388,27 @@ jobs:
                 root_id="$(jq -r --argjson id "${rc_id}" \
                   'map(select(any(.comments.nodes[]; .databaseId == $id)))
                    | .[0].comments.nodes[0].databaseId // $id' <<< "${THREADS_JSON}")"
+                # Idempotence gate: a crash-and-rerun of this round, a
+                # same-run repair that regenerates the dispositions, or a
+                # later round whose agent rewrites an unchanged declination
+                # must not post the same bot reply twice on one thread
+                # (observed 2026-08-16: an identical reply posted three
+                # times, #9296). Skip when the thread already carries a
+                # comment by the bot whose body EQUALS the neutralised body
+                # about to be posted; a changed body — a new reason in a
+                # later round — still posts. Best-effort like the rest: with
+                # a stale or empty threads view this degrades to the old
+                # post-always behavior.
+                if jq -e --argjson id "${root_id}" --arg bot "${AUTOFIX_BOT}" \
+                  --arg body "${REPLY_BODY}" '
+                    map(select(any(.comments.nodes[]; .databaseId == $id)))
+                    | .[0].comments.nodes // []
+                    | any(.[]; (.author.login // "") == $bot
+                             and (.body // "") == $body)' \
+                  <<< "${THREADS_JSON}" > /dev/null 2>&1; then
+                  echo "⏭️ reply to review comment ${rc_id} skipped — identical bot reply already on the thread"
+                  continue
+                fi
                 if gh api "repos/${REPO}/pulls/${PR}/comments/${root_id}/replies" \
                   -f body="${REPLY_BODY}" > /dev/null 2>&1; then
                   REPLIED_N=$(( REPLIED_N + 1 ))
