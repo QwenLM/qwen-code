@@ -129,6 +129,23 @@ describe('pathRulesFor — scoped, or it is noise', () => {
     // hook from a README, so it declines to guess — a visible decision.
     ['.husky/pre-commit', false],
     ['hooks/prepush', false],
+    // Consumer-facing contract documentation: a wire/API/SDK reference is
+    // governed; a proposal, a user guide and a changelog are not, and a
+    // filename saying `protocol` does not rescue a design doc.
+    ['docs/developers/qwen-serve-protocol.md', true],
+    ['docs/developer/api.md', true],
+    ['docs/api/sessions.mdx', true],
+    ['docs/reference/routes.md', true],
+    ['packages/sdk-typescript/README.md', true],
+    ['packages/sdk-java/docs/usage.md', true],
+    ['integrations/wire-format.md', true],
+    ['docs/users/features/code-review.md', false],
+    ['CHANGELOG.md', false],
+    ['docs/design/2026-08-18-live-state-protocol.md', false],
+    ['docs/plans/rollout-protocol.md', false],
+    ['docs/rfcs/0001-protocol.md', false],
+    ['src/sdkstuff/notes.md', false],
+    ['docs/developers/schema.json', false],
   ])('%s → governed by a rule: %s', (path, governed) => {
     expect(PATH_RULES.some((r) => r.matches(path))).toBe(governed);
   });
@@ -733,5 +750,124 @@ describe('pathRulesFor — the Java/JVM rule', () => {
     expect(out).toContain('--release');
     expect(out).toContain('maven.compiler.release');
     expect(out).toContain('no base side');
+  });
+});
+
+describe('pathRulesFor — the consumer-facing contract documentation rule', () => {
+  it('attaches when a protocol reference changes, and names only that file', () => {
+    const out = pathRulesFor([
+      'docs/developers/qwen-serve-protocol.md',
+      'src/pay.ts',
+    ]);
+    expect(out).toContain('Consumer-facing contract documentation');
+    expect(out).toContain('docs/developers/qwen-serve-protocol.md');
+    expect(out).not.toContain('src/pay.ts');
+  });
+
+  it('stays silent on the documentation genres that are not contracts', () => {
+    // The whole cost control. /review runs on repositories whose maintainers did
+    // not ask for a documentation lens, and a rule that fires on every docs PR is
+    // a rule that gets skimmed. A design doc describes behaviour the tree does
+    // not have yet — that is the genre, not a defect — and a user guide belongs
+    // to the sibling-parity lens, not to this one.
+    for (const quiet of [
+      'docs/design/2026-08-18-live-state-protocol.md',
+      'docs/plans/rollout-protocol.md',
+      'docs/rfcs/0001-protocol.md',
+      'docs/users/features/code-review.md',
+      'CHANGELOG.md',
+    ]) {
+      expect(pathRulesFor([quiet])).not.toContain(
+        'Consumer-facing contract documentation',
+      );
+    }
+  });
+
+  it('excludes a proposal even when its own name says protocol', () => {
+    // Order matters inside the matcher: the proposal exclusion runs BEFORE the
+    // filename branch, or every design doc with `protocol` in its title would be
+    // measured against code nobody has written yet.
+    expect(pathRulesFor(['docs/design/wire-protocol.md'])).toBe('');
+    // The same filename outside a proposal directory is governed.
+    expect(pathRulesFor(['integrations/wire-protocol.md'])).toContain(
+      'Consumer-facing contract documentation',
+    );
+  });
+
+  it('stacks with the code rules when a diff touches both', () => {
+    const out = pathRulesFor([
+      '.github/workflows/ci.yml',
+      'docs/developers/protocol.md',
+    ]);
+    expect(out).toContain('GitHub Actions workflows');
+    expect(out).toContain('Consumer-facing contract documentation');
+  });
+
+  it('asks the question no other lens asks: is the prose TRUE', () => {
+    // Every dimension reads the code and asks whether the code is right; the
+    // documentation-parity item asks whether a doc EXISTS. Nobody checks the
+    // document the PR ships against the behaviour the PR ships — and for a wire
+    // contract that document is what an integrator builds on.
+    const out = pathRulesFor(['docs/developers/protocol.md']);
+    expect(out).toContain('cannot read your code');
+    expect(out).toMatch(/whether the code makes it true/);
+    // A paragraph is not one claim: rule on the smallest falsifiable statements.
+    expect(out).toContain('split, then rule');
+    // And resolve each against the code, never against the document itself.
+    expect(out).toMatch(/Never resolve a doc claim by re-reading the doc/);
+  });
+
+  it('requires a positive control before a documented negative is confirmed', () => {
+    // Reference prose is mostly negatives — "X never advances it", "the field is
+    // absent before Y". A negative is only as good as an instrument that would
+    // have seen the positive, the same control the mutation harness owes its
+    // survivors. Without it, "the invariant holds" and "my probe never looked"
+    // are the same observation.
+    const out = pathRulesFor(['docs/developers/protocol.md']);
+    expect(out).toContain('A negative claim needs a positive control');
+    expect(out).toMatch(/my probe never looked/);
+  });
+
+  it('names the three blocker shapes, including the one a diff-scoped read cannot see', () => {
+    const out = pathRulesFor(['docs/developers/protocol.md']);
+    expect(out).toContain('A statement the code cannot satisfy');
+    // The important one: the wrong lines are the ones the diff did NOT touch.
+    expect(out).toContain('Prose this change silently falsified');
+    expect(out).toContain('the wrong lines are the ones the diff did');
+    expect(out).toContain('A guarantee wider than the code');
+  });
+
+  it('refuses to become a copy edit', () => {
+    // The failure mode that would make this rule net-negative: an agent handed a
+    // prose document files comma findings, and the author stops reading the whole
+    // review. Pin every exclusion that keeps it off that path.
+    const out = pathRulesFor(['docs/developers/protocol.md']);
+    expect(out).toContain('Not a finding, ever');
+    expect(out).toMatch(/Wording, tone, grammar/);
+    expect(out).toContain('not a copy edit');
+    // Silence belongs to the sibling-parity lens; this rule owns wrongness only.
+    expect(out).toContain('not statements that are missing');
+    // Roadmap text the document itself marks as such is exempt.
+    expect(out).toContain('not yet implemented');
+  });
+
+  it('keeps the scoping and precision discipline of the other rules', () => {
+    const out = pathRulesFor(['docs/developers/protocol.md']);
+    expect(out).toContain('reviewing this diff, not auditing this file');
+    expect(out).toContain('Favour precision over recall');
+    // And says which side of a mismatch is usually wrong — a finding that only
+    // reports "these two disagree" is not actionable.
+    expect(out).toContain('is right and the sentence is what has to change');
+  });
+
+  it('caps the path list like every other rule', () => {
+    const many = Array.from(
+      { length: 13 },
+      (_, i) => `docs/developers/route-${i}.md`,
+    );
+    const out = pathRulesFor(many);
+    expect(out).toContain('…and 3 more');
+    expect(out).toContain('docs/developers/route-9.md');
+    expect(out).not.toContain('docs/developers/route-10.md');
   });
 });

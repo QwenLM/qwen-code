@@ -187,8 +187,65 @@ A finding that a method "can no longer be inlined" needs the **dynamic** tier �
 **Favour precision over recall here.** A guessed JVM finding is the easiest kind for an author to dismiss, and one dismissal teaches them to skip the rest of the review. Every finding needs the concrete hot path and the concrete cost, like any other. Performance findings are **Suggestions** — slow is a cost, not incorrect behaviour — **except where the cost is itself the wrongness**: unbounded allocation, quadratic work, or unbounded cache growth on attacker-reachable input is a denial-of-service hole, which the severity ladder grades Critical, not a Suggestion. Name the reachable input that triggers it; "this loop is slow" with no attacker-reachable trigger stays a Suggestion.`,
 };
 
+const CONTRACT_DOCS: PathRule = {
+  title: 'Consumer-facing contract documentation',
+  matches: (p) => {
+    if (!/\.mdx?$/i.test(p)) return false;
+    // A proposal is not a contract. A design doc, an RFC or a plan describes what
+    // someone intends to build, and describing behaviour the tree does not have
+    // yet is the whole point of the genre — measuring one against the code would
+    // file a finding on every one of them.
+    if (/(?:^|\/)(?:designs?|plans?|rfcs?|proposals?|adrs?)\//i.test(p)) {
+      return false;
+    }
+    if (/(?:^|\/)CHANGELOG[^/]*$/i.test(p)) return false;
+    return (
+      /(?:^|\/)docs\/(?:developers?|api|reference|protocols?)\//i.test(p) ||
+      /(?:^|\/)sdks?(?:-[a-z0-9]+)*\//i.test(p) ||
+      /(?:^|\/)[^/]*(?:protocol|wire-format|api-reference|openapi)[^/]*\.mdx?$/i.test(
+        p,
+      )
+    );
+  },
+  checklist: `The reader of this document cannot read your code. It is a wire protocol, an API reference or an SDK guide — someone writes a client against it, ships that client, and never sees the implementation that was supposed to back the sentence they built on. Every other lens in this review reads the code and asks whether it is right. This one reads the **prose the diff added** and asks whether the code makes it true.
+
+That prose is also the only place in the PR where the contract appears in falsifiable form. Code comments state intent and tests state examples; a reference document states the general rule — "advances exactly once", "is written before the event is published", "is absent until the first such terminal", "is never earlier than the creation time". Each of those has a truth value, the author already wrote it, and nothing else in this review is looking at it. In a live verification of one protocol-doc change, a single changed hunk carried **twelve** independently falsifiable assertions.
+
+**You are reviewing this diff, not auditing this file.** A reference document is long and some of it has been wrong for years. In scope: prose this diff **adds or changes**, and prose this diff **leaves standing that its own code change falsifies**. Out of scope: everything else on the page.
+
+**Method — split, then rule.** A paragraph is not one claim. Break the changed prose into the smallest statements that can independently be true or false and rule on each separately; a paragraph judged as a unit gets the verdict of its most plausible sentence. Resolve each statement the way this review resolves any failure scenario: trace it to the code path that implements it, or — when it is runnable and reading has not settled it — **run it**. Never resolve a doc claim by re-reading the doc, and never by quoting the same sentence back as its own evidence.
+
+**A negative claim needs a positive control.** Reference prose is full of negatives — "X never advances it", "this does not invalidate the cache", "the field is absent before the first Y". A negative is only as good as an instrument that would have seen the positive, so before reporting that a documented "never" holds, show the same probe observing the case where it **does** happen. Without that, "the documented invariant holds" and "my probe never looked" are the same observation.
+
+**Blockers (Critical):**
+
+- **A statement the code cannot satisfy.** The document says a field is always present and a live path returns without setting it; it says a value is monotonic and a path assigns it from a source that can go backwards; it says a request is idempotent and the second call is not. An integrator builds on that sentence and their client is wrong in a way neither their tests nor yours will show, because both sides believe the document. Report the statement verbatim, the code path that falsifies it, and the observation that settles it.
+- **Prose this change silently falsified.** The diff changes an externally-observable behaviour — a status code, a field's presence or type, an ordering, an error shape, a default — and the paragraph describing the old behaviour is still on the page, unchanged, now wrong. This is the failure a diff-scoped read misses by construction: the wrong lines are the ones the diff did **not** touch. Take each externally-observable behaviour the diff changes and grep the reference docs for the sentence that describes it.
+- **A guarantee wider than the code's.** The document generalizes ("always", "never", "any", "every") where the implementation covers one case, or promises a property — ordering, exactly-once, durability, atomicity — the code provides only on the happy path. Name the input or the state that leaves the guarantee.
+
+**Recommendations (Suggestion):**
+
+- **A documented behaviour nothing tests.** The statement is true today and no test pins it, so the next refactor is free to break the contract without turning anything red. Name the statement and the test that should exist — one Suggestion for the set, never one per sentence.
+- **A contract carried only in prose that the type or schema could carry.** An optional field the document says is "absent before X" while the published type says merely optional; an enumerated set of values the document lists and the schema leaves as a bare string. The document is doing work the machine-readable artifact could do, and only one of the two is checked by anybody's build.
+
+**Not a finding, ever:**
+
+- Wording, tone, grammar, heading level, ordering, or formatting of the prose. This is not a copy edit, and a review that opens with a comma is a review the author stops reading.
+- A document that is merely **silent** about something the diff adds. Silence is the sibling-parity question and another lens already owns it; this rule is about statements that are **wrong**, not statements that are missing.
+- Aspirational or roadmap text the document itself marks as such ("planned", "not yet implemented", "experimental"), and any prose describing a deliberately unimplemented surface.
+- Imprecision no reasonable integrator could act on wrongly. "Fast", "small", "recent" are not falsifiable and are not defects.
+- A claim about behaviour outside this repository — another service's response, a platform's guarantee — unless the diff itself is what asserts it.
+
+**Favour precision over recall here.** A documentation finding is the cheapest kind for an author to dismiss, and the second dismissal teaches them to skim the rest of the review. Every finding names the exact sentence, the exact code path or observation that contradicts it, and what the sentence should say instead — a finding that reports a mismatch without saying which side is wrong is not actionable, and on this rule the answer is often that the **code** is right and the sentence is what has to change.`,
+};
+
 /** Every rule, in the order their checklists are appended. */
-export const PATH_RULES: PathRule[] = [GITHUB_ACTIONS, SHELL_LANES, JAVA];
+export const PATH_RULES: PathRule[] = [
+  GITHUB_ACTIONS,
+  SHELL_LANES,
+  JAVA,
+  CONTRACT_DOCS,
+];
 
 function isOutOfScope(p: string): boolean {
   return (
