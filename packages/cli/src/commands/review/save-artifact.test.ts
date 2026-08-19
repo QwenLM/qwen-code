@@ -74,7 +74,12 @@ const verdict = {
   // proves passthrough against a validator that would otherwise omit the
   // field entirely.
   postedInline: 3,
-  // Also non-default on purpose, for the same reason.
+  // Also non-default on purpose — and on the DEFAULTING side, with
+  // `deferredCount` and `floorEnforced`: an absent `bodyTrim` reads as an
+  // untrimmed one and the field is always emitted. Spelled out rather than
+  // said as "the same reason", which would now resolve against the
+  // preserved-absence block above it and teach the opposite of what
+  // `save-artifact.ts` does.
   bodyTrim: { sections: 2, deferralList: true, fold: true, truncated: true },
   lowSignal: { agents: 4, srcDiffLines: 120 },
   verdictLine: 'Verdict: Comment — Request changes was downgraded',
