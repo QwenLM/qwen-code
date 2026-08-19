@@ -3244,7 +3244,6 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
       reviews = '[]',
       runCreated = '',
       runStartedAttempt = '',
-      reviewedHead = '',
       expectedHead = '',
     } = {},
   ) {
@@ -3295,8 +3294,9 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
           '  echo "${RUN_HEAD:-}"; exit 0',
           'fi',
           // The reviews lookup runs the step's REAL --jq filter over the
-          // fixture: the guard under test IS that filter (author scope, head,
-          // submission time), so a stub that pre-applied it would pin nothing.
+          // fixture: the guard under test IS that filter (author scope and
+          // submission time — no head clause, which `attributes by TIME, not
+          // by head` pins), so a stub that pre-applied it would pin nothing.
           'if [ "$cmd" = "api" ] && [ "${sub#repos/}" != "$sub" ]; then',
           '  [ "${SCENARIO:-}" = "reviews_fail" ] && exit 1',
           '  printf "%s" "$REVIEWS_JSON" | jq -r "$filter"; exit 0',
@@ -3372,7 +3372,6 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
               REVIEWS_JSON: reviews,
               RUN_CREATED: runCreated,
               RUN_STARTED_ATTEMPT: runStartedAttempt,
-              REVIEWED_HEAD_SHA: reviewedHead,
             },
           },
         );

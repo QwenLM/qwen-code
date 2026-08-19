@@ -1788,12 +1788,6 @@ jobs:
           # that — but moves run-level `startedAt` to the re-executed attempt:
           # measured on this repo's runs 32219268680 (created 05:23:57Z,
           # startedAt 05:51:26Z) and 32218596441 (05:13:04Z → 05:22:05Z).
-          # Anchoring there would push attempt 1's review outside "this run"
-          # on every re-run, so a re-run that fails before posting would
-          # contradict the review attempt 1 had posted — the very shape this
-          # guard exists to stop. `createdAt` is attempt-stable, and a review
-          # submitted after the run was created still cannot belong to an
-          # earlier run.
           run_created="$(gh run view "${GITHUB_RUN_ID:?}" --repo "$GITHUB_REPOSITORY" --json createdAt --jq '.createdAt' 2>/dev/null)" || run_created=""
           posted_reviews=""
           # Three outcomes, and the guard must not be silent about the third:
@@ -2036,15 +2030,6 @@ jobs:
           # removes, and an oncall reading the log could not tell it from "no
           # review matched". Every sibling lookup in this step announces its
           # failures; this one says so too, then posts.
-          # The head this run REVIEWED, not the PR's head at fallback time: on
-          # every trigger but pull_request_target the head-moved guard above
-          # deliberately does not run, so a push landing between the post and
-          # this step leaves `pr_head` pointing at bytes no review ever
-          # covered — the reviewed head's review then matches nothing and the
-          # contradictory comment posts anyway. Executed through this file's
-          # harness, that interleaving reproduces the #9342 shape exactly.
-          # The job output is empty only when review-pr died before its review
-          # step ran, which is also a run that posted nothing.
           if [ -z "$run_created" ]; then
             echo "::warning::already-posted guard unavailable (no run creation time); posting the fallback comment"
             echo "Already-posted guard unavailable (run creation time missing); proceeding to post." >> "$GITHUB_STEP_SUMMARY"
