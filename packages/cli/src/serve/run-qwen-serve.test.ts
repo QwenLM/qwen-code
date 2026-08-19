@@ -5,6 +5,7 @@
  */
 
 import * as os from 'node:os';
+import * as dns from 'node:dns/promises';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { X509Certificate } from 'node:crypto';
@@ -1683,6 +1684,55 @@ X4161EJQYg==
 -----END CERTIFICATE-----
 `;
 
+// R5-6: the compliant twin of the pathlen fixture below — the SAME `pathlen:0`
+// root, but signing the serving leaf DIRECTLY, so zero CAs sit below it and the
+// constraint is satisfied (`depth - 1 === 0 <= 0`). This is the boundary the
+// `<=` comparison stands on, and it is a routine internal-PKI shape, not a
+// corner case. Measured on Node 22 / OpenSSL 3: the real handshake authorizes
+// (`authorized: true`), so any gap reported here is a false alarm that sends
+// the operator to reissue a CA that works.
+const TEST_TLS_CERT_FULLCHAIN_PATHLEN0_ROOT_DIRECT_LEAF = `-----BEGIN CERTIFICATE-----
+MIIDYjCCAkqgAwIBAgIUQFWDCU4nWSmHieSwTJF++8ywhbAwDQYJKoZIhvcNAQEL
+BQAwKzEpMCcGA1UEAwwgcXdlbiBwYXRobGVuIGRpcmVjdCB0ZXN0IHJvb3QgQ0Ew
+IBcNMjYwODE5MTkzOTMxWhgPMjEyNjA3MjYxOTM5MzFaMBQxEjAQBgNVBAMMCWxv
+Y2FsaG9zdDCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAKVuhk8R9NxA
+4xsGlH36meRlxgot5zoEclf901s/P0ByEoSDHeE3PQIct1+ap4aLjIPW9VeiWGYP
+gdlGgYOVSeK0/6lQuhkrTgv7nIBtLgisFG6/MmVEyRgww4azT0n+LHy3yV2Q85Yx
+AAFHXed9JqIuQXAlFGRd/b9YTbcqOi943148oci3PC+Cei2O7ts7Jv7Eb+vwBCrK
+tIxMNqoHBiZA8PVvaEWJP4UtrwXYXs9T3EbEcx5GTHbyiDyAthK4Bap335f+2nY2
+V3VvqaxMCEOeDHX64Nb0FT3HP4AYuKhovjeijiuh2m6MrjNJ97DzkCvTO8j7V4kr
+eUTIIRR8nkkCAwEAAaOBkjCBjzAaBgNVHREEEzARhwR/AAABgglsb2NhbGhvc3Qw
+DAYDVR0TAQH/BAIwADAOBgNVHQ8BAf8EBAMCBaAwEwYDVR0lBAwwCgYIKwYBBQUH
+AwEwHQYDVR0OBBYEFBI2dPpi736XRLz9bhSdPvnVNgmqMB8GA1UdIwQYMBaAFAKA
+SaZgr7HRIAEis/2MbjQKBYaTMA0GCSqGSIb3DQEBCwUAA4IBAQA33loq2Wb+KrrS
+RZ5LqoxlQB1UTUdjz8Jj+xM+C2qOcZWW0PFwJ3m1owlLPh9rN/73aQDLgvDMW3Uj
+31XwtUqoLy/wwuLzTubBFYFMUfIzrzTgXScpas6fQEi7LcVpGt6x1IwFKIzIv0uL
+x/U9XPiKBKfAPMO31xdXf7fRhkK9QLebM9eH35vULFZlfEZRkFhQ4eDlojurn80Y
+Imq1UxiLb8ShlJEDnH8TKeK10ZjL2mjtXWbEOizZEWPWHGcG5gKclGF5F+C3zkAU
+WQCF2cWq9czL5YiVzZlsu6rbBE53qyKqlym3tnsQFfDYDijx2v8w7y8YvZ1COnoP
+sHqf3h+S
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDKzCCAhOgAwIBAgIUM10oaiWBPf/BG3Luzzl1ud+SLOwwDQYJKoZIhvcNAQEL
+BQAwKzEpMCcGA1UEAwwgcXdlbiBwYXRobGVuIGRpcmVjdCB0ZXN0IHJvb3QgQ0Ew
+IBcNMjYwODE5MTkzOTMxWhgPMjEyNjA3MjYxOTM5MzFaMCsxKTAnBgNVBAMMIHF3
+ZW4gcGF0aGxlbiBkaXJlY3QgdGVzdCByb290IENBMIIBIjANBgkqhkiG9w0BAQEF
+AAOCAQ8AMIIBCgKCAQEArvaDVE4xfIo3f3SjyWd8ffvuKY3YrPC73SgGc7P9lL3k
+LZw6/IEPkgX8kqHuTt23kaTLhLNlP0coOPSsniyFP+CFuY/pJNZhXZL0Ps6+GUvQ
+lWqcOAhf//s6ivElqg+BO8cPNPSKx0cipAljZO85SjM/cz2PAK6dHM51H/wFFdUF
+Juv6zkoRtcDm+h3yq0yVFRAfdy+gJNQqPsxYy504Dq4CpGn+a9H/Zl3gJtJHdxqh
+cxgx+mEK2YSY9RmLRL45/O/72qdz9vzYO5CSgMFkzumjmqU5pK3q7tbiZ8GndFiD
+nPNrpbMlmNRPd2Enji+NuuM5QzDA1lDAB0WEFPligwIDAQABo0UwQzASBgNVHRMB
+Af8ECDAGAQH/AgEAMA4GA1UdDwEB/wQEAwIBBjAdBgNVHQ4EFgQUAoBJpmCvsdEg
+ASKz/YxuNAoFhpMwDQYJKoZIhvcNAQELBQADggEBAHB8Gk7R7Y5PssMyPJQi1hW8
+elU0ZPntodC/EXsiV2dvkLOi4SIRisjbJcVOrTu1Bkkrv3t8+VIvkxiJgGMnRWBp
+W5u4EzQfPVxsK2BcelTa13nr/xJLT99cMj9NrWHbsjj3S03k4/ENX+tObfLFHs2P
+vLSCzrifjatldTo+WcvqxLK8E6UtKFW2gOgJ8B7RB8Ww0ba4ttrr9MSHwonweMSf
+0kSjRRN8YNpDK2A3670OJiieY+2ctVGa9mHPB/7R00MGwxmhWyI4DaGmN9xZE8V6
+kBbyH6tpbpKVaN5IezdOWWhp1EsKpubMWLmCeQG04VbaAAOvr6aUK8eZPQTe5z8=
+-----END CERTIFICATE-----
+`;
+
 // R2-21 entrance 4: leaf + intermediate + a root asserting pathlen:0, which
 // admits no CA below it. Measured with a real handshake: PATH_LENGTH_EXCEEDED,
 // while the pathlen-free control authorizes.
@@ -2104,8 +2154,16 @@ describe('describeWorkerTlsTrustGaps', () => {
       )![1]!,
     );
     // Precondition: the two predicates disagree for this shape — which is
-    // what makes unifying them a silent regression.
+    // what makes unifying them a silent regression. `.ca === false` alone is
+    // shared with the explicit-CA:FALSE fixture, so it does not discriminate:
+    // pin the property that actually does, the ABSENCE of the extension, the
+    // way `declaresNotACa` reads it. Without this, regenerating the fixture
+    // with `basicConstraints=CA:FALSE` would keep every assertion below green
+    // while the fixture silently stopped covering the shape it is named for.
     expect(intermediate.ca).toBe(false);
+    expect(
+      intermediate.raw.includes(Buffer.from([0x06, 0x03, 0x55, 0x1d, 0x13])),
+    ).toBe(false);
 
     const gaps = describeWorkerTlsTrustGaps({
       cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_V3_NO_BC_INTERMEDIATE),
@@ -2178,6 +2236,22 @@ describe('describeWorkerTlsTrustGaps', () => {
     expect(gaps[0]).toContain('PATH_LENGTH_EXCEEDED');
     expect(gaps[0]).toContain('pathlen:0');
     expect(gaps[0]).toContain('qwen pathlen test root CA');
+  });
+
+  it('leaves a pathlen:0 root that signs the leaf directly alone', () => {
+    // R5-6: the arm was pinned by a single VIOLATING chain, so the boundary
+    // comparison itself was unpinned — an off-by-one (`<` for `<=`) survived
+    // the whole suite while false-alarming on this compliant shape, telling
+    // the operator to "Reissue that CA … or shorten the chain" for a chain
+    // whose real handshake authorizes. The mirror of the depth-0 purpose
+    // pinning above, one layer down.
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_PATHLEN0_ROOT_DIRECT_LEAF),
+        certPath: '/certs/fullchain.pem',
+        daemonUrl,
+      }),
+    ).toEqual([]);
   });
 
   // R2-21 entrance 5, the false-alarm direction: the walk took whichever copy
@@ -10592,6 +10666,74 @@ describe('runQwenServe channel worker supervisor', () => {
     } finally {
       vi.unstubAllEnvs();
     }
+  });
+
+  it('refuses at boot a bind channel workers cannot certify as local', async (ctx) => {
+    // R5-1: `assertChannelWorkerDaemonUrlIsLocal` was reached only by direct
+    // unit calls — every other boot test binds loopback, where it trivially
+    // returns — so deleting the call from the boot path kept the whole suite
+    // green. The cost of that is the silent mode the assertion exists to end:
+    // the daemon boots, `/health` answers, and every channel worker throws on
+    // its own daemon URL; the first worker's failure exits the daemon and
+    // channels added later restart-loop with nothing saying why.
+    //
+    // A DNS name is the reachable shape: it binds (the resolver points it at a
+    // local interface) but `isOwnInterfaceAddress` refuses to resolve names on
+    // the worker startup path, so no worker can certify the URL as local.
+    // Skipped where this host's own name does not resolve to an address it
+    // holds — the same guard the ::1 bind above carries.
+    const hostDnsName = os.hostname();
+    let resolved: string | undefined;
+    try {
+      resolved = (await dns.lookup(hostDnsName)).address;
+    } catch {
+      resolved = undefined;
+    }
+    const ownAddresses = new Set(
+      Object.values(os.networkInterfaces())
+        .flatMap((entries) => entries ?? [])
+        .map((entry) => entry.address.toLowerCase()),
+    );
+    if (
+      !resolved ||
+      !(ownAddresses.has(resolved.toLowerCase()) || resolved.startsWith('127.'))
+    ) {
+      ctx.skip();
+      return;
+    }
+
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-nonlocal-')),
+    );
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    // Boot fails outright rather than settling into the green-daemon /
+    // looping-worker mode: `runQwenServe` itself rejects, so there is no
+    // handle to close and no listening socket left behind.
+    await expect(
+      runQwenServe(
+        {
+          port: 0,
+          hostname: hostDnsName,
+          // A non-loopback bind needs a token, or the boot-time auth check
+          // rejects it before the channel path is ever reached.
+          token: 'secret-token',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          serveWebShell: false,
+          channelSelection: { mode: 'names', names: ['telegram'] },
+        },
+        {
+          bridge: makeFakeBridge(),
+          channelWorkerSupervisorFactory: makeReadyWorkerFactory(worker),
+          channelServicePidfile: makePidfileDeps(),
+        },
+      ),
+    ).rejects.toThrow(/does not name an address on this host/);
   });
 
   it('forwards webhook tasks through the channel worker group', async () => {

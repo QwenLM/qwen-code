@@ -1373,11 +1373,20 @@ describe('runChannelDaemonWorker', () => {
 
   it('accepts an IPv6 loopback daemon URL for a ::1-bound TLS daemon', async () => {
     // R2-14: formatChannelWorkerDaemonUrl emits `https://[::1]:<port>` for a
-    // `::1` TLS bind, and this side accepts it only because `'[::1]'` sits in
-    // LOOPBACK_BINDS. Nothing else pins that entry, so dropping it as
-    // redundant keeps every test green while every ::1-bound TLS daemon's
-    // workers reject their own URL at boot and restart-loop — the exact
-    // failure this PR exists to remove, regressing on IPv6 alone.
+    // `::1` TLS bind, and this pins that the worker side accepts the URL its
+    // own daemon hands it — the round trip, not one predicate inside it.
+    //
+    // R5-2: the original wording claimed this test was the sole pin on
+    // `'[::1]'` in LOOPBACK_BINDS. That stopped being true when this round's
+    // own-interface arm landed: `validateDaemonWorkerUrl` is now
+    // `!isLoopbackBind(…) && !isOwnInterfaceAddress(…)`, and
+    // `isOwnInterfaceAddress` strips the brackets and matches `lo`'s `::1`, so
+    // this test stays green with that entry dropped. The callers that entry
+    // still protects are the fallback-free `isLoopbackBind` ones — the
+    // boot-time token check in `run-qwen-serve.ts` (server.test.ts reddens
+    // under that mutant with `Refusing to bind [::1]:0 without a bearer
+    // token`) and the Host-header gate in `auth.ts` — neither of which this
+    // suite exercises.
     const sdk = createSdk();
     mockLoadChannelsConfig.mockReturnValueOnce({
       telegram: { type: 'telegram' },
