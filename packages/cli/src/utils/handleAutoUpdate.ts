@@ -59,7 +59,7 @@ export async function handleAutoUpdate(
     // installation type, but a Homebrew install can only be updated through
     // Homebrew. While the formula lags npm `latest`, `brew upgrade` is a
     // no-op and this notification would repeat on every startup with no way
-    // to clear it (#9493) — notify only when Homebrew actually offers
+    // to clear it (#9493) — notify only when local Homebrew metadata reports
     // something newer than the installed version. When the Homebrew version
     // cannot be determined, fall through and keep the previous behavior.
     if (

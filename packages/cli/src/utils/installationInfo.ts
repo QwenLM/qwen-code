@@ -150,8 +150,8 @@ const execFileAsync = promisify(childProcess.execFile);
 const HOMEBREW_INFO_TIMEOUT_MS = 5000;
 
 /**
- * Best-effort lookup of the newest version Homebrew currently offers for a
- * formula. While the homebrew-core formula lags the npm `latest` tag,
+ * Best-effort lookup of the newest formula version visible in local Homebrew
+ * metadata. While the homebrew-core formula lags the npm `latest` tag,
  * `brew upgrade` is a no-op, and an npm-based "update available"
  * notification would repeat on every startup with no way to clear it
  * (#9493). Callers use this to decide whether a Homebrew install can
