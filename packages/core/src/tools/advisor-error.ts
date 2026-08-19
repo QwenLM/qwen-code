@@ -60,7 +60,11 @@ export function mapAdvisorApiError(params: {
   if (message.includes('timeout') || type.includes('timeout')) {
     return 'execution_time_exceeded';
   }
-  if (message.includes('empty response')) {
+  if (
+    message.includes('empty response') ||
+    message.includes('invalid side query response') ||
+    message.includes('invalid structured output')
+  ) {
     return 'invalid_response';
   }
   return 'unavailable';

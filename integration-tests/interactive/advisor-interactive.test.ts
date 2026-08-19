@@ -89,6 +89,8 @@ async function setupAdvisorRig(rig: TestRig, baseUrl: string): Promise<void> {
   vi.stubEnv('HOME', rig.testDir!);
   vi.stubEnv('QWEN_HOME', join(rig.testDir!, '.qwen'));
   vi.stubEnv('QWEN_RUNTIME_DIR', join(rig.testDir!, '.qwen'));
+  vi.stubEnv('QWEN_CODE_NO_RELAUNCH', '1');
+  vi.stubEnv('QWEN_CODE_SKIP_UPDATE_CHECK_ONCE', 'true');
 }
 
 describe('interactive Advisor command', () => {
@@ -132,6 +134,7 @@ describe('interactive Advisor command', () => {
       try {
         const ready = await rig.waitForText('YOLO mode', 15000);
         expect(ready, 'CLI did not start in interactive mode').toBe(true);
+        await sleep(1000);
 
         await type(ptyProcess, '/advisor');
         await type(ptyProcess, '\r');
@@ -156,7 +159,14 @@ describe('interactive Advisor command', () => {
       let mainRequestIndex = 0;
       server = await startFakeOpenAIServer(({ body }) => {
         if (body['model'] === 'advisor-model') {
-          return { content: 'Interactive Advisor advice.' };
+          return {
+            content: JSON.stringify({
+              verdict: 'Interactive Advisor advice.',
+              risks: 'None found',
+              missingEvidence: 'None found',
+              recommendation: 'Continue with the TUI task.',
+            }),
+          };
         }
 
         if (body['stream'] !== true) {
@@ -194,6 +204,7 @@ describe('interactive Advisor command', () => {
       try {
         const ready = await rig.waitForText('YOLO mode', 15000);
         expect(ready, 'CLI did not start in interactive mode').toBe(true);
+        await sleep(1000);
 
         await type(ptyProcess, '/advisor advisor-model');
         await type(ptyProcess, '\r');

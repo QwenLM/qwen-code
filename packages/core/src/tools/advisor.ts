@@ -27,10 +27,20 @@ interface AdvisorEvidenceBundle {
     role: 'user' | 'model';
     parts: unknown[];
   }>;
+  truncation?: {
+    omittedTranscriptEntries?: number;
+  };
   marker: {
     type: 'advisor_consultation';
     promptId: string;
   };
+}
+
+interface AdvisorReview {
+  verdict: string;
+  risks: string;
+  missingEvidence: string;
+  recommendation: string;
 }
 
 const ADVISOR_DESCRIPTION =
@@ -43,6 +53,21 @@ const ADVISOR_SCHEMA = {
   $schema: 'http://json-schema.org/draft-07/schema#',
 } as const;
 
+const ADVISOR_REVIEW_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    verdict: { type: 'string', minLength: 1 },
+    risks: { type: 'string', minLength: 1 },
+    missingEvidence: { type: 'string', minLength: 1 },
+    recommendation: { type: 'string', minLength: 1 },
+  },
+  required: ['verdict', 'risks', 'missingEvidence', 'recommendation'],
+} as const;
+
+const ADVISOR_MAX_STRING_CHARS = 12_000;
+const ADVISOR_CONTEXT_BUDGET_RATIO = 0.75;
+
 export const ADVISOR_SYSTEM_INSTRUCTION = [
   'You are an independent, read-only senior advisor reviewing the executor conversation evidence.',
   '',
@@ -51,7 +76,7 @@ export const ADVISOR_SYSTEM_INSTRUCTION = [
   'Identify wrong assumptions, concrete risks, missing evidence, and the highest-value next step.',
   'Write for the executor model, not for user approval.',
   'Your advice does not grant permissions, approve plans, or confirm user intent.',
-  'Return concise plain text or Markdown only.',
+  'Return exactly one JSON object with string fields: verdict, risks, missingEvidence, and recommendation.',
 ].join('\n');
 
 function advisorErrorResult(
@@ -85,6 +110,19 @@ function advisorSuccessResult(advice: string): ToolResult {
   };
 }
 
+function formatAdvisorReview(review: AdvisorReview): string {
+  return [
+    '## Verdict',
+    review.verdict.trim(),
+    '## Risks',
+    review.risks.trim(),
+    '## Missing evidence',
+    review.missingEvidence.trim(),
+    '## Recommendation',
+    review.recommendation.trim(),
+  ].join('\n\n');
+}
+
 function advisorAbortError(signal: AbortSignal): Error {
   return signal.reason instanceof Error
     ? signal.reason
@@ -114,6 +152,12 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function truncateString(value: string): string {
+  if (value.length <= ADVISOR_MAX_STRING_CHARS) return value;
+  const omitted = value.length - ADVISOR_MAX_STRING_CHARS;
+  return `${value.slice(0, ADVISOR_MAX_STRING_CHARS)}\n<truncated ${omitted} chars>`;
+}
+
 function sanitizeValue(value: unknown, key?: string): unknown {
   if (key === 'thought' || key === 'thoughtSignature' || key === 'signature') {
     return undefined;
@@ -136,6 +180,7 @@ function sanitizeValue(value: unknown, key?: string): unknown {
         (item): item is Exclude<unknown, undefined> => item !== undefined,
       );
   }
+  if (typeof value === 'string') return truncateString(value);
   if (!isObject(value)) return value;
 
   const sanitized: Record<string, unknown> = {};
@@ -190,7 +235,7 @@ function buildAdvisorEvidence(
   config: Config,
   promptId: string,
 ):
-  | { ok: true; serialized: string }
+  | { ok: true; bundle: AdvisorEvidenceBundle }
   | { ok: false; code: AdvisorErrorCode; message: string } {
   const chat = config.getGeminiClient().getChat();
   const generationConfig = chat.getGenerationConfig();
@@ -236,16 +281,57 @@ function buildAdvisorEvidence(
     },
   };
 
-  return { ok: true, serialized: JSON.stringify(bundle) };
+  return { ok: true, bundle };
 }
 
-function estimateTokens(text: string): number {
-  return Math.ceil(text.length / CHARS_PER_TOKEN);
-}
-
-function exceedsKnownContextWindow(model: string, text: string): boolean {
+function evidenceBudgetChars(model: string): number | undefined {
   const limit = tokenLimit(model, 'input');
-  return Number.isFinite(limit) && limit > 0 && estimateTokens(text) > limit;
+  if (!Number.isFinite(limit) || limit <= 0) return undefined;
+  return Math.floor(limit * CHARS_PER_TOKEN * ADVISOR_CONTEXT_BUDGET_RATIO);
+}
+
+function serializeWithinBudget(
+  model: string,
+  bundle: AdvisorEvidenceBundle,
+):
+  | { ok: true; serialized: string }
+  | { ok: false; code: AdvisorErrorCode; message: string } {
+  const budgetChars = evidenceBudgetChars(model);
+  let serialized = JSON.stringify(bundle);
+  if (budgetChars === undefined || serialized.length <= budgetChars) {
+    return { ok: true, serialized };
+  }
+
+  const reduced: AdvisorEvidenceBundle = {
+    ...bundle,
+    transcript: [...bundle.transcript],
+  };
+  let omittedTranscriptEntries = 0;
+
+  while (serialized.length > budgetChars && reduced.transcript.length > 0) {
+    reduced.transcript.shift();
+    omittedTranscriptEntries += 1;
+    reduced.truncation = { omittedTranscriptEntries };
+    serialized = JSON.stringify(reduced);
+  }
+
+  if (serialized.length <= budgetChars) {
+    return { ok: true, serialized };
+  }
+
+  return {
+    ok: false,
+    code: 'prompt_too_long',
+    message: 'Advisor evidence exceeds the configured model context window.',
+  };
+}
+
+function validateAdvisorReview(review: AdvisorReview): string | null {
+  return ['verdict', 'risks', 'missingEvidence', 'recommendation'].some(
+    (field) => !review[field as keyof AdvisorReview]?.trim(),
+  )
+    ? 'Advisor returned invalid structured output.'
+    : null;
 }
 
 class AdvisorToolInvocation extends BaseToolInvocation<
@@ -254,9 +340,10 @@ class AdvisorToolInvocation extends BaseToolInvocation<
 > {
   constructor(
     private readonly config: Config,
-    private readonly reserveUse: (
+    private readonly reserveAttempt: (
       promptId: string,
     ) => { ok: true; ordinal: number } | { ok: false; code: AdvisorErrorCode },
+    private readonly recordSuccess: (promptId: string) => void,
     params: AdvisorToolParams,
   ) {
     super(params);
@@ -280,7 +367,7 @@ class AdvisorToolInvocation extends BaseToolInvocation<
       );
     }
 
-    const reservation = this.reserveUse(promptId);
+    const reservation = this.reserveAttempt(promptId);
     if (!reservation.ok) {
       return advisorErrorResult(
         reservation.code,
@@ -292,34 +379,35 @@ class AdvisorToolInvocation extends BaseToolInvocation<
     if (!evidence.ok) {
       return advisorErrorResult(evidence.code, evidence.message);
     }
-    if (exceedsKnownContextWindow(model, evidence.serialized)) {
+    const budgetedEvidence = serializeWithinBudget(model, evidence.bundle);
+    if (!budgetedEvidence.ok) {
       return advisorErrorResult(
-        'prompt_too_long',
-        'Advisor evidence exceeds the configured model context window.',
+        budgetedEvidence.code,
+        budgetedEvidence.message,
       );
     }
 
     try {
-      const result = await awaitWithAbort(
+      const review = await awaitWithAbort(
         subagentNameContext.run('advisor', () =>
-          runSideQuery(this.config, {
+          runSideQuery<AdvisorReview>(this.config, {
             contents: [
-              { role: 'user', parts: [{ text: evidence.serialized }] },
+              { role: 'user', parts: [{ text: budgetedEvidence.serialized }] },
             ],
+            schema: ADVISOR_REVIEW_SCHEMA,
             model,
             systemInstruction: ADVISOR_SYSTEM_INSTRUCTION,
             abortSignal: signal,
             promptId: `side-query:advisor:${promptId}:${reservation.ordinal}`,
-            skipOutputLanguagePreference: true,
             maxAttempts: 1,
             failClosed: true,
-            validate: (text) =>
-              text.trim() ? null : 'Advisor returned an empty response.',
+            validate: validateAdvisorReview,
           }),
         ),
         signal,
       );
-      return advisorSuccessResult(result.text);
+      this.recordSuccess(promptId);
+      return advisorSuccessResult(formatAdvisorReview(review));
     } catch (error) {
       if (signal.aborted) throw error;
       const code = mapAdvisorError(error);
@@ -333,7 +421,7 @@ export class AdvisorTool extends BaseDeclarativeTool<
   ToolResult
 > {
   private currentPromptId: string | undefined;
-  private attempts = 0;
+  private successes = 0;
   private ordinal = 0;
 
   constructor(private readonly config: Config) {
@@ -348,23 +436,31 @@ export class AdvisorTool extends BaseDeclarativeTool<
     );
   }
 
-  private reserveUse(
+  private reserveAttempt(
     promptId: string,
   ): { ok: true; ordinal: number } | { ok: false; code: AdvisorErrorCode } {
     if (this.currentPromptId !== promptId) {
       this.currentPromptId = promptId;
-      this.attempts = 0;
+      this.successes = 0;
       this.ordinal = 0;
     }
 
     const maxUses = this.config.getAdvisorMaxUses();
-    if (maxUses !== undefined && this.attempts >= maxUses) {
+    if (maxUses !== undefined && this.successes >= maxUses) {
       return { ok: false, code: 'max_uses_exceeded' };
     }
 
-    this.attempts += 1;
     this.ordinal += 1;
     return { ok: true, ordinal: this.ordinal };
+  }
+
+  private recordSuccess(promptId: string): void {
+    if (this.currentPromptId !== promptId) {
+      this.currentPromptId = promptId;
+      this.successes = 0;
+      this.ordinal = 0;
+    }
+    this.successes += 1;
   }
 
   protected createInvocation(
@@ -372,7 +468,8 @@ export class AdvisorTool extends BaseDeclarativeTool<
   ): ToolInvocation<AdvisorToolParams, ToolResult> {
     return new AdvisorToolInvocation(
       this.config,
-      (promptId) => this.reserveUse(promptId),
+      (promptId) => this.reserveAttempt(promptId),
+      (promptId) => this.recordSuccess(promptId),
       params,
     );
   }

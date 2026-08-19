@@ -14,10 +14,22 @@ import { ToolNames } from './tool-names.js';
 import { Kind } from './tools.js';
 
 const mockRunSideQuery = vi.hoisted(() => vi.fn());
+const mockTokenLimit = vi.hoisted(() => vi.fn(() => 1_000_000));
 
 vi.mock('../utils/sideQuery.js', () => ({
   runSideQuery: mockRunSideQuery,
 }));
+
+vi.mock('../core/tokenLimits.js', () => ({
+  tokenLimit: mockTokenLimit,
+}));
+
+const ADVISOR_REVIEW = {
+  verdict: 'Check the edge case.',
+  risks: 'The current plan may miss retries.',
+  missingEvidence: 'No failing test output was shown.',
+  recommendation: 'Add a focused regression test.',
+};
 
 function makeConfig(options: {
   advisorModel?: string;
@@ -68,7 +80,8 @@ function makeConfig(options: {
 describe('AdvisorTool', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockRunSideQuery.mockResolvedValue({ text: 'check the edge case' });
+    mockTokenLimit.mockReturnValue(1_000_000);
+    mockRunSideQuery.mockResolvedValue(ADVISOR_REVIEW);
   });
 
   it('declares the native Advisor contract', async () => {
@@ -108,9 +121,11 @@ describe('AdvisorTool', () => {
         systemInstruction: ADVISOR_SYSTEM_INSTRUCTION,
         abortSignal: signal,
         promptId: 'side-query:advisor:prompt-1:1',
-        skipOutputLanguagePreference: true,
         maxAttempts: 1,
         failClosed: true,
+        schema: expect.objectContaining({
+          required: ['verdict', 'risks', 'missingEvidence', 'recommendation'],
+        }),
       }),
     );
     const [, options] = mockRunSideQuery.mock.calls[0];
@@ -148,7 +163,8 @@ describe('AdvisorTool', () => {
     });
     expect(result.error).toBeUndefined();
     expect(String(result.llmContent)).toContain('<advisor_feedback>');
-    expect(result.returnDisplay).toBe('check the edge case');
+    expect(result.returnDisplay).toContain('## Verdict');
+    expect(result.returnDisplay).toContain('Check the edge case.');
   });
 
   it('propagates user cancellation instead of returning a tool error', async () => {
@@ -276,6 +292,82 @@ describe('AdvisorTool', () => {
     ]);
   });
 
+  it('truncates oversized text values before sending evidence', async () => {
+    const longOutput = 'x'.repeat(12_050);
+    const config = makeConfig({
+      advisorModel: 'advisor-model',
+      history: [
+        {
+          role: 'user',
+          parts: [{ text: 'inspect the generated output' }],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'run_shell_command',
+                response: { output: longOutput },
+              },
+            },
+          ],
+        },
+        {
+          role: 'model',
+          parts: [
+            { text: 'The output is large.' },
+            { functionCall: { name: ToolNames.ADVISOR, args: {} } },
+          ],
+        },
+      ],
+    });
+
+    await promptIdContext.run('prompt-1', () =>
+      new AdvisorTool(config).build({}).execute(new AbortController().signal),
+    );
+
+    const [, options] = mockRunSideQuery.mock.calls[0];
+    const evidence = JSON.parse(options.contents[0].parts[0].text);
+    const output =
+      evidence.transcript[1].parts[0].functionResponse.response.output;
+    expect(output).toContain('<truncated 50 chars>');
+    expect(output).not.toBe(longOutput);
+  });
+
+  it('omits oldest transcript entries to fit the Advisor model context', async () => {
+    mockTokenLimit.mockReturnValue(32_768);
+    const history: Content[] = Array.from({ length: 20 }, (_, index) => ({
+      role: 'user',
+      parts: [{ text: `old-${index}-${'x'.repeat(12_000)}` }],
+    }));
+    history.push(
+      {
+        role: 'user',
+        parts: [{ text: 'keep the most recent evidence' }],
+      },
+      {
+        role: 'model',
+        parts: [
+          { text: 'Ready to ask Advisor.' },
+          { functionCall: { name: ToolNames.ADVISOR, args: {} } },
+        ],
+      },
+    );
+
+    const config = makeConfig({ advisorModel: 'small-advisor-model', history });
+
+    await promptIdContext.run('prompt-1', () =>
+      new AdvisorTool(config).build({}).execute(new AbortController().signal),
+    );
+
+    const [, options] = mockRunSideQuery.mock.calls[0];
+    const evidenceText = options.contents[0].parts[0].text;
+    const evidence = JSON.parse(evidenceText);
+    expect(evidenceText.length).toBeLessThanOrEqual(32_768 * 4 * 0.75);
+    expect(evidence.truncation.omittedTranscriptEntries).toBeGreaterThan(0);
+    expect(evidenceText).toContain('keep the most recent evidence');
+  });
+
   it('returns disabled without calling the provider when Advisor is off', async () => {
     const tool = new AdvisorTool(makeConfig({ advisorModel: undefined }));
 
@@ -317,7 +409,7 @@ describe('AdvisorTool', () => {
     );
   });
 
-  it('consumes configured uses before failed requests and resets for a new prompt', async () => {
+  it('does not consume configured uses for failed requests', async () => {
     mockRunSideQuery.mockRejectedValueOnce(new Error('temporary failure'));
     const tool = new AdvisorTool(
       makeConfig({ advisorModel: 'advisor-model', advisorMaxUses: 1 }),
@@ -332,15 +424,19 @@ describe('AdvisorTool', () => {
     const third = await promptIdContext.run('prompt-2', () =>
       tool.build({}).execute(new AbortController().signal),
     );
+    const fourth = await promptIdContext.run('prompt-2', () =>
+      tool.build({}).execute(new AbortController().signal),
+    );
 
-    expect(mockRunSideQuery).toHaveBeenCalledTimes(2);
-    expect(String(second.llmContent)).toContain('code="max_uses_exceeded"');
+    expect(mockRunSideQuery).toHaveBeenCalledTimes(3);
+    expect(second.error).toBeUndefined();
     expect(third.error).toBeUndefined();
+    expect(String(fourth.llmContent)).toContain('code="max_uses_exceeded"');
   });
 
-  it('maps empty Advisor responses to invalid_response', async () => {
+  it('maps invalid Advisor responses to invalid_response', async () => {
     mockRunSideQuery.mockRejectedValueOnce(
-      new Error('Advisor returned an empty response.'),
+      new Error('Invalid side query response: missing verdict'),
     );
     const tool = new AdvisorTool(makeConfig({ advisorModel: 'advisor-model' }));
 
