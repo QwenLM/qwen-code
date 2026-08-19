@@ -6281,20 +6281,86 @@ jobs:
             # inline-comment id to its review thread, so the threads are
             # fetched once here and shared. Hoisted above both so a round that
             # only replies (no resolved-comments.txt) still has them.
-            # first-100 page cap: a comment in a thread past this page is not
-            # mapped, and each block falls back to the id as given.
+            # Paginated, because GitHub returns reviewThreads in ASCENDING
+            # creation order: a single first-100 page is the OLDEST hundred,
+            # which on a long-running PR is precisely not the threads this
+            # round is answering. Measured on #8403 (1256 threads): one page
+            # reached 8% of them, so an implemented Critical past it stayed
+            # open and read as unaddressed, and a decline past it was answered
+            # by silence — the two outcomes this function exists to prevent.
+            # A partial fetch is USED, not discarded: losing twelve good pages
+            # to a rate limit on the thirteenth would resolve nothing at all,
+            # so the failure is announced and the threads in hand still map.
+            # Residual: a thread with more than 100 comments still truncates,
+            # so a comment past that page is unmapped and each block falls
+            # back to the id as given; announced below, and unobserved so far.
+            # Do NOT close that residual by adding endCursor to the inner
+            # comments pageInfo: gh's paginator adopts the FIRST pageInfo
+            # carrying both hasNextPage and endCursor, so the inner one would
+            # hijack the thread-page cursor and stop after page one (exit 0, no
+            # warning) — silently restoring the oldest-hundred bug this fetch
+            # exists to fix. The outer cursor wins only because the inner
+            # pageInfo asks for hasNextPage alone. The outer field ORDER is
+            # load-bearing for the same reason: the scanner carries its flags
+            # across pageInfo objects and breaks at the first one yielding
+            # both, so alphabetizing to pageInfo{endCursor hasNextPage} makes
+            # it break on the outer endCursor while hasNextPage still carries
+            # the last INNER page's value (almost always false — thread comment
+            # pages rarely truncate, and the outer page's own hasNextPage is
+            # read only after the break) — gh then returns no cursor and the
+            # walk silently stops after page one.
             if [[ -s "${WORKDIR}/resolved-comments.txt" || -s "${WORKDIR}/comment-replies.json" ]]; then
-              THREADS_RAW="$(gh api graphql -f owner="${REPO%%/*}" -f name="${REPO##*/}" -F pr="${PR}" -f query='
-                query($owner:String!,$name:String!,$pr:Int!){
+              THREADS_FETCH_OK='true'
+              # gh's stderr goes to a fresh mktemp regular file, never a named
+              # WORKDIR path: WORKDIR is bind-mounted read-write into the agent
+              # sandbox, so branch code from the round that just ran can plant
+              # anything it likes at a predictable name here. A planted FIFO
+              # blocks bash's O_WRONLY open before gh even execs, and the only
+              # reader is the tail below gh — so the step would hang to the job
+              # timeout AFTER the push landed, losing the report and the round
+              # markers and breaking this block's own invariant that a resolve
+              # failure must never fail a good push. A planted symlink would
+              # instead truncate its target and fold 300 bytes of it into a
+              # public ::warning::. Same reasoning, same shape as the `gh api
+              # user` checks elsewhere in this file.
+              threads_err_file="$(mktemp)"
+              THREADS_RAW="$(gh api graphql --paginate -f owner="${REPO%%/*}" -f name="${REPO##*/}" -F pr="${PR}" -f query='
+                query($owner:String!,$name:String!,$pr:Int!,$endCursor:String){
                   repository(owner:$owner,name:$name){
                     pullRequest(number:$pr){
-                      reviewThreads(first:100){nodes{id isResolved comments(first:100){nodes{databaseId}}} pageInfo{hasNextPage}}
+                      reviewThreads(first:100, after:$endCursor){
+                        nodes{id isResolved comments(first:100){nodes{databaseId} pageInfo{hasNextPage}}}
+                        pageInfo{hasNextPage endCursor}
+                      }
                     }
                   }
-                }' --jq '(.data.repository.pullRequest.reviewThreads // {nodes:[]})' 2> /dev/null || echo '{"nodes":[]}')"
-              THREADS_JSON="$(jq '.nodes' <<< "${THREADS_RAW}")"
-              if [[ "$(jq -r '.pageInfo.hasNextPage // false' <<< "${THREADS_RAW}")" == "true" ]]; then
-                echo "::warning::PR has more than 100 review threads; threads past the first page will not be resolved or answered in-thread"
+                }' --jq '.data.repository.pullRequest.reviewThreads.nodes[]' 2> "${threads_err_file}")" || THREADS_FETCH_OK='false'
+              # gh emits one node per line across every page; slurp them
+              # into the flat array both blocks below already expect. The
+              # stream is consumed inline into a shell variable and never
+              # lands in a WORKDIR json file, so it takes no part in the
+              # slurp normalizer the paginated WORKDIR fetches share.
+              # Keep only thread-shaped documents: on a failing page gh skips
+              # --jq and appends that page's raw response body (a rate-limit
+              # message, or a GraphQL error envelope) to stdout after the good
+              # nodes. Slurped unfiltered it becomes a stray element, and the
+              # consumers below iterate .comments.nodes[] over it and exit 5 —
+              # which under errexit aborts this step AFTER a good push, losing
+              # the report and the markers. Both invariants above forbid that:
+              # a resolve failure must never fail a good push, and a partial
+              # fetch is used rather than discarded.
+              THREADS_JSON="$(jq -s '[.[] | select(type == "object" and has("id") and has("comments"))]' <<< "${THREADS_RAW}" 2> /dev/null)" || THREADS_JSON='[]'
+              [[ -n "${THREADS_JSON}" ]] || THREADS_JSON='[]'
+              if [[ "${THREADS_FETCH_OK}" != 'true' ]]; then
+                # Fold in gh's stderr: the warning announces THAT pagination
+                # stopped, and only this says WHY — a transient rate limit
+                # (back off) reads identically to an expired PAT (rotate) or a
+                # network failure without it.
+                echo "::warning::review-thread pagination did not complete; $(jq 'length' <<< "${THREADS_JSON}") thread(s) fetched, and any thread past them will not be resolved or answered in-thread: $(tail -c 300 "${threads_err_file}" 2> /dev/null | tr '\r\n' '  ')"
+              fi
+              rm -f "${threads_err_file}"
+              if [[ "$(jq -r 'map(select(.comments.pageInfo.hasNextPage)) | length' <<< "${THREADS_JSON}")" != "0" ]]; then
+                echo "::warning::a review thread carries more than 100 comments; a comment past that page is not mapped to its thread"
               fi
             fi
             if [[ "${CAN_RESOLVE_THREADS}" == 'true' ]]; then
@@ -6383,8 +6449,9 @@ jobs:
                 # replies are not supported"), and rc_id can itself be a reply
                 # id — the feedback step lists every review comment, replies
                 # included. Map to the thread's top-level comment (the one
-                # valid target), falling back to rc_id when the thread is past
-                # the first-100 page cap and so absent from THREADS_JSON.
+                # valid target), falling back to rc_id when the comment is
+                # absent from THREADS_JSON — a thread past a partial fetch, or
+                # a comment past its own thread's first-100 comment page.
                 root_id="$(jq -r --argjson id "${rc_id}" \
                   'map(select(any(.comments.nodes[]; .databaseId == $id)))
                    | .[0].comments.nodes[0].databaseId // $id' <<< "${THREADS_JSON}")"
