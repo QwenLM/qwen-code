@@ -62,8 +62,7 @@ unambiguous contract ships.
 ```
 
 Directories use mode `0700`; files use `0600`. Each item is one versioned JSON object.
-Identifiers have a type prefix and collision-resistant random suffix, for example
-`t-4f9c2a81`, `a-c072e3bd`, and `d-6a139cf0`. Creating an item never scans for or reuses a
+Identifiers have a type prefix and UUID suffix. Creating an item never scans for or reuses a
 numeric id.
 
 All read-modify-write transitions and pruning run under the same board lock. Creation uses
