@@ -1133,6 +1133,8 @@ const EN: Messages = {
   'scheduledTasks.error.emptyPrompt': 'Prompt is required',
   'scheduledTasks.error.promptTooLong': (v) =>
     `Prompt exceeds ${v?.max ?? 100_000}-character limit`,
+  'scheduledTasks.error.goalActive':
+    'Cannot start a scheduled task while a Goal is active.',
   'scheduledTasks.error.toggleFailed': 'Failed to update task',
   'scheduledTasks.error.deleteFailed': 'Failed to delete task',
   'scheduledTasks.edit': 'Edit',
@@ -2087,6 +2089,11 @@ const EN: Messages = {
   'goals.error.createFailed': 'Failed to start the goal',
   'goals.error.saveFailed': 'Failed to save the goal',
   'goals.error.goalUnavailable': 'The goal is no longer available.',
+  'goals.error.requiresObjective': (v) =>
+    `/goal ${v?.keyword ?? 'set'} requires an objective.`,
+  'goals.error.invalidCommand': 'Invalid /goal command',
+  'goals.error.goalsUnavailable':
+    'The goals view is not available on this surface.',
   'goals.error.attachmentsUnsupported':
     'Remove attachments before using /goal.',
   'goals.error.editFailed': 'Failed to edit the goal',
@@ -4123,6 +4130,7 @@ const ZH: Messages = {
   'scheduledTasks.error.emptyPrompt': '提示词不能为空',
   'scheduledTasks.error.promptTooLong': (v) =>
     `提示词超过 ${v?.max ?? 100_000} 字符限制`,
+  'scheduledTasks.error.goalActive': '目标运行期间无法启动定时任务。',
   'scheduledTasks.error.toggleFailed': '更新任务失败',
   'scheduledTasks.error.deleteFailed': '删除任务失败',
   'scheduledTasks.edit': '编辑',
@@ -4997,6 +5005,10 @@ const ZH: Messages = {
   'goals.error.createFailed': '启动目标失败',
   'goals.error.saveFailed': '保存目标失败',
   'goals.error.goalUnavailable': '该目标已不可用。',
+  'goals.error.requiresObjective': (v) =>
+    `/goal ${v?.keyword ?? 'set'} 需要提供目标内容。`,
+  'goals.error.invalidCommand': '无效的 /goal 命令',
+  'goals.error.goalsUnavailable': '当前界面不支持打开目标视图。',
   'goals.error.attachmentsUnsupported': '使用 /goal 前请先移除附件。',
   'goals.error.editFailed': '编辑目标失败',
   'goals.error.pauseFailed': '暂停目标失败',

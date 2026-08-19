@@ -173,11 +173,20 @@ export function GoalsDialog({
     setFormError(null);
     try {
       if (editingGoal) {
-        const currentEditingGoal =
-          goals?.find((item) => item.sessionId === editingGoal.sessionId) ??
-          editingGoal;
-        const goal = currentEditingGoal.snapshot.goal;
-        if (!goal || goal.goalId !== editingGoal.snapshot.goal?.goalId) {
+        // No fallback to the stale snapshot: a session that has dropped out of
+        // the list entirely is exactly the "no longer available" case this
+        // branch reports, and resurrecting it would compare the stale goal
+        // against itself and send a stale expectedRevision the daemon rejects
+        // with a raw conflict error.
+        const currentEditingGoal = goals?.find(
+          (item) => item.sessionId === editingGoal.sessionId,
+        );
+        const goal = currentEditingGoal?.snapshot.goal;
+        if (
+          !currentEditingGoal ||
+          !goal ||
+          goal.goalId !== editingGoal.snapshot.goal?.goalId
+        ) {
           throw new Error(t('goals.error.goalUnavailable'));
         }
         await actions.controlGoal(
@@ -358,6 +367,11 @@ export function GoalsDialog({
           const goal = item.snapshot.goal;
           if (!goal) return null;
           const busy = busySessionIds.has(item.sessionId);
+          // The reducer rejects `edit` on a completed Goal, and completion does
+          // not bump the revision, so the version check passes and the edit
+          // dead-ends in an error toast. Gate the affordance the way
+          // pause/resume are gated.
+          const canEdit = goal.status !== 'complete';
           const canPause = goal.status === 'active';
           const canResume =
             goal.status === 'paused' ||
@@ -374,16 +388,18 @@ export function GoalsDialog({
                   {goal.objective}
                 </div>
                 <div className={styles.cardMenu}>
-                  <button
-                    type="button"
-                    className={styles.iconAction}
-                    onClick={() => openEdit(item)}
-                    disabled={busy}
-                    title={t('goal.edit')}
-                    aria-label={t('goal.edit')}
-                  >
-                    <Pencil size={15} aria-hidden="true" />
-                  </button>
+                  {canEdit && (
+                    <button
+                      type="button"
+                      className={styles.iconAction}
+                      onClick={() => openEdit(item)}
+                      disabled={busy}
+                      title={t('goal.edit')}
+                      aria-label={t('goal.edit')}
+                    >
+                      <Pencil size={15} aria-hidden="true" />
+                    </button>
+                  )}
                   {canPause && (
                     <button
                       type="button"

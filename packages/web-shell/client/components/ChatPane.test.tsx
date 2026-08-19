@@ -528,6 +528,59 @@ describe('ChatPane', () => {
     },
   );
 
+  it('lets the host slash handler intercept /goal before the control plane', () => {
+    // The prop contract says the host handler runs before Web Shell handles a
+    // slash command; the main composer honours that for /goal, so the pane has
+    // to as well or an override silently applies on one surface only.
+    const onSlashCommand = vi.fn(() => true);
+    render({ onSlashCommand, onOpenGoals: vi.fn() });
+    let returned: boolean | undefined;
+
+    act(() => {
+      returned = latestOnSubmit!('/goal pause');
+    });
+
+    expect(returned).toBe(true);
+    expect(onSlashCommand).toHaveBeenCalled();
+    expect(getGoal).not.toHaveBeenCalled();
+    expect(controlGoal).not.toHaveBeenCalled();
+  });
+
+  it('does not swallow a bare /goal when the pane has no goals view', () => {
+    // The side-task pane passes no `onOpenGoals`; consuming the text there
+    // opens nothing and shows nothing.
+    const onError = vi.fn();
+    render({ onError });
+    let returned: boolean | undefined;
+
+    act(() => {
+      returned = latestOnSubmit!('/goal');
+    });
+
+    expect(returned).toBe(false);
+    expect(onError).toHaveBeenCalledWith(
+      expect.any(Error),
+      'The goals view is not available on this surface.',
+    );
+  });
+
+  it('reports an objective-less /goal set without consuming it', () => {
+    const onError = vi.fn();
+    render({ onError, onOpenGoals: vi.fn() });
+    let returned: boolean | undefined;
+
+    act(() => {
+      returned = latestOnSubmit!('/goal set');
+    });
+
+    expect(returned).toBe(false);
+    expect(onError).toHaveBeenCalledWith(
+      expect.any(Error),
+      '/goal set requires an objective.',
+    );
+    expect(controlGoal).not.toHaveBeenCalled();
+  });
+
   it('offers Insert only while a turn is running', () => {
     // Between two Goal turns streaming is idle while the hold keeps queued
     // prompts visible. `insertQueuedPrompt` no-ops at idle, so the affordance

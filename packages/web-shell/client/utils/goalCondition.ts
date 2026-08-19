@@ -24,7 +24,7 @@ export type ParsedWebShellGoalCommand =
   | { kind: 'status' }
   | { kind: 'set' | 'edit'; objective: string }
   | { kind: 'pause' | 'resume' | 'clear' }
-  | { kind: 'error'; message: string };
+  | { kind: 'error'; keyword: 'set' | 'edit' };
 
 /** The argument of a `/goal …` command; `''` for a bare `/goal`. */
 export function goalArgOf(text: string): string {
@@ -42,12 +42,11 @@ export function parseWebShellGoalCommand(
   const keyword = head.toLowerCase();
   const objective = tail.join(' ').trim();
   if (keyword === 'set' || keyword === 'edit') {
+    // The message is the caller's to render: this module is imported by both
+    // composers and must not bake in an untranslated English string.
     return objective
       ? { kind: keyword, objective }
-      : {
-          kind: 'error',
-          message: `/goal ${keyword} requires an objective.`,
-        };
+      : { kind: 'error', keyword };
   }
   if (tail.length === 0) {
     if (keyword === 'pause') return { kind: 'pause' };

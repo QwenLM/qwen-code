@@ -524,6 +524,54 @@ describe('GoalsDialog', () => {
     });
   });
 
+  it('offers no Edit control for a completed goal', async () => {
+    // The reducer rejects `edit` on a completed Goal and completion does not
+    // bump the revision, so the version check passes and the edit dead-ends in
+    // an error toast — the affordance has to disappear with the capability.
+    await mount([
+      baseGoal({
+        snapshot: {
+          v: 2,
+          activity: 'idle',
+          goal: {
+            goalId: 'goal-1',
+            revision: 4,
+            objective: 'all tests pass',
+            status: 'complete',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 2,
+            activeTimeMs: 0,
+            createdAt: 1,
+            updatedAt: 2,
+          },
+        },
+      }),
+    ]);
+
+    expect(document.querySelector('button[aria-label="Edit goal"]')).toBeNull();
+  });
+
+  it('reports an edit for a vanished session as unavailable', async () => {
+    // Falling back to the stale snapshot would compare it against itself and
+    // send a stale expectedRevision, surfacing the daemon's raw conflict error
+    // instead of the friendly copy this path was written for.
+    await mount([baseGoal()]);
+
+    click(document.querySelector('button[aria-label="Edit goal"]'));
+    setTextarea('updated objective');
+    actions.listGoals.mockResolvedValue({ goals: [], droppedCount: 0 });
+    click(findButton('Refresh'));
+    await flush();
+
+    click(findButton('Save'));
+    await flush();
+
+    expect(actions.controlGoal).not.toHaveBeenCalled();
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      'no longer available',
+    );
+  });
+
   it('rejects an edit when polling finds a replacement goal', async () => {
     await mount([baseGoal()]);
 

@@ -48,7 +48,6 @@ import type {
   DaemonSessionArtifact,
   DaemonWorkspaceCapability,
   DaemonWorkspaceGitStatus,
-  GoalControlRequest,
   GoalSnapshotV2,
 } from '@qwen-code/sdk/daemon';
 
@@ -162,6 +161,7 @@ import {
 import { ScheduledTasksDialog } from './components/dialogs/ScheduledTasksDialog';
 import { GoalsDialog } from './components/dialogs/GoalsDialog';
 import { parseWebShellGoalCommand } from './utils/goalCondition';
+import { buildGoalControlRequest } from './utils/goalControlRequest';
 import { ExtensionsManagerPage } from './components/extensions/ExtensionsManagerPage';
 import { PluginManagerPage } from './components/plugins/PluginManagerPage';
 import { ChannelsManagerPage } from './components/channels/ChannelsManagerPage';
@@ -5221,7 +5221,7 @@ export function App({
     () =>
       connectionRef.current.sessionId !== undefined &&
       (connectionRef.current.goalState === undefined ||
-        goalSnapshotRef.current?.goal?.status === 'active'),
+        connectionRef.current.goalState.goal?.status === 'active'),
     [],
   );
   const refreshActiveSessionDisplayName = useCallback(async () => {
@@ -8290,13 +8290,11 @@ export function App({
   const enqueueManualRun = useCallback(
     (prompt: string): Promise<void> =>
       new Promise<void>((resolve, reject) => {
-        if (
-          connectionRef.current.goalState === undefined ||
-          connectionRef.current.goalState.goal?.status === 'active'
-        ) {
-          reject(
-            new Error('Cannot start a scheduled task while Goal is active'),
-          );
+        // Session-less means no Goal can exist (and `sendPrompt` allocates a
+        // session itself), so gate on the shared predicate rather than on a
+        // bare `goalState === undefined`, which also fires with no session.
+        if (isGoalGateBlocked()) {
+          reject(new Error(t('scheduledTasks.error.goalActive')));
           return;
         }
         let admitted = false;
@@ -8316,7 +8314,7 @@ export function App({
           },
         );
       }),
-    [sendPrompt],
+    [isGoalGateBlocked, sendPrompt, t],
   );
   // Enqueue the pending bound run once its session is the current, fully-loaded
   // one — driven both by the effect below (when the session switch changes a
@@ -8486,28 +8484,10 @@ export function App({
         ) {
           throw new Error(t('goals.error.goalUnavailable'));
         }
-        let request: GoalControlRequest;
-        if (action === 'create' || action === 'replace') {
-          if (!objective) throw new Error(t('goals.error.emptyCondition'));
-          request = goal
-            ? {
-                action: 'replace',
-                objective,
-                expectedGoalId: goal.goalId,
-                expectedRevision: goal.revision,
-              }
-            : { action: 'create', objective };
-        } else {
-          if (!goal) throw new Error(t('goals.error.goalUnavailable'));
-          request = {
-            action,
-            ...(action === 'edit'
-              ? { objective: objective ?? goal.objective }
-              : {}),
-            expectedGoalId: goal.goalId,
-            expectedRevision: goal.revision,
-          } as GoalControlRequest;
-        }
+        const request = buildGoalControlRequest(action, goal, objective, {
+          emptyObjective: t('goals.error.emptyCondition'),
+          goalUnavailable: t('goals.error.goalUnavailable'),
+        });
 
         if (!busyOwner.isCurrent()) {
           throw new Error(t('goals.error.goalUnavailable'));
@@ -8596,8 +8576,18 @@ export function App({
         return true;
       }
       if (operation.kind === 'error') {
-        reportError(new Error(operation.message), 'Invalid /goal command');
-        return true;
+        pushToast(
+          'error',
+          t('goals.error.requiresObjective', { keyword: operation.keyword }),
+        );
+        return false;
+      }
+      // Returning true wipes the composer, so the preconditions that can be
+      // checked here must be checked before that happens — a control typed
+      // without a session would otherwise lose its text to a toast.
+      if (!connectionRef.current.sessionId && operation.kind !== 'set') {
+        pushToast('error', t('localCommand.noSession'));
+        return false;
       }
 
       void (async () => {

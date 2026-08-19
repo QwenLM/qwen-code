@@ -28,7 +28,6 @@ import {
   type DaemonSessionArtifact,
   type DaemonSessionMonitorTaskStatus,
   type DaemonWorkspaceCapability,
-  type GoalControlRequest,
 } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall } from '../adapters/types';
 import { SubagentDetailsProvider } from '../subagentDetailsContext';
@@ -62,6 +61,7 @@ import {
 import { findMonitorTaskForTool } from '../utils/monitorTasks';
 import { invokeSlashCommandHandler } from '../utils/slash-command-action';
 import { parseWebShellGoalCommand } from '../utils/goalCondition';
+import { buildGoalControlRequest } from '../utils/goalControlRequest';
 import type { WebShellSlashCommandHandler } from '../App';
 import { getModelDisplayName } from '../utils/modelDisplay';
 import {
@@ -627,28 +627,10 @@ export function ChatPane({
         ) {
           throw new Error(t('goals.error.goalUnavailable'));
         }
-        let request: GoalControlRequest;
-        if (action === 'replace') {
-          if (!objective) throw new Error(t('goals.error.emptyCondition'));
-          request = goal
-            ? {
-                action,
-                objective,
-                expectedGoalId: goal.goalId,
-                expectedRevision: goal.revision,
-              }
-            : { action: 'create', objective };
-        } else {
-          if (!goal) throw new Error(t('goals.error.goalUnavailable'));
-          request = {
-            action,
-            ...(action === 'edit'
-              ? { objective: objective ?? goal.objective }
-              : {}),
-            expectedGoalId: goal.goalId,
-            expectedRevision: goal.revision,
-          } as GoalControlRequest;
-        }
+        const request = buildGoalControlRequest(action, goal, objective, {
+          emptyObjective: t('goals.error.emptyCondition'),
+          goalUnavailable: t('goals.error.goalUnavailable'),
+        });
         if (!busyOwner.isCurrent()) {
           throw new Error(t('goals.error.goalUnavailable'));
         }
@@ -712,6 +694,15 @@ export function ChatPane({
       if (!trimmed && (images?.length ?? 0) === 0 && (files?.length ?? 0) === 0)
         return false;
       if (admissionPayloadLocked) return false;
+      // The host handler is documented as running before Web Shell handles a
+      // slash command, so it gets `/goal` first here exactly as it does in the
+      // main composer — otherwise an override works on one surface only.
+      if (
+        trimmed &&
+        invokeSlashCommandHandler(text, onSlashCommandRef.current, reportError)
+      ) {
+        return true;
+      }
       if (/^\/goal(?:\s|$)/i.test(trimmed)) {
         // The same guard App.tsx applies before any slash handling: a control
         // that cannot reach the daemon must leave the text in the composer
@@ -736,12 +727,24 @@ export function ChatPane({
         }
         const operation = parseWebShellGoalCommand(trimmed);
         if (operation.kind === 'status') {
-          onOpenGoals?.();
+          // A pane without a Goals surface (the side-task pane passes no
+          // handler) would otherwise consume the text and open nothing.
+          if (!onOpenGoals) {
+            reportError(
+              new Error(t('goals.error.goalsUnavailable')),
+              t('goals.error.goalsUnavailable'),
+            );
+            return false;
+          }
+          onOpenGoals();
           return true;
         }
         if (operation.kind === 'error') {
-          reportError(new Error(operation.message), 'Invalid /goal command');
-          return true;
+          const message = t('goals.error.requiresObjective', {
+            keyword: operation.keyword,
+          });
+          reportError(new Error(message), message);
+          return false;
         }
         const action = operation.kind === 'set' ? 'replace' : operation.kind;
         const objective =
@@ -752,12 +755,6 @@ export function ChatPane({
         void controlGoal(action, objective).catch((error: unknown) => {
           reportError(error, `Failed to ${operation.kind} /goal`);
         });
-        return true;
-      }
-      if (
-        trimmed &&
-        invokeSlashCommandHandler(text, onSlashCommandRef.current, reportError)
-      ) {
         return true;
       }
       if (

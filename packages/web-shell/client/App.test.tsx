@@ -19887,6 +19887,75 @@ describe('App /goal command', () => {
     expect(rawEnqueuePrompt.mock.calls[0]?.[0]).toBe('bypass me');
   });
 
+  it('keeps a session-less /goal control in the composer', async () => {
+    // Returning true wipes the composer, so a control that cannot run without
+    // a session has to be refused before that happens — the async path would
+    // otherwise clear the text and leave only a toast.
+    mockConnection.sessionId = undefined;
+    renderApp();
+    await flush();
+
+    let accepted: boolean | undefined;
+    act(() => {
+      accepted = testState.latestChatEditorProps?.onSubmit(
+        '/goal clear',
+        undefined,
+        undefined,
+        editorCommit,
+      );
+    });
+    await flush();
+
+    expect(accepted).toBe(false);
+    expect(editorCommit).not.toHaveBeenCalled();
+    expect(mockSessionActions.controlGoal).not.toHaveBeenCalled();
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+  });
+
+  it('reports an objective-less /goal set through the i18n layer', async () => {
+    // `formatError` prefers `error.message`, so a hardcoded English string in
+    // the parser would reach the toast untranslated. Localized copy comes from
+    // the dictionaries, which the zh-CN mount below exercises.
+    const onToast = vi.fn();
+    const { rerender } = renderApp({ onToast });
+    await flush();
+
+    let accepted: boolean | undefined;
+    act(() => {
+      accepted = testState.latestChatEditorProps?.onSubmit(
+        '/goal set',
+        undefined,
+        undefined,
+        editorCommit,
+      );
+    });
+    await flush();
+
+    expect(accepted).toBe(false);
+    expect(editorCommit).not.toHaveBeenCalled();
+    expect(onToast).toHaveBeenCalledWith(
+      'error',
+      '/goal set requires an objective.',
+    );
+
+    act(() => rerender({ onToast, language: 'zh-CN' }));
+    await flush();
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit(
+        '/goal edit',
+        undefined,
+        undefined,
+        editorCommit,
+      );
+    });
+    await flush();
+
+    expect(onToast).toHaveBeenLastCalledWith(
+      'error',
+      '/goal edit 需要提供目标内容。',
+    );
+  });
+
   it('keeps /goal attachments in the composer instead of discarding them', async () => {
     renderApp();
     await flush();
@@ -20601,6 +20670,26 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
       await expect(run('do the thing', null)).rejects.toThrow(/Goal is active/);
     });
     expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('starts an unbound manual run when no session is attached yet', async () => {
+    // Session-less means no Goal can exist and `sendPrompt` allocates a session
+    // itself, so gating the run on an unknown Goal state here would make every
+    // Run now on a fresh workspace fail.
+    admitOnSend();
+    const { container, rerender } = renderApp();
+    await flush();
+    const run = await openRunHandler(container);
+    act(() => {
+      mockConnection.sessionId = undefined;
+      mockConnection.goalState = undefined;
+      rerender({});
+    });
+
+    await act(async () => {
+      await expect(run('do the thing', null)).resolves.toBeUndefined();
+    });
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalled();
   });
 
   it('waits for bound-session Goal hydration before admitting a run', async () => {
