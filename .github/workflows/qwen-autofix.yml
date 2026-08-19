@@ -1400,7 +1400,7 @@ jobs:
             exit 1
           fi
           printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
-          rm -f "${WORKDIR}/decision.json" "${WORKDIR}/failure.md"
+          rm -f "${WORKDIR}/decision.json" "${WORKDIR}/failure.md" "${WORKDIR}/failure.zh.md"
           node .qwen/skills/autofix/scripts/run-agent.mjs \
             --mode assess-candidates \
             --workdir "${WORKDIR}"
@@ -1572,7 +1572,7 @@ jobs:
             exit 1
           fi
           printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
-          rm -f "${WORKDIR}/failure.md"
+          rm -f "${WORKDIR}/failure.md" "${WORKDIR}/failure.zh.md"
           node .qwen/skills/autofix/scripts/run-agent.mjs \
             --mode develop-issue \
             --issue "${ISSUE}" \
@@ -1701,10 +1701,15 @@ jobs:
           if git rev-parse --verify "${BRANCH}" > /dev/null 2>&1; then
             git diff "origin/main...${BRANCH}" > "${WORKDIR}/fix.diff" || true
           fi
-          for f in decision.json pr-title.txt pr-body.md e2e-report.md failure.md fix.diff; do
+          for f in decision.json pr-title.txt pr-body.md e2e-report.md failure.md failure.zh.md fix.diff; do
             if [[ -f "${WORKDIR}/${f}" ]]; then
               echo "=============== ${f} ==============="
-              cat "${WORKDIR}/${f}"
+              # Agent-written content on step STDOUT: a line-start `::` would
+              # be parsed as a workflow command (::error::, ::add-mask::), the
+              # same reason the PR-lane dump loop neutralizes it. (The two
+              # step-SUMMARY loops write to a file, where `::` is not
+              # parsed.)
+              sed 's/::/;;/g' "${WORKDIR}/${f}"
               echo
             fi
           done
@@ -1856,7 +1861,7 @@ jobs:
           {
             echo "### Issue autofix${ISSUE:+ #${ISSUE}} — outcome=${OUTCOME:-unknown}${SUFFIX}"
             echo
-            for f in decision.json pr-title.txt pr-body.md e2e-report.md failure.md fix.diff; do
+            for f in decision.json pr-title.txt pr-body.md e2e-report.md failure.md failure.zh.md fix.diff; do
               if [[ -s "${WORKDIR}/${f}" ]]; then
                 echo "**${f}:**"
                 echo '```'
@@ -1879,23 +1884,62 @@ jobs:
           # shellcheck disable=SC2016
           if [[ -f "${WORKDIR}/failure.md" ]]; then
             REASON='no further automated attempts will be made on this issue.'
-            DETAIL="$(head -c 1500 "${WORKDIR}/failure.md")"
+            REASON_ZH='不会对该 issue 再做自动尝试。'
+            # Same hygiene as the PR-lane DETAIL_FILE excerpt: -c drops a
+            # partial multi-byte sequence the byte-level head -c may have
+            # split, and the markup neutralization stops a failure.md quoting
+            # HTML whose opener sits before the 1500-byte cut and closer
+            # after it (`<!--`) — or a contract-violating `<details` — from
+            # swallowing the 中文说明 <details> block appended below
+            # (|| true: iconv -c exits 1 when it discards a byte, which
+            # under set -eo pipefail would drop the whole comment post).
+            DETAIL="$(head -c 1500 "${WORKDIR}/failure.md" | iconv -f utf-8 -t utf-8 -c | sed -e 's/<!--/<!\\-\\-/g' -e 's/<[dD][eE][tT][aA][iI][lL][sS]/＜details/g' -e 's/<\/[dD][eE][tT][aA][iI][lL][sS]/＜\/details/g' -e 's/<[sS][uU][mM][mM][aA][rR][yY]/＜summary/g' || true)"
             LABEL_ARGS=(--remove-label 'autofix/in-progress' --add-label 'autofix/skip')
           elif [[ "${PUBLISH_OUTCOME}" == 'failure' ]]; then
             REASON='the issue will require the `autofix/approved` label to be re-added before any future automated attempt.'
+            REASON_ZH='该 issue 需要重新添加 `autofix/approved` 标签才能再次自动尝试。'
             DETAIL='The agent produced and verified a fix, but publishing the PR failed. Check the Publish PR step logs for the CI_DEV_BOT_PAT actor, git push, PR creation, or PR comment error.'
             LABEL_ARGS=(--remove-label 'autofix/in-progress')
           else
             REASON='the issue will require the `autofix/approved` label to be re-added before any future automated attempt.'
+            REASON_ZH='该 issue 需要重新添加 `autofix/approved` 标签才能再次自动尝试。'
             DETAIL='The run failed before producing a verified fix.'
             LABEL_ARGS=(--remove-label 'autofix/in-progress')
           fi
           gh issue edit "${ISSUE}" --repo "${REPO}" "${LABEL_ARGS[@]}" || true
-          gh issue comment "${ISSUE}" --repo "${REPO}" --body "🤖 Withdrawing the claim above — the automated fix attempt did not succeed; ${REASON}
+          # failure.zh.md is the agent's translation of failure.md (SKILL:
+          # GitHub Actions Rules); the same sanitization as the PR-lane
+          # handoff keeps a pathological translation from breaking markup.
+          ZH_DETAIL=''
+          if [[ -s "${WORKDIR}/failure.zh.md" ]]; then
+            ZH_DETAIL="$(head -c 3000 "${WORKDIR}/failure.zh.md" | iconv -f utf-8 -t utf-8 -c | sed -e 's/<!--/<!\\-\\-/g' -e 's/<[dD][eE][tT][aA][iI][lL][sS]/＜details/g' -e 's/<\/[dD][eE][tT][aA][iI][lL][sS]/＜\/details/g' -e 's/<[sS][uU][mM][mM][aA][rR][yY]/＜summary/g' || true)"
+          fi
+          BODY="🤖 Withdrawing the claim above — the automated fix attempt did not succeed; ${REASON}
 
           What the agent found, in case it helps a human contributor:
 
-          ${DETAIL}" || true
+          ${DETAIL}"
+          # The 中文说明 block renders UNCONDITIONALLY, mirroring the PR
+          # lane's floor: on the crash shapes run-agent.mjs writes failure.md
+          # itself with no zh companion, and degrading this lane to zero
+          # Chinese while the PR lane still shows HEADLINE_ZH contradicts the
+          # design doc §5 floor — so the translated REASON always renders,
+          # with the sanitized excerpt inside it only when present.
+          ZH_BLOCK="${REASON_ZH}"
+          if [[ -n "${ZH_DETAIL}" ]]; then
+            ZH_BLOCK="${ZH_BLOCK}
+
+          ${ZH_DETAIL}"
+          fi
+          BODY="${BODY}
+
+          <details>
+          <summary>中文说明</summary>
+
+          ${ZH_BLOCK}
+
+          </details>"
+          gh issue comment "${ISSUE}" --repo "${REPO}" --body "${BODY}" || true
           if [[ -n "${COMMENT_ID}" ]]; then
             gh api -X DELETE "/repos/${REPO}/issues/comments/${COMMENT_ID}" || true
           fi
@@ -5785,7 +5829,7 @@ jobs:
             exit 1
           fi
           printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
-          rm -f "${WORKDIR}/failure.md"
+          rm -f "${WORKDIR}/failure.md" "${WORKDIR}/failure.zh.md"
           # Prepare severed hooks for its PAT-bearing git ops; THIS step
           # holds no PAT, so the branch's own hooks may check the agent's
           # commits again. HONEST LIMIT: the model key (OPENAI_API_KEY) IS
@@ -5948,6 +5992,7 @@ jobs:
             "${WORKDIR}/address-summary.md" \
             "${WORKDIR}/no-action.md" \
             "${WORKDIR}/failure.md" \
+            "${WORKDIR}/failure.zh.md" \
             "${WORKDIR}/handoff.md" \
             "${WORKDIR}/gate-output.log" \
             "${WORKDIR}/gate-output.log.check" \
@@ -6101,7 +6146,7 @@ jobs:
           if git rev-parse --verify "${BRANCH}" > /dev/null 2>&1; then
             git diff "origin/main...${BRANCH}" > "${WORKDIR}/pr.diff" || true
           fi
-          for f in feedback.md address-summary.md no-action.md failure.md handoff.md gate-rejection.md gate-advisories.md agent-api-error agent-api-error-kind agent-timeout resolved-comments.txt comment-replies.json deferred-findings.json deferred-findings.carry.json deferred-findings.unmerged.json pr.diff; do
+          for f in feedback.md address-summary.md no-action.md failure.md failure.zh.md handoff.md gate-rejection.md gate-advisories.md agent-api-error agent-api-error-kind agent-timeout resolved-comments.txt comment-replies.json deferred-findings.json deferred-findings.carry.json deferred-findings.unmerged.json pr.diff; do
             if [[ -f "${WORKDIR}/${f}" ]]; then
               echo "=============== ${f} ==============="
               # Agent-written content: a line-start `::` would be parsed as a
@@ -6863,7 +6908,7 @@ jobs:
             echo "### PR #${PR}${ISSUE_REF} — outcome=${OUTCOME:-unknown}${SUFFIX}"
             echo "- Base conflict: ${CONFLICT:-unknown}"
             echo
-            for f in address-summary.md no-action.md failure.md handoff.md; do
+            for f in address-summary.md no-action.md failure.md failure.zh.md handoff.md; do
               if [[ -s "${WORKDIR}/${f}" ]]; then
                 echo "**${f}:**"
                 cat "${WORKDIR}/${f}"
@@ -6930,9 +6975,14 @@ jobs:
             API_ERROR_DETAIL=''
             API_ERROR_KIND=''
             if [[ -s "${WORKDIR}/agent-api-error" ]]; then
-              # First line only, comment-opener escaped (agent stdout can echo
+              # First line only, markup neutralized (agent stdout can echo
               # external PR-comment text and the marker regex spans '<!-- ... -->'
               # happily), and capped so a long span can't bloat the headline.
+              # The tag substitutions are not just the comment opener: this
+              # value flows into CAUSE_ZH -> HEADLINE_ZH, which renders INSIDE
+              # the 中文说明 <details> wrapper — a bare `</details` in the
+              # first 200 bytes would close that wrapper early and spill the
+              # zh excerpt outside it.
               # `cut -c` counts BYTES, so the cap can split a multi-byte
               # character - and the classifier deliberately matches CJK renders,
               # so a >200-byte Chinese error is a supported input, not a
@@ -6941,7 +6991,7 @@ jobs:
               # this step's `set -eo pipefail` would abort before the marker and
               # the gh pr comment - hence the `|| true`, same as the sibling
               # publish site below.
-              API_ERROR_DETAIL="$(head -n 1 "${WORKDIR}/agent-api-error" | sed 's/<!--/<!\\-\\-/g' | cut -c1-200 | iconv -f utf-8 -t utf-8 -c || true)"
+              API_ERROR_DETAIL="$(head -n 1 "${WORKDIR}/agent-api-error" | sed -e 's/<!--/<!\\-\\-/g' -e 's/<[dD][eE][tT][aA][iI][lL][sS]/＜details/g' -e 's/<\/[dD][eE][tT][aA][iI][lL][sS]/＜\/details/g' -e 's/<[sS][uU][mM][mM][aA][rR][yY]/＜summary/g' | cut -c1-200 | iconv -f utf-8 -t utf-8 -c || true)"
             fi
             if [[ -s "${WORKDIR}/agent-api-error-kind" ]]; then
               API_ERROR_KIND="$(head -n 1 "${WORKDIR}/agent-api-error-kind" | tr -cd 'a-z')"
@@ -7011,7 +7061,9 @@ jobs:
                 # it (avoid a duplicate).
                 if [[ -n "${API_ERROR_DETAIL}" ]]; then
                   CAUSE="could not reach the model — ${API_ERROR_DETAIL}"
+                  CAUSE_ZH="无法连接模型 —— ${API_ERROR_DETAIL}"
                   LAST_FIX="a maintainer should check the autofix model key/access, then re-arm"
+                  LAST_FIX_ZH="维护者应检查 autofix 模型密钥/访问权限，然后重新武装"
                 elif [[ -n "${AGENT_TIMEOUT}" ]]; then
                   # A timeout evaluated nothing, so the feedback is unaddressed
                   # and stays live for the retry. On a big / heavily-reviewed PR
@@ -7021,21 +7073,28 @@ jobs:
                   # silent — more budget cannot cure it, so the terminal advice
                   # points at the sandbox, not the budget knobs.
                   CAUSE="ran out of time before finishing (${AGENT_TIMEOUT})"
+                  CAUSE_ZH="在完成前耗尽了时间（${AGENT_TIMEOUT}）"
                   if [[ "${AGENT_TIMEOUT}" == 'idle-timeout'* ]]; then
                     LAST_FIX="a maintainer should check the sandbox image and runner docker daemon, then re-arm — raising the time budget cannot cure a silent sandbox"
+                    LAST_FIX_ZH="维护者应检查 sandbox 镜像与 runner 的 docker daemon，然后重新武装 —— 提高时间预算治不了静默的 sandbox"
                   else
                     LAST_FIX="a human should split the PR or raise the agent time budget and its step backstop, then re-arm"
+                    LAST_FIX_ZH="应由人工拆分 PR，或同时提高 agent 时间预算与其步骤兜底，然后重新武装"
                   fi
                 elif [[ -z "${DETAIL_FILE}" ]]; then
                   CAUSE="crashed before it could evaluate the feedback"
+                  CAUSE_ZH="在评估反馈之前崩溃"
                   LAST_FIX="a human should take over this PR"
+                  LAST_FIX_ZH="应由人工接管此 PR"
                 else
                   # A gate crash points the maintainer at the gate logs: the
                   # agent's commit is discarded with the runner, but the
                   # feedback watermark is preserved, so the retry re-attempts
                   # the same feedback rather than skipping it.
                   CAUSE="hit a verification-gate error before reaching a verdict"
+                  CAUSE_ZH="在得出结论之前遇到验证门错误"
                   LAST_FIX="a maintainer should check the gate logs, then re-arm"
+                  LAST_FIX_ZH="维护者应查看验证门日志，然后重新武装"
                 fi
                 # Budget retries by CAUSE. A transient 429/5xx self-heals, so
                 # it keeps the full round budget. An auth/access error that
@@ -7056,8 +7115,10 @@ jobs:
                 DISPLAY_ROUND=$(( MARK_ROUND < CAUSE_MAX ? MARK_ROUND : CAUSE_MAX ))
                 if [[ "${MARK_ROUND}" -lt "${CAUSE_MAX}" ]]; then
                   HEADLINE="🤖 AutoFix ${CAUSE} (attempt ${DISPLAY_ROUND}/${CAUSE_MAX}) — it will retry on the next scan."
+                  HEADLINE_ZH="🤖 AutoFix ${CAUSE_ZH}（第 ${DISPLAY_ROUND}/${CAUSE_MAX} 次尝试）—— 将在下次扫描时重试。"
                 else
                   HEADLINE="🤖 AutoFix ${CAUSE} (attempt ${DISPLAY_ROUND}/${CAUSE_MAX}) — this was the last automatic attempt; ${LAST_FIX}."
+                  HEADLINE_ZH="🤖 AutoFix ${CAUSE_ZH}（第 ${DISPLAY_ROUND}/${CAUSE_MAX} 次尝试）—— 这是最后一次自动尝试；${LAST_FIX_ZH}。"
                   # Stamp the terminal round so the scan's max-round gate skips
                   # this PR instead of re-handing-off every tick; the sentinel
                   # ts keeps the feedback live for a re-arm once the key is
@@ -7095,6 +7156,7 @@ jobs:
                   # this not-the-PR's-fault round from counting toward the cap.
                   MARK_TS='9999-12-31T23:59:59Z'
                   HEADLINE="🤖 AutoFix updated a stale base — the fix did not pass verification, but this PR was behind \`${DEFAULT_BRANCH:-main}\`, so it merged current main in via update-branch and will retry on the next scan. A stale base (a dependency or symbol main already changed) can fail the build without being the fix's fault; if it still fails once current, it hands off to a human."
+                  HEADLINE_ZH="🤖 AutoFix 更新了一个过期的 base —— 修复未通过验证，但本 PR 落后于 \`${DEFAULT_BRANCH:-main}\`，因此已通过 update-branch 合入当前 main，并将在下次扫描时重试。过期的 base（main 已改动的依赖或符号）可能让构建失败而并非修复本身的错；若 base 更新后仍然失败，将移交人工处理。"
                 else
                   # Say what actually happens next. The old "A human should
                   # take over this PR" read as a full release, but the loop
@@ -7110,7 +7172,11 @@ jobs:
                   # no gate decision, so a blanket clause would repeat the very
                   # wording-doesn't-match-behaviour bug this PR fixes.
                   GATE_CLAUSE=''
-                  [[ -s "${WORKDIR}/gate-rejection.md" ]] && GATE_CLAUSE=' — the verification gate rejected the attempt'
+                  GATE_CLAUSE_ZH=''
+                  if [[ -s "${WORKDIR}/gate-rejection.md" ]]; then
+                    GATE_CLAUSE=' — the verification gate rejected the attempt'
+                    GATE_CLAUSE_ZH=' —— 验证门拒绝了该尝试'
+                  fi
                   # Pre-existing failures get the honest clause: the rejection
                   # is not the agent's and the repair was deliberately skipped.
                   # The remedy depends on WHY it pre-exists, and this branch
@@ -7126,13 +7192,17 @@ jobs:
                   if [[ "${PREEXISTING}" == 'true' ]]; then
                     if [[ "${CMP_R:-}" == 'behind' || "${CMP_R:-}" == 'diverged' ]]; then
                       GATE_CLAUSE=' — the verification gate hit a PRE-EXISTING failure (present without this round'"'"'s commit); the repair pass may only amend the round'"'"'s own fix, so it cannot reach it — the branch needs a base update (merge main)'
+                      GATE_CLAUSE_ZH=' —— 验证门遇到的是一个先前已存在的失败（没有本轮提交时就在）；修复环节只能修正本轮自己的修复，触及不到它 —— 该分支需要更新 base（合并 main）'
                     elif [[ -z "${CMP_R:-}" ]]; then
                       GATE_CLAUSE=' — the verification gate hit a PRE-EXISTING failure (present without this round'"'"'s commit); the repair pass may only amend the round'"'"'s own fix, so it cannot reach it — the base state could not be compared (compare API failed), so check whether merging main resolves it before auditing the branch'"'"'s own pre-round code'
+                      GATE_CLAUSE_ZH=' —— 验证门遇到的是一个先前已存在的失败（没有本轮提交时就在）；修复环节只能修正本轮自己的修复，触及不到它 —— base 状态未能比较（compare API 失败），请先确认合并 main 能否解决，再审查该分支自身本轮之前的代码'
                     else
                       GATE_CLAUSE=' — the verification gate hit a PRE-EXISTING failure (present without this round'"'"'s commit); the repair pass may only amend the round'"'"'s own fix, so it cannot reach it — the branch'"'"'s own pre-round code needs attention'
+                      GATE_CLAUSE_ZH=' —— 验证门遇到的是一个先前已存在的失败（没有本轮提交时就在）；修复环节只能修正本轮自己的修复，触及不到它 —— 该分支自身本轮之前的代码需要处理'
                     fi
                   fi
                   HEADLINE="🤖 Could not produce a passing fix for this feedback (round ${MARK_ROUND}/${MAX_ROUNDS})${GATE_CLAUSE}. This item now needs a human; the loop stays engaged and still picks up new feedback and base conflicts, but will not retry this item on its own."
+                  HEADLINE_ZH="🤖 未能为该反馈产生可通过验证的修复（第 ${MARK_ROUND}/${MAX_ROUNDS} 轮）${GATE_CLAUSE_ZH}。此项现在需要人工处理；循环保持在线，仍会拾取新反馈与 base 冲突，但不会自行重试此项。"
                 fi
               fi
             elif [[ "${PREPARE_OUTCOME}" != 'success' && "${PREPARE_OUTCOME}" != 'failure' ]]; then
@@ -7157,9 +7227,11 @@ jobs:
               MARK_TS='9999-12-31T23:59:59Z'
               if [[ "${MARK_ROUND}" -lt "${MAX_ROUNDS}" ]]; then
                 HEADLINE="🤖 AutoFix could not start — a setup step failed (or the run was cancelled) before the agent ran, so no fix was attempted. This is normally a transient infra issue, a broken base build, or a cancelled run — not this PR. It will retry on the next scan."
+                HEADLINE_ZH="🤖 AutoFix 未能启动 —— 在 agent 运行之前某个准备步骤失败（或本次运行被取消），因此未尝试修复。这通常是瞬时的基础设施问题、损坏的 base 构建或被取消的运行 —— 与本 PR 无关。将在下次扫描时重试。"
               else
                 MARK_ROUND="${MAX_ROUNDS}"
                 HEADLINE="🤖 AutoFix could not start — reached the round cap (${MAX_ROUNDS}) because a setup step (base install/build) kept failing before the agent ran. This is infra or a persistently broken base, not this PR. Fix the base build, then comment \`${RETRY_COMMAND}\` to re-arm."
+                HEADLINE_ZH="🤖 AutoFix 未能启动 —— 由于准备步骤（base 安装/构建）在 agent 运行之前持续失败，已达到轮次上限（${MAX_ROUNDS}）。这是基础设施问题或持续损坏的 base，与本 PR 无关。请修复 base 构建，然后评论 \`${RETRY_COMMAND}\` 重新武装。"
               fi
             else
               # Prepare RAN (outcome success/failure) but produced no feedback to
@@ -7172,6 +7244,7 @@ jobs:
               # max-round guard would ignore.
               MARK_ROUND="${MAX_ROUNDS}"
               HEADLINE="🤖 AutoFix could not start evaluation — it crashed or timed out before reading the feedback, so no fix was attempted. This PR is now marked terminal and future scans (including forced dispatch) will skip it. To recover: delete this bot's terminal \`autofix-eval\` marker comment, then re-trigger if the failure looked transient."
+              HEADLINE_ZH="🤖 AutoFix 未能开始评估 —— 在读取反馈之前崩溃或超时，因此未尝试修复。本 PR 已被标记为终止，后续扫描（包括强制 dispatch）都会跳过它。恢复方法：删除本 bot 的终止性 \`autofix-eval\` 标记评论；若失败看起来是瞬时的，再重新触发。"
             fi
 
             # Consecutive-failure circuit breaker, distinct from the round cap.
@@ -7237,6 +7310,7 @@ jobs:
               if [[ "${CONSEC_FAIL}" -ge "${CONSECUTIVE_FAILURE_CAP}" ]]; then
                 MARK_ROUND="${MAX_ROUNDS}"
                 HEADLINE="🤖 AutoFix stopped after ${CONSEC_FAIL} consecutive rounds that failed to push anything (timeouts and/or gate rejections). Retrying at the same per-round budget is not converging — this usually means the PR is too large or conflicts with a fast-moving \`main\`. A human should rebase, split, or reduce it, then comment \`${RETRY_COMMAND}\` to re-arm. Until then future scans will skip this PR."
+                HEADLINE_ZH="🤖 AutoFix 已停止：连续 ${CONSEC_FAIL} 轮未能推送任何内容（超时和/或验证门拒绝）。以相同的单轮预算重试并不收敛 —— 这通常意味着 PR 过大，或与快速变动的 \`main\` 冲突。应由人工 rebase、拆分或缩减它，然后评论 \`${RETRY_COMMAND}\` 重新武装。在此之前，后续扫描将跳过本 PR。"
               fi
               # CUMULATIVE timeout breaker — the sibling of the consecutive
               # one above, for the failure shape it cannot see: timeouts
@@ -7273,17 +7347,22 @@ jobs:
                   # that already carries the cap — the exact rollout state
                   # of #7929/#7846).
                   IDLE_CLAUSE=''
+                  IDLE_CLAUSE_ZH=''
                   if [[ "${IDLE_N}" -gt 0 ]]; then
                     IDLE_CLAUSE=" ${IDLE_N} of those were silent-sandbox (idle) timeouts that no budget increase can cure — investigate the sandbox image and runner docker daemon for those."
+                    IDLE_CLAUSE_ZH="其中 ${IDLE_N} 次是静默 sandbox（idle）超时，提高预算也治不了 —— 请针对这些排查 sandbox 镜像与 runner 的 docker daemon。"
                   fi
                   # Mirror the round-level split: when EVERY counted timeout
                   # was idle, the closing remedy must not prescribe the
                   # budget increase the clause above just declared useless.
                   REMEDY='split or reduce the PR (or raise the agent time budget AND its step backstop together)'
+                  REMEDY_ZH='拆分或缩减该 PR（或同时提高 agent 时间预算与其步骤兜底）'
                   if [[ "${IDLE_N}" -ge "${TIMEOUT_N}" ]]; then
                     REMEDY='investigate the sandbox image and runner docker daemon'
+                    REMEDY_ZH='排查 sandbox 镜像与 runner 的 docker daemon'
                   fi
                   HEADLINE="🤖 AutoFix stopped: this counting window now contains ${TIMEOUT_N} time-budget exhaustions (pushed rounds in between included; this round itself may have failed differently). That is ${TIMEOUT_N} full agent runs that pushed nothing.${IDLE_CLAUSE} A human should ${REMEDY}, then comment \`${RETRY_COMMAND}\` to re-arm. Until then future scans will skip this PR."
+                  HEADLINE_ZH="🤖 AutoFix 已停止：当前计数窗口内已累计 ${TIMEOUT_N} 次时间预算耗尽（含其间推送过的轮次；本轮本身可能以别的方式失败）。即 ${TIMEOUT_N} 次完整 agent 运行没有推送任何内容。${IDLE_CLAUSE_ZH}应由人工${REMEDY_ZH}，然后评论 \`${RETRY_COMMAND}\` 重新武装。在此之前，后续扫描将跳过本 PR。"
                 fi
               fi
             fi
@@ -7310,7 +7389,13 @@ jobs:
                 # `set -eo pipefail` would abort the step and skip the marker + gh
                 # pr comment below — the exact silent stall this block prevents — so
                 # `|| true` keeps the (already-emitted) cleaned text and continues.
-                head -c 1500 "${DETAIL_FILE}" | iconv -f utf-8 -t utf-8 -c | sed 's/<!--/<!\\-\\-/g' || true
+                # The tag substitutions beyond `<!--` matter on the
+                # address-summary/no-action shapes: SKILL mandates those files
+                # END with their own collapsed <details> 中文说明 block, so a
+                # mid-size summary whose mandated tail straddles the 1500-byte
+                # cut leaves a live severed <details> opener that swallows the
+                # 中文说明 wrapper this step appends below.
+                head -c 1500 "${DETAIL_FILE}" | iconv -f utf-8 -t utf-8 -c | sed -e 's/<!--/<!\\-\\-/g' -e 's/<[dD][eE][tT][aA][iI][lL][sS]/＜details/g' -e 's/<\/[dD][eE][tT][aA][iI][lL][sS]/＜\/details/g' -e 's/<[sS][uU][mM][mM][aA][rR][yY]/＜summary/g' || true
               else
                 echo "AutoFix failed before producing a verified commit (the run crashed or timed out before it could explain why)."
               fi
@@ -7344,6 +7429,46 @@ jobs:
                 head -c 3900 "${WORKDIR}/gate-rejection.md" | iconv -f utf-8 -t utf-8 -c | sed 's/<!--/<!\\-\\-/g' || true
                 echo '<!-- autofix-gate-rejection-end -->'
               fi
+              # Bilingual companion. Repo convention is English first, Chinese
+              # in a collapsed <details>. failure.md itself stays English-only
+              # — a byte-truncated excerpt of it is embedded above, and a
+              # severed agent-written <details> there would swallow the rest of
+              # the comment. So the Chinese lives in a SEPARATE agent-written
+              # file, failure.zh.md, and the workflow wraps it in its OWN
+              # <details> below: the wrapper tags are emitted HERE and the
+              # closing </details> unconditionally, so a truncated translation
+              # can lose content but can never swallow the markers that follow.
+              # A missing failure.zh.md (run-agent.mjs wrote failure.md itself,
+              # or the agent skipped it) degrades to the headline translation
+              # alone — never fail the round over a missing translation.
+              echo
+              echo '<details>'
+              echo '<summary>中文说明</summary>'
+              echo
+              echo "${HEADLINE_ZH}"
+              if [[ -s "${WORKDIR}/failure.zh.md" ]]; then
+                echo
+                if [[ "${COMMITTED}" == "true" ]]; then
+                  echo "⚠️ 此改动未被推送 —— 下文引用的任何提交都只存在于 runner 工作区，已被丢弃。以下是 agent 的报告："
+                else
+                  echo "**停止前我了解到的情况：**"
+                fi
+                # Same byte-budget hygiene as the English excerpt above. 3000
+                # bytes ≈ 1000 CJK characters — roughly the information in the
+                # 1500-byte English excerpt. Beyond the `<!--` escape, also
+                # neutralize the tag forms that could interact with THIS
+                # wrapper: a translation quoting HTML is pathological (SKILL
+                # forbids HTML in failure.zh.md), but must not be able to open
+                # or close a <details>/<summary> that swallows the closing tag
+                # the workflow emits below.
+                head -c 3000 "${WORKDIR}/failure.zh.md" | iconv -f utf-8 -t utf-8 -c | sed -e 's/<!--/<!\\-\\-/g' -e 's/<[dD][eE][tT][aA][iI][lL][sS]/＜details/g' -e 's/<\/[dD][eE][tT][aA][iI][lL][sS]/＜\/details/g' -e 's/<[sS][uU][mM][mM][aA][rR][yY]/＜summary/g' || true
+              fi
+              if [[ -s "${WORKDIR}/gate-rejection.md" ]]; then
+                echo
+                echo "验证门的拒绝原因与日志证据见上方英文部分（gate-rejection 不翻译）。"
+              fi
+              echo
+              echo '</details>'
               echo
               echo
               echo "Run log: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"

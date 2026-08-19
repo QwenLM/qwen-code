@@ -38,11 +38,8 @@ import {
   type Severity,
   type Source,
 } from './findings.js';
+import { BRIEFS } from './lib/agent-briefs.js';
 import {
-  BUDGET_STOP_PHRASE,
-  BUDGET_STOP_PHRASE_ZH,
-  ROUND_CAP_PHRASE,
-  ROUND_CAP_PHRASE_ZH,
   budgetStopDisclosure,
   budgetStopEntry,
   budgetStopEntryZh,
@@ -83,11 +80,13 @@ import {
 } from './lib/ledger.js';
 import {
   CRITICAL_PREFIX,
+  LEADING_INVISIBLE_RE,
   SUGGESTION_PREFIX,
   carriedClaimLine,
   countInlineFindings,
   markerStrippedBody,
   severityOf,
+  stripSeverityPrefix,
   unmarkedComments,
   type DraftedComment,
 } from './lib/inline-counts.js';
@@ -95,7 +94,11 @@ import {
   MODEL_ID_MAX_CHARS,
   footerVersion,
   isFooterSafeModelId,
+  rendersAsNothing,
   reviewFooter,
+  stripCommentMarkerLines,
+  stripFooterSpans,
+  stripForUnattributedPost,
   stripReviewFooter,
 } from './lib/review-footer.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
@@ -791,21 +794,69 @@ export interface ComposeReviewResult {
 }
 
 /**
+ * A dimension head reduced to its comparable core: lowercased, `&` read as
+ * `and`, hyphen/space runs collapsed to one hyphen, and the label dressing
+ * (`the …`, `… check`, `… verification`) stripped — so the orchestrator's
+ * prose variants (`build-and-test`, `build & test`, `the build-and-test
+ * check`) all reduce to the same core as the brief's `publicLabel`.
+ */
+function canonicalDimensionHead(s: string): string {
+  return (
+    s
+      .toLowerCase()
+      // Spaced, not bare: a tight ampersand (`build&test`) must gain its
+      // separators BEFORE the hyphen collapse, or it canonicalises to
+      // `buildandtest` while the derived set holds `build-and-test` — the
+      // replaced regex accepted the tight form via `[-\s]?`.
+      .replace(/&/g, ' and ')
+      .replace(/[-\s]+/g, '-')
+      .replace(/^the-/, '')
+      .replace(/-(?:check|verification)$/, '')
+  );
+}
+
+/** The fully separator-less spelling — the loosest form the old regex took. */
+function squashedDimensionHead(s: string): string {
+  return canonicalDimensionHead(s).replace(/-/g, '');
+}
+
+/**
+ * The exempt heads, DERIVED from the briefs rather than restated: every role
+ * whose brief sets `readsDiff: false`, by its `publicLabel`. A hardcoded
+ * head list drifted from the machine source of truth it documented — a
+ * label rename (or a second non-diff role) would silently stop or fail to
+ * extend the exemption, and every budget-stopped round on a large repo
+ * would withhold the incremental anchor again: the full-diff re-review loop
+ * this exemption exists to kill, back by way of a string.
+ */
+const NON_DIFF_DIMENSION_HEADS: ReadonlySet<string> = new Set(
+  Object.values(BRIEFS)
+    .filter((b) => !b.readsDiff)
+    .map((b) => canonicalDimensionHead(b.publicLabel)),
+);
+/** Squashed twins of the set above, for the separator-less prose spellings
+ *  (`buildandtest`, `build andtest`) the replaced regex accepted via its
+ *  optional separators — refusing them re-opened the anchor-withholding
+ *  cost on a rare variant, in the safe but expensive direction. */
+const NON_DIFF_DIMENSION_HEADS_SQUASHED: ReadonlySet<string> = new Set(
+  [...NON_DIFF_DIMENSION_HEADS].map((h) => h.replace(/-/g, '')),
+);
+
+/**
  * Does this `unreviewedDimensions` entry name a dimension that reads no diff?
  *
  * Entries are prose the orchestrator writes, in the shape the skill documents:
  * a dimension name, optionally followed by its own reason after an em-dash
  * (`build-and-test — the integration suite never ran`). Only the head is
- * matched, and only against the ONE dimension whose brief sets
- * `readsDiff: false`.
+ * matched, and only against dimensions whose brief sets `readsDiff: false`
+ * (English labels only — the entries are the orchestrator's English prose;
+ * `publicLabelZh` is a rendering concern).
  */
 export function isNonDiffDimensionGap(entry: string): boolean {
-  const head = entry
-    .split(/[—–-]{1,2}\s/)[0]
-    .trim()
-    .toLowerCase();
-  return /^(?:the\s+)?build[-\s]?(?:and|&)[-\s]?test(?:\s+check|\s+verification)?$/.test(
-    head,
+  const head = entry.split(/[—–-]{1,2}\s/)[0].trim();
+  return (
+    NON_DIFF_DIMENSION_HEADS.has(canonicalDimensionHead(head)) ||
+    NON_DIFF_DIMENSION_HEADS_SQUASHED.has(squashedDimensionHead(head))
   );
 }
 
@@ -939,11 +990,25 @@ function asListLine(text: string, pr: PrIdentity | null): string {
  * count and a pointer instead of duplicating the untranslatable English
  * list — on #8388 that duplication alone doubled the body.
  */
-function formatCannotTell(cannotTell: string[], pr: PrIdentity | null): Bi {
+function formatCannotTell(
+  cannotTell: string[],
+  pr: PrIdentity | null,
+  attribution: boolean,
+): Bi {
   const parsed = cannotTell.map((raw) => {
-    const unmarked = raw.startsWith(CRITICAL_PREFIX)
-      ? raw.slice(CRITICAL_PREFIX.length).trim()
-      : raw;
+    // Entries arrive collapsed (one list item each); an unattributed entry
+    // goes through the full fixpoint sanitation — the entry is quoted into
+    // a body that carries no canonical footer, so a surviving footer or
+    // marker in any position would be the post's only attribution. The
+    // marker check goes through `severityOf` (trims first — a leading space
+    // used to leak the marker past this strip into the posted body), and
+    // the strip is iterative — a looping model drafts stacked markers and a
+    // single slice posts the second one.
+    const source = attribution ? raw : stripForUnattributedPost(raw);
+    const unmarked =
+      severityOf({ body: source }) === null
+        ? source
+        : stripSeverityPrefix(source).trim();
     const line = asListLine(boundDeferredLine(unmarked), pr);
     // A dangling ` — ` with nothing after it is reasonless — an empty-string
     // reason would become a group key and render `2 entries — :`. The bound
@@ -977,14 +1042,17 @@ function formatCannotTell(cannotTell: string[], pr: PrIdentity | null): Bi {
     if (p.reason !== null) byReason.set(p.reason, group);
   }
   const lines: string[] = [];
+  // The marker is the attributed template's severity signal; an unattributed
+  // post lists the unresolved entries without it.
+  const marker = attribution ? `${CRITICAL_PREFIX} ` : '';
   for (const { reason, heads } of groups) {
     if (heads.length === 1) {
       lines.push(
-        `- ${CRITICAL_PREFIX} ${heads[0]}${reason === null ? '' : ` — ${reason}`}`,
+        `- ${marker}${heads[0]}${reason === null ? '' : ` — ${reason}`}`,
       );
     } else {
       lines.push(
-        `- ${CRITICAL_PREFIX} ${heads.length} entries — ${reason}:`,
+        `- ${marker}${heads.length} entries — ${reason}:`,
         ...heads.map((head) => `  - ${head}`),
       );
     }
@@ -1036,17 +1104,21 @@ function toStringList(value: unknown, field: string): string[] {
  * only sees an entry's end, before the footer is appended, and a forged footer
  * inside one would otherwise post directly above the canonical footer. Entries
  * that normalize to nothing drop, so the field's count never overclaims its
- * rendered list.
+ * rendered list. The attribution-off leg routes through the full fixpoint
+ * chain like every other attribution-off body part: duplicates entries are
+ * transcribed from earlier rounds' posted findings, and every attribution-on
+ * round posts visible prefixes — a surviving marker or forged attribution
+ * line here would be the only attribution the post carries.
  */
 function strippedList(
   input: ComposeReviewInput,
-  key:
-    | 'bodyCriticals'
-    | 'suggestionsDroppedAsDuplicates'
-    | 'cannotTellCriticals',
+  key: 'suggestionsDroppedAsDuplicates',
+  attribution: boolean,
 ): string[] {
   return toStringList(input[key], key)
-    .map(stripReviewFooter)
+    .map((entry) =>
+      stripReviewFooter(attribution ? entry : stripForUnattributedPost(entry)),
+    )
     .filter((entry) => entry.trim() !== '');
 }
 
@@ -1184,9 +1256,11 @@ export function composeReview(
  *
  * The round is 0 when the plan names no PR or no previous round was
  * recovered: this is round 1. It is shared by the marker (which stamps
- * `prevRound + 1`) and the deferred-suggestions clause (which names the
- * round the posture engaged on), so the two cannot disagree about which
- * round this is.
+ * `Math.min(prevRound + 1, LEDGER_MAX_ROUND)`) and the deferred-suggestions
+ * clause (which names the round the posture engaged on, clamped
+ * identically), so the two cannot disagree about which round this is — at
+ * the cap included, where an unclamped `prevRound + 1` on either side would
+ * name round 10001 beside a round-10000 marker.
  *
  * Two facts, one read, on purpose: reading the file twice would let a
  * mid-compose rewrite pair round N's number with round N+1's volume in a
@@ -1259,11 +1333,10 @@ function ledgerMarkerFor(
     // The anchor rides only when this round's SCOPE was clean. An anchor
     // written past unreviewed scope scopes the NEXT round's incremental diff
     // past it, and no later round ever re-covers the gap — so every cap that
-    // could mean "part of this diff went unread" withholds it, plus one raw
-    // check for the sliver the cap list drops (a whitespace-only
-    // `cannotTellCriticals` entry is filtered out of the rendered caps, but
-    // Step 8's contract is "any entry" — an undecided blocker whose text was
-    // lost is still an undecided blocker). The findings always ride: a
+    // could mean "part of this diff went unread" withholds it. (A
+    // whitespace-only cannot-tell entry cannot reach this point: the
+    // renders-nothing gates fail the draft at ingest.) The findings always
+    // ride: a
     // fail-closed round's work list is still a work list; it just cannot
     // certify a range.
     //
@@ -1287,7 +1360,6 @@ function ledgerMarkerFor(
     // doubt about the reading itself, `scopeUnproven` carries it here and the
     // anchor is withheld exactly as before.
     const failClosed =
-      (input.cannotTellCriticals?.length ?? 0) > 0 ||
       scopeUnproven ||
       !dimensionGapsAreDepthOnly ||
       cappedBy.some((cap) => cap !== 'unreviewed-dimension');
@@ -1365,7 +1437,7 @@ function ledgerMarkerFor(
           body?: unknown;
         }>,
         [
-          ...strippedList(input, 'bodyCriticals'),
+          ...ingestEntryList(input.bodyCriticals, 'bodyCriticals'),
           // The same split the body performed: a relocated Critical is a
           // posted, counted blocker and must enter the work list.
           ...splitDeferralChannel(input.deferredSuggestions).relocated,
@@ -1391,6 +1463,74 @@ function ledgerMarkerFor(
   }
 }
 
+// One model-written entry folded onto one line — the shape it renders as,
+// and the shape the gates and the render legs must share: a forged footer
+// or marker can split across the entry's lines where neither half strips,
+// but the collapsed line carries it rejoined. By split/join, not a
+// `/\s*\n+\s*/g` replace: that regex backtracks quadratically on a long
+// whitespace run with no newline in it, and these entries are model-written
+// with no length cap — one such entry stalled a measured probe for seconds
+// at 80k characters.
+function collapseEntry(entry: string): string {
+  return entry.includes('\n')
+    ? entry
+        .split('\n')
+        .map((seg) => seg.trim())
+        .filter((seg) => seg !== '')
+        .join(' ')
+    : entry;
+}
+
+/** A line that is a code-fence delimiter: a ``` or ~~~ run, any info string. */
+const ENTRY_FENCE_DELIMITER_RE = /^(?:`{3,}|~{3,})/;
+
+/**
+ * A model-written entry list as EVERY consumer sees it: one line per entry,
+ * trailing footers gone. Stripped per entry, not on the assembled body:
+ * these strings render verbatim as the LAST body part, and a forged footer
+ * relocated into one would post directly above the canonical footer — the
+ * `$`-anchored regex only sees an entry's end, before the footer is
+ * appended. Collapsed ONCE at ingestion, before the gates: the gates, the
+ * render legs, and the ledger titles must project ONE shape — line-anchored
+ * strips have no power on the raw multi-line form, and a leg reading a
+ * different shape once carried a forged-attribution fragment the visible
+ * list had stripped. An entry containing a fence-delimiter line is refused
+ * instead: the collapse trims each line to a segment, so the delimiter
+ * surfaces in the posted one-line shape, where CommonMark reads a line
+ * starting ~~~ as an OPENING fence whose info string is the rest of the
+ * line — the unclosed fence swallows every later body part. A backtick pair
+ * degrades to an inline code span, but a truncated or info-bearing backtick
+ * opener breaks the same way; no fence survives the collapse, and a
+ * redraft is cheap while the draft is still in hand.
+ */
+function ingestEntryList(value: unknown, field: string): string[] {
+  // Line endings normalize to LF on the way in — CommonMark renders a bare
+  // `\r` as a line break, and the fence refusal and the collapser below
+  // both read lines: a CR-hidden delimiter slipped the refusal, and a
+  // CR-folded entry escaped the one-line render.
+  const raw = toStringList(value, field).map((entry) =>
+    entry.replace(/\r\n?/g, '\n'),
+  );
+  for (const entry of raw) {
+    if (
+      entry
+        .split('\n')
+        .some((line) => ENTRY_FENCE_DELIMITER_RE.test(line.trim()))
+    ) {
+      throw new Error(
+        `compose-review: ${
+          field === 'bodyCriticals' ? 'a body Critical' : 'a cannot-tell entry'
+        } quotes a code fence its one-line render cannot carry — redraft ` +
+          'it quoting the code inline or indented instead',
+      );
+    }
+  }
+  // No emptiness filter: an entry that normalizes to nothing must reach
+  // the renders-nothing gates and fail the draft, not vanish — see the
+  // invariant at the gates below.
+  return raw.map(collapseEntry).map(stripReviewFooter);
+}
+
 function composeReviewBody(
   input: ComposeReviewInput,
   cliVersion: string,
@@ -1410,7 +1550,24 @@ function composeReviewBody(
     input.suggestionsInline,
     'suggestionsInline',
   );
-  const bodyCriticals = strippedList(input, 'bodyCriticals');
+  const bodyCriticals = ingestEntryList(input.bodyCriticals, 'bodyCriticals');
+  // A body Critical that is nothing but scaffolding renders nothing yet
+  // would still count toward REQUEST_CHANGES — the inline-comment path
+  // refuses this shape at submit's gate; refuse it here too, while the
+  // draft is still cheap to fix. The gate checks the shape the render legs
+  // post: strip the trailing forged footer BEFORE the emptiness projection
+  // (mirroring `submit`'s gate) — otherwise a footer past the strip's caps
+  // passes as ballast, the render legs strip it entirely, and a bare-marker
+  // entry posts and counts.
+  for (const entry of bodyCriticals) {
+    if (rendersAsNothing(stripReviewFooter(stripForUnattributedPost(entry)))) {
+      throw new Error(
+        'compose-review: a body Critical renders as nothing (marker-only, ' +
+          'empty comment, or otherwise invisible) — redraft it with the ' +
+          "finding's description",
+      );
+    }
+  }
   const suggestionsDiscarded = toCount(
     input.suggestionsDiscarded,
     'suggestionsDiscarded',
@@ -1418,6 +1575,7 @@ function composeReviewBody(
   const suggestionsDroppedAsDuplicates = strippedList(
     input,
     'suggestionsDroppedAsDuplicates',
+    attribution,
   );
   // A Critical marker in the deferral channel is RELOCATED, never fatal and
   // never deferred: it counts toward `C`, the event blocks, and the round
@@ -1486,7 +1644,22 @@ function composeReviewBody(
   const severityFloor: 'critical' | 'suggestion' | 'auto' = floorKnown
     ? (floorRaw as 'critical' | 'suggestion' | 'auto')
     : 'auto';
-  const cannotTell = strippedList(input, 'cannotTellCriticals');
+  const cannotTell = ingestEntryList(
+    input.cannotTellCriticals,
+    'cannotTellCriticals',
+  );
+  // The same gate in the same order: an entry the render leg would reduce
+  // to nothing must fail the draft, not vanish — silently dropping it lifts
+  // the `cannot-tell-existing-critical` cap and flips the verdict.
+  for (const entry of cannotTell) {
+    if (rendersAsNothing(stripReviewFooter(stripForUnattributedPost(entry)))) {
+      throw new Error(
+        'compose-review: a cannot-tell entry renders as nothing ' +
+          '(marker-only, empty comment, or otherwise invisible) — ' +
+          "redraft it with the finding's description",
+      );
+    }
+  }
   const uncoverable = toStringList(
     input.uncoverableChunks,
     'uncoverableChunks',
@@ -1516,27 +1689,31 @@ function composeReviewBody(
   // (the stderr instruction asks for one) is a courtesy to the terminal
   // reader, and a run that drops the sentence still cannot approve past a
   // truncated audit. Rendered STRUCTURAL, both languages, like every other
-  // coverage entry — the orchestrator's relayed copy is English-only prose,
-  // so the marker's phrase dedups it out and the two channels never say it
-  // twice.
+  // coverage entry — the orchestrator's compliant relay is byte-identical
+  // canonical text, so the canonical-entry splice dedups it out and the two
+  // channels never say it twice.
   // The marker's entry is tracked by reference: its relays are deduped by
-  // the phrase splice here, so the caller-echo filter below must NOT also
+  // the canonical-entry splice here, so the caller-echo filter below must NOT also
   // prefix-match on its `reverse audit` subject — that shadow silently
   // dropped every OTHER reverse-audit scope the orchestrator disclosed
   // (`reverse audit — chunk 2's auditor returned nothing substantive
   // twice`), in exactly the runs where a partial audit makes such scopes
   // likeliest.
   /**
-   * Entries the budget-phrase splice below removes from the rendered list.
+   * Entries the canonical-relay splice below removes from the rendered list.
    *
    * The splice exists so the body does not say the same gap twice, and it
-   * matches on a PHRASE — so an entry that merely mentions the review time
+   * matches entries CONTAINING a full canonical stop entry — verbatim relays
+   * and prefix-reshaped ones alike ("step 5 — " ahead of the subject), which
+   * the coverage prefix filter cannot see. An earlier match on the bare stop
+   * PHRASE spliced more: an entry that merely mentioned the review time
    * budget in its free-form reason ("security — the review time budget ended
-   * the round before the security relaunch returned evidence") is spliced out
-   * too. Harmless while every cap withheld the anchor; not harmless now that
-   * one cap does not, because the spliced entry is exactly the line-coverage
-   * claim the anchor decision must see. Kept here so the decision can read the
-   * list AS DISCLOSED while the body renders the spliced one.
+   * the round before the security relaunch returned evidence") was dropped
+   * from the posted body, though it is exactly the line-coverage claim both
+   * the author and the anchor decision must see. Such entries now stay in
+   * `unreviewed` — rendered and capping. The spliced relays are kept here so
+   * the decision can read the list AS DISCLOSED while the body renders the
+   * structural stop line once.
    *
    * Collected rather than snapshotted: the deterministic gates push their own
    * machine-owed debts into `unreviewed` AFTER this point, and a snapshot
@@ -1573,20 +1750,29 @@ function composeReviewBody(
               budgetStopEntryZh(stop.round ?? undefined),
             ]);
       // A round-cap stop and a time-budget stop both cap the verdict, but
-      // read differently and dedup against a different relayed phrase. The
-      // marker's `cause` picks which; an absent cause is a time stop, for
-      // markers written before the cause field existed.
+      // read differently. The marker's `cause` picks which pair of canonical
+      // entries exists; an absent cause is a time stop, for markers written
+      // before the cause field existed.
       const isRoundCap = stop.cause === 'round-cap';
-      // BOTH languages: the exemption admits the Chinese pair as a compliant
-      // relay, so the splice must retire it too — an English-only phrase let
-      // a relayed `budgetStopEntryZh` survive into the whiffed-dimension
-      // rendering beside the structural stop line, the same gap said twice
-      // with the wrong cause on one of them.
-      const phrases = isRoundCap
-        ? [ROUND_CAP_PHRASE, ROUND_CAP_PHRASE_ZH]
-        : [BUDGET_STOP_PHRASE, BUDGET_STOP_PHRASE_ZH];
+      // Spliced on the FULL canonical entry text (both languages: the
+      // exemption admits the Chinese pair as a compliant relay, so the
+      // splice must retire it too, or the same gap renders twice beside the
+      // structural stop line) — as a substring, because an orchestrator
+      // relay arrives verbatim OR reshaped with a prefix ("step 5 — " ahead
+      // of the subject), and the coverage prefix filter cannot see the
+      // reshaped one. What the predicate must NOT be is the bare stop
+      // PHRASE: that retired more than the relays — a genuine line-coverage
+      // disclosure that merely mentions the budget in its free-form reason
+      // ("security — the review time budget ended the round before the
+      // security relaunch returned evidence") was dropped from the posted
+      // body, and the module's contract is that a disclosed gap reaches the
+      // author. Such entries now stay in `unreviewed` — rendered AND
+      // capping. (The anchor DECISION below stays exact-text: a reshaped
+      // relay spliced here still withholds, over-withholding being the safe
+      // direction.)
+      const entries = [...canonicalStopEntries];
       for (let i = unreviewed.length - 1; i >= 0; i--) {
-        if (phrases.some((ph) => unreviewed[i].includes(ph))) {
+        if (entries.some((c) => unreviewed[i].includes(c))) {
           splicedForBudgetPhrase.push(unreviewed[i]);
           unreviewed.splice(i, 1);
         }
@@ -2158,7 +2344,8 @@ function composeReviewBody(
   // both before this line (the orchestrator's own entries) and after the
   // snapshot an earlier fix took (the script-lint and layer-audit gates, whose
   // debts are machine-owed line-coverage claims). Reading it here plus the
-  // entries the phrase splice removed is the only list that sees every writer.
+  // entries the canonical-entry splice removed is the only list that sees
+  // every writer.
   //
   // The stop's own relayed entry classifies as DEPTH, and only against the
   // marker. A budget/round-cap stop truncates how many audit PASSES ran over
@@ -2173,9 +2360,10 @@ function composeReviewBody(
   // head-plus-phrase, and that shape also covers a genuine line-coverage claim
   // whose whiffed scope IS the reverse audit — `reverse audit — the review
   // time budget ended the round before the chunk-2 relaunch returned
-  // evidence` — which the phrase splice then also removes from the rendered
-  // body, so the anchor rode past a whiffed audit while the posted review
-  // showed only the benign disclosure. The machinery mints its entries from
+  // evidence` — which the then-substring splice also removed from the
+  // rendered body, so the anchor rode past a whiffed audit while the posted
+  // review showed only the benign disclosure (both predicates are exact
+  // now). The machinery mints its entries from
   // one generator pair, the stderr instruction relays them verbatim, and only
   // that text is exempt: marker-anchored (no marker, no exemption) AND
   // text-anchored (an edited or paraphrased entry withholds — over-withholding
@@ -2862,12 +3050,16 @@ function composeReviewBody(
           // was wrong in the shape that prompted the tag was the trim
           // notice claiming "Nothing blocking was trimmed" over a cut —
           // fixed where the claim is made, not by reordering the loss.
-          formatCannotTell(cannotTell, pr),
+          formatCannotTell(cannotTell, pr, attribution),
         ];
 
-  // Model-written blockers: quoted as-is in both halves.
+  // Model-written blockers: quoted as-is in both halves. The marker is the
+  // attributed template's severity signal; an unattributed post quotes the
+  // blocker through the full fixpoint sanitation — no prefix, no forged
+  // footer in any position (the body carries no canonical footer here, so
+  // a surviving forged one would be the post's only attribution).
   const bodyCriticalBlock: Bi[] = bodyCriticals
-    .map((l) => withMarker(l))
+    .map((l) => (attribution ? withMarker(l) : stripForUnattributedPost(l)))
     .map((l) => ({ keep: 2, en: l, zh: l }));
 
   // Confirmed-but-duplicate Suggestions — dropped from the payload by the
@@ -3021,7 +3213,12 @@ function composeReviewBody(
     .map(renderDeferredEntry)
     .map(boundDeferredLine);
   const deferredMore = deferredSuggestions.length - deferredShown.length;
-  const deferredRound = deferredSuggestions.length ? prevRound + 1 : 0;
+  // Clamped exactly as the marker stamp is: `prevRound` can BE the cap
+  // (parseLedger accepts round == LEDGER_MAX_ROUND), and an unclamped +1
+  // here named a past-cap round beside a round-at-cap marker.
+  const deferredRound = deferredSuggestions.length
+    ? Math.min(prevRound + 1, LEDGER_MAX_ROUND)
+    : 0;
   // The unlicensed-deferral disclosure precedes the list it disclaims: the
   // findings stay visible, but nothing may read the paragraph below as a
   // sanctioned deferral when the posture never licensed one.
@@ -4205,8 +4402,21 @@ export function buildLedger(
     // was silently absent from the ledger, shifting every id after it.
     const sev = severityOf(c);
     if (!sev) continue;
-    const line = carriedClaimLine(typeof c.body === 'string' ? c.body : '');
-    const { id: carried, title } = titleOf(line ?? '');
+    // carriedClaimLine is the ONE readback statement shared with presubmit's
+    // carried-id extractor — marker + separator (newline-consuming) + first
+    // line. Strip forged footer spans and leading render-nothing residue off
+    // it before titleOf: the ledger rides the posted body as an HTML comment
+    // the autofix grep reads, and residue between the marker and a carried id
+    // would defeat the id anchor and silently renumber the finding.
+    const claim = carriedClaimLine(typeof c.body === 'string' ? c.body : '');
+    const { id: carried, title } = titleOf(
+      claim === null
+        ? ''
+        : stripFooterSpans(stripCommentMarkerLines(claim)).replace(
+            LEADING_INVISIBLE_RE,
+            '',
+          ),
+    );
     const file = typeof c.path === 'string' ? c.path : '(unknown)';
     findings.push({
       id: idFor(carried),
@@ -4220,7 +4430,15 @@ export function buildLedger(
     });
   }
   for (const b of bodyCriticals) {
-    const { id: carried, title } = titleOf(b);
+    // The title strips through the same fixpoint chain the visible list
+    // uses — the ledger marker rides the posted body as an HTML comment,
+    // and the autofix grep reads the whole body, comments included.
+    // Leading render-nothing residue goes too, for the same reason as the
+    // drafted-comment leg: residue between the marker and a carried id
+    // would defeat the id anchor and silently renumber the finding.
+    const { id: carried, title } = titleOf(
+      stripForUnattributedPost(b).replace(LEADING_INVISIBLE_RE, ''),
+    );
     findings.push({
       id: idFor(carried),
       sev: 'C',
