@@ -4455,23 +4455,49 @@ export class CoreToolScheduler {
 
     this.bouncedAwaitingApproval.add(callId);
 
+    // Mirror the ordinary confirmation phase: capture the invocation
+    // context NOW (while we still run in the invocation's async context)
+    // and re-enter it when the confirmation is answered. The responder
+    // (IDE / ACP / stream-json client) answers from its OWN async
+    // context; without the re-entry the tool-invocation guard would see
+    // the responder's identity instead of the invocation's (#9434
+    // review R4-4). Captured for BOTH the structured view and the
+    // synthetic info fallback below (#9434 review R5-1).
+    const invocationContext = getInvocationContext();
+    const hookAskReason =
+      reason ||
+      `A PreToolUse hook requested confirmation before running ${toolName}.`;
+    // A bounced re-execution skips the PreToolUse hook (the marker is
+    // consumed in _executeToolCallBody), so a modify payload answered
+    // during the bounce (inline modify, host-provided updatedInput) would
+    // change what runs without the hook ever reviewing it. Drop those
+    // payload fields so the approved call runs exactly what the hook saw
+    // (#9434 review R5-5).
+    const dropBounceModifyPayload = (
+      payload: ToolConfirmationPayload | undefined,
+    ): ToolConfirmationPayload | undefined => {
+      if (!payload) return payload;
+      const {
+        newContent: _newContent,
+        updatedInput: _updatedInput,
+        ...rest
+      } = payload;
+      return rest;
+    };
+
     let confirmationDetails: ToolCallConfirmationDetails;
     if (toolDetails) {
       const originalOnConfirm = toolDetails.onConfirm;
-      // Mirror the ordinary confirmation phase: capture the invocation
-      // context NOW (while we still run in the invocation's async context)
-      // and re-enter it when the confirmation is answered. The responder
-      // (IDE / ACP / stream-json client) answers from its OWN async
-      // context; without the re-entry the tool-invocation guard would see
-      // the responder's identity instead of the invocation's (#9434
-      // review R4-4).
-      const invocationContext = getInvocationContext();
       confirmationDetails = {
         ...toolDetails,
+        // Close the modify surface on bounced edit views: content edited
+        // during the bounce would be written without the hook ever seeing
+        // it (the post-ask re-execution skips the hook). hideModify closes
+        // the TUI affordance; the payload drop in onConfirm below is the
+        // enforcement half (#9434 review R5-5).
+        ...(toolDetails.type === 'edit' ? { hideModify: true } : {}),
         hideAlwaysAllow: true,
-        hookAskReason:
-          reason ??
-          `A PreToolUse hook requested confirmation before running ${toolName}.`,
+        hookAskReason,
         onConfirm: async (outcome, payload) =>
           runWithInvocationContext(invocationContext, async () => {
             // Mirror the ordinary confirmation phase: the plan-shell policy
@@ -4507,7 +4533,7 @@ export class CoreToolScheduler {
               originalOnConfirm,
               outcome,
               signal,
-              payload,
+              dropBounceModifyPayload(payload),
             );
           }),
       };
@@ -4515,21 +4541,55 @@ export class CoreToolScheduler {
       confirmationDetails = {
         type: 'info',
         title: `Hook requested confirmation to run ${toolName}`,
-        prompt:
-          reason ||
-          `A PreToolUse hook requested confirmation before running ${toolName}.`,
+        prompt: hookAskReason,
         renderPromptAsPlainText: true,
         hideAlwaysAllow: true,
-        onConfirm: (outcome, payload) =>
-          this.handleConfirmationResponse(
-            callId,
-            // No real tool onConfirm — for this synthetic prompt all of the
-            // approve/deny handling lives in handleConfirmationResponse.
-            async () => {},
-            outcome,
-            signal,
-            payload,
-          ),
+        // Off-TUI permission surfaces (ACP / stream-json) render the hook
+        // reason from this field for the info class too (#9434 review
+        // R5-2).
+        hookAskReason,
+        onConfirm: async (outcome, payload) =>
+          runWithInvocationContext(invocationContext, async () => {
+            // Mirror the structured branch: the carried plan-shell policy
+            // validates at approval time here as well, so a stale or
+            // policy-forbidden bounced approval is converted to Cancel
+            // instead of executing (#9434 review R5-4).
+            if (
+              planShellDecision &&
+              planShellDecision.classification !== 'not-applicable'
+            ) {
+              const approval = await validatePlanModeShellApproval({
+                config: this.config,
+                decision: planShellDecision,
+                requestArgs: scheduledCall.request.args,
+                invocationParams: scheduledCall.invocation.params as Record<
+                  string,
+                  unknown
+                >,
+                signal,
+                outcome,
+                payload,
+              });
+              await this.handleConfirmationResponse(
+                callId,
+                // No real tool onConfirm — for this synthetic prompt all of
+                // the approve/deny handling lives in
+                // handleConfirmationResponse.
+                async () => {},
+                approval.outcome,
+                signal,
+                approval.payload,
+              );
+              return;
+            }
+            await this.handleConfirmationResponse(
+              callId,
+              async () => {},
+              outcome,
+              signal,
+              dropBounceModifyPayload(payload),
+            );
+          }),
       };
     }
 

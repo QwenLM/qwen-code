@@ -40,6 +40,23 @@ describe('buildPermissionSuggestions', () => {
     );
   });
 
+  it('prepends the hook ask reason on info suggestions (ask-bounce fallback)', () => {
+    // Tools without a structured view land in the ask bounce's synthetic
+    // info prompt; the stream-json suggestions must carry the hook reason
+    // there too (#9434 review R5-2).
+    const info = buildPermissionSuggestions({
+      type: 'info',
+      title: 'Hook requested confirmation to run web_fetch',
+      prompt: 'network egress requires human review',
+      hookAskReason: 'network egress requires human review',
+      onConfirm: async () => undefined,
+    });
+    expect(info?.[0]?.description).toBe(
+      'Hook requested confirmation: network egress requires human review\n' +
+        'Hook requested confirmation to run web_fetch',
+    );
+  });
+
   it('keeps warnings below the hook reason and above the description', () => {
     const exec = buildPermissionSuggestions({
       type: 'exec',

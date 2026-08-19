@@ -10402,6 +10402,274 @@ describe('CoreToolScheduler Plan shell routing', () => {
     );
   });
 
+  function planShellAskMessageBus(): MessageBus {
+    return {
+      request: vi
+        .fn()
+        .mockImplementation(async (req: { eventName?: string }) => ({
+          type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+          correlationId: 'pre-hook',
+          success: true,
+          output:
+            req.eventName === 'PreToolUse'
+              ? { decision: 'ask', reason: 'hook says confirm' }
+              : {},
+        })),
+    } as unknown as MessageBus;
+  }
+
+  it('approves a bounced plan-shell call with ProceedOnce', async () => {
+    // Symmetric to the forbidden-outcome test above: a PERMITTED approval
+    // (ProceedOnce) through the bounce must execute, so a mutation that
+    // cancels every bounced plan-shell approval cannot ship green
+    // (#9434 review R5-7).
+    const rawCommand = "python -c 'print(1)'";
+    const onConfirm = vi.fn().mockResolvedValue(undefined);
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'ok',
+      returnDisplay: 'ok',
+    });
+    const { scheduler, onAllToolCallsComplete, onToolCallsUpdate } =
+      buildPlanShellScheduler({
+        tools: [
+          shellTool({
+            confirmation: async () => ({
+              type: 'exec',
+              title: 'Confirm shell',
+              command: rawCommand,
+              rootCommand: 'python',
+              onConfirm,
+            }),
+            execute,
+          }),
+        ],
+        messageBus: planShellAskMessageBus(),
+        disableHooks: false,
+      });
+
+    await scheduler.schedule(
+      [request('plan-ask-bounce-ok', rawCommand)],
+      new AbortController().signal,
+    );
+
+    // Round 1: the confirmation phase asks (UNKNOWN classification).
+    const first = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+    await first.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+
+    // Round 2: the hook's 'ask' bounces execution back.
+    const waitingWithHookReason = () =>
+      (
+        onToolCallsUpdate.mock.calls.flatMap(
+          (call) => call[0] as ToolCall[],
+        ) as Array<
+          ToolCall & { confirmationDetails?: { hookAskReason?: string } }
+        >
+      )
+        .filter((call) => call.status === 'awaiting_approval')
+        .find(
+          (call) =>
+            call.confirmationDetails?.hookAskReason === 'hook says confirm',
+        ) as WaitingToolCall | undefined;
+    await vi.waitFor(() => expect(waitingWithHookReason()).toBeDefined());
+    const bounced = waitingWithHookReason() as WaitingToolCall;
+
+    await bounced.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+
+    const completed = onAllToolCallsComplete.mock.calls.at(
+      -1,
+    )?.[0] as ToolCall[];
+    expect(completed[0].status).toBe('success');
+    expect(onConfirm).toHaveBeenCalledWith(
+      ToolConfirmationOutcome.ProceedOnce,
+      undefined,
+    );
+  });
+
+  it('approves a bounced plan-shell call through the info fallback', async () => {
+    // The permitted-outcome half of the fallback branch: when the bounce
+    // re-runs getConfirmationDetails and it throws, the synthetic info
+    // prompt still routes a valid ProceedOnce through
+    // validatePlanModeShellApproval to execution (#9434 review R5-4 /
+    // R5-7).
+    const rawCommand = "python -c 'print(1)'";
+    let confirmationCalls = 0;
+    const onConfirm = vi.fn().mockResolvedValue(undefined);
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'ok',
+      returnDisplay: 'ok',
+    });
+    const { scheduler, onAllToolCallsComplete, onToolCallsUpdate } =
+      buildPlanShellScheduler({
+        tools: [
+          shellTool({
+            confirmation: async () => {
+              confirmationCalls += 1;
+              if (confirmationCalls > 1) {
+                // The bounce's re-entrant preview fails (the exact shape
+                // the R4-3 shell change deliberately rethrows).
+                throw new Error('transient preview failure');
+              }
+              return {
+                type: 'exec',
+                title: 'Confirm shell',
+                command: rawCommand,
+                rootCommand: 'python',
+                onConfirm,
+              };
+            },
+            execute,
+          }),
+        ],
+        messageBus: planShellAskMessageBus(),
+        disableHooks: false,
+      });
+
+    await scheduler.schedule(
+      [request('plan-ask-bounce-info', rawCommand)],
+      new AbortController().signal,
+    );
+
+    const first = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+    await first.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+
+    const waitingWithHookReason = () =>
+      (
+        onToolCallsUpdate.mock.calls.flatMap(
+          (call) => call[0] as ToolCall[],
+        ) as Array<
+          ToolCall & { confirmationDetails?: { hookAskReason?: string } }
+        >
+      )
+        .filter((call) => call.status === 'awaiting_approval')
+        .find(
+          (call) =>
+            call.confirmationDetails?.hookAskReason === 'hook says confirm',
+        ) as WaitingToolCall | undefined;
+    await vi.waitFor(() => expect(waitingWithHookReason()).toBeDefined());
+    const bounced = waitingWithHookReason() as WaitingToolCall;
+    // The bounce landed in the synthetic info fallback.
+    expect(bounced.confirmationDetails.type).toBe('info');
+
+    await bounced.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+
+    const completed = onAllToolCallsComplete.mock.calls.at(
+      -1,
+    )?.[0] as ToolCall[];
+    expect(completed[0].status).toBe('success');
+  });
+
+  it('cancels a stale plan-shell approval when the bounce lands in the info fallback', async () => {
+    // The fallback branch receives the carried planShellDecision and must
+    // validate it at approval time exactly like the structured branch: an
+    // approval-mode revision bumped while the bounced approval is pending
+    // converts the ProceedOnce to Cancel instead of executing (#9434
+    // review R5-4).
+    const rawCommand = "python -c 'print(1)'";
+    let approvalRevision = 0;
+    let confirmationCalls = 0;
+    const onConfirm = vi.fn().mockResolvedValue(undefined);
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'ok',
+      returnDisplay: 'ok',
+    });
+    const { scheduler, onAllToolCallsComplete, onToolCallsUpdate } =
+      buildPlanShellScheduler({
+        tools: [
+          shellTool({
+            confirmation: async () => {
+              confirmationCalls += 1;
+              if (confirmationCalls > 1) {
+                throw new Error('transient preview failure');
+              }
+              return {
+                type: 'exec',
+                title: 'Confirm shell',
+                command: rawCommand,
+                rootCommand: 'python',
+                onConfirm,
+              };
+            },
+            execute,
+          }),
+        ],
+        messageBus: planShellAskMessageBus(),
+        disableHooks: false,
+        revision: () => approvalRevision,
+      });
+
+    await scheduler.schedule(
+      [request('plan-ask-bounce-stale', rawCommand)],
+      new AbortController().signal,
+    );
+
+    const first = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+    await first.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+
+    const waitingWithHookReason = () =>
+      (
+        onToolCallsUpdate.mock.calls.flatMap(
+          (call) => call[0] as ToolCall[],
+        ) as Array<
+          ToolCall & { confirmationDetails?: { hookAskReason?: string } }
+        >
+      )
+        .filter((call) => call.status === 'awaiting_approval')
+        .find(
+          (call) =>
+            call.confirmationDetails?.hookAskReason === 'hook says confirm',
+        ) as WaitingToolCall | undefined;
+    await vi.waitFor(() => expect(waitingWithHookReason()).toBeDefined());
+    const bounced = waitingWithHookReason() as WaitingToolCall;
+    expect(bounced.confirmationDetails.type).toBe('info');
+
+    // Stale the decision while the bounced approval is pending.
+    approvalRevision += 1;
+
+    await bounced.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+
+    const completed = onAllToolCallsComplete.mock.calls.at(
+      -1,
+    )?.[0] as ToolCall[];
+    expect(completed[0].status).toBe('cancelled');
+    expect(execute).not.toHaveBeenCalled();
+    // The synthetic fallback carries no tool onConfirm, so the stale
+    // cancel message surfaces on the terminal call response.
+    expect(JSON.stringify(completed[0])).toContain('no longer valid');
+    // The tool's own onConfirm ran exactly once — for the round-1
+    // confirmation-phase approval, never for the stale bounced one.
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+    expect(onConfirm).toHaveBeenCalledWith(
+      ToolConfirmationOutcome.ProceedOnce,
+      undefined,
+    );
+  });
+
   it('invalidates exact approval when ambient cwd moves while pending', async () => {
     const rawCommand = "python -c 'print(1)'";
     let targetDir = '/tmp/one';
@@ -10825,6 +11093,7 @@ describe('CoreToolScheduler telemetry spans', () => {
     sensitiveSpanAttributeMaxLength?: number;
     onToolCallsUpdate?: ReturnType<typeof vi.fn>;
     shouldObserveProducer?: (callId: string) => boolean;
+    toolInvocationGuard?: ToolInvocationGuard;
   }): {
     scheduler: CoreToolScheduler;
     onAllToolCallsComplete: ReturnType<typeof vi.fn>;
@@ -10877,6 +11146,7 @@ describe('CoreToolScheduler telemetry spans', () => {
         terminalHeight: 30,
       }),
       storage: { getProjectTempDir: () => '/tmp' },
+      getTargetDir: () => '/tmp',
       getTruncateToolOutputThreshold: () =>
         DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
@@ -10899,6 +11169,7 @@ describe('CoreToolScheduler telemetry spans', () => {
         options.includeSensitiveSpanAttributes ?? false,
       getTelemetrySensitiveSpanAttributeMaxLength: () =>
         options.sensitiveSpanAttributeMaxLength ?? 1024 * 1024,
+      getToolInvocationGuard: () => options.toolInvocationGuard,
     } as unknown as Config;
 
     const onAllToolCallsComplete = vi.fn();
@@ -12661,6 +12932,191 @@ describe('CoreToolScheduler telemetry spans', () => {
       ToolConfirmationOutcome.ProceedOnce,
       undefined,
     );
+  });
+
+  it('closes the modify surface and drops modify payloads on a bounced edit confirmation', async () => {
+    // #9434 review R5-5: the post-ask re-execution skips the PreToolUse
+    // hook, so a modify payload answered during the bounce (inline modify
+    // / host updatedInput) must not change what executes — the hook only
+    // ever reviewed the original args.
+    const toolOnConfirm = vi.fn().mockResolvedValue(undefined);
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'ok',
+      returnDisplay: 'ok',
+    });
+    const editTool = new MockTool({
+      name: 'mockTool',
+      execute,
+      getConfirmationDetails: async () => ({
+        type: 'edit',
+        title: 'Confirm Edit: test.txt',
+        fileName: 'test.txt',
+        filePath: '/tmp/test.txt',
+        fileDiff: '-old\n+new',
+        originalContent: 'old',
+        newContent: 'new',
+        onConfirm: toolOnConfirm,
+      }),
+    });
+    const messageBus = askMessageBus('path requires human review');
+    const { onToolCallsUpdate, onAllToolCallsComplete } = await scheduleWithAsk(
+      { messageBus, tools: [editTool] },
+    );
+
+    const waiting = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+    const details =
+      waiting.confirmationDetails as ToolCallConfirmationDetails & {
+        hideModify?: boolean;
+      };
+    expect(details.type).toBe('edit');
+    // The bounced view must not offer Modify — the hook never sees
+    // bounce-time edits.
+    expect(details.hideModify).toBe(true);
+
+    // Approve with a modify payload, as an inline-modify or host-policy
+    // responder would.
+    await details.onConfirm(ToolConfirmationOutcome.ProceedOnce, {
+      newContent: 'EVIL_CONTENT',
+      updatedInput: { input: 'EVIL_INPUT' },
+    });
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+    const completed = onAllToolCallsComplete.mock.calls.at(
+      -1,
+    )?.[0] as ToolCall[];
+    expect(completed[0].status).toBe('success');
+    expect(execute).toHaveBeenCalledTimes(1);
+    // The tool ran with exactly the args the hook reviewed.
+    expect(JSON.stringify(execute.mock.calls[0][0])).not.toContain('EVIL');
+    expect(execute.mock.calls[0][0]).toMatchObject({ input: 'x' });
+    const confirmPayload = toolOnConfirm.mock.calls[0][1] as
+      | ToolConfirmationPayload
+      | undefined;
+    expect(confirmPayload?.newContent).toBeUndefined();
+    expect(confirmPayload?.updatedInput).toBeUndefined();
+  });
+
+  // -------------------------------------------------------------------
+  // Invocation-context re-entry across the ask bounce (#9434 review
+  // R5-6): the responder (IDE / ACP / stream-json) answers from its OWN
+  // async context; BOTH bounce branches must re-enter the invocation's
+  // context so a context-dependent, fail-closed tool-invocation guard
+  // sees the invocation's identity instead of the responder's.
+  // -------------------------------------------------------------------
+  async function answerBouncedConfirmationFromUnrelatedContext(options: {
+    structured: boolean;
+  }): Promise<void> {
+    const invocationContext: InvocationContextV1 = {
+      version: 1,
+      sessionId: 'session-bounce',
+      promptId: 'prompt-bounce',
+    };
+    const unrelatedContext: InvocationContextV1 = {
+      ...invocationContext,
+      sessionId: 'unrelated-session',
+      promptId: 'unrelated-prompt',
+    };
+    const guardSeenContexts: Array<InvocationContextV1 | undefined> = [];
+    // Context-dependent, fail-closed guard (the managed-guard shape):
+    // denies when the runtime invocation identity is absent.
+    const guard: ToolInvocationGuard = (context) => {
+      guardSeenContexts.push(
+        context.invocationContext
+          ? { ...context.invocationContext }
+          : undefined,
+      );
+      return context.invocationContext?.sessionId ===
+        invocationContext.sessionId
+        ? { allowed: true }
+        : { allowed: false, reason: 'missing invocation context' };
+    };
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'ok',
+      returnDisplay: 'ok',
+    });
+    const tool = options.structured
+      ? new MockTool({
+          name: 'mockTool',
+          execute,
+          getConfirmationDetails: async () => ({
+            type: 'edit',
+            title: 'Confirm Edit: test.txt',
+            fileName: 'test.txt',
+            filePath: '/tmp/test.txt',
+            fileDiff: '-old\n+new',
+            originalContent: 'old',
+            newContent: 'new',
+            onConfirm: vi.fn().mockResolvedValue(undefined),
+          }),
+        })
+      : new MockTool({
+          name: 'mockTool',
+          execute,
+          getConfirmationDetails: async () => {
+            throw new Error('preview unavailable');
+          },
+        });
+    const messageBus = askMessageBus('confirm before running');
+    const { scheduler, onAllToolCallsComplete, onToolCallsUpdate } =
+      buildScheduler({
+        messageBus,
+        disableHooks: false,
+        tools: [tool],
+        toolInvocationGuard: guard,
+      });
+
+    await runWithInvocationContext(invocationContext, () =>
+      scheduler.schedule(
+        [
+          {
+            callId: 'bounce-ctx-call',
+            name: 'mockTool',
+            args: { input: 'x' },
+            isClientInitiated: false,
+            prompt_id: invocationContext.promptId,
+          },
+        ],
+        new AbortController().signal,
+      ),
+    );
+
+    const waiting = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+    expect(waiting.confirmationDetails.type).toBe(
+      options.structured ? 'edit' : 'info',
+    );
+
+    // The responder answers from its own, unrelated async context.
+    await runWithInvocationContext(unrelatedContext, () =>
+      waiting.confirmationDetails.onConfirm(
+        ToolConfirmationOutcome.ProceedOnce,
+      ),
+    );
+
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+    const completed = onAllToolCallsComplete.mock.calls.at(
+      -1,
+    )?.[0] as ToolCall[];
+    // Without the bounce-side runWithInvocationContext re-entry the guard
+    // would see the responder's (absent) context and deny the approved
+    // call as EXECUTION_DENIED.
+    expect(completed[0].status).toBe('success');
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(guardSeenContexts).toEqual([invocationContext]);
+  }
+
+  it('restores the invocation context when a bounced structured confirmation is answered from an unrelated context', async () => {
+    await answerBouncedConfirmationFromUnrelatedContext({ structured: true });
+  });
+
+  it('restores the invocation context when a bounced info fallback confirmation is answered from an unrelated context', async () => {
+    await answerBouncedConfirmationFromUnrelatedContext({ structured: false });
   });
 
   it('cancels rather than denies when the signal aborts while the confirmation view is prepared', async () => {

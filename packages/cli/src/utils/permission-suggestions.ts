@@ -117,7 +117,13 @@ export function buildPermissionSuggestions(
         {
           type: 'allow',
           label: 'Allow Info Request',
-          description: title || 'Allow information request',
+          // withWarnings surfaces a PreToolUse hook's ask reason on the
+          // synthetic info fallback the ask bounce uses for tools without
+          // a structured view (#9434 review R5-2).
+          description: withWarnings(
+            title || 'Allow information request',
+            details,
+          ),
         },
         {
           type: 'deny',
