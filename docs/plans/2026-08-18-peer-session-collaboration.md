@@ -300,7 +300,7 @@ is out of scope by construction.
 | Noun       | Is                                           | Terminal states                   |
 | ---------- | -------------------------------------------- | --------------------------------- |
 | `session`  | A registered, addressable running instance   | registered / gone                 |
-| `task`     | A unit of work — owner, status, deps         | pending / in_progress / completed |
+| `task`     | A unit of work — owner, status, notes        | pending / in_progress / completed |
 | `ask`      | A question to a session, expecting an answer | **answered / timeout / declined** |
 | `decision` | An item awaiting human authority             | approved / rejected               |
 
@@ -315,6 +315,12 @@ this is not `message`: a plain message has no failure mode, so a sender cannot d
 "parked" from "ignored". Explicit terminal states also make deadlock _detectable_ — who
 waits on whom becomes state rather than intent — which is the one thing a cross-session view
 can see that no single session can.
+
+**`decision` is by agreement, not enforcement.** The prompt tells agents not to
+resolve one, but `qwen board resolve` sits on the same command line they use for
+everything else, so anything with a shell could settle its own. Enforcing it
+would need a surface the agent panes do not carry. Recorded because an invariant
+the runtime does not hold is worse than a convention that says so.
 
 **`decision` is the noun this design was missing.** Approving a dangerous operation,
 accepting a finished result, and adjudicating two conflicting results are the same act: each
@@ -343,7 +349,7 @@ The omissions matter as much as the verbs:
 | `session`  | read a screen, attach, or manage lifecycle — we never hold its stdin |
 | `task`     | carry conversation; a note explains work, it is not a chat log       |
 | `ask`      | broadcast — deciding _whom_ to ask is itself worth forcing           |
-| `decision` | get resolved by an agent; that would defeat the point of the noun    |
+| `decision` | get resolved by an agent — by convention; nothing enforces it yet    |
 
 Verbs are flat under one `board` namespace rather than nested per noun — `board claim t-3`,
 not `board task claim t-3` — because **the id prefix already carries the noun**: `t-` task,
@@ -457,7 +463,12 @@ Two consequences worth stating:
 ### 2.7 Format neutrality
 
 `SwarmTask` — `id`, `subject`, `description`, `owner`, `status`, `blocks`, `blockedBy`,
-`metadata` — contains nothing vendor-specific. Dependencies are already modelled.
+`metadata` — contains nothing vendor-specific.
+
+What shipped on the board is narrower: `BoardTaskRecord` carries subject, owner,
+status and notes. `SwarmTask`'s dependency edges could not come with it (§5), so
+the deadlock detection §3.3 describes has no data yet. Adding `blocks` /
+`blockedBy` is open work, not a property to cite.
 
 This is an observation, not a goal. The position for v1:
 
