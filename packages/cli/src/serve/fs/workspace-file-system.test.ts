@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { promises as fsp, writeFileSync } from 'node:fs';
+import { promises as fsp, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
@@ -2616,6 +2616,139 @@ describe('WorkspaceFileSystem - writeBytesAtomic', () => {
         (e.data as { errorKind: string }).errorKind === 'file_too_large',
     );
     expect(denied).toBeDefined();
+  });
+});
+
+describe('WorkspaceFileSystem - mkdir', () => {
+  let h: Harness;
+  beforeEach(async () => {
+    h = await makeHarness();
+  });
+  afterEach(async () => {
+    await teardown(h);
+  });
+
+  it('creates a missing directory', async () => {
+    const r = await h.fs.resolve('new-dir', 'write');
+    await h.fs.mkdir(r);
+    const st = await fsp.stat(path.join(h.workspace, 'new-dir'));
+    expect(st.isDirectory()).toBe(true);
+  });
+
+  it('creates missing parents recursively', async () => {
+    const r = await h.fs.resolve('a/b/c', 'write');
+    await h.fs.mkdir(r, { recursive: true });
+    for (const p of ['a', 'a/b', 'a/b/c']) {
+      const st = await fsp.stat(path.join(h.workspace, p));
+      expect(st.isDirectory()).toBe(true);
+    }
+  });
+
+  it('reuses an existing directory without error', async () => {
+    const target = path.join(h.workspace, 'existing');
+    await fsp.mkdir(target);
+    const r = await h.fs.resolve('existing', 'write');
+    await expect(h.fs.mkdir(r)).resolves.toBeUndefined();
+    const st = await fsp.stat(target);
+    expect(st.isDirectory()).toBe(true);
+  });
+
+  it('rejects an existing non-directory at the target', async () => {
+    await fsp.writeFile(path.join(h.workspace, 'file.txt'), 'x');
+    const r = await h.fs.resolve('file.txt', 'write');
+    const err = await h.fs.mkdir(r).catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('parse_error');
+  });
+
+  it('rejects a target that becomes a symlink before creation completes', async () => {
+    // `resolve` already rejects symlink escapes at admission; this pins the
+    // post-create `lstat` re-check that defends the create itself.
+    const realMkdir = fsp.mkdir;
+    const target = path.join(h.workspace, 'race-dir');
+    const spy = vi
+      .spyOn(fsp, 'mkdir')
+      .mockImplementation(
+        async (
+          input: Parameters<typeof fsp.mkdir>[0],
+          options?: Parameters<typeof fsp.mkdir>[1],
+        ) => {
+          if (String(input) === target) {
+            await fsp.rm(target, { recursive: true, force: true });
+            await fsp.symlink(h.scratch, target, 'dir');
+          }
+          return realMkdir(input, options);
+        },
+      );
+    try {
+      const r = await h.fs.resolve('race-dir', 'write');
+      const err = await h.fs.mkdir(r).catch((e: unknown) => e);
+      expect(isFsError(err)).toBe(true);
+      expect((err as { kind: string }).kind).toBe('symlink_escape');
+      await expect(
+        fsp.stat(path.join(h.scratch, 'race-dir')),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('rejects a parent swapped for a symlink mid-recursive-create', async () => {
+    // The per-component `lstat` re-check cannot see an INTERMEDIATE ancestor
+    // that becomes a symlink (it only refuses to follow the final component);
+    // the parent re-check before the next `mkdir` is what closes that window.
+    let checks = 0;
+    let firstComponent = '';
+    await teardown(h);
+    h = await makeHarness({
+      generationGuard: {
+        assertOpen() {
+          checks += 1;
+          // The create loop's second iteration is about to mkdir `a/b`; the
+          // just-created `a` has been swapped for a symlink out of the
+          // workspace in the meantime.
+          if (checks === 5) {
+            rmSync(firstComponent, { recursive: true, force: true });
+            symlinkSync(h.scratch, firstComponent, 'dir');
+          }
+        },
+      },
+    });
+    firstComponent = path.join(h.workspace, 'a');
+    const r = await h.fs.resolve('a/b', 'write');
+    const err = await h.fs
+      .mkdir(r, { recursive: true })
+      .catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('symlink_escape');
+    // Nothing was created through the symlink.
+    await expect(fsp.stat(path.join(h.scratch, 'b'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+
+  it('refuses the non-recursive create when a parent is missing', async () => {
+    const r = await h.fs.resolve('a/b', 'write');
+    const err = await h.fs.mkdir(r).catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('path_not_found');
+  });
+
+  it('records audit access on success', async () => {
+    const r = await h.fs.resolve('audit-dir', 'write');
+    await h.fs.mkdir(r);
+    const access = h.events.find(
+      (e) =>
+        e.type === FS_ACCESS_EVENT_TYPE &&
+        (e.data as { intent: string }).intent === 'write',
+    );
+    expect(access).toBeDefined();
+    // Privacy mode hashes the path; only `QWEN_AUDIT_RAW_PATHS=1` exposes it.
+    expect((access!.data as { pathHash: string }).pathHash).toMatch(
+      /^[0-9a-f]{16}$/,
+    );
+    // `mkdir` must be distinguishable from a zero-byte file write.
+    expect((access!.data as { operation?: string }).operation).toBe('mkdir');
   });
 });
 

@@ -642,6 +642,7 @@ vi.mock('./components/ChatEditor', async () => {
               customization.fileUploadEnabled === undefined
                 ? undefined
                 : String(customization.fileUploadEnabled),
+            'data-file-upload-directory': customization.fileUploadDirectory,
           },
           React.createElement(
             'button',
@@ -10394,6 +10395,55 @@ describe('App session callbacks', () => {
       document.querySelector('[data-testid="approval-overlay"]'),
     ).not.toBeNull();
     expect(testState.latestToolApprovalKeyboardActive).toBe(true);
+  });
+
+  it('hides the composer while a tool approval overlay is pending and restores it after resolution', async () => {
+    const { container, rerender } = renderApp();
+    await flush();
+
+    const composerWrapper = () =>
+      container.querySelector('[data-web-shell-composer]')?.parentElement;
+    expect(composerWrapper()?.className).not.toContain('composerHidden');
+
+    await act(async () => {
+      testState.blocks = [makePendingPermissionBlock()];
+      rerender();
+      await Promise.resolve();
+    });
+    expect(
+      document.querySelector('[data-testid="approval-overlay"]'),
+    ).not.toBeNull();
+    expect(composerWrapper()?.className).toContain('composerHidden');
+
+    await act(async () => {
+      testState.blocks = [];
+      rerender();
+      await Promise.resolve();
+    });
+    expect(
+      document.querySelector('[data-testid="approval-overlay"]'),
+    ).toBeNull();
+    expect(composerWrapper()?.className).not.toContain('composerHidden');
+  });
+
+  it('hides the composer while an ask-user question overlay is pending', async () => {
+    const { container, rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.blocks = [
+        makePendingPermissionBlock({ toolName: 'ask_user_question' }),
+      ];
+      rerender();
+      await Promise.resolve();
+    });
+    expect(
+      document.querySelector('[data-testid="approval-overlay"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-composer]')?.parentElement
+        ?.className,
+    ).toContain('composerHidden');
   });
 
   it('does not show missing-session state for non-404/410 errors', async () => {
@@ -20177,5 +20227,19 @@ describe('fileUploadEnabled customization plumbing', () => {
     const { container } = renderApp({});
     const composer = container.querySelector('[data-web-shell-composer]');
     expect(composer?.hasAttribute('data-file-upload-enabled')).toBe(false);
+  });
+
+  it('reaches the composer customization with the upload directory', () => {
+    const { container } = renderApp({ fileUploadDirectory: 'uploads' });
+    const composer = container.querySelector('[data-web-shell-composer]');
+    expect(composer?.getAttribute('data-file-upload-directory')).toBe(
+      'uploads',
+    );
+  });
+
+  it('leaves the upload directory unset when the prop is omitted', () => {
+    const { container } = renderApp({});
+    const composer = container.querySelector('[data-web-shell-composer]');
+    expect(composer?.hasAttribute('data-file-upload-directory')).toBe(false);
   });
 });

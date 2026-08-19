@@ -453,6 +453,83 @@ describe('budgetGapDisclosures — the one parser of the disclosure format', () 
     }
   });
 
+  it('strips full-width parens too — a CJK IME wraps the same no-answer', () => {
+    // The strip knew only the ASCII pair, so `（无 — 所有检查均完成）`
+    // survived as a phantom gap in exactly the output language the ZH
+    // branch exists for — the #9094 incident shape, wearing the paren
+    // form a Chinese keyboard produces by default.
+    for (const line of [
+      'Budget gap: （无 — 所有检查均完成）',
+      'Budget gap: （无）',
+      '预算缺口：（没有跳过的检查）',
+    ]) {
+      expect(budgetGapDisclosures(line)).toEqual([]);
+    }
+    // A wrapped placeholder's inner tail judges identically to the bare
+    // form: bare `无？`/`无、` lose those tails to the fold-key strip before
+    // the classifier sees them, so the wrapped forms drop too — identical
+    // content cannot split bare-vs-wrapped.
+    for (const line of ['Budget gap: （无？）', 'Budget gap: （无、）']) {
+      expect(budgetGapDisclosures(line)).toEqual([]);
+    }
+    // Only a SYMMETRIC pair unwraps, and a real gap inside full-width
+    // parens survives — over-disclosure is the safe direction.
+    expect(
+      budgetGapDisclosures('Budget gap: （无法验证 Windows 矩阵的集成测试）'),
+    ).toEqual(['（无法验证 Windows 矩阵的集成测试）']);
+  });
+
+  it('closes the same split for ENGLISH no-answers wearing a CJK tail', () => {
+    // The normalize strip (TRAILING_GAP_CHAR_RE) is bilingual, so bare
+    // `none。` judges as `none` and drops — but a wrapped twin kept its
+    // inner tail: the EN tail classes in PLACEHOLDER_GAP_RE are ASCII-only,
+    // so `(none。)` survived as a phantom gap while its identical bare form
+    // dropped. The exact bare-vs-wrapped split the test above closed for
+    // the ZH branch, left open on the EN one — measured by the review on
+    // this PR: under a CJK output language `Budget gap: (none。)` spends a
+    // MAX_GAPS_PER_AGENT slot and an orchestrator ruling on a no-answer.
+    // The inner text must judge character-for-character as its bare twin,
+    // so the wrapped forms drop too — in both paren shapes.
+    for (const line of [
+      'Budget gap: none。',
+      'Budget gap: (none。)',
+      'Budget gap: （none。）',
+      'Budget gap: none - stayed under budget。',
+      'Budget gap: (none - stayed under budget。)',
+      'Budget gap: (N/A - stayed under budget。)',
+      'Budget gap: (none — all checks completed。)',
+    ]) {
+      expect(budgetGapDisclosures(line)).toEqual([]);
+    }
+    // A REAL gap keeps its CJK tail in both forms — the strip equalizes
+    // judgment, never swallows.
+    expect(budgetGapDisclosures('Budget gap: (渗透测试未进行。)')).toEqual([
+      '(渗透测试未进行。)',
+    ]);
+  });
+
+  it('folds a Chinese gap restated with and without a trailing full stop', () => {
+    // The fold key promises one disclosure per gap; a key that stripped only
+    // ASCII trailing punctuation kept `渗透测试未进行。` and `渗透测试未进行`
+    // as two, double-spending MAX_GAPS_PER_AGENT slots.
+    const text = [
+      'Budget gap: 渗透测试未进行。',
+      'some other line',
+      'Budget gap: 渗透测试未进行',
+    ].join('\n');
+    expect(budgetGapDisclosures(text)).toEqual(['渗透测试未进行。']);
+
+    // Both CJK full stops — 。(U+3002) and ．(U+FF0E) — are ZH_TAIL
+    // characters, and the fold key must strip both: covering only one left
+    // the double-spend open for the other.
+    const ff0e = [
+      'Budget gap: 渗透测试未进行．',
+      'some other line',
+      'Budget gap: 渗透测试未进行',
+    ].join('\n');
+    expect(budgetGapDisclosures(ff0e)).toEqual(['渗透测试未进行．']);
+  });
+
   it('keeps a REAL Chinese gap — 无法 is a prefix of the token, not the token', () => {
     // Chinese has no word boundary, so a token is only a token when
     // punctuation, whitespace or end-of-text follows it. `无法验证…`

@@ -205,14 +205,16 @@ export {
   buildRecordArtifactReminder,
   buildWorkspaceArtifactMetadata,
 } from './tools/write-file.js';
+export {
+  resolveBoundWorkspaceRoot,
+  toCanonicalWorkspaceArtifactPath,
+} from './utils/workspace-artifact-path.js';
 export type {
   ArtifactTool,
   ArtifactToolParams,
 } from './tools/artifact/artifact-tool.js';
-export type {
-  RecordArtifactTool,
-  RecordArtifactParams,
-} from './tools/record-artifact.js';
+export { RecordArtifactTool } from './tools/record-artifact.js';
+export type { RecordArtifactParams } from './tools/record-artifact.js';
 export type {
   ArtifactPublisher,
   PublishArtifactInput,
@@ -245,6 +247,7 @@ export {
   resolveSlimmingConfig,
   type ResolvedSlimmingConfig,
 } from './services/compactionInputSlimming.js';
+export { isClearedMediaPlaceholder } from './services/microcompaction/microcompact.js';
 export * from './services/chatRecordingService.js';
 export * from './services/branch-points.js';
 export * from './services/cronScheduler.js';

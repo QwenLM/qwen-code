@@ -337,6 +337,91 @@ describe('parseReviewArgs', () => {
     expect(got.target).toMatchObject({ type: 'pr-url', number: 42 });
   });
 
+  it('an Aone codereview URL is a pr-url target keyed on the global MR id', () => {
+    const got = parseReviewArgs(
+      'https://code.alibaba-inc.com/maxcompute/odps_src/codereview/29295886',
+    );
+    expect(got.target).toMatchObject({
+      type: 'pr-url',
+      host: 'code.alibaba-inc.com',
+      owner: 'maxcompute',
+      repo: 'odps_src',
+      number: 29295886,
+    });
+  });
+
+  it('an Aone codereview URL with a trailing query still parses', () => {
+    const got = parseReviewArgs(
+      'https://code.alibaba-inc.com/maxcompute/odps_src/codereview/123?tab=files',
+    );
+    expect(got.target).toMatchObject({ type: 'pr-url', number: 123 });
+  });
+
+  it('an Aone codereview URL with a nested group keeps the last two segments', () => {
+    const got = parseReviewArgs(
+      'https://code.alibaba-inc.com/sub/maxcompute/odps_src/codereview/123',
+    );
+    expect(got.target).toMatchObject({
+      type: 'pr-url',
+      owner: 'maxcompute',
+      repo: 'odps_src',
+      number: 123,
+      // The FULL path rides the target — the identity gates compare it
+      // against nested-group remotes (the collapse is non-injective).
+      groupPath: 'sub/maxcompute/odps_src',
+    });
+    // The canonicalized URL keeps the full path too — a collapsed spelling
+    // would name a different repo to anything that re-reads it.
+    expect((got.target as { url: string }).url).toBe(
+      'https://code.alibaba-inc.com/sub/maxcompute/odps_src/codereview/123',
+    );
+  });
+
+  it('a two-segment Aone codereview URL carries its exact path too', () => {
+    // The URL pins an exact repo: the gates must not match it against a
+    // nested remote sharing the tail (reverse direction of the hazard).
+    const got = parseReviewArgs(
+      'https://code.alibaba-inc.com/maxcompute/odps_src/codereview/5',
+    );
+    expect(got.target).toMatchObject({
+      type: 'pr-url',
+      groupPath: 'maxcompute/odps_src',
+    });
+  });
+
+  it('a codereview URL on a NON-Aone host is refused, not a live target', () => {
+    // Unlike …/pull/<n> (any GHE host legitimately serves it), /codereview/
+    // is Aone-only — on any other host it must hit the fail-closed
+    // invalid-url refusal, not become a live PR target.
+    const got = parseReviewArgs(
+      'https://github.com/QwenLM/qwen-code/codereview/123',
+    );
+    expect(got.target).toEqual({ type: 'local' });
+    expect(got.warnings[0]).toContain('not a PR/CR URL');
+  });
+
+  it('a /pull/ URL on an AONE host is refused — Aone serves no /pull/ pages', () => {
+    // The Aone CR grammar is …/codereview/<global-id>; a /pull/<n> URL on
+    // an Aone host is a fabrication and must fail closed, not become a live
+    // target routed at the Aone host.
+    const got = parseReviewArgs(
+      'https://code.alibaba-inc.com/maxcompute/odps_src/pull/123',
+    );
+    expect(got.target).toEqual({ type: 'local' });
+    expect(got.warnings[0]).toContain('not a PR/CR URL');
+  });
+
+  it('the trailing-dot FQDN spelling of an Aone host is refused too', () => {
+    // `code.alibaba-inc.com.` is DNS-identical to the plain host and the
+    // URL grammar admits the dot — isAoneHost normalizes it, so the /pull/
+    // refusal and the CR-form refusal treat both spellings alike.
+    const got = parseReviewArgs(
+      'https://code.alibaba-inc.com./maxcompute/odps_src/pull/5',
+    );
+    expect(got.target).toEqual({ type: 'local' });
+    expect(got.warnings[0]).toContain('not a PR/CR URL');
+  });
+
   it('refuses a junk PR URL instead of guessing (never a file path, never PR 42)', () => {
     const got = parseReviewArgs(
       'https://github.com/QwenLM/qwen-code/pull/42oops',
@@ -345,7 +430,7 @@ describe('parseReviewArgs', () => {
     expect(got.extraTokens).toEqual([
       'https://github.com/QwenLM/qwen-code/pull/42oops',
     ]);
-    expect(got.warnings[0]).toContain('not a GitHub PR URL');
+    expect(got.warnings[0]).toContain('not a PR/CR URL');
   });
 
   it('last explicit effort wins when repeated', () => {
@@ -487,6 +572,95 @@ describe('parseReviewArgs — --severity-floor (the convergence posture knob)', 
         true,
       );
     }
+  });
+
+  it('same-id CR URLs from DIFFERENT nested groups are ambiguous', () => {
+    // The global MR id collides across repos; the rescue pool once deduped
+    // these on the collapsed owner/repo + number key (both collapse to
+    // `maxcompute/odps_src`… here: shared tail `sub/app`) and silently
+    // reviewed the first. The full group path keeps them distinct.
+    const got = parseReviewArgs(
+      '--severity-floor https://code.alibaba-inc.com/groupA/sub/app/codereview/7 ' +
+        '--effort https://code.alibaba-inc.com/groupB/sub/app/codereview/7',
+    );
+    expect(got.target).toEqual({ type: 'local' });
+    expect(got.warnings.some((w) => w.includes('Ambiguous target'))).toBe(true);
+  });
+
+  it('a bare number beside a same-number CR URL never wins — in any order', () => {
+    // The CR URL is the only carrier of host/platform identity: when both
+    // spellings of one PR arrive, the URL must be the target regardless of
+    // token order — a bare-number target flips detection onto the cwd
+    // fallback and silently reviews the cwd clone's same-number PR.
+    const url = 'https://code.alibaba-inc.com/maxcompute/odps_src/codereview/7';
+    for (const args of [`7 ${url}`, `${url} 7`]) {
+      const got = parseReviewArgs(args);
+      expect(got.target).toMatchObject({
+        type: 'pr-url',
+        host: 'code.alibaba-inc.com',
+        owner: 'maxcompute',
+        repo: 'odps_src',
+        number: 7,
+      });
+    }
+  });
+
+  it('flag-rescued spellings prefer the CR URL over the bare number too', () => {
+    // The rescue pool's one-PR subsumption must pick the repo-qualified
+    // spelling whichever order the invalid flag values arrived in.
+    const url = 'https://code.alibaba-inc.com/maxcompute/odps_src/codereview/7';
+    for (const args of [
+      `--severity-floor 7 --effort ${url}`,
+      `--severity-floor ${url} --effort 7`,
+    ]) {
+      const got = parseReviewArgs(args);
+      expect(got.target).toMatchObject({
+        type: 'pr-url',
+        host: 'code.alibaba-inc.com',
+        number: 7,
+      });
+    }
+  });
+
+  it('MIXED shapes: a positional bare number never outranks a flag-rescued same-number CR URL', () => {
+    // The round-12 witness: the invariant "the URL never loses to a
+    // same-number bare spelling" was gated on !hasValidCandidate, and a
+    // POSITIONAL bare number satisfied it — the URL (the only carrier of
+    // host/platform identity) was discarded as an effort typo and the run
+    // retargeted onto the cwd clone's same-number PR. A DIFFERENT number
+    // typed positionally still outranks (control at the end).
+    const url = 'https://code.alibaba-inc.com/maxcompute/odps_src/codereview/7';
+    for (const args of [
+      `--effort ${url} 7`,
+      `7 --effort ${url}`,
+      `--severity-floor=${url} 7`,
+    ]) {
+      const got = parseReviewArgs(args);
+      expect(got.target).toMatchObject({
+        type: 'pr-url',
+        host: 'code.alibaba-inc.com',
+        number: 7,
+      });
+    }
+    // Control: a DIFFERENT positional number outranks the rescued URL.
+    expect(parseReviewArgs(`--effort ${url} 8`).target).toMatchObject({
+      type: 'pr-number',
+      number: 8,
+    });
+  });
+
+  it('records the --host flag verbatim for the write gate', () => {
+    expect(parseReviewArgs('123 --host gitlab.alibaba-inc.com').host).toBe(
+      'gitlab.alibaba-inc.com',
+    );
+    expect(parseReviewArgs('123 --host=code.alibaba-inc.com').host).toBe(
+      'code.alibaba-inc.com',
+    );
+    expect(parseReviewArgs('123').host).toBeUndefined();
+    // The value is consumed — it never leaks into the target tokens.
+    const got = parseReviewArgs('123 --host gitlab.alibaba-inc.com');
+    expect(got.target).toMatchObject({ type: 'pr-number', number: 123 });
+    expect(got.extraTokens).toEqual([]);
   });
 
   it('the equals form rescues a PR-shaped value exactly as the spaced form does', () => {
@@ -1399,5 +1573,70 @@ describe('parse-args warns when the bundle is not built from these sources', () 
     stamp(FOREIGN_DIGEST);
     run();
     expect(writeStdoutLine).toHaveBeenCalled();
+  });
+});
+
+describe('--resume', () => {
+  it('is effective on a PR target', () => {
+    const r = parseReviewArgs('6711 --resume');
+    expect(r.resume).toEqual({ requested: true, effective: true });
+    expect(r.warnings).toEqual([]);
+  });
+
+  it('is effective on a PR URL target', () => {
+    const r = parseReviewArgs(
+      'https://github.com/QwenLM/qwen-code/pull/6711 --resume',
+    );
+    expect(r.resume).toEqual({ requested: true, effective: true });
+  });
+
+  it('is ignored with a warning on a local target', () => {
+    const r = parseReviewArgs('--resume');
+    expect(r.resume).toEqual({ requested: true, effective: false });
+    expect(r.warnings.some((w) => w.includes('`--resume`'))).toBe(true);
+  });
+
+  it('is ignored with a warning on a FILE target too', () => {
+    // The other member of the `!isPr` class, which SKILL.md names alongside
+    // local. A gate written as `target.type !== 'local'` reports the flag
+    // effective here — on a target shape with no `fetch-pr` call to consume
+    // it — and every local-target test stays green.
+    const r = parseReviewArgs('src/foo.ts --resume');
+    expect(r.resume).toEqual({ requested: true, effective: false });
+    expect(r.warnings.some((w) => w.includes('`--resume`'))).toBe(true);
+  });
+
+  it('is absent by default', () => {
+    const r = parseReviewArgs('6711');
+    expect(r.resume).toEqual({ requested: false, effective: false });
+  });
+
+  it('keeps an explicit effort untouched on the EFFECTIVE path', () => {
+    // The missing corner of the matrix: the other three cells are covered,
+    // and this is the one an effort-forcing mutation on the effective path
+    // would slip through — the shape the sibling `--comment` bug took when
+    // it shipped.
+    const r = parseReviewArgs('6711 --resume --effort low');
+    expect(r.resume).toEqual({ requested: true, effective: true });
+    expect(r.effort).toBe('low');
+    expect(r.effortSource).toBe('explicit');
+  });
+
+  it('does not change the effort resolution', () => {
+    const r = parseReviewArgs('6711 --resume');
+    expect(r.effort).toBe('high'); // the PR default, not a resume effect
+    expect(r.effortSource).toBe('default');
+  });
+
+  it('an IGNORED --resume must not change the effort either', () => {
+    // The sibling `--comment` has this test because the bug shipped once:
+    // a flag ignored for the target still forced the level.
+    const r = parseReviewArgs('--resume --effort low');
+    expect(r.resume).toEqual({ requested: true, effective: false });
+    expect(r.effort).toBe('low');
+    expect(r.effortSource).toBe('explicit');
+    const d = parseReviewArgs('--resume');
+    expect(d.effort).toBe('medium'); // the local default, untouched
+    expect(d.effortSource).toBe('default');
   });
 });
