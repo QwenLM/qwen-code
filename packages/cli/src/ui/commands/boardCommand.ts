@@ -22,6 +22,8 @@ import { MessageType } from '../types.js';
 import {
   setBoardPromptContext,
   resolveBoardPromptContext,
+  joinBoard,
+  leaveBoard,
 } from '@qwen-code/qwen-code-core';
 
 export const boardCommand: SlashCommand = {
@@ -53,6 +55,10 @@ export const boardCommand: SlashCommand = {
     const client = context.services.config?.getGeminiClient();
 
     if (parts[0] === 'off') {
+      const leaving = resolveBoardPromptContext();
+      if (leaving?.as) {
+        await leaveBoard(leaving.board, leaving.as).catch(() => false);
+      }
       setBoardPromptContext(null);
       await client?.refreshSystemInstruction();
       context.ui.addItem(
@@ -69,14 +75,30 @@ export const boardCommand: SlashCommand = {
     const as =
       asIndex > 0 && parts[asIndex + 1] ? parts[asIndex + 1] : undefined;
 
-    setBoardPromptContext({ board, ...(as ? { as } : {}) });
+    // Register so peers can address this session by name. joinBoard may hand
+    // back a suffixed name when the one asked for is held by a live process,
+    // so the context records what was actually claimed.
+    let claimed = as;
+    try {
+      const rec = await joinBoard({
+        board,
+        name: as ?? 'session',
+        kind: 'interactive',
+      });
+      claimed = rec.name;
+    } catch {
+      // A board that cannot be written to is still worth joining in prompt
+      // terms — the session can read it and answer by hand.
+    }
+
+    setBoardPromptContext({ board, ...(claimed ? { as: claimed } : {}) });
     await client?.refreshSystemInstruction();
 
     context.ui.addItem(
       {
         type: MessageType.INFO,
         text:
-          `Joined board "${board}"${as ? ` as ${as}` : ''}. ` +
+          `Joined board "${board}"${claimed ? ` as ${claimed}` : ''}. ` +
           `Run "qwen board show --board ${board}" to see what is on it. ` +
           `Nothing is delivered — check the board when you need to.`,
       },

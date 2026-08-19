@@ -36,6 +36,9 @@ import {
   resolveDecision,
   getBoardSection,
   pruneCollection,
+  joinBoard,
+  leaveBoard,
+  listParticipants,
   type DecisionKind,
 } from '@qwen-code/qwen-code-core';
 import { resolveBoardName, resolveParticipantName } from './board/context.js';
@@ -114,6 +117,71 @@ export const boardCommand: CommandModule = {
         describe: 'Participant name to act as',
       })
       .option('json', { type: 'boolean', describe: 'Emit JSON' })
+
+      .command({
+        command: 'who',
+        describe: 'List participants currently on the board',
+        builder: (y: Argv) =>
+          y.option('all', {
+            type: 'boolean',
+            describe: 'Include records whose process is gone',
+          }),
+        handler: (argv) =>
+          run(async () => {
+            const a = argv as CommonArgs & { all?: boolean };
+            const people = await listParticipants(board(a), {
+              includeStale: a.all,
+            });
+            emit(
+              a,
+              people,
+              people.length === 0
+                ? '(nobody has joined)'
+                : people
+                    .map((p) => `${p.name}  ${p.kind}  ${p.cwd}`)
+                    .join('\n'),
+            );
+          }),
+      })
+
+      .command({
+        command: 'join',
+        describe: 'Claim a name on the board so peers can address you',
+        builder: (y: Argv) =>
+          y.option('kind', {
+            choices: ['interactive', 'daemon', 'spawned', 'foreign'] as const,
+            default: 'interactive' as const,
+          }),
+        handler: (argv) =>
+          run(async () => {
+            const a = argv as CommonArgs & {
+              kind: 'interactive' | 'daemon' | 'spawned' | 'foreign';
+            };
+            const rec = await joinBoard({
+              board: board(a),
+              name: participant(a),
+              kind: a.kind,
+            });
+            emit(
+              a,
+              rec,
+              rec.name === participant(a)
+                ? `Joined as ${rec.name}.`
+                : `Joined as ${rec.name} — "${participant(a)}" was taken.`,
+            );
+          }),
+      })
+
+      .command({
+        command: 'leave',
+        describe: 'Release your name on the board',
+        handler: (argv) =>
+          run(async () => {
+            const a = argv as CommonArgs;
+            const gone = await leaveBoard(board(a), participant(a));
+            emit(a, { left: gone }, gone ? 'Left the board.' : 'Not on it.');
+          }),
+      })
 
       .command({
         command: 'prune',

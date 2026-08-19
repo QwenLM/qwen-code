@@ -53,6 +53,7 @@ else**, then **work in flight**. Anything already settled disappears.
 Every participant uses the same commands.
 
 ```bash
+qwen board who                        # who else is here
 qwen board show                       # what is on the board right now
 qwen board watch                      # the same, refreshed until you stop it
 
@@ -116,7 +117,8 @@ qwen board protocol --board orders
 
 That prints the same instructions a Qwen session receives, filled in with the
 real board and participant name. Paste it into the other agent once and it can
-use every command below. Add `--json` for machine consumption:
+use every command below. Have it run `qwen board join --kind foreign` first so
+`qwen board who` lists it and peers can address it by name. Add `--json` for machine consumption:
 
 ```bash
 qwen board show --json

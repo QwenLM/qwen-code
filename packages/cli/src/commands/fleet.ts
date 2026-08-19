@@ -63,7 +63,14 @@ function paneCommand(
 ): string {
   const env = [`${BOARD_ENV}=${shellQuote(board)}`];
   if (as) env.push(`${PARTICIPANT_ENV}=${shellQuote(as)}`);
-  return `env ${env.join(' ')} ${command}`;
+  const prefix = `env ${env.join(' ')}`;
+  if (!as) return `${prefix} ${command}`;
+  // Register the name before the agent starts, rather than instructing the
+  // model to do it: a participant nobody registered cannot be addressed, and
+  // that is too load-bearing to leave to whether an agent follows a prompt.
+  return `${prefix} sh -c ${shellQuote(
+    `qwen board join >/dev/null 2>&1; exec ${command}`,
+  )}`;
 }
 
 export const fleetCommand: CommandModule = {
