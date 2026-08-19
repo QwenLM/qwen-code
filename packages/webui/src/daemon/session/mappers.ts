@@ -573,6 +573,14 @@ function getGoalState(
     return undefined;
   }
   const lastReason = getString(source, 'lastReason');
+  // `limitKind` is what tells a client an evidence-limited Goal cannot be
+  // resumed; dropping it here would leave the UI offering a Resume the reducer
+  // always rejects.
+  const limitKindRaw = getString(source, 'limitKind');
+  const limitKind =
+    limitKindRaw === 'evidence_catalog' || limitKindRaw === 'checkpoint_request'
+      ? limitKindRaw
+      : undefined;
   return {
     v: 2,
     activity,
@@ -587,6 +595,7 @@ function getGoalState(
       createdAt,
       updatedAt,
       ...(lastReason ? { lastReason } : {}),
+      ...(limitKind ? { limitKind } : {}),
     },
   };
 }

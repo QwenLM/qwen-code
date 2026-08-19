@@ -340,7 +340,7 @@ export type {
 export type {
   GoalActivity,
   GoalControlRequest,
-  GoalExpectedVersion,
+  GoalLimitKind,
   GoalRecord,
   GoalSnapshotV2,
   GoalStateResponse,

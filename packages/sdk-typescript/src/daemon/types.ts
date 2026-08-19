@@ -29,10 +29,12 @@ export interface TranscriptCursor {
   recordId: string | null;
 }
 
-export interface GoalExpectedVersion {
-  goalId: string;
-  revision: number;
-}
+/**
+ * Why the runtime stopped a Goal at one of its enumerated bounds. Set alongside
+ * `lastReason` — that stays the human-readable half, this is the half a client
+ * may key behavior off (an evidence-limited Goal cannot be resumed).
+ */
+export type GoalLimitKind = 'evidence_catalog' | 'checkpoint_request';
 
 export interface GoalRecord {
   goalId: string;
@@ -45,6 +47,7 @@ export interface GoalRecord {
   createdAt: number;
   updatedAt: number;
   lastReason?: string;
+  limitKind?: GoalLimitKind;
 }
 
 export interface GoalSnapshotV2 {

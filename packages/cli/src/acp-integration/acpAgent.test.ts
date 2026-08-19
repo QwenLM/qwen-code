@@ -225,6 +225,16 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   parseGoalControlRequest: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).parseGoalControlRequest,
+  // The real classes for the same reason as above: `mapGoalControlError`
+  // narrows on them with `instanceof`, and a stand-in (or an omission, which
+  // resolves to undefined) makes every conflict/transition branch throw before
+  // it can be asserted.
+  GoalConflictError: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).GoalConflictError,
+  GoalInvalidTransitionError: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).GoalInvalidTransitionError,
   normalizeEventPayload: vi.fn((payload: unknown) =>
     typeof payload === 'object' &&
     payload !== null &&
@@ -9814,15 +9824,38 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         },
       }),
     ).resolves.toEqual({ snapshot });
-    await expect(
-      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionGoalControl, {
-        sessionId,
-        request: { action: 'create', objective: 'new work' },
-      }),
-    ).rejects.toMatchObject({
-      code: -32003,
-      data: { errorKind: 'untrusted_workspace', httpStatus: 403 },
-    });
+    // Every action that starts or expands Goal work is gated, not just create:
+    // dropping any one of them restarts work in an untrusted workspace.
+    for (const request of [
+      { action: 'create' as const, objective: 'new work' },
+      {
+        action: 'replace' as const,
+        objective: 'new work',
+        expectedGoalId: 'goal-1',
+        expectedRevision: 1,
+      },
+      {
+        action: 'edit' as const,
+        objective: 'revised work',
+        expectedGoalId: 'goal-1',
+        expectedRevision: 1,
+      },
+      {
+        action: 'resume' as const,
+        expectedGoalId: 'goal-1',
+        expectedRevision: 1,
+      },
+    ]) {
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionGoalControl, {
+          sessionId,
+          request,
+        }),
+      ).rejects.toMatchObject({
+        code: -32003,
+        data: { errorKind: 'untrusted_workspace', httpStatus: 403 },
+      });
+    }
     expect(dispatch).toHaveBeenCalledOnce();
 
     mockConnectionState.resolve();

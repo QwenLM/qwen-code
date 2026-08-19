@@ -1396,6 +1396,40 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('wraps a Goal control request in the envelope the agent reads', async () => {
+    // The agent's `sessionGoalControl` handler reads `params['request']`; this
+    // method is its only producer, and a flattened envelope makes every
+    // POST /session/:id/goal fail with "Invalid or missing Goal control
+    // request" while the route and agent tests stay green.
+    const snapshot = { v: 2, activity: 'idle', goal: null };
+    const handle = makeChannel({
+      extMethodImpl: async (method) =>
+        method === SERVE_CONTROL_EXT_METHODS.sessionGoalControl
+          ? { snapshot }
+          : {},
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const request = { action: 'create' as const, objective: 'ship it' };
+
+    await expect(
+      bridge.controlSessionGoal(session.sessionId, request),
+    ).resolves.toEqual({ snapshot });
+    expect(handle.agent.extMethodCalls).toContainEqual({
+      method: SERVE_CONTROL_EXT_METHODS.sessionGoalControl,
+      params: { sessionId: session.sessionId, request },
+    });
+
+    await expect(
+      bridge.controlSessionGoal(
+        '11111111-2222-3333-4444-555555555555',
+        request,
+      ),
+    ).rejects.toBeInstanceOf(SessionNotFoundError);
+
+    await bridge.shutdown();
+  });
+
   it('serves completed MCP status without restarting an idle channel', async () => {
     const makeMcpChannel = () =>
       makeChannel({

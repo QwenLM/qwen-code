@@ -588,6 +588,85 @@ describe('updateConnectionFromDaemonEvent', () => {
     expect(next.goalState).toBe(replacement);
   });
 
+  it('carries limitKind through from the wire', () => {
+    // The client gates Resume on it: an evidence-limited Goal cannot be
+    // resumed, and dropping the field here leaves the UI offering a control the
+    // daemon always rejects.
+    const next = applyEvent(
+      { status: 'connected', workspaceCwd: '/workspace' },
+      {
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            _meta: {
+              goalState: {
+                v: 2,
+                activity: 'idle',
+                goal: {
+                  goalId: 'goal-1',
+                  revision: 3,
+                  objective: 'ship it',
+                  status: 'usage_limited',
+                  evidenceCursor: { recordId: 'record-1' },
+                  turnCount: 2,
+                  activeTimeMs: 10,
+                  createdAt: 1,
+                  updatedAt: 2,
+                  lastReason: 'evidence catalog exhausted',
+                  limitKind: 'evidence_catalog',
+                },
+              },
+            },
+          },
+        },
+      } as DaemonEvent,
+    );
+
+    expect(next.goalState?.goal).toMatchObject({
+      status: 'usage_limited',
+      limitKind: 'evidence_catalog',
+    });
+  });
+
+  it('drops an unknown limitKind rather than passing it through', () => {
+    const next = applyEvent(
+      { status: 'connected', workspaceCwd: '/workspace' },
+      {
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            _meta: {
+              goalState: {
+                v: 2,
+                activity: 'idle',
+                goal: {
+                  goalId: 'goal-1',
+                  revision: 3,
+                  objective: 'ship it',
+                  status: 'paused',
+                  evidenceCursor: { recordId: 'record-1' },
+                  turnCount: 2,
+                  activeTimeMs: 10,
+                  createdAt: 1,
+                  updatedAt: 2,
+                  limitKind: 'not-a-kind',
+                },
+              },
+            },
+          },
+        },
+      } as DaemonEvent,
+    );
+
+    expect(next.goalState?.goal?.limitKind).toBeUndefined();
+  });
+
   it('ignores malformed Goal snapshots', () => {
     const current: DaemonConnectionState = {
       status: 'connected',

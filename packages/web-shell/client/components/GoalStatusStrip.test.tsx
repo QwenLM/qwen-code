@@ -106,6 +106,33 @@ describe('GoalStatusStrip', () => {
     ).toBeNull();
   });
 
+  it('hides resume for an evidence-limited Goal', () => {
+    // The reducer refuses to resume a Goal stopped at an evidence bound, so
+    // offering the control only earns the user an invalid-transition 409.
+    const limited = snapshot('usage_limited');
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <GoalStatusStrip
+            snapshot={{
+              ...limited,
+              goal: { ...limited.goal!, limitKind: 'evidence_catalog' },
+            }}
+            onEdit={vi.fn()}
+            onPause={vi.fn()}
+            onResume={vi.fn()}
+            onClear={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(container.querySelector('[aria-label="Resume goal"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="goal-status-strip"]'),
+    ).not.toBeNull();
+  });
+
   it('adds current active time only while active', () => {
     expect(getGoalActiveTimeMs(snapshot('active'), 8000)).toBe(7000);
     expect(getGoalActiveTimeMs(snapshot('paused'), 8000)).toBe(4000);
