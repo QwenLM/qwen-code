@@ -103,6 +103,11 @@ import {
 } from './lib/review-footer.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
 import { recordedSeverityFloor } from './lib/authorization.js';
+import {
+  convergenceAdvisory,
+  convergenceAssessment,
+  type ConvergenceAssessment,
+} from './lib/convergence.js';
 
 export type ReviewEvent = 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT';
 
@@ -729,6 +734,18 @@ export interface ComposeReviewResult {
    */
   prevPostedInline?: number;
   /**
+   * The persistently-critical convergence assessment (#9410), present only
+   * when the carried telemetry shows the loop is in that shape: Criticals
+   * stood in the previous round's work-list AND stand again this round, with
+   * the two-round posting window present and not shrinking. Advisory only —
+   * it never moves the event, never caps, never blocks; it surfaces the
+   * `land-with-residual-risk` recommendation and a residual-risk inventory
+   * scaffold for the maintainer's risk-acceptance decision. Absent whenever
+   * the shape is not provable; every input degrades open, so absence is the
+   * fail-safe reading, never a suppressed finding.
+   */
+  convergence?: ConvergenceAssessment;
+  /**
    * What the body budget had to give up to fit GitHub's limit, when it did.
    * On the result because `verdictLine` — printed to stderr, persisted in
    * the composed JSON, copied into the archived report — otherwise keeps
@@ -1207,6 +1224,10 @@ export function composeReview(
     attribution,
     prevRound,
     reroute,
+    // The previous round's convergence facts, one read with the round and
+    // volume above (#9410): the persistently-critical signal is computed in
+    // the body composer beside the counts it compares against.
+    { hadCritical: prevFacts.hadCritical, posted: prevFacts.posted },
   );
   // The ledger marker rides the body THIS function returns, because this — not
   // the CLI handler — is what `submit` calls and posts. Appending it in the
@@ -1271,6 +1292,17 @@ export function composeReview(
 function prevLedgerFacts(planPath: string | undefined): {
   round: number;
   posted?: number;
+  /**
+   * Did the previous round's carried work-list hold a Critical? The
+   * persistently-critical signal's persistence half (#9410): a loop cannot
+   * be "persistently critical" unless the PREVIOUS round already stood
+   * behind a Critical. `undefined` (not `false`) when no previous round was
+   * recovered — "no prior work-list" is not "no prior Critical", and the
+   * signal degrades open on the distinction. Same fail-open, decides-nothing
+   * contract as the volume fields: a tampered or missing work-list costs a
+   * missed advisory, never a false one.
+   */
+  hadCritical?: boolean;
 } {
   try {
     if (!planPath) return { round: 0 };
@@ -1297,10 +1329,16 @@ function prevLedgerFacts(planPath: string | undefined): {
     // a volume but no usable round (partially written, hand-edited) would
     // otherwise attribute it to round 0 — and a round-1 marker would ship
     // `prevPosted` for a round that never existed, against this field's own
-    // "absent on round 1" contract.
+    // "absent on round 1" contract. The same-round rule binds the
+    // work-list's Critical presence: a round-0 work-list is no work-list.
+    const hadCritical =
+      round > 0 && Array.isArray(prev.findings)
+        ? prev.findings.some((f) => f?.sev === 'C') || undefined
+        : undefined;
     return {
       round,
       ...(posted === undefined || round === 0 ? {} : { posted }),
+      ...(hadCritical === undefined ? {} : { hadCritical }),
     };
   } catch {
     return { round: 0 };
@@ -1540,6 +1578,14 @@ function composeReviewBody(
     indices: [],
     entries: [],
   },
+  /**
+   * The previous round's convergence facts from the carried ledger (#9410):
+   * whether its work-list held a Critical, and its posting volume. Both
+   * optional — a round that recovered neither degrades the persistently-
+   * critical signal open (it simply does not fire), which is the fail-safe
+   * direction for an advisory.
+   */
+  prevConvergence: { hadCritical?: boolean; posted?: number } = {},
 ): ComposeReviewResult {
   // The posting set this body describes — `input` here is already the
   // post-enforcement one, so the count needs no second derivation and
@@ -1597,6 +1643,21 @@ function composeReviewBody(
     relocated: relocatedCriticals,
     relocatedDeterministic,
   } = splitDeferralChannel(input.deferredSuggestions);
+  // The persistently-critical convergence signal (#9410): computed, never
+  // decided. "This round's Criticals" counts every Critical this round
+  // stands behind — the inline count, the body-only Criticals, and the
+  // relocated ones (a Critical the model deferred is relocated back to a
+  // posted blocker, so it still stands). The persistence half and the volume
+  // window come from the carried ledger (`prevConvergence`). Advisory only:
+  // it cannot move the event or cap the verdict; it only surfaces, and every
+  // input degrades open to "no assessment".
+  const convergence = convergenceAssessment({
+    prevHadCritical: prevConvergence.hadCritical,
+    thisCriticals:
+      criticalsInline + bodyCriticals.length + relocatedCriticals.length,
+    posted: postedInline,
+    prevPosted: prevConvergence.posted,
+  });
   // The floor-enforced reroutes join the model's deferrals AFTER the split:
   // they are constructed typed by this module's own code (see
   // `floorEnforcedReroute`), so routing them through the model-channel
@@ -3287,6 +3348,24 @@ function composeReviewBody(
       ]
     : [];
 
+  // The persistently-critical convergence advisory (#9410): disclosed on
+  // every event when the carried telemetry shows the loop will not
+  // self-converge via the floor. Non-capping and advisory-only — it never
+  // moves the event, never caps, and its own text disclaims it ("does not
+  // block"). Rank 1 trim like the deferral display: it is guidance the
+  // operator also receives on the terminal and in the composed JSON, so it
+  // is the first thing to yield when the body overflows — the verdict and
+  // the findings outrank it. Bounded by construction: fixed prose plus a
+  // count, no model text, so it cannot balloon the body it rides.
+  const convergenceBlock: Bi[] = convergence
+    ? [
+        {
+          trim: 1,
+          ...convergenceAdvisory(convergence),
+        },
+      ]
+    : [];
+
   // The not-reviewed disclosures yield after the deferral display and before
   // nothing else: they say what the review could not certify, which the
   // verdict's own cap already carries, so trimming them costs detail rather
@@ -3569,6 +3648,9 @@ function composeReviewBody(
   //     precedes the list (non-capping).
   clauses.push(...unlicensedDeferralBlock);
   clauses.push(...deferredSuggestionsBlock);
+  // 6e'. Persistently-critical convergence advisory (non-capping, advisory
+  //     only) — the exit recommendation for a loop the floor cannot converge.
+  clauses.push(...convergenceBlock);
   // 6e. Resumed-run continuity (non-capping) — reused work that COUNTS as
   //     reviewed, disclosed so the author knows two attempts fed this verdict.
   clauses.push(...continuityBlock);
@@ -3620,6 +3702,7 @@ function composeReviewBody(
     lowSignal,
     scopeUnproven,
     dimensionGapsAreDepthOnly,
+    ...(convergence ? { convergence } : {}),
   };
 }
 
@@ -4339,6 +4422,17 @@ export const composeReviewCommand: CommandModule = {
           ? ''
           : ` (previous round: ${result.prevPostedInline})`),
     );
+    // The persistently-critical convergence advisory (#9410), when the
+    // carried telemetry shows the loop will not self-converge via the floor.
+    // Advisory only, like the VOLUME line beside it — facts plus the one
+    // recommendation that fits, never a threshold, never a decision: the
+    // land-with-residual-risk exit is the maintainer's to take. Printed only
+    // when the shape is provable; absence is the fail-safe reading.
+    if (result.convergence) {
+      writeStderrLine(
+        `CONVERGENCE: ${convergenceAdvisory(result.convergence).en}`,
+      );
+    }
     writeStderrLine(verdictLine(result));
   },
 };

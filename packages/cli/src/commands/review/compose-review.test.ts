@@ -2704,6 +2704,152 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
     }
   });
 
+  it('surfaces the persistently-critical advisory when the loop will not converge (#9410)', async () => {
+    // The carried telemetry shows the shape: a Critical stood in the
+    // previous round's work-list, one stands again this round, and the
+    // two-round posting window is present and not shrinking. The advisory
+    // must surface on all three surfaces — the composed JSON field, the body
+    // disclosure, and the terminal CONVERGENCE line — and it must be
+    // advisory-only: it never moves the event, never caps.
+    const dir = mkdtempSync(join(tmpdir(), 'compose-converge-'));
+    const inputPath = join(dir, 'compose.json');
+    const commentsPath = join(dir, 'comments.json');
+    const planPath = join(dir, 'plan.json');
+    writeFileSync(planPath, JSON.stringify({ prNumber: 8255 }), 'utf8');
+    writeFileSync(
+      inputPath,
+      JSON.stringify({ modelId: MODEL, planPath }),
+      'utf8',
+    );
+    // One Critical this round.
+    writeFileSync(
+      commentsPath,
+      JSON.stringify([
+        { path: 'a.ts', line: 1, body: '**[Critical]** standing blocker' },
+      ]),
+      'utf8',
+    );
+    const stderr = () =>
+      (writeStderrLine as ReturnType<typeof vi.fn>).mock.calls.map((c) =>
+        String(c[0]),
+      );
+    const stdoutJson = () =>
+      JSON.parse(
+        (writeStdoutLine as ReturnType<typeof vi.fn>).mock.calls
+          .map((c) => String(c[0]))
+          .join('\n'),
+      ) as {
+        convergence?: {
+          shape: string;
+          recommendation: string;
+          criticals: number;
+          posted: number;
+          prevPosted: number;
+        };
+        body?: string;
+      };
+    try {
+      // The predecessor carried a Critical and posted 1; this round posts 1
+      // (flat, not shrinking) — the persistently-critical conjunction.
+      (writeStderrLine as ReturnType<typeof vi.fn>).mockClear();
+      (writeStdoutLine as ReturnType<typeof vi.fn>).mockClear();
+      writeFileSync(
+        join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+        JSON.stringify({
+          v: 1,
+          round: 6,
+          findings: [{ id: 'R6-1', sev: 'C', file: 'x.ts', title: 'blocker' }],
+          posted: 1,
+        }),
+        'utf8',
+      );
+      await runComposeReviewCommand({
+        input: inputPath,
+        comments: commentsPath,
+      });
+      // Terminal CONVERGENCE line, advisory-only and self-disclaiming.
+      const conv = stderr().filter((l) => l.startsWith('CONVERGENCE: '));
+      expect(conv).toHaveLength(1);
+      expect(conv[0]).toContain('land-with-residual-risk');
+      expect(conv[0]).toContain('does not block');
+      // Structured field on the composed JSON.
+      const composed = stdoutJson();
+      expect(composed.convergence).toMatchObject({
+        shape: 'persistently-critical',
+        recommendation: 'land-with-residual-risk',
+        criticals: 1,
+        posted: 1,
+        prevPosted: 1,
+      });
+      // Body disclosure rides too, carrying the same recommendation code.
+      expect(composed.body).toContain('land-with-residual-risk');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('stays silent on the persistently-critical advisory when the loop IS converging (#9410)', async () => {
+    // Same shape as above except the volume is SHRINKING — the loop is
+    // working its Criticals down, so no advisory fires. Every degraded arm
+    // (shrinking volume, no prior Critical, missing window) is fail-open to
+    // silence; this pins the shrinking arm end to end.
+    const dir = mkdtempSync(join(tmpdir(), 'compose-converge-no-'));
+    const inputPath = join(dir, 'compose.json');
+    const commentsPath = join(dir, 'comments.json');
+    const planPath = join(dir, 'plan.json');
+    writeFileSync(planPath, JSON.stringify({ prNumber: 8255 }), 'utf8');
+    writeFileSync(
+      inputPath,
+      JSON.stringify({ modelId: MODEL, planPath }),
+      'utf8',
+    );
+    writeFileSync(
+      commentsPath,
+      JSON.stringify([
+        { path: 'a.ts', line: 1, body: '**[Critical]** standing blocker' },
+      ]),
+      'utf8',
+    );
+    const stderr = () =>
+      (writeStderrLine as ReturnType<typeof vi.fn>).mock.calls.map((c) =>
+        String(c[0]),
+      );
+    const stdoutJson = () =>
+      JSON.parse(
+        (writeStdoutLine as ReturnType<typeof vi.fn>).mock.calls
+          .map((c) => String(c[0]))
+          .join('\n'),
+      ) as { convergence?: unknown; body?: string };
+    try {
+      // The predecessor carried a Critical but posted MORE (3) than this
+      // round (1): the volume is shrinking, the loop is converging.
+      (writeStderrLine as ReturnType<typeof vi.fn>).mockClear();
+      (writeStdoutLine as ReturnType<typeof vi.fn>).mockClear();
+      writeFileSync(
+        join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+        JSON.stringify({
+          v: 1,
+          round: 6,
+          findings: [{ id: 'R6-1', sev: 'C', file: 'x.ts', title: 'blocker' }],
+          posted: 3,
+        }),
+        'utf8',
+      );
+      await runComposeReviewCommand({
+        input: inputPath,
+        comments: commentsPath,
+      });
+      expect(
+        stderr().filter((l) => l.startsWith('CONVERGENCE: ')),
+      ).toHaveLength(0);
+      const composed = stdoutJson();
+      expect(composed.convergence).toBeUndefined();
+      expect(composed.body ?? '').not.toContain('land-with-residual-risk');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('honours review.attribution=false through the handler (wiring)', async () => {
     // Third wiring leg: deleting the attribution argument from the
     // composeReviewCommand call leaves the direct composeReview test and the
