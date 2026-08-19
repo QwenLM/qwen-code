@@ -8,7 +8,7 @@ import type { ICommandLoader } from './types.js';
 import type { SlashCommand } from '../ui/commands/types.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { aboutCommand } from '../ui/commands/aboutCommand.js';
-import { boardCommand } from '../ui/commands/boardCommand.js';
+import { boardCommand } from '../ui/commands/board-command.js';
 import { advisorCommand } from '../ui/commands/advisor-command.js';
 import { tasksCommand } from '../ui/commands/tasksCommand.js';
 import { workflowsCommand } from '../ui/commands/workflowsCommand.js';

@@ -385,7 +385,8 @@ export const boardCommand: CommandModule = {
 
       .command({
         command: 'block <id>',
-        describe: 'Record that <id> cannot start until --on <blocker> completes',
+        describe:
+          'Record that <id> cannot start until --on <blocker> completes',
         builder: (y: Argv) =>
           y
             .positional('id', { type: 'string', demandOption: true })
@@ -591,12 +592,12 @@ export const boardCommand: CommandModule = {
             };
             // The one command on this surface that is not for agents.
             if (!a.force && !isInteractiveInvocation()) {
-              console.error(
+              process.stderr.write(
                 `Refusing to resolve ${a.id} from a non-interactive shell.\n` +
                   `A decision needs a person: approval, acceptance and ` +
                   `adjudication are exactly what no agent has the standing to ` +
                   `settle. Run this from your terminal, or pass --force if you ` +
-                  `are scripting it yourself.`,
+                  `are scripting it yourself.\n`,
               );
               process.exitCode = 1;
               return;

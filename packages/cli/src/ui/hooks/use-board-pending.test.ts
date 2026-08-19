@@ -8,7 +8,7 @@ import { describe, it, expect } from 'vitest';
 import {
   formatBoardPending,
   BOARD_POLL_INTERVAL_MS,
-} from './useBoardPending.js';
+} from './use-board-pending.js';
 
 describe('board pending indicator', () => {
   it('shows nothing when the session is on no board', () => {

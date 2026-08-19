@@ -7,9 +7,9 @@
 import { render } from 'ink-testing-library';
 
 const boardPendingMock = vi.hoisted(() => vi.fn(() => null));
-vi.mock('../hooks/useBoardPending.js', async (importOriginal) => {
+vi.mock('../hooks/use-board-pending.js', async (importOriginal) => {
   const actual =
-    await importOriginal<typeof import('../hooks/useBoardPending.js')>();
+    await importOriginal<typeof import('../hooks/use-board-pending.js')>();
   return { ...actual, useBoardPending: boardPendingMock };
 });
 import { render as inkRender } from 'ink';

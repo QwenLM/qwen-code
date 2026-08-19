@@ -13,7 +13,7 @@ import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import {
   useBoardPending,
   formatBoardPending,
-} from '../hooks/useBoardPending.js';
+} from '../hooks/use-board-pending.js';
 import { AutoAcceptIndicator } from './AutoAcceptIndicator.js';
 import { ShellModeIndicator } from './ShellModeIndicator.js';
 import { BackgroundTasksPill } from './background-view/BackgroundTasksPill.js';

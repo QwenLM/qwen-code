@@ -12,8 +12,11 @@
  * monitor; this one leads with what will not move until someone acts.
  */
 
-import type { BoardTaskRecord } from '@qwen-code/qwen-code-core';
-import type { AskRecord, DecisionRecord } from '@qwen-code/qwen-code-core';
+import type {
+  AskRecord,
+  BoardTaskRecord,
+  DecisionRecord,
+} from '@qwen-code/qwen-code-core';
 import { sanitizeTerminalText } from '../../ui/utils/textUtils.js';
 
 export interface BoardSnapshot {
