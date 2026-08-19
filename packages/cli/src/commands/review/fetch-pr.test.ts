@@ -14,6 +14,7 @@ import {
   computeDiffStats,
   isEmptyDiff,
   isCollapsedFromUpstream,
+  decodeWasLossy,
   resolveIncrementalAnchor,
   type AnchorProbe,
 } from './fetch-pr.js';
@@ -1636,6 +1637,68 @@ describe('fetch-pr report assembly', () => {
     expect(writtenDiff()).toBe(FULL_SOURCE_DELETED);
   });
 
+  it('a LIVE rename target still owes its source when the ranges STRADDLE', async () => {
+    // Rename detection is a similarity threshold, and the two ranges compare
+    // different pairs of blobs — so the delta can pair a rename that the full
+    // range does not. Round 1 rewrites `a.ts` past the threshold; round 2
+    // moves it to `q.ts` with an edit. `anchor..head` renders one rename
+    // section; `merge-base..head` renders a plain deletion of `a.ts` beside
+    // an addition of `q.ts`.
+    //
+    // Keying the ride-along on "the target was restored" missed this
+    // entirely: the target is LIVE, so nothing rode along, the lineage check
+    // passed on `q.ts` alone, and the slice published only the addition —
+    // `a.ts`'s deletion hunks, which no round had seen, retired at the next
+    // re-anchor. The rule is about the FULL range: does it carry a section
+    // under the source's name?
+    const FULL_STRADDLE = [
+      'diff --git a/a.ts b/a.ts',
+      'deleted file mode 100644',
+      '--- a/a.ts',
+      '+++ /dev/null',
+      '@@ -1,1 +0,0 @@',
+      '-A original',
+      'diff --git a/q.ts b/q.ts',
+      'new file mode 100644',
+      '--- /dev/null',
+      '+++ b/q.ts',
+      '@@ -0,0 +1,1 @@',
+      '+Q',
+      '',
+    ].join('\n');
+    // Both live: q.ts differs across the range, a.ts is gone at head.
+    producerMocks.gitOpt.mockImplementation((...args: string[]) => {
+      if (args[0] === 'cat-file' || args[0] === 'merge-base') return '';
+      if (args[0] === 'rev-parse') return ANCHOR;
+      if (args.includes('ls-tree')) {
+        if (args.includes('q.ts')) {
+          return args.includes(BASE) ? '' : '100644 blob feed\tq.ts';
+        }
+        if (args.includes('a.ts')) {
+          return args.includes(BASE) ? '100644 blob cafe\ta.ts' : '';
+        }
+        return '';
+      }
+      return null;
+    });
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+      probeUnavailable: false,
+    });
+    servesBothRanges(FULL_STRADDLE, DELTA_RENAME);
+    const report = await reportFor({ since: ANCHOR });
+    expect(ruling(report)).toEqual({ since: ANCHOR, effective: true });
+    const scope = (report.incremental as { scope: Record<string, unknown> })
+      .scope;
+    // BOTH halves are in scope — the source is not restored here, it is a
+    // live deletion the full range names on its own.
+    expect((scope['deltaFiles'] as string[]).sort()).toEqual(['a.ts', 'q.ts']);
+    // …and the published slice carries the deletion hunks that used to drop.
+    expect(writtenDiff()).toContain('-A original');
+    expect(writtenDiff()).toContain('+Q');
+  });
+
   it('a LIVE rename target still scopes by its new name only', async () => {
     // Control for the test above: when the target is NOT restored, the
     // rename's net hunks sit under the new-side section and scoping is
@@ -1726,6 +1789,74 @@ describe('fetch-pr report assembly', () => {
     // The round still reviews — the full range.
     expect(report.diffPath).not.toBeNull();
     expect(writtenDiff()).toBe(FULL_SOURCE_DELETED);
+  });
+
+  it('a LITERAL U+FFFD in the content is ordinary, not a lossy decode', () => {
+    // The guard measures the DECODE, not the decoded text. Scanning the text
+    // for U+FFFD cannot tell a substitution from the code point itself, and
+    // the code point is ordinary content — this repository holds four
+    // literal ones in source. A delta touching any of them, even as context,
+    // used to demote the round to a reason filed under "deterministic for the
+    // same sha and must NOT be retried", so that PR paid a full review every
+    // round afterwards under a cause that had not happened.
+    //
+    // Only INVALID bytes produce a substitution, and only substitution
+    // creates the name collision this guards.
+    const legitimate = Buffer.from('a � b', 'utf8');
+    expect(legitimate.includes(0xef)).toBe(true); // the code point IS present
+    expect(decodeWasLossy(legitimate)).toBe(false);
+
+    // An invalid byte does not round-trip: the substitution is three bytes
+    // where the original was one.
+    expect(decodeWasLossy(Buffer.from([0x61, 0xe9, 0x62]))).toBe(true);
+    // …and a truncated multi-byte sequence, the other shape a capture cut
+    // mid-character produces.
+    expect(decodeWasLossy(Buffer.from([0xe4, 0xb8]))).toBe(true);
+    // Ordinary multi-byte content is clean.
+    expect(decodeWasLossy(Buffer.from('héllo 世界', 'utf8'))).toBe(false);
+  });
+
+  it('scopes a capture whose CONTENT holds a literal U+FFFD', async () => {
+    // The end-to-end half of the guard's contract. Four files in this
+    // repository carry a literal U+FFFD in source, so a delta touching any of
+    // them — even as context — met a guard that scanned the decoded text and
+    // could not tell the character from a substitution. The round demoted to
+    // `containment-unverified`, which the recovery contract files under
+    // "deterministic for the same sha and must NOT be retried", so that PR
+    // paid a full review every round afterwards under a cause that had not
+    // happened.
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+      probeUnavailable: false,
+    });
+    const withChar = (body: string) =>
+      Buffer.from(
+        [
+          'diff --git a/a.ts b/a.ts',
+          '--- a/a.ts',
+          '+++ b/a.ts',
+          '@@ -1,2 +1,3 @@',
+          ' one',
+          `+${body}`,
+          ' three',
+          '',
+        ].join('\n'),
+        'utf8',
+      );
+    // The code point itself, as ordinary content — valid UTF-8 throughout.
+    const CLEAN = withChar("const replacement = '\uFFFD';");
+    producerMocks.gitRaw.mockImplementation((...args: string[]) =>
+      args.includes(`${ANCHOR}..f00df00df00d`) ||
+      args.includes(`${BASE}..f00df00df00d`)
+        ? CLEAN
+        : Buffer.from(''),
+    );
+    const report = await reportFor({ since: ANCHOR });
+    // Scoped, not demoted.
+    expect(ruling(report)).toEqual({ since: ANCHOR, effective: true });
+    expect(writtenDiff()).toContain('\uFFFD');
   });
 
   it('refuses to scope on a lossily decoded capture', async () => {
