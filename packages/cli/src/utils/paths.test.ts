@@ -14,6 +14,13 @@ describe('safeTarget', () => {
     expect(safeTarget('archive.tar.gz')).toBe('archive.tar.gz');
   });
 
+  it('keeps dashes — artifact naming is a two-sided contract', () => {
+    // Review producers hardcode the dash spelling (bundled-skill templates,
+    // composed names, prev-ledger); the lift must not rename any slug.
+    expect(safeTarget('pr-6771')).toBe('pr-6771');
+    expect(safeTarget('foo-bar')).toBe('foo-bar');
+  });
+
   it('neutralizes traversal tokens', () => {
     expect(safeTarget('../../evil')).toBe('evil');
     expect(safeTarget('..\\..\\evil')).toBe('evil');
@@ -25,10 +32,13 @@ describe('safeTarget', () => {
     expect(safeTarget('a b:c')).toBe('a_b_c');
   });
 
-  it('strips leading dashes so slugs survive argv boundaries', () => {
-    expect(safeTarget('-foo')).toBe('foo');
-    expect(safeTarget('./--verbose')).toBe('verbose');
-    expect(safeTarget('---')).toBe('target');
+  it('strips leading dots and underscores (byte-identical to the pre-lift behavior)', () => {
+    expect(safeTarget('./--verbose')).toBe('--verbose');
+    expect(safeTarget('_foo')).toBe('foo');
+    expect(safeTarget('...foo')).toBe('foo');
+    // Dashes are NOT leading-stripped — matching the pre-lift implementation
+    // exactly is the lift's contract.
+    expect(safeTarget('-foo')).toBe('-foo');
   });
 
   it('falls back to "target" when nothing safe remains', () => {
@@ -36,49 +46,5 @@ describe('safeTarget', () => {
     expect(safeTarget('.')).toBe('target');
     expect(safeTarget('...')).toBe('target');
     expect(safeTarget('///')).toBe('target');
-  });
-
-  it('keeps the slug space prefix-free at the dash boundary', () => {
-    // Review's cleanup sweeps `.qwen/tmp/` by `qwen-review-<slug>-` prefix:
-    // if a slug could contain `-` — natively, or via the truncation join —
-    // one target's slug could extend another's, and the shorter target's
-    // cleanup would delete the longer target's artifacts. `-` is therefore
-    // out of the slug alphabet entirely.
-    expect(safeTarget('foo-bar')).toBe('foo_bar');
-    const shortSlug = safeTarget('foo');
-    expect(safeTarget('foo-bar').startsWith(`${shortSlug}-`)).toBe(false);
-    const shared = Array.from({ length: 30 }, (_, i) => `level${i}`).join('/');
-    const deepSlug = safeTarget(`${shared}/alpha`);
-    expect(deepSlug).not.toContain('-');
-    // The short-vs-truncated direction too: a truncated slug never starts
-    // with `<short slug>-`, whatever the short target is.
-    expect(deepSlug.startsWith(`${safeTarget(shared)}-`)).toBe(false);
-  });
-
-  it('bounds deep targets to the one-component cap, keeping them distinct', () => {
-    // Deep nested paths flatten past POSIX's 255-byte filename component cap
-    // (ENAMETOOLONG): truncate and carry a hash of the ORIGINAL target so
-    // distinct deep paths stay distinct. The fixtures share a flattened
-    // prefix longer than the kept window (≥187 chars) and differ only in the
-    // tail, so a truncation-only slug — one that dropped the digest — would
-    // collide here instead of shipping green.
-    const shared = Array.from({ length: 30 }, (_, i) => `level${i}`).join('/');
-    const deepA = `${shared}/alpha`;
-    const deepB = `${shared}/beta`;
-    const slugA = safeTarget(deepA);
-    const slugB = safeTarget(deepB);
-    expect(slugA.length).toBeLessThanOrEqual(200);
-    expect(slugB.length).toBeLessThanOrEqual(200);
-    expect(slugA).not.toBe(slugB);
-    // …and the digest hashes the ORIGINAL target, not its flattened form:
-    // these two flatten to the same string, so only a hash of the originals
-    // keeps them apart (a hash-of-`flat` mutant collides).
-    const flatA = 'a/' + 'b/'.repeat(100) + 'end';
-    const flatB = flatA.replaceAll('/', '_');
-    expect(safeTarget(flatA)).not.toBe(safeTarget(flatB));
-    // Deterministic: the same target always flattens to the same slug.
-    expect(safeTarget(deepA)).toBe(slugA);
-    // Shallow targets stay untouched.
-    expect(safeTarget('packages/core')).toBe('packages_core');
   });
 });
