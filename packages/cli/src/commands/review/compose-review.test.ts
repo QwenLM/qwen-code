@@ -8873,3 +8873,92 @@ describe('convergence telemetry — volume, carried in the marker', () => {
     expect(l.posted).toBe(2);
   });
 });
+
+describe('convergence diagnosis reaches the POSTED body', () => {
+  // The module is unit-tested next door; these go through composeReview,
+  // the path GitHub receives, because a diagnosis that never reaches the
+  // body is a diagnosis nobody reads.
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'diagnosis-e2e-'));
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  const plan = () => {
+    const p = join(dir, 'plan.json');
+    writeFileSync(p, JSON.stringify({ prNumber: 8255 }));
+    return p;
+  };
+  const sideFile = (prev: Record<string, unknown>) =>
+    writeFileSync(
+      join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+      JSON.stringify({ v: 1, findings: [], ...prev }),
+    );
+
+  it('renders the observation when findings keep returning to one file', () => {
+    sideFile({
+      round: 4,
+      posted: 9,
+      findings: [
+        { id: 'R2-1', sev: 'S', file: 'src/a.ts', title: 'x' },
+        { id: 'R4-2', sev: 'S', file: 'src/a.ts', title: 'y' },
+      ],
+    });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 2,
+      draftedComments: [
+        { path: 'src/a.ts', line: 1, body: '**[Suggestion]** again' },
+        { path: 'src/a.ts', line: 9, body: '**[Suggestion]** and again' },
+      ],
+    });
+    expect(r.body).toContain('Convergence:');
+    expect(r.body).toContain(
+      '`src/a.ts` (findings in rounds 2, 4, 2 more now)',
+    );
+    // An observation, not a gate: the verdict and its caps are untouched.
+    expect(r.cappedBy).not.toContain('convergence');
+    expect(r.body).toContain('nothing was withheld');
+  });
+
+  it('stays silent on a healthy round', () => {
+    sideFile({
+      round: 4,
+      posted: 9,
+      findings: [{ id: 'R4-1', sev: 'S', file: 'src/old.ts', title: 'x' }],
+    });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: [
+        { path: 'src/new.ts', line: 1, body: '**[Suggestion]** unrelated' },
+      ],
+    });
+    expect(r.body).not.toContain('Convergence:');
+  });
+
+  it('counts the POST-enforcement set, like every other volume surface', () => {
+    // The floor moves both Suggestions out of the posting set, so the round
+    // posts one comment — and the diagnosis must describe that number, not
+    // the drafts, or the paragraph disagrees with the PR it sits on.
+    sideFile({ round: 5, posted: 1, findings: [] });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      severityFloor: 'critical',
+      criticalsInline: 1,
+      suggestionsInline: 2,
+      draftedComments: [
+        { path: 'a.ts', line: 1, body: '**[Critical]** boom' },
+        { path: 'b.ts', line: 2, body: '**[Suggestion]** one' },
+        { path: 'c.ts', line: 3, body: '**[Suggestion]** two' },
+      ],
+    });
+    expect(r.floorEnforced).toHaveLength(2);
+    expect(r.body).toContain('round 6 posted 1 inline comment(s)');
+  });
+});

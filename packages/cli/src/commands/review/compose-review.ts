@@ -79,6 +79,11 @@ import {
   type LedgerFinding,
 } from './lib/ledger.js';
 import {
+  diagnoseConvergence,
+  renderConvergenceDiagnosis,
+  type ConvergenceDiagnosis,
+} from './lib/convergence.js';
+import {
   CRITICAL_PREFIX,
   LEADING_INVISIBLE_RE,
   SUGGESTION_PREFIX,
@@ -1201,12 +1206,28 @@ export function composeReview(
       })(),
     };
   }
+  // Is the loop settling? Measured from facts this round already holds —
+  // the previous work list and volume from the side file, this round's
+  // drafts — and rendered as an observation. It changes nothing about what
+  // the round posts: no finding is withheld, no verdict capped. A round
+  // that looks healthy produces no diagnosis at all rather than an empty
+  // section.
+  const diagnosis = diagnoseConvergence({
+    round: prevRound + 1,
+    posted: (effective.draftedComments ?? []).length,
+    ...(prevFacts.posted === undefined ? {} : { prevPosted: prevFacts.posted }),
+    prevFindings: prevFacts.findings,
+    draftedPaths: (effective.draftedComments ?? [])
+      .map((c) => (typeof c.path === 'string' ? c.path : ''))
+      .filter((p) => p !== ''),
+  });
   const result = composeReviewBody(
     effective,
     cliVersion,
     attribution,
     prevRound,
     reroute,
+    diagnosis,
   );
   // The ledger marker rides the body THIS function returns, because this — not
   // the CLI handler — is what `submit` calls and posts. Appending it in the
@@ -1271,14 +1292,20 @@ export function composeReview(
 function prevLedgerFacts(planPath: string | undefined): {
   round: number;
   posted?: number;
+  /**
+   * The previous round's work list, for the recurrence join. Empty when
+   * nothing was recovered — which reads as "no recurrence to find", never
+   * as "the previous round found nothing".
+   */
+  findings: LedgerFinding[];
 } {
   try {
-    if (!planPath) return { round: 0 };
+    if (!planPath) return { round: 0, findings: [] };
     const plan = JSON.parse(readFileSync(planPath, 'utf8')) as {
       prNumber?: unknown;
     };
     const pr = plan?.prNumber;
-    if (!isPositivePrNumber(pr)) return { round: 0 };
+    if (!isPositivePrNumber(pr)) return { round: 0, findings: [] };
     const prev = JSON.parse(
       readFileSync(
         join(dirname(planPath), `qwen-review-pr-${pr}-prev-ledger.json`),
@@ -1298,12 +1325,22 @@ function prevLedgerFacts(planPath: string | undefined): {
     // otherwise attribute it to round 0 — and a round-1 marker would ship
     // `prevPosted` for a round that never existed, against this field's own
     // "absent on round 1" contract.
+    // Shape-checked like every other side-file read: the file is JSON
+    // `pr-context` wrote, and a malformed entry contributes no cluster
+    // rather than a wrong one.
+    const findings = Array.isArray(prev.findings)
+      ? prev.findings.filter(
+          (f): f is LedgerFinding =>
+            !!f && typeof f.id === 'string' && typeof f.file === 'string',
+        )
+      : [];
     return {
       round,
       ...(posted === undefined || round === 0 ? {} : { posted }),
+      findings,
     };
   } catch {
-    return { round: 0 };
+    return { round: 0, findings: [] };
   }
 }
 
@@ -1540,6 +1577,7 @@ function composeReviewBody(
     indices: [],
     entries: [],
   },
+  diagnosis: ConvergenceDiagnosis | null = null,
 ): ComposeReviewResult {
   // The posting set this body describes — `input` here is already the
   // post-enforcement one, so the count needs no second derivation and
@@ -3295,6 +3333,15 @@ function composeReviewBody(
   // interrupted earlier attempt. Disclosed on every verdict — Approve
   // included — and never capping: the recovered agents were re-certified
   // from the harness records and COUNT as reviewed.
+  // The convergence observation: rendered on every event, capping nothing,
+  // and only when a signal actually fired. It sits beside the other
+  // disclosure paragraphs because it is addressed to the same reader — the
+  // author deciding what to do next — and it is deliberately the only
+  // paragraph here that comments on the SHAPE of the review history rather
+  // than on the diff.
+  const convergenceBlock: Bi[] = diagnosis
+    ? [renderConvergenceDiagnosis(diagnosis)]
+    : [];
   const continuityBlock: Bi[] = recoveredFromPriorAttempt
     ? [
         {
@@ -3321,6 +3368,7 @@ function composeReviewBody(
       ...repositoryContextBlock,
       ...unlicensedDeferralBlock,
       ...deferredSuggestionsBlock,
+      ...convergenceBlock,
       ...continuityBlock,
       ...bodyCriticalBlock,
     ];
@@ -3374,6 +3422,7 @@ function composeReviewBody(
         ...repositoryContextBlock,
         ...unlicensedDeferralBlock,
         ...deferredSuggestionsBlock,
+        ...convergenceBlock,
         ...continuityBlock,
       ],
       notReviewedParts.length ||
@@ -3565,6 +3614,7 @@ function composeReviewBody(
   clauses.push(...deferredSuggestionsBlock);
   // 6e. Resumed-run continuity (non-capping) — reused work that COUNTS as
   //     reviewed, disclosed so the author knows two attempts fed this verdict.
+  clauses.push(...convergenceBlock);
   clauses.push(...continuityBlock);
 
   // 7. Body Criticals — on a COMMENT that stands where a REQUEST_CHANGES
