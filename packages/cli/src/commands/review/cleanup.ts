@@ -31,7 +31,7 @@ import {
   reviewLeaseHeldByAnotherSession,
   reviewLeasePath,
 } from '../../services/review-worktree-lease.js';
-import { sanitizedGitEnv } from './lib/worktree.js';
+import { redirectedAncestor, sanitizedGitEnv } from './lib/worktree.js';
 import { currentUser, getGhHost, ghApiAll, setGhHost } from './lib/gh.js';
 import { parseReceiptIds } from './lib/receipt.js';
 import { refExists, releaseWorktree } from './lib/git.js';
@@ -408,17 +408,6 @@ function auditPrWrites(target: string, prNumber: string): void {
  * filesystem root, and a path that cannot be read at all answers null — an
  * absent temp dir is the ordinary case, not a hazard.
  */
-function redirectedAncestor(dir: string): string | null {
-  try {
-    for (let cur = resolve(dir); ; cur = dirname(cur)) {
-      if (lstatSync(cur).isSymbolicLink()) return cur;
-      const up = dirname(cur);
-      if (up === cur) return null;
-    }
-  } catch {
-    return null;
-  }
-}
 
 function scratchWorktreesOf(worktree: string): {
   paths: string[];
@@ -519,9 +508,24 @@ export function runCleanup(target: string): void {
     // carrier), check the PR for writes that bypassed `qwen review submit`.
     auditPrWrites(target, prNumber);
 
-    // The audit is network-bound (seconds) — a lease can appear during it (a
-    // review that started after the gate above read none). Re-check before
-    // destroying anything and take the same skip path (#9205).
+    // The audit is network-bound (seconds) — and the ancestor gate at the top
+    // of this function ran BEFORE it. A link that appears at any component of
+    // the temp path during that window redirects every delete below it, so the
+    // same refusal is re-taken here rather than assumed to still hold.
+    const redirectedAfterAudit = redirectedAncestor(REVIEW_TMP_DIR);
+    if (redirectedAfterAudit !== null) {
+      writeStderrLine(
+        `Refusing to clean: ${redirectedAfterAudit} became a symlink during ` +
+          `the write audit, so every delete under ${REVIEW_TMP_DIR} would ` +
+          'land wherever it points. Remove the link by hand, then re-run.',
+      );
+      process.exitCode = 1;
+      return;
+    }
+
+    // A lease can appear during the same window (a review that started after
+    // the gate above read none). Re-check before destroying anything and take
+    // the same skip path (#9205).
     const holderAfterAudit = readReviewWorktreeLease(process.cwd(), target);
     if (reviewLeaseHeldByAnotherSession(holderAfterAudit)) {
       writeStdoutLine(

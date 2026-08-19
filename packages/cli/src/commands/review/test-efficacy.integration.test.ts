@@ -1683,6 +1683,10 @@ process.stdout.write(JSON.stringify({
     // this", asserted for statements no test covers.
     write('src/x.ts', 'gone.clear();\n');
     write('src/other.ts', 'export const clean = true;\n');
+    // The commit's own ignore rules are the PR's to write, so a plant named to
+    // match one of them is hidden from a sweep that honors them. `-fd` honored
+    // them; the sweep is `-ffdx` now, sparing only the borrowed farm.
+    write('.gitignore', 'node_modules\nplanted-cache/\n');
     commitAll('a second tracked file');
     // Plants ONCE, so the second run's state is the restore's doing and not
     // the runner's. The marker lives OUTSIDE the tree because inside it would
@@ -1699,6 +1703,8 @@ import path from 'node:path';
 if (!fs.existsSync(${JSON.stringify(marker)})) {
   fs.writeFileSync('src/other.ts', 'export const clean = false; // planted\\n');
   fs.writeFileSync('vitest.config.ts', 'export default { test: {} };\\n');
+  fs.mkdirSync('planted-cache', { recursive: true });
+  fs.writeFileSync('planted-cache/decider.json', '{}\\n');
   fs.writeFileSync(${JSON.stringify(marker)}, '1');
 }
 const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
@@ -1723,6 +1729,12 @@ process.stdout.write(JSON.stringify({
       'planted',
     );
     expect(existsSync(join(repo, 'vitest.config.ts'))).toBe(true);
+    expect(existsSync(join(repo, 'planted-cache/decider.json'))).toBe(true);
+    // ...and `status` cannot see the ignored one, which is the point of it:
+    // a sweep that honors the commit's ignore rules never reaches it either.
+    expect(
+      git(repo, 'status', '--porcelain', '--untracked-files=all'),
+    ).not.toContain('planted-cache');
 
     const second = runOneMutant(
       repo,
@@ -1735,6 +1747,7 @@ process.stdout.write(JSON.stringify({
       'export const clean = true;\n',
     );
     expect(existsSync(join(repo, 'vitest.config.ts'))).toBe(false);
+    expect(existsSync(join(repo, 'planted-cache/decider.json'))).toBe(false);
     expect(second.verdict).toBe('survived');
   });
 
@@ -1807,6 +1820,33 @@ process.stdout.write(JSON.stringify({
     writeFileSync(
       join(probeTree, 'src/x.test.mjs'),
       "import fs from 'node:fs'; import value from 'probe-dependency'; import scopedValue from '@probe/scoped-dependency'; if (value !== 1 || scopedValue !== 2 || fs.readFileSync('node_modules/.bin/probe-tool', 'utf8') !== 'available') throw new Error('bad dependency');\n",
+    );
+
+    // The probe tree a review builds is a `git worktree add` checkout, and the
+    // between-run restore refuses anything else; commit what this fixture has
+    // laid out so the restore is a no-op over it.
+    execFileSync('git', ['init', '-q', '-b', 'main', '--template=', '.'], {
+      cwd: probeTree,
+    });
+    execFileSync('git', ['add', '-A'], { cwd: probeTree });
+    execFileSync(
+      'git',
+      [
+        '-c',
+        'user.email=t@t.t',
+        '-c',
+        'user.name=t',
+        '-c',
+        'commit.gpgsign=false',
+        '-c',
+        'core.hooksPath=/dev/null/no-hooks',
+        'commit',
+        '-qm',
+        'fixture',
+        '--no-verify',
+        '--allow-empty',
+      ],
+      { cwd: probeTree },
     );
 
     const result = runOneMutant(

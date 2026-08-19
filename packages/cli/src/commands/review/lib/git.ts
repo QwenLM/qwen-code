@@ -9,8 +9,9 @@
 // across platforms.
 
 import { execFileSync } from 'node:child_process';
-import { sanitizedGitEnv } from './worktree.js';
+import { redirectedAncestor, sanitizedGitEnv } from './worktree.js';
 import { existsSync, lstatSync, rmSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 
 /** Deadline for a single `git` invocation. Generous; a hang must still end. */
 const GIT_TIMEOUT_MS = 120_000;
@@ -191,6 +192,30 @@ export function worktreeReleaseResult(
  * **before** the branch delete that depends on it.
  */
 export function releaseWorktree(worktreePath: string): WorktreeRelease {
+  // An ANCESTOR symlink first, because the leaf guard below cannot see one:
+  // `lstatSync` dereferences every component except the last, so a link at
+  // `.qwen/tmp` makes every path under it lstat as an ordinary directory while
+  // `git worktree remove --force` and the `rmSync` fallback both land in
+  // whatever checkout it points at. `runCleanup` refuses its whole sweep for
+  // this reason; `cleanStale` releases with no guard of its own, so the
+  // refusal belongs at this choke point where every caller inherits it.
+  // `dirname`, because the LEAF is the branch below: a link AT the path is
+  // unlinked rather than refused, which is what clears it out of the next
+  // `worktree add`'s way.
+  const redirected = redirectedAncestor(dirname(resolve(worktreePath)));
+  if (redirected !== null) {
+    // `existed`/`stillThere` both true: the contract's `reason` is only carried
+    // when something is still there, and a refusal is exactly that — the
+    // caller must log it and must not report the path as swept.
+    return worktreeReleaseResult(
+      true,
+      true,
+      new Error(
+        `refusing to release through a symlink: ${redirected} is a symlink, ` +
+          `so the removal would land wherever it points`,
+      ),
+    );
+  }
   // A symlink at the path must never reach the removal below: `existsSync`
   // follows a LIVE link and `git worktree remove --force` resolves it —
   // together they delete whichever registered worktree the link points at

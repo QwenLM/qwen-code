@@ -175,6 +175,30 @@ describe('releaseWorktree', () => {
     expect(existsSync(join(repo, 'victim', 'keep.txt'))).toBe(true);
   });
 
+  it('refuses to release through an ANCESTOR symlink, which lstat cannot see', () => {
+    // `lstatSync` dereferences every component except the last, so the leaf
+    // guard below is blind one level up: a link at `.qwen/tmp` leaves every
+    // path under it looking like an ordinary directory while
+    // `git worktree remove --force` and the `rmSync` fallback both land in
+    // whatever checkout it names. `runCleanup` refuses its whole sweep on
+    // this; `cleanStale` releases with no guard of its own, so the refusal
+    // belongs here where every caller inherits it.
+    mkdirSync(join(repo, 'real'));
+    git('worktree', 'add', '-q', join('real', 'victim'), '-b', 'victim-topic');
+    writeFileSync(join(repo, 'real', 'victim', 'keep.txt'), 'must survive\n');
+    symlinkSync(join(repo, 'real'), join(repo, 'link'));
+
+    const got = releaseWorktree(join(repo, 'link', 'victim'));
+
+    expect(got.freed).toBe(false);
+    expect(got.reason).toContain('symlink');
+    // Registered and on disk, both.
+    expect(git('worktree', 'list')).toContain(
+      join(realpathSync(repo), 'real', 'victim'),
+    );
+    expect(existsSync(join(repo, 'real', 'victim', 'keep.txt'))).toBe(true);
+  });
+
   it('unlinks a DANGLING symlink, which existsSync cannot see', () => {
     // `existsSync` reports a dangling link as never existed, so the removal
     // skips it — while the link still wedges the next `worktree add` at the

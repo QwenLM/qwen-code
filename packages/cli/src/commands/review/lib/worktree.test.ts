@@ -425,6 +425,23 @@ describe('worktreeResidue', () => {
     expect(worktreeResidue(tree).paths).toEqual(['payload.log']);
   });
 
+  it('stops believing a committed ignore file once the TREE has edited it', () => {
+    // Tracked is not unchanged. `ls-files` answers "is this path in the
+    // index", so a `.gitignore` the commit carries goes on vouching for rules
+    // appended to it after the checkout — the provenance test's own premise,
+    // read one word too loosely.
+    writeFileSync(join(tree, '.gitignore'), 'node_modules\ndist\ncoverage/\n');
+    git('add', '.gitignore');
+    git('commit', '-qm', 'ordinary rules');
+    appendFileSync(join(tree, '.gitignore'), 'payload.log\n');
+    writeFileSync(join(tree, 'payload.log'), 'residue');
+
+    const got = worktreeResidue(tree);
+
+    // Both: the edited rule file, and what it was hiding.
+    expect(got.paths.sort()).toEqual(['.gitignore', 'payload.log']);
+  });
+
   it('sees residue hidden by an ignore rule the COMMIT does not carry', () => {
     // The other half of the same rule. A `.gitignore` written after the
     // checkout, and a line appended to the common repo's `info/exclude`, are

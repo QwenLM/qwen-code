@@ -1506,16 +1506,19 @@ export function probeCleanupFailureDetail(
  * path can still hide is the same blindness the residue probe discloses.
  *
  * Returns null when the tree is as the commit left it, or a reason when it
- * could not be put back. A directory with no `.git` at all is neither: there
- * is no commit to restore FROM, and running the restore anyway would let `git`
- * walk up and check the ENCLOSING repository out into it, which is the
- * discovery hazard the residue probe's identity gate exists for. But a `.git`
- * that IS there and does not answer is a failure and says so — that file is
- * untracked, so no restore ever repairs it, and a guest that overwrites it
- * once would otherwise buy "proceed" from every later run.
+ * could not be put back — and an ABSENT `.git` is the second kind, not the
+ * first. It is the one state the tree can never be restored from, `.git` is
+ * an untracked pointer file sitting inside the tree the PR's own suite runs
+ * in, and treating "nothing to restore from" as "nothing to restore" hands a
+ * guest the whole guarantee for one `rm`. Running the restore anyway is not
+ * the alternative: with no `.git`, discovery walks UP and checks the enclosing
+ * repository out into the tree, which is the hazard the residue probe's
+ * identity gate exists for. Refusing is the only answer that is neither.
  */
 function restoreProbeTreeTracked(probeTree: string): string | null {
-  if (!existsSync(join(probeTree, '.git'))) return null;
+  if (!existsSync(join(probeTree, '.git'))) {
+    return `${probeTree} carries no .git, so there is no commit to put it back to`;
+  }
   const top = spawnSync('git', ['rev-parse', '--show-toplevel'], {
     cwd: probeTree,
     encoding: 'utf8',
@@ -1538,10 +1541,25 @@ function restoreProbeTreeTracked(probeTree: string): string | null {
   // in a tree this code is defending against, so it is emptied here the way
   // every other checkout in this pipeline empties it. `--` and a pathspec:
   // this restores FILES and never moves HEAD.
-  const noHooks = ['-c', 'core.hooksPath=/dev/null/no-hooks'];
+  // `core.fsmonitor` runs a command on BOTH of these, and the config that sets
+  // it lives in the tree they are cleaning: the residue probe empties it for
+  // exactly this reason and these two spawns were the ones still steerable.
+  const inert = [
+    '-c',
+    'core.hooksPath=/dev/null/no-hooks',
+    '-c',
+    'core.fsmonitor=',
+  ];
   for (const args of [
-    [...noHooks, 'checkout', '--force', 'HEAD', '--', '.'],
-    [...noHooks, 'clean', '-fd'],
+    [...inert, 'checkout', '--force', 'HEAD', '--', '.'],
+    // `-ffdx`, because `-fd` honors the ignore rules — and those belong to the
+    // commit under test, so a plant named to match one of them (a committed
+    // `.gitignore` line and a file to match it) survived every restore. The
+    // one exception is the dependency farm: it is ignored, it is borrowed
+    // rather than built, and it is the only ignored thing in this tree the
+    // probes cannot run without. Everything else ignored — a built `dist`, a
+    // planted config — goes.
+    [...inert, 'clean', '-ffdx', '-e', 'node_modules'],
   ]) {
     const r = spawnSync('git', args, {
       cwd: probeTree,
@@ -2043,6 +2061,10 @@ export function runControlMutant(
   let relinkedMidRun = false;
   const attempt = (): boolean | null => {
     try {
+      // Same pre-write re-check as the mutant and hunk paths: the entry guard
+      // is several calls back, and the injection is what would follow a link
+      // out of the tree.
+      if (probeTargetEscapes(probeTree, probeFile)) return null;
       writeFileSync(
         abs,
         `${original}\n;import { it as __qcIt, expect as __qcExpect } from 'vitest';\n__qcIt('QWEN-REVIEW-POSITIVE-CONTROL', () => {\n  __qcExpect(1).toBe(2);\n});\n`,
@@ -2134,6 +2156,20 @@ export function runOneMutant(
   let relinkedMidRun = false;
   const attempt = (): MutantResult => {
     try {
+      // Re-check at the write itself. The guard at the top of this function
+      // and this line are a check-then-use pair with a `readFileSync` and a
+      // restore between them, and the threat it exists for has a shell inside
+      // these trees and picks its moment — the hunk probe carries the same
+      // re-check immediately before its own mutation op, with the same
+      // reasoning, and these two writes were the ones without it.
+      if (probeTargetEscapes(probeTree, mutant.file)) {
+        return {
+          ...mutant,
+          verdict: 'inconclusive',
+          detail:
+            'the probe target was relinked through a symlink before the mutation was written — nothing was mutated',
+        };
+      }
       writeFileSync(abs, lines.join('\n'), 'utf8');
       const { perFile } = runProbeSuite(
         probeTree,

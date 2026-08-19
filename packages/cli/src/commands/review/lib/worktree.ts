@@ -109,6 +109,52 @@ const GIT_ENV_EXEC = [
   'XDG_CONFIG_HOME',
 ];
 
+/**
+ * The first symlink at or above `dir`, or null when every component is real.
+ *
+ * The walk STOPS at `stopAt` — the checkout — and does not climb through it.
+ * Components above the repository are the user's own filesystem layout, not
+ * anything a probe can plant: `/var` is a symlink on every macOS box, so a
+ * walk to `/` refuses every sweep there while reporting that it found a
+ * redirect. What this looks for is a link inside the tree the pipeline owns,
+ * which is where a probe can put one.
+ */
+export function redirectedAncestor(
+  dir: string,
+  stopAt: string = process.cwd(),
+): string | null {
+  try {
+    // Canonical on BOTH sides of the stop test, and only there: `process.cwd()`
+    // reports the resolved path while a caller's string may not (`/var` vs
+    // `/private/var` on macOS is the everyday case), so a literal comparison
+    // never matches and the walk climbs past the checkout into exactly the
+    // system links this is not about. The symlink test above it stays lstat —
+    // canonicalising THAT would resolve away the thing being looked for.
+    const stop = resolve(stopAt);
+    let stopReal = stop;
+    try {
+      stopReal = realpathSync(stopAt);
+    } catch {
+      // Unresolvable: the literal comparison below is the whole stop test.
+    }
+    for (let cur = resolve(dir); ; cur = dirname(cur)) {
+      if (lstatSync(cur).isSymbolicLink()) return cur;
+      if (cur === stop) return null;
+      try {
+        if (realpathSync(cur) === stopReal) return null;
+      } catch {
+        // A component that does not resolve is not the checkout; keep walking.
+      }
+      // `dir` was not under `stopAt` at all: nothing this owns is above it.
+      if (dirname(cur) === cur) return null;
+    }
+  } catch {
+    // A path that does not resolve has nothing above it to redirect through;
+    // the caller's own absent-path handling answers that case.
+    return null;
+  }
+}
+
 /** Git invocations must resolve the tree they are given, not the caller shell's redirects. */
 export function sanitizedGitEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };
@@ -703,6 +749,10 @@ export function worktreeResidue(cwd: string, cap = 12): WorktreeResidue {
     return { paths: [], total: 0, unmeasured: why };
   }
   const seen = new Set(paths);
+  // The status set, snapshotted before the extras below join it: an ignore
+  // file that appears HERE is one the working tree has edited away from the
+  // commit, so whatever it hides is not something the commit vouched for.
+  const editedFromHead = new Set(paths);
   const extras: string[] = [];
   for (const rec of others.stdout.split('\0')) {
     if (rec.length === 0 || seen.has(rec)) continue;
@@ -732,6 +782,11 @@ export function worktreeResidue(cwd: string, cap = 12): WorktreeResidue {
       if (
         rule !== undefined &&
         fromTheCommit.has(rule.source) &&
+        // Tracked is not the same as unchanged. `ls-files` answers "is this
+        // PATH in the index", and a `.gitignore` the commit carries can be
+        // rewritten in the tree afterwards — at which point its rules are the
+        // writer's, not the commit's, and vouch for nothing.
+        !editedFromHead.has(rule.source) &&
         !hidesEverything(rule.pattern)
       ) {
         continue;

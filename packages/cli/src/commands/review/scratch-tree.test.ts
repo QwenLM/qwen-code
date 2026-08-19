@@ -33,7 +33,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { runScratchTree, scratchTreeCommand } from './scratch-tree.js';
 import { scratchWorktreePath } from './lib/paths.js';
 import { isolateHostGitConfig } from './lib/test-utils.js';
@@ -111,6 +111,42 @@ describe('runScratchTree', () => {
     // a user's own git-lfs install carries are not this surface).
     git(worktree, 'config', '--unset', 'filter.evil.smudge');
     expect(run().available).toBe(true);
+  });
+
+  it("screens ANOTHER worktree's per-worktree config, not just this one's", () => {
+    // The screen runs against the review worktree, but the checkout it
+    // authorises runs in the SCRATCH tree — whose own
+    // `<common>/worktrees/<label>/config.worktree` is honored once
+    // `extensions.worktreeConfig` is on and was not among the files read. A
+    // filter planted there executed during the reset while this function
+    // reported the repository clean, so the screen now reads every entry under
+    // the common dir's `worktrees/`.
+    const first = run();
+    expect(first.available).toBe(true);
+
+    const common = execFileSync(
+      'git',
+      ['rev-parse', '--path-format=absolute', '--git-common-dir'],
+      { cwd: worktree, encoding: 'utf8' },
+    ).trim();
+    const scratchAdmin = join(
+      common,
+      'worktrees',
+      basename(first.path!),
+      'config.worktree',
+    );
+    execFileSync('git', ['config', 'extensions.worktreeConfig', 'true'], {
+      cwd: worktree,
+    });
+    writeFileSync(
+      scratchAdmin,
+      '[filter "planted"]\n\tsmudge = touch /tmp/qwen-should-never-run\n',
+    );
+
+    const r = run();
+
+    expect(r.available).toBe(false);
+    expect(r.note).toContain('filter.planted.smudge');
   });
 
   it('places it BESIDE the review worktree, never inside it', () => {

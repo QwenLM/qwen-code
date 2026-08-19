@@ -228,6 +228,37 @@ describe('findVitestBin', () => {
   });
 });
 
+/**
+ * Make a fixture directory the checkout a probe tree always is in production.
+ *
+ * `restoreProbeTreeTracked` refuses a tree with no `.git` — there is nothing to
+ * put it back to, and running the restore anyway would check the ENCLOSING
+ * repository out into it — so a bare `mkdtemp` no longer reaches the behaviour
+ * these tests are about. Commit whatever the test has already written, so the
+ * restore is a no-op and the test still pins its own thing.
+ */
+function asCheckout(dir: string): void {
+  const git = (...args: string[]) =>
+    execFileSync(
+      'git',
+      [
+        '-c',
+        'user.email=t@t.t',
+        '-c',
+        'user.name=t',
+        '-c',
+        'commit.gpgsign=false',
+        '-c',
+        'core.hooksPath=/dev/null/no-hooks',
+        ...args,
+      ],
+      { cwd: dir, encoding: 'utf8' },
+    );
+  git('init', '-q', '-b', 'main', '--template=', '.');
+  git('add', '-A');
+  git('commit', '-qm', 'fixture', '--no-verify', '--allow-empty');
+}
+
 describe('runControlMutant', () => {
   it('returns null — not false — when the probe file cannot be read', () => {
     // `false` is a VERDICT: "the injected always-failing test stayed green".
@@ -271,6 +302,7 @@ describe('runControlMutant', () => {
         }),
       );
       writeFileSync(join(vitestDir, 'index.js'), '');
+      asCheckout(dir);
       expect(() => runControlMutant(dir, 'a.test.ts')).toThrow();
       expect(readFileSync(join(dir, 'a.test.ts'), 'utf8')).toBe(original);
     } finally {
@@ -471,6 +503,31 @@ describe('probeCleanupFailureDetail', () => {
 });
 
 describe('restoreProbeTreeTracked, through runOneMutant', () => {
+  it('refuses to run when the tree carries NO .git at all', () => {
+    // The state the tree can never be put back from, and the cheapest one to
+    // reach: `.git` is an untracked pointer file inside the directory the PR's
+    // own suite runs in, so one `rm` used to turn every later restore into
+    // "nothing to restore" and let the plants stand. Running the restore
+    // anyway is not the alternative either — with no `.git`, discovery walks
+    // UP and checks the enclosing repository out into this tree.
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-nogit-'));
+    try {
+      writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
+
+      const r = runOneMutant(
+        dir,
+        { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+        ['a.test.ts'],
+      );
+
+      expect(r.verdict).toBe('inconclusive');
+      expect(r.detail).toContain('no .git');
+      expect(readFileSync(join(dir, 'a.ts'), 'utf8')).toBe('gone.clear();\n');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('refuses to run when the tree HAS a .git it cannot resolve', () => {
     // The gate skips a directory with no `.git` because there is no commit to
     // restore FROM — but `.git` is untracked, so nothing ever restores IT, and

@@ -42,6 +42,7 @@ import {
   lstatSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   writeFileSync,
 } from 'node:fs';
@@ -166,10 +167,25 @@ function localFilterCommands(worktree: string): string[] {
     return [];
   }
   const [commonDir, gitDir] = files.stdout.trim().split('\n');
+  const common = resolve(worktree, commonDir);
   const candidates = [
-    join(resolve(worktree, commonDir), 'config'),
+    join(common, 'config'),
     join(resolve(worktree, gitDir), 'config.worktree'),
   ];
+  // Every OTHER worktree's per-worktree config too. This screen runs against
+  // the review worktree, but the checkout it authorises runs in the SCRATCH
+  // tree, whose own `<common>/worktrees/<label>/config.worktree` is honored
+  // once `extensions.worktreeConfig` is on and was never read here — a filter
+  // planted there executed during the reset while this function reported the
+  // repository clean. The admin directory is one `readdir`, and a filter in
+  // any of these is a plant whichever tree carries it.
+  try {
+    for (const entry of readdirSync(join(common, 'worktrees'))) {
+      candidates.push(join(common, 'worktrees', entry, 'config.worktree'));
+    }
+  } catch {
+    // No linked worktrees registered: the two candidates above are all of it.
+  }
   const found: string[] = [];
   for (const file of candidates) {
     if (!existsSync(file)) continue;
@@ -253,6 +269,15 @@ function resetScratchTree(
   // resolves to. Discard-and-rebuild is the correct answer to all of it —
   // `discardWorktree`'s `rmSync` unlinks a symlink rather than following it.
   try {
+    // The PARENT, before anything else. Every check below — the toplevel
+    // comparison, the common-dir equality, the backpointer round-trip —
+    // resolves THROUGH a link there and so they all agree with each other
+    // about a tree that is not this one, while `lstatSync(tree)` cannot see it
+    // at all: it dereferences every component except the last. This is the
+    // directory the pipeline creates its trees in (`.qwen/tmp`), which is the
+    // one component above the leaf that anything running in these trees can
+    // replace; `runCleanup` refuses its whole sweep for the same reason.
+    if (lstatSync(dirname(resolve(tree))).isSymbolicLink()) return false;
     if (!lstatSync(tree).isDirectory()) return false;
     // A genuine linked worktree carries its `.git` as a FILE naming its admin
     // entry, and its gitdir is `<common>/worktrees/<name>`. A tree claiming
@@ -300,6 +325,13 @@ function resetScratchTree(
     return false;
   }
   try {
+    // Re-read the leaf immediately before the mutation. The gate above is a
+    // handful of spawns long, and what it authorises is a `checkout --force`
+    // and a `clean -ffdx`: a link swapped in during that window aims both at
+    // whatever it names. The window cannot be closed from here — this narrows
+    // it to one syscall, which is the same trade the hunk probe's pre-write
+    // re-check makes.
+    if (lstatSync(tree).isSymbolicLink()) return false;
     git(tree, 'checkout', '--force', '--detach', headSha);
     // `-ff` because a single `-f` refuses to delete a nested git repository, so
     // a probe that cloned or `git init`-ed a fixture would survive a reset the
