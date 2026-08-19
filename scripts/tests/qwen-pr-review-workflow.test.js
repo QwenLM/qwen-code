@@ -3216,6 +3216,20 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     expect(r.status).toBe(0);
   });
 
+  // The stub answers the guard's reviews and run-view lookups by running the
+  // caller's own `--jq` filter — that filter IS the thing under test — so
+  // these cases need jq on PATH. Windows runners have none, and a stub that
+  // silently produced nothing there would report the guard as broken rather
+  // than untested. Probed once, skipped honestly.
+  const hasJq = (() => {
+    try {
+      execFileSync('jq', ['--version'], { stdio: 'ignore' });
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+
   // Executed shape: run the step's REAL bash with a stub gh that logs every
   // call. The stub pre-applies the dedup filter's semantics to the fixture
   // (the filter's author scope is pinned by the text test above).
@@ -3524,135 +3538,158 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
   for (const useInJobStep of [false, true]) {
     const site = useInJobStep ? 'in-job step' : 'fallback job';
 
-    it(`${site} stays silent when THIS run already posted its review`, () => {
-      const r = runFallbackStep('default', {
-        useInJobStep,
-        prHead: 'HEADSHA1',
-        runCreated: RUN_CREATED,
-        runStartedAttempt: RUN_RESTARTED,
-        reviews: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', AFTER),
-      });
-      expect(r.status).toBe(0);
-      expect(r.posted).toBe('');
-      expect(r.summary).toContain('a bot review of this PR was submitted');
-    });
-
-    it(`${site} still posts when no review can be attributed to this run`, () => {
-      // Each clause alone must keep the fallback speaking, or a stale or
-      // foreign review buys silence on a genuinely dead pipeline: an earlier
-      // run's review (outside the window), another account's, an unsubmitted
-      // (PENDING) one, and none at all. The head is deliberately not a clause
-      // — see the attribute-by-TIME test below.
-      const cases = {
-        stale: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', BEFORE),
-        foreign: reviewFixture('someone-else', 'HEADSHA1', AFTER),
-        pending: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', null),
-        none: '[]',
-      };
-      for (const [name, reviews] of Object.entries(cases)) {
+    it.skipIf(!hasJq)(
+      `${site} stays silent when THIS run already posted its review`,
+      () => {
         const r = runFallbackStep('default', {
-          useInJobStep,
-          prHead: 'HEADSHA1',
-          runCreated: RUN_CREATED,
-          runStartedAttempt: RUN_RESTARTED,
-          reviews,
-        });
-        expect(r.posted, name).not.toBe('');
-      }
-    });
-
-    it(`${site} survives a job re-run: attempt 1's review still silences it`, () => {
-      // Re-running a failed job keeps the run id but moves run-level
-      // startedAt to the re-executed attempt (measured: runs 32219268680 and
-      // 32218596441 report startedAt ~28 and ~9 minutes after createdAt).
-      // Anchored there, attempt 1's review reads as older than "this run",
-      // and a re-run that fails before posting contradicts it — the very
-      // shape this guard exists to stop. The stub answers createdAt and
-      // startedAt with DIFFERENT values, so this fails if the guard reads
-      // the wrong field.
-      const r = runFallbackStep('default', {
-        useInJobStep,
-        prHead: 'HEADSHA1',
-        runCreated: RUN_CREATED,
-        runStartedAttempt: RUN_RESTARTED,
-        reviews: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', MID_RERUN),
-      });
-      expect(r.status).toBe(0);
-      expect(r.posted).toBe('');
-      expect(r.summary).toContain('a bot review of this PR was submitted');
-    });
-
-    it(`${site} says so in the log when the guard cannot run`, () => {
-      // A lookup that DIED degrades to the false comment this change
-      // removes, and silence there leaves an oncall unable to tell it from
-      // "no review matched". Both unavailable paths announce themselves.
-      for (const scenario of ['runstart_fail', 'reviews_fail']) {
-        const r = runFallbackStep(scenario, {
           useInJobStep,
           prHead: 'HEADSHA1',
           runCreated: RUN_CREATED,
           runStartedAttempt: RUN_RESTARTED,
           reviews: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', AFTER),
         });
-        expect(r.posted, scenario).not.toBe('');
-        expect(r.stdout, scenario).toContain('::warning::already-posted guard');
-        expect(r.summary, scenario).toContain(
-          'Already-posted guard unavailable',
-        );
-      }
-    });
+        expect(r.status).toBe(0);
+        expect(r.posted).toBe('');
+        expect(r.summary).toContain('a bot review of this PR was submitted');
+      },
+    );
 
-    it(`${site} posts when this run's creation time is unavailable`, () => {
-      // Without a start time there is no proof the review landed during THIS
-      // run, and posting wins over silence — the same call the head-moved
-      // guard makes when its comparison is unavailable.
-      const r = runFallbackStep('runstart_fail', {
-        useInJobStep,
-        prHead: 'HEADSHA1',
-        runCreated: RUN_CREATED,
-        runStartedAttempt: RUN_RESTARTED,
-        reviews: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', AFTER),
-      });
-      expect(r.posted).not.toBe('');
-    });
+    it.skipIf(!hasJq)(
+      `${site} still posts when no review can be attributed to this run`,
+      () => {
+        // Each clause alone must keep the fallback speaking, or a stale or
+        // foreign review buys silence on a genuinely dead pipeline: an earlier
+        // run's review (outside the window), another account's, an unsubmitted
+        // (PENDING) one, and none at all. The head is deliberately not a clause
+        // — see the attribute-by-TIME test below.
+        const cases = {
+          stale: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', BEFORE),
+          foreign: reviewFixture('someone-else', 'HEADSHA1', AFTER),
+          pending: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', null),
+          none: '[]',
+        };
+        for (const [name, reviews] of Object.entries(cases)) {
+          const r = runFallbackStep('default', {
+            useInJobStep,
+            prHead: 'HEADSHA1',
+            runCreated: RUN_CREATED,
+            runStartedAttempt: RUN_RESTARTED,
+            reviews,
+          });
+          expect(r.posted, name).not.toBe('');
+        }
+      },
+    );
 
-    it(`${site} posts when the reviews lookup itself fails`, () => {
-      // Same direction as every other lookup this step makes for a SKIP
-      // decision: a failed listing is never read as "a review exists".
-      const r = runFallbackStep('reviews_fail', {
-        useInJobStep,
-        prHead: 'HEADSHA1',
-        runCreated: RUN_CREATED,
-        runStartedAttempt: RUN_RESTARTED,
-        reviews: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', AFTER),
-      });
-      expect(r.posted).not.toBe('');
-    });
+    it.skipIf(!hasJq)(
+      `${site} survives a job re-run: attempt 1's review still silences it`,
+      () => {
+        // Re-running a failed job keeps the run id but moves run-level
+        // startedAt to the re-executed attempt (measured: runs 32219268680 and
+        // 32218596441 report startedAt ~28 and ~9 minutes after createdAt).
+        // Anchored there, attempt 1's review reads as older than "this run",
+        // and a re-run that fails before posting contradicts it — the very
+        // shape this guard exists to stop. The stub answers createdAt and
+        // startedAt with DIFFERENT values, so this fails if the guard reads
+        // the wrong field.
+        const r = runFallbackStep('default', {
+          useInJobStep,
+          prHead: 'HEADSHA1',
+          runCreated: RUN_CREATED,
+          runStartedAttempt: RUN_RESTARTED,
+          reviews: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', MID_RERUN),
+        });
+        expect(r.status).toBe(0);
+        expect(r.posted).toBe('');
+        expect(r.summary).toContain('a bot review of this PR was submitted');
+      },
+    );
+
+    it.skipIf(!hasJq)(
+      `${site} says so in the log when the guard cannot run`,
+      () => {
+        // A lookup that DIED degrades to the false comment this change
+        // removes, and silence there leaves an oncall unable to tell it from
+        // "no review matched". Both unavailable paths announce themselves.
+        for (const scenario of ['runstart_fail', 'reviews_fail']) {
+          const r = runFallbackStep(scenario, {
+            useInJobStep,
+            prHead: 'HEADSHA1',
+            runCreated: RUN_CREATED,
+            runStartedAttempt: RUN_RESTARTED,
+            reviews: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', AFTER),
+          });
+          expect(r.posted, scenario).not.toBe('');
+          expect(r.stdout, scenario).toContain(
+            '::warning::already-posted guard',
+          );
+          expect(r.summary, scenario).toContain(
+            'Already-posted guard unavailable',
+          );
+        }
+      },
+    );
+
+    it.skipIf(!hasJq)(
+      `${site} posts when this run's creation time is unavailable`,
+      () => {
+        // Without a start time there is no proof the review landed during THIS
+        // run, and posting wins over silence — the same call the head-moved
+        // guard makes when its comparison is unavailable.
+        const r = runFallbackStep('runstart_fail', {
+          useInJobStep,
+          prHead: 'HEADSHA1',
+          runCreated: RUN_CREATED,
+          runStartedAttempt: RUN_RESTARTED,
+          reviews: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', AFTER),
+        });
+        expect(r.posted).not.toBe('');
+      },
+    );
+
+    it.skipIf(!hasJq)(
+      `${site} posts when the reviews lookup itself fails`,
+      () => {
+        // Same direction as every other lookup this step makes for a SKIP
+        // decision: a failed listing is never read as "a review exists".
+        const r = runFallbackStep('reviews_fail', {
+          useInJobStep,
+          prHead: 'HEADSHA1',
+          runCreated: RUN_CREATED,
+          runStartedAttempt: RUN_RESTARTED,
+          reviews: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', AFTER),
+        });
+        expect(r.posted).not.toBe('');
+      },
+    );
   }
 
-  it("attributes by TIME, not by head — a moved head cannot hide this run's review", () => {
-    // The head is not a stable attribute of a run: a push moves the PR's head
-    // between the post and this step, and a re-run recomputes the reviewed
-    // head from a later attempt. Two revisions of this guard keyed on it and
-    // both re-opened the #9342 contradiction through one of those doors. What
-    // the guard proves now is narrower and stable — a bot review of this PR
-    // submitted while this run was alive — so a review on ANY head inside the
-    // window silences the comment.
-    for (const useInJobStep of [false, true]) {
-      const r = runFallbackStep('default', {
-        useInJobStep,
-        prHead: 'NEWSHA',
-        runCreated: RUN_CREATED,
-        runStartedAttempt: RUN_RESTARTED,
-        reviews: reviewFixture('qwen-code-ci-bot', 'OLDSHA', AFTER),
-      });
-      expect(r.status, String(useInJobStep)).toBe(0);
-      expect(r.posted, String(useInJobStep)).toBe('');
-      expect(r.summary, String(useInJobStep)).toContain(
-        'a bot review of this PR was submitted after this run was created',
-      );
-    }
-  });
+  it.skipIf(!hasJq)(
+    "attributes by TIME, not by head — a moved head cannot hide this run's review",
+    () => {
+      // The head is not a stable attribute of a run: a push moves the PR's head
+      // between the post and this step, and a re-run recomputes the reviewed
+      // head from a later attempt. Two revisions of this guard keyed on it and
+      // both re-opened the #9342 contradiction through one of those doors. What
+      // the guard proves now is narrower and stable — a bot review of this PR
+      // submitted while this run was alive — so a review on ANY head inside the
+      // window silences the comment.
+      for (const useInJobStep of [false, true]) {
+        const r = runFallbackStep('default', {
+          useInJobStep,
+          prHead: 'NEWSHA',
+          runCreated: RUN_CREATED,
+          runStartedAttempt: RUN_RESTARTED,
+          reviews: reviewFixture('qwen-code-ci-bot', 'OLDSHA', AFTER),
+        });
+        expect(r.status, String(useInJobStep)).toBe(0);
+        expect(r.posted, String(useInJobStep)).toBe('');
+        expect(r.summary, String(useInJobStep)).toContain(
+          'a bot review of this PR was submitted after this run was created',
+        );
+      }
+    },
+  );
 
   it('carries no cross-job head wiring to drift', () => {
     // An earlier revision published review-pr's reviewed head as a job output
