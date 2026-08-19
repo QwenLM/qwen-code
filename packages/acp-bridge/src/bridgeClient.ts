@@ -837,6 +837,14 @@ export class BridgeClient implements Client {
      * optional so existing direct constructors stay source-compatible.
      */
     private readonly onSessionCatalogChanged?: () => void,
+    /**
+     * Invoked after a child-driven Goal turn clears `goalTurnActive`. The
+     * bridge settles whatever the ending turn's last mid-turn drain missed —
+     * a Goal turn owns no prompt slot, so its terminal is the only signal.
+     * Trailing and optional so existing direct constructors stay
+     * source-compatible.
+     */
+    private readonly onGoalTurnEnded?: (sessionId: string) => void,
   ) {}
 
   async requestPermission(
@@ -1998,6 +2006,9 @@ export class BridgeClient implements Client {
       if (!entry || !this.ownsSession(sessionId)) return;
       if (source === 'goal') {
         entry.goalTurnActive = false;
+        // Before the promptId validation below: a malformed id costs the
+        // session its `turn_complete`, but the queue must still be settled.
+        this.onGoalTurnEnded?.(sessionId);
         const promptId = params['promptId'];
         if (
           typeof promptId !== 'string' ||
