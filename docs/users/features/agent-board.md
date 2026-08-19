@@ -106,9 +106,17 @@ qwen board resolve d-1 --reject --note "use the existing adapter instead"
 qwen fleet up "audit the auth flow" --agents 1 --with codex --with "claude"
 ```
 
-That pane gets `QWEN_BOARD` and `QWEN_BOARD_AS` in its environment, so anything
-running there can join with the same commands. Add `--json` for machine
-consumption:
+That pane gets `QWEN_BOARD` and `QWEN_BOARD_AS` in its environment — but a tool
+that is not Qwen Code never reads them, and nothing can reach its prompt from
+outside. Hand it the protocol yourself:
+
+```bash
+qwen board protocol --board orders
+```
+
+That prints the same instructions a Qwen session receives, filled in with the
+real board and participant name. Paste it into the other agent once and it can
+use every command below. Add `--json` for machine consumption:
 
 ```bash
 qwen board show --json
@@ -134,16 +142,18 @@ directory, which is what makes this possible.
 
 ## Options
 
-| Flag               | Applies to | Meaning                                              |
-| ------------------ | ---------- | ---------------------------------------------------- |
-| `--board <name>`   | all        | Board to use. Defaults to the project directory name |
-| `--as <name>`      | all        | Participant name to act as                           |
-| `--json`           | all        | Emit JSON instead of text                            |
-| `--wait`           | `ask`      | Block until the question settles                     |
-| `--timeout <s>`    | `ask`      | Seconds to block. Default 30                         |
-| `--agents <n>`     | `fleet up` | Qwen panes to open. Default 2                        |
-| `--with <cmd>`     | `fleet up` | Run another command in its own pane. Repeatable      |
-| `--session <name>` | `fleet up` | tmux session name. Default `qwen-fleet`              |
+| Flag               | Applies to | Meaning                                                |
+| ------------------ | ---------- | ------------------------------------------------------ |
+| `--board <name>`   | all        | Board to use. Defaults to the project directory name   |
+| `--as <name>`      | all        | Participant name to act as                             |
+| `--json`           | all        | Emit JSON instead of text                              |
+| `--wait`           | `ask`      | Block until the question settles                       |
+| `--timeout <s>`    | `ask`      | Seconds to block. Default 30                           |
+| `--ttl <m>`        | `ask`      | Minutes before the ask lapses to `timeout`. Default 15 |
+| `--mine`           | `show`     | Only what is addressed to or owned by you              |
+| `--agents <n>`     | `fleet up` | Qwen panes to open. Default 2                          |
+| `--with <cmd>`     | `fleet up` | Run another command in its own pane. Repeatable        |
+| `--session <name>` | `fleet up` | tmux session name. Default `qwen-fleet`                |
 
 `QWEN_BOARD` and `QWEN_BOARD_AS` set the first two for a whole shell, which is
 how each pane inherits them.
@@ -153,8 +163,12 @@ how each pane inherits them.
 - **Same machine, same user.** The board is a directory owned by your account;
   that is the whole access boundary. Nothing crosses machines.
 - **Participation is cooperative.** A board cannot force an agent to claim work
-  or answer a question. Agents that are not Qwen Code need to be told about the
-  commands in their own prompt.
+  or answer a question. Agents that are not Qwen Code need `qwen board protocol`
+  pasted into them; setting the environment variables is not enough on its own.
+- **A running session cannot join yet.** Board awareness is decided when a
+  session starts, from `QWEN_BOARD`. To bring an already-running Qwen session
+  in, paste `qwen board protocol` into it — it can then use the commands, but it
+  will not check the board on its own.
 - **A named owner is a proposal.** Naming someone on a task records who is
   expected to take it; only claiming it makes it theirs.
 - **There is no chat.** Everything is a task, a question, or a decision. Text

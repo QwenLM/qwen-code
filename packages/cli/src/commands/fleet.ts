@@ -35,8 +35,6 @@ import {
   tmuxSetOption,
   tmuxRespawnPane,
   tmuxListPanes,
-  parseTmuxListPanes,
-  tmuxCurrentWindowTarget,
   tmuxCurrentSession,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -102,14 +100,7 @@ export const fleetCommand: CommandModule = {
               describe: 'Attach after the layout is built',
             }),
         handler: async (argv) => {
-          const a = argv as unknown as {
-            goal?: string;
-            agents: number;
-            with: string[];
-            board?: string;
-            session: string;
-            attach: boolean;
-          };
+          const a = argv as unknown as FleetUpArgs;
           try {
             await verifyTmux();
           } catch (err) {
@@ -122,111 +113,130 @@ export const fleetCommand: CommandModule = {
             return;
           }
 
-          const board = resolveBoardName({ board: a.board });
-
-          if (a.goal) {
-            const { createBoardTask } =
-              await import('@qwen-code/qwen-code-core');
-            await createBoardTask({ board, subject: a.goal });
-          }
-
-          // Inside tmux already: add a window rather than a second session, so
-          // the user does not end up with nested clients.
-          const inside = Boolean(process.env['TMUX']);
-          let target: string;
-          if (inside) {
-            // Add the window to the session the user is actually in. Using the
-            // configured name here fails outright when their current session is
-            // called anything else, which is the common case.
-            const current = await tmuxCurrentSession();
-            await tmuxNewWindow(current, board);
-            target = await tmuxCurrentWindowTarget();
-          } else {
-            if (!(await tmuxHasSession(a.session))) {
-              await tmuxNewSession(a.session, { windowName: board });
-            }
-            target = `${a.session}:`;
-          }
-
-          // The window's existing pane becomes the board, respawned rather
-          // than typed into: send-keys would race a shell that may not be
-          // ready, and respawn-pane makes the command the pane's process.
-          const existing = parseTmuxListPanes(await tmuxListPanes(target));
-          const boardPane = existing[0]?.paneId;
-          if (!boardPane) {
-            console.error('Could not find a pane to host the board.');
+          try {
+            await buildLayout(a);
+          } catch (err) {
+            // Everything past verifyTmux talks to tmux, which fails for
+            // ordinary reasons — no room for another pane, a window name
+            // already taken. Those reach the user as one line, not a stack
+            // trace out of the yargs handler with a half-built layout behind
+            // it.
+            console.error(
+              `Could not build the layout: ` +
+                `${err instanceof Error ? err.message : String(err)}`,
+            );
             process.exitCode = 1;
-            return;
           }
-          await tmuxRespawnPane(
-            boardPane,
-            paneCommand(
-              board,
-              undefined,
-              `qwen board watch --board ${shellQuote(board)}`,
-            ),
-          );
-
-          const specs: Array<{ name: string; command: string }> = [];
-          for (let i = 1; i <= Math.max(0, a.agents); i++) {
-            const name = `agent-${i}`;
-            specs.push({ name, command: paneCommand(board, name, 'qwen') });
-          }
-          a.with.forEach((cmd, i) => {
-            const name = `ext-${i + 1}`;
-            // A foreign agent never reads QWEN_BOARD, and nothing we control
-            // can inject into its prompt. Printing the protocol into its pane
-            // first is the most we can do without pretending otherwise: the
-            // operator hands it over, and it is right there to copy.
-            specs.push({
-              name,
-              command: paneCommand(
-                board,
-                name,
-                `sh -c ${shellQuote(`qwen board protocol; exec ${cmd}`)}`,
-              ),
-            });
-          });
-
-          // No explicit sizes: an N-way split computed by hand hits `-l 100%`
-          // on the last pane, which tmux rejects. Create the panes, then let
-          // `main-vertical` do the arithmetic — it puts the first pane on the
-          // left and stacks the rest on the right, which is the layout.
-          for (const spec of specs) {
-            const pane = await tmuxSplitWindow(boardPane, {
-              command: spec.command,
-            });
-            await tmuxSelectPaneTitle(pane, spec.name);
-          }
-
-          if (specs.length > 0) {
-            await tmuxSetOption(
-              target,
-              'main-pane-width',
-              String(BOARD_WIDTH_COLUMNS),
-            );
-            await tmuxSelectLayout(target, 'main-vertical');
-          }
-
-          await tmuxSelectPane(boardPane);
-
-          if (!a.attach || inside) {
-            console.log(
-              inside
-                ? `Board "${board}" opened in a new window.`
-                : `Board "${board}" ready. Attach with: tmux attach -t ${a.session}`,
-            );
-            return;
-          }
-          // Replace this process so the user lands in the session directly and
-          // Ctrl-C reaches tmux rather than us.
-          const { spawnSync } = await import('node:child_process');
-          spawnSync('tmux', ['attach', '-t', a.session], {
-            stdio: 'inherit',
-          });
         },
       })
       .demandCommand(1, 'You need at least one command before continuing.')
       .version(false),
   handler: () => {},
 };
+
+interface FleetUpArgs {
+  goal?: string;
+  agents: number;
+  with: string[];
+  board?: string;
+  session: string;
+  attach: boolean;
+}
+
+async function buildLayout(a: FleetUpArgs): Promise<void> {
+  const board = resolveBoardName({ board: a.board });
+
+  if (a.goal) {
+    const { createBoardTask } = await import('@qwen-code/qwen-code-core');
+    await createBoardTask({ board, subject: a.goal });
+  }
+
+  // Always a fresh window, whether or not a session already exists:
+  // reusing one would respawn whatever pane happened to be there and
+  // destroy an earlier board.
+  const inside = Boolean(process.env['TMUX']);
+  const session = inside ? await tmuxCurrentSession() : a.session;
+  if (!inside && !(await tmuxHasSession(session))) {
+    await tmuxNewSession(session, { windowName: board });
+  }
+  // The window id comes from new-window itself. Asking tmux for "the
+  // current window" returns the one that invoked us — respawning its
+  // first pane would kill this very process.
+  const target = await tmuxNewWindow(session, board);
+
+  // The window's existing pane becomes the board, respawned rather
+  // than typed into: send-keys would race a shell that may not be
+  // ready, and respawn-pane makes the command the pane's process.
+  const existing = await tmuxListPanes(target);
+  const boardPane = existing[0]?.paneId;
+  if (!boardPane) {
+    console.error('Could not find a pane to host the board.');
+    process.exitCode = 1;
+    return;
+  }
+  await tmuxRespawnPane(
+    boardPane,
+    paneCommand(
+      board,
+      undefined,
+      `qwen board watch --board ${shellQuote(board)}`,
+    ),
+  );
+
+  const specs: Array<{ name: string; command: string }> = [];
+  for (let i = 1; i <= Math.max(0, a.agents); i++) {
+    const name = `agent-${i}`;
+    specs.push({ name, command: paneCommand(board, name, 'qwen') });
+  }
+  a.with.forEach((cmd, i) => {
+    const name = `ext-${i + 1}`;
+    // No prelude: most agent TUIs enter the alternate screen on start
+    // and discard whatever was printed before them, so a protocol
+    // banner here would be wiped before anyone read it. The operator is
+    // told once, after the layout is up, to paste `qwen board protocol`
+    // in — which is the honest mechanism, since nothing we control can
+    // reach a foreign agent's prompt.
+    specs.push({ name, command: paneCommand(board, name, cmd) });
+  });
+
+  // No explicit sizes: an N-way split computed by hand hits `-l 100%`
+  // on the last pane, which tmux rejects. Create the panes, then let
+  // `main-vertical` do the arithmetic — it puts the first pane on the
+  // left and stacks the rest on the right, which is the layout.
+  if (specs.length > 0) {
+    await tmuxSetOption(target, 'main-pane-width', String(BOARD_WIDTH_COLUMNS));
+  }
+  for (const spec of specs) {
+    const pane = await tmuxSplitWindow(boardPane, {
+      command: spec.command,
+    });
+    await tmuxSelectPaneTitle(pane, spec.name);
+    // Rebalance after every split. Splitting one pane repeatedly halves
+    // it each time and tmux refuses with "no space for new pane" after
+    // three or four; re-laying out gives the next split room.
+    await tmuxSelectLayout(target, 'main-vertical');
+  }
+
+  await tmuxSelectPane(boardPane);
+
+  if (a.with.length > 0) {
+    console.log(
+      `Panes ext-1..${a.with.length} run tools that do not read ` +
+        `${BOARD_ENV}. Paste the output of \`qwen board protocol ` +
+        `--board ${board}\` into each of them so they can join.`,
+    );
+  }
+
+  if (!a.attach || inside) {
+    console.log(
+      inside
+        ? `Board "${board}" opened in a new window.`
+        : `Board "${board}" ready. Attach with: tmux attach -t ${session}`,
+    );
+    return;
+  }
+  // Replace this process so the user lands in the session directly and
+  // Ctrl-C reaches tmux rather than us.
+  const { spawnSync } = await import('node:child_process');
+  spawnSync('tmux', ['attach', '-t', session], { stdio: 'inherit' });
+}

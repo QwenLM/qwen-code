@@ -143,12 +143,12 @@ export const boardCommand: CommandModule = {
           run(async () => {
             const a = argv as CommonArgs & { mine?: boolean };
             const name = board(a);
-            const snap = await snapshot(name);
-            emit(
-              a,
-              snap,
-              renderBoard(a.mine ? mine(snap, participant(a)) : snap),
-            );
+            // Filter before emitting, not just before rendering: --json is the
+            // branch a foreign agent uses, so filtering only the human view
+            // made the flag a no-op for its actual caller.
+            const full = await snapshot(name);
+            const snap = a.mine ? mine(full, participant(a)) : full;
+            emit(a, snap, renderBoard(snap));
           }),
       })
 

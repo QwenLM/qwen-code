@@ -215,13 +215,19 @@ export async function tmuxNewWindow(
   targetSession: string,
   windowName: string,
   serverName?: string,
-): Promise<void> {
+): Promise<string> {
   // -t session: (with trailing colon) means "create window in this session"
   // -t session (without colon) means "create at window index = session", which fails if index exists
-  await tmux(
-    ['new-window', '-t', `${targetSession}:`, '-n', windowName],
+  //
+  // -P -F prints the new window's id. Callers that need to address the window
+  // they just made cannot ask tmux for "the current window" instead: for a
+  // non-attached command client that resolves from the inherited $TMUX_PANE,
+  // which is the *invoking* window, not this one.
+  const output = await tmux(
+    ['new-window', '-t', `${targetSession}:`, '-n', windowName, '-P', '-F', '#{window_id}'],
     serverName,
   );
+  return output.trim();
 }
 
 /**
