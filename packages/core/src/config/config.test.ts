@@ -7130,9 +7130,10 @@ describe('Server Config (config.ts)', () => {
     it('removes the project dir when the session ran from a temp dir', async () => {
       // Records only ever point at temp roots → disposable at exit; the
       // transcripts are usage-salvaged first (#7384).
-      const cwdSpy = vi
-        .spyOn(Storage, 'collectRecordedCwds')
-        .mockReturnValue([path.join(os.tmpdir(), 'qwen-sess-cwd')]);
+      const cwdSpy = vi.spyOn(Storage, 'collectRecordedCwds').mockReturnValue({
+        cwds: [path.join(os.tmpdir(), 'qwen-sess-cwd')],
+        incomplete: false,
+      });
       const listSpy = vi
         .spyOn(Storage, 'listTranscriptPaths')
         .mockReturnValue(['/entry/chats/sess.jsonl']);
@@ -7170,9 +7171,10 @@ describe('Server Config (config.ts)', () => {
       // A certified handoff seals the writer so a successor can resume
       // from this very entry — shutdown must not delete the transcripts
       // out from under it, even when every guard would pass.
-      const cwdSpy = vi
-        .spyOn(Storage, 'collectRecordedCwds')
-        .mockReturnValue([path.join(os.tmpdir(), 'qwen-sess-cwd')]);
+      const cwdSpy = vi.spyOn(Storage, 'collectRecordedCwds').mockReturnValue({
+        cwds: [path.join(os.tmpdir(), 'qwen-sess-cwd')],
+        incomplete: false,
+      });
       try {
         const tmpCwd = path.join(os.tmpdir(), 'qwen-handoff-sess-test');
         const config = new Config({
@@ -7248,9 +7250,10 @@ describe('Server Config (config.ts)', () => {
         .spyOn(Storage, 'containsOnlySessionArtifacts')
         .mockReturnValueOnce(true)
         .mockReturnValue(false);
-      const cwdSpy = vi
-        .spyOn(Storage, 'collectRecordedCwds')
-        .mockReturnValue([path.join(os.tmpdir(), 'qwen-sess-cwd')]);
+      const cwdSpy = vi.spyOn(Storage, 'collectRecordedCwds').mockReturnValue({
+        cwds: [path.join(os.tmpdir(), 'qwen-sess-cwd')],
+        incomplete: false,
+      });
       try {
         const tmpCwd = path.join(os.tmpdir(), 'qwen-raced-entry');
         const config = new Config({
@@ -7283,12 +7286,10 @@ describe('Server Config (config.ts)', () => {
       const guardSpy = vi
         .spyOn(Storage, 'containsOnlySessionArtifacts')
         .mockReturnValue(true);
-      const cwdSpy = vi
-        .spyOn(Storage, 'collectRecordedCwds')
-        .mockReturnValue([
-          '/real/project',
-          path.join(os.tmpdir(), 'qwen-mixed-temp'),
-        ]);
+      const cwdSpy = vi.spyOn(Storage, 'collectRecordedCwds').mockReturnValue({
+        cwds: ['/real/project', path.join(os.tmpdir(), 'qwen-mixed-temp')],
+        incomplete: false,
+      });
       try {
         const tmpCwd = path.join(os.tmpdir(), 'qwen-migrated-entry');
         const config = new Config({
@@ -7318,7 +7319,7 @@ describe('Server Config (config.ts)', () => {
         .mockReturnValue(true);
       const cwdSpy = vi
         .spyOn(Storage, 'collectRecordedCwds')
-        .mockReturnValue([]);
+        .mockReturnValue({ cwds: [], incomplete: false });
       try {
         const tmpCwd = path.join(os.tmpdir(), 'qwen-norecords-entry');
         const config = new Config({
@@ -7344,9 +7345,10 @@ describe('Server Config (config.ts)', () => {
       rmSpy.mockImplementation(() => {
         throw new Error('EACCES');
       });
-      const cwdSpy = vi
-        .spyOn(Storage, 'collectRecordedCwds')
-        .mockReturnValue([path.join(os.tmpdir(), 'qwen-sess-cwd')]);
+      const cwdSpy = vi.spyOn(Storage, 'collectRecordedCwds').mockReturnValue({
+        cwds: [path.join(os.tmpdir(), 'qwen-sess-cwd')],
+        incomplete: false,
+      });
       try {
         const tmpCwd = path.join(os.tmpdir(), 'qwen-enter-sess-test');
         const config = new Config({

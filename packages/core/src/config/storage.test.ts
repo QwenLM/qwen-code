@@ -1038,9 +1038,11 @@ describe('Storage – cleanOrphanProjectDirs', () => {
     expect(actualFs.existsSync(entry)).toBe(false);
   });
 
-  it('removes an entry reduced to workflow residue (R7-2)', async () => {
-    // /cd moves only the session files: workflow snapshots and journals
-    // carry no cwd and must not strand the entry forever.
+  it('keeps an entry reduced to workflow residue (R9-1)', async () => {
+    // Workflow snapshots and journals carry no cwd proving their source
+    // project is gone (chat recording disabled + workflows enabled is a
+    // real configuration), so residue must fail closed: leaked, never
+    // deleted.
     const entry = path.join(projectsDir, '-workflow-residue');
     actualFs.mkdirSync(path.join(entry, 'chats'), { recursive: true });
     actualFs.mkdirSync(path.join(entry, 'workflows', 'run-1'), {
@@ -1056,7 +1058,85 @@ describe('Storage – cleanOrphanProjectDirs', () => {
     );
     ageEntry('-workflow-residue');
     await Storage.cleanOrphanProjectDirs('current');
-    expect(actualFs.existsSync(entry)).toBe(false);
+    expect(actualFs.existsSync(entry)).toBe(true);
+  });
+
+  it('keeps an entry when a record is unreadable (R9-5)', async () => {
+    // Mixed evidence: one transcript records a gone cwd, another cannot
+    // be opened. The unreadable one might hold a live cwd, so the scan
+    // is incomplete and must veto deletion — no marker either.
+    const entry = path.join(projectsDir, '-incomplete-scan');
+    actualFs.mkdirSync(path.join(entry, 'chats'), { recursive: true });
+    actualFs.writeFileSync(
+      path.join(entry, 'chats', 'a.jsonl'),
+      JSON.stringify({ cwd: goneCwd, type: 'qwen' }) + '\n',
+    );
+    const unreadable = path.join(entry, 'chats', 'b.jsonl');
+    actualFs.writeFileSync(
+      unreadable,
+      JSON.stringify({ cwd: '/real/project', type: 'qwen' }) + '\n',
+    );
+    actualFs.chmodSync(unreadable, 0o000);
+    ageEntry('-incomplete-scan');
+    await Storage.cleanOrphanProjectDirs('current');
+    expect(actualFs.existsSync(entry)).toBe(true);
+    expect(actualFs.existsSync(path.join(entry, '.qwen-orphan-since'))).toBe(
+      false,
+    );
+  });
+
+  it('keeps an entry whose marker vanished during salvage (R9-4)', async () => {
+    // Sweep A passes the expired-marker check and awaits salvage; in
+    // that window the entry becomes current for a new session, whose
+    // own sweep clears the marker. Sweep A must see the absence and
+    // bail out before rmSync — the marker's absence is the newest
+    // ownership signal.
+    writeSession('-marker-cleared', goneCwd);
+    ageEntry('-marker-cleared');
+    await Storage.cleanOrphanProjectDirs('current');
+    ageFile(path.join(projectsDir, '-marker-cleared', '.qwen-orphan-since'));
+    await Storage.cleanOrphanProjectDirs('current', async (entryPath) => {
+      actualFs.rmSync(path.join(entryPath, '.qwen-orphan-since'));
+    });
+    expect(actualFs.existsSync(path.join(projectsDir, '-marker-cleared'))).toBe(
+      true,
+    );
+  });
+
+  it('treats an over-budget transcript as incomplete evidence (R9-7)', async () => {
+    // A single record longer than the scan budget aborts the scan. The
+    // sibling transcript records a gone cwd, which alone would start the
+    // marker flow — but the over-budget one could hide a live cwd, so
+    // partial evidence must veto: no marker, no deletion.
+    const entry = path.join(projectsDir, '-over-budget');
+    actualFs.mkdirSync(path.join(entry, 'chats'), { recursive: true });
+    actualFs.writeFileSync(
+      path.join(entry, 'chats', 'huge.jsonl'),
+      'x'.repeat(8 * 1024 * 1024 + 1),
+    );
+    actualFs.writeFileSync(
+      path.join(entry, 'chats', 'gone.jsonl'),
+      JSON.stringify({ cwd: goneCwd, type: 'qwen' }) + '\n',
+    );
+    ageEntry('-over-budget');
+    await Storage.cleanOrphanProjectDirs('current');
+    expect(actualFs.existsSync(entry)).toBe(true);
+    expect(actualFs.existsSync(path.join(entry, '.qwen-orphan-since'))).toBe(
+      false,
+    );
+  });
+
+  describe('containsOnlySessionArtifacts', () => {
+    it('requires exact artifact names, not prefixes (R9-2)', () => {
+      const dir = actualFs.mkdtempSync(path.join(projectsDir, 'ownership-'));
+      actualFs.mkdirSync(path.join(dir, 'chats'));
+      actualFs.writeFileSync(path.join(dir, 'chats', 'sess-1.jsonl'), '');
+      expect(Storage.containsOnlySessionArtifacts(dir, 'sess-1')).toBe(true);
+      // A sibling session whose id extends ours (`sess-1.b`) shares the
+      // `sess-1.` prefix — a startsWith check would claim its files.
+      actualFs.writeFileSync(path.join(dir, 'chats', 'sess-1.b.jsonl'), '');
+      expect(Storage.containsOnlySessionArtifacts(dir, 'sess-1')).toBe(false);
+    });
   });
 
   it('keeps an entry reduced to subagent transcripts of a live cwd (R7-2)', async () => {

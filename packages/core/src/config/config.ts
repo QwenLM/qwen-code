@@ -5451,8 +5451,12 @@ export class Config {
           if (
             Storage.containsOnlySessionArtifacts(projectDir, this.sessionId)
           ) {
-            const recordedCwds = Storage.collectRecordedCwds(projectDir);
+            const { cwds: recordedCwds, incomplete } =
+              Storage.collectRecordedCwds(projectDir);
+            // Incomplete evidence (an unreadable or oversized artifact)
+            // may omit a non-temp cwd — fail closed, like the sweep.
             const disposable =
+              !incomplete &&
               recordedCwds.length > 0 &&
               recordedCwds.every((cwd) => isTempDirPath(cwd));
             if (disposable) {

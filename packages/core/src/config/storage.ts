@@ -396,6 +396,15 @@ export class Storage {
   private static readonly ORPHAN_MARKER_FILE = '.qwen-orphan-since';
 
   /**
+   * Per-transcript scan budget. Sweeps stream every record-bearing file
+   * on the startup thread; a pathological transcript (multi-GiB, or one
+   * giant newline-free line) must not stall startup or blow the heap —
+   * hitting the budget marks the evidence incomplete, which vetoes
+   * deletion (keep-only).
+   */
+  private static readonly CWD_SCAN_MAX_FILE_BYTES = 8 * 1024 * 1024;
+
+  /**
    * Removes orphaned project snapshot directories under
    * `<runtime>/projects/` (issue #7906). An entry is orphaned when none
    * of the working directories recorded in its artifacts (chat logs,
@@ -408,10 +417,10 @@ export class Storage {
    * once the marker has aged past the grace window, so a transiently
    * absent mount gets its chance to come back and a live-but-idle
    * temp-rooted session is never removed on a single sweep. Entries
-   * without any readable records are only removed when they hold no
-   * content beyond sweep bookkeeping and qwen-owned residue (workflow
-   * snapshots/journals, subagent transcripts) and are older than one
-   * day.
+   * without any readable records are only removed when completely empty
+   * (marker aside) and older than one day; incomplete scans — an
+   * unreadable artifact or one past the per-file byte budget — veto
+   * deletion.
    *
    * `onBeforeRemove` runs before each deletion so callers can salvage
    * derived state (e.g. usage summaries) from the transcripts; its
@@ -469,7 +478,13 @@ export class Storage {
           Storage.removeOrphanMarker(entryPath);
           continue;
         }
-        const cwds = Storage.collectRecordedCwds(entryPath);
+        const { cwds, incomplete } = Storage.collectRecordedCwds(entryPath);
+        if (incomplete) {
+          // Some artifact was unreadable or exceeded the scan budget:
+          // the evidence may omit a live cwd, so fail closed — no
+          // marker, no deletion.
+          continue;
+        }
         if (cwds.length > 0) {
           // `/cd` relocation keeps the old cwd on line 1 and moves the
           // file, so a single sampled cwd is not conclusive: a single
@@ -498,10 +513,9 @@ export class Storage {
           }
           continue;
         }
-        // No readable records: only remove if the entry holds nothing
-        // beyond sweep bookkeeping and qwen-owned residue, and is
-        // stale, so a concurrently starting session is never hit
-        // mid-write.
+        // No readable records: only remove if the entry is completely
+        // empty (marker aside) and stale, so a concurrently starting
+        // session is never hit mid-write.
         const stat = fs.statSync(entryPath);
         if (
           stat.isDirectory() &&
@@ -539,9 +553,17 @@ export class Storage {
     // plugged back in) and a new session may start writing into this
     // very entry during that time. Re-run the cheap gates before the
     // irreversible step and bail out if the entry is protected again.
-    if (cwds?.some((cwd) => fs.existsSync(cwd) && !isTempDirPath(cwd))) {
-      Storage.removeOrphanMarker(entryPath);
-      return;
+    if (cwds) {
+      if (!fs.existsSync(path.join(entryPath, Storage.ORPHAN_MARKER_FILE))) {
+        // A concurrent sweep cleared the marker because this entry
+        // became current or live again — its absence is the newest
+        // ownership signal.
+        return;
+      }
+      if (cwds.some((cwd) => fs.existsSync(cwd) && !isTempDirPath(cwd))) {
+        Storage.removeOrphanMarker(entryPath);
+        return;
+      }
     }
     const newest = Storage.newestFileMtimeMs(entryPath);
     if (newest > 0 && Date.now() - newest <= Storage.ORPHAN_STALE_AGE_MS) {
@@ -633,12 +655,20 @@ export class Storage {
    * (`chats/archive/`) are scanned too. Scanning stops once a cwd is
    * found that still exists outside temp roots: such a cwd vetoes
    * removal for every caller, and transcripts can be large.
+   *
+   * `incomplete` reports a scan whose evidence may be partial — an
+   * artifact that failed to read or exceeded the per-file byte budget.
+   * Callers must treat incomplete evidence as vetoing deletion.
    */
-  static collectRecordedCwds(entryPath: string): string[] {
+  static collectRecordedCwds(entryPath: string): {
+    cwds: string[];
+    incomplete: boolean;
+  } {
     const cwds = new Set<string>();
-    Storage.scanDirForCwds(path.join(entryPath, 'chats'), cwds, 0);
-    Storage.scanDirForCwds(path.join(entryPath, 'subagents'), cwds, 0);
-    return [...cwds];
+    const state = { incomplete: false };
+    Storage.scanDirForCwds(path.join(entryPath, 'chats'), cwds, 0, state);
+    Storage.scanDirForCwds(path.join(entryPath, 'subagents'), cwds, 0, state);
+    return { cwds: [...cwds], incomplete: state.incomplete };
   }
 
   /**
@@ -653,21 +683,25 @@ export class Storage {
     dir: string,
     cwds: Set<string>,
     depth: number,
+    state: { incomplete: boolean },
   ): boolean {
     if (depth > 2) return false;
     let dirents: fs.Dirent[];
     try {
       dirents = fs.readdirSync(dir, { withFileTypes: true });
     } catch {
+      // Absent directory = no evidence; an existing-but-unreadable one
+      // means the evidence set may be partial.
+      if (fs.existsSync(dir)) state.incomplete = true;
       return false;
     }
     for (const dirent of dirents) {
       const entryPath = path.join(dir, dirent.name);
       let vetoed = false;
       if (dirent.isDirectory()) {
-        vetoed = Storage.scanDirForCwds(entryPath, cwds, depth + 1);
+        vetoed = Storage.scanDirForCwds(entryPath, cwds, depth + 1, state);
       } else if (dirent.name.endsWith('.jsonl')) {
-        vetoed = Storage.scanFileForCwds(entryPath, cwds);
+        vetoed = Storage.scanFileForCwds(entryPath, cwds, state);
       } else if (dirent.name.endsWith('.runtime.json')) {
         const cwd = Storage.readJsonStringField(entryPath, 'work_dir');
         if (cwd) {
@@ -689,8 +723,13 @@ export class Storage {
   }
 
   /** Streams a transcript and records every line's cwd. */
-  private static scanFileForCwds(filePath: string, cwds: Set<string>): boolean {
+  private static scanFileForCwds(
+    filePath: string,
+    cwds: Set<string>,
+    state: { incomplete: boolean },
+  ): boolean {
     let fd: number | undefined;
+    let bytesReadTotal = 0;
     try {
       fd = fs.openSync(filePath, 'r');
       const decoder = new StringDecoder('utf8');
@@ -698,6 +737,11 @@ export class Storage {
       let leftover = '';
       for (;;) {
         const bytesRead = fs.readSync(fd, buf, 0, buf.length, null);
+        bytesReadTotal += bytesRead;
+        if (bytesReadTotal > Storage.CWD_SCAN_MAX_FILE_BYTES) {
+          state.incomplete = true;
+          return false;
+        }
         const text = leftover + decoder.write(buf.subarray(0, bytesRead));
         if (bytesRead === 0) {
           if (leftover && Storage.extractLineCwds(leftover, cwds)) {
@@ -707,11 +751,19 @@ export class Storage {
         }
         const lines = text.split('\n');
         leftover = lines.pop() ?? '';
+        if (leftover.length > Storage.CWD_SCAN_MAX_FILE_BYTES) {
+          // One record longer than the whole budget: keep accumulating it
+          // would copy a growing prefix on every chunk. Give up —
+          // incomplete evidence vetoes deletion.
+          state.incomplete = true;
+          return false;
+        }
         for (const line of lines) {
           if (line && Storage.extractLineCwds(line, cwds)) return true;
         }
       }
     } catch {
+      state.incomplete = true;
       return false;
     } finally {
       if (fd !== undefined) {
@@ -868,7 +920,11 @@ export class Storage {
     } catch {
       return true;
     }
-    return files.every((file) => file.startsWith(`${sessionId}.`));
+    return files.every((file) =>
+      ['.jsonl', '.runtime.json', '.worktree.json'].some((suffix) =>
+        file.endsWith(`${sessionId}${suffix}`),
+      ),
+    );
   }
 
   /** Every `*.jsonl` transcript under `<projectDir>/chats` (depth ≤ 2). */
@@ -901,22 +957,18 @@ export class Storage {
   }
 
   /**
-   * Counts content that must keep an entry alive. Sweep bookkeeping
-   * (the orphan marker) and qwen-owned residue — workflow snapshots and
-   * journals, subagent transcripts — carry no cwd a live project could
-   * be recognized by (`/cd` moves only the session files and leaves
-   * them behind), so they must not block the empty-entry branch
-   * forever.
+   * Counts content that must keep an entry alive. The orphan marker is
+   * sweep bookkeeping, not session content. Everything else — including
+   * qwen-owned residue such as workflow snapshots and journals — is
+   * content: residue carries no cwd the source project could be
+   * recognized by, so it cannot prove its own project is gone, and
+   * deleting it on absence of evidence would risk `/workflows` history
+   * of a live project (fail closed).
    */
   private static countFiles(dirPath: string, depth = 0): number {
     let count = 0;
     for (const entry of fs.readdirSync(dirPath, { withFileTypes: true })) {
-      if (
-        depth === 0 &&
-        (entry.name === Storage.ORPHAN_MARKER_FILE ||
-          entry.name === 'workflows' ||
-          entry.name === 'subagents')
-      ) {
+      if (depth === 0 && entry.name === Storage.ORPHAN_MARKER_FILE) {
         continue;
       }
       const child = path.join(dirPath, entry.name);

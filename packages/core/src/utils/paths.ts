@@ -577,7 +577,9 @@ export function isTempDirPath(p: string): boolean {
  * who points them at a persistent directory (e.g. `$HOME/tmp`) must not
  * see real projects under that root classified as disposable. Trust
  * only roots the OS itself owns: on POSIX the canonical system temp
- * bases, on Windows the well-known per-user temp locations.
+ * bases, on Windows the well-known per-user temp locations — and only
+ * when they sit at their default position, since LOCALAPPDATA is itself
+ * env-overridable.
  */
 function isSystemOwnedTempRoot(root: string): boolean {
   const real = realpathNearestExisting(root);
@@ -586,7 +588,17 @@ function isSystemOwnedTempRoot(root: string): boolean {
     // temp locations (isSubpath compares case-insensitively on win32).
     const bases: string[] = [];
     const localAppData = process.env['LOCALAPPDATA'];
-    if (localAppData) {
+    const userProfile = process.env['USERPROFILE'];
+    // %LOCALAPPDATA% can be overridden by portable wrappers exactly like
+    // %TEMP%, redirecting "trusted" temp into a persistent tree. Only
+    // honor it at its default position under %USERPROFILE%; anything
+    // else fails closed (classified persistent — leaked, never deleted).
+    if (
+      localAppData &&
+      userProfile &&
+      path.win32.join(userProfile, 'AppData', 'Local').toLowerCase() ===
+        localAppData.toLowerCase()
+    ) {
       bases.push(path.win32.join(localAppData, 'Temp'));
     }
     const systemRoot = process.env['SystemRoot'] ?? process.env['windir'];
