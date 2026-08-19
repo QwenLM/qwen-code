@@ -77,10 +77,43 @@ const GIT_ENV_CONFIG = [
   'GIT_CONFIG_PARAMETERS',
 ];
 
+/**
+ * The third half: variables git EXECUTES rather than reads.
+ *
+ * The two lists above close redirection and config injection and leave the
+ * most direct route open — `GIT_SSH_COMMAND` and `GIT_EXTERNAL_DIFF` are a
+ * command, `GIT_EXEC_PATH` moves git's own subcommand and remote-helper lookup
+ * to a directory of the setter's choosing, `GIT_TEMPLATE_DIR` plants hooks that
+ * run at the next `init`, and the askpass/proxy/editor trio are exec'd
+ * conditionally. This is not a new judgement call: `config/shared-env-keys.ts`
+ * already blocks exactly this family for session subprocesses, with the
+ * rationale written out there, and a review's git calls run as the same user
+ * with the same inheritance. `XDG_CONFIG_HOME` rides along because git merges
+ * `$XDG_CONFIG_HOME/git/config` with `~/.gitconfig`, which is the same config
+ * injection without naming a git variable at all.
+ *
+ * The setter does not have to be an attacker for this to matter: a reviewer's
+ * shell profile exporting `GIT_EXEC_PATH` for an unrelated reason silently
+ * changes which `git-remote-https` every fetch in this pipeline runs.
+ */
+const GIT_ENV_EXEC = [
+  'GIT_SSH_COMMAND',
+  'GIT_SSH',
+  'GIT_EXEC_PATH',
+  'GIT_TEMPLATE_DIR',
+  'GIT_ASKPASS',
+  'GIT_PROXY_COMMAND',
+  'GIT_EDITOR',
+  'GIT_SEQUENCE_EDITOR',
+  'GIT_EXTERNAL_DIFF',
+  'XDG_CONFIG_HOME',
+];
+
 /** Git invocations must resolve the tree they are given, not the caller shell's redirects. */
 export function sanitizedGitEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };
-  for (const key of [...GIT_ENV_REDIRECTS, ...GIT_ENV_CONFIG]) delete env[key];
+  for (const key of [...GIT_ENV_REDIRECTS, ...GIT_ENV_CONFIG, ...GIT_ENV_EXEC])
+    delete env[key];
   for (const key of Object.keys(env)) {
     if (/^GIT_CONFIG_(KEY|VALUE)_\d+$/.test(key)) delete env[key];
   }
@@ -420,7 +453,16 @@ function ignoreSourcesOf(
  */
 function hidesEverything(pattern: string): boolean {
   const core = pattern.replace(/^\//, '').replace(/\/$/, '');
-  return /^\*+(\/\*+)*$/.test(core);
+  if (core.length === 0) return false;
+  // Every segment wildcard-only, and at least one `*` so the pattern is not
+  // length-limited to a fixed number of characters. That is `*`, `**`, `**/*`
+  // — and `?*`, which the first cut missed: `?` matches any single character,
+  // so `?*` is `*` with extra steps, and a `.gitignore` whose whitelist is
+  // spelled that way would have vouched for everything it hid. Naming the
+  // spellings one at a time is how that hole got made; the shape is "nothing
+  // in this pattern names anything".
+  const segments = core.split('/');
+  return core.includes('*') && segments.every((seg) => /^[*?]+$/.test(seg));
 }
 
 /**

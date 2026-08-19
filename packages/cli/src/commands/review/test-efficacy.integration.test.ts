@@ -1685,16 +1685,21 @@ process.stdout.write(JSON.stringify({
     write('src/other.ts', 'export const clean = true;\n');
     commitAll('a second tracked file');
     // Plants ONCE, so the second run's state is the restore's doing and not
-    // the runner's. The marker is untracked, which is what makes it survive
-    // the restore that the plant does not.
+    // the runner's. The marker lives OUTSIDE the tree because inside it would
+    // be swept with everything else the run left — which is the other half of
+    // what this pins: an untracked `vitest.config.ts` is what a suite reaches
+    // for when it wants to decide the next run's collection, and no
+    // zero-config project commits one.
+    const marker = join(mkdtempSync(join(tmpdir(), 'qwen-plant-')), 'once');
     writeFileSync(
       vitestScript(),
       `#!/usr/bin/env node
 import fs from 'node:fs';
 import path from 'node:path';
-if (!fs.existsSync('planted.marker')) {
+if (!fs.existsSync(${JSON.stringify(marker)})) {
   fs.writeFileSync('src/other.ts', 'export const clean = false; // planted\\n');
-  fs.writeFileSync('planted.marker', '1');
+  fs.writeFileSync('vitest.config.ts', 'export default { test: {} };\\n');
+  fs.writeFileSync(${JSON.stringify(marker)}, '1');
 }
 const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
 process.stdout.write(JSON.stringify({
@@ -1713,10 +1718,11 @@ process.stdout.write(JSON.stringify({
       { file: 'src/x.ts', line: 1, statement: 'gone.clear();' },
       ['src/x.test.ts'],
     );
-    // The plant is real, and it outlives the run that made it.
+    // Both plants are real, and they outlive the run that made them.
     expect(readFileSync(join(repo, 'src/other.ts'), 'utf8')).toContain(
       'planted',
     );
+    expect(existsSync(join(repo, 'vitest.config.ts'))).toBe(true);
 
     const second = runOneMutant(
       repo,
@@ -1724,10 +1730,11 @@ process.stdout.write(JSON.stringify({
       ['src/x.test.ts'],
     );
 
-    // ...and the next run does not open on it.
+    // ...and the next run opens on neither.
     expect(readFileSync(join(repo, 'src/other.ts'), 'utf8')).toBe(
       'export const clean = true;\n',
     );
+    expect(existsSync(join(repo, 'vitest.config.ts'))).toBe(false);
     expect(second.verdict).toBe('survived');
   });
 

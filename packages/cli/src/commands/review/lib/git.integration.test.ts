@@ -11,6 +11,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import {
   mkdtempSync,
+  realpathSync,
   rmSync,
   existsSync,
   writeFileSync,
@@ -163,8 +164,14 @@ describe('releaseWorktree', () => {
     });
 
     expect(existsSync(join(repo, 'wt-link'))).toBe(false);
-    // The victim is still registered AND still on disk.
-    expect(git('worktree', 'list')).toContain(join(repo, 'victim'));
+    // The victim is still registered AND still on disk. `realpathSync`,
+    // because git prints the CANONICAL path and `tmpdir()` is a symlink on
+    // macOS (`/var` → `/private/var`): the raw spelling passes there only by
+    // accident — the canonical path happens to contain it as a substring —
+    // and would not on a Linux fixture reached through a symlinked ancestor.
+    expect(git('worktree', 'list')).toContain(
+      join(realpathSync(repo), 'victim'),
+    );
     expect(existsSync(join(repo, 'victim', 'keep.txt'))).toBe(true);
   });
 

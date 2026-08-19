@@ -409,6 +409,22 @@ describe('worktreeResidue', () => {
     expect(got.unmeasured).toBeUndefined();
   });
 
+  it('does not let a wildcard-only rule vouch, however it is spelled', () => {
+    // `?` matches any single character, so `?*` is `*` with extra steps — and
+    // the first cut of the catch-all check recognised only the pure `*`/`**`
+    // spellings. A rule that names nothing cannot vouch for what it hides, and
+    // this shape needs no execution at all: it is committed content.
+    writeFileSync(join(tree, '.gitignore'), '?*\n');
+    git('add', '-f', '.gitignore');
+    git('commit', '-qm', 'whitelist, spelled sideways');
+    writeFileSync(join(tree, 'payload.log'), 'residue');
+
+    // The blindness this closes: `status` exits 0 with zero bytes.
+    expect(git('status', '--porcelain', '--untracked-files=all')).toBe('');
+
+    expect(worktreeResidue(tree).paths).toEqual(['payload.log']);
+  });
+
   it('sees residue hidden by an ignore rule the COMMIT does not carry', () => {
     // The other half of the same rule. A `.gitignore` written after the
     // checkout, and a line appended to the common repo's `info/exclude`, are
@@ -1210,6 +1226,38 @@ describe('sanitizedGitEnv', () => {
       }
       // And it is still the caller's environment otherwise.
       expect(env['PATH']).toBe(saved['PATH']);
+    } finally {
+      process.env = saved;
+    }
+  });
+
+  it('drops the variables git EXECUTES, which are the most direct route', () => {
+    // Closing redirection and config injection and leaving these open is the
+    // same window one wall over: `GIT_SSH_COMMAND` and `GIT_EXTERNAL_DIFF` ARE
+    // a command, `GIT_EXEC_PATH` moves git's own subcommand and remote-helper
+    // lookup, `GIT_TEMPLATE_DIR` plants hooks for the next `init`. The repo
+    // blocks exactly this family for session subprocesses already
+    // (`config/shared-env-keys.ts`), and a review's git calls run as the same
+    // user with the same inheritance — a reviewer's shell profile is enough.
+    const saved = { ...process.env };
+    try {
+      const family = [
+        'GIT_SSH_COMMAND',
+        'GIT_SSH',
+        'GIT_EXEC_PATH',
+        'GIT_TEMPLATE_DIR',
+        'GIT_ASKPASS',
+        'GIT_PROXY_COMMAND',
+        'GIT_EDITOR',
+        'GIT_SEQUENCE_EDITOR',
+        'GIT_EXTERNAL_DIFF',
+        'XDG_CONFIG_HOME',
+      ];
+      for (const key of family) process.env[key] = '/tmp/attacker';
+
+      const env = sanitizedGitEnv();
+
+      for (const key of family) expect(env[key]).toBeUndefined();
     } finally {
       process.env = saved;
     }

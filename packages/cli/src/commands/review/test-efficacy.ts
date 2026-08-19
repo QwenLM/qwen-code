@@ -1407,7 +1407,22 @@ function existsAtRev(cwd: string, rev: string, path: string): boolean {
  * (`force` rm is already a no-op there), so return quietly.
  */
 export function safeRmWithin(worktree: string, relPath: string): void {
-  const parts = relPath.split(/[/\\]+/).filter((s) => s && s !== '.');
+  // Platform-correct separators, the same split `probeTargetEscapes` makes and
+  // for the same reason: on POSIX a backslash is an ordinary character in a
+  // filename, so splitting on it unconditionally turns ONE committed name —
+  // `\\..\\review-pr-42\\package.json`, a legal POSIX filename — into three
+  // components, two of which `join` then walks UP out of the tree. The write
+  // side took this fix; the delete side is where it costs more.
+  const separators = process.platform === 'win32' ? /[/\\]+/ : /\/+/;
+  const parts = relPath.split(separators).filter((s) => s && s !== '.');
+  // And nothing climbs, however it got spelled. `join` normalises `..` away
+  // silently, which is what made the split above a delete-anywhere primitive
+  // rather than a wrong-path bug.
+  if (parts.includes('..')) {
+    throw new Error(
+      `refusing to delete through a parent reference: ${relPath}`,
+    );
+  }
   // The ROOT is an ancestor too, and the one this guarantee was missing: a
   // symlink at the tree root resolves the whole prefix in the kernel, so every
   // component below it lstats as an ordinary entry and the delete lands
@@ -1483,52 +1498,63 @@ export function probeCleanupFailureDetail(
  * covers. The mirror direction plants a compile error and buys a blanket
  * `inconclusive`.
  *
+ * Untracked files go too, because the tracked half alone is a half-measure a
+ * suite can walk around: a `vitest.config.ts` that no zero-config project
+ * commits is untracked, is picked up from the runner's cwd, and decides every
+ * later run's collection. `-fd` and not `-fdx`, so the borrowed `node_modules`
+ * farm and the ignored build output the probes need survive; what an ignored
+ * path can still hide is the same blindness the residue probe discloses.
+ *
  * Returns null when the tree is as the commit left it, or a reason when it
- * could not be put back. A directory that is not a checkout of its own is not
- * a failure — there is no commit to restore FROM, and `git` would otherwise
+ * could not be put back. A directory with no `.git` at all is neither: there
+ * is no commit to restore FROM, and running the restore anyway would let `git`
  * walk up and check the ENCLOSING repository out into it, which is the
- * discovery hazard the residue probe's identity gate exists for.
+ * discovery hazard the residue probe's identity gate exists for. But a `.git`
+ * that IS there and does not answer is a failure and says so — that file is
+ * untracked, so no restore ever repairs it, and a guest that overwrites it
+ * once would otherwise buy "proceed" from every later run.
  */
 function restoreProbeTreeTracked(probeTree: string): string | null {
+  if (!existsSync(join(probeTree, '.git'))) return null;
   const top = spawnSync('git', ['rev-parse', '--show-toplevel'], {
     cwd: probeTree,
     encoding: 'utf8',
     env: sanitizedGitEnv(),
   });
-  try {
-    if (
-      top.error ||
-      top.status !== 0 ||
-      typeof top.stdout !== 'string' ||
-      realpathSync(top.stdout.trim()) !== realpathSync(probeTree)
-    ) {
-      return null;
-    }
-  } catch {
-    return null;
+  if (top.error || top.status !== 0 || typeof top.stdout !== 'string') {
+    return top.error
+      ? top.error.message
+      : (top.stderr ?? '').toString().trim() ||
+          `git rev-parse exited ${top.status}`;
   }
-  const r = spawnSync(
-    'git',
-    // A pathspec checkout runs no hook — but the config that decides that
-    // lives in a tree this code is defending against, so it is emptied here
-    // the way every other checkout in this pipeline empties it. `--` and a
-    // pathspec: this restores FILES and never moves HEAD.
-    [
-      '-c',
-      'core.hooksPath=/dev/null/no-hooks',
-      'checkout',
-      '--force',
-      'HEAD',
-      '--',
-      '.',
-    ],
-    { cwd: probeTree, encoding: 'utf8', env: sanitizedGitEnv() },
-  );
-  if (r.error) return r.error.message;
-  if (r.status !== 0) {
-    return (
-      (r.stderr ?? '').toString().trim() || `git checkout exited ${r.status}`
-    );
+  try {
+    if (realpathSync(top.stdout.trim()) !== realpathSync(probeTree)) {
+      return `the tree at ${probeTree} is not the root of its own checkout`;
+    }
+  } catch (e) {
+    return e instanceof Error ? e.message : String(e);
+  }
+  // A pathspec checkout runs no hook — but the config that decides that lives
+  // in a tree this code is defending against, so it is emptied here the way
+  // every other checkout in this pipeline empties it. `--` and a pathspec:
+  // this restores FILES and never moves HEAD.
+  const noHooks = ['-c', 'core.hooksPath=/dev/null/no-hooks'];
+  for (const args of [
+    [...noHooks, 'checkout', '--force', 'HEAD', '--', '.'],
+    [...noHooks, 'clean', '-fd'],
+  ]) {
+    const r = spawnSync('git', args, {
+      cwd: probeTree,
+      encoding: 'utf8',
+      env: sanitizedGitEnv(),
+    });
+    if (r.error) return r.error.message;
+    if (r.status !== 0) {
+      return (
+        (r.stderr ?? '').toString().trim() ||
+        `git ${args[2]} exited ${r.status}`
+      );
+    }
   }
   return null;
 }

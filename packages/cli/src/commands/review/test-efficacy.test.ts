@@ -44,7 +44,7 @@ import {
   rmSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 
 // The real root `package.json` workspace list.
 const GLOBS = [
@@ -470,6 +470,35 @@ describe('probeCleanupFailureDetail', () => {
   });
 });
 
+describe('restoreProbeTreeTracked, through runOneMutant', () => {
+  it('refuses to run when the tree HAS a .git it cannot resolve', () => {
+    // The gate skips a directory with no `.git` because there is no commit to
+    // restore FROM — but `.git` is untracked, so nothing ever restores IT, and
+    // a guest that overwrites it once would buy "proceed, nothing to put back"
+    // from every later phase: the planted content stands and the verdicts are
+    // the plant's. Present-but-unresolvable is a failure, not a skip. Same
+    // discipline the residue probe's oracles fail closed under.
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-brokengit-'));
+    try {
+      writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
+      writeFileSync(join(dir, '.git'), 'gitdir: /nonexistent-repo\n');
+
+      const r = runOneMutant(
+        dir,
+        { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+        ['a.test.ts'],
+      );
+
+      expect(r.verdict).toBe('inconclusive');
+      expect(r.detail).toContain('could not be put back');
+      // And the mutation never happened.
+      expect(readFileSync(join(dir, 'a.ts'), 'utf8')).toBe('gone.clear();\n');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('safeRmWithin', () => {
   // A reviewer reproduced a P0: the revert set is PR-controlled, and `rmSync`
   // follows symlinks in the path prefix, so a PR that turns `dir` into a symlink
@@ -489,6 +518,30 @@ describe('safeRmWithin', () => {
     safeRmWithin(root, 'realdir/f');
     expect(existsSync(join(root, 'realdir', 'f'))).toBe(false);
   });
+
+  // A backslash is a legal filename character on POSIX and a separator on
+  // Windows, so the shape only exists off Windows — which is where it bites.
+  it.skipIf(process.platform === 'win32')(
+    'treats a backslash in a POSIX name as a NAME, not as a separator',
+    () => {
+      // One committed file whose single-component name contains backslashes.
+      // Splitting on them unconditionally turned that name into three
+      // components — two of them `..` — and `join` normalises those away
+      // silently, so a PR-controlled name became a delete anywhere the tree's
+      // parent reaches, starting with the shared review worktree next door.
+      const { root, outside } = setup();
+      const escaping = `\\..\\${basename(outside)}\\victim`;
+
+      expect(() => safeRmWithin(root, escaping)).not.toThrow();
+
+      expect(readFileSync(join(outside, 'victim'), 'utf8')).toBe(
+        'must survive',
+      );
+      // ...and a name that really does climb is refused outright rather than
+      // resolved, whichever separator spelled it.
+      expect(() => safeRmWithin(root, '../victim')).toThrow(/parent reference/);
+    },
+  );
 
   it('refuses to delete through a symlinked ancestor, sparing the outside file', () => {
     const { root, outside } = setup();
