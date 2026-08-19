@@ -642,7 +642,7 @@ describe('Agent View PTY host process server', () => {
     });
   });
 
-  it('resolves connected host exit when killed', async () => {
+  it('waits for the remote endpoint to close after SIGKILL', async () => {
     const host = fakeHost();
     const socketPath = shortSocketPath();
     const server = createAgentViewPtyHostServer(host, socketPath);

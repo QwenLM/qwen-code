@@ -839,6 +839,7 @@ function normalizeActivity(
     queuedPromptPreview: stringValue(raw['queuedPromptPreview']),
     queuedPromptId: stringValue(raw['queuedPromptId']),
     queuedPromptText: stringValue(raw['queuedPromptText']),
+    queuedPromptDeliveredAt: stringValue(raw['queuedPromptDeliveredAt']),
     lastQueuedPromptAt: stringValue(raw['lastQueuedPromptAt']),
     lastActivityAt,
     capabilities: stringArrayValue(raw['capabilities']),
@@ -853,6 +854,7 @@ export function redactAgentViewActivity(
     ...activity,
     queuedPromptId: undefined,
     queuedPromptText: undefined,
+    queuedPromptDeliveredAt: undefined,
   }) as AgentViewActivityFile;
 }
 
