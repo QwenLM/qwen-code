@@ -234,6 +234,51 @@ describe('readTranscripts — defensive parsing', () => {
     expect(rec.successfulReadFileArgs[0]).toContain('/r/f.findings.md');
     expect(rec.successfulReadFileArgs[0]).not.toContain('search_file_content');
   });
+
+  it('counts a diff read via serializedArgsNamePath, not a look-alike', () => {
+    // The diff-read half of the shared needle: `diffToolCalls` is populated
+    // only when `diffPath` is passed, and no other test passes one. A swap of
+    // the two args at the `serializedArgsNamePath(JSON.stringify(args), path)`
+    // call site (both strings, so it compiles) ships green and every coverage
+    // gate then reads `diffToolCalls: 0`. Pin it with the exact read counted
+    // and two look-alikes — a `.bak` sibling and a shell command that only
+    // NAMES the diff — refused.
+    const b = { agentId: 'a1', agentName: 'general-purpose', sessionId: 'S1' };
+    const call = (name: string, args: object): object[] => [
+      {
+        ...b,
+        type: 'assistant',
+        message: { role: 'model', parts: [{ functionCall: { name, args } }] },
+      },
+      {
+        ...b,
+        type: 'tool_result',
+        message: {
+          role: 'user',
+          parts: [{ functionResponse: { name, response: { output: 'ok' } } }],
+        },
+      },
+    ];
+    file(
+      'agent-a1.jsonl',
+      [
+        JSON.stringify({
+          ...b,
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'chunk 1 of 1' }] },
+        }),
+        ...call('read_file', { file_path: '/d.txt' }),
+        ...call('read_file', { file_path: '/d.txt.bak' }),
+        ...call('run_shell_command', { command: 'rm /d.txt' }),
+      ]
+        .map((r) => JSON.stringify(r))
+        .join('\n') + '\n',
+    );
+    const [rec] = readTranscripts(undefined, ENV, '/d.txt');
+    expect(rec.diffToolCalls).toBe(1);
+    // And with no diffPath the field stays 0, whatever was read.
+    expect(readTranscripts(undefined, ENV)[0].diffToolCalls).toBe(0);
+  });
 });
 
 describe('wasGivenTheDiff', () => {

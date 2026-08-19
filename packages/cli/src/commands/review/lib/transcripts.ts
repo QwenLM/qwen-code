@@ -253,12 +253,6 @@ function rangeOf(args: Record<string, unknown>): [number, number] | null {
 }
 
 /**
- * Parse one transcript. Returns null for a file that is not one.
- *
- * `diffPath` is what makes a call "a read of the diff" rather than "a call". Pass
- * it and `diffToolCalls` is populated; omit it and the field stays 0.
- */
-/**
  * Do these serialized tool-call args name the EXACT `path`?
  *
  * The comparison is against the whole JSON string value — `JSON.stringify`
@@ -283,6 +277,12 @@ export function serializedArgsNamePath(
   return serializedArgs.includes(JSON.stringify(path));
 }
 
+/**
+ * Parse one transcript. Returns null for a file that is not one.
+ *
+ * `diffPath` is what makes a call "a read of the diff" rather than "a call". Pass
+ * it and `diffToolCalls` is populated; omit it and the field stays 0.
+ */
 function parseTranscript(file: string, diffPath?: string): AgentRecord | null {
   let raw: string;
   try {

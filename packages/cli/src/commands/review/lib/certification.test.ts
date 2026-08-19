@@ -130,6 +130,22 @@ describe('openedBrief / readBrief', () => {
     expect(openedBrief(r, PLAN, key)).toBe(true);
   });
 
+  it('credits a match anywhere in the call list, not just the first call', () => {
+    // The shared `argsNameExactPath` wrapper is an existential over the whole
+    // list. Every other fixture here has 0 or 1 arg, so a first-element-only
+    // regression (`args.length > 0 && …(args[0]!, path)`) ships green while
+    // refusing an agent whose first successful call named another file and
+    // whose LATER call opened the brief — its work re-owed. Match in the
+    // second position pins the quantifier for all three atoms.
+    const other = `{"absolute_path":${JSON.stringify(`${PLAN}-other.txt`)}}`;
+    expect(
+      openedBrief(rec({ successfulCallArgs: [other, arg] }), PLAN, key),
+    ).toBe(true);
+    expect(
+      readBrief(rec({ successfulReadFileArgs: [other, arg] }), PLAN, key),
+    ).toBe(true);
+  });
+
   it('does not credit a record that made zero successful tool calls', () => {
     // `[].every(...)` is true: the existential quantifier needs its own
     // negative, like its two sibling atoms already have.
