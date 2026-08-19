@@ -4438,6 +4438,20 @@ describe('Output format', () => {
     expect(config.getOutputFormat()).toBe(OutputFormat.JSON);
   });
 
+  it('should prioritize argv over a differing settings format', async () => {
+    // Discriminating precedence case: argv and settings disagree, so an
+    // inverted merge (settings over argv) fails here instead of passing.
+    process.argv = ['node', 'script.js', '--output-format', 'text'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { output: { format: OutputFormat.STREAM_JSON } },
+      argv,
+      undefined,
+      [],
+    );
+    expect(config.getOutputFormat()).toBe(OutputFormat.TEXT);
+  });
+
   it('should error on invalid --output-format argument', async () => {
     process.argv = ['node', 'script.js', '--output-format', 'yaml'];
     const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
