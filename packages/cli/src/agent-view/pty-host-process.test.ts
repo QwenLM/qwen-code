@@ -20,7 +20,11 @@ import {
   runAgentViewPtyHostProcess,
 } from './pty-host-process.js';
 import { PTY_HOST_AUTH_TOKEN_ENV } from './pty-host-env.js';
-import { BoundedOutputRing, type AgentViewPtyHostHandle } from './pty-host.js';
+import {
+  BoundedOutputRing,
+  type AgentViewPtyHostExit,
+  type AgentViewPtyHostHandle,
+} from './pty-host.js';
 import { getAgentViewSessionPaths } from './supervisor-store.js';
 
 const socketDirs = new Set<string>();
@@ -256,8 +260,8 @@ describe('Agent View PTY host process server', () => {
 
   it('does not escalate when the worker exits within the grace period', async () => {
     const host = fakeHost();
-    let resolveExited: (exit: { exitCode: number }) => void = () => {};
-    host.exited = new Promise<{ exitCode: number }>((resolve) => {
+    let resolveExited: (exit: AgentViewPtyHostExit) => void = () => {};
+    host.exited = new Promise<AgentViewPtyHostExit>((resolve) => {
       resolveExited = resolve;
     });
     const socketPath = shortSocketPath();
@@ -270,7 +274,7 @@ describe('Agent View PTY host process server', () => {
     await expect(requestHost(socketPath, 'shutdown')).resolves.toEqual({
       shuttingDown: true,
     });
-    resolveExited({ exitCode: 0 });
+    resolveExited({ kind: 'exited', exitCode: 0 });
     await new Promise((resolve) => setTimeout(resolve, 100));
 
     expect(host.killedWith).toBeUndefined();
@@ -279,7 +283,7 @@ describe('Agent View PTY host process server', () => {
   it('falls back to kill(SIGTERM) when the host has no shutdown method', async () => {
     const host = fakeHost();
     delete (host as Partial<typeof host>).shutdown;
-    host.exited = Promise.resolve({ exitCode: 0 });
+    host.exited = Promise.resolve({ kind: 'exited', exitCode: 0 });
     const socketPath = shortSocketPath();
     const server = createAgentViewPtyHostServer(host, socketPath, {
       shutdownGraceMs: 20,
@@ -618,9 +622,8 @@ describe('Agent View PTY host process server', () => {
     connected.shutdown?.();
 
     await waitFor(() => host.shutdowns === 1);
-    // A reconnected handle cannot observe the server-side drain itself and
-    // shutdown can be survived: exited must stay pending for the remote
-    // exit poller to report the real outcome (see the status-polling test).
+    // The RPC only starts the drain. Retirement is confirmed after the
+    // endpoint disappears, so a replacement cannot race socket teardown.
     await expect(
       Promise.race([
         connected.exited.then(() => true),
@@ -629,6 +632,12 @@ describe('Agent View PTY host process server', () => {
         ),
       ]),
     ).resolves.toBe(false);
+
+    servers.splice(servers.indexOf(server), 1);
+    await server.close();
+    await expect(connected.exited).resolves.toEqual({
+      kind: 'confirmed-shutdown',
+    });
   });
 
   it('resolves connected host exit when killed', async () => {
@@ -646,9 +655,10 @@ describe('Agent View PTY host process server', () => {
     connected.kill('SIGKILL');
 
     await waitFor(() => host.killedWith === 'SIGKILL');
+    servers.splice(servers.indexOf(server), 1);
+    await server.close();
     await expect(connected.exited).resolves.toEqual({
-      exitCode: 1,
-      observed: false,
+      kind: 'confirmed-kill',
     });
   });
 
@@ -681,11 +691,15 @@ describe('Agent View PTY host process server', () => {
     await waitFor(() => host.killedWith === 'SIGTERM');
     expect(await notSettledWithin(100)).toBe(false);
 
-    // Only SIGKILL cannot be trapped, so it resolves immediately.
+    // SIGKILL is confirmed only after the authenticated RPC lands and the
+    // endpoint disappears; replacement launch must wait for socket teardown.
     connected.kill('SIGKILL');
+    await waitFor(() => host.killedWith === 'SIGKILL');
+    expect(await notSettledWithin(100)).toBe(false);
+    servers.splice(servers.indexOf(server), 1);
+    await server.close();
     await expect(connected.exited).resolves.toEqual({
-      exitCode: 1,
-      observed: false,
+      kind: 'confirmed-kill',
     });
   });
 
@@ -750,8 +764,7 @@ describe('Agent View PTY host process server', () => {
       await vi.advanceTimersByTimeAsync(10000);
 
       await expect(connected.exited).resolves.toEqual({
-        exitCode: 1,
-        observed: false,
+        kind: 'unreachable',
       });
     } finally {
       vi.useRealTimers();
@@ -791,8 +804,7 @@ describe('Agent View PTY host process server', () => {
 
     await waitFor(() => host.shutdowns === 1);
     await expect(connected.exited).resolves.toEqual({
-      exitCode: 1,
-      observed: false,
+      kind: 'unreachable',
     });
   });
 
@@ -1107,8 +1119,7 @@ describe('Agent View PTY host process server', () => {
       await waitFor(() => operations.includes('shutdown'));
       expect(child.killedWith).toBeUndefined();
       await expect(handle.exited).resolves.toEqual({
-        exitCode: 1,
-        observed: false,
+        kind: 'unreachable',
       });
     } finally {
       server.close();
@@ -1164,8 +1175,8 @@ describe('Agent View PTY host process server', () => {
       child.emit('exit', null, 'SIGKILL');
 
       await expect(handle.exited).resolves.toEqual({
+        kind: 'exited',
         exitCode: 1,
-        observed: true,
         signal: os.constants.signals.SIGKILL,
       });
     } finally {
@@ -1212,7 +1223,7 @@ function fakeHost(maxOutputBytes = 5): AgentViewPtyHostHandle & {
     input: '',
     resizes: [],
     shutdowns: 0,
-    exited: new Promise<{ exitCode: number }>(() => {}),
+    exited: new Promise<AgentViewPtyHostExit>(() => {}),
     write(data: Buffer) {
       host.input += data.toString('utf8');
     },
