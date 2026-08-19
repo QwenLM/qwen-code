@@ -734,4 +734,28 @@ describe('Storage – getAuditFallbackDir', () => {
     expect(first).not.toBe(second);
     expect(Storage.getAuditFallbackDir('/project/a')).toBe(first);
   });
+
+  it('is stable across symlink spellings of the same directory', () => {
+    // macOS `/var` → `/private/var`: plan-files and guard-check must hash the
+    // same logical directory to the same fallback root whichever spelling
+    // arrives, or the relocation-containment check spuriously fails.
+    if (process.platform === 'win32') return;
+    // The file-wide mock intercepts realpathSync; delegate to the real one
+    // so the symlink actually resolves.
+    mockRealpathSync.mockImplementation((p: unknown) =>
+      actualFs.realpathSync(String(p)),
+    );
+    const real = actualFs.mkdtempSync(path.join(os.tmpdir(), 'audit-real-'));
+    const link = path.join(os.tmpdir(), `audit-link-${Date.now()}`);
+    try {
+      actualFs.symlinkSync(real, link);
+      expect(Storage.getAuditFallbackDir(link)).toBe(
+        Storage.getAuditFallbackDir(actualFs.realpathSync(real)),
+      );
+    } finally {
+      actualFs.rmSync(link, { force: true });
+      actualFs.rmSync(real, { recursive: true, force: true });
+      mockRealpathSync.mockReset();
+    }
+  });
 });

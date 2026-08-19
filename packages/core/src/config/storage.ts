@@ -342,10 +342,22 @@ export class Storage {
    * quoted (possibly exploitable) module content stays private to the user.
    */
   static getAuditFallbackDir(projectRoot: string): string {
+    // Resolve symlinks before hashing so the fallback root is stable across
+    // spellings of the same directory (macOS `/var` → `/private/var`):
+    // plan-files, guard-check, and the SKILL relocation must all agree on
+    // one root, or the relocation-containment check spuriously fails.
+    let resolved = projectRoot;
+    try {
+      const real = fs.realpathSync(projectRoot);
+      // A non-string/empty result (e.g. a mocked fs) keeps the raw path.
+      if (typeof real === 'string' && real.length > 0) resolved = real;
+    } catch {
+      // Unresolvable (e.g. not yet created): hash the raw path.
+    }
     const dir = path.join(
       Storage.getGlobalQwenDir(),
       'audits',
-      getProjectHash(projectRoot),
+      getProjectHash(resolved),
     );
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     return dir;
