@@ -1094,4 +1094,62 @@ describe('ToolConfirmationMessage', () => {
       expect(frame).toMatch(/\.{3} last \d+ lines hidden \.{3}/);
     });
   });
+
+  describe('PreToolUse hook ask reason (#9434)', () => {
+    it('shows the hook reason alongside the edit diff', () => {
+      const confirmationDetails: ToolCallConfirmationDetails = {
+        type: 'edit',
+        title: 'Confirm Edit: config.yaml',
+        fileName: 'config.yaml',
+        filePath: '/repo/config.yaml',
+        fileDiff: '-old\n+new',
+        originalContent: 'old',
+        newContent: 'new',
+        hideAlwaysAllow: true,
+        hookAskReason: 'path requires human review',
+        onConfirm: vi.fn(),
+      };
+
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={confirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={30}
+          contentWidth={80}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      // The hook reason is surfaced above the tool's diff view...
+      expect(frame).toContain(
+        'Hook requested confirmation: path requires human review',
+      );
+      // ...and the edit confirmation itself still renders.
+      expect(frame).toContain('Apply this change?');
+    });
+
+    it('does not show a hook reason line for ordinary confirmations', () => {
+      const confirmationDetails: ToolCallConfirmationDetails = {
+        type: 'edit',
+        title: 'Confirm Edit',
+        fileName: 'test.txt',
+        filePath: '/test.txt',
+        fileDiff: '...diff...',
+        originalContent: 'a',
+        newContent: 'b',
+        onConfirm: vi.fn(),
+      };
+
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={confirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={30}
+          contentWidth={80}
+        />,
+      );
+
+      expect(lastFrame()).not.toContain('Hook requested confirmation:');
+    });
+  });
 });

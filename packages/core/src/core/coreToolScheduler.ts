@@ -9,6 +9,8 @@ import type {
   ToolCallResponseInfo,
   ToolExecutionStatus,
   ToolCallConfirmationDetails,
+  ToolEditConfirmationDetails,
+  ToolExecuteConfirmationDetails,
   ToolResult,
   ToolResultDisplay,
   ToolRegistry,
@@ -4327,47 +4329,113 @@ export class CoreToolScheduler {
   /**
    * Bounce a tool from the EXECUTION phase back to awaiting_approval so the
    * user can confirm a PreToolUse 'ask' decision in the TUI. Reuses the
-   * standard confirmation machinery: a synthetic 'info' confirmation whose
-   * onConfirm routes through handleConfirmationResponse (ProceedOnce →
-   * re-execute, Cancel → cancelled). `hideAlwaysAllow` is set because the
-   * hook re-evaluates on every call, so an "always allow" rule is
-   * meaningless. The callId is added to `bouncedAwaitingApproval` BEFORE
-   * the status change so executeSingleToolCall's finally keeps the tool
-   * span open across the bounce and the re-execution skips the hook +
-   * prelude (see `_executeToolCallBody`).
+   * standard confirmation machinery: onConfirm routes through
+   * handleConfirmationResponse (ProceedOnce → re-execute, Cancel →
+   * cancelled).
+   *
+   * When the tool provides a structured confirmation view (edit diff /
+   * shell command), that view is reused so a hook-escalated call gets the
+   * same review UI as the ordinary confirmation phase, with the hook's
+   * reason attached via `hookAskReason` (#9434). Tools without a structured
+   * view fall back to a synthetic plain-text 'info' prompt carrying the
+   * hook reason. `hideAlwaysAllow` is set in both cases because the hook
+   * re-evaluates on every call, so an "always allow" rule is meaningless.
+   *
+   * The callId is added to `bouncedAwaitingApproval` BEFORE the status
+   * change so executeSingleToolCall's finally keeps the tool span open
+   * across the bounce and the re-execution skips the hook + prelude (see
+   * `_executeToolCallBody`).
+   *
+   * Returns false (without bouncing) when the signal aborts while the
+   * tool's confirmation view is being prepared; the caller then falls
+   * through to the deny path.
    */
-  private bounceToAwaitingApprovalForAsk(
+  private async bounceToAwaitingApprovalForAsk(
     scheduledCall: ScheduledToolCall,
     reason: string | undefined,
     toolSpan: Span,
     signal: AbortSignal,
-  ): void {
+  ): Promise<boolean> {
     const { callId, name: toolName } = scheduledCall.request;
     const canonicalName = canonicalToolName(toolName);
 
+    // Prefer the tool's own confirmation view (edit diff / exec command)
+    // over a bare reason prompt (#9434). Plain 'info' views (tool
+    // descriptions) add nothing over the hook reason, so they keep the
+    // synthetic fallback below. Preparing the view can read files (edit /
+    // write-file compute their diffs here), hence the abort-aware catch.
+    let toolDetails:
+      | ToolEditConfirmationDetails
+      | ToolExecuteConfirmationDetails
+      | undefined;
+    try {
+      const details =
+        await scheduledCall.invocation.getConfirmationDetails(signal);
+      if (details.type === 'edit' || details.type === 'exec') {
+        toolDetails = details;
+      }
+    } catch (error) {
+      if (signal.aborted) {
+        return false;
+      }
+      debugLogger.warn(
+        `getConfirmationDetails failed during PreToolUse ask bounce for ${toolName}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
     this.bouncedAwaitingApproval.add(callId);
 
-    const confirmationDetails: ToolCallConfirmationDetails = {
-      type: 'info',
-      title: `Hook requested confirmation to run ${toolName}`,
-      prompt:
-        reason ||
-        `A PreToolUse hook requested confirmation before running ${toolName}.`,
-      renderPromptAsPlainText: true,
-      hideAlwaysAllow: true,
-      onConfirm: (outcome, payload) =>
-        this.handleConfirmationResponse(
-          callId,
-          // No real tool onConfirm — for this synthetic prompt all of the
-          // approve/deny handling lives in handleConfirmationResponse.
-          async () => {},
-          outcome,
-          signal,
-          payload,
-        ),
-    };
+    let confirmationDetails: ToolCallConfirmationDetails;
+    if (toolDetails) {
+      const originalOnConfirm = toolDetails.onConfirm;
+      confirmationDetails = {
+        ...toolDetails,
+        hideAlwaysAllow: true,
+        hookAskReason: reason,
+        onConfirm: (outcome, payload) =>
+          this.handleConfirmationResponse(
+            callId,
+            originalOnConfirm,
+            outcome,
+            signal,
+            payload,
+          ),
+      };
+    } else {
+      confirmationDetails = {
+        type: 'info',
+        title: `Hook requested confirmation to run ${toolName}`,
+        prompt:
+          reason ||
+          `A PreToolUse hook requested confirmation before running ${toolName}.`,
+        renderPromptAsPlainText: true,
+        hideAlwaysAllow: true,
+        onConfirm: (outcome, payload) =>
+          this.handleConfirmationResponse(
+            callId,
+            // No real tool onConfirm — for this synthetic prompt all of the
+            // approve/deny handling lives in handleConfirmationResponse.
+            async () => {},
+            outcome,
+            signal,
+            payload,
+          ),
+      };
+    }
 
     this.setStatusInternal(callId, 'awaiting_approval', confirmationDetails);
+
+    // Mirror the confirmation phase: give the IDE a chance to resolve an
+    // edit confirmation too. Pass the PRE-wrap details so the IDE
+    // resolution routes through handleConfirmationResponse exactly once
+    // with the tool's own onConfirm — the wrapped onConfirm above would
+    // re-enter handleConfirmationResponse and double-process the outcome.
+    if (
+      toolDetails &&
+      (toolDetails.type !== 'edit' || !toolDetails.skipIdeDiff)
+    ) {
+      this.openIdeDiffIfEnabled(toolDetails, callId, signal);
+    }
 
     // blocked_on_user span as a child of the tool span — mirrors the
     // confirmation-phase setup so walk-away aborts and finalize paths
@@ -4392,6 +4460,8 @@ export class CoreToolScheduler {
         );
       });
     }
+
+    return true;
   }
 
   private safelyAddToolArgumentsAttributes(
@@ -4546,13 +4616,17 @@ export class CoreToolScheduler {
           // Preserve the tool_use_id so the post-approval re-execution
           // reuses it (see the toolUseId comment above).
           this.bouncedToolUseId.set(callId, toolUseId);
-          this.bounceToAwaitingApprovalForAsk(
+          const bounced = await this.bounceToAwaitingApprovalForAsk(
             scheduledCall,
             preHookResult.blockReason,
             span,
             signal,
           );
-          return;
+          if (bounced) {
+            return;
+          }
+          // The signal aborted while the confirmation view was being
+          // prepared — fall through to the deny path below.
         }
 
         // Hook blocked the execution.

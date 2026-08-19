@@ -10786,6 +10786,7 @@ describe('CoreToolScheduler telemetry spans', () => {
         options.experimentalZedIntegration ?? false,
       getShouldAvoidPermissionPrompts: () =>
         options.shouldAvoidPermissionPrompts ?? false,
+      getIdeMode: () => false,
       getTelemetryIncludeSensitiveSpanAttributes: () =>
         options.includeSensitiveSpanAttributes ?? false,
       getTelemetrySensitiveSpanAttributeMaxLength: () =>
@@ -12438,6 +12439,99 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(blocked).toHaveLength(1);
     expect(blocked[0].ended).toBe(false);
     expect(getToolSpans()[0].ended).toBe(false);
+  });
+
+  it('bounces a PreToolUse ask on an edit tool to its diff confirmation with the hook reason attached', async () => {
+    // #9434: a hook 'ask' on Edit/WriteFile must surface the tool's diff
+    // view, not a bare reason prompt, with the hook reason attached.
+    const toolOnConfirm = vi.fn();
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'ok',
+      returnDisplay: 'ok',
+    });
+    const editTool = new MockTool({
+      name: 'mockTool',
+      execute,
+      getConfirmationDetails: async () => ({
+        type: 'edit',
+        title: 'Confirm Edit: test.txt',
+        fileName: 'test.txt',
+        filePath: '/tmp/test.txt',
+        fileDiff: '-old\n+new',
+        originalContent: 'old',
+        newContent: 'new',
+        onConfirm: toolOnConfirm,
+      }),
+    });
+    const messageBus = askMessageBus('path requires human review');
+    const { onToolCallsUpdate, onAllToolCallsComplete } = await scheduleWithAsk(
+      { messageBus, tools: [editTool] },
+    );
+
+    const waiting = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+
+    const details =
+      waiting.confirmationDetails as ToolCallConfirmationDetails & {
+        fileDiff?: string;
+        hideAlwaysAllow?: boolean;
+      };
+    // The tool's own diff view is reused instead of a bare reason prompt...
+    expect(details.type).toBe('edit');
+    expect(details.fileDiff).toBe('-old\n+new');
+    // ...with the hook's reason attached for display.
+    expect(details.hookAskReason).toBe('path requires human review');
+    // The hook re-evaluates on every call → no persisted "always allow".
+    expect(details.hideAlwaysAllow).toBe(true);
+
+    // Approving routes through the tool's onConfirm and re-executes once.
+    await details.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+    const completed = onAllToolCallsComplete.mock.calls.at(
+      -1,
+    )?.[0] as ToolCall[];
+    expect(completed[0].status).toBe('success');
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(toolOnConfirm).toHaveBeenCalledWith(
+      ToolConfirmationOutcome.ProceedOnce,
+      undefined,
+    );
+  });
+
+  it('keeps the synthetic reason prompt when a PreToolUse ask bounces a non-structured tool', async () => {
+    // Tools whose confirmation view is a plain 'info' description keep the
+    // hook-reason prompt (the description adds nothing over it).
+    const infoTool = new MockTool({
+      name: 'mockTool',
+      getConfirmationDetails: async () => ({
+        type: 'info',
+        title: 'Confirm mockTool',
+        prompt: 'A mock tool invocation for mockTool',
+        onConfirm: vi.fn(),
+      }),
+    });
+    const messageBus = askMessageBus('confirm this');
+    const { onToolCallsUpdate } = await scheduleWithAsk({
+      messageBus,
+      tools: [infoTool],
+    });
+
+    const waiting = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+    expect(waiting.confirmationDetails.type).toBe('info');
+    expect(
+      (waiting.confirmationDetails as { prompt: string }).prompt,
+    ).toContain('confirm this');
+    expect(
+      (waiting.confirmationDetails as { renderPromptAsPlainText?: boolean })
+        .renderPromptAsPlainText,
+    ).toBe(true);
   });
 
   it('executes the tool exactly once when the user approves an ask (no re-ask loop)', async () => {

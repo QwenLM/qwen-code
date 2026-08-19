@@ -62,6 +62,10 @@ export const ToolConfirmationMessage: React.FC<
 }) => {
   const { onConfirm } = confirmationDetails;
   const autoModeFallback = confirmationDetails.autoModeFallback;
+  // Reason a PreToolUse hook gave when escalating this call to an
+  // interactive confirmation while the tool's own view (e.g. edit diff)
+  // is being shown (#9434). Undefined for ordinary confirmations.
+  const hookAskReason = confirmationDetails.hookAskReason;
 
   const settings = useSettings();
   const preferredEditor = settings.merged.general?.preferredEditor as
@@ -192,6 +196,15 @@ export const ToolConfirmationMessage: React.FC<
           hard: true,
         }).split('\n').length + 1
       : 0;
+    const HOOK_ASK_REASON_HEIGHT = hookAskReason
+      ? wrapAnsi(
+          `⚠ ${t('Hook requested confirmation: {{reason}}', {
+            reason: hookAskReason,
+          })}`,
+          warningContentWidth,
+          { trim: false, hard: true },
+        ).split('\n').length + 1
+      : 0;
 
     const surroundingElementsHeight =
       PADDING_OUTER_Y +
@@ -199,7 +212,8 @@ export const ToolConfirmationMessage: React.FC<
       HEIGHT_QUESTION +
       MARGIN_QUESTION_BOTTOM +
       HEIGHT_OPTIONS +
-      AUTO_MODE_FALLBACK_HEIGHT;
+      AUTO_MODE_FALLBACK_HEIGHT +
+      HOOK_ASK_REASON_HEIGHT;
     return Math.max(availableTerminalHeight - surroundingElementsHeight, 1);
   }
 
@@ -689,6 +703,25 @@ export const ToolConfirmationMessage: React.FC<
         <Box paddingX={1} marginLeft={1} marginBottom={1}>
           <Text color={theme.status.warning}>
             ⚠ {autoModeFallback.message}
+          </Text>
+        </Box>
+        {bodyContent}
+      </Box>
+    );
+  }
+
+  // A PreToolUse hook escalated this call while the tool's own view (e.g.
+  // the edit diff) is shown — surface the hook's reason above the body so
+  // the user knows why the prompt appeared (#9434).
+  if (hookAskReason) {
+    bodyContent = (
+      <Box flexDirection="column">
+        <Box paddingX={1} marginLeft={1} marginBottom={1}>
+          <Text color={theme.status.warning}>
+            ⚠{' '}
+            {t('Hook requested confirmation: {{reason}}', {
+              reason: hookAskReason,
+            })}
           </Text>
         </Box>
         {bodyContent}
