@@ -78,12 +78,34 @@ export function unregisterSessionProjectDir(sessionId: string): void {
  */
 const modelBySession = new Map<string, string>();
 
-export function registerSessionModel(sessionId: string, model: string): void {
-  if (sessionId && model) modelBySession.set(sessionId, model);
+/**
+ * The same model qualified by WHERE it resolves — `<model>@<8 hex of
+ * authType+baseUrl>` — keyed per session for the reason above, and for one
+ * more: a bare id is unique only inside one provider configuration, so a
+ * session handed ANOTHER session's qualification is handed a confidently
+ * wrong answer that passes gates the coarse id would have failed.
+ */
+const modelIdentityBySession = new Map<string, string>();
+
+export function registerSessionModel(
+  sessionId: string,
+  model: string,
+  identity?: string,
+): void {
+  if (!sessionId || !model) return;
+  modelBySession.set(sessionId, model);
+  // Registered together, dropped together: an identity left behind by an
+  // earlier model would qualify the wrong one.
+  if (identity) modelIdentityBySession.set(sessionId, identity);
+  else modelIdentityBySession.delete(sessionId);
 }
 
 export function getSessionModel(sessionId: string): string | undefined {
   return modelBySession.get(sessionId);
+}
+
+export function getSessionModelIdentity(sessionId: string): string | undefined {
+  return modelIdentityBySession.get(sessionId);
 }
 
 /**
@@ -93,4 +115,5 @@ export function getSessionModel(sessionId: string): string | undefined {
  */
 export function unregisterSessionModel(sessionId: string): void {
   modelBySession.delete(sessionId);
+  modelIdentityBySession.delete(sessionId);
 }

@@ -52,6 +52,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_source_metadata: { since: 'v1' },
   session_side_task: { since: 'v1' },
   session_prompt: { since: 'v1' },
+  session_turn_status: { since: 'v1' },
   // Prompts and mid-turn messages support session-scoped media uploaded once
   // and referenced by `mediaId`. The bridge resolves bytes only when ACP input
   // is dispatched, keeping base64 out of JSON and SSE payloads.
@@ -189,6 +190,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   workspace_tool_toggle: { since: 'v1' },
   workspace_skill_toggle: { since: 'v1' },
   workspace_skill_batch_toggle: { since: 'v1' },
+  extension_batch_activation_v2: { since: 'v1' },
   workspace_skill_manage: { since: 'v1' },
   workspace_settings: { since: 'v1' },
   // `GET /workspace/permissions` is always available when this tag is
