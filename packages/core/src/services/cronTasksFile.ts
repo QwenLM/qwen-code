@@ -101,22 +101,13 @@ export interface DurableCronTask {
    */
   disabledByArchive?: boolean;
   /**
-   * Id of the dedicated session this task is bound to. A task created through
-   * the Web Shell management page mints its own session and stores its id here;
-   * the task then fires ONLY inside that session (not via the shared per-project
-   * durable owner), so the session's transcript is the task's run history, and
-   * archiving/deleting that session stops the task. Absent on tool-created
-   * (`cron_create`) and legacy tasks, which keep the shared-owner firing model.
+   * Id of the session this task is bound to. The task fires only inside that
+   * session, so its transcript is the task's run history. Absent on unbound
+   * tool-created and legacy tasks, which use the shared durable owner.
    */
   sessionId?: string;
-  /**
-   * Whether the bound session was minted BY the task (`true`) or provided by
-   * the caller (`false`). Gates delete-time teardown: deleting a task closes a
-   * session it minted, but must never tear down a caller-provided session —
-   * that one pre-existed the task and survives it. Absent on tasks written
-   * before this field existed; every session bindable before then was
-   * task-minted, so absent is treated as owned (teardown preserved).
-   */
+  /** False when the caller, rather than the task, owns the bound session.
+   * Absent means task-owned for backward compatibility. */
   sessionOwnedByTask?: boolean;
   delivery?: CronTaskDelivery;
   /**

@@ -5,11 +5,11 @@
  */
 
 /**
- * Keeps scheduled-task-owned sessions resident against the bridge's idle
+ * Keeps sessions bound to scheduled tasks resident against the bridge's idle
  * reaper.
  *
  * A durable task created through the Web Shell management page is bound to a
- * dedicated session and fires ONLY inside it (its transcript is the task's run
+ * session and fires ONLY inside it (its transcript is the task's run
  * history). For that to keep happening the session must stay loaded so its
  * in-child scheduler ticks — but a session with no client / SSE subscriber is
  * closed by the bridge's idle reaper after the idle timeout, which would
@@ -42,7 +42,6 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { MAX_SESSION_RESTORE_TIMEOUT_MS } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
 import { scheduledTaskSessionName } from './routes/scheduled-tasks.js';
-import type { SessionArchiveCoordinator } from './server/session-archive.js';
 
 const log = createDebugLogger('SCHED_KEEPALIVE');
 
@@ -113,18 +112,15 @@ const KEEPALIVE_SPAWN_TIMEOUT_MS = 30_000;
 const MAX_REVIVE_BACKOFF_MS = 30 * 60_000;
 
 /**
- * Bind unbound durable tasks to dedicated sessions, and (re)name bound
- * sessions. The cron_create tool leaves durable tasks unbound so they stay
- * pickable by any lock owner (CLI/ACP/headless). In daemon mode this
- * keepalive mints a dedicated session per task and names it — binding is a
- * daemon-only concern.
+ * Bind unbound durable tasks to dedicated sessions, and rename bound
+ * task-owned sessions that don't yet have the ⏰ prefix. The cron_create tool leaves
+ * durable tasks unbound so they stay pickable by any lock owner (CLI/ACP
+ * /headless). In daemon mode this keepalive mints a dedicated session per
+ * task and names it — binding is a daemon-only concern.
  *
- * For unbound tasks: mints a dedicated session, names it `⏰ <name or
- * prompt>`, writes sessionId to disk.
- * For bound tasks: renames the session to `⏰ <name or prompt>` — the SAME
- * payload the scheduled-tasks route names with, so the route's naming and
- * this sweep agree instead of clobbering each other with different names
- * (matters for caller-provided sessions, which the route also names).
+ * For unbound tasks: mints a dedicated session, names it `⏰ prompt`,
+ * writes sessionId to disk.
+ * For task-owned bound tasks without ⏰ name: renames the session to `⏰ prompt`.
  *
  * A Set tracks renamed sessions so we don't call updateSessionMetadata
  * every tick. Best-effort — failures are logged and retried next tick.
@@ -137,17 +133,7 @@ async function bindAndNameSessions(
   spawnTimeoutMs: number,
   binding: Set<string>,
   cleanupSession: (sessionId: string) => Promise<unknown>,
-  sessionArchiveCoordinator?: SessionArchiveCoordinator,
 ): Promise<void> {
-  // Serialize teardown with the reuse-create bind path (#9415): a stale
-  // teardown must not land while a concurrent reuse-create holds the shared
-  // lease and is about to commit a reference to the session.
-  const teardownSession = (sessionId: string): Promise<unknown> =>
-    sessionArchiveCoordinator
-      ? sessionArchiveCoordinator.runExclusiveMany([sessionId], () =>
-          cleanupSession(sessionId),
-        )
-      : cleanupSession(sessionId);
   const unbound = tasks.filter(
     (t) =>
       !t.sessionId &&
@@ -158,6 +144,7 @@ async function bindAndNameSessions(
   const needsName = tasks.filter(
     (t) =>
       t.sessionId &&
+      t.sessionOwnedByTask !== false &&
       t.enabled !== false &&
       !taskHasLegacyCondition(t) &&
       !renamed.has(t.sessionId),
@@ -186,7 +173,7 @@ async function bindAndNameSessions(
               task.id,
               sessionId,
             );
-            await teardownSession(sessionId).catch(() => {});
+            await cleanupSession(sessionId).catch(() => {});
           }
         })
         .catch(() => {})
@@ -204,31 +191,14 @@ async function bindAndNameSessions(
       spawnedSessionId = sessionId;
       try {
         bridge.updateSessionMetadata(sessionId, {
-          displayName: scheduledTaskSessionName(task.name ?? task.prompt),
+          displayName: scheduledTaskSessionName(task.prompt),
         });
         renamed.add(sessionId);
       } catch {
         // naming is non-critical — the session still fires correctly
       }
       let matched = false;
-      // The two no-write reasons must stay distinguishable: when a COMMITTED
-      // task already references the just-minted session the session is NOT an
-      // orphan and must not be rolled back (see below); when the task itself
-      // is no longer bindable the session IS orphaned and rolls back.
-      let sessionClaimedByCommittedTask = false;
       await updateCronTasks(boundWorkspace, (list) => {
-        // Bail when ANY committed task already references the just-minted
-        // session: the scheduled-tasks reuse path can bind a session the
-        // moment the spawn above registers it in the live map, BEFORE this
-        // write commits — without this check the session would be bound to
-        // two tasks (same transcript, conflicting ⏰ renames), and a later
-        // delete of THIS task would close the session out from under the
-        // surviving one. Checked FIRST: a session a committed task references
-        // must never be torn down, whatever this task's own state.
-        if (list.some((t) => t.sessionId === sessionId)) {
-          sessionClaimedByCommittedTask = true;
-          return list;
-        }
         // Another process may have bound or disabled this task between our
         // read and this write-lock acquisition — only attach when the task is
         // still unbound and enabled. Otherwise return unchanged so the
@@ -242,38 +212,13 @@ async function bindAndNameSessions(
         }
         const result = list.map((t) =>
           t.id === task.id && !t.sessionId && t.enabled !== false
-            ? {
-                ...t,
-                sessionId,
-                // The keepalive minted this session, so deleting the task
-                // later may tear it down (see the DELETE route's gate).
-                sessionOwnedByTask: true,
-              }
+            ? { ...t, sessionId }
             : t,
         );
         matched = true;
         return result;
       });
       if (!matched) {
-        if (sessionClaimedByCommittedTask) {
-          // A concurrent create committed a reference to the just-minted
-          // session before this write ran — it owns the session now (the
-          // route's symmetric `alreadyBound` branch performs NO rollback for
-          // the same reason). Rolling back here would kill the winner's live
-          // session: in production wiring cleanupSession is
-          // deleteDaemonSessionIfOrphan, whose requireZeroAttaches passes
-          // for a just-minted session, and whose persisted removal cascades
-          // removeTasksForSessions — deleting the winner's committed task.
-          // Leave the session to its owner; THIS task stays unbound on
-          // disk and a later tick retries it with a fresh session.
-          log.debug(
-            'keepalive: session',
-            sessionId,
-            'already committed to another task — leaving it to its owner',
-            task.id,
-          );
-          continue;
-        }
         // Task was deleted between read and write — roll back the orphan.
         throw new Error(`task ${task.id} no longer on disk`);
       }
@@ -286,7 +231,7 @@ async function bindAndNameSessions(
     } catch (err) {
       log.debug('keepalive: failed to bind task', task.id, err);
       if (spawnedSessionId !== undefined) {
-        await teardownSession(spawnedSessionId).catch(() => {});
+        await cleanupSession(spawnedSessionId).catch(() => {});
       }
     }
   }
@@ -295,7 +240,7 @@ async function bindAndNameSessions(
     const sessionId = task.sessionId!;
     try {
       bridge.updateSessionMetadata(sessionId, {
-        displayName: scheduledTaskSessionName(task.name ?? task.prompt),
+        displayName: scheduledTaskSessionName(task.prompt),
       });
       renamed.add(sessionId);
     } catch (err) {
@@ -323,12 +268,6 @@ export interface StartScheduledTaskKeepaliveOptions {
   /** Per-task spawn timeout; defaults to KEEPALIVE_SPAWN_TIMEOUT_MS. */
   spawnTimeoutMs?: number;
   onTasksRead?: (tasks: readonly DurableCronTask[]) => void;
-  /**
-   * Session-scoped serialization shared with the scheduled-tasks bind path
-   * (#9415): keepalive teardown acquires the exclusive lease so a concurrent
-   * reuse-create holding the shared lease is never torn down under it.
-   */
-  sessionArchiveCoordinator?: SessionArchiveCoordinator;
 }
 
 export function startScheduledTaskKeepalive(
@@ -466,7 +405,6 @@ export function startScheduledTaskKeepalive(
       spawnTimeoutMs,
       binding,
       cleanupSession,
-      opts.sessionArchiveCoordinator,
     );
   };
   const tick = (): Promise<void> =>
@@ -561,7 +499,7 @@ export interface RehydrateResult {
 }
 
 /**
- * Reloads every scheduled-task-owned session at daemon startup so its in-child
+ * Reloads every scheduled-task-bound session at daemon startup so its in-child
  * scheduler re-arms after a restart — nothing rehydrates sessions on boot
  * otherwise, so a bound task would sit dormant (its bound session dead, and the
  * lock owner deliberately never fires a bound task) until something loaded it.

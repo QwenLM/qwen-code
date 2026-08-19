@@ -272,11 +272,7 @@ export interface DaemonCreateScheduledTaskRequest {
   recurring?: boolean;
   /** Defaults to true. */
   enabled?: boolean;
-  /** Reuse an existing live session instead of minting a dedicated one. The
-   * session must be live in this workspace, idle, not archived, and not
-   * already bound to another scheduled task; after a successful create it
-   * follows the regular scheduled-task session lifecycle. Omit (or null) to
-   * keep the dedicated-session behavior. */
+  /** Reuse an existing live, idle session instead of creating one. */
   sessionId?: string | null;
 }
 

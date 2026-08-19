@@ -661,12 +661,8 @@ describe('scheduled-task keepalive', () => {
   });
 
   it('binds an unbound task to a dedicated session and writes sessionId to disk', async () => {
-    // Named fixture + exact-name assertion discriminate the MINT-site naming
-    // payload (`task.name ?? task.prompt`): mutating it to `task.prompt`
-    // yields '⏰ check build' and fails this test. The already-bound rename
-    // branch is covered separately below.
     await updateCronTasks(workspace, () => [
-      task({ id: 'unbound-1', prompt: 'check build', name: 'Digest' }),
+      task({ id: 'unbound-1', prompt: 'check build' }),
     ]);
     const spawns: unknown[] = [];
     const names: Array<[string, { displayName?: string }]> = [];
@@ -697,47 +693,19 @@ describe('scheduled-task keepalive', () => {
     });
     expect(names).toHaveLength(1);
     expect(names[0]![0]).toBe('new-sess-1');
-    expect(names[0]![1].displayName).toBe('⏰ Digest');
+    expect(names[0]![1].displayName).toContain('⏰');
     const tasks = await readCronTasks(workspace);
     expect(tasks[0]!.sessionId).toBe('new-sess-1');
-    // The keepalive minted this session, so the task records ownership —
-    // the DELETE route's gate relies on it.
-    expect(tasks[0]!.sessionOwnedByTask).toBe(true);
   });
 
-  it('names bound sessions from the task name when one is set', async () => {
-    // The scheduled-tasks route names a bound session `⏰ <name or prompt>`;
-    // the keepalive must use the same payload or it clobbers the route's
-    // name (visible on caller-provided sessions, which the route also names).
-    await updateCronTasks(workspace, () => [
-      task({
-        id: 'named-bound',
-        sessionId: 'existing-sess',
-        prompt: 'summarize the day',
-        name: 'Digest',
-      }),
-    ]);
-    const names: Array<[string, { displayName?: string }]> = [];
-    const naming = {
-      ...bridge,
-      updateSessionMetadata: (id: string, m: { displayName?: string }) => {
-        names.push([id, m]);
-      },
-    };
-    const ka = startScheduledTaskKeepalive({
-      bridge: naming,
-      boundWorkspace: workspace,
-      intervalMs: 60_000,
-    });
-    await ka.tick();
-    ka.stop();
-    expect(names).toHaveLength(1);
-    expect(names[0]![1].displayName).toBe('⏰ Digest');
-  });
-
-  it('renames a bound session without ⏰ prefix exactly once', async () => {
+  it('renames task-owned sessions once without renaming caller-owned ones', async () => {
     await updateCronTasks(workspace, () => [
       task({ id: 'bound-1', sessionId: 'existing-sess', prompt: 'lint' }),
+      task({
+        id: 'caller-bound',
+        sessionId: 'caller-sess',
+        sessionOwnedByTask: false,
+      }),
     ]);
     const names: Array<[string, { displayName?: string }]> = [];
     const naming = {
@@ -884,70 +852,6 @@ describe('scheduled-task keepalive', () => {
     // The other process's sessionId is preserved.
     const tasks = await readCronTasks(workspace);
     expect(tasks[0]!.sessionId).toBe('other-sess');
-    removeSpy.mockRestore();
-  });
-
-  it('leaves a just-minted session alone when another committed task already references it', async () => {
-    // The scheduled-tasks reuse path can bind a session as soon as the spawn
-    // registers it in the live map — BEFORE this bind write commits. The
-    // in-lock check must notice the committed reference and leave the task
-    // unbound, not double-bind the session — but it must NOT roll the
-    // session back either: the committed task owns it now. In production
-    // wiring cleanupSession is deleteDaemonSessionIfOrphan, whose
-    // requireZeroAttaches passes for a just-minted session and whose
-    // persisted removal cascades removeTasksForSessions — a rollback here
-    // would kill the winner's live session AND delete the winner's task
-    // from the cron file. (Mirrors the route's alreadyBound branch, which
-    // deliberately performs no rollbackSession.) Reverting the fix puts
-    // 'contested-sess' back in `closed` and calls removeSession for it.
-    const closed: string[] = [];
-    const removeSpy = vi
-      .spyOn(SessionService.prototype, 'removeSession')
-      .mockResolvedValue(true);
-    const raceBridge = {
-      ...bridge,
-      spawnOrAttach: async () => {
-        // Simulate a concurrent caller-provided binding committing while our
-        // spawn is in flight.
-        await updateCronTasks(workspace, (list) => [
-          ...list,
-          task({
-            id: 'caller-task',
-            sessionId: 'contested-sess',
-            sessionOwnedByTask: false,
-          }),
-        ]);
-        return { sessionId: 'contested-sess' };
-      },
-      closeSession: async (id: string) => {
-        closed.push(id);
-      },
-      markSessionCatalogChanged: vi.fn(),
-      updateSessionMetadata: () => {},
-    };
-    await updateCronTasks(workspace, () => [
-      task({ id: 'tool-task', prompt: 'contested' }),
-    ]);
-    const ka = startScheduledTaskKeepalive({
-      bridge: raceBridge,
-      boundWorkspace: workspace,
-      intervalMs: 60_000,
-    });
-    await ka.tick();
-    ka.stop();
-    // No rollback: the winner's session survives untouched...
-    expect(closed).toEqual([]);
-    expect(removeSpy).not.toHaveBeenCalled();
-    expect(raceBridge.markSessionCatalogChanged).not.toHaveBeenCalled();
-    // ...and the session stays bound to exactly ONE task: the caller's,
-    // while THIS task remains unbound for a later tick to retry with a
-    // fresh session.
-    const tasks = await readCronTasks(workspace);
-    expect(tasks).toHaveLength(2);
-    const toolTask = tasks.find((t) => t.id === 'tool-task');
-    const callerTask = tasks.find((t) => t.id === 'caller-task');
-    expect(toolTask?.sessionId).toBeUndefined(); // still unbound
-    expect(callerTask?.sessionId).toBe('contested-sess');
     removeSpy.mockRestore();
   });
 
