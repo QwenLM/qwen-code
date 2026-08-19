@@ -5,7 +5,19 @@
  */
 
 import fs from 'node:fs/promises';
-import type { Metadata, SharpConstructor } from 'sharp';
+import type { Metadata } from 'sharp';
+
+/**
+ * The `sharp` module itself — callable, and carrying the namespace members the
+ * resize path uses (`sharp.kernel`).
+ *
+ * Not imported by name: `sharp` is declared `export = sharp`, a function merged
+ * with a namespace, and exports no type describing that shape. The name this
+ * file used before — `SharpConstructor` — does not exist in the version the
+ * manifest declares, so the package failed to build against its own dependency
+ * range.
+ */
+type SharpConstructor = typeof import('sharp');
 
 const IMAGE_VIEW_MAX_EDGE = 1568;
 const IMAGE_VIEW_MAX_PATCHES = 1568;
