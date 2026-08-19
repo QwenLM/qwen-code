@@ -742,16 +742,33 @@ export function describeWorkerTlsTrustGaps(opts: {
         `anchor nothing through this file. Re-export it as PEM and restart.`,
     );
   }
-  // Same rule for the serving file. In practice it always extracts — a fused
-  // or DER serving file cannot serve at all, `createSecureContext` throws at
-  // boot long before this runs — so the fallback below only keeps a leaf to
-  // reason about instead of reporting phantom gaps for a daemon that never
-  // started.
-  const servingChain =
-    loadableCertificates(opts.cert.toString('utf8')) ?? chain;
-  const workerTrustStore = operatorChain
-    ? [...servingChain, ...operatorChain]
-    : servingChain;
+  // Same rule for the serving file — and when it fails, the merge does NOT
+  // merge. `resolveWorkerCaCertPath` finds `daemonBlocks === undefined`,
+  // discards the operator CA and hands workers the serving file alone, so
+  // modelling a merged store here would report no gap while every worker
+  // handshake fails. (A serving file that fails extraction can still serve:
+  // `createSecureContext` accepts shapes the loader's framing rejects, so the
+  // "it would have thrown at boot" premise this fallback used to carry was
+  // false.)
+  const servingBlocks = loadableCertificates(opts.cert.toString('utf8'));
+  if (!servingBlocks && operatorChain) {
+    gaps.push(
+      `--tls-cert "${opts.certPath}" holds no PEM certificate block Node's ` +
+        `loader can read, so the channel workers' bundle cannot be merged: ` +
+        `they receive that file alone and NODE_EXTRA_CA_CERTS ` +
+        `"${opts.operatorCaCertPath}" is discarded. Every worker handshake ` +
+        `to the daemon will fail UNABLE_TO_VERIFY_LEAF_SIGNATURE. Re-export ` +
+        `--tls-cert as PEM with every -----BEGIN/END CERTIFICATE----- marker ` +
+        `alone on its own line and restart.`,
+    );
+  }
+  // The fallback keeps a leaf to reason about rather than reporting phantom
+  // gaps, but it must not pretend the operator CA reached the workers.
+  const servingChain = servingBlocks ?? chain;
+  const workerTrustStore =
+    operatorChain && servingBlocks
+      ? [...servingChain, ...operatorChain]
+      : servingChain;
   // A leaf in NODE_EXTRA_CA_CERTS is a usable trust anchor only when it signed
   // itself: chain verification has no PARTIAL_CHAIN flag here, so a CA-issued
   // leaf (what the `mkcert` flow this project documents produces) never
@@ -768,6 +785,18 @@ export function describeWorkerTlsTrustGaps(opts: {
         `("unsuitable certificate purpose"). Reissue that certificate with ` +
         `CA:TRUE, or point NODE_EXTRA_CA_CERTS at a real CA that anchors the ` +
         `chain, and restart.`,
+    );
+  } else if (anchorPath.incapableIssuer) {
+    gaps.push(
+      `--tls-cert "${opts.certPath}" chains through ` +
+        `"${anchorPath.incapableIssuer.subject.replace(/\r?\n/g, ', ')}", ` +
+        `which is not a CA — it carries basicConstraints CA:FALSE or, as an ` +
+        `X.509 v3 certificate, no basicConstraints at all, and OpenSSL ` +
+        `refuses to let it issue the certificate below it. Every worker ` +
+        `handshake to the daemon will fail INVALID_PURPOSE or INVALID_CA ` +
+        `even though the chain looks complete. Reissue that intermediate ` +
+        `with CA:TRUE, or point NODE_EXTRA_CA_CERTS at a chain whose ` +
+        `intermediates are real CAs, and restart.`,
     );
   } else if (!anchorPath.anchored) {
     gaps.push(
@@ -903,6 +932,8 @@ function walkWorkerAnchorPath(chain: readonly X509Certificate[]): {
   path: readonly X509Certificate[];
   /** Set when the walk terminated on a self-signed cert that is not a CA. */
   nonCaTerminator?: X509Certificate;
+  /** Set when the walk reached an issuer OpenSSL will not let issue. */
+  incapableIssuer?: X509Certificate;
 } {
   let next: X509Certificate | undefined = chain[0];
   const walked = new Set<string>();
@@ -922,11 +953,23 @@ function walkWorkerAnchorPath(chain: readonly X509Certificate[]): {
       return { anchored: true, path };
     }
     walked.add(current.fingerprint256);
-    next = chain.find(
+    const issuer: X509Certificate | undefined = chain.find(
       (candidate) =>
         !walked.has(candidate.fingerprint256) &&
         certIssuedBy(current, candidate),
     );
+    // `certIssuedBy` asks only "did this sign that": name match plus signature.
+    // OpenSSL asks a second question of every certificate it uses AS an issuer,
+    // and answering only the first is how a chain that walks THROUGH an
+    // incapable intermediate got reported anchored while every worker
+    // handshake failed. Measured on Node 22 / OpenSSL 3 with real handshakes:
+    // an explicit CA:FALSE intermediate and a v3 intermediate with no
+    // basicConstraints both fail INVALID_PURPOSE, and a keyCertSign-only v3
+    // intermediate fails INVALID_CA.
+    if (issuer && !isSelfSignedCert(issuer) && !issuer.ca) {
+      return { anchored: false, path, incapableIssuer: issuer };
+    }
+    next = issuer;
   }
   return { anchored: false, path };
 }

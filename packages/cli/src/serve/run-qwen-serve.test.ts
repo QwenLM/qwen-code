@@ -1405,6 +1405,76 @@ sxyEYG5sNF7HPXac1j3PqROJ8O1X1lpXWyd2MChHhhCnFCteAQ==
 -----END CERTIFICATE-----
 `;
 
+/**
+ * leaf <- intermediate with an explicit `basicConstraints CA:FALSE` <- CA:TRUE
+ * self-signed root. Chain geometry is complete and the terminator IS a CA, so
+ * every check short of issuer capability blesses it. Measured on Node 22 /
+ * OpenSSL 3 with a real `tls.createServer`/`tls.connect` handshake using this
+ * exact file as both the served chain and the trust store:
+ * `authorized=false code=INVALID_PURPOSE`.
+ */
+const TEST_TLS_CERT_FULLCHAIN_NON_CA_INTERMEDIATE = `-----BEGIN CERTIFICATE-----
+MIIDNjCCAh6gAwIBAgIUefcAWISh+F6Emetu1Y++2m4bKd8wDQYJKoZIhvcNAQEL
+BQAwKDEmMCQGA1UEAwwdcXdlbiBub24tQ0EgdGVzdCBpbnRlcm1lZGlhdGUwHhcN
+MjYwODE5MDIyNzIzWhcNNDYwODE0MDIyNzIzWjAUMRIwEAYDVQQDDAlsb2NhbGhv
+c3QwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQCk3+570b8ulBlD9+nk
+AEuH5T4ptxIpEF1ICep6Lr6E+4a3e36Xw8Dj3pWLcbTzE2cWatxeBOfsxzAPTjPA
+ijHfn/7l4uEdj2VO2wdaCx+KnTY3dBDfcugsQJD1x3sRYaI2lEbql9dzlUQsoBFS
+vfOJvKAAf8ld2prnEgwK4iL8SXQxGpiRHRZxZSX5BD3hY9qNHPUg5UbxF/3bqeFd
+WRlw5clo+KmrIXZT/jpEaCUsJV4AsvzBa4T1lgfi1bXfJc13UcVuKSAdZwVBg86I
+ULLK/Tm6GxuCE5tz0mAIdVlHgLg0nZRRBqT+uCSpfYyM3ZjBntExCJVLtnpomHIL
+8YWRAgMBAAGjbDBqMBoGA1UdEQQTMBGCCWxvY2FsaG9zdIcEfwAAATAMBgNVHRMB
+Af8EAjAAMB0GA1UdDgQWBBRXeK7yvKdpEUq/SBpScRyrdPU91TAfBgNVHSMEGDAW
+gBSs7k1wDaAA+5+e9J7OaevGnakJ7TANBgkqhkiG9w0BAQsFAAOCAQEApurke98w
+xA8lUbXQUiqJ+7e5p2OeBmBklQ5ugac78ChVB60BQA4/eVQGKGU66FcbE4I9o0+6
+fbSwa8tZBF4VxDB++jF/m4v4UgldmxFSOq+zLuBdCcdvE4QDK32R+6B31qiNbaqw
+rDeT3cyugIHWz+gMt+X40HRoIHYHwvdEMgYh6xudQxycsqQNklkUsAMlEAMBGEp4
+TkiudWy9u1JbAAfrJ4SlR9BL7IlsgFK/xFntyDK4eFxC2cYPx/gayFBod/4W/msB
+KeYjaUsUyzO/D883ox2WMIFtYDIMLySoEcBro3y92MR8ncLRKk7wByZAhNXtYKCb
+g+/g99FTckehrQ==
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDMzCCAhugAwIBAgIUIqd02dCREIdTnnN3wt3E0a9Zcb8wDQYJKoZIhvcNAQEL
+BQAwLTErMCkGA1UEAwwicXdlbiBub24tQ0EgaW50ZXJtZWRpYXRlIHRlc3Qgcm9v
+dDAeFw0yNjA4MTkwMjI3MjNaFw00NjA4MTQwMjI3MjNaMCgxJjAkBgNVBAMMHXF3
+ZW4gbm9uLUNBIHRlc3QgaW50ZXJtZWRpYXRlMIIBIjANBgkqhkiG9w0BAQEFAAOC
+AQ8AMIIBCgKCAQEAslKbC3Lox1Zs6ikaKk7IgD/HzDdcqOpXtO+AIxJy2O7aZg6L
+im1qolayFT+88/arTIOxaq1KGGh3dexWBBCo6h363BYrx4OGAQjI+1GKs98DQO5Q
+1nnnadZRyU25D3ra0v78Bm+lJjCA3xsor7jfh7GUxBbxbPKfTI3OJ5QQH91OreCK
+Ctk9ONMNVz4nt1NvFnnUKSbPfm7HdMvquB16nXuyAB/Uqgj997w2EGfeNXRO2/7x
+64EbDtYgMjuraAiM8eD2cMluY74lb3sGRcCR/xMHBlpZeTpkXgjtc5VR14RygGv4
+1QTNNsNl34jsq9nfOTzUAUspkEqKmFf+nF46qQIDAQABo1AwTjAMBgNVHRMBAf8E
+AjAAMB0GA1UdDgQWBBSs7k1wDaAA+5+e9J7OaevGnakJ7TAfBgNVHSMEGDAWgBSK
+0a9cMx46PmKxxogtlcPWrbiyrzANBgkqhkiG9w0BAQsFAAOCAQEAOSUiVqnkGec6
+uRs4nXM0fR+ouwC0lxqc8E4BGdnv8crJYKjGWxIib1W/NES/zsnwasu5sglMY0Kh
+IkeHhiAYFNVir++alT5YPdUAXU8ckohhbzixPMgOSFvnyZ2xCO64fsDwb7tNe3/c
+7dtknvkngkGHJHKtKPKkZ0/jQu6LjsfcIIz5bruEfTeETY6joYjrwZL26NpYslgg
+OmOMAitXmMnbbUMEEIzIW7mXFPRBMu+Q5qp4KlD5gfJeu7upRn+NqvXu+Ne2Z0fZ
+Si8ev1QSbEku6WmNG9EFzwTC9Y8dQalrAgVegDBHsfTJWdEwfwVs2iApHB3Z+8YE
+98DkVAtPXg==
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDOzCCAiOgAwIBAgIUZ+xVhIOhGz7UzQUUPwJYZueIk/kwDQYJKoZIhvcNAQEL
+BQAwLTErMCkGA1UEAwwicXdlbiBub24tQ0EgaW50ZXJtZWRpYXRlIHRlc3Qgcm9v
+dDAeFw0yNjA4MTkwMjI3MjNaFw00NjA4MTQwMjI3MjNaMC0xKzApBgNVBAMMInF3
+ZW4gbm9uLUNBIGludGVybWVkaWF0ZSB0ZXN0IHJvb3QwggEiMA0GCSqGSIb3DQEB
+AQUAA4IBDwAwggEKAoIBAQCs+QZ+ov2ClU5axpK1Q7sWUS1f2+7s/2bClYk8L56d
+/jByGWD4HCsDNa39nn0Vgq98+4AO9WlpZQUcJlmd16yXusY078ZhNq382fJJ7cn3
+FZZBHBmESZMeHNx8HX9MslQjL29vmpHLTRWNSMO66VeTpkRpAnMY0KVrXvQV2nRp
+pulRVPagZ0DNgO6puxkJZpInyt/ieIwJ1ZU1gwF3wyX7FcSgN0UwrwBnVsCvXr62
+w3WsuXAllLf+YTys9NS7ZLqAFFyhez8lXhplx8dtNQi0iHLOF4jN5jAyCn19tVT5
+deQ6qtPVOd/7I9r5Ye6s8HaHa5peYTKn0zBocaiXcumnAgMBAAGjUzBRMB0GA1Ud
+DgQWBBSK0a9cMx46PmKxxogtlcPWrbiyrzAfBgNVHSMEGDAWgBSK0a9cMx46PmKx
+xogtlcPWrbiyrzAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IBAQA/
+q1Eu2qiT3/6c8A5o9La2dSwj15/MIgD7C5OauBTKtfhDoVqBVTCeYG/2I+wPm8PX
+6EXC7AC7S2Jy97g7F6q+2PgyNpGrk2iuwjfTLJxgpjGbDkej7qUpn1NqbnUQrQh6
+yurBZVQi9x6na4HX7pfLVPF76IYLKqdoRdqMtl2EZD1mol0tZGIimQoYqhInSwZ0
+3zXzQ+KDMBG1qC1TKQo/8WSiUncdGRzzGKStW+Fp/q1foZsp8bZ4/XNdoJV/ESkk
+RjOhHLQYLkulVXNP/fK0cm5haD9yiS11LoFqmscwb+NXdFanLn07ibbHx/DCyyOL
+E6mwm4nEjVj2B5cT62Pv
+-----END CERTIFICATE-----
+`;
+
 describe('describeWorkerTlsTrustGaps', () => {
   const daemonUrl = 'https://127.0.0.1:4170';
 
@@ -1652,6 +1722,52 @@ describe('describeWorkerTlsTrustGaps', () => {
     expect(gaps[0]).toContain('qwen non-CA test issuer');
   });
 
+  it('names a chain that passes THROUGH an issuer that is not a CA', () => {
+    // R4-4: the CA-suitability check only covered the self-signed terminator,
+    // so a chain whose INTERMEDIATE carries basicConstraints CA:FALSE walked
+    // all the way to a real CA root and was reported anchored. Measured on
+    // Node 22 / OpenSSL 3 with this exact file as the served chain and the
+    // trust store: authorized=false, code=INVALID_PURPOSE — daemon green,
+    // /health green, every channel worker restart-looping with no boot hint.
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_NON_CA_INTERMEDIATE),
+      certPath: '/certs/fullchain.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('INVALID_PURPOSE');
+    expect(gaps[0]).toContain('qwen non-CA test intermediate');
+  });
+
+  it('reports the discarded operator CA when the serving file is unloadable', () => {
+    // R4-3: the model merged the operator CA into the serving chain
+    // unconditionally, but `resolveWorkerCaCertPath` does the opposite when
+    // the SERVING file yields no loadable block — `daemonBlocks === undefined`
+    // discards the operator CA and hands workers the serving file alone. Boot
+    // therefore reported no gap while every worker handshake failed.
+    const der = new X509Certificate(TEST_TLS_CERT_FULLCHAIN_LEAF_ONLY).raw;
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: der,
+      certPath: '/certs/daemon.der',
+      daemonUrl,
+      operatorCaCertPath: '/certs/rootCA.pem',
+      operatorCaCert: Buffer.from(fullchainRootPem()),
+    });
+    expect(gaps).toHaveLength(2);
+    expect(
+      gaps.some(
+        (gap) =>
+          gap.includes('/certs/daemon.der') &&
+          gap.includes('/certs/rootCA.pem') &&
+          gap.includes('is discarded'),
+      ),
+    ).toBe(true);
+    // The operator CA no longer anchors a chain the workers never receive.
+    expect(
+      gaps.some((gap) => gap.includes('UNABLE_TO_VERIFY_LEAF_SIGNATURE')),
+    ).toBe(true);
+  });
+
   it('keeps trusting a self-signed leaf that carries CA:FALSE', () => {
     // The constraint binds only past the leaf: a CA:FALSE self-signed cert in
     // its OWN trust store is verified at depth 0 and handshakes fine
@@ -1711,6 +1827,10 @@ describe('describeWorkerTlsTrustGaps', () => {
       operatorCaCertPath: '/certs/fused.pem',
       operatorCaCert: Buffer.from(fused),
     });
+    // R4-7: `.some()` alone lets a mutant that pushes the unanchored gap twice
+    // through, duplicating warnings in the log this diagnostic exists to keep
+    // readable. Every single-gap sibling here pins the count; so do these.
+    expect(gaps).toHaveLength(2);
     expect(gaps.some((gap) => gap.includes('/certs/fused.pem'))).toBe(true);
     expect(
       gaps.some((gap) =>
@@ -1735,7 +1855,16 @@ describe('describeWorkerTlsTrustGaps', () => {
       operatorCaCertPath: '/certs/root.der',
       operatorCaCert: der,
     });
+    // R4-7: gating the unreadable-file message on a `-----BEGIN` marker being
+    // present drops the DER diagnosis (DER has no markers) while the generic
+    // anchor gap still satisfies a bare `.some()` — the operator is then told
+    // the file 'does not carry a certificate that anchors it' instead of being
+    // told to re-export it as PEM. Pin the count and the DER-specific text.
+    expect(gaps).toHaveLength(2);
     expect(gaps.some((gap) => gap.includes('/certs/root.der'))).toBe(true);
+    expect(
+      gaps.some((gap) => gap.includes('a DER file is never read at all')),
+    ).toBe(true);
     expect(
       gaps.some((gap) => gap.includes('UNABLE_TO_VERIFY_LEAF_SIGNATURE')),
     ).toBe(true);
