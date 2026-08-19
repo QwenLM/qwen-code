@@ -603,7 +603,7 @@ describe('Agent View PTY host process server', () => {
     expect(host.shutdowns).toBe(1);
   });
 
-  it('resolves connected host exit when the remote host is shut down', async () => {
+  it('waits for the remote endpoint to close after shutdown', async () => {
     const host = fakeHost();
     const socketPath = shortSocketPath();
     const server = createAgentViewPtyHostServer(host, socketPath);
@@ -618,10 +618,21 @@ describe('Agent View PTY host process server', () => {
     connected.shutdown?.();
 
     await waitFor(() => host.shutdowns === 1);
+    await expect(
+      Promise.race([
+        connected.exited.then(() => true),
+        new Promise<boolean>((resolve) =>
+          setTimeout(() => resolve(false), 100),
+        ),
+      ]),
+    ).resolves.toBe(false);
+
+    servers.splice(servers.indexOf(server), 1);
+    await server.close();
     await expect(connected.exited).resolves.toEqual({ exitCode: 0 });
   });
 
-  it('resolves connected host exit when killed', async () => {
+  it('waits for the remote endpoint to close after SIGKILL', async () => {
     const host = fakeHost();
     const socketPath = shortSocketPath();
     const server = createAgentViewPtyHostServer(host, socketPath);
@@ -636,6 +647,8 @@ describe('Agent View PTY host process server', () => {
     connected.kill('SIGKILL');
 
     await waitFor(() => host.killedWith === 'SIGKILL');
+    servers.splice(servers.indexOf(server), 1);
+    await server.close();
     await expect(connected.exited).resolves.toEqual({ exitCode: 1 });
   });
 
@@ -668,8 +681,12 @@ describe('Agent View PTY host process server', () => {
     await waitFor(() => host.killedWith === 'SIGTERM');
     expect(await notSettledWithin(100)).toBe(false);
 
-    // Only SIGKILL cannot be trapped, so it resolves immediately.
+    // SIGKILL is confirmed only after the endpoint disappears.
     connected.kill('SIGKILL');
+    await waitFor(() => host.killedWith === 'SIGKILL');
+    expect(await notSettledWithin(100)).toBe(false);
+    servers.splice(servers.indexOf(server), 1);
+    await server.close();
     await expect(connected.exited).resolves.toEqual({ exitCode: 1 });
   });
 

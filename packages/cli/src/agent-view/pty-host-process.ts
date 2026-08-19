@@ -290,11 +290,11 @@ function createRemotePtyHostHandle({
       }).then(
         () => {
           // Only SIGKILL cannot be trapped, so once the RPC has landed it is
-          // the only kill that guarantees the worker is gone — settle then,
-          // not before: an RPC that never lands must leave the exit poller
-          // running, exactly like the trappable SIGINT/SIGTERM cases.
+          // the only kill that guarantees the worker will exit. Keep polling
+          // until the endpoint disappears so a replacement cannot race the
+          // old host's socket teardown.
           if (!child && allowedSignal === 'SIGKILL') {
-            exitTracker.resolve({ exitCode: 1 });
+            exitTracker.confirmTermination?.({ exitCode: 1 });
           }
         },
         () => {
@@ -305,11 +305,11 @@ function createRemotePtyHostHandle({
     shutdown(): void {
       void callAgentViewPtyHost(socketPath, authToken, 'shutdown').then(
         () => {
-          // Only settle once the RPC has landed: a failed or lost shutdown
+          // Only confirm once the RPC has landed: a failed or lost shutdown
           // leaves the host alive holding the socket lock, and resolving
           // early would clear the liveness poller that can still detect it.
           if (!child) {
-            exitTracker.resolve({ exitCode: 0 });
+            exitTracker.confirmTermination?.({ exitCode: 0 });
           }
         },
         () => {
@@ -328,10 +328,15 @@ function createRemotePtyHostHandle({
   };
 }
 
-function createChildExitTracker(child: ChildProcess): {
+interface AgentViewPtyHostExitTracker {
   exited: Promise<AgentViewPtyHostExit>;
   resolve(exit: AgentViewPtyHostExit): void;
-} {
+  confirmTermination?(exit: AgentViewPtyHostExit): void;
+}
+
+function createChildExitTracker(
+  child: ChildProcess,
+): AgentViewPtyHostExitTracker {
   let resolveExit: (exit: AgentViewPtyHostExit) => void = () => {};
   const exited = new Promise<AgentViewPtyHostExit>((resolve) => {
     resolveExit = resolve;
@@ -349,36 +354,60 @@ function createChildExitTracker(child: ChildProcess): {
 function createRemoteExitTracker(
   socketPath: string,
   authToken: string | undefined,
-): {
-  exited: Promise<AgentViewPtyHostExit>;
-  resolve(exit: AgentViewPtyHostExit): void;
-} {
+): AgentViewPtyHostExitTracker {
   let settled = false;
+  let pollInFlight = false;
+  let confirmedExit: AgentViewPtyHostExit | undefined;
+  let confirmedPoll: NodeJS.Timeout | undefined;
   let resolveExit: (exit: AgentViewPtyHostExit) => void = () => {};
   const exited = new Promise<AgentViewPtyHostExit>((resolve) => {
     resolveExit = resolve;
   });
   let consecutiveFailures = 0;
-  const interval = setInterval(() => {
+  const scheduleConfirmedPoll = () => {
+    if (settled || !confirmedExit) return;
+    clearTimeout(confirmedPoll);
+    confirmedPoll = setTimeout(poll, 50);
+    confirmedPoll.unref?.();
+  };
+  const poll = () => {
+    if (settled || pollInFlight) return;
+    pollInFlight = true;
     void callAgentViewPtyHost(socketPath, authToken, 'status')
       .then(() => {
+        if (settled) return;
         consecutiveFailures = 0;
       })
       .catch(() => {
+        if (settled) return;
         if (++consecutiveFailures >= 2) {
-          resolveExitOnce({ exitCode: 1 });
+          resolveExitOnce(confirmedExit ?? { exitCode: 1 });
         }
+      })
+      .finally(() => {
+        pollInFlight = false;
+        scheduleConfirmedPoll();
       });
-  }, REMOTE_HOST_EXIT_POLL_MS);
+  };
+  const interval = setInterval(poll, REMOTE_HOST_EXIT_POLL_MS);
   interval.unref?.();
 
   const resolveExitOnce = (exit: AgentViewPtyHostExit) => {
     if (settled) return;
     settled = true;
     clearInterval(interval);
+    clearTimeout(confirmedPoll);
     resolveExit(exit);
   };
-  return { exited, resolve: resolveExitOnce };
+  return {
+    exited,
+    resolve: resolveExitOnce,
+    confirmTermination: (exit) => {
+      if (confirmedExit) return;
+      confirmedExit = exit;
+      poll();
+    },
+  };
 }
 
 export async function runAgentViewPtyHostProcess({
