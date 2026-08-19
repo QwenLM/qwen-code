@@ -193,6 +193,9 @@ is a problem worth not having, so you decide when the board is quiet.
 - **Participation is cooperative.** A board cannot force an agent to claim work
   or answer a question. Agents that are not Qwen Code need `qwen board protocol`
   pasted into them; setting the environment variables is not enough on its own.
+- **The footer counts what is waiting.** A session on a board shows
+  `board demo ⚠ 1 ? 2` — decisions first, then asks addressed to you. It polls
+  every five seconds; nothing is pushed.
 - **A running session checks only when it looks.** `/board <name>` brings an
   already-running session in, but nothing is pushed to it — it sees an item the
   next time it reads the board.
