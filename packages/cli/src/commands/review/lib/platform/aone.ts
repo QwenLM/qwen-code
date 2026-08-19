@@ -684,6 +684,12 @@ function createMrComment(
   message: string,
   inline?: { path: string; line: number },
 ): number | undefined {
+  // a1JsonOnce is the tolerant read-back: an exec FAILURE propagates (a real
+  // post failure — the partial-post path counts what landed before it), but a
+  // SUCCEEDED exec whose answer does not parse is "accepted, id unknown", not
+  // a failure. Throwing on the parse miss would undercount the partial-post
+  // report by exactly this comment and, if it was the first, suppress the
+  // do-not-re-run advisory altogether (see aone-client.ts).
   const out = a1JsonOnce<unknown>(
     'repo',
     'mr',

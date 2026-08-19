@@ -57,6 +57,34 @@ describe('aone-client write discipline', () => {
     expect(args.slice(-2)).toEqual(['--format', 'json']);
   });
 
+  it('a1JsonOnce returns undefined (not a throw) when an ACCEPTED write answers unparseably', () => {
+    // The exec SUCCEEDED, so the write is accepted. A result that fails to
+    // parse is a platform anomaly, not a failed post — throwing would let a
+    // caller count the accepted comment as unposted and re-run it into a
+    // duplicate. undefined = "landed, result unreadable".
+    mockExecFileSync.mockReturnValue('this is not json\n');
+    const out = a1JsonOnce<{ id: number }>(
+      'repo',
+      'mr',
+      'comment',
+      'create',
+      '--mr',
+      '7',
+    );
+    expect(out).toBeUndefined();
+    expect(mockExecFileSync).toHaveBeenCalledTimes(1);
+  });
+
+  it('a1JsonOnce still PROPAGATES an exec failure (the write genuinely failed)', () => {
+    mockExecFileSync.mockImplementation(() => {
+      throw new Error('Command failed: a1 repo mr comment create\nboom\n');
+    });
+    expect(() =>
+      a1JsonOnce('repo', 'mr', 'comment', 'create', '--mr', '7'),
+    ).toThrow();
+    expect(mockExecFileSync).toHaveBeenCalledTimes(1);
+  });
+
   it('a1 (the read path) surfaces a NON-transient error at once', () => {
     // Only the transient class retries; anything else must not pay the
     // delay (and this exercises the shared exec path without its sleep).

@@ -950,4 +950,20 @@ describe('submitAoneReview (the a1 write path)', () => {
     expect(result.postedInline).toBe(2);
     expect(result.summaryCommentId).toBeUndefined();
   });
+
+  it('counts an accepted-but-unreadable answer as POSTED — no undercount, no throw', () => {
+    // a1JsonOnce yields undefined when an accepted write answers
+    // unparseably. The first inline then reads back no id — but it LANDED,
+    // so postedInline must still count it; only the id list drops it.
+    // (Undercounting here is what would re-post the comment on a retry.)
+    a1JsonOnceMock
+      .mockReturnValueOnce(undefined) // inline #1: accepted, unreadable
+      .mockReturnValueOnce({ id: 202 }) // inline #2
+      .mockReturnValueOnce({ id: 203 }); // summary
+    const result = submitAoneReview(req());
+    expect(result.postedInline).toBe(2);
+    expect(result.inlineCommentIds).toEqual([202]);
+    expect(result.summaryCommentId).toBe(203);
+    expect(result.summaryPosted).toBe(true);
+  });
 });

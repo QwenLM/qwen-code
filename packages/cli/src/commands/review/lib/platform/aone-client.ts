@@ -95,10 +95,20 @@ export function a1Json<T>(...args: string[]): T {
   return JSON.parse(a1(...args, '--format', 'json')) as T;
 }
 
-/** The JSON shape of `a1Once` — every WRITE that reads its result back
- *  (the created comment's id). */
-export function a1JsonOnce<T>(...args: string[]): T {
-  return JSON.parse(a1Once(...args, '--format', 'json')) as T;
+/** The JSON shape of `a1Once` — the WRITE that reads its result back (the
+ *  created comment's id). TOLERANT on purpose, and only here: an exec
+ *  failure propagates (the write genuinely failed), but once the exec
+ *  SUCCEEDED the write is ACCEPTED — an answer that then fails to parse is
+ *  a platform anomaly, not a failed post, and must degrade to `undefined`
+ *  ("landed, result unreadable"). A throw instead would let the caller
+ *  count an accepted comment as unposted and re-run it into a duplicate. */
+export function a1JsonOnce<T>(...args: string[]): T | undefined {
+  const raw = a1Once(...args, '--format', 'json');
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
