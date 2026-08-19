@@ -8,13 +8,14 @@
  */
 
 import type { FC } from 'react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { FileLink } from '../layout/FileLink.js';
 import {
   groupContent,
   mapToolStatusToContainerStatus,
 } from './shared/index.js';
 import { usePlatform } from '../../context/PlatformContext.js';
+import { useControlledExpanded } from '../../context/ExpandControlContext.js';
 import type {
   BaseToolCallProps,
   ToolCallContainerProps,
@@ -69,7 +70,7 @@ export const ReadToolCall: FC<BaseToolCallProps> = ({
   const { kind, title, content, locations, toolCallId } = toolCall;
   const platform = usePlatform();
   const openedDiffsRef = useRef<Map<string, string>>(new Map());
-  const [isExpanded, setIsExpanded] = useState(false);
+  const [isExpanded, setIsExpanded] = useControlledExpanded(false);
 
   // Group content by type; memoize to avoid new array identities on every render
   const { errors, diffs, textOutputs } = useMemo(
@@ -268,6 +269,8 @@ export const ReadToolCall: FC<BaseToolCallProps> = ({
             {isLongContent && (
               <button
                 onClick={() => setIsExpanded(!isExpanded)}
+                aria-expanded={isExpanded}
+                aria-label={isExpanded ? 'Collapse output' : 'Expand output'}
                 className="flex items-center justify-center w-full py-1 px-2 border-t border-[var(--app-input-border)] cursor-pointer text-[var(--app-secondary-foreground)] text-[0.75em] opacity-70 hover:opacity-100 hover:bg-[var(--app-code-background)] transition-opacity bg-transparent"
               >
                 {isExpanded ? '▲ Collapse' : '▼ Show more'}
@@ -325,6 +328,8 @@ export const ReadToolCall: FC<BaseToolCallProps> = ({
           {isLongContent && (
             <button
               onClick={() => setIsExpanded(!isExpanded)}
+              aria-expanded={isExpanded}
+              aria-label={isExpanded ? 'Collapse output' : 'Expand output'}
               className="flex items-center justify-center w-full py-1 px-2 border-t border-[var(--app-input-border)] cursor-pointer text-[var(--app-secondary-foreground)] text-[0.75em] opacity-70 hover:opacity-100 hover:bg-[var(--app-code-background)] transition-opacity bg-transparent"
             >
               {isExpanded ? '▲ Collapse' : '▼ Show more'}

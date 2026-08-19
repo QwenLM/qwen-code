@@ -19,6 +19,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   chmodSync,
+  existsSync,
   mkdtempSync,
   mkdirSync,
   readdirSync,
@@ -270,6 +271,12 @@ describe('the build stamp and the staleness check agree', () => {
     expect(roots).toContain(join(utils, 'findings.ts'));
     expect(roots).toContain(join(utils, 'shell-args.ts'));
     expect(roots).toContain(join(utils, 'paths.ts'));
+    // List membership is not tree existence: a moved file keeps its
+    // root listed — both digest copies stay equal — while absentRoots
+    // darkens every review's staleness check.
+    expect(existsSync(join(utils, 'findings.ts'))).toBe(true);
+    expect(existsSync(join(utils, 'shell-args.ts'))).toBe(true);
+    expect(existsSync(join(utils, 'paths.ts'))).toBe(true);
   });
 
   it('the skill allowlist covers everything the copier would ship', () => {

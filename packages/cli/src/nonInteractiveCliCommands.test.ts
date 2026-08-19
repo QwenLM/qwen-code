@@ -248,11 +248,42 @@ describe('handleSlashCommand', () => {
       mockSettings,
     );
 
-    expect(mockBtwCommand.action).toHaveBeenCalled();
+    expect(mockBtwCommand.action).toHaveBeenCalledWith(
+      expect.objectContaining({ abortSignal: undefined }),
+      'question',
+    );
     expect(result.type).toBe('message');
     if (result.type === 'message') {
       expect(result.content).toBe('btw> question\nanswer');
     }
+  });
+
+  it('passes the abort signal to executed commands', async () => {
+    const mockCommand = {
+      name: 'advisor',
+      description: 'Ask for advice',
+      kind: CommandKind.BUILT_IN,
+      supportedModes: ['acp'] as const,
+      action: vi.fn().mockResolvedValue({
+        type: 'message',
+        messageType: 'info',
+        content: 'ok',
+      }),
+    };
+    vi.mocked(mockConfig.getExperimentalZedIntegration).mockReturnValue(true);
+    mockGetCommands.mockReturnValue([mockCommand]);
+
+    await handleSlashCommand(
+      '/advisor check this',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(mockCommand.action).toHaveBeenCalledWith(
+      expect.objectContaining({ abortSignal: abortController.signal }),
+      'check this',
+    );
   });
 
   it('returns canonical goal_control for a non-interactive create', async () => {
@@ -778,6 +809,7 @@ describe('handleSlashCommand', () => {
     expect(result).toEqual({
       type: 'submit_prompt',
       content: 'Expanded prompt',
+      resolvedCommand: { name: 'custom', kind: CommandKind.FILE },
     });
   });
 
@@ -805,6 +837,7 @@ describe('handleSlashCommand', () => {
     expect(result).toEqual({
       type: 'submit_prompt',
       content: 'Expanded prompt',
+      resolvedCommand: { name: 'custom', kind: CommandKind.FILE },
     });
   });
 
@@ -832,6 +865,7 @@ describe('handleSlashCommand', () => {
     expect(result).toEqual({
       type: 'submit_prompt',
       content: 'Expanded prompt',
+      resolvedCommand: { name: 'custom', kind: CommandKind.FILE },
     });
   });
 
@@ -865,6 +899,7 @@ describe('handleSlashCommand', () => {
       type: 'message',
       messageType: 'error',
       content: 'UserPromptExpansion blocked: Blocked by policy',
+      resolvedCommand: { name: 'custom', kind: CommandKind.FILE },
     });
   });
 

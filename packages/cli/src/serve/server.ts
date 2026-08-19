@@ -34,10 +34,16 @@ import {
   allowOriginCors,
   bearerAuth,
   createMutationGate,
-  denyBrowserOriginCors,
   hostAllowlist,
+  MutableOriginAllowlist,
   parseAllowOriginPatterns,
 } from './auth.js';
+import {
+  CredentialStore,
+  listenerIdentityOf,
+  LocalControlService,
+} from './local-control/index.js';
+import { registerWorkspaceLocalControlRoutes } from './routes/workspace-local-control.js';
 import type {
   DeviceFlowProvider,
   DeviceFlowRegistry,
@@ -175,7 +181,10 @@ import {
   parseClientIdHeader,
   safeBody,
 } from './server/request-helpers.js';
-import { daemonTelemetryMiddleware } from './server/telemetry.js';
+import {
+  daemonInboundTraceIdCaptureMiddleware,
+  daemonTelemetryMiddleware,
+} from './server/telemetry.js';
 import { installAccessLogMiddleware } from './server/access-log.js';
 import { setupDeviceFlowRegistry } from './server/device-flow-registry.js';
 import {
@@ -1662,29 +1671,36 @@ export function createServeApp(
   // gets a full 10MB `JSON.parse` before the 401 fires — a trivially
   // amplified CPU/memory cost from any wrong-token client.
   //
-  // When `--allow-origin` is configured, install the
-  // allowlist middleware instead of the deny-wall. The allowlist owns
-  // both halves of the policy (matched → CORS headers + pass-through or
-  // 204 preflight; unmatched → 403 with the same error envelope as the
-  // wall). When `--allow-origin` is empty/undefined, the deny-wall stays
-  // installed. Pattern parsing happens in `run-qwen-serve.ts` for validation;
-  // here we still keep the wildcard/no-token invariant for embedded
-  // callers that construct the app directly.
-  if (opts.allowOrigins && opts.allowOrigins.length > 0) {
-    const parsedAllowOrigins = parseAllowOriginPatterns(opts.allowOrigins);
-    if (parsedAllowOrigins.allowAny && !opts.token) {
-      throw new Error(
-        `Refusing to start with --allow-origin '*' but no bearer token ` +
-          `configured. '*' admits any cross-origin browser to the API; ` +
-          `without a token, any local page can drive the daemon. Set a ` +
-          `token or list specific origins instead of '*'.`,
-      );
-    }
-    app.use(allowOriginCors(parsedAllowOrigins));
-  } else {
-    app.use(denyBrowserOriginCors);
+  // The allowlist middleware owns both halves of the policy (matched → CORS
+  // headers + pass-through or 204 preflight; unmatched → 403). It is now
+  // installed unconditionally: with an empty allowlist every Origin-bearing
+  // request gets the same 403 envelope the `denyBrowserOriginCors` wall
+  // returned, so the no-`--allow-origin` posture is unchanged, and there is
+  // one middleware to reason about instead of two interchangeable ones.
+  // Pattern parsing happens in `run-qwen-serve.ts` for validation; here we
+  // still keep the wildcard/no-token invariant for embedded callers that
+  // construct the app directly.
+  const parsedAllowOrigins = parseAllowOriginPatterns(opts.allowOrigins ?? []);
+  if (parsedAllowOrigins.allowAny && !opts.token) {
+    throw new Error(
+      `Refusing to start with --allow-origin '*' but no bearer token ` +
+        `configured. '*' admits any cross-origin browser to the API; ` +
+        `without a token, any local page can drive the daemon. Set a ` +
+        `token or list specific origins instead of '*'.`,
+    );
   }
+  // One CORS middleware for both deployments, over a set that can change.
+  // With no `--allow-origin` the behavior is byte-for-byte the
+  // `denyBrowserOriginCors` wall this replaces — every Origin-bearing request
+  // gets the same `Vary: Origin` + 403 body — but the set behind it can now
+  // gain the LAN origin while Local Control is on and lose it again on
+  // disable. Re-registering middleware at that point is not an option:
+  // Express fixes middleware order when the app is built.
+  const originAllowlist = new MutableOriginAllowlist(parsedAllowOrigins);
+  app.use(allowOriginCors(originAllowlist));
   app.use(hostAllowlist(opts.hostname, getPort));
+  const credentials = new CredentialStore(opts.token);
+  const authenticate = bearerAuth(credentials);
   const rateLimiter = installRateLimiter(app, opts, daemonLog, {
     mount: false,
     workspaceQualifiedAcpEnabled,
@@ -1697,10 +1713,23 @@ export function createServeApp(
     getRateLimiter: () => rateLimiter,
   });
   if (healthRoutes.exposeHealthPreAuth) {
+    app.use('/health', (req, res, next) => {
+      if (listenerIdentityOf(req).kind === 'local-control') {
+        authenticate(req, res, next);
+        return;
+      }
+      next();
+    });
     healthRoutes.register(app);
   }
 
   installAccessLogMiddleware(app, daemonLog);
+
+  // Capture the caller trace id BEFORE authenticate / rate limiter / body
+  // parser: those layers short-circuit (401/429/400) before the telemetry
+  // middleware ever runs, and the access log still needs the captured id
+  // to join their log lines (and 404s) with the caller's trace.
+  app.use(daemonInboundTraceIdCaptureMiddleware);
 
   // Serve the Web Shell static assets (/ and /assets) BEFORE bearerAuth. The
   // static shell carries no secrets and a browser cannot attach an
@@ -1778,7 +1807,11 @@ export function createServeApp(
     });
   }
 
-  app.use(bearerAuth(opts.token));
+  // Credentials are a listener-scoped set, not one token: while Local Control
+  // is on, the LAN listener accepts a revocable pairing token and rejects the
+  // runtime token, and the primary listener does the reverse. With no Local
+  // Control session this behaves exactly as `bearerAuth(opts.token)` did.
+  app.use(authenticate);
 
   // Rate limiter: after auth (only count authenticated requests), except
   // webhook routes which use their own shared-secret auth before bearerAuth.
@@ -2779,6 +2812,10 @@ export function createServeApp(
     fsFactory: primaryRouteFileSystemFactory,
     deviceFlowRegistry,
     token: opts.token,
+    // The WS upgrade bypasses Express middleware, so it needs the same
+    // listener-scoped credentials the REST gate uses — otherwise the
+    // `qwen-bearer.*` subprotocol would be a way around the scoping.
+    credentials,
     // Mirror the REST CORS allowlist onto the WS CSRF wall so an
     // explicitly permitted origin (e.g. the extension's
     // `chrome-extension://<id>`) can open the reverse tool channel.
@@ -2863,6 +2900,36 @@ export function createServeApp(
   if (acpHandleRef.current) {
     app.locals['acpHandle'] = acpHandleRef.current;
   }
+
+  // Local Control: the LAN listener serves THIS app, so the service is built
+  // here where the credential store and the CORS allowlist it has to mutate
+  // both live. Published on `app.locals` alongside `acpHandle` — the same
+  // channel `runQwenServe` already uses to reach into the constructed app for
+  // lifecycle work (drain, dispose).
+  const localControlService = new LocalControlService({
+    app,
+    credentials,
+    originAllowlist,
+    // Resolved through the ref on each call rather than captured so Local
+    // Control cannot attach to a stale ACP mount.
+    attachWebSocket: (server) => acpHandleRef.current?.attachServer(server),
+    detachWebSocket: (server) => acpHandleRef.current?.detachServer(server),
+    getPort,
+    tlsPaths:
+      opts.tlsCert && opts.tlsKey
+        ? { cert: opts.tlsCert, key: opts.tlsKey }
+        : undefined,
+  });
+  app.locals['localControlService'] = localControlService;
+
+  registerWorkspaceLocalControlRoutes(app, {
+    service: localControlService,
+    mutate,
+    safeBody,
+    isDaemonDraining: deps.isChannelControlDraining,
+    webShellAvailable: Boolean(webShellDir),
+    primaryBindHostname: opts.hostname,
+  });
 
   // Web Shell SPA deep-link fallback — registered AFTER every API route (and
   // just before the error handler) so real routes, including their bearerAuth

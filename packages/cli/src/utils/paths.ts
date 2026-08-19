@@ -7,13 +7,6 @@
 // CLI-level shared path helpers — the home for pieces more than one command
 // family consumes, so neither imports across command groups.
 
-import { createHash } from 'node:crypto';
-
-/** POSIX caps one filename component at 255 bytes; every consumer
- *  interpolates the slug into a single component. Keep the bound far
- *  enough under the cap that a suffix can still join the component. */
-const SAFE_TARGET_MAX_CHARS = 200;
-
 /**
  * A `target` reduced to a single safe filename component.
  *
@@ -29,22 +22,19 @@ const SAFE_TARGET_MAX_CHARS = 200;
  * packages/core (agent-transcript.ts) answers the same question for
  * transcript/monitor names and flattens dots instead — the two stay separate
  * on that deliberate difference.
+ *
+ * Deliberately byte-identical to the pre-lift review implementation: the
+ * lift must not change any slug, because review's artifact naming is a
+ * two-sided contract — bundled-skill templates, composed-name, prev-ledger,
+ * and brief/report producers hardcode the dash spelling. Deep-target
+ * truncation (and the prefix-free question it raises for cleanup's prefix
+ * sweep, review-round finding R8-7) stays OUT of this lift: it is a behavior
+ * change and lands with the sweep-side fix it needs, not smuggled through a
+ * move.
  */
 export function safeTarget(target: string): string {
-  let flat = target
+  const flat = target
     .replace(/[^A-Za-z0-9._-]/g, '_') // separators and anything odd → underscore
     .replace(/\.\.+/g, '_'); // no run of dots survives as a traversal token
-  // A deep nested target flattens past the one-component byte cap
-  // (ENAMETOOLONG): truncate and keep uniqueness with a hash of the
-  // ORIGINAL target, so distinct long paths stay distinct.
-  if (flat.length > SAFE_TARGET_MAX_CHARS) {
-    const digest = createHash('sha256')
-      .update(target)
-      .digest('hex')
-      .slice(0, 12);
-    flat = `${flat.slice(0, SAFE_TARGET_MAX_CHARS - digest.length - 1)}-${digest}`;
-  }
-  // Leading dashes too: a dash-leading slug is parsed as short flags when a
-  // consumer passes it as a spaced CLI argument value.
-  return flat.replace(/^[._-]+/, '') || 'target';
+  return flat.replace(/^[._]+/, '') || 'target';
 }

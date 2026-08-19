@@ -34,6 +34,7 @@ function Harness({
   commands,
   onImageIngestionNotice,
   workspaceUploadBusy,
+  fileDragEnabled,
 }: {
   composerInput?: WebShellComposerInput;
   onSubmit: ReturnType<typeof vi.fn>;
@@ -50,6 +51,7 @@ function Harness({
   commands?: UseComposerCoreOptions['commands'];
   onImageIngestionNotice?: UseComposerCoreOptions['onImageIngestionNotice'];
   workspaceUploadBusy?: boolean;
+  fileDragEnabled?: UseComposerCoreOptions['fileDragEnabled'];
 }) {
   const composer = useComposerCore({
     onSubmit,
@@ -65,6 +67,7 @@ function Harness({
     composerInputVersion: composerInput ? 1 : undefined,
     onImageIngestionNotice,
     workspaceUploadBusy,
+    fileDragEnabled,
   });
   latest = composer;
 
@@ -87,6 +90,7 @@ async function mount({
   commands,
   onImageIngestionNotice,
   workspaceUploadBusy,
+  fileDragEnabled,
 }: {
   composerInput?: WebShellComposerInput;
   onSubmit?: ReturnType<typeof vi.fn>;
@@ -103,6 +107,7 @@ async function mount({
   commands?: UseComposerCoreOptions['commands'];
   onImageIngestionNotice?: UseComposerCoreOptions['onImageIngestionNotice'];
   workspaceUploadBusy?: boolean;
+  fileDragEnabled?: UseComposerCoreOptions['fileDragEnabled'];
 } = {}) {
   container = document.createElement('div');
   document.body.append(container);
@@ -127,6 +132,7 @@ async function mount({
             commands={commands}
             onImageIngestionNotice={onImageIngestionNotice}
             workspaceUploadBusy={workspaceUploadBusy}
+            fileDragEnabled={fileDragEnabled}
           />
         </I18nProvider>
       </WebShellPortalRootContext.Provider>,
@@ -985,6 +991,53 @@ describe('useComposerCore paste', () => {
       window.dispatchEvent(new Event('dragend'));
     });
     expect(latest!.imageDragActive).toBe(false);
+  });
+
+  it('fileDragEnabled={false} leaves file drag-and-drop inert', async () => {
+    await mount({ fileDragEnabled: false });
+    const surface = container!.querySelector(
+      '[data-web-shell-composer-surface]',
+    )!;
+    const editor = container!.querySelector('.cm-content')!;
+    const dataTransfer = {
+      files: [],
+      items: [{ kind: 'file', type: 'image/png', getAsFile: () => null }],
+      types: ['Files'],
+      dropEffect: 'none',
+    };
+    const dispatchDrag = (target: Element, type: string) => {
+      const event = new Event(type, { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'dataTransfer', { value: dataTransfer });
+      target.dispatchEvent(event);
+      return event;
+    };
+
+    act(() => {
+      dispatchDrag(editor, 'dragenter');
+      dispatchDrag(editor, 'dragover');
+    });
+    // No drag highlight, no drop-target feedback.
+    expect(latest!.imageDragActive).toBe(false);
+    expect(dataTransfer.dropEffect).toBe('none');
+
+    const drop = new Event('drop', { bubbles: true, cancelable: true });
+    Object.defineProperty(drop, 'dataTransfer', {
+      value: {
+        files: [new File(['png'], 'photo.png', { type: 'image/png' })],
+        items: [],
+        types: ['Files'],
+        dropEffect: 'none',
+      },
+    });
+    act(() => {
+      surface.dispatchEvent(drop);
+    });
+    await waitForImageIngestion();
+    // Nothing is ingested on the inline lane, and the drop itself is
+    // cancelled so the browser cannot navigate to the dropped file.
+    expect(drop.defaultPrevented).toBe(true);
+    expect(latest!.pastedImages).toEqual([]);
+    expect(latest!.pastedFiles).toEqual([]);
   });
 
   it('keeps batch order, normalizes BMP, and aggregates rejected drops', async () => {

@@ -44,18 +44,23 @@ export function isGitIgnored(
   // A leading ':' in the first component would be parsed as pathspec magic
   // and probe the wrong pathname ('./' disambiguates it as a literal).
   const probe = path.startsWith(':') ? `./${path}` : path;
-  // GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE override `-C` path resolution, so
-  // an ambient value would answer against a foreign repository's ignore
-  // rules; strip them so `-C` is the sole repository selector.
-  // GIT_COMMON_DIR is the same class: it selects where check-ignore
-  // resolves info/exclude and config (core.excludesFile), so an ambient
-  // value answers against a foreign repository's rules.
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  delete env['GIT_DIR'];
-  delete env['GIT_WORK_TREE'];
-  delete env['GIT_INDEX_FILE'];
-  delete env['GIT_OBJECT_DIRECTORY'];
-  delete env['GIT_COMMON_DIR'];
+  // The verdict must come from `worktree`'s own rules, but git's env
+  // family can redirect every input check-ignore reads — repository
+  // selectors (GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE,
+  // GIT_OBJECT_DIRECTORY, GIT_COMMON_DIR), the config tiers and the
+  // inline -c channels (GIT_CONFIG_*), pathspec parsing
+  // (GIT_*_PATHSPECS) — and any redirect flips the verdict in one
+  // direction or the other. Drop the whole family rather than
+  // enumerating channels; `-C worktree` plus the user's own config tiers
+  // is all the probe needs. The system tier then gets closed explicitly
+  // because it is neither the repo's nor the user's config, and
+  // inheriting the ambient GIT_CONFIG_NOSYSTEM would let host policy
+  // (/etc/gitconfig) answer for the worktree.
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (!key.startsWith('GIT_')) env[key] = value;
+  }
+  env['GIT_CONFIG_NOSYSTEM'] = '1';
   try {
     execFileSync('git', ['-C', worktree, 'check-ignore', '-q', '--', probe], {
       stdio: 'ignore',
