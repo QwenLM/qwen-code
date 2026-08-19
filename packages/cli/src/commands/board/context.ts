@@ -84,7 +84,7 @@ export function resolveParticipantName(opts: BoardContextOptions = {}): string {
     // `os.userInfo()` throws SystemError when the effective uid has no passwd
     // entry (containers, root). Fall back to the environment before a generic
     // name so a stable per-user default still holds where the env is set.
-    username = env.USER ?? env.LOGNAME;
+    username = env['USER'] ?? env['LOGNAME'];
   }
   return slugify(username ?? 'user');
 }

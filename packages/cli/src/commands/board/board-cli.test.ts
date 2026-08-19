@@ -206,6 +206,7 @@ describe('board rendering', () => {
             ask({ id: 'a-1', from: 'api', to: 'web' }),
             ask({ id: 'a-2', from: 'web', to: 'api' }),
           ],
+          participantCount: 2,
         },
         now,
       );
