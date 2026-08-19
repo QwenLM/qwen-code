@@ -8884,8 +8884,8 @@ export class Config {
   /**
    * Wire the sub-session spawner used by the `create_sub_session` tool. Set by
    * the daemon/ACP session layer (which routes it to the bridge over
-   * `extMethod`); left unset in interactive TUI / headless — the tool then
-   * reports itself as daemon-only. `undefined` clears it on session teardown.
+   * `extMethod`); left unset in interactive TUI / headless, where the tool is
+   * therefore never registered. `undefined` clears it on session teardown.
    */
   setSubSessionSpawner(spawner: SubSessionSpawner | undefined): void {
     this.subSessionSpawner = spawner;
