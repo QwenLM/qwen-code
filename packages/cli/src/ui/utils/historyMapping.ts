@@ -172,6 +172,16 @@ export function computeApiTruncationIndex(
   });
 
   if (uiUserTurnCount === 0) {
+    // Marker-less auto-compaction (entrance 3): the API history carries a
+    // compressed prefix but the UI has no summarizing compression boundary.
+    // Rewinding to the first turn would silently truncate to
+    // [prelude, summary, ack] and drop every real turn — fail loud instead.
+    if (
+      compressionIndex === -1 &&
+      startIndex > getStartupContextLength(apiHistory)
+    ) {
+      return -1;
+    }
     // Rewinding to the first user turn: keep only startup context (if any)
     return startIndex;
   }

@@ -350,6 +350,25 @@ describe('computeApiTruncationIndex', () => {
 
       expect(computeApiTruncationIndex(ui, 4, api)).toBe(3);
     });
+
+    it('fails loud when marker-less auto-compaction left a compressed prefix', () => {
+      // Auto-compaction adds no UI compression marker, but leaves the API
+      // history with a [summary, ack] prefix. Rewinding to the first turn
+      // must abort (-1) rather than silently truncate to the compressed
+      // prefix and drop every real turn (R5-1 entrance 3).
+      const ui: HistoryItem[] = [
+        userItem(1, 'pre 1'),
+        geminiItem(2),
+        userItem(3, 'pre 2'),
+        geminiItem(4),
+      ];
+      const api: Content[] = [
+        startupEntry(),
+        userContent('<state_snapshot>summary\n\nResume the prior task...'),
+        modelContent('Got it. Thanks for the additional context!'),
+      ];
+      expect(computeApiTruncationIndex(ui, 1, api)).toBe(-1);
+    });
   });
 
   describe('with fast (non-summarizing) compression markers', () => {
