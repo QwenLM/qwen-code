@@ -23,6 +23,12 @@ import {
   getDeferredRuntimeRequestTiming,
   MAX_CLIENT_ID_LENGTH,
 } from './request-helpers.js';
+import {
+  daemonTelemetryResponseContext,
+  type TelemetryResponse,
+} from './telemetry-context.js';
+
+export { getDaemonTelemetryInboundTraceId } from './telemetry-context.js';
 
 type LegacySessionTelemetryAttribution = 'handler_resolved' | 'pre_resolved';
 
@@ -385,23 +391,6 @@ interface ResolvedDaemonTelemetryRoute {
   attribution?: LegacySessionTelemetryAttribution;
 }
 
-interface DaemonTelemetryResponseContext {
-  workspaceCwd?: string;
-  /**
-   * Caller trace id from a valid inbound `traceparent` header, captured with
-   * telemetry disabled (with telemetry on the request span already carries
-   * it into the log line's trace prefix). Consumed by the access log for the
-   * no-backend log-based join.
-   */
-  inboundTraceId?: string;
-}
-
-const daemonTelemetryResponseContext = Symbol('daemonTelemetryResponseContext');
-
-type TelemetryResponse = Response & {
-  [daemonTelemetryResponseContext]?: DaemonTelemetryResponseContext;
-};
-
 function decodePathSegment(value: string): string {
   try {
     return decodeURIComponent(value);
@@ -481,23 +470,6 @@ export function setDaemonTelemetryWorkspace(
     }
   } catch {
     // Telemetry must not affect request handling.
-  }
-}
-
-/**
- * The caller trace id captured from a valid inbound `traceparent` header when
- * telemetry is disabled. The access log reads it so a request's log line
- * still joins with the caller's logs (or trace backend) with no daemon-side
- * telemetry at all.
- */
-export function getDaemonTelemetryInboundTraceId(
-  res: Response,
-): string | undefined {
-  try {
-    return (res as TelemetryResponse)[daemonTelemetryResponseContext]
-      ?.inboundTraceId;
-  } catch {
-    return undefined;
   }
 }
 

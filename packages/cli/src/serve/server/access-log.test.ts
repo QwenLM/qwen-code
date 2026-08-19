@@ -16,7 +16,7 @@ const telemetryMocks = vi.hoisted(() => ({
 
 // The access log reads the caller trace id through this seam; mocking it
 // keeps the suite off the real telemetry module (and its core import graph).
-vi.mock('./telemetry.js', () => ({
+vi.mock('./telemetry-context.js', () => ({
   getDaemonTelemetryInboundTraceId:
     telemetryMocks.getDaemonTelemetryInboundTraceId,
 }));
