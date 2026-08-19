@@ -3145,6 +3145,23 @@ describe('Session', () => {
       expect(session.getRewindableUserTurnCount()).toBe(1);
     });
 
+    it('counts cleared media placeholders as rewindable prompts (twin divergence)', () => {
+      // The TUI twin (isUserTextContent in ui/utils/historyMapping.ts)
+      // excludes microcompaction media-clear placeholders from its rewind
+      // prompt count. The ACP twin must keep counting them: ACP rewind
+      // maps against per-prompt file-history snapshots, which ARE created
+      // for media-only prompts.
+      const history: Content[] = [
+        {
+          role: 'user',
+          parts: [{ text: '[Old inline media cleared: image/png]' }],
+        },
+      ];
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+
+      expect(session.getRewindableUserTurnCount()).toBe(1);
+    });
+
     it('rejects unreachable user turns', () => {
       const history: Content[] = [{ role: 'user', parts: [{ text: 'first' }] }];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
@@ -8900,7 +8917,7 @@ describe('Session', () => {
         expect(finishedSpy).toHaveBeenCalled();
       });
 
-      it('stops an ACP prompt after a repeated duplicate provider id without sending an empty follow-up', async () => {
+      it('stops an ACP prompt with a visible loop-detected error after a repeated duplicate provider id', async () => {
         mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
         vi.mocked(mockChat.getHistoryFunctionResponseIds)
           .mockReturnValueOnce(new Set<string>())
@@ -8983,9 +9000,17 @@ describe('Session', () => {
             ]),
           );
 
-        await session.prompt({
-          sessionId: 'test-session-id',
-          prompt: [{ type: 'text', text: 'read the file' }],
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'read the file' }],
+          }),
+        ).rejects.toMatchObject({
+          data: {
+            code: 'LOOP_DETECTED',
+            errorKind: 'loop_detected',
+            loopType: core.LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+          },
         });
 
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
@@ -8996,6 +9021,21 @@ describe('Session', () => {
         expect(
           duplicateFollowUp.message[0].functionResponse?.response?.['error'],
         ).toContain('Duplicate provider tool call id "shell_1"');
+        expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'Stopping ACP turn after repeated duplicate provider tool-call id: shell_1',
+          ),
+        );
+        expect(mockChat.addHistory).toHaveBeenCalledWith({
+          role: 'user',
+          parts: [
+            expect.objectContaining({
+              text: expect.stringContaining(
+                'terminated because the model exceeded tool-call safety limits',
+              ),
+            }),
+          ],
+        });
       });
 
       it('stops an ACP prompt after repeated invalid tool parameters with fresh ids', async () => {
@@ -25070,7 +25110,6 @@ describe('Session', () => {
         parts: Part[];
         stopAfterPermissionCancel: boolean;
         loopDetected?: boolean;
-        repeatedDuplicateProviderToolCall?: boolean;
         repeatedToolFailureBatch?: {
           complete: boolean;
           observations: Array<{
@@ -29467,12 +29506,26 @@ describe('Session', () => {
       ).runToolCalls(new AbortController().signal, 'prompt-history-dup', [
         duplicateCall,
       ]);
+      const toolLoopState: DaemonToolLoopState = {
+        totalToolCalls: 0,
+        invalidToolParamErrors: new Map<string, number>(),
+        toolCallKeyCounts: new Map<string, number>(),
+        maxToolCallKeyRepeat: 0,
+        loopDetected: false,
+        repeatedToolFailureMode: 'off',
+        repeatedToolFailureState: createRepeatedToolFailureGuardState(),
+      };
       const secondResult = await (
         session as unknown as ToolCallInternals
-      ).runToolCalls(new AbortController().signal, 'prompt-history-dup', [
-        duplicateCall,
-        { id: 'fresh_shell', name: 'read_file', args: { file_path: 'c.ts' } },
-      ]);
+      ).runToolCalls(
+        new AbortController().signal,
+        'prompt-history-dup',
+        [
+          duplicateCall,
+          { id: 'fresh_shell', name: 'read_file', args: { file_path: 'c.ts' } },
+        ],
+        toolLoopState,
+      );
 
       expect(mockToolRegistry.getTool).not.toHaveBeenCalled();
       expect(build).not.toHaveBeenCalled();
@@ -29487,7 +29540,11 @@ describe('Session', () => {
         ),
       });
       expect(secondResult.parts).toHaveLength(0);
-      expect(secondResult.repeatedDuplicateProviderToolCall).toBe(true);
+      expect(secondResult.loopDetected).toBe(true);
+      expect(toolLoopState.loopDetected).toBe(true);
+      expect(toolLoopState.loopType).toBe(
+        core.LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+      );
       expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledTimes(
         1,
       );
