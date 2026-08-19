@@ -47,19 +47,40 @@ export interface WorkspaceProvidersStatusProviderOptions {
   env?: Record<string, string | undefined>;
   workspaceTrusted?: boolean;
   modelMetadataCatalog?: ModelMetadataCatalog;
+  /**
+   * The daemon's own environment, frozen at boot. The test-runner gate is
+   * evaluated against this snapshot instead of live `process.env`, which
+   * sibling `loadSettings → loadEnvironment` calls merge workspace `.env`
+   * contents into for trusted workspaces (a `NODE_ENV=test` there would
+   * otherwise disable the catalog daemon-wide for the process's lifetime).
+   */
+  processEnv?: Record<string, string | undefined>;
 }
 
 export function createWorkspaceProvidersStatusProvider(
   options: WorkspaceProvidersStatusProviderOptions = {},
 ): WorkspaceProvidersStatusProvider {
+  // Evaluated once at provider creation (daemon boot): later process.env
+  // mutations from workspace .env loads must not flip the gate.
+  const bootEnv = options.processEnv ?? snapshotProcessEnv();
+  const isTestRunnerAtBoot =
+    bootEnv['NODE_ENV'] === 'test' ||
+    bootEnv['VITEST'] !== undefined ||
+    bootEnv['VITEST_WORKER_ID'] !== undefined;
   return async (workspaceCwd, acpChannelLive) =>
-    buildWorkspaceProvidersStatus(workspaceCwd, acpChannelLive, options);
+    buildWorkspaceProvidersStatus(
+      workspaceCwd,
+      acpChannelLive,
+      options,
+      isTestRunnerAtBoot,
+    );
 }
 
 async function buildWorkspaceProvidersStatus(
   workspaceCwd: string,
   acpChannelLive: boolean,
   options: WorkspaceProvidersStatusProviderOptions,
+  isTestRunner: boolean,
 ): Promise<ServeWorkspaceProvidersStatus> {
   try {
     const loaded = loadSettings(
@@ -79,15 +100,15 @@ async function buildWorkspaceProvidersStatus(
     );
     const settings = loaded.merged;
     const env = options.env ?? snapshotProcessEnv();
-    // Test-runner detection mirrors the CLI path and reads the daemon's own
-    // process env: the workspace effective env can carry NODE_ENV=test from
-    // a project .env file, which must not disable the catalog here while
-    // live sessions (gated on process.env) keep it.
+    // Test-runner detection uses the boot-time snapshot (see
+    // createWorkspaceProvidersStatusProvider): the workspace effective env can
+    // carry NODE_ENV=test from a project .env file, which must not disable
+    // the catalog here while live sessions (gated on process.env) keep it —
+    // and a sibling loadSettings that merges such a .env into the daemon's
+    // live process.env must not flip this gate after boot either.
     const modelMetadataCatalog =
       options.modelMetadataCatalog ??
-      (process.env['NODE_ENV'] === 'test' ||
-      process.env['VITEST'] !== undefined ||
-      process.env['VITEST_WORKER_ID'] !== undefined
+      (isTestRunner
         ? {}
         : await loadModelMetadataCatalog({
             proxyUrl:

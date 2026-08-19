@@ -1136,6 +1136,7 @@ export function createServeApp(
       workspaceProvidersStatusProvider: createWorkspaceProvidersStatusProvider({
         ...(primaryEffectiveEnv ? { env: primaryEffectiveEnv } : {}),
         workspaceTrusted: isPrimaryWorkspaceTrusted(),
+        processEnv: daemonEnvAtBoot,
       }),
       workspaceSkillsStatusProvider: createWorkspaceSkillsStatusProvider({
         workspaceTrusted: isPrimaryWorkspaceTrusted(),

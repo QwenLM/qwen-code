@@ -187,6 +187,38 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     }
   });
 
+  it('ignores NODE_ENV=test merged into process.env after provider creation', async () => {
+    // A sibling loadSettings → loadEnvironment call for a trusted workspace
+    // whose .env sets NODE_ENV=test writes it into the daemon's shared
+    // process.env after boot; the gate stays on the boot-time snapshot, so
+    // the catalog keeps loading for every workspace.
+    const savedTestRunnerEnv = snapshotTestRunnerEnv();
+    clearTestRunnerEnv();
+    try {
+      const provider = createWorkspaceProvidersStatusProvider({
+        env: { NODE_ENV: 'production' },
+      });
+      process.env['NODE_ENV'] = 'test';
+
+      await provider(workspace, false);
+
+      expect(coreMock.loadModelMetadataCatalog).toHaveBeenCalledOnce();
+    } finally {
+      restoreTestRunnerEnv(savedTestRunnerEnv);
+    }
+  });
+
+  it('honors an injected boot-time processEnv for the test-runner gate', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({
+      env: { NODE_ENV: 'production' },
+      processEnv: { NODE_ENV: 'production' },
+    });
+
+    await provider(workspace, false);
+
+    expect(coreMock.loadModelMetadataCatalog).toHaveBeenCalledOnce();
+  });
+
   it('reports catalog modalities for configured workspace models', async () => {
     const provider = createWorkspaceProvidersStatusProvider({
       env: {},

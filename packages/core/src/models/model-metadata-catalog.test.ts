@@ -610,6 +610,7 @@ describe('getCatalogModalities', () => {
 
   it.each([
     'vendor/base-model:free',
+    'vendor/base-model:batch',
     'vendor/base-model:extended',
     'vendor/base-model:thinking',
     'vendor/base-model:online',
@@ -633,7 +634,7 @@ describe('getCatalogModalities', () => {
     ).toEqual({ image: true });
   });
 
-  it('prefers exact OpenRouter variant metadata and preserves unknown suffixes', () => {
+  it('prefers exact OpenRouter variant metadata and falls back on unknown suffixes', () => {
     const variantCatalog: ModelMetadataCatalog = {
       openrouter: {
         models: {
@@ -651,12 +652,15 @@ describe('getCatalogModalities', () => {
         modelId: 'vendor/base-model:free',
       }),
     ).toEqual({});
+    // An unrecognized suffix still resolves through the base entry instead of
+    // degrading to text-only — variants are open-ended upstream (:batch is
+    // currently the most common one).
     expect(
       getCatalogModalities(variantCatalog, {
         providerId: 'openrouter',
         modelId: 'vendor/base-model:unknown',
       }),
-    ).toBeUndefined();
+    ).toEqual({ image: true });
   });
 
   it.each([

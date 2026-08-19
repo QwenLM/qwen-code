@@ -25,8 +25,6 @@ const MODELS_DEV_URL = 'https://models.dev/api.json';
 const CACHE_TTL_MS = 60 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 10_000;
 const MAX_CATALOG_BYTES = 32 * 1024 * 1024;
-const OPENROUTER_VARIANT_SUFFIX =
-  /:(?:free|extended|thinking|online|nitro|floor|exacto)$/i;
 // Placeholder baseUrl stamped on Qwen OAuth models by ModelRegistry. It is
 // not a real endpoint and must not count as baseUrl evidence, or it
 // suppresses the 'qwen-oauth' → 'alibaba' protocol fallback.
@@ -562,8 +560,14 @@ function findCatalogModel(
   }
   const candidates = [modelId];
   if (catalogProviderId === 'openrouter') {
-    const baseModelId = modelId.replace(OPENROUTER_VARIANT_SUFFIX, '');
-    if (baseModelId !== modelId) candidates.push(baseModelId);
+    // OpenRouter variants are spelled `<base>:<suffix>` (:free, :batch,
+    // :thinking, …) and models.dev only lists base entries, so fall back to
+    // the base id after the last ':'. Exact match stays first so an explicit
+    // variant entry in the catalog always wins.
+    const separatorIndex = modelId.lastIndexOf(':');
+    if (separatorIndex > 0) {
+      candidates.push(modelId.slice(0, separatorIndex));
+    }
   }
   if (sourceProviderId === 'idealab') {
     if (/^qwen.*-dogfooding$/i.test(modelId)) {
