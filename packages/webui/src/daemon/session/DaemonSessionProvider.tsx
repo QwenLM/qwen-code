@@ -556,6 +556,7 @@ interface HeartbeatFailureState {
 // session exhaust renderer memory). Callers can pass a smaller maxBlocks in
 // constrained contexts.
 export const DEFAULT_MAX_BLOCKS = 50_000;
+const TRANSCRIPT_DISPATCH_BATCH_MS = 16;
 
 const INITIAL_WORKSPACE_EVENT_SIGNALS: DaemonWorkspaceEventSignals = {
   memoryVersion: 0,
@@ -922,8 +923,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     // drains already-buffered events back-to-back via microtasks, so a
     // microtask flush would run between every event and never coalesce. A
     // macrotask only runs once the generator blocks on a genuinely new network
-    // event, so a whole burst collapses into a single dispatch while steady
-    // streaming stays at ~one dispatch per network chunk.
+    // event. Holding the batch for one frame also coalesces steady streaming:
+    // copying a 50k-block immutable snapshot once per token otherwise consumes
+    // the main thread before the render throttle can help. Control and terminal
+    // paths call flushTranscriptSync below, so ordering and completion are not
+    // delayed by the window.
     let pendingTranscriptEvents: DaemonUiEvent[] = [];
     let transcriptFlushTimer: ReturnType<typeof setTimeout> | undefined;
     const runTranscriptFlush = (force = false) => {
@@ -960,7 +964,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       if (events.length === 0) return;
       for (const event of events) pendingTranscriptEvents.push(event);
       if (transcriptFlushTimer === undefined) {
-        transcriptFlushTimer = setTimeout(runTranscriptFlush, 0);
+        transcriptFlushTimer = setTimeout(
+          runTranscriptFlush,
+          TRANSCRIPT_DISPATCH_BATCH_MS,
+        );
       }
     };
     // Apply buffered transcript events immediately. Called before any control

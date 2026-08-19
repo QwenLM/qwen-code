@@ -139,17 +139,17 @@ export function appendLocalUserTranscriptMessage(
   return trimTranscriptState(next);
 }
 
-// Freeze retained blocks at the dispatch boundary to catch consumers that
-// mutate a COW-shared blocks array in place (see reduceDaemonTranscriptEvents).
-// This is a dev/CI safety net; in production it is pure O(blocks) overhead on
-// every dispatch and the reducer's own mutation discipline (takeBlocksOwnership)
-// does not depend on it, so skip it there. App bundlers statically replace
-// `process.env.NODE_ENV`, folding the check to `false`. The `typeof process`
-// guard keeps an unbundled browser consumer from throwing a ReferenceError —
+// Freeze retained COW collections at the dispatch boundary to catch consumers
+// that mutate a shared snapshot (see reduceDaemonTranscriptEvents). This is a
+// dev/CI safety net; the reducer's own ownership discipline does not depend on
+// it, so skip the O(blocks) freeze in production. App bundlers statically
+// replace `process.env.NODE_ENV`, folding the check to `false`. The `typeof
+// process` guard keeps an unbundled browser consumer from throwing a
+// ReferenceError —
 // this module sits on the browser-hostile `daemon/ui` surface and Vite lib
 // builds preserve `process.env.NODE_ENV` in their output — matching the
 // existing SDK idiom (see ProcessTransport, cliPath).
-const FREEZE_TRANSCRIPT_BLOCKS =
+const FREEZE_TRANSCRIPT_COLLECTIONS =
   typeof process !== 'undefined' && process.env.NODE_ENV !== 'production';
 
 export function reduceDaemonTranscriptEvents(
@@ -161,17 +161,12 @@ export function reduceDaemonTranscriptEvents(
   const next = cloneTranscriptState(state, opts);
   for (const event of events) applyDaemonTranscriptEvent(next, event);
   const result = trimTranscriptState(next);
-  // With lazy COW, `state.blocks` is shared across
-  // sidechannel-only snapshots. A misbehaving consumer doing
-  // `(state.blocks as DaemonTranscriptBlock[]).sort()` would corrupt
-  // EVERY snapshot that shares the reference (previously only the
-  // current one). Freeze the array at the dispatch boundary so external
-  // in-place mutation throws in strict mode instead of silently
-  // poisoning future snapshots. Internal reducer mutation goes through
-  // `takeBlocksOwnership` which copies BEFORE mutating, so the frozen
-  // shared reference is never touched in-place by the next dispatch.
-  if (FREEZE_TRANSCRIPT_BLOCKS) {
+  // With lazy COW, blocks and their index can be shared across snapshots.
+  // Freeze both at the dispatch boundary so external in-place mutation throws
+  // in strict mode instead of poisoning every snapshot sharing the reference.
+  if (FREEZE_TRANSCRIPT_COLLECTIONS) {
     Object.freeze(result.blocks);
+    Object.freeze(result.blockIndexById);
   }
   return result;
 }
@@ -183,6 +178,7 @@ export function finalizeOfflineDaemonTranscriptState(
   finishAssistant(next);
   next.activeUserBlockId = undefined;
   Object.freeze(next.blocks);
+  Object.freeze(next.blockIndexById);
   return next;
 }
 
@@ -1035,6 +1031,8 @@ function discardToolBlock(
     );
   }
   state.blockIndexById = rebuildDaemonTranscriptBlockIndex(state.blocks);
+  ownedBlocks.set(state, state.blocks);
+  ownedBlockIndexes.set(state, state.blockIndexById);
   delete state.toolBlockByCallId[toolCallId];
   delete state.toolProgress[toolCallId];
   if (state.currentToolCallId === toolCallId) {
@@ -1498,10 +1496,10 @@ function trimTranscriptState(
   const keptIds = new Set(blocks.map((block) => block.id));
   state.blocks = blocks;
   state.blockIndexById = rebuildDaemonTranscriptBlockIndex(blocks);
-  // Trim replaces both arrays with fresh objects; register that this
-  // state now owns its blocks so future appends in the same dispatch
-  // don't double-copy.
+  // Trim replaces both collections with fresh objects; register ownership so
+  // future appends in the same dispatch don't copy them again.
   ownedBlocks.set(state, state.blocks);
+  ownedBlockIndexes.set(state, state.blockIndexById);
   for (const [toolCallId, blockId] of Object.entries(state.toolBlockByCallId)) {
     if (!keptIds.has(blockId)) {
       state.toolBlockByCallId[toolCallId] = TRIMMED_TOOL_BLOCK_ID;
@@ -1589,7 +1587,7 @@ function shouldRecreateTrimmedToolBlock(
 }
 
 /**
- * Lazy copy-on-write for `state.blocks` / `state.blockIndexById`.
+ * Lazy copy-on-write for `state.blocks`.
  *
  * `cloneTranscriptState` shares the parent's `blocks` reference (not
  * eager-copies) so non-block-mutating events keep the same array
@@ -1607,12 +1605,21 @@ const ownedBlocks = new WeakMap<
   DaemonTranscriptState,
   readonly DaemonTranscriptBlock[]
 >();
+const ownedBlockIndexes = new WeakMap<
+  DaemonTranscriptState,
+  Readonly<Record<string, number>>
+>();
 
 function takeBlocksOwnership(state: DaemonTranscriptState): void {
   if (ownedBlocks.get(state) === state.blocks) return;
   state.blocks = [...state.blocks];
-  state.blockIndexById = createIndex(state.blockIndexById);
   ownedBlocks.set(state, state.blocks);
+}
+
+function takeBlockIndexOwnership(state: DaemonTranscriptState): void {
+  if (ownedBlockIndexes.get(state) === state.blockIndexById) return;
+  state.blockIndexById = createIndex(state.blockIndexById);
+  ownedBlockIndexes.set(state, state.blockIndexById);
 }
 
 // Applies a daemon rewind event to this in-memory transcript only. The target
@@ -1654,6 +1661,7 @@ function truncateTranscriptBeforeBlock(
   state.retainedBytes = Math.max(0, state.retainedBytes - droppedBytes);
   ownedBlocks.set(state, state.blocks);
   rebuildTranscriptIndexes(state);
+  ownedBlockIndexes.set(state, state.blockIndexById);
 }
 
 function rebuildTranscriptIndexes(state: DaemonTranscriptState): void {
@@ -1692,7 +1700,9 @@ function appendBlock(
   block: DaemonTranscriptBlock,
 ): void {
   takeBlocksOwnership(state);
-  state.blockIndexById[block.id] = state.blocks.length;
+  takeBlockIndexOwnership(state);
+  (state.blockIndexById as Record<string, number>)[block.id] =
+    state.blocks.length;
   (state.blocks as DaemonTranscriptBlock[]).push(block);
   state.retainedBytes += estimateBlockBytes(block);
 }
