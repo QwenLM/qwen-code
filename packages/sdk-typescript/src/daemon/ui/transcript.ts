@@ -42,6 +42,18 @@ const TRIMMED_PERMISSION_BLOCK_ID = '__trimmed_permission_block__';
 export function isTrimmedToolBlockId(blockId: string | undefined): boolean {
   return blockId === TRIMMED_TOOL_BLOCK_ID;
 }
+
+/**
+ * True when a `permissionBlockByRequestId` entry is the trimmed-block
+ * sentinel (the original block was evicted by retention trimming). Lets
+ * consumers merge a pagination-resurrected real mapping without letting the
+ * stale sentinel win.
+ */
+export function isTrimmedPermissionBlockId(
+  blockId: string | undefined,
+): boolean {
+  return blockId === TRIMMED_PERMISSION_BLOCK_ID;
+}
 const MAX_TEXT_BLOCK_LENGTH = 100_000;
 const TEXT_TRUNCATED_SUFFIX = '\n[truncated]\n';
 const MAX_CLONE_DEPTH = 16;
@@ -1475,6 +1487,17 @@ function cloneTranscriptState(
   return next;
 }
 
+function sharesSourceRecordId(
+  a: DaemonTranscriptBlock,
+  b: DaemonTranscriptBlock,
+): boolean {
+  const aIds = a.sourceRecordIds;
+  const bIds = b.sourceRecordIds;
+  if (!aIds?.length || !bIds?.length) return false;
+  const set = new Set(aIds);
+  return bIds.some((recordId) => set.has(recordId));
+}
+
 function trimTranscriptState(
   state: DaemonTranscriptState,
 ): DaemonTranscriptState {
@@ -1492,6 +1515,25 @@ function trimTranscriptState(
   while (
     removeCount < state.blocks.length - 1 &&
     bytes > state.maxRetainedBytes
+  ) {
+    bytes -= estimateBlockBytes(state.blocks[removeCount]!);
+    removeCount += 1;
+  }
+  // Snap the cut to record boundaries: one persisted record fans out into
+  // several blocks sharing a sourceRecordIds entry, and trimming is
+  // block-granular, so the boundary can land mid-record. A partially evicted
+  // record is unrecoverable from both directions — exclusive-before
+  // pagination anchored at the shared record never returns the evicted
+  // sibling blocks, and the recordId dedup filter drops any later page that
+  // still advertises the recordId. Advance the cut until it no longer lands
+  // inside a record, keeping the at-least-one-block floor.
+  while (
+    removeCount > 0 &&
+    removeCount < state.blocks.length - 1 &&
+    sharesSourceRecordId(
+      state.blocks[removeCount - 1]!,
+      state.blocks[removeCount]!,
+    )
   ) {
     bytes -= estimateBlockBytes(state.blocks[removeCount]!);
     removeCount += 1;

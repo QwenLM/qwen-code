@@ -5288,17 +5288,14 @@ describe('DaemonSessionProvider', () => {
 
     expect(blocks.length).toBeLessThanOrEqual(3);
     expect(JSON.stringify(blocks)).not.toContain('partial tail');
-    expect(history?.hasMore).toBe(true);
-    await act(async () => history?.loadMore());
-    expect(sdkMocks.getSessionTranscriptPage).toHaveBeenNthCalledWith(
-      2,
-      initialSession.sessionId,
-      {
-        beforeRecordId: 'record-fresh-anchor',
-        limit: 100,
-        clientId: initialSession.clientId,
-      },
-    );
+    // R11-12: the bounded rebuild evicts the fresh snapshot's anchor record
+    // (record-fresh-anchor), and no retained block carries a recordId, so the
+    // re-anchor is uncomputable. Anchoring to the evicted record would leave
+    // it silently unreachable (exclusive-before never returns the anchor), so
+    // the affordance fails closed instead of paging from a stale anchor.
+    expect(history?.hasMore).toBe(false);
+    expect(history?.capacityReached).toBe(true);
+    expect(sdkMocks.getSessionTranscriptPage).toHaveBeenCalledTimes(1);
   });
 
   it.each([

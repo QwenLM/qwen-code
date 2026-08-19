@@ -16,6 +16,7 @@ export {
   estimateDaemonTranscriptBlockBytes,
   formatBlockTimestamp,
   isSubagentChildBlock,
+  isTrimmedPermissionBlockId,
   isTrimmedToolBlockId,
   rebuildDaemonTranscriptBlockIndex,
   reduceDaemonTranscriptEvents,

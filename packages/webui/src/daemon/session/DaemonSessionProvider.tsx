@@ -23,6 +23,7 @@ import {
   createDaemonTranscriptStore,
   estimateDaemonTranscriptBlockBytes,
   extractServerTimestamp,
+  isTrimmedPermissionBlockId,
   isTrimmedToolBlockId,
   matchTurnEvent,
   normalizeDaemonEvent,
@@ -289,6 +290,23 @@ function materializeTranscriptHistory(
       displayedRecordIds.add(recordId);
     }
   }
+  // Secondary content-aware dedup for blocks that carry no recordId — the
+  // locally echoed user prompt, which `suppressOwnUserEcho` keeps from ever
+  // unioning the daemon's recordId-stamped echo. RecordId dedup is blind to
+  // it, so once a trim leaves it as the oldest retained block, a load-older
+  // page returning that same prompt's persisted record would materialize a
+  // second user block and double-count it. Collect such prompts' text and
+  // drop matching page blocks below.
+  const localEchoUserTexts = new Set<string>();
+  for (const block of current.blocks) {
+    if (block.kind !== 'user' || (block.sourceRecordIds?.length ?? 0) > 0) {
+      continue;
+    }
+    const text = (block as { text?: string }).text;
+    if (text !== undefined && text !== '') {
+      localEchoUserTexts.add(text);
+    }
+  }
   const freshEvents =
     displayedRecordIds.size === 0
       ? events
@@ -309,11 +327,22 @@ function materializeTranscriptHistory(
   });
   historyStore.dispatch(freshEvents);
   const history = historyStore.getSnapshot();
+  // Drop page user blocks that duplicate a displayed recordId-less local echo
+  // prompt (matched by text). They are the same prompt already rendered, and
+  // keeping them would render it twice and double-count retained bytes.
+  const pageBlockList =
+    localEchoUserTexts.size === 0
+      ? history.blocks
+      : history.blocks.filter((block) => {
+          if (block.kind !== 'user') return true;
+          const text = (block as { text?: string }).text;
+          return text === undefined || !localEchoUserTexts.has(text);
+        });
   let pageBytes = 0;
-  for (const block of history.blocks) {
+  for (const block of pageBlockList) {
     pageBytes += estimateDaemonTranscriptBlockBytes(block);
   }
-  const pageBlocks = history.blocks.length;
+  const pageBlocks = pageBlockList.length;
   // `impossible` must be evaluated across BOTH dimensions, regardless of
   // which branch rejects: a page that alone fills the whole block window can
   // never be admitted (an anchored window always retains at least one block),
@@ -350,7 +379,7 @@ function materializeTranscriptHistory(
   return {
     admitted: true,
     materialization: {
-      blocks: history.blocks,
+      blocks: pageBlockList,
       nextOrdinal: history.nextOrdinal,
       retainedBytes: pageBytes,
       toolBlockByCallId: history.toolBlockByCallId,
@@ -389,6 +418,24 @@ function applyTranscriptHistory(
   for (const callId of Object.keys(history.toolBlockByCallId)) {
     delete trimmedToolNotificationByCallId[callId];
   }
+  // Same sentinel-aware merge for permission blocks: a page-resurrected real
+  // mapping must win over the current window's TRIMMED_PERMISSION sentinel, or
+  // a resurrected pending permission never flips to resolved (the permission
+  // upsert/resolve paths early-return on the sentinel).
+  const permissionBlockByRequestId: Record<string, string> = {
+    ...history.permissionBlockByRequestId,
+  };
+  for (const [requestId, blockId] of Object.entries(
+    current.permissionBlockByRequestId,
+  )) {
+    if (
+      isTrimmedPermissionBlockId(blockId) &&
+      permissionBlockByRequestId[requestId] !== undefined
+    ) {
+      continue;
+    }
+    permissionBlockByRequestId[requestId] = blockId;
+  }
   return {
     ...current,
     blocks: [...history.blocks, ...current.blocks],
@@ -396,10 +443,7 @@ function applyTranscriptHistory(
     nextOrdinal: history.nextOrdinal,
     toolBlockByCallId,
     trimmedToolNotificationByCallId,
-    permissionBlockByRequestId: {
-      ...history.permissionBlockByRequestId,
-      ...current.permissionBlockByRequestId,
-    },
+    permissionBlockByRequestId,
   };
 }
 
@@ -2007,14 +2051,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 } else {
                   // The rebuild trimmed but no retained block carries a
                   // recordId, so a re-anchor to a retained record is
-                  // uncomputable. Whether the pre-trim anchor
-                  // (firstPersistedRecordId) is still safe depends on the
-                  // evicted band: if the pre-trim replay carried several
-                  // distinct recordIds, evicting every recordId-bearing block
-                  // skips the non-oldest ones — a silent gap — so fail closed
-                  // (drop the anchor; the affordance closes below). With zero
-                  // or one recordId there is no such band, so the pre-trim
-                  // anchor remains a valid exclusive-before base.
+                  // uncomputable. If the pre-trim replay carried any recordId
+                  // at all, that record's blocks were all evicted, and
+                  // exclusive `beforeRecordId` pagination never returns the
+                  // anchor record itself — anchoring there would leave that
+                  // record silently unreachable. Fail closed (drop the anchor;
+                  // the affordance closes below). With zero pre-trim recordIds
+                  // there is no anchor to drop either way.
                   const replayRecordIds = new Set<string>();
                   for (const replayEvent of replayEvents) {
                     const recordId = getPersistedReplayRecordId(replayEvent);
@@ -2022,7 +2065,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                       replayRecordIds.add(recordId);
                     }
                   }
-                  if (replayRecordIds.size > 1) {
+                  if (replayRecordIds.size >= 1) {
                     transcriptHistoryRef.current.beforeRecordId = undefined;
                   }
                 }

@@ -107,6 +107,7 @@ export {
   getSessionUpdatePayload,
   isDaemonUiSensitiveKey,
   isSubagentChildBlock,
+  isTrimmedPermissionBlockId,
   isTrimmedToolBlockId,
   normalizeDaemonEvent,
   redactDaemonUiSensitiveFields,
