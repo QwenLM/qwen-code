@@ -605,3 +605,96 @@ describe('R5 round-5 Critical regressions', () => {
     },
   );
 });
+
+describe('R6 round-6 Critical regressions', () => {
+  // R6-2: the residue-extension gate stripped the marker name with an
+  // `iu`-flagged regex while every recognition gate around it folds case via
+  // `toUpperCase`. `'ı'.toUpperCase()` is `'I'` and `'ﬁ'.toUpperCase()` is
+  // `'FI'`, but `/I/iu.test('ı')` is `false`, so for `[FıLE:` the opening was
+  // recognised while the name survived in `pathPart` — `pathCouldContinue`
+  // went false and the residue stopped at the marker's own line, leaving the
+  // bare path line below it. That line carries no `[`, so no backward walk
+  // can ever find it and the absolute path shipped through every sanitizer.
+  const FOLDED_NAMES: Array<['IMAGE' | 'FILE', string]> = [
+    ['FILE', 'FıLE'],
+    ['FILE', 'ﬁle'],
+    ['IMAGE', 'IMAGE'.replace('I', 'ı')],
+    ['IMAGE', 'IMAGE'.replace('IMA', 'ıMA')],
+  ];
+
+  it.each(FOLDED_NAMES)(
+    'strips the next-line path of a closed `[%s`/`[%s:` opening',
+    (markerName, name) => {
+      const path = '/etc/passwd';
+      const text = `intro\n[${name}:\n${path}]\ntail prose kept`;
+      const stripped = stripPartialOutboundMediaMarker(text, markerName, '');
+      expect(stripped).not.toContain(path);
+      expect(stripped).toContain('tail prose kept');
+    },
+  );
+
+  it.each(FOLDED_NAMES)(
+    'strips an unclosed `[%s`/`[%s:` opening whose path sits alone below it',
+    (markerName, name) => {
+      const path = '/abs/secret/key.pdf';
+      const text = `intro\n[${name}:\n${path}\ntail prose kept`;
+      const stripped = stripPartialOutboundMediaMarker(text, markerName, '');
+      expect(stripped).not.toContain(path);
+      expect(stripped).toContain('tail prose kept');
+    },
+  );
+
+  // The ASCII twin already behaved; it pins that the fold did not regress it.
+  it('still strips the next-line path of an ASCII `[FILE:` opening', () => {
+    const text = 'intro\n[FILE:\n/etc/passwd]\ntail prose kept';
+    const stripped = stripPartialOutboundMediaMarker(text, 'FILE', '');
+    expect(stripped).not.toContain('/etc/passwd');
+    expect(stripped).toContain('tail prose kept');
+  });
+
+  // A real same-line path must still stop the residue at its own line, or the
+  // strip eats the prose that follows an abandoned marker.
+  it('keeps a same-line path from extending the residue past its line', () => {
+    const text = '[FILE: /tmp/a.txt\nplain prose line]\ntail';
+    const stripped = stripPartialOutboundMediaMarker(text, 'FILE', '');
+    expect(stripped).toContain('plain prose line]');
+    expect(stripped).toContain('tail');
+  });
+
+  // R6-6: the stripper rated completeness on the RAW text while
+  // `findOutboundMediaMarkers` rates deliverability on `maskCode(text)`. A
+  // marker whose body is visible prose but whose closing `]` sits inside an
+  // inline code span is masked at the `]`, so the finder matches nothing and
+  // never replaces it, while the raw `completedPattern` called it complete
+  // and left it alone. The absolute path then shipped through every display
+  // surface, and the truncation guard's raw pattern kept it through cuts too.
+  it.each([
+    ['FILE', '/Users/ben/private/report.pdf'],
+    ['IMAGE', '/Users/ben/private/shot.png'],
+  ] as Array<['IMAGE' | 'FILE', string]>)(
+    'strips a `%s` marker whose closing bracket alone is inside code',
+    (markerName, path) => {
+      const text = `Report ready: [${markerName}: ${path}\`]\` done`;
+      expect(findOutboundMediaMarkers(text, markerName)).toHaveLength(0);
+      const stripped = stripPartialOutboundMediaMarker(text, markerName, '');
+      expect(stripped).not.toContain(path);
+    },
+  );
+
+  // The pinned trade: a marker quoted in code WHOLE stays untouched, because
+  // its own `[` is masked too. Only mixed visibility is residue.
+  it.each([
+    ['an inline span', '`[FILE: /Users/ben/private/report.pdf]`'],
+    ['a fenced block', '```\n[FILE: /Users/ben/private/report.pdf]\n```'],
+  ])('leaves a marker quoted whole in %s alone', (_label, text) => {
+    expect(stripPartialOutboundMediaMarker(text, 'FILE', '')).toBe(text);
+  });
+
+  // A deliverable marker in plain prose is the finder's to replace, so the
+  // stripper must keep leaving it in place.
+  it('leaves a deliverable plain-prose marker alone', () => {
+    const text = 'Report ready: [FILE: /tmp/report.pdf] done';
+    expect(findOutboundMediaMarkers(text, 'FILE')).toHaveLength(1);
+    expect(stripPartialOutboundMediaMarker(text, 'FILE', '')).toBe(text);
+  });
+});

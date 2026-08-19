@@ -4434,6 +4434,102 @@ describe('DingtalkChannel outbound file delivery', () => {
     }
   });
 
+  // R6-1: the session webhook answers a successful post with a bare `ok` on
+  // some deployments — the exact reason `readDingTalkErrorCode` treats an
+  // absent/unparseable 2xx body as "no verdict" rather than a rejection. The
+  // file POST goes to the SAME webhook that just accepted the text, so on such
+  // a deployment the file arrives, this branch invented a failure, and
+  // `sendReplyFiles` posted a `[File delivery failed: …]` notice through that
+  // same lenient webhook: the user got the file AND a notice claiming it never
+  // came, with the turn booked successful.
+  it('accepts a bare non-JSON 2xx body from the session webhook', async () => {
+    const file = createTempFile();
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      seedWebhook(channel, 'cid123');
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const { fileCalls, markdownCalls } = stubFileReplyFetch({
+        fileHandler: () => new Response('ok', { status: 200 }),
+      });
+
+      await channel.sendMessage('cid123', `[FILE: ${file.path}]`);
+
+      expect(fileCalls()).toHaveLength(1);
+      // Exactly one markdown POST: the `[File sent: …]` receipt. A second one
+      // would be the false failure notice.
+      expect(markdownCalls()).toHaveLength(1);
+      const receipt = JSON.parse(
+        String((markdownCalls()[0]![1] as RequestInit).body),
+      ) as { markdown: { text: string } };
+      expect(receipt.markdown.text).toContain('[File sent: report.txt]');
+      expect(receipt.markdown.text).not.toContain(
+        '[File delivery failed: report.txt]',
+      );
+      expect(stderr).not.toHaveBeenCalled();
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  // Leniency is scoped to the shape that motivates it. An explicit non-zero
+  // code in a JSON body is still a rejection on the same branch.
+  it('still rejects a nonzero code from the session webhook', async () => {
+    const file = createTempFile();
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      seedWebhook(channel, 'cid123');
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      const { markdownCalls } = stubFileReplyFetch({
+        fileHandler: () =>
+          new Response(JSON.stringify({ errcode: 310000 }), { status: 200 }),
+      });
+
+      await channel.sendMessage('cid123', `[FILE: ${file.path}]`);
+
+      expect(markdownCalls()).toHaveLength(2);
+      const failure = JSON.parse(
+        String((markdownCalls()[1]![1] as RequestInit).body),
+      ) as { markdown: { text: string } };
+      expect(failure.markdown.text).toContain(
+        '[File delivery failed: report.txt]',
+      );
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  // The robot API answers documented JSON, so an unparseable body there is a
+  // real anomaly and stays strict.
+  it('still rejects a non-JSON 2xx body from the robot API', async () => {
+    const channel = createChannel();
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) =>
+      Promise.resolve(
+        String(input) === 'https://api.dingtalk.com/v1.0/oauth2/accessToken'
+          ? new Response(
+              JSON.stringify({ accessToken: 'robot-token', expireIn: 7200 }),
+              { status: 200 },
+            )
+          : new Response('ok', { status: 200 }),
+      ),
+    );
+
+    await expect(
+      (
+        channel as unknown as {
+          postRobotFileMessage(
+            url: string,
+            body: Record<string, unknown>,
+          ): Promise<Record<string, unknown>>;
+        }
+      ).postRobotFileMessage(
+        'https://api.dingtalk.com/v1.0/robot/groupMessages/send',
+        { msgtype: 'file' },
+      ),
+    ).rejects.toThrow('invalid JSON response');
+  });
+
   it('rejects a nonzero DingTalk code in a successful HTTP response', async () => {
     const file = createTempFile();
     try {

@@ -1174,18 +1174,31 @@ export class DingtalkChannel extends ChannelBase {
         );
       }
 
+      // R6-1: a 2xx body carries a verdict only when it parses as a JSON
+      // object. On the session webhook that is not a guarantee — the same
+      // endpoint answers a successful text post with a bare `ok` on some
+      // deployments, which is precisely why `readDingTalkErrorCode` treats an
+      // absent/unparseable body as "no verdict" rather than a rejection.
+      // Inventing a failure here shipped the file AND a `[File delivery
+      // failed: …]` notice through that same lenient webhook, so the user saw
+      // a contradiction and the turn was still booked successful. The
+      // robot-api branch answers documented JSON, so it stays strict.
       let data: Record<string, unknown> = {};
       if (responseText.trim()) {
+        let parsed: unknown;
         try {
-          const parsed = JSON.parse(responseText) as unknown;
-          if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-            throw new Error('invalid response');
-          }
-          data = parsed as Record<string, unknown>;
+          parsed = JSON.parse(responseText) as unknown;
         } catch {
-          throw new Error(
-            'DingTalk file delivery failed: invalid JSON response',
-          );
+          parsed = undefined;
+        }
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          if (usesRobotApiToken) {
+            throw new Error(
+              'DingTalk file delivery failed: invalid JSON response',
+            );
+          }
+        } else {
+          data = parsed as Record<string, unknown>;
         }
       }
 

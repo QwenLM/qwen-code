@@ -35,6 +35,34 @@ function opensMediaMarker(text: string, open: number): boolean {
 }
 
 /**
+ * What follows the marker name on `line`, with the separating spaces removed,
+ * or `undefined` when `line` does not open with a marker name.
+ *
+ * R6-2: the same `toUpperCase` fold {@link opensMediaMarker} recognises with,
+ * carried down to the offset in the ORIGINAL line. Uppercasing is not a
+ * length-preserving map — `'ﬁ'.toUpperCase()` is `'FI'` — so the name cannot
+ * be measured on an uppercased copy and sliced off the raw one; fold one
+ * source character at a time and cut where the accumulated uppercase
+ * completes a name. An `iu`-flagged regex is not a substitute: it rejects
+ * `'ı'` for `'I'` and `'ﬁ'` for `'FI'`, which is exactly the divergence
+ * R5-2/R5-3 closed for the truncation guard's gates.
+ */
+function afterMediaMarkerName(line: string): string | undefined {
+  const leading = /^[^\S\r\n]*/u.exec(line)![0].length;
+  let upper = '';
+  for (let index = leading; index < line.length; index++) {
+    upper += line[index]!.toUpperCase();
+    if (MEDIA_MARKER_PREFIXES.includes(upper)) {
+      return line.slice(index + 1).replace(/^[^\S\r\n]*/u, '');
+    }
+    if (!MEDIA_MARKER_PREFIXES.some((prefix) => prefix.startsWith(upper))) {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+/**
  * A well-formed marker as the finder's delivery grammar accepts it: full
  * name immediately after the `[` (no leading space), a bracket-free
  * same-line path, closed by the first `]`.
@@ -188,11 +216,14 @@ function partialMarkerResidueEnd(
   // R3-4: what remains after the marker name. Empty (the path starts on the
   // next line) or bracketed (never a deliverable path) both let the strip
   // continue past the marker's own line; a real same-line path stops it.
-  const pathPart = ownLine.replace(
-    new RegExp(`^[^\\S\\r\\n]*${MARKER_NAME_GROUP}[^\\S\\r\\n]*`, 'iu'),
-    '',
-  );
-  const pathCouldContinue = pathPart === '' || pathPart.includes('[');
+  // R6-2: fold case exactly as the recognition gates do. An `iu` regex left
+  // the name in `pathPart` for `[FıLE:` / `[ﬁLE:` — openings `toUpperCase`
+  // recognition accepts — so `pathCouldContinue` was false and the residue
+  // stopped at the marker's own line, stranding the bare path line below it
+  // with no leading `[` for any backward walk to find.
+  const pathPart = afterMediaMarkerName(ownLine);
+  const pathCouldContinue =
+    pathPart !== undefined && (pathPart === '' || pathPart.includes('['));
   // Step past the whole line break: `eol` sits on the `\r` of a CRLF pair.
   const nextStart =
     rest[eol] === '\r' && rest[eol + 1] === '\n' ? eol + 2 : eol + 1;
@@ -536,6 +567,16 @@ export function stripPartialOutboundMediaMarker(
   // here. A COMPLETE well-formed marker keeps its `]`, which this pass never
   // removes, so the pinned "a marker quoted in code is left alone" behaviour
   // survives.
+  //
+  // R6-6: completeness, however, is the finder's question, and the finder
+  // decides deliverability on `maskCode(text)`. A marker whose body is
+  // visible prose but whose closing `]` sits inside an inline code span is
+  // deliverable to neither layer — the finder matches nothing, so nothing
+  // ever replaces it, while the raw `completedPattern` rated it complete and
+  // left the absolute path in the text. Mixed visibility is residue. The
+  // pinned trade covers the marker quoted in code WHOLE, which is recognised
+  // here by its opening `[` being masked too.
+  const maskedText = maskCode(text);
   const spans: Array<{ start: number; end: number }> = [];
   let open = text.lastIndexOf('[');
   while (open !== -1) {
@@ -560,9 +601,15 @@ export function stripPartialOutboundMediaMarker(
       !immediate && normalized.replace(/^[^\S\r\n]+/u, '').startsWith(prefix);
     if (immediate || spaced) {
       const closeIdx = candidate.indexOf(']');
+      // The whole marker is quoted only when its own `[` is masked; a masked
+      // `]` under a visible `[` is the mixed shape the finder drops.
+      const quotedWhole = maskedText[open] !== '[';
+      const closeDeliverable =
+        closeIdx !== -1 &&
+        (quotedWhole || maskedText[open + 1 + closeIdx] === ']');
       const complete =
         immediate &&
-        closeIdx !== -1 &&
+        closeDeliverable &&
         completedPattern.test(candidate.slice(0, closeIdx + 1));
       if (!complete) {
         // R1-4: a marker whose close sits on a LATER line is matched by no
