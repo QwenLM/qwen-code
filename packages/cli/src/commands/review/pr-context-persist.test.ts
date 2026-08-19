@@ -45,8 +45,7 @@ describe('persistRecoveredLedger', () => {
       persistRecoveredLedger(
         side,
         { ledger, commitId: 'a'.repeat(40), reviewId: 42 },
-        true,
-        true,
+        { noOwnReview: true, identityKnown: true },
       );
       const written = JSON.parse(readFileSync(side, 'utf8'));
       expect(written).toEqual({
@@ -73,7 +72,10 @@ describe('persistRecoveredLedger', () => {
         side,
         JSON.stringify({ ...ledger, commitId: 'b'.repeat(40), reviewId: 7 }),
       );
-      persistRecoveredLedger(side, null, false, true);
+      persistRecoveredLedger(side, null, {
+        noOwnReview: false,
+        identityKnown: true,
+      });
       const written = JSON.parse(readFileSync(side, 'utf8'));
       expect(written).toEqual(ledger);
       expect(written.round).toBe(3);
@@ -95,7 +97,10 @@ describe('persistRecoveredLedger', () => {
         side,
         JSON.stringify({ ...ledger, commitId: 'b'.repeat(40), reviewId: 7 }),
       );
-      persistRecoveredLedger(side, null, true, true);
+      persistRecoveredLedger(side, null, {
+        noOwnReview: true,
+        identityKnown: true,
+      });
       expect(existsSync(side)).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -119,24 +124,21 @@ describe('persistRecoveredLedger', () => {
           commitId: 'a'.repeat(40),
           reviewId: 20,
         },
-        false,
-        true,
+        { noOwnReview: false, identityKnown: true },
       );
       expect(JSON.parse(readFileSync(side, 'utf8'))).toEqual(newer);
       // Same round, older reviewId: also kept.
       persistRecoveredLedger(
         side,
         { ledger: { ...ledger, round: 7 }, commitId: null, reviewId: 60 },
-        false,
-        true,
+        { noOwnReview: false, identityKnown: true },
       );
       expect(JSON.parse(readFileSync(side, 'utf8'))).toEqual(newer);
       // A genuinely newer recovery still writes.
       persistRecoveredLedger(
         side,
         { ledger: { ...ledger, round: 8 }, commitId: null, reviewId: 80 },
-        false,
-        true,
+        { noOwnReview: false, identityKnown: true },
       );
       expect(JSON.parse(readFileSync(side, 'utf8')).round).toBe(8);
     } finally {
@@ -148,7 +150,10 @@ describe('persistRecoveredLedger', () => {
     const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
     const side = join(dir, 'side.json');
     try {
-      persistRecoveredLedger(side, null, false, true);
+      persistRecoveredLedger(side, null, {
+        noOwnReview: false,
+        identityKnown: true,
+      });
       expect(existsSync(side)).toBe(false);
       // No debris of any name — the temp is per-process (`.<pid>.tmp`), so
       // asserting on the directory listing is the only check independent of
@@ -182,8 +187,7 @@ describe('persistRecoveredLedger', () => {
           commitId: 'c'.repeat(40),
           reviewId: 101,
         },
-        false,
-        false,
+        { noOwnReview: false, identityKnown: false },
       );
       expect(JSON.parse(readFileSync(side, 'utf8'))).toEqual(own);
     } finally {
@@ -197,9 +201,9 @@ describe('persistRecoveredLedger', () => {
     // their ids), while adopting the findings re-opens the swap. The anchor
     // and the age reference go — an anonymous round cannot be re-vouched,
     // and a sha superseded by rounds this account never certified must not
-    // scope the next review. `noOwnReview` is passed TRUE here on purpose:
-    // it is ignored on the recovered path, so a positional swap of the two
-    // booleans would delete the file and fail both assertions.
+    // scope the next review. `noOwnReview` is TRUE here on purpose: the
+    // recovered path ignores it, which is exactly what this fixture pins —
+    // the deletion licence must have no reach into a recovered write.
     const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
     const side = join(dir, 'side.json');
     try {
@@ -224,8 +228,7 @@ describe('persistRecoveredLedger', () => {
           commitId: 'c'.repeat(40),
           reviewId: 200,
         },
-        true,
-        false,
+        { noOwnReview: true, identityKnown: false },
       );
       const written = JSON.parse(readFileSync(side, 'utf8'));
       expect(written).toEqual({
@@ -251,8 +254,7 @@ describe('persistRecoveredLedger', () => {
       persistRecoveredLedger(
         side,
         { ledger: { ...ledger, round: 4 }, commitId: null, reviewId: 40 },
-        false,
-        false,
+        { noOwnReview: false, identityKnown: false },
       );
       const written = JSON.parse(readFileSync(side, 'utf8'));
       expect(written.round).toBe(4);
@@ -299,8 +301,7 @@ describe('persistedAnchorSha', () => {
           foreign: false,
           author: null,
         } as unknown as Parameters<typeof persistRecoveredLedger>[1],
-        false,
-        true,
+        { noOwnReview: false, identityKnown: true },
       );
       // The guard kept round 6 — so the anchor on disk is round 6's, not the
       // round-5 one this run recovered.

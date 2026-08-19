@@ -129,6 +129,24 @@ export interface BuildTestReport {
   build: CommandResult[];
   test: CommandResult[];
   /**
+   * True when the run was a deliberate `--build-only` probe. Structural,
+   * because `--resume`'s nothing-to-resume answer keys on it: a probe's
+   * report has no tests and no scope BY CHOICE, and without the stamp that
+   * shape is indistinguishable from a completed zero-suite run.
+   */
+  buildOnly?: boolean;
+  /**
+   * True when the test phase was ENTERED and ran nothing — the whole-call
+   * budget fell below the attempt floor (or the unbuilt closure covered
+   * every suite) before the first test command started. Structural for the
+   * same reason `buildOnly` is: a single-root run in this state carries no
+   * `testScope` and keeps `ok: true` (the build passed), so without the
+   * stamp `--resume` read it as a COMPLETED zero-suite run — certifying an
+   * existing, unrun suite as finished and dropping the re-run advice that
+   * is the only path to ever running it.
+   */
+  endedBeforeTests?: boolean;
+  /**
    * What the test phase covered, so the review can state exactly what was and
    * was not run: `workspaces` lists exactly the suites the run executes, and
    * `caveat` — when present — says why that set may be incomplete. Only set
@@ -528,6 +546,20 @@ function previousReport(out: string | undefined): BuildTestReport {
   const strings = (v: unknown): boolean =>
     Array.isArray(v) && v.every((e) => typeof e === 'string' && e.length > 0);
   const affectedOk = strings((parsed as { affected?: unknown }).affected);
+  // Read by the nothing-to-resume split (deliberate probe vs completed
+  // zero-suite run) — validated like every other field the continuation
+  // reads, so a corrupted stamp refuses here instead of steering the
+  // message off a non-boolean truthiness.
+  const buildOnlyShape = (parsed as { buildOnly?: unknown }).buildOnly;
+  const buildOnlyOk =
+    buildOnlyShape === undefined || typeof buildOnlyShape === 'boolean';
+  const endedBeforeShape = (parsed as { endedBeforeTests?: unknown })
+    .endedBeforeTests;
+  const endedBeforeOk =
+    endedBeforeShape === undefined || typeof endedBeforeShape === 'boolean';
+  // Same rule for `ok`, which the split reads beside it: required on the
+  // report, so undefined is refused too.
+  const okOk = typeof (parsed as { ok?: unknown }).ok === 'boolean';
   const notBuiltShape = (parsed as { notBuilt?: unknown }).notBuilt;
   const notBuiltOk = notBuiltShape === undefined || strings(notBuiltShape);
   const scope = shape.testScope;
@@ -547,6 +579,9 @@ function previousReport(out: string | undefined): BuildTestReport {
     !commandsOk(shape.build) ||
     !strings(shape.timedOut) ||
     !affectedOk ||
+    !buildOnlyOk ||
+    !endedBeforeOk ||
+    !okOk ||
     !notBuiltOk ||
     !scopeOk ||
     !runOk
