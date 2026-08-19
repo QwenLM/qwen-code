@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { SearchOptions, SearchResult } from './transcripts.js';
+import type { SearchHit, SearchOptions, SearchResult } from './transcripts.js';
 
 /** Validated args for the `qwen-rc search` CLI. */
 export interface ParsedSearchArgs {
@@ -110,6 +110,47 @@ export function parseSearchArgs(
  */
 export function formatSearchResultsJson(result: SearchResult): string {
   return JSON.stringify({ hits: result.hits, truncated: result.truncated });
+}
+
+/**
+ * `GET /rc/search` query string for daemon-mode search (task 1.4). The route
+ * reads `q`, `kind`, `sessionId`, `limit`, `since`, `until` (ISO-8601 — the
+ * local CLI keeps epoch ms, so convert here) and `rank=bm25`. `--cwd` has no
+ * remote meaning (the daemon searches ITS workspace) and is intentionally
+ * NOT sent.
+ */
+export function buildSearchApiQuery(parsed: ParsedSearchArgs): string {
+  const p = new URLSearchParams();
+  p.set('q', parsed.query);
+  if (parsed.opts.kind !== undefined) p.set('kind', parsed.opts.kind);
+  if (parsed.opts.sessionId !== undefined)
+    p.set('sessionId', parsed.opts.sessionId);
+  if (parsed.opts.limit !== undefined)
+    p.set('limit', String(parsed.opts.limit));
+  if (parsed.opts.since !== undefined)
+    p.set('since', new Date(parsed.opts.since).toISOString());
+  if (parsed.opts.until !== undefined)
+    p.set('until', new Date(parsed.opts.until).toISOString());
+  if (parsed.rank) p.set('rank', 'bm25');
+  return p.toString();
+}
+
+/**
+ * Coerce a `GET /rc/search` JSON body into the local SearchResult shape.
+ * The route answers `{hits, truncated, elapsedMs, mode}`; a foreign daemon
+ * may differ — an empty result beats a crash.
+ */
+export function searchFromApiResponse(body: unknown): SearchResult {
+  const obj =
+    body && typeof body === 'object' ? (body as Record<string, unknown>) : {};
+  const raw = Array.isArray(obj['hits']) ? obj['hits'] : [];
+  const hits = raw.filter(
+    (h): h is SearchHit =>
+      !!h &&
+      typeof h === 'object' &&
+      typeof (h as Record<string, unknown>)['sessionId'] === 'string',
+  );
+  return { hits, truncated: obj['truncated'] === true };
 }
 
 /**

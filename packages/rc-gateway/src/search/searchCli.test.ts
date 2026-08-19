@@ -9,6 +9,8 @@ import {
   parseSearchArgs,
   formatSearchResults,
   formatSearchResultsJson,
+  buildSearchApiQuery,
+  searchFromApiResponse,
 } from './searchCli.js';
 import type { SearchResult } from './transcripts.js';
 
@@ -152,5 +154,91 @@ describe('formatSearchResultsJson', () => {
     expect(
       JSON.parse(formatSearchResultsJson({ hits: [], truncated: false })),
     ).toEqual({ hits: [], truncated: false });
+  });
+});
+
+describe('buildSearchApiQuery', () => {
+  it('always carries q; omits unset opts', () => {
+    const parsed = parseSearchArgs(['oauth', 'flow']);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const params = new URLSearchParams(buildSearchApiQuery(parsed.value));
+    expect(params.get('q')).toBe('oauth flow');
+    expect([...params.keys()]).toEqual(['q']);
+  });
+
+  it('sends kind/session/limit and converts since/until to ISO-8601', () => {
+    const parsed = parseSearchArgs([
+      'oauth',
+      '--kind=assistant',
+      '--session=s1',
+      '--limit=10',
+      '--since=2026-06-01T00:00:00.000Z',
+      '--until=2026-06-10T00:00:00.000Z',
+    ]);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const params = new URLSearchParams(buildSearchApiQuery(parsed.value));
+    expect(params.get('q')).toBe('oauth');
+    expect(params.get('kind')).toBe('assistant');
+    expect(params.get('sessionId')).toBe('s1');
+    expect(params.get('limit')).toBe('10');
+    expect(params.get('since')).toBe('2026-06-01T00:00:00.000Z');
+    expect(params.get('until')).toBe('2026-06-10T00:00:00.000Z');
+    expect(params.get('rank')).toBeNull();
+  });
+
+  it('maps --rank to rank=bm25 and never sends --cwd', () => {
+    const parsed = parseSearchArgs(['oauth', '--rank', '--cwd=/local-only']);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const qs = buildSearchApiQuery(parsed.value);
+    expect(new URLSearchParams(qs).get('rank')).toBe('bm25');
+    expect(qs).not.toContain('cwd');
+  });
+});
+
+describe('searchFromApiResponse', () => {
+  it('passes a well-formed body through, dropping the route extras', () => {
+    const body = {
+      hits: [
+        {
+          sessionId: 's1',
+          eventId: 'e1',
+          kind: 'assistant',
+          ts: '2026-06-01T00:00:00.000Z',
+          snippet: 'the oauth flow',
+        },
+      ],
+      truncated: true,
+      elapsedMs: 12,
+      mode: 'bm25',
+    };
+    expect(searchFromApiResponse(body)).toEqual({
+      hits: body.hits,
+      truncated: true,
+    });
+  });
+
+  it('drops hits without a string sessionId', () => {
+    const r = searchFromApiResponse({
+      hits: [
+        { sessionId: 7, eventId: 'e', kind: 'user', ts: 't', snippet: '' },
+        null,
+      ],
+    });
+    expect(r.hits).toEqual([]);
+    expect(r.truncated).toBe(false);
+  });
+
+  it('yields an empty result for a malformed body', () => {
+    expect(searchFromApiResponse(undefined)).toEqual({
+      hits: [],
+      truncated: false,
+    });
+    expect(searchFromApiResponse({ hits: 'x' })).toEqual({
+      hits: [],
+      truncated: false,
+    });
   });
 });

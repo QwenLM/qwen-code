@@ -142,8 +142,96 @@ import {
   parseSearchArgs,
   formatSearchResults,
   formatSearchResultsJson,
+  buildSearchApiQuery,
+  searchFromApiResponse,
 } from './search/searchCli.js';
+import { listSessions, type SessionListItem } from './sessions/sessionList.js';
+import {
+  parseForkArgs,
+  buildForkPayload,
+  formatForkOutput,
+} from './sessions/forkCli.js';
+import {
+  parseSessionsArgs,
+  buildForkTree,
+  renderForkTree,
+  formatSessionsJson,
+  sessionsApiPath,
+  sessionsFromApiResponse,
+} from './sessions/sessionsCli.js';
+import { DaemonRegistry } from './daemons/registry.js';
+import { FileTokenStore, defaultTokensDir } from './daemons/tokenStore.js';
+import {
+  resolveDaemonTarget,
+  splitTargetFlags,
+  type DaemonTarget,
+  type SplitTargetFlagsResult,
+} from './daemons/daemonTarget.js';
+import {
+  daemonRequest,
+  probeHealth,
+  DaemonHttpError,
+  DaemonUnreachableError,
+} from './daemons/daemonClient.js';
+import {
+  readTokenMeta,
+  writeTokenMeta,
+  deleteTokenMeta,
+} from './daemons/tokenMeta.js';
+import {
+  parseDaemonsArgs,
+  formatDaemonsListTable,
+  formatHealthLine,
+  formatWhoami,
+  type DaemonRow,
+} from './daemons/daemonsCli.js';
 import { AuditLog } from './auditLog.js';
+
+/**
+ * Per-daemon target resolution shared by the `--daemon`-threaded commands
+ * (`fork`, `sessions`, `search` — add-multi-workspace-client task 1.4).
+ *
+ * Precedence: an EXPLICIT `--daemon`/`--url`/`--token` always targets the
+ * daemon API. With no target flags at all, a NON-EMPTY registry resolves to
+ * its default daemon (API mode, spec: "default to the registry's default
+ * daemon when omitted"); an EMPTY registry means the zero-config LOCAL setup
+ * and the command keeps its daemon-free on-disk behaviour (`target` is
+ * undefined — `sessions` scans the chats dir, `search` scans transcripts,
+ * exactly as the daemon's own routes do, so the two can never drift).
+ * `required: true` (fork) has no on-disk mode: an empty registry resolves to
+ * the local daemon default instead of `undefined`.
+ */
+async function resolveCliDaemonTarget(
+  split: SplitTargetFlagsResult,
+  opts: { required?: boolean } = {},
+): Promise<
+  | { ok: true; target?: DaemonTarget; insecure: boolean }
+  | { ok: false; error: string; exitCode: 1 | 2 }
+> {
+  const registry = new DaemonRegistry();
+  const tokens = new FileTokenStore();
+  const entries = await registry.list();
+  const explicit =
+    split.target.daemonName !== undefined ||
+    split.target.url !== undefined ||
+    split.target.token !== undefined;
+  if (!explicit && entries.length === 0 && !opts.required) {
+    return { ok: true, target: undefined, insecure: split.insecure };
+  }
+  const resolved = await resolveDaemonTarget(split.target, entries, (key) =>
+    tokens.get(key),
+  );
+  if (!resolved.ok) {
+    // Spec: unknown --daemon → exit 1 (`daemon_unknown`); a malformed
+    // --url is a usage error → exit 2.
+    return {
+      ok: false,
+      error: resolved.error,
+      exitCode: resolved.code === 'daemon_unknown' ? 1 : 2,
+    };
+  }
+  return { ok: true, target: resolved.target, insecure: split.insecure };
+}
 
 export interface ServeOptions {
   gatewayPort?: number;
@@ -1665,15 +1753,28 @@ if (process.argv[2] === 'serve') {
   });
 } else if (process.argv[2] === 'search') {
   // `qwen-rc search <query…> [--cwd=…] [--kind=…] [--since=…] [--until=…]
-  // [--limit=…] [--session=…]` — daemon-free on-disk transcript search. Derives
-  // the chats dir from --cwd (default cwd) via the exact resolveChatsDir and
-  // reuses searchTranscriptsDetailed (identical matcher to the HTTP route). The
-  // bug-prone logic is in the pure, unit-tested parseSearchArgs/
-  // formatSearchResults; this is glue. INSPECTOR: exit 0 on success (incl. 0
-  // hits), 2 on usage. The scan sets no timeout → it never throws; the catch is
-  // a defensive exit 1 only.
+  // [--limit=…] [--session=…] [--daemon <name>|--url <u>] [--token <t>]
+  // [--insecure]` — on-disk transcript search, daemon-free by default:
+  // derives the chats dir from --cwd (default cwd) via the exact
+  // resolveChatsDir and reuses searchTranscriptsDetailed (identical matcher
+  // to the HTTP route). add-multi-workspace-client task 1.4: with a target
+  // flag OR a non-empty registry the query goes to GET <daemon>/rc/search
+  // instead (the daemon's OWN workspace; --cwd is then ignored, --rank maps
+  // to ?rank=bm25 which the daemon answers with its index or a transparent
+  // scan fallback). The bug-prone logic is in the pure, unit-tested
+  // parseSearchArgs/formatSearchResults/buildSearchApiQuery; this is glue.
+  // Exit 0 on success (incl. 0 hits), 2 on usage, 1 on runtime failure.
   void (async () => {
-    const parsed = parseSearchArgs(process.argv.slice(3));
+    let split;
+    try {
+      split = splitTargetFlags(process.argv.slice(3));
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error(`search: ${(e as Error).message}`);
+      process.exit(2);
+      return;
+    }
+    const parsed = parseSearchArgs(split.core);
     if (!parsed.ok) {
       // eslint-disable-next-line no-console
       console.error(parsed.error);
@@ -1691,6 +1792,40 @@ if (process.argv[2] === 'serve') {
       parsed.value.json
         ? formatSearchResultsJson(result)
         : formatSearchResults(result);
+    const resolved = await resolveCliDaemonTarget(split);
+    if (!resolved.ok) {
+      // eslint-disable-next-line no-console
+      console.error(`search: ${resolved.error}`);
+      process.exit(resolved.exitCode);
+      return;
+    }
+    if (resolved.target) {
+      const { target } = resolved;
+      if (!target.token) {
+        // eslint-disable-next-line no-console
+        console.error(
+          `search: no token for daemon "${target.name}" — pass --token <t> or ` +
+            `register + pair first: qwen-rc daemons add <name> <url>`,
+        );
+        process.exit(1);
+        return;
+      }
+      if (parsed.value.cwd) {
+        // eslint-disable-next-line no-console
+        console.error(
+          `(remote daemon "${target.name}" — --cwd is ignored; its own workspace is searched)`,
+        );
+      }
+      const res = await daemonRequest(target, {
+        method: 'GET',
+        path: `/rc/search?${buildSearchApiQuery(parsed.value)}`,
+        insecure: resolved.insecure,
+      });
+      // eslint-disable-next-line no-console
+      console.log(render(searchFromApiResponse(res.json)));
+      process.exit(0);
+      return;
+    }
     if (parsed.value.rank) {
       const { SearchIndex } = await loadSearchIndexModule();
       const dbPath = join(
@@ -1737,8 +1872,19 @@ if (process.argv[2] === 'serve') {
     console.log(render(result));
     process.exit(0);
   })().catch((err: unknown) => {
-    // eslint-disable-next-line no-console
-    console.error(`search: ${(err as Error).message}`);
+    if (err instanceof DaemonHttpError && err.status === 401) {
+      // eslint-disable-next-line no-console
+      console.error(
+        'search: token rejected (401) — re-pair: qwen-rc daemons remove <name> && qwen-rc daemons add <name> <url>',
+      );
+    } else if (err instanceof DaemonUnreachableError) {
+      // eslint-disable-next-line no-console
+      console.error(`search: ${err.message}`);
+    } else {
+      // The local scan never throws (no timeout); daemon mode can.
+      // eslint-disable-next-line no-console
+      console.error(`search: ${(err as Error).message}`);
+    }
     process.exit(1);
   });
 } else if (process.argv[2] === 'reindex') {
@@ -1920,6 +2066,645 @@ if (process.argv[2] === 'serve') {
   })().catch((err: unknown) => {
     // eslint-disable-next-line no-console
     console.error(`daemons discover: ${(err as Error).message}`);
+    process.exit(1);
+  });
+} else if (process.argv[2] === 'fork') {
+  // `qwen-rc fork <sessionId> [--from-event <n>] [--mode include|empty]
+  // [--name <s>] [--daemon <name>|--url <u>] [--token <t>] [--insecure]`
+  // (add-session-forking task 3.4). POST /session/:id/fork (WRITE scope) and
+  // print ONLY the new sessionId to stdout; hints go to stderr. This repo has
+  // no interactive session REPL, so this command is also the terminal-client
+  // "fork from here" (task 3.2). Pure logic: sessions/forkCli.ts.
+  void (async () => {
+    let split;
+    try {
+      split = splitTargetFlags(process.argv.slice(3));
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error(`fork: ${(e as Error).message}`);
+      process.exit(2);
+      return;
+    }
+    const parsed = parseForkArgs(split.core);
+    if (!parsed.ok) {
+      // eslint-disable-next-line no-console
+      console.error(parsed.error);
+      process.exit(2);
+      return;
+    }
+    const resolved = await resolveCliDaemonTarget(split, { required: true });
+    if (!resolved.ok) {
+      // eslint-disable-next-line no-console
+      console.error(`fork: ${resolved.error}`);
+      process.exit(resolved.exitCode);
+      return;
+    }
+    const target = resolved.target!; // required: true → always set
+    if (!target.token) {
+      // eslint-disable-next-line no-console
+      console.error(
+        `fork: no token for daemon "${target.name}" — pass --token <t> or ` +
+          `register + pair first: qwen-rc daemons add <name> <url>`,
+      );
+      process.exit(1);
+      return;
+    }
+    const res = await daemonRequest(target, {
+      method: 'POST',
+      path: `/session/${parsed.value.sessionId}/fork`,
+      body: buildForkPayload(parsed.value),
+      insecure: resolved.insecure,
+    });
+    // eslint-disable-next-line no-console
+    console.log(formatForkOutput(res.json));
+    // eslint-disable-next-line no-console
+    console.error(
+      `forked ${parsed.value.sessionId} → see it in the session list: qwen-rc sessions`,
+    );
+    process.exit(0);
+  })().catch((err: unknown) => {
+    if (err instanceof DaemonHttpError && err.status === 401) {
+      // eslint-disable-next-line no-console
+      console.error(
+        'fork: token rejected (401) — re-pair: qwen-rc daemons remove <name> && qwen-rc daemons add <name> <url>',
+      );
+    } else if (err instanceof DaemonHttpError && err.code === 'name_taken') {
+      // eslint-disable-next-line no-console
+      console.error(`fork: name already used in this workspace (409)`);
+    } else if (
+      err instanceof DaemonHttpError &&
+      err.code === 'fork_mid_prompt'
+    ) {
+      // eslint-disable-next-line no-console
+      console.error(
+        'fork: parent is mid-prompt (409 fork_mid_prompt) — wait for the turn to settle and retry',
+      );
+    } else if (err instanceof DaemonUnreachableError) {
+      // eslint-disable-next-line no-console
+      console.error(`fork: ${err.message}`);
+    } else {
+      // eslint-disable-next-line no-console
+      console.error(`fork: ${(err as Error).message}`);
+    }
+    process.exit(1);
+  });
+} else if (process.argv[2] === 'sessions') {
+  // `qwen-rc sessions [--cwd <dir>] [--json] [--daemon <name>|--url <u>]
+  // [--token <t>] [--insecure]` (add-session-forking task 3.3: "the terminal
+  // renders a static tree with unicode box-drawing" + add-multi-workspace-
+  // client task 1.4: `--daemon` threading). Zero-config (no target flags,
+  // empty registry) stays DAEMON-FREE: it scans the on-disk chats dir via the
+  // EXACT listSessions the daemon's GET /rc/sessions uses, so the tree can
+  // never drift from the web UI's. With a target flag OR a non-empty
+  // registry the SAME tree renders over GET <daemon>/rc/sessions (OWNER),
+  // which is how a remote daemon's sessions are listed from this machine.
+  void (async () => {
+    let split;
+    try {
+      split = splitTargetFlags(process.argv.slice(3));
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error(`sessions: ${(e as Error).message}`);
+      process.exit(2);
+      return;
+    }
+    const parsed = parseSessionsArgs(split.core);
+    if (!parsed.ok) {
+      // eslint-disable-next-line no-console
+      console.error(parsed.error);
+      process.exit(2);
+      return;
+    }
+    const resolved = await resolveCliDaemonTarget(split);
+    if (!resolved.ok) {
+      // eslint-disable-next-line no-console
+      console.error(`sessions: ${resolved.error}`);
+      process.exit(resolved.exitCode);
+      return;
+    }
+    let result: { sessions: SessionListItem[]; truncated: boolean };
+    if (resolved.target) {
+      const { target } = resolved;
+      if (!target.token) {
+        // eslint-disable-next-line no-console
+        console.error(
+          `sessions: no token for daemon "${target.name}" — pass --token <t> or ` +
+            `register + pair first: qwen-rc daemons add <name> <url>`,
+        );
+        process.exit(1);
+        return;
+      }
+      const res = await daemonRequest(target, {
+        method: 'GET',
+        path: sessionsApiPath(parsed.value.cwd),
+        insecure: resolved.insecure,
+      });
+      result = sessionsFromApiResponse(res.json);
+      if (parsed.value.cwd) {
+        // eslint-disable-next-line no-console
+        console.error(
+          `(remote daemon "${target.name}" — --cwd selects a workspace on THAT daemon)`,
+        );
+      }
+    } else {
+      const chatsDir = resolveChatsDir(parsed.value.cwd ?? process.cwd());
+      result = await listSessions(chatsDir);
+    }
+    // eslint-disable-next-line no-console
+    console.log(
+      parsed.value.json
+        ? formatSessionsJson(result)
+        : renderForkTree(buildForkTree(result.sessions)),
+    );
+    if (result.truncated) {
+      // eslint-disable-next-line no-console
+      console.error('(listing truncated at the scan cap)');
+    }
+    process.exit(0);
+  })().catch((err: unknown) => {
+    if (err instanceof DaemonHttpError && err.status === 401) {
+      // eslint-disable-next-line no-console
+      console.error(
+        'sessions: token rejected (401) — re-pair: qwen-rc daemons remove <name> && qwen-rc daemons add <name> <url>',
+      );
+    } else if (err instanceof DaemonUnreachableError) {
+      // eslint-disable-next-line no-console
+      console.error(`sessions: ${err.message}`);
+    } else {
+      // eslint-disable-next-line no-console
+      console.error(`sessions: ${(err as Error).message}`);
+    }
+    process.exit(1);
+  });
+} else if (process.argv[2] === 'daemons') {
+  // `qwen-rc daemons <list|add|remove|set-default|health|whoami>` — the local
+  // multi-daemon registry (add-multi-workspace-client task 1.3). Registry I/O:
+  // ./daemons/registry.js (clients.toml); token I/O: ./daemons/tokenStore.js
+  // (0600 files); pairing + probes: ./daemons/daemonClient.js. Pure parsing /
+  // rendering: ./daemons/daemonsCli.js.
+  void (async () => {
+    const parsed = parseDaemonsArgs(process.argv.slice(3));
+    if (!parsed.ok) {
+      // eslint-disable-next-line no-console
+      console.error(`daemons: ${parsed.error}`);
+      process.exit(2);
+      return;
+    }
+    const a = parsed.value;
+    const registry = new DaemonRegistry();
+    const tokens = new FileTokenStore();
+    const tokensDir = defaultTokensDir();
+
+    if (a.sub === 'list') {
+      const entries = await registry.list();
+      const defaultName = (await registry.getDefault())?.name;
+      const rows = await Promise.all(
+        entries.map(async (e): Promise<DaemonRow> => {
+          const [tokenPresent, health] = await Promise.all([
+            tokens.get(e.tokenStorageKey).then((t) => t !== undefined),
+            probeHealth(e.url, 2000),
+          ]);
+          return {
+            name: e.name,
+            url: e.url,
+            isDefault: e.name === defaultName,
+            tokenPresent,
+            health,
+          };
+        }),
+      );
+      if (a.format === 'json') {
+        // First-time hint (spec "First-time creation": the registry file is
+        // NOT auto-created — the hint goes to stderr so stdout stays
+        // machine-readable).
+        if (entries.length === 0) {
+          // eslint-disable-next-line no-console
+          console.error(
+            'no daemons registered — add one: qwen-rc daemons add <name> <url>',
+          );
+        }
+        // eslint-disable-next-line no-console
+        console.log(JSON.stringify(rows, null, 2));
+      } else {
+        // The table renderer carries the same hint for an empty list.
+        // eslint-disable-next-line no-console
+        console.log(formatDaemonsListTable(rows));
+      }
+      process.exit(0);
+    } else if (a.sub === 'add') {
+      const base = a.url!.replace(/\/+$/, '');
+      const entries = await registry.list();
+      const existing = entries.find((e) => e.name === a.name!);
+      if (existing && !a.force) {
+        // eslint-disable-next-line no-console
+        console.error(
+          `daemons add: "${a.name}" already exists (${existing.url}) — pass --force to replace`,
+        );
+        process.exit(1);
+        return;
+      }
+      // Spec "Duplicate URL rejected": `daemon_url_duplicate` (exit 1) is
+      // checked BEFORE any pairing, so a rejected add never touches the daemon
+      // and the registry is trivially unchanged. Re-adding the SAME name+url
+      // under --force is not a duplicate.
+      const dupUrl = entries.find((e) => e.url === base && e.name !== a.name!);
+      if (dupUrl) {
+        // eslint-disable-next-line no-console
+        console.error(
+          `daemons add: daemon_url_duplicate: "${dupUrl.name}" already uses ${base} — remove it first: qwen-rc daemons remove ${dupUrl.name}`,
+        );
+        process.exit(1);
+        return;
+      }
+      // 1. Probe: GET /rc/capabilities proves liveness AND identity — a
+      //    qwen-rc daemon answers 2xx or an auth wall (401/403 pre-pairing),
+      //    a foreign server 404s (spec code `not_a_qwen_daemon`). The bare
+      //    /capabilities mount is the transparent-proxy alias: try it when the
+      //    /rc/-prefixed path 404s.
+      const probeCaps = async (
+        path: string,
+      ): Promise<'daemon' | 'not_found'> => {
+        try {
+          await daemonRequest(
+            { url: base, ...(a.token ? { token: a.token } : {}) },
+            { method: 'GET', path, timeoutMs: 5000, insecure: a.insecure },
+          );
+          return 'daemon';
+        } catch (err) {
+          if (err instanceof DaemonHttpError) {
+            if (err.status === 401 || err.status === 403) return 'daemon';
+            if (err.status === 404) return 'not_found';
+          }
+          throw err; // unreachable / other HTTP error → outer catch
+        }
+      };
+      let caps = await probeCaps('/rc/capabilities');
+      if (caps === 'not_found') caps = await probeCaps('/capabilities');
+      if (caps === 'not_found') {
+        // eslint-disable-next-line no-console
+        console.error(
+          `daemons add: not_a_qwen_daemon: ${base} answered 404 on /rc/capabilities (and /capabilities) — not a remote-control daemon`,
+        );
+        process.exit(1);
+        return;
+      }
+      // 2. Trust confirmation (spec "Trust step on adding a daemon"): the
+      //    warning MUST carry the arbitrary-JavaScript sentence, the answer
+      //    defaults to NO, and declining writes nothing and pairs nothing.
+      // eslint-disable-next-line no-console
+      console.error(
+        `\nTrust check — about to pair with ${base}\n` +
+          '  This daemon can serve arbitrary JavaScript to your browser\n' +
+          '  when you open its UI. The token will be stored at\n' +
+          '  ~/.qwen/rc/tokens/ (0600); a daemon sees your session transcripts.\n',
+      );
+      let trustOk: boolean;
+      if (a.yes) {
+        trustOk = true;
+      } else if (!process.stdin.isTTY) {
+        // eslint-disable-next-line no-console
+        console.error(
+          'daemons add: trust confirmation required — re-run interactively, or pass --yes to confirm',
+        );
+        process.exit(2);
+        return;
+      } else {
+        trustOk = await confirm('Continue? [y/N] ');
+      }
+      if (!trustOk) {
+        // eslint-disable-next-line no-console
+        console.log('aborted — no pairing attempted, registry unchanged');
+        process.exit(0);
+        return;
+      }
+      // 3. Pair (only after the trust confirmation).
+      const key = a.tokenStorageKey ?? a.name!;
+      let pairedScopes: string[] | undefined;
+      let pairedTokenId: string | undefined;
+      if (a.noPair) {
+        // Bare registry entry; commands against it will prompt for a token.
+      } else if (a.token !== undefined) {
+        await tokens.set(key, a.token);
+        // eslint-disable-next-line no-console
+        console.error('stored the provided token (no pairing)');
+      } else {
+        let code = a.code;
+        if (code === undefined) {
+          if (!process.stdin.isTTY) {
+            // eslint-disable-next-line no-console
+            console.error(
+              'daemons add: non-interactive stdin — pass --code <code> (or --token <t> / --no-pair)',
+            );
+            process.exit(2);
+            return;
+          }
+          const rl = createInterface({
+            input: process.stdin,
+            output: process.stdout,
+          });
+          try {
+            code = await new Promise<string>((resolve) =>
+              rl.question(
+                `Pairing code for ${a.name} (shown by qwen-rc serve): `,
+                resolve,
+              ),
+            );
+          } finally {
+            rl.close();
+          }
+        }
+        const redeem = await daemonRequest(
+          { url: base },
+          {
+            method: 'POST',
+            path: '/rc/pair/redeem',
+            body: { code: code.trim(), label: a.name! },
+            timeoutMs: 10000,
+            insecure: a.insecure,
+          },
+        );
+        const body = redeem.json as {
+          id?: unknown;
+          token?: unknown;
+          scopes?: unknown;
+        };
+        if (typeof body.token !== 'string') {
+          throw new Error('pairing response missing the token');
+        }
+        await tokens.set(key, body.token);
+        pairedTokenId = typeof body.id === 'string' ? body.id : undefined;
+        pairedScopes = Array.isArray(body.scopes)
+          ? body.scopes.map(String)
+          : undefined;
+        // eslint-disable-next-line no-console
+        console.error(`paired with ${a.name}`);
+      }
+      const updated = await registry.upsert({
+        name: a.name!,
+        url: base,
+        tokenStorageKey: key,
+      });
+      if (pairedTokenId && pairedScopes) {
+        await writeTokenMeta(tokensDir, key, {
+          tokenId: pairedTokenId,
+          scopes: pairedScopes,
+          label: a.name!,
+          addedAt: new Date().toISOString(),
+        });
+      }
+      if (updated.length === 1) {
+        // eslint-disable-next-line no-console
+        console.error(`added ${a.name} (now the default daemon)`);
+      } else {
+        // eslint-disable-next-line no-console
+        console.error(
+          `added ${a.name} (default unchanged: ${updated.find((e) => e.default)?.name ?? updated[0].name})`,
+        );
+      }
+      // eslint-disable-next-line no-console
+      console.error(
+        'Note: the browser aggregation views need the owner to admit this UI origin on each daemon (POST /rc/cors).',
+      );
+      process.exit(0);
+    } else if (a.sub === 'remove') {
+      const entry = await registry.getByName(a.name!);
+      if (!entry) {
+        // eslint-disable-next-line no-console
+        console.error(`daemons remove: unknown daemon "${a.name}"`);
+        process.exit(1);
+        return;
+      }
+      if (!a.yes) {
+        const ok = await confirm(
+          `Remove daemon "${a.name}"? (its token is revoked on the daemon, best-effort) [y/N] `,
+        );
+        if (!ok) {
+          // eslint-disable-next-line no-console
+          console.log('aborted');
+          process.exit(0);
+          return;
+        }
+      }
+      const token = await tokens.get(entry.tokenStorageKey);
+      const meta = await readTokenMeta(tokensDir, entry.tokenStorageKey);
+      if (token && meta) {
+        try {
+          await daemonRequest(
+            { url: entry.url, token },
+            {
+              method: 'DELETE',
+              path: `/rc/tokens/${meta.tokenId}`,
+              timeoutMs: 5000,
+              insecure: a.insecure,
+            },
+          );
+        } catch {
+          // Best-effort per spec: the daemon may already be gone or the token
+          // already revoked — the local entry still comes off.
+          // eslint-disable-next-line no-console
+          console.error(
+            '(daemon unreachable or token already gone — local entry removed)',
+          );
+        }
+      }
+      await registry.remove(a.name!);
+      await tokens.delete(entry.tokenStorageKey);
+      await deleteTokenMeta(tokensDir, entry.tokenStorageKey);
+      // eslint-disable-next-line no-console
+      console.log(`removed ${a.name}`);
+      process.exit(0);
+    } else if (a.sub === 'set-default') {
+      try {
+        await registry.setDefault(a.name!);
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.error(`daemons set-default: ${(e as Error).message}`);
+        process.exit(1);
+        return;
+      }
+      // eslint-disable-next-line no-console
+      console.log(`default daemon: ${a.name}`);
+      process.exit(0);
+    } else if (a.sub === 'health') {
+      const entries = await registry.list();
+      let targets = entries;
+      if (!a.all && a.daemonName !== undefined) {
+        const one = entries.find((e) => e.name === a.daemonName);
+        if (!one) {
+          // eslint-disable-next-line no-console
+          console.error(`daemons health: unknown daemon "${a.daemonName}"`);
+          process.exit(2);
+          return;
+        }
+        targets = [one];
+      } else if (!a.all && !a.daemonName) {
+        const def = entries.find((e) => e.default) ?? entries[0];
+        if (!def) {
+          // eslint-disable-next-line no-console
+          console.error('daemons health: no daemons registered');
+          process.exit(1);
+          return;
+        }
+        targets = [def];
+      }
+      let failed = false;
+      for (const e of targets) {
+        const started = Date.now();
+        try {
+          const res = await daemonRequest(
+            { url: e.url },
+            {
+              method: 'GET',
+              path: '/rc/health',
+              timeoutMs: 5000,
+              insecure: a.insecure,
+            },
+          );
+          // eslint-disable-next-line no-console
+          console.log(
+            formatHealthLine(
+              e.name,
+              e.url,
+              'ok',
+              Date.now() - started,
+              `HTTP ${res.status}`,
+            ),
+          );
+        } catch (err) {
+          failed = true;
+          const detail =
+            err instanceof DaemonHttpError
+              ? `HTTP ${err.status}`
+              : err instanceof Error
+                ? err.message
+                : String(err);
+          // eslint-disable-next-line no-console
+          console.log(
+            formatHealthLine(
+              e.name,
+              e.url,
+              err instanceof DaemonHttpError ? 'error' : 'unreachable',
+              undefined,
+              detail,
+            ),
+          );
+        }
+      }
+      process.exit(failed ? 1 : 0);
+    } else {
+      // whoami
+      const entries = await registry.list();
+      const entry =
+        a.daemonName !== undefined
+          ? entries.find((e) => e.name === a.daemonName)
+          : (entries.find((e) => e.default) ?? entries[0]);
+      if (!entry) {
+        // eslint-disable-next-line no-console
+        console.error(
+          a.daemonName
+            ? `whoami: unknown daemon "${a.daemonName}"`
+            : 'whoami: no daemons registered — add one: qwen-rc daemons add <name> <url>',
+        );
+        process.exit(2);
+        return;
+      }
+      const token = await tokens.get(entry.tokenStorageKey);
+      if (!token) {
+        // eslint-disable-next-line no-console
+        console.error(
+          `whoami: no stored token for "${entry.name}" — pair first: qwen-rc daemons add ${entry.name} ${entry.url}`,
+        );
+        process.exit(1);
+        return;
+      }
+      const target = { url: entry.url.replace(/\/+$/, ''), token };
+      const meta = await readTokenMeta(tokensDir, entry.tokenStorageKey);
+      // 1. Share tokens answer /rc/share/whoami (SHARE scope). A 401 here
+      //    means the bearer itself was rejected (the token is dead) — a live
+      //    non-share token gets 403/404 and falls through to the owner probe.
+      try {
+        const res = await daemonRequest(target, {
+          method: 'GET',
+          path: '/rc/share/whoami',
+          insecure: a.insecure,
+        });
+        const body = res.json as Record<string, unknown>;
+        const label =
+          (typeof body['label'] === 'string' && body['label']) ||
+          (typeof body['name'] === 'string' && body['name']) ||
+          meta?.label ||
+          entry.name;
+        const scopes = Array.isArray(body['scopes'])
+          ? body['scopes'].map(String)
+          : (meta?.scopes ?? []);
+        const expiresAt =
+          typeof body['expiresAt'] === 'string' ? body['expiresAt'] : undefined;
+        // eslint-disable-next-line no-console
+        console.log(
+          formatWhoami({ kind: 'share', name: label, scopes, expiresAt }),
+        );
+        process.exit(0);
+        return;
+      } catch (err) {
+        if (err instanceof DaemonHttpError && err.status === 401) {
+          // eslint-disable-next-line no-console
+          console.log(formatWhoami({ kind: 'invalid', scopes: [] }));
+          process.exit(1);
+          return;
+        }
+        if (
+          !(
+            err instanceof DaemonHttpError &&
+            (err.status === 403 || err.status === 404)
+          )
+        ) {
+          throw err;
+        }
+      }
+      // 2. Non-share: owner-class tokens can list /rc/tokens (metadata).
+      if (meta) {
+        // eslint-disable-next-line no-console
+        console.log(
+          formatWhoami({
+            kind: 'owner',
+            name: meta.label || entry.name,
+            scopes: meta.scopes,
+          }),
+        );
+        process.exit(0);
+        return;
+      }
+      // 3. No recorded metadata: probe the owner listing to at least confirm
+      //    the token is live.
+      try {
+        await daemonRequest(target, {
+          method: 'GET',
+          path: '/rc/tokens',
+          insecure: a.insecure,
+        });
+        // eslint-disable-next-line no-console
+        console.log(
+          formatWhoami({ kind: 'owner', name: entry.name, scopes: ['owner'] }),
+        );
+      } catch (err) {
+        if (err instanceof DaemonHttpError && err.status === 401) {
+          // eslint-disable-next-line no-console
+          console.log(formatWhoami({ kind: 'invalid', scopes: [] }));
+          process.exit(1);
+          return;
+        }
+        throw err;
+      }
+      process.exit(0);
+    }
+  })().catch((err: unknown) => {
+    if (err instanceof DaemonUnreachableError) {
+      // eslint-disable-next-line no-console
+      console.error(`daemons: ${err.message}`);
+    } else {
+      // eslint-disable-next-line no-console
+      console.error(`daemons: ${(err as Error).message}`);
+    }
     process.exit(1);
   });
 } else if (
