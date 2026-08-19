@@ -1994,6 +1994,23 @@ describe('extension tests', () => {
       expect(fs.existsSync(destination)).toBe(false);
     });
 
+    it('treats a declaration as absent when uninstalling by id', async () => {
+      const identity = { id: 'aa'.repeat(32), name: 'declared-extension' };
+      const extensionStore = new ExtensionStore({
+        extensionsDir: userExtensionsDir,
+      });
+      const declared = await extensionStore.setDefaultActivations(
+        [identity],
+        'disabled',
+      );
+      const manager = createExtensionManager({ extensionStore });
+
+      const snapshot = await manager.uninstallExtensionById(identity.id, true);
+
+      expect(snapshot).toEqual(declared);
+      expect(snapshot.extensions[identity.id]?.declarationOnly).toBe(true);
+    });
+
     it('uninstalls by id using the loaded artifact directory', async () => {
       const original = createExtension({
         extensionsDir: userExtensionsDir,
@@ -2151,7 +2168,10 @@ describe('extension tests', () => {
         userExtensionsDir,
         'extension-enablement.json',
       );
-      fs.writeFileSync(enablementFile, JSON.stringify({ touched: true }));
+      fs.writeFileSync(
+        enablementFile,
+        JSON.stringify({ touched: { overrides: [] } }),
+      );
       const older = new Date(Date.now() - 1_000);
       fs.utimesSync(enablementFile, older, older);
       expect(await manager.refreshCacheIfSourcesChanged()).toBe(true);
@@ -2593,6 +2613,172 @@ describe('extension tests', () => {
   });
 
   describe('enableExtension / disableExtension', () => {
+    it('sets multiple default activations with one generation and refresh', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'first-default-extension',
+        version: '1.0.0',
+      });
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'second-default-extension',
+        version: '1.0.0',
+      });
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const extensions = manager
+        .getLoadedExtensions()
+        .filter((extension) => extension.name.endsWith('default-extension'));
+      expect(extensions).toHaveLength(2);
+      const initial = await manager.getExtensionStoreSnapshot();
+      const refreshTools = vi
+        .spyOn(manager, 'refreshTools')
+        .mockResolvedValue();
+
+      const snapshot = await manager.setExtensionDefaultActivations(
+        extensions.map(({ name }) => name),
+        'disabled',
+      );
+
+      expect(snapshot.generation).toBe(initial.generation + 1);
+      expect(refreshTools).toHaveBeenCalledOnce();
+      for (const extension of extensions) {
+        expect(snapshot.extensions[extension.id]?.defaultActivation).toBe(
+          'disabled',
+        );
+      }
+      expect(extensions.every((extension) => !extension.isActive)).toBe(true);
+    });
+
+    it('clears multiple workspace activations with one generation and refresh', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'first-workspace-extension',
+        version: '1.0.0',
+      });
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'second-workspace-extension',
+        version: '1.0.0',
+      });
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const extensions = manager
+        .getLoadedExtensions()
+        .filter((extension) => extension.name.endsWith('workspace-extension'));
+      expect(extensions).toHaveLength(2);
+      await manager.setExtensionWorkspaceActivations(
+        extensions.map(({ name }) => name),
+        tempWorkspaceDir,
+        'disabled',
+      );
+      expect(extensions.every((extension) => !extension.isActive)).toBe(true);
+      const initial = await manager.getExtensionStoreSnapshot();
+      const refreshTools = vi
+        .spyOn(manager, 'refreshTools')
+        .mockResolvedValue();
+
+      const snapshot = await manager.setExtensionWorkspaceActivations(
+        extensions.map(({ name }) => name),
+        tempWorkspaceDir,
+        'inherit',
+      );
+
+      expect(snapshot.generation).toBe(initial.generation + 1);
+      expect(refreshTools).toHaveBeenCalledOnce();
+      for (const extension of extensions) {
+        expect(
+          manager.getExtensionActivationFromSnapshot(
+            extension.id,
+            snapshot,
+            tempWorkspaceDir,
+          ),
+        ).toMatchObject({ workspace: 'inherit', effective: 'enabled' });
+        expect(snapshot.extensions[extension.id]?.workspaceOverrides).toEqual(
+          {},
+        );
+      }
+      expect(extensions.every((extension) => extension.isActive)).toBe(true);
+    });
+
+    it('treats inherit for an unknown extension as a no-op', async () => {
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const initial = await manager.getExtensionStoreSnapshot();
+      const refreshTools = vi
+        .spyOn(manager, 'refreshTools')
+        .mockResolvedValue();
+      const onCommitted = vi.fn();
+
+      const snapshot = await manager.setExtensionWorkspaceActivations(
+        ['future-extension'],
+        tempWorkspaceDir,
+        'inherit',
+        onCommitted,
+      );
+
+      expect(snapshot.updated).toBe(false);
+      expect(snapshot.generation).toBe(initial.generation);
+      expect(snapshot.extensions).toEqual(initial.extensions);
+      expect(onCommitted).not.toHaveBeenCalled();
+      expect(refreshTools).not.toHaveBeenCalled();
+      expect(
+        manager.getExtensionActivationForNameFromSnapshot(
+          'future-extension',
+          snapshot,
+          tempWorkspaceDir,
+        ),
+      ).toMatchObject({
+        default: 'enabled',
+        workspace: 'inherit',
+        effective: 'enabled',
+        source: 'default',
+      });
+    });
+
+    it('updates loaded and declared extensions with one generation and refresh', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'available-extension',
+        version: '1.0.0',
+      });
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const loaded = manager
+        .getLoadedExtensions()
+        .find((extension) => extension.name === 'available-extension')!;
+      const declaredName = 'future-extension';
+      const declaredId = hashValue(declaredName);
+      const initial = await manager.getExtensionStoreSnapshot();
+      const refreshTools = vi
+        .spyOn(manager, 'refreshTools')
+        .mockResolvedValue();
+      const onCommitted = vi.fn();
+
+      const snapshot = await manager.setExtensionDefaultActivations(
+        [loaded.name, declaredName],
+        'disabled',
+        onCommitted,
+      );
+
+      expect(snapshot.generation).toBe(initial.generation + 1);
+      expect(snapshot.extensions[declaredId]).toMatchObject({
+        name: declaredName,
+        declarationOnly: true,
+        defaultActivation: 'disabled',
+      });
+      expect(snapshot.extensions[loaded.id]?.defaultActivation).toBe(
+        'disabled',
+      );
+      expect(loaded.isActive).toBe(false);
+      expect(onCommitted).toHaveBeenCalledOnce();
+      expect(onCommitted).toHaveBeenCalledWith(snapshot.generation);
+      expect(refreshTools).toHaveBeenCalledOnce();
+      await expect(
+        manager.setExtensionDefaultActivation(declaredId, 'enabled'),
+      ).rejects.toThrow(`Extension with id ${declaredId} does not exist.`);
+    });
+
     it('applies V2 default and workspace activation to loaded extensions', async () => {
       createExtension({
         extensionsDir: userExtensionsDir,

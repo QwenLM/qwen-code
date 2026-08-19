@@ -104,6 +104,17 @@ export type ExtensionMutationEvent = {
   updated?: boolean;
   reason?: string;
   states?: Record<string, string>;
+  results?: Array<
+    | {
+        name: string;
+        defaultActivation: 'enabled' | 'disabled';
+      }
+    | {
+        name: string;
+        workspaceActivation: 'enabled' | 'disabled' | null;
+        effectiveActivation: 'enabled' | 'disabled';
+      }
+  >;
 };
 
 export type ExtensionPendingInteraction =
