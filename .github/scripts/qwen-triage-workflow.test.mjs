@@ -1014,8 +1014,13 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     // executes, so it is a changed test file exactly like M.
     assert.match(
       recordStep.run,
-      /^\s*git -c core\.quotePath=false diff -z --name-only --diff-filter=ACMRT 'HEAD\^1' HEAD \\\n\s*> "\$GATE_HOME\/files-all"$/m,
+      /^\s*git -c core\.quotePath=false diff -z --name-only --diff-filter=ACMRT "\$BASE_OID" HEAD \\\n\s*> "\$GATE_HOME\/files-all"$/m,
       'the NUL diff must flow straight into its file — $( ) strips NUL bytes, a pipeline swallows the exit status',
+    );
+    assert.match(
+      recordStep.run,
+      /^\s*BASE_OID="\$\(cat "\$\{RUNNER_TEMP:\?\}\/verify-base-oid"\)"$/m,
+      'the record step must diff against the base OID captured while .git was root-owned, not re-resolve HEAD^1',
     );
     assert.ok(
       recordStep.run.includes(
