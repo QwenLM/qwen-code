@@ -1699,3 +1699,63 @@ describe('external links in the desktop shell', () => {
     c.remove();
   });
 });
+
+describe('Markdown CJK emphasis', () => {
+  // CommonMark flanking rules reject emphasis delimiters adjacent to CJK
+  // punctuation (commonmark/commonmark-spec#650); the registered CJK-friendly
+  // remark plugin relaxes that so assistant answers can bold quoted terms.
+  function renderMd(content: string): HTMLDivElement {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        createElement(
+          I18nProvider,
+          { language: 'en' },
+          createElement(Markdown, { content }),
+        ),
+      );
+    });
+    (container as HTMLDivElement & { __unmount: () => void }).__unmount = () =>
+      act(() => root.unmount());
+    return container as HTMLDivElement;
+  }
+
+  function cleanup(c: HTMLDivElement) {
+    (c as HTMLDivElement & { __unmount: () => void }).__unmount();
+    c.remove();
+  }
+
+  it('bolds emphasis starting with ASCII quotes after a CJK character', () => {
+    const c = renderMd('这是**"示例"文本**。');
+    const strong = c.querySelector('strong');
+    expect(strong?.textContent).toBe('"示例"文本');
+    expect(c.textContent).not.toContain('**');
+    cleanup(c);
+  });
+
+  it('bolds emphasis starting with fullwidth quotes after a CJK character', () => {
+    const c = renderMd('这是**“示例”文本**。');
+    const strong = c.querySelector('strong');
+    expect(strong?.textContent).toBe('“示例”文本');
+    expect(c.textContent).not.toContain('**');
+    cleanup(c);
+  });
+
+  it('bolds emphasis closed by a CJK full stop', () => {
+    const c = renderMd('**示例句子。**后续文本。');
+    const strong = c.querySelector('strong');
+    expect(strong?.textContent).toBe('示例句子。');
+    expect(c.textContent).not.toContain('**');
+    cleanup(c);
+  });
+
+  it('keeps plain English emphasis unchanged', () => {
+    const c = renderMd('This is **important**.');
+    const strong = c.querySelector('strong');
+    expect(strong?.textContent).toBe('important');
+    expect(c.textContent).not.toContain('**');
+    cleanup(c);
+  });
+});
