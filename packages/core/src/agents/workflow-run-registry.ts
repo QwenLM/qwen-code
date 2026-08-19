@@ -1046,6 +1046,7 @@ function restrictWorkflowConfirmationDetails(
         hideModify: true,
         skipIdeDiff: true,
         warnings: details.warnings ? [...details.warnings] : undefined,
+        hookAskReason: details.hookAskReason,
       };
     case 'exec':
       return {
@@ -1055,6 +1056,7 @@ function restrictWorkflowConfirmationDetails(
         rootCommand: details.rootCommand,
         hideAlwaysAllow: true,
         warnings: details.warnings ? [...details.warnings] : undefined,
+        hookAskReason: details.hookAskReason,
       };
     case 'mcp':
       return {
