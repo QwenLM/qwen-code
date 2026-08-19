@@ -322,6 +322,11 @@ describe('qwen autofix fork bridge', () => {
     `github.event.pull_request.${field}`,
     `github.event.pull_request['${field}']`,
     `github.event.pull_request["${field}"]`,
+    // Actions tolerates whitespace inside the index brackets, and so does
+    // `asDotAccess`. Without a spelling that carries it, the helper's two
+    // `\s*` are unpinned: deleting them leaves this file green while a gate
+    // written in the spaced form reaches the same absent field again.
+    `github.event.pull_request[ '${field}' ]`,
     `github.event['pull_request'].${field}`,
     `github.event['pull_request']['${field}']`,
   ];
@@ -348,7 +353,7 @@ describe('qwen autofix fork bridge', () => {
   });
 
   it('sees a full-object field through the index operator', () => {
-    // The incident field, in the four non-dot spellings. Each is a legal
+    // The incident field, in the five non-dot spellings. Each is a legal
     // expression resolving to the same absent property, so a guard blind to
     // any of them lets the always-false gate return with this file green.
     for (const spelling of referenceSpellings('maintainer_can_modify')) {
