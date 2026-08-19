@@ -207,6 +207,22 @@ const allowedProcessEnvAccesses = normalizeAllowances([
       },
     },
   ],
+  [
+    'packages/cli/src/serve/workspace-providers-status.ts',
+    {
+      reason:
+        'Whether the daemon runs under a test runner is process-scoped, and it ' +
+        'gates the model metadata catalog fetch exactly as the CLI path does ' +
+        '(packages/cli/src/config/config.ts). Reading the workspace effective ' +
+        'env here would let a project .env file with NODE_ENV=test disable the ' +
+        'catalog for that workspace while live sessions keep it.',
+      accesses: {
+        'key:NODE_ENV': 1,
+        'key:VITEST': 1,
+        'key:VITEST_WORKER_ID': 1,
+      },
+    },
+  ],
 ]);
 
 function listTypeScriptFiles(dir: string): string[] {
