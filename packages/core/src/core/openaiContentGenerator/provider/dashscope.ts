@@ -28,12 +28,11 @@ import { DefaultOpenAICompatibleProvider } from './default.js';
 const debugLogger = createDebugLogger('DashScopeOpenAICompatibleProvider');
 
 /**
- * Tiers the qwen3.8-max family accepts in `reasoning_effort`. DashScope's
- * ladder stops at `xhigh`; `max` exists only as a DeepSeek extension (see
- * the Anthropic and DeepSeek providers) and is rejected here with a 400
- * that then repeats on every later request in the session. Declaring the
- * supported subset lets `clampReasoningEffort` cap the tier the same way
- * the Anthropic generator caps tiers its model lacks.
+ * Tiers the qwen3.8-max family accepts in `reasoning_effort`. This family's
+ * ladder stops at `xhigh`, and a `max` above it is rejected with a 400 that
+ * then repeats on every later request in the session. Declaring the supported
+ * subset lets `clampReasoningEffort` cap the tier the same way the Anthropic
+ * generator caps tiers its model lacks.
  */
 const DASHSCOPE_TIERED_EFFORTS: readonly ReasoningEffort[] = [
   'low',
@@ -175,8 +174,6 @@ export const DASHSCOPE_REGIONAL_HOSTS: readonly string[] = [
 ];
 
 export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatibleProvider {
-  private effortClampWarned = false;
-
   constructor(
     contentGeneratorConfig: ContentGeneratorConfig,
     cliConfig: Config,
@@ -553,9 +550,9 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
 
   /**
    * Cap a configured tier at what the qwen3.8-max family actually accepts.
-   * `max` is a DeepSeek extension DashScope rejects, and the rejection is a
-   * 400 on every subsequent request rather than a one-off, so the tier is
-   * clamped to the strongest supported tier and reported once. Only the
+   * This family does not take `max`, and the rejection is a 400 on every
+   * subsequent request rather than a one-off, so the tier is clamped to the
+   * strongest supported tier and reported once. Only the
    * configured `reasoning.effort` passes through here: an explicit
    * `extra_body` / `samplingParams` `reasoning_effort` is a documented
    * verbatim override and is merged after this, so it still ships unchanged.

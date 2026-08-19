@@ -7,6 +7,8 @@
 import type OpenAI from 'openai';
 import type { Config } from '../../../config/config.js';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
+import type { ReasoningEffort } from '../../reasoning-effort.js';
+import { REASONING_EFFORT_TIERS } from '../../reasoning-effort.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
 import type { GenerateContentConfig } from '@google/genai';
 import { ensureReasoningContentOnAssistantMessage } from './utils.js';
@@ -80,6 +82,18 @@ export class DeepSeekOpenAICompatibleProvider extends DefaultOpenAICompatiblePro
    */
   static isDeepSeekProvider = isDeepSeekProvider;
   static isDeepSeekHostname = isDeepSeekHostname;
+
+  /**
+   * DeepSeek's ladder tops out at `max`, so the generic ceiling must not apply
+   * here. Deliberately not hostname-gated, unlike `translateReasoningEffort`
+   * below: which tiers a model accepts is a property of the model, while the
+   * flat-vs-nested wire shape is a property of the endpoint. A self-hosted
+   * deepseek-* model reached through the model-name fallback still understands
+   * `max`, so capping it there would silently downgrade a valid request.
+   */
+  protected override get supportedReasoningEfforts(): readonly ReasoningEffort[] {
+    return REASONING_EFFORT_TIERS;
+  }
 
   /**
    * DeepSeek's API requires message content to be a plain string, not an

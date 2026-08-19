@@ -6,6 +6,8 @@
 
 import type OpenAI from 'openai';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
+import type { ReasoningEffort } from '../../reasoning-effort.js';
+import { REASONING_EFFORT_TIERS } from '../../reasoning-effort.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
 import { createDebugLogger } from '../../../utils/debugLogger.js';
 
@@ -61,6 +63,17 @@ export class ZaiOpenAICompatibleProvider extends DefaultOpenAICompatibleProvider
 
   // Latch so the skipped-flatten warning fires once per provider lifetime.
   private nonZaiHostnameFlattenWarned = false;
+
+  /**
+   * GLM-5.2+ accepts `max`, so the generic ceiling must not apply here.
+   * Deliberately not hostname-gated, unlike the flatten below: which tiers a
+   * model accepts is a property of the model, while the flat-vs-nested wire
+   * shape is a property of the endpoint. A self-hosted glm-* model reached
+   * through the model-name fallback still understands `max`.
+   */
+  protected override get supportedReasoningEfforts(): readonly ReasoningEffort[] {
+    return REASONING_EFFORT_TIERS;
+  }
 
   override buildRequest(
     request: OpenAI.Chat.ChatCompletionCreateParams,

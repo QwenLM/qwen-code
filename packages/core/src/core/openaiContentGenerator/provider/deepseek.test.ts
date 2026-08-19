@@ -87,6 +87,28 @@ describe('DeepSeekOpenAICompatibleProvider', () => {
   });
 
   describe('buildRequest', () => {
+    it('keeps the max tier: the generic xhigh ceiling must not apply here', () => {
+      const generator = new DeepSeekOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          baseUrl: 'https://api.deepseek.com/v1',
+          model: 'deepseek-reasoner',
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+
+      const result = generator.buildRequest(
+        {
+          model: 'deepseek-reasoner',
+          messages: [{ role: 'user', content: 'hi' }],
+          reasoning: { effort: 'max' },
+        } as unknown as Parameters<typeof generator.buildRequest>[0],
+        'prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['reasoning_effort']).toBe('max');
+    });
+
     const userPromptId = 'prompt-123';
 
     it('converts array content into a string', () => {

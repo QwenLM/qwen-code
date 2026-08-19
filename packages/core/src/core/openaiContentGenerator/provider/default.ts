@@ -12,6 +12,30 @@ import {
   defaultOutputCeiling,
   parsePositiveIntegerEnvValue,
 } from '../../tokenLimits.js';
+import type { ReasoningEffort } from '../../reasoning-effort.js';
+import {
+  REASONING_EFFORT_TIERS,
+  clampReasoningEffort,
+} from '../../reasoning-effort.js';
+import { createDebugLogger } from '../../../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('DefaultOpenAICompatibleProvider');
+
+/**
+ * Tiers a generic OpenAI-compatible endpoint accepts. `max` is a vendor
+ * extension rather than part of the shared contract: DeepSeek, GLM-5.2+ and
+ * newer Anthropic models take it natively, but a generic endpoint's ladder
+ * stops at `xhigh` and 400s on anything above it. Matches the OpenAI column
+ * of the effort ladder in
+ * docs/design/2026-06-30-unified-reasoning-effort-cli.md. Subclasses whose
+ * endpoint does accept `max` override `supportedReasoningEfforts`.
+ */
+const OPENAI_COMPATIBLE_EFFORTS: readonly ReasoningEffort[] = [
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+];
 
 type AssistantMessageWithReasoningFields =
   OpenAI.Chat.ChatCompletionAssistantMessageParam & {
@@ -53,6 +77,12 @@ export class DefaultOpenAICompatibleProvider
 {
   protected contentGeneratorConfig: ContentGeneratorConfig;
   protected cliConfig: Config;
+  /**
+   * Latch so an effort-clamp warning fires once per provider lifetime. Shared
+   * with subclasses that clamp on their own wire shape (see DashScope) so one
+   * provider instance never repeats the notice.
+   */
+  protected effortClampWarned = false;
 
   constructor(
     contentGeneratorConfig: ContentGeneratorConfig,
@@ -100,6 +130,52 @@ export class DefaultOpenAICompatibleProvider
     });
   }
 
+  /**
+   * Effort tiers this endpoint accepts. Override in a subclass whose endpoint
+   * takes `max` natively; the clamp reads it through `this`, so a subclass
+   * value applies even on the `super.buildRequest` path.
+   */
+  protected get supportedReasoningEfforts(): readonly ReasoningEffort[] {
+    return OPENAI_COMPATIBLE_EFFORTS;
+  }
+
+  /**
+   * Cap the pipeline-injected `reasoning.effort` at what this endpoint accepts.
+   * The tier is configured once (`/effort`) and persisted, so an unaccepted
+   * value is not a one-off rejection: it 400s every later request in the
+   * session too. `extra_body` merges after this, so an explicit override still
+   * ships verbatim.
+   */
+  protected clampConfiguredReasoningEffort<T extends object>(request: T): T {
+    const loose = request as unknown as Record<string, unknown>;
+    const reasoning = loose['reasoning'] as { effort?: unknown } | undefined;
+    const effort = reasoning?.effort;
+    if (
+      typeof effort !== 'string' ||
+      !REASONING_EFFORT_TIERS.includes(effort as ReasoningEffort)
+    ) {
+      return request;
+    }
+    const clamped = clampReasoningEffort(
+      effort as ReasoningEffort,
+      this.supportedReasoningEfforts,
+    );
+    if (clamped === effort) {
+      return request;
+    }
+    if (!this.effortClampWarned) {
+      debugLogger.warn(
+        `reasoning.effort='${effort}' is not accepted by this ` +
+          `OpenAI-compatible endpoint; using '${clamped}'.`,
+      );
+      this.effortClampWarned = true;
+    }
+    return {
+      ...loose,
+      reasoning: { ...reasoning, effort: clamped },
+    } as unknown as T;
+  }
+
   buildRequest(
     request: OpenAI.Chat.ChatCompletionCreateParams,
     _userPromptId: string,
@@ -108,7 +184,9 @@ export class DefaultOpenAICompatibleProvider
 
     // Apply output token limits to ensure max_tokens is set appropriately
     // This prevents occupying too much context window with output reservation
-    const requestWithTokenLimits = this.applyOutputTokenLimit(request);
+    const requestWithTokenLimits = this.clampConfiguredReasoningEffort(
+      this.applyOutputTokenLimit(request),
+    );
     const messages = shouldMirrorReasoningContentForQwen3(request.model)
       ? requestWithTokenLimits.messages.map(mirrorReasoningContentToReasoning)
       : requestWithTokenLimits.messages;

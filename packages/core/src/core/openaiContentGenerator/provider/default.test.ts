@@ -449,6 +449,72 @@ describe('DefaultOpenAICompatibleProvider', () => {
       expect(result).not.toBe(originalRequest);
     });
 
+    it('clamps a configured max effort to xhigh for a generic endpoint', () => {
+      const originalRequest = {
+        model: 'gpt-5.4',
+        messages: [{ role: 'user', content: 'Hello' }],
+        reasoning: { effort: 'max' },
+      } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+
+      const result = provider.buildRequest(
+        originalRequest,
+        'prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['reasoning']).toEqual({ effort: 'xhigh' });
+    });
+
+    it('leaves an accepted effort tier untouched', () => {
+      const originalRequest = {
+        model: 'gpt-5.4',
+        messages: [{ role: 'user', content: 'Hello' }],
+        reasoning: { effort: 'xhigh' },
+      } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+
+      const result = provider.buildRequest(
+        originalRequest,
+        'prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['reasoning']).toEqual({ effort: 'xhigh' });
+    });
+
+    it('keeps an unrecognized effort string as-is rather than rewriting it', () => {
+      const originalRequest = {
+        model: 'gpt-5.4',
+        messages: [{ role: 'user', content: 'Hello' }],
+        reasoning: { effort: 'ludicrous' },
+      } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+
+      const result = provider.buildRequest(
+        originalRequest,
+        'prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['reasoning']).toEqual({ effort: 'ludicrous' });
+    });
+
+    it('lets an extra_body reasoning override ship verbatim', () => {
+      const providerWithOverride = new DefaultOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          extra_body: { reasoning: { effort: 'max' } },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+
+      const result = providerWithOverride.buildRequest(
+        {
+          model: 'gpt-5.4',
+          messages: [{ role: 'user', content: 'Hello' }],
+          reasoning: { effort: 'max' },
+        } as unknown as OpenAI.Chat.ChatCompletionCreateParams,
+        'prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['reasoning']).toEqual({ effort: 'max' });
+    });
+
     it('should merge extra_body into the request', () => {
       const providerWithExtraBody = new DefaultOpenAICompatibleProvider(
         {
