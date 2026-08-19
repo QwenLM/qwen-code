@@ -490,6 +490,65 @@ describe('splitCompoundCommand', () => {
     ]);
   });
 
+  it('never swallows executed lines behind a phantom heredoc', async () => {
+    // arithmetic << is a shift operator, not a heredoc opener: every line
+    // stays visible to rule evaluation.
+    expect(splitCompoundCommand('echo $((1 << 20))\nrm -rf /\n20')).toEqual([
+      'echo $((1 << 20))',
+      'rm -rf /',
+      '20',
+    ]);
+  });
+
+  it('ignores a heredoc-looking token inside a comment', async () => {
+    expect(
+      splitCompoundCommand('echo hi # <<EOF\ntouch /tmp/pwned\nEOF'),
+    ).toEqual(['echo hi # <<EOF', 'touch /tmp/pwned', 'EOF']);
+  });
+
+  it('ignores a heredoc-looking token inside an unclosed quote', async () => {
+    expect(
+      splitCompoundCommand('echo "start\n<<EOF\nrm -rf /\nEOF\nend"'),
+    ).toEqual(['echo "start\n<<EOF\nrm -rf /\nEOF\nend"']);
+  });
+
+  it('leaves a backslash-continued opener visible rather than guessing the body', async () => {
+    expect(
+      splitCompoundCommand('cat <<EOF \\\n&& rm -rf /\nbody\nEOF'),
+    ).toEqual(['cat <<EOF \\', 'rm -rf /', 'body', 'EOF']);
+  });
+
+  it('reads a delimiter with word characters beyond the old charset', async () => {
+    expect(splitCompoundCommand('cat <<A,B\nbody\nA,B')).toEqual(['cat <<A,B']);
+  });
+
+  it('keeps a shell-fed heredoc body visible to deny rules', async () => {
+    // bash <<EOF executes its body as shell; stripping it would hide the rm
+    // from Bash(rm *) denies. Non-shell interpreters keep the strip.
+    expect(splitCompoundCommand('bash <<EOF\nrm -rf /\nEOF')).toEqual([
+      'bash <<EOF',
+      'rm -rf /',
+      'EOF',
+    ]);
+    expect(splitCompoundCommand('sudo bash <<EOF\nrm -rf /\nEOF')).toEqual([
+      'sudo bash <<EOF',
+      'rm -rf /',
+      'EOF',
+    ]);
+  });
+
+  it('drains concurrent heredocs in order', async () => {
+    expect(
+      splitCompoundCommand('cat <<A && cat <<B\nfirst\nA\nsecond\nB'),
+    ).toEqual(['cat <<A', 'cat <<B']);
+  });
+
+  it('strips the body of a double-quoted delimiter', async () => {
+    expect(splitCompoundCommand('cat <<"TAG"\nbody\nTAG')).toEqual([
+      'cat <<"TAG"',
+    ]);
+  });
+
   it('handles mixed operators', async () => {
     expect(splitCompoundCommand('a && b | c; d')).toEqual(['a', 'b', 'c', 'd']);
   });
@@ -1800,6 +1859,34 @@ describe('PermissionManager', () => {
           command: 'npm install',
         }),
       ).toBe('ask');
+    });
+
+    it('deny rules still see lines after an arithmetic shift expression', async () => {
+      // The phantom-heredoc witness from review: $((1 << 20)) is not a heredoc
+      // opener, so the rm line must stay a segment and hit the deny rule.
+      const pm2 = new PermissionManager(
+        makeConfig({ permissionsDeny: ['Bash(rm *)'] }),
+      );
+      pm2.initialize();
+      expect(
+        await pm2.evaluate({
+          toolName: 'run_shell_command',
+          command: 'echo $((1 << 20))\nrm -rf /important\n20',
+        }),
+      ).toBe('deny');
+    });
+
+    it('deny rules see the body of a shell-fed heredoc', async () => {
+      const pm2 = new PermissionManager(
+        makeConfig({ permissionsDeny: ['Bash(rm *)'] }),
+      );
+      pm2.initialize();
+      expect(
+        await pm2.evaluate({
+          toolName: 'run_shell_command',
+          command: 'bash <<EOF\nrm -rf /important\nEOF',
+        }),
+      ).toBe('deny');
     });
 
     it('matches an allow prefix rule against a whole heredoc command', async () => {

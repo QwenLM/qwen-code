@@ -675,15 +675,75 @@ export function buildHumanReadableRuleLabel(rules: string[]): string {
 const SHELL_OPERATORS = ['&&', '||', ';;', '|&', '|', ';', '&', '\n'];
 
 /**
- * Collect the heredoc delimiters opened on one line (`<<EOF`, `<<-'PY'`,
- * `<<"TAG"` all count; `<<<` here-strings do not). Quoted regions are ignored
- * so `echo "<<EOF"` does not start one.
+ * Scan one line for heredoc openers (`<<EOF`, `<<-'PY'`, `<<"TAG"` all count;
+ * `<<<` here-strings do not). Quote state is threaded across lines because an
+ * unclosed string makes the next physical line string content, not a new
+ * command line, so a `<<` seen there opens nothing.
+ *
+ * Soundness contract: anything this scanner cannot prove is left visible
+ * (reported via `unsafe`), never swallowed. A `#` outside quotes starts a
+ * comment and ends scanning; `<<` inside `$(( ))` / `(( ))` is a shift
+ * operator, not a heredoc; a trailing unquoted backslash means the logical
+ * line continues and the body boundary is not provable; a heredoc feeding a
+ * shell interpreter (its body IS executed shell) is reported but never
+ * stripped by the caller.
  */
-function getHeredocDelimiters(line: string): string[] {
-  const delimiters: string[] = [];
-  let inSingle = false;
-  let inDouble = false;
+interface HeredocScan {
+  delimiters: Array<{ delim: string; stripTabs: boolean }>;
+  unsafe: boolean;
+  inSingle: boolean;
+  inDouble: boolean;
+}
+
+const HEREDOC_SHELL_INTERPRETERS = new Set([
+  'sh',
+  'bash',
+  'zsh',
+  'dash',
+  'ash',
+  'ksh',
+]);
+const HEREDOC_WRAPPER_WORDS = new Set([
+  'env',
+  'command',
+  'exec',
+  'builtin',
+  'noglob',
+  'time',
+  'nohup',
+  'sudo',
+  'doas',
+]);
+
+function heredocReceiverIsShell(line: string): boolean {
+  // Peel assignment prefixes (FOO=1) and wrapper words (sudo, env A=B, ...) to
+  // the real command word; then compare its basename.
+  const words = line.split(/\s+/).filter(Boolean);
+  let i = 0;
+  while (i < words.length) {
+    const w = words[i]!;
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w)) {
+      i++;
+      continue;
+    }
+    const base = w.split('/').pop()!;
+    if (HEREDOC_WRAPPER_WORDS.has(base)) {
+      i++;
+      continue;
+    }
+    return HEREDOC_SHELL_INTERPRETERS.has(base);
+  }
+  return false;
+}
+
+function getHeredocDelimiters(
+  line: string,
+  state: { inSingle: boolean; inDouble: boolean },
+): HeredocScan {
+  const delimiters: Array<{ delim: string; stripTabs: boolean }> = [];
+  let { inSingle, inDouble } = state;
   let escaped = false;
+  let arithmeticDepth = 0;
 
   for (let i = 0; i < line.length; i++) {
     const ch = line[i]!;
@@ -696,24 +756,52 @@ function getHeredocDelimiters(line: string): string[] {
       escaped = true;
       continue;
     }
-    if (ch === "'" && !inDouble) {
-      inSingle = !inSingle;
+    if (inSingle) {
+      if (ch === "'") inSingle = false;
       continue;
     }
-    if (ch === '"' && !inSingle) {
-      inDouble = !inDouble;
+    if (inDouble) {
+      if (ch === '"') inDouble = false;
       continue;
     }
-    if (inSingle || inDouble || ch !== '<' || line[i + 1] !== '<') {
+    if (ch === "'") {
+      inSingle = true;
+      continue;
+    }
+    if (ch === '"') {
+      inDouble = true;
+      continue;
+    }
+    if (ch === '#') {
+      break; // comment to end of line
+    }
+    if (ch === '(' && line[i + 1] === '(') {
+      arithmeticDepth++;
+      i++;
+      continue;
+    }
+    if (arithmeticDepth > 0 && ch === ')' && line[i + 1] === ')') {
+      arithmeticDepth--;
+      i++;
+      continue;
+    }
+    if (arithmeticDepth > 0) {
+      continue; // `<<` in arithmetic is a shift, not a heredoc
+    }
+    if (ch !== '<' || line[i + 1] !== '<') {
       continue;
     }
     if (line[i + 2] === '<') {
-      i += 2;
+      i += 2; // here-string
       continue;
     }
 
     let wordStart = i + 2;
-    if (line[wordStart] === '-') wordStart++;
+    let stripTabs = false;
+    if (line[wordStart] === '-') {
+      stripTabs = true;
+      wordStart++;
+    }
     while (line[wordStart] === ' ' || line[wordStart] === '\t') {
       wordStart++;
     }
@@ -722,21 +810,36 @@ function getHeredocDelimiters(line: string): string[] {
     const quoted = quote === "'" || quote === '"';
     if (quoted) wordStart++;
 
+    // bash reads the delimiter as a word: unquoted, it runs to the next shell
+    // metacharacter; quoted, to the closing quote. Anything else (or nothing)
+    // is not a heredoc we can prove.
     let wordEnd = wordStart;
     while (wordEnd < line.length) {
       const wordCh = line[wordEnd]!;
-      if (quoted ? wordCh === quote : !/[A-Za-z0-9_./-]/.test(wordCh)) {
+      if (quoted ? wordCh === quote : /[\s;&|<>()$`'"\\]/.test(wordCh)) {
         break;
       }
       wordEnd++;
     }
+    if (quoted && line[wordEnd] !== quote) {
+      return { delimiters, unsafe: true, inSingle, inDouble };
+    }
 
     if (wordEnd > wordStart) {
-      delimiters.push(line.slice(wordStart, wordEnd));
+      delimiters.push({ delim: line.slice(wordStart, wordEnd), stripTabs });
+      i = wordEnd;
+    } else {
+      i += 1; // bare `<<` with no word: skip the operator, open nothing
     }
-    i = wordEnd;
   }
-  return delimiters;
+
+  // A trailing unquoted backslash continues the logical line: the heredoc body
+  // starts only after the continuation completes, which this scanner cannot
+  // prove. An unclosed quote puts the next line inside a string. Both bail.
+  const trailingContinuation =
+    !inSingle && !inDouble && /\\$/.test(line.replace(/\\\\$/, ''));
+  const unsafe = trailingContinuation || inSingle || inDouble;
+  return { delimiters, unsafe, inSingle, inDouble };
 }
 
 /**
@@ -744,22 +847,39 @@ function getHeredocDelimiters(line: string): string[] {
  * Heredoc bodies are stdin, not commands: anything between the opening line
  * and the delimiter line must survive splitting untouched instead of being
  * evaluated as shell segments of its own.
+ *
+ * Two visibility rules keep deny/ask rules able to see everything bash would
+ * execute: a heredoc feeding a shell interpreter (bash/sh/...) is never
+ * stripped because its body is real shell, and any opening line the scanner
+ * cannot fully prove (comments, arithmetic, continuations, multi-line quotes)
+ * leaves the whole construct visible.
  */
 export function stripHeredocBodies(command: string): string {
   const lines = command.split('\n');
   const kept: string[] = [];
-  const pendingDelimiters: string[] = [];
+  const pending: Array<{ delim: string; stripTabs: boolean }> = [];
+  let quoteState = { inSingle: false, inDouble: false };
 
   for (const line of lines) {
-    if (pendingDelimiters.length > 0) {
-      if (line.trim() === pendingDelimiters[0]) {
-        pendingDelimiters.shift();
-      }
+    if (pending.length > 0) {
+      const p = pending[0]!;
+      const match = p.stripTabs
+        ? line.replace(/^\t+/, '') === p.delim // bash strips leading TABS only
+        : line === p.delim; // plain << wants an exact line
+      if (match) pending.shift();
       continue;
     }
 
     kept.push(line);
-    pendingDelimiters.push(...getHeredocDelimiters(line));
+    const scan = getHeredocDelimiters(line, quoteState);
+    quoteState = { inSingle: scan.inSingle, inDouble: scan.inDouble };
+    if (scan.unsafe || scan.delimiters.length === 0) {
+      continue;
+    }
+    if (heredocReceiverIsShell(line)) {
+      continue; // the body is shell code; deny/ask rules must keep seeing it
+    }
+    pending.push(...scan.delimiters);
   }
 
   return kept.join('\n');
@@ -832,7 +952,8 @@ export interface CompoundCommandSegment {
  * the operator that terminated each one.
  *
  * See {@link splitCompoundCommand} for the string-only form and for examples;
- * this is the same split, and that function is a projection of this one.
+ * that function strips heredoc bodies first, so the two are the same split
+ * only for heredoc-free input.
  */
 export function splitCompoundCommandSegments(
   command: string,
