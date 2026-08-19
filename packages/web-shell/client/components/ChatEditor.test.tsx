@@ -1657,6 +1657,21 @@ describe('ChatEditor file upload gating', () => {
     expect(workspace.client.uploadWorkspaceFile).not.toHaveBeenCalled();
   });
 
+  it('keeps the first drop while its choice dialog is open', () => {
+    const workspace = makeWorkspace(['workspace_file_upload']);
+    uploadWorkspaceState.current = workspace;
+    const container = renderChatEditor({});
+    const editor = container.querySelector('[data-web-shell-composer-editor]')!;
+    const firstFiles = [new File(['a'], 'first.txt')];
+
+    dispatchDrag(editor, 'drop', ['Files'], firstFiles);
+    dispatchDrag(editor, 'drop', ['Files'], [new File(['b'], 'second.txt')]);
+    chooseDropAction('reference');
+
+    expect(composerCoreState.ingestFiles).toHaveBeenCalledTimes(1);
+    expect(composerCoreState.ingestFiles).toHaveBeenCalledWith(firstFiles);
+  });
+
   it('cancels a dropped-file choice without ingesting or uploading', () => {
     const workspace = makeWorkspace(['workspace_file_upload']);
     uploadWorkspaceState.current = workspace;

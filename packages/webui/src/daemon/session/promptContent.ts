@@ -72,7 +72,9 @@ export function toDaemonPromptContent(
 
   for (const file of files) {
     if (file.text === undefined) {
-      throw new TypeError('File attachment content is unavailable');
+      throw new TypeError(
+        `File attachment content is unavailable: ${file.name}`,
+      );
     }
     const mimeType = file.mimeType ?? file.mediaType ?? file.media_type;
     prompt.push({

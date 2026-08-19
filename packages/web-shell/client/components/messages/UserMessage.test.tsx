@@ -349,9 +349,7 @@ describe('UserMessage', () => {
       />,
     );
     const img = container.querySelector('img')!;
-    expect(
-      container.querySelector('[data-web-shell-user-bubble]')?.contains(img),
-    ).toBe(false);
+    expect(container.querySelector('[data-web-shell-user-bubble]')).toBeNull();
     act(() => img.click());
     expect(onImagePreview).toHaveBeenCalledWith(
       'data:image/png;base64,abc',
@@ -380,6 +378,20 @@ describe('UserMessage', () => {
     );
     expect(container.textContent).toContain('check this');
     expect(container.textContent).toContain('app.log');
+  });
+
+  it('does not render an empty bubble for a file-only message', () => {
+    const container = render(
+      <UserMessage
+        content=""
+        files={[{ name: 'app.log', mimeType: 'text/plain' }]}
+      />,
+    );
+
+    expect(
+      container.querySelector('[data-web-shell-user-files]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[data-web-shell-user-bubble]')).toBeNull();
   });
 
   it('previews a sent text attachment when its chip is clicked', () => {

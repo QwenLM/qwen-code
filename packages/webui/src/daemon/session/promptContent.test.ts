@@ -59,7 +59,7 @@ describe('toDaemonPromptContent', () => {
         [],
         [{ name: 'report.pdf', data: new Blob(['pdf']) }],
       ),
-    ).toThrow('File attachment content is unavailable');
+    ).toThrow('File attachment content is unavailable: report.pdf');
   });
 
   it('normalizes image aliases into daemon image content blocks', () => {

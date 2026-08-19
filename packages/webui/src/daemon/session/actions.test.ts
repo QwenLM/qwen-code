@@ -1706,7 +1706,7 @@ describe('createDaemonSessionActions', () => {
     );
   });
 
-  it('uses the target session client id when removing old media', async () => {
+  it('uses the target session client id when removing an old attachment', async () => {
     vi.stubGlobal('window', {
       sessionStorage: {
         getItem: vi.fn(() => 'client-old'),

@@ -1783,7 +1783,6 @@ export function useComposerCore(
           );
           if (imageIngestionLaneRef.current !== lane) return;
           const fileResult = await readFileTransfer(transfer.fileCandidates, {
-            ...readerLifecycle,
             maxBytes: MAX_FILE_ATTACHMENT_DATA_BYTES,
           });
           if (imageIngestionLaneRef.current !== lane) return;

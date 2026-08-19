@@ -363,12 +363,11 @@ export function createDaemonSessionActions({
         type: 'text',
         text: withAttachmentTokens(
           text,
-          files.map((file) => {
-            const uploadedIndex = uploadableFiles.indexOf(file);
-            const uploaded =
-              uploadedIndex >= 0 ? fileReferences[uploadedIndex] : undefined;
-            return attachmentUriForName(uploaded?.attachmentId ?? file.name);
-          }),
+          files.map((file, index) =>
+            attachmentUriForName(
+              fileReferences[index]?.attachmentId ?? file.name,
+            ),
+          ),
         ),
       };
       content.splice(1, 0, ...references);

@@ -350,7 +350,7 @@ describe('ChatRecordingService', () => {
       expect(record.systemPayload).toEqual({ displayText: 'save logs' });
     });
 
-    it('records mid-turn media references without inline bytes', async () => {
+    it('records mid-turn attachment references without inline bytes', async () => {
       const attachmentReferences = [
         {
           type: 'image' as const,
@@ -379,7 +379,7 @@ describe('ChatRecordingService', () => {
       });
     });
 
-    it('records media references when the mid-turn display text is empty', async () => {
+    it('records attachment references when the mid-turn display text is empty', async () => {
       const attachmentReferences = [
         {
           type: 'image' as const,

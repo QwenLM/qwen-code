@@ -380,11 +380,11 @@ export async function readImageTransfer(
 
 export function readFileTransfer(
   fileCandidates: readonly AttachmentFileCandidate[],
-  lifecycle: ReaderLifecycle = {},
+  options: { maxBytes?: number } = {},
 ): Promise<FileIngestionBatchResult> {
   const accepted: PromptFile[] = [];
   const rejected: ImageIngestionRejection[] = [];
-  const maxBytes = lifecycle.maxBytes ?? MAX_FILE_ATTACHMENT_DATA_BYTES;
+  const maxBytes = options.maxBytes ?? MAX_FILE_ATTACHMENT_DATA_BYTES;
   for (const candidate of fileCandidates) {
     if (candidate.file.size > maxBytes) {
       rejected.push({ name: candidate.file.name, reason: 'too-large' });

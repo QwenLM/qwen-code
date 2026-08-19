@@ -309,49 +309,53 @@ export const UserMessage = memo(function UserMessage({
             })}
           </div>
         )}
-        <div
-          className={`${styles.chatBubble}${
-            isLocateFlashing ? ` ${flashStyles.flash}` : ''
-          }`}
-          data-web-shell-user-bubble
-        >
+        {content.trim().length > 0 && (
           <div
-            ref={contentRef}
-            className={`${styles.chatContent} ${
-              heightOverflowing && !expanded ? styles.chatContentCollapsed : ''
+            className={`${styles.chatBubble}${
+              isLocateFlashing ? ` ${flashStyles.flash}` : ''
             }`}
+            data-web-shell-user-bubble
           >
-            {renderedContent}
-          </div>
-          {heightOverflowing && (
-            <button
-              type="button"
-              className={styles.toggleButton}
-              onClick={() => setExpanded((value) => !value)}
+            <div
+              ref={contentRef}
+              className={`${styles.chatContent} ${
+                heightOverflowing && !expanded
+                  ? styles.chatContentCollapsed
+                  : ''
+              }`}
             >
-              <span>
-                {expanded
-                  ? t('userMessage.showLess')
-                  : t('userMessage.showMore')}
-              </span>
-              <svg
-                className={`${styles.toggleIcon} ${
-                  expanded ? styles.toggleIconExpanded : ''
-                }`}
-                viewBox="0 0 16 16"
-                aria-hidden="true"
+              {renderedContent}
+            </div>
+            {heightOverflowing && (
+              <button
+                type="button"
+                className={styles.toggleButton}
+                onClick={() => setExpanded((value) => !value)}
               >
-                <path
-                  d="m4 6 4 4 4-4"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-              </svg>
-            </button>
-          )}
-        </div>
+                <span>
+                  {expanded
+                    ? t('userMessage.showLess')
+                    : t('userMessage.showMore')}
+                </span>
+                <svg
+                  className={`${styles.toggleIcon} ${
+                    expanded ? styles.toggleIconExpanded : ''
+                  }`}
+                  viewBox="0 0 16 16"
+                  aria-hidden="true"
+                >
+                  <path
+                    d="m4 6 4 4 4-4"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </button>
+            )}
+          </div>
+        )}
         {sendFailed && onRetrySend && (
           <div className={styles.sendFailure}>
             <span>{t('userMessage.sendFailed')}</span>

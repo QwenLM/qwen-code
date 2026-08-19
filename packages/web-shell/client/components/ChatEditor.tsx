@@ -1674,6 +1674,7 @@ export const ChatEditor = memo(
 
     const addComposerTags = core.addTags;
     const clearImageDragState = core.clearImageDragState;
+    const ingestFiles = core.ingestFiles;
     const insertUploadReference = useCallback(
       (path: string) => {
         const serialized = fileReferenceInsertText(path).trim();
@@ -1780,6 +1781,11 @@ export const ChatEditor = memo(
         const files = collectDroppedFiles(event.dataTransfer);
         uploadDragDepthRef.current = 0;
         setUploadDragActive(false);
+        if (pendingDropFiles !== null) {
+          event.preventDefault();
+          event.stopPropagation();
+          return;
+        }
         if (disabled) {
           // Cancel the drop itself; otherwise the browser navigates the tab
           // to the dropped file, tearing down the Web Shell SPA mid-turn.
@@ -1807,14 +1813,15 @@ export const ChatEditor = memo(
         clearImageDragState,
         disabled,
         fileUploadEnabled,
+        pendingDropFiles,
         uploadEnabled,
       ],
     );
     const referenceDroppedFiles = useCallback(() => {
       if (!pendingDropFiles) return;
-      core.ingestFiles(pendingDropFiles);
+      ingestFiles(pendingDropFiles);
       setPendingDropFiles(null);
-    }, [core, pendingDropFiles]);
+    }, [ingestFiles, pendingDropFiles]);
     const uploadDroppedFiles = useCallback(() => {
       if (!pendingDropFiles) return;
       uploadFiles(
