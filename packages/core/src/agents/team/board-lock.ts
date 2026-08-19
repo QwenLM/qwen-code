@@ -207,10 +207,15 @@ export async function pruneCollection(
       const record = JSON.parse(raw) as {
         settledAt?: number | null;
         resolvedAt?: number | null;
+        expiresAt?: number;
         updatedAt?: number;
       };
       if (!isSettled(record)) continue;
-      const raw = record.settledAt ?? record.resolvedAt ?? record.updatedAt;
+      const raw =
+        record.settledAt ??
+        record.resolvedAt ??
+        record.expiresAt ??
+        record.updatedAt;
       if (raw === undefined || raw === null) continue;
       // A non-numeric or unparseable timestamp must never read as "older than
       // cutoff": `now - "…"` is NaN and `NaN < olderThanMs` is false, which
