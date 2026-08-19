@@ -111,6 +111,7 @@ import {
   evaluatePlanModeShellPolicy,
   validatePlanModeShellApproval,
   validatePlanModeShellContext,
+  type PlanModeShellDecision,
 } from './plan-mode-shell-policy.js';
 import {
   findPlanModeEntryBatchBoundaryIndex,
@@ -4355,6 +4356,7 @@ export class CoreToolScheduler {
     reason: string | undefined,
     toolSpan: Span,
     signal: AbortSignal,
+    planShellDecision: PlanModeShellDecision | undefined,
   ): Promise<boolean> {
     const { callId, name: toolName } = scheduledCall.request;
     const canonicalName = canonicalToolName(toolName);
@@ -4372,7 +4374,17 @@ export class CoreToolScheduler {
       const details =
         await scheduledCall.invocation.getConfirmationDetails(signal);
       if (details.type === 'edit' || details.type === 'exec') {
-        toolDetails = details;
+        // Re-apply the plan-shell policy's view closures that the ordinary
+        // confirmation phase adds (hideModify, skipIdeDiff, the UNKNOWN
+        // warnings); the bounce must not drop them.
+        toolDetails =
+          planShellDecision &&
+          planShellDecision.classification !== 'not-applicable'
+            ? (decoratePlanModeShellConfirmation(
+                planShellDecision,
+                details,
+              ) as ToolEditConfirmationDetails | ToolExecuteConfirmationDetails)
+            : details;
       }
     } catch (error) {
       if (signal.aborted) {
@@ -4403,14 +4415,41 @@ export class CoreToolScheduler {
         hookAskReason:
           reason ??
           `A PreToolUse hook requested confirmation before running ${toolName}.`,
-        onConfirm: (outcome, payload) =>
-          this.handleConfirmationResponse(
+        onConfirm: async (outcome, payload) => {
+          // Mirror the ordinary confirmation phase: the plan-shell policy
+          // validates at approval time, so a payload the policy forbids is
+          // converted to Cancel before the tool's own onConfirm runs.
+          if (
+            planShellDecision &&
+            planShellDecision.classification !== 'not-applicable'
+          ) {
+            const approval = await validatePlanModeShellApproval({
+              config: this.config,
+              decision: planShellDecision,
+              requestArgs: scheduledCall.request.args,
+              invocationParams: scheduledCall.invocation
+                .params as Record<string, unknown>,
+              signal,
+              outcome,
+              payload,
+            });
+            await this.handleConfirmationResponse(
+              callId,
+              originalOnConfirm,
+              approval.outcome,
+              signal,
+              approval.payload,
+            );
+            return;
+          }
+          await this.handleConfirmationResponse(
             callId,
             originalOnConfirm,
             outcome,
             signal,
             payload,
-          ),
+          );
+        },
       };
     } else {
       confirmationDetails = {
@@ -4632,6 +4671,7 @@ export class CoreToolScheduler {
             preHookResult.blockReason,
             span,
             signal,
+            planShellDecision,
           );
           if (bounced) {
             return;
