@@ -283,17 +283,28 @@ export function createGoalRuntime(
   const reportMeterFailure = (detail: string): void => {
     if (meterFailureReported) return;
     meterFailureReported = true;
-    debugLogger.warn(
+    const message =
       `Goal token meter unreadable (${detail}); tokensUsed will report 0 ` +
-        `for this runtime until the meter recovers. Reported once per runtime.`,
-    );
+      `until the meter recovers. Reported once per fault.`;
+    // `debugLogger.warn` is gated behind QWEN_DEBUG_LOG_FILE (unset for almost
+    // all users), so on its own it leaves the default configuration with
+    // nothing to grep — the exact indistinguishability this breadcrumb exists
+    // to remove. Surface it on stderr too, as `quarantineCorruptFile` does.
+    process.stderr.write(`[warn] ${message}\n`);
+    debugLogger.warn(message);
   };
 
   const readSessionTokens = (): number | undefined => {
     if (!options.tokenMeter) return undefined;
     try {
       const total = options.tokenMeter.readSessionTokens();
-      if (Number.isFinite(total)) return total;
+      if (Number.isFinite(total)) {
+        // Re-arm on recovery, so "until the meter recovers" is true and a
+        // LATER, distinct fault is reported instead of being swallowed by the
+        // first one's flag.
+        meterFailureReported = false;
+        return total;
+      }
       // A non-finite reading is the shape that drift produces: rename
       // `tokens.total` and the config meter's reduce yields NaN.
       reportMeterFailure(`non-finite reading ${String(total)}`);

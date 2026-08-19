@@ -2320,6 +2320,69 @@ describe('Server Config (config.ts)', () => {
       );
     });
 
+    it('replays a marked session exactly once, then never again', async () => {
+      // R4-5: both ends of this handshake are mocked on their own side —
+      // `client.test.ts` injects a fake `consumeUiTelemetryEventsReplayed`
+      // onto its mockConfig, and the resume/branch hooks pass a `vi.fn()` as
+      // `markUiTelemetryEventsReplayed` — so a regression making the real
+      // `consume` always return false, or the real `mark` a no-op, would
+      // reintroduce the double replay this PR fixes with every suite green.
+      const config = new Config({ ...baseParams });
+      await config.initialize({
+        skipGeminiInitialization: true,
+        skipHooks: true,
+        skipMcpDiscovery: true,
+        skipSkillManager: true,
+        skipFileCheckpointing: true,
+      });
+
+      // Nothing marked: initialize() must do its own replay.
+      expect(config.consumeUiTelemetryEventsReplayed('session-a')).toBe(false);
+
+      config.markUiTelemetryEventsReplayed('session-a');
+      // The one initialize() that follows the caller's own replay skips it...
+      expect(config.consumeUiTelemetryEventsReplayed('session-a')).toBe(true);
+      // ...and the marker is one-shot, so a later initialize() replays again.
+      expect(config.consumeUiTelemetryEventsReplayed('session-a')).toBe(false);
+    });
+
+    it('does not let one session id consume another session id marker', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize({
+        skipGeminiInitialization: true,
+        skipHooks: true,
+        skipMcpDiscovery: true,
+        skipSkillManager: true,
+        skipFileCheckpointing: true,
+      });
+
+      config.markUiTelemetryEventsReplayed('session-a');
+
+      expect(config.consumeUiTelemetryEventsReplayed('session-b')).toBe(false);
+      // And the mismatched read left session-a's marker intact.
+      expect(config.consumeUiTelemetryEventsReplayed('session-a')).toBe(true);
+    });
+
+    it('re-arms the replay marker on the next session swap', async () => {
+      // The `uiTelemetryReplayedSessionId = undefined` re-arm in
+      // startNewSession is what makes resuming the SAME session a second time
+      // replay exactly once again; dropping it leaves a marker that swallows
+      // the next initialize()'s legitimate replay.
+      const config = new Config({ ...baseParams });
+      await config.initialize({
+        skipGeminiInitialization: true,
+        skipHooks: true,
+        skipMcpDiscovery: true,
+        skipSkillManager: true,
+        skipFileCheckpointing: true,
+      });
+
+      config.markUiTelemetryEventsReplayed('session-a');
+      config.startNewSession('session-b');
+
+      expect(config.consumeUiTelemetryEventsReplayed('session-a')).toBe(false);
+    });
+
     it('carries the outgoing session id when resuming a different persisted session', async () => {
       const config = new Config({ ...baseParams });
       await config.initialize({

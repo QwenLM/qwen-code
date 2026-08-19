@@ -383,6 +383,84 @@ describe('goal runtime', () => {
     },
   );
 
+  it('surfaces the meter breadcrumb on stderr, not only the debug log', async () => {
+    // R1-5: `debugLogger.warn` writes nothing unless QWEN_DEBUG_LOG_FILE is
+    // set (`writeLog` returns early otherwise, with no console fallback), so
+    // on its own this breadcrumb leaves the default configuration with exactly
+    // the silence it exists to remove — a Goal reporting 0 tokens against a
+    // session billed for real usage, with nothing to grep. Same remedy as
+    // `quarantineCorruptFile`.
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      const journal = fakeGoalJournal();
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({
+        journal,
+        tokenMeter: {
+          readSessionTokens: () => {
+            throw new Error('metrics are unavailable');
+          },
+        },
+      });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+      await runtime.finishTurn(host.started[0]!);
+
+      const written = stderr.mock.calls
+        .map(([chunk]) => String(chunk))
+        .filter((line) => line.includes('Goal token meter unreadable'));
+      expect(written).toHaveLength(1);
+      expect(written[0]).toContain('[warn]');
+      expect(written[0]).toContain('metrics are unavailable');
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('reports a later fault after the meter recovers', async () => {
+    // R1-5 (secondary): the message promises "until the meter recovers", but
+    // the one-shot flag was never reset — so one transient fault permanently
+    // silenced every distinct later one, and the wording was a lie.
+    debugWarn.mockClear();
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      let reading = 0;
+      const journal = fakeGoalJournal();
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({
+        journal,
+        tokenMeter: { readSessionTokens: () => reading },
+      });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      // Turn 1 closes on a fault. (Turn 2 auto-starts on the same bad
+      // reading, and must NOT warn again — that is the crash-loop case the
+      // one-shot flag exists for.)
+      reading = Number.NaN;
+      await runtime.finishTurn(host.started[0]!);
+      expect(debugWarn).toHaveBeenCalledTimes(1);
+
+      // Turn 2 reads fine at both ends: the meter recovered, so the flag
+      // must re-arm.
+      reading = 100;
+      await runtime.finishTurn(host.started[1]!);
+      expect(debugWarn).toHaveBeenCalledTimes(1);
+
+      // Turn 3 faults again — a distinct fault, not a repeat of the first.
+      reading = Number.NaN;
+      await runtime.finishTurn(host.started[2]!);
+
+      expect(debugWarn).toHaveBeenCalledTimes(2);
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
   it.each([Number.NaN, Number.POSITIVE_INFINITY])(
     'finishes the turn when the token meter returns %s',
     async (invalidTotal) => {
