@@ -3227,6 +3227,8 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
       runHead = '',
       prHead = '',
       useInJobStep = false,
+      reviews = '[]',
+      runStarted = '',
     } = {},
   ) {
     const dir = mkdtempSync(join(tmpdir(), 'fallback-comment-'));
@@ -3258,8 +3260,22 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
           '  echo "qwen-code-ci-bot"; exit 0',
           'fi',
           'if [ "$cmd" = "run" ] && [ "$sub" = "view" ]; then',
+          '  case "$*" in',
+          '    *startedAt*)',
+          '      [ "${SCENARIO:-}" = "runstart_fail" ] && exit 1',
+          '      printf "%s" "${RUN_STARTED:-}"; exit 0 ;;',
+          '  esac',
           '  [ "${SCENARIO:-}" = "runview_fail" ] && exit 1',
           '  echo "${RUN_HEAD:-}"; exit 0',
+          'fi',
+          // The reviews lookup runs the step's REAL --jq filter over the
+          // fixture: the guard under test IS that filter (author scope, head,
+          // submission time), so a stub that pre-applied it would pin nothing.
+          'if [ "$cmd" = "api" ] && [ "${sub#repos/}" != "$sub" ]; then',
+          '  [ "${SCENARIO:-}" = "reviews_fail" ] && exit 1',
+          '  filter=""; prev=""',
+          '  for a in "$@"; do if [ "$prev" = "--jq" ]; then filter="$a"; fi; prev="$a"; done',
+          '  printf "%s" "$REVIEWS_JSON" | jq -r "$filter"; exit 0',
           'fi',
           'if [ "$cmd" = "pr" ] && [ "$sub" = "view" ]; then',
           '  case "$*" in',
@@ -3268,7 +3284,8 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
           '      cat "$COMMENTS_FILE"; exit 0 ;;',
           '    *state,headRefOid*)',
           '      [ "${SCENARIO:-}" = "state_fail" ] && exit 1',
-          '      printf "OPEN\\t%s\\n" "${PR_HEAD:-}"; exit 0 ;;',
+          '      state=OPEN; [ "${SCENARIO:-}" = "pr_closed" ] && state=MERGED',
+          '      printf "%s\\t%s\\n" "$state" "${PR_HEAD:-}"; exit 0 ;;',
           '    *headRefOid*)',
           '      [ "${SCENARIO:-}" = "prview_fail" ] && exit 1',
           '      echo "${PR_HEAD:-}"; exit 0 ;;',
@@ -3314,6 +3331,8 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
               CALLS: calls,
               COMMENTS_FILE: commentsFile,
               POSTED: posted,
+              REVIEWS_JSON: reviews,
+              RUN_STARTED: runStarted,
             },
           },
         );
@@ -3419,7 +3438,12 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     });
     expect(r.status).toBe(0);
     expect(r.posted).not.toBe('');
-    expect(r.calls).not.toContain('run view');
+    // Pinned on the head lookup itself, not on `gh run view` as a whole:
+    // the already-posted guard below asks the same command for this run's
+    // startedAt on every event, and a blanket "no run view" assertion would
+    // read that as a head comparison it never makes.
+    expect(r.calls).not.toContain('headSha');
+    expect(r.calls).not.toContain('--json headRefOid');
   });
 
   it('degrades to POSTING when the head comparison lookups fail', () => {
@@ -3449,6 +3473,86 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     expect(r.status).toBe(0);
     expect(r.posted).not.toBe('');
   });
+
+  // A run can fail AFTER posting its review — the CLI exiting silently, a
+  // cleanup step dying — and both fallback bodies then announce a review
+  // sitting right above them as one that could not be posted, retry
+  // instruction attached. Measured on PR #9342: review posted 11:56:34Z,
+  // review-pr failed 12:00:53Z, the comment landed 12:01:00Z asking for a
+  // fresh ~3-hour review; the autofix takeover loop reads the same feed a
+  // human does. The guard is a FILTER (author scope, head, submission
+  // time), so these run the step's real bash over review fixtures.
+  const RUN_STARTED = '2026-08-18T09:08:38Z';
+  const AFTER = '2026-08-18T11:56:34Z';
+  const BEFORE = '2026-08-17T10:00:00Z';
+  const reviewFixture = (login, commit, submitted) =>
+    JSON.stringify([
+      { id: 1, user: { login }, commit_id: commit, submitted_at: submitted },
+    ]);
+
+  for (const useInJobStep of [false, true]) {
+    const site = useInJobStep ? 'in-job step' : 'fallback job';
+
+    it(`${site} stays silent when THIS run already posted its review`, () => {
+      const r = runFallbackStep('default', {
+        useInJobStep,
+        prHead: 'HEADSHA1',
+        runStarted: RUN_STARTED,
+        reviews: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', AFTER),
+      });
+      expect(r.status).toBe(0);
+      expect(r.posted).toBe('');
+      expect(r.summary).toContain('already posted a review');
+    });
+
+    it(`${site} still posts when no review can be attributed to this run`, () => {
+      // Each clause alone must keep the fallback speaking, or a stale or
+      // foreign review buys silence on a genuinely dead pipeline: an earlier
+      // run's review at the same head, another account's, one of a different
+      // head, an unsubmitted (PENDING) one, and none at all.
+      const cases = {
+        stale: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', BEFORE),
+        foreign: reviewFixture('someone-else', 'HEADSHA1', AFTER),
+        otherHead: reviewFixture('qwen-code-ci-bot', 'OTHERSHA', AFTER),
+        pending: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', null),
+        none: '[]',
+      };
+      for (const [name, reviews] of Object.entries(cases)) {
+        const r = runFallbackStep('default', {
+          useInJobStep,
+          prHead: 'HEADSHA1',
+          runStarted: RUN_STARTED,
+          reviews,
+        });
+        expect(r.posted, name).not.toBe('');
+      }
+    });
+
+    it(`${site} posts when this run's start time is unavailable`, () => {
+      // Without a start time there is no proof the review landed during THIS
+      // run, and posting wins over silence — the same call the head-moved
+      // guard makes when its comparison is unavailable.
+      const r = runFallbackStep('runstart_fail', {
+        useInJobStep,
+        prHead: 'HEADSHA1',
+        runStarted: RUN_STARTED,
+        reviews: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', AFTER),
+      });
+      expect(r.posted).not.toBe('');
+    });
+
+    it(`${site} posts when the reviews lookup itself fails`, () => {
+      // Same direction as every other lookup this step makes for a SKIP
+      // decision: a failed listing is never read as "a review exists".
+      const r = runFallbackStep('reviews_fail', {
+        useInJobStep,
+        prHead: 'HEADSHA1',
+        runStarted: RUN_STARTED,
+        reviews: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', AFTER),
+      });
+      expect(r.posted).not.toBe('');
+    });
+  }
 
   it('in-job step dedupes on a fallback comment this run already has', () => {
     // Re-runs of failed jobs keep the run id: when a prior attempt died

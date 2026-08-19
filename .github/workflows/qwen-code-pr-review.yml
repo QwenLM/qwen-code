@@ -1756,6 +1756,23 @@ jobs:
             echo "Fallback comment dedup lookup failed; deferring to the fallback-comment job." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
+          # Same guard as the fallback-comment job's, for the same reason: a
+          # review posted moments before this step runs makes every body
+          # below — each one ending in a retry instruction — contradict the
+          # review already on the PR. Scoped to the bot's own account, the
+          # head this run reviewed, and a submission at or after this run
+          # started, so a stale review from an earlier run cannot silence a
+          # genuinely dead one; an unavailable start time or head declines to
+          # fire and posts.
+          run_started="$(gh run view "${GITHUB_RUN_ID:?}" --repo "$GITHUB_REPOSITORY" --json startedAt --jq '.startedAt' 2>/dev/null)" || run_started=""
+          if [ -n "$run_started" ] && [ -n "$current_head" ]; then
+            posted_reviews="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" --paginate \
+              --jq ".[] | select(.user.login == \"$bot_login\") | select(.commit_id == \"$current_head\") | select(.submitted_at >= \"$run_started\") | .id" 2>/dev/null)" || posted_reviews=""
+            if [ -n "$posted_reviews" ]; then
+              echo "Skipping fallback comment: this run already posted a review on ${current_head}." >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+          fi
           MAX_TIMEOUT_MINUTES="${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}"
           if [ "$FAILURE_KIND" = "timeout" ]; then
             if [ "$TIMEOUT_MINUTES" -lt "$MAX_TIMEOUT_MINUTES" ]; then
@@ -1935,14 +1952,38 @@ jobs:
               exit 0
               ;;
           esac
-          pr_state="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state --jq '.state')" || {
+          pr_data="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state,headRefOid --jq '[.state, .headRefOid] | @tsv')" || {
             echo "::error::could not verify PR #${PR_NUMBER} state; refusing to post on a failed lookup"
             echo "Could not verify PR #${PR_NUMBER} (API error); failing instead of guessing." >> "$GITHUB_STEP_SUMMARY"
             exit 1
           }
+          IFS=$'\t' read -r pr_state pr_head <<< "$pr_data"
           if [ "$pr_state" != "OPEN" ]; then
             echo "Skipping fallback comment: PR #${PR_NUMBER} is ${pr_state}." >> "$GITHUB_STEP_SUMMARY"
             exit 0
+          fi
+          # A run that DID post its review must not be announced as one that
+          # could not. The review job can fail AFTER the post — the CLI
+          # exiting silently, a cleanup step dying — and this body's claim
+          # ("failed before a review could be posted"), with its retry
+          # instruction, then contradicts the review sitting right above it.
+          # Measured on PR #9342: the review posted at 11:56:34Z, the job
+          # failed at 12:00:53Z, and this comment landed at 12:01:00Z asking
+          # for a fresh ~3-hour review; the autofix takeover loop reads the
+          # same feed a human does. Scoped three ways so a STALE review can
+          # never buy this silence: the bot's own account, the head this run
+          # reviewed, and a submission at or after this run started. When the
+          # start time or the head is unavailable the guard declines to fire —
+          # posting wins over silence, the same call the head-moved guard
+          # above makes.
+          run_started="$(gh run view "${GITHUB_RUN_ID:?}" --repo "$GITHUB_REPOSITORY" --json startedAt --jq '.startedAt' 2>/dev/null)" || run_started=""
+          if [ -n "$run_started" ] && [ -n "$pr_head" ]; then
+            posted_reviews="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" --paginate \
+              --jq ".[] | select(.user.login == \"$bot_login\") | select(.commit_id == \"$pr_head\") | select(.submitted_at >= \"$run_started\") | .id" 2>/dev/null)" || posted_reviews=""
+            if [ -n "$posted_reviews" ]; then
+              echo "Skipping fallback comment: this run already posted a review on ${pr_head}." >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
           fi
           body="**Qwen Code review did not complete successfully.** The review pipeline failed before a review could be posted. A transient error is retried automatically; if you are seeing this, retry with \`@qwen-code /review\`. See [workflow logs](${RUN_URL})."
           body="$(printf '%s\n\n%s' "$FALLBACK_MARKER" "$body")"
