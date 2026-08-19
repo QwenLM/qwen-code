@@ -38,7 +38,9 @@ import {
   reviewLeaseHeldByAnotherSession,
   reviewLeasePath,
 } from '../../services/review-worktree-lease.js';
-import { ensureAuthenticated, gh, setGhHost } from './lib/gh.js';
+import { setGhHost } from './lib/gh.js';
+import { getPlatformReader } from './lib/platform/registry.js';
+import type { ReviewPlatformReader } from './lib/platform/types.js';
 import type { ReviewEffort } from './parse-args.js';
 import {
   git,
@@ -70,9 +72,26 @@ import {
 } from './lib/report.js';
 import { resolveMergeBase, type GitProbe } from './lib/merge-base.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
-import { hasReviewDeadline } from './lib/deadline.js';
-import { appendRunSession } from './lib/run-ledger.js';
 import { SHA_RE } from './lib/ledger.js';
+import {
+  appendRunSession,
+  ledgerResumeCount,
+  readResumeMarker,
+  recordResume,
+  recordRestart,
+  RESUME_MAX,
+} from './lib/run-ledger.js';
+import {
+  assessResume,
+  type PreviousReport,
+  type ResumeRefusal,
+} from './lib/resume.js';
+import {
+  hasReviewDeadline,
+  readBudgetStop,
+  clearBudgetStop,
+  clearRoundStamps,
+} from './lib/deadline.js';
 import { certifierMatchesRound, roundModelIdFrom } from './lib/round-model.js';
 
 interface PrMetadata {
@@ -102,6 +121,15 @@ interface FetchPrArgs {
    * array and the recovery flow can produce one; `runFetchPr` normalizes.
    */
   since?: string | string[];
+  /**
+   * Continue the interrupted run at this plan path when its state still
+   * matches (worktree at `fetchedSha`, diff bytes unhashed-unchanged, live
+   * head unmoved): keep the worktree, do NOT rewrite the plan — its mtime is
+   * the run epoch every fence keys on — and re-announce the existing report.
+   * When the state does not match, fall through to a fresh fetch; the flag
+   * never fails a run that could start over.
+   */
+  resume?: boolean;
   /**
    * WHO certified the `--since` anchor: the `lastModelId` beside it in the
    * cache, or the `model` beside the marker's `sha`. Copied through verbatim
@@ -602,11 +630,68 @@ function sectionsContained(
   return true;
 }
 
+/**
+ * Allowlist shape for a server-controlled branch name reaching git's argv:
+ * a plain branch name and nothing else (twin of aone.ts's guard — see that
+ * comment for each admitted channel's wrong outcome). Fail closed: an
+ * unusual-but-legal name is refused with a clear metadata-stage error
+ * rather than guessed at inside a git invocation. The pseudo-ref set rides
+ * the same rejection: `FETCH_HEAD` resolves to the JUST-fetched PR head
+ * (merge-base(head, head) = empty diff beside full-range metadata), and
+ * `ORIG_HEAD` to an arbitrary ancestor — both shape-legal, both silently
+ * wrong. The match is CASE-INSENSITIVE: on case-insensitive filesystems
+ * (macOS/Windows defaults) `.git/fetch_head` folds onto `.git/FETCH_HEAD`,
+ * so the lowercase spellings reach the same pseudo-refs. `refs/`-prefixed
+ * names ride the same rejection: they are legal branch names
+ * (`git check-ref-format --branch` accepts `refs/heads/x`), but as a
+ * fetch/merge-base argument they resolve QUALIFIED refs the server
+ * controls — a wrong base disclosed only by a misdescribing warning.
+ */
+const GIT_PSEUDO_REFS =
+  /^(FETCH|ORIG|MERGE|CHERRY_PICK|REVERT|REBASE|BISECT)_HEAD$/i;
+
+function isPlainBranchName(name: string): boolean {
+  return (
+    name.toUpperCase() !== 'HEAD' &&
+    !GIT_PSEUDO_REFS.test(name) &&
+    !name.includes('..') &&
+    !/^refs\//i.test(name) &&
+    /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(name)
+  );
+}
+
 /** The real git surface `resolveMergeBase` runs against. */
 const gitProbe: GitProbe = {
-  fetch: (remote, ref) => gitOpt('fetch', remote, ref) !== null,
+  // `--` ends option parsing: the base ref is server-controlled platform
+  // metadata (GitHub `baseRefName`, Aone `targetBranch`), and a dash-leading
+  // value must never reach git as an option (`git fetch origin
+  // --upload-pack=<payload>` executes the attacker-named program on the
+  // remote host with the reviewer's credentials).
+  //
+  // The fetch must ALSO have produced the tracking ref: a bare-name fetch
+  // of a TAG exits 0 writing only FETCH_HEAD (`* tag v1.0 -> FETCH_HEAD`),
+  // so the fetch "succeeds" yet no `origin/<ref>` exists — and the
+  // bare-name fallback then merge-bases against the reviewer's LOCAL tag:
+  // a wrong-base diff with baseFetchFailed falsely false. The fetch is an
+  // EXPLICIT BRANCH REFSPEC: the source is fully qualified (git dwims a
+  // bare name onto a same-named TAG and exits 0 without updating the
+  // tracking ref — a pushable, server-controlled shadow that passes the
+  // freshness guard it never refreshed), and the destination is the
+  // qualified tracking ref. The backstop check is FULLY QUALIFIED
+  // (`refs/remotes/…`): an unqualified `origin/<ref>` resolves in
+  // refs/tags and refs/heads FIRST, so a tag or branch named
+  // `origin/<ref>` — likewise pushable, auto-carried at clone time — would
+  // satisfy the check with no tracking ref present.
+  fetch: (remote, ref) =>
+    gitOpt(
+      'fetch',
+      remote,
+      '--',
+      `+refs/heads/${ref}:refs/remotes/${remote}/${ref}`,
+    ) !== null && refExists(`refs/remotes/${remote}/${ref}`),
   refExists,
-  mergeBase: (a, b) => gitOpt('merge-base', a, b),
+  mergeBase: (a, b) =>
+    gitOpt('-c', 'core.commitGraph=false', 'merge-base', a, b),
 };
 
 function tryRemove(action: () => void): void {
@@ -625,6 +710,144 @@ function cleanStale(prNumber: string): void {
       execFileSync('git', ['branch', '-D', ref], { stdio: 'pipe' }),
     );
   }
+}
+
+/** sha256 of a file's raw bytes, or null when it cannot be read. */
+function sha256OfFile(path: string): string | null {
+  try {
+    return createHash('sha256').update(readFileSync(path)).digest('hex');
+  } catch {
+    return null;
+  }
+}
+
+type ResumeOutcome =
+  | { resumed: true }
+  | { resumed: false; reason: ResumeRefusal; priorFetchedSha: string | null };
+
+/**
+ * The `--resume` fast path: rule on the interrupted attempt's state and, when
+ * it holds, continue it — every probe is a fact this command gathers itself
+ * (git, gh, file hashes, the CLI-written marker), never the orchestrator's
+ * account. On a continuation the plan file is NOT touched: its mtime is the
+ * run epoch that keeps the first attempt's records, stamps and transcripts
+ * inside every reader's fence.
+ */
+function tryResume(
+  args: FetchPrArgs,
+  wt: string,
+  platform: ReviewPlatformReader,
+): ResumeOutcome {
+  const { pr_number: prNumber, owner_repo: ownerRepo, out } = args;
+  let prev: PreviousReport | null = null;
+  try {
+    prev = JSON.parse(readFileSync(out, 'utf8')) as PreviousReport;
+  } catch {
+    prev = null;
+  }
+  // An unreachable forge reads as "unmoved": the worktree and diff hashes
+  // pin the content, and presubmit's headDrift re-checks before anything
+  // posts. Only the live head OID is needed — a moved head is the one
+  // upstream change resume refuses. The read goes through the same platform
+  // reader the fresh path uses, so an Aone clone resolves the same way.
+  let liveHeadSha: string | null = null;
+  try {
+    const oid = platform.getFetchMeta(Number(prNumber), ownerRepo).headRefOid;
+    liveHeadSha = typeof oid === 'string' && oid !== '' ? oid : null;
+  } catch {
+    liveHeadSha = null;
+  }
+  // The resume cap: how many times this review has already been resumed.
+  // Both counters are the CLI's own record; the marker is primary and the
+  // session ledger cross-caps it, minus the original run's own first entry.
+  const marker = readResumeMarker(out);
+  const currentSessionId = process.env['QWEN_CODE_SESSION_ID']?.trim();
+  const ledgerResumes = ledgerResumeCount(out, {
+    excludeSessionId: currentSessionId,
+  });
+  const currentKey = currentSessionId?.toLowerCase();
+  const markerResumes = marker.resumes.filter(
+    (r) => r.sessionId.toLowerCase() !== currentKey,
+  ).length;
+  // `--porcelain` prints nothing on a clean tree; a null (the command could
+  // not run) is treated as dirty. `--untracked-files=normal` explicitly, so
+  // a `status.showUntrackedFiles=no` tuning cannot hide residue that is not
+  // in the PR.
+  const status = gitOpt(
+    '-C',
+    wt,
+    'status',
+    '--porcelain',
+    '--untracked-files=normal',
+  );
+  const ruling = assessResume(prev, {
+    prNumber,
+    worktreeHeadSha: gitOpt('-C', wt, 'rev-parse', 'HEAD'),
+    worktreeClean: status === null ? null : status.trim() === '',
+    diffSha256OnDisk: sha256OfFile(tmpFile(`pr-${prNumber}`, 'diff.txt')),
+    liveHeadSha,
+    resumeCount: Math.max(markerResumes, ledgerResumes),
+    requestedEffort: args.effort ?? null,
+  });
+  if (!ruling.ok) {
+    return {
+      resumed: false,
+      reason: ruling.reason,
+      priorFetchedSha:
+        prev !== null && typeof prev.fetchedSha === 'string'
+          ? prev.fetchedSha
+          : null,
+    };
+  }
+
+  // Budget hygiene: the continuation runs under a fresh deadline, so a
+  // time-budget stop is the dead attempt's, not this run's, and is cleared.
+  // A round-cap stop is about rounds, not time — it is the trusted CLI's own
+  // record that the audit reached its round cap, so it stands, and the round
+  // stamps stay with it. Any other stop is cleared with the stamps: the span
+  // from the dead attempt's last stamp to the continuation's first admission
+  // spans the death gap and would price a round at hours; without the stamps
+  // the gate falls back to its conservative constant.
+  const stop = readBudgetStop(out);
+  const roundCapStands = stop !== null && stop.cause === 'round-cap';
+  if (stop !== null && !roundCapStands) {
+    clearBudgetStop(out);
+  }
+  if (!roundCapStands) {
+    clearRoundStamps(out);
+  }
+  appendRunSession(out);
+  recordResume(out);
+  // Read the marker back: `recordResume` deduplicates by session, so a
+  // second `--resume` in the SAME session is the same resume, and deriving
+  // the number from the pre-write count would announce attempt 2 for it.
+  const attempt = Math.max(1, readResumeMarker(out).resumes.length);
+  // `restartsSpent` is the resume marker's ONE consumer beyond idempotency:
+  // the resumed session initialises Step 7's once-per-review restart bound
+  // from it — without a reader here, the recorded restart would silently
+  // reset on every resume. `effort` names the level the continuation is
+  // pinned to (the plan's, deliberately untouched), so a continuation never
+  // silently runs at a level the caller did not expect.
+  const pinnedEffort =
+    prev !== null && typeof prev.effort === 'string' && prev.effort !== ''
+      ? prev.effort
+      : 'high';
+  writeStdoutLine(
+    JSON.stringify({
+      resumed: true,
+      resumeAttempt: attempt,
+      restartsSpent: marker.restarts.length,
+      effort: pinnedEffort,
+      out,
+    }),
+  );
+  writeStderrLine(
+    `Resumed PR #${prNumber} review (resume ${attempt} of ${RESUME_MAX}): ` +
+      `worktree, plan and the interrupted attempt's agent evidence are reused; ` +
+      `the report at ${out} is unchanged, and the run continues at its ` +
+      `recorded effort (${pinnedEffort}).`,
+  );
+  return { resumed: true };
 }
 
 async function runFetchPr(args: FetchPrArgs): Promise<void> {
@@ -647,8 +870,18 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
   if (ownerRepo.indexOf('/') < 0) {
     throw new Error('owner_repo must look like "owner/repo"');
   }
-
-  ensureAuthenticated();
+  // Validate before coercing: Number('1e3') is 1000, so an unvalidated token
+  // would fetch a DIFFERENT PR's head while the ref/worktree/report all carry
+  // the caller's label. `[1-9]` also rejects `0` (no PR zero — the message
+  // promises a POSITIVE integer, and admitting it ran detection, auth, and a
+  // worktree lease before dying at the fetch) and leading zeros (the label
+  // would not round-trip through Number). The skill path is guarded by
+  // parse-args' digit grammar; this is the direct-CLI surface.
+  if (!/^[1-9]\d*$/.test(prNumber)) {
+    throw new Error(
+      `pr_number must be a positive integer, got ${JSON.stringify(prNumber)}`,
+    );
+  }
 
   const ref = reviewBranch(prNumber);
   const wt = worktreePath(prNumber);
@@ -690,7 +923,6 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         `re-run.`,
     );
   }
-
   // The lock above refuses any later session that finds another
   // session's lease, so one left behind by ANY failure after this point
   // would block every later review of this PR until deleted by hand.
@@ -709,33 +941,102 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       branch: ref,
     });
 
+    // Select the platform from the remote under review (falling back to the
+    // cwd clone's origin), so an Aone clone fetches the Aone ref via a1
+    // while a GitHub clone keeps `pull/<n>/head` via gh. Trim the host:
+    // isAoneHost does not trim, and a padded `--host` would silently drop
+    // to GitHub here. Runs INSIDE the lease gate: the refusal above must
+    // precede every call this command makes — the detection probe included
+    // — and a detection/auth failure rolls the lease back through the catch.
+    let remoteUrl: string | undefined;
+    try {
+      remoteUrl = git('remote', 'get-url', remote).trim();
+    } catch {
+      remoteUrl = undefined;
+    }
+    const platform = getPlatformReader({ remoteUrl, host: args.host?.trim() });
+    platform.ensureAuthenticated();
+
+    // A `--resume` rules before any destructive step: a continuation must
+    // reach neither the cleanup below (the worktree is the state being
+    // resumed) nor the plan write (its mtime is the run epoch). Platform
+    // detection above is non-destructive and gives the resume probe's forge
+    // read its auth. The lease already covers the resumed run — a
+    // continuation keeps working in this worktree after this command
+    // returns, and cleanup releases the lease with the rest. A refused
+    // resume falls through to the fresh path and announces why; head
+    // movement is recorded AFTER the fresh plan lands, so the marker entry
+    // postdates the new epoch.
+    let resumeRefusal: ResumeRefusal | null = null;
+    let priorFetchedSha: string | null = null;
+    if (args.resume) {
+      const outcome = tryResume(args, wt, platform);
+      if (outcome.resumed) return;
+      resumeRefusal = outcome.reason;
+      priorFetchedSha = outcome.priorFetchedSha;
+      writeStdoutLine(
+        JSON.stringify({ resumed: false, resumeRefused: outcome.reason }),
+      );
+      writeStderrLine(
+        `Cannot resume PR #${prNumber} (${outcome.reason}); starting a fresh review.`,
+      );
+    }
+
     // 1. Clean any stale worktree / branch from an earlier run.
     cleanStale(prNumber);
 
-    // 2. Fetch PR HEAD into a unique local ref.
+    // 2. Fetch PR HEAD into a unique local ref. The refspec source is
+    //    platform-specific: GitHub `pull/<n>/head`, Aone
+    //    `refs/merge-requests/<global-id>/head`.
     try {
-      git('fetch', remote, `pull/${prNumber}/head:${ref}`);
+      git(
+        'fetch',
+        remote,
+        `${platform.fetchHeadRefSpec(Number(prNumber))}:${ref}`,
+      );
     } catch (err) {
       throw new Error(
         `Failed to fetch PR #${prNumber} from remote "${remote}": ${(err as Error).message}`,
       );
     }
-    const fetchedSha = git('rev-parse', ref);
+    // QUALIFIED: an unqualified `ref` resolves in refs/tags BEFORE
+    // refs/heads, so a planted tag with the throwaway branch's name (fully
+    // attacker-known, no pid here) would silently name the tag's commit as
+    // the fetched head while the worktree shows the real one.
+    const fetchedSha = git('rev-parse', `refs/heads/${ref}`);
 
-    // 3. Fetch PR metadata via gh CLI. Cross-repo flag tells the LLM whether
-    //    to switch into lightweight mode.
+    // 3. Fetch PR metadata via the platform. Cross-repo flag tells the LLM
+    //    whether to switch into lightweight mode.
     let meta: PrMetadata;
     try {
-      const json = gh(
-        'pr',
-        'view',
-        prNumber,
-        '--repo',
-        ownerRepo,
-        '--json',
-        'headRefName,headRefOid,baseRefName,additions,deletions,changedFiles,isCrossRepository,body',
-      );
-      meta = JSON.parse(json) as PrMetadata;
+      const fetchMeta = platform.getFetchMeta(Number(prNumber), ownerRepo);
+      meta = {
+        headRefName: fetchMeta.headRefName ?? prNumber,
+        headRefOid: fetchMeta.headRefOid,
+        baseRefName: fetchMeta.baseRefName,
+        // Platforms without advertised stats (Aone) fill these from the
+        // captured diff after step 5.
+        additions: fetchMeta.additions ?? 0,
+        deletions: fetchMeta.deletions ?? 0,
+        changedFiles: fetchMeta.changedFiles ?? 0,
+        isCrossRepository: fetchMeta.isCrossRepository,
+        body: fetchMeta.body,
+      };
+      // The base ref is server-controlled metadata reaching git's argv through
+      // the base fetch below. The fetch probe passes `--`, but that only ends
+      // OPTION parsing — validate ALLOWLIST-style, accepting only a plain
+      // branch name (the twin of aone.fetchDiff's target guard, whose comment
+      // names each admitted channel's wrong outcome: option spellings, `+`
+      // force refspec, `src:dst` colon refspec, `HEAD`'s silent fetch + stale
+      // clone-time symref merge-base, rev-parse metasyntax, the empty
+      // string). A hostile platform value dies here with the metadata rolled
+      // back, not inside a git invocation.
+      if (!isPlainBranchName(meta.baseRefName)) {
+        throw new Error(
+          `refusing base ref ${JSON.stringify(meta.baseRefName)} from the ` +
+            `platform metadata — not a plain branch name`,
+        );
+      }
     } catch (err) {
       // Roll back the fetched ref so the next run starts clean.
       tryRemove(() =>
@@ -745,6 +1046,9 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         `Failed to fetch PR #${prNumber} metadata: ${(err as Error).message}`,
       );
     }
+    // Aone does not advertise diff stats; compute them from the captured diff
+    // once it exists. Tracked so the recomputed numbers replace the zeros.
+    const needsLocalStats = platform.kind !== 'github';
 
     // 4. Create the ephemeral worktree.
     try {
@@ -770,7 +1074,9 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     const { sha: mergeBaseSha, baseFetchFailed } = resolveMergeBase(
       remote,
       meta.baseRefName,
-      ref,
+      // QUALIFIED — the head side is dwim-shadowable exactly like the
+      // fetchedSha read above.
+      `refs/heads/${ref}`,
       gitProbe,
     );
     if (baseFetchFailed) {
@@ -1201,6 +1507,20 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       );
     }
 
+    // Aone does not advertise diff stats — fill them from the captured diff
+    // so the report's diffStat and the stderr summary carry real numbers.
+    // Runs AFTER the plan/rescue above, where `diffText` is FINAL: the
+    // partition-rescue can republish the full range over a delta-scoped
+    // capture, and a backfill run before it would advertise the delta's
+    // numbers beside a diffPath pointing at the full merge-base diff. The
+    // numbers must describe the SAME diff the report points at.
+    if (needsLocalStats) {
+      const stats = computeDiffStats(diffText);
+      meta.additions = stats.additions;
+      meta.deletions = stats.deletions;
+      meta.changedFiles = stats.changedFiles;
+    }
+
     // 6. Emit the report. The window opening survives drift restarts: this
     // command overwrites its own report, and a reset boundary would hide any
     // bypass write made during the abandoned attempt from cleanup's audit.
@@ -1243,8 +1563,12 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
           // attempt, never forward. A corrupted far-future `auditSince`
           // (`"2099-…"`) is therefore rejected here — it would push the window
           // ahead of every real comment and silently report a clean audit.
-          // (ISO-8601 strings from `toISOString()` compare chronologically.)
-          prevSince < auditSince
+          // Compared NUMERICALLY: `toISOString()` output happens to sort
+          // chronologically, but a forged extended-year form
+          // (`"+275760-…"`) parses to the far future while sorting
+          // lexicographically BEFORE any `"2026-…"` string — a string
+          // comparison inherits exactly the forgery this bound rejects.
+          Date.parse(prevSince) < Date.parse(auditSince)
         ) {
           auditSince = prevSince;
         }
@@ -1319,14 +1643,24 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       // advertised stat, so the collapse ratio would fire on every incremental
       // review — both flags are full-range facts, so both read `fullText` on
       // EVERY round, delta-scoped or not.
-      ...(isCollapsedFromUpstream({
-        diffText: fullText ?? '',
-        baseFetchFailed,
-        additions: meta.additions,
-        deletions: meta.deletions,
-      })
-        ? { collapsedFromUpstream: true }
-        : {}),
+      // The collapse disclosure needs TWO independent quantities: the
+      // platform-advertised full-PR stat and the recomputed full-range count.
+      // Off GitHub the advertised half is locally derived FROM THE SAME
+      // captured text — one source, not two — and on a delta-scoped round it
+      // is delta-scoped beside a full-range count (a churned delta passing
+      // containment would fire a false "overlapping merged PRs collapsed
+      // this PR"). Skip it when the stats are locally derived; a genuine
+      // upstream collapse cannot be disclosed without an independent fact.
+      ...(needsLocalStats
+        ? {}
+        : isCollapsedFromUpstream({
+              diffText: fullText ?? '',
+              baseFetchFailed,
+              additions: meta.additions,
+              deletions: meta.deletions,
+            })
+          ? { collapsedFromUpstream: true }
+          : {}),
       diffStat: {
         files: meta.changedFiles,
         additions: meta.additions,
@@ -1352,6 +1686,14 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     // reads the ledger to find this attempt's transcripts. After the plan
     // write, so the entry sits inside the run-epoch fence it is read through.
     appendRunSession(out);
+    if (resumeRefusal === 'head-moved') {
+      // The once-per-review restart bound, now a fact on disk. Recorded after
+      // the plan write for the same fence reason as the session entry.
+      recordRestart(
+        out,
+        `head-moved ${priorFetchedSha?.slice(0, 7) ?? 'unknown'}->${fetchedSha.slice(0, 7)}`,
+      );
+    }
     writeStdoutLine(`Wrote fetch-pr report to ${out}`);
     if (diffPath) writeStdoutLine(`Wrote review diff to ${diffPath}`);
     // Surface diff stats to stderr so a human running the command interactively
@@ -1453,34 +1795,59 @@ export function isCollapsedFromUpstream(i: {
   );
 }
 
-/** Changed (+/-) lines in a unified diff — headers excluded. */
+/**
+ * Changed (+/-) lines in a unified diff — headers excluded. Delegates to the
+ * single hunk-state walker in computeDiffStats so the two can never disagree
+ * (isCollapsedFromUpstream compares this against the advertised stats, and
+ * for Aone the advertised stats COME from computeDiffStats — one walker, or
+ * the ratio is load-bearing on two copies agreeing).
+ *
+ * POSITION, not prefix shape. Guessing by prefix (`^-(?!--)`) has to exclude
+ * every line starting `--`, and a DELETED line whose own content starts `--`
+ * arrives as `--- …`: markdown rules and YAML document markers, SQL and Lua
+ * comments, a `--flag` in a script. Each one silently dropped a real changed
+ * line, and every drop pushes the ratio toward a false `collapsedFromUpstream`
+ * (the disclosure fires when the recomputed count comes in LOW).
+ */
 export function countDiffChangedLines(diffText: string): number {
-  // POSITION, not prefix shape. Guessing by prefix (`^-(?!--)`) has to exclude
-  // every line starting `--`, and a DELETED line whose own content starts `--`
-  // arrives as `--- …`: markdown rules and YAML document markers, SQL and Lua
-  // comments, a `--flag` in a script. Each one silently dropped a real changed
-  // line, and every drop pushes the ratio toward a false `collapsedFromUpstream`
-  // (the disclosure fires when the recomputed count comes in LOW).
-  //
-  // Inside a hunk the position is unambiguous — `---`/`+++` cannot be file
-  // headers there — so track hunk state and count every `+`/`-` line in it.
-  let n = 0;
+  const { additions, deletions } = computeDiffStats(diffText);
+  return additions + deletions;
+}
+
+/**
+ * Additions / deletions / changed-files counted straight off a unified diff —
+ * the single hunk-state walker (see countDiffChangedLines). Used when the
+ * platform does not advertise diff stats (Aone); GitHub's `gh pr view`
+ * reports them, so GitHub keeps the advertised numbers. Inside a hunk the
+ * position is unambiguous — `---`/`+++` cannot be file headers there — so
+ * track hunk state and count every `+`/`-` line in it; `diff --git` opens
+ * the next file's header block and `\ No newline at end of file` is a marker,
+ * not content.
+ */
+export function computeDiffStats(diffText: string): {
+  additions: number;
+  deletions: number;
+  changedFiles: number;
+} {
+  let additions = 0;
+  let deletions = 0;
+  let changedFiles = 0;
   let inHunk = false;
   for (const line of diffText.split('\n')) {
+    if (line.startsWith('diff --git')) {
+      changedFiles++;
+      inHunk = false;
+      continue;
+    }
     if (line.startsWith('@@')) {
       inHunk = true;
       continue;
     }
-    // `diff --git` opens the next file's header block; `\ No newline at end of
-    // file` is a marker, not content, and git emits it inside the hunk.
-    if (line.startsWith('diff --git')) {
-      inHunk = false;
-      continue;
-    }
     if (!inHunk || line.startsWith('\\')) continue;
-    if (line.startsWith('+') || line.startsWith('-')) n++;
+    if (line.startsWith('+')) additions++;
+    else if (line.startsWith('-')) deletions++;
   }
-  return n;
+  return { additions, deletions, changedFiles };
 }
 
 export const fetchPrCommand: CommandModule = {
@@ -1513,13 +1880,19 @@ export const fetchPrCommand: CommandModule = {
       .option('host', {
         type: 'string',
         describe:
-          'GitHub host for this PR (GitHub Enterprise). Routes every gh call in this command via GH_HOST; omit for github.com.',
+          "The host the target lives on — it selects the platform, i.e. whether the fetch uses pull/<n>/head or refs/merge-requests/<id>/head. An Aone host (*.alibaba-inc.com) selects the Aone backend; omitted: detected from the remote under review, else the clone's origin, else GitHub.",
       })
       .option('max-chunk-lines', {
         type: 'number',
         default: DEFAULT_MAX_CHUNK_LINES,
         describe:
           'Target size, in diff lines, of each review chunk. A chunk boundary falls on a hunk boundary; a hunk larger than this is split only at a top-level declaration, never inside a function.',
+      })
+      .option('resume', {
+        type: 'boolean',
+        default: false,
+        describe:
+          'Continue an interrupted run of this PR when its on-disk state still matches (worktree at the fetched SHA, diff bytes unchanged, PR head unmoved): keep the worktree, leave the plan untouched, and print {"resumed":true}. Falls through to a normal fresh fetch — printing {"resumed":false,"resumeRefused":"<reason>"} — whenever the state does not match.',
       })
       .option('effort', {
         type: 'string',
