@@ -197,6 +197,36 @@ function hasFlag(
   return false;
 }
 
+// A version token demotes the mcp route only when the mcp fast path has no
+// option for it and would reject it via `.strict()`. `mcp add` is the one
+// subcommand that captures unknown options into its variadic `[args…]` tail
+// (`unknown-options-as-args`), so a `-v`/`--version` token there is a server
+// argument and must stay on the fast path — routing it to the full parser
+// would let the root `.version()` option consume it and silently drop it from
+// the persisted server config. `mcp --version`, `mcp -v`, and
+// `mcp <sub> --version` are version flags the `.strict()` parser has no option
+// for, so they demote to the full parser.
+function mcpVersionDemotes(argv: readonly string[]): boolean {
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]!;
+    if (arg === '--') {
+      return false;
+    }
+    i = skipOptionValues(argv, i);
+    if (arg !== '--version' && arg !== '-v') {
+      continue;
+    }
+    // `mcp add <name> <commandOrUrl> [args…]`: the variadic tail starts after
+    // the two required positionals, so any token at index ≥ 4 is the server
+    // command's own argument, not an mcp-level flag.
+    if (argv[1] === 'add' && i >= 4) {
+      continue;
+    }
+    return true;
+  }
+  return false;
+}
+
 async function buildTopLevelHelpParser() {
   const { default: yargs } = await import('yargs');
   const parser = yargs([])
@@ -308,8 +338,10 @@ export function resolveBootstrapRoute(
   // Version-bearing mcp argv must reach the full parser: `runMcpFastPath`
   // registers no version option and runs `.strict()`, so `mcp <sub> --version`
   // would otherwise exit 1 instead of printing the version or running the
-  // subcommand. The full parser owns those argv shapes.
-  if (firstArg === 'mcp' && !hasFlag(argv, '--version', '-v')) {
+  // subcommand. The full parser owns those argv shapes — except `mcp add`'s
+  // variadic `[args…]` tail, where a version-looking token is a server
+  // argument the fast path persists verbatim (see `mcpVersionDemotes`).
+  if (firstArg === 'mcp' && !mcpVersionDemotes(argv)) {
     return 'mcp';
   }
 

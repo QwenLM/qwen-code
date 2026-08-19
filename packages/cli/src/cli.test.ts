@@ -269,6 +269,31 @@ describe('resolveBootstrapRoute', () => {
     expect(resolveBootstrapRoute(['--version'])).toBe('version');
   });
 
+  it('keeps version-looking server args in the mcp add variadic tail', () => {
+    // `mcp add` captures unknown options into its `[args…]` tail
+    // (`unknown-options-as-args`), so a `-v`/`--version` token there is a
+    // server argument, not a version flag. Routing it to the full parser would
+    // let the root `.version()` option consume it and silently drop it from
+    // the persisted server config.
+    expect(
+      resolveBootstrapRoute([
+        'mcp',
+        'add',
+        'my-server',
+        'node',
+        'server.js',
+        '-v',
+      ]),
+    ).toBe('mcp');
+    expect(
+      resolveBootstrapRoute(['mcp', 'add', 'my-server', 'node', '--version']),
+    ).toBe('mcp');
+    // Controls: version tokens at the mcp level (or on a non-variadic
+    // subcommand) still demote to the full parser.
+    expect(resolveBootstrapRoute(['mcp', '--version'])).toBe('default');
+    expect(resolveBootstrapRoute(['mcp', 'list', '--version'])).toBe('default');
+  });
+
   it('demotes unrecognized short-option clusters to the slow path', () => {
     // Documented limitation (see skipOptionValues): clusters are matched as
     // whole tokens, so -h/-v inside a cluster falls back to the full boot.
