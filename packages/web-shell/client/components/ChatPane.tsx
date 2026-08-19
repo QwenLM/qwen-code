@@ -532,8 +532,6 @@ export function ChatPane({
     editQueuedPrompt,
     editLastQueuedPrompt,
     clearQueuedPrompts,
-    restoreUnknownQueuedPrompt,
-    discardUnknownQueuedPrompt,
   } = useQueuedPrompts({
     connected: connection.status === 'connected',
     sessionId: connection.sessionId,
@@ -1060,8 +1058,6 @@ export function ChatPane({
             canMutateMidTurn={canMutateMidTurn}
             onDelete={removeQueuedPrompt}
             onEdit={editQueuedPrompt}
-            onRestoreUnknown={restoreUnknownQueuedPrompt}
-            onDiscardUnknown={discardUnknownQueuedPrompt}
             onImagePreview={handleImagePreview}
           />
           {unknownPromptAdmission && (

@@ -948,6 +948,16 @@ export interface WebShellProps {
    * `true`/omitted still requires the capability to be satisfied.
    */
   fileUploadEnabled?: boolean;
+  /**
+   * Directory that drag-and-dropped files upload into, **relative to the
+   * workspace root**. Use a relative path WITHOUT a leading `/` — e.g.
+   * `'uploads'`, `'uploads/images'`, or omit it to upload into the
+   * workspace root (the default). A leading-slash path like `'/uploads'`
+   * is rejected by the daemon as outside the workspace. The directory
+   * (including intermediate components) is created automatically on upload
+   * when it does not exist.
+   */
+  fileUploadDirectory?: string;
   /** Additional @ mention categories shown alongside built-in files/extensions. */
   atProviders?: readonly WebShellAtProvider[];
   /** Icon URLs for custom composer tag kinds used by @ mention chips. */
@@ -1815,6 +1825,7 @@ export function App({
   atProviders,
   composerTagIcons,
   fileUploadEnabled,
+  fileUploadDirectory,
   renderToolHeaderExtra,
   renderWelcomeHeader,
   renderWelcomeFooter,
@@ -2074,6 +2085,7 @@ export function App({
       markdown,
       loadingPhrases,
       fileUploadEnabled,
+      fileUploadDirectory,
     }),
     [
       composerTagIcons,
@@ -2100,6 +2112,7 @@ export function App({
       markdown,
       loadingPhrases,
       fileUploadEnabled,
+      fileUploadDirectory,
     ],
   );
   const CustomFooter = renderFooter;
@@ -6135,8 +6148,6 @@ export function App({
     editQueuedPrompt,
     editLastQueuedPrompt,
     clearQueuedPrompts,
-    restoreUnknownQueuedPrompt,
-    discardUnknownQueuedPrompt,
   } = useQueuedPrompts({
     connected,
     writeBlocked: sessionWriteBlocked,
@@ -12486,8 +12497,6 @@ export function App({
                           canMutateMidTurn={canMutateMidTurn}
                           onDelete={removeQueuedPrompt}
                           onEdit={editQueuedPrompt}
-                          onRestoreUnknown={restoreUnknownQueuedPrompt}
-                          onDiscardUnknown={discardUnknownQueuedPrompt}
                           onImagePreview={openImagePanel}
                         />
                         {CustomComposerHeader && (
