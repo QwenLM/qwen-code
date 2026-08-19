@@ -398,17 +398,6 @@ function auditPrWrites(target: string, prNumber: string): void {
  * review's own `<worktree>-scratch-` prefix is a much narrower thing than any
  * string that matches a glob.
  */
-/**
- * The first ancestor of `dir` (itself included) that is a symlink, or null.
- *
- * `lstat` refuses to dereference only the LAST component, so checking the
- * directory a sweep is about to walk says nothing about the path it hangs
- * from: a link one hop higher (`.qwen` over `.qwen/tmp`) resolves silently and
- * every delete below lands wherever it points. The walk stops at the
- * filesystem root, and a path that cannot be read at all answers null — an
- * absent temp dir is the ordinary case, not a hazard.
- */
-
 function scratchWorktreesOf(worktree: string): {
   paths: string[];
   failed: boolean;
