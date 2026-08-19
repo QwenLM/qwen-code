@@ -114,6 +114,24 @@ export interface ParsedReviewArgs {
    *  write gate can bind a recorded bare-number target's platform (the
    *  target itself carries no host in that spelling). */
   host?: string;
+  /**
+   * `--resume`: continue an interrupted run of this same target instead of
+   * starting over — Step 1 passes it to `fetch-pr --resume`, which rules on
+   * the on-disk state itself and silently falls back to a fresh run when the
+   * state no longer matches. Gated on PR targets: only `fetch-pr` has a
+   * resume path (a local review's diff is captured from a live working tree
+   * that has no stable interrupted state to continue). `effective` is a
+   * TARGET-SHAPE gate, not a promise: a cross-repo `pr-url` with no matching
+   * remote routes to lightweight mode, which never calls `fetch-pr` — the
+   * parser cannot see remotes, so Step 1's lightweight branch owns telling
+   * the user the flag is inert there.
+   */
+  resume: {
+    /** `--resume` appeared in the arguments. */
+    requested: boolean;
+    /** `--resume` applies (the target is a PR). */
+    effective: boolean;
+  };
   /** Non-flag tokens beyond the first target token, reported not guessed. */
   extraTokens: string[];
   /** Unrecognized `--flags`, reported not guessed. */
@@ -331,6 +349,7 @@ export function parseReviewArgs(
 
   let commentRequestedByFlag = false;
   let fixRequested = false;
+  let resumeRequested = false;
   let explicitEffort: ReviewEffort | null = null;
   let explicitFloor: ReviewSeverityFloor | 'auto' | null = null;
   let recordedHostFlag: string | undefined;
@@ -419,6 +438,10 @@ export function parseReviewArgs(
         recordedHostFlag = next;
         i++;
       }
+      continue;
+    }
+    if (token === '--resume') {
+      resumeRequested = true;
       continue;
     }
 
@@ -733,6 +756,13 @@ export function parseReviewArgs(
     );
   }
 
+  const resumeEffective = resumeRequested && isPr;
+  if (resumeRequested && !isPr) {
+    warnings.push(
+      'Warning: `--resume` flag is ignored because the review target is not a PR — only a PR review has interrupted state to continue.',
+    );
+  }
+
   // `--fix` edits a working tree, so it needs one that outlives the review. A
   // PR review's tree is the ephemeral worktree Step 9 removes; a `local` or
   // `file` review's tree is the user's own checkout.
@@ -895,6 +925,7 @@ export function parseReviewArgs(
     severityFloor,
     severityFloorSource,
     ...(recordedHostFlag !== undefined ? { host: recordedHostFlag } : {}),
+    resume: { requested: resumeRequested, effective: resumeEffective },
     extraTokens,
     unknownFlags,
     warnings,
@@ -939,7 +970,7 @@ function reviewDefaultsFromSettings(): {
 export const parseArgsCommand: CommandModule = {
   command: 'parse-args [raw]',
   describe:
-    'Parse the /review skill argument string (--comment, --fix, --effort, --severity-floor, target disambiguation) and emit the verdict as JSON; pass the string on stdin via --stdin (a positional that begins with a dash never reaches this handler — yargs rejects it as an unknown flag)',
+    'Parse the /review skill argument string (--comment, --fix, --resume, --effort, --severity-floor, target disambiguation) and emit the verdict as JSON; pass the string on stdin via --stdin (a positional that begins with a dash never reaches this handler — yargs rejects it as an unknown flag)',
   builder: (yargs) =>
     yargs
       .positional('raw', {
