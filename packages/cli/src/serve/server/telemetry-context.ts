@@ -11,13 +11,6 @@ import type { Response } from 'express';
 // here, so it cannot reach the telemetry middleware's core import graph.
 export interface DaemonTelemetryResponseContext {
   workspaceCwd?: string;
-  /**
-   * Caller trace id from a valid inbound `traceparent` header, captured with
-   * telemetry disabled (with telemetry on the request span already carries
-   * it into the log line's trace prefix). Consumed by the access log for the
-   * no-backend log-based join.
-   */
-  inboundTraceId?: string;
 }
 
 export const daemonTelemetryResponseContext = Symbol(
@@ -28,9 +21,22 @@ export type TelemetryResponse = Response & {
   [daemonTelemetryResponseContext]?: DaemonTelemetryResponseContext;
 };
 
+// The captured caller trace id lives under its own symbol: the presence of
+// the telemetry response context doubles as the opt-in gate for
+// handler-resolved workspace attribution (see setDaemonTelemetryWorkspace),
+// so capturing a trace id must never create it — otherwise a caller merely
+// sending a traceparent header would silently change span attribution.
+export const daemonInboundTraceIdContext = Symbol(
+  'daemonInboundTraceIdContext',
+);
+
+export type InboundTraceIdResponse = Response & {
+  [daemonInboundTraceIdContext]?: string;
+};
+
 /**
- * The caller trace id captured from a valid inbound `traceparent` header when
- * telemetry is disabled. The access log reads it so a request's log line
+ * The caller trace id captured from a valid inbound `traceparent` header,
+ * in both telemetry modes. The access log reads it so a request's log line
  * still joins with the caller's logs (or trace backend) with no daemon-side
  * telemetry at all.
  */
@@ -38,8 +44,7 @@ export function getDaemonTelemetryInboundTraceId(
   res: Response,
 ): string | undefined {
   try {
-    return (res as TelemetryResponse)[daemonTelemetryResponseContext]
-      ?.inboundTraceId;
+    return (res as InboundTraceIdResponse)[daemonInboundTraceIdContext];
   } catch {
     return undefined;
   }
