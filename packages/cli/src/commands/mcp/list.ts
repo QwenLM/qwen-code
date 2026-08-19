@@ -11,12 +11,12 @@ import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import type { MCPServerConfig } from '@qwen-code/qwen-code-core';
 import {
   MCPServerStatus,
+  createMcpClient,
   createTransport,
   ExtensionManager,
   isGatedMcpScope,
   runWithTimeout,
 } from '@qwen-code/qwen-code-core';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { isWorkspaceTrusted } from '../../config/trustedFolders.js';
 import { assembleMcpServers } from '../../config/mcpServers.js';
 import { loadMcpApprovals } from '../../config/mcpApprovals.js';
@@ -74,10 +74,7 @@ async function testMCPConnection(
   serverName: string,
   config: MCPServerConfig,
 ): Promise<McpConnectionResult> {
-  const client = new Client({
-    name: 'mcp-test-client',
-    version: '0.0.1',
-  });
+  const client = createMcpClient('mcp-test-client', config);
 
   let transport;
   try {

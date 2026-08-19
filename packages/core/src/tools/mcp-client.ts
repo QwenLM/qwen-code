@@ -360,7 +360,7 @@ export type DiscoveredMCPResource = Resource & {
   serverName: string;
 };
 
-function createMcpClient(name: string, cfg: MCPServerConfig): Client {
+export function createMcpClient(name: string, cfg: MCPServerConfig): Client {
   const remote = !!(cfg.httpUrl || cfg.url || cfg.tcp);
   return new Client(
     { name, version: '0.0.1' },
