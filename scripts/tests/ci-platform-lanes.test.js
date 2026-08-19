@@ -53,6 +53,32 @@ describe('platform lanes — triggers', () => {
       );
     });
 
+    it(`${lane}'s triggers are alternatives, not requirements`, () => {
+      // The clause-presence assertions above survive a connective mutation:
+      // `||` → `&&` between two event clauses leaves every string in place
+      // and makes the gate unsatisfiable for every trigger, silently turning
+      // both lanes off again — the exact state this PR exists to end. Read
+      // the event group and require it to be a disjunction.
+      const cond = condOf(lane).replace(/\s+/g, ' ');
+      // From the first event clause to the close of the group — not from the
+      // first `(`, which belongs to `!cancelled()`.
+      const group = cond.slice(
+        cond.indexOf('github.event_name'),
+        cond.lastIndexOf(')'),
+      );
+      expect(group).toContain("github.event_name == 'schedule'");
+      expect(group.split('||').length).toBeGreaterThanOrEqual(4);
+      // The only `&&` allowed inside the group is the one binding the
+      // pull-request clause to its classifier output.
+      for (const clause of group.split('||')) {
+        if (clause.includes('platform_sensitive')) continue;
+        expect(
+          clause,
+          `event clause is conjoined: ${clause.trim()}`,
+        ).not.toContain('&&');
+      }
+    });
+
     it(`${lane} skips only on a confident 'false'`, () => {
       // The fail-safe direction is the whole design: `== 'true'` would turn
       // every classifier error, every skipped classify job and every empty
@@ -205,6 +231,10 @@ describe('platform lanes — a failing nightly is visible', () => {
     // effectively off again.
     const wr = (failureIssue[true] ?? failureIssue['on']).workflow_run;
     expect(wr.workflows).toContain('Qwen Code CI');
+    // Both sides of the binding: `workflow_run.workflows` matches the watched
+    // workflow's `name:`, so renaming ci.yml silently unhooks the watcher and
+    // the nightly goes back to failing where nobody is told.
+    expect(ci.name).toBe('Qwen Code CI');
     // `workflow_run.workflows` matches the watched workflow's `name:` key:
     // pin the coupling itself, so renaming ci.yml's name fails here instead
     // of silently stopping the nightly's workflow_run events.
