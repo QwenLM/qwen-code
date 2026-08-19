@@ -485,9 +485,12 @@ describe('splitCompoundCommand', () => {
   });
 
   it('handles the tab-stripping heredoc variant', async () => {
-    expect(splitCompoundCommand('python <<-PY\n\timport os\n\tPY')).toEqual([
-      'python <<-PY',
-    ]);
+    // The trailing segment keeps the terminator observable: both mutants
+    // (dropping the `-` skip, or matching the terminator without trim) must
+    // keep `echo done` visible rather than swallowing it into the body.
+    expect(
+      splitCompoundCommand('python <<-PY\n\timport os\n\tPY\necho done'),
+    ).toEqual(['python <<-PY', 'echo done']);
   });
 
   it('never swallows executed lines behind a phantom heredoc', async () => {
