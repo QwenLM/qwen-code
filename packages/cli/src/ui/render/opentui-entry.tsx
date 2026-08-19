@@ -94,10 +94,14 @@ export async function startOpenTuiUI(
   // (ink kittyProtocolDetector parity) and disable the protocol outright in
   // terminals that do not answer, so legacy key input always works.
   const kittySupported = await probeKittyKeyboardSupport();
+  // Mouse capture honors the ui.mouseTracking setting (opencode config.mouse
+  // parity, default on): off means the terminal keeps its native selection,
+  // context menu, and wheel scrolling instead of the app.
+  const mouseTracking = settings?.merged.ui?.mouseTracking ?? true;
   const renderer = await createCliRenderer({
     targetFps: 60,
     useKittyKeyboard: kittySupported ? {} : null,
-    useMouse: true,
+    useMouse: mouseTracking,
     exitOnCtrlC: false,
     externalOutputMode: 'passthrough',
     autoFocus: true,

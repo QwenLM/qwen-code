@@ -1,9 +1,20 @@
 /** Clipboard write: OSC 52 (terminal-native) + platform fallback spawn. */
 import { spawn } from 'node:child_process';
 
-function osc52(text: string): string {
+/**
+ * OSC 52 sequence for `text`, wrapped in a tmux/screen DCS passthrough when
+ * running inside either multiplexer (opencode writeOsc52 parity — a bare
+ * OSC 52 would be swallowed by the outer terminal there).
+ */
+export function osc52Sequence(
+  text: string,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
   const b64 = Buffer.from(text, 'utf8').toString('base64');
-  return `\x1b]52;c;${b64}\x07`;
+  const sequence = `\x1b]52;c;${b64}\x07`;
+  return env['TMUX'] || env['STY']
+    ? `\x1bPtmux;\x1b${sequence}\x1b\\`
+    : sequence;
 }
 
 function platformCopy(text: string): Promise<void> {
@@ -42,7 +53,7 @@ export async function copyText(text: string): Promise<boolean> {
     /warp/i.test(process.env['TERMINAL_EMULATOR'] ?? '');
   if (!isWarp) {
     try {
-      process.stdout.write(osc52(text));
+      process.stdout.write(osc52Sequence(text));
     } catch {
       /* ignore */
     }

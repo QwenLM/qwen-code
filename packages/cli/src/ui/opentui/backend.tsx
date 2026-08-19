@@ -840,10 +840,11 @@ function App({
     });
   }, []);
 
-  // copy-on-select: drag text, release → clipboard (like a native terminal)
-  useSelectionHandler(async (selection) => {
-    const text = selection.getSelectedText();
-    if (!text) return;
+  // Copy the active selection and clear it (opencode Selection.copy parity;
+  // shared by copy-on-select, ctrl+c and ctrl+y).
+  const copyActiveSelection = useCallback(async (): Promise<boolean> => {
+    const text = renderer.getSelection()?.getSelectedText();
+    if (!text) return false;
     const ok = await copyText(text);
     setToast(
       ok
@@ -852,6 +853,13 @@ function App({
     );
     setTimeout(() => setToast(null), 1500);
     renderer.clearSelection();
+    return true;
+  }, [renderer]);
+
+  // copy-on-select: drag text, release → clipboard (like a native terminal)
+  useSelectionHandler(async (selection) => {
+    if (!selection.getSelectedText()) return;
+    await copyActiveSelection();
   });
 
   // Double/triple-click word/line selection (ink parity): the framework's
@@ -1275,9 +1283,29 @@ function App({
   };
 
   useKeyboard((key) => {
+    // Selection keys win ahead of normal bindings (opencode keymap.intercept
+    // parity): escape dismisses a selection, ctrl+c copies it instead of
+    // interrupting, ctrl+y copies explicitly and otherwise falls through.
+    if (key.name === 'escape' && renderer.getSelection()) {
+      renderer.clearSelection();
+      return;
+    }
     if (key.name === 'c' && key.ctrl) {
+      if (renderer.getSelection()?.getSelectedText()) {
+        void copyActiveSelection();
+        return;
+      }
+      // A selection without text is dismissed, then ctrl+c keeps its normal
+      // interrupt/exit meaning.
+      if (renderer.getSelection()) renderer.clearSelection();
       handleExitGuardKey('ctrl-c');
       return;
+    }
+    if (key.name === 'y' && key.ctrl) {
+      if (renderer.getSelection()?.getSelectedText()) {
+        void copyActiveSelection();
+        return;
+      }
     }
     if (key.name === 'd' && key.ctrl) {
       handleExitGuardKey('ctrl-d');
