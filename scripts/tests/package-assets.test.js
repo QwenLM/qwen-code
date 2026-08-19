@@ -15,6 +15,7 @@ import {
   truncateSync,
   writeFileSync,
 } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -561,6 +562,141 @@ describe('package asset scripts', () => {
     ).toBe(true);
   });
 
+  it('copies node_repl runtime modules into the bundle asset directory', () => {
+    const rootDir = createFixtureRoot();
+    writeFile(
+      rootDir,
+      'packages/core/src/tools/node-repl/runtime/kernel.mjs',
+      'export const kernel = true;\n',
+    );
+    writeFile(
+      rootDir,
+      'packages/core/src/tools/node-repl/runtime/module-loader.mjs',
+      'export const loader = true;\n',
+    );
+    writeFile(
+      rootDir,
+      'node_modules/tree-sitter-wasms/out/tree-sitter-javascript.wasm',
+      'grammar',
+    );
+    writeFile(
+      rootDir,
+      'dist/node-repl-runtime/stale.mjs',
+      'export const stale = true;\n',
+    );
+    stubConsole();
+
+    copyBundleAssets({ root: rootDir });
+
+    const destination = path.join(rootDir, 'dist', 'node-repl-runtime');
+    expect(readdirSync(destination).sort()).toEqual([
+      'kernel.mjs',
+      'module-loader.mjs',
+      'tree-sitter-javascript.wasm',
+    ]);
+  });
+
+  it('requires and copies node_repl assets into the VSIX CLI layout', () => {
+    const rootDir = createFixtureRoot();
+    const script = 'packages/vscode-ide-companion/scripts/copy-bundled-cli.js';
+    writeFile(
+      rootDir,
+      script,
+      readFileSync(
+        new URL(
+          '../../packages/vscode-ide-companion/scripts/copy-bundled-cli.js',
+          import.meta.url,
+        ),
+        'utf8',
+      ),
+    );
+    createMinimalNodeReplBundle(rootDir);
+
+    execFileSync(process.execPath, [path.join(rootDir, script)], {
+      stdio: 'ignore',
+    });
+
+    const copiedRuntime = path.join(
+      rootDir,
+      'packages/vscode-ide-companion/dist/qwen-cli/node-repl-runtime',
+    );
+    expect(readdirSync(copiedRuntime).sort()).toEqual([
+      'kernel.mjs',
+      'module-loader.mjs',
+      'tree-sitter-javascript.wasm',
+    ]);
+
+    rmSync(path.join(rootDir, 'dist/node-repl-runtime/kernel.mjs'));
+    expect(() =>
+      execFileSync(process.execPath, [path.join(rootDir, script)], {
+        stdio: 'pipe',
+      }),
+    ).toThrow(/Missing root dist artifacts/);
+  });
+
+  it('copies node_repl assets into both TypeScript SDK CLI layouts', () => {
+    const rootDir = createFixtureRoot();
+    const sdkRoot = path.join(rootDir, 'packages/sdk-typescript');
+    const sourceScript = 'packages/sdk-typescript/scripts/bundle-cli.js';
+    const npmScript = 'packages/sdk-typescript/scripts/bundle-cli-from-npm.js';
+    for (const [destination, source] of [
+      [
+        sourceScript,
+        new URL(
+          '../../packages/sdk-typescript/scripts/bundle-cli.js',
+          import.meta.url,
+        ),
+      ],
+      [
+        npmScript,
+        new URL(
+          '../../packages/sdk-typescript/scripts/bundle-cli-from-npm.js',
+          import.meta.url,
+        ),
+      ],
+    ]) {
+      writeFile(rootDir, destination, readFileSync(source, 'utf8'));
+    }
+    mkdirSync(path.join(sdkRoot, 'dist'), { recursive: true });
+    createMinimalNodeReplBundle(rootDir);
+
+    execFileSync(process.execPath, [path.join(rootDir, sourceScript)], {
+      stdio: 'ignore',
+    });
+    expect(
+      readdirSync(path.join(sdkRoot, 'dist/cli/node-repl-runtime')).sort(),
+    ).toEqual([
+      'kernel.mjs',
+      'module-loader.mjs',
+      'tree-sitter-javascript.wasm',
+    ]);
+
+    execFileSync(process.execPath, [path.join(rootDir, npmScript)], {
+      env: { ...process.env, CLI_PACKAGE_PATH: path.join(rootDir, 'dist') },
+      stdio: 'ignore',
+    });
+    expect(
+      readdirSync(path.join(sdkRoot, 'dist/cli/node-repl-runtime')).sort(),
+    ).toEqual([
+      'kernel.mjs',
+      'module-loader.mjs',
+      'tree-sitter-javascript.wasm',
+    ]);
+
+    rmSync(path.join(rootDir, 'dist/node-repl-runtime'), {
+      recursive: true,
+    });
+    expect(() =>
+      execFileSync(process.execPath, [path.join(rootDir, npmScript)], {
+        env: { ...process.env, CLI_PACKAGE_PATH: path.join(rootDir, 'dist') },
+        stdio: 'pipe',
+      }),
+    ).not.toThrow();
+    expect(existsSync(path.join(sdkRoot, 'dist/cli/node-repl-runtime'))).toBe(
+      false,
+    );
+  });
+
   it('copies bundled skill scripts and references into the runtime dist', () => {
     const rootDir = createFixtureRoot();
     writeFile(
@@ -754,6 +890,48 @@ describe('package asset scripts', () => {
     expect(existsSync(path.join(distSrc, 'notes', 'DESIGN.md'))).toBe(true);
   });
 
+  it('copies only node_repl runtime mjs files into per-package dist', () => {
+    const rootDir = createFixtureRoot();
+    writeFile(
+      rootDir,
+      'packages/core/src/tools/node-repl/runtime/kernel.mjs',
+      'export const kernel = true;\n',
+    );
+    writeFile(
+      rootDir,
+      'packages/core/src/unrelated.mjs',
+      'export const unrelated = true;\n',
+    );
+    writeFile(
+      rootDir,
+      'node_modules/tree-sitter-wasms/out/tree-sitter-javascript.wasm',
+      'grammar',
+    );
+    stubConsole();
+
+    copyFiles({ root: path.join(rootDir, 'packages', 'core') });
+
+    const distSrc = path.join(rootDir, 'packages', 'core', 'dist', 'src');
+    expect(
+      existsSync(
+        path.join(distSrc, 'tools', 'node-repl', 'runtime', 'kernel.mjs'),
+      ),
+    ).toBe(true);
+    expect(
+      readFileSync(
+        path.join(
+          distSrc,
+          'tools',
+          'node-repl',
+          'runtime',
+          'tree-sitter-javascript.wasm',
+        ),
+        'utf8',
+      ),
+    ).toBe('grammar');
+    expect(existsSync(path.join(distSrc, 'unrelated.mjs'))).toBe(false);
+  });
+
   it('includes extension examples in the prepared dist package', () => {
     const rootDir = createFixtureRoot();
     createBundleArtifacts(rootDir);
@@ -769,6 +947,7 @@ describe('package asset scripts', () => {
     );
 
     expect(distPackageJson.files).toContain('examples');
+    expect(distPackageJson.files).toContain('node-repl-runtime');
     expect(distPackageJson.bundledDependencies).toBeUndefined();
     expect(distPackageJson.optionalDependencies).toMatchObject({
       '@qwen-code/audio-capture': rootPackageJson.version,
@@ -1297,6 +1476,13 @@ describe('package asset scripts', () => {
   function createBundleArtifacts(rootDir) {
     writeFile(rootDir, 'dist/cli.js', '');
     mkdirSync(path.join(rootDir, 'dist', 'vendor'), { recursive: true });
+    writeFile(rootDir, 'dist/node-repl-runtime/kernel.mjs', '');
+    writeFile(rootDir, 'dist/node-repl-runtime/module-loader.mjs', '');
+    writeFile(
+      rootDir,
+      'dist/node-repl-runtime/tree-sitter-javascript.wasm',
+      '',
+    );
     mkdirSync(path.join(rootDir, 'dist', 'bundled', 'qc-helper', 'docs'), {
       recursive: true,
     });
@@ -1306,6 +1492,18 @@ describe('package asset scripts', () => {
     mkdirSync(path.join(rootDir, 'dist', 'web-shell', 'assets'), {
       recursive: true,
     });
+  }
+
+  function createMinimalNodeReplBundle(rootDir) {
+    writeFile(rootDir, 'dist/cli.js', '');
+    writeFile(rootDir, 'dist/vendor/.keep', '');
+    writeFile(rootDir, 'dist/node-repl-runtime/kernel.mjs', '');
+    writeFile(rootDir, 'dist/node-repl-runtime/module-loader.mjs', '');
+    writeFile(
+      rootDir,
+      'dist/node-repl-runtime/tree-sitter-javascript.wasm',
+      '',
+    );
   }
 
   function writeFile(rootDir, relativePath, content) {

@@ -346,6 +346,40 @@ export function copyBundleAssets({ root = defaultRoot } = {}) {
     console.warn(`Warning: User docs directory not found at ${userDocsDir}`);
   }
 
+  const nodeReplRuntimeDir = join(
+    root,
+    'packages',
+    'core',
+    'src',
+    'tools',
+    'node-repl',
+    'runtime',
+  );
+  if (existsSync(nodeReplRuntimeDir)) {
+    const destination = join(distDir, 'node-repl-runtime');
+    fs.rmSync(destination, { recursive: true, force: true });
+    copyRecursiveSync(nodeReplRuntimeDir, destination);
+    const grammarSource = join(
+      root,
+      'node_modules',
+      'tree-sitter-wasms',
+      'out',
+      'tree-sitter-javascript.wasm',
+    );
+    if (!existsSync(grammarSource)) {
+      throw new Error('node_repl JavaScript grammar asset was not found');
+    }
+    copyFileSync(
+      grammarSource,
+      join(destination, 'tree-sitter-javascript.wasm'),
+    );
+    console.log('Copied node_repl runtime to dist/node-repl-runtime/');
+  } else {
+    console.warn(
+      `Warning: node_repl runtime not found at ${nodeReplRuntimeDir}`,
+    );
+  }
+
   // Copy builtin locales so bundled dist/cli.js can load UI translations at runtime.
   // Published packages already include these via prepare-package.js; bundle output
   // should mirror that behavior for local `node dist/cli.js` runs.

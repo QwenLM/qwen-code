@@ -672,6 +672,11 @@ describe('standalone release packaging', () => {
     const packageScript = readScript('scripts/create-standalone-package.js');
     expect(packageScript).toContain('Copyright 2025 Qwen Team');
     expect(packageScript).toContain("'bundled/qc-helper/docs'");
+    expect(packageScript).toContain("'node-repl-runtime/kernel.mjs'");
+    expect(packageScript).toContain("'node-repl-runtime/module-loader.mjs'");
+    expect(packageScript).toContain(
+      "'node-repl-runtime/tree-sitter-javascript.wasm'",
+    );
     expect(packageScript).toContain('DIST_ALLOWED_ENTRIES');
     expect(packageScript).toContain('Unexpected dist asset');
     expect(packageScript).toContain('topLevelDistEntryForPath(outDir)');
@@ -746,6 +751,12 @@ describe('standalone release packaging', () => {
 
     expect(output).toContain('package:standalone:release');
     expect(output).toContain('--node-version VERSION');
+  });
+
+  it('allows the node_repl runtime directory in standalone archives', async () => {
+    const { isAllowedDistEntry } = await import(standalonePackageScriptUrl);
+
+    expect(isAllowedDistEntry('node-repl-runtime')).toBe(true);
   });
 
   it('loads the hosted installation release helpers', () => {
@@ -1781,6 +1792,23 @@ describe('standalone release packaging', () => {
         expect(
           existsSync(path.join(extractDir, 'qwen-code', 'lib', 'cli-entry.js')),
         ).toBe(true);
+        for (const file of [
+          'kernel.mjs',
+          'module-loader.mjs',
+          'tree-sitter-javascript.wasm',
+        ]) {
+          expect(
+            existsSync(
+              path.join(
+                extractDir,
+                'qwen-code',
+                'lib',
+                'node-repl-runtime',
+                file,
+              ),
+            ),
+          ).toBe(true);
+        }
         expect(
           existsSync(path.join(extractDir, 'qwen-code', 'node', 'node.exe')),
         ).toBe(true);
@@ -1968,6 +1996,23 @@ describe('standalone release packaging', () => {
         expect(
           existsSync(path.join(extractDir, 'qwen-code', 'lib', 'cli-entry.js')),
         ).toBe(true);
+        for (const file of [
+          'kernel.mjs',
+          'module-loader.mjs',
+          'tree-sitter-javascript.wasm',
+        ]) {
+          expect(
+            existsSync(
+              path.join(
+                extractDir,
+                'qwen-code',
+                'lib',
+                'node-repl-runtime',
+                file,
+              ),
+            ),
+          ).toBe(true);
+        }
         const shim = readScript(
           path.join(extractDir, 'qwen-code', 'bin', 'qwen'),
         );
@@ -4362,9 +4407,22 @@ function ensureMinimalDist({
 
   mkdirSync(path.join(distPath, 'chunks'), { recursive: true });
   mkdirSync(path.join(distPath, 'vendor'), { recursive: true });
+  mkdirSync(path.join(distPath, 'node-repl-runtime'), { recursive: true });
   mkdirSync(path.join(distPath, 'bundled/qc-helper/docs'), {
     recursive: true,
   });
+  writeFileSync(
+    path.join(distPath, 'node-repl-runtime', 'kernel.mjs'),
+    'export {};\n',
+  );
+  writeFileSync(
+    path.join(distPath, 'node-repl-runtime', 'module-loader.mjs'),
+    'export {};\n',
+  );
+  writeFileSync(
+    path.join(distPath, 'node-repl-runtime', 'tree-sitter-javascript.wasm'),
+    'grammar',
+  );
   writeFileSync(path.join(distPath, 'cli.js'), 'console.log("qwen");\n');
   if (includeCliEntry) {
     writeFileSync(path.join(distPath, 'cli-entry.js'), 'import "./cli.js";\n');

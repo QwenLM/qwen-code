@@ -8787,6 +8787,11 @@ export class Config {
       await registerComputerUseTools(registerLazy, this);
     }
 
+    const { registerNodeReplTools } = await import(
+      '../tools/node-repl/index.js'
+    );
+    await registerNodeReplTools(registerLazy, this);
+
     // Register monitor tool
     await registerLazy(ToolNames.MONITOR, async () => {
       const { MonitorTool } = await import('../tools/monitor.js');

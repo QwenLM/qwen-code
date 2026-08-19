@@ -70,6 +70,9 @@ export const ToolNames = {
   GET_GOAL: 'get_goal',
   UPDATE_GOAL: 'update_goal',
   DISPLAY_IMAGE: 'display_image',
+  NODE_REPL: 'node_repl',
+  NODE_REPL_RESET: 'node_repl_reset',
+  NODE_REPL_ADD_NODE_MODULE_DIR: 'node_repl_add_node_module_dir',
 } as const;
 
 /**
@@ -125,6 +128,9 @@ export const ToolDisplayNames = {
   GET_GOAL: 'Goal',
   UPDATE_GOAL: 'UpdateGoal',
   DISPLAY_IMAGE: 'DisplayImage',
+  NODE_REPL: 'NodeRepl',
+  NODE_REPL_RESET: 'NodeReplReset',
+  NODE_REPL_ADD_NODE_MODULE_DIR: 'NodeReplAddNodeModuleDir',
 } as const;
 
 // Migration from old tool names to new tool names

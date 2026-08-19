@@ -57,8 +57,10 @@ function copyFilesRecursive(source, target, rootSourceDir) {
       const normalizedPath = relativePath.replace(/\\/g, '/');
       const isLocaleJs =
         ext === '.js' && normalizedPath.startsWith('i18n/locales/');
+      const isNodeReplRuntime =
+        ext === '.mjs' && normalizedPath.startsWith('tools/node-repl/runtime/');
       if (
-        (extensionsToCopy.includes(ext) || isLocaleJs) &&
+        (extensionsToCopy.includes(ext) || isLocaleJs || isNodeReplRuntime) &&
         !isBundledSkillDesignDoc(normalizedPath)
       ) {
         fs.copyFileSync(sourcePath, targetPath);
@@ -77,6 +79,36 @@ export function copyFiles({ root = process.cwd() } = {}) {
   }
 
   copyFilesRecursive(sourceDir, targetDir, sourceDir);
+
+  const nodeReplRuntimeSource = path.join(
+    sourceDir,
+    'tools',
+    'node-repl',
+    'runtime',
+  );
+  if (path.basename(root) === 'core' && fs.existsSync(nodeReplRuntimeSource)) {
+    const grammarRelative = path.join(
+      'tree-sitter-wasms',
+      'out',
+      'tree-sitter-javascript.wasm',
+    );
+    const grammarSource = [
+      path.join(root, 'node_modules', grammarRelative),
+      path.join(root, '..', '..', 'node_modules', grammarRelative),
+    ].find((candidate) => fs.existsSync(candidate));
+    if (!grammarSource) {
+      throw new Error('node_repl JavaScript grammar asset was not found');
+    }
+    const grammarTarget = path.join(
+      targetDir,
+      'tools',
+      'node-repl',
+      'runtime',
+      'tree-sitter-javascript.wasm',
+    );
+    fs.mkdirSync(path.dirname(grammarTarget), { recursive: true });
+    fs.copyFileSync(grammarSource, grammarTarget);
+  }
 
   // Copy example extensions into the bundle.
   const packageName = path.basename(root);
