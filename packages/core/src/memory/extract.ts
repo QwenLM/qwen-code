@@ -45,6 +45,26 @@ export interface AutoMemoryExtractResult {
   cursor: AutoMemoryExtractCursor;
 }
 
+function getSessionMismatchResult(
+  sessionId: string,
+  expectedSessionId: string,
+  now: Date,
+): AutoMemoryExtractResult | null {
+  const cachedSessionId = getCacheSafeParamsSessionId();
+  if (cachedSessionId === undefined || cachedSessionId === expectedSessionId) {
+    return null;
+  }
+  debugLogger.debug('Skipping auto-memory extract: session_mismatch.');
+  return {
+    touchedTopics: [],
+    skippedReason: 'session_mismatch',
+    cursor: {
+      sessionId,
+      updatedAt: now.toISOString(),
+    },
+  };
+}
+
 async function readExtractCursor(
   projectRoot: string,
 ): Promise<AutoMemoryExtractCursor> {
@@ -110,6 +130,19 @@ export async function runAutoMemoryExtract(params: {
   config?: Config;
 }): Promise<AutoMemoryExtractResult> {
   const now = params.now ?? new Date();
+  if (!params.config) {
+    throw new Error(
+      'Managed auto-memory extraction requires config for forked-agent execution.',
+    );
+  }
+  const expectedSessionId = params.config.getSessionId();
+  const earlyMismatch = getSessionMismatchResult(
+    params.sessionId,
+    expectedSessionId,
+    now,
+  );
+  if (earlyMismatch) return earlyMismatch;
+
   // Per-project scaffold is required (extraction cursor + metadata live
   // there). User-level scaffold is optional — a brand-new user without
   // write access to `~/.qwen/memories/` should still be able to use
@@ -120,12 +153,6 @@ export async function runAutoMemoryExtract(params: {
   } catch (error) {
     debugLogger.warn(
       `User-level auto-memory scaffold failed (non-critical, will skip user-level writes this run): ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-
-  if (!params.config) {
-    throw new Error(
-      'Managed auto-memory extraction requires config for forked-agent execution.',
     );
   }
 
@@ -161,21 +188,12 @@ export async function runAutoMemoryExtract(params: {
     return { touchedTopics: [], cursor };
   }
 
-  const cachedSessionId = getCacheSafeParamsSessionId();
-  if (
-    cachedSessionId !== undefined &&
-    cachedSessionId !== params.config.getSessionId()
-  ) {
-    debugLogger.debug('Skipping auto-memory extract: session_mismatch.');
-    return {
-      touchedTopics: [],
-      skippedReason: 'session_mismatch',
-      cursor: {
-        sessionId: params.sessionId,
-        updatedAt: now.toISOString(),
-      },
-    };
-  }
+  const lateMismatch = getSessionMismatchResult(
+    params.sessionId,
+    expectedSessionId,
+    now,
+  );
+  if (lateMismatch) return lateMismatch;
 
   const agentResult = await runAutoMemoryExtractionByAgent(
     params.config,

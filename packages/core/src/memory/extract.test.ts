@@ -133,7 +133,9 @@ describe('auto-memory extraction', () => {
   });
 
   it('skips a session mismatch without advancing the cursor', async () => {
-    vi.mocked(getCacheSafeParamsSessionId).mockReturnValue('session-2');
+    vi.mocked(getCacheSafeParamsSessionId)
+      .mockReturnValueOnce('session-1')
+      .mockReturnValueOnce('session-2');
     const cursorBefore = await fs.readFile(
       getAutoMemoryExtractCursorPath(projectRoot),
       'utf-8',
@@ -152,6 +154,24 @@ describe('auto-memory extraction', () => {
     expect(
       await fs.readFile(getAutoMemoryExtractCursorPath(projectRoot), 'utf-8'),
     ).toBe(cursorBefore);
+  });
+
+  it('skips an existing session mismatch before scaffold IO', async () => {
+    vi.mocked(getCacheSafeParamsSessionId).mockReturnValue('session-2');
+    const uncreatedProjectRoot = path.join(tempDir, 'not-created');
+
+    const result = await runAutoMemoryExtract({
+      projectRoot: uncreatedProjectRoot,
+      sessionId: 'session-1',
+      config: mockConfig,
+      history: [{ role: 'user', parts: [{ text: 'Remember this.' }] }],
+    });
+
+    expect(result.skippedReason).toBe('session_mismatch');
+    await expect(fs.stat(uncreatedProjectRoot)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+    expect(runAutoMemoryExtractionByAgent).not.toHaveBeenCalled();
   });
 
   it('preserves the empty-cache failure path', async () => {
