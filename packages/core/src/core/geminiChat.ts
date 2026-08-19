@@ -336,27 +336,39 @@ export function redactStructuredOutputArgsForRecording(
  *
  * Exported for tests.
  */
-export function buildRecordMessageFromHistoryParts(parts: Part[]): Part[] {
-  // Join every thought part the way `processStreamResponse` builds
-  // `thoughtContentPart`: a coalesced recovery turn carries one thought part
-  // per merged attempt, and keeping only the first would silently drop each
-  // continuation's thinking from the transcript. The first thoughtSignature
-  // wins, matching the per-stream derivation.
+/**
+ * Join every thought part into the single thought content part an assistant
+ * record carries: texts concatenated in order, first `thoughtSignature`
+ * wins. The one implementation is shared by `processStreamResponse` (stream
+ * consolidation) and `buildRecordMessageFromHistoryParts` (merged recovery
+ * records) so the record shape has a single owner.
+ */
+function buildThoughtContentPart(parts: readonly Part[]): Part | undefined {
   const thoughtText = parts
     .filter((part) => part.thought)
     .map((part) => (typeof part.text === 'string' ? part.text : ''))
     .join('')
     .trim();
-  let thoughtPart: Part | undefined;
-  if (thoughtText !== '') {
-    thoughtPart = { text: thoughtText, thought: true };
-    const thoughtSignature = parts.find(
-      (part) => part.thought && part.thoughtSignature,
-    )?.thoughtSignature;
-    if (thoughtSignature) {
-      thoughtPart.thoughtSignature = thoughtSignature;
-    }
+  if (thoughtText === '') {
+    return undefined;
   }
+  const thoughtPart: Part = { text: thoughtText, thought: true };
+  const thoughtSignature = parts.find(
+    (part) => part.thought && part.thoughtSignature,
+  )?.thoughtSignature;
+  if (thoughtSignature) {
+    thoughtPart.thoughtSignature = thoughtSignature;
+  }
+  return thoughtPart;
+}
+
+export function buildRecordMessageFromHistoryParts(parts: Part[]): Part[] {
+  // A coalesced recovery turn carries one thought part per merged attempt,
+  // and keeping only the first would silently drop each continuation's
+  // thinking from the transcript. `buildThoughtContentPart` is shared with
+  // `processStreamResponse` so the merged record's thought shape cannot
+  // drift from the per-stream records around it.
+  const thoughtPart = buildThoughtContentPart(parts);
   const contentText = parts
     .filter((part) => !part.thought && typeof part.text === 'string')
     .map((part) => part.text)
@@ -385,7 +397,9 @@ export function buildRecordMessageFromHistoryParts(parts: Part[]): Part[] {
  * summed across attempts — and `totalTokenCount` raised by the same amount —
  * while prompt-side counts stay the final attempt's, since every attempt
  * re-sends the same grown prompt and summing those would multiply-count the
- * shared context.
+ * shared context. When the final attempt reports no usage at all there is no
+ * prompt-side baseline to merge into, so the record honestly carries none
+ * rather than a fabricated output-only object.
  *
  * Exported for tests.
  */
@@ -393,6 +407,9 @@ export function mergeDeferredUsageMetadata(
   records: ReadonlyArray<{ tokens?: GenerateContentResponseUsageMetadata }>,
 ): GenerateContentResponseUsageMetadata | undefined {
   const finalTokens = records[records.length - 1]?.tokens;
+  if (finalTokens === undefined) {
+    return undefined;
+  }
   let extraCandidates = 0;
   let extraThoughts = 0;
   for (const record of records.slice(0, -1)) {
@@ -4697,7 +4714,7 @@ export class GeminiChat {
     // only on non-tool-result streams: tool-result continuations defer based
     // on the first-wins `deferredFinishReason` instead, because that is the
     // value the outer loop's recovery-entry decision sees re-emitted.
-    let observedFinishReason: FinishReason | undefined;
+    let yieldedFinishReason: FinishReason | undefined;
     const protocolTagDetector = new LeadingProtocolTagLeakDetector();
     let pendingProtocolParts: Part[] = [];
     const takePendingProtocolParts = (): Part[] => {
@@ -4754,16 +4771,6 @@ export class GeminiChat {
         hasFinishReason ||=
           chunk?.candidates?.some((candidate) => candidate.finishReason) ??
           false;
-        // Shares `firstCandidateFinishReason` with the outer send loop
-        // (last-wins, `candidates[0]`) so the record-deferral decision agrees
-        // with the recovery-entry decision even on a malformed multi-finish
-        // stream — otherwise a `STOP`-before-`MAX_TOKENS` stream could record
-        // immediately while recovery still runs, stranding a record on disk.
-        const chunkFinishReason = firstCandidateFinishReason(chunk);
-        if (chunkFinishReason) {
-          observedFinishReason = chunkFinishReason as FinishReason;
-        }
-
         if (isValidResponse(chunk)) {
           const candidate = chunk.candidates?.[0];
           let content = candidate?.content;
@@ -4933,6 +4940,17 @@ export class GeminiChat {
           !protocolTextWasSuppressed ||
           !protocolTagDetector.blockingOutput
         ) {
+          // Capture the finish reason from exactly the chunks the outer send
+          // loop will consume (last-wins via `firstCandidateFinishReason`,
+          // after the tool-result-continuation strip above), so the
+          // record-deferral decision below cannot disagree with the
+          // recovery-entry decision: a finish reason on a suppressed or
+          // stripped chunk never reaches the outer loop, and one this
+          // capture misses never enters recovery.
+          const yieldedChunkFinishReason = firstCandidateFinishReason(chunk);
+          if (yieldedChunkFinishReason) {
+            yieldedFinishReason = yieldedChunkFinishReason as FinishReason;
+          }
           yield chunk;
         }
       }
@@ -4966,26 +4984,7 @@ export class GeminiChat {
       }
     }
 
-    let thoughtContentPart: Part | undefined;
-    const thoughtText = allModelParts
-      .filter((part) => part.thought)
-      .map((part) => part.text)
-      .join('')
-      .trim();
-
-    if (thoughtText !== '') {
-      thoughtContentPart = {
-        text: thoughtText,
-        thought: true,
-      };
-
-      const thoughtSignature = allModelParts.filter(
-        (part) => part.thoughtSignature && part.thought,
-      )?.[0]?.thoughtSignature;
-      if (thoughtContentPart && thoughtSignature) {
-        thoughtContentPart.thoughtSignature = thoughtSignature;
-      }
-    }
+    const thoughtContentPart = buildThoughtContentPart(allModelParts);
 
     let contentParts = allModelParts.filter((part) => !part.thought);
     const consolidatedHistoryParts: Part[] = [];
@@ -5093,7 +5092,7 @@ export class GeminiChat {
     //
     // Thought-only responses remain valid for ordinary user turns. After a tool
     // result, they do not advance the agent without text or another tool call.
-    const hasAnyContent = contentText || thoughtText;
+    const hasAnyContent = contentText || thoughtContentPart !== undefined;
     const lacksVisibleToolResultProgress =
       isToolResultContinuation &&
       (!contentText || contentText === GEMINI_EMPTY_CONTENT_PLACEHOLDER);
@@ -5237,16 +5236,16 @@ export class GeminiChat {
       } else if (
         recordDeferral === 'always' ||
         (recordDeferral === 'on-max-tokens' &&
-          // The deferral decision must read the same finish reason the
-          // recovery-entry decision will see. On tool-result continuations
-          // the real finish chunks are stripped above and the outer loop only
-          // sees the re-emitted first-wins `deferredFinishReason` — so a
-          // `[MAX_TOKENS, STOP]` stream judged by last-wins
-          // `observedFinishReason` would record immediately here while
-          // recovery still activates, duplicating the turn on disk.
-          (isToolResultContinuation
-            ? deferredFinishReason
-            : observedFinishReason) === FinishReason.MAX_TOKENS)
+          // Both terms are the finish reason the outer send loop actually
+          // consumes: `yieldedFinishReason` is captured at the yield
+          // boundary (so stripped and suppressed chunks are excluded by
+          // construction), and on tool-result continuations, where every
+          // real finish chunk is stripped, `deferredFinishReason` is the
+          // value the synthetic trailing chunk re-emits. The deferral
+          // decision therefore cannot disagree with the recovery-entry
+          // decision on any stream shape.
+          (yieldedFinishReason ?? deferredFinishReason) ===
+            FinishReason.MAX_TOKENS)
       ) {
         // MAX_TOKENS output-recovery owns this turn: stash the record so the
         // recovery block can emit a single merged one matching coalesced
@@ -5255,7 +5254,7 @@ export class GeminiChat {
         this.deferredMaxTokensRecords.push(recordArgs);
         debugLogger.debug(
           `[MAX_TOKENS_DEFER] Deferring assistant record ` +
-            `(mode=${recordDeferral}, observed=${observedFinishReason}, ` +
+            `(mode=${recordDeferral}, yielded=${yieldedFinishReason}, ` +
             `deferred=${deferredFinishReason}, stashed=` +
             `${this.deferredMaxTokensRecords.length})`,
         );

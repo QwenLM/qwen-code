@@ -13487,6 +13487,21 @@ describe('GeminiChat', async () => {
         mergeDeferredUsageMetadata([{ tokens: { totalTokenCount: 9 } }]),
       ).toEqual({ totalTokenCount: 9 });
       expect(mergeDeferredUsageMetadata([{}, {}])).toBeUndefined();
+      // Final attempt without usage: no prompt-side baseline exists, so the
+      // merged record carries none rather than a fabricated output-only
+      // object that under-reports the turn.
+      expect(
+        mergeDeferredUsageMetadata([
+          {
+            tokens: {
+              promptTokenCount: 5000,
+              candidatesTokenCount: 800,
+              totalTokenCount: 5800,
+            },
+          },
+          {},
+        ]),
+      ).toBeUndefined();
     });
 
     it('joins every attempt’s thought content in the merged recovery record', async () => {
