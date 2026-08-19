@@ -2080,8 +2080,21 @@ export class ShellToolInvocation extends BaseToolInvocation<
     if (sedInfo) {
       try {
         const edit = await this.prepareSedEdit(sedInfo);
+        const previous = this.preparedSedEdit;
+        // Only clear a prior user-confirmed edit when the freshly prepared
+        // edit differs from the previously prepared one (a genuinely new sed
+        // target). A re-entrant getConfirmationDetails for the SAME sed edit —
+        // the PreToolUse ask bounce — must keep the content the user already
+        // edited and approved, or the bounce would silently discard it and the
+        // post-ask re-execution would write the simulated result instead.
+        if (
+          previous === undefined ||
+          previous.filePath !== edit.filePath ||
+          previous.newContent !== edit.newContent
+        ) {
+          this.confirmedSedNewContent = undefined;
+        }
         this.preparedSedEdit = edit;
-        this.confirmedSedNewContent = undefined;
         this.sedEditPreviewFailed = false;
         const display = this.makeSedEditDisplay(edit);
         const confirmationDetails: ToolEditConfirmationDetails = {
