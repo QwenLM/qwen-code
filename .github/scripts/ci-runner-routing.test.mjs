@@ -48,8 +48,7 @@ const pickRunner = ciDoc.jobs.classify_pr.steps.find(
 // author_association.
 function simulateRunsOn({ ecsDisabled, sameRepo, assoc, mergeGroup }) {
   const trusted = TRUSTED.includes(assoc);
-  const ecs =
-    !ecsDisabled && (sameRepo || trusted || mergeGroup);
+  const ecs = !ecsDisabled && (sameRepo || trusted || mergeGroup);
   return ecs ? ECS : HOSTED;
 }
 
@@ -62,10 +61,7 @@ function simulateRunsOn({ ecsDisabled, sameRepo, assoc, mergeGroup }) {
 // instead of silently outgrowing the matrix.
 function evalRunsOn(expression, { ecsDisabled, eventName, sameRepo, assoc }) {
   const substitutions = [
-    [
-      /vars\.MAINTAINER_ECS_RUNNER_DISABLED != 'true'/,
-      String(!ecsDisabled),
-    ],
+    [/vars\.MAINTAINER_ECS_RUNNER_DISABLED != 'true'/, String(!ecsDisabled)],
     [
       /github\.event_name == 'merge_group'/,
       String(eventName === 'merge_group'),
@@ -223,7 +219,10 @@ describe('ci.yml classify_pr runner routing', () => {
       classifyRunsOn,
       /contains\(fromJSON\('\["OWNER","MEMBER","COLLABORATOR"\]'\), github\.event\.pull_request\.author_association\)/,
     );
-    assert.match(classifyRunsOn, /vars\.MAINTAINER_ECS_RUNNER_DISABLED != 'true'/);
+    assert.match(
+      classifyRunsOn,
+      /vars\.MAINTAINER_ECS_RUNNER_DISABLED != 'true'/,
+    );
     assert.match(classifyRunsOn, /github\.event_name == 'merge_group'/);
   });
 });
