@@ -1148,9 +1148,19 @@ export function persistRecoveredLedger(
         if (exRound >= recovered.ledger.round) {
           return;
         }
+        // The volumes go with the anchor and the age reference, and for the
+        // same reason: each is a fact ABOUT a specific round, and this branch
+        // is advancing the round counter past the one they describe. Keeping
+        // them would attribute this account's round-3 posting count to the
+        // foreign round 5 that won recovery — one fabricated point on a trend
+        // whose whole value is that its points are real. Absence is already
+        // the "not recorded" reading downstream, so dropping them degrades
+        // exactly as a pre-telemetry predecessor does.
         const {
           sha: _droppedSha,
           commitId: _droppedCommitId,
+          posted: _droppedPosted,
+          prevPosted: _droppedPrevPosted,
           ...kept
         } = existing;
         mkdirSync(dirname(sideFilePath), { recursive: true });
