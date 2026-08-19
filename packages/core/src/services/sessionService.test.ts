@@ -2653,6 +2653,91 @@ describe('SessionService', () => {
         sessionService.findSessionIdIgnoringCase(sessionIdA),
       ).resolves.toBeUndefined();
     });
+
+    it('reports the requested spelling absent when its own transcript head is unreadable', async () => {
+      // A first run that crashed before its first record leaves a 0-byte
+      // transcript under the requested spelling. It is a case-only twin of
+      // nothing, so reusing the id must stay possible — `getSessionLocation`
+      // already reports the file as nonexistent.
+      readdirSyncSpy
+        .mockReturnValueOnce([`${sessionIdA}.jsonl`] as never)
+        .mockReturnValueOnce([] as never);
+      vi.spyOn(sessionService, 'getSessionLocation').mockResolvedValue(
+        undefined,
+      );
+      existsSyncSpy.mockReturnValue(true);
+
+      await expect(
+        sessionService.findSessionIdIgnoringCase(sessionIdA),
+      ).resolves.toBeUndefined();
+    });
+
+    it('ignores persisted names getSessionLocation cannot classify', async () => {
+      // Agent-suffixed ids are admitted by the CLI and written under the raw
+      // session id, but SESSION_FILE_PATTERN excludes them — enumerating them
+      // here would report a healthy transcript as occupied-but-unreadable.
+      const agentSessionId = `${sessionIdA}-agent-foo`;
+      readdirSyncSpy
+        .mockReturnValueOnce([`${agentSessionId}.jsonl`] as never)
+        .mockReturnValueOnce([] as never);
+      const getLocation = vi.spyOn(sessionService, 'getSessionLocation');
+      existsSyncSpy.mockReturnValue(true);
+
+      await expect(
+        sessionService.findSessionIdIgnoringCase(agentSessionId),
+      ).resolves.toBeUndefined();
+      expect(getLocation).not.toHaveBeenCalled();
+    });
+
+    it('collapses case-variant spellings that alias one physical transcript', async () => {
+      // On a case-insensitive filesystem both spellings open the same file, so
+      // each reports a readable location even though only one copy exists.
+      const legacySessionId = sessionIdA.toUpperCase();
+      readdirSyncSpy
+        .mockReturnValueOnce([`${sessionIdA}.jsonl`] as never)
+        .mockReturnValueOnce([`${legacySessionId}.jsonl`] as never);
+      vi.spyOn(sessionService, 'getSessionLocation').mockResolvedValue(
+        'active',
+      );
+      statSyncSpy.mockReturnValue({
+        dev: 1,
+        ino: 42,
+        isFile: () => true,
+      } as fs.Stats);
+
+      await expect(
+        sessionService.findSessionIdIgnoringCase(sessionIdA),
+      ).resolves.toBe(sessionIdA);
+    });
+
+    it('still rejects two readable spellings backed by distinct files', async () => {
+      const legacySessionId = sessionIdA.toUpperCase();
+      readdirSyncSpy
+        .mockReturnValueOnce([
+          `${sessionIdA}.jsonl`,
+          `${legacySessionId}.jsonl`,
+        ] as never)
+        .mockReturnValueOnce([] as never);
+      vi.spyOn(sessionService, 'getSessionLocation').mockResolvedValue(
+        'active',
+      );
+      statSyncSpy.mockImplementation(
+        (filePath: fs.PathLike) =>
+          ({
+            dev: 1,
+            ino: String(filePath).includes(legacySessionId) ? 43 : 42,
+            isFile: () => true,
+          }) as fs.Stats,
+      );
+
+      await expect(
+        sessionService.findSessionIdIgnoringCase(sessionIdA),
+      ).rejects.toMatchObject({
+        name: 'SessionIdCaseConflictError',
+        sessionId: sessionIdA,
+        candidateSessionId: undefined,
+      });
+    });
   });
 
   describe('loadLastSession', () => {

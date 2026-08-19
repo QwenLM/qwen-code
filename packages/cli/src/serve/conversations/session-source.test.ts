@@ -32,6 +32,10 @@ const CYCLE_B_ID = '550e8400-e29b-41d4-a716-44665544000d';
 const LEGACY_CHILD_OF_EXPLICIT_ID = '550e8400-e29b-41d4-a716-44665544000e';
 const SELF_STANDALONE_ID = '550e8400-e29b-41d4-a716-44665544000f';
 const MALFORMED_PARENT_STANDALONE_ID = '550e8400-e29b-41d4-a716-446655440010';
+const ATTRIBUTED_STANDALONE_CHILD_ID = '550e8400-e29b-41d4-a716-446655440011';
+const STANDALONE_CHILD_OF_LIVE_ID = '550e8400-e29b-41d4-a716-446655440012';
+const STANDALONE_CYCLE_A_ID = '550e8400-e29b-41d4-a716-446655440013';
+const STANDALONE_CYCLE_B_ID = '550e8400-e29b-41d4-a716-446655440014';
 
 function createStore(
   records: ReadonlyMap<string, LiveSessionCreationMetadata>,
@@ -82,6 +86,31 @@ describe('conversation session source classification', () => {
       MALFORMED_PARENT_STANDALONE_ID,
       { sourceType: 'standalone', parentSessionId: 'not-a-session-id' },
     ],
+    // A forged `sourceId` must not ride the explicit-standalone child
+    // shortcut, which is reached before the legacy source-pairing guard.
+    [
+      ATTRIBUTED_STANDALONE_CHILD_ID,
+      {
+        sourceType: 'standalone',
+        sourceId: 'realtime_voice:forged-worker',
+        parentSessionId: EXPLICIT_ID,
+      },
+    ],
+    // An explicit standalone child is self-describing: its reserved source
+    // decides the kind, so the parent's own source and continued existence
+    // are deliberately not consulted (depth-1 is enforced at creation).
+    [
+      STANDALONE_CHILD_OF_LIVE_ID,
+      { sourceType: 'standalone', parentSessionId: LIVE_ID },
+    ],
+    [
+      STANDALONE_CYCLE_A_ID,
+      { sourceType: 'standalone', parentSessionId: STANDALONE_CYCLE_B_ID },
+    ],
+    [
+      STANDALONE_CYCLE_B_ID,
+      { sourceType: 'standalone', parentSessionId: STANDALONE_CYCLE_A_ID },
+    ],
   ]);
   const store = createStore(records);
 
@@ -123,6 +152,9 @@ describe('conversation session source classification', () => {
     [EXPLICIT_ID, 'standalone', 'explicit'],
     [EXPLICIT_CHILD_ID, 'standalone', 'explicit'],
     [LEGACY_CHILD_OF_EXPLICIT_ID, 'standalone', 'legacy'],
+    // The reserved source decides these without reading the parent.
+    [STANDALONE_CHILD_OF_LIVE_ID, 'standalone', 'explicit'],
+    [STANDALONE_CYCLE_A_ID, 'standalone', 'explicit'],
   ] as const)(
     'classifies %s as %s %s',
     async (sessionId, kind, persistence) => {
@@ -140,6 +172,7 @@ describe('conversation session source classification', () => {
     SELF_ID,
     SELF_STANDALONE_ID,
     MALFORMED_PARENT_STANDALONE_ID,
+    ATTRIBUTED_STANDALONE_CHILD_ID,
     CYCLE_A_ID,
   ])('rejects malformed or ambiguous lineage for %s', async (sessionId) => {
     await expect(

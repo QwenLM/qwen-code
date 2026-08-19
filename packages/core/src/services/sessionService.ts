@@ -770,6 +770,10 @@ export class SessionService {
       }
       for (const fileName of fileNames) {
         if (fileName.toLowerCase() !== expectedFileName) continue;
+        // `getSessionLocation` classifies only pattern-matching names, so a
+        // name it would reject (agent-suffixed ids) must not be enumerated
+        // here either — otherwise it reads back as occupied-but-unreadable.
+        if (!SESSION_FILE_PATTERN.test(fileName)) continue;
         const candidateSessionId = fileName.slice(0, -'.jsonl'.length);
         const states = candidates.get(candidateSessionId) ?? new Set();
         states.add(state);
@@ -781,15 +785,20 @@ export class SessionService {
       // whose head recovers no records (crash-mid-append tear, foreign
       // project) still occupies the id, but does not make a loadable
       // session conflict with one.
-      const readable: string[] = [];
+      const readable: Array<{
+        candidateSessionId: string;
+        state: SessionArchiveState;
+      }> = [];
       for (const candidateSessionId of candidates.keys()) {
         const location = await this.getSessionLocation(candidateSessionId);
         if (location === 'conflict') {
           throw new SessionIdCaseConflictError(sessionId, candidateSessionId);
         }
-        if (location !== undefined) readable.push(candidateSessionId);
+        if (location !== undefined) {
+          readable.push({ candidateSessionId, state: location });
+        }
       }
-      if (readable.length === 1) return readable[0];
+      if (readable.length === 1) return readable[0].candidateSessionId;
       if (readable.length === 0) {
         // Every enumerated file failed content validation: files still on
         // disk occupy the id (admission must not mint a case-only twin);
@@ -809,6 +818,15 @@ export class SessionService {
           'unreadable_transcript',
         );
       }
+      // On a case-insensitive filesystem every spelling opens the same
+      // physical transcript, so several spellings can each report a readable
+      // location while only one file exists. Collapse those aliases before
+      // calling it a conflict.
+      const aliased = this.resolveAliasedReadableCandidate(
+        readable,
+        candidates,
+      );
+      if (aliased !== undefined) return aliased;
       throw new SessionIdCaseConflictError(sessionId);
     }
     const candidate = candidates.entries().next().value;
@@ -822,9 +840,15 @@ export class SessionService {
       throw new SessionIdCaseConflictError(sessionId, candidateSessionId);
     }
     if (location !== undefined) return candidateSessionId;
-    // The head recovered no records: a file still on disk occupies the id
-    // (admission must not mint a case-only twin of it); one that raced
-    // away mid-resolution is genuinely absent.
+    // The head recovered no records. Only a *different* persisted spelling
+    // occupies the id, because minting the requested spelling beside it would
+    // create the case-only twin that makes both permanently unrestorable. The
+    // requested spelling is a twin of nothing: reporting it absent is how a
+    // first run that crashed before its first record resumes its own 0-byte
+    // transcript, and it keeps this resolver consistent with
+    // `getSessionLocation`, which already calls that file nonexistent.
+    if (candidateSessionId === sessionId) return undefined;
+    // A file that raced away mid-resolution is genuinely absent.
     for (const state of states) {
       if (fs.existsSync(this.getSessionFilePath(candidateSessionId, state))) {
         throw new SessionIdCaseConflictError(
@@ -835,6 +859,45 @@ export class SessionService {
       }
     }
     return undefined;
+  }
+
+  /**
+   * Collapses readable candidates that are case-variant spellings of one
+   * physical transcript, as happens on case-insensitive filesystems where
+   * every spelling opens the same file. Returns the spelling whose own
+   * directory entry backs that file, or undefined when the candidates are
+   * genuinely distinct transcripts (a real conflict).
+   */
+  private resolveAliasedReadableCandidate(
+    readable: Array<{
+      candidateSessionId: string;
+      state: SessionArchiveState;
+    }>,
+    candidates: Map<string, Set<SessionArchiveState>>,
+  ): string | undefined {
+    const identities = new Set<string>();
+    const owners: string[] = [];
+    for (const { candidateSessionId, state } of readable) {
+      let stats;
+      try {
+        stats = fs.statSync(this.getSessionFilePath(candidateSessionId, state));
+      } catch {
+        return undefined;
+      }
+      // Without a device/inode pair there is no proof the spellings alias one
+      // file, so fall back to reporting a conflict.
+      if (typeof stats.dev !== 'number' || typeof stats.ino !== 'number') {
+        return undefined;
+      }
+      identities.add(`${stats.dev}:${stats.ino}`);
+      if (identities.size > 1) return undefined;
+      // The readable state was reached through a case-folded path unless this
+      // spelling is itself a directory entry of that state.
+      if (candidates.get(candidateSessionId)?.has(state)) {
+        owners.push(candidateSessionId);
+      }
+    }
+    return owners.length === 1 ? owners[0] : undefined;
   }
 
   private removeFileIfExists(filePath: string): void {
