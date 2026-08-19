@@ -4255,6 +4255,18 @@ export class Session implements SessionContext {
             // — so hold it (and a push-count snapshot) to restore on that path.
             let strippedOrphanEntries: Content[] | null = null;
             let orphanPushCountSnapshot = 0;
+            // The continuation strip un-tracks any skill body it removes;
+            // every terminal path of this turn re-adds the stripped content
+            // (send re-push, catch restore, or the abort addHistory). The
+            // stashed names gate the settle reconcile in the outer finally,
+            // which rebuilds tracking from the SETTLED history — residency
+            // aware, because a mid-turn rewrite can blank or summarize away
+            // the re-pushed body again. Names are resolved AT STRIP TIME:
+            // a compression inside the continuation send can summarize away
+            // the model-side functionCalls needed for pairing, so
+            // re-deriving the gate from the post-send history would miss
+            // them.
+            let orphanStrippedSkillNames: string[] = [];
             if (goalTurn?.origin === 'runtime') {
               this.config.getChatRecordingService()?.recordGoalRuntimeMessage(
                 modelPromptBlocks
@@ -4290,6 +4302,12 @@ export class Session implements SessionContext {
                 strippedOrphanEntries =
                   this.#getCurrentChat().stripOrphanedUserEntriesFromHistory() ??
                   null;
+                orphanStrippedSkillNames =
+                  (strippedOrphanEntries?.length ?? 0) > 0
+                    ? this.#getCurrentChat().resolveLoadedSkillNamesInEntries(
+                        strippedOrphanEntries!,
+                      )
+                    : [];
                 orphanPushCountSnapshot =
                   this.#getCurrentChat().getUserContentPushCount?.() ?? 0;
                 continuationParts = recoveryPlan.continuation.parts;
@@ -4961,6 +4979,30 @@ export class Session implements SessionContext {
               }
               return result;
             } finally {
+              // Fires on every terminal path of the turn — including the
+              // top-of-loop abort return that re-adds the stripped content
+              // via addHistory without entering the send-try's finally.
+              if (orphanStrippedSkillNames.length > 0) {
+                // Residency-aware, not additive: a mid-turn rewrite
+                // (tryCompress / microcompaction) can blank or summarize
+                // away the re-pushed body and correctly un-track it;
+                // re-adding the stashed names anyway would resurrect the
+                // ghost the strip just removed. Mirrors the TUI twin in
+                // restoreStrippedRetryEntries (client.ts).
+                //
+                // Accepted trade-off: the pre-send tryCompress can also
+                // summarize away the re-pushed body's pairing model-side
+                // functionCall, leaving the body resident-but-untracked at
+                // settle — the next invoke then injects one duplicate body
+                // and self-heals (the documented direction in
+                // unloadSkillsFromEntries). Rebuilding from the stashed ids
+                // would add a second residency-truth path beside the
+                // reconcile; not worth it for a self-healing duplicate.
+                this.#getCurrentChat().reconcileLoadedSkillTracking(
+                  'acpContinuationSettle',
+                );
+                orphanStrippedSkillNames = [];
+              }
               logConversationFinishedEvent(
                 this.config,
                 new ConversationFinishedEvent(

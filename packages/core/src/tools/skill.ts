@@ -284,6 +284,31 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
   }
 
   /**
+   * Removes the given names from loaded-skills tracking. Called when a
+   * history rewrite (microcompaction, /compress-fast, memory-pressure
+   * compaction) drops a skill body, so the dedup guard re-arms
+   * and the next invocation returns the full body again instead of
+   * "already loaded in context".
+   */
+  unloadSkills(names: Iterable<string>): void {
+    for (const name of names) {
+      this.loadedSkillNames.delete(name);
+    }
+  }
+
+  /**
+   * Re-adds the given names to loaded-skills tracking. Called when skill
+   * bodies previously stripped from history are restored (client retry
+   * restore), so the dedup guard matches the resident bodies again
+   * instead of letting a duplicate body through.
+   */
+  trackSkills(names: Iterable<string>): void {
+    for (const name of names) {
+      this.loadedSkillNames.add(name);
+    }
+  }
+
+  /**
    * Detach the change listener from SkillManager. Tool registries call
    * this on teardown (mirroring AgentTool's pattern). Per-subagent
    * SkillTool instances share the parent's SkillManager via

@@ -8,7 +8,28 @@ import type { PermissionManager } from '../permissions/permission-manager.js';
 import type { Config } from '../config/config.js';
 import type { SkillManager } from '../skills/skill-manager.js';
 import type { SkillConfig, SkillLevel } from '../skills/types.js';
+import type { MicrocompactMeta } from '../services/microcompaction/microcompact.js';
+import type { Content } from '@google/genai';
+import type { ToolRegistry } from './tool-registry.js';
+import { ToolNames } from './tool-names.js';
 import { escapeXml } from '../utils/xml.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('SKILL');
+
+/** Prefix every injected skill body shares (see {@link buildSkillLlmContent}).
+ * Used as a positive residency marker: a Skill tool-result whose output starts
+ * with this is a real body; a dedup confirmation, SkillTool error text
+ * (`Skill "x" not found.` / `is disabled.` / `Failed to load skill "x":`),
+ * a `/unskill` placeholder, or a microcompact cleared message are NOT bodies
+ * and so must not keep a skill tracked (or let `/unskill` claim a body exists). */
+const SKILL_BODY_PREFIX = 'Base directory for this skill:';
+
+/** Second static line every {@link buildSkillLlmContent} output carries;
+ * checked together with the prefix so arbitrary command-executor-fallback
+ * text that merely starts with the prefix cannot spoof residency. */
+const SKILL_BODY_STATIC_LINE =
+  'Important: ALWAYS resolve absolute paths from this base directory when working with skills.';
 
 /**
  * Builds the LLM-facing content string when a skill body is injected.
@@ -16,7 +37,33 @@ import { escapeXml } from '../utils/xml.js';
  * so that token estimates stay in sync with actual usage.
  */
 export function buildSkillLlmContent(baseDir: string, body: string): string {
-  return `Base directory for this skill: ${baseDir}\nImportant: ALWAYS resolve absolute paths from this base directory when working with skills.\n\n${body}\n`;
+  return `${SKILL_BODY_PREFIX} ${baseDir}\n${SKILL_BODY_STATIC_LINE}\n\n${body}\n`;
+}
+
+/** Whether a Skill tool-result output is an injected skill body (built by
+ * {@link buildSkillLlmContent}). Proves residency: excludes dedup confirmations,
+ * SkillTool error text, `/unskill` placeholders, and cleared messages. */
+export function isSkillBodyOutput(output: unknown): boolean {
+  return (
+    typeof output === 'string' &&
+    output.startsWith(SKILL_BODY_PREFIX) &&
+    output.includes(SKILL_BODY_STATIC_LINE)
+  );
+}
+
+/**
+ * Whether a tool-result output is the dedup guard's short confirmation
+ * (`Skill "x" is already loaded in context.`, emitted by SkillTool) rather
+ * than a full body. A kept confirmation must NOT suppress eviction
+ * reporting for its skill — the body it refers to may already be gone;
+ * only a kept full body proves residency.
+ */
+export function isSkillDedupConfirmation(output: unknown): boolean {
+  return (
+    typeof output === 'string' &&
+    output.startsWith('Skill "') &&
+    output.endsWith('" is already loaded in context.')
+  );
 }
 
 /**
@@ -276,4 +323,260 @@ export function applySkillAllowedTools(
   for (const rule of allowedTools) {
     permissionManager.addSessionAllowRule(rule);
   }
+}
+
+/**
+ * Duck-typed view of `SkillTool`'s loaded-skill tracking. Kept structural
+ * (mirroring `clearCommand`'s existing duck-typed `clearLoadedSkills` call)
+ * so history-eviction consumers don't need a runtime import of the tool
+ * class.
+ */
+interface LoadedSkillTracker {
+  unloadSkills(names: Iterable<string>): void;
+  clearLoadedSkills(): void;
+  trackSkills(names: Iterable<string>): void;
+}
+
+function getLoadedSkillTracker(
+  toolRegistry: ToolRegistry | undefined,
+): LoadedSkillTracker | undefined {
+  const tool = toolRegistry?.getTool(ToolNames.SKILL);
+  if (
+    tool &&
+    'unloadSkills' in tool &&
+    'clearLoadedSkills' in tool &&
+    'trackSkills' in tool
+  ) {
+    return tool as unknown as LoadedSkillTracker;
+  }
+  return undefined;
+}
+
+/**
+ * Sync loaded-skill tracking after a history eviction blanked Skill tool
+ * results. Targeted un-track when every blanked skill was resolved; blanket
+ * clear when any could not be resolved — over-clearing only costs a
+ * duplicated body on the next invoke, while a stale entry leaves that skill
+ * permanently unreloadable behind the dedup guard.
+ *
+ * Shared by pre-send microcompaction, /compress-fast, and the
+ * memory-pressure `compact_history` step (mirrors
+ * `disarmFileReadCacheAfterEviction` for the file-read cache).
+ */
+export function syncSkillEvictions(
+  meta: Pick<MicrocompactMeta, 'evictedSkillNames' | 'unresolvedEvictedSkills'>,
+  toolRegistry: ToolRegistry | undefined,
+  logTag: string,
+): void {
+  if (
+    meta.unresolvedEvictedSkills === 0 &&
+    meta.evictedSkillNames.length === 0
+  ) {
+    return;
+  }
+  const tracker = getLoadedSkillTracker(toolRegistry);
+  if (!tracker) {
+    return;
+  }
+  if (meta.unresolvedEvictedSkills > 0) {
+    tracker.clearLoadedSkills();
+    debugLogger.debug(
+      `[SKILL_TRACKING] cleared all loaded-skill tracking after ${logTag} ` +
+        `(${meta.unresolvedEvictedSkills} unresolved blanked skill result(s))`,
+    );
+    return;
+  }
+  tracker.unloadSkills(meta.evictedSkillNames);
+  debugLogger.debug(
+    `[SKILL_TRACKING] un-tracked ${meta.evictedSkillNames.length} ` +
+      `skill(s) after ${logTag}: ${meta.evictedSkillNames.join(', ')}`,
+  );
+}
+
+/**
+ * Blanket-clear loaded-skill tracking. Used when history is rewritten in
+ * ways that may drop skill bodies without per-skill eviction meta and
+ * without a knowable residency afterwards: LLM compression
+ * (`tryCompress`). Truncation and orphan-entry stripping reconcile /
+ * un-track targeted instead.
+ */
+export function clearLoadedSkillTracking(
+  toolRegistry: ToolRegistry | undefined,
+  logTag: string,
+): void {
+  const tracker = getLoadedSkillTracker(toolRegistry);
+  if (!tracker) {
+    return;
+  }
+  tracker.clearLoadedSkills();
+  debugLogger.debug(
+    `[SKILL_TRACKING] cleared loaded-skill tracking after ${logTag}`,
+  );
+}
+
+/**
+ * Build a `callId → skill name[]` map for every Skill tool call: the name
+ * lives on the request-side `functionCall.args.skill`, not on the
+ * (possibly blanked) `functionResponse`, so this is the only way to
+ * recover which skill a cleared body belonged to. Calls missing an id or
+ * skill name are absent (callers treat that as unresolvable —
+ * over-clearing only costs a duplicated body on re-invoke, while keeping
+ * a stale entry leaves the skill unrecoverable behind the dedup guard).
+ * Duplicate names for one id (a provider reusing call ids) are deduped
+ * here so every consumer agrees on what counts as ambiguous.
+ *
+ * Lives here (not in microcompact.ts) so skill-utils does not
+ * value-import from a module that value-imports skill-utils.
+ */
+export function buildCallIdToSkillName(
+  history: Content[],
+): Map<string, string[]> {
+  const map = new Map<string, string[]>();
+  for (const content of history) {
+    if (content.role !== 'model' || !content.parts) continue;
+    for (const part of content.parts) {
+      const call = part.functionCall;
+      if (!call?.id || call.name !== ToolNames.SKILL) {
+        continue;
+      }
+      const skillName = (call.args as { skill?: unknown } | undefined)?.skill;
+      if (typeof skillName === 'string' && skillName.length > 0) {
+        const existing = map.get(call.id);
+        if (existing) {
+          if (!existing.includes(skillName)) existing.push(skillName);
+        } else {
+          map.set(call.id, [skillName]);
+        }
+      }
+    }
+  }
+  return map;
+}
+
+/**
+ * Resolve the skill names of the skill-body functionResponses in
+ * `entries` by pairing their call ids against the model-role
+ * functionCalls in `history`. Ambiguous or unresolvable ids are
+ * omitted (callers treat them as "not provable").
+ */
+export function resolveLoadedSkillNames(
+  entries: Content[],
+  history: Content[],
+): string[] {
+  const callIdToSkillName = buildCallIdToSkillName(history);
+  const names = new Set<string>();
+  for (const entry of entries) {
+    for (const part of entry.parts ?? []) {
+      const fr = part.functionResponse;
+      if (
+        fr?.id &&
+        fr.name === ToolNames.SKILL &&
+        isSkillBodyOutput(fr.response?.['output'])
+      ) {
+        const resolved = callIdToSkillName.get(fr.id);
+        if (resolved?.length === 1) {
+          names.add(resolved[0]!);
+        }
+      }
+    }
+  }
+  return [...names];
+}
+
+/**
+ * Rebuild loaded-skill tracking to exactly match history: clear it, then
+ * re-track the skills whose bodies are resident in `history`. Used after
+ * rewrites where residency is KNOWABLE — truncation (the kept prefix),
+ * the hard-rescue verbatim restore, and the retry restore of stripped
+ * entries — where the blanket-clear uncertainty rationale does not apply.
+ * (The retry restore reconciles via `restoreStrippedRetryEntries` in
+ * client.ts; the ACP continuation settle reconciles via the chat-level
+ * wrapper.)
+ */
+export function reconcileLoadedSkillTracking(
+  history: Content[],
+  toolRegistry: ToolRegistry | undefined,
+  logTag: string,
+): void {
+  const tracker = getLoadedSkillTracker(toolRegistry);
+  if (!tracker) {
+    return;
+  }
+  const names = resolveLoadedSkillNames(history, history);
+  tracker.clearLoadedSkills();
+  if (names.length > 0) {
+    tracker.trackSkills(names);
+  }
+  debugLogger.debug(
+    `[SKILL_TRACKING] reconciled loaded-skill tracking after ${logTag} ` +
+      `(${names.length} resident skill(s))`,
+  );
+}
+
+/**
+ * Un-track only the skills whose bodies `entries` dropped from history —
+ * unlike a blanket clear, resident bodies elsewhere keep their tracking.
+ * A skill with ANOTHER resident body keeps its tracking too: un-tracking
+ * it would disarm the dedup guard while a body is still resident, letting
+ * a duplicate body through on the next invoke. If ANY stripped body's call
+ * id cannot be resolved to a name — including when other bodies in the
+ * same batch DO resolve — tracking is cleared wholesale instead: the same
+ * policy as `syncSkillEvictions`. The body IS gone, and over-clearing only
+ * costs one duplicated body on the next invoke, while leaving the stripped
+ * body's skill tracked makes it unreloadable behind the dedup guard.
+ */
+export function unloadSkillsFromEntries(
+  entries: Content[],
+  history: Content[],
+  toolRegistry: ToolRegistry | undefined,
+  logTag: string,
+): void {
+  const callIdToSkillName = buildCallIdToSkillName(history);
+  const dropped = new Set<string>();
+  let hasUnresolvableBody = false;
+  for (const entry of entries) {
+    for (const part of entry.parts ?? []) {
+      const fr = part.functionResponse;
+      if (
+        fr?.name !== ToolNames.SKILL ||
+        !isSkillBodyOutput(fr.response?.['output'])
+      ) {
+        continue;
+      }
+      const resolved = fr.id ? callIdToSkillName.get(fr.id) : undefined;
+      if (resolved?.length === 1) {
+        dropped.add(resolved[0]!);
+      } else {
+        hasUnresolvableBody = true;
+      }
+    }
+  }
+  if (hasUnresolvableBody) {
+    // An unresolvable body still counts as a dropped body: its skill must
+    // not stay tracked with no resident body (the deadlock direction).
+    const tracker = getLoadedSkillTracker(toolRegistry);
+    tracker?.clearLoadedSkills();
+    debugLogger.debug(
+      `[SKILL_TRACKING] blanket-cleared loaded-skill tracking after ` +
+        `${logTag} (stripped body with unresolvable call id)`,
+    );
+    return;
+  }
+  if (dropped.size === 0) {
+    return;
+  }
+  const resident = new Set(resolveLoadedSkillNames(history, history));
+  const names = [...dropped].filter((name) => !resident.has(name));
+  if (names.length === 0) {
+    return;
+  }
+  const tracker = getLoadedSkillTracker(toolRegistry);
+  if (!tracker) {
+    return;
+  }
+  tracker.unloadSkills(names);
+  debugLogger.debug(
+    `[SKILL_TRACKING] un-tracked ${names.length} skill(s) after ${logTag}: ` +
+      names.join(', '),
+  );
 }

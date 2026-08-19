@@ -21,6 +21,7 @@ import type { FileReadCache } from './fileReadCache.js';
 import type { Config } from '../config/config.js';
 import type { Content } from '@google/genai';
 import { MICROCOMPACT_CLEARED_MESSAGE } from './microcompaction/microcompact.js';
+import { buildSkillLlmContent } from '../tools/skill-utils.js';
 import { MemoryDiagnosticsDumper } from './memoryDiagnosticsDumper.js';
 import { MemoryMetricType } from '../telemetry/metrics.js';
 
@@ -150,6 +151,7 @@ function createMockConfig(
       toolResultsNumToKeep: number;
       toolResultsThresholdMinutes?: number;
     };
+    toolRegistry?: { getTool: (name: string) => unknown };
   } = {},
 ): Config {
   const client =
@@ -178,6 +180,8 @@ function createMockConfig(
       toolResultsNumToKeep: 5,
       ...overrides.clearContextOnIdle,
     }),
+    getToolRegistry: () =>
+      overrides.toolRegistry ?? { getTool: () => undefined },
   } as unknown as Config;
 }
 
@@ -1434,6 +1438,103 @@ describe('MemoryPressureMonitor', () => {
       expect(memoryResult?.functionResponse?.response?.['output']).toBe(
         'content of f0',
       );
+    });
+
+    it('un-tracks skills whose bodies were blanked by compact_history', async () => {
+      const setHistory = vi.fn();
+      const unloadSkills = vi.fn();
+      const clearLoadedSkills = vi.fn();
+      const trackSkills = vi.fn();
+      const toolHistory: Content[] = [
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call_skill',
+                name: 'skill',
+                args: { skill: 'demo-poem' },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'skill',
+                id: 'call_skill',
+                response: {
+                  output: buildSkillLlmContent(
+                    '/demo',
+                    'skill body '.repeat(50),
+                  ),
+                },
+              },
+            },
+          ],
+        },
+      ];
+      // Push the skill result out of the keep window with newer tool results.
+      for (let i = 0; i < 3; i++) {
+        toolHistory.push(
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: `call_${i}`,
+                  name: 'read_file',
+                  args: { file_path: `/f${i}.ts` },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  name: 'read_file',
+                  id: `call_${i}`,
+                  response: { output: `content of f${i}` },
+                },
+              },
+            ],
+          },
+        );
+      }
+      const monitor = new MemoryPressureMonitor(
+        createMockConfig({
+          geminiClient: {
+            isInitialized: () => true,
+            getChat: () => ({
+              getHistoryShallow: () => toolHistory,
+              setHistory,
+            }),
+          },
+          clearContextOnIdle: {
+            clearContextMinutes: 60,
+            toolResultsNumToKeep: 1,
+          },
+          toolRegistry: {
+            getTool: (name: string) =>
+              name === 'skill'
+                ? { unloadSkills, clearLoadedSkills, trackSkills }
+                : undefined,
+          },
+        }),
+        { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 0 },
+      );
+
+      setMemUsage(11 * 1024 * 1024 * 1024); // hard pressure
+      monitor.performCheck();
+      await drainCleanupMeasurement();
+
+      expect(setHistory).toHaveBeenCalled();
+      expect(unloadSkills).toHaveBeenCalledWith(['demo-poem']);
+      expect(clearLoadedSkills).not.toHaveBeenCalled();
     });
 
     it('overrides positive toolResultsThresholdMinutes to 0', async () => {

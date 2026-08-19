@@ -9,10 +9,13 @@ import {
   applySkillAllowedTools,
   collectAvailableSkillEntries,
   clearCollectedSkillEntriesCache,
+  syncSkillEvictions,
+  clearLoadedSkillTracking,
 } from './skill-utils.js';
 import type { PermissionManager } from '../permissions/permission-manager.js';
 import type { SkillManager } from '../skills/skill-manager.js';
 import type { Config } from '../config/config.js';
+import type { ToolRegistry } from './tool-registry.js';
 
 function mockPermissionManager(): {
   pm: PermissionManager;
@@ -145,5 +148,102 @@ describe('collectAvailableSkillEntries memoize cache', () => {
     await collectAvailableSkillEntries(sm, cfg);
 
     expect(sm.listSkills).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('syncSkillEvictions / clearLoadedSkillTracking', () => {
+  function mockRegistry(tool: unknown): {
+    registry: ToolRegistry;
+    getTool: ReturnType<typeof vi.fn>;
+  } {
+    const getTool = vi.fn().mockReturnValue(tool);
+    return { registry: { getTool } as unknown as ToolRegistry, getTool };
+  }
+
+  function mockSkillTool(): {
+    tool: unknown;
+    unloadSkills: ReturnType<typeof vi.fn>;
+    clearLoadedSkills: ReturnType<typeof vi.fn>;
+    trackSkills: ReturnType<typeof vi.fn>;
+  } {
+    const unloadSkills = vi.fn();
+    const clearLoadedSkills = vi.fn();
+    const trackSkills = vi.fn();
+    return {
+      tool: { unloadSkills, clearLoadedSkills, trackSkills },
+      unloadSkills,
+      clearLoadedSkills,
+      trackSkills,
+    };
+  }
+
+  it('un-tracks the reported names when all evictions resolved', () => {
+    const { tool, unloadSkills, clearLoadedSkills } = mockSkillTool();
+    const { registry } = mockRegistry(tool);
+
+    syncSkillEvictions(
+      { evictedSkillNames: ['a', 'b'], unresolvedEvictedSkills: 0 },
+      registry,
+      'test',
+    );
+
+    expect(unloadSkills).toHaveBeenCalledWith(['a', 'b']);
+    expect(clearLoadedSkills).not.toHaveBeenCalled();
+  });
+
+  it('blanket-clears when any eviction is unresolved', () => {
+    const { tool, unloadSkills, clearLoadedSkills } = mockSkillTool();
+    const { registry } = mockRegistry(tool);
+
+    syncSkillEvictions(
+      { evictedSkillNames: ['a'], unresolvedEvictedSkills: 1 },
+      registry,
+      'test',
+    );
+
+    expect(clearLoadedSkills).toHaveBeenCalledOnce();
+    expect(unloadSkills).not.toHaveBeenCalled();
+  });
+
+  it('is a NOOP when nothing was evicted', () => {
+    const { tool, unloadSkills, clearLoadedSkills } = mockSkillTool();
+    const { registry, getTool } = mockRegistry(tool);
+
+    syncSkillEvictions(
+      { evictedSkillNames: [], unresolvedEvictedSkills: 0 },
+      registry,
+      'test',
+    );
+
+    expect(getTool).not.toHaveBeenCalled();
+    expect(unloadSkills).not.toHaveBeenCalled();
+    expect(clearLoadedSkills).not.toHaveBeenCalled();
+  });
+
+  it('tolerates a missing registry or skill tool', () => {
+    expect(() =>
+      syncSkillEvictions(
+        { evictedSkillNames: ['a'], unresolvedEvictedSkills: 0 },
+        undefined,
+        'test',
+      ),
+    ).not.toThrow();
+    const { registry } = mockRegistry(undefined);
+    expect(() =>
+      syncSkillEvictions(
+        { evictedSkillNames: ['a'], unresolvedEvictedSkills: 0 },
+        registry,
+        'test',
+      ),
+    ).not.toThrow();
+  });
+
+  it('clearLoadedSkillTracking blanket-clears via the registry', () => {
+    const { tool, clearLoadedSkills } = mockSkillTool();
+    const { registry } = mockRegistry(tool);
+
+    clearLoadedSkillTracking(registry, 'test');
+
+    expect(clearLoadedSkills).toHaveBeenCalledOnce();
   });
 });

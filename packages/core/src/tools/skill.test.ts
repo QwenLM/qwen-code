@@ -1052,6 +1052,69 @@ describe('SkillTool', () => {
       expect(llmText2).toContain('Review code for quality and best practices.');
     });
 
+    it('unloadSkills re-arms dedup only for the given names', async () => {
+      vi.mocked(mockSkillManager.loadSkillForRuntime)
+        .mockResolvedValueOnce(mockSkills[0])
+        .mockResolvedValueOnce(mockSkills[1])
+        .mockResolvedValue(mockRuntimeConfig);
+
+      const inv1 = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'code-review' });
+      await inv1.execute();
+      const inv2 = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'testing' });
+      await inv2.execute();
+
+      skillTool.unloadSkills(['code-review']);
+      expect([...skillTool.getLoadedSkillNames()]).toEqual(['testing']);
+
+      // Unloaded skill reloads with full content…
+      const inv3 = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'code-review' });
+      const result3 = await inv3.execute();
+      expect(partToString(result3.llmContent)).toContain(
+        'Review code for quality and best practices.',
+      );
+
+      // …while the untouched skill still dedups.
+      const inv4 = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'testing' });
+      const result4 = await inv4.execute();
+      expect(partToString(result4.llmContent)).toBe(
+        'Skill "testing" is already loaded in context.',
+      );
+    });
+
+    it('trackSkills re-arms dedup for restored bodies', async () => {
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(
+        mockSkills[0],
+      );
+
+      const inv1 = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'code-review' });
+      await inv1.execute();
+
+      // A history rewrite cleared the tracking; the restore puts the body
+      // back and re-tracks it.
+      skillTool.clearLoadedSkills();
+      skillTool.trackSkills(['code-review']);
+      expect([...skillTool.getLoadedSkillNames()]).toEqual(['code-review']);
+
+      // The resident body must dedup again instead of doubling up.
+      const inv2 = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'code-review' });
+      const result2 = await inv2.execute();
+      expect(partToString(result2.llmContent)).toBe(
+        'Skill "code-review" is already loaded in context.',
+      );
+    });
+
     it('re-invocation still logs telemetry and calls onSkillLoaded', async () => {
       vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(
         mockRuntimeConfig,

@@ -43,6 +43,7 @@ import {
   estimatePromptTokens,
 } from '../services/tokenEstimation.js';
 import { SYSTEM_REMINDER_OPEN } from '../utils/environmentContext.js';
+import { buildSkillLlmContent } from '../tools/skill-utils.js';
 import { SessionStartSource } from '../hooks/types.js';
 import * as sideQueryModule from '../utils/sideQuery.js';
 import {
@@ -282,6 +283,167 @@ describe('GeminiChat', async () => {
       ],
     } as unknown as GenerateContentResponse;
   }
+
+  describe('tryCompress loaded-skill tracking', () => {
+    const mockSkillTool = () => ({
+      unloadSkills: vi.fn(),
+      clearLoadedSkills: vi.fn(),
+      trackSkills: vi.fn(),
+    });
+
+    it('blanket-clears skill tracking after a COMPRESSED result', async () => {
+      const skillTool = mockSkillTool();
+      vi.mocked(mockConfig.getToolRegistry).mockReturnValue({
+        getTool: vi.fn().mockReturnValue(skillTool),
+      } as unknown as ReturnType<Config['getToolRegistry']>);
+      vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      ).mockResolvedValueOnce({
+        newHistory: [
+          { role: 'user', parts: [{ text: 'summary' }] },
+          { role: 'model', parts: [{ text: 'ack' }] },
+        ],
+        info: {
+          originalTokenCount: 100_000,
+          newTokenCount: 30_000,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+      });
+
+      await chat.tryCompress('prompt-skill-clear', true);
+
+      expect(skillTool.clearLoadedSkills).toHaveBeenCalledOnce();
+    });
+
+    it('leaves skill tracking untouched on NOOP', async () => {
+      const skillTool = mockSkillTool();
+      vi.mocked(mockConfig.getToolRegistry).mockReturnValue({
+        getTool: vi.fn().mockReturnValue(skillTool),
+      } as unknown as ReturnType<Config['getToolRegistry']>);
+      vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      ).mockResolvedValueOnce({
+        newHistory: null,
+        info: {
+          originalTokenCount: 1_000,
+          newTokenCount: 1_000,
+          compressionStatus: CompressionStatus.NOOP,
+        },
+      });
+
+      await chat.tryCompress('prompt-skill-noop', true);
+
+      expect(skillTool.clearLoadedSkills).not.toHaveBeenCalled();
+      expect(skillTool.unloadSkills).not.toHaveBeenCalled();
+    });
+
+    it('leaves skill tracking untouched for forked chats sharing the parent registry', async () => {
+      const skillTool = mockSkillTool();
+      vi.mocked(mockConfig.getToolRegistry).mockReturnValue({
+        getTool: vi.fn().mockReturnValue(skillTool),
+      } as unknown as ReturnType<Config['getToolRegistry']>);
+      vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      ).mockResolvedValueOnce({
+        newHistory: [
+          { role: 'user', parts: [{ text: 'summary' }] },
+          { role: 'model', parts: [{ text: 'ack' }] },
+        ],
+        info: {
+          originalTokenCount: 100_000,
+          newTokenCount: 30_000,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+      });
+      // Forked chats compress a copy of a parent-history slice while
+      // sharing the parent's SkillTool tracker — clearing there would
+      // disarm the parent's dedup guard with its bodies still resident.
+      chat.isForkedChat = true;
+
+      await chat.tryCompress('prompt-skill-fork', true);
+
+      expect(skillTool.clearLoadedSkills).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('history-rewrite loaded-skill tracking', () => {
+    const mockSkillTool = () => ({
+      unloadSkills: vi.fn(),
+      clearLoadedSkills: vi.fn(),
+      trackSkills: vi.fn(),
+    });
+    const wireRegistry = (skillTool: ReturnType<typeof mockSkillTool>) => {
+      vi.mocked(mockConfig.getToolRegistry).mockReturnValue({
+        getTool: vi.fn().mockReturnValue(skillTool),
+      } as unknown as ReturnType<Config['getToolRegistry']>);
+    };
+    const skillCall = (id: string, name: string): Content => ({
+      role: 'model',
+      parts: [{ functionCall: { id, name: 'skill', args: { skill: name } } }],
+    });
+    const skillResponse = (id: string, output: string): Content => ({
+      role: 'user',
+      parts: [
+        { functionResponse: { id, name: 'skill', response: { output } } },
+      ],
+    });
+
+    it('strip un-tracks only the skill body it removes', () => {
+      const skillTool = mockSkillTool();
+      wireRegistry(skillTool);
+      chat.setHistory([
+        skillCall('s0', 'kept'),
+        skillResponse('s0', buildSkillLlmContent('/kept', 'kept body')),
+        { role: 'model', parts: [{ text: 'ack' }] },
+        skillCall('s1', 'dropped'),
+        skillResponse('s1', buildSkillLlmContent('/dropped', 'dropped body')),
+      ]);
+
+      chat.stripOrphanedUserEntriesFromHistory();
+
+      expect(skillTool.clearLoadedSkills).not.toHaveBeenCalled();
+      expect(skillTool.unloadSkills).toHaveBeenCalledWith(['dropped']);
+    });
+
+    it('truncate reconciles tracking to the surviving prefix', () => {
+      const skillTool = mockSkillTool();
+      wireRegistry(skillTool);
+      chat.setHistory([
+        skillCall('s0', 'kept'),
+        skillResponse('s0', buildSkillLlmContent('/kept', 'kept body')),
+        { role: 'model', parts: [{ text: 'ack' }] },
+        skillCall('s1', 'gone'),
+        skillResponse('s1', buildSkillLlmContent('/gone', 'gone body')),
+        { role: 'model', parts: [{ text: 'ack2' }] },
+      ]);
+
+      chat.truncateHistory(3);
+
+      expect(skillTool.clearLoadedSkills).toHaveBeenCalledOnce();
+      expect(skillTool.trackSkills).toHaveBeenCalledWith(['kept']);
+    });
+
+    it('truncate clears tracking entirely when no skill body survives the cut', () => {
+      // The clear must run UNCONDITIONALLY — before the non-empty gate on
+      // trackSkills — or a rewrite that drops every body would leave stale
+      // tracking and deadlock the skill behind the dedup guard.
+      const skillTool = mockSkillTool();
+      wireRegistry(skillTool);
+      chat.setHistory([
+        { role: 'model', parts: [{ text: 'ack' }] },
+        skillCall('s0', 'gone'),
+        skillResponse('s0', buildSkillLlmContent('/gone', 'gone body')),
+      ]);
+
+      chat.truncateHistory(1);
+
+      expect(skillTool.clearLoadedSkills).toHaveBeenCalledOnce();
+      expect(skillTool.trackSkills).not.toHaveBeenCalled();
+    });
+  });
 
   describe('system instruction helpers', () => {
     it('replaces prior session-start context instead of appending indefinitely', () => {
@@ -4090,7 +4252,41 @@ describe('GeminiChat', async () => {
     });
 
     it('rejects before request serialization and restores history when hard-rescue compression is still oversized', async () => {
+      const skillTool = {
+        unloadSkills: vi.fn(),
+        clearLoadedSkills: vi.fn(),
+        trackSkills: vi.fn(),
+      };
+      vi.mocked(mockConfig.getToolRegistry).mockReturnValue({
+        getTool: vi.fn().mockReturnValue(skillTool),
+      } as unknown as ReturnType<Config['getToolRegistry']>);
       const originalHistory: Content[] = [
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 's0',
+                name: 'skill',
+                args: { skill: 'demo' },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 's0',
+                name: 'skill',
+                response: {
+                  output: buildSkillLlmContent('/demo', 'demo body'),
+                },
+              },
+            },
+          ],
+        },
         { role: 'user', parts: [{ text: 'x'.repeat(720_000) }] },
         { role: 'model', parts: [{ text: 'ack' }] },
       ];
@@ -4138,9 +4334,17 @@ describe('GeminiChat', async () => {
       expect(recordChatCompression).not.toHaveBeenCalled();
       expect(chatWithRecording.getLastPromptTokenCount()).toBe(176_999);
       expect(chatWithRecording.isLastPromptTokenCountEstimated()).toBe(false);
-      expect(chatWithRecording.getHistory()[0].parts?.[0].text).toBe(
-        originalHistory[0].parts?.[0].text,
+      // Index 2: the oversized user entry sits after the prepended skill
+      // call/response pair; asserting index 0 would compare two undefined
+      // functionCall texts and pass for any history.
+      expect(chatWithRecording.getHistory()[2].parts?.[0].text).toBe(
+        originalHistory[2].parts?.[0].text,
       );
+      // The verbatim restore reconciles tracking from the restored history:
+      // the tryCompress blanket clear (COMPRESSED) plus the reconcile's own
+      // clear, then the resident body's skill is re-tracked.
+      expect(skillTool.clearLoadedSkills).toHaveBeenCalledTimes(2);
+      expect(skillTool.trackSkills).toHaveBeenCalledWith(['demo']);
     });
 
     it('rejects when compressed history is below hard but the pending user message pushes it over', async () => {

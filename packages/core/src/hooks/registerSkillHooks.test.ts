@@ -226,4 +226,85 @@ describe('registerSkillHooks', () => {
     expect(hooks).toHaveLength(1);
     expect(hooks[0].skillRoot).toBe(skillRoot);
   });
+
+  it('should not duplicate hooks when the same skill registers again (skill reload)', () => {
+    // Skill unload (/unskill, eviction sync) never unregisters session hooks,
+    // so a reload must not push duplicate entries — otherwise the hook fires
+    // once per unload/reload cycle.
+    const skill: SkillConfig = {
+      name: 'test-skill',
+      description: 'Test skill',
+      level: 'user',
+      filePath: '/path/to/skill/SKILL.md',
+      skillRoot,
+      body: 'Test body',
+      hooks: {
+        [HookEventName.PreToolUse]: [
+          {
+            matcher: 'Bash',
+            hooks: [
+              {
+                type: HookType.Command,
+                command: 'echo "checking command"',
+              },
+            ],
+          },
+        ],
+      },
+    };
+
+    expect(registerSkillHooks(sessionHooksManager, sessionId, skill)).toBe(1);
+    expect(registerSkillHooks(sessionHooksManager, sessionId, skill)).toBe(0);
+
+    const hooks = sessionHooksManager.getHooksForEvent(
+      sessionId,
+      HookEventName.PreToolUse,
+    );
+    expect(hooks).toHaveLength(1);
+  });
+
+  it('still registers a same-command hook from a different skill', () => {
+    const makeSkill = (name: string, root: string): SkillConfig => ({
+      name,
+      description: 'Test skill',
+      level: 'user',
+      filePath: `${root}/SKILL.md`,
+      skillRoot: root,
+      body: 'Test body',
+      hooks: {
+        [HookEventName.PreToolUse]: [
+          {
+            matcher: 'Bash',
+            hooks: [
+              {
+                type: HookType.Command,
+                command: 'echo "checking command"',
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    expect(
+      registerSkillHooks(
+        sessionHooksManager,
+        sessionId,
+        makeSkill('skill-a', '/path/to/a'),
+      ),
+    ).toBe(1);
+    expect(
+      registerSkillHooks(
+        sessionHooksManager,
+        sessionId,
+        makeSkill('skill-b', '/path/to/b'),
+      ),
+    ).toBe(1);
+
+    const hooks = sessionHooksManager.getHooksForEvent(
+      sessionId,
+      HookEventName.PreToolUse,
+    );
+    expect(hooks).toHaveLength(2);
+  });
 });

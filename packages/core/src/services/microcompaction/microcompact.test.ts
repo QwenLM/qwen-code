@@ -14,6 +14,7 @@ import {
   MICROCOMPACT_CLEARED_MESSAGE,
   MICROCOMPACT_CLEARED_IMAGE_PREFIX,
 } from './microcompact.js';
+import { buildSkillLlmContent } from '../../tools/skill-utils.js';
 
 function makeInlineImage(mimeType = 'image/png', data = 'AAAA'): Content {
   return {
@@ -2078,5 +2079,267 @@ describe('microcompactHistory — force option', () => {
     // No compactable tools → no meta
     expect(result.meta).toBeUndefined();
     expect(result.history).toEqual(history);
+  });
+});
+
+describe('microcompactHistory evictedSkillNames (issue #6762 sync)', () => {
+  const TWO_HOURS_AGO = Date.now() - 2 * 60 * 60 * 1000;
+
+  function skillCall(id: string | undefined, skillName: string): Content {
+    return {
+      role: 'model',
+      parts: [
+        { functionCall: { id, name: 'skill', args: { skill: skillName } } },
+      ],
+    };
+  }
+
+  function skillResult(id: string | undefined, output: string): Content {
+    return {
+      role: 'user',
+      parts: [
+        { functionResponse: { id, name: 'skill', response: { output } } },
+      ],
+    };
+  }
+
+  function shellCall(id: string): Content {
+    return {
+      role: 'model',
+      parts: [{ functionCall: { id, name: 'run_shell_command', args: {} } }],
+    };
+  }
+
+  function shellResult(id: string, output: string): Content {
+    return {
+      role: 'user',
+      parts: [
+        {
+          functionResponse: {
+            id,
+            name: 'run_shell_command',
+            response: { output },
+          },
+        },
+      ],
+    };
+  }
+
+  it('reports the skill name of a blanked skill result', () => {
+    const history: Content[] = [
+      skillCall('s0', 'demo-poem'),
+      skillResult(
+        's0',
+        buildSkillLlmContent('/demo', 'skill body content '.repeat(50)),
+      ),
+      shellCall('c1'),
+      shellResult('c1', 'newer shell output'),
+    ];
+
+    const result = microcompactHistory(history, TWO_HOURS_AGO, {
+      toolResultsThresholdMinutes: 5,
+      toolResultsNumToKeep: 1,
+    });
+
+    expect(result.meta).toBeDefined();
+    expect(result.meta!.evictedSkillNames).toEqual(['demo-poem']);
+    expect(result.meta!.unresolvedEvictedSkills).toBe(0);
+    expect(
+      result.history[1]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+  });
+
+  it('counts a blanked skill result with no call id as unresolved', () => {
+    const history: Content[] = [
+      skillCall(undefined, 'demo-poem'),
+      skillResult(
+        undefined,
+        buildSkillLlmContent('/demo', 'skill body content '.repeat(50)),
+      ),
+      shellCall('c1'),
+      shellResult('c1', 'newer shell output'),
+    ];
+
+    const result = microcompactHistory(history, TWO_HOURS_AGO, {
+      toolResultsThresholdMinutes: 5,
+      toolResultsNumToKeep: 1,
+    });
+
+    expect(result.meta).toBeDefined();
+    expect(result.meta!.evictedSkillNames).toEqual([]);
+    expect(result.meta!.unresolvedEvictedSkills).toBe(1);
+  });
+
+  it('does not report a kept (recent-budget) skill result', () => {
+    const history: Content[] = [
+      shellCall('c0'),
+      shellResult('c0', 'old shell output '.repeat(50)),
+      skillCall('s1', 'demo-poem'),
+      skillResult('s1', 'skill body content'),
+    ];
+
+    const result = microcompactHistory(history, TWO_HOURS_AGO, {
+      toolResultsThresholdMinutes: 5,
+      toolResultsNumToKeep: 1,
+    });
+
+    expect(result.meta).toBeDefined();
+    expect(result.meta!.toolsCleared).toBe(1);
+    expect(result.meta!.evictedSkillNames).toEqual([]);
+    expect(result.meta!.unresolvedEvictedSkills).toBe(0);
+    expect(
+      result.history[3]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe('skill body content');
+  });
+
+  it('dedupes when the body and a dedup confirmation are both blanked', () => {
+    const history: Content[] = [
+      skillCall('s0', 'demo-poem'),
+      skillResult(
+        's0',
+        buildSkillLlmContent('/demo', 'skill body content '.repeat(50)),
+      ),
+      skillCall('s1', 'demo-poem'),
+      skillResult('s1', 'Skill "demo-poem" is already loaded in context.'),
+      shellCall('c2'),
+      shellResult('c2', 'newer shell output'),
+    ];
+
+    const result = microcompactHistory(history, TWO_HOURS_AGO, {
+      toolResultsThresholdMinutes: 5,
+      toolResultsNumToKeep: 1,
+    });
+
+    expect(result.meta).toBeDefined();
+    expect(result.meta!.evictedSkillNames).toEqual(['demo-poem']);
+    expect(result.meta!.unresolvedEvictedSkills).toBe(0);
+  });
+
+  it('suppresses the report when a stale confirmation is blanked but the reloaded body is kept', () => {
+    // Cross-cycle ordering: the previous body was already blanked, its dedup
+    // confirmation (s1) is older than the reloaded body (s2). Blanking the
+    // confirmation must not un-track the skill — the live body is still in
+    // context, and un-tracking would make the next invocation re-append it.
+    const history: Content[] = [
+      skillCall('s0', 'demo-poem'),
+      skillResult('s0', MICROCOMPACT_CLEARED_MESSAGE),
+      skillCall('s1', 'demo-poem'),
+      skillResult('s1', 'Skill "demo-poem" is already loaded in context.'),
+      skillCall('s2', 'demo-poem'),
+      skillResult(
+        's2',
+        buildSkillLlmContent('/demo', 'skill body content '.repeat(50)),
+      ),
+      shellCall('c3'),
+      shellResult('c3', 'newer shell output'),
+    ];
+
+    const result = microcompactHistory(history, TWO_HOURS_AGO, {
+      toolResultsThresholdMinutes: 5,
+      toolResultsNumToKeep: 2,
+    });
+
+    expect(result.meta).toBeDefined();
+    expect(result.meta!.evictedSkillNames).toEqual([]);
+    expect(result.meta!.unresolvedEvictedSkills).toBe(0);
+    expect(
+      result.history[3]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+    expect(
+      result.history[5]!.parts![0]!.functionResponse!.response!['output'],
+    ).toContain('skill body content');
+  });
+
+  it('does not let a kept SkillTool error output mask a blanked body (R2-1)', () => {
+    // The kept error output ('Skill "x" is disabled.') is not a body, so it
+    // must not suppress the eviction report for the older body being blanked
+    // — otherwise the skill stays tracked with no body (dedup-guard ghost).
+    const history: Content[] = [
+      skillCall('s0', 'demo-poem'),
+      skillResult('s0', buildSkillLlmContent('/demo', 'body '.repeat(50))),
+      skillCall('s1', 'demo-poem'),
+      skillResult('s1', 'Skill "demo-poem" is disabled.'),
+      shellCall('c2'),
+      shellResult('c2', 'newer shell output'),
+    ];
+
+    const result = microcompactHistory(history, TWO_HOURS_AGO, {
+      toolResultsThresholdMinutes: 5,
+      toolResultsNumToKeep: 2,
+    });
+
+    expect(result.meta).toBeDefined();
+    expect(result.meta!.evictedSkillNames).toEqual(['demo-poem']);
+  });
+
+  it('protects no skill when a call-id is ambiguous (R2-3)', () => {
+    // A resumed/malformed history reuses one call-id across two Skill calls
+    // (foo kept via keepRecent, bar blanked). buildKeptFilePaths protects
+    // NONE on ambiguity; buildKeptSkillNames must match so bar's eviction is
+    // reported (foo over-reports — the documented tolerated direction).
+    const history: Content[] = [
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              id: 'shared',
+              name: 'skill',
+              args: { skill: 'bar' },
+            },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'shared',
+              name: 'skill',
+              response: {
+                output: buildSkillLlmContent('/bar', 'bar '.repeat(50)),
+              },
+            },
+          },
+        ],
+      },
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              id: 'shared',
+              name: 'skill',
+              args: { skill: 'foo' },
+            },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'shared',
+              name: 'skill',
+              response: { output: buildSkillLlmContent('/foo', 'foo') },
+            },
+          },
+        ],
+      },
+      shellCall('c1'),
+      shellResult('c1', 'newer shell output'),
+    ];
+
+    const result = microcompactHistory(history, TWO_HOURS_AGO, {
+      toolResultsThresholdMinutes: 5,
+      toolResultsNumToKeep: 2,
+    });
+
+    expect(result.meta).toBeDefined();
+    expect(new Set(result.meta!.evictedSkillNames)).toEqual(
+      new Set(['bar', 'foo']),
+    );
   });
 });
