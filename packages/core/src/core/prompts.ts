@@ -8,10 +8,6 @@ import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
 import { ToolNames } from '../tools/tool-names.js';
-import {
-  resolveBoardPromptContext,
-  getBoardSection,
-} from '../agents/team/board-prompt.js';
 import process from 'node:process';
 import { isGitRepository } from '../utils/gitUtils.js';
 import { QWEN_DIR } from '../config/storage.js';
@@ -413,12 +409,7 @@ You are running outside of a sandbox container, directly on the user's system. F
   }
 })()}
 
-${getActionsSection()}${(function () {
-      // Only present when this session was started onto a shared board. Inert
-      // otherwise, so the section costs nothing for the common single-agent case.
-      const boardCtx = resolveBoardPromptContext();
-      return boardCtx ? `\n${getBoardSection(boardCtx)}` : '';
-    })()}
+${getActionsSection()}
 
 ${(function () {
   if (isGitRepository(process.cwd())) {

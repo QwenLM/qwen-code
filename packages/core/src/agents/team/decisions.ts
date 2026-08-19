@@ -4,69 +4,38 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-/**
- * `decision` board items — something awaiting human authority.
- *
- * Stored at `~/.qwen/boards/{board}/decisions/{id}.json`.
- *
- * Approving a dangerous operation, accepting a finished result, and
- * adjudicating two conflicting results are the same act: each needs
- * *authority*, and no agent has more of it than another. Unifying them under
- * one item gives the exception view something to show — a `decision` list is
- * the answer to "what is waiting on me".
- *
- * Two rules distinguish this from an `ask`:
- *
- * - **No agent resolves one.** `qwen board resolve` refuses from a
- *   non-interactive shell, which is what an agent's tool call is — a barrier
- *   rather than a proof, since `--force` bypasses it and a pty would pass, but
- *   enough that settling your own request is no longer the easiest path. This
- *   module does not check: the caller does, because only the caller can see
- *   whether a person is there.
- * - **No expiry.** A decision that expires silently converts "nobody has looked
- *   yet" into "the system decided for them", which is the exact authority
- *   nothing but a human may hold. Decisions stall visibly instead — the cost
- *   is intended and is why the exception view exists.
- */
-
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { atomicWriteJSON } from '../../utils/atomicFileWrite.js';
-import { isNodeError } from '../../utils/errors.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { isNodeError } from '../../utils/errors.js';
 import {
+  assertItemId,
   assertSafeName,
+  createBoardRecord,
   getCollectionDir,
+  pruneCollection,
   withItemLock,
 } from './board-lock.js';
 
 const debug = createDebugLogger('BOARD_DECISIONS');
 
 export const DECISIONS_COLLECTION = 'decisions';
-
 const MAX_TEXT_LENGTH = 65536;
-const SCHEMA_VERSION = 1;
+const DECISION_FILE = /^d-[0-9a-f-]{36}\.json$/;
 
-export type DecisionKind = 'approval' | 'acceptance' | 'adjudication';
 export type DecisionState = 'open' | 'approved' | 'rejected';
 
-/** `acceptance` and `adjudication` are always about a task; `approval` may not be. */
-const REQUIRES_ABOUT: ReadonlySet<DecisionKind> = new Set([
-  'acceptance',
-  'adjudication',
-]);
-
 export interface DecisionRecord {
-  schemaVersion: number;
+  schemaVersion: 1;
   id: string;
-  kind: DecisionKind;
   raisedBy: string;
   about?: string;
   question: string;
   state: DecisionState;
   createdAt: number;
   resolvedAt: number | null;
-  /** The human's reason, when they give one. */
+  resolvedBy: string | null;
   note: string | null;
 }
 
@@ -85,101 +54,117 @@ function assertText(field: string, value: string): void {
   }
 }
 
-async function nextDecisionId(board: string): Promise<string> {
-  const dir = decisionsDir(board);
-  let files: string[];
-  try {
-    files = await fs.readdir(dir);
-  } catch (err) {
-    if (isNodeError(err) && err.code === 'ENOENT') return 'd-1';
-    throw err;
+function parseDecision(value: unknown): DecisionRecord {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Decision record must be an object.');
   }
-  let max = 0;
-  for (const file of files) {
-    const m = /^d-(\d+)\.json$/.exec(file);
-    if (m) max = Math.max(max, Number.parseInt(m[1], 10));
+  const decision = value as Partial<DecisionRecord>;
+  if (decision.schemaVersion !== 1) {
+    throw new Error('Unsupported decision schema.');
   }
-  return `d-${max + 1}`;
+  if (typeof decision.id !== 'string') {
+    throw new Error('Decision id must be text.');
+  }
+  assertItemId('decision id', decision.id, 'd');
+  if (typeof decision.raisedBy !== 'string') {
+    throw new Error('Decision raisedBy must be a name.');
+  }
+  assertSafeName('actor name', decision.raisedBy);
+  if (decision.about !== undefined) {
+    if (typeof decision.about !== 'string') {
+      throw new Error('Decision about must be an item id.');
+    }
+    assertItemId('item id', decision.about);
+  }
+  if (typeof decision.question !== 'string') {
+    throw new Error('Decision question must be text.');
+  }
+  assertText('question', decision.question);
+  if (!['open', 'approved', 'rejected'].includes(decision.state ?? '')) {
+    throw new Error('Invalid decision state.');
+  }
+  if (!Number.isFinite(decision.createdAt)) {
+    throw new Error('Decision createdAt must be a finite number.');
+  }
+  if (decision.resolvedAt !== null && !Number.isFinite(decision.resolvedAt)) {
+    throw new Error('Decision resolvedAt must be a finite number or null.');
+  }
+  if (
+    decision.resolvedAt !== null &&
+    (decision.resolvedAt ?? 0) < (decision.createdAt ?? 0)
+  ) {
+    throw new Error('Decision resolvedAt precedes createdAt.');
+  }
+  if (decision.resolvedBy !== null && typeof decision.resolvedBy !== 'string') {
+    throw new Error('Decision resolvedBy must be a name or null.');
+  }
+  if (decision.resolvedBy) {
+    assertSafeName('actor name', decision.resolvedBy);
+  }
+  if (decision.note !== null && typeof decision.note !== 'string') {
+    throw new Error('Decision note must be text or null.');
+  }
+  if (decision.note) assertText('note', decision.note);
+  if (decision.state === 'open') {
+    if (
+      decision.resolvedAt !== null ||
+      decision.resolvedBy !== null ||
+      decision.note !== null
+    ) {
+      throw new Error('An open decision cannot contain a resolution.');
+    }
+  } else if (decision.resolvedAt === null || !decision.resolvedBy) {
+    throw new Error('A resolved decision requires resolvedAt and resolvedBy.');
+  }
+  return decision as DecisionRecord;
 }
 
-export interface RaiseDecisionOptions {
+export async function raiseDecision(opts: {
   board: string;
-  kind: DecisionKind;
   raisedBy: string;
   question: string;
   about?: string;
-}
-
-export async function raiseDecision(
-  opts: RaiseDecisionOptions,
-): Promise<DecisionRecord> {
-  assertSafeName('board name', opts.board);
-  assertSafeName('participant name', opts.raisedBy);
+}): Promise<DecisionRecord> {
+  assertSafeName('actor name', opts.raisedBy);
   assertText('question', opts.question);
-  if (REQUIRES_ABOUT.has(opts.kind) && !opts.about) {
-    throw new Error(
-      `A "${opts.kind}" decision must name the task it is about via "about".`,
-    );
-  }
-
-  const dir = decisionsDir(opts.board);
-  await fs.mkdir(dir, { recursive: true, mode: 0o700 });
-
-  for (let attempt = 0; attempt < 10; attempt++) {
-    const id = await nextDecisionId(opts.board);
-    const record: DecisionRecord = {
-      schemaVersion: SCHEMA_VERSION,
-      id,
-      kind: opts.kind,
-      raisedBy: opts.raisedBy,
-      ...(opts.about ? { about: opts.about } : {}),
-      question: opts.question,
-      state: 'open',
-      createdAt: Date.now(),
-      resolvedAt: null,
-      note: null,
-    };
-    try {
-      await fs.writeFile(
-        decisionPath(opts.board, id),
-        JSON.stringify(record, null, 2),
-        { flag: 'wx', mode: 0o600 },
-      );
-      return record;
-    } catch (err) {
-      if (isNodeError(err) && err.code === 'EEXIST') continue;
-      throw err;
-    }
-  }
-  throw new Error('Could not allocate a decision id after 10 attempts.');
+  if (opts.about) assertItemId('item id', opts.about);
+  const now = Date.now();
+  return createBoardRecord(opts.board, DECISIONS_COLLECTION, 'd', (id) => ({
+    schemaVersion: 1,
+    id,
+    raisedBy: opts.raisedBy,
+    ...(opts.about ? { about: opts.about } : {}),
+    question: opts.question,
+    state: 'open',
+    createdAt: now,
+    resolvedAt: null,
+    resolvedBy: null,
+    note: null,
+  }));
 }
 
-export async function getDecision(
+async function getDecision(
   board: string,
   id: string,
 ): Promise<DecisionRecord | null> {
   assertSafeName('board name', board);
-  assertSafeName('decision id', id);
+  assertItemId('decision id', id, 'd');
+  let raw: string;
   try {
-    const raw = await fs.readFile(decisionPath(board, id), 'utf8');
-    if (!raw.trim()) return null;
-    return JSON.parse(raw) as DecisionRecord;
+    raw = await fs.readFile(decisionPath(board, id), 'utf8');
   } catch (err) {
     if (isNodeError(err) && err.code === 'ENOENT') return null;
-    debug.warn(`unreadable decision ${id}:`, err);
+    throw err;
+  }
+  try {
+    return parseDecision(JSON.parse(raw));
+  } catch (err) {
+    debug.warn(`skipping invalid decision ${id}:`, err);
     return null;
   }
 }
 
-export interface ListDecisionsFilter {
-  states?: readonly DecisionState[];
-  kinds?: readonly DecisionKind[];
-}
-
-export async function listDecisions(
-  board: string,
-  filter: ListDecisionsFilter = {},
-): Promise<DecisionRecord[]> {
+export async function listDecisions(board: string): Promise<DecisionRecord[]> {
   assertSafeName('board name', board);
   let files: string[];
   try {
@@ -188,65 +173,67 @@ export async function listDecisions(
     if (isNodeError(err) && err.code === 'ENOENT') return [];
     throw err;
   }
-
-  const out: DecisionRecord[] = [];
-  for (const file of files) {
-    if (!/^d-\d+\.json$/.test(file)) continue;
-    const item = await getDecision(board, file.slice(0, -'.json'.length));
-    if (!item) continue;
-    if (filter.states && !filter.states.includes(item.state)) continue;
-    if (filter.kinds && !filter.kinds.includes(item.kind)) continue;
-    out.push(item);
-  }
-  // Oldest first: the exception view reads top-down, and the thing that has
-  // been waiting longest is the thing most likely to be blocking someone.
-  out.sort((a, b) => a.createdAt - b.createdAt);
-  return out;
+  const decisions = (
+    await Promise.all(
+      files
+        .filter((file) => DECISION_FILE.test(file))
+        .map((file) => getDecision(board, file.slice(0, -5))),
+    )
+  ).filter((decision): decision is DecisionRecord => decision !== null);
+  return decisions.sort((a, b) => a.createdAt - b.createdAt);
 }
 
-export class DecisionSettledError extends Error {
-  constructor(id: string, state: DecisionState) {
-    super(`Decision "${id}" is already ${state}.`);
-    this.name = 'DecisionSettledError';
-  }
-}
-
-/**
- * Resolve a decision. Intended for the human, and the prompt tells agents not
- * to call it — but nothing here checks, so treat "no agent resolves one" as a
- * convention rather than a guarantee (see the module header).
- */
-export async function resolveDecision(
+export function resolveDecision(
   board: string,
   id: string,
+  by: string,
   outcome: 'approved' | 'rejected',
   note?: string,
 ): Promise<DecisionRecord> {
   assertSafeName('board name', board);
-  assertSafeName('decision id', id);
+  assertItemId('decision id', id, 'd');
+  assertSafeName('actor name', by);
   if (note !== undefined) assertText('note', note);
-
   const target = decisionPath(board, id);
-  const missing = () => {
-    throw new Error(`Decision "${id}" not found.`);
-  };
   return withItemLock(
     target,
     async () => {
-      const raw = await fs.readFile(target, 'utf8');
-      const current = JSON.parse(raw) as DecisionRecord;
+      const current = parseDecision(
+        JSON.parse(await fs.readFile(target, 'utf8')),
+      );
       if (current.state !== 'open') {
-        throw new DecisionSettledError(id, current.state);
+        throw new Error(`Decision "${id}" is already ${current.state}.`);
       }
-      const next: DecisionRecord = {
+      const next = parseDecision({
         ...current,
         state: outcome,
         resolvedAt: Date.now(),
+        resolvedBy: by,
         note: note ?? null,
-      };
-      await atomicWriteJSON(target, next);
+      });
+      await atomicWriteJSON(target, next, { mode: 0o600, forceMode: true });
       return next;
     },
-    missing,
+    () => {
+      throw new Error(`Decision "${id}" not found.`);
+    },
+  );
+}
+
+export function pruneDecisions(
+  board: string,
+  olderThanMs: number,
+  now?: number,
+): Promise<string[]> {
+  return pruneCollection(
+    board,
+    DECISIONS_COLLECTION,
+    DECISION_FILE,
+    (value) => {
+      const decision = parseDecision(value);
+      return decision.state === 'open' ? null : decision.resolvedAt;
+    },
+    olderThanMs,
+    now,
   );
 }

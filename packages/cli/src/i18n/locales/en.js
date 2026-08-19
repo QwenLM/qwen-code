@@ -2839,6 +2839,4 @@ export default {
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.',
   'Kept model as {{model}}': 'Kept model as {{model}}',
-  'join a shared agent board (or "off" to leave)':
-    'join a shared agent board (or "off" to leave)',
 };

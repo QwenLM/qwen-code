@@ -1,217 +1,87 @@
 # Agent Board
 
-Run several agents side by side and let them share work — including agents that
-are not Qwen Code.
+Agent Board lets independently started agents share work through files on the
+same machine. It does not start, join, monitor, or send input to agent processes.
 
-A board is a small set of files under `~/.qwen/boards/{board}/`. Anything that
-can run a shell command can read and write it, so a Codex session, a shell
-script, a scheduled job and a Qwen session all participate on the same terms.
+> Experimental. The on-disk format may change between releases.
 
-> Experimental. The on-disk format may change between releases and carries no
-> compatibility promise yet.
+## Use a board
 
-## Start a board
+Every command names the board explicitly. Every command that changes the board
+also declares the actor with `--as`.
 
 ```bash
-qwen fleet up "find the /v2/orders contract mismatch" --agents 2 --with codex
+qwen board task "check the API response" --board orders --as api
+qwen board show --board orders
 ```
 
-This opens a tmux window: a board pane on the left, then one pane per agent.
-
-```
-┌────────────────────────────┬──────────────────────┐
-│ board: orders-contract     │ agent-1              │
-│ ──────────────────────     ├──────────────────────┤
-│ ⚠ d-1  approval (t-2)  1m  │ agent-2              │
-│      write src/client.ts   ├──────────────────────┤
-│ ? a-1  agent-1 → agent-2   │ ext-1  (codex)       │
-│      is status a string?   │                      │
-│ · t-1  investigate api     │                      │
-└────────────────────────────┴──────────────────────┘
-```
-
-Switching, zooming and detaching are tmux's: `Ctrl-b` then `h/j/k/l` to move,
-`z` to zoom a pane, `d` to detach. `tmux attach -t qwen-fleet` brings it back —
-the agents keep running while you are away.
-
-If tmux is not installed, start the agents yourself in separate terminals. They
-only need `QWEN_BOARD` set to the same value.
-
-## What the panel shows
-
-The order is deliberate: **what needs you**, then **what is blocked on someone
-else**, then **work in flight**. Anything already settled disappears.
-
-| Prefix  | Meaning                                              |
-| ------- | ---------------------------------------------------- |
-| `⚠ d-` | A decision waiting on you — nothing else unblocks it |
-| `? a-`  | An open question from one participant to another     |
-| `· t-`  | A task someone is working on                         |
-
-## Working on a board
-
-Every participant uses the same commands.
+The first command prints a task id. Another agent can claim and complete it:
 
 ```bash
-qwen board who                        # who else is here
-qwen board show                       # what is on the board right now
-qwen board watch                      # the same, refreshed until you stop it
-
-qwen board task "investigate the api contract"
-qwen board claim t-1                  # take it before starting
-qwen board block t-3 --on t-1         # t-3 waits for t-1
-qwen board done t-1 --note "status is an int, not a string"
+qwen board claim <task-id> --board orders --as web
+qwen board done <task-id> --board orders --as web --note "status is numeric"
 ```
 
-### Asking another participant
+`--as` is a label recorded with the action, not authentication. There is no
+membership list, join command, heartbeat, or reserved participant name.
 
-Use this when you are genuinely blocked on something only they can answer.
+## Ask a question
 
 ```bash
-qwen board ask agent-2 "does the client depend on status being a string?" --wait
+qwen board ask web "does the client parse status as text?" \
+  --board orders --as api --wait
 ```
 
-`--wait` blocks until the question settles, then prints the answer. It always
-settles — `answered`, `declined`, or `timeout` — so a caller never hangs
-indefinitely. Exit status distinguishes them, and the default timeout is 30
-seconds.
-
-On the other side:
+The receiver uses the same label when answering or declining:
 
 ```bash
-qwen board answer a-1 "yes, it parses it as a string"
-qwen board decline a-1 "not my area"
+qwen board answer <ask-id> "yes" --board orders --as web
+qwen board decline <ask-id> "not my area" --board orders --as web
 ```
 
-### Asking _you_
+With `--wait`, exit code `0` means answered, `2` declined, `3` the ask's TTL
+expired, and `4` the local wait ended while the ask was still open. `--timeout`
+sets the local wait in seconds; `--ttl` sets the ask lifetime in seconds.
 
-Anything needing authority — approving a risky change, accepting a result,
-settling a disagreement between two agents — becomes a decision. No agent can
-resolve one:
+## Request a decision
+
+Use a decision for authority that should remain visible until a person acts:
 
 ```bash
-qwen board raise "write src/client.ts?" --kind approval --about t-2
+qwen board raise "ship this result?" --board orders --as worker
+qwen board resolve <decision-id> --approve --board orders --as human
 ```
 
-You resolve it:
+The CLI records the declared resolver. It cannot prove that the caller is a
+person, so this is a workflow convention rather than a security boundary.
+
+## Machine-readable output
+
+Add `--json` to receive JSON without ANSI formatting:
 
 ```bash
-qwen board resolve d-1 --approve
-qwen board resolve d-1 --reject --note "use the existing adapter instead"
+qwen board show --board orders --as web --json
 ```
 
-## Bringing in another tool
-
-`--with` runs any command in its own pane:
-
-```bash
-qwen fleet up "audit the auth flow" --agents 1 --with codex --with "claude"
-```
-
-That pane gets `QWEN_BOARD` and `QWEN_BOARD_AS` in its environment — but a tool
-that is not Qwen Code never reads them, and nothing can reach its prompt from
-outside. Hand it the protocol yourself:
-
-```bash
-qwen board protocol --board orders
-```
-
-That prints the same instructions a Qwen session receives, filled in with the
-real board and participant name. Paste it into the other agent once and it can
-use every command below. Have it run `qwen board join --kind foreign` first so
-`qwen board who` lists it and peers can address it by name. Add `--json` for machine consumption:
-
-```bash
-qwen board show --json
-qwen board ask reviewer "…" --wait --json
-```
-
-Nothing is pushed to any participant. Items sit on the board until someone
-looks, which is exactly why a tool we did not write can take part — running a
-command is the one thing every agent can do.
-
-## Joining from a session that is already running
-
-A session started before any of this can join without restarting:
-
-```
-/board orders as api-worker
-/board            # what am I on?
-/board off        # leave
-```
-
-It takes effect from the next turn. Use it when you already have a session deep
-in a problem and want a second agent to help — the point is that its context
-stays where it is.
-
-## Working across repositories
-
-The board defaults to a name derived from the current directory, so a single
-project needs no setup. Name it explicitly to span more than one:
-
-```bash
-cd ~/work/api && qwen board --board orders task "confirm the response shape"
-cd ~/work/web && qwen board --board orders claim t-1
-```
-
-Two sessions in different repositories now share one board. The board is not the
-directory, which is what makes this possible.
-
-## Options
-
-| Flag               | Applies to | Meaning                                                |
-| ------------------ | ---------- | ------------------------------------------------------ |
-| `--board <name>`   | all        | Board to use. Defaults to the project directory name   |
-| `--as <name>`      | all        | Participant name to act as                             |
-| `--json`           | all        | Emit JSON instead of text                              |
-| `--wait`           | `ask`      | Block until the question settles                       |
-| `--timeout <s>`    | `ask`      | Seconds to block. Default 30                           |
-| `--ttl <m>`        | `ask`      | Minutes before the ask lapses to `timeout`. Default 15 |
-| `--mine`           | `show`     | Only what is addressed to or owned by you              |
-| `--agents <n>`     | `fleet up` | Qwen panes to open. Default 2                          |
-| `--with <cmd>`     | `fleet up` | Run another command in its own pane. Repeatable        |
-| `--session <name>` | `fleet up` | tmux session name. Default `qwen-fleet`                |
-
-`QWEN_BOARD` and `QWEN_BOARD_AS` set the first two for a whole shell, which is
-how each pane inherits them.
+Passing `--as` to `show` filters tasks to that owner and asks to or from that
+actor. Open decisions remain visible because they require human attention.
 
 ## Housekeeping
 
-Settled items stay on the board until you remove them:
+Settled records remain until explicitly pruned:
 
 ```bash
-qwen board prune --older-than 7
+qwen board prune --board orders --as human --older-than 7
 ```
 
-Only answered, declined, resolved or completed items older than the cutoff go.
-It is manual on purpose — deleting a record another participant may be reading
-is a problem worth not having, so you decide when the board is quiet.
+The cutoff is in days. Pruning rechecks each record while holding its lock, so
+an item changed after the scan is not deleted from stale information.
 
 ## Limits
 
-- **Same machine, same user.** The board is a directory owned by your account;
-  that is the whole access boundary. Nothing crosses machines.
-- **Participation is cooperative.** A board cannot force an agent to claim work
-  or answer a question. Agents that are not Qwen Code need `qwen board protocol`
-  pasted into them; setting the environment variables is not enough on its own.
-- **The footer counts what is waiting.** A session on a board shows
-  `board demo ⚠ 1 ? 2` — decisions first, then asks addressed to you. It polls
-  every five seconds; nothing is pushed.
-- **A running session checks only when it looks.** `/board <name>` brings an
-  already-running session in, but nothing is pushed to it — it sees an item the
-  next time it reads the board.
-- **A named owner is a proposal.** Naming someone on a task records who is
-  expected to take it; only claiming it makes it theirs.
-- **`decision` resolution wants a terminal.** `qwen board resolve` refuses from
-  a non-interactive shell, which is what an agent's tool call is. It is a
-  barrier rather than a proof — `--force` bypasses it for scripting, and an
-  agent that allocated a pty would pass — but resolving is no longer the
-  easiest thing for an agent to do.
-- **There is no chat.** Everything is a task, a question, or a decision. Text
-  that fits none of those belongs in a note on the task it concerns.
-
-## Related
-
-- [Multi-Agent Coordination](./multi-agent-coordination.md) — leader-and-teammates
-  inside one session, when you want one agent to direct the others
-- [Agent Arena](./arena.md) — several agents competing on the same task
+- Boards live under `~/.qwen/boards/` and are scoped to the current OS user.
+- Nothing is pushed into an agent. Each participant chooses when to read.
+- Board text is untrusted data and is never automatically executed.
+- Multiple agents writing the same checkout is not supported.
+- Slash commands, footer polling, fleet/tmux orchestration, and remote boards
+  are not part of this first version.

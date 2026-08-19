@@ -5,20 +5,7 @@
  */
 
 import fs from 'node:fs/promises';
-import type { Metadata } from 'sharp';
-
-/**
- * The callable `sharp` default export, including namespace members used by the
- * resize path (`sharp.kernel`).
- *
- * sharp 0.35 ships dual type entries: the ESM `.d.mts` declares
- * `export default sharp` (a callable `SharpConstructor`), while the CJS
- * `.d.cts` uses `export = sharp`. This package is ESM, so `typeof
- * import('sharp')` resolves to the module namespace `{ sharp, default, … }`,
- * which is not callable; `['default']` is the callable function+namespace
- * type, matching the runtime `(await import('sharp')).default` this file uses.
- */
-type SharpConstructor = (typeof import('sharp'))['default'];
+import type { Metadata, SharpConstructor } from 'sharp';
 
 const IMAGE_VIEW_MAX_EDGE = 1568;
 const IMAGE_VIEW_MAX_PATCHES = 1568;

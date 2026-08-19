@@ -10,10 +10,6 @@ import { type DOMElement, Box, Text, useBoxMetrics } from 'ink';
 import { theme } from '../semantic-colors.js';
 import { ContextUsageDisplay } from './ContextUsageDisplay.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
-import {
-  useBoardPending,
-  formatBoardPending,
-} from '../hooks/use-board-pending.js';
 import { AutoAcceptIndicator } from './AutoAcceptIndicator.js';
 import { ShellModeIndicator } from './ShellModeIndicator.js';
 import { BackgroundTasksPill } from './background-view/BackgroundTasksPill.js';
@@ -97,10 +93,6 @@ export const Footer: React.FC<FooterProps> = ({ containerRef }) => {
   // Check if debug mode is enabled
   const debugMode = config.getDebugMode();
 
-  // Nothing is delivered to a session, so an idle one would never notice an
-  // ask addressed to it. The hook polls; this only renders the count.
-  const boardPending = formatBoardPending(useBoardPending());
-
   const contextWindowSize =
     config.getContentGeneratorConfig()?.contextWindowSize;
 
@@ -166,16 +158,6 @@ export const Footer: React.FC<FooterProps> = ({ containerRef }) => {
   );
 
   const rightItems: Array<{ key: string; node: React.ReactNode }> = [];
-  if (boardPending) {
-    // Additive rather than a branch in leftBottomContent: a board indicator
-    // should sit alongside sandbox and safe-mode, not displace the shortcut
-    // hint. Warning-coloured because everything it counts is something
-    // waiting on someone.
-    rightItems.push({
-      key: 'board',
-      node: <Text color={theme.status.warning}>{boardPending}</Text>,
-    });
-  }
   if (sandboxInfo) {
     rightItems.push({
       key: 'sandbox',

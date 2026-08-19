@@ -5,13 +5,6 @@
  */
 
 import { render } from 'ink-testing-library';
-
-const boardPendingMock = vi.hoisted(() => vi.fn(() => null));
-vi.mock('../hooks/use-board-pending.js', async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import('../hooks/use-board-pending.js')>();
-  return { ...actual, useBoardPending: boardPendingMock };
-});
 import { render as inkRender } from 'ink';
 import type { DOMElement } from 'ink';
 import stripAnsi from 'strip-ansi';
@@ -760,39 +753,5 @@ describe('<Footer />', () => {
       const { lastFrame } = renderWithWidth(79, createMockUIState());
       expect(lastFrame()).toMatchSnapshot('complete-footer-narrow');
     });
-  });
-});
-
-describe('Footer board indicator', () => {
-  beforeEach(() => boardPendingMock.mockReturnValue(null));
-
-  // The indicator is additive: it sits with sandbox and safe-mode rather than
-  // displacing the shortcut hint, so a quiet board must leave the footer
-  // exactly as it was.
-  it('shows nothing when the session is on no board', () => {
-    const { lastFrame } = renderWithWidth(120, createMockUIState());
-    expect(lastFrame()).not.toContain('board ');
-  });
-
-  it('shows nothing when the board has nothing waiting', () => {
-    boardPendingMock.mockReturnValue({
-      board: 'demo',
-      asks: 0,
-      decisions: 0,
-    } as never);
-    const { lastFrame } = renderWithWidth(120, createMockUIState());
-    expect(lastFrame()).not.toContain('board demo');
-  });
-
-  it('counts what is waiting, decisions first', () => {
-    boardPendingMock.mockReturnValue({
-      board: 'demo',
-      asks: 2,
-      decisions: 1,
-    } as never);
-    const { lastFrame } = renderWithWidth(120, createMockUIState());
-    expect(lastFrame()).toContain('board demo');
-    expect(lastFrame()).toContain('⚠ 1');
-    expect(lastFrame()).toContain('? 2');
   });
 });

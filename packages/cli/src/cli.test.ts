@@ -1064,7 +1064,6 @@ describe('bootstrap import boundaries', () => {
       ['boardCommand', 'board'],
       ['channelCommand', 'channel'],
       ['extensionsCommand', 'extensions'],
-      ['fleetCommand', 'fleet'],
       ['hooksCommand', 'hooks'],
       ['mcpCommand', 'mcp'],
       ['reviewCommand', 'review'],

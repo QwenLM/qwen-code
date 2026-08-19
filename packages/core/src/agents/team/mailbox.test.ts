@@ -17,6 +17,7 @@ import {
   clearInbox,
   clearAllInboxes,
   sendStructuredMessage,
+  disposeInboxLocks,
 } from './mailbox.js';
 import { mockCompromisedLock } from '../../test-utils/mock-compromised-lock.js';
 
@@ -237,6 +238,32 @@ describe('mailbox', () => {
 
     expect(await readInbox('team', 'w1')).toEqual([]);
     expect(await readInbox('team', 'w2')).toEqual([]);
+  });
+
+  // ─── disposeInboxLocks ─────────────────────────────────────
+
+  it('evicts inbox locks for one team and reports the count', async () => {
+    // writeMessage creates a per-inbox lock under the team's inboxes dir.
+    await writeMessage('alpha', 'w1', makeMessage());
+    await writeMessage('alpha', 'w2', makeMessage());
+    await writeMessage('beta', 'w1', makeMessage());
+
+    // Evicts only alpha's two locks.
+    expect(disposeInboxLocks('alpha')).toBe(2);
+    // Idempotent: nothing left for alpha.
+    expect(disposeInboxLocks('alpha')).toBe(0);
+    // Team isolation: beta's lock survived alpha's eviction.
+    expect(disposeInboxLocks('beta')).toBe(1);
+  });
+
+  it('clearAllInboxes evicts the team inbox locks too', async () => {
+    await writeMessage('gamma', 'w1', makeMessage());
+    await writeMessage('gamma', 'w2', makeMessage());
+
+    await clearAllInboxes('gamma');
+
+    // Already evicted by clearAllInboxes.
+    expect(disposeInboxLocks('gamma')).toBe(0);
   });
 
   // ─── sendStructuredMessage ─────────────────────────────────

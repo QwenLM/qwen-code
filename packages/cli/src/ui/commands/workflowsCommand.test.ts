@@ -11,8 +11,7 @@ import path from 'node:path';
 import { workflowsCommand } from './workflowsCommand.js';
 import { type CommandContext } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
-import type { WorkflowTask } from '@qwen-code/qwen-code-core';
-import type { WorkflowSnapshot } from '@qwen-code/qwen-code-core/board';
+import type { WorkflowTask, WorkflowSnapshot } from '@qwen-code/qwen-code-core';
 
 function entry(overrides: Partial<WorkflowTask> = {}): WorkflowTask {
   return {

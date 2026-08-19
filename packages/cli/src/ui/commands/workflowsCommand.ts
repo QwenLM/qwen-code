@@ -4,13 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { WorkflowTask } from '@qwen-code/qwen-code-core';
-import type { WorkflowSnapshot } from '@qwen-code/qwen-code-core/board';
+import type { WorkflowTask, WorkflowSnapshot } from '@qwen-code/qwen-code-core';
 import {
   isActiveWorkflowStatus,
   isTerminalWorkflowStatus,
+  listWorkflowSnapshots,
 } from '@qwen-code/qwen-code-core';
-import { listWorkflowSnapshots } from '@qwen-code/qwen-code-core/board';
 import type { SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';

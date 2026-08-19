@@ -374,7 +374,7 @@ export * from './services/shellExecutionService.js';
 export * from './services/monitorRegistry.js';
 export * from './services/backgroundShellRegistry.js';
 export * from './agents/workflow-run-registry.js';
-
+export * from './agents/workflow-snapshot.js';
 export {
   listSavedWorkflows,
   resolveSavedWorkflowScript,

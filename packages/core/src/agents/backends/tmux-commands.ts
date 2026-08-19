@@ -200,13 +200,12 @@ export async function tmuxNewSession(
   name: string,
   opts?: { cols?: number; rows?: number; windowName?: string },
   serverName?: string,
-): Promise<string> {
+): Promise<void> {
   const args = ['new-session', '-d', '-s', name];
   if (opts?.windowName) args.push('-n', opts.windowName);
   if (opts?.cols) args.push('-x', String(opts.cols));
   if (opts?.rows) args.push('-y', String(opts.rows));
-  args.push('-P', '-F', '#{window_id}');
-  return (await tmux(args, serverName)).trim();
+  await tmux(args, serverName);
 }
 
 /**
@@ -216,19 +215,13 @@ export async function tmuxNewWindow(
   targetSession: string,
   windowName: string,
   serverName?: string,
-): Promise<string> {
+): Promise<void> {
   // -t session: (with trailing colon) means "create window in this session"
   // -t session (without colon) means "create at window index = session", which fails if index exists
-  //
-  // -P -F prints the new window's id. Callers that need to address the window
-  // they just made cannot ask tmux for "the current window" instead: for a
-  // non-attached command client that resolves from the inherited $TMUX_PANE,
-  // which is the *invoking* window, not this one.
-  const output = await tmux(
-    ['new-window', '-t', `${targetSession}:`, '-n', windowName, '-P', '-F', '#{window_id}'],
+  await tmux(
+    ['new-window', '-t', `${targetSession}:`, '-n', windowName],
     serverName,
   );
-  return output.trim();
 }
 
 /**

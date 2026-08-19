@@ -26,10 +26,11 @@
 
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import lockfile from 'proper-lockfile';
+import { Mutex } from 'async-mutex';
 import { isNodeError } from '../../utils/errors.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { atomicWriteJSON } from '../../utils/atomicFileWrite.js';
-import { createItemLock } from './board-lock.js';
 import { getInboxesDir } from './teamHelpers.js';
 
 const debug = createDebugLogger('AGENTS_TEAM_MAILBOX');
@@ -67,18 +68,96 @@ export interface MailboxMessage {
 
 // ─── Lock options ───────────────────────────────────────────
 
-// Shared with the task board via `createItemLock`. The budget stays at 10
-// rather than the board's 30: an inbox has one writer per message, not
-// MAX_TEAMMATES contending for the same file, so a deep retry stack buys
-// nothing and delays the caller. A compromised lock logs at debug — stale
-// locks from crashed processes are expected here.
-
-const withInboxLock = createItemLock({
-  retries: 10,
+const LOCK_OPTIONS: lockfile.LockOptions = {
+  retries: {
+    retries: 10,
+    minTimeout: 5,
+    maxTimeout: 100,
+    factor: 2,
+    // Jitter the backoff so cross-process contenders don't retry in
+    // lockstep (thundering herd) and starve each other out of the
+    // retry budget.
+    randomize: true,
+  },
+  stale: 5000,
+  // Stale locks from crashed processes are expected in multi-agent
+  // scenarios; log at debug level for traceability without noise.
   onCompromised: (err) => {
     debug.debug('mailbox lock compromised:', err);
   },
-});
+};
+
+// ─── In-process serialization ───────────────────────────────
+//
+// One `Mutex` per inbox path, keyed by absolute path. Distinct
+// inboxes never block each other; concurrent operations on the same
+// inbox queue in memory so only one of them ever reaches for the
+// `proper-lockfile` file lock at a time. Entries are evicted on team
+// teardown (`disposeInboxLocks`) so a long-running process doesn't
+// accumulate a dead `Mutex` per inbox across team create/delete cycles.
+
+const inboxLocks = new Map<string, Mutex>();
+
+function getInboxLock(inboxPath: string): Mutex {
+  let lock = inboxLocks.get(inboxPath);
+  if (!lock) {
+    lock = new Mutex();
+    inboxLocks.set(inboxPath, lock);
+  }
+  return lock;
+}
+
+/**
+ * Evict the in-process inbox locks for a team. The lock map keys on
+ * absolute inbox path and would otherwise retain a `Mutex` for every
+ * inbox the process ever touched — a slow leak across many team
+ * create/delete cycles in a long-lived daemon. All of a team's inbox
+ * paths sit directly under its inboxes dir, so match on the parent.
+ *
+ * Best-effort: a teammate's late `writeMessage` racing team teardown
+ * can re-create an entry afterwards, but the next same-name
+ * `team_create` resets inboxes and evicts it again.
+ *
+ * Returns the number of locks evicted.
+ */
+export function disposeInboxLocks(teamName: string): number {
+  const dir = getInboxesDir(teamName);
+  let evicted = 0;
+  for (const key of inboxLocks.keys()) {
+    if (path.dirname(key) === dir) {
+      inboxLocks.delete(key);
+      evicted++;
+    }
+  }
+  return evicted;
+}
+
+/**
+ * Run `fn` while holding both the in-process inbox mutex and the
+ * cross-process file lock for `inboxPath`.
+ *
+ * The mutex serializes writers in this process so they don't stampede
+ * the file lock (the cause of the Windows `ELOCKED` flakiness); the
+ * file lock runs inside it to still guard against writers in other
+ * agent processes.
+ */
+async function withInboxLock<T>(
+  inboxPath: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  return getInboxLock(inboxPath).runExclusive(async () => {
+    const release = await lockfile.lock(inboxPath, LOCK_OPTIONS);
+    try {
+      return await fn();
+    } finally {
+      try {
+        await release();
+      } catch (error) {
+        debug.debug('Failed to release mailbox lock:', error);
+      }
+    }
+  });
+}
 
 // ─── Path helpers ───────────────────────────────────────────
 
@@ -203,6 +282,7 @@ export async function clearInbox(
 export async function clearAllInboxes(teamName: string): Promise<void> {
   const dir = getInboxesDir(teamName);
   await fs.rm(dir, { recursive: true, force: true });
+  disposeInboxLocks(teamName);
 }
 
 // ─── Convenience: send structured message ───────────────────
