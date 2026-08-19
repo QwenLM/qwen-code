@@ -329,6 +329,7 @@ vi.mock('./QueuedPromptDisplay', () => ({
     <div
       data-testid="pane-queue"
       data-can-mutate-mid-turn={String(props.canMutateMidTurn)}
+      data-can-insert-mid-turn={String(props.canInsertMidTurn)}
     >
       {String(props.prompts.length)}
     </div>
@@ -526,6 +527,39 @@ describe('ChatPane', () => {
       expect(transcriptDispatch).not.toHaveBeenCalled();
     },
   );
+
+  it('offers Insert only while a turn is running', () => {
+    // Between two Goal turns streaming is idle while the hold keeps queued
+    // prompts visible. `insertQueuedPrompt` no-ops at idle, so the affordance
+    // has to disappear with it rather than render a button that does nothing.
+    queuedPromptsMock = [{ id: 1, text: 'held while the Goal runs' } as never];
+    connectionState.goalState = {
+      v: 2,
+      activity: 'idle',
+      goal: {
+        goalId: 'goal-1',
+        revision: 1,
+        objective: 'ship it',
+        status: 'active',
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 1,
+        activeTimeMs: 10,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    };
+    streamingStateValue = 'idle';
+    render();
+
+    expect(testid('pane-queue')?.dataset['canInsertMidTurn']).toBe('false');
+
+    act(() => {
+      streamingStateValue = 'responding';
+      rerender();
+    });
+
+    expect(testid('pane-queue')?.dataset['canInsertMidTurn']).toBe('true');
+  });
 
   it('preserves a /goal command the pane connection cannot deliver', () => {
     // App.tsx applies the broken-connection guard before any slash handling and

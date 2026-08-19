@@ -294,9 +294,6 @@ export function useQueuedPrompts({
   const latestSessionIdRef = useRef(sessionId);
   const latestWorkspaceCwdRef = useRef(workspaceCwd);
   const midTurnEnqueueAbortRef = useRef<AbortController | null>(null);
-  const explicitInsertAbortControllersRef = useRef(
-    new Map<AbortController, string | undefined>(),
-  );
   const explicitInsertGenerationsRef = useRef<Map<number, number>>(new Map());
   const submitAbortControllersRef = useRef<Set<AbortController>>(new Set());
   const removingServerPromptIdsRef = useRef<Set<string>>(new Set());
@@ -1106,15 +1103,20 @@ export function useQueuedPrompts({
     rememberCompletedPromptId,
   ]);
 
+  /**
+   * Submit one pending prompt. Returns the admission promise (already
+   * error-handled) so callers releasing several prompts can chain them and
+   * keep the daemon's queue in the order the user typed them.
+   */
   const submitPendingPrompt = useCallback(
-    (prompt: QueuedPrompt) => {
+    (prompt: QueuedPrompt): Promise<void> => {
       const { id: localId, sessionId: targetSessionId } = prompt;
       const ownerToken = ownerTokenRef.current;
       const submitAbort = new AbortController();
       submitAbortControllersRef.current.add(submitAbort);
       let admissionStarted = false;
 
-      sessionActions
+      return sessionActions
         .submitPrompt(prompt.text, {
           images: prompt.images,
           files: prompt.files,
@@ -1758,8 +1760,16 @@ export function useQueuedPrompts({
       );
       queuedPromptsRef.current = next;
       setQueuedPrompts(next);
+      // Release serially: a prompt carrying media awaits its uploads before its
+      // admission POST, so firing the whole batch at once lets a later plain
+      // prompt overtake it and reach the daemon's queue out of order.
+      let release: Promise<void> | undefined;
       for (const prompt of next) {
-        if (localIds.has(prompt.id)) submitPendingPrompt(prompt);
+        if (!localIds.has(prompt.id)) continue;
+        const submit = () => submitPendingPrompt(prompt).catch(() => undefined);
+        // The first release stays synchronous, so a single held prompt reaches
+        // the daemon exactly as it did before.
+        release = release ? release.then(submit) : submit();
       }
     }
     if (!canQueryMidTurn) return;
@@ -2182,25 +2192,19 @@ export function useQueuedPrompts({
         isRemoving: false,
         ...(messageId ? { midTurnMessageId: messageId } : {}),
       });
-      const abort = new AbortController();
-      explicitInsertAbortControllersRef.current.set(abort, promptOwnerKey);
+      // Deliberately uncancellable: an explicit insert the user asked for
+      // outlives an owner rotation and settles into the queue of the session it
+      // was started from (pinned by the source-session stash tests), so it gets
+      // no abort signal.
       let result: Awaited<
         ReturnType<typeof sessionActions.enqueueMidTurnMessage>
       >;
       try {
         result = await sessionActions.enqueueMidTurnMessage(prompt.text, {
           ...(messageId ? { messageId } : {}),
-          signal: abort.signal,
         });
       } catch (error) {
         if (!isCurrentInsertion()) return;
-        if (abort.signal.aborted) {
-          recoverAfterSettledInsert({
-            isInserting: false,
-            midTurnMessageId: undefined,
-          });
-          return;
-        }
         if (messageId) {
           // The request was dispatched, so the daemon may already own this
           // message: its queue snapshot decides. A message the daemon reports
@@ -2261,8 +2265,6 @@ export function useQueuedPrompts({
           reportError(error, t('queue.insertFailed'));
         }
         return;
-      } finally {
-        explicitInsertAbortControllersRef.current.delete(abort);
       }
       if (!isCurrentInsertion()) return;
       if (!result.accepted) {
@@ -2271,7 +2273,6 @@ export function useQueuedPrompts({
           midTurnMessageId: undefined,
         });
         if (
-          !abort.signal.aborted &&
           !submitted &&
           queueOwnerKey(
             latestWorkspaceCwdRef.current,

@@ -210,9 +210,11 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
 
     await act(async () => latest.insertQueuedPrompt(1));
 
+    // An explicit insert is deliberately uncancellable: it carries no abort
+    // signal so an owner rotation cannot kill a send the user asked for.
     expect(actions.enqueueMidTurnMessage).toHaveBeenCalledWith(
       'wait for explicit insert',
-      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+      expect.not.objectContaining({ signal: expect.anything() }),
     );
     expect(latest.queuedPrompts).toMatchObject([
       {
@@ -267,6 +269,39 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
 
     expect(actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
     expect(latest.queuedPrompts).toHaveLength(1);
+  });
+
+  it('does not insert a held prompt carrying images', async () => {
+    // `enqueueMidTurnMessage` transmits text only, so inserting an image-bearing
+    // row would silently drop the attachment. The display hides Insert for this
+    // shape; the hook guard is the backstop on the public API.
+    const { actions } = createActions();
+    mount('responding', actions, true, false, false, true);
+
+    act(() =>
+      latest.enqueuePrompt('look at this', [
+        { data: 'abc', media_type: 'image/png' },
+      ]),
+    );
+    await act(async () => latest.insertQueuedPrompt(1));
+
+    expect(actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
+    expect(latest.queuedPrompts).toMatchObject([
+      { text: 'look at this', images: [{ media_type: 'image/png' }] },
+    ]);
+  });
+
+  it('does not insert a held slash command', async () => {
+    // A command injected mid-turn arrives as literal text the daemon never
+    // executes, so it must stay queued for the ordinary path.
+    const { actions } = createActions();
+    mount('responding', actions, true, false, false, true);
+
+    act(() => latest.enqueuePrompt('/compact'));
+    await act(async () => latest.insertQueuedPrompt(1));
+
+    expect(actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
+    expect(latest.queuedPrompts).toMatchObject([{ text: '/compact' }]);
   });
 
   it('does not insert a held prompt with file attachments', async () => {
@@ -359,7 +394,8 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
       ?.signal;
     render('idle', 'session-1', false, false, true);
 
-    expect(signal?.aborted).toBe(false);
+    // Nothing can cancel an explicit insert: it is issued without a signal.
+    expect(signal).toBeUndefined();
   });
 
   it('does not resubmit a legacy explicit insert accepted as the turn becomes idle', async () => {
@@ -422,7 +458,11 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     );
     expect(actions.submitPrompt).toHaveBeenCalledOnce();
     expect(latest.queuedPrompts).toMatchObject([
-      { text: 'recover after failure', serverState: 'submitting' },
+      {
+        text: 'recover after failure',
+        serverState: 'submitting',
+        isInserting: false,
+      },
     ]);
   });
 
@@ -482,14 +522,12 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     render('idle', 'session-2', true, false, true);
 
     await act(async () => {
-      if (!signal?.aborted) {
-        admission.resolve({ accepted: true, messageId: 'inserted-once' });
-      }
+      admission.resolve({ accepted: true, messageId: 'inserted-once' });
       await insertion;
     });
     render('responding', 'session-1', true, false, true);
 
-    expect(signal?.aborted).toBe(false);
+    expect(signal).toBeUndefined();
     expect(latest.queuedPrompts).toMatchObject([
       {
         text: 'insert once',
@@ -532,7 +570,7 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     expect(actions.enqueueMidTurnMessage).toHaveBeenCalledTimes(1);
 
     render('idle', 'session-1', false, false, true);
-    expect(signal?.aborted).toBe(false);
+    expect(signal).toBeUndefined();
     await act(async () => {
       admission.resolve({ accepted: true, messageId: 'inserted-once' });
       await insertion;
@@ -555,6 +593,35 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
       'run after goal',
       expect.objectContaining({ optimisticUserMessage: false }),
     );
+  });
+
+  it('releases held Goal follow-ups one at a time, in queue order', async () => {
+    // A prompt carrying media waits for its uploads before its admission POST,
+    // so releasing the whole batch at once lets a later plain prompt overtake
+    // it and land in the daemon's queue first.
+    const { actions } = createActions();
+    const firstAdmission = deferred<{ promptId: string }>();
+    vi.mocked(actions.submitPrompt)
+      .mockReturnValueOnce(firstAdmission.promise as never)
+      .mockResolvedValue({ promptId: 'second' } as never);
+    const { render } = mount('responding', actions, true, false, false, true);
+
+    act(() => latest.enqueuePrompt('first with media'));
+    act(() => latest.enqueuePrompt('second plain'));
+
+    render('idle', 'session-1', false, false, false);
+
+    expect(
+      vi.mocked(actions.submitPrompt).mock.calls.map((call) => call[0]),
+    ).toEqual(['first with media']);
+
+    await act(async () => {
+      firstAdmission.resolve({ promptId: 'first' });
+    });
+
+    expect(
+      vi.mocked(actions.submitPrompt).mock.calls.map((call) => call[0]),
+    ).toEqual(['first with media', 'second plain']);
   });
 
   it('keeps locally held Goal follow-ups isolated across session switches', () => {

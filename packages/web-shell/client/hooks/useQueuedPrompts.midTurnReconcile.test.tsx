@@ -1224,6 +1224,69 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     }
   });
 
+  it('hands a held prompt to the new owner key exactly once', async () => {
+    // The relocation has to release the old key: if both keys keep the same
+    // array, a later transition through the stale key re-transfers prompts that
+    // were already handed off and the queue shows them twice.
+    const harness = createHarness();
+    try {
+      await harness.render({
+        sessionId: 'session-a',
+        workspaceCwd: undefined,
+        streamingState: 'idle',
+        holdQueuedPromptsLocally: true,
+      });
+      await act(async () => {
+        harness.result().enqueuePrompt('exactly once');
+      });
+
+      await harness.render({
+        sessionId: 'session-b',
+        workspaceCwd: '/workspace-b',
+        streamingState: 'idle',
+        holdQueuedPromptsLocally: true,
+      });
+      await harness.render({
+        sessionId: 'session-a',
+        workspaceCwd: '/workspace-a',
+        streamingState: 'idle',
+        holdQueuedPromptsLocally: true,
+      });
+      expect(harness.result().queuedPrompts).toHaveLength(1);
+
+      // Stop the Goal: the held prompt drains through the ordinary path.
+      await harness.render({
+        sessionId: 'session-a',
+        workspaceCwd: '/workspace-a',
+        streamingState: 'idle',
+        holdQueuedPromptsLocally: false,
+      });
+      await act(async () => {
+        harness.result().removeQueuedPrompt(1);
+      });
+      expect(harness.result().queuedPrompts).toEqual([]);
+
+      await harness.render({
+        sessionId: 'session-b',
+        workspaceCwd: '/workspace-b',
+        streamingState: 'idle',
+        holdQueuedPromptsLocally: true,
+      });
+      await harness.render({
+        sessionId: 'session-a',
+        workspaceCwd: '/workspace-a',
+        streamingState: 'idle',
+        holdQueuedPromptsLocally: true,
+      });
+
+      // The stash it came from must have been released, or the prompt the user
+      // already dealt with comes back from the stale key.
+      expect(harness.result().queuedPrompts).toEqual([]);
+    } finally {
+      await harness.dispose();
+    }
+  });
+
   it('retains held prompts when the same session learns a new workspace', async () => {
     const harness = createHarness();
     try {
@@ -1841,7 +1904,8 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
         await insertion;
       });
 
-      expect(admissionSignal?.aborted).toBe(false);
+      // An explicit insert is issued without an abort signal by design.
+      expect(admissionSignal).toBeUndefined();
       expect(harness.reportError).not.toHaveBeenCalled();
       expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
       expect(harness.result().queuedPrompts).toEqual([]);
