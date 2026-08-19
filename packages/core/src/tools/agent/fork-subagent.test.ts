@@ -7,6 +7,7 @@
 import type { Content } from '@google/genai';
 import { describe, expect, it } from 'vitest';
 import { ToolNames } from '../tool-names.js';
+import { markApiHistoryPrompt } from '../../services/session-api-history.js';
 import {
   buildForkedMessages,
   FORK_PLACEHOLDER_RESULT,
@@ -142,6 +143,31 @@ describe('selectForkHistory', () => {
           toolResult,
           firstModel,
           secondUser,
+          secondModel,
+        ],
+        1,
+      ),
+    ).toEqual([secondUser, secondModel]);
+  });
+
+  it('uses stable identities instead of classifying user-shaped entries', () => {
+    const identifiedFirst = structuredClone(firstUser);
+    const identifiedSecond = structuredClone(secondUser);
+    const placeholder: Content = {
+      role: 'user',
+      parts: [{ text: '[Old inline media cleared: image/png]' }],
+    };
+    markApiHistoryPrompt(identifiedFirst, 'prompt-1');
+    markApiHistoryPrompt(identifiedSecond, 'prompt-2');
+
+    expect(
+      selectForkHistory(
+        [
+          startup,
+          identifiedFirst,
+          firstModel,
+          placeholder,
+          identifiedSecond,
           secondModel,
         ],
         1,

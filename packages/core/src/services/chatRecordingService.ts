@@ -62,6 +62,7 @@ import {
   type BranchPoint,
   type BranchToolCallIdentity,
 } from './branch-points.js';
+import { getApiHistoryPromptId } from './session-api-history.js';
 
 const debugLogger = createDebugLogger('CHAT_RECORDING');
 
@@ -318,6 +319,8 @@ export interface ChatRecord {
     | 'goal_runtime'
     | 'realtime_message'
     | 'turn_result';
+  /** Stable identity shared by the UI and API representation of a user turn. */
+  promptId?: string;
   /** Explicit source classification used by Goal evidence validation. */
   provenance?: ChatRecordProvenance;
   /** Goal identity and logical turn that owned this model-facing record. */
@@ -497,6 +500,8 @@ export interface ChatCompressionRecordPayload {
    * resume reconstruction.
    */
   compressedHistory: Content[];
+  /** Stable prompt identities aligned with compressedHistory by index. */
+  promptIds?: Array<string | null>;
 }
 
 export interface SlashCommandRecordPayload {
@@ -1748,6 +1753,7 @@ export class ChatRecordingService {
     message: PartListUnion,
     goalContext?: GoalTurnPermit,
     promptPayload?: UserPromptRecordPayload,
+    promptId?: string,
   ): void {
     try {
       this.trackUserDisplayTextForTitle(promptPayload?.displayText);
@@ -1755,6 +1761,7 @@ export class ChatRecordingService {
       const record: ChatRecord = {
         ...this.createBaseRecord('user'),
         ...(goalContext ? { goalContext: copyGoalContext(goalContext) } : {}),
+        ...(promptId ? { promptId } : {}),
         message: createUserContent(message),
         ...(promptPayload ? { systemPayload: promptPayload } : {}),
       };
@@ -2217,11 +2224,16 @@ export class ChatRecordingService {
    */
   recordChatCompression(payload: ChatCompressionRecordPayload): void {
     try {
+      const promptIds = payload.compressedHistory.map(
+        (content) => getApiHistoryPromptId(content) ?? null,
+      );
       const record: ChatRecord = {
         ...this.createBaseRecord('system'),
         type: 'system',
         subtype: 'chat_compression',
-        systemPayload: payload,
+        systemPayload: promptIds.some(Boolean)
+          ? { ...payload, promptIds }
+          : payload,
       };
 
       this.appendRecord(record);

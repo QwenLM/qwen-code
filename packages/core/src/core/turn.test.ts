@@ -191,12 +191,41 @@ describe('Turn', () => {
         },
         'prompt-id-1',
         undefined,
+        undefined,
       );
 
       expect(events).toEqual([
         { type: GeminiEventType.Content, value: 'Hello' },
         { type: GeminiEventType.Content, value: ' world' },
       ]);
+    });
+
+    it('passes the stable user-turn identity to chat history', async () => {
+      const identifiedTurn = new Turn(
+        mockChatInstance as unknown as GeminiChat,
+        'prompt-id-1',
+        undefined,
+        true,
+      );
+
+      for await (const _ of identifiedTurn.run(
+        'test-model',
+        [{ text: 'Hi' }],
+        new AbortController().signal,
+      )) {
+        // Drain the stream.
+      }
+
+      expect(mockSendMessageStream).toHaveBeenCalledWith(
+        'test-model',
+        {
+          message: [{ text: 'Hi' }],
+          config: { abortSignal: expect.any(AbortSignal) },
+        },
+        'prompt-id-1',
+        undefined,
+        { promptId: 'prompt-id-1' },
+      );
     });
 
     it('should preserve ordered image parts in content events', async () => {

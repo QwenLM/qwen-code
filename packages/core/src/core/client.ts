@@ -1186,7 +1186,7 @@ export class GeminiClient {
       return;
     }
 
-    const currentHistory = this.getChat().getHistory();
+    const currentHistory = this.getChat().getHistoryShallow();
     const startupLength = getStartupContextLength(currentHistory);
     if (startupLength === 0) {
       return;
@@ -1227,7 +1227,7 @@ export class GeminiClient {
       return;
     }
 
-    const currentHistory = this.getChat().getHistory();
+    const currentHistory = this.getChat().getHistoryShallow();
     if (getStartupContextLength(currentHistory) !== 0) {
       return;
     }
@@ -2997,9 +2997,15 @@ export class GeminiClient {
               request,
               goalPermit,
               userPromptRecordPayload,
+              prompt_id,
             );
           } else {
-            recorder?.recordUserMessage(request, goalPermit);
+            recorder?.recordUserMessage(
+              request,
+              goalPermit,
+              undefined,
+              prompt_id,
+            );
           }
         }
       }
@@ -3213,7 +3219,13 @@ export class GeminiClient {
         }
       }
 
-      const turn = new Turn(this.getChat(), prompt_id, goalPermit);
+      const turn = new Turn(
+        this.getChat(),
+        prompt_id,
+        goalPermit,
+        messageType === SendMessageType.UserQuery ||
+          messageType === SendMessageType.Retry,
+      );
 
       // Determine the model to use for this turn
       const model = options?.modelOverride ?? this.config.getModel();

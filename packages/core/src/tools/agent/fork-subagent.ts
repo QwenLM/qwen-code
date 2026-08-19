@@ -8,6 +8,7 @@ import {
   getStartupContextLength,
   isSystemReminderContent,
 } from '../../utils/environmentContext.js';
+import { getApiHistoryPromptIndexes } from '../../services/session-api-history.js';
 
 export const FORK_SUBAGENT_TYPE = 'fork';
 
@@ -237,15 +238,21 @@ export function selectForkHistory(
     const syntheticPrefixLength = getStartupContextLength(history, {
       includeCompressed: true,
     });
-    const realUserTurnIndexes: number[] = [];
-    for (let index = syntheticPrefixLength; index < history.length; index++) {
-      const content = history[index]!;
-      if (isRealUserTurn(content)) {
-        realUserTurnIndexes.push(index);
+    const identifiedTurns = getApiHistoryPromptIndexes(history);
+    const realUserTurnIndexes =
+      identifiedTurns?.filter((index) => index >= syntheticPrefixLength) ?? [];
+    if (identifiedTurns === undefined) {
+      selected = [];
+    } else if (realUserTurnIndexes.length === 0) {
+      for (let index = syntheticPrefixLength; index < history.length; index++) {
+        const content = history[index]!;
+        if (isRealUserTurn(content)) {
+          realUserTurnIndexes.push(index);
+        }
       }
     }
 
-    if (realUserTurnIndexes.length === 0) {
+    if (identifiedTurns === undefined || realUserTurnIndexes.length === 0) {
       selected = [];
     } else {
       selected = history.slice(

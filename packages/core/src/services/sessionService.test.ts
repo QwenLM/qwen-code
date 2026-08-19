@@ -22,6 +22,7 @@ import { readRuntimeStatus } from '../utils/runtimeStatus.js';
 import {
   SessionService,
   buildApiHistoryFromConversation,
+  getApiHistoryPromptId,
   getResumePromptTokenCount,
   getResumeTokenCounts,
   type ConversationRecord,
@@ -2897,6 +2898,21 @@ describe('SessionService', () => {
   });
 
   describe('buildApiHistoryFromConversation', () => {
+    it('restores the stable prompt identity without exposing it in JSON', () => {
+      const prompt: ChatRecord = {
+        ...recordA1,
+        promptId: 'prompt-1',
+      };
+      const conversation = {
+        messages: [prompt],
+      } as ConversationRecord;
+
+      const [content] = buildApiHistoryFromConversation(conversation);
+
+      expect(getApiHistoryPromptId(content!)).toBe('prompt-1');
+      expect(JSON.stringify(content)).not.toContain('prompt-1');
+    });
+
     it('should return linear messages when no compression checkpoint exists', () => {
       const assistantA1: ChatRecord = {
         ...recordB2,
