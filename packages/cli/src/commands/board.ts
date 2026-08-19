@@ -235,7 +235,17 @@ export const boardCommand: CommandModule = {
                 name,
                 'asks',
                 /^a-\d+\.json$/,
-                (r) => (r as { state?: string }).state !== 'open',
+                (r) => {
+                  const rec = r as { state?: string; expiresAt?: number };
+                  if (rec.state !== 'open') return true;
+                  // `timeout` is computed, never stored: an open ask past its
+                  // expiresAt is settled on disk even though state stays 'open'.
+                  return (
+                    typeof rec.expiresAt === 'number' &&
+                    Number.isFinite(rec.expiresAt) &&
+                    rec.expiresAt < Date.now()
+                  );
+                },
                 cutoff,
               ),
               pruneCollection(
