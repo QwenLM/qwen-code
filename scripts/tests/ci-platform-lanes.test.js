@@ -112,7 +112,14 @@ describe('platform lanes — triggers', () => {
       // runs. A step whose inputs name one event must be gated to that
       // event — for every step in a job that now runs on four.
       for (const step of ci.jobs[lane].steps ?? []) {
-        const inputs = JSON.stringify(step.with ?? {});
+        // Every place a step can read an event context, not just `with:` —
+        // an interpolation in `run:` or `env:` is the same defect wearing a
+        // different key.
+        const inputs = JSON.stringify({
+          with: step.with ?? {},
+          env: step.env ?? {},
+          run: step.run ?? '',
+        });
         const gate = String(step.if ?? '');
         for (const [context, event] of [
           ['github.event.merge_group', "'merge_group'"],
@@ -147,6 +154,13 @@ describe('platform lanes — triggers', () => {
       expect(excluded, `${name} would also run on the nightly schedule`).toBe(
         true,
       );
+      // Mentioning an allowlisted event is not the same as excluding this
+      // one: `event == 'pull_request' || event == 'schedule'` satisfies the
+      // check above while running nightly. Require the impossibility.
+      expect(
+        cond,
+        `${name} admits the schedule event explicitly`,
+      ).not.toContain("github.event_name == 'schedule'");
       expect(cond, `${name} has no event gate at all`).not.toBe('');
     }
   });

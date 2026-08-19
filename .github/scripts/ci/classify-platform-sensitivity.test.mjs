@@ -183,6 +183,23 @@ test('parses the wrapper JSONL contract, and survives a non-JSON line', () => {
   assert.equal(classifyChangedFiles(parsed), PLATFORM_SENSITIVE);
 });
 
+test('a CRLF listing does not smuggle a carriage return into a filename', () => {
+  // The suffix rules are end-anchored, so a trailing `\r` defeats every one
+  // of them and a script-layer change would classify as ordinary source. The
+  // sibling classifier splits on /\r?\n/ for the same reason.
+  const parsed = parseChangedFiles(
+    '{"filename":"scripts/build.sh","status":"modified"}\r\n{"filename":"src/a.ts","status":"modified"}\r\n',
+  );
+  assert.equal(parsed.length, 2);
+  assert.equal(parsed[0].filename, 'scripts/build.sh');
+  assert.equal(classifyChangedFiles(parsed), PLATFORM_SENSITIVE);
+  // And the raw-line path, where the `\r` would land on the name itself.
+  assert.equal(
+    classifyChangedFiles(parseChangedFiles('scripts/build.sh\r\nsrc/a.ts\r\n')),
+    PLATFORM_SENSITIVE,
+  );
+});
+
 test('windows path separators classify the same as posix ones', () => {
   // The listing is API-shaped and uses forward slashes, but a caller feeding
   // this from a local `git diff` on Windows must not silently classify a

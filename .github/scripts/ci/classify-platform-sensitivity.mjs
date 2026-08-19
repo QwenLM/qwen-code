@@ -116,18 +116,23 @@ export function classifyChangedFiles(entries) {
 
 /** The JSONL contract of classify-pr-profile.sh: one projected entry per line. */
 export function parseChangedFiles(text) {
-  return String(text)
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => {
-      try {
-        return JSON.parse(line);
-      } catch {
-        // Not JSON: treat the raw line as a filename rather than dropping it.
-        return line;
-      }
-    });
+  return (
+    String(text)
+      // `\r?\n`, matching the sibling classifier's reader: a CRLF listing would
+      // otherwise leave a trailing `\r` on every filename and defeat the
+      // end-anchored suffix rules above.
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        try {
+          return JSON.parse(line);
+        } catch {
+          // Not JSON: treat the raw line as a filename rather than dropping it.
+          return line;
+        }
+      })
+  );
 }
 
 function main() {
