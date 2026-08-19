@@ -107,17 +107,20 @@ export function buildReattachParts(
       if (stored) candidates.push({ stored });
     }
   }
-
   const recent = recentUniqueImages(candidates, maxRecentImages).map(
     ({ stored }) => stored,
   );
+  const reattachLimit = Math.max(maxRecentImages, 1);
   if (store) {
     for (const id of lastReferencedIds) {
       if (inlineIds.has(id) || recent.some((image) => image.id === id)) {
         continue;
       }
       const stored = store.get(id);
-      if (stored) recent.push(stored);
+      if (stored) {
+        if (recent.length >= reattachLimit) recent.shift();
+        recent.push(stored);
+      }
     }
   }
   if (recent.length === 0) return [];

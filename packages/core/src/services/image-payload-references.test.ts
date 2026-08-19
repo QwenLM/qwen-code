@@ -363,6 +363,27 @@ describe('buildReattachParts', () => {
     expect(parts.at(-1)?.inlineData?.data).toBe('current');
   });
 
+  it('bounds current-turn marker reattachment to the recency cap', () => {
+    const store = new InMemoryImagePayloadStore();
+    const contents: Content[] = [
+      {
+        role: 'user',
+        parts: ['a', 'b', 'c'].map((data) => ({
+          inlineData: { mimeType: 'image/png', data },
+        })),
+      },
+    ];
+    replaceImagePayloadsInPlace(contents, store);
+
+    const parts = buildReattachParts([], 1, contents, store);
+
+    expect(
+      parts
+        .filter((part) => part.inlineData)
+        .map((part) => part.inlineData?.data),
+    ).toEqual(['c']);
+  });
+
   it('does not reattach an image that is already inline', () => {
     const store = new InMemoryImagePayloadStore();
     const markerContents = [toolImageTurn('same')];
