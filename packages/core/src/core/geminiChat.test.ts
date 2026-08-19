@@ -13421,10 +13421,26 @@ describe('GeminiChat', async () => {
       ).toBe('A continuation');
     });
 
+    it('buildRecordMessageFromHistoryParts keeps a lone attempt’s thought signature', () => {
+      // The signature is dropped only when the joined text spans more than
+      // one thought part. A single-attempt turn's signature still covers its
+      // own text, so it must survive into the record.
+      expect(
+        buildRecordMessageFromHistoryParts([
+          { text: 'Only thinking. ', thought: true, thoughtSignature: 'sig-1' },
+          { text: 'Hello.' },
+        ]),
+      ).toEqual([
+        { text: 'Only thinking.', thought: true, thoughtSignature: 'sig-1' },
+        { text: 'Hello.' },
+      ]);
+    });
+
     it('buildRecordMessageFromHistoryParts joins thoughts and keeps record shape', () => {
       // Direct unit coverage for the exported projection helper: thought
-      // texts join into one part (first signature wins), text parts fuse and
-      // trim, functionCall args are redacted, inlineData is dropped.
+      // texts join into one part (no signature, since none covers the joined
+      // text), text parts fuse and trim, functionCall args are redacted,
+      // inlineData is dropped.
       const message = buildRecordMessageFromHistoryParts([
         { text: 'First thinking. ', thought: true, thoughtSignature: 'sig-1' },
         { text: 'More thinking.', thought: true, thoughtSignature: 'sig-2' },
@@ -13442,7 +13458,6 @@ describe('GeminiChat', async () => {
         {
           text: 'First thinking.\n\nMore thinking.',
           thought: true,
-          thoughtSignature: 'sig-1',
         },
         { text: 'Hello world.' },
         {
@@ -13544,9 +13559,13 @@ describe('GeminiChat', async () => {
         .message as Part[];
       const thoughtParts = recordedMessage.filter((part) => part.thought);
       expect(thoughtParts).toHaveLength(1);
-      // Each attempt's thought is trimmed when it lands in history, so the
-      // join concatenates the trimmed texts without a synthetic separator.
+      // Each attempt's thought is trimmed when it lands in history; the
+      // merged record joins the trimmed texts with a blank-line separator.
       expect(thoughtParts[0]!.text).toBe('First thinking.\n\nMore thinking.');
+      // Multi-attempt thought text carries no signature: each signature
+      // covers only its own attempt's thought, and `--resume` re-feeds this
+      // record to signature-verifying backends.
+      expect(thoughtParts[0]!.thoughtSignature).toBeUndefined();
       // `recordedText` would return the thought part here; look up the
       // non-thought content part explicitly.
       const contentPart = recordedMessage.find(

@@ -379,6 +379,14 @@ export function buildRecordMessageFromHistoryParts(parts: Part[]): Part[] {
   // `processStreamResponse` so the merged record's thought shape cannot
   // drift from the per-stream records around it.
   const thoughtPart = buildThoughtContentPart(parts, '\n\n');
+  if (thoughtPart && parts.filter((part) => part.thought).length > 1) {
+    // Each signature covers only the one attempt's thought it was issued
+    // with. Keeping the first alongside text joined from every attempt
+    // persists a pair the model never produced, and `--resume` re-feeds it
+    // to a signature-verifying backend. Absence degrades gracefully; a
+    // wrong pair does not.
+    delete thoughtPart.thoughtSignature;
+  }
   const contentText = parts
     .filter((part) => !part.thought && typeof part.text === 'string')
     .map((part) => part.text)
