@@ -138,9 +138,16 @@ export function diagnoseConvergence(input: {
       a.file.localeCompare(b.file),
   );
 
+  // A round that posted NOTHING is the observation a convergence trend most
+  // wants, not a symptom: zero is where a settling loop lands, and
+  // `0 >= 0` would otherwise narrate "the volume is not falling" at exactly
+  // the moment it has finished falling. The signal is about a loop still
+  // producing comments at an undiminished rate, so it needs this round to
+  // have produced some.
   const volumeNotShrinking =
     input.round >= 3 &&
     input.prevPosted !== undefined &&
+    input.posted > 0 &&
     input.posted >= input.prevPosted;
 
   if (clusters.length === 0 && !volumeNotShrinking) return null;

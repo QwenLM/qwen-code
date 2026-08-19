@@ -3430,6 +3430,14 @@ function composeReviewBody(
         testPlanBlock.length ||
         repositoryContextBlock.length ||
         deferredSuggestionsBlock.length ||
+        // Unreachable today and kept deliberately: an APPROVE is composed
+        // from zero findings, which means zero posted comments and zero
+        // drafted paths, so neither convergence signal can fire on this
+        // branch. It is listed anyway because the separator's job is to
+        // know about every block the branch renders — a condition that is
+        // right only because another rule makes its input impossible is a
+        // trap for whoever changes that other rule.
+        convergenceBlock.length ||
         continuityBlock.length
         ? '\n\n'
         : ' ',

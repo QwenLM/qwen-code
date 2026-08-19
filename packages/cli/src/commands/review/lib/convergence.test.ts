@@ -102,6 +102,33 @@ describe('diagnoseConvergence — the trigger table', () => {
     expect(grew.volumeNotShrinking).toBe(true);
   });
 
+  it('stays silent on a loop that posted nothing — zero is where convergence lands', () => {
+    // `0 >= 0` is arithmetically "not shrinking" and semantically the
+    // opposite: a round that posted nothing is the observation the trend
+    // exists to find, so narrating "the volume is not falling" there would
+    // flag the settled state as the unsettled one.
+    expect(
+      diagnoseConvergence({
+        round: 7,
+        posted: 0,
+        prevPosted: 0,
+        prevFindings: [],
+        draftedPaths: [],
+      }),
+    ).toBeNull();
+    // And the round that lands on zero from above is the clearest possible
+    // shrink.
+    expect(
+      diagnoseConvergence({
+        round: 7,
+        posted: 0,
+        prevPosted: 6,
+        prevFindings: [],
+        draftedPaths: [],
+      }),
+    ).toBeNull();
+  });
+
   it('holds the volume signal until round 3 — one step is not a trend', () => {
     expect(
       diagnoseConvergence({
