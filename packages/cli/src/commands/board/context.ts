@@ -77,7 +77,16 @@ export function resolveParticipantName(opts: BoardContextOptions = {}): string {
   const env = opts.env ?? process.env;
   const explicit = opts.as || env[PARTICIPANT_ENV_NAME];
   if (explicit) return explicit;
-  return slugify(os.userInfo().username);
+  let username: string | undefined;
+  try {
+    username = os.userInfo().username;
+  } catch {
+    // `os.userInfo()` throws SystemError when the effective uid has no passwd
+    // entry (containers, root). Fall back to the environment before a generic
+    // name so a stable per-user default still holds where the env is set.
+    username = env.USER ?? env.LOGNAME;
+  }
+  return slugify(username ?? 'user');
 }
 
 /**
