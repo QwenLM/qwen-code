@@ -8616,6 +8616,41 @@ describe('composeReview — approach signal', () => {
     expect(r.approachSignal).toMatchObject({ round: 5, src0: 228 });
   });
 
+  // `prevRound` can BE the cap (parseLedger accepts round == LEDGER_MAX_ROUND
+  // and a side file at the cap carries forward), so the signal clamps exactly
+  // as the marker stamp and the deferred-suggestions clause do. Unclamped, one
+  // body announced "Round 10001" beside a marker stamping round 10000 — the
+  // three consumers of this round disagreeing about which round this is.
+  it('names the round AT the ledger cap — the signal and the marker agree', () => {
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      ownerRepo: 'QwenLM/qwen-code',
+      srcDiffLines: 920,
+    });
+    prevLedger(planPath, {
+      v: 1,
+      round: LEDGER_MAX_ROUND,
+      findings: [],
+      src0: 228,
+    });
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+    });
+    expect(r.approachSignal).toMatchObject({
+      round: LEDGER_MAX_ROUND,
+      src0: 228,
+    });
+    expect(r.body).toContain(`⚠️ Round ${LEDGER_MAX_ROUND}, `);
+    expect(r.body).not.toContain(`Round ${LEDGER_MAX_ROUND + 1}`);
+    // The signal and the marker must name the SAME round — at the cap too.
+    expect(parseLedger(r.body)?.round).toBe(LEDGER_MAX_ROUND);
+  });
+
   // `growth >= APPROACH_GROWTH_FACTOR` — exactly the documented "grown by
   // at least 3x" must fire.
   it('fires at exactly the growth factor', () => {

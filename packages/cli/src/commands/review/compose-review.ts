@@ -2572,7 +2572,10 @@ function composeReviewBody(
   // the loudest false positive available, and it would contradict the posture
   // that composes a deferrals-only late Approve on purpose.
   if (baseEvent !== 'APPROVE' && prevSrc0 > 0 && input.planPath) {
-    const round = prevRound + 1;
+    // Same clamp as the ledger marker stamp and the deferred-suggestions
+    // clause: a side file at the cap is representable and carries forward, so
+    // an unclamped +1 would print a round the marker in the same body denies.
+    const round = Math.min(prevRound + 1, LEDGER_MAX_ROUND);
     const rounds =
       operatorReviewSettings().approachRounds ?? APPROACH_ROUNDS_DEFAULT;
     if (round >= rounds) {
