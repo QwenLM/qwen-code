@@ -2549,10 +2549,12 @@ describe('SessionService', () => {
     });
 
     it('rejects case-only duplicates whose heads are all unreadable as occupying the id', async () => {
+      // Neither spelling on disk is the requested one, so minting the request
+      // beside them would add a third case-variant of the same id.
       readdirSyncSpy
         .mockReturnValueOnce([
-          `${sessionIdA}.jsonl`,
           `${sessionIdA.toUpperCase()}.jsonl`,
+          `${sessionIdA.replace('e29b', 'E29b')}.jsonl`,
         ] as never)
         .mockReturnValueOnce([] as never);
       // Neither head recovers records, but both files persist on disk.
@@ -2642,12 +2644,37 @@ describe('SessionService', () => {
     });
 
     it('returns undefined when the matching transcript disappears during resolution', async () => {
+      // The candidate must differ in case from the request, otherwise the
+      // self-escape short-circuits and the race loop below it never runs.
+      const legacySessionId = sessionIdA.toUpperCase();
       readdirSyncSpy
-        .mockReturnValueOnce([`${sessionIdA}.jsonl`] as never)
+        .mockReturnValueOnce([`${legacySessionId}.jsonl`] as never)
         .mockReturnValueOnce([] as never);
       vi.spyOn(sessionService, 'getSessionLocation').mockResolvedValue(
         undefined,
       );
+      existsSyncSpy.mockReturnValue(false);
+
+      await expect(
+        sessionService.findSessionIdIgnoringCase(sessionIdA),
+      ).resolves.toBeUndefined();
+    });
+
+    it('reports the requested spelling absent even when an unreadable case twin is enumerated', async () => {
+      // Both files are unreadable, so this takes the multi-candidate arm. The
+      // requested spelling already exists, so reusing the id mints no twin and
+      // the crashed-first-run recovery must survive the twin's presence.
+      const legacySessionId = sessionIdA.toUpperCase();
+      readdirSyncSpy
+        .mockReturnValueOnce([
+          `${sessionIdA}.jsonl`,
+          `${legacySessionId}.jsonl`,
+        ] as never)
+        .mockReturnValueOnce([] as never);
+      vi.spyOn(sessionService, 'getSessionLocation').mockResolvedValue(
+        undefined,
+      );
+      existsSyncSpy.mockReturnValue(true);
 
       await expect(
         sessionService.findSessionIdIgnoringCase(sessionIdA),

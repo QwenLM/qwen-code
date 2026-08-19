@@ -801,9 +801,15 @@ export class SessionService {
       }
       if (readable.length === 1) return readable[0].candidateSessionId;
       if (readable.length === 0) {
-        // Every enumerated file failed content validation: files still on
-        // disk occupy the id (admission must not mint a case-only twin);
-        // files that raced away mid-resolution are genuinely absent.
+        // The requested spelling's own transcript is a twin of nothing: reusing
+        // an id whose file already exists mints no case-only twin, so a first
+        // run that crashed before its first record still resumes it. Same
+        // escape as the single-candidate arm below.
+        if (candidates.has(sessionId)) return undefined;
+        // Every enumerated file failed content validation: a file still on
+        // disk under another spelling occupies the id, because minting the
+        // requested spelling beside it would make both permanently
+        // unrestorable; files that raced away mid-resolution are absent.
         let anyPresent = false;
         for (const [candidateSessionId, states] of candidates) {
           for (const state of states) {
