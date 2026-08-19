@@ -219,7 +219,6 @@ describe('qwen autofix fork bridge', () => {
         '&& github.event.pull_request.head.repo.full_name != github.repository',
         "&& github.event.pull_request.base.ref == 'main'",
         "&& github.event.pull_request.state == 'open'",
-        '&& github.event.pull_request.maintainer_can_modify == true',
         `&& (github.event.pull_request.user.login == (vars.AUTOFIX_BOT_LOGIN || '${BOT_FALLBACK}')`,
         `|| contains(toJSON(github.event.pull_request.labels.*.name), '"${TAKEOVER_LABEL}"'))`,
         `&& !contains(toJSON(github.event.pull_request.labels.*.name), '"${SKIP_LABEL}"')`,
@@ -254,6 +253,43 @@ describe('qwen autofix fork bridge', () => {
     expect(bridgeScript).toContain(
       'if [[ "${SIGNAL_REVIEWER}" != "${REVIEW_BOT}" ]]; then',
     );
+  });
+
+  it('gates the signal only on fields the review payload actually delivers', () => {
+    // `pull_request_review` delivers the SIMPLE pull-request object. These
+    // fields exist only on the FULL object the `pull_request` event sends, so
+    // in this gate each one evaluates to null — and `null == true` is false,
+    // which closes the gate for every delivery rather than for the case the
+    // author meant to exclude. That is not hypothetical: `maintainer_can_modify`
+    // sat in this gate from #8676 (2026-08-07) until this test was written, and
+    // across 300 signal runs not one reached the signal step.
+    //
+    // A silent always-false is the worst failure this file can have. The gate
+    // has no observable output when it holds — the whole job is one echo — so a
+    // gate that never opens is indistinguishable from a repository where no fork
+    // review happened to qualify. Fork reviews just quietly fall back to the
+    // cron backstop, and when THAT stalls they fall through entirely.
+    //
+    // Anything on this list that the chain genuinely needs belongs in the
+    // bridge, which reads live PR state with credentials this job deliberately
+    // does not hold (`permissions: {}`, no secrets, no checkout).
+    const fullObjectOnlyFields = [
+      'maintainer_can_modify',
+      'mergeable',
+      'mergeable_state',
+      'rebaseable',
+      'merged',
+      'merged_by',
+      'additions',
+      'deletions',
+      'changed_files',
+      'commits',
+      'comments',
+      'review_comments',
+    ];
+    for (const field of fullObjectOnlyFields) {
+      expect(signalJob.if).not.toContain(`pull_request.${field}`);
+    }
   });
 
   it('keeps every identity literal pinned to qwen-autofix.yml', () => {
