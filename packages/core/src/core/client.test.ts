@@ -12157,6 +12157,46 @@ Other open files:
         expect(accept).toHaveBeenCalledOnce();
       });
 
+      it('settles an attached steer when auto-compression is the first event', async () => {
+        let pushCount = 0;
+        client.getChat().getUserContentPushCount = vi.fn(() => pushCount);
+        mockTurnRunFn.mockImplementation(() => {
+          pushCount = 1;
+          return (async function* () {
+            yield {
+              type: GeminiEventType.ChatCompressed,
+              value: {
+                originalTokenCount: 100,
+                newTokenCount: 50,
+                compressionStatus: CompressionStatus.COMPRESSED,
+              },
+            };
+            yield { type: GeminiEventType.Content, value: 'response' };
+          })();
+        });
+        const accept = vi.fn();
+        const restore = vi.fn();
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'tool result plus steer' }],
+            new AbortController().signal,
+            'prompt-steer-compressed-first',
+            {
+              type: SendMessageType.ToolResult,
+              steerInput: {
+                parts: [{ text: 'steer' }],
+                accept,
+                restore,
+              },
+            },
+          ),
+        );
+
+        expect(accept).toHaveBeenCalledOnce();
+        expect(restore).not.toHaveBeenCalled();
+      });
+
       it('restores an attached ToolResult steer when history never accepts it', async () => {
         client.getChat().getUserContentPushCount = vi.fn().mockReturnValue(0);
         mockTurnRunFn.mockImplementationOnce(() => {

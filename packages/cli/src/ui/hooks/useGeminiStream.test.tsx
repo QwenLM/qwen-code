@@ -545,6 +545,38 @@ describe('useGeminiStream', () => {
       expect(onDeliveryFailed).toHaveBeenCalledOnce();
     });
 
+    it('does not report delivery failure for a pre-send auto-compression', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.ChatCompressed,
+            value: { originalTokenCount: 100, newTokenCount: 50 },
+          };
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'response after auto-compression',
+          };
+        })(),
+      );
+      const onContextAccepted = vi.fn();
+      const onDelivered = vi.fn();
+      const onDeliveryFailed = vi.fn();
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery(
+          'schema-bearing tool result',
+          SendMessageType.ToolResult,
+          undefined,
+          { onContextAccepted, onDelivered, onDeliveryFailed },
+        );
+      });
+
+      expect(onDeliveryFailed).not.toHaveBeenCalled();
+      expect(onDelivered).toHaveBeenCalledOnce();
+      expect(onContextAccepted).not.toHaveBeenCalled();
+    });
+
     it.each([
       {
         caseName: 'an error event',

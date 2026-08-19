@@ -3755,6 +3755,16 @@ export const useGeminiStream = (
                 event.type === ServerGeminiEventType.ChatCompressed
               ) {
                 mutatedBeforeAcceptance = true;
+              } else if (
+                !accepted &&
+                mutatedBeforeAcceptance &&
+                event.type === ServerGeminiEventType.Retry
+              ) {
+                // Only reactive overflow recovery rebuilds the request payload,
+                // and it always emits compression *followed by* a retry. A
+                // pre-send auto-compression emits compression alone and leaves
+                // the carrying send intact, so it must not be reported as a
+                // delivery failure.
                 reportDeliveryFailure();
               }
               const terminalRejection =
