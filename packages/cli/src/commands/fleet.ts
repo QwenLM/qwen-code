@@ -112,10 +112,10 @@ export const fleetCommand: CommandModule = {
           try {
             await verifyTmux();
           } catch (err) {
-            console.error(
+            process.stderr.write(
               `${err instanceof Error ? err.message : String(err)}\n` +
                 `Install tmux, or start the agents yourself in separate ` +
-                `terminals — they only need ${BOARD_ENV} set to the same board.`,
+                `terminals — they only need ${BOARD_ENV} set to the same board.\n`,
             );
             process.exitCode = 1;
             return;
@@ -129,9 +129,9 @@ export const fleetCommand: CommandModule = {
             // already taken. Those reach the user as one line, not a stack
             // trace out of the yargs handler with a half-built layout behind
             // it.
-            console.error(
+            process.stderr.write(
               `Could not build the layout: ` +
-                `${err instanceof Error ? err.message : String(err)}`,
+                `${err instanceof Error ? err.message : String(err)}\n`,
             );
             process.exitCode = 1;
           }
@@ -175,7 +175,7 @@ async function buildLayout(a: FleetUpArgs): Promise<void> {
   const existing = await tmuxListPanes(target);
   const boardPane = existing[0]?.paneId;
   if (!boardPane) {
-    console.error('Could not find a pane to host the board.');
+    process.stderr.write('Could not find a pane to host the board.\n');
     process.exitCode = 1;
     return;
   }
@@ -223,18 +223,19 @@ async function buildLayout(a: FleetUpArgs): Promise<void> {
   await tmuxSelectPane(boardPane);
 
   if (a.with.length > 0) {
-    console.log(
+    process.stdout.write(
       `Panes ext-1..${a.with.length} run tools that do not read ` +
         `${BOARD_ENV}. Paste the output of \`qwen board protocol ` +
-        `--board ${board}\` into each of them so they can join.`,
+        `--board ${board}\` into each of them so they can join.\n`,
     );
   }
 
   if (!a.attach || inside) {
-    console.log(
-      inside
+    process.stdout.write(
+      (inside
         ? `Board "${board}" opened in a new window.`
-        : `Board "${board}" ready. Attach with: tmux attach -t ${session}`,
+        : `Board "${board}" ready. Attach with: tmux attach -t ${session}`) +
+        '\n',
     );
     return;
   }

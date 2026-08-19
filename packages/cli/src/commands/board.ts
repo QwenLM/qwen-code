@@ -60,11 +60,7 @@ function participant(argv: CommonArgs): string {
 }
 
 function emit(argv: CommonArgs, value: unknown, human: string): void {
-  if (argv.json) {
-    console.log(JSON.stringify(value));
-  } else {
-    console.log(human);
-  }
+  process.stdout.write(`${argv.json ? JSON.stringify(value) : human}\n`);
 }
 
 /**
@@ -77,7 +73,9 @@ async function run(fn: () => Promise<void>): Promise<void> {
   try {
     await fn();
   } catch (err) {
-    console.error(err instanceof Error ? err.message : String(err));
+    process.stderr.write(
+      `${err instanceof Error ? err.message : String(err)}\n`,
+    );
     process.exitCode = 1;
   }
 }
@@ -258,7 +256,9 @@ export const boardCommand: CommandModule = {
             // agent never reads it. Nothing we control can inject into that
             // agent's prompt, so the honest answer is to make the text trivial
             // to hand over rather than pretend the env var is enough.
-            console.log(getBoardSection({ board: name, as: who }).trim());
+            process.stdout.write(
+              `${getBoardSection({ board: name, as: who }).trim()}\n`,
+            );
           }),
       })
 
@@ -451,7 +451,9 @@ export const boardCommand: CommandModule = {
                 return;
               }
               if (Date.now() >= deadline) {
-                console.error(`${ask.id} still open after ${a.timeout}s`);
+                process.stderr.write(
+                  `${ask.id} still open after ${a.timeout}s\n`,
+                );
                 process.exitCode = 3;
                 return;
               }
