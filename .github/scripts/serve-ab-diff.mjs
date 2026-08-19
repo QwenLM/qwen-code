@@ -44,13 +44,14 @@ export function maskPath(path, patterns = DEFAULT_VOLATILE) {
   return patterns.some((re) => re.test(path));
 }
 
-/**
- * Written by the drive script once every scenario has been captured. Both arms
- * are driven by the HEAD checkout's drive script, so the two capture dirs always
- * have the same scenario set — unless one of them aborted, which is what this
- * marker distinguishes.
- */
-export const DRIVE_COMPLETE_MARKER = '.drive-complete';
+// The completion marker is OWNED by the drive script (the writer) and imported
+// here rather than re-declared: two copies drift silently — each suite would
+// keep testing against its own — and a drifted reader either flags every
+// complete baseline as truncated or stops noticing truncated ones at all.
+// Importing is side-effect-free; the drive's CLI body sits behind an
+// `import.meta.url` guard.
+export { DRIVE_COMPLETE_MARKER } from './serve-ab-drive.mjs';
+import { DRIVE_COMPLETE_MARKER } from './serve-ab-drive.mjs';
 
 export function typeOf(v) {
   if (v === null) return 'null';

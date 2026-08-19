@@ -50,6 +50,56 @@ export function isPlainObject(v) {
 }
 
 /**
+ * Build the capture for one scenario.
+ *
+ * `_status` is always recorded, and always the HTTP status the harness saw: a
+ * status-only change (404 → 409, say) under an otherwise similar body is
+ * exactly the admission difference these scenarios exist to catch, so a body
+ * carrying its own `_status` key must not be able to overwrite it. A non-object
+ * body (scalar, null, array) is nested rather than spread — spreading would
+ * drop a scalar and re-key an array — because the capture has to survive
+ * whatever a future scenario probes.
+ */
+export function composeCapture(scenario, json, res) {
+  if (scenario.project) return scenario.project(json, res);
+  return isPlainObject(json)
+    ? { ...json, _status: res.status }
+    : { _status: res.status, _body: json };
+}
+
+/**
+ * A canary scenario asserts its own precondition and aborts the drive when it
+ * fails — publishing "no response changes" from a scenario set that never
+ * created the state it believed it was probing is the failure this whole
+ * harness exists to prevent.
+ *
+ * Two shapes, because the two canaries guard different things:
+ *
+ * - `expectStatus` — the answer must be exactly this. For a precondition every
+ *   later scenario shares (the project directory, the `chats` leaf, the fixture
+ *   loading at all): if it moved, nothing below it means anything.
+ * - `rejectStatus` — only this answer is a failure, anything else is data. For
+ *   a precondition that just asks "did the daemon see the file I staged?": a
+ *   404 says it did not, while any other answer proves it did and is a product
+ *   decision worth capturing rather than a reason to suppress the whole report.
+ */
+export function assertCanaryStatus(scenario, status, bodyText = '') {
+  const fail = (expectation) => {
+    throw new Error(
+      `scenario "${scenario.name}" ${expectation} but got ${status}: ${String(
+        bodyText,
+      ).slice(0, 300)}`,
+    );
+  };
+  if (scenario.expectStatus !== undefined && status !== scenario.expectStatus) {
+    fail(`expected HTTP ${scenario.expectStatus}`);
+  }
+  if (scenario.rejectStatus !== undefined && status === scenario.rejectStatus) {
+    fail(`must not answer HTTP ${scenario.rejectStatus}`);
+  }
+}
+
+/**
  * Where the daemon persists a workspace's transcripts: `Storage.getProjectDir()`
  * (`<runtimeBaseDir>/projects/<sanitized cwd>`) plus SessionService's `chats`
  * leaf, with `archive/` under it. Kept in lockstep with `sanitizeCwd()` in
@@ -185,6 +235,12 @@ export const SCENARIOS = [
     // harness writes to. Without it, a drifted archive name would leave the
     // active/archived conflict scenario below loading from active on both arms
     // — identical captures, and a conflict-admission regression diffing clean.
+    //
+    // `rejectStatus`, not `expectStatus`: the only answer that means "the
+    // staged file was never seen" is 404. Today the daemon refuses an
+    // archived-only load with 409, but if that ever becomes loadable the
+    // precondition still held, and pinning the exact status would abort the
+    // drive and suppress the very `409 → 200` row the captures already hold.
     name: 'session-restore-archived-only',
     fixtures: (ctx) =>
       stageTranscripts(ctx, [{ sessionId: SID.archivedOnly, archived: true }]),
@@ -193,7 +249,7 @@ export const SCENARIOS = [
     auth: true,
     body: () => ({}),
     project: admissionOnly,
-    expectStatus: 409,
+    rejectStatus: 404,
   },
   {
     // Legacy `uuidgen` spelling: only the uppercase file exists, the caller
@@ -385,31 +441,15 @@ export async function driveCli(cliEntry, outDir) {
       } catch {
         json = { _nonJson: text.slice(0, 500) };
       }
-      // `_status` is always recorded: a status-only change (404 → 409, say)
-      // with an otherwise similar body is exactly the kind of admission
-      // difference these scenarios exist to catch. A non-object body (scalar,
-      // null, array) is nested rather than spread, which would drop or re-key
-      // it — the capture has to survive whatever a future scenario probes.
-      const captured = s.project
-        ? s.project(json, res)
-        : isPlainObject(json)
-          ? { _status: res.status, ...json }
-          : { _status: res.status, _body: json };
+      const captured = composeCapture(s, json, res);
       writeFileSync(
         join(outDir, `${s.name}.json`),
         JSON.stringify(captured, null, 2) + '\n',
       );
       process.stderr.write(`  captured ${s.name} (HTTP ${res.status})\n`);
-      // A canary scenario asserts its own precondition. Checked AFTER the
-      // capture is written, so the deviating response is on disk and in the
-      // log rather than lost to the abort. Failing beats publishing "no
-      // response changes" from a scenario set that never created the state it
-      // believed it was probing.
-      if (s.expectStatus !== undefined && res.status !== s.expectStatus) {
-        throw new Error(
-          `scenario "${s.name}" expected HTTP ${s.expectStatus} but got ${res.status}: ${text.slice(0, 300)}`,
-        );
-      }
+      // Checked AFTER the capture is written, so a deviating response is on
+      // disk and in the log rather than lost to the abort.
+      assertCanaryStatus(s, res.status, text);
     }
     // Completion marker. An abort part-way through (a canary, a daemon crash)
     // leaves a capture dir that LOOKS like a full baseline, and the scenarios

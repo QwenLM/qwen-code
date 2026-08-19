@@ -10,11 +10,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
+import { readdirSync } from 'node:fs';
+
 import {
   SCENARIOS,
   SID,
   admissionOnly,
+  assertCanaryStatus,
   chatsDirFor,
+  composeCapture,
   isPlainObject,
   readTranscriptFixture,
   retargetTranscript,
@@ -91,17 +95,73 @@ test('restore scenarios never share a session id (an attach also answers 200)', 
 });
 
 test('both canaries assert their own precondition', () => {
-  const canaries = SCENARIOS.filter((s) => s.expectStatus !== undefined);
+  const canaries = SCENARIOS.filter(
+    (s) => s.expectStatus !== undefined || s.rejectStatus !== undefined,
+  );
   assert.deepEqual(
-    canaries.map((c) => [c.name, c.expectStatus]),
+    canaries.map((c) => [c.name, c.expectStatus, c.rejectStatus]),
     [
-      ['session-restore-healthy', 200],
-      ['session-restore-archived-only', 409],
+      // Shared by every scenario below it → must be exactly 200.
+      ['session-restore-healthy', 200, undefined],
+      // Only 404 proves the staged file was never seen; any other answer is a
+      // product decision the captures should carry, not a reason to abort.
+      ['session-restore-archived-only', undefined, 404],
     ],
   );
   // One certifies the active `chats` leaf and the fixture, the other the
   // `chats/archive` leaf — every layout fact the harness encodes is covered.
   for (const c of canaries) assert.equal(typeof c.fixtures, 'function');
+});
+
+test('assertCanaryStatus enforces both canary shapes and leaves others alone', () => {
+  const exact = { name: 'exact', expectStatus: 200 };
+  assert.doesNotThrow(() => assertCanaryStatus(exact, 200, 'body'));
+  assert.throws(
+    () => assertCanaryStatus(exact, 404, 'body'),
+    /scenario "exact" expected HTTP 200 but got 404/,
+  );
+
+  const reject = { name: 'reject', rejectStatus: 404 };
+  assert.doesNotThrow(() => assertCanaryStatus(reject, 409));
+  assert.doesNotThrow(
+    () => assertCanaryStatus(reject, 200),
+    'a changed admission answer is data, not a drift alarm',
+  );
+  assert.throws(
+    () => assertCanaryStatus(reject, 404),
+    /scenario "reject" must not answer HTTP 404/,
+  );
+
+  // A scenario with neither field is never a canary, whatever it answers.
+  for (const status of [200, 404, 409, 500]) {
+    assert.doesNotThrow(() => assertCanaryStatus({ name: 'plain' }, status));
+  }
+});
+
+test('every staged scenario probes an id it actually staged', () => {
+  const home = mkdtempSync(join(tmpdir(), 'sad-'));
+  const workspace = join(home, 'ws');
+  const chats = chatsDirFor(home, workspace);
+  for (const s of SCENARIOS) {
+    if (!s.fixtures) continue;
+    const probed = /\/session\/([^/]+)\//.exec(s.path)?.[1];
+    if (!probed) continue;
+    s.fixtures({ home, workspace });
+    const staged = [
+      ...readdirSync(chats),
+      ...readdirSync(join(chats, 'archive')),
+    ]
+      .filter((f) => f.endsWith('.jsonl'))
+      .map((f) => f.slice(0, -'.jsonl'.length).toLowerCase());
+    // Case-insensitively: mixed-case and case-twins deliberately probe a
+    // spelling other than the one on disk. A scenario probing an id it never
+    // staged answers 404 on BOTH arms — identical captures, "no response
+    // changes", and that branch silently drops out of A/B coverage.
+    assert.ok(
+      staged.includes(probed.toLowerCase()),
+      `${s.name} probes ${probed} but stages no spelling of it`,
+    );
+  }
 });
 
 test('staged scenarios stage fixtures before they probe', () => {
@@ -194,4 +254,49 @@ test('isPlainObject decides which bodies may be spread into a capture', () => {
   assert.equal(isPlainObject(null), false);
   assert.equal(isPlainObject(123), false);
   assert.equal(isPlainObject('x'), false);
+});
+
+test('composeCapture always records the status the harness saw', () => {
+  // A body key of the same name must not win: that would turn a status-only
+  // regression into "body unchanged", the masking this harness exists to stop.
+  assert.deepEqual(
+    composeCapture({}, { _status: 400, ok: true }, { status: 200 }),
+    {
+      ok: true,
+      _status: 200,
+    },
+  );
+  assert.deepEqual(composeCapture({}, { a: 1 }, { status: 409 }), {
+    a: 1,
+    _status: 409,
+  });
+});
+
+test('composeCapture nests non-object bodies instead of spreading them', () => {
+  assert.deepEqual(composeCapture({}, 123, { status: 200 }), {
+    _status: 200,
+    _body: 123,
+  });
+  assert.deepEqual(composeCapture({}, null, { status: 204 }), {
+    _status: 204,
+    _body: null,
+  });
+  assert.deepEqual(composeCapture({}, ['a', 'b'], { status: 200 }), {
+    _status: 200,
+    _body: ['a', 'b'],
+  });
+});
+
+test('composeCapture defers to a scenario projection when one is declared', () => {
+  const scenario = {
+    project: (json, res) => ({ _status: res.status, code: json.code }),
+  };
+  assert.deepEqual(
+    composeCapture(
+      scenario,
+      { code: 'x', compactedReplay: [] },
+      { status: 409 },
+    ),
+    { _status: 409, code: 'x' },
+  );
 });
