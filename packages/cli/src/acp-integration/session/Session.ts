@@ -9511,7 +9511,6 @@ export class Session implements SessionContext {
     const callId = fc.id ?? generatedCallId ?? `${fc.name}-${Date.now()}`;
     let args = (fc.args ?? {}) as Record<string, unknown>;
     let responseToolName = fc.name ?? 'unknown_tool';
-    let telemetryToolName = fc.name ?? '';
     let telemetryProviderName: string | undefined;
     let executionStatus: ToolExecutionStatus = 'not_started';
     let executionErrorType: ToolErrorType | undefined;
@@ -9766,21 +9765,22 @@ export class Session implements SessionContext {
       // attempted target and recordings retain the structured error type.
       responseToolName = normalizedRequest.providerName;
       telemetryProviderName = normalizedRequest.providerName;
-      telemetryToolName =
-        normalizedRequest.targetName ?? normalizedRequest.providerName;
-      return earlyErrorResponse(normalizedRequest.error, telemetryToolName, {
-        status: 'error',
-        errorType: normalizedRequest.errorType,
-        executionStatus: 'not_started',
-        recordInvalidToolParams: true,
-      });
+      return earlyErrorResponse(
+        normalizedRequest.error,
+        normalizedRequest.targetName ?? normalizedRequest.providerName,
+        {
+          status: 'error',
+          errorType: normalizedRequest.errorType,
+          executionStatus: 'not_started',
+          recordInvalidToolParams: true,
+        },
+      );
     }
 
     const effectiveRequest = normalizedRequest.request;
     const toolName = effectiveRequest.name;
     args = effectiveRequest.args;
     responseToolName = providerToolName(effectiveRequest);
-    telemetryToolName = toolName;
     telemetryProviderName = effectiveRequest.providerName;
     const tool =
       normalizedRequest.resolvedTool ?? toolRegistry.getTool(toolName);

@@ -486,6 +486,9 @@ describe('Session', () => {
     registerTool: ReturnType<typeof vi.fn>;
     warmAll: ReturnType<typeof vi.fn>;
     getFunctionDeclarationsFiltered: ReturnType<typeof vi.fn>;
+    schemaFingerprint: ReturnType<typeof vi.fn>;
+    markProxySchemaPresented: ReturnType<typeof vi.fn>;
+    hasPresentedProxySchema: ReturnType<typeof vi.fn>;
   };
   let mockWorkflowRunRegistry: {
     setApprovalRequestCallback: ReturnType<typeof vi.fn>;
@@ -762,6 +765,9 @@ describe('Session', () => {
       getFunctionDeclarationsFiltered: vi.fn((names: string[]) =>
         names.map((name) => ({ name })),
       ),
+      schemaFingerprint: vi.fn().mockReturnValue('fp'),
+      markProxySchemaPresented: vi.fn(),
+      hasPresentedProxySchema: vi.fn().mockReturnValue(true),
     };
     const fileService = {
       shouldGitIgnoreFile: vi.fn().mockReturnValue(false),

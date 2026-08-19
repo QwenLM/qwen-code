@@ -2455,10 +2455,27 @@ export class CoreToolScheduler {
           );
           if (recordPrevalidationCancellation()) continue;
           if (!normalizedRequest.ok) {
+            // Keep the failed request's diagnostic identity self-consistent:
+            // the recorded name is the attempted target when known (pinned by
+            // the retry-isolation contract), and when the attempted arguments
+            // form is an object the recorded args are the attempted target
+            // args (mirroring the success path) instead of the wrapper
+            // envelope. Malformed-arguments failures keep the envelope args:
+            // they are the diagnostic payload itself.
+            const attemptedArgs = reqInfo.args['arguments'];
+            const hasObjectArgs =
+              !!attemptedArgs &&
+              typeof attemptedArgs === 'object' &&
+              !Array.isArray(attemptedArgs);
             const errorRequest: ToolCallRequestInfo = {
               ...reqInfo,
               ...(normalizedRequest.targetName
-                ? { name: normalizedRequest.targetName }
+                ? {
+                    name: normalizedRequest.targetName,
+                    ...(hasObjectArgs
+                      ? { args: attemptedArgs as Record<string, unknown> }
+                      : {}),
+                  }
                 : {}),
               providerName: normalizedRequest.providerName,
             };

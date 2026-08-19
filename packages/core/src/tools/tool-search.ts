@@ -551,6 +551,9 @@ class ToolSearchInvocation extends BaseToolInvocation<
       if (blockedErrorMessage) {
         message += `\n\nUnavailable: ${blockedErrorMessage}`;
       }
+      if (directlyDeclared.length > 0) {
+        message += `\n\nAlready declared and directly callable: ${this.formatCappedNameList(directlyDeclared)}`;
+      }
       if (truncated.length > 0) {
         message += `\n\nTruncated by max_results — request these in a follow-up call: ${this.formatCappedNameList(truncated)}`;
       }
@@ -602,6 +605,15 @@ class ToolSearchInvocation extends BaseToolInvocation<
         registry.unrevealDeferredTool(name);
       }
       const message = error instanceof Error ? error.message : String(error);
+      // Surface the failed direct-declaration sync to operators: the refusal
+      // the model sees is recoverable, but the underlying setTools failure
+      // (or an uninitialised client) would otherwise be invisible.
+      debugLogger.warn(
+        `Direct declaration of oversized deferred schemas failed: ${message}`,
+      );
+      process.stderr.write(
+        `[ToolSearch] direct declaration of oversized deferred schemas failed: ${message}\n`,
+      );
       let refusal = `Error: deferred schemas exceeded the inline output budget and could not be declared directly (${message}).`;
       if (missing.length > 0) {
         refusal += `\n\nNot found: ${this.formatCappedNameList(missing)}`;
