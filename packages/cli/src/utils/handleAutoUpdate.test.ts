@@ -6,7 +6,11 @@
 
 import type { Mock } from 'vitest';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { getInstallationInfo, PackageManager } from './installationInfo.js';
+import {
+  getInstallationInfo,
+  getHomebrewLatestVersion,
+  PackageManager,
+} from './installationInfo.js';
 import { updateEventEmitter } from './updateEventEmitter.js';
 import type { UpdateObject } from '../ui/utils/updateCheck.js';
 import type { LoadedSettings } from '../config/settings.js';
@@ -21,6 +25,7 @@ vi.mock('./installationInfo.js', async () => {
   return {
     ...actual,
     getInstallationInfo: vi.fn(),
+    getHomebrewLatestVersion: vi.fn(),
   };
 });
 
@@ -44,6 +49,7 @@ interface MockChildProcess extends EventEmitter {
 }
 
 const mockGetInstallationInfo = vi.mocked(getInstallationInfo);
+const mockGetHomebrewLatestVersion = vi.mocked(getHomebrewLatestVersion);
 const mockPerformStandaloneUpdate = vi.mocked(performStandaloneUpdate);
 
 describe('handleAutoUpdate', () => {
@@ -710,5 +716,90 @@ describe('setUpdateHandler', () => {
     );
 
     cleanup();
+  });
+});
+
+describe('handleAutoUpdate — Homebrew installs (#9493)', () => {
+  let mockSettings: LoadedSettings;
+  let mockUpdateInfo: UpdateObject;
+  let emitSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    emitSpy = vi.spyOn(updateEventEmitter, 'emit');
+    mockSettings = {
+      merged: { general: { enableAutoUpdate: true } },
+    } as LoadedSettings;
+    // npm registry reports a newer version than the installed one...
+    mockUpdateInfo = {
+      update: {
+        latest: '0.21.14',
+        current: '0.21.13',
+        type: 'patch',
+        name: '@qwen-code/qwen-code',
+      },
+      message: 'Qwen Code update available! 0.21.13 → 0.21.14',
+    };
+    mockGetInstallationInfo.mockReturnValue({
+      packageManager: PackageManager.HOMEBREW,
+      isGlobal: true,
+      updateMessage:
+        'Installed via Homebrew. Please update with "brew upgrade".',
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('does not notify when Homebrew offers nothing newer than the installed version', async () => {
+    // ...but the Homebrew formula is still at the installed version, so
+    // `brew upgrade` is a no-op and the npm-based notification can never be
+    // cleared (#9493). It must be suppressed.
+    mockGetHomebrewLatestVersion.mockResolvedValue('0.21.13');
+
+    await handleAutoUpdate(mockUpdateInfo, mockSettings, '/root');
+
+    expect(emitSpy).not.toHaveBeenCalledWith(
+      'update-received',
+      expect.anything(),
+    );
+  });
+
+  it('still notifies when Homebrew offers a newer version', async () => {
+    mockGetHomebrewLatestVersion.mockResolvedValue('0.21.14');
+
+    await handleAutoUpdate(mockUpdateInfo, mockSettings, '/root');
+
+    expect(emitSpy).toHaveBeenCalledWith('update-received', {
+      message:
+        'Qwen Code update available! 0.21.13 → 0.21.14\n' +
+        'Installed via Homebrew. Please update with "brew upgrade".',
+    });
+  });
+
+  it('still notifies when the Homebrew version cannot be determined', async () => {
+    mockGetHomebrewLatestVersion.mockResolvedValue(null);
+
+    await handleAutoUpdate(mockUpdateInfo, mockSettings, '/root');
+
+    expect(emitSpy).toHaveBeenCalledWith('update-received', {
+      message:
+        'Qwen Code update available! 0.21.13 → 0.21.14\n' +
+        'Installed via Homebrew. Please update with "brew upgrade".',
+    });
+  });
+
+  it('does not query Homebrew for non-Homebrew installs', () => {
+    mockGetInstallationInfo.mockReturnValue({
+      updateCommand: undefined,
+      updateMessage: 'Cannot determine update command.',
+      isGlobal: false,
+      packageManager: PackageManager.NPM,
+    });
+
+    handleAutoUpdate(mockUpdateInfo, mockSettings, '/root');
+
+    expect(mockGetHomebrewLatestVersion).not.toHaveBeenCalled();
   });
 });
