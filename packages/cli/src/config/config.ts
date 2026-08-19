@@ -44,7 +44,6 @@ import {
   type WebSearchSettings,
   MAX_SUBAGENT_DEPTH_LIMIT,
   addDaemonRequestAttribute,
-  SessionIdCaseConflictError,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
@@ -2078,12 +2077,12 @@ export async function loadCliConfig(
       occupied =
         (await sessionService.findSessionIdIgnoringCase(argv['sessionId'])) !==
         undefined;
-    } catch (error) {
-      if (error instanceof SessionIdCaseConflictError) {
-        occupied = true;
-      } else {
-        throw error;
-      }
+    } catch {
+      // Any read failure leaves the id unproven, and the resolver propagates
+      // non-ENOENT errors. Assume occupied, as the previous existence check
+      // did: startup must reach the guarded conflict message and honour
+      // `throwOnSessionIdConflict` rather than die on a raw errno.
+      occupied = true;
     }
     if (occupied) {
       const message = `Error: Session Id ${argv['sessionId']} already exists (active or archived). Delete or unarchive it first.`;
