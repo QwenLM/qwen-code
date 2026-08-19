@@ -3230,6 +3230,8 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
       reviews = '[]',
       runCreated = '',
       runStartedAttempt = '',
+      reviewedHead = '',
+      expectedHead = '',
     } = {},
   ) {
     const dir = mkdtempSync(join(tmpdir(), 'fallback-comment-'));
@@ -3256,21 +3258,24 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
           '#!/bin/bash',
           'echo "gh $*" >> "$CALLS"',
           'cmd="$1"; sub="${2:-}"',
+          // Hoisted: both the run-view and the reviews branches run the
+          // caller's own --jq, so the extraction cannot live inside one of them.
+          'filter=""; prev=""',
+          'for a in "$@"; do if [ "$prev" = "--jq" ]; then filter="$a"; fi; prev="$a"; done',
           'if [ "$cmd" = "api" ] && [ "$sub" = "user" ]; then',
           '  [ "${SCENARIO:-}" = "lookup_fail" ] && exit 1',
           '  echo "qwen-code-ci-bot"; exit 0',
           'fi',
           'if [ "$cmd" = "run" ] && [ "$sub" = "view" ]; then',
           '  case "$*" in',
-          '    *createdAt*)',
+          '    *createdAt*|*startedAt*)',
           '      [ "${SCENARIO:-}" = "runstart_fail" ] && exit 1',
-          '      printf "%s" "${RUN_CREATED:-}"; exit 0 ;;',
-          // Answered on purpose, and with a DIFFERENT value: the guard must
-          // read createdAt (attempt-stable), and a stub that returned one
-          // value for both fields could not tell the two apart.
-          '    *startedAt*)',
-          '      [ "${SCENARIO:-}" = "runstart_fail" ] && exit 1',
-          '      printf "%s" "${RUN_STARTED_ATTEMPT:-}"; exit 0 ;;',
+          // Real --jq over an object carrying BOTH fields, exactly as the
+          // reviews stub does: a `case` on "$*" answers a combined
+          // `--json createdAt,startedAt --jq .startedAt` from whichever
+          // substring branch comes first, so the discriminator between the
+          // two anchors would silently stop discriminating.
+          '      printf \'{"createdAt":"%s","startedAt":"%s"}\' "${RUN_CREATED:-}" "${RUN_STARTED_ATTEMPT:-}" | jq -r "$filter"; exit 0 ;;',
           '  esac',
           '  [ "${SCENARIO:-}" = "runview_fail" ] && exit 1',
           '  echo "${RUN_HEAD:-}"; exit 0',
@@ -3280,8 +3285,6 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
           // submission time), so a stub that pre-applied it would pin nothing.
           'if [ "$cmd" = "api" ] && [ "${sub#repos/}" != "$sub" ]; then',
           '  [ "${SCENARIO:-}" = "reviews_fail" ] && exit 1',
-          '  filter=""; prev=""',
-          '  for a in "$@"; do if [ "$prev" = "--jq" ]; then filter="$a"; fi; prev="$a"; done',
           '  printf "%s" "$REVIEWS_JSON" | jq -r "$filter"; exit 0',
           'fi',
           'if [ "$cmd" = "pr" ] && [ "$sub" = "view" ]; then',
@@ -3335,7 +3338,7 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
               GITHUB_STEP_SUMMARY: summary,
               PR_NUMBER: '42',
               RUN_URL: 'https://github.com/QwenLM/qwen-code/actions/runs/12345',
-              EXPECTED_HEAD_SHA: '',
+              EXPECTED_HEAD_SHA: expectedHead,
               FAILURE_KIND: '',
               FAILURE_REASON:
                 'Run review failed. See workflow logs for details.',
@@ -3349,6 +3352,7 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
               REVIEWS_JSON: reviews,
               RUN_CREATED: runCreated,
               RUN_STARTED_ATTEMPT: runStartedAttempt,
+              REVIEWED_HEAD_SHA: reviewedHead,
             },
           },
         );
@@ -3524,7 +3528,7 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
       });
       expect(r.status).toBe(0);
       expect(r.posted).toBe('');
-      expect(r.summary).toContain('already posted a review');
+      expect(r.summary).toContain('a bot review already exists');
     });
 
     it(`${site} still posts when no review can be attributed to this run`, () => {
@@ -3569,7 +3573,7 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
       });
       expect(r.status).toBe(0);
       expect(r.posted).toBe('');
-      expect(r.summary).toContain('already posted a review');
+      expect(r.summary).toContain('a bot review already exists');
     });
 
     it(`${site} says so in the log when the guard cannot run`, () => {
@@ -3619,6 +3623,44 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
       expect(r.posted).not.toBe('');
     });
   }
+
+  it('the fallback job compares against the head it REVIEWED, not the fresh one', () => {
+    // The job sees only the PR's CURRENT head, and on every trigger but
+    // pull_request_target the head-moved guard above does not run — so a push
+    // landing between the post and this step leaves the fresh head pointing
+    // at bytes no review covered. Comparing against it matches nothing and
+    // the contradictory comment posts anyway: the #9342 shape, re-opened for
+    // the trigger + post + push + fail-after-post interleaving. The job now
+    // reads the head review-pr published as its output.
+    const r = runFallbackStep('default', {
+      prHead: 'NEWSHA',
+      reviewedHead: 'HEADSHA1',
+      runCreated: RUN_CREATED,
+      runStartedAttempt: RUN_RESTARTED,
+      reviews: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', AFTER),
+    });
+    expect(r.status).toBe(0);
+    expect(r.posted).toBe('');
+    expect(r.summary).toContain('a bot review already exists on HEADSHA1');
+  });
+
+  it('the in-job step is immune to the same interleaving, one guard earlier', () => {
+    // Its head-moved check runs unconditionally on the head the review step
+    // recorded, so a moved head exits before any body is composed. Pinned so
+    // the asymmetry between the two sites is deliberate and visible rather
+    // than an oversight in the twin that does need the output.
+    const r = runFallbackStep('default', {
+      useInJobStep: true,
+      prHead: 'NEWSHA',
+      expectedHead: 'HEADSHA1',
+      runCreated: RUN_CREATED,
+      runStartedAttempt: RUN_RESTARTED,
+      reviews: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', AFTER),
+    });
+    expect(r.status).toBe(0);
+    expect(r.posted).toBe('');
+    expect(r.summary).toContain('moved from');
+  });
 
   it('in-job step dedupes on a fallback comment this run already has', () => {
     // Re-runs of failed jobs keep the run id: when a prior attempt died
