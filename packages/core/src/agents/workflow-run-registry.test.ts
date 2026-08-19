@@ -415,6 +415,7 @@ describe('WorkflowRunRegistry', () => {
           fileDiff: '@@ safe display diff @@',
           originalContent: 'ORIGINAL_CONTENT_SENTINEL',
           newContent: 'NEW_CONTENT_SENTINEL',
+          hookAskReason: 'HOOK_ASK_REASON_SENTINEL',
         },
       }),
     );
@@ -431,6 +432,9 @@ describe('WorkflowRunRegistry', () => {
         hideAlwaysAllow: true,
         hideModify: true,
         skipIdeDiff: true,
+        // The hook reason must survive the restriction so bubbled approvals
+        // keep the reason in the leader UI (#9441 R1-1 follow-up).
+        hookAskReason: 'HOOK_ASK_REASON_SENTINEL',
       },
     });
   });
