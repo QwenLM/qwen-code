@@ -187,24 +187,47 @@ A finding that a method "can no longer be inlined" needs the **dynamic** tier �
 **Favour precision over recall here.** A guessed JVM finding is the easiest kind for an author to dismiss, and one dismissal teaches them to skip the rest of the review. Every finding needs the concrete hot path and the concrete cost, like any other. Performance findings are **Suggestions** — slow is a cost, not incorrect behaviour — **except where the cost is itself the wrongness**: unbounded allocation, quadratic work, or unbounded cache growth on attacker-reachable input is a denial-of-service hole, which the severity ladder grades Critical, not a Suggestion. Name the reachable input that triggers it; "this loop is slow" with no attacker-reachable trigger stays a Suggestion.`,
 };
 
+/**
+ * Genres that describe intent or history rather than a contract. One list, used
+ * for both the directory form (`docs/rfcs/x.md`) and the filename form
+ * (`docs/api/rfc-0001.md`), so the two cannot drift apart — a review found the
+ * exclusion enforced for the directory form of proposals and the filename form
+ * of changelogs and for neither of the other two, which let a changelog
+ * directory and a flat-layout RFC through.
+ */
+const NON_CONTRACT_GENRE = 'designs?|plans?|rfcs?|proposals?|adrs?|changelogs?';
+const NON_CONTRACT_DIR = new RegExp(`(?:^|/)(?:${NON_CONTRACT_GENRE})/`, 'i');
+const NON_CONTRACT_STEM = new RegExp(
+  `^(?:${NON_CONTRACT_GENRE})(?:[-_. ]|$)`,
+  'i',
+);
+
 const CONTRACT_DOCS: PathRule = {
   title: 'Consumer-facing contract documentation',
+  // Governance comes from WHERE the document lives, never from a keyword in its
+  // name. A keyword branch was tried and withdrawn: `protocol` in a filename
+  // fires anywhere in the tree, which put a user guide, a changelog entry and a
+  // flat-layout RFC under a checklist whose blockers are graded Critical, and no
+  // amount of adding exclusions closed it — each audit round found another form,
+  // which is the signal that the entrance space does not enumerate. It also
+  // backtracked quadratically: `[^/]*(keyword)[^/]*\.mdx?$` paid a failing tail
+  // scan once per keyword occurrence, 403 ms on a 96 kB path that git accepts,
+  // synchronously inside every agent-brief build — the shape the JAVA checklist
+  // in this same file grades a denial-of-service hole.
+  //
+  // The cost of location-only is real and deliberate: a repository that keeps
+  // its wire reference outside a documentation or SDK tree (`PROTOCOL.md` at the
+  // root, `spec/wire.md`) is not governed. That is the precision side of the
+  // trade this file already takes everywhere else, and a project that wants the
+  // checklist anyway has `.qwen/review-rules.md`.
   matches: (p) => {
     if (!/\.mdx?$/i.test(p)) return false;
-    // A proposal is not a contract. A design doc, an RFC or a plan describes what
-    // someone intends to build, and describing behaviour the tree does not have
-    // yet is the whole point of the genre — measuring one against the code would
-    // file a finding on every one of them.
-    if (/(?:^|\/)(?:designs?|plans?|rfcs?|proposals?|adrs?)\//i.test(p)) {
-      return false;
-    }
-    if (/(?:^|\/)CHANGELOG[^/]*$/i.test(p)) return false;
+    if (NON_CONTRACT_DIR.test(p)) return false;
+    const stem = p.slice(p.lastIndexOf('/') + 1).replace(/\.mdx?$/i, '');
+    if (NON_CONTRACT_STEM.test(stem)) return false;
     return (
       /(?:^|\/)docs\/(?:developers?|api|reference|protocols?)\//i.test(p) ||
-      /(?:^|\/)sdks?(?:-[a-z0-9]+)*\//i.test(p) ||
-      /(?:^|\/)[^/]*(?:protocol|wire-format|api-reference|openapi)[^/]*\.mdx?$/i.test(
-        p,
-      )
+      /(?:^|\/)sdks?(?:-[a-z0-9]+)*\//i.test(p)
     );
   },
   checklist: `The reader of this document cannot read your code. It is a wire protocol, an API reference or an SDK guide — someone writes a client against it, ships that client, and never sees the implementation that was supposed to back the sentence they built on. Every other lens in this review reads the code and asks whether it is right. This one reads the **prose the diff added** and asks whether the code makes it true.

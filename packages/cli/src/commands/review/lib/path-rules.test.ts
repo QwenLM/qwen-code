@@ -129,23 +129,60 @@ describe('pathRulesFor — scoped, or it is noise', () => {
     // hook from a README, so it declines to guess — a visible decision.
     ['.husky/pre-commit', false],
     ['hooks/prepush', false],
-    // Consumer-facing contract documentation: a wire/API/SDK reference is
-    // governed; a proposal, a user guide and a changelog are not, and a
-    // filename saying `protocol` does not rescue a design doc.
+    // Consumer-facing contract documentation. Governance comes from LOCATION —
+    // a reference section or an SDK package — and never from a keyword in a
+    // filename; every alternative of both the location branches and the
+    // genre exclusion is pinned here, or narrowing one ships green.
     ['docs/developers/qwen-serve-protocol.md', true],
     ['docs/developer/api.md', true],
     ['docs/api/sessions.mdx', true],
     ['docs/reference/routes.md', true],
+    ['docs/protocol/frames.md', true],
+    ['docs/protocols/session.md', true],
     ['packages/sdk-typescript/README.md', true],
     ['packages/sdk-java/docs/usage.md', true],
-    ['integrations/wire-format.md', true],
+    ['sdks/go/README.md', true],
+    ['docs/developers/schema.json', false],
+    // A keyword in the name buys nothing outside a governed location: this is
+    // the branch that was withdrawn, and these rows are what keep it withdrawn.
+    ['integrations/wire-format.md', false],
+    ['integrations/openapi.md', false],
+    ['PROTOCOL.md', false],
+    ['docs/users/features/live-state-protocol.md', false],
     ['docs/users/features/code-review.md', false],
-    ['CHANGELOG.md', false],
+    ['src/sdkstuff/notes.md', false],
+    // The genre exclusion, in BOTH forms, for every member of its list. The
+    // directory rows sit outside a governed location on purpose only where the
+    // genre is the whole point; the rest are inside one, so the exclusion is
+    // the deciding clause and a deleted member flips the row.
+    ['docs/api/design/overview.md', false],
+    ['docs/api/designs/overview.md', false],
+    ['docs/api/plan/rollout.md', false],
+    ['docs/api/plans/rollout.md', false],
+    ['docs/api/rfc/0001.md', false],
+    ['docs/api/rfcs/0001.md', false],
+    ['docs/api/proposal/idea.md', false],
+    ['docs/api/proposals/idea.md', false],
+    ['docs/api/adr/0003.md', false],
+    ['docs/api/adrs/0003.md', false],
+    ['docs/api/changelog/2026-08.md', false],
+    ['docs/api/changelogs/2026-08.md', false],
+    ['docs/developers/changelog/entries.md', false],
+    ['docs/api/design.md', false],
+    ['docs/api/plan-b.md', false],
+    ['docs/api/rfc-0001.md', false],
+    ['docs/api/proposal.md', false],
+    ['docs/api/adr-0003.md', false],
+    ['docs/api/CHANGELOG.md', false],
+    ['packages/sdk-typescript/CHANGELOG.md', false],
     ['docs/design/2026-08-18-live-state-protocol.md', false],
     ['docs/plans/rollout-protocol.md', false],
     ['docs/rfcs/0001-protocol.md', false],
-    ['src/sdkstuff/notes.md', false],
-    ['docs/developers/schema.json', false],
+    ['proposals/wire-protocol.md', false],
+    ['adrs/0001-protocol.md', false],
+    // A stem that merely STARTS with the letters of a genre is not that genre.
+    ['docs/api/designer-notes.md', true],
+    ['docs/api/planning-board.md', true],
   ])('%s → governed by a rule: %s', (path, governed) => {
     expect(PATH_RULES.some((r) => r.matches(path))).toBe(governed);
   });
@@ -445,6 +482,46 @@ describe('pathRulesFor — matcher cost stays linear on attacker-shaped paths', 
     // The lane rule routes every path through pathTool, whose workflow
     // regex pays its failed suffix once per anchor whose prefix matches.
     const path = `.github/workflows/${'.github/workflows/'.repeat(16_000)}x`;
+    expect(msOf(() => pathRulesFor([path]))).toBeLessThan(BOUND_MS);
+  }, 60_000);
+
+  // Every arm above ends without a documentation extension, so the contract-doc
+  // rule short-circuits on all of them and its own bound went unpinned — which
+  // is how a quadratic keyword matcher shipped: `[^/]*(protocol)[^/]*\.mdx?$`
+  // paid a failing tail scan once per keyword occurrence, 403 ms on a 96 kB
+  // path git accepts, synchronously inside every agent-brief build. These arms
+  // end in `.md` so the gate lets them through to the matcher underneath.
+
+  it('the contract-doc rule pays no per-keyword cost on a repeated-keyword path', () => {
+    // The withdrawn branch's exact hostile shape. Governance is location-only
+    // now, so this input is silent — and it must be silent CHEAPLY, or a future
+    // keyword branch reintroduces the blowup with every other timing test green.
+    const path = `${'protocol'.repeat(12_000)}/notes.md`;
+    expect(msOf(() => pathRulesFor([path]))).toBeLessThan(BOUND_MS);
+  }, 60_000);
+
+  it('the contract-doc rule pays no per-anchor cost inside a governed section', () => {
+    // A governed prefix so the location branch cannot fail fast, then a deep
+    // path: an anchor repeated at every level must not pay its suffix once per
+    // anchor. Ends in `.md`, so the extension gate does not rescue it.
+    const path = `docs/api/${'docs/api/'.repeat(40_000)}x.md`;
+    expect(msOf(() => pathRulesFor([path]))).toBeLessThan(BOUND_MS);
+  }, 60_000);
+
+  it("the contract-doc rule's SDK arm pays no nested-quantifier cost", () => {
+    // `sdks?(-[a-z0-9]+)*` is the one nested quantifier in the matcher. Its
+    // iterations are separated by `-`, which the inner class cannot match, so
+    // the split points are forced — pin that, because widening the inner class
+    // to include `-` would make it catastrophic and nothing else would say so.
+    const path = `sdk${'-a'.repeat(48_000)}x.md`;
+    expect(msOf(() => pathRulesFor([path]))).toBeLessThan(BOUND_MS);
+  }, 60_000);
+
+  it('the genre exclusion pays no per-anchor cost either', () => {
+    // The exclusion runs before the location branches on every documentation
+    // path, so it is on the same attacker-reachable path and owes the same
+    // bound.
+    const path = `${'design/'.repeat(40_000)}x.md`;
     expect(msOf(() => pathRulesFor([path]))).toBeLessThan(BOUND_MS);
   }, 60_000);
 });
@@ -783,15 +860,39 @@ describe('pathRulesFor — the consumer-facing contract documentation rule', () 
     }
   });
 
-  it('excludes a proposal even when its own name says protocol', () => {
-    // Order matters inside the matcher: the proposal exclusion runs BEFORE the
-    // filename branch, or every design doc with `protocol` in its title would be
-    // measured against code nobody has written yet.
-    expect(pathRulesFor(['docs/design/wire-protocol.md'])).toBe('');
-    // The same filename outside a proposal directory is governed.
-    expect(pathRulesFor(['integrations/wire-protocol.md'])).toContain(
-      'Consumer-facing contract documentation',
+  it('takes governance from location, never from a keyword in the name', () => {
+    // The withdrawn branch, and why. A keyword-in-filename test fires anywhere in
+    // the tree: it put a user guide, a changelog entry and a flat-layout RFC under
+    // a checklist whose blockers are graded Critical, and closing that entrance by
+    // entrance did not converge — every audit round found another form. Location
+    // is the signal that enumerates: two shapes, and everything else is silent.
+    const governed = 'Consumer-facing contract documentation';
+    // Same filename. Inside a reference section, governed; outside one, silent.
+    expect(pathRulesFor(['docs/reference/wire-protocol.md'])).toContain(
+      governed,
     );
+    expect(pathRulesFor(['integrations/wire-protocol.md'])).not.toContain(
+      governed,
+    );
+    // And the recall this costs, stated as a test rather than left to be
+    // rediscovered: a wire reference outside a docs or SDK tree is NOT governed.
+    expect(pathRulesFor(['PROTOCOL.md'])).toBe('');
+    expect(pathRulesFor(['spec/wire.md'])).toBe('');
+  });
+
+  it('applies the genre exclusion in both its directory and filename forms', () => {
+    // The two forms come from one shared list so they cannot drift; before that
+    // they had, and a changelog DIRECTORY under a governed section and a
+    // flat-layout `rfc-0001.md` both reached the checklist. Every member is
+    // pinned in the matcher table; this pins that both spellings are enforced.
+    const governed = 'Consumer-facing contract documentation';
+    expect(pathRulesFor(['docs/api/changelog/2026-08.md'])).not.toContain(
+      governed,
+    );
+    expect(pathRulesFor(['docs/api/rfc-0001.md'])).not.toContain(governed);
+    // The control that makes those two meaningful: the same governed section,
+    // with a name that is not a genre, is still governed.
+    expect(pathRulesFor(['docs/api/sessions.md'])).toContain(governed);
   });
 
   it('stacks with the code rules when a diff touches both', () => {
