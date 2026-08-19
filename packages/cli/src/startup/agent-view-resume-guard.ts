@@ -8,11 +8,7 @@ import {
   patchAgentViewSessionState,
   readAgentViewSessionState,
 } from '../agent-view/supervisor-store.js';
-import {
-  isAgentViewWorkerEnv,
-  QWEN_AGENT_VIEW_SESSION_ID,
-  readAgentViewWorkerSidebandEnv,
-} from '../agent-view/worker-sideband.js';
+import { readAgentViewWorkerSidebandEnv } from '../agent-view/worker-sideband.js';
 
 export const MANAGED_AGENT_VIEW_RESUME_MESSAGE =
   'That session is still running as a background agent. Open `qwen agents` to attach to it, or remove it from Agent View first to resume here.';
@@ -27,12 +23,11 @@ export const MANAGED_AGENT_VIEW_DELETE_MESSAGE =
   'That session is still running as a background agent. Stop or remove it from `qwen agents` before deleting it here.';
 
 // The worker-env bypass is load-bearing (respawned workers resume their own
-// session), so require the sideband session id to match — a lone forged
-// QWEN_AGENT_VIEW_WORKER=1 no longer defeats the guard.
+// session), so require the full sideband env plus a matching session id —
+// both production spawn paths build env via createAgentViewWorkerSidebandEnv,
+// while a pasted/stray marker+id pair must not defeat the guard.
 function isSessionWorker(sessionId: string, env: NodeJS.ProcessEnv): boolean {
-  return (
-    isAgentViewWorkerEnv(env) && env[QWEN_AGENT_VIEW_SESSION_ID] === sessionId
-  );
+  return readAgentViewWorkerSidebandEnv(env)?.sessionId === sessionId;
 }
 
 export async function isManagedAgentViewResumeBlocked(
@@ -41,7 +36,10 @@ export async function isManagedAgentViewResumeBlocked(
 ): Promise<boolean> {
   if (isSessionWorker(sessionId, env)) return false;
   const state = await readAgentViewSessionState(sessionId);
-  return state?.ownership === 'managed';
+  // Block during the 'adopting' window too: /background adopt writes
+  // 'adopting', spawns the --resume worker, and only patches 'managed'
+  // afterwards — a concurrent foreground resume would double-run the session.
+  return state?.ownership === 'managed' || state?.ownership === 'adopting';
 }
 
 /**
@@ -56,7 +54,12 @@ export async function isManagedAgentViewContinueBlocked(
 ): Promise<boolean> {
   if (isSessionWorker(sessionId, env)) return false;
   const state = await readAgentViewSessionState(sessionId);
-  return state?.ownership === 'managed' && state.processState !== 'exited';
+  return (
+    (state?.ownership === 'managed' &&
+      state.processState !== 'exited' &&
+      state.processState !== 'hibernated') ||
+    state?.ownership === 'adopting'
+  );
 }
 
 /**
@@ -84,9 +87,12 @@ export async function releaseExitedManagedSessionForContinue(
 ): Promise<void> {
   // Same strict predicate as the /resume block: a lone marker must not
   // suppress the release in an ordinary foreground session.
-  if (readAgentViewWorkerSidebandEnv(env) !== undefined) return;
+  if (isSessionWorker(sessionId, env)) return;
   const state = await readAgentViewSessionState(sessionId);
-  if (state?.ownership !== 'managed' || state.processState !== 'exited') {
+  if (
+    state?.ownership !== 'managed' ||
+    (state.processState !== 'exited' && state.processState !== 'hibernated')
+  ) {
     return;
   }
   await patchAgentViewSessionState(sessionId, {

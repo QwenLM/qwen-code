@@ -4,14 +4,61 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-const { writeTerminalTitleSpy, useWakeRepaintMock, buildWakeRepaintSpy } =
-  vi.hoisted(() => ({
-    writeTerminalTitleSpy: vi.fn(),
-    useWakeRepaintMock: vi.fn(),
-    buildWakeRepaintSpy: vi.fn((deps: Record<string, unknown>) =>
-      vi.fn(() => deps),
+import type { AgentViewWorkerSidebandEnv } from '../agent-view/worker-sideband.js';
+
+const {
+  writeTerminalTitleSpy,
+  useWakeRepaintMock,
+  buildWakeRepaintSpy,
+  buildCurrentCliArgvMock,
+} = vi.hoisted(() => ({
+  writeTerminalTitleSpy: vi.fn(),
+  useWakeRepaintMock: vi.fn(),
+  buildWakeRepaintSpy: vi.fn((deps: Record<string, unknown>) =>
+    vi.fn(() => deps),
+  ),
+  buildCurrentCliArgvMock: vi.fn(),
+}));
+
+const agentViewHandoffMocks = vi.hoisted(() => ({
+  detachCurrentSession: vi.fn(async () => ({ sessionId: 'session-1' })),
+  readWorkerSideband: vi.fn<() => AgentViewWorkerSidebandEnv | undefined>(
+    () => undefined,
+  ),
+  sendWorkerEvent: vi.fn(async () => undefined),
+  reportWorkerState: vi.fn(async () => undefined),
+}));
+
+vi.mock('../agent-view/managed-detach.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../agent-view/managed-detach.js')>();
+  return {
+    ...actual,
+    detachCurrentSessionToAgentView: agentViewHandoffMocks.detachCurrentSession,
+  };
+});
+
+vi.mock('../agent-view/worker-sideband.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../agent-view/worker-sideband.js')>();
+  return {
+    ...actual,
+    readAgentViewWorkerSidebandEnv: agentViewHandoffMocks.readWorkerSideband,
+    sendAgentViewWorkerEvent: agentViewHandoffMocks.sendWorkerEvent,
+    reportAgentViewWorkerState: agentViewHandoffMocks.reportWorkerState,
+  };
+});
+
+vi.mock('../agent-view/current-cli-argv.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../agent-view/current-cli-argv.js')>();
+  return {
+    ...actual,
+    buildCurrentQwenCliArgv: buildCurrentCliArgvMock.mockImplementation(
+      actual.buildCurrentQwenCliArgv,
     ),
-  }));
+  };
+});
 
 vi.mock('./hooks/use-wake-repaint.js', () => ({
   useWakeRepaint: useWakeRepaintMock,
@@ -21,9 +68,9 @@ vi.mock('./utils/terminal-resize-reflow.js', () => ({
   buildWakeRepaint: buildWakeRepaintSpy,
 }));
 
-vi.mock('../utils/windowTitle.js', async (importOriginal) => {
+vi.mock('./utils/windowTitle.js', async (importOriginal) => {
   const actual =
-    await importOriginal<typeof import('../utils/windowTitle.js')>();
+    await importOriginal<typeof import('./utils/windowTitle.js')>();
   return {
     ...actual,
     writeTerminalTitle: (
@@ -63,7 +110,7 @@ import {
 import {
   formatSessionWindowTitle,
   writeTerminalTitle,
-} from '../utils/windowTitle.js';
+} from './utils/windowTitle.js';
 import ansiEscapes from 'ansi-escapes';
 import {
   type Config,
@@ -212,6 +259,7 @@ import { useKeypress, type Key } from './hooks/useKeypress.js';
 import { ShellExecutionService } from '@qwen-code/qwen-code-core';
 import { clearCiEnv } from '../test-utils/ci-env.js';
 import { restorePromptStash } from '../services/prompt-stash.js';
+import { runExitCleanup } from '../utils/cleanup.js';
 
 type SpawnSync = typeof import('node:child_process').spawnSync;
 
@@ -266,6 +314,12 @@ describe('AppContainer State Management', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    agentViewHandoffMocks.detachCurrentSession.mockResolvedValue({
+      sessionId: 'session-1',
+    });
+    agentViewHandoffMocks.readWorkerSideband.mockReturnValue(undefined);
+    agentViewHandoffMocks.sendWorkerEvent.mockResolvedValue(undefined);
+    agentViewHandoffMocks.reportWorkerState.mockResolvedValue(undefined);
     restoreCiEnv = clearCiEnv();
     vi.stubEnv('TERM', 'xterm-256color');
     originalStdoutIsTTY = process.stdout.isTTY;
@@ -778,6 +832,43 @@ describe('AppContainer State Management', () => {
   });
 
   describe('Basic Rendering', () => {
+    it('reports working after an Agent View worker starts responding', async () => {
+      agentViewHandoffMocks.readWorkerSideband.mockReturnValue({
+        sessionId: 'session-1',
+        sidebandEndpoint: '/tmp/agent-view.sock',
+        token: 'token',
+        activeCwd: '/test/workspace',
+      });
+      mockedUseGeminiStream.mockReturnValue({
+        pendingToolCalls: [],
+        streamingState: StreamingState.Responding,
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
+        clearPendingState: mockClearPendingState,
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await vi.waitFor(() => {
+        expect(agentViewHandoffMocks.reportWorkerState).toHaveBeenCalledWith({
+          sessionState: 'working',
+        });
+      });
+    });
+
     it('continues quitting when cancelling the active request fails', () => {
       vi.useFakeTimers();
       const cancelOngoingRequest = vi.fn(() => {
@@ -821,6 +912,90 @@ describe('AppContainer State Management', () => {
       expect(cancelOngoingRequest).toHaveBeenCalledOnce();
       expect(requestShutdown).toHaveBeenCalledOnce();
       expect(vi.getTimerCount()).toBe(timerCount + 1);
+    });
+
+    it('exits the foreground runtime after handing it to Agent View', async () => {
+      buildCurrentCliArgvMock.mockReturnValueOnce([
+        process.execPath,
+        '-e',
+        'process.exit(0)',
+      ]);
+      const requestShutdown = vi.fn();
+      vi.spyOn(mockConfig, 'getGeminiClient').mockReturnValue({
+        requestShutdown,
+      } as unknown as GeminiClient);
+      const exit = vi
+        .spyOn(process, 'exit')
+        .mockImplementation((() => undefined) as never);
+
+      try {
+        render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+        const actions = mockedUseSlashCommandProcessor.mock.calls.at(
+          -1,
+        )?.[12] as { detachAgentViewSession: () => Promise<void> } | undefined;
+
+        await actions?.detachAgentViewSession();
+
+        expect(agentViewHandoffMocks.detachCurrentSession).toHaveBeenCalledWith(
+          mockConfig,
+          { terminal: { columns: 80, rows: 24 } },
+        );
+        expect(requestShutdown).toHaveBeenCalledOnce();
+        expect(runExitCleanup).toHaveBeenCalledOnce();
+        expect(exit).toHaveBeenCalledWith(0);
+        expect(
+          agentViewHandoffMocks.detachCurrentSession.mock
+            .invocationCallOrder[0],
+        ).toBeLessThan(requestShutdown.mock.invocationCallOrder[0]);
+        expect(requestShutdown.mock.invocationCallOrder[0]).toBeLessThan(
+          vi.mocked(runExitCleanup).mock.invocationCallOrder[0],
+        );
+        expect(
+          vi.mocked(runExitCleanup).mock.invocationCallOrder[0],
+        ).toBeLessThan(exit.mock.invocationCallOrder[0]);
+      } finally {
+        exit.mockRestore();
+      }
+    });
+
+    it('detaches an attached worker through sideband without adopting it', async () => {
+      agentViewHandoffMocks.readWorkerSideband.mockReturnValue({
+        sessionId: 'session-1',
+        sidebandEndpoint: '/tmp/agent-view.sock',
+        token: 'token',
+        activeCwd: '/repo',
+      });
+      const requestShutdown = vi.fn();
+      vi.spyOn(mockConfig, 'getGeminiClient').mockReturnValue({
+        requestShutdown,
+      } as unknown as GeminiClient);
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      const actions = mockedUseSlashCommandProcessor.mock.calls.at(-1)?.[12] as
+        | { detachAgentViewSession: () => Promise<void> }
+        | undefined;
+
+      await actions?.detachAgentViewSession();
+
+      expect(agentViewHandoffMocks.sendWorkerEvent).toHaveBeenCalledWith({
+        type: 'detach',
+      });
+      expect(agentViewHandoffMocks.detachCurrentSession).not.toHaveBeenCalled();
+      expect(requestShutdown).not.toHaveBeenCalled();
+      expect(runExitCleanup).not.toHaveBeenCalled();
     });
 
     it('shows recording failures as warnings and unsubscribes on unmount', async () => {
@@ -1951,9 +2126,63 @@ describe('AppContainer State Management', () => {
         '/btw quick side question',
         SendMessageType.UserQuery,
         undefined,
-        { submittedPrompt: '/btw quick side question' },
+        expect.objectContaining({
+          submittedPrompt: '/btw quick side question',
+          onAdmissionFailed: expect.any(Function),
+        }),
       );
       expect(mockQueueMessage).not.toHaveBeenCalled();
+    });
+
+    it('queues a responding ?btw submission when concurrent admission fails', () => {
+      const mockSubmitQuery = vi.fn();
+      const mockQueueMessage = vi.fn();
+
+      mockedUseGeminiStream.mockReturnValue({
+        pendingToolCalls: [],
+        streamingState: 'responding',
+        submitQuery: mockSubmitQuery,
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
+        messageQueue: [],
+        addMessage: mockQueueMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      capturedUIActions.handleFinalSubmit('?btw wait for the tool', {
+        submittedPrompt: '?btw wait for the tool',
+      });
+      const metadata = mockSubmitQuery.mock.calls[0]?.[3] as
+        | { onAdmissionFailed?: () => void }
+        | undefined;
+      metadata?.onAdmissionFailed?.();
+
+      expect(mockQueueMessage).toHaveBeenCalledWith(
+        '?btw wait for the tool',
+        true,
+        '?btw wait for the tool',
+      );
     });
 
     it('runs opted-in slash commands outside the active turn while responding', () => {

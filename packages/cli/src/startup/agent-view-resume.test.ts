@@ -97,10 +97,15 @@ describe('routeManagedAgentViewResume', () => {
     mockReadAgentViewSessionState.mockResolvedValue(state('managed'));
 
     await expect(
-      routeManagedAgentViewResume('session-1', {
-        QWEN_AGENT_VIEW_WORKER: '1',
-        QWEN_AGENT_VIEW_SESSION_ID: 'session-1',
-      }),
+      routeManagedAgentViewResume(
+        'session-1',
+        createAgentViewWorkerSidebandEnv({
+          sessionId: 'session-1',
+          sidebandEndpoint: 'unix:/tmp/qwen-agent-view.sock',
+          token: 'token-1',
+          activeCwd: '/repo',
+        }),
+      ),
     ).resolves.toBe(false);
 
     expect(mockReadAgentViewSessionState).not.toHaveBeenCalled();

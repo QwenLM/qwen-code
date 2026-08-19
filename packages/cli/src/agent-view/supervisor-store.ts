@@ -89,10 +89,74 @@ export async function readAgentViewRoster(
 export async function readAgentViewRosterForWrite(
   options: StoreOptions = {},
 ): Promise<AgentViewRosterFile> {
-  const raw = await readJsonRecordForWrite(
-    getAgentViewStorePaths(options).rosterPath,
-  );
-  return normalizeRoster(raw);
+  // Roster pins exist nowhere else: a corrupt-but-present file must fail
+  // closed exactly like readAgentViewRosterStrict, or the mutation would
+  // write back an emptied roster and silently drop every other session's
+  // pin. ENOENT still reads as an empty roster so first-dispatch creation
+  // works.
+  return readAgentViewRosterStrict(options);
+}
+
+/**
+ * Like readAgentViewRosterForWrite, but corrupt or non-object content is a
+ * hard error instead of an empty roster: callers making safety decisions
+ * (e.g. the hibernation pin check) must fail closed when the file exists
+ * but its pins cannot be read.
+ */
+export async function readAgentViewRosterStrict(
+  options: StoreOptions = {},
+): Promise<AgentViewRosterFile> {
+  const rosterPath = getAgentViewStorePaths(options).rosterPath;
+  let text: string;
+  try {
+    text = await fs.readFile(rosterPath, 'utf8');
+  } catch (error) {
+    if (isNodeError(error) && error.code === 'ENOENT') {
+      return normalizeRoster(undefined);
+    }
+    throw error;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    throw new Error(`Agent View roster at ${rosterPath} is corrupt.`, {
+      cause: error,
+    });
+  }
+  if (!isRecord(parsed)) {
+    throw new Error(`Agent View roster at ${rosterPath} is not a JSON object.`);
+  }
+  // Failing open here would void the hibernation pin check: a missing
+  // sessions array or a dropped (structurally incomplete) entry reads as
+  // "no pins", hibernating a session its owner explicitly kept alive.
+  if (!Array.isArray(parsed['sessions'])) {
+    throw new Error(
+      `Agent View roster at ${rosterPath} has no sessions array.`,
+    );
+  }
+  // A declared-but-unreadable pin (e.g. "true" as a string) must not be
+  // silently coerced away by normalizeRosterEntry: the hibernation pin
+  // checks test truthiness, so failing open here would void the very
+  // keep-alive opt-out this reader exists to protect.
+  for (const entry of parsed['sessions']) {
+    if (
+      isRecord(entry) &&
+      'pinned' in entry &&
+      typeof entry['pinned'] !== 'boolean'
+    ) {
+      throw new Error(
+        `Agent View roster at ${rosterPath} has a non-boolean pinned field.`,
+      );
+    }
+  }
+  const roster = normalizeRoster(parsed);
+  if (roster.sessions.length !== parsed['sessions'].length) {
+    throw new Error(
+      `Agent View roster at ${rosterPath} has incomplete session entries.`,
+    );
+  }
+  return roster;
 }
 
 export async function writeAgentViewRoster(
@@ -192,14 +256,19 @@ export async function writeAgentViewSessionState(
   state: AgentViewSessionStateFile,
   options: StoreOptions = {},
 ): Promise<void> {
-  const paths = getAgentViewSessionPaths(state.sessionId, options);
-  const existing = await readJsonRecordForWrite(paths.statePath);
-  await writeJsonFile(paths.statePath, {
-    ...existing,
-    ...state,
-    schemaVersion: 1,
+  // Serialize with the per-session queue: an unqueued full-snapshot write
+  // landing after a queued verdict patch would re-assert stale fields over
+  // it.
+  return mutateAgentViewState(state.sessionId, options, async () => {
+    const paths = getAgentViewSessionPaths(state.sessionId, options);
+    const existing = await readJsonRecordForWrite(paths.statePath);
+    await writeJsonFile(paths.statePath, {
+      ...existing,
+      ...state,
+      schemaVersion: 1,
+    });
+    await fs.mkdir(paths.tmpDir, { recursive: true });
   });
-  await fs.mkdir(paths.tmpDir, { recursive: true });
 }
 
 /**
@@ -232,21 +301,25 @@ export async function patchAgentViewSessionStateIf(
     existing: AgentViewSessionStateFile,
   ) => Partial<AgentViewSessionStateFile> | undefined,
   options: StoreOptions = {},
-): Promise<void> {
-  return mutateAgentViewState(sessionId, options, async () => {
+): Promise<boolean> {
+  let applied = false;
+  await mutateAgentViewState(sessionId, options, async () => {
     const paths = getAgentViewSessionPaths(sessionId, options);
-    const existing = await readJsonRecordForWrite(paths.statePath);
+    const existing = await readJsonRecordForConditionalWrite(paths.statePath);
     if (existing === undefined) {
       return;
     }
     const normalized = normalizeSessionState(existing, sessionId);
     if (normalized === undefined) {
-      return;
+      throw new Error(
+        `Agent View session state at ${paths.statePath} is incomplete.`,
+      );
     }
     const patch = decidePatch(normalized);
     if (patch === undefined) {
       return;
     }
+    applied = true;
     await writeJsonFile(paths.statePath, {
       ...existing,
       ...patch,
@@ -254,6 +327,7 @@ export async function patchAgentViewSessionStateIf(
     });
     await fs.mkdir(paths.tmpDir, { recursive: true });
   });
+  return applied;
 }
 
 export async function listAgentViewSessionStates(
@@ -293,7 +367,9 @@ export async function listAgentViewSessionSnapshots(
       launch: redactAgentViewLaunch(
         await readAgentViewLaunch(state.sessionId, options),
       ),
-      activity: await readAgentViewActivity(state.sessionId, options),
+      activity: redactAgentViewActivity(
+        await readAgentViewActivity(state.sessionId, options),
+      ),
       worker: redactAgentViewWorker(
         await readAgentViewWorker(state.sessionId, options),
       ),
@@ -385,6 +461,28 @@ export async function patchAgentViewActivityIf(
     });
   });
   return applied;
+}
+
+/**
+ * Drops the persisted pids once a terminal exit verdict is authoritative:
+ * stale pids may be reused by unrelated processes, and leaving them makes
+ * later liveness probes and signaling paths target the wrong process.
+ */
+export async function clearAgentViewWorkerPids(
+  sessionId: string,
+  options: StoreOptions = {},
+): Promise<void> {
+  const paths = getAgentViewSessionPaths(sessionId, options);
+  await withMutationQueue(workerMutationQueues, paths.workerPath, async () => {
+    const existing = await readJsonRecordForWrite(paths.workerPath);
+    if (existing === undefined) {
+      return;
+    }
+    const next: JsonRecord = { ...existing };
+    delete next['hostPid'];
+    delete next['workerPid'];
+    await writeJsonFile(paths.workerPath, { ...next, schemaVersion: 1 });
+  });
 }
 
 export function digestAgentViewWorkerToken(token: string): string {
@@ -498,6 +596,32 @@ async function readJsonRecordForWrite(
     // Corrupt contents have no fields worth preserving; overwriting recovers.
     return undefined;
   }
+}
+
+async function readJsonRecordForConditionalWrite(
+  filePath: string,
+): Promise<JsonRecord | undefined> {
+  let text: string;
+  try {
+    text = await fs.readFile(filePath, 'utf8');
+  } catch (error) {
+    if (isNodeError(error) && error.code === 'ENOENT') {
+      return undefined;
+    }
+    throw error;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    throw new Error(`Agent View record at ${filePath} is corrupt.`, {
+      cause: error,
+    });
+  }
+  if (!isRecord(parsed)) {
+    throw new Error(`Agent View record at ${filePath} is not a JSON object.`);
+  }
+  return parsed;
 }
 
 async function withMutationQueue<T>(
@@ -649,6 +773,9 @@ function normalizeSessionState(
     activeCwd: path.resolve(activeCwd),
     createdAt,
     updatedAt,
+    ...(typeof raw['initialPromptPending'] === 'boolean'
+      ? { initialPromptPending: raw['initialPromptPending'] }
+      : {}),
     worktree: isRecord(raw['worktree'])
       ? {
           ...raw['worktree'],
@@ -710,9 +837,22 @@ function normalizeActivity(
     lastResult: stringValue(raw['lastResult']),
     queuedPromptCount: numberValue(raw['queuedPromptCount']),
     queuedPromptPreview: stringValue(raw['queuedPromptPreview']),
+    queuedPromptId: stringValue(raw['queuedPromptId']),
+    queuedPromptText: stringValue(raw['queuedPromptText']),
     lastQueuedPromptAt: stringValue(raw['lastQueuedPromptAt']),
     lastActivityAt,
     capabilities: stringArrayValue(raw['capabilities']),
+  }) as AgentViewActivityFile;
+}
+
+export function redactAgentViewActivity(
+  activity: AgentViewActivityFile | undefined,
+): AgentViewActivityFile | undefined {
+  if (!activity) return undefined;
+  return stripUndefined({
+    ...activity,
+    queuedPromptId: undefined,
+    queuedPromptText: undefined,
   }) as AgentViewActivityFile;
 }
 

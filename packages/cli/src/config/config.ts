@@ -549,53 +549,40 @@ function normalizeOutputFormat(
   return OutputFormat.TEXT;
 }
 
-// Subcommands and listing flags of `qwen agents`; any other token after
-// `agents` means the input is a natural-language prompt, not the command.
-const AGENTS_COMMAND_TOKENS = new Set([
-  'attach',
-  'logs',
-  'stop',
-  'kill',
-  'respawn',
-  'rm',
-  'daemon',
-  '--json',
-  '--all',
-  '--cwd',
-  '--help',
-  '-h',
-  '--version',
-  '-v',
-]);
-
-function isAgentsPromptFallback(rawArgv: readonly string[]): boolean {
-  return (
-    rawArgv.length >= 2 &&
-    rawArgv[0] === 'agents' &&
-    !AGENTS_COMMAND_TOKENS.has(rawArgv[1])
+function hasRawOption(
+  rawArgv: readonly string[],
+  longName: string,
+  shortName?: string,
+): boolean {
+  const separatorIndex = rawArgv.indexOf('--');
+  const optionTokens = rawArgv.slice(
+    0,
+    separatorIndex === -1 ? rawArgv.length : separatorIndex,
+  );
+  const camelName = `--${longName
+    .slice(2)
+    .replace(/-([a-z])/g, (_, letter: string) => letter.toUpperCase())}`;
+  const longNames = camelName === longName ? [longName] : [longName, camelName];
+  return optionTokens.some(
+    (token) =>
+      longNames.some(
+        (name) =>
+          token === name ||
+          token.startsWith(`${name}=`) ||
+          token === `--no-${name.slice(2)}`,
+      ) ||
+      token === shortName ||
+      (shortName !== undefined && token.startsWith(`${shortName}=`)) ||
+      (shortName !== undefined &&
+        token.startsWith('-') &&
+        !token.startsWith('--') &&
+        token.slice(1).includes(shortName.slice(1))),
   );
 }
 
-export async function parseArguments(): Promise<CliArgs> {
-  let rawArgv = hideBin(process.argv);
-
-  // hack: if the first argument is the CLI entry point, remove it
-  if (
-    rawArgv.length > 0 &&
-    (rawArgv[0].endsWith('/dist/qwen-cli/cli.js') ||
-      rawArgv[0].endsWith('/dist/cli.js') ||
-      rawArgv[0].endsWith('/dist/cli/cli.js'))
-  ) {
-    rawArgv = rawArgv.slice(1);
-  }
-
-  // `qwen agents explain this project` must stay a positional prompt: when
-  // the second token is not a real `agents` subcommand, skip registering
-  // the command group so the tokens route to the default prompt command
-  // instead of dying in strict mode.
-  const agentsPromptFallback = isAgentsPromptFallback(rawArgv);
-
-  const yargsInstance = yargs(rawArgv)
+function buildCliParser(rawArgv: string[]): Argv {
+  const parser = yargs(rawArgv)
+    .parserConfiguration({ 'populate--': true })
     .locale('en')
     .scriptName('qwen')
     .usage(
@@ -1024,8 +1011,10 @@ export async function parseArguments(): Promise<CliArgs> {
           const hasPositionalQuery = Array.isArray(query)
             ? query.length > 0
             : !!query;
+          const separatorTail = Array.isArray(argv['--']) ? argv['--'] : [];
+          const hasQuery = hasPositionalQuery || separatorTail.length > 0;
 
-          if (argv['background'] && !hasPositionalQuery) {
+          if (argv['background'] && !hasQuery) {
             return 'Cannot use --bg/--background without a positional prompt';
           }
           if (argv['background'] && argv['prompt'] !== undefined) {
@@ -1034,7 +1023,11 @@ export async function parseArguments(): Promise<CliArgs> {
           if (argv['background'] && argv['promptInteractive'] !== undefined) {
             return 'Cannot use --bg/--background with --prompt-interactive (-i)';
           }
-          if (argv['background'] && (argv['acp'] || argv['experimentalAcp'])) {
+          if (
+            argv['background'] &&
+            (hasRawOption(rawArgv, '--acp') ||
+              hasRawOption(rawArgv, '--experimental-acp'))
+          ) {
             return 'Cannot use --bg/--background with ACP mode';
           }
           if (argv['background'] && argv['inputFormat'] === 'stream-json') {
@@ -1053,7 +1046,7 @@ export async function parseArguments(): Promise<CliArgs> {
           if (
             argv['background'] &&
             (argv['resume'] !== undefined ||
-              argv['continue'] ||
+              hasRawOption(rawArgv, '--continue', '-c') ||
               argv['sessionId'] !== undefined)
           ) {
             return 'Cannot use --bg/--background with --resume, --continue, or --session-id';
@@ -1070,12 +1063,12 @@ export async function parseArguments(): Promise<CliArgs> {
           if (argv['background'] && argv['includeDirectories']) {
             return 'Cannot use --bg/--background with --include-directories';
           }
-          if (argv['background'] && argv['yolo']) {
+          if (argv['background'] && hasRawOption(rawArgv, '--yolo', '-y')) {
             return 'Cannot use --bg/--background with --yolo (-y)';
           }
           if (
             argv['background'] &&
-            (argv['sandbox'] ||
+            (hasRawOption(rawArgv, '--sandbox', '-s') ||
               argv['sandboxImage'] !== undefined ||
               argv['systemPrompt'] !== undefined ||
               argv['appendSystemPrompt'] !== undefined ||
@@ -1094,7 +1087,7 @@ export async function parseArguments(): Promise<CliArgs> {
               argv['excludeTools'] !== undefined ||
               argv['disabledSlashCommands'] !== undefined ||
               argv['authType'] !== undefined ||
-              argv['experimentalLsp'] ||
+              hasRawOption(rawArgv, '--experimental-lsp') ||
               argv['jsonFile'] !== undefined ||
               argv['jsonFd'] !== undefined)
           ) {
@@ -1111,30 +1104,30 @@ export async function parseArguments(): Promise<CliArgs> {
           }
           if (
             argv['background'] &&
-            (argv['safeMode'] ||
+            (hasRawOption(rawArgv, '--safe-mode') ||
               argv['proxy'] !== undefined ||
-              argv['insecure'] ||
-              argv['chatRecording'] ||
-              argv['openaiLogging'] ||
+              hasRawOption(rawArgv, '--insecure') ||
+              hasRawOption(rawArgv, '--chat-recording') ||
+              hasRawOption(rawArgv, '--openai-logging') ||
               argv['openaiLoggingDir'] !== undefined ||
               argv['openaiApiKey'] !== undefined ||
               argv['openaiBaseUrl'] !== undefined ||
-              argv['screenReader'] ||
-              argv['bare'] ||
-              argv['debug'])
+              hasRawOption(rawArgv, '--screen-reader') ||
+              hasRawOption(rawArgv, '--bare') ||
+              hasRawOption(rawArgv, '--debug', '-d'))
           ) {
             return 'Cannot use --bg/--background with --safe-mode, --proxy, --insecure, --chat-recording, --openai-logging, --openai-logging-dir, --openai-api-key, --openai-base-url, --screen-reader, --bare, or --debug';
           }
           if (
             argv['background'] &&
-            (argv['telemetry'] ||
+            (hasRawOption(rawArgv, '--telemetry') ||
               argv['telemetryTarget'] !== undefined ||
               argv['telemetryOtlpEndpoint'] !== undefined ||
               argv['telemetryOtlpProtocol'] !== undefined ||
-              argv['telemetryLogPrompts'] ||
+              hasRawOption(rawArgv, '--telemetry-log-prompts') ||
               argv['telemetryOutfile'] !== undefined ||
               argv['channel'] !== undefined ||
-              argv['listExtensions'] ||
+              hasRawOption(rawArgv, '--list-extensions', '-l') ||
               argv['sandboxSessionId'] !== undefined)
           ) {
             return 'Cannot use --bg/--background with telemetry flags, --channel, --list-extensions, or --sandbox-session-id';
@@ -1144,7 +1137,7 @@ export async function parseArguments(): Promise<CliArgs> {
             // is positional here; the only actionable fix is a TTY.
             return 'Cannot use --bg/--background when stdin is not an interactive terminal; run it from a TTY';
           }
-          if (argv['prompt'] && hasPositionalQuery) {
+          if (argv['prompt'] && hasQuery) {
             return 'Cannot use both a positional prompt and the --prompt (-p) flag together';
           }
           if (argv['prompt'] && argv['promptInteractive']) {
@@ -1239,7 +1232,8 @@ export async function parseArguments(): Promise<CliArgs> {
           }
           return true;
         }),
-    )
+    );
+  parser
     // Register MCP subcommands
     .command(mcpCommand)
     // Register Extension subcommands
@@ -1257,12 +1251,41 @@ export async function parseArguments(): Promise<CliArgs> {
     .command(sessionsCommand)
     // Register update command
     .command(updateCommand);
+  return parser;
+}
 
-  // Register Agent View Phase 1 command surface (skipped on the
-  // agents-initial positional-prompt fallback above).
-  if (!agentsPromptFallback) {
-    yargsInstance.command(agentsCommand);
+export async function parseArguments(): Promise<CliArgs> {
+  let rawArgv = hideBin(process.argv);
+
+  // hack: if the first argument is the CLI entry point, remove it
+  if (
+    rawArgv.length > 0 &&
+    (rawArgv[0].endsWith('/dist/qwen-cli/cli.js') ||
+      rawArgv[0].endsWith('/dist/cli.js') ||
+      rawArgv[0].endsWith('/dist/cli/cli.js'))
+  ) {
+    rawArgv = rawArgv.slice(1);
   }
+
+  const separatorIndex = rawArgv.indexOf('--');
+  const optionTokens = rawArgv.slice(
+    0,
+    separatorIndex === -1 ? rawArgv.length : separatorIndex,
+  );
+  const agentsTokenIndex = optionTokens.indexOf('agents');
+  const assignedAgentsBoolean =
+    agentsTokenIndex === -1
+      ? undefined
+      : optionTokens.find((token) => /^--(?:json|all)=/.test(token));
+  if (assignedAgentsBoolean !== undefined) {
+    writeStderrLine(
+      `${assignedAgentsBoolean.split('=')[0]} is a boolean flag and does not accept an assigned value.`,
+    );
+    process.exit(1);
+  }
+
+  const yargsInstance = buildCliParser(rawArgv);
+  yargsInstance.command(agentsCommand);
 
   yargsInstance
     .version(await getCliVersion()) // This will enable the --version flag based on package.json
@@ -1288,7 +1311,7 @@ export async function parseArguments(): Promise<CliArgs> {
       result._[0] === 'channel' ||
       result._[0] === 'review' ||
       result._[0] === 'sessions' ||
-      (result._[0] === 'agents' && !agentsPromptFallback) ||
+      result._[0] === 'agents' ||
       result._[0] === 'update')
   ) {
     // Note: `serve` is intentionally NOT in this list. Its handler blocks
@@ -1307,9 +1330,16 @@ export async function parseArguments(): Promise<CliArgs> {
 
   // Normalize query args: handle both quoted "@path file" and unquoted @path file
   const queryArg = (result as { query?: string | string[] | undefined }).query;
-  const q: string | undefined = Array.isArray(queryArg)
-    ? queryArg.join(' ')
-    : queryArg;
+  const queryParts = Array.isArray(queryArg)
+    ? queryArg.map(String)
+    : queryArg
+      ? [queryArg]
+      : [];
+  const separatorTail = (result as { '--'?: unknown })['--'];
+  if (Array.isArray(separatorTail)) {
+    queryParts.push(...separatorTail.map(String));
+  }
+  const q = queryParts.length > 0 ? queryParts.join(' ') : undefined;
 
   // Route positional args: explicit -i flag -> interactive; else -> one-shot (even for @commands)
   if (q && !result['prompt'] && !result['background']) {
@@ -2205,16 +2235,22 @@ export async function loadCliConfig(
 
     if (argv.forkSession && sessionId) {
       const sourceSessionId = sessionId;
-      // --continue --fork-session: the continue guard in gemini.tsx runs
-      // after this fork and would check the fresh fork UUID, so gate the
-      // source here — a live managed session must never be forked into a
-      // second foreground runtime.
-      if (argv.continue) {
+      // --continue/--resume --fork-session: the continue guard in gemini.tsx
+      // runs after this fork and would check the fresh fork UUID, so gate
+      // the source here — a live managed session must never be forked into
+      // a second foreground runtime. In the sandbox-host partial-config
+      // process the --resume routing never runs at all, so the resume case
+      // must be gated here too.
+      if (argv.continue || argv.resume) {
         const {
           isManagedAgentViewContinueBlocked,
+          isManagedAgentViewResumeBlocked,
           MANAGED_AGENT_VIEW_RESUME_MESSAGE,
         } = await import('../startup/agent-view-resume-guard.js');
-        if (await isManagedAgentViewContinueBlocked(sourceSessionId)) {
+        const blocked = argv.resume
+          ? await isManagedAgentViewResumeBlocked(sourceSessionId)
+          : await isManagedAgentViewContinueBlocked(sourceSessionId);
+        if (blocked) {
           writeStderrLine(MANAGED_AGENT_VIEW_RESUME_MESSAGE);
           process.exit(1);
         }

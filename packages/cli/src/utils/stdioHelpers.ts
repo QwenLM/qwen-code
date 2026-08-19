@@ -89,17 +89,16 @@ export const drainStdioBeforeExit = (timeoutMs = 5000): Promise<void> =>
       }
     };
     const onError = (): void => settle();
-    process.stdout.once('error', onError);
-    process.stderr.once('error', onError);
+    // Persistent listeners: Node emits stream errors asynchronously, so an
+    // EPIPE from a queued write can arrive after a successful drain removed
+    // one-shot listeners, crashing the process with an unhandled 'error'.
+    // The process exits right after the drain, so keeping them is harmless.
+    process.stdout.on('error', onError);
+    process.stderr.on('error', onError);
     const timer = setTimeout(settle, timeoutMs);
     timer.unref?.();
     process.stdout.write('', () => {
-      process.stderr.write('', () => {
-        clearTimeout(timer);
-        process.stdout.removeListener('error', onError);
-        process.stderr.removeListener('error', onError);
-        settle();
-      });
+      process.stderr.write('', settle);
     });
   });
 

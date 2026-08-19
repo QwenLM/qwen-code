@@ -160,7 +160,7 @@ import {
   formatSessionWindowTitle,
   titleStatusPrefix,
   writeTerminalTitle,
-} from '../utils/windowTitle.js';
+} from './utils/windowTitle.js';
 import { clearScreen } from '../utils/stdioHelpers.js';
 import { useTextBuffer } from './components/shared/text-buffer.js';
 import { useLogger } from './hooks/useLogger.js';
@@ -246,7 +246,7 @@ import { useContextualTips } from './hooks/useContextualTips.js';
 import { detachCurrentSessionToAgentView } from '../agent-view/managed-detach.js';
 import { buildCurrentQwenCliArgv } from '../agent-view/current-cli-argv.js';
 import {
-  isAgentViewWorkerEnv,
+  readAgentViewWorkerSidebandEnv,
   readAgentViewWorkerControlEvents,
   reportAgentViewWorkerState,
   sendAgentViewWorkerEvent,
@@ -1749,7 +1749,7 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const detachAgentViewSession = useCallback(async () => {
     try {
-      if (isAgentViewWorkerEnv()) {
+      if (readAgentViewWorkerSidebandEnv() !== undefined) {
         await sendAgentViewWorkerEvent({ type: 'detach' });
         return;
       }
@@ -2244,7 +2244,7 @@ export const AppContainer = (props: AppContainerProps) => {
   );
 
   useEffect(() => {
-    if (!isAgentViewWorkerEnv()) return;
+    if (readAgentViewWorkerSidebandEnv() === undefined) return;
     if (streamingState !== StreamingState.Idle) {
       answeredAgentViewSoftQuestionRef.current = undefined;
     }
@@ -2696,12 +2696,12 @@ export const AppContainer = (props: AppContainerProps) => {
         isBtwCommand(submittedValue)
       ) {
         void Promise.resolve(
-          submitQuery(
-            submittedValue,
-            SendMessageType.UserQuery,
-            undefined,
-            submittedPrompt === undefined ? undefined : { submittedPrompt },
-          ),
+          submitQuery(submittedValue, SendMessageType.UserQuery, undefined, {
+            ...(submittedPrompt === undefined ? {} : { submittedPrompt }),
+            onAdmissionFailed: () => {
+              addMessage(submittedValue, true, submittedPrompt);
+            },
+          }),
         ).catch((error) => {
           debugLogger.warn('Failed to admit /btw submission', error);
         });
@@ -2866,7 +2866,7 @@ export const AppContainer = (props: AppContainerProps) => {
   const handleFinalSubmitRef = useRef(handleFinalSubmit);
   handleFinalSubmitRef.current = handleFinalSubmit;
   useEffect(() => {
-    if (!isAgentViewWorkerEnv()) return undefined;
+    if (readAgentViewWorkerSidebandEnv() === undefined) return undefined;
 
     let disposed = false;
     let timer: NodeJS.Timeout | undefined;
@@ -4254,7 +4254,7 @@ export const AppContainer = (props: AppContainerProps) => {
         buffer.text.length === 0 &&
         !dialogsVisibleRef.current
       ) {
-        if (isAgentViewWorkerEnv()) {
+        if (readAgentViewWorkerSidebandEnv() !== undefined) {
           void detachAgentViewSession();
         }
         return;

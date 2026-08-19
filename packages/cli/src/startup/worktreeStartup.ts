@@ -334,6 +334,36 @@ export async function setupStartupWorktree(
   };
 }
 
+export async function discardCreatedStartupWorktree(
+  context: StartupWorktreeContext | null,
+): Promise<string | undefined> {
+  if (context === null || context.wasReattached) return undefined;
+  try {
+    process.chdir(context.repoRoot);
+    const service = new GitWorktreeService(context.repoRoot);
+    const owner = await readWorktreeSessionMarker(context.worktreePath);
+    if (owner !== null) {
+      return `worktree ${context.worktreePath} is owned by session ${owner}`;
+    }
+    if (await service.hasWorktreeChanges(context.worktreePath)) {
+      return `worktree ${context.worktreePath} has uncommitted changes`;
+    }
+    const branchHead = await service.resolveRef(context.branch);
+    if (branchHead !== context.originalHeadCommit) {
+      return `worktree branch ${context.branch} changed after startup`;
+    }
+    const result = await service.removeUserWorktree(context.slug, {
+      deleteBranch: true,
+      forceDeleteBranch: true,
+    });
+    return result.success
+      ? undefined
+      : (result.error ?? `failed to remove ${context.worktreePath}`);
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+}
+
 /**
  * Result of the post-`loadCliConfig` sidecar persist step. Callers use the
  * boolean fields to decide whether to surface an INFO line in TUI / a

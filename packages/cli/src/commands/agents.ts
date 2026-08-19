@@ -358,7 +358,7 @@ function formatRosterRowsText(rows: AgentRosterRow[]): string {
 }
 
 export const agentsListCommand: CommandModule<unknown, AgentsArgs> = {
-  command: '$0',
+  command: ['$0', 'list'],
   describe: 'List background agents',
   builder: (yargs: Argv) =>
     yargs
@@ -471,6 +471,19 @@ export const agentsCommand: CommandModule = {
   describe: 'Manage Agent View background agents',
   builder: (yargs: Argv) =>
     yargs
+      // Hoisted from the list subcommand so the space form
+      // `agents --cwd <dir>` is consumed at this level instead of failing
+      // strict mode (the $0 builder only applies once yargs descends).
+      .option('cwd', {
+        type: 'string',
+        description: 'Workspace directory to inspect',
+      })
+      .check((argv) => {
+        const separatorTail = (argv as { '--'?: unknown })['--'];
+        return Array.isArray(separatorTail) && separatorTail.length > 0
+          ? '`qwen agents` does not accept arguments after `--`.'
+          : true;
+      })
       // Session verbs are subcommands of `qwen agents` so they cannot
       // hijack natural-language prompts at the top level.
       .command(agentsListCommand)

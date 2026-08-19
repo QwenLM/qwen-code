@@ -383,6 +383,7 @@ describe('parseArguments', () => {
 
   it.each([
     ['agents', ['agents']],
+    ['agents list', ['agents', 'list']],
     ['agents daemon stop --any', ['agents', 'daemon', 'stop', '--any']],
     ['agents attach <id>', ['agents', 'attach', 'session-1']],
     ['agents logs <id>', ['agents', 'logs', 'session-1']],
@@ -391,6 +392,8 @@ describe('parseArguments', () => {
     ['agents respawn <id>', ['agents', 'respawn', 'session-1']],
     ['agents respawn --all', ['agents', 'respawn', '--all']],
     ['agents rm <id>', ['agents', 'rm', 'session-1']],
+    ['agents --cwd=<dir>', ['agents', '--cwd=/tmp']],
+    ['agents --cwd <dir>', ['agents', '--cwd', '/tmp']],
   ])(
     'exits after `%s` instead of continuing to main CLI flow',
     async (_label, args) => {
@@ -435,7 +438,6 @@ describe('parseArguments', () => {
     ['attach', ['attach', 'the', 'server']],
     ['logs', ['logs', 'the', 'server']],
     ['respawn', ['respawn', 'the', 'server']],
-    ['agents', ['agents', 'explain', 'this', 'project']],
   ])(
     'still parses verb-initial input starting with `%s` as a positional prompt',
     async (_verb, args) => {
@@ -446,6 +448,270 @@ describe('parseArguments', () => {
       expect(argv.query).toBe(args.join(' '));
     },
   );
+
+  it.each([
+    ['agents', 'explain', 'this', 'project'],
+    ['--debug', 'agents', 'fix', 'the', 'bug'],
+  ])('reserves `agents` as a command word for %j', async (...args) => {
+    process.argv = ['node', 'script.js', ...args];
+    mockEnsureAgentViewSupervisor.mockClear();
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+
+    try {
+      await expect(parseArguments()).rejects.toThrow();
+      expect(mockEnsureAgentViewSupervisor).not.toHaveBeenCalled();
+    } finally {
+      mockExit.mockRestore();
+    }
+  });
+
+  it('fails loudly instead of blocking on `-p agents serve`', async () => {
+    process.argv = ['node', 'script.js', '-p', 'agents', 'serve'];
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+
+    try {
+      await expect(parseArguments()).rejects.toThrow();
+    } finally {
+      mockExit.mockRestore();
+    }
+  });
+
+  it('rejects agents list options with an unexpected positional', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      'agents',
+      '--cwd',
+      '/tmp',
+      'explain',
+      'this',
+      'project',
+    ];
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    mockEnsureAgentViewSupervisor.mockClear();
+
+    try {
+      await expect(parseArguments()).rejects.toThrow('process.exit called');
+      expect(mockEnsureAgentViewSupervisor).not.toHaveBeenCalled();
+    } finally {
+      mockExit.mockRestore();
+    }
+  });
+
+  it('does not dispatch when --cwd consumes an agents verb', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      'agents',
+      '--cwd',
+      'attach',
+      'session-1',
+    ];
+    mockEnsureAgentViewSupervisor.mockClear();
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+
+    try {
+      await expect(parseArguments()).rejects.toThrow();
+      expect(mockEnsureAgentViewSupervisor).not.toHaveBeenCalled();
+    } finally {
+      mockExit.mockRestore();
+    }
+  });
+
+  it('treats tokens after top-level `--` as a positional prompt', async () => {
+    process.argv = ['node', 'script.js', '--', 'agents', 'stop', 'session-1'];
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+
+    try {
+      const argv = await parseArguments();
+      expect(argv.query).toBe('agents stop session-1');
+      expect(mockExit).not.toHaveBeenCalled();
+    } finally {
+      mockExit.mockRestore();
+    }
+  });
+
+  it('keeps option-looking tokens after top-level `--` in the prompt', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--',
+      '--json',
+      'agents',
+      'do',
+      'something',
+    ];
+
+    const argv = await parseArguments();
+
+    expect(argv.query).toBe('--json agents do something');
+  });
+
+  it.each([
+    ['agents', '--', 'stop', 'session-1'],
+    ['agents', 'respawn', '--', 'session-1'],
+    ['agents', 'respawn', '--all', '--', 'stray'],
+  ])(
+    'rejects arguments after `--` inside the agents command: %j',
+    async (...args) => {
+      process.argv = ['node', 'script.js', ...args];
+      mockEnsureAgentViewSupervisor.mockClear();
+      const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+        throw new Error('process.exit called');
+      });
+
+      try {
+        await expect(parseArguments()).rejects.toThrow();
+        expect(mockEnsureAgentViewSupervisor).not.toHaveBeenCalled();
+      } finally {
+        mockExit.mockRestore();
+      }
+    },
+  );
+
+  it.each([
+    ['agents', '--json=true'],
+    ['agents', '--json=1'],
+    ['agents', '--all=false'],
+    ['agents', '--all=1'],
+    ['--json=1', 'agents'],
+  ])('rejects assigned agents boolean %s', async (...args) => {
+    process.argv = ['node', 'script.js', ...args];
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+
+    try {
+      await expect(parseArguments()).rejects.toThrow('process.exit called');
+      expect(mockExit).toHaveBeenCalledWith(1);
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        expect.stringContaining('does not accept an assigned value'),
+      );
+    } finally {
+      mockExit.mockRestore();
+    }
+  });
+
+  it.each([
+    '--safe-mode=false',
+    '--no-safe-mode',
+    '--insecure=false',
+    '--no-insecure',
+    '--openai-logging=false',
+    '--no-openai-logging',
+    '--screen-reader=false',
+    '--no-screen-reader',
+    '--bare=false',
+    '--no-bare',
+    '--debug=false',
+    '--no-debug',
+    '-d=false',
+    '-l=false',
+    '-sy',
+  ])('rejects --bg combined with explicitly false %s', async (option) => {
+    process.argv = ['node', 'script.js', '--bg', 'background task', option];
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+
+    try {
+      await expect(parseArguments()).rejects.toThrow();
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        expect.stringContaining('Cannot use --bg/--background with'),
+      );
+    } finally {
+      mockExit.mockRestore();
+    }
+  });
+
+  it('rejects --bg before an agents command instead of treating it as a prompt', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--bg',
+      'agents',
+      'attach',
+      'session-1',
+    ];
+    mockEnsureAgentViewSupervisor.mockClear();
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+
+    try {
+      await expect(parseArguments()).rejects.toThrow();
+      expect(mockEnsureAgentViewSupervisor).not.toHaveBeenCalled();
+    } finally {
+      mockExit.mockRestore();
+    }
+  });
+
+  it('shows the agents attach help for `agents attach --help`', async () => {
+    process.argv = ['node', 'script.js', 'agents', 'attach', '--help'];
+    const chunks: string[] = [];
+    const outSpy = vi.spyOn(process.stdout, 'write').mockImplementation(((
+      chunk: unknown,
+    ) => {
+      chunks.push(String(chunk));
+      return true;
+    }) as never);
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(((
+      ...args: unknown[]
+    ) => {
+      chunks.push(args.map(String).join(' '));
+    }) as never);
+
+    try {
+      // yargs prints the subcommand help, then exits 0.
+      await expect(parseArguments()).rejects.toThrow(
+        'process.exit unexpectedly called with "0"',
+      );
+      expect(chunks.join('')).toContain('agents attach <id>');
+    } finally {
+      outSpy.mockRestore();
+      logSpy.mockRestore();
+    }
+  });
+
+  it('runs the agents surface for `agents --version` instead of the probe version', async () => {
+    process.argv = ['node', 'script.js', 'agents', '--version'];
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+
+    try {
+      await expect(parseArguments()).rejects.toThrow('process.exit called');
+      expect(mockExit).toHaveBeenCalledWith(0);
+      expect(mockEnsureAgentViewSupervisor).toHaveBeenCalled();
+    } finally {
+      mockExit.mockRestore();
+    }
+  });
+
+  it('fails loudly on `agents --yolo` instead of prompting "agents"', async () => {
+    process.argv = ['node', 'script.js', 'agents', '--yolo'];
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+
+    try {
+      await expect(parseArguments()).rejects.toThrow(
+        'process.exit unexpectedly called with "1"',
+      );
+    } finally {
+      mockExit.mockRestore();
+    }
+  });
 
   it('propagates non-zero exitCode from the update handler', async () => {
     process.argv = ['node', 'script.js', 'update'];
@@ -593,6 +859,14 @@ describe('parseArguments', () => {
       'Cannot use --bg/--background with --safe-mode',
     ],
     [
+      ['--bg', 'background task', '--chat-recording=false'],
+      'Cannot use --bg/--background with --safe-mode',
+    ],
+    [
+      ['--bg', 'background task', '--no-chat-recording'],
+      'Cannot use --bg/--background with --safe-mode',
+    ],
+    [
       ['--bg', 'background task', '--screen-reader'],
       'Cannot use --bg/--background with --safe-mode',
     ],
@@ -602,6 +876,14 @@ describe('parseArguments', () => {
     ],
     [
       ['--bg', 'background task', '--telemetry'],
+      'Cannot use --bg/--background with telemetry flags',
+    ],
+    [
+      ['--bg', 'background task', '--telemetry=false'],
+      'Cannot use --bg/--background with telemetry flags',
+    ],
+    [
+      ['--bg', 'background task', '--no-telemetry'],
       'Cannot use --bg/--background with telemetry flags',
     ],
     [
@@ -653,6 +935,69 @@ describe('parseArguments', () => {
       }
     },
   );
+
+  it.each(['fix the bug', '--yolo'])(
+    'treats top-level `--` tail %j as a background prompt',
+    async (prompt) => {
+      process.argv = ['node', 'script.js', '--bg', '--', prompt];
+      const originalIsTTY = process.stdin.isTTY;
+      process.stdin.isTTY = true;
+      try {
+        const argv = await parseArguments();
+
+        expect(argv.background).toBe(true);
+        expect(argv.query).toBe(prompt);
+        expect(argv.yolo).toBe(false);
+      } finally {
+        process.stdin.isTTY = originalIsTTY;
+      }
+    },
+  );
+
+  it('rejects --prompt combined with a top-level `--` tail', async () => {
+    process.argv = ['node', 'script.js', '--prompt', 'first', '--', 'second'];
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    mockWriteStderrLine.mockClear();
+
+    try {
+      await expect(parseArguments()).rejects.toThrow('process.exit called');
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'Cannot use both a positional prompt and the --prompt',
+        ),
+      );
+    } finally {
+      mockExit.mockRestore();
+    }
+  });
+
+  it.each([
+    '--safeMode',
+    '--chatRecording',
+    '--openaiLogging',
+    '--screenReader',
+    '--telemetryLogPrompts',
+    '--listExtensions',
+    '--experimentalAcp',
+    '--experimentalLsp',
+  ])('rejects --bg combined with camelCase option %s', async (option) => {
+    process.argv = ['node', 'script.js', '--bg', 'background task', option];
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    mockWriteStderrLine.mockClear();
+
+    try {
+      await expect(parseArguments()).rejects.toThrow('process.exit called');
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        expect.stringContaining('Cannot use --bg/--background with'),
+      );
+    } finally {
+      mockExit.mockRestore();
+    }
+  });
 
   it('rejects --bg when stdin is piped', async () => {
     process.argv = ['node', 'script.js', '--bg', 'background task'];

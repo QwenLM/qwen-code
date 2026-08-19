@@ -10,14 +10,14 @@ import { lstat, mkdir, realpath, rmdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 
-export interface LiveConversationRootIdentity {
+export interface ConversationRootIdentity {
   readonly configuredRoot: string;
   readonly canonicalRoot: string;
   readonly device: number;
   readonly inode: number;
 }
 
-export interface LiveConversationWorkspaceOptions {
+export interface ConversationWorkspaceOptions {
   homeDir?: string;
 }
 
@@ -55,15 +55,12 @@ function validateRootStats(stats: Stats, label = 'root'): void {
   }
 }
 
-function hasIdentity(
-  stats: Stats,
-  root: LiveConversationRootIdentity,
-): boolean {
+function hasIdentity(stats: Stats, root: ConversationRootIdentity): boolean {
   return stats.dev === root.device && stats.ino === root.inode;
 }
 
 async function validateConversationDirectory(
-  root: LiveConversationRootIdentity,
+  root: ConversationRootIdentity,
   name: string,
   candidate: string,
   parent: string = root.canonicalRoot,
@@ -86,19 +83,17 @@ async function validateConversationDirectory(
       'Live conversation directory must be an owned direct child',
     );
   }
-  await revalidateLiveConversationRoot(root);
+  await revalidateConversationRoot(root);
   return canonical;
 }
 
-export function getLiveConversationRootPath(
-  homeDir: string = homedir(),
-): string {
+export function getConversationRootPath(homeDir: string = homedir()): string {
   return resolve(homeDir, 'Documents', 'Qwen Code', 'Conversations');
 }
 
 async function createRoot(
   configuredRoot: string,
-): Promise<LiveConversationRootIdentity> {
+): Promise<ConversationRootIdentity> {
   try {
     await mkdir(configuredRoot, { recursive: true, mode: 0o700 });
   } catch (error) {
@@ -130,9 +125,9 @@ async function createRoot(
   };
 }
 
-export async function revalidateLiveConversationRoot(
-  root: LiveConversationRootIdentity,
-): Promise<LiveConversationRootIdentity> {
+export async function revalidateConversationRoot(
+  root: ConversationRootIdentity,
+): Promise<ConversationRootIdentity> {
   const configuredStats = await lstat(root.configuredRoot);
   validateRootStats(configuredStats);
   if (!hasIdentity(configuredStats, root)) {
@@ -152,11 +147,11 @@ export async function revalidateLiveConversationRoot(
   return root;
 }
 
-export async function assertExactLiveConversationRoot(
-  root: LiveConversationRootIdentity,
+export async function assertExactConversationRoot(
+  root: ConversationRootIdentity,
   candidate: string,
-): Promise<LiveConversationRootIdentity> {
-  await revalidateLiveConversationRoot(root);
+): Promise<ConversationRootIdentity> {
+  await revalidateConversationRoot(root);
   const resolvedCandidate = resolve(candidate);
   if (
     !isSamePath(resolvedCandidate, root.configuredRoot) &&
@@ -174,15 +169,15 @@ export async function assertExactLiveConversationRoot(
   return root;
 }
 
-export class LiveConversationWorkspace {
+export class ConversationWorkspace {
   readonly rootPath: string;
-  private rootPromise?: Promise<LiveConversationRootIdentity>;
+  private rootPromise?: Promise<ConversationRootIdentity>;
 
-  constructor(options: LiveConversationWorkspaceOptions = {}) {
-    this.rootPath = getLiveConversationRootPath(options.homeDir);
+  constructor(options: ConversationWorkspaceOptions = {}) {
+    this.rootPath = getConversationRootPath(options.homeDir);
   }
 
-  async getRoot(): Promise<LiveConversationRootIdentity> {
+  async getRoot(): Promise<ConversationRootIdentity> {
     if (!this.rootPromise) {
       const pending = createRoot(this.rootPath);
       this.rootPromise = pending;
@@ -193,14 +188,12 @@ export class LiveConversationWorkspace {
     return this.rootPromise;
   }
 
-  async revalidate(): Promise<LiveConversationRootIdentity> {
-    return revalidateLiveConversationRoot(await this.getRoot());
+  async revalidate(): Promise<ConversationRootIdentity> {
+    return revalidateConversationRoot(await this.getRoot());
   }
 
-  async assertExactRoot(
-    candidate: string,
-  ): Promise<LiveConversationRootIdentity> {
-    return assertExactLiveConversationRoot(await this.getRoot(), candidate);
+  async assertExactRoot(candidate: string): Promise<ConversationRootIdentity> {
+    return assertExactConversationRoot(await this.getRoot(), candidate);
   }
 
   async materializeConversationDirectory(sessionId: string): Promise<string> {
@@ -252,7 +245,7 @@ export class LiveConversationWorkspace {
       }
       throw error;
     }
-    await revalidateLiveConversationRoot(root);
+    await revalidateConversationRoot(root);
     return true;
   }
 }

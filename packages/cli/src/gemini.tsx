@@ -22,9 +22,11 @@ import {
   uiTelemetryService,
 } from '@qwen-code/qwen-code-core';
 import {
+  EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE,
   EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
   EXTERNAL_TOOL_GUARD_TOKEN_ENV,
   PRIVATE_EXTERNAL_TOOL_GUARD_ENV,
+  PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV,
 } from '@qwen-code/acp-bridge/externalToolGuard';
 import dns from 'node:dns';
 import fs from 'node:fs';
@@ -57,6 +59,7 @@ import { ExtensionRefreshState } from './config/extension-refresh-state.js';
 import { initializeI18n, resolveLanguageSetting } from './i18n/index.js';
 import {
   setupStartupWorktree,
+  discardCreatedStartupWorktree,
   persistStartupWorktreeSidecar,
   buildStartupWorktreeNotice,
   type StartupWorktreeContext,
@@ -371,6 +374,12 @@ export async function main() {
       ? EXTERNAL_TOOL_GUARD_REQUIRED_VALUE
       : undefined;
   delete process.env[PRIVATE_EXTERNAL_TOOL_GUARD_ENV];
+  const privateExternalToolGuardProvider =
+    process.env[PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV] ===
+    EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE
+      ? EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE
+      : undefined;
+  delete process.env[PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV];
 
   if (process.argv.includes('--bare')) {
     process.env[QWEN_CODE_SIMPLE_ENV_VAR] = '1';
@@ -412,6 +421,9 @@ export async function main() {
         './agent-view/pty-host-process.js'
       );
       const exit = await runAgentViewPtyHostProcess({ launchPath, socketPath });
+      if (exit.kind !== 'exited') {
+        process.exit(exit.kind === 'confirmed-shutdown' ? 0 : 1);
+      }
       // node-pty reports signal-kills as {exitCode: 0, signal}; surface them
       // as failures (shell convention) so the supervisor does not record a
       // killed worker as successfully completed.
@@ -442,6 +454,12 @@ export async function main() {
           ...(privateExternalToolGuard
             ? {
                 [PRIVATE_EXTERNAL_TOOL_GUARD_ENV]: privateExternalToolGuard,
+                ...(privateExternalToolGuardProvider
+                  ? {
+                      [PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV]:
+                        privateExternalToolGuardProvider,
+                    }
+                  : {}),
               }
             : {}),
         }
@@ -907,6 +925,13 @@ export async function main() {
         hasOneShotInput,
       )
     ) {
+      const cleanupError = await discardCreatedStartupWorktree(
+        startupWorktreeContext,
+      );
+      if (cleanupError) {
+        writeStderrLine(`Failed to clean up startup worktree: ${cleanupError}`);
+        process.exitCode = 1;
+      }
       process.exit(process.exitCode ?? 0);
     }
   }
@@ -959,6 +984,14 @@ export async function main() {
       } = await import('./startup/agent-view-resume-guard.js');
       if (await isManagedAgentViewContinueBlocked(config.getSessionId())) {
         writeStderrLine(MANAGED_AGENT_VIEW_RESUME_MESSAGE);
+        const cleanupError = await discardCreatedStartupWorktree(
+          startupWorktreeContext,
+        );
+        if (cleanupError) {
+          writeStderrLine(
+            `Failed to clean up startup worktree: ${cleanupError}`,
+          );
+        }
         process.exit(1);
       }
       await releaseExitedManagedSessionForContinue(config.getSessionId());
@@ -1212,6 +1245,11 @@ export async function main() {
             isAcpMode &&
             privateAcpParentCapability !== undefined &&
             privateExternalToolGuard === EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
+          externalToolGuardProviderAttached:
+            isAcpMode &&
+            privateAcpParentCapability !== undefined &&
+            privateExternalToolGuardProvider ===
+              EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE,
         });
       } finally {
         // Clean up child processes even when ACP setup or shutdown fails.

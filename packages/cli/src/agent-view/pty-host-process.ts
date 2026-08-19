@@ -287,33 +287,39 @@ function createRemotePtyHostHandle({
       const allowedSignal = killSignalValue(signal);
       void callAgentViewPtyHost(socketPath, authToken, 'kill', {
         signal: allowedSignal,
-      }).catch(() => {
-        child?.kill(allowedSignal);
-      });
-      // Only SIGKILL cannot be trapped, so it is the only kill that
-      // guarantees the worker is gone — resolve the exit tracker immediately
-      // for it. SIGINT/SIGTERM can be trapped and survived (the server-side
-      // kill op, unlike shutdown, has no SIGKILL escalation), so let the
-      // remote exit poller observe whether the worker actually exits.
-      if (!child && allowedSignal === 'SIGKILL') {
-        exitTracker.resolve({ exitCode: 1 });
-      }
+      }).then(
+        () => {
+          // Only SIGKILL cannot be trapped. Remember that the authenticated
+          // RPC landed, but keep polling until the endpoint disappears so a
+          // replacement cannot race the old host's socket teardown.
+          if (!child && allowedSignal === 'SIGKILL') {
+            exitTracker.markKillConfirmed?.();
+          }
+        },
+        () => {
+          child?.kill(allowedSignal);
+        },
+      );
     },
     shutdown(): void {
-      void callAgentViewPtyHost(socketPath, authToken, 'shutdown').catch(() => {
-        child?.kill('SIGTERM');
-      });
+      void callAgentViewPtyHost(socketPath, authToken, 'shutdown').then(
+        () => {
+          if (!child) {
+            exitTracker.markShutdownConfirmed?.();
+          }
+        },
+        () => {
+          child?.kill('SIGTERM');
+        },
+      );
       attachSocket?.destroy();
-      if (!child) {
-        exitTracker.resolve({ exitCode: 0 });
-      }
     },
     dispose(): void {
       void callAgentViewPtyHost(socketPath, authToken, 'shutdown').catch(() => {
         child?.kill('SIGTERM');
       });
       attachSocket?.destroy();
-      exitTracker.resolve({ exitCode: 1 });
+      exitTracker.resolve({ kind: 'unreachable' });
     },
   };
 }
@@ -321,6 +327,8 @@ function createRemotePtyHostHandle({
 function createChildExitTracker(child: ChildProcess): {
   exited: Promise<AgentViewPtyHostExit>;
   resolve(exit: AgentViewPtyHostExit): void;
+  markKillConfirmed?: () => void;
+  markShutdownConfirmed?: () => void;
 } {
   let resolveExit: (exit: AgentViewPtyHostExit) => void = () => {};
   const exited = new Promise<AgentViewPtyHostExit>((resolve) => {
@@ -328,6 +336,7 @@ function createChildExitTracker(child: ChildProcess): {
     child.once('exit', (code, signal) => {
       const signalNumber = signal ? os.constants.signals[signal] : undefined;
       resolve({
+        kind: 'exited',
         exitCode: typeof code === 'number' ? code : 1,
         ...(signalNumber ? { signal: signalNumber } : {}),
       });
@@ -342,6 +351,8 @@ function createRemoteExitTracker(
 ): {
   exited: Promise<AgentViewPtyHostExit>;
   resolve(exit: AgentViewPtyHostExit): void;
+  markKillConfirmed(): void;
+  markShutdownConfirmed(): void;
 } {
   let settled = false;
   let resolveExit: (exit: AgentViewPtyHostExit) => void = () => {};
@@ -349,26 +360,55 @@ function createRemoteExitTracker(
     resolveExit = resolve;
   });
   let consecutiveFailures = 0;
-  const interval = setInterval(() => {
+  let confirmedTermination: 'kill' | 'shutdown' | undefined;
+  let confirmedTerminationPoll: NodeJS.Timeout | undefined;
+  const poll = () => {
+    if (settled) return;
     void callAgentViewPtyHost(socketPath, authToken, 'status')
       .then(() => {
+        if (settled) return;
         consecutiveFailures = 0;
+        if (confirmedTermination) {
+          clearTimeout(confirmedTerminationPoll);
+          confirmedTerminationPoll = setTimeout(poll, 50);
+          confirmedTerminationPoll.unref?.();
+        }
       })
       .catch(() => {
-        if (++consecutiveFailures >= 2) {
-          resolveExitOnce({ exitCode: 1 });
+        if (settled) return;
+        if (confirmedTermination || ++consecutiveFailures >= 2) {
+          resolveExitOnce(
+            confirmedTermination === 'kill'
+              ? { kind: 'confirmed-kill' }
+              : confirmedTermination === 'shutdown'
+                ? { kind: 'confirmed-shutdown' }
+                : { kind: 'unreachable' },
+          );
         }
       });
-  }, REMOTE_HOST_EXIT_POLL_MS);
+  };
+  const interval = setInterval(poll, REMOTE_HOST_EXIT_POLL_MS);
   interval.unref?.();
 
   const resolveExitOnce = (exit: AgentViewPtyHostExit) => {
     if (settled) return;
     settled = true;
     clearInterval(interval);
+    clearTimeout(confirmedTerminationPoll);
     resolveExit(exit);
   };
-  return { exited, resolve: resolveExitOnce };
+  return {
+    exited,
+    resolve: resolveExitOnce,
+    markKillConfirmed: () => {
+      confirmedTermination ??= 'kill';
+      poll();
+    },
+    markShutdownConfirmed: () => {
+      confirmedTermination ??= 'shutdown';
+      poll();
+    },
+  };
 }
 
 export async function runAgentViewPtyHostProcess({

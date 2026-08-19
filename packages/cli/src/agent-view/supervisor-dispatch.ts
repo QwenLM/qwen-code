@@ -35,6 +35,7 @@ interface DispatchOptions {
 // activity.json is re-read on every list() poll; keep the summary a
 // display-sized preview, matching the queued-prompt preview cap.
 const MAX_ACTIVITY_SUMMARY_CHARS = 500;
+const MAX_ARGV_PROMPT_BYTES = 16 * 1024;
 
 export async function dispatchAgentViewSession(
   prompt: string,
@@ -45,6 +46,14 @@ export async function dispatchAgentViewSession(
   const token = options.token ?? randomUUID();
   const now = new Date().toISOString();
   const resolvedCwd = path.resolve(cwd);
+  if (
+    options.promptInArgv !== false &&
+    Buffer.byteLength(prompt, 'utf8') > MAX_ARGV_PROMPT_BYTES
+  ) {
+    throw new Error(
+      `Agent View prompt is too large for argv (${MAX_ARGV_PROMPT_BYTES} UTF-8 bytes maximum).`,
+    );
+  }
   const state = {
     schemaVersion: 1 as const,
     sessionId,
@@ -57,6 +66,7 @@ export async function dispatchAgentViewSession(
     activeCwd: resolvedCwd,
     createdAt: now,
     updatedAt: now,
+    ...(options.promptInArgv === false ? {} : { initialPromptPending: true }),
     worktree: { mode: 'none' as const },
   };
   try {
@@ -185,6 +195,9 @@ function buildNativeWorkerArgv(sessionId: string, prompt?: string): string[] {
   return buildCurrentQwenCliArgv([
     '--session-id',
     sessionId,
-    ...(prompt ? ['--prompt-interactive', prompt] : []),
+    // Attached-value form: a bare token after the flag would be re-parsed
+    // by yargs when the prompt starts with '-', turning e.g. '-y' into
+    // flags instead of prompt text.
+    ...(prompt ? [`--prompt-interactive=${prompt}`] : []),
   ]);
 }

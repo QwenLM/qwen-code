@@ -64,6 +64,57 @@ describe('daemon UI normalizer and transcript reducer', () => {
     ]);
   });
 
+  it('attaches branchRecordId when the decorated chunk merges into an existing block', () => {
+    // A checkpointed record replayed as 2+ chunks creates its block from
+    // the first (undecorated) chunk; the decorated final chunk must merge
+    // into that block and carry the branchRecordId with it.
+    const first = normalizeDaemonEvent({
+      id: 3,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'historical ' },
+          _meta: {
+            qwenTranscript: { sourceRecordIds: ['record-1'] },
+          },
+        },
+      },
+    });
+    const second = normalizeDaemonEvent({
+      id: 4,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'answer' },
+          _meta: {
+            qwenTranscript: {
+              sourceRecordIds: ['record-1'],
+              branchRecordId: 'checkpoint-record',
+            },
+          },
+        },
+      },
+    });
+
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [...first, ...second],
+      { now: 2 },
+    );
+
+    expect(state.blocks).toMatchObject([
+      {
+        kind: 'assistant',
+        text: 'historical answer',
+        branchRecordId: 'checkpoint-record',
+      },
+    ]);
+  });
+
   it('drops silent-shell heartbeat tool updates instead of rewriting the tool block', () => {
     const events = normalizeDaemonEvent({
       id: 1,
@@ -212,6 +263,20 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(store.getSnapshot().blocks[0]).toMatchObject({
       kind: 'user',
       meta: { inputAnnotations },
+    });
+  });
+
+  it('stores text file attachment metadata on local user messages', () => {
+    const store = createDaemonTranscriptStore();
+
+    store.appendLocalUserMessage('check this', undefined, undefined, [
+      { name: 'app.log', mimeType: 'text/plain' },
+    ]);
+
+    expect(store.getSnapshot().blocks[0]).toMatchObject({
+      kind: 'user',
+      text: 'check this',
+      files: [{ name: 'app.log', mimeType: 'text/plain' }],
     });
   });
 

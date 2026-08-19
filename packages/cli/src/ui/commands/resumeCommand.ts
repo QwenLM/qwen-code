@@ -50,15 +50,16 @@ export const resumeCommand: SlashCommand = {
 
     // Try as session UUID
     if (isValidSessionId(arg)) {
-      if (await isManagedAgentViewResumeBlocked(arg)) {
-        return {
-          type: 'message',
-          messageType: 'error',
-          content: MANAGED_AGENT_VIEW_RESUME_MESSAGE,
-        };
-      }
       const sessionService = config.getSessionService();
-      if (await sessionService.sessionExists(arg)) {
+      const exists = await sessionService.sessionExists(arg);
+      if (exists) {
+        if (await isManagedAgentViewResumeBlocked(arg)) {
+          return {
+            type: 'message',
+            messageType: 'error',
+            content: t(MANAGED_AGENT_VIEW_RESUME_MESSAGE),
+          };
+        }
         return { type: 'dialog', dialog: 'resume', sessionId: arg };
       }
       return {
