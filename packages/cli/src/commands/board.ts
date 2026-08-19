@@ -42,7 +42,11 @@ import {
   listParticipants,
   type DecisionKind,
 } from '@qwen-code/qwen-code-core';
-import { resolveBoardName, resolveParticipantName } from './board/context.js';
+import {
+  resolveBoardName,
+  resolveParticipantName,
+  isInteractiveInvocation,
+} from './board/context.js';
 import { renderBoard, type BoardSnapshot } from './board/render.js';
 
 interface CommonArgs {
@@ -530,6 +534,13 @@ export const boardCommand: CommandModule = {
             .option('approve', { type: 'boolean' })
             .option('reject', { type: 'boolean' })
             .option('note', { type: 'string' })
+            .option('force', {
+              type: 'boolean',
+              describe:
+                'Resolve from a non-interactive shell. Documented, and it is ' +
+                'how an agent would bypass the guard — use it only in scripts ' +
+                'you wrote',
+            })
             .check((a) => {
               if (!a['approve'] && !a['reject']) {
                 throw new Error('Pass --approve or --reject.');
@@ -545,7 +556,20 @@ export const boardCommand: CommandModule = {
               id: string;
               approve?: boolean;
               note?: string;
+              force?: boolean;
             };
+            // The one command on this surface that is not for agents.
+            if (!a.force && !isInteractiveInvocation()) {
+              console.error(
+                `Refusing to resolve ${a.id} from a non-interactive shell.\n` +
+                  `A decision needs a person: approval, acceptance and ` +
+                  `adjudication are exactly what no agent has the standing to ` +
+                  `settle. Run this from your terminal, or pass --force if you ` +
+                  `are scripting it yourself.`,
+              );
+              process.exitCode = 1;
+              return;
+            }
             const decision = await resolveDecision(
               board(a),
               a.id,

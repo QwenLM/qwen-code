@@ -17,11 +17,12 @@
  *
  * Two rules distinguish this from an `ask`:
  *
- * - **No agent is supposed to resolve one.** This is a convention the prompt
- *   states, not an invariant the runtime enforces: `qwen board resolve` sits on
- *   the same CLI an agent uses for everything else, so anything with a shell
- *   could settle its own decision. Enforcing it would need a surface the agent
- *   panes do not carry; until then the honest description is "by agreement".
+ * - **No agent resolves one.** `qwen board resolve` refuses from a
+ *   non-interactive shell, which is what an agent's tool call is — a barrier
+ *   rather than a proof, since `--force` bypasses it and a pty would pass, but
+ *   enough that settling your own request is no longer the easiest path. This
+ *   module does not check: the caller does, because only the caller can see
+ *   whether a person is there.
  * - **No expiry.** A decision that expires silently converts "nobody has looked
  *   yet" into "the system decided for them", which is the exact authority
  *   nothing but a human may hold. Decisions stall visibly instead — the cost

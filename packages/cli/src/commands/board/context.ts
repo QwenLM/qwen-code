@@ -79,3 +79,26 @@ export function resolveParticipantName(opts: BoardContextOptions = {}): string {
   if (explicit) return explicit;
   return slugify(os.userInfo().username);
 }
+
+/**
+ * Whether this invocation is a person at a terminal, as opposed to an agent
+ * shelling out.
+ *
+ * `decision` exists because approval, acceptance and adjudication need
+ * authority no agent holds. Until now that was a sentence in the prompt, on a
+ * command line agents use for everything else — so anything with a shell could
+ * approve its own request. This is the cheapest structural difference
+ * available: an agent's tool call captures stdout, a person's terminal does
+ * not.
+ *
+ * It is a barrier, not a proof. An agent that allocated a pty would pass, and
+ * `--force` bypasses it outright for scripting. Both are fine: the threat here
+ * is a model taking the path of least resistance, not one working to defeat a
+ * check. What matters is that resolving is no longer the easiest thing to do.
+ */
+export function isInteractiveInvocation(
+  stdout: { isTTY?: boolean } = process.stdout,
+  stdin: { isTTY?: boolean } = process.stdin,
+): boolean {
+  return Boolean(stdout.isTTY) && Boolean(stdin.isTTY);
+}

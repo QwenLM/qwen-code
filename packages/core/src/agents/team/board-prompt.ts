@@ -73,7 +73,7 @@ qwen board show
 
 - **A unit of work** is a \`task\` (\`t-\`). Claim before starting (\`qwen board claim t-3\`); mark it done when finished (\`qwen board done t-3 --note "…"\`). **Completing a task is how you report** — do not also announce it to anyone.
 - **A question only another participant can answer** is an \`ask\` (\`a-\`): \`qwen board ask web-worker "does the client depend on status being a string?" --wait\`. It settles as answered, declined, or timeout, so you always learn which and can move on. Use it when you are genuinely blocked on something outside your reach — not for anything you can read or run yourself.
-- **Anything needing the user's authority** is a \`decision\` (\`d-\`): approval for a risky or far-reaching action, acceptance of a finished result, or adjudication when your conclusion conflicts with another participant's. \`qwen board raise "…" --kind approval --about t-3\`. No agent resolves one, including you — raise it and continue with work that does not depend on it.
+- **Anything needing the user's authority** is a \`decision\` (\`d-\`): approval for a risky or far-reaching action, acceptance of a finished result, or adjudication when your conclusion conflicts with another participant's. \`qwen board raise "…" --kind approval --about t-3\`. No agent resolves one, including you — \`qwen board resolve\` refuses from a tool call. Raise it and continue with work that does not depend on it.
 
 Answer asks addressed to you promptly: \`qwen board answer a-1 "…"\`, or \`qwen board decline a-1 "not my area"\` when you cannot. A peer is blocked on it.
 

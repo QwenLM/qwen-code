@@ -202,9 +202,11 @@ is a problem worth not having, so you decide when the board is quiet.
   next time it reads the board.
 - **A named owner is a proposal.** Naming someone on a task records who is
   expected to take it; only claiming it makes it theirs.
-- **`decision` is by agreement, not enforcement.** The prompt tells agents not
-  to resolve one, but `qwen board resolve` is on the same command line they use
-  for everything else, so nothing stops one that ignores the instruction.
+- **`decision` resolution wants a terminal.** `qwen board resolve` refuses from
+  a non-interactive shell, which is what an agent's tool call is. It is a
+  barrier rather than a proof — `--force` bypasses it for scripting, and an
+  agent that allocated a pty would pass — but resolving is no longer the
+  easiest thing for an agent to do.
 - **There is no chat.** Everything is a task, a question, or a decision. Text
   that fits none of those belongs in a note on the task it concerns.
 

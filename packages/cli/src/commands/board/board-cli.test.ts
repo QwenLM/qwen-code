@@ -5,7 +5,11 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { resolveBoardName, resolveParticipantName } from './context.js';
+import {
+  resolveBoardName,
+  resolveParticipantName,
+  isInteractiveInvocation,
+} from './context.js';
 import {
   renderBoard,
   findDeadlocks,
@@ -209,6 +213,26 @@ describe('board rendering', () => {
       expect(lines.findIndex((l) => l.includes('each waiting'))).toBeLessThan(
         lines.findIndex((l) => l.includes('a-1')),
       );
+    });
+  });
+
+  // `decision` exists because approval needs authority no agent holds. That was
+  // a sentence in the prompt on a command line agents use for everything else,
+  // so anything with a shell could approve its own request. A tty is the
+  // cheapest structural difference between a person and a tool call.
+  describe('decision authority', () => {
+    it('recognises a terminal, and does not recognise a captured pipe', () => {
+      expect(isInteractiveInvocation({ isTTY: true }, { isTTY: true })).toBe(
+        true,
+      );
+      expect(isInteractiveInvocation({ isTTY: false }, { isTTY: true })).toBe(
+        false,
+      );
+      expect(isInteractiveInvocation({ isTTY: true }, { isTTY: false })).toBe(
+        false,
+      );
+      // An agent's shell tool captures both ends.
+      expect(isInteractiveInvocation({}, {})).toBe(false);
     });
   });
 });
