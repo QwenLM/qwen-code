@@ -53,6 +53,7 @@ import type {
   TurnResultRecordPayload,
   WorkflowApproval,
   BranchPoint,
+  FileHistorySnapshot,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
@@ -105,6 +106,7 @@ import {
   getStartupContextLength,
   getApiHistoryPromptId,
   getApiHistoryPromptIndexes,
+  markApiHistoryPrompt,
   isSystemReminderContent,
   buildSessionRecoveryPlanFromApiHistory,
   TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
@@ -1594,6 +1596,29 @@ export interface AvailableCommandsSnapshot {
     level?: string;
     modelInvocable?: boolean;
   }>;
+}
+
+interface RewindableSnapshotTarget {
+  promptId: string;
+  turnIndex: number;
+}
+
+interface SessionRewindResult {
+  targetTurnIndex: number;
+  apiTruncateIndex: number;
+  promptId?: string;
+}
+
+interface RewindTurnCoordinates {
+  promptId?: string;
+  turnIndex: number;
+  apiTruncateIndex: number;
+  recordingTurnIndex?: number;
+}
+
+interface RewindTurnProjection {
+  mode: 'identified' | 'legacy';
+  turns: RewindTurnCoordinates[];
 }
 
 export async function buildAvailableCommandsSnapshot(
@@ -3426,10 +3451,7 @@ export class Session implements SessionContext {
   rewindToTurn(
     targetTurnIndex: number,
     opts?: { rewindFiles?: boolean },
-  ): {
-    targetTurnIndex: number;
-    apiTruncateIndex: number;
-  } {
+  ): SessionRewindResult {
     if (!Number.isInteger(targetTurnIndex) || targetTurnIndex < 0) {
       throw RequestError.invalidParams(
         undefined,
@@ -3437,28 +3459,124 @@ export class Session implements SessionContext {
       );
     }
 
-    if (this.closing || this.#hasActiveTurn()) {
-      throw RequestError.invalidParams(
-        undefined,
-        'Cannot rewind while a prompt is running',
-      );
-    }
-
-    const chat = this.config.getGeminiClient()!.getChat();
-    const apiHistory = chat.getHistoryShallow();
-    const apiTruncateIndex = this.#computeApiTruncationIndexForUserTurn(
-      apiHistory,
-      targetTurnIndex,
+    this.#assertCanRewind();
+    const apiHistory = this.captureHistorySnapshot();
+    const projection = this.#getRewindTurnProjection(apiHistory);
+    const target = projection?.turns.find((turn) =>
+      projection.mode === 'identified'
+        ? turn.recordingTurnIndex === targetTurnIndex
+        : turn.turnIndex === targetTurnIndex,
     );
-
-    if (apiTruncateIndex < 0) {
+    if (!target) {
       throw RequestError.invalidParams(
         undefined,
         'Cannot rewind to the requested turn. It may have been compressed or does not exist.',
       );
     }
 
-    chat.truncateHistory(apiTruncateIndex);
+    return this.#rewindToCoordinates(
+      target,
+      projection!.mode,
+      apiHistory,
+      opts,
+    );
+  }
+
+  rewindToPrompt(
+    promptId: string,
+    opts?: { rewindFiles?: boolean },
+  ): SessionRewindResult {
+    if (!promptId) {
+      throw RequestError.invalidParams(
+        undefined,
+        'promptId must be a non-empty string',
+      );
+    }
+
+    this.#assertCanRewind();
+    const apiHistory = this.captureHistorySnapshot();
+    const projection = this.#getRewindTurnProjection(apiHistory);
+    let target = projection?.turns.find((turn) => turn.promptId === promptId);
+    if (projection?.mode === 'legacy') {
+      const snapshots = this.config.getFileHistoryService().getSnapshots();
+      const snapshotIndexes = this.#getSnapshotIndexesByPromptId(snapshots);
+      const targetTurnIndex = snapshotIndexes?.get(promptId);
+      target =
+        targetTurnIndex === undefined
+          ? undefined
+          : projection.turns[targetTurnIndex];
+    }
+    if (!target) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Cannot rewind to the requested prompt. Its stable identity is missing or ambiguous.',
+      );
+    }
+
+    return this.#rewindToCoordinates(
+      { ...target, promptId },
+      projection!.mode,
+      apiHistory,
+      opts,
+    );
+  }
+
+  #assertCanRewind(): void {
+    if (this.closing || this.#hasActiveTurn()) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Cannot rewind while a prompt is running',
+      );
+    }
+  }
+
+  #rewindToCoordinates(
+    target: RewindTurnCoordinates,
+    mode: RewindTurnProjection['mode'],
+    apiHistory: Content[],
+    opts?: { rewindFiles?: boolean },
+  ): SessionRewindResult {
+    if (target.recordingTurnIndex === undefined) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Cannot rewind to the requested prompt. Its recording identity is missing or ambiguous.',
+      );
+    }
+    const fileHistoryService = this.config.getFileHistoryService();
+    const snapshots = fileHistoryService.getSnapshots();
+    const effectivePromptId =
+      target.promptId ??
+      (mode === 'legacy' ? snapshots[target.turnIndex]?.promptId : undefined);
+    const rewindFiles = opts?.rewindFiles !== false;
+    let survivingSnapshots:
+      | ReturnType<typeof fileHistoryService.getSnapshots>
+      | undefined;
+    if (rewindFiles) {
+      if (fileHistoryService.isEnabled()) {
+        const targetSnapshotIndex =
+          mode === 'identified'
+            ? effectivePromptId
+              ? this.#getSnapshotIndexesByPromptId(snapshots)?.get(
+                  effectivePromptId,
+                )
+              : undefined
+            : target.turnIndex < snapshots.length
+              ? target.turnIndex
+              : undefined;
+        if (targetSnapshotIndex === undefined) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Cannot rewind to the requested prompt. Its file snapshot identity is missing or ambiguous.',
+          );
+        }
+        survivingSnapshots = snapshots.slice(0, targetSnapshotIndex + 1);
+      } else {
+        survivingSnapshots = [];
+      }
+    }
+
+    const chat = this.config.getGeminiClient()!.getChat();
+    chat.truncateHistory(target.apiTruncateIndex);
     chat.stripThoughtsFromHistory();
     this.activeTodoPlanRevision = undefined;
     const preserveQueuedPromptPriority = this.todoStopGuardQueuedPromptPriority;
@@ -3468,60 +3586,151 @@ export class Session implements SessionContext {
       !preserveQueuedPromptPriority;
     this.todoStopGuard.blockUntilOrdinaryPromptStarts();
 
-    const rewindFiles = opts?.rewindFiles !== false;
-    const fileHistoryService = this.config.getFileHistoryService();
-    const survivingSnapshots = rewindFiles
-      ? fileHistoryService.getSnapshots().slice(0, targetTurnIndex + 1)
-      : undefined;
-
     if (survivingSnapshots) {
       fileHistoryService.restoreFromSnapshots(survivingSnapshots);
     }
 
-    this.config
-      .getChatRecordingService()
-      ?.rewindRecording(
-        targetTurnIndex,
-        { truncatedCount: Math.max(0, apiHistory.length - apiTruncateIndex) },
-        survivingSnapshots,
-      );
+    this.config.getChatRecordingService()?.rewindRecording(
+      target.recordingTurnIndex,
+      {
+        truncatedCount: Math.max(
+          0,
+          apiHistory.length - target.apiTruncateIndex,
+        ),
+      },
+      survivingSnapshots,
+    );
 
     if (shouldDrainAutomaticQueues) {
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
     }
 
-    return { targetTurnIndex, apiTruncateIndex };
+    return {
+      targetTurnIndex: target.turnIndex,
+      apiTruncateIndex: target.apiTruncateIndex,
+      ...(effectivePromptId ? { promptId: effectivePromptId } : {}),
+    };
+  }
+
+  #getRewindTurnProjection(
+    apiHistory: Content[],
+  ): RewindTurnProjection | undefined {
+    const apiPromptIndexes = getApiHistoryPromptIndexes(apiHistory);
+    if (apiPromptIndexes === undefined) return undefined;
+    const recordingPromptIds = this.config
+      .getChatRecordingService()
+      ?.getRewindableTurnPromptIds();
+    if (apiPromptIndexes.length === 0) {
+      if (recordingPromptIds?.some(Boolean)) {
+        return { mode: 'identified', turns: [] };
+      }
+      const startIndex = getStartupContextLength(apiHistory, {
+        includeCompressed: true,
+      });
+      const turns: RewindTurnCoordinates[] = [];
+      for (let index = startIndex; index < apiHistory.length; index++) {
+        if (!this.#isUserTextContent(apiHistory[index]!)) continue;
+        turns.push({
+          turnIndex: turns.length,
+          apiTruncateIndex: index,
+          recordingTurnIndex: turns.length,
+        });
+      }
+      return { mode: 'legacy', turns };
+    }
+
+    const apiTurns = apiPromptIndexes.map((apiTruncateIndex) => ({
+      promptId: getApiHistoryPromptId(apiHistory[apiTruncateIndex]!),
+      apiTruncateIndex,
+    }));
+    if (apiTurns.some((turn) => !turn.promptId)) return undefined;
+
+    let recordingIndexes: Map<string, number> | undefined;
+    if (recordingPromptIds !== undefined) {
+      recordingIndexes = new Map<string, number>();
+      for (let index = 0; index < recordingPromptIds.length; index++) {
+        const promptId = recordingPromptIds[index];
+        if (!promptId) continue;
+        if (recordingIndexes.has(promptId)) return undefined;
+        recordingIndexes.set(promptId, index);
+      }
+    }
+
+    const coordinates: RewindTurnCoordinates[] = [];
+    for (let turnIndex = 0; turnIndex < apiTurns.length; turnIndex++) {
+      const apiTurn = apiTurns[turnIndex]!;
+      const promptId = apiTurn.promptId!;
+      const recordingTurnIndex = recordingIndexes
+        ? recordingIndexes.get(promptId)
+        : turnIndex;
+      coordinates.push({
+        promptId,
+        turnIndex: recordingTurnIndex ?? turnIndex,
+        apiTruncateIndex: apiTurn.apiTruncateIndex,
+        ...(recordingTurnIndex !== undefined ? { recordingTurnIndex } : {}),
+      });
+    }
+    return { mode: 'identified', turns: coordinates };
+  }
+
+  #getSnapshotIndexesByPromptId(
+    snapshots: readonly FileHistorySnapshot[],
+  ): Map<string, number> | undefined {
+    const indexes = new Map<string, number>();
+    for (let index = 0; index < snapshots.length; index++) {
+      const promptId = snapshots[index]!.promptId;
+      if (!promptId || indexes.has(promptId)) return undefined;
+      indexes.set(promptId, index);
+    }
+    return indexes;
   }
 
   captureHistorySnapshot(): Content[] {
     return this.config.getGeminiClient()!.getChat().getHistoryShallow();
   }
 
-  getRewindableUserTurnCount(): number {
-    const apiHistory = this.captureHistorySnapshot();
-    const identifiedTurns = getApiHistoryPromptIndexes(apiHistory);
-    if (identifiedTurns === undefined) {
-      return 0;
-    }
-    if (identifiedTurns.length > 0) {
-      return identifiedTurns.length;
-    }
-    const startIndex = getStartupContextLength(apiHistory, {
-      includeCompressed: true,
-    });
-    let count = 0;
-
-    for (let i = startIndex; i < apiHistory.length; i++) {
-      if (this.#isUserTextContent(apiHistory[i]!)) {
-        count += 1;
-      }
-    }
-
-    return count;
+  captureHistoryPromptIds(history: readonly Content[]): Array<string | null> {
+    return history.map((content) => getApiHistoryPromptId(content) ?? null);
   }
 
-  restoreHistory(history: Content[]): void {
+  getRewindableSnapshotTargets(): RewindableSnapshotTarget[] {
+    const projection = this.#getRewindTurnProjection(
+      this.captureHistorySnapshot(),
+    );
+    if (!projection || projection.turns.length === 0) return [];
+    const snapshots = this.config.getFileHistoryService().getSnapshots();
+    const snapshotIndexes = this.#getSnapshotIndexesByPromptId(snapshots);
+    if (!snapshotIndexes) return [];
+    if (projection.mode === 'legacy') {
+      return snapshots
+        .slice(0, projection.turns.length)
+        .map((snapshot, turnIndex) => ({
+          promptId: snapshot.promptId,
+          turnIndex,
+        }));
+    }
+    return projection.turns.flatMap(
+      ({ promptId, turnIndex, recordingTurnIndex }) =>
+        promptId &&
+        recordingTurnIndex !== undefined &&
+        snapshotIndexes.has(promptId)
+          ? [{ promptId, turnIndex }]
+          : [],
+    );
+  }
+
+  getRewindableUserTurnCount(): number {
+    return (
+      this.#getRewindTurnProjection(this.captureHistorySnapshot())?.turns
+        .length ?? 0
+    );
+  }
+
+  restoreHistory(
+    history: Content[],
+    promptIds: Array<string | null> = this.captureHistoryPromptIds(history),
+  ): void {
     if (this.closing || this.#hasActiveTurn()) {
       throw RequestError.invalidParams(
         undefined,
@@ -3529,48 +3738,30 @@ export class Session implements SessionContext {
       );
     }
 
-    this.config
-      .getGeminiClient()!
-      .getChat()
-      .setHistory(structuredClone(history));
+    if (promptIds.length !== history.length) {
+      throw RequestError.invalidParams(
+        undefined,
+        'promptIds must have the same length as history',
+      );
+    }
+    const seen = new Set<string>();
+    const restoredHistory = structuredClone(history);
+    for (let index = 0; index < promptIds.length; index++) {
+      const promptId = promptIds[index];
+      if (promptId === null) continue;
+      if (!promptId || seen.has(promptId)) {
+        throw RequestError.invalidParams(
+          undefined,
+          'promptIds must contain unique non-empty strings or null',
+        );
+      }
+      seen.add(promptId);
+      markApiHistoryPrompt(restoredHistory[index]!, promptId);
+    }
+
+    this.config.getGeminiClient()!.getChat().setHistory(restoredHistory);
     this.activeTodoPlanRevision = undefined;
     this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
-  }
-
-  #computeApiTruncationIndexForUserTurn(
-    apiHistory: Content[],
-    targetTurnIndex: number,
-  ): number {
-    const identifiedTurns = getApiHistoryPromptIndexes(apiHistory);
-    if (identifiedTurns === undefined) {
-      return -1;
-    }
-    if (identifiedTurns.length > 0) {
-      return identifiedTurns[targetTurnIndex] ?? -1;
-    }
-
-    const startIndex = getStartupContextLength(apiHistory, {
-      includeCompressed: true,
-    });
-
-    if (targetTurnIndex === 0) {
-      return startIndex;
-    }
-
-    let realUserPromptCount = 0;
-    for (let i = startIndex; i < apiHistory.length; i++) {
-      if (!this.#isUserTextContent(apiHistory[i]!)) {
-        continue;
-      }
-
-      if (realUserPromptCount === targetTurnIndex) {
-        return i;
-      }
-
-      realUserPromptCount += 1;
-    }
-
-    return -1;
   }
 
   #isUserTextContent(content: Content): boolean {
@@ -4436,7 +4627,7 @@ export class Session implements SessionContext {
             // throws before re-pushing it, the orphan would be permanently lost
             // — so hold it (and a push-count snapshot) to restore on that path.
             let strippedOrphanEntries: Content[] | null = null;
-            let continuedPromptIdentity: string | undefined;
+            let resubmittedPromptIdentity: string | undefined;
             let orphanPushCountSnapshot = 0;
             if (goalTurn?.origin === 'runtime') {
               this.config.getChatRecordingService()?.recordGoalRuntimeMessage(
@@ -4473,16 +4664,15 @@ export class Session implements SessionContext {
                 strippedOrphanEntries =
                   this.#getCurrentChat().stripOrphanedUserEntriesFromHistory() ??
                   null;
-                const promptIdentities = new Set(
+                const promptIdentities =
                   strippedOrphanEntries
                     ?.map(getApiHistoryPromptId)
-                    .filter((value): value is string => value !== undefined),
-                );
-                if (promptIdentities.size === 1) {
-                  continuedPromptIdentity = promptIdentities
-                    .values()
-                    .next().value;
-                }
+                    .filter((value): value is string => value !== undefined) ??
+                  [];
+                resubmittedPromptIdentity =
+                  promptIdentities.length === 1
+                    ? promptIdentities[0]
+                    : undefined;
                 orphanPushCountSnapshot =
                   this.#getCurrentChat().getUserContentPushCount?.() ?? 0;
                 continuationParts = recoveryPlan.continuation.parts;
@@ -4498,7 +4688,14 @@ export class Session implements SessionContext {
               // The orphaned content is already persisted; recording a new user
               // message would duplicate the turn in the transcript.
             } else if (isRetry) {
-              this.#getCurrentChat().stripOrphanedUserEntriesFromHistory();
+              const strippedRetryEntries =
+                this.#getCurrentChat().stripOrphanedUserEntriesFromHistory() ??
+                [];
+              const promptIdentities = strippedRetryEntries
+                .map(getApiHistoryPromptId)
+                .filter((value): value is string => value !== undefined);
+              resubmittedPromptIdentity =
+                promptIdentities.length === 1 ? promptIdentities[0] : undefined;
             } else if (!isSlashInput || slashCommandName !== 'advisor') {
               // record user message for session management. Only `/advisor`
               // defers its record to after command resolution below — a
@@ -4753,21 +4950,26 @@ export class Session implements SessionContext {
             // block in GeminiClient.sendMessageStream). Placed after
             // slash-command and hook early-returns so locally handled commands
             // don't create phantom snapshots that desync the snapshot index.
-            try {
-              const fileHistoryService = this.config.getFileHistoryService();
-              await fileHistoryService.makeSnapshot(promptId);
+            // Resubmissions keep updating the original turn's latest snapshot.
+            if (!isContinue && !isRetry && goalTurn?.origin !== 'runtime') {
               try {
-                const latestSnapshot = fileHistoryService.getSnapshots().at(-1);
-                if (latestSnapshot) {
-                  this.config
-                    .getChatRecordingService()
-                    ?.recordFileHistorySnapshot(latestSnapshot);
+                const fileHistoryService = this.config.getFileHistoryService();
+                await fileHistoryService.makeSnapshot(promptId);
+                try {
+                  const latestSnapshot = fileHistoryService
+                    .getSnapshots()
+                    .at(-1);
+                  if (latestSnapshot) {
+                    this.config
+                      .getChatRecordingService()
+                      ?.recordFileHistorySnapshot(latestSnapshot);
+                  }
+                } catch (e) {
+                  debugLogger.error(`FileHistory: recordSnapshot failed: ${e}`);
                 }
               } catch (e) {
-                debugLogger.error(`FileHistory: recordSnapshot failed: ${e}`);
+                debugLogger.error(`FileHistory: makeSnapshot failed: ${e}`);
               }
-            } catch (e) {
-              debugLogger.error(`FileHistory: makeSnapshot failed: ${e}`);
             }
 
             // Prepend session-level system reminders (plan mode / subagent /
@@ -4841,6 +5043,12 @@ export class Session implements SessionContext {
             }
 
             let nextMessage: Content | null = { role: 'user', parts };
+            if (goalTurn?.origin !== 'runtime') {
+              markApiHistoryPrompt(
+                nextMessage,
+                isContinue || isRetry ? resubmittedPromptIdentity : promptId,
+              );
+            }
             let turnCount = 0;
             const toolLoopState = createDaemonToolLoopState(
               channelTurn ? 'off' : this.repeatedToolFailureGuardMode,
@@ -4899,10 +5107,8 @@ export class Session implements SessionContext {
                       {
                         modelOverride: fullTurnModelOverride,
                         promptIdentity:
-                          turnCount === 1 && goalTurn?.origin !== 'runtime'
-                            ? isContinue
-                              ? continuedPromptIdentity
-                              : promptId
+                          turnCount === 1
+                            ? getApiHistoryPromptId(nextMessage)
                             : undefined,
                       },
                     );

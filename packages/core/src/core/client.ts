@@ -131,6 +131,7 @@ import {
 import type { DeferredToolSummary } from '../tools/tool-registry.js';
 import {
   buildApiHistoryFromConversation,
+  getApiHistoryPromptId,
   replayUiTelemetryFromConversation,
 } from '../services/sessionService.js';
 import { reportError } from '../utils/errorReporting.js';
@@ -2512,6 +2513,7 @@ export class GeminiClient {
       return takePendingGoalEvents();
     };
     let strippedRetryEntries: Content[] = [];
+    let retryPromptIdentity: string | undefined;
     // Snapshot of GeminiChat's user-content push counter, taken right after the
     // strip. The Retry's re-submitted content is the first thing the send
     // pushes, so if the counter advances at all that content landed.
@@ -2573,6 +2575,13 @@ export class GeminiClient {
 
     if (messageType === SendMessageType.Retry) {
       strippedRetryEntries = this.stripOrphanedUserEntriesFromHistory() ?? [];
+      const strippedPromptIdentities = strippedRetryEntries
+        .map(getApiHistoryPromptId)
+        .filter((identity): identity is string => identity !== undefined);
+      retryPromptIdentity =
+        strippedPromptIdentities.length === 1
+          ? strippedPromptIdentities[0]
+          : undefined;
       pushCountAfterStrip = currentPushCount();
       // The matching dangling-`functionCall` repair runs inside
       // `chat.sendMessageStream` AFTER the user content is pushed, so any
@@ -3233,8 +3242,11 @@ export class GeminiClient {
         this.getChat(),
         prompt_id,
         goalPermit,
-        messageType === SendMessageType.UserQuery ||
-          messageType === SendMessageType.Retry,
+        messageType === SendMessageType.UserQuery
+          ? prompt_id
+          : messageType === SendMessageType.Retry
+            ? retryPromptIdentity
+            : undefined,
       );
 
       // Determine the model to use for this turn

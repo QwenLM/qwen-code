@@ -36,11 +36,17 @@ import {
   SessionWriterUnavailableError,
   type SessionWriterLease,
 } from './session-writer-lease.js';
+import {
+  buildApiHistoryFromConversation,
+  getApiHistoryPromptId,
+  markApiHistoryPrompt,
+} from './session-api-history.js';
 import type {
   GoalStateRecordPayloadV2,
   GoalTurnPermit,
 } from '../goals/goal-protocol.js';
 import type { ToolResultBoundaryObservation } from '../utils/tool-result-boundary-diagnostics.js';
+import { CompressionStatus } from '../core/turn.js';
 
 function branchTestRecord(
   uuid: string,
@@ -1234,6 +1240,7 @@ describe('ChatRecordingService', () => {
           sessionId: 'test-session-id',
           timestamp: '2026-06-27T00:00:00.000Z',
           type: 'user',
+          promptId: 'prompt-1',
           cwd: '/test/project/root',
           version: '1.0.0',
           message: { role: 'user', parts: [{ text: 'first turn' }] },
@@ -1278,6 +1285,7 @@ describe('ChatRecordingService', () => {
           sessionId: 'test-session-id',
           timestamp: '2026-06-27T00:00:04.000Z',
           type: 'user',
+          promptId: 'prompt-2',
           cwd: '/test/project/root',
           version: '1.0.0',
           message: { role: 'user', parts: [{ text: 'second turn' }] },
@@ -1287,7 +1295,14 @@ describe('ChatRecordingService', () => {
       // The Goal runtime continuation is not a turn boundary, so turn index 1
       // is the second REAL user turn (user-2), re-rooting at assistant-2. Were
       // the continuation counted, index 1 would re-root at assistant-1.
+      expect(chatRecordingService.getRewindableTurnPromptIds()).toEqual([
+        'prompt-1',
+        'prompt-2',
+      ]);
       chatRecordingService.rewindRecording(1, { truncatedCount: 3 });
+      expect(chatRecordingService.getRewindableTurnPromptIds()).toEqual([
+        'prompt-1',
+      ]);
       await chatRecordingService.flush();
 
       const records = vi
@@ -2421,6 +2436,38 @@ describe('ChatRecordingService', () => {
 
       expect(userRecord.parentUuid).toBeNull();
       expect(slashRecord.parentUuid).toBe(userRecord.uuid);
+    });
+  });
+
+  describe('recordChatCompression', () => {
+    it('preserves prompt identities through persistence and resume', async () => {
+      const compressedHistory = [
+        { role: 'user' as const, parts: [{ text: 'question' }] },
+        { role: 'model' as const, parts: [{ text: 'answer' }] },
+      ];
+      markApiHistoryPrompt(compressedHistory[0]!, 'prompt-1');
+
+      chatRecordingService.recordChatCompression({
+        info: {
+          originalTokenCount: 100,
+          newTokenCount: 50,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+        compressedHistory,
+      });
+      await chatRecordingService.flush();
+
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      const persistedRecord = JSON.parse(JSON.stringify(record)) as ChatRecord;
+      const restored = buildApiHistoryFromConversation({
+        messages: [persistedRecord],
+      });
+
+      expect(restored.map(getApiHistoryPromptId)).toEqual([
+        'prompt-1',
+        undefined,
+      ]);
+      expect(JSON.stringify(restored)).not.toContain('prompt-1');
     });
   });
 

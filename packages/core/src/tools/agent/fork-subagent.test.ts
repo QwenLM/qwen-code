@@ -170,9 +170,9 @@ describe('selectForkHistory', () => {
           identifiedSecond,
           secondModel,
         ],
-        1,
+        2,
       ),
-    ).toEqual([secondUser, secondModel]);
+    ).toEqual([firstUser, firstModel, placeholder, secondUser, secondModel]);
   });
 
   it('keeps all available context when fewer turns exist than requested', () => {

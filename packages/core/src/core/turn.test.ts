@@ -218,12 +218,12 @@ describe('Turn', () => {
       ]);
     });
 
-    it('passes the stable user-turn identity to chat history', async () => {
+    it('passes the stable user-turn identity independently of the interaction id', async () => {
       const identifiedTurn = new Turn(
         mockChatInstance as unknown as GeminiChat,
-        'prompt-id-1',
+        'interaction-prompt-id',
         undefined,
-        true,
+        'stable-user-turn-id',
       );
 
       for await (const _ of identifiedTurn.run(
@@ -240,9 +240,9 @@ describe('Turn', () => {
           message: [{ text: 'Hi' }],
           config: { abortSignal: expect.any(AbortSignal) },
         },
-        'prompt-id-1',
+        'interaction-prompt-id',
         undefined,
-        { promptId: 'prompt-id-1' },
+        { promptId: 'stable-user-turn-id' },
       );
     });
 

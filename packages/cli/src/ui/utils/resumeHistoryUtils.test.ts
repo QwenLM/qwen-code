@@ -475,6 +475,7 @@ describe('resumeHistoryUtils', () => {
           },
           {
             type: 'user',
+            promptId: 'prompt-1',
             message: {
               parts: [{ text: 'expanded model prompt' }, { text: tagged }],
             },
@@ -486,8 +487,14 @@ describe('resumeHistoryUtils', () => {
         makeConfig({}),
         1_000,
       );
-      const userItem = items.find((i) => i.type === 'user') as { text: string };
-      expect(userItem.text).toBe('@file.ts summarize this');
+      const userItem = items.find((i) => i.type === 'user') as {
+        text: string;
+        promptId?: string;
+      };
+      expect(userItem).toMatchObject({
+        text: '@file.ts summarize this',
+        promptId: 'prompt-1',
+      });
       expect(userItem.text).not.toContain('qwen:user-prompt-submit-context');
     });
 

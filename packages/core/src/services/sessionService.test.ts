@@ -3592,6 +3592,60 @@ describe('SessionService', () => {
       expect(srcLines.every((r) => !r.forkedFrom)).toBe(true);
     });
 
+    it('remaps persisted prompt identities in forked records and compression checkpoints', async () => {
+      const oldId = '11111111-1111-1111-1111-111111111112';
+      const newId = '22222222-2222-2222-2222-222222222223';
+      const oldPromptId = `${oldId}########0`;
+      const newPromptId = `${newId}########0`;
+      const { file, lines } = seedSession(oldId);
+      lines[0]!['promptId'] = oldPromptId;
+      fs.writeFileSync(
+        file,
+        [
+          ...lines,
+          {
+            uuid: 'compression-1',
+            parentUuid: 'u2',
+            sessionId: oldId,
+            type: 'system',
+            subtype: 'chat_compression',
+            timestamp: '2026-04-22T00:00:02.000Z',
+            cwd,
+            version: 'test',
+            systemPayload: {
+              info: {
+                originalTokenCount: 100,
+                newTokenCount: 50,
+                compressionStatus: CompressionStatus.COMPRESSED,
+              },
+              compressedHistory: [
+                { role: 'user', parts: [{ text: 'hello' }] },
+                { role: 'model', parts: [{ text: 'hi' }] },
+              ],
+              promptIds: [oldPromptId, null],
+            },
+          },
+        ]
+          .map((record) => JSON.stringify(record))
+          .join('\n') + '\n',
+      );
+
+      const result = await service.forkSession(oldId, newId);
+      const written = fs
+        .readFileSync(result.filePath, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+
+      expect(written.find((record) => record.uuid === 'u1')?.promptId).toBe(
+        newPromptId,
+      );
+      expect(
+        written.find((record) => record.uuid === 'compression-1')?.systemPayload
+          .promptIds,
+      ).toEqual([newPromptId, null]);
+    });
+
     it('does not copy source turn_result identities into a fork', async () => {
       const oldId = '31313131-3131-3131-3131-313131313131';
       const newId = '41414141-4141-4141-4141-414141414141';

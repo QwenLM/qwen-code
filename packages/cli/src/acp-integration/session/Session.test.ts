@@ -433,6 +433,7 @@ describe('Session', () => {
     recordRealtimeConversation: ReturnType<typeof vi.fn>;
     recordFileHistorySnapshot: ReturnType<typeof vi.fn>;
     rewindRecording: ReturnType<typeof vi.fn>;
+    getRewindableTurnPromptIds: ReturnType<typeof vi.fn>;
     setTitleRecordedCallback: ReturnType<typeof vi.fn>;
     getBranchCheckpointCursor: ReturnType<typeof vi.fn>;
     recordBranchCheckpointTransaction: ReturnType<typeof vi.fn>;
@@ -441,6 +442,7 @@ describe('Session', () => {
   let mockFileHistoryService: {
     makeSnapshot: ReturnType<typeof vi.fn>;
     getSnapshots: ReturnType<typeof vi.fn>;
+    isEnabled: ReturnType<typeof vi.fn>;
     restoreFromSnapshots: ReturnType<typeof vi.fn>;
     rewind: ReturnType<typeof vi.fn>;
   };
@@ -706,6 +708,7 @@ describe('Session', () => {
       recordRealtimeConversation: vi.fn().mockResolvedValue(undefined),
       recordFileHistorySnapshot: vi.fn(),
       rewindRecording: vi.fn(),
+      getRewindableTurnPromptIds: vi.fn().mockReturnValue([]),
       setTitleRecordedCallback: vi.fn(),
       getBranchCheckpointCursor: vi.fn().mockReturnValue({
         recordId: null,
@@ -738,6 +741,7 @@ describe('Session', () => {
     mockFileHistoryService = {
       makeSnapshot: vi.fn().mockResolvedValue(undefined),
       getSnapshots: vi.fn().mockReturnValue([]),
+      isEnabled: vi.fn().mockReturnValue(false),
       restoreFromSnapshots: vi.fn(),
       rewind: vi.fn(),
     };
@@ -2132,6 +2136,37 @@ describe('Session', () => {
     expect(textParts(retryCall.message)).toContain(reminder);
   });
 
+  it('reuses the stripped ACP retry identity without recording a duplicate turn', async () => {
+    const orphan: Content = {
+      role: 'user',
+      parts: [{ text: 'failed prompt' }],
+    };
+    core.markApiHistoryPrompt(orphan, 'original-prompt');
+    mockChat.stripOrphanedUserEntriesFromHistory = vi
+      .fn()
+      .mockReturnValue([orphan]);
+    mockChat.sendMessageStream = vi.fn().mockResolvedValue(createEmptyStream());
+
+    await session.prompt({
+      sessionId: 'test-session-id',
+      prompt: [{ type: 'text', text: 'failed prompt' }],
+      _meta: { 'qwen.daemon.retry': true },
+    } as PromptRequest);
+
+    expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
+      'qwen3-code-plus',
+      expect.any(Object),
+      'test-session-id########1',
+      undefined,
+      { promptId: 'original-prompt' },
+    );
+    expect(mockChatRecordingService.recordUserMessage).not.toHaveBeenCalled();
+    expect(mockFileHistoryService.makeSnapshot).not.toHaveBeenCalled();
+    expect(
+      mockChatRecordingService.recordFileHistorySnapshot,
+    ).not.toHaveBeenCalled();
+  });
+
   it('continues active Todo context for related automatic turns', async () => {
     mockChat.sendMessageStream = vi
       .fn()
@@ -2620,9 +2655,15 @@ describe('Session', () => {
 
     it('preserves the orphaned turn when a continuation send fails (no data loss)', async () => {
       // An interrupted prompt: an orphaned user turn the model never answered.
-      mockChat.getHistory = vi
+      const orphan: Content = {
+        role: 'user',
+        parts: [{ text: 'unanswered' }],
+      };
+      core.markApiHistoryPrompt(orphan, 'original-prompt');
+      mockChat.getHistory = vi.fn().mockReturnValue([orphan]);
+      mockChat.stripOrphanedUserEntriesFromHistory = vi
         .fn()
-        .mockReturnValue([{ role: 'user', parts: [{ text: 'unanswered' }] }]);
+        .mockReturnValue([orphan]);
       // Force the continuation send to fail NON-cancelled (session token limit)
       // so it hits the `!responseStream` branch — the data-loss window.
       mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
@@ -2650,6 +2691,77 @@ describe('Session', () => {
             expect.objectContaining({ text: 'unanswered' }),
           ]),
         }),
+      );
+      const restored = vi.mocked(mockChat.addHistory).mock.calls[0]![0];
+      expect(core.getApiHistoryPromptId(restored)).toBe('original-prompt');
+    });
+
+    it('reuses the interrupted prompt identity only for the continuation send', async () => {
+      const orphan: Content = {
+        role: 'user',
+        parts: [{ text: 'unanswered' }],
+      };
+      core.markApiHistoryPrompt(orphan, 'original-prompt');
+      mockChat.getHistory = vi.fn().mockReturnValue([orphan]);
+      mockChat.stripOrphanedUserEntriesFromHistory = vi
+        .fn()
+        .mockReturnValue([orphan]);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        prompt: [],
+        sessionId: 'test-session-id',
+        _meta: { 'qwen.daemon.continueLastTurn': true },
+      } as unknown as Parameters<typeof session.prompt>[0]);
+
+      expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
+        'qwen3-code-plus',
+        expect.any(Object),
+        'test-session-id########1',
+        undefined,
+        { promptId: 'original-prompt' },
+      );
+      expect(mockFileHistoryService.makeSnapshot).not.toHaveBeenCalled();
+      expect(
+        mockChatRecordingService.recordFileHistorySnapshot,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('does not reuse an identity from multiple continuation entries', async () => {
+      const firstOrphan: Content = {
+        role: 'user',
+        parts: [{ text: 'first orphan part' }],
+      };
+      const secondOrphan: Content = {
+        role: 'user',
+        parts: [{ text: 'second orphan part' }],
+      };
+      core.markApiHistoryPrompt(firstOrphan, 'original-prompt');
+      core.markApiHistoryPrompt(secondOrphan, 'original-prompt');
+      mockChat.getHistory = vi
+        .fn()
+        .mockReturnValue([firstOrphan, secondOrphan]);
+      mockChat.stripOrphanedUserEntriesFromHistory = vi
+        .fn()
+        .mockReturnValue([firstOrphan, secondOrphan]);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        prompt: [],
+        sessionId: 'test-session-id',
+        _meta: { 'qwen.daemon.continueLastTurn': true },
+      } as unknown as Parameters<typeof session.prompt>[0]);
+
+      expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
+        'qwen3-code-plus',
+        expect.any(Object),
+        'test-session-id########1',
+        undefined,
+        undefined,
       );
     });
 
@@ -3170,12 +3282,92 @@ describe('Session', () => {
       core.markApiHistoryPrompt(history[0]!, 'prompt-1');
       core.markApiHistoryPrompt(history[4]!, 'prompt-2');
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
+        'prompt-1',
+        undefined,
+        'prompt-2',
+      ]);
+      mockFileHistoryService.isEnabled.mockReturnValue(true);
+      mockFileHistoryService.getSnapshots.mockReturnValue([
+        {
+          promptId: 'prompt-1',
+          timestamp: new Date('2026-06-13T00:00:00.000Z'),
+          trackedFileBackups: {},
+        },
+        {
+          promptId: 'goal-runtime',
+          timestamp: new Date('2026-06-13T00:01:00.000Z'),
+          trackedFileBackups: {},
+        },
+        {
+          promptId: 'prompt-2',
+          timestamp: new Date('2026-06-13T00:02:00.000Z'),
+          trackedFileBackups: {},
+        },
+      ]);
 
       expect(session.getRewindableUserTurnCount()).toBe(2);
-      expect(session.rewindToTurn(1)).toEqual({
-        targetTurnIndex: 1,
+      expect(session.getRewindableSnapshotTargets()).toEqual([
+        { promptId: 'prompt-1', turnIndex: 0 },
+        { promptId: 'prompt-2', turnIndex: 2 },
+      ]);
+      expect(session.rewindToTurn(2)).toEqual({
+        targetTurnIndex: 2,
         apiTruncateIndex: 4,
+        promptId: 'prompt-2',
       });
+      expect(mockFileHistoryService.restoreFromSnapshots).toHaveBeenCalledWith(
+        mockFileHistoryService.getSnapshots(),
+      );
+      expect(mockChatRecordingService.rewindRecording).toHaveBeenCalledWith(
+        2,
+        { truncatedCount: 1 },
+        mockFileHistoryService.getSnapshots(),
+      );
+    });
+
+    it('does not fall back to positional rewinds when recorder identities are missing from API history', () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'unidentified prompt' }] },
+        { role: 'model', parts: [{ text: 'reply' }] },
+      ];
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
+        'prompt-1',
+      ]);
+
+      expect(session.getRewindableUserTurnCount()).toBe(0);
+      expect(session.getRewindableSnapshotTargets()).toEqual([]);
+      expect(() => session.rewindToTurn(0)).toThrow(
+        'Cannot rewind to the requested turn',
+      );
+      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+    });
+
+    it('resolves numeric identified rewinds by recording index without ordinal collision', () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'unjoined first' }] },
+        { role: 'model', parts: [{ text: 'first reply' }] },
+        { role: 'user', parts: [{ text: 'joined second' }] },
+      ];
+      core.markApiHistoryPrompt(history[0]!, 'prompt-a');
+      core.markApiHistoryPrompt(history[2]!, 'prompt-b');
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
+        'prompt-b',
+      ]);
+
+      expect(session.rewindToTurn(0)).toEqual({
+        targetTurnIndex: 0,
+        apiTruncateIndex: 2,
+        promptId: 'prompt-b',
+      });
+      expect(mockChat.truncateHistory).toHaveBeenCalledWith(2);
+      expect(mockChatRecordingService.rewindRecording).toHaveBeenCalledWith(
+        0,
+        { truncatedCount: 1 },
+        [],
+      );
     });
 
     it('rejects unreachable user turns', () => {
@@ -3282,13 +3474,19 @@ describe('Session', () => {
         { role: 'user', parts: [{ text: 'first' }] },
         { role: 'model', parts: [{ text: 'first reply' }] },
       ];
+      core.markApiHistoryPrompt(history[0]!, 'prompt-1');
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
 
       const snapshot = session.captureHistorySnapshot();
-      session.restoreHistory(snapshot);
+      const promptIds = session.captureHistoryPromptIds(snapshot);
+      const wireHistory = JSON.parse(JSON.stringify(snapshot)) as Content[];
+      session.restoreHistory(wireHistory, promptIds);
 
       expect(snapshot).toEqual(history);
-      expect(mockChat.setHistory).toHaveBeenCalledWith(history);
+      const restored = vi.mocked(mockChat.setHistory).mock.calls[0]![0];
+      expect(JSON.parse(JSON.stringify(restored))).toEqual(wireHistory);
+      expect(core.getApiHistoryPromptId(restored[0]!)).toBe('prompt-1');
+      expect(core.getApiHistoryPromptId(restored[1]!)).toBeUndefined();
       expect(mockChat.getHistory).not.toHaveBeenCalled();
     });
 
@@ -5536,6 +5734,9 @@ describe('Session', () => {
 
       expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
         '原始语音文本',
+        undefined,
+        undefined,
+        'test-session-id########1',
       );
       expect(textParts(firstSentMessage())).toEqual([
         '<realtime_delegation>trusted model input</realtime_delegation>',
@@ -5572,6 +5773,7 @@ describe('Session', () => {
           hookContext: '',
           mediaReferences: [mediaReference],
         },
+        'test-session-id########1',
       );
     });
 
@@ -5598,6 +5800,7 @@ describe('Session', () => {
         'describe these',
         undefined,
         expect.objectContaining({ mediaReferences }),
+        'test-session-id########1',
       );
     });
 
@@ -5861,6 +6064,8 @@ describe('Session', () => {
           config: { abortSignal: expect.any(AbortSignal) },
         },
         expect.stringMatching(/^test-session-id########notification\d+$/),
+        undefined,
+        undefined,
       );
       expect(mockChatRecordingService.recordNotification).toHaveBeenCalledWith(
         [
@@ -7188,6 +7393,8 @@ describe('Session', () => {
           config: { abortSignal: expect.any(AbortSignal) },
         },
         expect.stringMatching(/^test-session-id########notification\d+$/),
+        undefined,
+        undefined,
       );
       expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
         sessionId: 'test-session-id',
@@ -7266,6 +7473,9 @@ describe('Session', () => {
 
       expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
         '3',
+        undefined,
+        undefined,
+        'test-session-id########3',
       );
       expect(mockGeminiClient.tryCompressChat).toHaveBeenCalledWith(
         'test-session-id########3',
@@ -7294,6 +7504,7 @@ describe('Session', () => {
         'internal channel instructions\n\nhello',
         undefined,
         { displayText: 'hello', hookContext: '' },
+        'test-session-id########1',
       );
       expect(
         agentTelemetry.addAgentInputMessageAttributes,
@@ -7756,12 +7967,16 @@ describe('Session', () => {
         'vision-agent\0https://vision.example.com/v1\0',
         expect.any(Object),
         expect.any(String),
+        undefined,
+        expect.objectContaining({ promptId: expect.any(String) }),
       );
       expect(mockChat.sendMessageStream).toHaveBeenNthCalledWith(
         2,
         'vision-agent\0https://vision.example.com/v1\0',
         expect.any(Object),
         expect.any(String),
+        undefined,
+        undefined,
       );
       expect(resolveForModel).toHaveBeenCalledWith(
         'vision-agent\0https://vision.example.com/v1',
@@ -7784,6 +7999,8 @@ describe('Session', () => {
         'qwen3-code-plus',
         expect.any(Object),
         expect.any(String),
+        undefined,
+        expect.objectContaining({ promptId: expect.any(String) }),
       );
       expect(mockGeminiClient.tryCompressChat).toHaveBeenCalledOnce();
     });
@@ -10961,6 +11178,8 @@ describe('Session', () => {
             config: { abortSignal: expect.any(AbortSignal) },
           },
           'test-session-id########1',
+          undefined,
+          { promptId: 'test-session-id########1' },
         );
       });
 
@@ -11048,6 +11267,8 @@ describe('Session', () => {
             config: { abortSignal: expect.any(AbortSignal) },
           },
           'test-session-id########1',
+          undefined,
+          { promptId: 'test-session-id########1' },
         );
       });
 
@@ -16784,6 +17005,9 @@ describe('Session', () => {
         expect(finishedSpy).toHaveBeenCalledTimes(1);
         expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
           '/btw question',
+          undefined,
+          undefined,
+          'test-session-id########1',
         );
         expect(
           mockChatRecordingService.recordSlashCommand,
@@ -17540,6 +17764,7 @@ describe('Session', () => {
           }),
           expect.any(String),
           permit,
+          undefined,
         );
         expect(
           mockChatRecordingService.recordGoalRuntimeMessage,
@@ -18144,6 +18369,7 @@ describe('Session', () => {
           expect.any(Object),
           expect.any(String),
           permit,
+          undefined,
         );
       });
 
@@ -18257,10 +18483,13 @@ describe('Session', () => {
           expect.any(Object),
           expect.any(String),
           permit,
+          expect.objectContaining({ promptId: expect.any(String) }),
         );
         expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
           'hello',
           permit,
+          undefined,
+          'test-session-id########1',
         );
         expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
       });
@@ -18367,6 +18596,7 @@ describe('Session', () => {
           expect.any(Object),
           expect.any(String),
           userPermit,
+          expect.objectContaining({ promptId: expect.any(String) }),
         );
         expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(
           automaticPermit,
@@ -18616,6 +18846,7 @@ describe('Session', () => {
           expect.any(Object),
           expect.any(String),
           userPermit,
+          expect.objectContaining({ promptId: expect.any(String) }),
         );
         expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(userPermit);
       });

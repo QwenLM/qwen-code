@@ -594,6 +594,7 @@ describe('SessionMessageHandler', () => {
       currentSessionId: 'session-1',
       rewindSession: vi.fn().mockResolvedValue({
         historyBeforeRewind: [{ role: 'user', parts: [{ text: 'first' }] }],
+        historyBeforeRewindPromptIds: ['prompt-1'],
       }),
       restoreSessionHistory: vi.fn().mockResolvedValue(undefined),
       sendMessage: vi.fn().mockRejectedValue(new Error('send failed')),
@@ -622,9 +623,10 @@ describe('SessionMessageHandler', () => {
       },
     });
 
-    expect(agentManager.restoreSessionHistory).toHaveBeenCalledWith([
-      { role: 'user', parts: [{ text: 'first' }] },
-    ]);
+    expect(agentManager.restoreSessionHistory).toHaveBeenCalledWith(
+      [{ role: 'user', parts: [{ text: 'first' }] }],
+      ['prompt-1'],
+    );
     expect(conversationStore.replaceMessages).toHaveBeenCalledWith(
       'session-1',
       originalConversation.messages,
@@ -847,6 +849,7 @@ describe('SessionMessageHandler', () => {
     });
 
     const historyBeforeRewind = [{ role: 'user', parts: [{ text: 'first' }] }];
+    const historyBeforeRewindPromptIds = ['prompt-1'];
     const originalConversation = {
       id: 'session-1',
       title: 'Existing session',
@@ -861,7 +864,10 @@ describe('SessionMessageHandler', () => {
     const agentManager = {
       isConnected: true,
       currentSessionId: 'session-1',
-      rewindSession: vi.fn().mockResolvedValue({ historyBeforeRewind }),
+      rewindSession: vi.fn().mockResolvedValue({
+        historyBeforeRewind,
+        historyBeforeRewindPromptIds,
+      }),
       restoreSessionHistory: vi.fn().mockResolvedValue(undefined),
       sendMessage: vi.fn(),
     };
@@ -891,6 +897,7 @@ describe('SessionMessageHandler', () => {
 
     expect(agentManager.restoreSessionHistory).toHaveBeenCalledWith(
       historyBeforeRewind,
+      historyBeforeRewindPromptIds,
     );
     expect(conversationStore.replaceMessages).toHaveBeenCalledWith(
       'session-1',

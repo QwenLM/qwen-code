@@ -47,22 +47,24 @@ Summarizing compression intentionally discards identities for absorbed turns.
 history transformations retain the internal Symbol. New post-compression turns
 receive new identities normally.
 
-Forked sessions rewrite the session-prefixed identity on both user records and
-file-history snapshots so their rewind boundaries stay aligned.
+Forked sessions rewrite the session-prefixed identity on user records,
+compression checkpoints, and file-history snapshots so their rewind boundaries
+stay aligned.
 
 ## Affected paths
 
 - TUI `/rewind`: `HistoryItemUser.promptId` locates the matching API entry.
 - ACP rewind/count: identified histories count and locate marked user prompts;
-  legacy histories retain the existing ACP classifier.
+  snapshots, recording branches, and API history join on that identity. Legacy
+  histories retain the existing ACP classifier.
 - Fork turn selection: identified histories count marked prompts; legacy
   histories retain the existing content-shape classifier.
 - Session resume: both UI and API projections are rebuilt from the same
   persisted `ChatRecord.promptId`.
 
-Recording rewind and file rollback keep their current APIs. They already use
-the same logical user-turn order and file snapshots already key on `promptId`;
-changing those contracts is unnecessary for fixing UI/API alignment.
+ACP edit rollback carries prompt identities beside the JSON-serialized API
+history and restores the internal Symbols after transport. The parallel field
+keeps provider content unchanged and remains optional for older clients.
 
 ## Verification
 
