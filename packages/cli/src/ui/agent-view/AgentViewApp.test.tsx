@@ -146,6 +146,59 @@ describe('AgentViewApp', () => {
     expect(lastFrame()).toContain('> ship it');
   });
 
+  it('does not overwrite newer input when an earlier dispatch fails', async () => {
+    let rejectDispatch: ((error: Error) => void) | undefined;
+    const dispatchPrompt = vi.fn(
+      () =>
+        new Promise((_, reject) => {
+          rejectDispatch = reject;
+        }),
+    );
+    const { stdin, lastFrame } = render(
+      <AgentViewApp
+        rows={[row('session-1')]}
+        actions={actions({ dispatchPrompt })}
+        onExit={vi.fn()}
+      />,
+    );
+
+    for (const char of 'first') {
+      stdin.write(char);
+      await Promise.resolve();
+    }
+    stdin.write('\r');
+    await settleInput();
+    for (const char of 'newer') {
+      stdin.write(char);
+      await Promise.resolve();
+    }
+
+    await act(async () => {
+      rejectDispatch?.(new Error('dispatch failed'));
+      await flushInk();
+    });
+
+    expect(lastFrame()).toContain('> newer');
+    expect(lastFrame()).not.toContain('> first');
+  });
+
+  it('keeps a rowless initial error panel visible', () => {
+    const { lastFrame } = render(
+      <AgentViewApp
+        rows={[]}
+        actions={actions()}
+        initialPeekPanel={{
+          title: 'missing-session',
+          lines: ['adopt failed'],
+          error: true,
+        }}
+        onExit={vi.fn()}
+      />,
+    );
+
+    expect(lastFrame()).toContain('adopt failed');
+  });
+
   it('keeps a successful dispatch when the row refresh fails', async () => {
     const dispatchPrompt = vi.fn(async () => ({ sessionId: 'new-session' }));
     const loadRows = vi.fn(async () => {
@@ -298,9 +351,10 @@ describe('AgentViewApp', () => {
       await flushInk();
     });
 
-    // The failure must not resurrect the panel the user explicitly closed.
+    // The failure must not resurrect the panel the user explicitly closed,
+    // but it still needs to be visible outside the hidden peek input.
     expect(lastFrame()).not.toContain('space to close');
-    expect(lastFrame()).not.toContain('worker is gone');
+    expect(lastFrame()).toContain('Reply was not sent: worker is gone');
   });
 
   it('sends soft needs-input replies as follow-ups', async () => {
@@ -900,6 +954,11 @@ describe('AgentViewApp', () => {
       await Promise.resolve();
     }
     stdin.write('\r');
+    await settleInput();
+    for (const char of 'next') {
+      stdin.write(char);
+      await Promise.resolve();
+    }
     stdin.write('\r');
     await Promise.resolve();
     await Promise.resolve();
@@ -907,6 +966,7 @@ describe('AgentViewApp', () => {
     expect(dispatchPrompt).toHaveBeenCalledOnce();
     expect(dispatchPrompt).toHaveBeenCalledWith('slow', false);
     expect(lastFrame()).toContain('Starting session');
+    expect(lastFrame()).toContain('> next');
 
     resolveDispatch({ sessionId: 'new-session' });
     await flushInk();

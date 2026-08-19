@@ -31,7 +31,10 @@ import { showResumeSessionPickerItem } from '../ui/components/StandaloneSessionP
 import type { AgentRosterRow } from '../ui/agent-view/roster-model.js';
 import { buildAgentRosterRows } from '../ui/agent-view/roster-model.js';
 import { getAuthTypeFromEnv } from '../utils/modelConfigUtils.js';
-import { stripUnsafeCharacters } from '../ui/utils/textUtils.js';
+import {
+  cleanSingleLineText,
+  stripUnsafeCharacters,
+} from '../ui/utils/textUtils.js';
 import { writeStdoutLine } from '../utils/stdioHelpers.js';
 import { getCliVersion } from '../utils/version.js';
 import {
@@ -111,9 +114,9 @@ export async function runAgentsInteractiveSession({
   renderRoster,
   header,
 }: RunAgentsInteractiveSessionOptions): Promise<void> {
-  // Titles only change on rename (handled via rosterEntry.displayName), so
-  // resolve each transcript at most once instead of re-reading on every tick.
-  const titleCache = new Map<string, string | undefined>();
+  // Cache only discovered transcript titles; a new session may be titled
+  // after its first roster poll.
+  const titleCache = new Map<string, string>();
   const loadRows = async () =>
     toRosterRows(toSnapshots(await supervisor.list(listCwd)), titleCache);
   const actions: AgentsInteractiveActions = {
@@ -137,6 +140,7 @@ export async function runAgentsInteractiveSession({
     loadRows,
     subscribeToChanges: (onChange) =>
       supervisor.subscribe(() => {
+        titleCache.clear();
         onChange();
       }),
   };
@@ -171,6 +175,7 @@ export async function runAgentsInteractiveSession({
           initialPeekPanel = {
             title: result.sessionId,
             lines: [error instanceof Error ? error.message : String(error)],
+            error: true,
           };
         } finally {
           resetTerminalForRoster();
@@ -224,6 +229,7 @@ async function adoptResumeSessionFromPicker(
     return {
       title: sessionId,
       lines: [error instanceof Error ? error.message : String(error)],
+      error: true,
     };
   }
 }
@@ -258,7 +264,7 @@ async function defaultRenderAgentsRoster(
 
 function toRosterRows(
   snapshots: AgentViewSessionSnapshot[],
-  titleCache: Map<string, string | undefined>,
+  titleCache: Map<string, string>,
 ): AgentRosterRow[] {
   if (snapshots.length === 0) {
     return [];
@@ -282,15 +288,17 @@ function toRosterRows(
 
 function getRosterEntryWithTitle(
   snapshot: AgentViewSessionSnapshot,
-  titleCache: Map<string, string | undefined>,
+  titleCache: Map<string, string>,
 ): AgentViewRosterEntry | undefined {
   if (snapshot.rosterEntry?.displayName) {
     return snapshot.rosterEntry;
   }
   let title = titleCache.get(snapshot.sessionId);
-  if (title === undefined && !titleCache.has(snapshot.sessionId)) {
+  if (title === undefined) {
     title = readTranscriptTitle(snapshot);
-    titleCache.set(snapshot.sessionId, title);
+    if (title) {
+      titleCache.set(snapshot.sessionId, title);
+    }
   }
   if (!title) {
     return snapshot.rosterEntry;
@@ -342,10 +350,9 @@ function formatRosterRowsText(rows: AgentRosterRow[]): string {
     .map((row) => {
       // Non-TTY output has no ink sanitize-ansi protection, so untrusted
       // session text must be stripped here.
-      const summary = row.summary
-        ? ` ${stripUnsafeCharacters(row.summary)}`
-        : '';
-      return `${row.sessionId} ${row.stateLabel} ${row.aliveIndicator} ${row.cwd} ${row.ageLabel}${summary}`;
+      const cleanSummary = cleanSingleLineText(row.summary ?? '');
+      const summary = cleanSummary ? ` ${cleanSummary}` : '';
+      return `${row.sessionId} ${row.stateLabel} ${row.aliveIndicator} ${cleanSingleLineText(row.cwd)} ${row.ageLabel}${summary}`;
     })
     .join('\n');
 }
@@ -413,7 +420,8 @@ function readConfiguredModelHeader(
       ...readProviderLabel(settings.modelProviders, model),
     };
   } catch {
-    const model = process.env['OPENAI_MODEL']?.trim();
+    const model =
+      process.env['OPENAI_MODEL']?.trim() || process.env['QWEN_MODEL']?.trim();
     return {
       authLabel: process.env['OPENAI_API_KEY'] ? 'API Key' : 'Auth',
       ...(model ? { model } : {}),

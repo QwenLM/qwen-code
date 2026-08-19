@@ -2233,16 +2233,27 @@ export const AppContainer = (props: AppContainerProps) => {
     }
   }, [streamingState]);
 
+  const agentViewLastResult = getLastAgentViewModelOutputLine([
+    ...historyManager.history,
+    ...pendingGeminiHistoryItems,
+  ]);
+  const agentViewLastResultRef = useRef(agentViewLastResult);
+  agentViewLastResultRef.current = agentViewLastResult;
+  const answeredAgentViewSoftQuestionRef = useRef<string | undefined>(
+    undefined,
+  );
+
   useEffect(() => {
     if (!isAgentViewWorkerEnv()) return;
+    if (streamingState !== StreamingState.Idle) {
+      answeredAgentViewSoftQuestionRef.current = undefined;
+    }
     const report = getAgentViewWorkerStateForUi({
       initError,
       streamingState,
       pendingToolCalls,
-      lastResult: getLastAgentViewModelOutputLine([
-        ...historyManager.history,
-        ...pendingGeminiHistoryItems,
-      ]),
+      lastResult: agentViewLastResult,
+      answeredSoftQuestion: answeredAgentViewSoftQuestionRef.current,
     });
     void reportAgentViewWorkerState({
       ...report,
@@ -2251,9 +2262,8 @@ export const AppContainer = (props: AppContainerProps) => {
       ...(report.summary || !sessionName ? {} : { summary: sessionName }),
     });
   }, [
-    historyManager.history,
+    agentViewLastResult,
     initError,
-    pendingGeminiHistoryItems,
     pendingToolCalls,
     sessionName,
     streamingState,
@@ -2314,6 +2324,7 @@ export const AppContainer = (props: AppContainerProps) => {
     dialogOpen: bgTasksDialogOpen,
     entries: bgTaskEntries,
     livePanelFocused: bgLivePanelFocused,
+    pillFocused: bgPillFocused,
   } = useBackgroundTaskViewState();
   const { closeDialog: closeBgTasksDialog } = useBackgroundTaskViewActions();
 
@@ -2868,6 +2879,12 @@ export const AppContainer = (props: AppContainerProps) => {
       }
       const nextPrompt = pendingAgentViewControlPromptsRef.current.shift();
       if (nextPrompt) {
+        const lastResult = agentViewLastResultRef.current;
+        answeredAgentViewSoftQuestionRef.current = lastResult;
+        void reportAgentViewWorkerState({
+          sessionState: 'idle',
+          ...(lastResult ? { lastResult } : {}),
+        });
         handleFinalSubmitRef.current(nextPrompt, {
           bypassAgentTabRouting: true,
         });
@@ -2879,6 +2896,7 @@ export const AppContainer = (props: AppContainerProps) => {
         if (!disposed && events.some((event) => event.type === 'redraw')) {
           refreshStatic();
         }
+        let stopped = false;
         for (const event of events) {
           await applyAgentViewWorkerControlEventForUi(
             event,
@@ -2904,8 +2922,12 @@ export const AppContainer = (props: AppContainerProps) => {
               }).then(shutdown, shutdown);
             },
           );
+          if (event.type === 'stop') {
+            stopped = true;
+            break;
+          }
         }
-        if (!disposed) {
+        if (!disposed && !stopped) {
           flushPrompt();
         }
       } catch {
@@ -4222,6 +4244,12 @@ export const AppContainer = (props: AppContainerProps) => {
         !key.ctrl &&
         !key.meta &&
         !key.shift &&
+        agentViewState.activeView === 'main' &&
+        !agentViewState.agentTabBarFocused &&
+        !agentViewState.agentShellFocused &&
+        !bgLivePanelFocused &&
+        !bgPillFocused &&
+        !activePtyId &&
         !embeddedShellFocused &&
         buffer.text.length === 0 &&
         !dialogsVisibleRef.current
@@ -4472,6 +4500,11 @@ export const AppContainer = (props: AppContainerProps) => {
       buffer,
       handleSlashCommand,
       activePtyId,
+      agentViewState.activeView,
+      agentViewState.agentShellFocused,
+      agentViewState.agentTabBarFocused,
+      bgLivePanelFocused,
+      bgPillFocused,
       embeddedShellFocused,
       btwItem,
       setBtwItem,

@@ -463,6 +463,27 @@ describe('SessionPicker', () => {
   });
 
   describe('Display', () => {
+    it('sanitizes managed session titles before rendering', async () => {
+      const session = Object.assign(createMockSession(), {
+        agentViewManaged: true,
+        customTitle: '\u001b]0;spoof\u0007first\nsecond',
+      });
+      const { lastFrame } = render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <SessionPicker
+            sessionService={createMockSessionService([session]) as never}
+            onSelect={vi.fn()}
+            onCancel={vi.fn()}
+          />
+        </KeypressProvider>,
+      );
+
+      await flush();
+
+      expect(lastFrame()).toContain('first second');
+      expect(lastFrame()).not.toContain('spoof');
+    });
+
     it('should show session metadata', async () => {
       const sessions = [
         createMockSession({
@@ -890,7 +911,10 @@ describe('SessionPicker', () => {
       await flush();
       stdin.write('\r'); // Enter
       await flush();
-      expect(onSelect).toHaveBeenCalledWith('s1');
+      expect(onSelect).toHaveBeenCalledWith(
+        's1',
+        expect.objectContaining({ sessionId: 's1' }),
+      );
     });
 
     it('without enablePreview, Space is a no-op and footer omits the hint', async () => {

@@ -342,13 +342,13 @@ describe('agents command', () => {
 
     expect(runSpy).toHaveBeenCalledOnce();
     expect(runSpy.mock.calls[0]?.[0]).toEqual({
-      cwd: '/tmp/workspace',
-      listCwd: '/tmp/workspace',
+      cwd: path.resolve('/tmp/workspace'),
+      listCwd: path.resolve('/tmp/workspace'),
       supervisor: mockSupervisor,
       renderRoster: expect.any(Function),
       header: expect.objectContaining({
         version: 'test-version',
-        cwd: '/tmp/workspace',
+        cwd: path.resolve('/tmp/workspace'),
         model: 'settings-model',
         providerLabel: 'Idealab',
       }),
@@ -357,6 +357,11 @@ describe('agents command', () => {
   });
 
   it('prints a text roster when --json is not set and stdout is not a TTY', async () => {
+    const snapshots = structuredClone(await mockSupervisor.list());
+    mockSupervisor.list.mockClear();
+    snapshots[0]!.state.activeCwd = '\u001b]0;spoof\u0007/tmp/work\nspace';
+    snapshots[0]!.activity!.summary = 'write\nmore tests';
+    mockSupervisor.list.mockResolvedValueOnce(snapshots);
     const handler = agentsListCommand.handler;
     if (!handler) throw new Error('agents list command handler missing');
 
@@ -366,13 +371,19 @@ describe('agents command', () => {
       >[0],
     );
 
-    const output = mockWriteStdoutLine.mock.calls
-      .map((call) => String(call[0]))
-      .join('\n');
-    expect(output).toContain('session-1');
-    expect(output).toContain('Working');
-    expect(output).toContain('session-done');
-    expect(output).toContain('Completed');
+    const output = String(mockWriteStdoutLine.mock.calls[0]?.[0]);
+    const lines = output.split('\n');
+    expect(lines).toHaveLength(3);
+    expect(lines[0]).toMatch(
+      /^session-1 Working alive \/tmp\/work space \S+ write more tests$/,
+    );
+    expect(
+      lines.some((line) => line.startsWith('session-attached Idle alive ')),
+    ).toBe(true);
+    expect(
+      lines.some((line) => line.startsWith('session-done Completed offline ')),
+    ).toBe(true);
+    expect(output).not.toContain('spoof');
   });
 
   it('prints a placeholder when the non-TTY roster is empty', async () => {
@@ -589,6 +600,7 @@ describe('agents command', () => {
         expect(initialPeekPanel).toEqual({
           title: 'session-1',
           lines: ['stale PTY host'],
+          error: true,
         });
         return { type: 'exit' };
       },
@@ -655,11 +667,68 @@ describe('agents command', () => {
     expect(supervisor.dispatch).not.toHaveBeenCalled();
     expect(supervisor.adopt).toHaveBeenCalledWith({
       sessionId: '123e4567-e89b-12d3-a456-426614174000',
-      projectCwd: '/tmp/history-workspace',
-      activeCwd: '/tmp/history-workspace',
+      projectCwd: path.resolve('/tmp/history-workspace'),
+      activeCwd: path.resolve('/tmp/history-workspace'),
       terminal: {
         columns: expect.any(Number),
         rows: expect.any(Number),
+      },
+    });
+  });
+
+  it('does not re-adopt a history session that is already managed', async () => {
+    mockShowResumeSessionPickerItem.mockResolvedValueOnce({
+      sessionId: 'managed-session',
+      cwd: '/tmp/history-workspace',
+      startTime: '2026-07-17T08:00:00.000Z',
+      mtime: Date.parse('2026-07-17T08:00:00.000Z'),
+      prompt: 'historical prompt',
+      filePath: '/tmp/history-workspace/.qwen/chats/session.jsonl',
+    });
+    let renderCount = 0;
+
+    await runAgentsInteractiveSession({
+      cwd: '/tmp/workspace',
+      supervisor: mockSupervisor,
+      renderRoster: async (_rows, _actions, initialPeekPanel) => {
+        renderCount += 1;
+        if (renderCount === 1) return { type: 'resume' };
+        expect(initialPeekPanel).toEqual({
+          title: 'managed-session',
+          lines: ['Session is already managed by Agent View.'],
+        });
+        return { type: 'exit' };
+      },
+    });
+
+    expect(mockSupervisor.adopt).not.toHaveBeenCalled();
+  });
+
+  it('shows adoption failures in a persistent error panel', async () => {
+    mockShowResumeSessionPickerItem.mockResolvedValueOnce({
+      sessionId: 'history-session',
+      cwd: '/tmp/history-workspace',
+      startTime: '2026-07-17T08:00:00.000Z',
+      mtime: Date.parse('2026-07-17T08:00:00.000Z'),
+      prompt: 'historical prompt',
+      filePath: '/tmp/history-workspace/.qwen/chats/session.jsonl',
+    });
+    mockSupervisor.peek.mockRejectedValueOnce(new Error('not managed'));
+    mockSupervisor.adopt.mockRejectedValueOnce(new Error('adopt failed'));
+    let renderCount = 0;
+
+    await runAgentsInteractiveSession({
+      cwd: '/tmp/workspace',
+      supervisor: mockSupervisor,
+      renderRoster: async (_rows, _actions, initialPeekPanel) => {
+        renderCount += 1;
+        if (renderCount === 1) return { type: 'resume' };
+        expect(initialPeekPanel).toEqual({
+          title: 'history-session',
+          lines: ['adopt failed'],
+          error: true,
+        });
+        return { type: 'exit' };
       },
     });
   });

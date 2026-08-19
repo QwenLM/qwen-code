@@ -70,6 +70,7 @@ export function AgentViewApp({
 }: AgentViewAppProps) {
   const [currentRows, setCurrentRows] = useState(rows);
   const [prompt, setPrompt] = useState('');
+  const [promptVersion, setPromptVersion] = useState(0);
   const [peekPrompt, setPeekPrompt] = useState('');
   const [selectedSessionId, setSelectedSessionId] = useState<
     string | undefined
@@ -95,6 +96,7 @@ export function AgentViewApp({
   const dispatchInFlightRef = useRef(false);
   const peekSubmitInFlightRef = useRef(false);
   const pinInFlightRef = useRef(false);
+  const promptRevisionRef = useRef(0);
   // Invalidates in-flight peek loads on every open/close so a stale response
   // can never overwrite a newer panel or resurrect a closed one.
   const peekGenerationRef = useRef(0);
@@ -131,6 +133,7 @@ export function AgentViewApp({
     const row = currentRows.find((item) => item.sessionId === peekPanel.title);
     if (!row) {
       if (peekPanel.title !== 'Filter') {
+        if (peekPanel.error) return;
         // The peeked session disappeared; close the stale panel instead of
         // leaving a reply input aimed at a removed session.
         peekGenerationRef.current += 1;
@@ -196,29 +199,26 @@ export function AgentViewApp({
   );
 
   const dispatch = useCallback(
-    (attach: boolean, promptOverride?: string) => {
+    (attach: boolean, promptOverride?: string): boolean => {
       if (dispatchInFlightRef.current) {
-        // The roster already cleared its buffer before calling onDispatch;
-        // restore the text here or the typed prompt exists nowhere.
-        setPrompt(promptOverride ?? prompt);
         setNotice({
           lines: ['Starting session...'],
         });
         setPeekReplyTarget(undefined);
         setPeekPrompt('');
-        return;
+        return false;
       }
       const promptToSubmit = promptOverride ?? prompt;
 
       if (isRosterExitCommand(promptToSubmit)) {
         onExit();
-        return;
+        return true;
       }
 
       if (isRosterResumeCommand(promptToSubmit)) {
         setPrompt('');
         onResumeRequested?.();
-        return;
+        return true;
       }
 
       if (isBlockingFilterPrompt(promptToSubmit)) {
@@ -229,10 +229,11 @@ export function AgentViewApp({
         });
         setPeekReplyTarget(undefined);
         setPeekPrompt('');
-        return;
+        return true;
       }
 
       const submitted = promptToSubmit;
+      const restoreRevision = promptRevisionRef.current;
       dispatchInFlightRef.current = true;
       setPrompt('');
       setNotice({
@@ -250,7 +251,10 @@ export function AgentViewApp({
           if (attach) {
             const sessionId = getDispatchedSessionId(result);
             if (!sessionId) {
-              setPrompt(submitted);
+              if (promptRevisionRef.current === restoreRevision) {
+                setPrompt(submitted);
+                setPromptVersion((current) => current + 1);
+              }
               setNotice({
                 lines: ['Agent dispatch did not return a session id.'],
               });
@@ -275,7 +279,10 @@ export function AgentViewApp({
           setPeekPrompt('');
         } catch (error) {
           dispatchInFlightRef.current = false;
-          setPrompt(submitted);
+          if (promptRevisionRef.current === restoreRevision) {
+            setPrompt(submitted);
+            setPromptVersion((current) => current + 1);
+          }
           setNotice({
             lines: [error instanceof Error ? error.message : String(error)],
           });
@@ -283,6 +290,7 @@ export function AgentViewApp({
           setPeekPrompt('');
         }
       })();
+      return true;
     },
     [
       actions,
@@ -342,9 +350,9 @@ export function AgentViewApp({
           // Restore the undelivered reply for retry, but never resurrect a
           // panel the user closed (or overwrite a newer one) while the send
           // was in flight.
-          setPeekPrompt(submitted);
           setPeekSubmittedPreview(undefined);
           if (peekGenerationRef.current === generation) {
+            setPeekPrompt(submitted);
             setPeekPanel({
               title: target.sessionId,
               lines: [
@@ -352,6 +360,14 @@ export function AgentViewApp({
                 error instanceof Error ? error.message : String(error),
               ],
               error: true,
+            });
+          } else {
+            setNotice({
+              lines: [
+                `Reply was not sent: ${
+                  error instanceof Error ? error.message : String(error)
+                }`,
+              ],
             });
           }
         } finally {
@@ -432,7 +448,8 @@ export function AgentViewApp({
     (displayName: string) => {
       const row = visibleRows[selectedIndex];
       if (!row) return;
-      const previousPrompt = prompt;
+      const previousPrompt = displayName;
+      const restoreRevision = promptRevisionRef.current;
       setPrompt('');
       void (async () => {
         try {
@@ -444,14 +461,17 @@ export function AgentViewApp({
             ],
           });
         } catch (error) {
-          setPrompt(previousPrompt);
+          if (promptRevisionRef.current === restoreRevision) {
+            setPrompt(previousPrompt);
+            setPromptVersion((current) => current + 1);
+          }
           setNotice({
             lines: [error instanceof Error ? error.message : String(error)],
           });
         }
       })();
     },
-    [actions, prompt, refreshRows, selectedIndex, visibleRows],
+    [actions, refreshRows, selectedIndex, visibleRows],
   );
 
   const stopOrRemoveSelected = useCallback(
@@ -552,6 +572,7 @@ export function AgentViewApp({
       return;
     }
     if (prompt) {
+      promptRevisionRef.current += 1;
       setPrompt('');
       setLastInterruptAt(Date.now());
       return;
@@ -581,6 +602,7 @@ export function AgentViewApp({
       return;
     }
     if (prompt) {
+      promptRevisionRef.current += 1;
       setPrompt('');
       return;
     }
@@ -591,6 +613,7 @@ export function AgentViewApp({
     <AgentViewRoster
       rows={visibleRows}
       prompt={prompt}
+      promptVersion={promptVersion}
       selectedIndex={selectedIndex}
       groupMode={groupMode}
       header={header}
@@ -605,6 +628,9 @@ export function AgentViewApp({
         peekPanel,
       )}
       onPromptChange={setPrompt}
+      onPromptEdit={() => {
+        promptRevisionRef.current += 1;
+      }}
       onPeekPromptChange={setPeekPrompt}
       onDispatch={dispatch}
       onSubmitPeekPrompt={submitPeekPrompt}

@@ -14,7 +14,10 @@ import {
   formatMessageCount,
   truncateText,
 } from '../utils/sessionPickerUtils.js';
-import { stripUnsafeCharacters } from '../utils/textUtils.js';
+import {
+  cleanSingleLineText,
+  stripUnsafeCharacters,
+} from '../utils/textUtils.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { t } from '../../i18n/index.js';
 import { SessionPreview } from './SessionPreview.js';
@@ -144,7 +147,7 @@ function SessionListItemView({
   const agentViewMeta =
     session.agentViewManaged && session.agentViewLastResult
       ? truncateText(
-          stripUnsafeCharacters(session.agentViewLastResult),
+          cleanSingleLineText(session.agentViewLastResult),
           maxPromptWidth,
         )
       : undefined;
@@ -160,7 +163,9 @@ function SessionListItemView({
         ? prefixChars.scrollDown
         : prefixChars.normal;
 
-  const promptText = session.customTitle || session.prompt || '(empty prompt)';
+  const promptText = cleanSingleLineText(
+    session.customTitle || session.prompt || '(empty prompt)',
+  );
   // Reserve space for the checkbox when multi-select is active so the
   // prompt column doesn't shift between modes.
   const checkboxWidth = isChecked === undefined ? 0 : 4; // "[x] "
@@ -361,7 +366,13 @@ export function SessionPicker(props: SessionPickerProps) {
       <SessionPreview
         sessionService={sessionService}
         sessionId={picker.previewSessionId}
-        sessionTitle={previewed?.customTitle ?? previewed?.prompt ?? undefined}
+        sessionTitle={
+          previewed?.customTitle || previewed?.prompt
+            ? cleanSingleLineText(
+                previewed.customTitle || previewed.prompt || '',
+              )
+            : undefined
+        }
         messageCount={previewed?.messageCount}
         mtime={previewed?.mtime}
         gitBranch={previewed?.gitBranch}
@@ -593,7 +604,9 @@ function ManagedAgentViewSessionPreview({
       borderColor={theme.border.default}
       paddingX={1}
     >
-      <Text bold>{session.customTitle ?? session.prompt}</Text>
+      <Text bold>
+        {cleanSingleLineText(session.customTitle ?? session.prompt ?? '')}
+      </Text>
       {session.agentViewLastResult ? (
         <Text color={theme.text.secondary}>
           {stripUnsafeCharacters(session.agentViewLastResult)}

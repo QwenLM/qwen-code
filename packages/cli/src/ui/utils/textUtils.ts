@@ -123,6 +123,10 @@ export function stripUnsafeCharacters(str: string): string {
     .join('');
 }
 
+export function cleanSingleLineText(str: string): string {
+  return stripUnsafeCharacters(str).replace(/\s+/g, ' ').trim();
+}
+
 // String width caching for performance optimization
 const stringWidthCache = new Map<string, number>();
 

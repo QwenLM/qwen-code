@@ -27,7 +27,10 @@ import type { LoadedSettings } from '../../config/settings.js';
 import { BuiltinCommandLoader } from '../../services/BuiltinCommandLoader.js';
 import type { AgentRosterGroupMode, AgentRosterRow } from './roster-model.js';
 import { FOCUS_IN, FOCUS_OUT } from '../hooks/useFocus.js';
-import { stripUnsafeCharacters } from '../utils/textUtils.js';
+import {
+  cleanSingleLineText,
+  stripUnsafeCharacters,
+} from '../utils/textUtils.js';
 
 export interface AgentViewHeaderInfo {
   version: string;
@@ -40,6 +43,7 @@ export interface AgentViewHeaderInfo {
 export interface AgentViewRosterProps {
   rows: AgentRosterRow[];
   prompt: string;
+  promptVersion?: number;
   selectedIndex: number;
   groupMode: AgentRosterGroupMode;
   header?: AgentViewHeaderInfo;
@@ -51,8 +55,9 @@ export interface AgentViewRosterProps {
   peekQueuedPrompts?: string[];
   slashCommands?: readonly SlashCommand[];
   onPromptChange: (prompt: string) => void;
+  onPromptEdit?: () => void;
   onPeekPromptChange: (prompt: string) => void;
-  onDispatch: (attach: boolean, prompt: string) => void;
+  onDispatch: (attach: boolean, prompt: string) => boolean;
   onSubmitPeekPrompt: (promptOverride?: string) => void;
   onAttachSelected: (sessionId?: string) => void;
   onPeekSelected: () => void;
@@ -114,6 +119,7 @@ interface RosterInputKey {
 export function AgentViewRoster({
   rows,
   prompt,
+  promptVersion = 0,
   selectedIndex,
   groupMode,
   header,
@@ -125,6 +131,7 @@ export function AgentViewRoster({
   peekQueuedPrompts,
   slashCommands = AGENT_VIEW_SLASH_COMMANDS,
   onPromptChange,
+  onPromptEdit,
   onPeekPromptChange,
   onDispatch,
   onSubmitPeekPrompt,
@@ -142,12 +149,12 @@ export function AgentViewRoster({
   const loadedSlashCommands = useAgentViewSlashCommands(slashCommands);
   const promptInput = useAgentViewPromptInput({
     prompt,
+    promptVersion,
     slashCommands: loadedSlashCommands,
     onPromptChange,
   });
   const currentPrompt = promptInput.buffer.text;
   const hasPrompt = currentPrompt.trim().length > 0;
-  const hasPeekPrompt = peekPrompt.trim().length > 0;
   const peekPromptPending = Boolean(peekQueuedPrompts?.length);
   const peekRow =
     rows.find((row) => row.sessionId === peekInputTarget) ??
@@ -188,15 +195,22 @@ export function AgentViewRoster({
       return;
     }
 
-    if (isCtrlInput(input, key, 't', '\x14') && rows.length > 0) {
+    if (
+      isCtrlInput(input, key, 't', '\x14') &&
+      rows.length > 0 &&
+      !sessionPeekActive
+    ) {
       onTogglePinSelected();
       return;
     }
 
-    if (isCtrlInput(input, key, 'r', '\x12') && rows.length > 0) {
+    if (
+      isCtrlInput(input, key, 'r', '\x12') &&
+      rows.length > 0 &&
+      !sessionPeekActive
+    ) {
       const displayName = currentPrompt.trim();
       promptInput.buffer.setText('');
-      onPromptChange('');
       onRenameSelected(displayName);
       return;
     }
@@ -218,6 +232,7 @@ export function AgentViewRoster({
 
     if (isCtrlInput(input, key, 'c', '\x03')) {
       if (!peekInputActive && hasPrompt) {
+        onPromptEdit?.();
         promptInput.buffer.setText('');
         onPromptChange('');
         onInterrupt();
@@ -240,15 +255,18 @@ export function AgentViewRoster({
       ) &&
       promptInput.handleCompletionKey(input, key)
     ) {
+      if (key.tab) {
+        onPromptEdit?.();
+      }
       return;
     }
 
-    if (key.upArrow) {
+    if (key.upArrow && !sessionPeekActive) {
       onMoveSelection(-1);
       return;
     }
 
-    if (key.downArrow) {
+    if (key.downArrow && !sessionPeekActive) {
       onMoveSelection(1);
       return;
     }
@@ -271,14 +289,14 @@ export function AgentViewRoster({
         if (submittedPeekPrompt.trim()) {
           onSubmitPeekPrompt(submittedPeekPrompt);
         } else if (rows.length > 0) {
-          onAttachSelected();
+          onAttachSelected(peekRow?.sessionId);
         }
       } else {
         const submittedPrompt = `${currentPrompt}${returnPrefix}`;
         if (submittedPrompt.trim()) {
-          promptInput.buffer.setText('');
-          onPromptChange('');
-          onDispatch(Boolean(key.shift), submittedPrompt);
+          if (onDispatch(Boolean(key.shift), submittedPrompt)) {
+            promptInput.buffer.setText('');
+          }
         } else if (rows.length > 0) {
           onAttachSelected();
         }
@@ -294,7 +312,12 @@ export function AgentViewRoster({
       return;
     }
 
-    if (input === ' ' && sessionPeekActive && !hasPeekPrompt && !hasPrompt) {
+    if (
+      input === ' ' &&
+      sessionPeekActive &&
+      !peekPromptRef.current.trim() &&
+      !hasPrompt
+    ) {
       onCancel();
       return;
     }
@@ -312,6 +335,7 @@ export function AgentViewRoster({
         peekPromptRef.current = next;
         onPeekPromptChange(next);
       } else {
+        onPromptEdit?.();
         promptInput.handleBufferKey(input, key);
       }
       return;
@@ -323,6 +347,7 @@ export function AgentViewRoster({
         peekPromptRef.current = next;
         onPeekPromptChange(next);
       } else {
+        onPromptEdit?.();
         promptInput.handleBufferKey(input, key);
       }
       return;
@@ -509,10 +534,12 @@ function AgentViewHeader({
 
 function useAgentViewPromptInput({
   prompt,
+  promptVersion,
   slashCommands,
   onPromptChange,
 }: {
   prompt: string;
+  promptVersion: number;
   slashCommands: readonly SlashCommand[];
   onPromptChange: (prompt: string) => void;
 }): AgentViewPromptInput {
@@ -521,6 +548,7 @@ function useAgentViewPromptInput({
   const commandContext = useMemo(() => createAgentViewCommandContext(), []);
   const lastPromptRef = useRef(prompt);
   const lastSeenPromptPropRef = useRef(prompt);
+  const lastSeenPromptVersionRef = useRef(promptVersion);
   // Values we emitted, so lagging prop echoes can be told apart from genuine
   // external updates. Cleared whenever the prompt is emptied, so it cannot
   // grow across the component's whole lifetime.
@@ -555,6 +583,14 @@ function useAgentViewPromptInput({
   );
 
   useEffect(() => {
+    if (promptVersion !== lastSeenPromptVersionRef.current) {
+      lastSeenPromptVersionRef.current = promptVersion;
+      lastSeenPromptPropRef.current = prompt;
+      lastPromptRef.current = prompt;
+      emittedPromptsRef.current.clear();
+      buffer.setText(prompt);
+      return;
+    }
     if (prompt === lastSeenPromptPropRef.current) {
       return;
     }
@@ -574,7 +610,7 @@ function useAgentViewPromptInput({
       return;
     }
     buffer.setText(prompt);
-  }, [buffer, prompt]);
+  }, [buffer, prompt, promptVersion]);
 
   const acceptActiveSuggestion = useCallback((): boolean => {
     if (completion.suggestions.length === 0) {
@@ -791,7 +827,10 @@ function SessionPeekBox({
   queuedPrompts: string[] | undefined;
 }) {
   const lines = getSessionPeekLines(row, panel, queuedPrompts);
-  const inputActive = Boolean(inputMode && !queuedPrompts?.length);
+  const blockingWait = Boolean(row.waitingFor && row.waitingFor !== 'response');
+  const inputActive = Boolean(
+    inputMode && (!queuedPrompts?.length || blockingWait),
+  );
   return (
     <Box flexDirection="column" borderStyle="round" paddingX={1}>
       <Text>
@@ -821,7 +860,7 @@ function SessionPeekBox({
         </Box>
       ) : null}
       <Text color={theme.text.secondary}>
-        {getPeekFooter(inputMode, queuedPrompts)}
+        {getPeekFooter(inputActive ? inputMode : undefined, queuedPrompts)}
       </Text>
     </Box>
   );
@@ -831,11 +870,11 @@ function getPeekFooter(
   inputMode: 'answer' | 'send' | undefined,
   queuedPrompts: string[] | undefined,
 ): string {
-  if (queuedPrompts?.length) {
-    return 'waiting for response · space to close · ctrl+x to delete';
-  }
   if (inputMode) {
     return 'enter to send · space to close · ctrl+x to delete';
+  }
+  if (queuedPrompts?.length) {
+    return 'waiting for response · space to close · ctrl+x to delete';
   }
   return 'enter to open · space to close · ctrl+x to delete';
 }
@@ -905,7 +944,8 @@ function formatWaitingLine(waitingFor: string | undefined): string | undefined {
   if (!waitingFor || waitingFor === 'response') {
     return undefined;
   }
-  return `Waiting: ${waitingFor}`;
+  const text = cleanSingleLineText(waitingFor);
+  return text ? `Waiting: ${text}` : undefined;
 }
 
 function getQueuedPromptLine(
@@ -914,7 +954,7 @@ function getQueuedPromptLine(
   if (!queuedPrompts || queuedPrompts.length === 0) {
     return undefined;
   }
-  const latest = queuedPrompts.at(-1)?.trim();
+  const latest = cleanSingleLineText(queuedPrompts.at(-1) ?? '');
   if (!latest) {
     return undefined;
   }
@@ -1034,7 +1074,7 @@ function formatRowOutput(row: AgentRosterRow): string {
 function cleanRowText(value: string | undefined): string | undefined {
   // Worker/model output is untrusted; strip unsafe control sequences before
   // rendering it into the operator's terminal.
-  const text = value ? stripUnsafeCharacters(value).trim() : undefined;
+  const text = value ? cleanSingleLineText(value) : undefined;
   return text ? text : undefined;
 }
 

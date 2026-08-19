@@ -113,7 +113,7 @@ describe('AgentViewRoster', () => {
   });
 
   it('dispatches prompt in the background on Enter', () => {
-    const onDispatch = vi.fn();
+    const onDispatch = vi.fn(() => true);
 
     renderRoster({
       prompt: 'ship it',
@@ -126,7 +126,7 @@ describe('AgentViewRoster', () => {
   });
 
   it('dispatches prompt when a PTY sends carriage return', () => {
-    const onDispatch = vi.fn();
+    const onDispatch = vi.fn(() => true);
 
     renderRoster({
       prompt: 'ship it',
@@ -139,7 +139,7 @@ describe('AgentViewRoster', () => {
   });
 
   it('dispatches when a PTY sends text and carriage return together', () => {
-    const onDispatch = vi.fn();
+    const onDispatch = vi.fn(() => true);
 
     renderRoster({
       onDispatch,
@@ -197,7 +197,7 @@ describe('AgentViewRoster', () => {
   });
 
   it('inserts multi-line pastes instead of dropping the tail', () => {
-    const onDispatch = vi.fn();
+    const onDispatch = vi.fn(() => true);
     const onPromptChange = vi.fn();
 
     renderRoster({
@@ -473,6 +473,25 @@ describe('AgentViewRoster', () => {
     expect(onCancel).toHaveBeenCalledOnce();
   });
 
+  it('keeps a same-tick peek reply when Space follows typed text', () => {
+    const onCancel = vi.fn();
+    const onPeekPromptChange = vi.fn();
+
+    renderRoster({
+      peekPanel: { title: 'alpha', lines: ['Result: ready'] },
+      peekInputMode: 'send',
+      peekInputTarget: 'alpha',
+      onCancel,
+      onPeekPromptChange,
+    });
+
+    press('y', {});
+    press(' ', {});
+
+    expect(onCancel).not.toHaveBeenCalled();
+    expect(onPeekPromptChange).toHaveBeenLastCalledWith('y ');
+  });
+
   it('renders peek panel details', () => {
     const { lastFrame } = renderRoster({
       rows: [row('alpha', { summary: 'ready' })],
@@ -507,6 +526,38 @@ describe('AgentViewRoster', () => {
     const output = lastFrame() ?? '';
     expect(output).toContain('worker is not responding');
     expect(output).not.toContain('stale result');
+  });
+
+  it('keeps blocking answers visible while follow-up prompts are queued', () => {
+    const { lastFrame } = renderRoster({
+      rows: [row('alpha', { waitingFor: 'Edit', queuedPromptCount: 1 })],
+      peekPanel: { title: 'alpha', lines: [] },
+      peekPrompt: 'yes',
+      peekInputMode: 'answer',
+      peekInputTarget: 'alpha',
+      peekQueuedPrompts: ['continue'],
+    });
+
+    expect(lastFrame()).toContain('> yes');
+    expect(lastFrame()).toContain('enter to send');
+  });
+
+  it('renders worker text as sanitized single lines', () => {
+    const { lastFrame } = renderRoster({
+      rows: [
+        row('alpha', {
+          displayName: 'first\nsecond',
+          waitingFor: '\u001b]0;spoof\u0007Edit\nfile',
+        }),
+      ],
+      peekPanel: { title: 'alpha', lines: [] },
+      peekInputTarget: 'alpha',
+    });
+
+    const output = lastFrame() ?? '';
+    expect(output).toContain('first second');
+    expect(output).toContain('Waiting: Edit file');
+    expect(output).not.toContain('spoof');
   });
 
   it('renders notices without hiding the dispatch input', () => {
@@ -600,6 +651,32 @@ describe('AgentViewRoster', () => {
     press('', { return: true });
     expect(onAttachSelected).toHaveBeenCalledWith('alpha');
   });
+
+  it('locks roster selection and rename shortcuts while a peek is open', () => {
+    const onMoveSelection = vi.fn();
+    const onRenameSelected = vi.fn();
+    const onTogglePinSelected = vi.fn();
+
+    renderRoster({
+      rows: [row('beta'), row('alpha')],
+      selectedIndex: 0,
+      prompt: 'hidden name',
+      peekPanel: { title: 'alpha', lines: [] },
+      peekInputMode: 'send',
+      peekInputTarget: 'alpha',
+      onMoveSelection,
+      onRenameSelected,
+      onTogglePinSelected,
+    });
+
+    press('', { upArrow: true });
+    press('r', { ctrl: true });
+    press('t', { ctrl: true });
+
+    expect(onMoveSelection).not.toHaveBeenCalled();
+    expect(onRenameSelected).not.toHaveBeenCalled();
+    expect(onTogglePinSelected).not.toHaveBeenCalled();
+  });
 });
 
 function renderRoster(overrides: Partial<AgentViewRosterProps> = {}) {
@@ -612,7 +689,7 @@ function renderRoster(overrides: Partial<AgentViewRosterProps> = {}) {
         groupMode="state"
         onPromptChange={vi.fn()}
         onPeekPromptChange={vi.fn()}
-        onDispatch={vi.fn()}
+        onDispatch={vi.fn(() => true)}
         onSubmitPeekPrompt={vi.fn()}
         onAttachSelected={vi.fn()}
         onPeekSelected={vi.fn()}

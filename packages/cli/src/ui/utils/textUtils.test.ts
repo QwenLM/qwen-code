@@ -10,6 +10,7 @@ import type {
   ToolEditConfirmationDetails,
 } from '@qwen-code/qwen-code-core';
 import {
+  cleanSingleLineText,
   escapeAnsiCtrlCodes,
   sanitizeFilenameForDisplay,
   sanitizeMultilineForDisplay,
@@ -19,6 +20,14 @@ import {
 } from './textUtils.js';
 
 describe('textUtils', () => {
+  describe('cleanSingleLineText', () => {
+    it('strips terminal controls and flattens whitespace', () => {
+      expect(
+        cleanSingleLineText('\u001b]0;spoof\u0007first\nsecond\tline'),
+      ).toBe('first second line');
+    });
+  });
+
   describe('sliceTextByVisualHeight', () => {
     it('returns the original text when maxHeight is undefined', () => {
       const sliced = sliceTextByVisualHeight('a\nb\nc', undefined, 10);

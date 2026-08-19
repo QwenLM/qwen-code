@@ -122,6 +122,18 @@ describe('getAgentViewWorkerStateForUi', () => {
         'What would you like to test? A specific file, the full suite, or something else?',
     });
   });
+
+  it('does not re-open an answered soft question without new model output', () => {
+    const lastResult = 'What should I do next?';
+    expect(
+      getAgentViewWorkerStateForUi({
+        initError: null,
+        streamingState: StreamingState.Idle,
+        lastResult,
+        answeredSoftQuestion: lastResult,
+      }),
+    ).toEqual({ sessionState: 'idle', lastResult });
+  });
 });
 
 describe('answerAgentViewPendingToolCall', () => {

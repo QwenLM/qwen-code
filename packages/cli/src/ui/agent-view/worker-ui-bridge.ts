@@ -40,11 +40,13 @@ export function getAgentViewWorkerStateForUi({
   streamingState,
   pendingToolCalls,
   lastResult,
+  answeredSoftQuestion,
 }: {
   initError: unknown;
   streamingState: StreamingState;
   pendingToolCalls?: AgentViewStatusToolCall[];
   lastResult?: string;
+  answeredSoftQuestion?: string;
 }): AgentViewWorkerUiStateReport {
   if (initError) {
     const summary =
@@ -74,7 +76,11 @@ export function getAgentViewWorkerStateForUi({
     };
   }
 
-  if (lastResult && looksLikeUserQuestion(lastResult)) {
+  if (
+    lastResult &&
+    lastResult !== answeredSoftQuestion &&
+    looksLikeUserQuestion(lastResult)
+  ) {
     return {
       sessionState: 'needs_input',
       waitingFor: 'response',
