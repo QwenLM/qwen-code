@@ -104,6 +104,7 @@ export interface AgentViewActivityFile {
   queuedPromptPreview?: string;
   queuedPromptId?: string;
   queuedPromptText?: string;
+  queuedPromptDeliveredAt?: string;
   lastQueuedPromptAt?: string;
   lastActivityAt: string;
   capabilities: string[];

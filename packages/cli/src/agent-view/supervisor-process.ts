@@ -211,7 +211,6 @@ class AgentViewSupervisorProcessHandler
     AgentViewWorkerControlEvent[]
   >();
   private readonly promptQueues = new Map<string, Promise<void>>();
-  private readonly deliveredPromptIds = new Map<string, Set<string>>();
   private readonly attachSetupQueues = new Map<string, Promise<void>>();
   private readonly workers: WorkerRegistry;
   private workerControlSequence = 0;
@@ -228,7 +227,6 @@ class AgentViewSupervisorProcessHandler
       () => this.notifyChanged(),
       (sessionId) => {
         this.pendingWorkerControls.delete(sessionId);
-        this.deliveredPromptIds.delete(sessionId);
       },
       (sessionId) => {
         // prompt/answer controls hold accepted user input and survive a
@@ -242,7 +240,6 @@ class AgentViewSupervisorProcessHandler
         } else {
           this.pendingWorkerControls.delete(sessionId);
         }
-        this.deliveredPromptIds.delete(sessionId);
       },
       (sessionId) => this.hasPendingWorkerStopControl(sessionId),
     );
@@ -484,11 +481,6 @@ class AgentViewSupervisorProcessHandler
         // Stale 'adopting' left by a supervisor crash mid-adopt: allow the
         // session to be re-adopted once the record is past the ready
         // timeout even if its stored pids probe as live (recycled pids).
-        if (pidAlive) {
-          throw new Error(
-            `Agent View session ${adoption.sessionId} still has an unverified stored worker. Stop it before adopting again.`,
-          );
-        }
       }
       if (this.workers.has(adoption.sessionId)) {
         throw new Error(
@@ -712,7 +704,6 @@ class AgentViewSupervisorProcessHandler
         this.hasPendingWorkerInputControl(event.sessionId),
         this.workers.has(event.sessionId),
         this.workers.hasPendingWorkerReady(event.sessionId),
-        this.deliveredPromptIds.get(event.sessionId),
       );
     } catch (error) {
       if (event.type === 'ready') {
@@ -732,14 +723,6 @@ class AgentViewSupervisorProcessHandler
         );
       }
     }
-    if (
-      applied &&
-      !hasPendingPrompt(
-        await readAgentViewActivity(event.sessionId, this.store),
-      )
-    ) {
-      this.deliveredPromptIds.delete(event.sessionId);
-    }
     this.notifyChanged();
     return { sessionId: event.sessionId, accepted: true };
   }
@@ -748,32 +731,56 @@ class AgentViewSupervisorProcessHandler
     await requireKnownSession(sessionId, this.store);
     await requireValidWorkerToken(sessionId, params, this.store);
     return this.withPromptQueueLock(sessionId, async () => {
-      const events = this.pendingWorkerControls.get(sessionId) ?? [];
+      const pendingEvents = this.pendingWorkerControls.get(sessionId) ?? [];
       this.pendingWorkerControls.delete(sessionId);
-      const activity = await readAgentViewActivity(sessionId, this.store);
-      const promptId = activity?.queuedPromptId;
-      const promptText = activity?.queuedPromptText;
-      if (
-        promptId &&
-        promptText &&
-        !(this.deliveredPromptIds.get(sessionId)?.has(promptId) ?? false) &&
-        !events.some(
-          (event) => event.type === 'prompt' && event.text === promptText,
-        )
-      ) {
-        events.push({
-          type: 'prompt',
-          sequence: this.nextSequence(),
-          text: promptText,
-          at: activity.lastQueuedPromptAt ?? new Date().toISOString(),
-        });
+      try {
+        const events: AgentViewWorkerControlEvent[] = pendingEvents.filter(
+          (event) => event.type !== 'prompt',
+        );
+        const pendingPrompt = pendingEvents.find(
+          (event) => event.type === 'prompt',
+        );
+        let durablePrompt: typeof pendingPrompt;
+        let hasDurablePrompt = false;
+        const deliveredAt = new Date().toISOString();
+        await patchAgentViewActivityIf(
+          sessionId,
+          (latest) => {
+            hasDurablePrompt = Boolean(latest.queuedPromptId);
+            if (
+              !latest.queuedPromptId ||
+              !latest.queuedPromptText ||
+              latest.queuedPromptDeliveredAt
+            ) {
+              return undefined;
+            }
+            durablePrompt =
+              pendingPrompt?.text === latest.queuedPromptText
+                ? pendingPrompt
+                : {
+                    type: 'prompt',
+                    sequence: this.nextSequence(),
+                    text: latest.queuedPromptText,
+                    at: latest.lastQueuedPromptAt ?? deliveredAt,
+                  };
+            return { queuedPromptDeliveredAt: deliveredAt };
+          },
+          this.store,
+        );
+        if (durablePrompt) {
+          events.push(durablePrompt);
+        } else if (!hasDurablePrompt && pendingPrompt) {
+          events.push(pendingPrompt);
+        }
+        return { sessionId, events };
+      } catch (error) {
+        const newlyQueued = this.pendingWorkerControls.get(sessionId) ?? [];
+        this.pendingWorkerControls.set(sessionId, [
+          ...pendingEvents,
+          ...newlyQueued,
+        ]);
+        throw error;
       }
-      if (promptId && events.some((event) => event.type === 'prompt')) {
-        const delivered = this.deliveredPromptIds.get(sessionId) ?? new Set();
-        delivered.add(promptId);
-        this.deliveredPromptIds.set(sessionId, delivered);
-      }
-      return { sessionId, events };
     });
   }
   async attachStream(
@@ -2959,6 +2966,7 @@ function getQueuedPromptActivityPatch(
     queuedPromptPreview: text.slice(0, MAX_QUEUED_PROMPT_PREVIEW_CHARS),
     queuedPromptId: promptId,
     queuedPromptText: text,
+    queuedPromptDeliveredAt: undefined,
     lastQueuedPromptAt: at,
   };
 }
@@ -2969,6 +2977,7 @@ function getDequeuedPromptActivityPatch(): Partial<AgentViewActivityFile> {
     queuedPromptPreview: undefined,
     queuedPromptId: undefined,
     queuedPromptText: undefined,
+    queuedPromptDeliveredAt: undefined,
     lastQueuedPromptAt: undefined,
   };
 }
@@ -3224,7 +3233,6 @@ async function applyWorkerEvent(
   hasPendingInputControl = false,
   hostRegistered = false,
   readyWaiterPending = false,
-  deliveredPromptIds: ReadonlySet<string> | undefined = undefined,
 ): Promise<boolean> {
   const state = await readOrThrowIfAbsent(
     getAgentViewSessionPaths(event.sessionId, options).statePath,
@@ -3320,7 +3328,6 @@ async function applyWorkerEvent(
     state,
     existingActivity,
     hasPendingInputControl,
-    deliveredPromptIds,
   );
   const activityPatch =
     event.type === 'state' || event.type === 'ready'
@@ -3352,7 +3359,6 @@ async function applyWorkerEvent(
     existingActivity,
     activityPatch,
     hasPendingInputControl,
-    deliveredPromptIds,
   })
     ? now
     : (existingActivity?.lastActivityAt ?? now);
@@ -3424,7 +3430,6 @@ function shouldClearPendingPrompt(
   previousState: AgentViewSessionStateFile,
   activity: AgentViewActivityFile | undefined,
   hasPendingInputControl = false,
-  deliveredPromptIds: ReadonlySet<string> | undefined = undefined,
 ): boolean {
   if (!hasPendingPrompt(activity)) {
     return false;
@@ -3435,10 +3440,7 @@ function shouldClearPendingPrompt(
   if (hasPendingInputControl) {
     return false;
   }
-  if (
-    activity?.queuedPromptId &&
-    !deliveredPromptIds?.has(activity.queuedPromptId)
-  ) {
+  if (activity?.queuedPromptId && !activity.queuedPromptDeliveredAt) {
     return false;
   }
   // A queued-prompt marker newer than this event belongs to a prompt the
@@ -3465,7 +3467,6 @@ function shouldAdvanceActivityTime({
   existingActivity,
   activityPatch,
   hasPendingInputControl = false,
-  deliveredPromptIds,
 }: {
   event: AgentViewWorkerEvent;
   previousState: AgentViewSessionStateFile;
@@ -3473,7 +3474,6 @@ function shouldAdvanceActivityTime({
   existingActivity: AgentViewActivityFile | undefined;
   activityPatch: Partial<AgentViewActivityFile>;
   hasPendingInputControl?: boolean;
-  deliveredPromptIds?: ReadonlySet<string>;
 }): boolean {
   if (!existingActivity) {
     return true;
@@ -3521,7 +3521,6 @@ function shouldAdvanceActivityTime({
       previousState,
       existingActivity,
       hasPendingInputControl,
-      deliveredPromptIds,
     ) && getQueuedPromptCount(existingActivity) > 0
   );
 }
@@ -3551,7 +3550,7 @@ async function clearStalePendingPromptIfNeeded(
     // persisted marker is provably not stale.
     return activity;
   }
-  if (activity.queuedPromptId) {
+  if (activity.queuedPromptId && !activity.queuedPromptDeliveredAt) {
     return activity;
   }
   if (!shouldClearStalePendingPrompt(state, activity)) {
@@ -3570,6 +3569,10 @@ async function clearStalePendingPromptIfNeeded(
         !hasPendingPrompt(latest) ||
         latest.lastQueuedPromptAt !== baselineMarker
       ) {
+        result = latest;
+        return undefined;
+      }
+      if (latest.queuedPromptId && !latest.queuedPromptDeliveredAt) {
         result = latest;
         return undefined;
       }
