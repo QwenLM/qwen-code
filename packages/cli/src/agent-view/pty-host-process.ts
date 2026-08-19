@@ -355,6 +355,7 @@ function createRemoteExitTracker(
   markShutdownConfirmed(): void;
 } {
   let settled = false;
+  let pollInFlight = false;
   let resolveExit: (exit: AgentViewPtyHostExit) => void = () => {};
   const exited = new Promise<AgentViewPtyHostExit>((resolve) => {
     resolveExit = resolve;
@@ -362,21 +363,23 @@ function createRemoteExitTracker(
   let consecutiveFailures = 0;
   let confirmedTermination: 'kill' | 'shutdown' | undefined;
   let confirmedTerminationPoll: NodeJS.Timeout | undefined;
+  const scheduleConfirmedPoll = () => {
+    if (settled || !confirmedTermination) return;
+    clearTimeout(confirmedTerminationPoll);
+    confirmedTerminationPoll = setTimeout(poll, 50);
+    confirmedTerminationPoll.unref?.();
+  };
   const poll = () => {
-    if (settled) return;
+    if (settled || pollInFlight) return;
+    pollInFlight = true;
     void callAgentViewPtyHost(socketPath, authToken, 'status')
       .then(() => {
         if (settled) return;
         consecutiveFailures = 0;
-        if (confirmedTermination) {
-          clearTimeout(confirmedTerminationPoll);
-          confirmedTerminationPoll = setTimeout(poll, 50);
-          confirmedTerminationPoll.unref?.();
-        }
       })
       .catch(() => {
         if (settled) return;
-        if (confirmedTermination || ++consecutiveFailures >= 2) {
+        if (++consecutiveFailures >= 2) {
           resolveExitOnce(
             confirmedTermination === 'kill'
               ? { kind: 'confirmed-kill' }
@@ -385,6 +388,10 @@ function createRemoteExitTracker(
                 : { kind: 'unreachable' },
           );
         }
+      })
+      .finally(() => {
+        pollInFlight = false;
+        scheduleConfirmedPoll();
       });
   };
   const interval = setInterval(poll, REMOTE_HOST_EXIT_POLL_MS);
@@ -401,11 +408,13 @@ function createRemoteExitTracker(
     exited,
     resolve: resolveExitOnce,
     markKillConfirmed: () => {
-      confirmedTermination ??= 'kill';
+      if (confirmedTermination) return;
+      confirmedTermination = 'kill';
       poll();
     },
     markShutdownConfirmed: () => {
-      confirmedTermination ??= 'shutdown';
+      if (confirmedTermination) return;
+      confirmedTermination = 'shutdown';
       poll();
     },
   };
