@@ -1161,6 +1161,86 @@ function isValidContentPart(part: Part): boolean {
   return !isInvalid;
 }
 
+const UPSTREAM_DEGRADED_PLACEHOLDER = '(request timeout)';
+
+function degradedPlaceholderError(): InvalidStreamError {
+  return new InvalidStreamError(
+    'Model response is an upstream fail-fast placeholder.',
+    'UPSTREAM_DEGRADED_RESPONSE',
+  );
+}
+
+function isDegradedPlaceholderTurn(content: Content): boolean {
+  const parts = content.parts ?? [];
+  return (
+    parts.length > 0 &&
+    parts.every(
+      (part) =>
+        part.functionCall === undefined &&
+        (part.thought || part.text !== undefined),
+    ) &&
+    parts
+      .filter((part) => !part.thought)
+      .map((part) => part.text ?? '')
+      .join('')
+      .trim() === UPSTREAM_DEGRADED_PLACEHOLDER
+  );
+}
+
+async function* rejectDegradedPlaceholderResponse(
+  stream: AsyncGenerator<GenerateContentResponse>,
+): AsyncGenerator<GenerateContentResponse> {
+  const pending: GenerateContentResponse[] = [];
+  let text = '';
+  let passthrough = false;
+
+  for await (const chunk of stream) {
+    if (passthrough) {
+      yield chunk;
+      continue;
+    }
+
+    const parts = chunk.candidates?.[0]?.content?.parts ?? [];
+    if (
+      parts.some(
+        (part) =>
+          part.functionCall !== undefined ||
+          (!part.thought && part.text === undefined),
+      )
+    ) {
+      yield* pending;
+      pending.length = 0;
+      yield chunk;
+      passthrough = true;
+      continue;
+    }
+
+    const chunkText = parts
+      .filter((part) => !part.thought)
+      .map((part) => part.text ?? '')
+      .join('');
+    if (pending.length === 0 && chunkText === '') {
+      yield chunk;
+      continue;
+    }
+
+    pending.push(chunk);
+    text += chunkText;
+    const trimmed = text.trim();
+    if (trimmed && !UPSTREAM_DEGRADED_PLACEHOLDER.startsWith(trimmed)) {
+      yield* pending;
+      pending.length = 0;
+      passthrough = true;
+    }
+  }
+
+  if (passthrough) return;
+  if (text.trim() === UPSTREAM_DEGRADED_PLACEHOLDER) {
+    throw degradedPlaceholderError();
+  }
+  yield* pending;
+}
+
 /**
  * Validates the history contains the correct roles.
  *
@@ -1205,7 +1285,9 @@ function extractCuratedHistory(comprehensiveHistory: Content[]): Content[] {
         i++;
       }
       if (isValid) {
-        curatedHistory.push(...modelOutput);
+        curatedHistory.push(
+          ...modelOutput.filter((turn) => !isDegradedPlaceholderTurn(turn)),
+        );
       }
     }
   }
@@ -1475,12 +1557,14 @@ interface ScanResult {
   expected: Map<string, string>;
   matched: Map<string, FrLocation[]>;
   scanEnd: number;
+  adjacentIdx: number;
 }
 
 /** Decision-phase output: exact mutations the next phase will apply. */
 interface RepairPlan {
   modelIdx: number;
   scanEnd: number;
+  adjacentIdx: number;
   synthesizeIds: Array<[string, string]>;
   hoistedParts: Part[];
   removalTargets: Array<{ turnIdx: number; partIdx: number }>;
@@ -1502,6 +1586,14 @@ function scanModelTurn(history: Content[], modelIdx: number): ScanResult {
 
   const matched = new Map<string, FrLocation[]>();
   let scanIdx = modelIdx + 1;
+  while (
+    scanIdx < history.length &&
+    history[scanIdx]?.role === 'model' &&
+    isDegradedPlaceholderTurn(history[scanIdx])
+  ) {
+    scanIdx++;
+  }
+  const adjacentIdx = scanIdx;
   while (scanIdx < history.length && history[scanIdx]?.role === 'user') {
     const parts = history[scanIdx].parts ?? [];
     for (let pIdx = 0; pIdx < parts.length; pIdx++) {
@@ -1516,7 +1608,7 @@ function scanModelTurn(history: Content[], modelIdx: number): ScanResult {
     scanIdx++;
   }
 
-  return { modelIdx, expected, matched, scanEnd: scanIdx };
+  return { modelIdx, expected, matched, scanEnd: scanIdx, adjacentIdx };
 }
 
 /**
@@ -1530,7 +1622,7 @@ function planRepair(scan: ScanResult): RepairPlan {
   const removalTargets: Array<{ turnIdx: number; partIdx: number }> = [];
   const droppedDuplicates: Array<{ callId: string; name: string }> = [];
 
-  const adjacentIdx = scan.modelIdx + 1;
+  const adjacentIdx = scan.adjacentIdx;
   for (const [id, name] of scan.expected) {
     const locations = scan.matched.get(id);
     if (!locations || locations.length === 0) {
@@ -1560,6 +1652,7 @@ function planRepair(scan: ScanResult): RepairPlan {
   return {
     modelIdx: scan.modelIdx,
     scanEnd: scan.scanEnd,
+    adjacentIdx: scan.adjacentIdx,
     synthesizeIds,
     hoistedParts,
     removalTargets,
@@ -1569,12 +1662,12 @@ function planRepair(scan: ScanResult): RepairPlan {
 
 /**
  * MUTATION — apply the plan to `history` in place. Returns the count
- * of new user turns inserted ahead of `modelIdx + 1` (0 or 1) so the
- * outer loop can advance its cursor.
+ * of new user turns inserted (0 or 1) so the outer loop can advance its
+ * cursor.
  *
  * Order: (1) splice removal targets desc-by-desc, (2) drop empty user
- * turns in `[modelIdx + 2, scanEnd)`, (3) HEAD-insert at the adjacent
- * user turn OR splice a new user turn between. The HEAD insert is
+ * turns after the resolved adjacent turn, (3) HEAD-insert at that user
+ * turn OR splice a new user turn there. The HEAD insert is
  * load-bearing (mirrors upstream `hoistToolResults`) — see the
  * canonical note for why tail-append re-triggers the wedge.
  */
@@ -1602,19 +1695,20 @@ function applyRepair(
     if (turnParts) turnParts.splice(loc.partIdx, 1);
   }
 
-  // (2) Drop now-empty user turns within [modelIdx + 2, scanEnd).
+  // (2) Drop now-empty user turns after the resolved adjacent turn.
   // Preserve the adjacent turn even if empty — we'll rewrite it
   // below.
-  const adjacentIdx = plan.modelIdx + 1;
+  const adjacentIdx = plan.adjacentIdx;
   for (let j = plan.scanEnd - 1; j > adjacentIdx; j--) {
     if (history[j]?.role === 'user' && (history[j].parts?.length ?? 0) === 0) {
       history.splice(j, 1);
     }
   }
 
+  if (partsToInject.length === 0) return { insertedBefore: 0 };
+
   // (3) Place new parts at the head of the adjacent user turn, OR
-  // insert a fresh user turn between this model turn and whatever
-  // follows.
+  // insert a fresh user turn at the resolved adjacency.
   const next = history[adjacentIdx];
   if (next?.role === 'user') {
     const existing = next.parts ?? [];
@@ -3972,7 +4066,7 @@ export class GeminiChat {
 
     return this.processStreamResponse(
       model,
-      streamResponse,
+      rejectDegradedPlaceholderResponse(streamResponse),
       goalContext,
       transportContinuationPrefix,
     );
