@@ -15,14 +15,25 @@ import type {
   DaemonTranscriptReducerOptions,
   DaemonTranscriptState,
   DaemonUiEvent,
+  DaemonUiStatusEvent,
   DaemonUiTextEvent,
+  DaemonUnrecognizedDiagnostic,
+  DaemonUnrecognizedDiagnosticReason,
   DaemonUserShellTranscriptBlock,
 } from './types.js';
-import { DAEMON_PLAN_TOOL_CALL_ID } from './types.js';
+import {
+  DAEMON_PLAN_TOOL_CALL_ID,
+  isUnrecognizedDiagnosticReason,
+} from './types.js';
 import { createDaemonToolPreview } from './toolPreview.js';
 import { isRecord } from './utils.js';
 
 const DEFAULT_MAX_BLOCKS = 1_000;
+/**
+ * Cap for the `unrecognizedDiagnostics` sidechannel. Forward-compat noise
+ * must stay inspectable without growing unboundedly in long sessions.
+ */
+export const UNRECOGNIZED_DIAGNOSTICS_LIMIT = 50;
 const TRIMMED_TOOL_BLOCK_ID = '__trimmed_tool_block__';
 const TRIMMED_PERMISSION_BLOCK_ID = '__trimmed_permission_block__';
 const MAX_TEXT_BLOCK_LENGTH = 100_000;
@@ -53,6 +64,7 @@ export function createDaemonTranscriptState(
     activeThoughtBlockByParent: createIndex(),
     // PR-E sidechannel: track current tool / approval mode / progress
     toolProgress: createIndex(),
+    unrecognizedDiagnostics: [],
     awaitingResync: false,
     resyncRequiredCount: 0,
     nextOrdinal: 1,
@@ -381,6 +393,10 @@ function applyDaemonTranscriptEvent(
       break;
     case 'status':
     case 'debug':
+      if (isUnrecognizedDiagnostic(event)) {
+        appendUnrecognizedDiagnostic(next, event);
+        break;
+      }
       appendStatusBlock(next, event.type, event.text, event, {
         clearActiveText: event.clearActiveText,
       });
@@ -1290,6 +1306,75 @@ function resolvePermissionBlock(
   clearActiveText(state);
 }
 
+type UnrecognizedDiagnosticEvent = DaemonUiStatusEvent & {
+  type: 'debug';
+  debugReason: DaemonUnrecognizedDiagnosticReason;
+};
+
+function isUnrecognizedDiagnostic(
+  event: DaemonUiStatusEvent,
+): event is UnrecognizedDiagnosticEvent {
+  return (
+    event.type === 'debug' && isUnrecognizedDiagnosticReason(event.debugReason)
+  );
+}
+
+/**
+ * Route forward-compatibility noise to the bounded `unrecognizedDiagnostics`
+ * sidechannel instead of `blocks[]`. Appending it as a status block would
+ * run the default `clearActiveText`, finalizing the streaming assistant/
+ * thought block so a following `assistant.usage` frame is dropped, and each
+ * block would consume the `maxBlocks` budget — repeated noise then evicts
+ * real conversation content in `trimTranscriptState`. Renderer-side
+ * filtering runs strictly after these mutations, so hiding the block later
+ * cannot prevent either symptom. `malformed_payload` diagnostics and
+ * client-dispatched debug events keep their block semantics.
+ */
+function appendUnrecognizedDiagnostic(
+  state: DaemonTranscriptState,
+  event: UnrecognizedDiagnosticEvent,
+): void {
+  // The replaced `appendStatusBlock` path also reset the user pointer
+  // (its non-user block append runs `state.activeUserBlockId = undefined`).
+  // Keep that reset: diagnostics carry no association with the active user
+  // block, and a stale pointer lets a later mergeable `user.text.delta`
+  // with no promptId stamp (e.g. a peer client's `$ <cmd>` echo) append
+  // onto an earlier user block, collapsing two turns into one and skewing
+  // `rewindTranscriptToUserTurn`'s turn indexing. The streaming
+  // assistant/thought pointer stays untouched — that is the whole point of
+  // the sidechannel (see the doc above).
+  state.activeUserBlockId = undefined;
+  // The replaced `appendStatusBlock` path capped exactly these diagnostics at
+  // `MAX_TEXT_BLOCK_LENGTH`; a single SSE frame can carry ~16M code units and
+  // up to `UNRECOGNIZED_DIAGNOSTICS_LIMIT` entries persist, so the cap stays.
+  // Shares `truncateTextAtLimit` with the block path; the only delta is the
+  // truncation report, which has no block id to report under.
+  const diagnostic: DaemonUnrecognizedDiagnostic = {
+    debugReason: event.debugReason,
+    text: truncateTextAtLimit(event.text),
+    clientReceivedAt: state.now,
+    ...(event.promptId !== undefined ? { promptId: event.promptId } : {}),
+    ...(event.sourceRecordIds !== undefined
+      ? { sourceRecordIds: event.sourceRecordIds }
+      : {}),
+    ...(event.branchRecordId !== undefined
+      ? { branchRecordId: event.branchRecordId }
+      : {}),
+    ...(event.originatorClientId !== undefined
+      ? { originatorClientId: event.originatorClientId }
+      : {}),
+    ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event.serverTimestamp !== undefined
+      ? { serverTimestamp: event.serverTimestamp }
+      : {}),
+  };
+  const diagnostics = [...state.unrecognizedDiagnostics, diagnostic];
+  state.unrecognizedDiagnostics =
+    diagnostics.length > UNRECOGNIZED_DIAGNOSTICS_LIMIT
+      ? diagnostics.slice(-UNRECOGNIZED_DIAGNOSTICS_LIMIT)
+      : diagnostics;
+}
+
 function appendStatusBlock(
   state: DaemonTranscriptState,
   kind: 'status' | 'error' | 'debug',
@@ -1447,6 +1532,9 @@ function cloneTranscriptState(
     // (e.g. `useDaemonFollowupSuggestion`) skip re-renders for events
     // that don't touch the suggestion.
     lastFollowupSuggestion: state.lastFollowupSuggestion,
+    // Same reference-stability contract: the reducer replaces the whole
+    // array when appending, never mutates it in-place.
+    unrecognizedDiagnostics: state.unrecognizedDiagnostics,
   };
   const onTruncation = opts.onTruncation ?? truncationCallbacks.get(state);
   if (onTruncation) truncationCallbacks.set(next, onTruncation);
@@ -1623,7 +1711,6 @@ function rebuildTranscriptIndexes(state: DaemonTranscriptState): void {
   state.currentToolCallId = undefined;
   state.pendingUserShellCommand = undefined;
   state.lastFollowupSuggestion = undefined;
-
   const liveToolCallIds = new Set<string>();
   for (const block of state.blocks) {
     if (block.kind === 'tool') {
@@ -1725,6 +1812,15 @@ function appendBoundedText(
   return truncateText(state, block.id, block.sourceRecordIds, existing + text);
 }
 
+function truncateTextAtLimit(text: string): string {
+  if (text.length <= MAX_TEXT_BLOCK_LENGTH) return text;
+  const keepLength = Math.max(
+    0,
+    MAX_TEXT_BLOCK_LENGTH - TEXT_TRUNCATED_SUFFIX.length,
+  );
+  return `${text.slice(0, keepLength)}${TEXT_TRUNCATED_SUFFIX}`;
+}
+
 function truncateText(
   state: DaemonTranscriptState,
   blockId: string,
@@ -1733,11 +1829,7 @@ function truncateText(
 ): string {
   if (text.length <= MAX_TEXT_BLOCK_LENGTH) return text;
   reportTextTruncation(state, blockId, sourceRecordIds);
-  const keepLength = Math.max(
-    0,
-    MAX_TEXT_BLOCK_LENGTH - TEXT_TRUNCATED_SUFFIX.length,
-  );
-  return `${text.slice(0, keepLength)}${TEXT_TRUNCATED_SUFFIX}`;
+  return truncateTextAtLimit(text);
 }
 
 function reportTextTruncation(
@@ -1914,6 +2006,19 @@ export function selectLastFollowupSuggestion(
   state: DaemonTranscriptState,
 ): { suggestion: string; promptId: string } | undefined {
   return state.lastFollowupSuggestion;
+}
+
+/**
+ * Forward-compatibility diagnostics mirrored from normalizer-classified
+ * `unrecognized_event` / `unrecognized_session_update` debug events. These
+ * live outside `blocks[]` (see `appendUnrecognizedDiagnostic`), so developer
+ * tooling can still inspect them after renderers hide them. Bounded by
+ * `UNRECOGNIZED_DIAGNOSTICS_LIMIT`, newest last.
+ */
+export function selectUnrecognizedDiagnostics(
+  state: DaemonTranscriptState,
+): readonly DaemonUnrecognizedDiagnostic[] {
+  return state.unrecognizedDiagnostics;
 }
 
 /**

@@ -359,7 +359,10 @@ export function ChatPane({
       catalogOwnerCwd === catalogStreamingWorkspaceCwdRef.current &&
       reportCatalogTurnCompletion
     ) {
-      sessionCatalogController.turnCompleted(catalogOwnerCwd);
+      sessionCatalogController.turnCompleted(
+        catalogOwnerCwd,
+        connection.sessionId,
+      );
     }
   }, [
     catalogOwnerCwd,

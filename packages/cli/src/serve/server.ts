@@ -181,7 +181,10 @@ import {
   parseClientIdHeader,
   safeBody,
 } from './server/request-helpers.js';
-import { daemonTelemetryMiddleware } from './server/telemetry.js';
+import {
+  daemonInboundTraceIdCaptureMiddleware,
+  daemonTelemetryMiddleware,
+} from './server/telemetry.js';
 import { installAccessLogMiddleware } from './server/access-log.js';
 import { setupDeviceFlowRegistry } from './server/device-flow-registry.js';
 import {
@@ -1725,6 +1728,12 @@ export function createServeApp(
   }
 
   installAccessLogMiddleware(app, daemonLog);
+
+  // Capture the caller trace id BEFORE authenticate / rate limiter / body
+  // parser: those layers short-circuit (401/429/400) before the telemetry
+  // middleware ever runs, and the access log still needs the captured id
+  // to join their log lines (and 404s) with the caller's trace.
+  app.use(daemonInboundTraceIdCaptureMiddleware);
 
   // Serve the Web Shell static assets (/ and /assets) BEFORE bearerAuth. The
   // static shell carries no secrets and a browser cannot attach an
