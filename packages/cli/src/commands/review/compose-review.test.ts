@@ -28,7 +28,11 @@ import {
 } from './lib/deadline.js';
 import { getGhHost, setGhHost } from './lib/gh.js';
 import { BRIEFS } from './lib/agent-briefs.js';
-import { LEDGER_MAX_ROUND, parseLedger } from './lib/ledger.js';
+import {
+  LEDGER_MAX_ROUND,
+  LEDGER_MAX_VOLUME,
+  parseLedger,
+} from './lib/ledger.js';
 import { countInlineFindings } from './lib/inline-counts.js';
 import {
   composeReview,
@@ -8748,6 +8752,22 @@ describe('convergence telemetry — volume, carried in the marker', () => {
     });
     expect(r.postedInline).toBe(3);
     expect(parseLedger(r.body)?.posted).toBe(3);
+  });
+
+  it('clamps the count at its origin, so every surface agrees', () => {
+    // The terminal line, the marker and the artifact must never disagree
+    // about one round's count. This is the defensive over-cap case: the
+    // reader is applied where the number is derived, not only where it is
+    // written, so no surface can see the raw value.
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: LEDGER_MAX_VOLUME + 5,
+      draftedComments: drafts(LEDGER_MAX_VOLUME + 5),
+    });
+    expect(r.postedInline).toBe(LEDGER_MAX_VOLUME);
+    expect(parseLedger(r.body)?.posted).toBe(LEDGER_MAX_VOLUME);
   });
 
   it('counts the POST-enforcement set — what submit actually sends', () => {
