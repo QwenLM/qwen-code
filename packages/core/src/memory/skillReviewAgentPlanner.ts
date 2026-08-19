@@ -13,7 +13,7 @@ import type {
   PermissionCheckContext,
   PermissionDecision,
 } from '../permissions/types.js';
-import { runForkedAgent } from '../utils/forkedAgent.js';
+import { copyHistoryContainers, runForkedAgent } from '../utils/forkedAgent.js';
 import { buildFunctionResponseParts } from '../tools/agent/fork-subagent.js';
 import { ToolNames } from '../tools/tool-names.js';
 import {
@@ -283,22 +283,27 @@ export const SKILL_REVIEW_SYSTEM_PROMPT = [
 
 function buildAgentHistory(history: Content[]): Content[] {
   if (history.length === 0) return [];
-  const last = history[history.length - 1];
+  // Clone part containers before the agent runs: the skill-review agent
+  // inherits the parent's image-payload threshold and evicts image bytes
+  // in place (`replaceImagePayloadsInPlace`), which must never rewrite the
+  // parent session's durable Part objects shared through `getHistoryShallow`.
+  const cloned = copyHistoryContainers(history);
+  const last = cloned[cloned.length - 1];
   // If the final message is a user turn (not a model turn), drop it. A trailing
   // user message means the session ended mid-exchange (e.g. user sent a new
   // query that has not yet received a model response). Including it would make
   // the skill-review agent see an open "conversation" with an unanswered user
   // prompt, which can confuse the model and produce hallucinated tool calls
   // attempting to "answer" the user instead of reviewing skills.
-  if (last.role !== 'model') return history.slice(0, -1);
+  if (last.role !== 'model') return cloned.slice(0, -1);
   const openCalls = (last.parts ?? []).filter((p) => p.functionCall);
-  if (openCalls.length === 0) return [...history];
+  if (openCalls.length === 0) return [...cloned];
   const toolResponses = buildFunctionResponseParts(
     last,
     'Background skill review started.',
   );
   return [
-    ...history,
+    ...cloned,
     { role: 'user' as const, parts: toolResponses },
     { role: 'model' as const, parts: [{ text: 'Acknowledged.' }] },
   ];

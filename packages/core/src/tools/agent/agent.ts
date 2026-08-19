@@ -129,6 +129,7 @@ import type {
   ResidentBackgroundAgent,
 } from '../../agents/background-tasks.js';
 import { buildModelIdContext, resolveModelId } from '../../utils/modelId.js';
+import { copyHistoryContainers } from '../../utils/forkedAgent.js';
 import type { AuthOverrides } from '../../models/content-generator-config.js';
 
 function persistBackgroundCancellation(
@@ -1675,6 +1676,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         ];
       }
     }
+
+    // Clone part containers before seeding the fork: the forked agent evicts
+    // image bytes in place, and `getHistoryShallow` / `getHistoryForForkWindow`
+    // return containers whose Part objects are shared with the parent's
+    // durable history — mutating them would erase the parent's images.
+    rawHistory = copyHistoryContainers(rawHistory);
 
     // Build the history that will seed the fork's chat. Must end with a
     // model message so agent-headless can send the task_prompt as a user

@@ -11,6 +11,7 @@ import {
   getCacheSafeParamsSessionId,
   clearCacheSafeParams,
   runForkedAgent,
+  copyHistoryContainers,
 } from './forkedAgent.js';
 import type { Content, GenerateContentConfig } from '@google/genai';
 import type { Config } from '../config/config.js';
@@ -1036,5 +1037,54 @@ describe('runForkedAgent (cache path)', () => {
     // This test verifies the GeminiChat path is taken when cacheSafeParams present.
     // The null guard lives in the callers.
     void mockConfig; // suppress unused
+  });
+});
+
+describe('copyHistoryContainers', () => {
+  it('clones part objects so in-place eviction does not reach the source history', () => {
+    const source: Content[] = [
+      {
+        role: 'user',
+        parts: [{ inlineData: { mimeType: 'image/png', data: 'bytes' } }],
+      },
+      {
+        role: 'model',
+        parts: [
+          {
+            functionResponse: {
+              name: 'tool',
+              response: {},
+              parts: [
+                { inlineData: { mimeType: 'image/jpeg', data: 'nested' } },
+              ],
+            },
+          },
+        ],
+      },
+    ];
+
+    const cloned = copyHistoryContainers(source);
+
+    // Simulate replaceImagePayloadsInPlace: property reassignment on the clone.
+    (cloned[0]!.parts![0] as { inlineData?: unknown }).inlineData = undefined;
+    (
+      cloned[1]!.parts![0] as { functionResponse?: { parts?: unknown[] } }
+    ).functionResponse!.parts![0] = {
+      text: 'Image #0',
+    };
+
+    // The source history must be untouched.
+    expect(
+      (source[0]!.parts![0] as { inlineData?: unknown }).inlineData,
+    ).toEqual({ mimeType: 'image/png', data: 'bytes' });
+    const nested = (
+      source[1]!.parts![0] as {
+        functionResponse?: { parts?: unknown[] };
+      }
+    ).functionResponse!.parts![0] as { inlineData?: unknown };
+    expect(nested.inlineData).toEqual({
+      mimeType: 'image/jpeg',
+      data: 'nested',
+    });
   });
 });

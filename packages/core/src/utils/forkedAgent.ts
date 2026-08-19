@@ -101,7 +101,7 @@ export interface CacheSafeParams {
 let currentCacheSafeParams: CacheSafeParams | null = null;
 let currentVersion = 0;
 
-function clonePart(part: Part): Part {
+export function clonePart(part: Part): Part {
   const nested = part.functionResponse as { parts?: unknown } | undefined;
   if (!Array.isArray(nested?.parts)) return { ...part };
   return {
@@ -113,7 +113,7 @@ function clonePart(part: Part): Part {
   };
 }
 
-function copyHistoryContainers(history: Content[]): Content[] {
+export function copyHistoryContainers(history: Content[]): Content[] {
   return history.map((content) => ({
     ...content,
     ...(content.parts ? { parts: content.parts.map(clonePart) } : {}),
