@@ -5461,15 +5461,25 @@ export class Config {
               } catch {
                 // Salvage failures must never block removal.
               }
-              fs.rmSync(projectDir, {
-                recursive: true,
-                force: true,
-              });
-              this.debugLogger.info(
-                `Orphan project snapshot removed at shutdown: ${path.basename(
-                  projectDir,
-                )}`,
-              );
+              // The salvage await (and the transcript streaming above)
+              // widens the check-then-delete window: a sibling session
+              // sharing this entry — concurrent temp sessions or a
+              // sanitized-cwd collision — may have started writing
+              // since the guard ran. Re-check before the irreversible
+              // step, mirroring the sweep-side removeEntry.
+              if (
+                Storage.containsOnlySessionArtifacts(projectDir, this.sessionId)
+              ) {
+                fs.rmSync(projectDir, {
+                  recursive: true,
+                  force: true,
+                });
+                this.debugLogger.info(
+                  `Orphan project snapshot removed at shutdown: ${path.basename(
+                    projectDir,
+                  )}`,
+                );
+              }
             }
           }
         }

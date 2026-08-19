@@ -7239,6 +7239,40 @@ describe('Server Config (config.ts)', () => {
       }
     });
 
+    it('keeps the project dir when a sibling session lands during salvage (R8-1)', async () => {
+      // The ownership guard passes before salvage, but a sibling
+      // session sharing the entry (concurrent temp sessions or a
+      // sanitized-cwd collision) starts writing during the salvage
+      // await: the pre-delete re-check must abort the removal.
+      const guardSpy = vi
+        .spyOn(Storage, 'containsOnlySessionArtifacts')
+        .mockReturnValueOnce(true)
+        .mockReturnValue(false);
+      const cwdSpy = vi
+        .spyOn(Storage, 'collectRecordedCwds')
+        .mockReturnValue([path.join(os.tmpdir(), 'qwen-sess-cwd')]);
+      try {
+        const tmpCwd = path.join(os.tmpdir(), 'qwen-raced-entry');
+        const config = new Config({
+          ...baseParams,
+          cwd: tmpCwd,
+          targetDir: tmpCwd,
+        });
+        config['initialized'] = true;
+
+        await config.shutdown();
+
+        expect(guardSpy).toHaveBeenCalledTimes(2);
+        expect(rmSpy).not.toHaveBeenCalledWith(
+          config.storage.getProjectDir(),
+          expect.anything(),
+        );
+      } finally {
+        guardSpy.mockRestore();
+        cwdSpy.mockRestore();
+      }
+    });
+
     it('keeps the project dir when its records point at any non-temp cwd', async () => {
       // Records migrated here via `/cd` from a real project stay
       // resumable — the exit-time predicate requires EVERY recorded cwd
