@@ -61,19 +61,32 @@ export function declaresOwnUncoverable(
 }
 
 /**
+ * Does any of these serialized tool-call args name the EXACT `path`? The
+ * comparison is against the whole JSON string value (`JSON.stringify(path)`
+ * carries the closing quote), so a `${path}.bak` — or any longer path that
+ * merely contains this one as a prefix — is NOT credited: the same trap
+ * `parseTranscript` avoids for the diff path. This one needle is what the
+ * bar's "exact path, not a look-alike" guarantee rests on; every path atom
+ * below routes through it, so a fix to the match reaches all of them at once
+ * (the drift this module exists to eliminate, applied to its own internals).
+ */
+function namesPath(args: readonly string[], path: string): boolean {
+  const needle = JSON.stringify(path);
+  return args.some((a) => a.includes(needle));
+}
+
+/**
  * Did this record's agent open the brief recorded under `key`? Compared as a
  * whole JSON string value (`successfulCallArgs` are serialized args), so a
- * `${brief}.bak` cannot be credited for the brief — the same trap
- * `parseTranscript` avoids for the diff path. "Open" is mention-level: any
- * successful tool whose args name the exact path.
+ * `${brief}.bak` cannot be credited for the brief. "Open" is mention-level:
+ * any successful tool whose args name the exact path.
  */
 export function openedBrief(
   rec: AgentRecord,
   planPath: string,
   key: string,
 ): boolean {
-  const needle = JSON.stringify(briefPath(planPath, key));
-  return rec.successfulCallArgs.some((a) => a.includes(needle));
+  return namesPath(rec.successfulCallArgs, briefPath(planPath, key));
 }
 
 /**
@@ -87,8 +100,7 @@ export function readBrief(
   planPath: string,
   key: string,
 ): boolean {
-  const needle = JSON.stringify(briefPath(planPath, key));
-  return rec.successfulReadFileArgs.some((a) => a.includes(needle));
+  return namesPath(rec.successfulReadFileArgs, briefPath(planPath, key));
 }
 
 /**
@@ -104,6 +116,5 @@ export function readFindingsPointer(
   pointer: string | null,
 ): boolean {
   if (pointer === null) return true;
-  const needle = JSON.stringify(pointer);
-  return rec.successfulReadFileArgs.some((a) => a.includes(needle));
+  return namesPath(rec.successfulReadFileArgs, pointer);
 }
