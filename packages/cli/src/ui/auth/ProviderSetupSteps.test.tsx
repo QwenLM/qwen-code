@@ -468,6 +468,74 @@ describe('ProviderSetupSteps', () => {
     unmount();
   });
 
+  it('keeps a half-typed separator in the custom-ids input across a swap', async () => {
+    // R5-1: the custom-ids buffer is uncontrolled, and the re-derive recomputed
+    // its text from the normalized `flow.state.modelIds` — where
+    // `normalizeModelIds` has already dropped the bare trailing segment. A
+    // lookup resolving while the user sat between two ids therefore remounted
+    // the input over `id1,` with `id1`, cursor back at offset 0, so the next
+    // character glued onto the previous id and Enter installed one
+    // concatenated, nonexistent model id where the user meant two.
+    let swapFlow!: (next: ProviderSetupFlow) => void;
+    function FlowHarness({ first }: { first: ProviderSetupFlow }) {
+      const [flow, setFlow] = useState(first);
+      swapFlow = setFlow;
+      return <ProviderSetupSteps flow={flow} />;
+    }
+
+    const before = createModelIdsFlow();
+    const beforeState = before.state as unknown as Record<string, unknown>;
+    beforeState['discoveryStatus'] = 'loading';
+    beforeState['recommendedModelsRevision'] = 0;
+
+    const { lastFrame, unmount } = renderWithProviders(
+      <FlowHarness first={before} />,
+    );
+
+    // The custom-ids input takes the initial focus, so typing starts there.
+    for (const char of ['i', 'd', '1', ',']) {
+      await act(async () => {
+        pressLatestKey(char, char);
+      });
+    }
+    expect(lastFrame() ?? '').toContain('id1,');
+
+    // The endpoint resolves in that gap and bumps the revision. The two
+    // built-ins are checked recommendations, so they are in `modelIds` too.
+    const submitModelIds = vi.fn();
+    const changeModelIds = vi.fn();
+    const after = createModelIdsFlow({ submitModelIds });
+    (after as unknown as Record<string, unknown>)['changeModelIds'] =
+      changeModelIds;
+    const afterState = after.state as unknown as Record<string, unknown>;
+    afterState['modelIds'] = 'id1, MiniMax-M3, MiniMax-M2.7';
+    afterState['discoveryStatus'] = 'success';
+    afterState['recommendedModelsRevision'] = 1;
+
+    await act(async () => {
+      swapFlow(after);
+    });
+
+    // The separator carries no id, so no re-derive is entitled to drop it.
+    expect(lastFrame() ?? '').toContain('id1,');
+
+    // The next id must start its own segment, not extend the previous one.
+    await act(async () => {
+      pressLatestKey('q', 'q');
+    });
+    await act(async () => {
+      pressLatestKey('return');
+    });
+
+    expect(changeModelIds.mock.calls.at(-1)?.[0]).toBe(
+      'id1, q, MiniMax-M3, MiniMax-M2.7',
+    );
+    expect(submitModelIds).toHaveBeenCalledWith({
+      modelIds: ['id1', 'q', 'MiniMax-M3', 'MiniMax-M2.7'],
+    });
+    unmount();
+  });
+
   it('notes a failed lookup without hiding the built-in recommendations', () => {
     const flow = createModelIdsFlow();
     const state = flow.state as unknown as Record<string, unknown>;

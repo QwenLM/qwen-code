@@ -260,6 +260,62 @@ function getCustomModelIdsText(
 }
 
 /**
+ * Re-split the custom-ids input after the recommendation list was replaced,
+ * working from the raw buffer text rather than the normalized flow state.
+ *
+ * Re-deriving from `flow.state.modelIds` round-trips the text through
+ * `normalizeModelIds`, which drops a bare trailing segment. A user who had
+ * typed `id1,` on the way to the second id therefore got the comma eaten by a
+ * lookup resolving mid-typing, and the next character glued onto `id1` — Enter
+ * then installed one concatenated id where two were meant. The separator the
+ * user just typed carries no id, so no filter can drop it; only ids move.
+ *
+ * Ids the new list now offers move out to their checkbox, and ids that were
+ * checked recommendations but are no longer on offer fall back in here, where
+ * they stay visible and removable. Segments that survive are kept verbatim, so
+ * a re-derive that changes no id leaves the buffer byte-identical and the
+ * caller can skip the remount entirely.
+ */
+function resplitCustomModelIdsText(
+  customModelIdsText: string,
+  selectedModelIds: string[],
+  recommendedModelIds: Set<string>,
+): string {
+  const segments = customModelIdsText.split(',');
+  const hasTrailingSeparator =
+    segments.length > 1 && segments[segments.length - 1].trim() === '';
+  const bodySegments = hasTrailingSeparator ? segments.slice(0, -1) : segments;
+
+  const keptIds = new Set<string>();
+  const parts: string[] = [];
+  for (const segment of bodySegments) {
+    const id = segment.trim();
+    if (id.length === 0 || recommendedModelIds.has(id) || keptIds.has(id)) {
+      continue;
+    }
+    keptIds.add(id);
+    parts.push(segment);
+  }
+  for (const id of selectedModelIds) {
+    if (recommendedModelIds.has(id) || keptIds.has(id)) {
+      continue;
+    }
+    keptIds.add(id);
+    parts.push(parts.length > 0 ? ` ${id}` : id);
+  }
+
+  const body = parts.join(',');
+  if (body.length === 0) {
+    // Nothing is left to separate: the ids in front of the trailing comma all
+    // moved to checkboxes, so an empty input is what the user should see.
+    return '';
+  }
+  return hasTrailingSeparator
+    ? `${body},${segments[segments.length - 1]}`
+    : body;
+}
+
+/**
  * Inline note about where the recommendations came from. Discovery is a
  * best-effort enrichment, so a failure reads as a footnote, not an error —
  * the list below it works either way.
@@ -344,11 +400,23 @@ function ModelIdsStep({
   const [derivedModelsRevision, setDerivedModelsRevision] = useState(
     recommendedModelsRevision,
   );
+  // `TextInput` seeds its buffer from `value` at mount only, so a re-derived
+  // split reaches the screen only by remounting the input. Remounting also
+  // sends the cursor to offset 0, which is destructive when the text did not
+  // actually change — hence a key that moves only on a real edit, rather than
+  // one that tracks the revision.
+  const [modelIdsInputKey, setModelIdsInputKey] = useState(0);
   if (derivedModelsRevision !== recommendedModelsRevision) {
     setDerivedModelsRevision(recommendedModelsRevision);
-    setCustomModelIdsText(
-      getCustomModelIdsText(selectedModelIds, recommendedModelIds),
+    const nextCustomModelIdsText = resplitCustomModelIdsText(
+      customModelIdsText,
+      selectedModelIds,
+      recommendedModelIds,
     );
+    if (nextCustomModelIdsText !== customModelIdsText) {
+      setCustomModelIdsText(nextCustomModelIdsText);
+      setModelIdsInputKey((key) => key + 1);
+    }
     setSelectedRecommendationKeys(
       getRecommendedSelections(selectedModelIds, modelOptions),
     );
@@ -477,10 +545,11 @@ function ModelIdsStep({
           <TextInput
             // `TextInput` seeds an uncontrolled buffer from `value` at mount,
             // so the re-derived split above only reaches the screen if this
-            // one input remounts. Keying it on the revision does that without
-            // taking the search query and focus down with it, which is what
-            // remounting the whole step used to do.
-            key={`model-ids-input-${derivedModelsRevision}`}
+            // one input remounts. Keying it on an edit counter does that
+            // without taking the search query and focus down with it (which is
+            // what remounting the whole step used to do) and without resetting
+            // the cursor on a swap that left the text alone.
+            key={`model-ids-input-${modelIdsInputKey}`}
             value={customModelIdsText}
             onChange={handleCustomModelIdsChange}
             onSubmit={handleSubmitModelIds}
