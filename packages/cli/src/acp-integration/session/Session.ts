@@ -4071,6 +4071,7 @@ export class Session implements SessionContext {
       }
       if (goalTurn) {
         await this.#settleGoalTurn(goalTurn, promptResult, promptFailed);
+        await this.#emitGoalEndTurn(promptResult);
       } else if (reservedGoalRuntime && reservedGoalTurnKey) {
         await reservedGoalRuntime.releaseTurn(reservedGoalTurnKey);
       }
@@ -8455,6 +8456,27 @@ export class Session implements SessionContext {
     } catch (error) {
       debugLogger.debug(
         `Background notification end-turn extNotification dropped: ${this.#formatError(error)}`,
+      );
+    }
+  }
+
+  /**
+   * Goal turns run inside this child via `prompt()` directly, so the daemon
+   * bridge never observes a `session/prompt` RPC boundary for them and would
+   * otherwise publish no `turn_complete` — leaving SSE clients (Web Shell,
+   * SDK) with a streaming state that never settles.
+   */
+  async #emitGoalEndTurn(result: PromptResponse | undefined): Promise<void> {
+    try {
+      await this.client.extNotification('_qwencode/end_turn', {
+        sessionId: this.sessionId,
+        reason: result?.stopReason ?? 'cancelled',
+        source: 'goal',
+        promptId: this.config.getSessionId() + '########' + String(this.turn),
+      });
+    } catch (error) {
+      debugLogger.debug(
+        `Goal end-turn extNotification dropped: ${this.#formatError(error)}`,
       );
     }
   }

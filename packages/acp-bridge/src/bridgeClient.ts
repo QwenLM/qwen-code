@@ -1926,7 +1926,7 @@ export class BridgeClient implements Client {
    * `qwen/notify/session/prompt-suggestion` (followup assist),
    * `qwen/notify/session/artifact-event` (hook artifacts),
    * `qwen/notify/session/terminal-sequence`, and
-   * `_qwencode/end_turn` (background-notification turns), and
+   * `_qwencode/end_turn` (background-notification and goal turns), and
    * `qwen/notify/session/mcp-budget-event` — each translated into a
    * session-scoped SSE frame. Unknown methods are dropped silently for
    * forward-compat.
@@ -1961,18 +1961,35 @@ export class BridgeClient implements Client {
     if (method === '_qwencode/end_turn') {
       const sessionId = params['sessionId'];
       const reason = params['reason'];
+      const source = params['source'];
       if (
         typeof sessionId !== 'string' ||
         sessionId.length === 0 ||
         typeof reason !== 'string' ||
         reason.length === 0 ||
         reason.length > 128 ||
-        params['source'] !== 'background_notification'
+        (source !== 'background_notification' && source !== 'goal')
       ) {
         return;
       }
       const entry = this.resolveEntry(sessionId);
       if (!entry || !this.ownsSession(sessionId)) return;
+      if (source === 'goal') {
+        const promptId = params['promptId'];
+        if (
+          typeof promptId !== 'string' ||
+          promptId.length === 0 ||
+          promptId.length > 256
+        ) {
+          return;
+        }
+        entry.events.publish({
+          type: 'turn_complete',
+          promptId,
+          data: { sessionId, stopReason: reason, promptId },
+        });
+        return;
+      }
       entry.events.publish({
         type: 'background_notification_turn_complete',
         data: { sessionId, reason },

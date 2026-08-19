@@ -213,6 +213,63 @@ describe('BridgeClient — background notification turn boundary', () => {
     });
   });
 
+  it('publishes a real turn_complete for a goal-turn end signal', async () => {
+    const sessionId = 'session-goal';
+    const publish = vi.fn().mockReturnValue(true);
+    const entry = { sessionId, events: { publish } };
+    const noFlow = () => {
+      throw new Error('test: permission flow should not run');
+    };
+    const client = new BridgeClient(
+      ((id: string) => (id === sessionId ? entry : undefined)) as never,
+      noFlow as never,
+      { request: noFlow } as never,
+      0,
+      Infinity,
+    );
+
+    await client.extNotification('_qwencode/end_turn', {
+      sessionId,
+      reason: 'end_turn',
+      source: 'goal',
+      promptId: 'session-goal########3',
+    });
+
+    expect(publish).toHaveBeenCalledWith({
+      type: 'turn_complete',
+      promptId: 'session-goal########3',
+      data: {
+        sessionId,
+        stopReason: 'end_turn',
+        promptId: 'session-goal########3',
+      },
+    });
+  });
+
+  it('drops a goal-turn end signal without a promptId', async () => {
+    const sessionId = 'session-goal';
+    const publish = vi.fn();
+    const entry = { sessionId, events: { publish } };
+    const noFlow = () => {
+      throw new Error('test: permission flow should not run');
+    };
+    const client = new BridgeClient(
+      ((id: string) => (id === sessionId ? entry : undefined)) as never,
+      noFlow as never,
+      { request: noFlow } as never,
+      0,
+      Infinity,
+    );
+
+    await client.extNotification('_qwencode/end_turn', {
+      sessionId,
+      reason: 'end_turn',
+      source: 'goal',
+    });
+
+    expect(publish).not.toHaveBeenCalled();
+  });
+
   it('drops malformed or foreign end-turn signals', async () => {
     const publish = vi.fn();
     const entry = { sessionId: 'owned', events: { publish } };
