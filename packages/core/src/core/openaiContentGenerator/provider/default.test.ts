@@ -494,6 +494,29 @@ describe('DefaultOpenAICompatibleProvider', () => {
       expect(result['reasoning']).toEqual({ effort: 'ludicrous' });
     });
 
+    it('leaves a samplingParams reasoning object verbatim', () => {
+      // The pipeline hands samplingParams keys straight to the wire and skips
+      // the reasoning injection, so this object is the user's own value.
+      const providerWithSampling = new DefaultOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          samplingParams: { reasoning: { effort: 'max' } },
+        } as unknown as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+
+      const result = providerWithSampling.buildRequest(
+        {
+          model: 'gpt-5.4',
+          messages: [{ role: 'user', content: 'Hello' }],
+          reasoning: { effort: 'max' },
+        } as unknown as OpenAI.Chat.ChatCompletionCreateParams,
+        'prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['reasoning']).toEqual({ effort: 'max' });
+    });
+
     it('lets an extra_body reasoning override ship verbatim', () => {
       const providerWithOverride = new DefaultOpenAICompatibleProvider(
         {

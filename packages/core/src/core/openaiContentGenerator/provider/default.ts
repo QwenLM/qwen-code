@@ -143,10 +143,19 @@ export class DefaultOpenAICompatibleProvider
    * Cap the pipeline-injected `reasoning.effort` at what this endpoint accepts.
    * The tier is configured once (`/effort`) and persisted, so an unaccepted
    * value is not a one-off rejection: it 400s every later request in the
-   * session too. `extra_body` merges after this, so an explicit override still
-   * ships verbatim.
+   * session too.
+   *
+   * Only the pipeline-injected tier is capped. A `reasoning` object the user
+   * put in `samplingParams` ships verbatim (the pipeline hands those keys
+   * straight to the wire and skips the injection entirely), and `extra_body`
+   * merges after this, so both explicit overrides survive unchanged.
    */
   protected clampConfiguredReasoningEffort<T extends object>(request: T): T {
+    if (
+      this.contentGeneratorConfig.samplingParams?.['reasoning'] !== undefined
+    ) {
+      return request;
+    }
     const loose = request as unknown as Record<string, unknown>;
     const reasoning = loose['reasoning'] as { effort?: unknown } | undefined;
     const effort = reasoning?.effort;

@@ -57,6 +57,25 @@ export function isZaiProvider(
   return model.toLowerCase().startsWith('glm-');
 }
 
+/**
+ * True for GLM model ids at 5.2 or newer, the family Z.ai documents as taking
+ * the tiered `reasoning_effort` (including `max`). Older GLM ids do not, so a
+ * blanket `glm-*` check would claim a tier the endpoint can reject.
+ * See https://docs.z.ai/guides/capabilities/thinking.
+ */
+export function isGlmTieredEffortModel(model: string | undefined): boolean {
+  if (!model) {
+    return false;
+  }
+  const parsed = /^glm-(\d+)(?:\.(\d+))?/.exec(model.toLowerCase());
+  if (!parsed) {
+    return false;
+  }
+  const major = Number(parsed[1]);
+  const minor = Number(parsed[2] ?? 0);
+  return major > 5 || (major === 5 && minor >= 2);
+}
+
 export class ZaiOpenAICompatibleProvider extends DefaultOpenAICompatibleProvider {
   static isZaiProvider = isZaiProvider;
   static isZaiHostname = isZaiHostname;
@@ -65,14 +84,18 @@ export class ZaiOpenAICompatibleProvider extends DefaultOpenAICompatibleProvider
   private nonZaiHostnameFlattenWarned = false;
 
   /**
-   * GLM-5.2+ accepts `max`, so the generic ceiling must not apply here.
-   * Deliberately not hostname-gated, unlike the flatten below: which tiers a
-   * model accepts is a property of the model, while the flat-vs-nested wire
-   * shape is a property of the endpoint. A self-hosted glm-* model reached
-   * through the model-name fallback still understands `max`.
+   * The full ladder, including `max`, only on a verified Z.ai host running a
+   * GLM-5.2+ model. Both halves matter: `isZaiProvider` also routes here on a
+   * bare `glm-*` model name, which says nothing about what an arbitrary
+   * self-hosted backend accepts, and older GLM ids predate the tiered field.
+   * Anything else keeps the generic ceiling, matching the hostname gate the
+   * wire reshape below already uses.
    */
   protected override get supportedReasoningEfforts(): readonly ReasoningEffort[] {
-    return REASONING_EFFORT_TIERS;
+    return isZaiHostname(this.contentGeneratorConfig) &&
+      isGlmTieredEffortModel(this.contentGeneratorConfig.model)
+      ? REASONING_EFFORT_TIERS
+      : super.supportedReasoningEfforts;
   }
 
   override buildRequest(

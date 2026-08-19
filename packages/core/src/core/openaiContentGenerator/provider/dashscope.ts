@@ -22,8 +22,12 @@ import {
   isTieredEffortWireModel,
 } from '../../modalityDefaults.js';
 import type { ReasoningEffort } from '../../reasoning-effort.js';
-import { clampReasoningEffort } from '../../reasoning-effort.js';
+import {
+  REASONING_EFFORT_TIERS,
+  clampReasoningEffort,
+} from '../../reasoning-effort.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
+import { isGlmTieredEffortModel } from './zai.js';
 
 const debugLogger = createDebugLogger('DashScopeOpenAICompatibleProvider');
 
@@ -440,7 +444,9 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
         delete visionResult['reasoning'];
       }
       return this.mergeExtraBodyAndResolveKnobs(
-        visionResult,
+        hasQwenEffortConfig
+          ? visionResult
+          : this.clampConfiguredReasoningEffort(visionResult),
         extraBody,
         request.model,
         selectedThinkingKnob,
@@ -466,8 +472,12 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     if (hasQwenEffortConfig && 'reasoning' in result) {
       delete result['reasoning'];
     }
+    // No qwen effort field means the nested `reasoning` object is what ships,
+    // so it needs the same ceiling any other OpenAI-compatible request gets.
     return this.mergeExtraBodyAndResolveKnobs(
-      result,
+      hasQwenEffortConfig
+        ? result
+        : this.clampConfiguredReasoningEffort(result),
       extraBody,
       request.model,
       selectedThinkingKnob,
@@ -546,6 +556,19 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       return { enable_thinking: true };
     }
     return {};
+  }
+
+  /**
+   * Tiers accepted on the non-qwen path. DashScope also serves GLM, and
+   * GLM-5.2+ takes the full ladder; anything else here is an ordinary
+   * OpenAI-compatible model and keeps the generic ceiling. The qwen families
+   * never reach this: they are capped by `clampTieredEffort` on their own
+   * flat wire field instead.
+   */
+  protected override get supportedReasoningEfforts(): readonly ReasoningEffort[] {
+    return isGlmTieredEffortModel(this.contentGeneratorConfig.model)
+      ? REASONING_EFFORT_TIERS
+      : super.supportedReasoningEfforts;
   }
 
   /**

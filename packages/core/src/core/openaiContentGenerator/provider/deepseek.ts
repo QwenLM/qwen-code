@@ -84,15 +84,17 @@ export class DeepSeekOpenAICompatibleProvider extends DefaultOpenAICompatiblePro
   static isDeepSeekHostname = isDeepSeekHostname;
 
   /**
-   * DeepSeek's ladder tops out at `max`, so the generic ceiling must not apply
-   * here. Deliberately not hostname-gated, unlike `translateReasoningEffort`
-   * below: which tiers a model accepts is a property of the model, while the
-   * flat-vs-nested wire shape is a property of the endpoint. A self-hosted
-   * deepseek-* model reached through the model-name fallback still understands
-   * `max`, so capping it there would silently downgrade a valid request.
+   * The full ladder, including `max`, only on a verified DeepSeek host.
+   * `isDeepSeekProvider` also routes here on a `deepseek` substring in the
+   * model name, which says nothing about what the endpoint accepts, so the
+   * capability follows the rule the module comment above already states: a
+   * decision about the wire shape DeepSeek's own API exposes uses
+   * `isDeepSeekHostname`. Elsewhere the generic ceiling applies.
    */
   protected override get supportedReasoningEfforts(): readonly ReasoningEffort[] {
-    return REASONING_EFFORT_TIERS;
+    return isDeepSeekHostname(this.contentGeneratorConfig)
+      ? REASONING_EFFORT_TIERS
+      : super.supportedReasoningEfforts;
   }
 
   /**
