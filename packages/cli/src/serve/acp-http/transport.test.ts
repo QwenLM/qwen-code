@@ -5219,11 +5219,14 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       expect(bridge.loadRequests).toContainEqual(
         expect.objectContaining({ sessionId }),
       );
-      expect(materializeConversationDirectory).toHaveBeenCalledWith(
+      // The private directory follows the live entry, so it is keyed on the
+      // canonical id even though storage keeps the mixed-case spelling.
+      expect(materializeConversationDirectory).toHaveBeenCalledWith(sessionId);
+      expect(materializeConversationDirectory).not.toHaveBeenCalledWith(
         storageSessionId,
       );
       expect(changeSessionCwd).toHaveBeenCalledWith(sessionId, {
-        path: `/live/conversation-${storageSessionId}`,
+        path: `/live/conversation-${sessionId}`,
         allowedRoots: [TEST_WORKSPACE],
         managedRelocation: 'live-conversation',
       });

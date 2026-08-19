@@ -3091,7 +3091,11 @@ export function registerSessionRoutes(
               if (!materialize) {
                 throw new Error('Live conversation workspace is unavailable.');
               }
-              liveConversationCwd = await materialize(restoredStorageSessionId);
+              // Keyed on the canonical id, not the persisted spelling: the
+              // bridge registers the live entry under the canonical id, and
+              // every later materialize/discard call derives the directory
+              // from that same id.
+              liveConversationCwd = await materialize(sessionId);
             }
             assertRuntimeGenerationOpen?.();
             const restored =

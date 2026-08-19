@@ -1901,9 +1901,14 @@ export class AcpDispatcher {
                 ) {
                   throw new SessionNotFoundError(sessionId);
                 }
+                // The private directory belongs to the live entry, which the
+                // bridge registers under the canonical id, so every other
+                // materialize/discard call site keys it the same way. Hashing
+                // the persisted spelling here would strand a restored
+                // mixed-case session in a directory no later call can find.
                 const liveConversationCwd = this.liveSessionIsolation
                   ? await this.liveSessionIsolation.materializeConversationDirectory(
-                      storageSessionId,
+                      sessionId,
                     )
                   : undefined;
                 assertGenerationOpen?.();

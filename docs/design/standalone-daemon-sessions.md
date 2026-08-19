@@ -544,7 +544,9 @@ convenience method may omit it only if the SDK generates the UUID before sending
 the request. Wire IDs, lifecycle locks, and in-flight maps use lowercase
 canonical UUIDs. For compatibility with legacy transcripts whose filename
 contains a mixed-case UUID, storage and ACP operations preserve that
-authoritative spelling, including the private-directory hash. If more than one
+authoritative spelling. The private-directory hash is not one of them: the
+directory belongs to the live entry, so it is derived from the canonical UUID
+that every materialize and discard call site already uses. If more than one
 persisted spelling maps to the same canonical UUID, exact lookup fails with a
 conflict and listing excludes the ambiguous entries; the daemon never chooses
 one by filesystem enumeration order. The daemon fixes `sessionScope` to
