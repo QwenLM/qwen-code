@@ -27,6 +27,7 @@ import {
   SKILL_ARGS_DIR,
 } from '../../../services/skill-args-file.js';
 import { parseReviewArgs } from '../parse-args.js';
+import { isOwnerRepo } from './gh.js';
 
 /**
  * Where the CLI records a skill's invocation arguments, verbatim, before the
@@ -364,4 +365,136 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
     // would refuse the canonical same-session github posting flow instead.
     recordedHost: t.type === 'pr-url' ? t.host : verdict.host,
   };
+}
+
+/**
+ * Best-effort recovery of the operator's recorded posting floor, shared by
+ * the two boundaries that must resolve the floor from the CLI's verbatim
+ * record rather than the model-written state: `submit` (the posting write)
+ * and `compose-review`'s CLI handler (the archived composed JSON and the
+ * terminal verdict). Both resolving through this ONE function — with the
+ * SAME identity source — is what keeps the registered artifact and the
+ * posted review describing the same floor.
+ *
+ * **The identity is the CALLER'S CLI-typed one first; the plan only fills
+ * the axes the caller did not supply.** The plan's CONTENT is CLI-written,
+ * but its PATH arrives through the model-written state JSON — the same
+ * document whose floor copy this recovery exists to outrank — so a
+ * plan-first precedence let a parseable-but-wrong plan choose which
+ * identity the operator's verbatim record was tested against and silently
+ * stand the recovery down. Caller-first closes that: at submit the caller
+ * pr is additionally gate-bound to the recorded target on the `--comment`
+ * path, and both boundaries are fed the same caller identity by the skill
+ * (`--pr`/`--repo`/`--host` at compose mirroring submit's own flags), so
+ * the two recoveries still resolve one floor for one review.
+ *
+ * The record is bound to that identity at the SAME bar the `--comment`
+ * authorisation applies to the same record: the number always, and — for a
+ * URL-shaped record — the repo (when an identity repo is known) and the
+ * host, both case-insensitive with an absent host reading as github.com.
+ * The record is last-writer-wins (`writeSkillArgs` truncates), so a later
+ * `/review` of a different PR — or the same number in a DIFFERENT repo —
+ * must recover nothing.
+ *
+ * Returns the floor with its source only when the record carries an
+ * operator decision (`severityFloorSource` of `explicit`/`configured`) —
+ * the source rides along so the boundaries' audit notes can name the true
+ * origin instead of claiming a flag the operator never typed. A
+ * default-resolved `auto` (including one produced by silently discarding an
+ * invalid configured value) is not a decision and recovers nothing. Every
+ * failure mode — no plan PR, no record, unreadable, no decision, another
+ * PR's or repo's record — returns undefined and leaves the caller's state
+ * value standing, the same fail-open direction enforcement itself takes.
+ * The path rule is the gate's own: the caller-supplied seam is honoured
+ * only when no session id is present.
+ */
+export function recordedSeverityFloor(opts: {
+  /** The plan of the review being composed or posted — CLI-written content
+   * behind a model-written path, so it only FILLS identity axes the caller
+   * did not supply, never overrides them. */
+  planPath?: string;
+  /** The caller's CLI-typed PR number — the identity's first source. */
+  callerPr?: number;
+  /** The caller's repo — the URL-record bar's first repo source, the plan's
+   * `ownerRepo` filling in when absent. */
+  callerRepo?: string;
+  /** The caller's EFFECTIVE host. Never plan-filled: absent means
+   * github.com by the gate's own rule, so there is no gap to fill — the
+   * axis where absence is meaningful must not read absence as a gap. */
+  callerHost?: string;
+  defaultSeverityFloor?: string;
+  skillArgs?: string;
+}):
+  | {
+      floor: 'critical' | 'suggestion' | 'auto';
+      source: 'explicit' | 'configured';
+    }
+  | undefined {
+  let planPr: number | undefined;
+  let planRepo: string | undefined;
+  try {
+    if (opts.planPath) {
+      const plan = JSON.parse(readFileSync(opts.planPath, 'utf8')) as {
+        prNumber?: unknown;
+        ownerRepo?: unknown;
+      };
+      const n = plan?.prNumber;
+      if (typeof n === 'number' && Number.isInteger(n) && n > 0) planPr = n;
+      else if (typeof n === 'string' && /^\d+$/.test(n)) planPr = Number(n);
+      if (typeof plan?.ownerRepo === 'string' && isOwnerRepo(plan.ownerRepo)) {
+        planRepo = plan.ownerRepo;
+      }
+    }
+  } catch {
+    /* the identity falls back to the caller's, exactly as with no plan */
+  }
+  const pr = opts.callerPr ?? planPr;
+  if (pr === undefined) return undefined;
+  const repo = opts.callerRepo ?? planRepo;
+  // The host axis is NEVER plan-filled: an absent caller host IS github.com
+  // by the gate's own rule ("an absent req.host means the write routes at
+  // github.com — a host like any other, not an exemption"), so there is no
+  // gap for the plan to fill — and a gap-read here handed the model-pathed
+  // plan the one identity axis the mandatory caller flags did not pin.
+  const host = (opts.callerHost ?? 'github.com').toLowerCase();
+  const path =
+    currentSessionId() === '' && opts.skillArgs
+      ? opts.skillArgs
+      : defaultSkillArgsPath();
+  try {
+    const verdict = parseReviewArgs(readFileSync(path, 'utf8'), {
+      severityFloor: opts.defaultSeverityFloor,
+    });
+    const t = verdict.target;
+    if (t.type === 'pr-number') {
+      if (t.number !== pr) return undefined;
+    } else if (t.type === 'pr-url') {
+      if (t.number !== pr) return undefined;
+      // A URL-shaped record NAMES a repo, so the repo bar is part of its
+      // identity — and an unknown identity repo cannot check it. Skipping
+      // the comparison there (the gate's shape, whose only repo-less
+      // caller is publish-assets writing to a DESIGNATED assets repo) let
+      // another repo's record bind on number and host alone: the record is
+      // last-writer-wins, so a `/review other/repo#123` in the session
+      // could hand its floor to this repo's #123. Unknown repo therefore
+      // recovers nothing — the same direction every other doubt state
+      // takes here, leaving the state's floor standing.
+      if (
+        repo === undefined ||
+        `${t.owner}/${t.repo}`.toLowerCase() !== repo.toLowerCase()
+      ) {
+        return undefined;
+      }
+      if (t.host.toLowerCase() !== host) return undefined;
+    } else {
+      return undefined;
+    }
+    if (verdict.severityFloorSource === 'default') return undefined;
+    return {
+      floor: verdict.severityFloor,
+      source: verdict.severityFloorSource,
+    };
+  } catch {
+    return undefined;
+  }
 }
