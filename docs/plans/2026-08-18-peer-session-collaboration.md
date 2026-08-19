@@ -86,8 +86,8 @@ multiple processes. Its conclusion does not survive, for three reasons found sin
    single-leader lock, and explicitly demotes "a second Qwen in the same repo" to a
    read-only roster viewer — precisely the participant this design is about.
 3. **The cheaper answer was already written.** [#8724](https://github.com/QwenLM/qwen-code/issues/8724)
-   implemented discovery and consent in 7,018 lines and was closed for process reasons,
-   not design ones (§1.5).
+   is the open umbrella; its implementation ([#8730](https://github.com/QwenLM/qwen-code/pull/8730))
+   wrote 7,018 lines and was closed for process reasons, not design ones (§1.5).
 
 ## 1. Current implementation, traced
 
@@ -97,8 +97,9 @@ All line references at `179c8f80fd`.
 
 `tasks.ts` (1,056 LOC) and `mailbox.ts` (361 LOC) persist under `~/.qwen/` behind a
 deliberate two-tier lock: an in-process `async-mutex` serializing local writers, wrapping
-a `proper-lockfile` **cross-process** file lock (`retries: 30`, randomized backoff
-5→100 ms, `stale: 5000`, `onCompromised` handler), over `atomicWriteJSON`.
+a `proper-lockfile` **cross-process** file lock (`retries: 30` in `tasks.ts`, `10` in
+`mailbox.ts`; randomized backoff 5→100 ms, `stale: 5000`, `onCompromised` handler), over
+`atomicWriteJSON`.
 
 The in-source rationale names the multi-process case directly: the mutex exists so local
 writers "don't stampede the file lock", which is retained "to still guard against writers
@@ -425,8 +426,10 @@ safe rather than as reasons a gate is unnecessary later:
   anyone's turn claiming to be their user. Prompt-injection surface exists (a fetched task
   description is still text a model reads) but it is the same surface as reading a file, not
   the sharper one of an unsolicited user-role message.
-- **Same-uid is the boundary either way.** Directory `0700` is the whole access model, exactly
-  as in Claude Code's cross-session messaging, which ships with no inbound gate at all.
+- **Same-uid is the boundary either way.** The board's `0700` directories / `0600` files (§2.8)
+  are the whole access model, exactly as in Claude Code's cross-session messaging, which ships
+  with no inbound gate at all — that mode is a requirement this design imposes, not a property
+  the reused helpers already provide.
 
 ### 2.6 Responsiveness without push
 
@@ -523,11 +526,20 @@ prune` removes settled items past a retention window. Deliberately manual in v1:
 deletion of a record another participant may still be reading is a concurrency problem worth
 not having yet.
 
+**Permissions.** The board is written as `0700` directories / `0600` files, following the
+`session-registry.ts` precedent (#8969: `REGISTRY_DIR_MODE = 0o700` / `REGISTRY_FILE_MODE =
+0o600` + `forceMode`). The reused `agents/team` helpers do **not** supply this — `teamHelpers.ts`,
+`tasks.ts`, and `mailbox.ts` create directories with a bare `fs.mkdir(..., { recursive: true })`
+and their `atomicWriteJSON` calls pass no mode, so items land umask-masked (`0644` in `0755`
+directories). Stage 1 must pass the mode explicitly (and tighten any directory already created
+loosely) rather than inherit the reused discipline "without special cases".
+
 ### 2.9 What the items contain
 
 `task` already exists as `SwarmTask` and is unchanged. The two new items follow its shape —
 flat JSON, one file, `schemaVersion` first — so the same atomic-write and lock discipline
-applies without special cases.
+applies, with one addition: the `0700`/`0600` mode from §2.8, which the reused helpers do not
+set on their own.
 
 ```jsonc
 // asks/{id}.json
@@ -660,7 +672,7 @@ other work may cover any of these, and §1.6 records a series that covers the fi
 | Hosting other vendors' processes         | That is becoming herdr. We publish a format; we host nothing                                                                                               |
 | A new roster UI                          | This design reuses `ui/components/agent-view/`                                                                                                             |
 | Push delivery in v1                      | Nothing can push to a foreign agent (§1.8), so a design built on delivery excludes them. Push arrives later, with #8730's gate, as a Qwen-only latency win |
-| Remote / SSH / cross-machine             | Same-uid filesystem permissions **are** the security model. Off-machine voids it                                                                           |
+| Remote / SSH / cross-machine             | The board's mandated `0700`/`0600` filesystem permissions (§2.8) **are** the security model. Off-machine voids it                                                                           |
 | Broadcast (`to: "*"`)                    | #8724 removes it rather than extending it to N processes                                                                                                   |
 | Same-checkout multi-writer               | A peer's permissions were fixed by whoever started it; no participant can demote another                                                                   |
 | Central completion guarantee             | Peers decide what to claim. Unclaimed work stays visible on the board, not forced                                                                          |
