@@ -30,6 +30,7 @@ import {
   transcriptDir,
   TranscriptsUnavailableError,
   type AgentRecord,
+  serializedArgsNamePath,
 } from './transcripts.js';
 import { appendRunSession, recordResume } from './run-ledger.js';
 
@@ -728,5 +729,34 @@ describe('the incomplete-transcript shapes the resume path reads', () => {
       ].join('\n') + '\n',
     );
     expect(readTranscripts(undefined, ENV)).toHaveLength(1);
+  });
+});
+
+describe('serializedArgsNamePath — the one needle both halves use', () => {
+  const brief = '/plan/chunk-3.brief.md';
+
+  it('matches the path as a whole JSON string value', () => {
+    expect(
+      serializedArgsNamePath(JSON.stringify({ absolute_path: brief }), brief),
+    ).toBe(true);
+  });
+
+  it('does not credit a longer path holding this one as a prefix', () => {
+    expect(
+      serializedArgsNamePath(
+        JSON.stringify({ absolute_path: `${brief}.bak` }),
+        brief,
+      ),
+    ).toBe(false);
+  });
+
+  it('does not credit a shell command that merely mentions the path', () => {
+    // The divergence the review measured between this and the prose-boundary
+    // `namesPath` in `utils/findings.ts`, which returns true here. Both the
+    // diff-read half and the brief atoms route through THIS one, so the
+    // certification bar cannot credit `rm <file>` as opening it.
+    expect(
+      serializedArgsNamePath(JSON.stringify({ command: `rm ${brief}` }), brief),
+    ).toBe(false);
   });
 });

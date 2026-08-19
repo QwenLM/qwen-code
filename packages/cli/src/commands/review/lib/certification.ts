@@ -22,6 +22,7 @@
  */
 
 import type { AgentRecord } from './transcripts.js';
+import { serializedArgsNamePath } from './transcripts.js';
 import { briefPath } from './prompt-record.js';
 
 /**
@@ -61,18 +62,23 @@ export function declaresOwnUncoverable(
 }
 
 /**
- * Does any of these serialized tool-call args name the EXACT `path`? The
- * comparison is against the whole JSON string value (`JSON.stringify(path)`
- * carries the closing quote), so a `${path}.bak` — or any longer path that
- * merely contains this one as a prefix — is NOT credited: the same trap
- * `parseTranscript` avoids for the diff path. This one needle is what the
- * bar's "exact path, not a look-alike" guarantee rests on; every path atom
- * below routes through it, so a fix to the match reaches all of them at once
- * (the drift this module exists to eliminate, applied to its own internals).
+ * Does ANY of these serialized tool-call args name the EXACT `path`?
+ *
+ * The match itself lives in `transcripts.ts` beside the code that serializes
+ * the args, and `parseTranscript`'s diff-read half calls the same function —
+ * so the bar's "exact path, not a look-alike" guarantee has ONE definition,
+ * not one per half. This wrapper only spreads it over a record's call list;
+ * every path atom below routes through it.
+ *
+ * The name is deliberately not `namesPath`: `utils/findings.ts` has a
+ * module-private `namesPath` that matches a path named in PROSE on a name
+ * boundary — it credits `rm /plan/chunk-3.brief.md` for naming the brief.
+ * Unifying these two would make `openedBrief` credit an agent for deleting a
+ * file it never opened, so they keep distinct names to stop a future reader
+ * treating either as THE path matcher.
  */
-function namesPath(args: readonly string[], path: string): boolean {
-  const needle = JSON.stringify(path);
-  return args.some((a) => a.includes(needle));
+function argsNameExactPath(args: readonly string[], path: string): boolean {
+  return args.some((a) => serializedArgsNamePath(a, path));
 }
 
 /**
@@ -86,7 +92,7 @@ export function openedBrief(
   planPath: string,
   key: string,
 ): boolean {
-  return namesPath(rec.successfulCallArgs, briefPath(planPath, key));
+  return argsNameExactPath(rec.successfulCallArgs, briefPath(planPath, key));
 }
 
 /**
@@ -100,7 +106,10 @@ export function readBrief(
   planPath: string,
   key: string,
 ): boolean {
-  return namesPath(rec.successfulReadFileArgs, briefPath(planPath, key));
+  return argsNameExactPath(
+    rec.successfulReadFileArgs,
+    briefPath(planPath, key),
+  );
 }
 
 /**
@@ -116,5 +125,5 @@ export function readFindingsPointer(
   pointer: string | null,
 ): boolean {
   if (pointer === null) return true;
-  return namesPath(rec.successfulReadFileArgs, pointer);
+  return argsNameExactPath(rec.successfulReadFileArgs, pointer);
 }

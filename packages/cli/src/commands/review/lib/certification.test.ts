@@ -111,6 +111,20 @@ describe('openedBrief / readBrief', () => {
   const needle = JSON.stringify(briefPath(PLAN, key));
   const arg = `{"absolute_path":${needle}}`;
 
+  it('does not credit a shell command that merely MENTIONS the brief', () => {
+    // The trap a prose matcher walks into: `utils/findings.ts` has a
+    // same-purpose-looking `namesPath` that matches on a name boundary, and
+    // it credits this arg. Deleting a brief is not opening it — so this atom
+    // matches the whole JSON string value instead, and keeps a different
+    // name so no future consolidation unifies the two the wrong way.
+    const r = rec({
+      successfulCallArgs: [
+        JSON.stringify({ command: `rm ${briefPath(PLAN, key)}` }),
+      ],
+    });
+    expect(openedBrief(r, PLAN, key)).toBe(false);
+  });
+
   it('credits any successful tool whose args name the exact brief path', () => {
     const r = rec({ successfulCallArgs: [arg] });
     expect(openedBrief(r, PLAN, key)).toBe(true);
