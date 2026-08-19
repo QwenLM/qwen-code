@@ -1065,34 +1065,40 @@ describe('fetch-pr report assembly', () => {
   const ANCHOR = 'a'.repeat(40);
   const BASE = 'b'.repeat(40);
   /**
-   * ONE coherent history, with the anchor round's work and this round's work
-   * in DIFFERENT regions of the same file — which is what makes narrowing
-   * observable at all:
+   * ONE coherent history across TWO files, because narrowing is per FILE:
    *
-   *   base   [line,        line2, line3, … , ctx, ctx2]
-   *   anchor [line, added, line2, line3, … , ctx, ctx2]
-   *   head   [line, added, line2, line3, … , ctx, bulk × 200, ctx2]
+   *   base   a.ts [line, line2, line3, ctx, ctx2]   b.ts [x, y]
+   *   anchor a.ts + `added`                          b.ts + `y2`
+   *   head   a.ts + 200 bulk lines                   b.ts unchanged since anchor
    *
-   * `FULL_DIFF` therefore carries two hunks; the delta touches only the
-   * second. The published scope is the second hunk alone — assembled from
-   * FULL_DIFF's own bytes, never from the delta's.
+   * The round touches only `a.ts`, so the published scope is `a.ts`'s section
+   * ENTIRE — both hunks, including the one the anchor round already covered —
+   * and `b.ts` is dropped. The saving is the untouched file; over-inclusion
+   * inside a touched file is the deliberate price of never dropping a hunk
+   * two independent Myers alignments place differently.
    */
   const FULL_DIFF = [
     'diff --git a/a.ts b/a.ts',
     '--- a/a.ts',
     '+++ b/a.ts',
-    '@@ -1,3 +1,4 @@', // new [1,4] — the anchor round's work
+    '@@ -1,3 +1,4 @@',
     ' line',
     '+added',
     ' line2',
     ' line3',
-    '@@ -50,2 +51,202 @@', // new [51,252] — this round's work
+    '@@ -50,2 +51,202 @@',
     ' ctx',
     ...Array.from({ length: 200 }, (_, i) => `+bulk ${i}`),
     ' ctx2',
+    'diff --git a/b.ts b/b.ts',
+    '--- a/b.ts',
+    '+++ b/b.ts',
+    '@@ -1,2 +1,2 @@',
+    ' x',
+    '+y2',
     '',
   ].join('\n');
-  /** `anchor..head`: only the second region changed since the anchor. */
+  /** `anchor..head`: only `a.ts` changed since the anchor. */
   const DELTA_DIFF = [
     'diff --git a/a.ts b/a.ts',
     '--- a/a.ts',
@@ -1103,16 +1109,16 @@ describe('fetch-pr report assembly', () => {
     ' ctx2',
     '',
   ].join('\n');
-  /**
-   * What the round publishes: FULL_DIFF's header plus the hunk the delta
-   * overlaps. Spelled out rather than computed, so a test reading it can see
-   * that the anchor round's `+added` is gone and every surviving line came
-   * from FULL_DIFF.
-   */
+  /** `a.ts`'s section whole; `b.ts` gone. */
   const NARROWED = [
     'diff --git a/a.ts b/a.ts',
     '--- a/a.ts',
     '+++ b/a.ts',
+    '@@ -1,3 +1,4 @@',
+    ' line',
+    '+added',
+    ' line2',
+    ' line3',
     '@@ -50,2 +51,202 @@',
     ' ctx',
     ...Array.from({ length: 200 }, (_, i) => `+bulk ${i}`),
@@ -1360,7 +1366,11 @@ describe('fetch-pr report assembly', () => {
     // hand them hunks GitHub's PR diff does not display.
     expect(report.diffPath).not.toBeNull();
     expect(report.diffLines).toBeGreaterThan(0);
-    expect(writtenDiff()).toBe(FULL_DIFF);
+    expect(writtenDiff()).toBe(NARROWED);
+    // `a.ts`'s section ENTIRE — the revert's own hunks are absent because the
+    // PR's diff never displays them, which is exactly why they are not
+    // reviewable. `b.ts`, untouched this round, is what the narrowing drops.
+    expect(writtenDiff()).not.toContain('b.ts');
     // `read_file` rejects a relative path, so every agent dereferences this
     // one — a relative leak fails the whole fan-out.
     expect(report.diffPathAbsolute).toBe(resolve(report.diffPath as string));
@@ -1464,10 +1474,14 @@ describe('fetch-pr report assembly', () => {
     });
     servesBothRanges();
     const report = await reportFor({ since: ANCHOR });
+    // Not `capture-failed`: nothing threw. The fetch succeeded and
+    // `git merge-base` found no common ancestor, which a re-run reproduces
+    // exactly — so the reason is the deterministic one, and the recovery
+    // flow does not retry it as infrastructure.
     expect(report.incremental).toEqual({
       since: ANCHOR,
       effective: false,
-      reason: 'capture-failed',
+      reason: 'nothing-to-narrow',
     });
     // Nothing is published, which is what a base-free round does ANYWAY: with
     // no merge base there is no full range either, and the command already
@@ -2078,16 +2092,15 @@ describe('fetch-pr report assembly', () => {
     });
     const report = await reportFor({ since: ANCHOR });
     expect(report.diffPath).toBeNull();
-    // The base-free arm now refuses for containment BEFORE anything is
-    // partitioned, so the reason names the earlier cause. That also makes the
-    // rescue's `fullText !== null` guard unreachable from here: `scopedDelta`
-    // can no longer be true without a base, so it now implies a non-null
-    // `fullText`. The guard stays as a guard; what changed is that this shape
-    // no longer reaches it.
+    // The base-free arm refuses BEFORE anything is partitioned, so the reason
+    // names the earlier cause — and it is the deterministic one, because no
+    // capture threw. That also makes the rescue's `fullText !== null` guard
+    // unreachable from here: `scopedDelta` cannot be true without a base, so
+    // it now implies a non-null `fullText`.
     expect(report.incremental).toEqual({
       since: ANCHOR,
       effective: false,
-      reason: 'capture-failed',
+      reason: 'nothing-to-narrow',
     });
   });
 

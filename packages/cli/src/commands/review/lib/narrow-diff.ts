@@ -41,15 +41,7 @@
 // the same head commit. That is the only cross-capture fact this needs, and it
 // is the one fact that was never in doubt.
 
-import { parseDiff, type DiffHunk } from './diff-plan.js';
-
-/** Do two inclusive ranges share a line? */
-function overlaps(
-  [aStart, aEnd]: [number, number],
-  [bStart, bEnd]: [number, number],
-): boolean {
-  return aStart <= bEnd && bStart <= aEnd;
-}
+import { parseDiff } from './diff-plan.js';
 
 /**
  * The PR's own hunks that overlap what changed since the anchor.
@@ -103,25 +95,16 @@ export function narrowToDelta(
   const delta = parseDiff(deltaText);
   if (full.files.length === 0 || delta.files.length === 0) return null;
 
-  /** path -> the post-image ranges the delta touched. */
-  const touched = new Map<string, Array<[number, number]>>();
-  /** path -> the delta's hunks, read by the position-divergence guard. */
-  const deltaHunks = new Map<string, DiffHunk[]>();
-  const deltaLines = deltaText.split('\n');
-  for (const f of delta.files) {
-    const ranges = touched.get(f.path) ?? [];
-    const hunks = deltaHunks.get(f.path) ?? [];
-    // A section with no hunks — a mode change, a pure rename, a binary
-    // replacement — touches the path without naming a range. It enters as an
-    // EMPTY range list, which the emission loop reads as "the change lives in
-    // the full section's header; emit the section whole".
-    for (const h of f.hunks) {
-      ranges.push([h.newStart, h.newEnd]);
-      hunks.push(h);
-    }
-    touched.set(f.path, ranges);
-    deltaHunks.set(f.path, hunks);
-  }
+  /**
+   * Every path the delta touched.
+   *
+   * A set, not ranges. Narrowing is per FILE now, so the only question a path
+   * has to answer is whether the round touched it at all — which also makes a
+   * hunk-less section (a mode change, a pure rename, a binary replacement)
+   * ordinary rather than a special case: it touches the path, so its section
+   * is emitted, exactly like any other.
+   */
+  const touched = new Set(delta.files.map((f) => f.path));
 
   // The two captures can key the same change differently whenever git's
   // rename detection resolves differently across the two ranges —
@@ -132,7 +115,7 @@ export function narrowToDelta(
   //
   // Shape one: a delta path the full capture does not carry at all.
   const fullPaths = new Set(full.files.map((f) => f.path));
-  for (const p of touched.keys()) {
+  for (const p of touched) {
     if (!fullPaths.has(p)) return null;
   }
   // Shape two: a rename the full capture does not key as the SAME rename.
@@ -156,98 +139,42 @@ export function narrowToDelta(
   // 1-based line numbers throughout, matching `parseDiff`'s own coordinates.
   const lines = fullText.split('\n');
 
-  /**
-   * A hunk's changed lines keyed by new-side junction — the `+`/`-` record
-   * joined to the new-side position it sits at. Both captures end at the
-   * same head commit, so a change both display sits at the same junction in
-   * both; a bystander that merely carries identical TEXT at a different
-   * junction does not corroborate. The walk advances the new-side cursor on
-   * ` `/`+` lines and not on `-`, the same cursor `parseDiff` keeps.
-   */
-  const changedLineKeys = (textLines: string[], h: DiffHunk): string[] => {
-    const out: string[] = [];
-    let newLine = h.newStart;
-    for (let n = h.diffStart + 1; n <= h.diffEnd; n++) {
-      const l = textLines[n - 1];
-      if (l.startsWith('+')) {
-        out.push(`${newLine}:${l}`);
-        newLine++;
-      } else if (l.startsWith('-')) {
-        out.push(`${newLine}:${l}`);
-      } else if (l === '' || l.startsWith(' ')) {
-        newLine++;
-      }
-    }
-    return out;
-  };
-
-  /** [from, to] line ranges of the full capture the output carries, in order. */
+  // Whole SECTIONS, not selected hunks.
+  //
+  // The two captures are independent Myers alignments over overlapping
+  // content, so the hunk a change lands in is not stable between them: a run
+  // of identical lines — blank runs, repeated imports, regenerated tables —
+  // lets the same edit be attributed to the run's front in one capture and
+  // its back in the other. Four rounds of review each closed the reported
+  // position-divergence entrance and the next round found another, because
+  // matching hunks across two alignments is a heuristic over arbitrary
+  // content, exactly like the containment oracle this file replaced. The
+  // failure was worse than the oracle's, too: a dropped hunk left the round
+  // reporting `effective: true`, and the ledger then certified head as the
+  // next anchor, so the change was never reviewed by any round.
+  //
+  // What IS stable is which FILE a change belongs to — file identity, which
+  // the path and rename guards above already fail closed on. So the unit of
+  // narrowing is the file: a section the delta touched is emitted whole, and
+  // a section it did not touch is dropped. Nothing the delta performed can
+  // fall out of a section that is emitted entire, and every emitted line is
+  // still a line the PR's own diff displays.
+  //
+  // The cost is real and bounded: within a touched file the round reviews all
+  // of that file's PR hunks, not only the ones that moved since the anchor.
+  // The saving incremental review exists for is the untouched files — a round
+  // touching 2 of 40 reviews 2 — and that is untouched by this.
   const selected: Array<[number, number]> = [];
   for (const file of full.files) {
-    const ranges = touched.get(file.path);
-    if (ranges === undefined) continue;
-
-    if (ranges.length === 0) {
-      // Hunk-less delta touch (mode change, pure rename, binary replacement):
-      // the change lives in the full section's header, so emit the section
-      // whole.
-      selected.push([file.diffStart, file.diffEnd]);
-      continue;
-    }
-
-    // Position divergence: Myers aligns a change inside a run of identical
-    // lines against whatever surrounds it, and the two captures' old sides
-    // differ — so the SAME post-anchor change can sit at disjoint head-side
-    // ranges in the two captures, and the divergent delta hunk can even
-    // overlap an unrelated bystander hunk. The range join sees neither
-    // shape: it drops the full hunk displaying the change, and can publish
-    // the bystander instead. A delta hunk is corroborated only by a full
-    // hunk that BOTH overlaps its new-side range — so the join carries that
-    // full hunk — AND shares one of its changed lines at the same new-side
-    // junction — so the carried hunk displays the same change, and a
-    // bystander carrying identical text at a different junction cannot stand
-    // in for it. A hunk no full hunk corroborates might be a
-    // netted-out undo, but it might equally be a misplacement the join is
-    // about to drop, and the captures cannot tell the two apart — telling
-    // them was the old oracle's shape, a heuristic proof over two
-    // alignment-dependent rendered diffs. Fail closed instead: emit the
-    // section whole. Every line of it is displayed — over-inclusion is the
-    // chosen semantics — and a dropped change here is certified unreviewed
-    // by the ledger.
-    if (
-      (deltaHunks.get(file.path) ?? []).some((dh) => {
-        const dhChanged = new Set(changedLineKeys(deltaLines, dh));
-        return !file.hunks.some(
-          (fh) =>
-            overlaps([fh.newStart, fh.newEnd], [dh.newStart, dh.newEnd]) &&
-            changedLineKeys(lines, fh).some((k) => dhChanged.has(k)),
-        );
-      })
-    ) {
-      selected.push([file.diffStart, file.diffEnd]);
-      continue;
-    }
-
-    // The section header: everything from the start of the section up to its
-    // first hunk. A hunkless full section has no hunks to select, so the
-    // header IS the section, and it is emitted whole when the delta touched
-    // that path.
-    const firstHunk = file.hunks[0];
-    const matching = file.hunks.filter((h) =>
-      ranges.some((r) => overlaps([h.newStart, h.newEnd], r)),
-    );
-
-    const headerEnd =
-      firstHunk === undefined ? file.diffEnd : firstHunk.diffStart - 1;
-    selected.push([file.diffStart, headerEnd]);
-    for (const h of matching) selected.push([h.diffStart, h.diffEnd]);
+    if (!touched.has(file.path)) continue;
+    selected.push([file.diffStart, file.diffEnd]);
   }
 
   if (selected.length === 0) return null;
-  // Assemble without spreading the ranges into a single `push`: a selected
-  // hunk can exceed the argument-count ceiling (~125k lines), and this path
-  // exists for exactly the large long-lived PRs that carry such hunks. Safe
-  // to encode: every line here came from text that decoded cleanly above.
+  // Assemble without spreading the ranges into a single `push`: a section can
+  // exceed the argument-count ceiling (~125k lines), and this path exists for
+  // exactly the large long-lived PRs that carry such sections. Safe to
+  // encode: every line here came from text that decoded cleanly above.
   const parts = selected.map(([from, to]) =>
     lines.slice(from - 1, to).join('\n'),
   );

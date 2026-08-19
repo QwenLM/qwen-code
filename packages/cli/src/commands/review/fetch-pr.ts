@@ -942,17 +942,19 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         // below for the flows that continue anyway (a model change,
         // --comment).
         anchor.incremental.upToDate = true;
-      } else if (
-        mergeBaseSha === null ||
-        fullBytes === null ||
-        fullText === null
-      ) {
-        // No PR diff to narrow. A base was resolved and its capture threw (the
-        // 120s git timeout the large long-lived PR `--since` exists for), or no
-        // base resolved at all. Either way the scope this round would publish
-        // cannot be built out of what GitHub displays, so it is not built:
-        // the round keeps the full range, which on a base-free PR is itself
-        // nothing — the same state such a round reaches without `--since`.
+      } else if (mergeBaseSha === null) {
+        // No merge base at all: the fetch succeeded and `git merge-base` found
+        // no common ancestor — an unrelated-history PR. There is no PR diff to
+        // narrow against, so no scope is built; but nothing THREW, and calling
+        // it `capture-failed` asserts an infrastructure fault that did not
+        // happen and puts the round in the class SKILL.md's recovery flow
+        // retries. A re-run reproduces this exactly, so it names the
+        // deterministic reason instead.
+        demote('nothing-to-narrow');
+      } else if (fullBytes === null || fullText === null) {
+        // A base WAS resolved and its capture threw — the 120s git timeout the
+        // large long-lived PR `--since` exists for. That is infrastructure,
+        // and a re-run can succeed, so this one keeps `capture-failed`.
         demote('capture-failed');
       } else if ((narrowed = narrowToDelta(fullBytes, deltaBytes)) === null) {
         // The narrowing found nothing it could publish — all safe, because

@@ -580,7 +580,11 @@ describe('narrowToDelta on real-git captures', () => {
     expect(narrowed).toContain('+O15-EDIT');
     // The round-1 edit is correctly absent: a non-empty-range section
     // emits matching hunks only.
-    expect(narrowed).not.toContain('+O3-EDIT');
+    // Carried, not excluded: narrowing is per FILE now, so a touched
+    // section arrives whole — including hunks the anchor round already
+    // covered. Over-inclusion inside a touched file is the deliberate price
+    // of never dropping one.
+    expect(narrowed).toContain('+O3-EDIT');
     expect(everyLineIsDisplayed(narrowed!, full)).toBe(true);
   });
 
@@ -666,7 +670,9 @@ describe('narrowToDelta on real-git captures', () => {
     expect(narrowed).toContain('sd-f.ts');
     expect(narrowed).toContain('+F10-EDIT');
     expect(narrowed).toContain('+G15-EDIT');
-    expect(narrowed).not.toContain('+G5-EDIT');
+    // Same file, so the whole section is carried — the sibling narrowing
+    // that matters is the FILE the round did not touch, asserted below.
+    expect(narrowed).toContain('+G5-EDIT');
     expect(narrowed!).not.toContain('X1');
     expect(everyLineIsDisplayed(narrowed!, full)).toBe(true);
   });
@@ -790,6 +796,58 @@ describe('narrowToDelta on real-git captures', () => {
     expect(everyLineIsDisplayed(narrowed!, full)).toBe(true);
   });
 
+  it('narrows between FILES, never within one — the invariant, stated once', () => {
+    // What four rounds of position-divergence findings were really about:
+    // the delta and the full capture are independent Myers alignments, so
+    // which HUNK a change lands in is not stable between them, and every
+    // attempt to match hunks across them was defeated by a new shape. Which
+    // FILE it lands in IS stable — the path and rename guards above fail
+    // closed on the one way that could differ — so the file is the unit.
+    //
+    // Stated as a property rather than a shape: for every file the delta
+    // touched, the narrowed output contains that section's every line.
+    const base = commit('inv base', {
+      'inv-a.ts': lines(30, 'A'),
+      'inv-b.ts': lines(30, 'B'),
+    });
+    const anchor = commit('inv round 1', {
+      'inv-a.ts': lines(30, 'A').replace('A4\n', 'A4-EDIT\n'),
+      'inv-b.ts': lines(30, 'B').replace('B4\n', 'B4-EDIT\n'),
+    });
+    // Round 2 touches only inv-a, and does so near a run of identical lines —
+    // the shape that makes Myers place the same edit differently.
+    const head = commit('inv round 2', {
+      'inv-a.ts': lines(30, 'A')
+        .replace('A4\n', 'A4-EDIT\n')
+        .replace('A20\n', 'A20-EDIT\n'),
+      'inv-b.ts': lines(30, 'B').replace('B4\n', 'B4-EDIT\n'),
+    });
+
+    const full = capture(base, head);
+    const narrowed = narrowToDelta(
+      captureBytes(base, head),
+      captureBytes(anchor, head),
+    )!.toString('utf8');
+
+    // The untouched FILE is gone — that is the whole saving.
+    expect(narrowed).not.toContain('inv-b.ts');
+    // The touched file arrives entire: every line of its full section, not a
+    // selection of it. Checked by containment of the section, not by naming
+    // hunks, so no future alignment change can quietly narrow it further.
+    const sectionOf = (text: string, path: string) => {
+      const all = text.split('\n');
+      const start = all.findIndex((l) => l.startsWith(`diff --git a/${path}`));
+      const rest = all
+        .slice(start + 1)
+        .findIndex((l) => l.startsWith('diff --git '));
+      return all.slice(start, rest === -1 ? undefined : start + 1 + rest);
+    };
+    for (const line of sectionOf(full, 'inv-a.ts')) {
+      expect(narrowed).toContain(line);
+    }
+    expect(everyLineIsDisplayed(narrowed, full)).toBe(true);
+  });
+
   it('carries a change the captures display at disjoint positions under disjoint texts', () => {
     // R9-1 entrance A: round 1 substitutes the line LEADING a run of
     // identical lines with the run's own text, extending the run by one;
@@ -837,7 +895,10 @@ describe('narrowToDelta on real-git captures', () => {
     expect(narrowed).toContain('dt-run.ts');
     expect(narrowed).toContain('-B');
     expect(narrowed).toContain('+S10-EDIT');
-    expect(narrowed).not.toContain('+S2-EDIT');
+    // The divergent change is what must survive, and it does — carried
+    // inside the whole section rather than selected by a position match that
+    // two independent Myers alignments cannot be trusted to agree on.
+    expect(narrowed).toContain('+S2-EDIT');
     expect(everyLineIsDisplayed(narrowed!, full)).toBe(true);
   });
 
