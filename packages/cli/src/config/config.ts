@@ -549,36 +549,34 @@ function normalizeOutputFormat(
   return OutputFormat.TEXT;
 }
 
-// Subcommands of `qwen agents`; any other second positional token means the
-// input is a natural-language prompt, not the command.
-const AGENTS_SUBCOMMAND_TOKENS = new Set([
-  'attach',
-  'logs',
-  'stop',
-  'kill',
-  'respawn',
-  'rm',
-  'daemon',
-]);
-
-// `qwen agents` list-command options; when they appear alongside a
-// natural-language prompt tail the invocation cannot be routed, so fail
-// loudly instead of dying in strict mode with a confusing message.
-function hasAgentsListOption(rawArgv: readonly string[]): boolean {
-  return rawArgv.some(
+function hasRawOption(
+  rawArgv: readonly string[],
+  longName: string,
+  shortName?: string,
+): boolean {
+  const separatorIndex = rawArgv.indexOf('--');
+  const optionTokens = rawArgv.slice(
+    0,
+    separatorIndex === -1 ? rawArgv.length : separatorIndex,
+  );
+  const negatedName = `--no-${longName.slice(2)}`;
+  return optionTokens.some(
     (token) =>
-      token === '--json' ||
-      token === '--all' ||
-      token === '--cwd' ||
-      token.startsWith('--cwd='),
+      token === longName ||
+      token.startsWith(`${longName}=`) ||
+      token === negatedName ||
+      token === shortName ||
+      (shortName !== undefined && token.startsWith(`${shortName}=`)) ||
+      (shortName !== undefined &&
+        token.startsWith('-') &&
+        !token.startsWith('--') &&
+        token.slice(1).includes(shortName.slice(1))),
   );
 }
 
-function buildCliParser(
-  rawArgv: string[],
-  options?: { oracle?: boolean },
-): Argv {
+function buildCliParser(rawArgv: string[]): Argv {
   const parser = yargs(rawArgv)
+    .parserConfiguration({ 'populate--': true })
     .locale('en')
     .scriptName('qwen')
     .usage(
@@ -1017,7 +1015,11 @@ function buildCliParser(
           if (argv['background'] && argv['promptInteractive'] !== undefined) {
             return 'Cannot use --bg/--background with --prompt-interactive (-i)';
           }
-          if (argv['background'] && (argv['acp'] || argv['experimentalAcp'])) {
+          if (
+            argv['background'] &&
+            (hasRawOption(rawArgv, '--acp') ||
+              hasRawOption(rawArgv, '--experimental-acp'))
+          ) {
             return 'Cannot use --bg/--background with ACP mode';
           }
           if (argv['background'] && argv['inputFormat'] === 'stream-json') {
@@ -1036,7 +1038,7 @@ function buildCliParser(
           if (
             argv['background'] &&
             (argv['resume'] !== undefined ||
-              argv['continue'] ||
+              hasRawOption(rawArgv, '--continue', '-c') ||
               argv['sessionId'] !== undefined)
           ) {
             return 'Cannot use --bg/--background with --resume, --continue, or --session-id';
@@ -1053,12 +1055,12 @@ function buildCliParser(
           if (argv['background'] && argv['includeDirectories']) {
             return 'Cannot use --bg/--background with --include-directories';
           }
-          if (argv['background'] && argv['yolo']) {
+          if (argv['background'] && hasRawOption(rawArgv, '--yolo', '-y')) {
             return 'Cannot use --bg/--background with --yolo (-y)';
           }
           if (
             argv['background'] &&
-            (argv['sandbox'] ||
+            (hasRawOption(rawArgv, '--sandbox', '-s') ||
               argv['sandboxImage'] !== undefined ||
               argv['systemPrompt'] !== undefined ||
               argv['appendSystemPrompt'] !== undefined ||
@@ -1077,7 +1079,7 @@ function buildCliParser(
               argv['excludeTools'] !== undefined ||
               argv['disabledSlashCommands'] !== undefined ||
               argv['authType'] !== undefined ||
-              argv['experimentalLsp'] ||
+              hasRawOption(rawArgv, '--experimental-lsp') ||
               argv['jsonFile'] !== undefined ||
               argv['jsonFd'] !== undefined)
           ) {
@@ -1094,30 +1096,30 @@ function buildCliParser(
           }
           if (
             argv['background'] &&
-            (argv['safeMode'] ||
+            (hasRawOption(rawArgv, '--safe-mode') ||
               argv['proxy'] !== undefined ||
-              argv['insecure'] ||
-              argv['chatRecording'] ||
-              argv['openaiLogging'] ||
+              hasRawOption(rawArgv, '--insecure') ||
+              hasRawOption(rawArgv, '--chat-recording') ||
+              hasRawOption(rawArgv, '--openai-logging') ||
               argv['openaiLoggingDir'] !== undefined ||
               argv['openaiApiKey'] !== undefined ||
               argv['openaiBaseUrl'] !== undefined ||
-              argv['screenReader'] ||
-              argv['bare'] ||
-              argv['debug'])
+              hasRawOption(rawArgv, '--screen-reader') ||
+              hasRawOption(rawArgv, '--bare') ||
+              hasRawOption(rawArgv, '--debug', '-d'))
           ) {
             return 'Cannot use --bg/--background with --safe-mode, --proxy, --insecure, --chat-recording, --openai-logging, --openai-logging-dir, --openai-api-key, --openai-base-url, --screen-reader, --bare, or --debug';
           }
           if (
             argv['background'] &&
-            (argv['telemetry'] ||
+            (hasRawOption(rawArgv, '--telemetry') ||
               argv['telemetryTarget'] !== undefined ||
               argv['telemetryOtlpEndpoint'] !== undefined ||
               argv['telemetryOtlpProtocol'] !== undefined ||
-              argv['telemetryLogPrompts'] ||
+              hasRawOption(rawArgv, '--telemetry-log-prompts') ||
               argv['telemetryOutfile'] !== undefined ||
               argv['channel'] !== undefined ||
-              argv['listExtensions'] ||
+              hasRawOption(rawArgv, '--list-extensions', '-l') ||
               argv['sandboxSessionId'] !== undefined)
           ) {
             return 'Cannot use --bg/--background with telemetry flags, --channel, --list-extensions, or --sandbox-session-id';
@@ -1223,29 +1225,24 @@ function buildCliParser(
           return true;
         }),
     );
-  // In oracle mode (the agents-fallback probe) register no subcommands:
-  // parse() executes matched command handlers, and the probe must be
-  // side-effect free.
-  if (!options?.oracle) {
-    parser
-      // Register MCP subcommands
-      .command(mcpCommand)
-      // Register Extension subcommands
-      .command(extensionsCommand)
-      .command(authCommand)
-      // Register Hooks subcommands
-      .command(hooksCommand)
-      // Register Channel subcommands
-      .command(channelCommand)
-      // Register /review skill helpers (presubmit checks, cleanup)
-      .command(reviewCommand)
-      // Register `qwen serve` (Stage 1 daemon)
-      .command(serveCommand)
-      // Register sessions subcommands
-      .command(sessionsCommand)
-      // Register update command
-      .command(updateCommand);
-  }
+  parser
+    // Register MCP subcommands
+    .command(mcpCommand)
+    // Register Extension subcommands
+    .command(extensionsCommand)
+    .command(authCommand)
+    // Register Hooks subcommands
+    .command(hooksCommand)
+    // Register Channel subcommands
+    .command(channelCommand)
+    // Register /review skill helpers (presubmit checks, cleanup)
+    .command(reviewCommand)
+    // Register `qwen serve` (Stage 1 daemon)
+    .command(serveCommand)
+    // Register sessions subcommands
+    .command(sessionsCommand)
+    // Register update command
+    .command(updateCommand);
   return parser;
 }
 
@@ -1262,56 +1259,25 @@ export async function parseArguments(): Promise<CliArgs> {
     rawArgv = rawArgv.slice(1);
   }
 
-  // `qwen agents explain this project` must stay a positional prompt: when
-  // the second positional token is not a real `agents` subcommand, skip
-  // registering the command group so the tokens route to the default prompt
-  // command instead of dying in strict mode. Decide with an oracle parse of
-  // the same option grammar (no strict, no help/version interception, no
-  // subcommand registrations): hand-rolled token filtering cannot tell
-  // option values apart from positionals (`--model qwen3-max agents fix`
-  // or `agents --cwd /tmp`).
-  let agentsPromptFallback = false;
-  const firstAgentsToken = rawArgv.indexOf('agents');
-  if (
-    firstAgentsToken !== -1 &&
-    (rawArgv[0] === 'agents' || rawArgv[0]?.startsWith('-'))
-  ) {
-    const dashDashIndex = rawArgv.indexOf('--');
-    if (dashDashIndex !== -1 && dashDashIndex < firstAgentsToken) {
-      // yargs never dispatches commands after `--`; force the prompt path
-      // instead of silently exiting with the command never run.
-      agentsPromptFallback = true;
-    } else {
-      const probe = await buildCliParser(rawArgv, { oracle: true })
-        .option('cwd', { type: 'string' })
-        .help(false)
-        .version(false)
-        .parse();
-      const probedQuery = (probe as { query?: unknown }).query;
-      const positionals = Array.isArray(probedQuery)
-        ? probedQuery.map(String)
-        : probe._.map(String);
-      const [first, second] = positionals;
-      agentsPromptFallback =
-        first === 'agents' &&
-        second !== undefined &&
-        !AGENTS_SUBCOMMAND_TOKENS.has(second);
-    }
-    if (agentsPromptFallback && hasAgentsListOption(rawArgv)) {
-      writeStderrLine(
-        'Cannot combine `qwen agents` list options (--cwd/--json/--all) with a natural-language prompt. Run `qwen agents` on its own, or drop the options.',
-      );
-      process.exit(1);
-    }
+  const separatorIndex = rawArgv.indexOf('--');
+  const optionTokens = rawArgv.slice(
+    0,
+    separatorIndex === -1 ? rawArgv.length : separatorIndex,
+  );
+  const agentsTokenIndex = optionTokens.indexOf('agents');
+  const assignedAgentsBoolean =
+    agentsTokenIndex === -1
+      ? undefined
+      : optionTokens.find((token) => /^--(?:json|all)=/.test(token));
+  if (assignedAgentsBoolean !== undefined) {
+    writeStderrLine(
+      `${assignedAgentsBoolean.split('=')[0]} is a boolean flag and does not accept an assigned value.`,
+    );
+    process.exit(1);
   }
 
   const yargsInstance = buildCliParser(rawArgv);
-
-  // Register Agent View Phase 1 command surface (skipped on the
-  // agents-initial positional-prompt fallback above).
-  if (!agentsPromptFallback) {
-    yargsInstance.command(agentsCommand);
-  }
+  yargsInstance.command(agentsCommand);
 
   yargsInstance
     .version(await getCliVersion()) // This will enable the --version flag based on package.json
@@ -1337,7 +1303,7 @@ export async function parseArguments(): Promise<CliArgs> {
       result._[0] === 'channel' ||
       result._[0] === 'review' ||
       result._[0] === 'sessions' ||
-      (result._[0] === 'agents' && !agentsPromptFallback) ||
+      result._[0] === 'agents' ||
       result._[0] === 'update')
   ) {
     // Note: `serve` is intentionally NOT in this list. Its handler blocks
@@ -1356,9 +1322,16 @@ export async function parseArguments(): Promise<CliArgs> {
 
   // Normalize query args: handle both quoted "@path file" and unquoted @path file
   const queryArg = (result as { query?: string | string[] | undefined }).query;
-  const q: string | undefined = Array.isArray(queryArg)
-    ? queryArg.join(' ')
-    : queryArg;
+  const queryParts = Array.isArray(queryArg)
+    ? queryArg.map(String)
+    : queryArg
+      ? [queryArg]
+      : [];
+  const separatorTail = (result as { '--'?: unknown })['--'];
+  if (Array.isArray(separatorTail)) {
+    queryParts.push(...separatorTail.map(String));
+  }
+  const q = queryParts.length > 0 ? queryParts.join(' ') : undefined;
 
   // Route positional args: explicit -i flag -> interactive; else -> one-shot (even for @commands)
   if (q && !result['prompt'] && !result['background']) {

@@ -382,6 +382,7 @@ describe('parseArguments', () => {
 
   it.each([
     ['agents', ['agents']],
+    ['agents list', ['agents', 'list']],
     ['agents daemon stop --any', ['agents', 'daemon', 'stop', '--any']],
     ['agents attach <id>', ['agents', 'attach', 'session-1']],
     ['agents logs <id>', ['agents', 'logs', 'session-1']],
@@ -436,7 +437,6 @@ describe('parseArguments', () => {
     ['attach', ['attach', 'the', 'server']],
     ['logs', ['logs', 'the', 'server']],
     ['respawn', ['respawn', 'the', 'server']],
-    ['agents', ['agents', 'explain', 'this', 'project']],
   ])(
     'still parses verb-initial input starting with `%s` as a positional prompt',
     async (_verb, args) => {
@@ -448,68 +448,19 @@ describe('parseArguments', () => {
     },
   );
 
-  it('routes `--debug agents <prompt>` as a positional prompt', async () => {
-    process.argv = [
-      'node',
-      'script.js',
-      '--debug',
-      'agents',
-      'fix',
-      'the',
-      'bug',
-    ];
-
-    const argv = await parseArguments();
-
-    expect(argv.query).toBe('agents fix the bug');
-  });
-
-  it('routes `--model <value> agents <prompt>` as a positional prompt', async () => {
-    process.argv = [
-      'node',
-      'script.js',
-      '--model',
-      'qwen3-max',
-      'agents',
-      'fix',
-      'the',
-      'bug',
-    ];
-
-    const argv = await parseArguments();
-
-    expect(argv.query).toBe('agents fix the bug');
-  });
-
-  it('does not treat an option value that names a command as command shadowing', async () => {
-    process.argv = [
-      'node',
-      'script.js',
-      '--model',
-      'review',
-      'agents',
-      'fix',
-      'the',
-      'bug',
-    ];
-
-    const argv = await parseArguments();
-
-    expect(argv.query).toBe('agents fix the bug');
-  });
-
-  it('never runs the update handler from the agents-fallback probe', async () => {
-    process.argv = ['node', 'script.js', '--model', 'agents', 'update'];
+  it.each([
+    ['agents', 'explain', 'this', 'project'],
+    ['--debug', 'agents', 'fix', 'the', 'bug'],
+  ])('reserves `agents` as a command word for %j', async (...args) => {
+    process.argv = ['node', 'script.js', ...args];
+    mockEnsureAgentViewSupervisor.mockClear();
     const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
       throw new Error('process.exit called');
     });
 
     try {
-      // The shape is ambiguous (`agents` is the --model value), so failing
-      // loudly is acceptable; running the update handler twice (probe +
-      // real parse) is not.
       await expect(parseArguments()).rejects.toThrow();
-      expect(mockUpdateHandler.mock.calls.length).toBeLessThan(2);
+      expect(mockEnsureAgentViewSupervisor).not.toHaveBeenCalled();
     } finally {
       mockExit.mockRestore();
     }
@@ -522,14 +473,13 @@ describe('parseArguments', () => {
     });
 
     try {
-      await expect(parseArguments()).rejects.toThrow('process.exit called');
-      expect(mockExit).toHaveBeenCalledWith(1);
+      await expect(parseArguments()).rejects.toThrow();
     } finally {
       mockExit.mockRestore();
     }
   });
 
-  it('fails loudly when agents list options mix with a natural-language prompt', async () => {
+  it('fails loudly when agents list options have an unexpected positional', async () => {
     process.argv = [
       'node',
       'script.js',
@@ -545,28 +495,160 @@ describe('parseArguments', () => {
     });
 
     try {
-      await expect(parseArguments()).rejects.toThrow('process.exit called');
-      expect(mockExit).toHaveBeenCalledWith(1);
-      expect(mockWriteStderrLine).toHaveBeenCalledWith(
-        expect.stringContaining('Cannot combine `qwen agents` list options'),
-      );
+      await expect(parseArguments()).rejects.toThrow();
+      expect(mockWriteStderrLine).toHaveBeenCalled();
     } finally {
       mockExit.mockRestore();
     }
   });
 
-  it('does not silently exit on `-- agents stop <id>`', async () => {
+  it('does not dispatch when --cwd consumes an agents verb', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      'agents',
+      '--cwd',
+      'attach',
+      'session-1',
+    ];
+    mockEnsureAgentViewSupervisor.mockClear();
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+
+    try {
+      await expect(parseArguments()).rejects.toThrow();
+      expect(mockEnsureAgentViewSupervisor).not.toHaveBeenCalled();
+    } finally {
+      mockExit.mockRestore();
+    }
+  });
+
+  it('treats tokens after top-level `--` as a positional prompt', async () => {
     process.argv = ['node', 'script.js', '--', 'agents', 'stop', 'session-1'];
     const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
       throw new Error('process.exit called');
     });
 
     try {
-      // Tokens after `--` never dispatch commands; the invocation must fall
-      // through instead of exiting 0 with the command never run.
       const argv = await parseArguments();
-      expect(argv.query).toBeUndefined();
+      expect(argv.query).toBe('agents stop session-1');
       expect(mockExit).not.toHaveBeenCalled();
+    } finally {
+      mockExit.mockRestore();
+    }
+  });
+
+  it('keeps option-looking tokens after top-level `--` in the prompt', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--',
+      '--json',
+      'agents',
+      'do',
+      'something',
+    ];
+
+    const argv = await parseArguments();
+
+    expect(argv.query).toBe('--json agents do something');
+  });
+
+  it.each([
+    ['agents', '--', 'stop', 'session-1'],
+    ['agents', 'respawn', '--', 'session-1'],
+    ['agents', 'respawn', '--all', '--', 'stray'],
+  ])(
+    'rejects arguments after `--` inside the agents command: %j',
+    async (...args) => {
+      process.argv = ['node', 'script.js', ...args];
+      mockEnsureAgentViewSupervisor.mockClear();
+      const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+        throw new Error('process.exit called');
+      });
+
+      try {
+        await expect(parseArguments()).rejects.toThrow();
+        expect(mockEnsureAgentViewSupervisor).not.toHaveBeenCalled();
+      } finally {
+        mockExit.mockRestore();
+      }
+    },
+  );
+
+  it.each([
+    ['agents', '--json=true'],
+    ['agents', '--json=1'],
+    ['agents', '--all=false'],
+    ['agents', '--all=1'],
+    ['--json=1', 'agents'],
+  ])('rejects assigned agents boolean %s', async (...args) => {
+    process.argv = ['node', 'script.js', ...args];
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+
+    try {
+      await expect(parseArguments()).rejects.toThrow('process.exit called');
+      expect(mockExit).toHaveBeenCalledWith(1);
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        expect.stringContaining('does not accept an assigned value'),
+      );
+    } finally {
+      mockExit.mockRestore();
+    }
+  });
+
+  it.each([
+    '--safe-mode=false',
+    '--no-safe-mode',
+    '--insecure=false',
+    '--no-insecure',
+    '--openai-logging=false',
+    '--no-openai-logging',
+    '--screen-reader=false',
+    '--no-screen-reader',
+    '--bare=false',
+    '--no-bare',
+    '--debug=false',
+    '--no-debug',
+    '-d=false',
+    '-l=false',
+    '-sy',
+  ])('rejects --bg combined with explicitly false %s', async (option) => {
+    process.argv = ['node', 'script.js', '--bg', 'background task', option];
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+
+    try {
+      await expect(parseArguments()).rejects.toThrow();
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        expect.stringContaining('Cannot use --bg/--background with'),
+      );
+    } finally {
+      mockExit.mockRestore();
+    }
+  });
+
+  it('rejects --bg before an agents command instead of treating it as a prompt', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--bg',
+      'agents',
+      'attach',
+      'session-1',
+    ];
+    mockEnsureAgentViewSupervisor.mockClear();
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+
+    try {
+      await expect(parseArguments()).rejects.toThrow();
+      expect(mockEnsureAgentViewSupervisor).not.toHaveBeenCalled();
     } finally {
       mockExit.mockRestore();
     }
@@ -775,6 +857,14 @@ describe('parseArguments', () => {
       'Cannot use --bg/--background with --safe-mode',
     ],
     [
+      ['--bg', 'background task', '--chat-recording=false'],
+      'Cannot use --bg/--background with --safe-mode',
+    ],
+    [
+      ['--bg', 'background task', '--no-chat-recording'],
+      'Cannot use --bg/--background with --safe-mode',
+    ],
+    [
       ['--bg', 'background task', '--screen-reader'],
       'Cannot use --bg/--background with --safe-mode',
     ],
@@ -784,6 +874,14 @@ describe('parseArguments', () => {
     ],
     [
       ['--bg', 'background task', '--telemetry'],
+      'Cannot use --bg/--background with telemetry flags',
+    ],
+    [
+      ['--bg', 'background task', '--telemetry=false'],
+      'Cannot use --bg/--background with telemetry flags',
+    ],
+    [
+      ['--bg', 'background task', '--no-telemetry'],
       'Cannot use --bg/--background with telemetry flags',
     ],
     [

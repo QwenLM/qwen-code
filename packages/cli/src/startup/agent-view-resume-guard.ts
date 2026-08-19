@@ -52,7 +52,9 @@ export async function isManagedAgentViewContinueBlocked(
   if (isSessionWorker(sessionId, env)) return false;
   const state = await readAgentViewSessionState(sessionId);
   return (
-    (state?.ownership === 'managed' && state.processState !== 'exited') ||
+    (state?.ownership === 'managed' &&
+      state.processState !== 'exited' &&
+      state.processState !== 'hibernated') ||
     state?.ownership === 'adopting'
   );
 }
@@ -70,7 +72,10 @@ export async function releaseExitedManagedSessionForContinue(
   // suppress the release in an ordinary foreground session.
   if (readAgentViewWorkerSidebandEnv(env) !== undefined) return;
   const state = await readAgentViewSessionState(sessionId);
-  if (state?.ownership !== 'managed' || state.processState !== 'exited') {
+  if (
+    state?.ownership !== 'managed' ||
+    (state.processState !== 'exited' && state.processState !== 'hibernated')
+  ) {
     return;
   }
   await patchAgentViewSessionState(sessionId, {

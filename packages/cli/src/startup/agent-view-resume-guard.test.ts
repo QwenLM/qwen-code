@@ -53,6 +53,16 @@ describe('managed Agent View resume guards', () => {
     );
   });
 
+  it('allows --continue once the managed worker is hibernated', async () => {
+    mockReadAgentViewSessionState.mockResolvedValue(
+      state('managed', 'hibernated'),
+    );
+
+    await expect(isManagedAgentViewContinueBlocked('session-1')).resolves.toBe(
+      false,
+    );
+  });
+
   it('allows --continue for unmanaged and unknown sessions', async () => {
     mockReadAgentViewSessionState.mockResolvedValue(
       state('unmanaged', 'alive'),
@@ -143,6 +153,19 @@ describe('managed Agent View resume guards', () => {
 
   it('releases an exited managed session for foreground --continue', async () => {
     mockReadAgentViewSessionState.mockResolvedValue(state('managed', 'exited'));
+
+    await releaseExitedManagedSessionForContinue('session-1');
+
+    expect(mockPatchAgentViewSessionState).toHaveBeenCalledWith(
+      'session-1',
+      expect.objectContaining({ ownership: 'unmanaged' }),
+    );
+  });
+
+  it('releases a hibernated managed session for foreground --continue', async () => {
+    mockReadAgentViewSessionState.mockResolvedValue(
+      state('managed', 'hibernated'),
+    );
 
     await releaseExitedManagedSessionForContinue('session-1');
 

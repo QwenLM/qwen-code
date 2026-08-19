@@ -248,7 +248,7 @@ describe('Agent View supervisor process helpers', () => {
     await fs.rm(globalDir, { recursive: true, force: true });
   });
 
-  it('waits for worker ready before completing dispatch when enabled', async () => {
+  it('passes the prompt in argv while waiting for worker ready', async () => {
     const globalDir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'qwen-agent-view-store-'),
     );
@@ -290,17 +290,12 @@ describe('Agent View supervisor process helpers', () => {
       activeCwd: globalDir,
       updatedAt: '2026-07-17T00:00:00.000Z',
     });
-    expect(launchedArgv).not.toContain('write tests');
+    expect(launchedArgv).toEqual(
+      expect.arrayContaining(['--prompt-interactive', 'write tests']),
+    );
     await expect(
       handler.workerControl?.({ sessionId: result.sessionId, token }),
-    ).resolves.toMatchObject({
-      events: [
-        expect.objectContaining({
-          type: 'prompt',
-          text: 'write tests',
-        }),
-      ],
-    });
+    ).resolves.toMatchObject({ events: [] });
 
     await fs.rm(globalDir, { recursive: true, force: true });
   });

@@ -57,6 +57,7 @@ import { ExtensionRefreshState } from './config/extension-refresh-state.js';
 import { initializeI18n, resolveLanguageSetting } from './i18n/index.js';
 import {
   setupStartupWorktree,
+  discardCreatedStartupWorktree,
   persistStartupWorktreeSidecar,
   buildStartupWorktreeNotice,
   type StartupWorktreeContext,
@@ -907,6 +908,13 @@ export async function main() {
         hasOneShotInput,
       )
     ) {
+      const cleanupError = await discardCreatedStartupWorktree(
+        startupWorktreeContext,
+      );
+      if (cleanupError) {
+        writeStderrLine(`Failed to clean up startup worktree: ${cleanupError}`);
+        process.exitCode = 1;
+      }
       process.exit(process.exitCode ?? 0);
     }
   }
@@ -959,6 +967,14 @@ export async function main() {
       } = await import('./startup/agent-view-resume-guard.js');
       if (await isManagedAgentViewContinueBlocked(config.getSessionId())) {
         writeStderrLine(MANAGED_AGENT_VIEW_RESUME_MESSAGE);
+        const cleanupError = await discardCreatedStartupWorktree(
+          startupWorktreeContext,
+        );
+        if (cleanupError) {
+          writeStderrLine(
+            `Failed to clean up startup worktree: ${cleanupError}`,
+          );
+        }
         process.exit(1);
       }
       await releaseExitedManagedSessionForContinue(config.getSessionId());

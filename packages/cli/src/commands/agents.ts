@@ -63,7 +63,7 @@ function formatAgentsText(snapshots: AgentViewSessionSnapshot[]): string {
 }
 
 export const agentsListCommand: CommandModule<unknown, AgentsArgs> = {
-  command: '$0',
+  command: ['$0', 'list'],
   describe: 'List background agents',
   builder: (yargs: Argv) =>
     yargs
@@ -113,6 +113,12 @@ export const agentsCommand: CommandModule = {
       .option('cwd', {
         type: 'string',
         description: 'Workspace directory to inspect',
+      })
+      .check((argv) => {
+        const separatorTail = (argv as { '--'?: unknown })['--'];
+        return Array.isArray(separatorTail) && separatorTail.length > 0
+          ? '`qwen agents` does not accept arguments after `--`.'
+          : true;
       })
       // Session verbs are subcommands of `qwen agents` so they cannot
       // hijack natural-language prompts at the top level.

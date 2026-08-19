@@ -24,6 +24,10 @@ import {
 } from '../utils/backgroundWorkUtils.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { waitForGoalRuntime } from '../utils/goal-runtime.js';
+import {
+  isManagedAgentViewResumeBlocked,
+  MANAGED_AGENT_VIEW_RESUME_MESSAGE,
+} from '../../startup/agent-view-resume-guard.js';
 
 export interface UseResumeCommandOptions {
   config: Config | null;
@@ -109,6 +113,17 @@ export function useResumeCommand(
 
       // Close dialog immediately to prevent input capture during async operations.
       closeResumeDialog();
+
+      if (await isManagedAgentViewResumeBlocked(sessionId)) {
+        addItem(
+          {
+            type: MessageType.ERROR,
+            text: MANAGED_AGENT_VIEW_RESUME_MESSAGE,
+          } as HistoryItemWithoutId,
+          Date.now(),
+        );
+        return;
+      }
 
       const oldSessionId = config.getSessionId();
       let coreSwapped = false;

@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { AgentViewWorkerSidebandEnv } from '../agent-view/worker-sideband.js';
+
 const { writeTerminalTitleSpy, useWakeRepaintMock, buildWakeRepaintSpy } =
   vi.hoisted(() => ({
     writeTerminalTitleSpy: vi.fn(),
@@ -12,6 +14,33 @@ const { writeTerminalTitleSpy, useWakeRepaintMock, buildWakeRepaintSpy } =
       vi.fn(() => deps),
     ),
   }));
+
+const agentViewHandoffMocks = vi.hoisted(() => ({
+  detachCurrentSession: vi.fn(async () => ({ sessionId: 'session-1' })),
+  readWorkerSideband: vi.fn<() => AgentViewWorkerSidebandEnv | undefined>(
+    () => undefined,
+  ),
+  sendWorkerEvent: vi.fn(async () => undefined),
+}));
+
+vi.mock('../agent-view/managed-detach.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../agent-view/managed-detach.js')>();
+  return {
+    ...actual,
+    detachCurrentSessionToAgentView: agentViewHandoffMocks.detachCurrentSession,
+  };
+});
+
+vi.mock('../agent-view/worker-sideband.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../agent-view/worker-sideband.js')>();
+  return {
+    ...actual,
+    readAgentViewWorkerSidebandEnv: agentViewHandoffMocks.readWorkerSideband,
+    sendAgentViewWorkerEvent: agentViewHandoffMocks.sendWorkerEvent,
+  };
+});
 
 vi.mock('./hooks/use-wake-repaint.js', () => ({
   useWakeRepaint: useWakeRepaintMock,
@@ -211,6 +240,7 @@ import { useKeypress, type Key } from './hooks/useKeypress.js';
 import { ShellExecutionService } from '@qwen-code/qwen-code-core';
 import { clearCiEnv } from '../test-utils/ci-env.js';
 import { restorePromptStash } from '../services/prompt-stash.js';
+import { runExitCleanup } from '../utils/cleanup.js';
 
 describe('AppContainer State Management', () => {
   let mockConfig: Config;
@@ -263,6 +293,11 @@ describe('AppContainer State Management', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    agentViewHandoffMocks.detachCurrentSession.mockResolvedValue({
+      sessionId: 'session-1',
+    });
+    agentViewHandoffMocks.readWorkerSideband.mockReturnValue(undefined);
+    agentViewHandoffMocks.sendWorkerEvent.mockResolvedValue(undefined);
     restoreCiEnv = clearCiEnv();
     vi.stubEnv('TERM', 'xterm-256color');
     originalStdoutIsTTY = process.stdout.isTTY;
@@ -743,6 +778,83 @@ describe('AppContainer State Management', () => {
       expect(cancelOngoingRequest).toHaveBeenCalledOnce();
       expect(requestShutdown).toHaveBeenCalledOnce();
       expect(vi.getTimerCount()).toBe(timerCount + 1);
+    });
+
+    it('exits the foreground runtime after handing it to Agent View', async () => {
+      const requestShutdown = vi.fn();
+      vi.spyOn(mockConfig, 'getGeminiClient').mockReturnValue({
+        requestShutdown,
+      } as unknown as GeminiClient);
+      const exit = vi
+        .spyOn(process, 'exit')
+        .mockImplementation((() => undefined) as never);
+
+      try {
+        render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+        const actions = mockedUseSlashCommandProcessor.mock.calls.at(
+          -1,
+        )?.[12] as { detachAgentViewSession: () => Promise<void> } | undefined;
+
+        await actions?.detachAgentViewSession();
+
+        expect(agentViewHandoffMocks.detachCurrentSession).toHaveBeenCalledWith(
+          mockConfig,
+        );
+        expect(requestShutdown).toHaveBeenCalledOnce();
+        expect(runExitCleanup).toHaveBeenCalledOnce();
+        expect(exit).toHaveBeenCalledWith(0);
+        expect(
+          agentViewHandoffMocks.detachCurrentSession.mock
+            .invocationCallOrder[0],
+        ).toBeLessThan(requestShutdown.mock.invocationCallOrder[0]);
+        expect(requestShutdown.mock.invocationCallOrder[0]).toBeLessThan(
+          vi.mocked(runExitCleanup).mock.invocationCallOrder[0],
+        );
+        expect(
+          vi.mocked(runExitCleanup).mock.invocationCallOrder[0],
+        ).toBeLessThan(exit.mock.invocationCallOrder[0]);
+      } finally {
+        exit.mockRestore();
+      }
+    });
+
+    it('detaches an attached worker through sideband without adopting it', async () => {
+      agentViewHandoffMocks.readWorkerSideband.mockReturnValue({
+        sessionId: 'session-1',
+        sidebandEndpoint: '/tmp/agent-view.sock',
+        token: 'token',
+        activeCwd: '/repo',
+      });
+      const requestShutdown = vi.fn();
+      vi.spyOn(mockConfig, 'getGeminiClient').mockReturnValue({
+        requestShutdown,
+      } as unknown as GeminiClient);
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      const actions = mockedUseSlashCommandProcessor.mock.calls.at(-1)?.[12] as
+        { detachAgentViewSession: () => Promise<void> } | undefined;
+
+      await actions?.detachAgentViewSession();
+
+      expect(agentViewHandoffMocks.sendWorkerEvent).toHaveBeenCalledWith({
+        type: 'detach',
+      });
+      expect(agentViewHandoffMocks.detachCurrentSession).not.toHaveBeenCalled();
+      expect(requestShutdown).not.toHaveBeenCalled();
+      expect(runExitCleanup).not.toHaveBeenCalled();
     });
 
     it('shows recording failures as warnings and unsubscribes on unmount', async () => {

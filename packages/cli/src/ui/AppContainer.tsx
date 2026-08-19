@@ -250,6 +250,10 @@ import {
   requestConsentOrFail,
 } from '../commands/extensions/consent.js';
 import { detachCurrentSessionToAgentView } from '../agent-view/managed-detach.js';
+import {
+  readAgentViewWorkerSidebandEnv,
+  sendAgentViewWorkerEvent,
+} from '../agent-view/worker-sideband.js';
 import type { AgentViewIdleGateState } from './commands/types.js';
 import {
   findLastUserItemIndex,
@@ -1731,7 +1735,14 @@ export const AppContainer = (props: AppContainerProps) => {
   );
 
   const detachAgentViewSession = useCallback(async () => {
+    if (readAgentViewWorkerSidebandEnv() !== undefined) {
+      await sendAgentViewWorkerEvent({ type: 'detach' });
+      return;
+    }
     await detachCurrentSessionToAgentView(config);
+    config.getGeminiClient()?.requestShutdown();
+    await runExitCleanup();
+    process.exit(0);
   }, [config]);
 
   // Subscribe to skill-review task changes and keep skillReviewPending in sync.

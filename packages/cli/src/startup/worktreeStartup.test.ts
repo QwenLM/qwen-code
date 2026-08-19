@@ -13,6 +13,7 @@ import * as path from 'node:path';
 
 import {
   setupStartupWorktree,
+  discardCreatedStartupWorktree,
   buildStartupWorktreeNotice,
   persistStartupWorktreeSidecar,
 } from './worktreeStartup.js';
@@ -135,6 +136,49 @@ describe('setupStartupWorktree', () => {
         path.join(tempRepo, '.qwen', 'worktrees', 'my-feature'),
       );
     }
+  });
+
+  it('discards a newly-created worktree before an early startup exit', async () => {
+    tempRepo = await makeTempRepo();
+    process.chdir(tempRepo);
+
+    const res = await setupStartupWorktree('managed-resume');
+    expect(res?.ok).toBe(true);
+    if (!res?.ok) return;
+
+    await expect(
+      discardCreatedStartupWorktree(res.context),
+    ).resolves.toBeUndefined();
+
+    expect(process.cwd()).toBe(tempRepo);
+    await expect(fs.stat(res.context.worktreePath)).rejects.toThrow();
+    const { stdout } = await exec('git', ['worktree', 'list', '--porcelain'], {
+      cwd: tempRepo,
+    });
+    expect(stdout).not.toContain(res.context.worktreePath);
+  });
+
+  it('keeps a reattached worktree on an early startup exit', async () => {
+    tempRepo = await makeTempRepo();
+    process.chdir(tempRepo);
+
+    const first = await setupStartupWorktree('managed-resume-existing');
+    expect(first?.ok).toBe(true);
+    if (!first?.ok) return;
+    process.chdir(tempRepo);
+    const second = await setupStartupWorktree('managed-resume-existing');
+    expect(second?.ok).toBe(true);
+    if (!second?.ok) return;
+    expect(second.context.wasReattached).toBe(true);
+
+    await expect(
+      discardCreatedStartupWorktree(second.context),
+    ).resolves.toBeUndefined();
+
+    expect(process.cwd()).toBe(second.context.worktreePath);
+    expect((await fs.stat(second.context.worktreePath)).isDirectory()).toBe(
+      true,
+    );
   });
 
   it('rejects invalid slug characters before any git operation', async () => {

@@ -334,6 +334,26 @@ export async function setupStartupWorktree(
   };
 }
 
+export async function discardCreatedStartupWorktree(
+  context: StartupWorktreeContext | null,
+): Promise<string | undefined> {
+  if (context === null || context.wasReattached) return undefined;
+  try {
+    process.chdir(context.repoRoot);
+    const result = await new GitWorktreeService(
+      context.repoRoot,
+    ).removeUserWorktree(context.slug, {
+      deleteBranch: true,
+      forceDeleteBranch: true,
+    });
+    return result.success
+      ? undefined
+      : (result.error ?? `failed to remove ${context.worktreePath}`);
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+}
+
 /**
  * Result of the post-`loadCliConfig` sidecar persist step. Callers use the
  * boolean fields to decide whether to surface an INFO line in TUI / a

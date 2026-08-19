@@ -11,6 +11,8 @@ import { t } from '../../i18n/index.js';
 import {
   AGENT_VIEW_WORKER_RESUME_MESSAGE,
   isAgentViewWorkerResumeCommandBlocked,
+  isManagedAgentViewResumeBlocked,
+  MANAGED_AGENT_VIEW_RESUME_MESSAGE,
 } from '../../startup/agent-view-resume-guard.js';
 
 export const resumeCommand: SlashCommand = {
@@ -51,6 +53,13 @@ export const resumeCommand: SlashCommand = {
       const sessionService = config.getSessionService();
       const exists = await sessionService.sessionExists(arg);
       if (exists) {
+        if (await isManagedAgentViewResumeBlocked(arg)) {
+          return {
+            type: 'message',
+            messageType: 'error',
+            content: t(MANAGED_AGENT_VIEW_RESUME_MESSAGE),
+          };
+        }
         return { type: 'dialog', dialog: 'resume', sessionId: arg };
       }
       return {

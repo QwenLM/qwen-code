@@ -354,7 +354,7 @@ class AgentViewSupervisorProcessHandler
       ...store,
       sidebandEndpoint: this.socketPath,
       publishRoster: false,
-      promptInArgv: !shouldWaitForWorkerReady(this.options),
+      promptInArgv: true,
     });
     const launch = await readAgentViewLaunch(result.sessionId, store);
     if (!launch) {
@@ -388,9 +388,6 @@ class AgentViewSupervisorProcessHandler
       await ready;
       readyCompleted = true;
       await ensureSessionStillLaunchable(result.sessionId, store);
-      if (shouldWaitForWorkerReady(this.options)) {
-        await this.queuePromptForSession(result.sessionId, prompt);
-      }
       const state = await readAgentViewSessionState(result.sessionId, store);
       const publishedAt = new Date().toISOString();
       try {
