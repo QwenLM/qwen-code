@@ -2110,12 +2110,19 @@ export class CoreToolScheduler {
       return mcpMessage;
     }
 
-    // `list_directory` is an opt-in built-in: absent here means it was never
-    // registered, so say how to turn it on instead of suggesting unrelated
-    // tools by edit distance. Resolve aliases (`ListFiles`, `ReadFolder`, ...)
-    // so an aliased call gets the same explanation.
+    // `list_directory` is an opt-in built-in: when it is genuinely unregistered,
+    // say how to turn it on instead of suggesting unrelated tools by edit
+    // distance. Resolve aliases (`ListFiles`, `ReadFolder`, ...) so an aliased
+    // call gets the same explanation — but only once the canonical name is
+    // confirmed absent. The registry is keyed by canonical names while the
+    // lookup that lands here resolves legacy migrations only, so an alias call
+    // misses even when the tool IS enabled; that case must keep the generic
+    // path's "Did you mean list_directory" self-correction.
     const canonicalName = resolveToolName(unknownToolName);
-    if (canonicalName === ToolNames.LS) {
+    if (
+      canonicalName === ToolNames.LS &&
+      !(await this.toolRegistry.ensureTool(canonicalName))
+    ) {
       if (this.config.getDisabledTools().has(canonicalName)) {
         return `Tool "${unknownToolName}" has been disabled for this workspace via the workspace tools toggle. Re-enable it there; the tools.listDirectory.enabled setting only controls whether the tool is registered by default.`;
       }

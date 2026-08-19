@@ -6441,6 +6441,56 @@ describe('CoreToolScheduler', () => {
         await (scheduler as any).getToolNotFoundMessage('list_directory');
       expect(message).toContain('disabled for this workspace');
       expect(message).not.toContain('disabled by default');
+
+      // The toggle lookup must use the canonical name, so an aliased call in a
+      // workspace that turned the tool off gets the toggle message too — the
+      // enablement setting cannot lift a workspace disable.
+      const aliasMessage =
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await (scheduler as any).getToolNotFoundMessage('ListFiles');
+      expect(aliasMessage).toContain('disabled for this workspace');
+      expect(aliasMessage).not.toContain('disabled by default');
+    });
+
+    it('should not claim list_directory is disabled when an alias is used for a registered tool', async () => {
+      const lsTool = {
+        name: 'list_directory',
+      } as unknown as AnyDeclarativeTool;
+      const mockToolRegistry = {
+        getAllToolNames: () => ['glob', 'read_file', 'list_directory'],
+        getTool: (name: string) =>
+          name === 'list_directory' ? lsTool : undefined,
+        ensureTool: async (name: string) =>
+          name === 'list_directory' ? lsTool : undefined,
+      } as unknown as ToolRegistry;
+
+      const mockConfig = {
+        getToolRegistry: () => mockToolRegistry,
+        getUseModelRouter: () => false,
+        getGeminiClient: () => null,
+        getPermissionsDeny: () => undefined,
+        isInteractive: () => true,
+        getMessageBus: vi.fn().mockReturnValue(undefined),
+        getDisableAllHooks: vi.fn().mockReturnValue(true),
+        getDisabledTools: vi.fn().mockReturnValue(new Set<string>()),
+      } as unknown as Config;
+
+      const scheduler = new CoreToolScheduler({
+        config: mockConfig,
+        getPreferredEditor: () => 'vscode',
+        onEditorClose: vi.fn(),
+      });
+
+      // The registry lookup is keyed by canonical name, so an alias call misses
+      // even though the tool is enabled. It must fall through to the generic
+      // path, which names the tool, rather than telling the user to switch on a
+      // setting that is already on.
+      const message =
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await (scheduler as any).getToolNotFoundMessage('ListFiles');
+      expect(message).not.toContain('disabled by default');
+      expect(message).toContain('list_directory');
+      expect(message).toContain('Did you mean');
     });
   });
 
