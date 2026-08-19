@@ -479,6 +479,9 @@ export class ExtensionStore {
         );
         if (staleEntry) {
           const [staleId, policy] = staleEntry;
+          if (!policy.declarationOnly && policy.name !== identity.name) {
+            policy.artifactDirectory ??= policy.name;
+          }
           if (policy.declarationOnly) {
             delete policy.declarationOnly;
             policy.artifactGeneration = existing.generation + 1;

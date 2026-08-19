@@ -588,7 +588,16 @@ describe('ExtensionStore', () => {
     const store = makeStore();
     const oldId = 'a'.repeat(64);
     const newId = 'b'.repeat(64);
-    await store.ensureInitialized([{ id: oldId, name: 'DotNet' }]);
+    const oldIdentity = { id: oldId, name: 'DotNet' };
+    const staging = await store.createStagingDirectory();
+    await fsp.writeFile(path.join(staging, 'version'), 'dotnet');
+    await store.commitArtifact({
+      operation: 'install',
+      identity: oldIdentity,
+      stagingDirectory: staging,
+      destinationDirectory: path.join(extensionsDir, oldIdentity.name),
+      initialActivation: { scope: 'user' },
+    });
     await store.setDefaultActivation({ id: oldId, name: 'DotNet' }, 'disabled');
 
     const snapshot = await store.ensureInitialized([
@@ -598,8 +607,27 @@ describe('ExtensionStore', () => {
     expect(snapshot.extensions[oldId]).toBeUndefined();
     expect(snapshot.extensions[newId]).toMatchObject({
       name: 'dotnet',
+      artifactDirectory: 'DotNet',
       defaultActivation: 'disabled',
     });
+
+    const internals = store as unknown as {
+      pathExists(filePath: string): Promise<boolean>;
+    };
+    const pathExists = internals.pathExists.bind(store);
+    vi.spyOn(internals, 'pathExists').mockImplementation(async (filePath) =>
+      filePath === path.join(extensionsDir, 'dotnet')
+        ? false
+        : await pathExists(filePath),
+    );
+    const uninstalled = await store.commitArtifact({
+      operation: 'uninstall',
+      identity: { id: newId, name: 'dotnet' },
+      destinationDirectory: path.join(extensionsDir, 'dotnet'),
+    });
+
+    expect(uninstalled.extensions[newId]).toBeUndefined();
+    expect(fs.existsSync(path.join(extensionsDir, 'DotNet'))).toBe(false);
   });
 
   it('adopts a manifest rename and its declared activation', async () => {
