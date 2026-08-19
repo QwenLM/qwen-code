@@ -1234,6 +1234,75 @@ describe('fileUtils', () => {
       expect(result.error).toBeUndefined();
     });
 
+    it('omits provider-unsupported image formats instead of forwarding raw bytes (#9291)', async () => {
+      // A MIME type the model endpoint cannot safely consume (image/heic on
+      // Responses-compatible routes) must not be forwarded verbatim: the
+      // provider rejects it with a 400 that aborts the whole session. The
+      // read must stay in-band — a text notice, no inline image, no error.
+      const heicPath = path.join(tempRootDir, 'photo.heic');
+      actualNodeFs.writeFileSync(heicPath, 'not decodable heic bytes');
+      mockMimeGetType.mockReturnValue('image/heic');
+
+      const result = await processSingleFileContent(heicPath, mockConfig);
+
+      expect(result.error).toBeUndefined();
+      expect(typeof result.llmContent).toBe('string');
+      expect(result.llmContent).toContain('image/heic');
+      expect(JSON.stringify(result.llmContent)).not.toContain('inlineData');
+    });
+
+    it('keeps provider-unsupported images inline for the vision bridge', async () => {
+      const heicPath = path.join(tempRootDir, 'photo.heic');
+      const bytes = Buffer.from('heic bytes for bridge');
+      actualNodeFs.writeFileSync(heicPath, bytes);
+      mockMimeGetType.mockReturnValue('image/heic');
+
+      const mockConfigNoImage = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({ modalities: {} }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        heicPath,
+        mockConfigNoImage,
+        { preserveUnsupportedImage: true },
+      );
+
+      expect(result.llmContent).toEqual({
+        inlineData: {
+          data: bytes.toString('base64'),
+          mimeType: 'image/heic',
+          displayName: 'photo.heic',
+        },
+      });
+    });
+
+    it('keeps undecodable images inline for the vision bridge', async () => {
+      const corruptPath = path.join(tempRootDir, 'corrupt.png');
+      const bytes = Buffer.from('not a png');
+      actualNodeFs.writeFileSync(corruptPath, bytes);
+      mockMimeGetType.mockReturnValue('image/png');
+
+      const mockConfigNoImage = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({ modalities: {} }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        corruptPath,
+        mockConfigNoImage,
+        { preserveUnsupportedImage: true },
+      );
+
+      expect(result.llmContent).toEqual({
+        inlineData: {
+          data: bytes.toString('base64'),
+          mimeType: 'image/png',
+          displayName: 'corrupt.png',
+        },
+      });
+    });
+
     it('should process an image file', async () => {
       await sharp({
         create: {
@@ -1356,7 +1425,7 @@ describe('fileUtils', () => {
       expect(result.returnDisplay).toContain('Read image file: animated.webp');
     });
 
-    it('rejects unsupported image bytes whose format differs from the extension', async () => {
+    it('omits non-canonical content behind a canonical extension (#9291)', async () => {
       const gifBytes = Buffer.from(
         '47494638396101000100800000000000ffffff21f90400010000002c000000000100010000020244010021f90400010000002c00000000010001000002024c01003b',
         'hex',
@@ -1393,6 +1462,8 @@ describe('fileUtils', () => {
         'Skipped binary file: archive.png',
       );
       expect(result.error).toBeUndefined();
+      expect(typeof result.llmContent).toBe('string');
+      expect(JSON.stringify(result.llmContent)).not.toContain('inlineData');
     });
 
     it('rejects unrecognized binary content behind an image extension', async () => {
@@ -1543,24 +1614,76 @@ describe('fileUtils', () => {
       ]);
     });
 
-    it.each([
-      ['animated GIF', 'animation.gif', 'image/gif'],
-      ['BMP', 'bitmap.bmp', 'image/bmp'],
-    ])('keeps %s image bytes unchanged', async (_label, name, mimeType) => {
-      const filePath = path.join(tempRootDir, name);
-      const bytes = Buffer.from('GIF89aunchanged image bytes');
-      actualNodeFs.writeFileSync(filePath, bytes);
-      mockMimeGetType.mockReturnValue(mimeType);
+    it('keeps animated GIF image bytes unchanged', async () => {
+      // A real, decodable GIF: forwarded verbatim (never re-encoded).
+      const gifBytes = Buffer.from(
+        '47494638396101000100800000000000ffffff21f90400010000002c000000000100010000020244010021f90400010000002c00000000010001000002024c01003b',
+        'hex',
+      );
+      const filePath = path.join(tempRootDir, 'animation.gif');
+      actualNodeFs.writeFileSync(filePath, gifBytes);
+      mockMimeGetType.mockReturnValue('image/gif');
 
       const result = await processSingleFileContent(filePath, mockConfig);
 
       expect(result.llmContent).toEqual({
         inlineData: {
-          data: bytes.toString('base64'),
-          mimeType,
-          displayName: name,
+          data: gifBytes.toString('base64'),
+          mimeType: 'image/gif',
+          displayName: 'animation.gif',
         },
       });
+    });
+
+    it('omits a corrupt GIF instead of forwarding undecodable bytes (#9291)', async () => {
+      const filePath = path.join(tempRootDir, 'broken.gif');
+      actualNodeFs.writeFileSync(filePath, Buffer.from('not a real gif'));
+      mockMimeGetType.mockReturnValue('image/gif');
+
+      const result = await processSingleFileContent(filePath, mockConfig);
+
+      expect(result.error).toBeUndefined();
+      expect(typeof result.llmContent).toBe('string');
+      expect(JSON.stringify(result.llmContent)).not.toContain('inlineData');
+    });
+
+    it('keeps corrupt GIF bytes inline for the vision bridge', async () => {
+      const filePath = path.join(tempRootDir, 'broken.gif');
+      const bytes = Buffer.from('not a real gif');
+      actualNodeFs.writeFileSync(filePath, bytes);
+      mockMimeGetType.mockReturnValue('image/gif');
+
+      const mockConfigNoImage = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({ modalities: {} }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        filePath,
+        mockConfigNoImage,
+        { preserveUnsupportedImage: true },
+      );
+
+      expect(result.llmContent).toEqual({
+        inlineData: {
+          data: bytes.toString('base64'),
+          mimeType: 'image/gif',
+          displayName: 'broken.gif',
+        },
+      });
+    });
+
+    it('omits BMP image bytes the provider cannot safely consume (#9291)', async () => {
+      const filePath = path.join(tempRootDir, 'bitmap.bmp');
+      const bytes = Buffer.from('unchanged image bytes');
+      actualNodeFs.writeFileSync(filePath, bytes);
+      mockMimeGetType.mockReturnValue('image/bmp');
+
+      const result = await processSingleFileContent(filePath, mockConfig);
+
+      expect(result.error).toBeUndefined();
+      expect(typeof result.llmContent).toBe('string');
+      expect(result.llmContent).toContain('image/bmp');
     });
 
     it('should reject image files when model does not support image', async () => {

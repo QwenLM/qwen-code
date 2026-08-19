@@ -20,7 +20,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { persistRecoveredLedger } from './pr-context.js';
+import { persistedAnchorSha, persistRecoveredLedger } from './pr-context.js';
 import type { Ledger } from './lib/ledger.js';
 
 describe('persistRecoveredLedger', () => {
@@ -45,7 +45,7 @@ describe('persistRecoveredLedger', () => {
       persistRecoveredLedger(
         side,
         { ledger, commitId: 'a'.repeat(40), reviewId: 42 },
-        true,
+        { noOwnReview: true, identityKnown: true },
       );
       const written = JSON.parse(readFileSync(side, 'utf8'));
       expect(written).toEqual({
@@ -70,11 +70,26 @@ describe('persistRecoveredLedger', () => {
     try {
       writeFileSync(
         side,
-        JSON.stringify({ ...ledger, commitId: 'b'.repeat(40), reviewId: 7 }),
+        JSON.stringify({
+          ...ledger,
+          commitId: 'b'.repeat(40),
+          reviewId: 7,
+          // The volumes describe the round this file still names, and this
+          // path keeps that round — so they stay. Generalising the
+          // anonymous branch's drop to here would erase this account's
+          // last posting count on every transient failure, leaving the
+          // next VOLUME line and the next marker's `prevPosted` blank at
+          // exactly the rounds this path exists to protect.
+          posted: 4,
+          prevPosted: 2,
+        }),
       );
-      persistRecoveredLedger(side, null, false);
+      persistRecoveredLedger(side, null, {
+        noOwnReview: false,
+        identityKnown: true,
+      });
       const written = JSON.parse(readFileSync(side, 'utf8'));
-      expect(written).toEqual(ledger);
+      expect(written).toEqual({ ...ledger, posted: 4, prevPosted: 2 });
       expect(written.round).toBe(3);
       expect(written.sha).toBe('deadbeef00112233');
     } finally {
@@ -94,7 +109,10 @@ describe('persistRecoveredLedger', () => {
         side,
         JSON.stringify({ ...ledger, commitId: 'b'.repeat(40), reviewId: 7 }),
       );
-      persistRecoveredLedger(side, null, true);
+      persistRecoveredLedger(side, null, {
+        noOwnReview: true,
+        identityKnown: true,
+      });
       expect(existsSync(side)).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -118,21 +136,21 @@ describe('persistRecoveredLedger', () => {
           commitId: 'a'.repeat(40),
           reviewId: 20,
         },
-        false,
+        { noOwnReview: false, identityKnown: true },
       );
       expect(JSON.parse(readFileSync(side, 'utf8'))).toEqual(newer);
       // Same round, older reviewId: also kept.
       persistRecoveredLedger(
         side,
         { ledger: { ...ledger, round: 7 }, commitId: null, reviewId: 60 },
-        false,
+        { noOwnReview: false, identityKnown: true },
       );
       expect(JSON.parse(readFileSync(side, 'utf8'))).toEqual(newer);
       // A genuinely newer recovery still writes.
       persistRecoveredLedger(
         side,
         { ledger: { ...ledger, round: 8 }, commitId: null, reviewId: 80 },
-        false,
+        { noOwnReview: false, identityKnown: true },
       );
       expect(JSON.parse(readFileSync(side, 'utf8')).round).toBe(8);
     } finally {
@@ -144,7 +162,10 @@ describe('persistRecoveredLedger', () => {
     const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
     const side = join(dir, 'side.json');
     try {
-      persistRecoveredLedger(side, null, false);
+      persistRecoveredLedger(side, null, {
+        noOwnReview: false,
+        identityKnown: true,
+      });
       expect(existsSync(side)).toBe(false);
       // No debris of any name — the temp is per-process (`.<pid>.tmp`), so
       // asserting on the directory listing is the only check independent of
@@ -153,6 +174,179 @@ describe('persistRecoveredLedger', () => {
       expect(readdirSync(dir)).toEqual([]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('an ANONYMOUS same-round winner cannot replace the persisted list', () => {
+    // The R13-1 drive-by: identity lookup down, every marker foreign — the
+    // union never had an own side — and a stranger's marker at this round
+    // (later review id) won round-first selection. Wholesale writing it
+    // swapped this machine's certified list for the stranger's, permanently:
+    // the marker stays on the PR, so every later outage reopened the swap.
+    const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
+    const side = join(dir, 'side.json');
+    try {
+      const own = { ...ledger, round: 7, reviewId: 100 };
+      writeFileSync(side, JSON.stringify(own));
+      persistRecoveredLedger(
+        side,
+        {
+          ledger: {
+            v: 1,
+            round: 7,
+            findings: [{ id: 'R7-2', sev: 'S', file: 'x.ts', title: 'theirs' }],
+          },
+          commitId: 'c'.repeat(40),
+          reviewId: 101,
+        },
+        { noOwnReview: false, identityKnown: false },
+      );
+      expect(JSON.parse(readFileSync(side, 'utf8'))).toEqual(own);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('an ANONYMOUS higher round advances the counter but keeps the findings', () => {
+    // Both halves matter: refusing the round too re-exposes the id-space
+    // collision (a counter that lags rounds the PR already carries re-issues
+    // their ids), while adopting the findings re-opens the swap. The anchor
+    // and the age reference go — an anonymous round cannot be re-vouched,
+    // and a sha superseded by rounds this account never certified must not
+    // scope the next review. `noOwnReview` is TRUE here on purpose: the
+    // recovered path ignores it, which is exactly what this fixture pins —
+    // the deletion licence must have no reach into a recovered write.
+    const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
+    const side = join(dir, 'side.json');
+    try {
+      writeFileSync(
+        side,
+        JSON.stringify({
+          ...ledger,
+          round: 7,
+          reviewId: 100,
+          commitId: 'b'.repeat(40),
+          // The volumes belong to round 7. This branch advances the counter
+          // past it, so they must go the way the anchor and the age
+          // reference go — kept, they would attribute this account's round-7
+          // posting count to the foreign round that won recovery, and the
+          // next compose would stamp it as `prevPosted`.
+          posted: 4,
+          prevPosted: 2,
+        }),
+      );
+      persistRecoveredLedger(
+        side,
+        {
+          ledger: {
+            v: 1,
+            round: 8,
+            findings: [{ id: 'R8-1', sev: 'S', file: 'x.ts', title: 'theirs' }],
+            sha: 'attacker00112233',
+          },
+          commitId: 'c'.repeat(40),
+          reviewId: 200,
+        },
+        { noOwnReview: true, identityKnown: false },
+      );
+      const written = JSON.parse(readFileSync(side, 'utf8'));
+      expect(written).toEqual({
+        v: 1,
+        round: 8,
+        findings: ledger.findings,
+        reviewId: 200,
+      });
+      expect(written.sha).toBeUndefined();
+      expect(written.commitId).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('an ANONYMOUS recovery with no existing file still writes whole', () => {
+    // Nothing to protect: a machine with no side file gains round context
+    // from the write, and the list it gains is exactly what a healthy
+    // foreign-only recovery would have handed it — THEIR claims, no anchor.
+    const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
+    const side = join(dir, 'side.json');
+    try {
+      persistRecoveredLedger(
+        side,
+        { ledger: { ...ledger, round: 4 }, commitId: null, reviewId: 40 },
+        { noOwnReview: false, identityKnown: false },
+      );
+      const written = JSON.parse(readFileSync(side, 'utf8'));
+      expect(written.round).toBe(4);
+      expect(written.findings).toEqual(ledger.findings);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('persistedAnchorSha', () => {
+  const dir = () => mkdtempSync(join(tmpdir(), 'persisted-anchor-'));
+
+  it('reads back what the never-lower-round guard actually KEPT', () => {
+    // The seam the section's verdict rules on. A run whose recovery walk came
+    // back short leaves a higher-round file in place; the verdict must be
+    // about THAT sha, because it is the one Step 1 passes. Inferring it from
+    // the recovered ledger — the shape before this read existed — is how a
+    // HOLDS about sha X got obeyed against sha Y.
+    const d = dir();
+    try {
+      const side = join(d, 'prev-ledger.json');
+      writeFileSync(
+        side,
+        JSON.stringify({
+          v: 1,
+          round: 6,
+          findings: [],
+          sha: 'ffff1111ffff1111',
+          reviewId: 99,
+        }),
+      );
+      persistRecoveredLedger(
+        side,
+        {
+          ledger: {
+            v: 1,
+            round: 5,
+            findings: [{ id: 'R5-1', sev: 'C', file: 'a.ts', title: 't' }],
+            sha: 'aaaa2222aaaa2222',
+          },
+          commitId: 'c',
+          reviewId: 1,
+          foreign: false,
+          author: null,
+        } as unknown as Parameters<typeof persistRecoveredLedger>[1],
+        { noOwnReview: false, identityKnown: true },
+      );
+      // The guard kept round 6 — so the anchor on disk is round 6's, not the
+      // round-5 one this run recovered.
+      expect(persistedAnchorSha(side)).toBe('ffff1111ffff1111');
+    } finally {
+      rmSync(d, { recursive: true, force: true });
+    }
+  });
+
+  it('answers null for absent, unparseable, and anchor-less files', () => {
+    // Each leaves the ruling to the recovered ledger alone rather than
+    // inventing a disagreement out of a file that says nothing.
+    const d = dir();
+    try {
+      expect(persistedAnchorSha(join(d, 'nope.json'))).toBeNull();
+      const broken = join(d, 'broken.json');
+      writeFileSync(broken, '{"sha": "trunc');
+      expect(persistedAnchorSha(broken)).toBeNull();
+      const noSha = join(d, 'no-sha.json');
+      writeFileSync(noSha, JSON.stringify({ v: 1, round: 2, findings: [] }));
+      expect(persistedAnchorSha(noSha)).toBeNull();
+      const emptySha = join(d, 'empty-sha.json');
+      writeFileSync(emptySha, JSON.stringify({ v: 1, round: 2, sha: '' }));
+      expect(persistedAnchorSha(emptySha)).toBeNull();
+    } finally {
+      rmSync(d, { recursive: true, force: true });
     }
   });
 });

@@ -76,17 +76,13 @@ test('keeps long session details inside a constrained WebShell @smoke', async ({
 
   const webShellRoot = page.locator('[data-web-shell-root]');
   await page.getByRole('button', { name: 'Toggle menu' }).click();
-  const sessionTitle = page.getByTitle(longTitle);
+  const sessionTitle = webShellRoot.getByText(longTitle, { exact: true });
   await expect(sessionTitle).toBeVisible();
 
-  const sessionRow = sessionTitle.locator('..');
-  await sessionRow.hover();
-  await sessionRow.getByRole('button', { name: 'More actions' }).click();
-  await page.getByRole('menuitem', { name: 'Details' }).hover();
-
-  const details = page.locator('[data-slot="dropdown-menu-sub-content"]');
+  await sessionTitle.hover();
+  const details = page.getByRole('dialog', { name: longTitle });
   const title = details.getByTitle(longTitle);
-  const copyAction = details.getByRole('menuitem', {
+  const copyAction = details.getByRole('button', {
     name: 'Copy session ID',
   });
   await expect(details).toBeVisible();
@@ -103,6 +99,11 @@ test('keeps long session details inside a constrained WebShell @smoke', async ({
     { width: 520, height: 320 },
   ]) {
     await page.setViewportSize(size);
+    // Close the details popover before re-hovering: at constrained sizes it
+    // can flip to cover its own anchor row and intercept the hover.
+    await page.mouse.move(0, 0);
+    await expect(details).toBeHidden();
+    await sessionTitle.hover();
     await expect(details).toBeVisible();
     await expectDetailsInsideRoot(webShellRoot, details);
     await expect(copyAction).toBeVisible();
@@ -113,16 +114,14 @@ test('keeps long session details inside a constrained WebShell @smoke', async ({
     return {
       clientHeight: element.clientHeight,
       lineHeight: Number.parseFloat(style.lineHeight),
-      scrollHeight: element.scrollHeight,
+      clientWidth: element.clientWidth,
+      scrollWidth: element.scrollWidth,
     };
   });
   expect(titleMetrics.clientHeight).toBeLessThanOrEqual(
-    titleMetrics.lineHeight * 3 + 1,
+    titleMetrics.lineHeight + 1,
   );
-  expect(titleMetrics.clientHeight).toBeGreaterThanOrEqual(
-    titleMetrics.lineHeight * 3 - 1,
-  );
-  expect(titleMetrics.scrollHeight).toBeGreaterThan(titleMetrics.clientHeight);
+  expect(titleMetrics.scrollWidth).toBeGreaterThan(titleMetrics.clientWidth);
 });
 
 async function expectDetailsInsideRoot(

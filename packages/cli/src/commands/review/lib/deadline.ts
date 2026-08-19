@@ -49,7 +49,7 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 import { parsePositiveIntegerEnv } from '@qwen-code/qwen-code-core';
-import { promptRecordDir } from './prompt-record.js';
+import { promptRecordDir, runEpochMs } from './prompt-record.js';
 
 /** Unix seconds at which the review process will be killed. Set by CI. */
 export const DEADLINE_ENV = 'QWEN_REVIEW_DEADLINE_EPOCH';
@@ -159,35 +159,91 @@ const STAMPS_FILE = 'budget-rounds.json';
 const STOP_FILE = 'budget-stop.json';
 
 /**
- * Slack for the run-epoch fence below: absorbs the sub-millisecond skew
- * between a file mtime (fractional) and `Date.now()` (integral) when a
- * record is written moments after the plan. Real cross-run gaps are minutes
- * to hours; two seconds is noise against them.
+ * Claim the retirement-degradation NOTE's slot for `round`, this run:
+ * `true` at most once per round per run, across PROCESSES — Step 3B
+ * builds each chunk in its own CLI process, and the claim file's atomic
+ * `wx` create is the inter-process exclusion a read-modify-write sidecar
+ * does not have (#9272: 24 concurrent builds all claimed one slot, and
+ * the JSON tore). One claim file per round, fenced to the run by its
+ * mtime against the plan's epoch — a previous run's claim must not
+ * silence this run's channel; the stale-claim remove-then-create window
+ * can double-print, which is the verbose side and accepted. Every other
+ * failure fails toward PRINTING: the note is the diagnostic, and silence
+ * is the only wrong answer here (#9206).
  */
-const RUN_EPOCH_SLACK_MS = 2000;
-
-/**
- * The run's epoch: records older than this predate the run and are ignored.
- *
- * The stamps and the stop marker key on the plan path, which is stable per
- * PR — but every run rewrites the plan at its Step 1 capture (`fetch-pr` /
- * `plan-diff` / `capture-local`), so the plan's own mtime dates the run. A
- * budgeted run killed by the outer deadline leaves its records behind (the
- * Step 9 cleanup never ran, and the workflow's start-of-run sweep removes
- * worktrees, not these files); without the fence the next review of the
- * same PR would price its rounds off the previous run's stamps (an
- * hours-old stamp reads as an hours-long round and refuses round 1 of a
- * fresh budget) and cap its verdict on a stop that did not happen in this
- * run. An unstatable plan disables the fence — fail open, like every other
- * malformed input this module reads.
- */
-export function runEpochMs(planPath: string): number {
+export function claimRetirementDegradeNote(
+  planPath: string,
+  round: number | undefined,
+): boolean {
+  const dir = promptRecordDir(planPath);
+  const file = join(dir, `retirement-degrade-note-round-${round ?? 'x'}.json`);
   try {
-    return statSync(planPath).mtimeMs - RUN_EPOCH_SLACK_MS;
+    mkdirSync(dir, { recursive: true });
   } catch {
-    return Number.NEGATIVE_INFINITY;
+    // An uncreatable record dir is not a claim — the note must still
+    // print. A recursive mkdir throws EEXIST when the path exists but is
+    // NOT a directory, and the create's catch below reads only the `wx`
+    // EEXIST as "claimed already"; conflating the two silenced the note
+    // on every round of a run whose record path was a regular file
+    // (#9272).
+    return true;
+  }
+  // A previous-run claim must be reclaimed. Fence it by SHAPE and by its
+  // own `atMs` vs the strict plan epoch (#9272 — file mtimes are not
+  // reliable across runners, so the fence reads the claim's CONTENT).
+  // `recursive` so a directory occupant clears. A non-file, an
+  // unreadable/corrupt claim, and a readable claim older than the epoch
+  // are all NOT this run's claim and are removed; the absence case (no
+  // occupant) needs no removal.
+  try {
+    const st = statSync(file);
+    let stale: boolean;
+    if (!st.isFile()) {
+      stale = true;
+    } else {
+      try {
+        stale =
+          JSON.parse(readFileSync(file, 'utf8')).atMs <
+          statSync(planPath).mtimeMs;
+      } catch {
+        // Corrupt/unreadable content is not a claim — a torn concurrent
+        // write would otherwise sit at the path and EEXIST-silence the
+        // note forever (#9272).
+        stale = true;
+      }
+    }
+    if (stale) {
+      rmSync(file, { force: true, recursive: true });
+    }
+  } catch {
+    // Absent occupant — the create below is the claimant.
+  }
+  try {
+    writeFileSync(
+      file,
+      JSON.stringify({ round: round ?? null, atMs: Date.now() }),
+      { flag: 'wx' },
+    );
+    return true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') return true;
+    // EEXIST: claimed already this run — but only when the occupant is
+    // the claim FILE. A directory or other non-file at the claim path
+    // holds no claim, and treating it as one silences the NOTE forever —
+    // the only wrong answer here (#9272).
+    try {
+      return !statSync(file).isFile();
+    } catch {
+      return true;
+    }
   }
 }
+
+// The run-epoch fence is shared with every other per-run artifact (the
+// prompt records, the transcripts, the session ledger) — one definition in
+// `prompt-record.ts`, so a change to it cannot apply to some readers and not
+// others. The stamps and the stop marker key on the plan path, which is
+// stable per PR; its mtime dates the run.
 
 /**
  * The admission stamps written so far THIS RUN, oldest first. Unreadable →
@@ -532,12 +588,25 @@ export interface BudgetStop {
 }
 
 /**
- * The phrase that identifies the budget-stop disclosure wherever it is
- * relayed. Exported so `compose-review` dedups the orchestrator's copy
- * against the marker's by the same text the entry itself is spelled with —
- * a reword of the entry moves its key along with it.
+ * The phrase the budget-stop entry is spelled with — interpolated into the
+ * disclosure below, so a reword changes every rendering in one place.
+ *
+ * NOT a dedup key: `compose-review` once spliced relayed copies by this
+ * substring, and the phrase alone also matched genuine free-form
+ * line-coverage disclosures that merely mention the budget — those were
+ * silently dropped from the posted body. The splice now keys on the FULL
+ * canonical entry text (`budgetStopEntry`/`budgetStopEntryZh`), so a
+ * phrase-only relay is no longer deduped: it renders beside the structural
+ * stop line, which is the honest outcome for text the machinery did not
+ * mint.
  */
 export const BUDGET_STOP_PHRASE = 'review time budget';
+/** The Chinese pair, spelled into `budgetStopEntryZh`. Same non-dedup-key
+ *  status as the English phrase above: the splice reads the full canonical
+ *  entry in BOTH languages (a relayed Chinese entry checked against only
+ *  the English text once survived and double-rendered), never the bare
+ *  phrase. */
+export const BUDGET_STOP_PHRASE_ZH = '评审时间预算';
 
 /**
  * The disclosure as structural parts, both languages: compose-review renders
@@ -556,7 +625,7 @@ export function budgetStopDisclosure(round: number | undefined): {
     subject: 'reverse audit',
     reason: `stopped before ${which} by the ${BUDGET_STOP_PHRASE}`,
     subjectZh: '反向审计',
-    reasonZh: `评审时间预算不足，未能开始${whichZh}`,
+    reasonZh: `${BUDGET_STOP_PHRASE_ZH}不足，未能开始${whichZh}`,
   };
 }
 
@@ -573,11 +642,13 @@ export function budgetStopEntryZh(round: number | undefined): string {
 }
 
 /**
- * The phrase identifying a ROUND-CAP disclosure wherever it is relayed —
- * the cap analogue of `BUDGET_STOP_PHRASE`, so `compose-review` dedups the
- * orchestrator's relayed copy against the marker's by shared text.
+ * The phrase the round-cap entry is spelled with — the cap analogue of
+ * `BUDGET_STOP_PHRASE`, and like it NOT a dedup key: `compose-review`
+ * splices relays by the full canonical entry text, never this substring.
  */
 export const ROUND_CAP_PHRASE = 'reverse-audit round cap';
+/** The Chinese pair, spelled into the zh entry — same non-dedup-key status. */
+export const ROUND_CAP_PHRASE_ZH = '反审轮数上限';
 
 /**
  * The round-cap disclosure as structural parts, both languages — the
@@ -594,7 +665,7 @@ export function roundCapStopDisclosure(cap: number): {
     subject: 'reverse audit',
     reason: `did not converge within the ${ROUND_CAP_PHRASE} of ${cap}`,
     subjectZh: '反向审计',
-    reasonZh: `在 ${cap} 轮的反审轮数上限内未收敛`,
+    reasonZh: `在 ${cap} 轮的${ROUND_CAP_PHRASE_ZH}内未收敛`,
   };
 }
 
@@ -746,6 +817,23 @@ export function clearBudgetStop(planPath: string): void {
   } catch {
     // Best-effort: a marker we could not remove still only caps a verdict,
     // never corrupts one, and the converged stderr is the load-bearing half.
+  }
+}
+
+/**
+ * Remove the admission stamps beside the prompt records. Called by the
+ * `--resume` path in `fetch-pr`: the span from the interrupted attempt's last
+ * stamp to the continuation's first admission contains the death gap and the
+ * retry backoff, which would price a "round" at hours and refuse round 1 of a
+ * fresh deadline. Without stamps the gate falls back to its conservative
+ * constant — the failure direction is an early stop with a disclosure, never
+ * a kill-before-compose. Errors are swallowed like `clearBudgetStop`'s.
+ */
+export function clearRoundStamps(planPath: string): void {
+  try {
+    rmSync(join(promptRecordDir(planPath), STAMPS_FILE), { force: true });
+  } catch {
+    // Best-effort: stale stamps only make the gate MORE conservative.
   }
 }
 

@@ -16,7 +16,9 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { scheduleReverseAuditRound } from './retirement.js';
+import { appendRunSession, recordResume } from './run-ledger.js';
 import {
+  findingsPointerOf,
   promptRecordDir,
   recordPrompt,
   writeFindingsFile,
@@ -153,6 +155,46 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
                 functionResponse: {
                   name: 'read_file',
                   response: { output: 'diff bytes' },
+                },
+              },
+            ],
+          },
+        }),
+      );
+    }
+    // A compliant auditor reads the cumulative findings list its prompt
+    // points at — the comparison against known findings IS the audit's
+    // method, and the scheduler now refuses receipts from an auditor that
+    // skipped it. Modeled by default, like the brief-opens elsewhere; a test
+    // that wants a skipping auditor writes its own transcript.
+    const pointer = findingsPointerOf(launchPrompt);
+    if (pointer !== null) {
+      lines.push(
+        JSON.stringify({
+          ...base,
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  name: 'read_file',
+                  args: { file_path: pointer },
+                },
+              },
+            ],
+          },
+        }),
+        JSON.stringify({
+          ...base,
+          type: 'tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  name: 'read_file',
+                  response: { output: 'the cumulative list' },
                 },
               },
             ],
@@ -603,6 +645,224 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     ]);
   });
 
+  it.each([
+    [
+      'a passive no+noun admission (no regressions were verified)',
+      'No issues found — re-walked the reconnect path; no regressions ' +
+        'were verified.',
+      'receipt clause contradicts the phrase',
+    ],
+    [
+      'the incapacity compound 未来得及',
+      '未发现问题——走查了解析器，未来得及检查生成的文件。',
+      'receipt clause contradicts the phrase',
+    ],
+    [
+      'a limiter before the walk verb (没有回归，只走查了X)',
+      '未发现问题——没有回归，只走查了解析器与调用点。',
+      'receipt clause contradicts the phrase',
+    ],
+    [
+      'an un-examined admission (unexamined)',
+      'No issues found — re-walked the scheduler; the fallback path ' +
+        'went unexamined.',
+      'receipt clause contradicts the phrase',
+    ],
+    [
+      'a no+verb admission (no verification)',
+      'No issues found — I did no verification of the parser or its callers.',
+      'receipt clause contradicts the phrase',
+    ],
+    [
+      'a strip-dead noun in the passive seat (no issues were verified)',
+      'No issues found — re-walked the reconnect state machine and its ' +
+        'call sites; no issues were verified.',
+      'receipt clause restates the all-clear',
+    ],
+    [
+      'a strip-dead noun with an adverb between (no issues at all were verified)',
+      'No issues found — re-walked the reconnect state machine and its ' +
+        'call sites; no issues at all were verified.',
+      'receipt clause restates the all-clear',
+    ],
+    [
+      'a strip-dead noun, findings (no findings were verified)',
+      'No issues found — re-walked the reconnect state machine and its ' +
+        'call sites; no findings were verified.',
+      'receipt clause restates the all-clear',
+    ],
+    [
+      'a strip-dead noun, gaps (no gaps are verified outstanding)',
+      'No issues found — re-walked the reconnect state machine and its ' +
+        'call sites; no gaps are verified outstanding.',
+      'receipt clause restates the all-clear',
+    ],
+    [
+      'a strip-dead noun in a filler-seat clause (there were no issues verified)',
+      'No issues found — there were no issues verified this round across ' +
+        'the reconnect state machine and its call sites.',
+      'receipt clause restates the all-clear',
+    ],
+    [
+      'a passive head with a non-walk participle (no issues were checked)',
+      'No issues found — re-walked the reconnect state machine and its ' +
+        'call sites; no issues were checked.',
+      'receipt clause restates the all-clear',
+    ],
+    [
+      'a get-passive head with a non-walk participle (no issues got checked)',
+      'No issues found — re-walked the reconnect state machine and its ' +
+        'call sites; no issues got checked.',
+      'receipt clause restates the all-clear',
+    ],
+    [
+      'a passive head with a non-walk participle (no issues were confirmed)',
+      'No issues found — re-walked the reconnect state machine and its ' +
+        'call sites; no issues were confirmed.',
+      'receipt clause restates the all-clear',
+    ],
+    [
+      'a hyphenated walk verb in the passive seat (no issues were re-verified)',
+      'No issues found — re-walked the reconnect state machine and its ' +
+        'call sites; no issues were re-verified.',
+      'receipt clause restates the all-clear',
+    ],
+    [
+      'a passive seat across a no-break space (no issues NBSP were verified)',
+      'No issues found — re-walked the reconnect state machine and its ' +
+        'call sites; no issues\u00A0were verified.',
+      'receipt clause restates the all-clear',
+    ],
+    [
+      'a passive seat across an ideographic space (no issues U+3000 were verified)',
+      'No issues found — re-walked the reconnect state machine and its ' +
+        'call sites; no issues\u3000were verified.',
+      'receipt clause restates the all-clear',
+    ],
+    [
+      'a passive seat across a parenthetical (no issues, however, were verified)',
+      'No issues found — re-walked the reconnect state machine and its ' +
+        'call sites; no issues, however, were verified.',
+      'receipt clause restates the all-clear',
+    ],
+    [
+      'a passive seat across parens (no issues (all 12) were verified)',
+      'No issues found — re-walked the reconnect state machine and its ' +
+        'call sites; no issues (all 12) were verified.',
+      'receipt clause restates the all-clear',
+    ],
+    [
+      'a prefixed one-token participle in the passive seat (no issues were reverified)',
+      'No issues found — re-walked the reconnect state machine and its ' +
+        'call sites; no issues were reverified.',
+      'receipt clause restates the all-clear',
+    ],
+    [
+      'a prefixed one-token participle in the passive seat (no issues were retraced)',
+      'No issues found — re-walked the reconnect state machine and its ' +
+        'call sites; no issues were retraced.',
+      'receipt clause restates the all-clear',
+    ],
+    [
+      'a blanket-found pardon with an admission spliced after (nothing was verified)',
+      'No issues found — re-walked the reconnect state machine and its ' +
+        'call sites; no issues were found because nothing was verified.',
+      'receipt clause restates the all-clear',
+    ],
+    [
+      'a headless reduced passive (no issues checked)',
+      'No issues found — re-walked the reconnect state machine and its ' +
+        'call sites; no issues checked.',
+      'receipt clause restates the all-clear',
+    ],
+    [
+      'a dash-split passive (no issues — were verified)',
+      'No issues found — re-walked the reconnect state machine and its ' +
+        'call sites; no issues — were verified across every call site.',
+      'receipt clause restates the all-clear',
+    ],
+  ])(
+    'an admission stays marked, however the absence-of-problems phrasing tempts an exception: %s (#9272)',
+    (_label, leaked, failure) => {
+      // The fleet-family fixtures restate the receipt's core in the
+      // clause — the passive/reduced/spliced family three shipped guard
+      // shapes failed to close — and fall to the restatement bar by FORM
+      // (`receipt clause restates the all-clear`), no lookahead, no
+      // enumeration. The marker fixtures carry no core, so the bare
+      // marker list itself contradicts them (`…contradicts the phrase`).
+      // The expected bar rides with each tuple.
+      transcript(record(1, 13, 'chunk 13 round 1 territory walk'), leaked);
+      transcript(record(2, 13, 'chunk 13 round 2 territory walk'), leaked);
+
+      const r3 = schedule(3, [13]);
+      expect(r3.due).toEqual([13]);
+      expect(r3.skipped).toEqual([]);
+      expect(r3.diagnostics).toEqual([
+        `chunk 13 — round 1: ${failure}; round 2: ${failure}`,
+      ]);
+    },
+  );
+
+  it('an honest absence-of-problems receipt stays under audit — the accepted residue (#9272)', () => {
+    // `verified no regressions` is honest audit prose, and it reads
+    // `unknown` anyway: the exception that would spare it licenses
+    // admissions no regex enumeration closes (executed, two rounds
+    // running). The chunk simply stays under audit — the failure
+    // direction this module declares.
+    for (const r of [1, 2]) {
+      transcript(
+        record(r, 13, `chunk 13 round ${r} territory walk`),
+        'No issues found — verified no regressions in the reconnect path ' +
+          'and re-walked its call sites.',
+      );
+    }
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.diagnostics).toEqual([
+      'chunk 13 — round 1: receipt clause contradicts the phrase; round 2: receipt clause contradicts the phrase',
+    ]);
+  });
+
+  it('an echo in a walk verb\u2019s object seat restates the all-clear — the form refuses it (#9272)', () => {
+    // The object-seat restatement reads as the all-clear the walk
+    // produced — and it is refused anyway: no regex tells `verified no
+    // issues in X` from an admission wearing the same words, so the form
+    // forbids the restatement outright (the brief now mandates the
+    // clause never restates the all-clear). Fails toward audit — the
+    // declared direction — and stays out of the enumeration trap the
+    // last three guard shapes fell into (#9272 rounds 4-6).
+    for (const r of [1, 2]) {
+      transcript(
+        record(r, 13, `chunk 13 round ${r} territory walk`),
+        'No issues found — re-walked the scheduler and verified no ' +
+          'issues in it or its callers.',
+      );
+    }
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.diagnostics).toEqual([
+      'chunk 13 — round 1: receipt clause restates the all-clear; round 2: receipt clause restates the all-clear',
+    ]);
+  });
+
+  it('a lead filler carrying walk vocabulary still retires — the lead never restates (#9272)', () => {
+    // `No issues found after verification — …` puts the walk in the
+    // receipt's own filler: the lead strip removes the phrase core, the
+    // residue carries no marker, and the clause narrates without
+    // restating — the honest shape the form keeps retiring.
+    const receipt =
+      'No issues found after verification — re-walked the parser and both ' +
+      'of its call sites.';
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), receipt);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), receipt);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([]);
+    expect(r3.skipped.map((s) => s.chunkId)).toEqual([13]);
+  });
+
   it('a Chinese receipt separated by a full-width colon is dry', () => {
     // U+FF1A is the standard zh separator; the receipt's separator class
     // admits a colon in either width. Probed on the unfixed class: the
@@ -725,7 +985,7 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
 
   it.each([
     [
-      'a hedge the contrast list does not name (though)',
+      'a trailing though with a listed marker in the clause',
       'No new issues were found. I could not open the generated files, ' +
         'though.',
     ],
@@ -740,11 +1000,11 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
         'not open and I did not check them.',
     ],
     [
-      'a Chinese hedge without a listed contrast word (只是)',
+      'a Chinese hedge with 只是 and listed markers (未能/没有)',
       '未发现新问题，只是我未能打开生成的文件，没有检查它们。',
     ],
     [
-      'a comma-led incapacity admission without any contrast word',
+      'a comma-led incapacity admission carrying listed markers',
       'No new issues were found, I could not open the generated files and ' +
         'did not check them.',
     ],
@@ -758,8 +1018,11 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     // prose: any hedge not on the list (though, Yet, unfortunately, 只是)
     // retired the chunk on the clause that admitted it was not checked,
     // and a hedge inside the phrase's filler (…found but only skimmed.)
-    // never reached the clause-only test at all. Both directions fail
-    // toward RETIREMENT — the direction this module declares impossible.
+    // never reached the clause-only test at all. The contrast list is
+    // gone now (#9259): the marker test runs over the match's own prefix
+    // plus the clause, so the hedge's POSITION no longer matters — a
+    // listed marker in any seat refuses, and every miss fails toward
+    // RETIREMENT, the direction this module declares impossible.
     transcript(record(1, 13, 'chunk 13 round 1 territory walk'), hedged);
     transcript(record(2, 13, 'chunk 13 round 2 territory walk'), hedged);
 
@@ -770,19 +1033,19 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
 
   it.each([
     [
-      'an incapacity admission with no listed marker (unable)',
+      'an incapacity admission carrying a listed marker (unable)',
       'No issues found — I was unable to open the generated files.',
     ],
     [
-      'an omission admission with no listed marker (failed)',
+      'an omission admission carrying a listed marker (failed)',
       'No issues found — I failed to check them.',
     ],
     [
-      'an omission admission with no listed marker (skipped)',
+      'an omission admission carrying a listed marker (skipped)',
       'No issues found — I skipped the generated files.',
     ],
     [
-      'an omission admission with no listed marker (unchecked)',
+      'an omission admission carrying a listed marker (unchecked)',
       'No issues found — left them unchecked.',
     ],
     [
@@ -805,24 +1068,25 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
         "retry cap and both changed exports' call sites.",
     ],
     [
-      'a filler hedge the contrast list does not name (dash path)',
+      'a filler hedge the lead marker test catches (dash path)',
       'No issues found though only skimmed — re-walked the retry cap and ' +
         "both changed exports' call sites.",
     ],
     [
-      'a filler hedge the contrast list does not name (anchored path)',
+      'a filler hedge the lead marker test catches (anchored path)',
       'No new issues found though only skimmed. Re-walked the retry cap ' +
         "and both changed exports' call sites.",
     ],
   ])('an executed leak family is refused: %s (#9213)', (_label, leaked) => {
     // The six leak families executed against the real scheduler (#9213
-    // on #9206): incapacity/omission admissions carrying no listed
-    // marker, zh bare-不 and 跳过, a marker lost to the saturation
-    // strip, phrase echoes lending the floor their substance, a hedge
-    // BEFORE the phrase the guard never saw, and filler hedges the
-    // contrast list does not name on both separator paths. Every one
-    // read dry twice and retired the chunk — the direction this module
-    // declares impossible.
+    // on #9206): incapacity/omission admissions the marker list names,
+    // zh bare-不 and 跳过, a marker lost to the saturation strip, phrase
+    // echoes lending the floor their substance, a hedge BEFORE the
+    // phrase the guard never saw, and filler hedges the lead marker
+    // test catches on both separator paths (#9259 — the labels used to
+    // cite the removed contrast list). Every one read dry twice
+    // and retired the chunk — the direction this module declares
+    // impossible.
     transcript(record(1, 13, 'chunk 13 round 1 territory walk'), leaked);
     transcript(record(2, 13, 'chunk 13 round 2 territory walk'), leaked);
 
@@ -833,9 +1097,13 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
 
   it.each([
     [
+      // The residue names a walk (`re-walking`) so the refusal comes ONLY
+      // from the marker surviving the strip: under the greedy filler-tail
+      // strip the marker is swallowed, the walk gate and floor pass, and
+      // this case reads dry — the mutation this fixture pins (#9259).
       'a listed marker the phrase-strip used to swallow (skipped)',
       'No issues found — no issues found but I skipped the generated ' +
-        'files and their call sites.',
+        'files after re-walking the parser.',
     ],
     [
       'an admission on the line BEFORE the receipt (en)',
@@ -966,9 +1234,41 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     const r3 = schedule(3, [13]);
     expect(r3.due).toEqual([13]);
     expect(r3.skipped).toEqual([]);
+    // The cut leaves an empty clause, and an empty clause names no walk.
     expect(r3.diagnostics).toEqual([
-      'chunk 13 — round 1: receipt clause not substantive; ' +
-        'round 2: receipt clause not substantive',
+      'chunk 13 — round 1: receipt clause names no walk; ' +
+        'round 2: receipt clause names no walk',
+    ]);
+  });
+
+  it('a quoted layer line is never stripped — fence and blockquote stay, and fail the form (#9259)', () => {
+    // The strip is fence- and blockquote-aware: a QUOTED `Layer walked:`
+    // line is prose the return carries, not a receipt the form strips, so
+    // the return refuses — the safe direction. A plain line filter would
+    // strip these too and let the non-receipt certify; that regression is
+    // what these two shapes pin. Chunk 13 fences the layer line above the
+    // receipt (no receipt at the anchor); chunk 14 blockquotes it below
+    // (prose after the receipt's line).
+    const fenced =
+      '```\nLayer walked: lexing\n```\n' +
+      'No issues found — re-walked the parser and the retry cap call sites.';
+    const blockquoted =
+      'No issues found — re-walked the parser and the retry cap call sites.\n' +
+      '> Layer walked: lexing';
+    for (const r of [1, 2]) {
+      transcript(record(r, 13, `chunk 13 round ${r} territory walk`), fenced);
+      transcript(
+        record(r, 14, `chunk 14 round ${r} territory walk`),
+        blockquoted,
+      );
+    }
+
+    const r3 = schedule(3, [13, 14]);
+    expect(r3.due).toEqual([13, 14]);
+    expect(r3.skipped).toEqual([]);
+    expect(r3.diagnostics).toEqual([
+      'chunk 13 — round 1: receipt not matched; round 2: receipt not matched',
+      'chunk 14 — round 1: receipt not alone; round 2: receipt not alone',
     ]);
   });
 
@@ -1066,9 +1366,9 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     // exactly the receipts it was added to admit. The anchored matcher
     // must take the lead.
     for (const receipt of [
-      'No new issues were found. All six layers walked; no gaps: none.',
-      'No new issues were found. Re-walked the scheduler: no issues — all ' +
-        'cold.',
+      'No new issues were found. All six layers walked; every gap already ' +
+        'on the list.',
+      'No new issues were found. Re-walked the scheduler: all of it cold.',
     ]) {
       transcript(record(1, 13, 'chunk 13 round 1 territory walk'), receipt);
       transcript(record(2, 13, 'chunk 13 round 2 territory walk'), receipt);
@@ -1110,6 +1410,85 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     const r3 = schedule(3, [13]);
     expect(r3.due).toEqual([13]);
     expect(r3.skipped).toEqual([]);
+  });
+
+  it('a quoted phrase with a marker-free walk clause is refused ONLY by the anchor (#9259)', () => {
+    // The clause after the quoted phrase names a walk and dodges every
+    // marker, so no other bar can refuse this return: an unanchored
+    // sentence-punctuation separator would open a clause out of the
+    // quotation and retire the chunk — the mutation this pins. (The
+    // sibling above carries `not` in its clause, so it falls at the
+    // polarity bar no matter where the anchor sits.)
+    const quoted =
+      'I cannot write "No new issues were found." I re-walked the ' +
+      'parser and its call sites this round.';
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), quoted);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), quoted);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.skipped).toEqual([]);
+    expect(r3.diagnostics).toEqual([
+      'chunk 13 — round 1: receipt not matched; round 2: receipt not matched',
+    ]);
+  });
+
+  it('a hedged clause carrying a code span is refused by polarity, not saved by the object (#9259)', () => {
+    // The object escape hatch lives inside the substance floor, BELOW the
+    // polarity bar: a clause that contradicts the phrase is refused
+    // whatever it names. Reordering those checks retires this shape with
+    // no other red test — the mutation this pins.
+    const hedged =
+      'No new issues found; I could not open `gen/output.ts` and left ' +
+      'it unchecked.';
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), hedged);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), hedged);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.diagnostics).toEqual([
+      'chunk 13 — round 1: receipt clause contradicts the phrase; round 2: receipt clause contradicts the phrase',
+    ]);
+  });
+
+  it('a transcript that never reads the diff reads "no read of the diff", even with territory baked (#9259)', () => {
+    // Crosses the two adjacent bars: the record bakes a diff window (so
+    // territory is non-empty) and the transcript's only successful call
+    // reads the brief instead. The `diffToolCalls === 0` bar must answer
+    // first — swapped, this shape mislabels as a range-overlap mismatch
+    // and sends the operator hunting the wrong mismatch.
+    for (const r of [1, 2]) {
+      const built = record(
+        r,
+        13,
+        `chunk 13 round ${r} walk — ` +
+          `read_file(file_path="${diff}", offset=1000, limit=200)`,
+      );
+      transcript(built, DRY, 1, join(dir, 'brief.md'), 0, 50);
+    }
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.diagnostics).toEqual([
+      'chunk 13 — round 1: no read of the diff; round 2: no read of the diff',
+    ]);
+  });
+
+  it('a yield suppresses the diagnostic for the chunk it explains (#9259)', () => {
+    // The certifiable gate requires the last two outcomes to be free of
+    // yields: round 1 reads `unknown`, round 2 yields, and the round-3
+    // schedule stays silent — the yield already explains the chunk's
+    // heat. Dropping the gate emits the round-1 failure here and no other
+    // test notices — the mutation this pins.
+    transcript(
+      record(1, 13, 'chunk 13 round 1 territory walk'),
+      'Walked the territory carefully and studied every edge case in it.',
+    );
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), YIELD);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.diagnostics).toEqual([]);
   });
 
   it('the bare stock sentence stays unknown through the widened class (#9206)', () => {
@@ -1215,10 +1594,25 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     ]);
   });
 
-  it('diagnoses a receipt whose clause names nothing (#9206)', () => {
+  it('diagnoses a transcript with no successful tool calls (#9259)', () => {
+    // The whiff shape — prose and nothing else — falls at the very first
+    // bar, and the diagnostic names it instead of collapsing into a
+    // downstream refusal.
+    for (const r of [1, 2]) {
+      transcript(record(r, 13, `chunk 13 round ${r} territory walk`), DRY, 0);
+    }
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.diagnostics).toEqual([
+      'chunk 13 — round 1: no successful tool calls; round 2: no successful tool calls',
+    ]);
+  });
+
+  it('diagnoses a receipt whose clause names no walk (#9206)', () => {
     // The receipt matches and every tool-call bar clears — but the clause
-    // after the separator names no territory, so the substance floor is
-    // the bar that fell, and the diagnostic says so.
+    // after the separator carries neither a walk verb nor a named object,
+    // so the walk gate is the bar that fell, and the diagnostic says so.
     for (const r of [1, 2]) {
       transcript(
         record(r, 13, `chunk 13 round ${r} territory walk`),
@@ -1229,7 +1623,58 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     const r3 = schedule(3, [13]);
     expect(r3.due).toEqual([13]);
     expect(r3.diagnostics).toEqual([
-      'chunk 13 — round 1: receipt clause not substantive; round 2: receipt clause not substantive',
+      'chunk 13 — round 1: receipt clause names no walk; round 2: receipt clause names no walk',
+    ]);
+  });
+
+  it('diagnoses a clause that names a walk but stays under the substance floor (#9259)', () => {
+    // `walked lexing` clears the walk gate on its verb and then falls at
+    // the floor (13 flattened characters, no object) — pinning the
+    // floor's own refusal, which the walk-gate fixture above cannot reach.
+    for (const r of [1, 2]) {
+      transcript(
+        record(r, 13, `chunk 13 round ${r} territory walk`),
+        'No issues found — walked lexing',
+      );
+    }
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.diagnostics).toEqual([
+      'chunk 13 — round 1: receipt clause too thin; round 2: receipt clause too thin',
+    ]);
+  });
+
+  it('diagnoses a lead-side hedge as the lead contradicting the phrase (#9259)', () => {
+    // The hedge rides the receipt's own filler, before the clause: the
+    // lead is the bar that fell, and the name says so — distinct from a
+    // clause-side admission.
+    for (const r of [1, 2]) {
+      transcript(
+        record(r, 13, `chunk 13 round ${r} territory walk`),
+        'No issues found but only skimmed. Re-walked the parser.',
+      );
+    }
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.diagnostics).toEqual([
+      'chunk 13 — round 1: receipt lead contradicts the phrase; round 2: receipt lead contradicts the phrase',
+    ]);
+  });
+
+  it('diagnoses a clause-side admission as the clause contradicting the phrase (#9259)', () => {
+    for (const r of [1, 2]) {
+      transcript(
+        record(r, 13, `chunk 13 round ${r} territory walk`),
+        'No issues found — re-walked the parser but skipped the generated files',
+      );
+    }
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.diagnostics).toEqual([
+      'chunk 13 — round 1: receipt clause contradicts the phrase; round 2: receipt clause contradicts the phrase',
     ]);
   });
 
@@ -1285,11 +1730,11 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     expect(schedule(3, [13]).due).toEqual([13]);
   });
 
-  it('a doubled stock sentence is not dry — an echo cannot lend the floor its substance (#9213)', () => {
-    // The stock sentence pasted twice: the parrot refusal sees the model
-    // clause in any casing, and whatever the parrot misses the substance
-    // floor measures on the phrase-STRIPPED clause, so echoed phrases
-    // cannot lend the floor their length.
+  it("a doubled stock sentence is not dry — the parrot bar refuses the brief's own example (#9213)", () => {
+    // The stock sentence pasted twice: the doubled clause RESTATES the
+    // all-clear core twice over, so the restatement bar is the bar that
+    // falls (#9272 — an earlier form credited the parrot bar, and before
+    // that the substance floor; the form's refusal lands earlier now).
     transcript(record(1, 13, 'chunk 13 round 1 territory walk'), DRY);
     transcript(
       record(2, 13, 'chunk 13 round 2 territory walk'),
@@ -1301,6 +1746,60 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     );
 
     expect(schedule(3, [13]).due).toEqual([13]);
+  });
+
+  it('an echo cannot lend the floor its substance — the restatement bar refuses it first (#9272)', () => {
+    // The clause carries a walk verb, but every flat character past it is
+    // an echoed all-clear — a restatement, which the form refuses before
+    // any floor measurement runs (the strip-measure ordering this test
+    // once pinned is unreachable now: no clause with a core in it
+    // survives the restatement bar to be measured).
+    for (const r of [1, 2]) {
+      transcript(
+        record(r, 13, `chunk 13 round ${r} territory walk`),
+        'No issues found — re-walked, no issues found, no issues found.',
+      );
+    }
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.diagnostics).toEqual([
+      'chunk 13 — round 1: receipt clause restates the all-clear; round 2: receipt clause restates the all-clear',
+    ]);
+  });
+
+  it('a Chinese clause of four ideographs clears the substance floor (#9259)', () => {
+    // The CJK floor branch (>= 4 ideographs) — every prior zh dry fixture
+    // used a ~30-char clause that the 20-char branch would have passed
+    // anyway, leaving this branch pinned by nothing.
+    for (const r of [1, 2]) {
+      transcript(
+        record(r, 13, `chunk 13 round ${r} territory walk`),
+        '未发现问题——走查解析',
+      );
+    }
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([]);
+    expect(r3.skipped.map((s) => s.chunkId)).toEqual([13]);
+  });
+
+  it('a Chinese clause of three ideographs stays under the floor (#9259)', () => {
+    // One ideograph short of the CJK branch and far under 20 flattened
+    // characters, with a walk verb carrying it past the walk gate — the
+    // floor is the bar that falls.
+    for (const r of [1, 2]) {
+      transcript(
+        record(r, 13, `chunk 13 round ${r} territory walk`),
+        '未发现问题——走查了',
+      );
+    }
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.diagnostics).toEqual([
+      'chunk 13 — round 1: receipt clause too thin; round 2: receipt clause too thin',
+    ]);
   });
 
   it('a quoted marker inside the clause contradicts the phrase (#9213)', () => {
@@ -1482,6 +1981,240 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     expect(r3.diagnostics).toEqual([
       'chunk 13 — round 1: receipt not matched; round 2: receipt not matched',
     ]);
+  });
+
+  it('an auditor that SKIPPED the findings read cannot retire the chunk', () => {
+    // The comparison against known findings IS the audit's method, and the
+    // brief instructs the read. Two dry receipts from auditors that skipped
+    // it would retire the chunk on a comparison nobody made. The fixture
+    // builder models the compliant read automatically, so this one writes
+    // its transcripts by hand, minus the read.
+    for (const r of [1, 2]) {
+      const findingsFile = writeFindingsFile(
+        plan,
+        `reverse-audit--round-${r}--skip99`,
+        '- **File:** src/pay.ts:42 — the double charge\n' +
+          '- **Severity:** Suggestion\n',
+      );
+      const built = record(
+        r,
+        13,
+        `chunk 13 round ${r} territory\n` +
+          `read_file(file_path="${findingsFile}")`,
+      );
+      const id = `aud-skip-${r}`;
+      const base = {
+        agentId: id,
+        agentName: 'general-purpose',
+        sessionId: 'S1',
+      };
+      writeFileSync(
+        join(dir, 'subagents', 'S1', `agent-${id}.jsonl`),
+        [
+          JSON.stringify({
+            ...base,
+            type: 'user',
+            message: { role: 'user', parts: [{ text: built }] },
+          }),
+          JSON.stringify({
+            ...base,
+            type: 'assistant',
+            message: {
+              role: 'model',
+              parts: [
+                {
+                  functionCall: {
+                    name: 'read_file',
+                    args: { file_path: diff, offset: 0, limit: 100 },
+                  },
+                },
+              ],
+            },
+          }),
+          JSON.stringify({
+            ...base,
+            type: 'tool_result',
+            message: {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    name: 'read_file',
+                    response: { output: 'diff bytes' },
+                  },
+                },
+              ],
+            },
+          }),
+          JSON.stringify({
+            ...base,
+            type: 'assistant',
+            message: { role: 'model', parts: [{ text: DRY }] },
+          }),
+        ].join('\n') + '\n',
+      );
+    }
+
+    const r3 = schedule(3, [13]);
+    // The receipts do not classify, both rounds read `unknown`, and the
+    // chunk stays hot.
+    expect(r3.due).toEqual([13]);
+  });
+
+  /** A transcript whose FINAL text is followed by more tool traffic — the
+   *  died-mid-flight shape: `returned: false`, narration only. */
+  function deadTranscript(launchPrompt: string, narration: string): void {
+    const id = `aud-dead-${++seq}`;
+    const base = {
+      agentId: id,
+      agentName: 'general-purpose',
+      sessionId: 'S1',
+    };
+    const call = JSON.stringify({
+      ...base,
+      type: 'assistant',
+      message: {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              name: 'read_file',
+              args: { file_path: diff, offset: 0, limit: 100 },
+            },
+          },
+        ],
+      },
+    });
+    const result = JSON.stringify({
+      ...base,
+      type: 'tool_result',
+      message: {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'read_file',
+              response: { output: 'diff bytes' },
+            },
+          },
+        ],
+      },
+    });
+    writeFileSync(
+      join(dir, 'subagents', 'S1', `agent-${id}.jsonl`),
+      [
+        JSON.stringify({
+          ...base,
+          type: 'user',
+          message: { role: 'user', parts: [{ text: launchPrompt }] },
+        }),
+        call,
+        result,
+        JSON.stringify({
+          ...base,
+          type: 'assistant',
+          message: { role: 'model', parts: [{ text: narration }] },
+        }),
+        // The traffic AFTER the text is what makes it narration: the agent
+        // went on working and the process died mid-walk.
+        call,
+        result,
+      ].join('\n') + '\n',
+    );
+  }
+
+  it('a died-mid-flight narration carrying a receipt shape classifies nothing', () => {
+    // `finalText` keeps the last non-empty assistant text, narration
+    // included — an auditor that printed a receipt-shaped progress line and
+    // was killed mid-walk must not read `dry`. Two such corpses would
+    // retire the chunk on an audit that never finished.
+    deadTranscript(record(1, 13, 'chunk 13 round 1 territory walk'), DRY);
+    deadTranscript(record(2, 13, 'chunk 13 round 2 territory walk'), DRY);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.converged).toBe(false);
+  });
+
+  it('a filed YIELD survives a skipped findings read — the bar gates dry only', () => {
+    // The findings-read bar exists so a no-issues receipt cannot certify a
+    // comparison nobody made. Applied BEFORE classification it also
+    // suppressed filed findings: round 2's yielder skipped the list read,
+    // its yield vanished, the compliant dry sibling carried the round, and
+    // the chunk retired WITH a live finding on it.
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), DRY);
+    const findingsFile = writeFindingsFile(
+      plan,
+      'reverse-audit--round-2--yield7',
+      '- **File:** src/pay.ts:42 — the double charge\n' +
+        '- **Severity:** Suggestion\n',
+    );
+    const built = record(
+      2,
+      13,
+      `chunk 13 round 2 territory walk\n` +
+        `read_file(file_path="${findingsFile}")`,
+    );
+    // The yielder, by hand: territory read, NO findings read, a new finding.
+    const id = `aud-yielder-${++seq}`;
+    const base = {
+      agentId: id,
+      agentName: 'general-purpose',
+      sessionId: 'S1',
+    };
+    writeFileSync(
+      join(dir, 'subagents', 'S1', `agent-${id}.jsonl`),
+      [
+        JSON.stringify({
+          ...base,
+          type: 'user',
+          message: { role: 'user', parts: [{ text: built }] },
+        }),
+        JSON.stringify({
+          ...base,
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  name: 'read_file',
+                  args: { file_path: diff, offset: 0, limit: 100 },
+                },
+              },
+            ],
+          },
+        }),
+        JSON.stringify({
+          ...base,
+          type: 'tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  name: 'read_file',
+                  response: { output: 'diff bytes' },
+                },
+              },
+            ],
+          },
+        }),
+        JSON.stringify({
+          ...base,
+          type: 'assistant',
+          message: { role: 'model', parts: [{ text: YIELD }] },
+        }),
+      ].join('\n') + '\n',
+    );
+    // The compliant dry sibling for the same record (the helper models the
+    // findings read automatically).
+    transcript(built, DRY);
+
+    const r3 = schedule(3, [13]);
+    // yielded outranks dry: round 2 is hot and the chunk stays due.
+    expect(r3.due).toEqual([13]);
+    expect(r3.skipped).toEqual([]);
   });
 
   it('quoting a WHOLE entry from the findings FILE is not a yield (post-#8597 shape)', () => {
@@ -1681,5 +2414,151 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     const r3 = schedule(3, []);
     expect(r3.due).toEqual([]);
     expect(r3.converged).toBe(false);
+  });
+});
+
+describe('scheduleReverseAuditRound — a resumed run reads the prior attempt', () => {
+  let dir: string;
+  let plan: string;
+  let diff: string;
+  let seq = 0;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'retirement-resume-'));
+    plan = join(dir, 'plan.json');
+    writeFileSync(plan, '{}');
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+    diff = join(dir, 'diff.txt');
+    process.env['QWEN_CODE_PROJECT_DIR'] = dir;
+    process.env['QWEN_CODE_SESSION_ID'] = 'S1';
+    mkdirSync(join(dir, 'subagents', 'S1'), { recursive: true });
+    mkdirSync(join(dir, 'subagents', 'S0'), { recursive: true });
+  });
+
+  afterEach(() => {
+    delete process.env['QWEN_CODE_PROJECT_DIR'];
+    delete process.env['QWEN_CODE_SESSION_ID'];
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  function record(round: number, chunk: number, body: string): string {
+    const prompt = `reverse-audit ${body}`;
+    recordPrompt(
+      plan,
+      `reverse-audit--chunk-${chunk}--round-${round}--abc123`,
+      prompt,
+    );
+    return prompt;
+  }
+
+  /** A dry-receipt transcript, written into the named session's dir. */
+  function transcriptIn(session: string, launchPrompt: string): void {
+    const id = `aud-${++seq}`;
+    const base = {
+      agentId: id,
+      agentName: 'general-purpose',
+      sessionId: session,
+    };
+    const lines = [
+      JSON.stringify({
+        ...base,
+        type: 'user',
+        message: { role: 'user', parts: [{ text: launchPrompt }] },
+      }),
+      JSON.stringify({
+        ...base,
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                name: 'read_file',
+                args: { file_path: diff, offset: 0, limit: 100 },
+              },
+            },
+          ],
+        },
+      }),
+      JSON.stringify({
+        ...base,
+        type: 'tool_result',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'read_file',
+                response: { output: 'diff bytes' },
+              },
+            },
+          ],
+        },
+      }),
+      JSON.stringify({
+        ...base,
+        type: 'assistant',
+        message: { role: 'model', parts: [{ text: DRY }] },
+      }),
+    ];
+    const f = join(dir, 'subagents', session, `agent-${id}.jsonl`);
+    writeFileSync(f, lines.join('\n') + '\n');
+    // Backdated below the ledger fixture's prior-window close: a CI stall
+    // after ledger() would otherwise fence these out via the until clamp.
+    const past = new Date(Date.now() - 10_000);
+    utimesSync(f, past, past);
+  }
+
+  function ledger(...ids: string[]): void {
+    const d = promptRecordDir(plan);
+    mkdirSync(d, { recursive: true });
+    // Written by the real writer: it stamps the plan mtime each entry is
+    // keyed on, and the resume marker is what authorizes reading prior
+    // evidence at all. The current attempt is stamped last, since each
+    // attempt's window closes when the next one opened.
+    const nowMs = Date.now();
+    ids.forEach((id, i) =>
+      appendRunSession(
+        plan,
+        { QWEN_CODE_SESSION_ID: id },
+        i === ids.length - 1 ? nowMs + 1500 : nowMs,
+      ),
+    );
+    recordResume(plan, process.env, nowMs + 1500);
+  }
+
+  it('reads the prior attempt before this session has launched anything', () => {
+    // The scheduler runs BEFORE the first launch of a resumed run, so the
+    // harness has not created `subagents/<current>` yet — the exact shape
+    // `currentDirOptional` exists for.
+    ledger('S0', 'S1');
+    for (const r of [1, 2]) {
+      transcriptIn('S0', record(r, 13, `chunk 13 round ${r} territory walk`));
+    }
+    rmSync(join(dir, 'subagents', 'S1'), { recursive: true, force: true });
+    const r3 = scheduleReverseAuditRound(plan, [13], 3, process.env, diff);
+    expect(r3.due).toEqual([]);
+    expect(r3.converged).toBe(true);
+  });
+
+  it('retires a chunk on dry receipts the interrupted attempt earned', () => {
+    ledger('S0', 'S1');
+    for (const r of [1, 2]) {
+      transcriptIn('S0', record(r, 13, `chunk 13 round ${r} territory walk`));
+    }
+    const r3 = scheduleReverseAuditRound(plan, [13], 3, process.env, diff);
+    expect(r3.due).toEqual([]);
+    expect(r3.skipped.map((s) => s.chunkId)).toEqual([13]);
+    expect(r3.converged).toBe(true);
+  });
+
+  it('keeps every chunk hot when no ledger names the prior session', () => {
+    for (const r of [1, 2]) {
+      transcriptIn('S0', record(r, 13, `chunk 13 round ${r} territory walk`));
+    }
+    const r3 = scheduleReverseAuditRound(plan, [13], 3, process.env, diff);
+    expect(r3.due).toEqual([13]);
+    expect(r3.skipped).toEqual([]);
   });
 });

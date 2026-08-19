@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "forbiddenFields": [
+    "rawInput",
+    "rawOutput",
+    "eventId",
+    "uniqueFiles",
+    "serverTimestamp",
+    "promptId",
+    "branchRecordId",
+    "debugReason",
+    "toolCall",
+    "details",
+    "locations",
+    "sourceRecordIds",
+    "sessionId",
+    "sessionLabel"
+  ],
+  "frozenErrorKinds": [
+    "missing_binary",
+    "blocked_egress",
+    "auth_env_error",
+    "init_timeout",
+    "restore_timeout",
+    "protocol_error",
+    "missing_file",
+    "parse_error",
+    "budget_exhausted",
+    "mcp_budget_would_exceed",
+    "mcp_server_spawn_failed",
+    "invalid_config",
+    "prompt_deadline_exceeded",
+    "writer_idle_timeout",
+    "model_stream_interrupted",
+    "loop_detected"
+  ],
+  "timestamps": 0,
+  "implementation": "deferred-to-mr2"
+}
