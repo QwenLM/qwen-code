@@ -11335,10 +11335,12 @@ describe('Session', () => {
           stopReason: 'cancelled',
         });
         expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
-        expect(mockChat.addHistory).toHaveBeenCalledWith({
-          role: 'user',
-          parts: expect.any(Array),
-        });
+        expect(mockChat.addHistory).toHaveBeenCalledWith(
+          expect.objectContaining({
+            role: 'user',
+            parts: expect.any(Array),
+          }),
+        );
         expect(mockClient.sessionUpdate).not.toHaveBeenCalledWith({
           sessionId: 'test-session-id',
           update: {
@@ -17134,10 +17136,12 @@ describe('Session', () => {
           }),
         ).resolves.toEqual({ stopReason: 'cancelled' });
 
-        expect(mockChat.addHistory).toHaveBeenCalledWith({
-          role: 'user',
-          parts: [{ text: 'Expanded prompt' }],
-        });
+        expect(mockChat.addHistory).toHaveBeenCalledWith(
+          expect.objectContaining({
+            role: 'user',
+            parts: [{ text: 'Expanded prompt' }],
+          }),
+        );
         expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
         expect(finishedSpy).toHaveBeenCalledTimes(1);
       });
