@@ -4391,7 +4391,7 @@ describe('DingtalkChannel outbound file delivery', () => {
     }
   });
 
-  it('continues with later files when a failure notice cannot be sent', async () => {
+  it('continues with later files but fails the turn when no notice lands', async () => {
     const first = createTempFile('first.txt');
     const secondPath = join(first.dir, 'second.txt');
     writeFileSync(secondPath, 'second');
@@ -4410,15 +4410,94 @@ describe('DingtalkChannel outbound file delivery', () => {
         },
       });
 
-      await channel.sendMessage(
-        'cid123',
-        `[FILE: ${first.path}]\n[FILE: ${secondPath}]`,
-      );
+      // Behaviour flip (R2-9): this used to resolve. The `[File sent: …]`
+      // receipt is already in the chat, the file never arrived, and the one
+      // correction that would have said so did not land either — recording
+      // that turn as a success is what left the loss invisible.
+      await expect(
+        channel.sendMessage(
+          'cid123',
+          `[FILE: ${first.path}]\n[FILE: ${secondPath}]`,
+        ),
+      ).rejects.toThrow(/no delivered notice: first\.txt/);
 
+      // The later file still got its turn: the throw happens after the loop.
       expect(fileCalls()).toHaveLength(2);
     } finally {
       rmSync(first.dir, { recursive: true, force: true });
     }
+  });
+
+  it('fails the turn when a 200+errcode rejects both the file and its notice', async () => {
+    // R2-9 witness P1: `sendPreparedReply` logged `!resp.ok` and never looked at
+    // `errcode` on HTTP 200, then returned `true`. A throttled sessionWebhook
+    // answers 200 + errcode for the file AND for the `[File delivery failed: …]`
+    // notice sent through that same webhook, so the sole correction died
+    // silently while `sendMessage` resolved and the turn was booked a success.
+    const file = createTempFile();
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      seedWebhook(channel, 'cid123');
+      const writes: string[] = [];
+      vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+        writes.push(String(chunk));
+        return true;
+      });
+      const { fileCalls, markdownCalls } = stubFileReplyFetch({
+        fileHandler: () =>
+          new Response(JSON.stringify({ errcode: 310000 }), { status: 200 }),
+        markdownHandler: (markdownCall) =>
+          markdownCall === 1
+            ? new Response(JSON.stringify({ errcode: 130101 }), { status: 200 })
+            : new Response(JSON.stringify({ errcode: 0 }), { status: 200 }),
+      });
+
+      await expect(
+        channel.sendMessage('cid123', `[FILE: ${file.path}]`),
+      ).rejects.toThrow(/no delivered notice: report\.txt/);
+
+      expect(fileCalls()).toHaveLength(1);
+      // The notice was attempted, and its own rejection is now on the record
+      // rather than dropped — the witness reported no trace of 130101 at all.
+      expect(markdownCalls()).toHaveLength(2);
+      expect(writes.join('')).toContain('130101');
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails a plain text reply when the webhook answers a non-2xx status', async () => {
+    // The other half of the swallow: `!resp.ok` was logged and then followed by
+    // `return true`, so a 429/5xx from the sessionWebhook was booked as sent
+    // and the `sendTextThenFiles` rescue never engaged for it either.
+    const channel = createChannel();
+    seedWebhook(channel, 'cid123');
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response('too many requests', { status: 429 }),
+    );
+
+    await expect(channel.sendMessage('cid123', 'hello')).rejects.toThrow(
+      /HTTP 429/,
+    );
+  });
+
+  it('fails a plain text reply on a 200+errcode from the webhook', async () => {
+    // The swallow was not specific to files: every `sendPreparedReply` caller
+    // read a rejected post as delivered, so an ordinary answer that DingTalk
+    // refused still resolved as sent.
+    const channel = createChannel();
+    seedWebhook(channel, 'cid123');
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ errcode: 310000, errmsg: 'quota' }), {
+        status: 200,
+      }),
+    );
+
+    await expect(channel.sendMessage('cid123', 'hello')).rejects.toThrow(
+      /API code 310000/,
+    );
   });
 
   it('opens and uploads at most five files from one response', async () => {

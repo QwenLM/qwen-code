@@ -234,6 +234,41 @@ type DingtalkChannelConfig = ChannelConfig & {
   interactiveCards?: unknown;
 };
 
+/**
+ * The non-zero `errcode`/`code` a DingTalk webhook returns alongside HTTP 200
+ * when it rejects a post, or `undefined` when the response carries no verdict.
+ *
+ * A body that is absent or is not JSON is not a rejection: some deployments
+ * answer a successful post with a bare `ok`, and inventing a failure from an
+ * unparseable body would drop messages that did arrive. Only an explicit
+ * non-zero code counts.
+ */
+async function readDingTalkErrorCode(
+  resp: Response,
+): Promise<string | undefined> {
+  const text = await resp
+    .clone()
+    .text()
+    .catch(() => '');
+  if (!text.trim()) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return undefined;
+  }
+  const data = parsed as Record<string, unknown>;
+  for (const value of [data['errcode'], data['code']]) {
+    if (value !== undefined && String(value) !== '0') {
+      return sanitizeLogText(String(value), 80);
+    }
+  }
+  return undefined;
+}
+
 export class DingtalkChannel extends ChannelBase {
   private client: DWClient;
   private readonly atSender: boolean;
@@ -805,10 +840,24 @@ export class DingtalkChannel extends ChannelBase {
       }
 
       if (!resp.ok) {
-        const detail = await resp.text().catch(() => '');
+        const detail = sanitizeLogText(await resp.text().catch(() => ''), 300);
         process.stderr.write(
           `[DingTalk:${this.name}] sendMessage failed: HTTP ${resp.status} ${detail}\n`,
         );
+        throw new Error(
+          `DingTalk sendMessage failed: HTTP ${resp.status}${detail ? ` ${detail}` : ''}`,
+        );
+      }
+
+      // R2-9: DingTalk answers a rejected webhook post with HTTP 200 and a
+      // non-zero `errcode` (quota, revoked webhook, oversized payload). Reading
+      // only `resp.ok` treats every one of those as delivered.
+      const code = await readDingTalkErrorCode(resp);
+      if (code !== undefined) {
+        process.stderr.write(
+          `[DingTalk:${this.name}] sendMessage failed: API code ${code}\n`,
+        );
+        throw new Error(`DingTalk sendMessage failed: API code ${code}`);
       }
     }
     return true;
@@ -1163,6 +1212,16 @@ export class DingtalkChannel extends ChannelBase {
     const webhook = this.webhooks.get(chatId);
     if (!webhook) return;
 
+    // R2-9: the `[File delivery failed: …]` notice is the only correction the
+    // user ever sees once the `[File sent: …]` receipt has shipped, and it goes
+    // to the same webhook that just rejected the file — so it is rejected the
+    // same way whenever the cause is the webhook itself (quota, revocation).
+    // Logging that and resolving would record the turn as fully successful
+    // while the chat keeps a receipt for a file that does not exist. Collect
+    // the undelivered notices instead and fail the send once every file has had
+    // its turn.
+    const undeliveredNotices: string[] = [];
+
     for (const file of files) {
       try {
         await this.postRobotFileMessage(
@@ -1201,8 +1260,15 @@ export class DingtalkChannel extends ChannelBase {
               300,
             )}\n`,
           );
+          undeliveredNotices.push(sanitizeLogText(file.fileName, 255));
         }
       }
+    }
+
+    if (undeliveredNotices.length > 0) {
+      throw new Error(
+        `DingTalk file delivery failed with no delivered notice: ${undeliveredNotices.join(', ')}`,
+      );
     }
   }
 
