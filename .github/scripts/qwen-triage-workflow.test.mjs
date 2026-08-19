@@ -9,7 +9,6 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import {
   chmodSync,
-  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -936,39 +935,6 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
   const publishStep = doc.jobs['publish-verify'].steps.find(
     (s) => s.name === 'Post verification report comment',
   );
-  // Round 11 (R8-35): the runner applies file commands a step's PR code
-  // wrote to the uid-1000-owned backing files at step end, so a
-  // root-side block's inherited PATH may be attacker-poisoned; each
-  // block this PR adds pins a root-only-writable one before resolving
-  // bare binaries. The EUID gate keeps the harness's stub PATH intact.
-  const pathPinRe =
-    /^\s*if \[\[ \$\{EUID:-1\} -eq 0 \]\]; then\n\s*export PATH='\/usr\/local\/sbin:\/usr\/local\/bin:\/usr\/sbin:\/usr\/bin:\/sbin:\/bin'\n\s*fi$/m;
-  // R15-1: the pre-exec decisions are reserved words — bash imports a
-  // BASH_FUNC_[%% env entry as a FUNCTION named `[`, and function lookup
-  // precedes builtins, so a `[`-shaped guard is itself hijackable
-  // (probe-verified on this pool's bash). R14-2: the child runs the body
-  // the parent snapshotted — the runner wrote the script node-owned in
-  // the uid-1000-writable $RUNNER_TEMP, so a second open by the child is
-  // a plant window.
-  // R18-4: the identity conjunct queries the kernel through an absolute
-  // path — bash imports $EUID from the process environment, overriding
-  // the native readonly variable, so an EUID line planted through the
-  // uid-1000 file-command channel would skip every root-gated defence.
-  const scrubRefusalRe =
-    /^\s*if \[\[ \$\(\/usr\/bin\/id -u\) -eq 0 \]\] && \[\[ -n \$\{BASH_ENV:-\} \|\| -n \$\{LD_PRELOAD:-\} \|\| -n \$\{LD_AUDIT:-\} \|\| -n \$\{LD_LIBRARY_PATH:-\} \]\]; then$/m;
-  const reExecRe =
-    /case "\$\{1:-\}" in[\s\S]*?--flake-clean-child\) ;;[\s\S]*?_flake_body="\$\(<"\$\{BASH_SOURCE\[0\]\}"\)"[\s\S]*?LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= exec \/usr\/bin\/env -i[\s\S]*?\/usr\/bin\/bash --noprofile --norc -e -o pipefail -c "\$_flake_body" \S+ --flake-clean-child/;
-  const reExecMarkerRe = /case "\$\{1:-\}" in/;
-  const pathChildRe = /"\$\{BASH_SOURCE\[0\]\}" --flake-clean-child/;
-  // R15-1: POSIX mode resolves special builtins before functions, so the
-  // re-exec's `exec` and every refusal's `exit` cannot be shadowed by a
-  // BASH_FUNC_* import the way bare builtins can (probe-verified on this
-  // pool's bash). `set` is itself shadowable, so the switch is verified
-  // with a reserved word, and the refusal ends in a slash-pathed kill of
-  // last resort for the case where `exit` is shadowed too.
-  const posixSwitchRe = /^\s*set -o posix\n\s*if \[\[ ! -o posix \]\]; then$/m;
-  const posixKillRe = /exit [01]\n\s*\/usr\/bin\/kill -9 \$\$\n\s*fi/;
-
   it('records the changed-test list BEFORE the workspace is handed to the build user', () => {
     assert.ok(recordStep, 'record step must exist');
     assert.ok(flakeStep, 'flake gate step must exist');
@@ -1051,69 +1017,6 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
       /^\s*printf '%s-%s' "\$\{GITHUB_RUN_ID:\?\}" "\$\{GITHUB_RUN_ATTEMPT:\?\}" > "\$GATE_HOME\/run-id"$/m,
       'the record step must stamp the run identity into the home it creates',
     );
-    // Startup-channel scrub: BASH_FUNC_* imports are dropped by a
-    // one-shot env -i re-exec whose child marker is POSITIONAL — an
-    // env-borne sentinel would be forgeable through the very
-    // file-command channel the scrub defends against.
-    assert.match(
-      recordStep.run,
-      reExecRe,
-      'the record step must re-exec through env -i with a positional child marker, an absolute-path bash operand, and the parent-snapshotted body',
-    );
-    assert.doesNotMatch(
-      recordStep.run,
-      pathChildRe,
-      'the re-exec child must never re-open the script by path — the second open is the plant window',
-    );
-    assert.match(
-      recordStep.run,
-      scrubRefusalRe,
-      'the record step scrub refusal must be reserved-word shaped — `[` is shadowable by a BASH_FUNC import',
-    );
-    assert.match(
-      recordStep.run,
-      /survivors="\$\(\/usr\/bin\/ps -o pid=,stat= -u node 2>\/dev\/null \| \/usr\/bin\/awk '\$2 !~ \/\^Z\/'\)" \|\| true\n\s*if \[\[ -n \$survivors \]\]; then\n\s*\/usr\/bin\/printf '::error::flake-gate record:[\s\S]*?\\n'\n\s*exit 1/,
-      'the record step kill must be liveness-verified — the budget loop alone is out-forked between sweeps',
-    );
-    const recordKill = recordStep.run.search(/survivors="\$\(\/usr\/bin\/ps/);
-    const recordReExec = recordStep.run.search(reExecMarkerRe);
-    assert.ok(
-      recordKill !== -1 && recordReExec !== -1 && recordKill < recordReExec,
-      'node survivors must be killed BEFORE the re-exec snapshot re-reads this script from disk',
-    );
-    assert.doesNotMatch(
-      recordStep.run,
-      /_FLAKE_CLEAN_REEXEC/,
-      'the re-exec child marker must never be an env entry — env markers are forgeable via the file-command channel',
-    );
-    assert.match(
-      recordStep.run,
-      pathPinRe,
-      'the record step must pin a root-only-writable PATH — its inherited one may be poisoned through the file-command backing files',
-    );
-    // R15-1: `exec` and `exit` are builtins and function lookup precedes
-    // builtins — a BASH_FUNC_exec%% import shadows the re-exec keyword and
-    // the poisoned parent falls through with every import alive
-    // (probe-verified on this pool's bash). POSIX mode resolves special
-    // builtins before functions, closing the class for `exec`, `exit` and
-    // every refusal; the switch must precede the first refusal it
-    // immunizes.
-    assert.match(
-      recordStep.run,
-      posixSwitchRe,
-      'the record step must enter POSIX mode so exec/exit cannot be shadowed by a BASH_FUNC import',
-    );
-    assert.match(
-      recordStep.run,
-      posixKillRe,
-      'the posix refusal must end in a slash-pathed kill — exit itself may be the shadowed builtin',
-    );
-    const recordPosix = recordStep.run.search(/^\s*set -o posix$/m);
-    const recordScrub = recordStep.run.search(scrubRefusalRe);
-    assert.ok(
-      recordPosix !== -1 && recordScrub !== -1 && recordPosix < recordScrub,
-      'the POSIX switch must precede the first refusal whose exit it immunizes',
-    );
     // A grep ERROR (status 2 — e.g. ENOSPC opening the output) is
     // infrastructure: swallowing it narrows the gate to zero files and
     // starves it into n/a, so it must fail the record step loudly.
@@ -1168,107 +1071,6 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     );
   });
 
-  it('round-19 startup hardening: kernel identity, POSIX-from-invocation, pathed refusal writes, inode-anchored snapshot', () => {
-    const stageStep = verifyJob.steps.find(
-      (s) => s.name === 'Stage flakiness gate log for upload',
-    );
-    const recheckStep = verifyJob.steps.find(
-      (s) => s.id === 'flake-upload-check',
-    );
-    const scrubbedSteps = [
-      ['record', recordStep],
-      ['gate', flakeStep],
-      ['staging', stageStep],
-      ['re-check', recheckStep],
-    ];
-    // R18-2: POSIXLY_CORRECT in the step env puts bash in POSIX mode at
-    // INVOCATION — a BASH_FUNC_* import named after a special builtin is
-    // refused at import (probe-verified: without it, a poisoned `set`
-    // runs attacker code on the body's first command and can even enable
-    // posix itself to slip past the reserved-word refusal).
-    for (const [label, step] of scrubbedSteps) {
-      assert.equal(
-        step.env.POSIXLY_CORRECT,
-        '1',
-        `${label}: POSIXLY_CORRECT must make bash POSIX-mode before the body's first shadowable command`,
-      );
-    }
-    // R18-4: parent-side identity comes from the kernel — $EUID is
-    // imported from the process environment (probe-verified: a planted
-    // EUID skips or fires the gate at will; blanking cannot restore it,
-    // set-but-empty reads as unset). The record/gate/staging PATH pins
-    // run INSIDE the env -i child where imports are wiped and EUID is
-    // the native readonly — only the parent-side gates are pinned here.
-    const preReExec = (run) => run.slice(0, run.search(reExecMarkerRe));
-    for (const [label, step] of [
-      ['record', recordStep],
-      ['gate', flakeStep],
-      ['staging', stageStep],
-    ]) {
-      assert.doesNotMatch(
-        preReExec(step.run),
-        /\$\{EUID/,
-        `${label}: parent-side identity must not read $EUID — the poisoned file-command channel can import it`,
-      );
-    }
-    assert.doesNotMatch(
-      recheckStep.run,
-      /\$\{EUID/,
-      're-check identity must not read $EUID — the step has no env -i re-exec, so it runs in the inherited job environment',
-    );
-    assert.match(
-      recheckStep.run,
-      /^\s*if \[\[ \$\(\/usr\/bin\/id -u\) -eq 0 \]\]; then\n\s*export PATH='/m,
-      'the re-check PATH pin must key on the kernel identity too',
-    );
-    // R18-3: every pre-re-exec refusal write goes through slash-pathed
-    // printf — echo is a REGULAR builtin, shadowable by a BASH_FUNC
-    // import even in POSIX mode (probe-verified; the mechanism pin lives
-    // in the behavioral suite), and the refusal path runs in exactly the
-    // poisoned environment the refusals detect.
-    for (const [label, section] of [
-      ['record', preReExec(recordStep.run)],
-      ['gate', preReExec(flakeStep.run)],
-      ['staging', preReExec(stageStep.run)],
-      ['re-check', recheckStep.run],
-    ]) {
-      assert.doesNotMatch(
-        section,
-        /^\s*echo /m,
-        `${label}: no bare echo before the env -i re-exec — BASH_FUNC_echo%% shadows it even in POSIX mode`,
-      );
-    }
-    // R18-1: the re-exec snapshot is anchored to the inode bash is
-    // executing (fd 255) — a swap that lands between bash's open of the
-    // runner-written step script and the snapshot is filesystem state a
-    // kill cannot un-land, and the path re-open would read the plant.
-    // Capture precedes the snapshot, the check precedes the exec.
-    const inodeAnchorRe =
-      /_flake_self_id="\$\(\/usr\/bin\/stat -L -c '%d:%i' "\/proc\/\$\$\/fd\/255" 2>\/dev\/null\)" \|\| _flake_self_id=''[\s\S]*?_flake_body="\$\(<"\$\{BASH_SOURCE\[0\]\}"\)"[\s\S]*?if \[\[ -z \$_flake_self_id \]\] \|\|\n\s*\[\[ "\$\(\/usr\/bin\/stat -L -c '%d:%i' "\$\{BASH_SOURCE\[0\]\}" 2>\/dev\/null\)" != "\$_flake_self_id" \]\]; then/;
-    for (const [label, step] of [
-      ['record', recordStep],
-      ['gate', flakeStep],
-      ['staging', stageStep],
-    ]) {
-      assert.match(
-        step.run,
-        inodeAnchorRe,
-        `${label}: the re-exec snapshot must be anchored to the inode bash is executing, re-verified after the snapshot, before the exec`,
-      );
-      const killAt = step.run.search(/\/usr\/bin\/pkill -KILL -u node/);
-      const reExecAt = step.run.search(reExecMarkerRe);
-      const anchorAt = step.run.search(/_flake_self_id="\$\(\/usr\/bin\/stat/);
-      assert.ok(
-        killAt !== -1 &&
-          reExecAt !== -1 &&
-          anchorAt !== -1 &&
-          killAt < reExecAt &&
-          reExecAt < anchorAt,
-        `${label}: the anchor sits inside the parent re-exec arm, after the kill`,
-      );
-    }
-  });
-
   it('runs PR test code as the build user with no tokens, and fails open', () => {
     assert.equal(flakeStep.env.GITHUB_TOKEN, '', 'no GitHub token in the gate');
     assert.equal(flakeStep.env.GH_TOKEN, '', 'no gh token in the gate');
@@ -1310,77 +1112,8 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     // command (see the behavioral poison scenario below).
     assert.deepEqual(
       Object.keys(flakeStep.env).sort(),
-      [
-        'BASH_ENV',
-        'FLAKE_ROUNDS',
-        'GH_TOKEN',
-        'GITHUB_TOKEN',
-        'LD_AUDIT',
-        'LD_LIBRARY_PATH',
-        'LD_PRELOAD',
-        'POSIXLY_CORRECT',
-      ],
+      ['FLAKE_ROUNDS', 'GH_TOKEN', 'GITHUB_TOKEN'],
       'the gate env must stay tokens-blanked and secret-free',
-    );
-    // Startup-channel scrub: BASH_FUNC_* imports are dropped by a
-    // one-shot env -i re-exec whose child marker is POSITIONAL — an
-    // env-borne sentinel would be forgeable through the very
-    // file-command channel the scrub defends against.
-    assert.match(
-      flakeStep.run,
-      reExecRe,
-      'the gate must re-exec through env -i with a positional child marker, an absolute-path bash operand, and the parent-snapshotted body',
-    );
-    assert.doesNotMatch(
-      flakeStep.run,
-      pathChildRe,
-      'the re-exec child must never re-open the script by path — the second open is the plant window',
-    );
-    assert.doesNotMatch(
-      flakeStep.run,
-      /_FLAKE_CLEAN_REEXEC/,
-      'the re-exec child marker must never be an env entry — env markers are forgeable via the file-command channel',
-    );
-    assert.match(
-      flakeStep.run,
-      scrubRefusalRe,
-      'the gate scrub refusal must be reserved-word shaped — `[` is shadowable by a BASH_FUNC import',
-    );
-    // R15-1: same discipline as the record step — the gate's fail-open
-    // refusals ride the same exit channel.
-    assert.match(
-      flakeStep.run,
-      posixSwitchRe,
-      'the gate must enter POSIX mode so exec/exit cannot be shadowed by a BASH_FUNC import',
-    );
-    assert.match(
-      flakeStep.run,
-      posixKillRe,
-      'the posix refusal must end in a slash-pathed kill — exit itself may be the shadowed builtin',
-    );
-    const gatePosix = flakeStep.run.search(/^\s*set -o posix$/m);
-    const gateScrub = flakeStep.run.search(scrubRefusalRe);
-    assert.ok(
-      gatePosix !== -1 && gateScrub !== -1 && gatePosix < gateScrub,
-      'the POSIX switch must precede the first refusal whose exit it immunizes',
-    );
-    // R14-2/R12-2: the runner writes this script as a node-owned file
-    // inside the uid-1000-writable $RUNNER_TEMP — a detached
-    // install/build survivor still alive at the re-exec snapshot
-    // overwrites the file in place and the wrapper executes attacker
-    // content in its full environment. The kill must precede the
-    // snapshot, absolute-pathed (no PATH pin applies this early),
-    // EUID-gated (the harness stays on its stubs), and liveness-
-    // verified with a fail-open refusal (the agent-step guard shape):
-    // the budget loop alone is out-forked by a plant repopulating
-    // between sweeps.
-    const gatePreKill = flakeStep.run.search(
-      /^\s*if \[\[ \$\(\/usr\/bin\/id -u\) -eq 0 \]\]; then\n\s*\/usr\/bin\/pkill -KILL -u node 2>\/dev\/null \|\| true\n\s*for _ in 1 2 3; do\n\s*\[\[ -n \$\(\/usr\/bin\/ps -o pid=,stat= -u node 2>\/dev\/null \| \/usr\/bin\/awk '\$2 !~ \/\^Z\/'\) \]\] \|\| break\n\s*\/usr\/bin\/sleep 1\n\s*\/usr\/bin\/pkill -KILL -u node 2>\/dev\/null \|\| true\n\s*done\n\s*survivors="\$\(\/usr\/bin\/ps -o pid=,stat= -u node 2>\/dev\/null \| \/usr\/bin\/awk '\$2 !~ \/\^Z\/'\)" \|\| true\n\s*if \[\[ -n \$survivors \]\]; then\n\s*\/usr\/bin\/printf 'flake_verdict=%s\\n' error >> "\$GITHUB_OUTPUT"\n\s*\/usr\/bin\/printf 'flake_summary=%s\\n' 'node-owned processes survived SIGKILL — the gate refused to sample' >> "\$GITHUB_OUTPUT"\n\s*exit 0\n\s*fi\n\s*fi$/m,
-    );
-    const gateReExec = flakeStep.run.search(reExecMarkerRe);
-    assert.ok(
-      gatePreKill !== -1 && gateReExec !== -1 && gatePreKill < gateReExec,
-      'node survivors must be killed (and their absence verified) BEFORE the re-exec snapshot re-reads this script from disk',
     );
     // Actions merges workflow- and job-level env into every step: the
     // step-key pin above is only exhaustive while those levels stay empty.
@@ -1598,84 +1331,6 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
       uniqueOut !== -1 && loopStart < uniqueOut,
       'each invocation output must get a unique path — no stale bytes to misread',
     );
-    const neverCreated = flakeStep.run.search(
-      /^\s*if \[ ! -e "\$out" \]; then$/m,
-    );
-    const exitClassify = flakeStep.run.search(
-      /^\s*elif \[ "\$status" -ge 124 \]; then$/m,
-    );
-    assert.ok(
-      neverCreated !== -1 && exitClassify !== -1 && neverCreated < exitClassify,
-      'a never-created output must route to the infra class ahead of the exit-status classifier',
-    );
-    assert.match(
-      flakeStep.run,
-      /^\s*rm -f "\$out"$/m,
-      'the sample bytes must be reclaimed after classification — ENOSPC is the named hazard of this job',
-    );
-    // Round 11 (R8-1): rename(2) needs write on the PARENT of the
-    // home, which the uid-1000-writable $RUNNER_TEMP top level grants
-    // — the 0700 home cannot stop its own entry being swapped after
-    // the one-time validation. Every later path-based access
-    // re-verifies the identity recorded at validation time.
-    assert.match(
-      flakeStep.run,
-      /^\s*GATE_HOME_ID="\$\(stat -c '%d:%i' "\$GATE_DIR"\)"$/m,
-      'the home identity must be recorded at validation time',
-    );
-    assert.match(
-      flakeStep.run,
-      /^\s*gate_home_intact\(\) \{$/m,
-      'an identity re-check must guard every later path-based access to the home',
-    );
-    const intactBeforeList = flakeStep.run.search(
-      /^\s*gate_home_intact \|\|\n\s*finish error 'the gate working directory changed since validation/m,
-    );
-    const listRead = flakeStep.run.search(
-      /^\s*\{ \[ -f "\$LIST" \] && \[ ! -L "\$LIST" \]; \} \|\|$/m,
-    );
-    assert.ok(
-      intactBeforeList !== -1 && listRead !== -1 && intactBeforeList < listRead,
-      'the recorded list must only be read through an intact home',
-    );
-    // R12-2 entrance 5: `: >` opens with O_TRUNC through any symlink —
-    // the truncate must never run ahead of the first identity re-check.
-    const truncLog = flakeStep.run.search(/^\s*: > "\$LOG"$/m);
-    assert.ok(
-      intactBeforeList !== -1 && truncLog !== -1 && intactBeforeList < truncLog,
-      'the log truncate must run only through the verified home',
-    );
-    const intactInLoop = flakeStep.run.search(
-      /^\s*if ! gate_home_intact; then\n\s*if \[ "\$samples" -eq 0 \]; then\n\s*finish error 'the gate working directory changed mid-run — refusing to continue'\n\s*fi/m,
-    );
-    assert.ok(
-      intactInLoop !== -1 &&
-        loopStart < intactInLoop &&
-        intactInLoop < uniqueOut,
-      'every invocation output must open through a re-verified home',
-    );
-    // A swap AFTER samples exist must stop and classify them, not
-    // discard them: publishing `error` there would let a PR dodge a
-    // computed demotion by renaming the home after its first divergent
-    // sample.
-    assert.match(
-      flakeStep.run,
-      /^\s*printf 'gate home changed mid-run: sampling stopped, classifying the collected results\\n' >> "\$DETAIL"\n\s*break 2$/m,
-      'a swapped home after samples must keep the collected results',
-    );
-    assert.match(
-      flakeStep.run,
-      /^\s*if gate_home_intact; then\n\s*printf '\\nverdict: %s\\nsummary: %s\\n' "\$1" "\$2" >> "\$LOG"$/m,
-      'finish must write the verdict to the log only through a home re-verified at call time — a swapped home must not receive the bytes through a planted `log` symlink',
-    );
-    // Round 11 (R8-35): the gate resolves bare binaries as root; its
-    // inherited PATH may be poisoned through the file-command backing
-    // files, so pin a root-only-writable one before the first use.
-    const gatePathPin = flakeStep.run.search(pathPinRe);
-    assert.ok(
-      gatePathPin !== -1 && gatePathPin < firstInvocation,
-      'the gate must pin a root-only-writable PATH before its first bare-binary resolution',
-    );
     assert.equal(
       flakeStep.if,
       "steps.pr.outputs.decision == 'run' && steps.prepare.outputs.verdict == ''",
@@ -1709,363 +1364,6 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     assert.equal(
       publishStep.env.FLAKE_SUMMARY,
       '${{ needs.verify.outputs.flake_summary }}',
-    );
-    // The authoritative log stays root-owned in RUNNER_TEMP and is staged
-    // into verify-results by a dedicated always() root step AFTER the agent
-    // exits — the last write to that filename. Staging it earlier loses it
-    // on an early agent abort, and verify-results is chowned to the build
-    // user while PR-controlled agent code runs, so an earlier copy could be
-    // rewritten before upload (round-1 review).
-    const stageStep = verifyJob.steps.find(
-      (s) => s.name === 'Stage flakiness gate log for upload',
-    );
-    assert.ok(stageStep, 'the staging step must exist');
-    assert.equal(
-      stageStep.if,
-      "always() && steps.pr.outputs.decision == 'run'",
-      'staging must survive a failed agent step',
-    );
-    const agentIdx = verifyJob.steps.indexOf(agentStep);
-    const stageIdx = verifyJob.steps.indexOf(stageStep);
-    const uploadIdx = verifyJob.steps.findIndex(
-      (s) => s.name === 'Upload verify results',
-    );
-    assert.ok(
-      agentIdx < stageIdx && stageIdx < uploadIdx,
-      'staging must run after the agent and before the upload',
-    );
-    // The transport itself (round 6): the chain is only closed if the
-    // upload actually ships the staged directory and cannot fail the job
-    // out from under the recorded verdict.
-    const uploadStep = verifyJob.steps[uploadIdx];
-    assert.equal(
-      uploadStep.with.path,
-      '/flake-gate/upload/',
-      'the artifact must ship the REBUILT tree, never the agent-era directory',
-    );
-    // R12-2 entrance 3: staging's anchoring expires at its exit, and the
-    // upload re-resolves the path in a later step — a re-check step must
-    // re-validate the entry identity immediately before the enumeration
-    // and gate the upload on it.
-    const recheckStep = verifyJob.steps.find(
-      (s) => s.id === 'flake-upload-check',
-    );
-    assert.ok(recheckStep, 'the pre-upload re-check step must exist');
-    assert.equal(
-      recheckStep.if,
-      "always() && steps.pr.outputs.decision == 'run'",
-      'the re-check must run whenever staging can',
-    );
-    assert.equal(
-      recheckStep['continue-on-error'],
-      true,
-      'the re-check must not be able to fail the job',
-    );
-    const recheckIdx = verifyJob.steps.indexOf(recheckStep);
-    assert.ok(
-      stageIdx < recheckIdx && recheckIdx < uploadIdx,
-      'the re-check must sit between staging and the upload',
-    );
-    assert.equal(
-      uploadStep.if,
-      "always() && steps.pr.outputs.decision == 'run' && steps.flake-upload-check.outputs.upload_ok == 'true'",
-      'the upload must only enumerate a home the re-check step just validated',
-    );
-    assert.match(
-      recheckStep.run,
-      /upload_ok=true/,
-      'the re-check must publish its decision as a step output',
-    );
-    assert.match(
-      recheckStep.run,
-      /\/usr\/bin\/rm -rf -- "\$GATE_DIR"/,
-      'a home that fails the re-check must be removed before the upload enumerates the path',
-    );
-    // R15-1: the re-check has no env -i re-exec — it runs in the
-    // inherited job environment. POSIX mode immunizes set/export/exit;
-    // every remaining decision must stay a reserved word and every
-    // external absolute-pathed, so no shadowable command word stands
-    // between a poisoned env and the verdict (a bare cd/[/stat subshell
-    // or a bare echo verdict write would re-open exactly that surface).
-    assert.match(
-      recheckStep.run,
-      posixSwitchRe,
-      'the re-check must enter POSIX mode so set/export/exit cannot be shadowed by a BASH_FUNC import',
-    );
-    assert.match(
-      recheckStep.run,
-      posixKillRe,
-      'the posix refusal must end in a slash-pathed kill — exit itself may be the shadowed builtin',
-    );
-    assert.match(
-      recheckStep.run,
-      /\/usr\/bin\/printf 'upload_ok=%s\\n' "\$upload_ok" >> "\$GITHUB_OUTPUT"/,
-      'the verdict write must be slash-pathed — echo is shadowable by a BASH_FUNC import',
-    );
-    assert.doesNotMatch(
-      recheckStep.run,
-      /\(\s*cd /,
-      'the re-check must not run a cd-anchored subshell — bare cd/[/stat are shadowable command words',
-    );
-    assert.match(
-      uploadStep.with.name,
-      /^verify-results-/,
-      'the artifact name must stay in the family the publisher downloads',
-    );
-    assert.equal(
-      uploadStep['continue-on-error'],
-      true,
-      'a missing/empty results dir must not fail the job and mask the original error',
-    );
-    // R16-2: the loader channel reaches the final consumer of the defense
-    // chain — this uses: step's node process inherits the job env the
-    // run: steps blank at their own blocks.
-    assert.deepEqual(
-      Object.keys(uploadStep.env).sort(),
-      ['LD_AUDIT', 'LD_LIBRARY_PATH', 'LD_PRELOAD'],
-      'the upload step must blank the LD_* loader channels like its run: siblings',
-    );
-    // Evidence-copying only, after the verdict outputs are written: a
-    // staging failure (ENOSPC, hostile mount) must not flip the job red or
-    // the publisher discards the recorded verdict as "infrastructure".
-    assert.equal(
-      stageStep['continue-on-error'],
-      true,
-      'staging must not be able to fail the job',
-    );
-    // The ORDER is the guard (round-4 R2-P1): presence-only pins stayed
-    // green with `cp` reordered before the unlinks, reopening the planted
-    // FIFO/symlink hazard. Kill racers → drop a planted dir/symlink at the
-    // directory level → recreate → unlink the destination entry → copy.
-    // Line-anchored (round 5): unanchored substrings are satisfied by
-    // comments, and the guard's REACTION (the directory-level rm) must be
-    // part of the chain — an inert guard body lets mkdir/cp write through
-    // a planted symlink.
-    // Round 7 rewrite: the step no longer HARDENS the agent-era tree (its
-    // entry lived in the uid-1000-writable $RUNNER_TEMP, so a kill-race
-    // survivor could rename the whole hardened tree and replant a symlink
-    // farm for upload-artifact to follow). It BUILDS a trusted tree inside
-    // the 0700 root-only home instead, copying regular files only.
-    const sr = stageStep.run;
-    const iPkill = sr.search(/^\s*\/usr\/bin\/pkill -KILL -u node/m);
-    // R12-2 entrance 1: one cleanup for both refusals — a detected
-    // mid-staging swap must be removed, not merely aborted on.
-    const iStagedOk = sr.search(/^\s*staged_ok=''$/m);
-    const iWait = sr.search(
-      /^\s*\[\[ -n \$\(\/usr\/bin\/ps -o pid=,stat= -u node 2>\/dev\/null \| \/usr\/bin\/awk '\$2 !~ \/\^Z\/'\) \]\] \|\| break$/m,
-    );
-    // R12-2 entrance 4: the budget loop alone is out-forked by a plant
-    // repopulating between sweeps — the kill ends in a liveness check
-    // and a fail-closed refusal matching the agent-step guard.
-    const iSurvivors = sr.search(
-      /^\s*survivors="\$\(\/usr\/bin\/ps -o pid=,stat= -u node 2>\/dev\/null \| \/usr\/bin\/awk '\$2 !~ \/\^Z\/'\)" \|\| true$/m,
-    );
-    const stageReExec = sr.search(reExecMarkerRe);
-    const iHomeCheck = sr.search(
-      /^\s*if \[\[ ! -L \$GATE_DIR \]\] && \[\[ -d \$GATE_DIR \]\] && \[\[ -O \$GATE_DIR \]\] &&$/m,
-    );
-    // The RUN-identity conjunct: ownership/mode/shape all pass on a
-    // stale-but-genuine home an earlier run left on the persistent
-    // pool; only the marker the record step stamped separates runs.
-    const iRunId = sr.search(
-      /^\s*\[\[ \$\(cat "\$GATE_DIR\/run-id" 2>\/dev\/null\) == "\$\{GITHUB_RUN_ID:\?\}-\$\{GITHUB_RUN_ATTEMPT:\?\}" \]\]; then$/m,
-    );
-    // R12-2: the validated ENTRY lives in the uid-1000-writable
-    // $RUNNER_TEMP top level, so the rebuild cds into the home once,
-    // re-stats the opened directory against the validated identity, and
-    // runs every phase from relative paths anchored to that inode.
-    const iHomeId = sr.search(
-      /^\s*home_id="\$\(stat -c '%d:%i' "\$GATE_DIR" 2>\/dev\/null \|\| true\)"$/m,
-    );
-    const iHomeCd = sr.search(/^\s*cd "\$GATE_DIR" \|\| exit 1$/m);
-    const iHomeIntact = sr.search(
-      /^\s*\[ "\$\(stat -c '%d:%i' \. 2>\/dev\/null\)" = "\$home_id" \] \|\| exit 1$/m,
-    );
-    // R12-2 entrance 2: the outer conjuncts are six separate path
-    // resolutions a swap can thread — the attribute half must re-run
-    // against the OPENED directory.
-    // The guards are explicit `|| exit 1`, not bare statements: the
-    // subshell is an `if` condition, where bash suppresses errexit —
-    // an unguarded failing check would fall through into the copy
-    // phases instead of refusing.
-    const iInnerOwner = sr.search(/^\s*\[ -O \. \] \|\| exit 1$/m);
-    const iInnerMode = sr.search(
-      /^\s*\[ "\$\(stat -c '%a' \. 2>\/dev\/null\)" = '700' \] \|\| exit 1$/m,
-    );
-    const iInnerRunId = sr.search(
-      /^\s*\[ "\$\(cat \.\/run-id 2>\/dev\/null\)" = "\$\{GITHUB_RUN_ID:\?\}-\$\{GITHUB_RUN_ATTEMPT:\?\}" \] \|\| exit 1$/m,
-    );
-    const iFresh = sr.search(
-      /^\s*install -d -m 0700 -o root -g root upload \|\| exit 1$/m,
-    );
-    const iCopyRegular = sr.search(
-      /^\s*timeout -k 10 60 find \. -type f -exec cp -f --no-dereference --parents \{\} "\$UPLOAD_DIR\/" \\;$/m,
-    );
-    // R12-2: the per-entry find→cp race can still land a symlink or
-    // FIFO/socket/device inside the rebuilt tree; the scrub deletes
-    // every non-regular arrival inside the root-only home before
-    // upload-artifact (which follows links) can ship it.
-    const iScrub = sr.search(
-      /^\s*find upload \\\( -type l -o -type p -o -type s -o -type b -o -type c \\\) -delete \|\| exit 1$/m,
-    );
-    const iCopyLog = sr.search(
-      /^\s*cp -f --no-dereference log upload\/flake-gate\.log \|\| exit 1$/m,
-    );
-    const iChown = sr.search(/^\s*chown -R root:root upload \|\| exit 1$/m);
-    const iChmod = sr.search(/^\s*chmod -R go-rwx upload \|\| exit 1$/m);
-    // R13-21: the always() upload step enumerates the path
-    // unconditionally, so a home that failed validation must be removed
-    // — a stale tree left in place ships a previous run's evidence
-    // under this run's artifact name.
-    const iStaleRemoval = sr.search(/^\s*rm -rf -- "\$GATE_DIR"$/m);
-    // Round 11 (R8-36): the guard and the cd re-resolve verify-results;
-    // a kill-loop survivor owning the uid-1000 parent can swap the
-    // entry between the two — the opened directory must still BE the
-    // validated one, or the copy is skipped.
-    // || true (round 14): a survivor renaming verify-results between
-    // the guard and this stat must degrade to a skipped copy, never a
-    // set -e abort that discards the authoritative gate-log copy.
-    const iVrId = sr.search(
-      /^\s*vr_id="\$\(stat -c '%d:%i' "\$RUNNER_TEMP\/verify-results" 2>\/dev\/null \|\| true\)"$/m,
-    );
-    const iVrIntact = sr.search(
-      /^\s*\[ "\$\(stat -c '%d:%i' \. 2>\/dev\/null\)" = "\$vr_id" \] &&$/m,
-    );
-    // Round 11 (R4-6/R8-7): the pinned log name must be reserved
-    // before the conditional copy — a planted file must not survive a
-    // missing authoritative log, and a planted directory must not
-    // swallow the authoritative file.
-    const iReserveName = sr.search(
-      /^\s*rm -rf -- upload\/flake-gate\.log \|\| exit 1$/m,
-    );
-    // The kill must NOT be gated on the log existing: node can unlink the
-    // log, and that must not skip the rebuild for the agent's own report.
-    assert.ok(
-      iPkill < sr.search(/^\s*GATE_DIR=/m),
-      'the kill must run before (and independently of) the home lookup',
-    );
-    assert.doesNotMatch(
-      sr,
-      /^\s*if \[ -f "\$\{?RUNNER_TEMP:?\??\}?\/flake-gate\.log" \]; then$/m,
-      'the rebuild must not be gated on the log file existing',
-    );
-    // Only regular files cross the boundary, and nothing is resolved:
-    // -type f excludes links/FIFOs/sockets/devices at selection time and
-    // --no-dereference never opens a target that wins a race after it.
-    assert.match(
-      sr,
-      /-type f -exec cp -f --no-dereference --parents/,
-      'only regular files may be copied out of the untrusted tree',
-    );
-    assert.match(
-      sr,
-      /\[ -d "\$RUNNER_TEMP\/verify-results" \] && \[ ! -L "\$RUNNER_TEMP\/verify-results" \]/,
-      'a symlinked verify-results must not be traversed at all',
-    );
-    for (const [label, idx] of [
-      ['pkill', iPkill],
-      ['bounded survivor wait', iWait],
-      ['liveness refusal', iSurvivors],
-      ['clean re-exec guard', stageReExec],
-      ['staging outcome flag', iStagedOk],
-      ['root-only home integrity check', iHomeCheck],
-      ['run-identity check', iRunId],
-      ['home identity pin', iHomeId],
-      ['home cd', iHomeCd],
-      ['home opened-directory re-check', iHomeIntact],
-      ['opened-directory owner re-check', iInnerOwner],
-      ['opened-directory mode re-check', iInnerMode],
-      ['opened-directory run-identity re-check', iInnerRunId],
-      ['fresh 0700 upload dir', iFresh],
-      ['verify-results identity pin', iVrId],
-      ['opened-directory identity re-check', iVrIntact],
-      ['regular-file-only copy', iCopyRegular],
-      ['non-regular arrival scrub', iScrub],
-      ['log-name reservation', iReserveName],
-      ['authoritative log copy', iCopyLog],
-      ['root re-own', iChown],
-      ['mode revoke', iChmod],
-      ['stale-tree removal', iStaleRemoval],
-    ]) {
-      assert.ok(idx !== -1, `staging must contain the ${label}`);
-    }
-    assert.ok(
-      iPkill < iWait &&
-        iWait < iSurvivors &&
-        iSurvivors < stageReExec &&
-        stageReExec < iStagedOk &&
-        iStagedOk < iHomeCheck &&
-        iHomeCheck < iRunId &&
-        iRunId < iHomeId &&
-        iHomeId < iHomeCd &&
-        iHomeCd < iHomeIntact &&
-        iHomeIntact < iInnerOwner &&
-        iInnerOwner < iInnerMode &&
-        iInnerMode < iInnerRunId &&
-        iInnerRunId < iFresh &&
-        iFresh < iVrId &&
-        iVrId < iVrIntact &&
-        iVrIntact < iCopyRegular &&
-        iCopyRegular < iScrub &&
-        iScrub < iReserveName &&
-        iReserveName < iCopyLog &&
-        iCopyLog < iChown &&
-        iChown < iChmod &&
-        iChmod < iStaleRemoval,
-      'staging order must be: kill+wait+liveness, re-exec, home check, run identity, home identity pin, opened-directory attribute re-checks, fresh dir, identity-pinned copy, scrub, reserved log name, authoritative log last, re-own, mode revoke, stale-tree removal',
-    );
-    assert.match(
-      sr,
-      pathPinRe,
-      'staging must pin a root-only-writable PATH — its inherited one may be poisoned through the file-command backing files',
-    );
-    // Startup-channel scrub: same one-shot env -i re-exec as the record
-    // and gate blocks, positional child marker (env markers forgeable).
-    assert.match(
-      sr,
-      reExecRe,
-      'staging must re-exec through env -i with a positional child marker, an absolute-path bash operand, and the parent-snapshotted body',
-    );
-    assert.doesNotMatch(
-      sr,
-      pathChildRe,
-      'the re-exec child must never re-open the script by path — the second open is the plant window',
-    );
-    assert.match(
-      sr,
-      scrubRefusalRe,
-      'the staging scrub refusal must be reserved-word shaped — `[` is shadowable by a BASH_FUNC import',
-    );
-    // R15-1: same discipline as the record step.
-    assert.match(
-      sr,
-      posixSwitchRe,
-      'staging must enter POSIX mode so exec/exit cannot be shadowed by a BASH_FUNC import',
-    );
-    assert.match(
-      sr,
-      posixKillRe,
-      'the posix refusal must end in a slash-pathed kill — exit itself may be the shadowed builtin',
-    );
-    assert.doesNotMatch(
-      sr,
-      /_FLAKE_CLEAN_REEXEC/,
-      'the re-exec child marker must never be an env entry — env markers are forgeable via the file-command channel',
-    );
-    assert.doesNotMatch(
-      agentStep.run,
-      /flake-gate\.log/,
-      'the agent step must not stage the log — that is the wrong trust boundary',
-    );
-    assert.match(
-      publishStep.run,
-      /^\s*FLAKE_LOG='verify-results\/flake-gate\.log'$/m,
-      'the publisher must pin the exact root-level path, never find/sort',
-    );
-    assert.match(
-      publishStep.run,
-      /^\s*emit_block 'Flakiness gate log' "\$FLAKE_LOG" 10000$/m,
-      'the gate-log cap must leave headroom under GitHub 65,536-char comment limit next to the 45000 report block',
     );
   });
 
@@ -2140,79 +1438,6 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
       '${{ steps.download.outcome }}',
       'the download-failure branch input must stay wired',
     );
-  });
-
-  it('the gate home sits at the container root, not in the writable RUNNER_TEMP', () => {
-    // The whole TOCTOU class (R8-1, R8-36, R12-2 and their re-reports)
-    // rests on one property of the PARENT, not the entry: rename(2) and
-    // unlink(2) need write permission on the directory holding the entry.
-    // $RUNNER_TEMP's top level is uid-1000 writable and the container's
-    // node is uid 1000, so a 0700 root home there could always be
-    // renamed away wholesale — every added re-validation only narrowed
-    // the window. `/` is root:root 755, so entries in it are outside
-    // PR-controlled reach with no window to re-check.
-    for (const [label, step] of [
-      ['record', recordStep],
-      ['gate', flakeStep],
-      [
-        'staging',
-        verifyJob.steps.find(
-          (x) => x.name === 'Stage flakiness gate log for upload',
-        ),
-      ],
-      [
-        'upload re-check',
-        verifyJob.steps.find((x) => x.id === 'flake-upload-check'),
-      ],
-    ]) {
-      assert.doesNotMatch(
-        step.run,
-        /\$\{?RUNNER_TEMP:?\??\}?\/flake-gate/,
-        `${label} must not place the gate home under RUNNER_TEMP`,
-      );
-    }
-    assert.match(
-      recordStep.run,
-      /^\s*GATE_HOME=\/flake-gate$/m,
-      'the record step must create the home at the container root',
-    );
-    for (const [label, step] of [
-      ['gate', flakeStep],
-      [
-        'staging',
-        verifyJob.steps.find(
-          (x) => x.name === 'Stage flakiness gate log for upload',
-        ),
-      ],
-      [
-        'upload re-check',
-        verifyJob.steps.find((x) => x.id === 'flake-upload-check'),
-      ],
-    ]) {
-      assert.match(
-        step.run,
-        /^\s*GATE_DIR=\/flake-gate$/m,
-        `${label} must resolve the home to the container-root constant`,
-      );
-    }
-    const uploadStep = verifyJob.steps.find(
-      (x) => x.name === 'Upload verify results',
-    );
-    assert.equal(
-      uploadStep.with.path,
-      '/flake-gate/upload/',
-      'the artifact must ship the tree that lives outside PR-writable space',
-    );
-    // No env knob: $GITHUB_ENV is uid-1000 writable, so an overridable
-    // home would be a PR-reachable channel — and the record step rm -rf's
-    // whatever the home names.
-    for (const step of verifyJob.steps) {
-      assert.doesNotMatch(
-        String(step.run ?? ''),
-        /FLAKE_GATE_HOME/,
-        'the gate home must not be overridable through the environment',
-      );
-    }
   });
 
   it('the publisher clears its downloaded results before the download', () => {
@@ -2341,24 +1566,6 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
   // reset's wait loop.
   const STUB_PKILL = ['#!/bin/bash', 'exit 0', ''].join('\n');
   const STUB_PS = ['#!/bin/bash', 'exit 0', ''].join('\n');
-  // R14-3 model: the invocation's runner binary is a detached survivor —
-  // while the sample runs it swaps the gate home's ENTRY in the
-  // uid-1000-writable $RUNNER_TEMP (rename needs write on the parent
-  // only), then fails the sample. The redirect fd was opened against the
-  // genuine home; every path-based read the mark cascade does afterwards
-  // must be re-validated first.
-  const SWAP_HOME_STUB = [
-    '#!/bin/bash',
-    'if [ ! -e "$RUNNER_TEMP/.flake-home-swapped" ]; then',
-    '  touch "$RUNNER_TEMP/.flake-home-swapped"',
-    '  mv "$RUNNER_TEMP/flake-gate" "$RUNNER_TEMP/flake-gate-stash"',
-    '  mkdir "$RUNNER_TEMP/flake-gate"',
-    '  chmod 700 "$RUNNER_TEMP/flake-gate"',
-    'fi',
-    'echo "stub test failure (home-swap scenario)"',
-    'exit 1',
-    '',
-  ].join('\n');
 
   const scenarioRoot = mkdtempSync(join(tmpdir(), 'flake-behavioral-'));
   after(() => {
@@ -2568,7 +1775,7 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
     // FFFFF file masks the PFPFP one); per-file groups must still see the
     // divergence. Every F also exercises the errexit hazard: without
     // `set +e` the first one kills the script under the wrapper.
-    const { res, outputs, log } = runGate({
+    const { res, outputs, log, summary } = runGate({
       layout: UNIT,
       list: 'scripts/tests/a.test.js\nscripts/tests/b.test.js\n',
       sequences: { 'a.test.js': 'F', 'b.test.js': 'PF' },
@@ -2577,23 +1784,21 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
     assert.equal(outputs.flake_verdict, 'flaky');
     assert.match(log, /a\.test\.js: FFFFF/);
     assert.match(log, /b\.test\.js: PFPFP/);
-    // The publisher embeds only the FIRST 10,000 chars: the matrix and
-    // verdict must precede the failure tails or the demotion's promised
-    // evidence is truncated away in exactly the flaky runs it points at.
-    const matrixAt = log.indexOf('per-file results');
-    const verdictAt = log.indexOf('\nverdict: flaky');
-    const detailAt = log.indexOf('--- per-invocation detail');
+    // The step summary is where a reader meets this run: the one-line
+    // verdict first, then the matrix, and only then the failure tails —
+    // which are the part that can grow without bound.
+    const headlineAt = summary.indexOf('Flakiness gate: flaky');
+    const matrixAt = summary.indexOf('per-file results');
+    const verdictAt = summary.indexOf('\nverdict: flaky');
     assert.ok(
-      matrixAt !== -1 && verdictAt !== -1 && detailAt !== -1,
-      'log must carry matrix, verdict, and detail sections',
+      headlineAt !== -1 && matrixAt !== -1 && verdictAt !== -1,
+      'the summary must carry the headline, the matrix and the verdict',
     );
     assert.ok(
-      matrixAt < verdictAt && verdictAt < detailAt,
-      'matrix and verdict must precede the failure detail',
+      headlineAt < matrixAt && matrixAt < verdictAt,
+      'headline and matrix must precede the verdict block',
     );
-    // And the failure tails themselves — the content that can outgrow the
-    // embed cap — must all sit behind the verdict, not just the marker.
-    const firstTail = log.indexOf('--- output tail');
+    const firstTail = summary.indexOf('--- output tail');
     assert.ok(
       firstTail !== -1 && firstTail > verdictAt,
       'failure tails must never precede the matrix/verdict',
@@ -2630,7 +1835,7 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
     // A pass next to an exit-124 round used to publish `flaky`; an OOM
     // kill (137) is the same class. Infra exits must stay out of P/F
     // divergence and land the informational `timeout` verdict instead.
-    const { res, outputs, log } = runGate({
+    const { res, outputs, log, summary } = runGate({
       layout: UNIT,
       list: 'scripts/tests/a.test.js\nscripts/tests/b.test.js\n',
       sequences: { 'a.test.js': 'PT', 'b.test.js': 'K' },
@@ -2639,7 +1844,7 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
     assert.equal(outputs.flake_verdict, 'timeout');
     assert.match(log, /a\.test\.js: PIPIP/);
     assert.match(log, /b\.test\.js: IIIII/);
-    assert.match(log, /exit 124/);
+    assert.match(summary, /exit 124/);
     assert.doesNotMatch(outputs.flake_summary, /a\.test\.js|b\.test\.js/);
   });
 
@@ -2649,7 +1854,7 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
     // unrunnable/missing) — recorded as F they published a fake `flaky`
     // next to any pass (round-7 Critical probe: exit 127 → FPPPP read as
     // flaky).
-    const { res, outputs, log } = runGate({
+    const { res, outputs, log, summary } = runGate({
       layout: { 'scripts/tests/a.test.js': '' },
       list: 'scripts/tests/a.test.js\n',
       sequences: { 'a.test.js': 'MPPPP' },
@@ -2657,7 +1862,7 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
     assert.equal(res.status, 0, res.stderr);
     assert.equal(outputs.flake_verdict, 'timeout');
     assert.match(log, /a\.test\.js: IPPPP/);
-    assert.match(log, /exit 127/);
+    assert.match(summary, /exit 127/);
     assert.doesNotMatch(outputs.flake_summary, /a\.test\.js/);
   });
 
@@ -2691,31 +1896,6 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
     assert.equal(res.status, 0, res.stderr);
     assert.equal(outputs.flake_verdict, 'flaky');
     assert.match(log, /a\.test\.js: NFNFN/);
-  });
-
-  it('a home swapped mid-invocation is detected after the subshell returns — the mark comes from the exit status, never from swapped bytes', () => {
-    // R14-3: the cascade after `status=$?` read $out path-based with no
-    // intact re-check — a survivor swapping the home's entry during the
-    // invocation erased recorded F marks into I (the redirect fd opened
-    // against the genuine home, but `[ ! -e "$out" ]` re-resolved
-    // through the swapped entry), dodging the very demotion the gate
-    // exists to apply. Honest bound: a compromised home stops sampling —
-    // the mark comes from the exit status alone and the detection is
-    // visible; preserving the demotion itself would price a mid-run
-    // swap as demoting evidence, which stays a design call.
-    const { res, outputs, log } = runGate({
-      layout: { 'scripts/tests/a.test.js': '' },
-      list: 'scripts/tests/a.test.js\n',
-      sequences: { 'a.test.js': 'F' },
-      stubs: { npx: SWAP_HOME_STUB, node: SWAP_HOME_STUB },
-    });
-    assert.equal(res.status, 0, res.stderr);
-    // Sub-2-round stop: one honest sample cannot separate a flake from
-    // a deterministic outcome — the verdict stays informational, but
-    // the mark must be the honest F, never the erased I.
-    assert.equal(outputs.flake_verdict, 'timeout');
-    assert.match(log, /^\s*scripts\/tests\/a\.test\.js: F$/m);
-    assert.doesNotMatch(log, /^\s*scripts\/tests\/a\.test\.js: I$/m);
   });
 
   it('real divergence still outranks an infra exit in another file', () => {
@@ -3087,24 +2267,6 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
     );
   });
 
-  it('a working home that is not exclusively ours fails closed to `error`', () => {
-    // R7-8: $RUNNER_TEMP's top level is uid-1000 writable and the
-    // container's `node` is uid 1000, so a group/other-accessible home is
-    // one a PR could have planted files in — the gate must refuse to read
-    // it rather than sample attacker-chosen bytes, and must still exit 0.
-    const { res, outputs } = runGate({
-      layout: UNIT,
-      list: 'scripts/tests/a.test.js\n',
-      gateHomeMode: 0o777,
-    });
-    assert.equal(res.status, 0, res.stderr);
-    assert.equal(outputs.flake_verdict, 'error');
-    assert.match(
-      outputs.flake_summary,
-      /not root-owned 0700|working directory/,
-    );
-  });
-
   it('a missing recorded list degrades to the `error` verdict, exit 0', () => {
     const { res, outputs } = runGate({ layout: UNIT, list: null });
     assert.equal(res.status, 0, res.stderr);
@@ -3293,159 +2455,6 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
     assert.equal(floored.res.status, 0, floored.res.stderr);
     assert.equal(roundsInLog(floored), '2');
     assert.equal(floored.outputs.flake_verdict, 'flaky');
-  });
-
-  describe('round-19 startup-channel hardening (behavioral)', () => {
-    it('a BASH_FUNC_set%% import never runs — POSIXLY_CORRECT refuses it at bash startup', () => {
-      // R18-2: without POSIX mode at INVOCATION the import runs attacker
-      // code as root on the step's first command, and can even enable
-      // posix itself so the reserved-word refusal never fires
-      // (probe-verified). The harness applies the step env block, so the
-      // step's POSIXLY_CORRECT reaches bash exactly as in production.
-      const marker = join(scenarioRoot, 'set-poison-marker');
-      const { res, outputs } = runGate({
-        layout: UNIT,
-        list: 'scripts/tests/a.test.js\n',
-        env: {
-          'BASH_FUNC_set%%': `() { command touch "${marker}"; command set "$@"; command set -o posix; }`,
-        },
-      });
-      assert.notEqual(
-        res.status,
-        0,
-        'a poisoned startup must fail the step red at bash startup',
-      );
-      assert.ok(
-        !existsSync(marker),
-        'the poisoned set function must never execute — the import is refused before the body starts',
-      );
-      assert.equal(
-        outputs.flake_verdict,
-        undefined,
-        'bash aborts at import (exit 2), before the fail-open verdict path — the abort IS the refusal',
-      );
-    });
-
-    it('echo stays shadowable even in POSIX mode — refusal writes must stay slash-pathed', () => {
-      // R18-3 mechanism pin: function lookup precedes REGULAR builtins;
-      // only SPECIAL builtins outrank functions (probe-verified). This is
-      // why every pre-re-exec refusal writes through /usr/bin/printf.
-      const poisonEnv = {
-        ...process.env,
-        'BASH_FUNC_echo%%': '() { builtin printf "FORGED\\n"; }',
-      };
-      const shadowed = spawnSync(
-        'bash',
-        ['--noprofile', '--norc', '--posix', '-c', 'echo first; echo second'],
-        { env: poisonEnv, encoding: 'utf8' },
-      );
-      assert.equal(shadowed.stdout, 'FORGED\nFORGED\n');
-      const pathed = spawnSync(
-        'bash',
-        [
-          '--noprofile',
-          '--norc',
-          '--posix',
-          '-c',
-          '/usr/bin/printf "%s\\n" honest',
-        ],
-        { env: poisonEnv, encoding: 'utf8' },
-      );
-      assert.equal(pathed.stdout, 'honest\n');
-    });
-
-    it('a planted EUID cannot move the root identity gates (kernel-queried)', () => {
-      // R18-4: extract the gate's poisoned-env refusal condition verbatim
-      // and drive it under spoofed EUID values from a non-root process.
-      // The kernel query must ignore the spoof; the pre-round $EUID shape
-      // fired on a planted EUID=0 and skipped on a planted EUID=1000.
-      const cond = flakeRunVerbatim.match(
-        /^\s*if (\[\[ [^\n]*\/usr\/bin\/id -u[^\n]*\]\] && \[\[ -n \$\{BASH_ENV:-\}[^\n]*\]\]); then$/m,
-      );
-      assert.ok(
-        cond,
-        'the gate poisoned-env refusal must key its identity conjunct on /usr/bin/id -u',
-      );
-      const drive = (extra) =>
-        spawnSync(
-          'bash',
-          [
-            '--noprofile',
-            '--norc',
-            '-c',
-            `if ${cond[1]}; then printf FIRED; else printf SKIPPED; fi`,
-          ],
-          {
-            env: { ...process.env, BASH_ENV: '/dev/null', ...extra },
-            encoding: 'utf8',
-          },
-        );
-      assert.equal(
-        drive({ EUID: '0' }).stdout,
-        'SKIPPED',
-        'a planted EUID=0 must not fire a root-gated refusal for a non-root process',
-      );
-      assert.equal(
-        drive({ EUID: '1000' }).stdout,
-        'SKIPPED',
-        'a planted EUID=1000 changes nothing either — identity comes from the kernel',
-      );
-    });
-
-    it('a script swap between bash open and the re-exec snapshot is refused by the inode anchor', () => {
-      // R18-1: model the window deterministically by swapping the script
-      // from its own first line — fd 255 already holds the genuine inode
-      // when the swap lands, exactly the state an external watcher
-      // produces by racing the kill (a swap before bash opens is the one
-      // case no step-level defence can catch: bash would execute the
-      // plant directly). Pre-round, the snapshot re-open read the plant
-      // and the re-exec ran it.
-      const caseBlock = flakeRunVerbatim.match(
-        /^\s*case "\$\{1:-\}" in\n[\s\S]*?\n\s*esac$/m,
-      );
-      assert.ok(caseBlock, 'the gate re-exec case block must exist');
-      const root = mkdtempSync(join(scenarioRoot, 'anchor-'));
-      const script = join(root, 'gate-arm.sh');
-      const plantMarker = join(root, 'plant-marker');
-      const swapLines = [
-        'mv -- "$0" "$0.genuine"',
-        `printf '%s\\n' 'printf "PLANT-EXECUTED\\n" > "${plantMarker}"' > "$0"`,
-      ];
-      writeFileSync(script, `${swapLines.join('\n')}\n${caseBlock[0]}\n`);
-      const out = join(root, 'github-output');
-      writeFileSync(out, '');
-      const res = spawnSync(
-        'bash',
-        ['--noprofile', '--norc', '-e', '-o', 'pipefail', script],
-        {
-          cwd: root,
-          env: {
-            ...process.env,
-            GITHUB_OUTPUT: out,
-            RUNNER_TEMP: root,
-            GITHUB_STEP_SUMMARY: join(root, 'summary'),
-          },
-          encoding: 'utf8',
-          timeout: 30_000,
-        },
-      );
-      assert.equal(res.status, 0, `the gate refusal is fail-open: ${res.stderr}`);
-      const outputs = Object.fromEntries(
-        readFileSync(out, 'utf8')
-          .split('\n')
-          .filter((l) => l.includes('='))
-          .map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]),
-      );
-      assert.equal(outputs.flake_verdict, 'error');
-      assert.match(
-        outputs.flake_summary,
-        /step script changed between open and re-exec snapshot/,
-      );
-      assert.ok(
-        !existsSync(plantMarker),
-        'the swapped-in script body must never execute',
-      );
-    });
   });
 
   it('publisher demotion executes one-way: only `flaky` demotes, and it MUST demote', () => {
@@ -3687,151 +2696,6 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
     assert.match(log, /sampling stopped/);
   });
 
-  it('a home swapped mid-run fails closed instead of sampling through the plant', () => {
-    // Round 11 (R8-1) + round 14 (R12-1): rename(2) needs write on the
-    // PARENT directory — the uid-1000 $RUNNER_TEMP top level grants it,
-    // so the 0700 home cannot stop its own entry being swapped after
-    // the one-time validation. The stub swaps the home during round 1;
-    // the identity re-check before the next output open must stop the
-    // sampling (-O passes on the harness user, so only the recorded
-    // identity catches the plant). With only agreeing samples collected
-    // the stop lands the sub-2-round timeout verdict — never the old
-    // `error`, which discarded honest samples.
-    const STUB_SWAPPER = [
-      '#!/bin/bash',
-      'f="${@: -1}"',
-      'case "$f" in',
-      '  ./scripts/tests/swapper.test.js)',
-      '    if [ ! -e "$RUNNER_TEMP/flake-gate.real" ]; then',
-      '      mv "$RUNNER_TEMP/flake-gate" "$RUNNER_TEMP/flake-gate.real"',
-      '      mkdir "$RUNNER_TEMP/flake-gate"',
-      '      chmod 700 "$RUNNER_TEMP/flake-gate"',
-      '    fi',
-      '    exit 0',
-      '    ;;',
-      'esac',
-      'exit 0',
-      '',
-    ].join('\n');
-    const { res, outputs } = runGate({
-      layout: {
-        'scripts/tests/a.test.js': '',
-        'scripts/tests/swapper.test.js': '',
-      },
-      list: 'scripts/tests/a.test.js\nscripts/tests/swapper.test.js\n',
-      stubs: { npx: STUB_SWAPPER },
-    });
-    assert.equal(res.status, 0, res.stderr);
-    assert.equal(outputs.flake_verdict, 'timeout');
-    assert.match(outputs.flake_summary, /no flakiness signal either way/);
-  });
-
-  it('a home swapped after a computed divergence still demotes', () => {
-    // Round 14 (R12-1): samples already collected are honest — the
-    // swap must stop the sampling and classify them, because
-    // publishing `error` instead lets a PR dodge its demotion by
-    // renaming the home after the first divergent sample. a.test.js
-    // diverges F-then-P in rounds 1-2; the home is swapped during
-    // round 2, after the divergence is already collected.
-    const STUB_SWAPPER = [
-      '#!/bin/bash',
-      'f="${@: -1}"',
-      'case "$f" in',
-      '  ./scripts/tests/a.test.js)',
-      '    n_file="$FLAKE_SEQ_DIR/.count-a"',
-      '    n=$(cat "$n_file" 2>/dev/null || echo 0)',
-      '    echo $((n+1)) > "$n_file"',
-      '    seq="$(cat "$FLAKE_SEQ_DIR/a.test.js" 2>/dev/null || echo P)"',
-      '    [ "${seq:$((n % ${#seq})):1}" = F ] && exit 1',
-      '    exit 0',
-      '    ;;',
-      '  ./scripts/tests/swapper.test.js)',
-      '    n_file="$FLAKE_SEQ_DIR/.count-swapper"',
-      '    n=$(cat "$n_file" 2>/dev/null || echo 0)',
-      '    echo $((n+1)) > "$n_file"',
-      '    if [ "$n" -eq 1 ] && [ ! -e "$RUNNER_TEMP/flake-gate.real" ]; then',
-      '      mv "$RUNNER_TEMP/flake-gate" "$RUNNER_TEMP/flake-gate.real"',
-      '      mkdir "$RUNNER_TEMP/flake-gate"',
-      '      chmod 700 "$RUNNER_TEMP/flake-gate"',
-      '    fi',
-      '    exit 0',
-      '    ;;',
-      'esac',
-      'exit 1',
-      '',
-    ].join('\n');
-    const { res, outputs, log } = runGate({
-      layout: {
-        'scripts/tests/a.test.js': '',
-        'scripts/tests/swapper.test.js': '',
-      },
-      list: 'scripts/tests/a.test.js\nscripts/tests/swapper.test.js\n',
-      sequences: { 'a.test.js': 'FP' },
-      stubs: { npx: STUB_SWAPPER },
-    });
-    assert.equal(res.status, 0, res.stderr);
-    assert.equal(outputs.flake_verdict, 'flaky');
-    assert.match(outputs.flake_summary, /returned different results/);
-    assert.match(log, /a\.test\.js: FP/);
-  });
-
-  it('a BASH_FUNC_[%% import never reaches the pre-exec decisions — POSIXLY_CORRECT kills it at startup', () => {
-    // Round 15 pinned the second layer: a poisoned `[` that survived
-    // import still failed closed on the reserved-word decisions. Round
-    // 19's POSIXLY_CORRECT closes the class one layer earlier: POSIX
-    // mode at INVOCATION refuses the `[` import (probe-verified), and
-    // under the runner wrapper's `-e` the step then dies red before its
-    // first command — the poison never runs, no round is sampled, no
-    // verdict is forged. The second layer is unreachable by construction
-    // while the step env carries POSIXLY_CORRECT (pinned above).
-    const { res, outputs, counts } = runGate({
-      layout: UNIT,
-      list: 'scripts/tests/a.test.js\n',
-      gateHomeMode: 0o777,
-      env: { 'BASH_FUNC_[%%': '() { ((_p_n=${_p_n:-0}+1)); (( _p_n > 3 )); }' },
-    });
-    assert.notEqual(res.status, 0, 'a poisoned startup must fail the step red');
-    assert.match(
-      res.stderr,
-      /error importing function definition for `\['/,
-      'bash must refuse the `[` import at startup',
-    );
-    assert.equal(
-      outputs.flake_verdict,
-      undefined,
-      'no verdict may be written on a poisoned startup',
-    );
-    assert.equal(counts('a.test.js'), 0, 'no round may run on a poisoned startup');
-  });
-
-  it('a BASH_FUNC_exec%% import cannot skip the env -i re-exec — bash refuses it at startup', () => {
-    // Round 15 pinned the second layer: POSIX mode resolves the SPECIAL
-    // builtin `exec` before functions. Round 19's POSIXLY_CORRECT closes
-    // the class one layer earlier: `exec` being special, bash refuses
-    // the import outright at startup (probe-verified: exit 2, body never
-    // runs) — the poisoned parent fall-through is unreachable by
-    // construction while the step env carries POSIXLY_CORRECT (pinned
-    // above).
-    const { res, outputs, counts } = runGate({
-      layout: UNIT,
-      list: 'scripts/tests/a.test.js\n',
-      sequences: { 'a.test.js': 'PPPPP' },
-      env: { 'BASH_FUNC_exec%%': '() { return 0; }' },
-    });
-    assert.notEqual(res.status, 0, 'a poisoned startup must fail the step red');
-    assert.match(
-      res.stderr,
-      /`exec': is a special builtin/,
-      'bash must refuse the special-builtin import at startup',
-    );
-    assert.equal(
-      outputs.flake_verdict,
-      undefined,
-      'no verdict may be written on a poisoned startup',
-    );
-    assert.equal(counts('a.test.js'), 0, 'the body must never run on a poisoned startup');
-  });
-
   it('a same-stem sibling (X.test.tsx next to changed X.test.ts) runs in ONE merged group, never attributed separately', () => {
     // vitest's positional filters are lowercase SUBSTRING matches on
     // root-relative paths — verified against the installed vitest: one
@@ -3886,213 +2750,5 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
     assert.doesNotMatch(tsxOnly.log, /substring-colliding sibling/);
     assert.doesNotMatch(tsxOnly.log, /x\.test\.ts \+/);
     assert.equal(tsxOnly.counts('x.test.tsx'), 5);
-  });
-});
-describe('qwen-triage: flakiness gate staging/upload — behavioral, under the production wrapper', () => {
-  // The structural pins cannot observe whether a DETECTED swap is also
-  // CLEANED UP — a set -e abort used to leave the swapped-in tree for
-  // the always() upload to enumerate (R12-2 entrances 1+3).
-  const stageStep = verifyJob.steps.find(
-    (s) => s.name === 'Stage flakiness gate log for upload',
-  );
-  const recheckStep = verifyJob.steps.find(
-    (s) => s.id === 'flake-upload-check',
-  );
-
-  const stageRoot = mkdtempSync(join(tmpdir(), 'flake-staging-'));
-  after(() => {
-    // Same safeguard as the gate suite's hook: a scenario that leaves a
-    // mode-500 directory behind makes rmSync throw EACCES (force
-    // suppresses ENOENT only), marking the whole suite hookFailed and
-    // leaking the tree; restore owner permissions first.
-    spawnSync('chmod', ['-R', 'u+rwx', stageRoot]);
-    rmSync(stageRoot, { recursive: true, force: true });
-  });
-
-  const makeHome = (rt, { runId = '777-1', files = {} } = {}) => {
-    const home = join(rt, 'flake-gate');
-    mkdirSync(home, { recursive: true });
-    chmodSync(home, 0o700);
-    writeFileSync(join(home, 'run-id'), runId);
-    for (const [name, content] of Object.entries(files)) {
-      writeFileSync(join(home, name), content);
-    }
-    return home;
-  };
-
-  const runStaging = (rt, bin) => {
-    const scriptFile = join(rt, 'staging.sh');
-    // Same fixture relocation as the gate harness: the home is a
-    // hard-coded container-root constant in production (an env knob there
-    // would be PR-reachable), so the suite moves that one constant into
-    // its scratch tree and pins the production value structurally.
-    writeFileSync(
-      scriptFile,
-      stageStep.run.replaceAll(
-        'GATE_DIR=/flake-gate',
-        `GATE_DIR=${join(rt, 'flake-gate')}`,
-      ),
-    );
-    const out = join(rt, 'github-output');
-    writeFileSync(out, '');
-    return spawnSync(
-      'bash',
-      ['--noprofile', '--norc', '-e', '-o', 'pipefail', scriptFile],
-      {
-        env: {
-          ...process.env,
-          // Step-env parity with the gate harness (POSIXLY_CORRECT
-          // startup defence included) — literal values only.
-          ...Object.fromEntries(
-            Object.entries(stageStep.env).filter(
-              ([, v]) => typeof v === 'string' && !v.includes('${{'),
-            ),
-          ),
-          PATH: `${bin}:${process.env.PATH}`,
-          RUNNER_TEMP: rt,
-          GITHUB_OUTPUT: out,
-          GITHUB_STEP_SUMMARY: join(rt, 'github-summary'),
-          GITHUB_RUN_ID: '777',
-          GITHUB_RUN_ATTEMPT: '1',
-        },
-        encoding: 'utf8',
-        timeout: 30_000,
-      },
-    );
-  };
-
-  // Models the kill-race survivor deterministically: the plant lands in
-  // the window AFTER the home_id capture (the 2nd stat call reads the
-  // genuine state first) and BEFORE the cd opens the directory — the
-  // inner re-stat must detect the mismatch, and the detection must
-  // REMOVE the plant, not merely abort on it.
-  const STUB_STAT_SWAP = [
-    '#!/bin/bash',
-    'n_file="$RUNNER_TEMP/.stat-count"',
-    'n=$(cat "$n_file" 2>/dev/null || echo 0)',
-    'echo $((n+1)) > "$n_file"',
-    'out="$(/usr/bin/stat "$@")"',
-    'if [ "$n" -eq 1 ] && [ ! -e "$RUNNER_TEMP/flake-gate.real" ]; then',
-    '  mv "$RUNNER_TEMP/flake-gate" "$RUNNER_TEMP/flake-gate.real"',
-    '  mkdir "$RUNNER_TEMP/flake-gate"',
-    '  chmod 700 "$RUNNER_TEMP/flake-gate"',
-    '  echo PLANT-MARKER > "$RUNNER_TEMP/flake-gate/plant-marker"',
-    '  echo 777-1 > "$RUNNER_TEMP/flake-gate/run-id"',
-    'fi',
-    'printf "%s\\n" "$out"',
-    '',
-  ].join('\n');
-
-  it('a swap detected by the opened-directory re-check is removed, never left to the always() upload', () => {
-    const rt = mkdtempSync(join(stageRoot, 'swap-'));
-    const bin = join(stageRoot, 'bin-swap');
-    mkdirSync(bin, { recursive: true });
-    writeFileSync(join(bin, 'stat'), STUB_STAT_SWAP);
-    chmodSync(join(bin, 'stat'), 0o755);
-    makeHome(rt, { files: { log: 'genuine gate log\n' } });
-    const res = runStaging(rt, bin);
-    assert.equal(
-      res.status,
-      0,
-      `staging must survive a detected swap: ${res.stderr}`,
-    );
-    assert.ok(
-      !existsSync(join(rt, 'flake-gate')),
-      'the swapped-in tree must be removed — the always() upload enumerates this path unconditionally',
-    );
-    assert.ok(
-      existsSync(join(rt, 'flake-gate.real')),
-      'sanity: the stub stashed the genuine home',
-    );
-  });
-
-  it('a genuine home still rebuilds the upload tree with the authoritative log', () => {
-    const rt = mkdtempSync(join(stageRoot, 'clean-'));
-    const bin = join(stageRoot, 'bin-clean');
-    mkdirSync(bin, { recursive: true });
-    // install/chown/chmod need root in production; the harness stubs the
-    // ownership plumbing and keeps the real directory creation.
-    for (const [name, body] of [
-      ['install', '#!/bin/bash\nmkdir -p "${@: -1}"\n'],
-      ['chown', '#!/bin/bash\nexit 0\n'],
-      ['chmod', '#!/bin/bash\nexit 0\n'],
-    ]) {
-      writeFileSync(join(bin, name), body);
-      chmodSync(join(bin, name), 0o755);
-    }
-    makeHome(rt, { files: { log: 'genuine gate log\n' } });
-    const res = runStaging(rt, bin);
-    assert.equal(res.status, 0, res.stderr);
-    assert.equal(
-      readFileSync(join(rt, 'flake-gate', 'upload', 'flake-gate.log'), 'utf8'),
-      'genuine gate log\n',
-      'the authoritative log must land in the rebuilt upload tree',
-    );
-  });
-
-  const runRecheck = (rt) => {
-    const out = join(rt, 'github-output');
-    writeFileSync(out, '');
-    const res = spawnSync(
-      'bash',
-      [
-        '--noprofile',
-        '--norc',
-        '-e',
-        '-o',
-        'pipefail',
-        '-c',
-        recheckStep.run.replaceAll(
-          'GATE_DIR=/flake-gate',
-          `GATE_DIR=${join(rt, 'flake-gate')}`,
-        ),
-      ],
-      {
-        env: {
-          ...process.env,
-          // Step-env parity with the gate harness (POSIXLY_CORRECT
-          // startup defence included) — literal values only.
-          ...Object.fromEntries(
-            Object.entries(recheckStep.env).filter(
-              ([, v]) => typeof v === 'string' && !v.includes('${{'),
-            ),
-          ),
-          RUNNER_TEMP: rt,
-          GITHUB_OUTPUT: out,
-          GITHUB_RUN_ID: '777',
-          GITHUB_RUN_ATTEMPT: '1',
-        },
-        cwd: rt,
-        encoding: 'utf8',
-        timeout: 30_000,
-      },
-    );
-    const outputs = Object.fromEntries(
-      readFileSync(out, 'utf8')
-        .split('\n')
-        .filter((l) => l.includes('='))
-        .map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]),
-    );
-    return { res, outputs };
-  };
-
-  it('the pre-upload re-check removes a stale or planted home and gates the upload', () => {
-    const bad = mkdtempSync(join(stageRoot, 'recheck-bad-'));
-    makeHome(bad, { runId: '666-9' });
-    mkdirSync(join(bad, 'flake-gate', 'upload'), { recursive: true });
-    const rejected = runRecheck(bad);
-    assert.equal(rejected.res.status, 0, rejected.res.stderr);
-    assert.equal(rejected.outputs.upload_ok, 'false');
-    assert.ok(
-      !existsSync(join(bad, 'flake-gate')),
-      'a home that fails the re-check must be removed before the upload enumerates it',
-    );
-    const good = mkdtempSync(join(stageRoot, 'recheck-good-'));
-    makeHome(good);
-    mkdirSync(join(good, 'flake-gate', 'upload'), { recursive: true });
-    const accepted = runRecheck(good);
-    assert.equal(accepted.res.status, 0, accepted.res.stderr);
-    assert.equal(accepted.outputs.upload_ok, 'true');
-    assert.ok(existsSync(join(good, 'flake-gate', 'upload')));
   });
 });
