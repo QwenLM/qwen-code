@@ -484,6 +484,19 @@ class ToolSearchInvocation extends BaseToolInvocation<
     return result;
   }
 
+  /**
+   * Re-embedded name lists are capped so the oversized-budget fallback can
+   * never itself exceed the budget it enforces (a 100-name select: would
+   * otherwise re-list every name verbatim). The model can retry names
+   * individually to discover any omitted ones.
+   */
+  private formatCappedNameList(names: readonly string[]): string {
+    const MAX_LISTED_NAMES = 5;
+    const listed = names.slice(0, MAX_LISTED_NAMES).join(', ');
+    const omitted = names.length - MAX_LISTED_NAMES;
+    return omitted > 0 ? `${listed} (+${omitted} more)` : listed;
+  }
+
   private async revealOversizedSchemasDirectly(
     llmContent: string,
     schemas: readonly FunctionDeclaration[],
@@ -527,19 +540,19 @@ class ToolSearchInvocation extends BaseToolInvocation<
       let message =
         'Error: the requested schemas exceeded the inline output budget and were not returned.';
       if (retryNames.length > 0) {
-        message += ` Request these tools individually or in a smaller batch: ${retryNames.join(', ')}.`;
+        message += ` Request these tools individually or in a smaller batch: ${this.formatCappedNameList(retryNames)}.`;
       }
       if (atomicOversizedNames.length > 0) {
-        message += ` These schemas exceed the budget even when requested alone: ${atomicOversizedNames.join(', ')}.`;
+        message += ` These schemas exceed the budget even when requested alone: ${this.formatCappedNameList(atomicOversizedNames)}.`;
       }
       if (missing.length > 0) {
-        message += `\n\nNot found: ${missing.join(', ')}`;
+        message += `\n\nNot found: ${this.formatCappedNameList(missing)}`;
       }
       if (blockedErrorMessage) {
         message += `\n\nUnavailable: ${blockedErrorMessage}`;
       }
       if (truncated.length > 0) {
-        message += `\n\nTruncated by max_results — request these in a follow-up call: ${truncated.join(', ')}`;
+        message += `\n\nTruncated by max_results — request these in a follow-up call: ${this.formatCappedNameList(truncated)}`;
       }
       return {
         llmContent: message,
@@ -589,8 +602,18 @@ class ToolSearchInvocation extends BaseToolInvocation<
         registry.unrevealDeferredTool(name);
       }
       const message = error instanceof Error ? error.message : String(error);
+      let refusal = `Error: deferred schemas exceeded the inline output budget and could not be declared directly (${message}).`;
+      if (missing.length > 0) {
+        refusal += `\n\nNot found: ${this.formatCappedNameList(missing)}`;
+      }
+      if (blockedErrorMessage) {
+        refusal += `\n\nUnavailable: ${blockedErrorMessage}`;
+      }
+      if (truncated.length > 0) {
+        refusal += `\n\nTruncated by max_results — request these in a follow-up call: ${this.formatCappedNameList(truncated)}`;
+      }
       return {
-        llmContent: `Error: deferred schemas exceeded the inline output budget and could not be declared directly (${message}).`,
+        llmContent: refusal,
         returnDisplay: `Direct declaration failed: ${message}`,
         error: { message },
       };
@@ -598,22 +621,22 @@ class ToolSearchInvocation extends BaseToolInvocation<
 
     let directDeclarationMessage =
       atomicOversizedNames.length > 0
-        ? `The requested deferred schemas exceeded the inline output budget, so these individually oversized tools were declared directly instead: ${atomicOversizedNames.join(', ')}. Call them by exact name on a later turn; do not use tool_call for them.`
+        ? `The requested deferred schemas exceeded the inline output budget, so these individually oversized tools were declared directly instead: ${this.formatCappedNameList(atomicOversizedNames)}. Call them by exact name on a later turn; do not use tool_call for them.`
         : 'The requested deferred schemas exceed the combined inline output budget. No tools were declared directly because each schema fits when requested alone.';
     if (followUpNames.length > 0) {
-      directDeclarationMessage += `\n\nRequest these tools individually or in a smaller follow-up batch: ${followUpNames.join(', ')}`;
+      directDeclarationMessage += `\n\nRequest these tools individually or in a smaller follow-up batch: ${this.formatCappedNameList(followUpNames)}`;
     }
     if (directlyDeclared.length > 0) {
-      directDeclarationMessage += `\n\nAlready declared and directly callable: ${directlyDeclared.join(', ')}`;
+      directDeclarationMessage += `\n\nAlready declared and directly callable: ${this.formatCappedNameList(directlyDeclared)}`;
     }
     if (missing.length > 0) {
-      directDeclarationMessage += `\n\nNot found: ${missing.join(', ')}`;
+      directDeclarationMessage += `\n\nNot found: ${this.formatCappedNameList(missing)}`;
     }
     if (blockedErrorMessage) {
       directDeclarationMessage += `\n\nUnavailable: ${blockedErrorMessage}`;
     }
     if (truncated.length > 0) {
-      directDeclarationMessage += `\n\nTruncated by max_results — request these in a follow-up call: ${truncated.join(', ')}`;
+      directDeclarationMessage += `\n\nTruncated by max_results — request these in a follow-up call: ${this.formatCappedNameList(truncated)}`;
     }
     return {
       llmContent: directDeclarationMessage,

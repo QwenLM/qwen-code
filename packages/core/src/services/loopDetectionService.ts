@@ -369,7 +369,12 @@ export class LoopDetectionService {
     // Hash the (tool,args) key once and share it across the guards that need
     // it (consecutive-identical and the adaptive cap's stuck tracker). Args
     // can be large (e.g. write_file content), so avoid recomputing per guard.
-    const key = this.getToolCallKey(event.value);
+    // Unwrap the deferred proxy envelope first so alternating direct +
+    // proxied identical calls hash to the same key instead of splitting the
+    // repetition across two keys and evading both guards. Pure-proxy repeats
+    // hash identically either way.
+    const toolCall = unwrapDeferredToolCallShape(event.value);
+    const key = this.getToolCallKey(toolCall);
 
     // Always-on stuck-repetition tracking for the adaptive cap (see
     // checkTurnToolCallCap): lets the cap tell a productive turn from a stuck
@@ -388,7 +393,7 @@ export class LoopDetectionService {
       return true;
     }
 
-    if (this.checkShellCommandStagnation(event.value)) {
+    if (this.checkShellCommandStagnation(toolCall)) {
       this.loopDetected = true;
       return true;
     }

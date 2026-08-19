@@ -1576,6 +1576,16 @@ export class CoreToolScheduler {
         case 'success': {
           // Successful execution only resets retry state for this tool
           this.clearRetryCountsForTool(currentCall.request.name);
+          // Proxied calls also reset the wrapper identity: malformed-envelope
+          // failures are keyed under the wrapper name (no target known), so
+          // without this a session alternating envelope-error / successful
+          // proxied call would accumulate wrapper counts across recoveries
+          // and eventually trip the retry-loop stop directive.
+          if (
+            currentCall.request.providerName === ToolNames.DEFERRED_TOOL_CALL
+          ) {
+            this.clearRetryCountsForTool(ToolNames.DEFERRED_TOOL_CALL);
+          }
           const durationMs = existingStartTime
             ? Date.now() - existingStartTime
             : undefined;
@@ -2456,12 +2466,18 @@ export class CoreToolScheduler {
               errorRequest.name,
               normalizedRequest.error.message,
             );
+            // A MAX_TOKENS-truncated response can cut a tool_call envelope
+            // mid-JSON; surface the same truncation guidance the sibling
+            // validation-failure paths append, so the model shrinks the call
+            // instead of re-sending the oversized envelope. The retry-count
+            // key above stays on the raw message.
+            const baseMessage = reqInfo.wasOutputTruncated
+              ? `${normalizedRequest.error.message} ${TRUNCATION_PARAM_GUIDANCE}`
+              : normalizedRequest.error.message;
             const finalError =
               count >= VALIDATION_RETRY_LOOP_THRESHOLD
-                ? new Error(
-                    `${normalizedRequest.error.message}${RETRY_LOOP_STOP_DIRECTIVE}`,
-                  )
-                : normalizedRequest.error;
+                ? new Error(`${baseMessage}${RETRY_LOOP_STOP_DIRECTIVE}`)
+                : new Error(baseMessage);
             newToolCalls.push({
               status: 'error',
               request: errorRequest,
