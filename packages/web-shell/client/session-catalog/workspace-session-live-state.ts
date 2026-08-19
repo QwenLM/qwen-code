@@ -289,27 +289,18 @@ export function useWorkspaceSessionLiveState(
         state.inFlight = false;
         return;
       }
-      catalogStore.applyLiveState(state.workspaceCwd, live.sessions);
+      const absorbedActivity = catalogStore.applyLiveState(
+        state.workspaceCwd,
+        live.sessions,
+      );
       state.liveRetryAt = 0;
       if (pendingActivity) {
-        const liveById = new Map(
-          live.sessions.map((session) => [session.sessionId, session]),
-        );
         for (const [sessionId, sequence] of pendingActivity) {
-          const row = liveById.get(sessionId);
-          const activityTime =
-            row?.updatedAt !== undefined
-              ? Date.parse(row.updatedAt)
-              : Number.NaN;
-          // applyLiveState already stamped the row; a completion is settled
-          // in place only when the watermark is usable and the session sits
-          // on a loaded active page. Anything else (missing row, absent or
+          // applyLiveState reports which sessions absorbed a usable watermark
+          // on a loaded active page; anything else (missing row, absent or
           // invalid stamp, row outside the loaded catalog) falls back to the
           // rate-limited full reconcile.
-          if (
-            !Number.isFinite(activityTime) ||
-            !catalogStore.hasLoadedActiveSession(state.workspaceCwd, sessionId)
-          ) {
+          if (!absorbedActivity.has(sessionId)) {
             state.invalidationRequested = true;
           }
           catalogStore.resolveSessionActivity(

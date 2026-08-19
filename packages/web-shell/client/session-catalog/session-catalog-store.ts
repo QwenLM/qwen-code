@@ -298,26 +298,6 @@ export class SessionCatalogStore {
     if (pending.size === 0) this.liveStatePendingActivity.delete(workspaceCwd);
   }
 
-  hasLoadedActiveSession(workspaceCwd: string, sessionId: string): boolean {
-    for (const entry of this.entries.values()) {
-      if (entry.query.workspaceCwd !== workspaceCwd || !entry.snapshot.page) {
-        continue;
-      }
-      if (!ownsActivityReorder(entry)) continue;
-      if (
-        entry.snapshot.page.sessions.some(
-          (session) =>
-            session.sessionId === sessionId &&
-            session.isArchived !== true &&
-            (!session.workspaceCwd || session.workspaceCwd === workspaceCwd),
-        )
-      ) {
-        return true;
-      }
-    }
-    return false;
-  }
-
   private requestLiveStateRefresh(
     workspaceCwd: string,
     kind: 'interactive' | 'invalidated',
@@ -517,10 +497,15 @@ export class SessionCatalogStore {
   applyLiveState(
     workspaceCwd: string,
     liveSessions: readonly DaemonSessionLiveState[],
-  ): void {
+  ): ReadonlySet<string> {
     const liveById = new Map(
       liveSessions.map((session) => [session.sessionId, session]),
     );
+    // Session ids whose live activity watermark was usable on a loaded,
+    // reorder-owning page (stamped or already at least as fresh). The settle
+    // loop consumes this instead of re-deriving the index and acceptance
+    // rules, so the two sites cannot drift apart.
+    const absorbed = new Set<string>();
     for (const entry of this.entries.values()) {
       if (entry.query.workspaceCwd !== workspaceCwd || !entry.snapshot.page) {
         continue;
@@ -550,6 +535,7 @@ export class SessionCatalogStore {
             : undefined;
         const liveActivityTime =
           liveUpdatedAt !== undefined ? Date.parse(liveUpdatedAt) : Number.NaN;
+        if (Number.isFinite(liveActivityTime)) absorbed.add(session.sessionId);
         const updatedAt =
           liveUpdatedAt !== undefined &&
           Number.isFinite(liveActivityTime) &&
@@ -591,6 +577,7 @@ export class SessionCatalogStore {
         page: { ...entry.snapshot.page, sessions },
       });
     }
+    return absorbed;
   }
 
   async stageWorkspaceRefresh(

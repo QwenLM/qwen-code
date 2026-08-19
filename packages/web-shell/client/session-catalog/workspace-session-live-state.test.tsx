@@ -201,6 +201,12 @@ describe('useWorkspaceSessionLiveState', () => {
       await vi.advanceTimersByTimeAsync(SESSION_LIVE_STATE_POLL_MS);
     });
     expect(listSessions).toHaveBeenCalledTimes(catalogRequests + 1);
+    // Falling back must still resolve the pending completion — a leaked
+    // entry would re-flag the invalidation on every poll and re-run a full
+    // rescan once per cooldown window, forever.
+    expect(
+      getSessionCatalogStore(client).snapshotSessionActivity('/work'),
+    ).toBeUndefined();
   });
 
   it('settles a turn completion from the live watermark without a catalog scan', async () => {
@@ -300,6 +306,34 @@ describe('useWorkspaceSessionLiveState', () => {
       await vi.advanceTimersByTimeAsync(SESSION_LIVE_STATE_POLL_MS);
     });
     expect(listSessions).toHaveBeenCalledTimes(catalogRequests + 1);
+    expect(
+      getSessionCatalogStore(client).snapshotSessionActivity('/work'),
+    ).toBeUndefined();
+
+    // With the completion resolved, an idle cooldown window must stay quiet
+    // — no further rescan may be re-triggered by leaked pending state.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(
+        SESSION_LIVE_STATE_RECONCILE_COOLDOWN_MS,
+      );
+    });
+    expect(listSessions).toHaveBeenCalledTimes(catalogRequests + 1);
+  });
+
+  it('falls back when the completed session is absent from the live response', async () => {
+    await renderProbe();
+    const catalogRequests = listSessions.mock.calls.length;
+
+    // The live response only ever lists session-a; a completion for a
+    // session the daemon no longer reports live must fall back.
+    act(() => controller.turnCompleted('/work', 'session-ghost'));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SESSION_LIVE_STATE_POLL_MS);
+    });
+    expect(listSessions).toHaveBeenCalledTimes(catalogRequests + 1);
+    expect(
+      getSessionCatalogStore(client).snapshotSessionActivity('/work'),
+    ).toBeUndefined();
   });
 
   it('keeps a completion pending across a reconcile and settles on the next poll', async () => {
