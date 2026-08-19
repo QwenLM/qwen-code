@@ -88,24 +88,6 @@ function sha256(path: string): string {
   return createHash('sha256').update(readFileSync(path)).digest('hex');
 }
 
-function findMatchingClosingBrace(
-  source: string,
-  openingBraceIndex: number,
-): number {
-  let depth = 0;
-  for (let index = openingBraceIndex; index < source.length; index += 1) {
-    if (source[index] === '{') {
-      depth += 1;
-    } else if (source[index] === '}') {
-      depth -= 1;
-      if (depth === 0) {
-        return index;
-      }
-    }
-  }
-  return -1;
-}
-
 function listFixtureEvidenceFiles(
   directory: string,
   relativeDirectory = '',
@@ -605,48 +587,5 @@ describe('chat transcript contract prevalidation', () => {
         [],
       ),
     ).toThrow(/Unsupported identity probe block kind: status/u);
-  });
-
-  it('keeps Tauri wired to the packaged Web Shell artifact', () => {
-    const prepareRuntime = readFileSync(
-      resolve(repoRoot, 'packages/desktop-shell/scripts/prepare-runtime.js'),
-      'utf8',
-    );
-    const normalizedPrepareRuntime = prepareRuntime.replace(/\s+/gu, ' ');
-    const skipBuildIndex = normalizedPrepareRuntime.indexOf(
-      "const skipBuild = process.env.QWEN_DESKTOP_SKIP_BUILD === '1';",
-    );
-    const guardedBuildIndex =
-      normalizedPrepareRuntime.indexOf('if (!skipBuild) {');
-    const guardedBuildOpeningBraceIndex = normalizedPrepareRuntime.indexOf(
-      '{',
-      guardedBuildIndex,
-    );
-    const guardedBuildClosingBraceIndex = findMatchingClosingBrace(
-      normalizedPrepareRuntime,
-      guardedBuildOpeningBraceIndex,
-    );
-    const webShellBuildIndex = normalizedPrepareRuntime.indexOf(
-      "'--workspace=packages/web-shell'",
-    );
-    const distDirectoryIndex = normalizedPrepareRuntime.indexOf(
-      "const distDir = path.join(sourceRoot, 'dist');",
-    );
-
-    expect(prepareRuntime).toContain("'web-shell/index.html'");
-    expect(prepareRuntime).toContain("'web-shell/assets'");
-    expect(normalizedPrepareRuntime).toContain(
-      'copyDirectory(distDir, libDir)',
-    );
-    expect(skipBuildIndex).toBeGreaterThanOrEqual(0);
-    expect(guardedBuildIndex).toBeGreaterThan(skipBuildIndex);
-    expect(guardedBuildOpeningBraceIndex).toBeGreaterThan(guardedBuildIndex);
-    expect(webShellBuildIndex).toBeGreaterThan(guardedBuildOpeningBraceIndex);
-    expect(guardedBuildClosingBraceIndex).toBeGreaterThan(webShellBuildIndex);
-    expect(
-      normalizedPrepareRuntime.split("'--workspace=packages/web-shell'")
-        .length - 1,
-    ).toBe(1);
-    expect(distDirectoryIndex).toBeGreaterThan(guardedBuildClosingBraceIndex);
   });
 });

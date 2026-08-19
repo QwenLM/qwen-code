@@ -18,7 +18,7 @@
   ],
   "normalizedFields": ["clientReceivedAt", "createdAt", "updatedAt"],
   "hashes": {
-    "capability-matrix.md": "bbfb12546580f2587692dca439d0bb5e8aa0cbe319c4f5d9524322c2ef392d87",
+    "capability-matrix.md": "2f8925d7343b47f70ee66df15939ab5d1c1d2ee58dfd291ccaa3360d08a124ca",
     "cases/representative/daemon-events.jsonl": "196d6d03c8e71545123a2be340f41f9ad128fe9a53ddb934511858c89e936041",
     "cases/representative/acp-session-updates.jsonl": "7c7fc96fcf3768c8595ce21d069cb7e7cabccc2d5359596e2c442ff7df887a34",
     "cases/representative/chat-records.jsonl": "b66abea928c3c65cdedc4ca1c455d86b1b0a46b90e2a6a186afefaa89e87db0e",

@@ -58,7 +58,7 @@ ChatTranscriptModel
 | 消费端                  | 当前事实                                                                                             | 本方案处理                                              |
 | ----------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
 | Web/Qwen Server         | daemon state 经 SDK reducer 产生 `DaemonTranscriptBlock[]`，完整 WebShell 渲染                       | 保持生产路径不变；作为语义和兼容基线                    |
-| Qwen Tauri Desktop      | 构建并复制同一 WebShell 产物                                                                         | 不增加 Desktop adapter；验证打包 wiring                 |
+| Qwen Tauri Desktop      | 构建并复制同一 WebShell 产物                                                                         | 不增加 Desktop adapter；MR1 不认证安装产物行为          |
 | VS Code                 | `QwenAgentManager` 仍以 ACP、自有消息状态和现有 Webview 时间线为主；仓库存在 daemon connection spike | MR2 选择 direct-daemon 或 ACP 薄转换，只替换时间线      |
 | HTML Export             | 产品和 integration runner 仍有独立 HTML/ChatViewer 路径                                              | MR2 收敛到版本绑定的 `WebShellTranscript` document mode |
 | OpenWork/Craft Electron | 独立聊天实现                                                                                         | 本方案范围外                                            |
@@ -295,7 +295,7 @@ MR1 的 read-only probe 使用当前 `normalizeDaemonEvent` 和 `reduceDaemonTra
 1. 完整输入从空 state 归约；
 2. 去掉首个历史片段后重新归约同一尾部；
 3. 通过语义 key 对齐同一 block；
-4. 比较当前 block ID 和 source provenance。
+4. 比较当前 block ID，并记录 source provenance 是否存在。
 
 当前结果：
 
@@ -647,7 +647,7 @@ integration-tests/fixtures/chat-transcript-contract/v1/
 
 ### 11.3 capability matrix
 
-每项记录：Capability、Native source、Contract mapping、Render/action mapping、Consumers、Fixture/Evidence、Owner 和 Gate。
+MR1 的紧凑矩阵每项记录 Capability、当前 source/path、Fixture/Evidence、Owner 和 Gate；其中 path 合并 native source 与当前 mapping，evidence 合并 contract/render 证据。MR2 增加真实消费者时再拆出 Consumers 和 Render/action mapping，不能用省略列隐藏未验证能力。
 
 required 项不能以 `unknown`、`TBD`、人工截图或“测试能运行”通过。PASS、FAIL、BLOCKED、DEFERRED 必须分别使用，不能把预计后续修复写成当前 PASS。
 
@@ -662,7 +662,8 @@ required 项不能以 `unknown`、`TBD`、人工截图或“测试能运行”�
 - 测试目录内 direct-daemon/ACP/read-only probes；
 - ChatRecord → SDK → 默认 Web Shell adapter 等价性测试；
 - `write_file` → Turn Output 完整 diff 回归；
-- 必要的 integration test alias/config。
+- 必要的 integration test alias/config、no-AK CI wiring；
+- 为 integration TypeScript program 补齐的显式 `.js` ESM import specifier；这些改动不得改变 Web Shell runtime 语义。
 
 明确不包含：
 
@@ -716,11 +717,14 @@ flowchart TD
 ```bash
 npm run build
 npm run typecheck
-cd integration-tests && npx vitest run chat-transcript-contract.test.ts
+cd integration-tests && npx tsc -p tsconfig.json --pretty false
+npx vitest run chat-transcript-contract.test.ts
 cd ../packages/web-shell && npx vitest run client/components/artifacts/turnOutputSelectors.test.ts
 ```
 
 MR1 证明：fixture/hash/schema 可重复、默认 raw runtime 兼容、Turn Output 完整 diff 不回归，以及两条 identity blocker 可重复。
+
+MR1 不以源码文本断言认证 Desktop 打包行为。Web/Tauri 的现有构建检查继续作为回归信号；安装产物中 Web Shell 文件布局与可加载性的行为 smoke 属于 MR2 Packaging gate，在当前矩阵中保持 DEFERRED。
 
 ### 13.2 MR2 必须验证
 
