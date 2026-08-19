@@ -88,14 +88,16 @@ describe('prepareImagePayloadsForRequest', () => {
         store,
       },
     );
-    const id = JSON.stringify(firstPass).match(/Image #([a-f0-9]{12})/)?.[1];
-    expect(id).toBeDefined();
+    const marker = JSON.stringify(firstPass).match(
+      /\[Image #[a-f0-9]{12}: [^\]]+\]/,
+    )?.[0];
+    expect(marker).toBeDefined();
 
     const prepared = prepareImagePayloadsForRequest(
       [
         oldImage,
         toolImageTurn('new-shot'),
-        { role: 'user', parts: [{ text: `inspect Image #${id}` }] },
+        { role: 'user', parts: [{ text: `inspect ${marker}` }] },
       ],
       {
         maxRecentImages: 0,
@@ -117,11 +119,13 @@ describe('prepareImagePayloadsForRequest', () => {
         store,
       },
     );
-    const id = JSON.stringify(firstPass).match(/Image #([a-f0-9]{12})/)?.[1];
-    expect(id).toBeDefined();
+    const marker = JSON.stringify(firstPass).match(
+      /\[Image #[a-f0-9]{12}: [^\]]+\]/,
+    )?.[0];
+    expect(marker).toBeDefined();
 
     const prepared = prepareImagePayloadsForRequest(
-      [{ role: 'user', parts: [{ text: `inspect Image #${id}` }] }],
+      [{ role: 'user', parts: [{ text: `inspect ${marker}` }] }],
       {
         maxRecentImages: 0,
         store,
@@ -131,6 +135,25 @@ describe('prepareImagePayloadsForRequest', () => {
     expect(imageParts(prepared).map((part) => part.inlineData?.data)).toEqual([
       'old-shot',
     ]);
+  });
+
+  it('does not resurrect a stored image from a bare Image #id echo', () => {
+    const store = new InMemoryImagePayloadStore();
+    const firstPass = prepareImagePayloadsForRequest(
+      [toolImageTurn('old-shot'), { role: 'model', parts: [{ text: 'ok' }] }],
+      { maxRecentImages: 0, store },
+    );
+    const id = JSON.stringify(firstPass).match(/Image #([a-f0-9]{12})/)?.[1];
+    expect(id).toBeDefined();
+
+    // A model reply echoing just the id (not the full eviction marker) must
+    // not re-inject the stored payload.
+    const prepared = prepareImagePayloadsForRequest(
+      [{ role: 'user', parts: [{ text: `I saw Image #${id} earlier` }] }],
+      { maxRecentImages: 0, store },
+    );
+
+    expect(imageParts(prepared)).toEqual([]);
   });
 
   it('reattaches the most recent unique historical images', () => {

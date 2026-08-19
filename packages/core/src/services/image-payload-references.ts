@@ -11,8 +11,12 @@ import { approxBase64Bytes } from '../core/inlineMediaLimit.js';
 import { getFunctionResponseParts } from './compactionInputSlimming.js';
 
 const IMAGE_ID_LENGTH = 12;
+// Anchor the match to the full output of `imageReferenceText` so only the
+// markers eviction actually wrote resolve against the store. A bare
+// `Image #<id>` echo (a model reply quoting the id, or a post-compaction
+// summary that retained marker text) must not resurrect the stored payload.
 const IMAGE_REFERENCE_PATTERN = new RegExp(
-  `Image #([a-f0-9]{${IMAGE_ID_LENGTH}})`,
+  `\\[Image #([a-f0-9]{${IMAGE_ID_LENGTH}}): [^\\]]+\\]`,
   'gi',
 );
 
