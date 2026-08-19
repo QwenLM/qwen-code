@@ -496,7 +496,9 @@ describe('parseArguments', () => {
     mockEnsureAgentViewSupervisor.mockClear();
 
     try {
-      await expect(parseArguments()).rejects.toThrow('process.exit called');
+      await expect(parseArguments()).rejects.toThrow(
+        'process.exit unexpectedly called with "1"',
+      );
       expect(mockEnsureAgentViewSupervisor).not.toHaveBeenCalled();
     } finally {
       mockExit.mockRestore();
@@ -591,9 +593,35 @@ describe('parseArguments', () => {
     });
 
     try {
-      await expect(parseArguments()).rejects.toThrow('process.exit called');
-      expect(mockExit).toHaveBeenCalledWith(1);
+      await expect(parseArguments()).rejects.toThrow(
+        'process.exit unexpectedly called with "1"',
+      );
       expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        expect.stringContaining('does not accept an assigned value'),
+      );
+    } finally {
+      mockExit.mockRestore();
+    }
+  });
+
+  it('does not apply agents boolean validation to another command argument', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      'mcp',
+      'approve',
+      'agents',
+      '--all=true',
+    ];
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    mockWriteStderrLine.mockClear();
+
+    try {
+      await expect(parseArguments()).rejects.toThrow('process.exit called');
+      expect(mockExit).toHaveBeenCalledWith(0);
+      expect(mockWriteStderrLine).not.toHaveBeenCalledWith(
         expect.stringContaining('does not accept an assigned value'),
       );
     } finally {

@@ -425,7 +425,11 @@ export async function main() {
       // as failures (shell convention) so the supervisor does not record a
       // killed worker as successfully completed.
       process.exit(
-        exit.exitCode === 0 && exit.signal ? 128 + exit.signal : exit.exitCode,
+        exit.kind === 'exited'
+          ? exit.exitCode === 0 && exit.signal
+            ? 128 + exit.signal
+            : exit.exitCode
+          : 1,
       );
     }
   }
@@ -979,7 +983,10 @@ export async function main() {
         MANAGED_AGENT_VIEW_RESUME_MESSAGE,
         releaseExitedManagedSessionForContinue,
       } = await import('./startup/agent-view-resume-guard.js');
-      if (await isManagedAgentViewContinueBlocked(config.getSessionId())) {
+      if (
+        (await isManagedAgentViewContinueBlocked(config.getSessionId())) ||
+        !(await releaseExitedManagedSessionForContinue(config.getSessionId()))
+      ) {
         writeStderrLine(MANAGED_AGENT_VIEW_RESUME_MESSAGE);
         const cleanupError = await discardCreatedStartupWorktree(
           startupWorktreeContext,
@@ -991,7 +998,6 @@ export async function main() {
         }
         process.exit(1);
       }
-      await releaseExitedManagedSessionForContinue(config.getSessionId());
     }
 
     {

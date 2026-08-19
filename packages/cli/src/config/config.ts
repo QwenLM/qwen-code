@@ -1267,23 +1267,6 @@ export async function parseArguments(): Promise<CliArgs> {
     rawArgv = rawArgv.slice(1);
   }
 
-  const separatorIndex = rawArgv.indexOf('--');
-  const optionTokens = rawArgv.slice(
-    0,
-    separatorIndex === -1 ? rawArgv.length : separatorIndex,
-  );
-  const agentsTokenIndex = optionTokens.indexOf('agents');
-  const assignedAgentsBoolean =
-    agentsTokenIndex === -1
-      ? undefined
-      : optionTokens.find((token) => /^--(?:json|all)=/.test(token));
-  if (assignedAgentsBoolean !== undefined) {
-    writeStderrLine(
-      `${assignedAgentsBoolean.split('=')[0]} is a boolean flag and does not accept an assigned value.`,
-    );
-    process.exit(1);
-  }
-
   const yargsInstance = buildCliParser(rawArgv);
   yargsInstance.command(agentsCommand);
 

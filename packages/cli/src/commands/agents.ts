@@ -14,7 +14,7 @@ import type {
   AgentViewWorkerFile,
 } from '../agent-view/protocol.js';
 import { ensureAgentViewSupervisor } from '../agent-view/supervisor-runner.js';
-import { writeStdoutLine } from '../utils/stdioHelpers.js';
+import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
 import {
   attachCommand,
   killCommand,
@@ -107,6 +107,18 @@ export const agentsCommand: CommandModule = {
   describe: 'Manage Agent View background agents',
   builder: (yargs: Argv) =>
     yargs
+      .check(() => {
+        const assignedBoolean = process.argv
+          .slice(2)
+          .find((token) => /^--(?:json|all)=/.test(token));
+        if (assignedBoolean) {
+          writeStderrLine(
+            `${assignedBoolean.split('=')[0]} is a boolean flag and does not accept an assigned value.`,
+          );
+          process.exit(1);
+        }
+        return true;
+      })
       // Hoisted from the list subcommand so the space form
       // `agents --cwd <dir>` is consumed at this level instead of failing
       // strict mode (the $0 builder only applies once yargs descends).
