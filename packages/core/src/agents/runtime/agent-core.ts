@@ -187,6 +187,7 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   ToolNames.TEAM_CREATE,
   ToolNames.TEAM_DELETE,
   ToolNames.TEAM_PLAN_APPROVAL,
+  ToolNames.REQUEST_SHUTDOWN,
   ToolNames.TASK_CREATE,
   ToolNames.TASK_UPDATE,
   ToolNames.TASK_LIST,
@@ -252,6 +253,7 @@ const EXCLUDED_TOOLS_FOR_TEAMMATES: ReadonlySet<string> = new Set([
   ToolNames.TEAM_CREATE,
   ToolNames.TEAM_DELETE,
   ToolNames.TEAM_PLAN_APPROVAL,
+  ToolNames.REQUEST_SHUTDOWN,
   ToolNames.TODO_WRITE,
   ...SUBAGENT_PLAN_LIFECYCLE_TOOLS,
   // Worktree management belongs to the parent session.
