@@ -36,11 +36,15 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
 import {
   daemonInboundTraceIdCaptureMiddleware,
   daemonTelemetryMiddleware,
-  getDaemonTelemetryInboundTraceId,
   legacySessionTelemetryRoutes,
   resolveDaemonTelemetryRoute,
   setDaemonTelemetryWorkspace,
 } from './telemetry.js';
+// Deliberately imported from the context module (not telemetry.ts's
+// re-export): the middleware must write and this getter must read the SAME
+// symbol — if either side ever declares its own, the readback tests below
+// fail (the access log reads through this exact seam).
+import { getDaemonTelemetryInboundTraceId } from './telemetry-context.js';
 import {
   getDeferredRuntimeRequestTiming,
   MAX_CLIENT_ID_LENGTH,
