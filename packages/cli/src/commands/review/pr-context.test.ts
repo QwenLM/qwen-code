@@ -72,8 +72,13 @@ import {
   latestLedger,
   recoverLedger,
   renderLedgerSection,
+  FOREIGN_ROUND_HEADROOM,
 } from './pr-context.js';
-import { serializeLedger, type Ledger } from './lib/ledger.js';
+import {
+  serializeLedger,
+  LEDGER_MAX_FINDINGS,
+  type Ledger,
+} from './lib/ledger.js';
 
 // Guards the recognition of legacy suggestion-summary comments. This is what
 // decides which issue comment is excluded from the "Already discussed" list.
@@ -1327,6 +1332,9 @@ describe('latestLedger — the split trust surface', () => {
     expect(foreign?.ledger.model).toBeUndefined();
     expect(foreign?.ledger.findings).toEqual(anchored.findings);
     expect(foreign?.ledger.round).toBe(2);
+    // Pure-foreign (no own base): nothing was merged, so the renderer's
+    // whole-list THEIR-claims sentence is the accurate one.
+    expect(foreign?.merged).toBe(false);
   });
 
   it('carries the anchor through intact for the OWN account', () => {
@@ -1485,6 +1493,11 @@ describe('latestLedger — the split trust surface', () => {
     const squatting =
       'LGTM <!-- qwen-review-ledger {"v":1,"round":3,"findings":[' +
       '{"id":"R4-1","sev":"C","file":"a.ts","title":"squat"},' +
+      // Not only the immediate-next round: the filter is `idRound > round`,
+      // and a fixture whose only future id was round+1 left an `=== round+1`
+      // mutant green — a deeper squat (R6-1 against a round-3 marker) then
+      // rode the chain and collided two rounds later.
+      '{"id":"R6-1","sev":"S","file":"e.ts","title":"deep squat"},' +
       '{"id":"R3-1","sev":"C","file":"b.ts","title":"own"},' +
       '{"id":"R1-2","sev":"S","file":"c.ts","title":"carried"},' +
       '{"id":"f7","sev":"S","file":"d.ts","title":"non-pipeline id"}' +
@@ -1522,6 +1535,11 @@ describe('latestLedger — the split trust surface', () => {
     expect(wiped?.foreign).toBe(true);
     expect(wiped?.ledger.round).toBe(8);
     expect(wiped?.ledger.findings.map((f) => f.id)).toEqual(['R7-1']);
+    // The union announces itself: the renderer keys the mixed-provenance
+    // wording (and the PARTIAL note's merged form) on this flag, so a
+    // recovery that merged but said `merged: false` would render the own
+    // subset as another account's claims.
+    expect(wiped?.merged).toBe(true);
 
     // The doctored variant — copy the own list minus the entry to suppress —
     // fails the same way: the union restores it.
@@ -1557,6 +1575,72 @@ describe('latestLedger — the split trust surface', () => {
     const entry = kept?.ledger.findings.find((f) => f.id === 'R7-1');
     expect(entry?.sev).toBe('C');
     expect(entry?.title).toBe('certified critical');
+
+    // An ordinary LGTM round posts `"findings":[]` — with zero own entries
+    // there is nothing to merge OVER, and flagging that shape `merged`
+    // made the provenance wording claim own-certified entries exist when
+    // none do. It recovers as what it is: pure foreign.
+    const emptyOwn =
+      'LGTM <!-- qwen-review-ledger {"v":1,"round":7,"findings":[]} -->';
+    const foreignOnly = recoverLedger(
+      [
+        review('maintainer', '2026-01-01T00:00:00Z', emptyOwn),
+        review('stranger', '2026-01-09T00:00:00Z', doctored),
+      ],
+      'maintainer',
+    ).recovered;
+    expect(foreignOnly?.merged).toBe(false);
+    expect(foreignOnly?.ledger.findings.map((f) => f.id)).toEqual(['R7-2']);
+  });
+
+  it('the merge cap trims FOREIGN entries first — own-first is load-bearing', () => {
+    // Both markers can legitimately carry LEDGER_MAX_FINDINGS entries, so a
+    // union of up to twice the cap is reachable on a long-lived PR with a
+    // CI-bot interleave. Own-first concatenation is what makes the re-cap
+    // trim the foreign tail; a reversed concatenation survived the suite
+    // (every merge fixture held 1-2 entries) and would trim THIS account's
+    // certified entries first — the suppression class the union was added
+    // to kill, reintroduced by an ordering nobody pinned.
+    const ownFindings = Array.from(
+      { length: LEDGER_MAX_FINDINGS },
+      (_, i) =>
+        `{"id":"R7-${i + 1}","sev":"S","file":"a.ts","title":"own ${i + 1}"}`,
+    ).join(',');
+    const foreignFindings = Array.from(
+      { length: 5 },
+      (_, i) =>
+        `{"id":"R8-${i + 1}","sev":"S","file":"b.ts","title":"theirs ${i + 1}"}`,
+    ).join(',');
+    // Both source markers declare their OWN losses: the union's dropped is a
+    // three-term sum (own marker's, foreign marker's, the re-cap), and a
+    // fixture whose markers carried none pinned only the re-cap term — a
+    // refactor zeroing either marker-borne term shipped green.
+    const atCap = recoverLedger(
+      [
+        review(
+          'maintainer',
+          '2026-01-01T00:00:00Z',
+          `x <!-- qwen-review-ledger {"v":1,"round":7,"findings":[${ownFindings}],"dropped":3} -->`,
+        ),
+        review(
+          'stranger',
+          '2026-01-09T00:00:00Z',
+          `x <!-- qwen-review-ledger {"v":1,"round":8,"findings":[${foreignFindings}],"dropped":2} -->`,
+        ),
+      ],
+      'maintainer',
+    ).recovered;
+    // Every own id survives the cap…
+    const ids = atCap?.ledger.findings.map((f) => f.id) ?? [];
+    expect(ids.filter((id) => id.startsWith('R7-'))).toHaveLength(
+      LEDGER_MAX_FINDINGS,
+    );
+    // …the trimmed entries are exactly the foreign tail…
+    expect(ids).toHaveLength(LEDGER_MAX_FINDINGS);
+    expect(ids.some((id) => id.startsWith('R8-'))).toBe(false);
+    // …and `dropped` is the full three-term sum: own marker's 3, foreign
+    // marker's 2, plus the 5 the re-cap trimmed.
+    expect(atCap?.ledger.dropped).toBe(3 + 2 + 5);
   });
 
   it('does not adopt a foreign round implausibly far past our own', () => {
@@ -1588,6 +1672,43 @@ describe('latestLedger — the split trust surface', () => {
     );
     expect(near?.ledger.round).toBe(11);
     expect(near?.foreign).toBe(true);
+
+    // The boundary itself, SYMBOLICALLY — near/far fixtures alone constrain
+    // the constant only to a wide interval, and both a 6 and a 499 mutant
+    // left the suite green: one refuses a bot a week ahead (the measured
+    // full-diff re-review regression), the other widens the per-hostile-post
+    // counter-inflation bound ~8x. The symbolic fixtures cannot kill a value
+    // mutant either — rounds AND expectations both compute from the
+    // constant, so any mutated value satisfies the arithmetic in lockstep;
+    // pin the value itself:
+    expect(FOREIGN_ROUND_HEADROOM).toBe(64);
+    // Last admitted:
+    const atBound = latestLedger(
+      [
+        review('maintainer', '2026-01-05T00:00:00Z', marker(8)),
+        review(
+          'ci-bot',
+          '2026-01-09T00:00:00Z',
+          marker(8 + FOREIGN_ROUND_HEADROOM),
+        ),
+      ],
+      'maintainer',
+    );
+    expect(atBound?.ledger.round).toBe(8 + FOREIGN_ROUND_HEADROOM);
+    // …and first refused:
+    const pastBound = latestLedger(
+      [
+        review('maintainer', '2026-01-05T00:00:00Z', marker(8)),
+        review(
+          'ci-bot',
+          '2026-01-09T00:00:00Z',
+          marker(8 + FOREIGN_ROUND_HEADROOM + 1),
+        ),
+      ],
+      'maintainer',
+    );
+    expect(pastBound?.ledger.round).toBe(8);
+    expect(pastBound?.foreign).toBe(false);
   });
 
   it('bounds foreign rounds from zero when this account never posted', () => {
@@ -1599,6 +1720,52 @@ describe('latestLedger — the split trust surface', () => {
         review('stranger', '2026-01-09T00:00:00Z', marker(500)),
       ],
       'maintainer',
+    );
+    expect(found?.ledger.round).toBe(3);
+
+    // The zero-base boundary, symbolically: rounds ≤ the headroom recover,
+    // the first past it does not.
+    const atBound = latestLedger(
+      [
+        review(
+          'ci-bot',
+          '2026-01-02T00:00:00Z',
+          marker(FOREIGN_ROUND_HEADROOM),
+        ),
+      ],
+      'maintainer',
+    );
+    expect(atBound?.ledger.round).toBe(FOREIGN_ROUND_HEADROOM);
+    expect(
+      latestLedger(
+        [
+          review(
+            'ci-bot',
+            '2026-01-02T00:00:00Z',
+            marker(FOREIGN_ROUND_HEADROOM + 1),
+          ),
+        ],
+        'maintainer',
+      ),
+    ).toBeNull();
+  });
+
+  it('holds the headroom under a NULL login — the outage fallback stays bounded', () => {
+    // The FOREIGN_ROUND_HEADROOM doc promises: "Under a FAILED identity
+    // lookup (null login) … recovery is bounded to rounds ≤ the headroom."
+    // A mutant guarding the bound on a known identity (`me && …`) survived
+    // the whole suite — the only null-login fixture used round 2, which
+    // clears any plausible bound — and during a rate-limit blip a squatter's
+    // round-9999 marker beside the bot's round-3 one was adopted
+    // round-first: compose's capped stamp then pins the counter at the cap,
+    // the permanent win the headroom exists to prevent, reopened exactly
+    // during the identity-outage fallback.
+    const found = latestLedger(
+      [
+        review('ci-bot', '2026-01-02T00:00:00Z', marker(3)),
+        review('stranger', '2026-01-09T00:00:00Z', marker(9999)),
+      ],
+      null,
     );
     expect(found?.ledger.round).toBe(3);
   });
@@ -1755,6 +1922,47 @@ describe('renderLedgerSection', () => {
     expect(own).not.toContain('THEIR claims');
   });
 
+  it('a MERGED list is mixed provenance — never all THEIR claims', () => {
+    // The union merges a foreign winner OVER this account's own findings, so
+    // the rendered table holds both accounts' entries. The pure-foreign
+    // sentence attributed the whole list — the own certified subset
+    // included — to the foreign poster, inverting the trust distinction the
+    // author parameter exists to enforce; and the PARTIAL note pinned a
+    // dropped sum spanning two markers plus the merge re-cap on one round's
+    // size cap, sending a Step 6 reader to cross-reference a round that
+    // lost nothing.
+    const mergedSection = renderLedgerSection(
+      {
+        v: 1,
+        round: 8,
+        findings: [
+          { id: 'R7-1', sev: 'C', file: 'a.ts', title: 'own certified' },
+          { id: 'R8-1', sev: 'S', file: 'b.ts', title: 'theirs' },
+        ],
+        dropped: 2,
+      },
+      'm',
+      'qwen-code-ci-bot',
+      true,
+    );
+    expect(mergedSection).toContain(
+      "MERGED over this account's own latest findings",
+    );
+    expect(mergedSection).toContain(
+      'entries this account certified are its own claims',
+    );
+    expect(mergedSection).not.toContain('THEIR claims');
+    // The dropped sum is a three-term total any subset of which can be
+    // zero, and the note must not pin it on any single round or claim both
+    // sources lost entries — a reader cross-referencing a complete marker
+    // would dismiss the warning as stale.
+    expect(mergedSection).toContain('did not survive into this merged list');
+    expect(mergedSection).toContain('not attributable to any single round');
+    expect(mergedSection).not.toContain('from round 8 did not fit');
+    // No anchor travels with a foreign winner, merged or not.
+    expect(mergedSection).toContain('no incremental anchor');
+  });
+
   it('says so when the ledger is PARTIAL, and stays silent when it is not', () => {
     // The size cap can drop entries. A truncated list rendered under "every
     // entry below is owed a ruling" reads as complete, and the next round
@@ -1870,6 +2078,7 @@ describe('renderLedgerSection', () => {
       recovered,
       'model-a@aaaaaaaa',
       null,
+      false,
       'ffff1111ffff1111',
     );
     expect(diverged).toContain('Do NOT pass any sha');
@@ -1887,12 +2096,13 @@ describe('renderLedgerSection', () => {
         recovered,
         'model-a@aaaaaaaa',
         null,
+        false,
         'aaaa2222aaaa2222',
       ),
     ).toContain('the same-model contract HOLDS');
     // …and so does a side file that holds no anchor to disagree with.
     expect(
-      renderLedgerSection(recovered, 'model-a@aaaaaaaa', null, null),
+      renderLedgerSection(recovered, 'model-a@aaaaaaaa', null, false, null),
     ).toContain('the same-model contract HOLDS');
   });
 
@@ -2246,7 +2456,8 @@ describe('buildMarkdown host baking', () => {
       [longReview],
       null,
       undefined,
-      undefined,
+      null,
+      false,
       'ghe.example.com',
     );
     expect(md).toContain(
@@ -2276,6 +2487,7 @@ describe('buildMarkdown host baking', () => {
       ledger,
       '',
       'qwen-code-ci-bot',
+      false,
       'ghe.example.com',
     );
     expect(md).toContain("**@qwen-code-ci-bot**'s last posted review");
@@ -2319,7 +2531,8 @@ describe('buildMarkdown host baking', () => {
       [],
       null,
       undefined,
-      undefined,
+      null,
+      false,
       'ghe.example.com',
     );
     expect(md).toContain(
@@ -2402,6 +2615,174 @@ describe('runPrContext identity failure (handler level)', () => {
       out: '/tmp/ctx.md',
     });
     expect(rmSyncMock).not.toHaveBeenCalled();
+  });
+
+  const run = async () =>
+    (prContextCommand.handler as (a: unknown) => Promise<void>)({
+      _: [],
+      $0: 'qwen',
+      pr_number: '6711',
+      owner_repo: 'o/r',
+      out: '/tmp/ctx.md',
+    });
+  const contextWrite = () =>
+    (writeFileSyncMock.mock.calls.find(
+      (c) => c[0] === '/tmp/ctx.md',
+    )?.[1] as string) ?? '';
+
+  it('recovery SURVIVES the identity throw — isolation, not just non-deletion', async () => {
+    // The marker-less fixture above cannot tell the two arms apart: with the
+    // try/catch around currentUser() removed, the throw degrades recovery to
+    // "no ledger" and rmSync is still never called — green — while a fresh
+    // machine on a rate-limit blip recovers nothing, compose restarts at
+    // round 1 and re-issues R1-* ids the PR already carries. A marker in the
+    // walked list is the discriminator: isolation keeps the ledger section
+    // in the written context; a swallowed-by-the-outer-catch recovery loses
+    // it.
+    currentUserMock.mockImplementation(() => {
+      throw new Error('rate limited');
+    });
+    ghApiAllMock.mockReset();
+    ghApiAllMock
+      .mockReturnValueOnce([])
+      .mockReturnValueOnce([])
+      .mockReturnValueOnce([
+        {
+          id: 9,
+          user: { login: 'someone' },
+          state: 'COMMENTED',
+          submitted_at: '2026-08-01',
+          body: 'x <!-- qwen-review-ledger {"v":1,"round":3,"findings":[{"id":"R3-1","sev":"C","file":"a.ts","title":"t"}]} -->',
+        },
+      ]);
+    await run();
+    // Narrowed to the side file: recovery WRITES here, and the write path's
+    // debris cleanup legitimately rm's its own `.tmp` (the mocked
+    // writeFileSync never created it, so the real rename throws).
+    expect(
+      rmSyncMock.mock.calls.some((c) =>
+        String(c[0]).endsWith('prev-ledger.json'),
+      ),
+    ).toBe(false);
+    expect(contextWrite()).toContain('## Previous /review round');
+  });
+
+  it('deletes ONLY under the full licence, and both conjuncts have teeth', async () => {
+    // The two unpinned halves of the deletion flag. A confirmed identity
+    // over a walked list with no own review and nothing recovered IS the
+    // licence — deletion fires:
+    currentUserMock.mockReturnValue('bot');
+    await run();
+    expect(rmSyncMock).toHaveBeenCalled();
+  });
+
+  it('a marker-less OWN review is a persistent state, not proven absence', async () => {
+    // An own follow-up whose marker fails to parse must not read as "no
+    // prior round": deleting the side file here resets the posture clock
+    // mid-PR — the documented regression the `sawOwnReview` conjunct
+    // exists to prevent.
+    currentUserMock.mockReturnValue('someone');
+    await run();
+    expect(rmSyncMock).not.toHaveBeenCalled();
+  });
+
+  it('wires the foreign marker through to the rendered context and the side file', async () => {
+    // Both handler describes used marker-less fixtures, so recoverLedger
+    // returned null in every handler test and the foreign→author wiring was
+    // never executed: `prevLedgerAuthor = null` and a dropped `.foreign ?`
+    // conditional both shipped green. Cross-account recovery — the primary
+    // case — must render whose claims these are, and the persisted side
+    // file must not carry the foreign sha.
+    currentUserMock.mockReturnValue('maintainer');
+    ghApiAllMock.mockReset();
+    ghApiAllMock
+      .mockReturnValueOnce([])
+      .mockReturnValueOnce([])
+      .mockReturnValueOnce([
+        {
+          id: 11,
+          user: { login: 'ci-bot' },
+          state: 'COMMENTED',
+          submitted_at: '2026-08-01',
+          body: 'x <!-- qwen-review-ledger {"v":1,"round":4,"findings":[{"id":"R4-1","sev":"S","file":"a.ts","title":"t"}],"sha":"deadbeef00112233"} -->',
+        },
+      ]);
+    await run();
+    const ctx = contextWrite();
+    expect(ctx).toContain('**@ci-bot**');
+    expect(ctx).toContain('THEIR claims');
+    // The side-file write is the atomic temp write; the foreign anchor was
+    // stripped at the recovery seam and must not reappear on disk.
+    const sideWrite = writeFileSyncMock.mock.calls.find((c) =>
+      String(c[0]).includes('prev-ledger.json'),
+    );
+    expect(sideWrite).toBeDefined();
+    expect(String(sideWrite?.[1])).not.toContain('"sha"');
+
+    // And the OWN anchored ledger renders as this account's, sha intact —
+    // the dropped-conditional mutant rendered it as another account's
+    // claims beside its own "reviewed at" sha.
+    vi.clearAllMocks();
+    ensureAuthenticatedMock.mockReturnValue(undefined);
+    ghMock.mockReturnValue(metaJson);
+    currentUserMock.mockReturnValue('maintainer');
+    ghApiAllMock
+      .mockReturnValueOnce([])
+      .mockReturnValueOnce([])
+      .mockReturnValueOnce([
+        {
+          id: 12,
+          user: { login: 'maintainer' },
+          state: 'COMMENTED',
+          submitted_at: '2026-08-02',
+          body: 'x <!-- qwen-review-ledger {"v":1,"round":5,"findings":[{"id":"R5-1","sev":"S","file":"a.ts","title":"t"}],"sha":"deadbeef00112233"} -->',
+        },
+      ]);
+    await run();
+    const ownCtx = contextWrite();
+    expect(ownCtx).toContain("this account's last posted review");
+    expect(ownCtx).not.toContain('THEIR claims');
+    expect(ownCtx).toContain('reviewed at');
+    const ownSideWrite = writeFileSyncMock.mock.calls.find((c) =>
+      String(c[0]).includes('prev-ledger.json'),
+    );
+    expect(String(ownSideWrite?.[1])).toContain('"sha"');
+  });
+
+  it('wires the MERGED union through the handler to the rendered context', async () => {
+    // The passthrough is one hardcodable constant: with
+    // `const prevLedgerMerged = false;` at the call site every other test
+    // stayed green — the recovery seam asserts `merged` on the return
+    // value, the renderer test passes `true` directly, and no handler
+    // fixture held BOTH an own marker and a higher-round foreign winner.
+    // A real cross-account recovery would then render the pure-foreign
+    // THEIR-claims wording over a list whose own subset this account
+    // certified.
+    currentUserMock.mockReturnValue('maintainer');
+    ghApiAllMock.mockReset();
+    ghApiAllMock
+      .mockReturnValueOnce([])
+      .mockReturnValueOnce([])
+      .mockReturnValueOnce([
+        {
+          id: 21,
+          user: { login: 'maintainer' },
+          state: 'COMMENTED',
+          submitted_at: '2026-08-01',
+          body: 'x <!-- qwen-review-ledger {"v":1,"round":7,"findings":[{"id":"R7-1","sev":"C","file":"a.ts","title":"own"}]} -->',
+        },
+        {
+          id: 22,
+          user: { login: 'ci-bot' },
+          state: 'COMMENTED',
+          submitted_at: '2026-08-02',
+          body: 'x <!-- qwen-review-ledger {"v":1,"round":8,"findings":[{"id":"R8-1","sev":"S","file":"b.ts","title":"theirs"}]} -->',
+        },
+      ]);
+    await run();
+    const ctx = contextWrite();
+    expect(ctx).toContain("MERGED over this account's own latest findings");
+    expect(ctx).not.toContain('THEIR claims');
   });
 });
 

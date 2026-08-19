@@ -787,7 +787,7 @@ export interface RecoveredLedger {
  * identity vouches for, and the round is full-range. That is the fallback's
  * price, paid only while the identity endpoint is down.
  */
-const FOREIGN_ROUND_HEADROOM = 64;
+export const FOREIGN_ROUND_HEADROOM = 64;
 
 /**
  * The latest machine ledger posted on this PR — with the trust surface split.
@@ -835,7 +835,19 @@ export function recoverLedger(
   login: string | null,
 ): {
   recovered:
-    | (RecoveredLedger & { foreign: boolean; author: string | null })
+    | (RecoveredLedger & {
+        foreign: boolean;
+        author: string | null;
+        /**
+         * True when the union fired: a foreign winner was merged OVER this
+         * account's own latest findings. The renderer keys its provenance
+         * wording on it — a merged list is NOT "another account's claims"
+         * (the own subset is this account's own), and its `dropped` sum
+         * spans two markers plus the re-cap, so the PARTIAL note must not
+         * attribute it to one round's size cap.
+         */
+        merged: boolean;
+      })
     | null;
   sawOwnReview: boolean;
 } {
@@ -937,7 +949,14 @@ export function recoverLedger(
   // shared id space — and the union is exactly what makes the headroom doc's
   // "re-ruled entry by entry" true for entries a displacement would have
   // removed from view.
-  if (best.foreign && bestOwn) {
+  let mergedOverOwn = false;
+  // Non-empty own list only: an ordinary LGTM round posts `"findings":[]`,
+  // and with zero own entries there is nothing to merge OVER — flagging that
+  // shape `merged` made the provenance wording claim own-certified entries
+  // exist when none do (and misattributed the PARTIAL note's sum). The
+  // foreign winner recovers as pure-foreign, which is exactly what it is.
+  if (best.foreign && bestOwn && bestOwn.ledger.findings.length > 0) {
+    mergedOverOwn = true;
     const ownIds = new Set(bestOwn.ledger.findings.map((f) => f.id));
     const merged = [
       ...bestOwn.ledger.findings,
@@ -961,6 +980,7 @@ export function recoverLedger(
       reviewId: best.id,
       foreign: best.foreign,
       author: best.author,
+      merged: mergedOverOwn,
     },
     sawOwnReview,
   };
@@ -970,13 +990,19 @@ export function recoverLedger(
 export function latestLedger(
   reviews: RawReview[],
   login: string | null,
-): { ledger: Ledger; foreign: boolean; author: string | null } | null {
+): {
+  ledger: Ledger;
+  foreign: boolean;
+  author: string | null;
+  merged: boolean;
+} | null {
   const { recovered } = recoverLedger(reviews, login);
   return recovered
     ? {
         ledger: recovered.ledger,
         foreign: recovered.foreign,
         author: recovered.author,
+        merged: recovered.merged,
       }
     : null;
 }
@@ -1008,7 +1034,7 @@ export function persistedAnchorSha(sideFilePath: string): string | null {
 
 /**
  * Persist (or degrade) the prev-ledger side file for this run's recovery.
- * Three outcomes, each honest about what this run learned:
+ * Four outcomes, each honest about what this run learned:
  *
  * - Recovered: the ledger's own fields plus `commitId`/`reviewId` — the age
  *   reference and its provenance for Step 6's convergence posture. Readers
@@ -1055,9 +1081,14 @@ export function persistedAnchorSha(sideFilePath: string): string | null {
 export function persistRecoveredLedger(
   sideFilePath: string,
   recovered: RecoveredLedger | null,
-  noOwnReview: boolean,
-  identityKnown: boolean,
+  // Named, not positional: the pair encodes a safety invariant (deletion is
+  // licensed only under a PROVEN identity) that two adjacent bare booleans
+  // could not defend — a swapped call compiled cleanly, and on an
+  // identity-known run whose recovery threw it deleted the side file and
+  // reset the id space with every suite green.
+  flags: { noOwnReview: boolean; identityKnown: boolean },
 ): void {
+  const { noOwnReview, identityKnown } = flags;
   // Unique per process: two same-PR fetches racing on one fixed `.tmp` can
   // rename each other's bytes (A renames B's write; B's ENOENT is
   // swallowed), leaving the side file disagreeing with the context A holds
@@ -1296,11 +1327,20 @@ function anchorRuling(
  * foreign work list as this account's own certified round. Such a ledger
  * reaches here already stripped of its `sha`, so the gate above never rules
  * on one: a foreign anchor is not withheld by comparison, it is absent.
+ * `merged` refines that: when the foreign winner was merged OVER this
+ * account's own findings (the union), the list is MIXED — calling it all
+ * "THEIR claims" gave false provenance for the own subset and inverted the
+ * exact trust distinction the author sentence exists to enforce — and its
+ * `dropped` sum spans two markers plus the merge re-cap, so the PARTIAL
+ * note must not pin the loss on one round's size cap (a Step 6 reader
+ * cross-referencing that round's body finds it complete and dismisses the
+ * warning as stale).
  */
 export function renderLedgerSection(
   ledger: Ledger,
   running: string,
   author: string | null = null,
+  merged = false,
   /**
    * The `sha` the prev-ledger side file holds after this run's persist
    * decision — what Step 1 will actually pass. Null when the file holds none
@@ -1330,13 +1370,15 @@ export function renderLedgerSection(
   return [
     '## Previous /review round (machine ledger)',
     '',
-    `Round ${ledger.round}${ledger.sha ? `, reviewed at \`${code(ledger.sha)}\`${ledger.model ? ` by \`${code(ledger.model)}\`` : ''}` : ''}, recovered from the marker ${author ? `**@${cell(author)}**'s last posted review carried — another account, so these are THEIR claims and no incremental anchor travelled with them (the sha never crosses accounts; this round is full-range unless a local cache supplies one)` : `this account's last posted review carried`}. **Every entry below is owed a this-round ruling** (fixed / still stands / cannot tell / superseded by <class-id>) under Step 6's previous-round rules — the ledger is a work list, not a verdict; re-assert each claim against the code before repeating or retiring it.${ledger.sha ? ` ${anchorRuling(ledger, running, code, persistedSha)}` : ''}`,
+    `Round ${ledger.round}${ledger.sha ? `, reviewed at \`${code(ledger.sha)}\`${ledger.model ? ` by \`${code(ledger.model)}\`` : ''}` : ''}, recovered from ${author ? (merged ? `**@${cell(author)}**'s round-${ledger.round} marker MERGED over this account's own latest findings — entries this account certified are its own claims, the rest are @${cell(author)}'s, and no incremental anchor travelled with the foreign marker (the sha never crosses accounts; this round is full-range unless a local cache supplies one)` : `the marker **@${cell(author)}**'s last posted review carried — another account, so these are THEIR claims and no incremental anchor travelled with them (the sha never crosses accounts; this round is full-range unless a local cache supplies one)`) : `the marker this account's last posted review carried`}. **Every entry below is owed a this-round ruling** (fixed / still stands / cannot tell / superseded by <class-id>) under Step 6's previous-round rules — the ledger is a work list, not a verdict; re-assert each claim against the code before repeating or retiring it.${ledger.sha ? ` ${anchorRuling(ledger, running, code, persistedSha)}` : ''}`,
     // A truncated ledger must not read like a complete one. `dropped` exists
     // to draw that line, and this is the only place a reader sees the list.
     ...(ledger.dropped
       ? [
           '',
-          `**This list is PARTIAL**: ${ledger.dropped} further finding(s) from round ${ledger.round} did not fit the marker's size cap and are not here. Absence below is not evidence a finding was fixed — say so rather than reporting the missing ones as retired.`,
+          merged
+            ? `**This list is PARTIAL**: ${ledger.dropped} further finding(s) did not survive into this merged list — lost to a source marker's size cap or to the merge's own re-cap, and not attributable to any single round's marker. Absence below is not evidence a finding was fixed — say so rather than reporting the missing ones as retired.`
+            : `**This list is PARTIAL**: ${ledger.dropped} further finding(s) from round ${ledger.round} did not fit the marker's size cap and are not here. Absence below is not evidence a finding was fixed — say so rather than reporting the missing ones as retired.`,
         ]
       : []),
     '',
@@ -1358,6 +1400,8 @@ export function buildMarkdown(
   me: string = '',
   /** Set only when the ledger came from another account — see the section. */
   prevLedgerAuthor: string | null = null,
+  /** True when the ledger is the union of a foreign winner over own findings. */
+  prevLedgerMerged = false,
   /** The PR host (GitHub Enterprise); baked into the emitted refetch commands. */
   host?: string,
   /** See `renderLedgerSection` — the anchor that survives on disk. */
@@ -1441,6 +1485,7 @@ export function buildMarkdown(
         prevLedger,
         roundModelIdFrom(process.env),
         prevLedgerAuthor,
+        prevLedgerMerged,
         persistedSha,
       ),
     );
@@ -1676,30 +1721,37 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
   const prevLedgerAuthor = prevRecovered?.foreign
     ? (prevRecovered.author ?? null)
     : null;
-  // The side file's three outcomes live in the helper: recovered → written
+  const prevLedgerMerged = prevRecovered?.merged ?? false;
+  // The side file's four outcomes live in the helper: recovered → written
   // whole (any account — the round counter is a shared id space, and the
   // anchor was already stripped at the seam for a foreign winner);
   // demonstrably no prior round for THIS account and none recovered from any
   // other → removed (a stale counter would stamp rounds nobody posted);
-  // recovery threw → round counter kept, age-sensitive `commitId`/`reviewId`
-  // stripped.
+  // recovered anonymously over an existing file → only the round counter and
+  // tiebreak advance, the persisted list survives and `sha`/`commitId` are
+  // dropped (an anonymous round cannot be re-vouched); recovery threw →
+  // round counter kept, age-sensitive `commitId`/`reviewId` stripped.
   persistRecoveredLedger(
     join(dirname(out), `qwen-review-pr-${prNumber}-prev-ledger.json`),
     prevRecovered,
-    // Deletion is licensed ONLY by proof of true absence: a CONFIRMED
-    // identity, and a non-empty list this run walked in which no submitted
-    // review by that identity exists. An empty `reviews` may be an error
-    // envelope ghApiAll flattened to []; an own review whose marker fails to
-    // parse is a persistent state, not absence; and a failed identity lookup
-    // proves nothing about anyone — all take the conservative strip path.
-    // (A recovered foreign ledger also protects the file, but through the
-    // helper's own recovered-first branch, not through this flag.)
-    reviews.length > 0 && identityKnown && !recoveryThrew && !sawOwnReview,
-    // Separately from deletion: an ANONYMOUS recovery (identity unknown)
-    // must not replace the persisted work list — the helper's fourth
-    // outcome. Every marker walks as foreign without a `me`, so the union
-    // never protected the own list this run.
-    identityKnown,
+    {
+      // Deletion is licensed ONLY by proof of true absence: a CONFIRMED
+      // identity, and a non-empty list this run walked in which no submitted
+      // review by that identity exists. An empty `reviews` may be an error
+      // envelope ghApiAll flattened to []; an own review whose marker fails
+      // to parse is a persistent state, not absence; and a failed identity
+      // lookup proves nothing about anyone — all take the conservative strip
+      // path. (A recovered foreign ledger also protects the file, but
+      // through the helper's own recovered-first branch, not through this
+      // flag.)
+      noOwnReview:
+        reviews.length > 0 && identityKnown && !recoveryThrew && !sawOwnReview,
+      // Separately from deletion: an ANONYMOUS recovery (identity unknown)
+      // must not replace the persisted work list — the helper's fourth
+      // outcome. Every marker walks as foreign without a `me`, so the union
+      // never protected the own list this run.
+      identityKnown,
+    },
   );
 
   const persistedSha = persistedAnchorSha(
@@ -1726,6 +1778,7 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
     prevLedger,
     me,
     prevLedgerAuthor,
+    prevLedgerMerged,
     bakeHost,
     persistedSha,
   );

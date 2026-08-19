@@ -2773,8 +2773,18 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     // The command runs install + builds + tests in one process; the agent's default
     // 120s shell timeout would kill it — the very failure this command prevents, one
     // level up. So the block tells the agent to pass the tool's max, 600000ms.
+    //
+    // Pinned PER SITE, not per prompt: three sites supply the directive (the
+    // first call, the resume paragraph's "Same …", the efficacy probe's
+    // "… too"), so a whole-prompt `toContain` stayed green with any one of
+    // them deleted — and the deleted first-call directive is exactly the
+    // 120s mid-install kill this assertion's own comment names.
     const p = buildRoleBrief(PR_PLAN, '7', { planPath: '/abs/tmp/plan.json' });
-    expect(p).toContain(`timeout: ${SHELL_TOOL_MAX_TIMEOUT_MS}`);
+    expect(p).toContain(
+      `Invoke it with \`timeout: ${SHELL_TOOL_MAX_TIMEOUT_MS}\`:`,
+    );
+    expect(p).toContain(`Same \`timeout: ${SHELL_TOOL_MAX_TIMEOUT_MS}\``);
+    expect(p).toContain(`\`timeout: ${SHELL_TOOL_MAX_TIMEOUT_MS}\` too`);
   });
 
   it('tells Agent 7 how to CONTINUE a run one call could not finish', () => {
@@ -2784,8 +2794,14 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     // call teaches the agent to report a truncated dimension as a finished
     // one — which is what three live reviews did.
     const p = buildRoleBrief(PR_PLAN, '7', { planPath: '/abs/tmp/plan.json' });
-    expect(p).toContain('testScope.notRun');
-    expect(p).toContain('"clamped": true');
+    // Anchored to the continuation PARAGRAPH's own sentence: the bare
+    // literals are also supplied verbatim by the role-7 base brief
+    // (agent-briefs), so `toContain('testScope.notRun')` stayed green with
+    // the whole paragraph deleted.
+    expect(p).toContain(
+      'Work is left when `testScope.notRun` is non-empty, or when any ' +
+        '`test[]` entry has `"clamped": true`',
+    );
 
     // Asserted on the CONTINUATION BLOCK ALONE, which is the whole point. The
     // first cut of this test searched the entire prompt: `--resume` matched the
@@ -2802,11 +2818,45 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     // `resolve` — not spelled as POSIX literals: on Windows the prompt carries
     // `C:\\abs\\tmp\\plan.json`, and a hardcoded expectation fails there for a
     // reason that has nothing to do with the continuation block.
-    expect(resumeBlock[0]).toContain('review build-test');
+    // The FULL wrapper, on THIS block: the whole-prompt pins are satisfied
+    // by the first invocation block and vice versa, so a wrapper deleted
+    // from either one shipped green — and a resume block without it execs
+    // bare PATH `qwen`, an old global that lacks `build-test` entirely.
+    expect(resumeBlock[0]).toContain(
+      '"${QWEN_CODE_CLI:-qwen}" review build-test',
+    );
     expect(resumeBlock[0]).toContain(`--plan ${resolve('/abs/tmp/plan.json')}`);
+    // The tree too: a continuation against a different tree measures a
+    // different run. Never asserted before — a dropped `--worktree` line
+    // shipped green.
+    expect(resumeBlock[0]).toContain(
+      `--worktree ${resolve('.qwen/tmp/review-pr-6766')}`,
+    );
     expect(resumeBlock[0]).toContain(
       `--out ${join(resolve('/abs/tmp'), 'qwen-review-pr-6766-build-test.json')}`,
     );
+    expect(resumeBlock[0]).toContain('--resume');
+
+    // And the FIRST invocation block carries its own wrapper and tree — the
+    // same two elements, scoped to the block that must supply them.
+    const firstBlock = fences.find(
+      (f) => f.includes('review build-test') && !f.includes('--resume'),
+    );
+    expect(firstBlock).toBeDefined();
+    expect(firstBlock).toContain('"${QWEN_CODE_CLI:-qwen}" review build-test');
+    expect(firstBlock).toContain(
+      `--worktree ${resolve('.qwen/tmp/review-pr-6766')}`,
+    );
+
+    // The third-shape sentence, at BOTH prose sites — the role-7 base brief
+    // and the welded resume paragraph each carry it, so a single toContain
+    // is satisfied by either and a one-site deletion ships green. Counted,
+    // not just matched: deleting the sentence anywhere drops the count, and
+    // an agent missing it treats the endedBeforeTests shape as continuable,
+    // spending a MAX_RESUME_CALLS slot on a --resume that can only answer
+    // "ended before its test phase".
+    expect(p.split('"endedBeforeTests": true').length - 1).toBe(2);
+    expect(p.split('do not spend a continuation on it').length - 1).toBe(2);
   });
 
   it('welds the PR into Agent 0 — an unqualified number judges the wrong issue', () => {

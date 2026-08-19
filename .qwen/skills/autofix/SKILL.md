@@ -188,6 +188,18 @@ dispositions, changed files, checks actually run, and remaining blocker.
   handoff comments embed a byte-truncated excerpt of them, and a severed
   `<details>` tag would swallow the rest of the comment when rendered.
 
+  Instead, whenever you write `<workdir>/failure.md`, ALSO write
+  `<workdir>/failure.zh.md` — a complete paragraph-by-paragraph Chinese
+  translation of it. The workflow wraps `failure.zh.md` in its OWN collapsed
+  `<details><summary>中文说明</summary>` block when posting the handoff
+  comment, so Chinese maintainers can act on the escalation without reading
+  the English body. Constraints on `failure.zh.md`, because the workflow
+  byte-truncates it inside that wrapper: plain Markdown only; NO HTML tags at
+  all (no `<details>`, `<summary>`, or any `<…>`); no `<!--` sequences. A
+  missing `failure.zh.md` degrades the comment to the headline translation
+  alone, so write it even when the stop is a single paragraph. Translate the
+  whole of `failure.md`, section by section; do not summarize or omit.
+
 - Never ask the user a question in this headless workflow. Write
   `<workdir>/failure.md` and stop only when a required runnable check remains
   failing after attempted fixes; tracing the exact evidence through its source,
