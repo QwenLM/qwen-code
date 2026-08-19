@@ -12386,7 +12386,17 @@ export function App({
                           />
                         </div>
                       )}
-                      <div className={styles.composer}>
+                      {/* A pending approval overlay owns the footer: drop the
+                          composer out of layout (kept mounted so the draft
+                          survives) instead of leaving a live input below the
+                          dialog. */}
+                      <div
+                        className={
+                          approvalOverlayActive && mainView === 'chat'
+                            ? `${styles.composer} ${styles.composerHidden}`
+                            : styles.composer
+                        }
+                      >
                         {streamingState !== 'idle' ? (
                           suppressFailedPromptRetryStreaming ? null : (
                             <StreamingStatus

@@ -1479,6 +1479,89 @@ describe('tool row rendering', () => {
     expect(onOpen).toHaveBeenCalledWith(tool);
   });
 
+  it('keeps the agent row static while its launch approval is pending', () => {
+    const onOpen = vi.fn();
+    const tool = makeTool({
+      toolName: 'agent',
+      status: 'pending',
+      args: { subagent_type: 'Explore' },
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SubagentDetailsProvider onOpen={onOpen}>
+            <ToolLine
+              tool={tool}
+              approval={{
+                id: 'perm-1',
+                toolCallId: tool.callId,
+                content: [],
+                options: [],
+              }}
+            />
+          </SubagentDetailsProvider>
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+
+    // No expand affordance while the launch approval is unanswered: the row
+    // must not open details for an agent that has not started yet.
+    expect(container.querySelector('[class*="lineExpandable"]')).toBeNull();
+    expect(container.querySelector('button[class*="lineButton"]')).toBeNull();
+    act(() => {
+      (container.querySelector('[class*="lineButton"]') as HTMLElement).click();
+    });
+    expect(onOpen).not.toHaveBeenCalled();
+  });
+
+  it('keeps the agent row openable while a sub-tool approval is pending', () => {
+    const onOpen = vi.fn();
+    const tool = makeTool({
+      toolName: 'agent',
+      status: 'in_progress',
+      args: { subagent_type: 'Explore' },
+      subTools: [{ callId: 'sub-1', toolName: 'web_fetch', status: 'pending' }],
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SubagentDetailsProvider onOpen={onOpen}>
+            <ToolLine
+              tool={tool}
+              approval={{
+                id: 'perm-sub',
+                toolCallId: 'sub-1',
+                content: [],
+                options: [],
+              }}
+            />
+          </SubagentDetailsProvider>
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+
+    // A sub-tool approval is not the agent's own launch approval: the row
+    // stays openable so the pending sub-tool stays reachable in the details
+    // panel.
+    expect(
+      container.querySelector('button[class*="lineButton"]'),
+    ).not.toBeNull();
+    act(() => {
+      (
+        container.querySelector('button[class*="lineButton"]') as HTMLElement
+      ).click();
+    });
+    expect(onOpen).toHaveBeenCalledWith(tool);
+  });
+
   it('respects hideHeader for agent tools inside SubagentDetailsProvider', () => {
     const onOpen = vi.fn();
     const tool = makeTool({
