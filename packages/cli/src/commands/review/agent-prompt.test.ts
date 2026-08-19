@@ -3404,6 +3404,27 @@ describe('verify and reverse-audit briefs — the Step 4/5 methodology, in code'
     expect(p).toContain('go read the claimed source first');
   });
 
+  it('the verify brief carries the #9341 live-verification run disciplines', () => {
+    // A live two-arm verification of the standalone-session PR produced four
+    // disciplines the brief did not then carry, each from a measured miss: a
+    // behaviour matrix whose first pass was contaminated by reusing one session
+    // id across rows; a restore/delete race whose verdict came off a
+    // deterministic 40-round-per-arm split, not prose; a darwin-only HTTP
+    // surface exercised one level down against the compiled resolver; and a
+    // reserved-value session created on the base daemon and loaded on the PR
+    // daemon — the base-produces/PR-consumes handoff a same-input A/B can
+    // never produce. Pin each so a paraphrase cannot drop them back.
+    const p = buildRoleBrief(PLAN, 'verify');
+    expect(p).toContain('Each row of a run matrix starts from fresh state');
+    expect(p).toContain('a deterministic split is what separates');
+    expect(p).toContain('drive the same code one level down');
+    expect(p).toContain('let base produce and PR consume');
+    // Verifier run-hygiene must not bleed into a finder dimension.
+    expect(buildRoleBrief(PLAN, '1a')).not.toContain(
+      'Each row of a run matrix starts from fresh state',
+    );
+  });
+
   it('the verify brief is a verdict role: Exclusion Criteria yes, finding format no', () => {
     const p = buildRoleBrief(PLAN, 'verify');
     expect(p).toContain('What is NOT a finding'); // the Exclusion Criteria heading
