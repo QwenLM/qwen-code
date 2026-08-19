@@ -1,6 +1,32 @@
-/* global self, fetch, indexedDB */
+/* global self, fetch, indexedDB, URL */
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
+
+// Multi-daemon manifest cache written by the viewer (CLIENTS_KEY) — same
+// origin, so the SW shares the page's localStorage. Maps this SW's origin to
+// its registry name so push titles can carry the source daemon
+// (add-multi-workspace-client "Notification displays source daemon").
+// Resolves '' on any error — a missing/corrupt cache just drops the prefix.
+function originDaemonName() {
+  try {
+    const raw = self.localStorage.getItem('qwen-rc:clients');
+    if (!raw) return '';
+    const obj = JSON.parse(raw);
+    const list = Array.isArray(obj.daemons) ? obj.daemons : [];
+    for (const d of list) {
+      if (!d || typeof d.name !== 'string' || typeof d.url !== 'string')
+        continue;
+      try {
+        if (new URL(d.url).origin === self.location.origin) return d.name;
+      } catch {
+        /* malformed url entry — skip it */
+      }
+    }
+  } catch {
+    /* corrupt cache — no prefix */
+  }
+  return '';
+}
 
 self.addEventListener('push', (event) => {
   let p;
@@ -10,8 +36,12 @@ self.addEventListener('push', (event) => {
     p = {};
   }
   if (p.v !== 1) return;
-  const title =
+  let title =
     p.kind === 'permission.required' ? 'Permission needed' : 'qwen-code';
+  // Push titles only (notification clicks are untouched): when this origin is
+  // one of several registered daemons, "[workstation-1] Permission needed".
+  const dname = originDaemonName();
+  if (dname) title = '[' + dname + '] ' + title;
   const actions =
     p.kind === 'permission.required'
       ? [

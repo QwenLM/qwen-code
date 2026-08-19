@@ -212,6 +212,29 @@
       <div><button id="list-sessions">List sessions</button></div>
       <pre id="sessions">(not listed)</pre>
     </section>
+    <section id="daemons">
+      <strong>Daemons</strong> (multi-daemon registry; requires owner scope)
+      <div
+        id="daemons-empty"
+        style="color: #888; font-size: 0.85rem"
+      >
+        (no registry — this daemon has no clients.toml, or your token lacks
+        owner scope)
+      </div>
+      <div id="daemons-body" hidden>
+        <div id="daemons-rows"></div>
+        <div style="margin-top: 6px">
+          <button id="daemons-refresh-sessions">
+            Sessions on all daemons
+          </button>
+          <span
+            id="daemons-updated"
+            style="color: #888; font-size: 0.85rem"
+          ></span>
+        </div>
+        <div id="daemons-sessions" hidden>(not fetched)</div>
+      </div>
+    </section>
     <section id="push-prefs">
       <strong>Push preferences</strong> (quiet hours + rate cap; requires owner
       scope)
@@ -241,6 +264,12 @@
         <label
           title="BM25 relevance ranking over the prebuilt index (run `qwen-rc reindex` first); falls back to the scan if unavailable"
           ><input id="search-rank" type="checkbox" /> rank (BM25)</label
+        >
+        <label
+          id="search-all-daemons-label"
+          title="Also search every daemon in the multi-daemon registry (cross-origin; per-daemon rows, no merged ranking)"
+          ><input id="search-all-daemons" type="checkbox" disabled /> all
+          daemons</label
         >
       </div>
       <div id="search-results">(not searched)</div>
@@ -275,10 +304,21 @@
       <div id="commands-list">(not listed)</div>
     </section>
     <section id="fork-session">
-      <strong>Fork session</strong> (full copy; requires write scope)
+      <strong>Fork session</strong> (requires write scope)
       <div>
         <input id="fork-id" placeholder="parent session id" />
         <input id="fork-name" placeholder="optional name" />
+        <input
+          id="fork-from"
+          type="number"
+          min="0"
+          placeholder="from event (blank = full)"
+        />
+        <select id="fork-mode" title="transcript mode">
+          <option value="include" selected>include (copy)</option>
+          <option value="empty">empty (header only)</option>
+          <option value="summary" disabled>summary (unavailable)</option>
+        </select>
         <button id="fork-btn">Fork</button>
       </div>
       <div id="fork-result"></div>
@@ -417,6 +457,62 @@
       #transcript .tool .st {
         opacity: 0.7;
       }
+      /* Per-message "Fork from here" (add-session-forking web gap): a small
+         action under a COMPLETED assistant turn. */
+      #transcript .bubble-fork {
+        align-self: flex-start;
+        margin-top: -4px;
+      }
+      #transcript .bubble-fork button {
+        background: transparent;
+        border: 1px solid #3a3f47;
+        border-radius: 6px;
+        color: #8a8f98;
+        font-size: 0.72rem;
+        padding: 2px 8px;
+        cursor: pointer;
+      }
+      #transcript .bubble-fork button:hover {
+        color: #e6e6e6;
+        border-color: #8a8f98;
+      }
+      /* Fork-lineage breadcrumb above the transcript (add-session-forking). */
+      #lineage {
+        margin-top: 8px;
+        padding: 4px 8px;
+        background: #14171c;
+        border-radius: 6px;
+        color: #9aa0a6;
+        font-family: ui-monospace, monospace;
+        font-size: 0.78rem;
+        word-break: break-word;
+      }
+      /* Aggregated multi-daemon sessions/search rows (spec 4.5/4.6/4.7). */
+      .daemon-pill {
+        display: inline-block;
+        background: #1d4ed8;
+        color: #fff;
+        border-radius: 8px;
+        font-size: 0.7rem;
+        padding: 1px 8px;
+        margin-right: 6px;
+      }
+      .daemon-status-row {
+        color: #f38ba8;
+        font-size: 0.85rem;
+      }
+      .daemon-status-row a {
+        color: #f38ba8;
+      }
+      .agg-session-row {
+        padding: 3px 0;
+        border-bottom: 1px solid #26292e;
+        font-family: ui-monospace, monospace;
+        font-size: 0.85rem;
+      }
+      .agg-session-row .open {
+        cursor: pointer;
+      }
     </style>
     <div
       id="session-footer"
@@ -438,6 +534,7 @@
         ><input type="checkbox" id="raw-toggle" /> raw JSON</label
       >
     </div>
+    <div id="lineage" hidden></div>
     <div id="transcript"></div>
     <pre id="log" style="display: none"></pre>
     <script>
@@ -463,6 +560,18 @@
       let curThought = null; // current thinking bubble
       const toolEls = new Map(); // toolCallId -> row element
 
+      // ---- Turn accounting for "Fork from here" (add-session-forking) ------
+      // The daemon bridge publishes one `user_message_chunk` echo per
+      // accepted prompt (live + replay ring) and `agent_message_chunk` frames
+      // per assistant reply. The first agent chunk AFTER a user record
+      // crosses a turn boundary, so forkTurnCount equals the user-turn count
+      // the fork API's fromTurn expects ("keep the first N user turns").
+      let userTurnsSeen = 0; // user_message_chunk frames observed this watch
+      let forkTurnCount = 0; // turn boundaries crossed (see above)
+      let asstThisTurn = false; // current turn produced an assistant bubble
+      let forkBtnEl = null; // the placed "Fork from here" row
+      let forkBtnTurn = -1; // forkTurnCount value the placed button is bound to
+
       // Strip terminal control chars (the daemon may emit them); keep \n and \t.
       // textContent is used everywhere below, so there's no HTML-injection path.
       const clean = (t) =>
@@ -487,6 +596,13 @@
         ctxInfo = null;
         liveIn = 0;
         liveOut = 0;
+        // A new watch starts with a fresh turn count (replayed history
+        // re-establishes it frame by frame) and no placed fork button.
+        userTurnsSeen = 0;
+        forkTurnCount = 0;
+        asstThisTurn = false;
+        forkBtnEl = null;
+        forkBtnTurn = -1;
         renderFooter();
       }
       function makeBubble(cls, roleLabel) {
@@ -669,6 +785,38 @@
         }
       }
 
+      // Fork-lineage breadcrumb (add-session-forking): GET /session/:id/lineage
+      // (OWNER). chain[0] is the session itself, chain[1] its parent — show
+      // "parent: <name> @ <id>" in #lineage above the transcript only for
+      // FORKED sessions (chain.length > 1). Best-effort: a non-owner token
+      // gets 403 (hidden), and a slow response for a superseded session must
+      // not render (guarded by watchedSessionId).
+      async function renderLineage(id) {
+        const el = $('lineage');
+        el.hidden = true;
+        el.textContent = '';
+        if (!token()) return;
+        try {
+          const res = await fetch(
+            '/session/' + encodeURIComponent(id) + '/lineage',
+            { headers: { Authorization: 'Bearer ' + token() } },
+          );
+          if (!res.ok) return; // 403 non-owner / 404 unknown -> no breadcrumb
+          const body = await res.json();
+          if (watchedSessionId !== id) return; // superseded by a newer watch
+          const chain = Array.isArray(body.chain) ? body.chain : [];
+          if (chain.length <= 1) return; // root session, not a fork
+          const parent = chain[1];
+          if (!parent || !parent.sessionId) return;
+          const name =
+            parent.title || String(parent.sessionId).slice(0, 8);
+          el.textContent = 'parent: ' + name + ' @ ' + parent.sessionId;
+          el.hidden = false;
+        } catch {
+          /* best-effort — the transcript never depends on the breadcrumb */
+        }
+      }
+
       function renderSessionUpdate(u) {
         if (!u || typeof u !== 'object') return;
         const su = u.sessionUpdate;
@@ -676,12 +824,34 @@
         // carry empty text), so read it before the text guard below.
         updateLiveTokens(u._meta && u._meta.usage);
         const text = u.content && u.content.text;
-        if (su === 'agent_message_chunk' && text) return appendAssistant(text);
+        // Still NOT rendered (the prompt is echoed locally on send) — but
+        // counted: each user record arms the next turn boundary.
+        if (su === 'user_message_chunk') {
+          userTurnsSeen += 1;
+          asstThisTurn = false;
+          return;
+        }
+        if (su === 'agent_message_chunk' && text) {
+          // First agent chunk after a user record = one completed turn
+          // boundary (the value "Fork from here" posts as fromTurn).
+          if (userTurnsSeen > forkTurnCount) forkTurnCount = userTurnsSeen;
+          asstThisTurn = true;
+          appendAssistant(text);
+          // A turn may span several assistant bubbles (tool calls between
+          // them) — keep the current turn's fork button under the LATEST one.
+          if (
+            forkBtnEl &&
+            forkBtnTurn === forkTurnCount &&
+            forkBtnEl.previousElementSibling !== curAsst
+          ) {
+            $('transcript').appendChild(forkBtnEl);
+          }
+          return;
+        }
         if (su === 'agent_thought_chunk' && text) return appendThought(text);
         if (su === 'tool_call' || su === 'tool_call_update')
           return renderTool(u);
         if (su === 'plan') return renderPlan(u.entries);
-        // user_message_chunk is ignored — we echo the prompt locally on send.
       }
       // Turn a relayed daemon frame into transcript UI. Permission cards are
       // handled separately (in #cards); noise frames are suppressed here and
@@ -719,10 +889,115 @@
             }
             return addSystem('model switched to ' + (mid || '?'), false);
           }
+          case 'turn_complete':
+            // The just-finished turn is a valid fork point: place "Fork from
+            // here" under the turn's last assistant bubble. Replayed history
+            // carries no turn_complete, so historical turns stay button-less
+            // by design (fork them from the Sessions/fork panels instead).
+            if (asstThisTurn && curAsst) placeForkButton();
+            return;
           // suppressed noise (still in raw JSON): client_joined, client_left,
           // usage_tick, permission_* (rendered as cards)
           default:
             return;
+        }
+      }
+
+      // ---- Per-message "Fork from here" (add-session-forking web gap) ------
+      // A small action under the last assistant bubble of a completed turn.
+      // Clicking POSTs /session/:id/fork { fromTurn, transcript, name? }
+      // where fromTurn = the number of user turns answered so far (the
+      // daemon's turnResolver reads it as "keep the first N user turns").
+      // On success the viewer switches to the fork via the SAME hand-off
+      // resumeConversation uses (set #session, re-fire the Watch handler —
+      // which clears the transcript, resetting the turn counters).
+      function buildForkButton(turn) {
+        const row = document.createElement('div');
+        row.className = 'bubble-fork';
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = 'Fork from here';
+        const mode = document.createElement('select');
+        mode.title = 'transcript mode for the fork';
+        for (const val of ['include', 'empty']) {
+          const o = document.createElement('option');
+          o.value = val;
+          o.textContent = val;
+          mode.appendChild(o);
+        }
+        const note = document.createElement('span');
+        note.style.cssText =
+          'color:#9aa0a6;font-size:0.72rem;margin-left:6px';
+        btn.onclick = () =>
+          doForkHere(watchedSessionId, turn, mode.value, btn, note);
+        row.appendChild(btn);
+        row.appendChild(mode);
+        row.appendChild(note);
+        return row;
+      }
+
+      // Idempotent: re-calls for the same turn only re-position the button
+      // (a late agent chunk may have started a newer assistant bubble).
+      function placeForkButton() {
+        if (!curAsst || forkTurnCount === 0) return;
+        if (!forkBtnEl || forkBtnTurn !== forkTurnCount) {
+          if (forkBtnEl) forkBtnEl.remove();
+          forkBtnEl = buildForkButton(forkTurnCount);
+          forkBtnTurn = forkTurnCount;
+        }
+        if (forkBtnEl.previousElementSibling !== curAsst) {
+          $('transcript').appendChild(forkBtnEl); // move below the last bubble
+        }
+      }
+
+      async function doForkHere(sessionId, turn, mode, btn, note) {
+        if (!sessionId) return (note.textContent = 'watch a session first');
+        if (!token()) return (note.textContent = 'pair first');
+        // Optional human name (same field the Fork-session panel posts).
+        const name = window.prompt('Fork name (optional):');
+        if (name === null) return; // cancelled — no request
+        btn.disabled = true;
+        note.textContent = 'forking…';
+        const payload = { fromTurn: turn, transcript: mode };
+        if (name.trim()) payload.name = name.trim();
+        try {
+          const res = await fetch(
+            '/session/' + encodeURIComponent(sessionId) + '/fork',
+            {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: 'Bearer ' + token(),
+              },
+              body: JSON.stringify(payload),
+            },
+          );
+          if (!res.ok) {
+            let code = res.status;
+            try {
+              const b = await res.json();
+              if (b && b.code) code = b.code;
+            } catch {
+              /* non-JSON error body */
+            }
+            btn.disabled = false;
+            note.textContent =
+              res.status === 401 || res.status === 403
+                ? 'not authorized — needs write scope'
+                : 'fork failed: ' + code;
+            return;
+          }
+          const data = await res.json();
+          setStatus('forked → ' + String(data.sessionId).slice(0, 8) + '…');
+          // Switch the viewer to the fork: abort any live stream (the
+          // onclick() call bypasses #watch's disabled guard), then run the
+          // standard watch hand-off.
+          if ($('watch').disabled) $('stop').onclick();
+          $('session').value = data.sessionId;
+          $('watch').onclick();
+        } catch (e) {
+          btn.disabled = false;
+          note.textContent = 'fork error: ' + e;
         }
       }
 
@@ -811,6 +1086,11 @@
           // are callable here regardless of source order.
           renderRecentWorkspaces();
           void browseTo();
+          // A fresh pair (QR or code) happens AFTER the script-load manifest
+          // fetch (which bailed on !token()), so re-attempt it now: owner
+          // tokens reveal the daemon switcher + the "all daemons" search
+          // toggle (add-multi-workspace-client task 4.1).
+          void loadDaemonManifest();
           pairFeedback(
             '✓ paired — scopes: ' + (data.scopes || []).join(', '),
             true,
@@ -1461,6 +1741,7 @@
           $('composer').style.display = '';
           clearTranscript(); // fresh transcript for this watch session
           void fetchContext(id); // populate the model/context/mode footer
+          void renderLineage(id); // fork-lineage breadcrumb (best-effort)
           void refreshIdleToggle(); // reflect this session's idle-suggest state
           const reader = res.body.getReader();
           const decoder = new TextDecoder();
@@ -1837,6 +2118,404 @@
         }
       };
 
+      // ===================================================================
+      // Multi-daemon registry UI (add-multi-workspace-client tasks 4.1–4.8).
+      // The manifest (clients.toml) comes from GET /ui/clients-manifest.json
+      // (OWNER) and is cached in localStorage under CLIENTS_KEY (spec 4.1).
+      // A non-owner token gets 403 → the section stays hidden (no switcher).
+      // Cross-origin fan-out (health / sessions / search) presents THIS
+      // page's bearer token to every daemon; a foreign daemon that does not
+      // know it answers 401 → the row says RE-PAIR REQUIRED and points at
+      // that daemon's /ui/ (spec 4.6 state mapping). textContent-only.
+      // ===================================================================
+      const CLIENTS_KEY = 'qwen-rc:clients';
+      // Spec 4.2 + "Health poll interval clamp": 30 s default cadence,
+      // operator-configurable via localStorage, clamped to a 10 s minimum.
+      const POLL_KEY = 'qwen-rc:health-poll-ms';
+      const healthPollMs = () => {
+        const v = Number(localStorage.getItem(POLL_KEY));
+        return Number.isFinite(v) && v > 0 ? Math.max(10000, v) : 30000;
+      };
+      // Spec 4.2 state machine needs the LAST SUCCESSFUL 200 per daemon, not
+      // just the latest poll outcome — persist it so a reload renders the
+      // right dot immediately (green ≤30 s, yellow 30 s–5 min, red >5 min).
+      const HEALTH_KEY = 'qwen-rc:health';
+      let healthLastSuccess = {}; // { daemonUrl: epochMs }
+      try {
+        const raw = localStorage.getItem(HEALTH_KEY);
+        const obj = raw ? JSON.parse(raw) : {};
+        if (obj && typeof obj === 'object') healthLastSuccess = obj;
+      } catch {
+        healthLastSuccess = {};
+      }
+      const saveHealthLastSuccess = () => {
+        try {
+          localStorage.setItem(HEALTH_KEY, JSON.stringify(healthLastSuccess));
+        } catch {
+          /* private mode — dots degrade to latest-poll-only */
+        }
+      };
+      // Latest poll outcome per daemon: { kind, status? }.
+      const daemonHealth = new Map();
+      let daemonHealthTimer = null;
+
+      function manifestDaemons() {
+        try {
+          const raw = localStorage.getItem(CLIENTS_KEY);
+          if (!raw) return [];
+          const obj = JSON.parse(raw);
+          const list = Array.isArray(obj.daemons) ? obj.daemons : [];
+          const clean = list.filter(
+            (d) =>
+              d && typeof d.name === 'string' && typeof d.url === 'string',
+          );
+          // "No explicit default → first entry is the default" (spec 4.1) —
+          // the endpoint does NOT synthesize `default`, the client does.
+          if (clean.length > 0 && !clean.some((d) => d.default)) {
+            clean[0] = { ...clean[0], default: true };
+          }
+          return clean;
+        } catch {
+          return [];
+        }
+      }
+
+      // Spec 4.2 dot state machine. Green: 200 within the last 30 s. Yellow:
+      // last successful 200 is 30 s–5 min old, OR latest poll was a 5xx. Red:
+      // latest poll was 401/403/network failure, OR no success in >5 min.
+      // `unknown` (grey) only before the very first poll has any data.
+      function healthDotState(d, now) {
+        const last = healthLastSuccess[d.url];
+        const age = last === undefined ? Infinity : now - last;
+        if (age > 5 * 60 * 1000) return 'red'; // no success in over 5 min
+        const latest = daemonHealth.get(d.url);
+        if (latest && latest.kind !== 'ok') {
+          if (latest.kind === 'http5xx') {
+            return age <= 30 * 1000 ? 'green' : 'yellow';
+          }
+          // 401 / 403 / network failure / timeout
+          return 'red';
+        }
+        if (latest === undefined && last === undefined) return 'unknown';
+        return age <= 30 * 1000 ? 'green' : 'yellow';
+      }
+      const relTime = (ms) => {
+        const s = Math.max(0, Math.round(ms / 1000));
+        if (s < 60) return s + 's ago';
+        const m = Math.round(s / 60);
+        if (m < 60) return m + 'm ago';
+        const h = Math.round(m / 60);
+        if (h < 48) return h + 'h ago';
+        return Math.round(h / 24) + 'd ago';
+      };
+      function renderDaemonRows() {
+        const rows = $('daemons-rows');
+        rows.textContent = '';
+        const now = Date.now();
+        for (const d of manifestDaemons()) {
+          const row = document.createElement('div');
+          row.style.cssText =
+            'padding:4px 0;cursor:pointer;border-bottom:1px solid #26292e';
+          const st = healthDotState(d, now);
+          const latest = daemonHealth.get(d.url);
+          const last = healthLastSuccess[d.url];
+          const detail =
+            st +
+            (latest && latest.status ? ' — HTTP ' + latest.status : '') +
+            (last !== undefined ? ' — last success ' + relTime(now - last) : '');
+          const dot = document.createElement('span');
+          dot.style.cssText =
+            'display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px';
+          dot.style.background =
+            st === 'green'
+              ? 'green'
+              : st === 'yellow'
+                ? 'yellow'
+                : st === 'unknown'
+                  ? '#666'
+                  : 'red';
+          dot.title = 'health: ' + detail;
+          row.appendChild(dot);
+          const label = document.createElement('span');
+          label.textContent =
+            d.name + (d.default ? ' (default)' : '') + ' — ' + d.url;
+          row.appendChild(label);
+          if (new URL(d.url).origin === location.origin) {
+            const cur = document.createElement('span');
+            cur.textContent = '  ← current';
+            cur.style.color = '#888';
+            row.appendChild(cur);
+          }
+          row.onclick = () => {
+            if (new URL(d.url).origin === location.origin) return;
+            if (!confirm('Switch to daemon "' + d.name + '" at ' + d.url + '?'))
+              return;
+            localStorage.setItem('qwen-rc:active-daemon', d.url);
+            location.assign(d.url.replace(/\/+$/, '') + '/ui/');
+          };
+          rows.appendChild(row);
+        }
+      }
+
+      async function checkDaemonHealth(d) {
+        // Spec 4.2: /rc/health is public. Classify the outcome — the dot
+        // state machine (healthDotState) combines it with the last-success
+        // timestamp to derive green/yellow/red.
+        try {
+          const res = await fetch(d.url.replace(/\/+$/, '') + '/rc/health', {
+            signal: AbortSignal.timeout(10000),
+          });
+          if (res.ok) return { kind: 'ok' };
+          if (res.status >= 500) return { kind: 'http5xx', status: res.status };
+          return { kind: 'http' + res.status, status: res.status };
+        } catch (e) {
+          return { kind: e && e.name === 'TimeoutError' ? 'timeout' : 'network' };
+        }
+      }
+
+      async function pollDaemonHealths() {
+        if (document.hidden) return; // spec 4.2: pause while the tab is hidden
+        const daemons = manifestDaemons();
+        if (daemons.length === 0) return;
+        await Promise.all(
+          daemons.map(async (d) => {
+            const r = await checkDaemonHealth(d);
+            daemonHealth.set(d.url, r);
+            if (r.kind === 'ok') healthLastSuccess[d.url] = Date.now();
+          }),
+        );
+        saveHealthLastSuccess();
+        renderDaemonRows();
+      }
+
+      // Spec 4.2: polling pauses while the tab is backgrounded and RESUMES on
+      // visibility return (the interval alone would just keep skipping).
+      document.addEventListener('visibilitychange', () => {
+        if (!document.hidden) void pollDaemonHealths();
+      });
+
+      async function loadDaemonManifest() {
+        if (!token()) return;
+        try {
+          const res = await fetch('/ui/clients-manifest.json', {
+            headers: { Authorization: 'Bearer ' + token() },
+          });
+          if (!res.ok) return; // 403 non-owner / 404 → no switcher (spec 4.1)
+          const body = await res.json();
+          const daemons = Array.isArray(body.daemons) ? body.daemons : [];
+          if (daemons.length === 0) return;
+          localStorage.setItem(
+            CLIENTS_KEY,
+            JSON.stringify({ daemons, updatedAt: Date.now() }),
+          );
+          $('daemons-empty').hidden = true;
+          $('daemons-body').hidden = false;
+          $('search-all-daemons').disabled = false;
+          await pollDaemonHealths();
+          if (!daemonHealthTimer) {
+            daemonHealthTimer = setInterval(pollDaemonHealths, healthPollMs());
+          }
+        } catch {
+          /* manifest fetch is best-effort — the page works without it */
+        }
+      }
+
+      // Spec 4.5/4.6: aggregated sessions — parallel fan-out of
+      // GET /rc/sessions to every configured daemon. Failures MUST NOT block
+      // the view: each failing daemon contributes exactly one status row per
+      // the spec 4.6 state mapping, and successful daemons feed one unified
+      // list (daemon-name pills, sorted by updatedAt desc across daemons).
+      // Clicking a session navigates to that daemon's /ui/session/<sid>
+      // (spec 4.5). textContent-only.
+      const AGG_TIMEOUT_KEY = 'qwen-rc:aggregate-fetch-timeout-ms';
+      const STALE_KEY = 'qwen-rc:stale-last-seen-sec';
+      const LAST_SEEN_KEY = 'qwen-rc:last-seen';
+      // Spec "Configuration: aggregateFetchTimeoutMs": default 5000, values
+      // below 1000 clamped to 1000.
+      const aggTimeoutMs = () => {
+        const v = Number(localStorage.getItem(AGG_TIMEOUT_KEY));
+        return Number.isFinite(v) && v > 0 ? Math.max(1000, v) : 5000;
+      };
+      // Spec "Configuration: staleLastSeenSec": default 86400 (24 h), values
+      // below 1 clamped to 1.
+      const staleLastSeenSec = () => {
+        const v = Number(localStorage.getItem(STALE_KEY));
+        return Number.isFinite(v) && v > 0 ? Math.max(1, v) : 86400;
+      };
+      // Last successful contact per daemon (epoch ms), persisted so
+      // "last seen <relative>" survives reloads.
+      let lastSeen = {};
+      try {
+        const raw = localStorage.getItem(LAST_SEEN_KEY);
+        const obj = raw ? JSON.parse(raw) : {};
+        if (obj && typeof obj === 'object') lastSeen = obj;
+      } catch {
+        lastSeen = {};
+      }
+      const saveLastSeen = () => {
+        try {
+          localStorage.setItem(LAST_SEEN_KEY, JSON.stringify(lastSeen));
+        } catch {
+          /* private mode — last-seen degrades to this page session */
+        }
+      };
+
+      const daemonPill = (name) => {
+        const pill = document.createElement('span');
+        pill.className = 'daemon-pill';
+        pill.textContent = name;
+        return pill;
+      };
+
+      async function fetchDaemonSessions(d) {
+        // One fetch per daemon, no auto-retry (spec 4.6: once a 401 is
+        // received the row goes RE-PAIR REQUIRED and stays there).
+        try {
+          const res = await fetch(d.url.replace(/\/+$/, '') + '/rc/sessions', {
+            headers: { Authorization: 'Bearer ' + token() },
+            signal: AbortSignal.timeout(aggTimeoutMs()),
+          });
+          if (res.ok) {
+            lastSeen[d.url] = Date.now();
+            saveLastSeen();
+            const body = await res.json();
+            return {
+              ok: true,
+              sessions: Array.isArray(body.sessions) ? body.sessions : [],
+            };
+          }
+          return { ok: false, status: res.status };
+        } catch (e) {
+          // Browsers surface BOTH a refused CORS preflight and a dead
+          // network as TypeError('Failed to fetch') — they are
+          // indistinguishable, so the status row covers both readings.
+          return {
+            ok: false,
+            kind: e && e.name === 'TimeoutError' ? 'timeout' : 'network',
+          };
+        }
+      }
+
+      function daemonStatusRow(d, out, detail, actionUrl) {
+        const row = document.createElement('div');
+        row.className = 'daemon-status-row';
+        row.appendChild(daemonPill(d.name));
+        const txt = document.createElement('span');
+        txt.textContent = ' ' + detail;
+        row.appendChild(txt);
+        if (actionUrl) {
+          const a = document.createElement('a');
+          a.href = actionUrl;
+          a.textContent = " (open " + d.name + "'s UI to re-pair)";
+          row.appendChild(a);
+        }
+        out.appendChild(row);
+      }
+
+      async function runAggregatedSessions() {
+        const out = $('daemons-sessions');
+        out.hidden = false;
+        out.textContent = 'fetching…';
+        const daemons = manifestDaemons();
+        if (daemons.length === 0) {
+          out.textContent = '(no daemons registered)';
+          return;
+        }
+        const results = await Promise.all(daemons.map(fetchDaemonSessions));
+        out.textContent = '';
+        const now = Date.now();
+        const staleMs = staleLastSeenSec() * 1000;
+        const unified = [];
+        results.forEach((r, i) => {
+          const d = daemons[i];
+          const base = d.url.replace(/\/+$/, '');
+          const ls = lastSeen[d.url];
+          // Spec 4.6: last successful contact older than staleLastSeenSec →
+          // OFFLINE since <time>, REGARDLESS of this fetch's outcome.
+          if (ls !== undefined && now - ls > staleMs) {
+            daemonStatusRow(
+              d,
+              out,
+              'OFFLINE since ' + new Date(ls).toLocaleString(),
+            );
+            return;
+          }
+          if (r.ok) {
+            for (const s of r.sessions) unified.push({ d, base, s });
+            return;
+          }
+          if (r.status === 401) {
+            // Spec 4.6: RE-PAIR REQUIRED with an action link to the
+            // re-pair flow (the pairing code is minted on THAT daemon's
+            // host, so the link opens its /ui/).
+            daemonStatusRow(d, out, 'RE-PAIR REQUIRED', base + '/ui/');
+          } else if (r.status !== undefined && r.status >= 500) {
+            daemonStatusRow(
+              d,
+              out,
+              'ERROR — daemon returned ' + r.status,
+            );
+          } else if (r.status === 403) {
+            daemonStatusRow(
+              d,
+              out,
+              'ERROR — daemon returned 403 (token lacks owner scope)',
+            );
+          } else if (r.kind === 'timeout' || r.kind === 'network') {
+            const seen = ls !== undefined ? relTime(now - ls) : 'never';
+            daemonStatusRow(
+              d,
+              out,
+              'UNREACHABLE — last seen ' + seen +
+                ' · if this daemon is up: origin not admitted on ' + d.name +
+                ' — owner action required: qwen-rc cors add ' +
+                location.origin,
+            );
+          } else {
+            daemonStatusRow(
+              d,
+              out,
+              'ERROR — daemon returned ' + r.status,
+            );
+          }
+        });
+        // Unified list, sorted by updatedAt desc ACROSS daemons (spec 4.5).
+        unified.sort((a, b) =>
+          String(b.s.updatedAt || '').localeCompare(String(a.s.updatedAt || '')),
+        );
+        for (const u of unified) {
+          const row = document.createElement('div');
+          row.className = 'agg-session-row';
+          row.appendChild(daemonPill(u.d.name));
+          const open = document.createElement('span');
+          open.className = 'open';
+          open.textContent =
+            String(u.s.sessionId) +
+            (u.s.title ? ' — ' + u.s.title : '') +
+            '  (' +
+            String(u.s.updatedAt || '').slice(0, 16).replace('T', ' ') +
+            ')';
+          // Spec 4.5: clicking a session navigates to that daemon's
+          // /ui/session/<sid> (full navigation to the source daemon).
+          open.onclick = () =>
+            location.assign(
+              u.base + '/ui/session/' + encodeURIComponent(u.s.sessionId),
+            );
+          row.appendChild(open);
+          out.appendChild(row);
+        }
+        if (unified.length === 0) {
+          const none = document.createElement('div');
+          none.textContent = '(no sessions)';
+          out.appendChild(none);
+        }
+        $('daemons-updated').textContent =
+          'updated ' + new Date().toLocaleTimeString();
+      }
+      $('daemons-refresh-sessions').onclick = () => void runAggregatedSessions();
+
+      loadDaemonManifest();
+
       // Send test push (cycle 73): POST /rc/push/test (OWNER) fans a synthetic
       // task.completed to the caller's OWN subscriptions. `sent` is the count
       // ATTEMPTED (delivery is best-effort). textContent-only.
@@ -2067,12 +2746,16 @@
       // recency sort, timeout). THE riskiest line is rendering hit.snippet —
       // it is arbitrary transcript text (user/model/tool), so it goes through
       // textContent ONLY (never innerHTML), like every other server field.
-      function searchHitRow(h) {
+      function searchHitRow(h, daemonName) {
         const row = document.createElement('div');
         // Dedicated column layout (not .token-row's space-between flex) so the
         // snippet sits BENEATH the header and a long unbroken snippet wraps.
         row.className = 'search-row';
         const head = document.createElement('div');
+        // Multi-daemon fan-out (spec 4.7): tag each hit with its source
+        // daemon. Omitted for the local (origin) daemon — its results stay
+        // authoritative and render exactly as before.
+        if (daemonName) head.appendChild(daemonPill(daemonName));
         const label = document.createElement('span');
         label.textContent = h.kind + '  ' + h.ts + '  ' + h.sessionId;
         // Open (cycle 65): reuse the existing watch panel — set #session and
@@ -2162,9 +2845,129 @@
             const none = document.createElement('div');
             none.textContent = '(no hits)';
             out.appendChild(none);
-            return;
+          } else {
+            for (const h of hits) out.appendChild(searchHitRow(h));
           }
-          for (const h of hits) out.appendChild(searchHitRow(h));
+          // add-multi-workspace-client task 4.8 (spec 4.7): opt-in fan-out to
+          // the OTHER daemons in the registry — PARALLEL (Promise.allSettled,
+          // so one dead/slow daemon never blocks the section), each hit row
+          // tagged with its daemon name (pill), one footer note per daemon
+          // ("B: 0 hits" / failure state). NO merged global ranking (spec
+          // 4.7); the local results above stay authoritative. Per-daemon
+          // fetch capped by aggTimeoutMs (spec 4.6 config; default 5 s).
+          if ($('search-all-daemons').checked) {
+            const other = manifestDaemons().filter(
+              (d) => new URL(d.url).origin !== location.origin,
+            );
+            if (other.length > 0) {
+              const head = document.createElement('div');
+              head.textContent = '— other daemons —';
+              head.style.marginTop = '8px';
+              out.appendChild(head);
+              // The mapper never rejects (network/CORS/timeout are classified
+              // inside), so allSettled is belt-and-braces for the section.
+              const settled = await Promise.allSettled(
+                other.map(async (d) => {
+                  const base = d.url.replace(/\/+$/, '');
+                  try {
+                    const p2 = new URLSearchParams({ q, kind, limit: '10' });
+                    const res2 = await fetch(
+                      base + '/rc/search?' + p2.toString(),
+                      {
+                        headers: { Authorization: 'Bearer ' + token() },
+                        signal: AbortSignal.timeout(aggTimeoutMs()),
+                      },
+                    );
+                    if (!res2.ok) return { d, status: res2.status };
+                    const b2 = await res2.json();
+                    return { d, hits: Array.isArray(b2.hits) ? b2.hits : [] };
+                  } catch (e2) {
+                    // Browsers surface BOTH a refused CORS preflight and a
+                    // dead network as TypeError('Failed to fetch') — the
+                    // note covers both readings (spec 4.7 origin isolation).
+                    return {
+                      d,
+                      kind:
+                        e2 && e2.name === 'TimeoutError'
+                          ? 'timeout'
+                          : 'network',
+                    };
+                  }
+                }),
+              );
+              if (seq !== searchSeq) return; // superseded while fanning out
+              // Hits first (each row pill-tagged with its daemon)…
+              const notes = [];
+              for (const r of settled) {
+                if (r.status !== 'fulfilled') continue; // allSettled: defensive
+                const v = r.value;
+                if (v.status !== undefined) continue; // failure -> footer note
+                if (v.hits.length === 0) {
+                  notes.push(v.d.name + ': 0 hits');
+                  continue;
+                }
+                for (const h2 of v.hits)
+                  out.appendChild(searchHitRow(h2, v.d.name));
+              }
+              // …then one footer note per failed / empty daemon (spec 4.7:
+              // a daemon's absence must NOT fail the modal).
+              for (const r of settled) {
+                if (r.status !== 'fulfilled') continue;
+                const v = r.value;
+                const base = v.d.url.replace(/\/+$/, '');
+                if (v.status === 401) {
+                  notes.push(v.d.name + ': 401 not paired · ');
+                  notes.push({
+                    link: base + '/ui/',
+                    text: 're-pair to include',
+                  });
+                } else if (v.status === 403) {
+                  notes.push(v.d.name + ': 403 — token lacks owner scope · ');
+                  notes.push({
+                    link: base + '/ui/',
+                    text: 'pair an owner token',
+                  });
+                } else if (v.status !== undefined) {
+                  notes.push(
+                    v.d.name + ': ERROR — daemon returned ' + v.status,
+                  );
+                } else if (v.kind) {
+                  const seen =
+                    lastSeen[v.d.url] !== undefined
+                      ? relTime(Date.now() - lastSeen[v.d.url])
+                      : 'never';
+                  notes.push(
+                    v.d.name +
+                      ': UNREACHABLE — last seen ' +
+                      seen +
+                      (v.kind === 'timeout' ? ' (timeout)' : '') +
+                      ' · origin not admitted on ' +
+                      v.d.name +
+                      ' — owner action required: qwen-rc cors add ' +
+                      location.origin,
+                  );
+                }
+              }
+              if (notes.length > 0) {
+                const footer = document.createElement('div');
+                footer.style.cssText =
+                  'margin-top:6px;color:#9aa0a6;font-size:0.8rem';
+                notes.forEach((n, i) => {
+                  if (i > 0)
+                    footer.appendChild(document.createTextNode(' · '));
+                  if (typeof n === 'string') {
+                    footer.appendChild(document.createTextNode(n));
+                  } else {
+                    const a = document.createElement('a');
+                    a.href = n.link;
+                    a.textContent = n.text;
+                    footer.appendChild(a);
+                  }
+                });
+                out.appendChild(footer);
+              }
+            }
+          }
         } catch (e) {
           out.textContent = 'search error: ' + e;
         }
@@ -2670,6 +3473,17 @@
         // custom_title record so the fork shows this name in the picker / on
         // resume / via /rc/sessions. Omitted when blank -> an unnamed fork.
         const forkName = ($('fork-name').value || '').trim();
+        const mode = $('fork-mode').value || 'include';
+        const fromRaw = ($('fork-from').value || '').trim();
+        const payload = { transcript: mode };
+        if (forkName) payload.name = forkName;
+        if (
+          fromRaw !== '' &&
+          Number.isInteger(Number(fromRaw)) &&
+          Number(fromRaw) >= 0
+        ) {
+          payload.fromEventId = Number(fromRaw);
+        }
         try {
           const res = await fetch(
             '/session/' + encodeURIComponent(id) + '/fork',
@@ -2679,11 +3493,7 @@
                 'Content-Type': 'application/json',
                 Authorization: 'Bearer ' + token(),
               },
-              body: JSON.stringify(
-                forkName
-                  ? { transcript: 'include', name: forkName }
-                  : { transcript: 'include' },
-              ),
+              body: JSON.stringify(payload),
             },
           );
           if (!res.ok) {
