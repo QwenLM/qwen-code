@@ -583,7 +583,11 @@ describe('reconcileDanglingPromptTerminals', () => {
           v: 1,
           promptId: 'p-new',
           state: 'in_flight',
-          at: Date.now(),
+          // The admission must predate the visible tail (fixture records
+          // sit just past RECORD_BASE_MS): a wall-clock admission ~months
+          // after the tail could never own it, so the race would not
+          // actually threaten the verdict.
+          at: RECORD_BASE_MS + 26_000,
         });
         return super.loadSession(sessionId);
       }
