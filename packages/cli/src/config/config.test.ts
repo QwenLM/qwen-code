@@ -4439,8 +4439,6 @@ describe('Output format', () => {
   });
 
   it('should prioritize argv over a differing settings format', async () => {
-    // Discriminating precedence case: argv and settings disagree, so an
-    // inverted merge (settings over argv) fails here instead of passing.
     process.argv = ['node', 'script.js', '--output-format', 'text'];
     const argv = await parseArguments();
     const config = await loadCliConfig(

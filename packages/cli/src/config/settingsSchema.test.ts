@@ -581,9 +581,9 @@ describe('SettingsSchema', () => {
 
       expect(format.type).toBe('enum');
       const values = format.options?.map((o: { value: string }) => o.value);
-      // Pin the options to the full runtime enum, set-derived so both a
-      // removed value and a format added in core fail this test until the
-      // schema follows.
+      // Pin the options to the full runtime enum, array-derived (order
+      // included) so a removed, added, or reordered core format fails this
+      // test until the schema follows.
       expect(values).toEqual(Object.values(OutputFormat));
     });
 
