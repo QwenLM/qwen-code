@@ -2422,7 +2422,7 @@ export default {
   'toolDisplayName.TeamCreate': 'Crea equip',
   'toolDisplayName.TeamDelete': 'Suprimeix equip',
   'toolDisplayName.TeamPlanApproval': "Aprovació del pla d'equip",
-  'toolDisplayName.RequestShutdown': 'RequestShutdown',
+  'toolDisplayName.RequestShutdown': "Sol·licita l'aturada",
   'toolDisplayName.SendMessage': 'Envia missatge',
   'toolDisplayName.StructuredOutput': 'Sortida estructurada',
   'toolDisplayName.Monitor': 'Monitor',
