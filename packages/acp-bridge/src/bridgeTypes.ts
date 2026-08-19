@@ -8,6 +8,8 @@ import type {
   ApprovalMode,
   GoalSnapshotV2,
   SessionGroupPresetColor,
+  TurnResultCode,
+  TurnResultErrorPayload,
 } from '@qwen-code/qwen-code-core';
 import type {
   CancelNotification,
@@ -933,6 +935,7 @@ export interface BridgeMidTurnMessagesSnapshot {
 export interface PendingPromptEntry {
   promptId: string;
   queuedAt: number;
+  startedAt?: number;
   originatorClientId?: string;
   promotedMidTurn?: true;
   text: string;
@@ -983,6 +986,23 @@ export interface PendingPromptSummary {
   content?: BridgePromptContentBlock[];
   queuedAt: number;
   state: 'queued' | 'running';
+  originatorClientId?: string;
+}
+
+export interface BridgeTurnStatus {
+  sessionId: string;
+  state: 'idle' | 'queued' | 'running' | 'completed' | 'cancelled' | 'error';
+  promptId?: string;
+  promptText?: string;
+  promptTextTruncated?: boolean;
+  queuedAt?: number;
+  startedAt?: number;
+  endedAt?: number;
+  stopReason?: string;
+  error?: TurnResultErrorPayload;
+  resultText?: string;
+  resultTruncated?: boolean;
+  resultCode?: TurnResultCode;
   originatorClientId?: string;
 }
 
@@ -1275,6 +1295,13 @@ export interface AcpSessionBridge {
     sessionId: string,
     context?: BridgeClientRequestContext,
   ): readonly PendingPromptSummary[];
+
+  /** Read an exact prompt, or the current/newest turn when omitted. */
+  getSessionTurnStatus(
+    sessionId: string,
+    context?: BridgeClientRequestContext,
+    promptId?: string,
+  ): Promise<BridgeTurnStatus | undefined>;
 
   /**
    * Remove a specific prompt from the pending queue. For `queued` prompts,
