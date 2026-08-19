@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 import type { Stats } from 'node:fs';
 import { lstat, mkdir, realpath } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { hasVerifiableInode } from '@qwen-code/qwen-code-core';
 
 export interface ConversationRootIdentity {
   readonly configuredRoot: string;
@@ -103,7 +104,29 @@ function hasRootIdentity(
   stats: Stats,
   root: ConversationRootIdentity,
 ): boolean {
-  return stats.dev === root.device && stats.ino === root.inode;
+  return (
+    hasVerifiableInode(stats.ino) &&
+    hasVerifiableInode(root.inode) &&
+    stats.dev === root.device &&
+    stats.ino === root.inode
+  );
+}
+
+/**
+ * True iff `before` and `after` are provably the same directory.
+ *
+ * These comparisons are the anti-swap checks: they must prove the path was not
+ * replaced between two probes. A filesystem that reports no inode makes every
+ * directory compare equal, so an unverifiable inode is treated as a changed
+ * identity rather than as a match.
+ */
+function isSameDirectoryIdentity(before: Stats, after: Stats): boolean {
+  return (
+    hasVerifiableInode(before.ino) &&
+    hasVerifiableInode(after.ino) &&
+    before.dev === after.dev &&
+    before.ino === after.ino
+  );
 }
 
 function hasExpectedDirectoryIdentity(
@@ -111,6 +134,10 @@ function hasExpectedDirectoryIdentity(
   expected: ConversationDirectoryIdentity,
 ): boolean {
   return (
+    hasVerifiableInode(identity.inode) &&
+    hasVerifiableInode(expected.inode) &&
+    hasVerifiableInode(identity.root.inode) &&
+    hasVerifiableInode(expected.root.inode) &&
     identity.storageSessionId === expected.storageSessionId &&
     identity.name === expected.name &&
     isSameConversationPath(identity.canonicalPath, expected.canonicalPath) &&
@@ -162,7 +189,7 @@ export async function createConversationRootIdentity(
     throwIdentityIoError('root', error);
   }
   validateDirectoryStats(after, 'root');
-  if (before.dev !== after.dev || before.ino !== after.ino) {
+  if (!isSameDirectoryIdentity(before, after)) {
     throw new ConversationDirectoryIdentityError('root', 'identity_changed');
   }
   return {
@@ -283,7 +310,7 @@ export async function inspectConversationDirectoryIdentity(
   ) {
     throw new ConversationDirectoryIdentityError('child', 'not_direct_child');
   }
-  if (before.dev !== after.dev || before.ino !== after.ino) {
+  if (!isSameDirectoryIdentity(before, after)) {
     throw new ConversationDirectoryIdentityError('child', 'identity_changed');
   }
   await revalidateConversationRootIdentity(root);

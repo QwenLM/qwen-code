@@ -188,4 +188,31 @@ describe('conversation directory identity', () => {
       vi.mocked(lstat).mockRestore();
     }
   });
+
+  it('refuses to prove identity on a filesystem that reports no inode', async () => {
+    // FAT/exFAT and some SMB mounts report ino 0 for every entry, which would
+    // make every directory compare equal and let a swap pass the anti-swap
+    // checks unnoticed. An unverifiable inode must read as a changed identity.
+    // The pinned root carries inode 0 too, so a plain `===` comparison would
+    // match and this only fails on the verifiability guard itself.
+    const { root } = await tempRoot();
+    const inodelessRoot = { ...root, inode: 0 };
+    const realLstat = realFsPromises.lstat;
+    vi.mocked(lstat).mockImplementation((async (path: string) => {
+      const stats = (await realLstat(path)) as Stats;
+      return {
+        ...stats,
+        ino: 0,
+        isDirectory: () => stats.isDirectory(),
+        isSymbolicLink: () => stats.isSymbolicLink(),
+      } as Stats;
+    }) as unknown as typeof lstat);
+    try {
+      await expect(
+        revalidateConversationRootIdentity(inodelessRoot),
+      ).rejects.toMatchObject({ scope: 'root', reason: 'identity_changed' });
+    } finally {
+      vi.mocked(lstat).mockRestore();
+    }
+  });
 });
