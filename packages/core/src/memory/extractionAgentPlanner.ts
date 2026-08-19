@@ -247,7 +247,7 @@ export async function runAutoMemoryExtractionByAgent(
   config: Config,
   projectRoot: string,
 ): Promise<AutoMemoryExtractionExecutionResult> {
-  const cacheSafe = getCacheSafeParams();
+  const cacheSafe = getCacheSafeParams(config.getSessionId());
   if (!cacheSafe) {
     throw new Error(
       'runAutoMemoryExtractionByAgent: no cache-safe params available; ' +

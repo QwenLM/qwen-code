@@ -140,10 +140,20 @@ export function saveCacheSafeParams(
 }
 
 /**
- * Get the current cache-safe params, or null if not yet captured.
+ * Get the current cache-safe params, or null if not yet captured or owned by
+ * another session. Production readers must pass their session id; omitting it
+ * is retained for tests and callers that inspect the raw process-global slot.
  */
-export function getCacheSafeParams(): CacheSafeParams | null {
+export function getCacheSafeParams(
+  expectedSessionId?: string,
+): CacheSafeParams | null {
   if (!currentCacheSafeParams) return null;
+  if (
+    expectedSessionId !== undefined &&
+    currentCacheSafeParams.sessionId !== expectedSessionId
+  ) {
+    return null;
+  }
   return {
     generationConfig: structuredClone(currentCacheSafeParams.generationConfig),
     history: copyHistoryContainers(currentCacheSafeParams.history),

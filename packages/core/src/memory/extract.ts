@@ -129,7 +129,8 @@ export async function runAutoMemoryExtract(params: {
 
   // Read the cursor first, then scan only the unprocessed slice. The old
   // code ran partToString().replace() over EVERY message but the resulting
-  // text was never read — fork agent context comes from getCacheSafeParams().
+  // text was never read — fork agent context comes from the session-scoped
+  // cache-safe params lookup.
   const currentCursor = await readExtractCursor(params.projectRoot);
   const rawOffset =
     currentCursor.sessionId === params.sessionId

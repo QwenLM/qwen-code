@@ -75,6 +75,13 @@ describe('CacheSafeParams', () => {
       expect(getCacheSafeParams()?.sessionId).toBe('session-a');
     });
 
+    it('rejects params owned by another session', () => {
+      saveCacheSafeParams({}, [], 'model', 'session-b');
+
+      expect(getCacheSafeParams('session-a')).toBeNull();
+      expect(getCacheSafeParams('session-b')?.sessionId).toBe('session-b');
+    });
+
     it('returns the current session id without reading full params', () => {
       saveCacheSafeParams({}, [], 'model', 'session-a');
 
