@@ -1797,7 +1797,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             setConnection((c) => ({ ...c, catchingUp: undefined }));
           }
           const restoredTitle = getRestoredSessionTitle(activeSession.session);
-          setConnectionSynchronous((current) => ({
+          setConnection((current) => ({
             ...current,
             status: 'connected',
             sessionId: activeSession.sessionId,
@@ -1807,12 +1807,26 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             workspaceCwd: activeSession.workspaceCwd,
             displayName: loadedSessionThisIteration
               ? (getSessionDisplayName(activeSession.state) ??
-                restoredTitle.displayName)
+                restoredTitle.displayName ??
+                (current.sessionId === activeSession.sessionId
+                  ? current.displayName
+                  : undefined))
               : current.sessionId === activeSession.sessionId
                 ? current.displayName
                 : undefined,
+            // Provenance follows whichever name source won above: a
+            // server-provided name carries the snapshot's source (a legacy
+            // snapshot with none clears a stale client-side 'manual'); only
+            // when the name itself came from the current connection (e.g. a
+            // replayed metadata event during repair) is the current source
+            // kept.
             titleSource: loadedSessionThisIteration
-              ? restoredTitle.titleSource
+              ? (getSessionDisplayName(activeSession.state) ??
+                  restoredTitle.displayName) !== undefined
+                ? restoredTitle.titleSource
+                : current.sessionId === activeSession.sessionId
+                  ? current.titleSource
+                  : undefined
               : current.sessionId === activeSession.sessionId
                 ? current.titleSource
                 : undefined,
@@ -1977,6 +1991,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                       current.reasoning?.effort,
                     )
                   : current.reasoning,
+              // Refresh the title from the live session state on every
+              // iteration (repairs and metadata refreshes mutate it without a
+              // load, so the load-gated merge above never sees it).
+              displayName:
+                getSessionDisplayName(activeSession.state) ??
+                current.displayName,
               contextWindow: configSnapshotCurrent
                 ? (sessionContextWindow ?? current.contextWindow)
                 : current.contextWindow,
