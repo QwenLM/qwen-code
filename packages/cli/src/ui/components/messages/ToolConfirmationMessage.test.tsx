@@ -1151,5 +1151,52 @@ describe('ToolConfirmationMessage', () => {
 
       expect(lastFrame()).not.toContain('Hook requested confirmation:');
     });
+
+    // The 5-line reason cap and the matching HOOK_ASK_REASON_HEIGHT
+    // reservation have to be pinned together (#9434 review R3-7):
+    // a verbose hook reason must not push the question/options off a
+    // short terminal. Template: the warnings reservation test above.
+    it('caps a verbose hook reason at five lines and reserves its height on a short terminal', () => {
+      const reason = Array.from(
+        { length: 8 },
+        (_, i) => `hook reason line ${i + 1}`,
+      ).join('\n');
+      const confirmationDetails: ToolCallConfirmationDetails = {
+        type: 'edit',
+        title: 'Confirm Edit: config.yaml',
+        fileName: 'config.yaml',
+        filePath: '/repo/config.yaml',
+        fileDiff: ['-old-1', '-old-2', '+new-1', '+new-2'].join('\n'),
+        originalContent: 'old-1\nold-2',
+        newContent: 'new-1\nnew-2',
+        hideAlwaysAllow: true,
+        hookAskReason: reason,
+        onConfirm: vi.fn(),
+      };
+
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={confirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={10}
+          contentWidth={80}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      // Only the first five reason lines render, plus the ellipsis.
+      expect(frame).toContain('hook reason line 1');
+      expect(frame).toContain('hook reason line 5');
+      expect(frame).not.toContain('hook reason line 6');
+      expect(frame).toContain('…');
+      // The reason's height is reserved from the body cap: with the
+      // reservation the body collapses to the '... diff hidden ...'
+      // placeholder; without it the cap computes too loose and the diff
+      // renders instead.
+      expect(frame).toContain('... diff hidden ...');
+      // The question and options stay on-screen.
+      expect(frame).toContain('Apply this change?');
+      expect(frame).toContain('Yes, allow once');
+    });
   });
 });

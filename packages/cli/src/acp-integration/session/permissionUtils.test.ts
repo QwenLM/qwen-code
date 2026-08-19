@@ -218,6 +218,46 @@ describe('permissionUtils', () => {
     });
   });
 
+  it('renders the hook ask reason on edit and exec permission requests', () => {
+    // A PreToolUse hook escalated these calls (#9434): off-TUI surfaces
+    // must carry the reason so the prompt is distinguishable from an
+    // ordinary permission request.
+    const editContent = buildPermissionRequestContent({
+      type: 'edit',
+      title: 'Confirm edit',
+      fileName: 'a.txt',
+      filePath: '/tmp/a.txt',
+      fileDiff: 'diff',
+      originalContent: 'a',
+      newContent: 'b',
+      hookAskReason: 'path requires human review',
+      onConfirm: async () => undefined,
+    });
+    expect(editContent).toContainEqual({
+      type: 'content',
+      content: {
+        type: 'text',
+        text: 'Hook requested confirmation: path requires human review',
+      },
+    });
+
+    const execContent = buildPermissionRequestContent({
+      type: 'exec',
+      title: 'Confirm shell',
+      command: 'git status',
+      rootCommand: 'git',
+      hookAskReason: 'path requires human review',
+      onConfirm: async () => undefined,
+    });
+    expect(execContent).toContainEqual({
+      type: 'content',
+      content: {
+        type: 'text',
+        text: 'Hook requested confirmation: path requires human review',
+      },
+    });
+  });
+
   it('accepts only an option that was actually offered', () => {
     const options = toPermissionOptions({
       type: 'exec',

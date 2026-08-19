@@ -1441,6 +1441,18 @@ export class CoreToolScheduler {
   // PostToolUse — reusing this id keeps the Pre/Post pair correlated instead
   // of orphaning two events. Cleared on terminal state via finalizeToolSpan.
   private readonly bouncedToolUseId = new Map<string, string>();
+  // Plan-mode shell policy decisions computed in the CONFIRMATION phase
+  // (`_schedule`), keyed by callId. The EXECUTION phase cannot recompute
+  // them cheaply (evaluation needs the confirmation-phase permission
+  // context), but a PreToolUse 'ask' bounce re-creates the confirmation
+  // view there and must re-apply the policy exactly like the ordinary
+  // confirmation phase does: decoratePlanModeShellConfirmation on the view
+  // and validatePlanModeShellApproval at approval time (#9434). Cleared on
+  // terminal state via finalizeToolSpan.
+  private readonly planShellDecisionByCallId = new Map<
+    string,
+    PlanModeShellDecision
+  >();
   private readonly runtimeContentGeneratorViews = new Map<
     string,
     RuntimeContentGeneratorView
@@ -1823,6 +1835,34 @@ export class CoreToolScheduler {
   }
 
   /**
+   * Cancel a call before execution with a synthetic cancelled response.
+   * Shared by the abort checkpoints INSIDE `_executeToolCallBody` (the
+   * PreToolUse ask-bounce re-check and the tool-invocation-guard
+   * re-check). Unlike `cancelPreExecutionIfAborted` — which runs from the
+   * scheduling side and finalizes the blocked/tool spans itself — these
+   * checkpoints run inside the execution body, where
+   * `executeSingleToolCall`'s `finally` still fires and owns span
+   * finalization (#9434 review R3-5).
+   */
+  private cancelWithSyntheticResponse(
+    scheduledCall: ScheduledToolCall,
+    span: Span,
+    observeSyntheticProducer: (response: CoreToolCallResponseInfo) => void,
+  ): void {
+    const { callId } = scheduledCall.request;
+    const cancelledResponse = createCancelledResponse(
+      scheduledCall.request,
+      'Tool call cancelled before execution.',
+      'not_started',
+    );
+    observeSyntheticProducer(cancelledResponse);
+    this.setStatusInternal(callId, 'cancelled', cancelledResponse);
+    if (this.toolSpans.has(callId)) {
+      setToolSpanCancelled(span);
+    }
+  }
+
+  /**
    * End the tool span for `callId` (if any) and remove it from the map.
    * Centralizes terminal-state cleanup so every cancel/error/success path
    * goes through one place — easier to audit for leaks. Idempotent:
@@ -1839,6 +1879,7 @@ export class CoreToolScheduler {
     // defensive no-span path.
     this.bouncedAwaitingApproval.delete(callId);
     this.bouncedToolUseId.delete(callId);
+    this.planShellDecisionByCallId.delete(callId);
     this.autoModeFallbackCallIds.delete(callId);
     this.runtimeContentGeneratorViews.delete(callId);
     // PostToolBatch can replace the response at the last position in request
@@ -2839,6 +2880,15 @@ export class CoreToolScheduler {
                 }),
               )
             : ({ classification: 'not-applicable' } as const);
+          // Carry the decision into the execution phase: a PreToolUse 'ask'
+          // bounce re-creates the confirmation view there and must re-apply
+          // the same policy (see planShellDecisionByCallId).
+          if (planShellDecision.classification !== 'not-applicable') {
+            this.planShellDecisionByCallId.set(
+              reqInfo.callId,
+              planShellDecision,
+            );
+          }
           if (
             this.cancelPreExecutionIfAborted(reqInfo.callId, signal, toolSpan)
           ) {
@@ -4348,8 +4398,8 @@ export class CoreToolScheduler {
    * `_executeToolCallBody`).
    *
    * Returns false (without bouncing) when the signal aborts while the
-   * tool's confirmation view is being prepared; the caller then falls
-   * through to the deny path.
+   * tool's confirmation view is being prepared; the caller then cancels
+   * the call instead of reporting a hook denial.
    */
   private async bounceToAwaitingApprovalForAsk(
     scheduledCall: ScheduledToolCall,
@@ -4380,10 +4430,9 @@ export class CoreToolScheduler {
         toolDetails =
           planShellDecision &&
           planShellDecision.classification !== 'not-applicable'
-            ? (decoratePlanModeShellConfirmation(
-                planShellDecision,
-                details,
-              ) as ToolEditConfirmationDetails | ToolExecuteConfirmationDetails)
+            ? (decoratePlanModeShellConfirmation(planShellDecision, details) as
+                | ToolEditConfirmationDetails
+                | ToolExecuteConfirmationDetails)
             : details;
       }
     } catch (error) {
@@ -4409,47 +4458,58 @@ export class CoreToolScheduler {
     let confirmationDetails: ToolCallConfirmationDetails;
     if (toolDetails) {
       const originalOnConfirm = toolDetails.onConfirm;
+      // Mirror the ordinary confirmation phase: capture the invocation
+      // context NOW (while we still run in the invocation's async context)
+      // and re-enter it when the confirmation is answered. The responder
+      // (IDE / ACP / stream-json client) answers from its OWN async
+      // context; without the re-entry the tool-invocation guard would see
+      // the responder's identity instead of the invocation's (#9434
+      // review R4-4).
+      const invocationContext = getInvocationContext();
       confirmationDetails = {
         ...toolDetails,
         hideAlwaysAllow: true,
         hookAskReason:
           reason ??
           `A PreToolUse hook requested confirmation before running ${toolName}.`,
-        onConfirm: async (outcome, payload) => {
-          // Mirror the ordinary confirmation phase: the plan-shell policy
-          // validates at approval time, so a payload the policy forbids is
-          // converted to Cancel before the tool's own onConfirm runs.
-          if (
-            planShellDecision &&
-            planShellDecision.classification !== 'not-applicable'
-          ) {
-            const approval = await validatePlanModeShellApproval({
-              config: this.config,
-              decision: planShellDecision,
-              requestArgs: scheduledCall.request.args,
-              invocationParams: scheduledCall.invocation
-                .params as Record<string, unknown>,
-              signal,
-              outcome,
-              payload,
-            });
+        onConfirm: async (outcome, payload) =>
+          runWithInvocationContext(invocationContext, async () => {
+            // Mirror the ordinary confirmation phase: the plan-shell policy
+            // validates at approval time, so a payload the policy forbids is
+            // converted to Cancel before the tool's own onConfirm runs.
+            if (
+              planShellDecision &&
+              planShellDecision.classification !== 'not-applicable'
+            ) {
+              const approval = await validatePlanModeShellApproval({
+                config: this.config,
+                decision: planShellDecision,
+                requestArgs: scheduledCall.request.args,
+                invocationParams: scheduledCall.invocation.params as Record<
+                  string,
+                  unknown
+                >,
+                signal,
+                outcome,
+                payload,
+              });
+              await this.handleConfirmationResponse(
+                callId,
+                originalOnConfirm,
+                approval.outcome,
+                signal,
+                approval.payload,
+              );
+              return;
+            }
             await this.handleConfirmationResponse(
               callId,
               originalOnConfirm,
-              approval.outcome,
+              outcome,
               signal,
-              approval.payload,
+              payload,
             );
-            return;
-          }
-          await this.handleConfirmationResponse(
-            callId,
-            originalOnConfirm,
-            outcome,
-            signal,
-            payload,
-          );
-        },
+          }),
       };
     } else {
       confirmationDetails = {
@@ -4671,7 +4731,10 @@ export class CoreToolScheduler {
             preHookResult.blockReason,
             span,
             signal,
-            planShellDecision,
+            // The confirmation-phase decision carried into the execution
+            // phase (see planShellDecisionByCallId); undefined for calls
+            // the plan-shell policy does not apply to.
+            this.planShellDecisionByCallId.get(callId),
           );
           if (bounced) {
             return;
@@ -4680,16 +4743,11 @@ export class CoreToolScheduler {
           // prepared — cancel rather than report a hook denial, so a
           // user-initiated cancellation is not misattributed to the hook.
           if (signal.aborted) {
-            const cancelledResponse = createCancelledResponse(
-              scheduledCall.request,
-              'Tool call cancelled before execution.',
-              'not_started',
+            this.cancelWithSyntheticResponse(
+              scheduledCall,
+              span,
+              observeSyntheticProducer,
             );
-            observeSyntheticProducer(cancelledResponse);
-            this.setStatusInternal(callId, 'cancelled', cancelledResponse);
-            if (this.toolSpans.has(callId)) {
-              setToolSpanCancelled(span);
-            }
             return;
           }
         }
@@ -4730,16 +4788,11 @@ export class CoreToolScheduler {
         },
       );
       if (signal.aborted) {
-        const cancelledResponse = createCancelledResponse(
-          scheduledCall.request,
-          'Tool call cancelled before execution.',
-          'not_started',
+        this.cancelWithSyntheticResponse(
+          scheduledCall,
+          span,
+          observeSyntheticProducer,
         );
-        observeSyntheticProducer(cancelledResponse);
-        this.setStatusInternal(callId, 'cancelled', cancelledResponse);
-        if (this.toolSpans.has(callId)) {
-          setToolSpanCancelled(span);
-        }
         return;
       }
       if (!guardDecision.allowed) {

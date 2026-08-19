@@ -45,9 +45,11 @@ import { ExitPlanModeTool } from '../tools/exitPlanMode.js';
 import type {
   CompletedToolCall,
   ExecutingToolCall,
+  ScheduledToolCall,
   ToolCall,
   WaitingToolCall,
 } from './coreToolScheduler.js';
+import type { PlanModeShellDecision } from './plan-mode-shell-policy.js';
 import {
   CoreToolScheduler,
   convertToFunctionErrorResponse,
@@ -10294,6 +10296,112 @@ describe('CoreToolScheduler Plan shell routing', () => {
     await second.confirmationDetails.onConfirm(ToolConfirmationOutcome.Cancel);
   });
 
+  it('re-applies the plan-shell policy when a PreToolUse ask bounces execution', async () => {
+    // The PreToolUse hook fires at the EXECUTION boundary, so a hook 'ask'
+    // on a plan-mode shell call bounces back to awaiting_approval after
+    // the confirmation phase already asked once. The bounce must re-apply
+    // the policy exactly like the ordinary confirmation phase: the view
+    // carries decoratePlanModeShellConfirmation's closures/warnings and
+    // approval runs through validatePlanModeShellApproval (#9434 review
+    // R4-7 / R3-2).
+    const rawCommand = "python -c 'print(1)'";
+    const onConfirm = vi.fn().mockResolvedValue(undefined);
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'ok',
+      returnDisplay: 'ok',
+    });
+    const messageBus = {
+      request: vi
+        .fn()
+        .mockImplementation(async (req: { eventName?: string }) => ({
+          type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+          correlationId: 'pre-hook',
+          success: true,
+          output:
+            req.eventName === 'PreToolUse'
+              ? { decision: 'ask', reason: 'hook says confirm' }
+              : {},
+        })),
+    } as unknown as MessageBus;
+    const { scheduler, onAllToolCallsComplete, onToolCallsUpdate } =
+      buildPlanShellScheduler({
+        tools: [
+          shellTool({
+            confirmation: async () => ({
+              type: 'exec',
+              title: 'Confirm shell',
+              command: rawCommand,
+              rootCommand: 'python',
+              onConfirm,
+            }),
+            execute,
+          }),
+        ],
+        messageBus,
+        disableHooks: false,
+      });
+
+    await scheduler.schedule(
+      [request('plan-ask-bounce', rawCommand)],
+      new AbortController().signal,
+    );
+
+    // Round 1: the confirmation phase asks (UNKNOWN classification).
+    const first = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+    await first.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+
+    // Round 2: the hook's 'ask' bounces execution back. The bounced view
+    // must carry BOTH the hook reason and the plan-shell decoration (the
+    // UNKNOWN warning the raw tool details do not contain). Wait for an
+    // awaiting_approval carrying the hook reason (the bounce) — the hook
+    // mock resolves instantly, so the bounce can land before any further
+    // test code runs; scan the full update history instead of clearing.
+    const waitingWithHookReason = () =>
+      (
+        onToolCallsUpdate.mock.calls.flatMap(
+          (call) => call[0] as ToolCall[],
+        ) as Array<
+          ToolCall & { confirmationDetails?: { hookAskReason?: string } }
+        >
+      )
+        .filter((call) => call.status === 'awaiting_approval')
+        .find(
+          (call) =>
+            call.confirmationDetails?.hookAskReason === 'hook says confirm',
+        ) as WaitingToolCall | undefined;
+    await vi.waitFor(() => expect(waitingWithHookReason()).toBeDefined());
+    const bounced = waitingWithHookReason() as WaitingToolCall;
+    expect(bounced.request.callId).toBe('plan-ask-bounce');
+    expect(bounced.confirmationDetails).toMatchObject({
+      hookAskReason: 'hook says confirm',
+      hideAlwaysAllow: true,
+      warnings: [unknownWarning],
+    });
+
+    // Approval-time validation is live through the bounce: a
+    // policy-forbidden outcome (anything but ProceedOnce) is converted to
+    // Cancel instead of executing.
+    await bounced.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedAlways,
+    );
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+
+    const completed = onAllToolCallsComplete.mock.calls.at(
+      -1,
+    )?.[0] as ToolCall[];
+    expect(completed[0].status).toBe('cancelled');
+    expect(execute).not.toHaveBeenCalled();
+    expect(onConfirm).toHaveBeenCalledWith(
+      ToolConfirmationOutcome.Cancel,
+      expect.objectContaining({ cancelMessage: expect.any(String) }),
+    );
+  });
+
   it('invalidates exact approval when ambient cwd moves while pending', async () => {
     const rawCommand = "python -c 'print(1)'";
     let targetDir = '/tmp/one';
@@ -12581,6 +12689,182 @@ describe('CoreToolScheduler telemetry spans', () => {
     )?.[0] as ToolCall[];
     expect(completed[0].status).toBe('cancelled');
     expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('cancels without bouncing when an aborted signal resolves a confirmation view normally', async () => {
+    // Structured tools resolve normally even after an abort (their
+    // getConfirmationDetails implementations do not read the signal), so
+    // the post-resolution signal.aborted re-check is what keeps a
+    // cancelled call out of awaiting_approval. Without it the cancelled
+    // call would bounce, fire the permission-notification hook, and leak
+    // a blocked_on_user span (#9434 review R3-9).
+    const execute = vi.fn();
+    const abortController = new AbortController();
+    const abortingTool = new MockTool({
+      name: 'mockTool',
+      execute,
+      getConfirmationDetails: async () => {
+        abortController.abort();
+        // Resolves normally AFTER the abort (no throw).
+        return {
+          type: 'edit',
+          title: 'Confirm Edit: test.txt',
+          fileName: 'test.txt',
+          filePath: '/tmp/test.txt',
+          fileDiff: '-old\n+new',
+          originalContent: 'old',
+          newContent: 'new',
+          onConfirm: vi.fn(),
+        };
+      },
+    });
+    const messageBus = askMessageBus('path requires human review');
+    const { onToolCallsUpdate, onAllToolCallsComplete } = await scheduleWithAsk(
+      {
+        messageBus,
+        tools: [abortingTool],
+        abortController,
+      },
+    );
+
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+    const completed = onAllToolCallsComplete.mock.calls.at(
+      -1,
+    )?.[0] as ToolCall[];
+    expect(completed[0].status).toBe('cancelled');
+    expect(execute).not.toHaveBeenCalled();
+    // Never bounced: awaiting_approval never surfaced and no
+    // blocked_on_user span was opened.
+    const seenStatuses = onToolCallsUpdate.mock.calls
+      .flatMap((call) => call[0])
+      .map((toolCall: ToolCall) => toolCall.status);
+    expect(seenStatuses).not.toContain('awaiting_approval');
+    expect(getBlockedSpans()).toHaveLength(0);
+  });
+
+  it('falls back to a default structured reason when the ask carries none', async () => {
+    // The hook-trigger layer substitutes its own generic reason for a
+    // reason-less ask, so the bounce-level `reason ?? fallback` branch is
+    // only reachable by driving the bounce directly with an undefined
+    // reason. Pin the fallback so dropping it (bare `hookAskReason:
+    // reason`) cannot ship green (#9434 review R3-9).
+    const toolOnConfirm = vi.fn();
+    const editTool = new MockTool({
+      name: 'mockTool',
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'ok',
+        returnDisplay: 'ok',
+      }),
+      getConfirmationDetails: async () => ({
+        type: 'edit',
+        title: 'Confirm Edit: test.txt',
+        fileName: 'test.txt',
+        filePath: '/tmp/test.txt',
+        fileDiff: '-old\n+new',
+        originalContent: 'old',
+        newContent: 'new',
+        onConfirm: toolOnConfirm,
+      }),
+    });
+    const messageBus = askMessageBus('any reason');
+    const { scheduler, onToolCallsUpdate, onAllToolCallsComplete } =
+      await scheduleWithAsk({
+        messageBus,
+        tools: [editTool],
+      });
+    const waiting = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+
+    // Re-bounce the same call with an undefined reason and read the
+    // confirmation details the bounce produced.
+    const schedulerInternals = scheduler as unknown as {
+      bounceToAwaitingApprovalForAsk: (
+        scheduledCall: ScheduledToolCall,
+        reason: string | undefined,
+        toolSpan: unknown,
+        signal: AbortSignal,
+        planShellDecision: PlanModeShellDecision | undefined,
+      ) => Promise<boolean>;
+      toolCalls: ToolCall[];
+    };
+    const bounced = await schedulerInternals.bounceToAwaitingApprovalForAsk(
+      {
+        status: 'scheduled',
+        request: waiting.request,
+        tool: waiting.tool,
+        invocation: waiting.invocation,
+      },
+      undefined,
+      {},
+      new AbortController().signal,
+      undefined,
+    );
+    expect(bounced).toBe(true);
+
+    const rebounced = schedulerInternals.toolCalls.find(
+      (call) => call.request.callId === 'ask-call',
+    ) as WaitingToolCall | undefined;
+    expect(rebounced?.confirmationDetails.hookAskReason).toBe(
+      'A PreToolUse hook requested confirmation before running mockTool.',
+    );
+
+    // Clean up the re-bounced call so the scheduler settles.
+    await rebounced?.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.Cancel,
+    );
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+  });
+
+  it('cancels a structured bounced ask without executing when the user declines', async () => {
+    // The bounce's wrapped onConfirm decline path must route Cancel to the
+    // tool's own onConfirm and never execute (#9434 review R4-6).
+    const toolOnConfirm = vi.fn();
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'ok',
+      returnDisplay: 'ok',
+    });
+    const editTool = new MockTool({
+      name: 'mockTool',
+      execute,
+      getConfirmationDetails: async () => ({
+        type: 'edit',
+        title: 'Confirm Edit: test.txt',
+        fileName: 'test.txt',
+        filePath: '/tmp/test.txt',
+        fileDiff: '-old\n+new',
+        originalContent: 'old',
+        newContent: 'new',
+        onConfirm: toolOnConfirm,
+      }),
+    });
+    const messageBus = askMessageBus('path requires human review');
+    const { onToolCallsUpdate, onAllToolCallsComplete } = await scheduleWithAsk(
+      { messageBus, tools: [editTool] },
+    );
+
+    const waiting = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+    expect(waiting.confirmationDetails.type).toBe('edit');
+    await waiting.confirmationDetails.onConfirm(ToolConfirmationOutcome.Cancel);
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+    const completed = onAllToolCallsComplete.mock.calls.at(
+      -1,
+    )?.[0] as ToolCall[];
+    expect(completed[0].status).toBe('cancelled');
+    expect(execute).not.toHaveBeenCalled();
+    expect(toolOnConfirm).toHaveBeenCalledWith(
+      ToolConfirmationOutcome.Cancel,
+      undefined,
+    );
   });
 
   it('keeps the synthetic reason prompt when a PreToolUse ask bounces a non-structured tool', async () => {

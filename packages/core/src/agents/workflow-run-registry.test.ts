@@ -439,6 +439,40 @@ describe('WorkflowRunRegistry', () => {
     });
   });
 
+  it('preserves the hook reason on exec confirmations through restriction', () => {
+    // The hookAskReason passthrough must survive restrictWorkflow-
+    // ConfirmationDetails for the EXEC branch too, not only edit
+    // (#9441 R3-8): a workflow subagent's hook-escalated shell command
+    // must bubble to the leader UI with the hook's reason intact.
+    const r = new WorkflowRunRegistry();
+    r.register(reg('wf_exec_hook_reason'));
+    r.setApprovalChangeCallback(() => {});
+    const emitter = new AgentEventEmitter();
+    r.bridgeApprovalEvents('wf_exec_hook_reason', emitter);
+    emitter.emit(
+      AgentEventType.TOOL_WAITING_APPROVAL,
+      approvalEvent({
+        name: 'Shell',
+        confirmationDetails: {
+          type: 'exec',
+          title: 'Run command?',
+          command: 'git status',
+          rootCommand: 'git',
+          hookAskReason: 'HOOK_ASK_REASON_SENTINEL',
+        },
+      }),
+    );
+
+    expect(r.get('wf_exec_hook_reason')!.pendingApprovals[0]).toMatchObject({
+      confirmationDetails: {
+        type: 'exec',
+        command: 'git status',
+        hideAlwaysAllow: true,
+        hookAskReason: 'HOOK_ASK_REASON_SENTINEL',
+      },
+    });
+  });
+
   it('preserves plain-text rendering for copied info confirmations', () => {
     const r = new WorkflowRunRegistry();
     r.register(reg('wf_plain_info'));
