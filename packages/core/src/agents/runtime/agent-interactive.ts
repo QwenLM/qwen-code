@@ -41,6 +41,7 @@ import {
   type AgentInteractiveConfig,
   type AgentMessage,
 } from './agent-types.js';
+import type { LoopType } from '../../telemetry/types.js';
 
 const debugLogger = createDebugLogger('AGENT_INTERACTIVE');
 
@@ -239,11 +240,13 @@ export class AgentInteractive {
         result.terminateMode &&
         result.terminateMode !== AgentTerminateMode.GOAL
       ) {
-        const msg = terminateModeMessage(result.terminateMode);
+        const msg = terminateModeMessage(result.terminateMode, result.loopType);
         if (msg) {
           this.addMessage('info', msg.text, { metadata: { level: msg.level } });
         }
-        this.lastRoundError = `Terminated: ${result.terminateMode}`;
+        this.lastRoundError = result.loopType
+          ? `Terminated: ${result.terminateMode} (${result.loopType})`
+          : `Terminated: ${result.terminateMode}`;
       }
     } catch (err) {
       // User-initiated cancellation already logged by cancelCurrentRound().
@@ -520,6 +523,7 @@ export class AgentInteractive {
  */
 function terminateModeMessage(
   mode: AgentTerminateMode,
+  loopType?: LoopType | null,
 ): { text: string; level: 'info' | 'warning' | 'error' } | null {
   switch (mode) {
     case AgentTerminateMode.MAX_TURNS:
@@ -533,7 +537,11 @@ function terminateModeMessage(
       return { text: 'Agent stopped due to an error.', level: 'error' };
     case AgentTerminateMode.LOOP_DETECTED:
       return {
-        text: 'Agent stopped: duplicate tool-call loop detected.',
+        // Name the exact detector so a stop is attributable (issue #9450)
+        // instead of collapsing every loop type into one generic label.
+        text: loopType
+          ? `Agent stopped: duplicate tool-call loop detected (${loopType}).`
+          : 'Agent stopped: duplicate tool-call loop detected.',
         level: 'error',
       };
     case AgentTerminateMode.CANCELLED:
