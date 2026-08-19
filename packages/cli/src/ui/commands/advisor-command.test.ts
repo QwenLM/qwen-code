@@ -10,6 +10,7 @@ import { type CommandContext } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import { CommandKind } from './types.js';
 import { MessageType } from '../types.js';
+import type { LoadedSettings } from '../../config/settings.js';
 
 vi.mock('../../i18n/index.js', () => ({
   t: (key: string, params?: Record<string, string>) => {
@@ -33,11 +34,24 @@ const mockBuildBtwCacheSafeParams = vi.hoisted(() =>
   }),
 );
 
-vi.mock('@qwen-code/qwen-code-core', () => ({
-  BTW_MAX_INPUT_LENGTH: 4096,
-  runForkedAgent: mockRunForkedAgent,
-  buildBtwCacheSafeParams: mockBuildBtwCacheSafeParams,
-}));
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...actual,
+    BTW_MAX_INPUT_LENGTH: 4096,
+    runForkedAgent: mockRunForkedAgent,
+    buildBtwCacheSafeParams: mockBuildBtwCacheSafeParams,
+    resolveModelId: (value: string | undefined) => {
+      const raw = value?.trim();
+      if (!raw || raw.includes(' ')) throw new Error('invalid selector');
+      const [authType, ...rest] = raw.split(':');
+      return rest.length > 0
+        ? { authType, modelId: rest.join(':') }
+        : { modelId: raw };
+    },
+  };
+});
 
 const ADVISOR_REVIEW = {
   verdict: 'Sound.',
@@ -66,6 +80,19 @@ const ADVISOR_MARKDOWN = [
 
 describe('advisorCommand', () => {
   let mockContext: CommandContext;
+  let setValue: Mock;
+  let setAdvisorConfig: Mock;
+
+  const createSettings = (
+    merged: Record<string, unknown> = {},
+  ): LoadedSettings =>
+    ({
+      merged,
+      user: { settings: {} },
+      workspace: { settings: {} },
+      setValue,
+      isTrusted: true,
+    }) as unknown as LoadedSettings;
 
   const createConfig = (overrides: Record<string, unknown> = {}) => ({
     getGeminiClient: () => ({
@@ -74,6 +101,31 @@ describe('advisorCommand', () => {
       ],
     }),
     getModel: () => 'test-model',
+    getAdvisorModel: () => undefined,
+    getAllConfiguredModels: () => [
+      {
+        id: 'advisor-model',
+        label: 'Advisor',
+        authType: 'openai',
+      },
+      {
+        id: 'vision-only',
+        label: 'Vision Only',
+        authType: 'openai',
+        visionOnly: true,
+      },
+    ],
+    getAvailableModelsForAuthType: (authType: string) =>
+      authType === 'openai'
+        ? [
+            {
+              id: 'advisor-model',
+              label: 'Advisor',
+              authType: 'openai',
+            },
+          ]
+        : [],
+    setAdvisorConfig,
     getSessionId: () => 'test-session-id',
     getApprovalMode: () => 'default',
     ...overrides,
@@ -81,6 +133,8 @@ describe('advisorCommand', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    setValue = vi.fn();
+    setAdvisorConfig = vi.fn().mockResolvedValue(undefined);
     mockBuildBtwCacheSafeParams.mockReturnValue({
       generationConfig: {},
       history: [{ role: 'user', parts: [{ text: 'hello' }] }],
@@ -90,450 +144,302 @@ describe('advisorCommand', () => {
     mockContext = createMockCommandContext({
       services: {
         config: createConfig(),
+        settings: createSettings(),
       },
     });
   });
 
-  it('should have correct metadata', () => {
+  it('has correct metadata', () => {
     expect(advisorCommand.name).toBe('advisor');
     expect(advisorCommand.kind).toBe(CommandKind.BUILT_IN);
     expect(advisorCommand.description).toBeTruthy();
     expect(advisorCommand.supportedModes).toEqual(['interactive', 'acp']);
   });
 
-  it('should return error when focus exceeds max length', async () => {
-    const result = await advisorCommand.action!(mockContext, 'x'.repeat(4097));
+  it('opens the Advisor model picker when run without args interactively', async () => {
+    const result = await advisorCommand.action!(mockContext, '');
+
+    expect(result).toEqual({
+      type: 'dialog',
+      dialog: 'advisor-model',
+    });
+  });
+
+  it('prints an actionable message for no-arg ACP use', async () => {
+    const result = await advisorCommand.action!(
+      { ...mockContext, executionMode: 'acp' },
+      '',
+    );
 
     expect(result).toEqual({
       type: 'message',
-      messageType: 'error',
-      // The identity t() mock substitutes {{max}}, so pin the fully
-      // interpolated text: a mismatched parameter name at the call site
-      // would otherwise leave the raw '{{max}}' token invisible here.
-      content: 'Focus too long (max 4096 chars)',
+      messageType: 'info',
+      content:
+        'Current Advisor model: not set\nUse "/advisor <model-id>" to enable Advisor or "/advisor off" to disable it.',
     });
   });
 
-  it('should accept a focus at exactly the max length', async () => {
-    mockRunForkedAgent.mockResolvedValue(advisorResult());
-
-    const result = await advisorCommand.action!(mockContext, 'x'.repeat(4096));
-
-    expect(result).toBeUndefined();
-    expect(mockRunForkedAgent).toHaveBeenCalledTimes(1);
-  });
-
-  it('should return error when config is not loaded', async () => {
-    const noConfigContext = createMockCommandContext({
-      services: { config: null },
-    });
-
-    const result = await advisorCommand.action!(noConfigContext, '');
+  it('shows the current Advisor status without opening the picker', async () => {
+    const result = await advisorCommand.action!(mockContext, 'status');
 
     expect(result).toEqual({
       type: 'message',
-      messageType: 'error',
-      content: 'Config not loaded.',
+      messageType: 'info',
+      content:
+        'Current Advisor model: not set\nUse "/advisor <model-id>" to enable Advisor or "/advisor off" to disable it.',
     });
+    expect(setValue).not.toHaveBeenCalled();
+    expect(setAdvisorConfig).not.toHaveBeenCalled();
   });
 
-  it('should return error when no model is configured', async () => {
-    const noModelContext = createMockCommandContext({
+  it('shows the active Advisor model in status output', async () => {
+    mockContext = createMockCommandContext({
       services: {
-        config: createConfig({ getModel: () => null }),
+        config: createConfig({
+          getAdvisorModel: () => 'advisor-model',
+        }),
+        settings: createSettings({ advisorModel: 'advisor-model' }),
       },
     });
 
-    const result = await advisorCommand.action!(noModelContext, '');
+    const result = await advisorCommand.action!(mockContext, 'status');
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content:
+        'Current Advisor model: advisor-model\nUse "/advisor <model-id>" to enable Advisor or "/advisor off" to disable it.',
+    });
+  });
+
+  it('rejects extra args for Advisor status', async () => {
+    const result = await advisorCommand.action!(mockContext, 'status now');
 
     expect(result).toEqual({
       type: 'message',
       messageType: 'error',
-      content: 'No model configured.',
+      content: 'Usage: /advisor status',
     });
+    expect(setValue).not.toHaveBeenCalled();
+    expect(setAdvisorConfig).not.toHaveBeenCalled();
+  });
+
+  it('offers status completion for Advisor', async () => {
+    await expect(
+      advisorCommand.completion!(mockContext, 'sta'),
+    ).resolves.toEqual([
+      {
+        value: 'status',
+        description: 'Show the current Advisor model',
+      },
+    ]);
+  });
+
+  it('persists and applies an Advisor model selector', async () => {
+    const result = await advisorCommand.action!(mockContext, 'advisor-model');
+
+    expect(setValue).toHaveBeenCalledWith(
+      expect.any(String),
+      'advisorModel',
+      'advisor-model',
+    );
+    expect(setAdvisorConfig).toHaveBeenCalledWith({
+      model: 'advisor-model',
+      maxUses: undefined,
+      modelOverride: true,
+    });
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Advisor Model: advisor-model',
+    });
+  });
+
+  it('returns a message result for /advisor <selector> in ACP mode', async () => {
+    const result = await advisorCommand.action!(
+      { ...mockContext, executionMode: 'acp' },
+      'advisor-model',
+    );
+
+    expect(setValue).toHaveBeenCalledWith(
+      expect.any(String),
+      'advisorModel',
+      'advisor-model',
+    );
+    expect(setAdvisorConfig).toHaveBeenCalledWith({
+      model: 'advisor-model',
+      maxUses: undefined,
+      modelOverride: true,
+    });
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Advisor Model: advisor-model',
+    });
+  });
+
+  it('persists an empty tombstone and disables Advisor for /advisor off', async () => {
+    const result = await advisorCommand.action!(mockContext, 'off');
+
+    expect(setValue).toHaveBeenCalledWith(
+      expect.any(String),
+      'advisorModel',
+      '',
+    );
+    expect(setAdvisorConfig).toHaveBeenCalledWith({
+      model: undefined,
+      maxUses: undefined,
+      modelOverride: true,
+    });
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Advisor disabled',
+    });
+  });
+
+  it('returns a message result for /advisor off in ACP mode', async () => {
+    const result = await advisorCommand.action!(
+      { ...mockContext, executionMode: 'acp' },
+      'off',
+    );
+
+    expect(setValue).toHaveBeenCalledWith(
+      expect.any(String),
+      'advisorModel',
+      '',
+    );
+    expect(setAdvisorConfig).toHaveBeenCalledWith({
+      model: undefined,
+      maxUses: undefined,
+      modelOverride: true,
+    });
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Advisor disabled',
+    });
+  });
+
+  it('rejects unknown selectors instead of treating them as review focus', async () => {
+    const result = await advisorCommand.action!(mockContext, 'missing-model');
+
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'error',
+    });
+    expect(
+      String(result && 'content' in result ? result.content : ''),
+    ).toContain("Advisor model 'missing-model' is not configured.");
     expect(mockRunForkedAgent).not.toHaveBeenCalled();
   });
 
-  describe('interactive mode', () => {
-    it('should show pending item, add an advisor review item, then clear pending', async () => {
-      mockRunForkedAgent.mockResolvedValue(advisorResult('resolved-model'));
+  it('rejects mutually exclusive scope flags', async () => {
+    const result = await advisorCommand.action!(
+      mockContext,
+      '--project --global advisor-model',
+    );
 
-      const result = await advisorCommand.action!(mockContext, '');
-
-      expect(mockContext.ui.setPendingItem).toHaveBeenNthCalledWith(1, {
-        type: MessageType.INFO,
-        text: 'Consulting advisor...',
-      });
-      // The indicator must be raised before the forked model call starts —
-      // that call is the only window the pending state exists for.
-      expect(
-        (mockContext.ui.setPendingItem as Mock).mock.invocationCallOrder[0],
-      ).toBeLessThan(mockRunForkedAgent.mock.invocationCallOrder[0]);
-      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
-        {
-          type: MessageType.ADVISOR,
-          text: ADVISOR_MARKDOWN,
-          model: 'resolved-model',
-        },
-        expect.any(Number),
-      );
-      expect(mockContext.ui.addItem).toHaveBeenCalledTimes(1);
-      expect(mockRunForkedAgent).toHaveBeenCalledTimes(1);
-      expect(mockContext.ui.setPendingItem).toHaveBeenLastCalledWith(null);
-      expect(result).toBeUndefined();
-    });
-
-    it('should pass focus into the advisor prompt', async () => {
-      mockRunForkedAgent.mockResolvedValue(advisorResult());
-
-      await advisorCommand.action!(mockContext, 'check the error handling');
-
-      expect(mockRunForkedAgent).toHaveBeenCalledWith(
-        expect.objectContaining({
-          cacheSafeParams: expect.objectContaining({ model: 'test-model' }),
-          userMessage: expect.stringContaining('check the error handling'),
-          jsonSchema: expect.objectContaining({
-            type: 'object',
-            required: ['verdict', 'risks', 'missingEvidence', 'recommendation'],
-          }),
-          disableModelFallbacks: true,
-        }),
-      );
-      const prompt = mockRunForkedAgent.mock.calls[0][0].userMessage;
-      for (const required of [
-        'You have NO tools',
-        'verdict',
-        'risks',
-        'missingEvidence',
-        'recommendation',
-      ]) {
-        expect(prompt).toContain(required);
-      }
-      // The forked chat is built from exactly this object, so a gutted or
-      // substituted copy would make the advisor review nothing.
-      expect(mockRunForkedAgent.mock.calls[0][0].cacheSafeParams).toBe(
-        mockBuildBtwCacheSafeParams.mock.results.at(-1)?.value,
-      );
-    });
-
-    it('should trim padding around the focus before building the prompt', async () => {
-      mockRunForkedAgent.mockResolvedValue(advisorResult());
-
-      await advisorCommand.action!(mockContext, ' check the padding ');
-
-      expect(mockRunForkedAgent.mock.calls[0][0].userMessage).toContain(
-        'check the padding',
-      );
-    });
-
-    it('should not pass model override when advisorModel is unset', async () => {
-      mockRunForkedAgent.mockResolvedValue(advisorResult());
-
-      await advisorCommand.action!(mockContext, '');
-
-      const callArgs = mockRunForkedAgent.mock.calls[0][0];
-      expect(callArgs).not.toHaveProperty('model');
-      expect(callArgs.disableModelFallbacks).toBe(true);
-    });
-
-    it('should not pass model override when advisorModel is whitespace-only', async () => {
-      mockRunForkedAgent.mockResolvedValue(advisorResult());
-      const contextWithBlankModel = createMockCommandContext({
-        services: {
-          config: createConfig(),
-          settings: {
-            merged: { advisorModel: '   ' },
-          },
-        },
-      });
-
-      await advisorCommand.action!(contextWithBlankModel, '');
-
-      const callArgs = mockRunForkedAgent.mock.calls[0][0];
-      expect(callArgs).not.toHaveProperty('model');
-    });
-
-    it('should pass advisorModel setting as model override', async () => {
-      mockRunForkedAgent.mockResolvedValue(advisorResult('stronger-model'));
-      const contextWithModel = createMockCommandContext({
-        services: {
-          config: createConfig(),
-          settings: {
-            merged: { advisorModel: 'stronger-model' },
-          },
-        },
-      });
-
-      await advisorCommand.action!(contextWithModel, '');
-
-      expect(mockRunForkedAgent).toHaveBeenCalledWith(
-        expect.objectContaining({
-          model: 'stronger-model',
-          disableModelFallbacks: true,
-        }),
-      );
-    });
-
-    it('should strip tools (never preserve) on the default path, matching /btw', async () => {
-      mockRunForkedAgent.mockResolvedValue(advisorResult());
-
-      await advisorCommand.action!(mockContext, '');
-
-      const callArgs = mockRunForkedAgent.mock.calls[0][0];
-      expect(callArgs).not.toHaveProperty('preserveTools');
-    });
-
-    it('should strip tools even when advisorModel is set', async () => {
-      mockRunForkedAgent.mockResolvedValue(advisorResult('stronger-model'));
-      const contextWithModel = createMockCommandContext({
-        services: {
-          config: createConfig(),
-          settings: {
-            merged: { advisorModel: 'stronger-model' },
-          },
-        },
-      });
-
-      await advisorCommand.action!(contextWithModel, '');
-
-      const callArgs = mockRunForkedAgent.mock.calls[0][0];
-      expect(callArgs).not.toHaveProperty('preserveTools');
-    });
-
-    it('should forward abortSignal to runForkedAgent', async () => {
-      mockRunForkedAgent.mockResolvedValue(advisorResult());
-      const abortController = new AbortController();
-      const contextWithSignal = createMockCommandContext({
-        services: { config: createConfig() },
-        abortSignal: abortController.signal,
-      });
-
-      await advisorCommand.action!(contextWithSignal, '');
-
-      expect(mockRunForkedAgent).toHaveBeenCalledWith(
-        expect.objectContaining({ abortSignal: abortController.signal }),
-      );
-    });
-
-    it('should error when no conversation context is available', async () => {
-      mockBuildBtwCacheSafeParams.mockReturnValue(null);
-
-      await advisorCommand.action!(mockContext, '');
-
-      expect(mockRunForkedAgent).not.toHaveBeenCalled();
-      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: MessageType.ERROR,
-          text: expect.stringContaining('No conversation context'),
-        }),
-        expect.any(Number),
-      );
-      expect(mockContext.ui.setPendingItem).toHaveBeenLastCalledWith(null);
-    });
-
-    it('should ignore startup-only history', async () => {
-      mockContext = createMockCommandContext({
-        services: {
-          config: createConfig({
-            getGeminiClient: () => ({
-              getHistoryForForkWindow: () => [],
-            }),
-          }),
-        },
-      });
-
-      await advisorCommand.action!(mockContext, '');
-
-      expect(mockRunForkedAgent).not.toHaveBeenCalled();
-      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: MessageType.ERROR,
-          text: expect.stringContaining('No conversation context'),
-        }),
-        expect.any(Number),
-      );
-      expect(mockContext.ui.setPendingItem).toHaveBeenLastCalledWith(null);
-    });
-
-    it('should add error item on failure and clear pending', async () => {
-      mockRunForkedAgent.mockRejectedValue(new Error('API error'));
-
-      const result = await advisorCommand.action!(mockContext, '');
-
-      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
-        {
-          type: MessageType.ERROR,
-          text: 'Advisor review failed: API error',
-        },
-        expect.any(Number),
-      );
-      expect(mockContext.ui.setPendingItem).toHaveBeenLastCalledWith(null);
-      expect(result).toBeUndefined();
-    });
-
-    it('should format non-Error rejections with a fallback', async () => {
-      mockRunForkedAgent.mockRejectedValue(null);
-
-      await advisorCommand.action!(mockContext, '');
-
-      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
-        {
-          type: MessageType.ERROR,
-          text: 'Advisor review failed: Unknown error',
-        },
-        expect.any(Number),
-      );
-    });
-
-    it('should preserve truthy non-Error rejection text', async () => {
-      mockRunForkedAgent.mockRejectedValue('string error');
-
-      await advisorCommand.action!(mockContext, '');
-
-      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
-        {
-          type: MessageType.ERROR,
-          text: 'Advisor review failed: string error',
-        },
-        expect.any(Number),
-      );
-    });
-
-    it('should block when another pendingItem exists', async () => {
-      const busyContext = createMockCommandContext({
-        services: { config: createConfig() },
-        ui: { pendingItem: { type: 'info' } },
-      });
-
-      const result = await advisorCommand.action!(busyContext, '');
-
-      expect(mockRunForkedAgent).not.toHaveBeenCalled();
-      expect(busyContext.ui.addItem).not.toHaveBeenCalled();
-      expect(busyContext.ui.setPendingItem).not.toHaveBeenCalled();
-      expect(result).toEqual({
-        type: 'message',
-        messageType: 'error',
-        content: expect.stringContaining('Another operation is in progress'),
-      });
-    });
-
-    it('should block when the main turn is still in flight', async () => {
-      const busyContext = createMockCommandContext({
-        services: { config: createConfig() },
-        ui: { isIdleRef: { current: false }, pendingItem: null },
-      });
-
-      const result = await advisorCommand.action!(busyContext, '');
-
-      expect(mockRunForkedAgent).not.toHaveBeenCalled();
-      expect(busyContext.ui.addItem).not.toHaveBeenCalled();
-      expect(busyContext.ui.setPendingItem).not.toHaveBeenCalled();
-      expect(result).toEqual({
-        type: 'message',
-        messageType: 'error',
-        content: expect.stringContaining('Another operation is in progress'),
-      });
-    });
-
-    it('should not add items after abort', async () => {
-      const abortController = new AbortController();
-      mockRunForkedAgent.mockImplementation(async () => {
-        abortController.abort();
-        return advisorResult();
-      });
-      const abortableContext = createMockCommandContext({
-        services: { config: createConfig() },
-        abortSignal: abortController.signal,
-      });
-
-      await advisorCommand.action!(abortableContext, '');
-
-      expect(abortableContext.ui.addItem).not.toHaveBeenCalled();
-      expect(abortableContext.ui.setPendingItem).toHaveBeenCalledWith({
-        type: MessageType.INFO,
-        text: 'Consulting advisor...',
-      });
-      expect(abortableContext.ui.setPendingItem).not.toHaveBeenLastCalledWith(
-        null,
-      );
-    });
-
-    it('should not add items when the forked agent rejects on abort', async () => {
-      const abortController = new AbortController();
-      mockRunForkedAgent.mockImplementation(async () => {
-        abortController.abort();
-        throw new Error('aborted');
-      });
-      const abortableContext = createMockCommandContext({
-        services: { config: createConfig() },
-        abortSignal: abortController.signal,
-      });
-
-      await advisorCommand.action!(abortableContext, '');
-
-      expect(abortableContext.ui.addItem).not.toHaveBeenCalled();
-      expect(abortableContext.ui.setPendingItem).toHaveBeenCalledWith({
-        type: MessageType.INFO,
-        text: 'Consulting advisor...',
-      });
-      expect(abortableContext.ui.setPendingItem).not.toHaveBeenLastCalledWith(
-        null,
-      );
-    });
-
-    it('should reject malformed advisor output', async () => {
-      mockRunForkedAgent.mockResolvedValue({
-        text: '{"verdict":"Sound."}',
-        jsonResult: { verdict: 'Sound.' },
-        model: 'test-model',
-        usage: { inputTokens: 1, outputTokens: 0, cacheHitTokens: 0 },
-      });
-
-      await advisorCommand.action!(mockContext, '');
-
-      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
-        {
-          type: MessageType.ERROR,
-          text: 'Advisor review failed: Advisor returned invalid structured output.',
-        },
-        expect.any(Number),
-      );
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: 'Cannot use both --project and --global. Choose one scope flag.',
     });
   });
 
-  describe('acp mode', () => {
-    it('should return message result with review on success', async () => {
-      mockRunForkedAgent.mockResolvedValue(advisorResult());
-      const acpContext = createMockCommandContext({
-        executionMode: 'acp',
-        services: { config: createConfig() },
-      });
+  it('runs the manual structured review under /advisor review', async () => {
+    mockRunForkedAgent.mockResolvedValue(advisorResult('resolved-model'));
 
-      const result = await advisorCommand.action!(acpContext, '');
+    const result = await advisorCommand.action!(
+      mockContext,
+      'review check the error handling',
+    );
 
-      expect(result).toEqual({
-        type: 'message',
-        messageType: 'info',
-        content: ADVISOR_MARKDOWN,
-      });
-      expect(mockRunForkedAgent).toHaveBeenCalledTimes(1);
-      expect(acpContext.ui.setPendingItem).not.toHaveBeenCalled();
+    expect(result).toBeUndefined();
+    expect(mockRunForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userMessage: expect.stringContaining('check the error handling'),
+        disableModelFallbacks: true,
+      }),
+    );
+    expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+      {
+        type: MessageType.ADVISOR,
+        text: ADVISOR_MARKDOWN,
+        model: 'resolved-model',
+      },
+      expect.any(Number),
+    );
+  });
+
+  it('passes the active Advisor model as model override for manual review', async () => {
+    mockRunForkedAgent.mockResolvedValue(advisorResult('stronger-model'));
+    mockContext = createMockCommandContext({
+      services: {
+        config: createConfig({
+          getAdvisorModel: () => 'stronger-model',
+        }),
+        settings: createSettings({ advisorModel: 'stronger-model' }),
+      },
     });
 
-    it('should return error message on failure', async () => {
-      mockRunForkedAgent.mockRejectedValue(new Error('Model error'));
-      const acpContext = createMockCommandContext({
-        executionMode: 'acp',
-        services: { config: createConfig() },
-      });
+    await advisorCommand.action!(mockContext, 'review');
 
-      const result = await advisorCommand.action!(acpContext, '');
+    expect(mockRunForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: 'stronger-model',
+      }),
+    );
+  });
 
-      expect(result).toEqual({
-        type: 'message',
-        messageType: 'error',
-        content: 'Advisor review failed: Model error',
-      });
+  it('uses the active Advisor model over persisted settings for manual review', async () => {
+    mockRunForkedAgent.mockResolvedValue(advisorResult('session-model'));
+    mockContext = createMockCommandContext({
+      services: {
+        config: createConfig({
+          getAdvisorModel: () => 'session-model',
+        }),
+        settings: createSettings({ advisorModel: 'persisted-model' }),
+      },
     });
+
+    await advisorCommand.action!(mockContext, 'review');
+
+    expect(mockRunForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: 'session-model',
+      }),
+    );
+  });
+
+  it('returns manual review errors in ACP mode', async () => {
+    mockRunForkedAgent.mockRejectedValue(new Error('bad json'));
+
+    const result = await advisorCommand.action!(
+      { ...mockContext, executionMode: 'acp' },
+      'review',
+    );
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: 'Advisor review failed: bad json',
+    });
+  });
+
+  it('returns manual review output in ACP mode', async () => {
+    mockRunForkedAgent.mockResolvedValue(advisorResult('resolved-model'));
+
+    const result = await advisorCommand.action!(
+      { ...mockContext, executionMode: 'acp' },
+      'review check risk',
+    );
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: ADVISOR_MARKDOWN,
+    });
+    expect(mockContext.ui.addItem).not.toHaveBeenCalled();
   });
 });

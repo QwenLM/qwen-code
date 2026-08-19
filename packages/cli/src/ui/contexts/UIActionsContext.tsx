@@ -55,10 +55,12 @@ export interface UIActions {
   closeModelDialog: () => void;
   openModelDialog: (options?: {
     fastModelMode?: boolean;
+    advisorModelMode?: boolean;
     voiceModelMode?: boolean;
     visionModelMode?: boolean;
     compactionModelMode?: boolean;
     imageModelMode?: boolean;
+    persistScope?: 'workspace' | 'user';
   }) => void;
   openArenaDialog: (type: Exclude<ArenaDialogType, null>) => void;
   closeArenaDialog: () => void;

@@ -71,6 +71,7 @@ export interface UIState {
   skillReviewPending: { taskId: string; skills: PendingSkillView[] } | null;
   isModelDialogOpen: boolean;
   isFastModelMode: boolean;
+  isAdvisorModelMode: boolean;
   isVoiceModelMode: boolean;
   isVisionModelMode: boolean;
   isCompactionModelMode: boolean;

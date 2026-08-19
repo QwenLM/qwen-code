@@ -643,6 +643,8 @@ export class QwenLogger {
         input_token_count: event.input_token_count,
         output_token_count: event.output_token_count,
         cached_content_token_count: event.cached_content_token_count,
+        cache_creation_input_token_count:
+          event.cache_creation_input_token_count,
         thoughts_token_count: event.thoughts_token_count,
       }),
     });
@@ -679,6 +681,7 @@ export class QwenLogger {
         subagent_name: event.subagent_name,
         error_message: event.error_message,
         error_type: event.error_type,
+        advisor_error_code: event.advisor_error_code,
       },
     });
 

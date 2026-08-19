@@ -11,7 +11,7 @@ import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
 import { describe, expect, it } from 'vitest';
 import { TestRig } from '../test-helper.js';
-import { startFakeOpenAIServer } from '../fake-openai-server.js';
+import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
 
 const REQUEST_TIMEOUT_MS = 60_000;
 const INITIAL_PROMPT = 'Create a quick note (smoke test).';
@@ -24,6 +24,8 @@ type PendingRequest = {
   reject: (reason: Error) => void;
   timeout: NodeJS.Timeout;
 };
+
+type JsonObject = Record<string, unknown>;
 
 type UsageMetadata = {
   inputTokens?: number | null;
@@ -83,6 +85,48 @@ type PermissionRequest = {
 type PermissionHandler = (
   request: PermissionRequest,
 ) => { optionId: string } | { outcome: 'cancelled' };
+
+function messagesOf(body: JsonObject): JsonObject[] {
+  const messages = body['messages'];
+  return Array.isArray(messages)
+    ? messages.filter(
+        (message): message is JsonObject =>
+          typeof message === 'object' && message !== null,
+      )
+    : [];
+}
+
+function textFromContent(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .map((part) => {
+      if (typeof part === 'string') return part;
+      if (typeof part !== 'object' || part === null) return '';
+      const record = part as JsonObject;
+      return typeof record['text'] === 'string' ? record['text'] : '';
+    })
+    .join('\n');
+}
+
+function allMessageText(body: JsonObject): string {
+  return messagesOf(body)
+    .map((message) => textFromContent(message['content']))
+    .join('\n');
+}
+
+function toolNames(body: JsonObject): string[] {
+  const tools = body['tools'];
+  if (!Array.isArray(tools)) return [];
+  return tools.flatMap((tool) => {
+    if (typeof tool !== 'object' || tool === null) return [];
+    const record = tool as JsonObject;
+    const fn = record['function'];
+    if (typeof fn !== 'object' || fn === null) return [];
+    const name = (fn as JsonObject)['name'];
+    return typeof name === 'string' ? [name] : [];
+  });
+}
 
 /**
  * Sets up an ACP test environment with all necessary utilities.
@@ -781,6 +825,349 @@ function setupAcpTest(
       throw e;
     } finally {
       await cleanup();
+    }
+  });
+
+  it('handles Advisor configuration slash commands in ACP mode', async () => {
+    const rig = new TestRig();
+    const fakeServer = await startFakeOpenAIServer(
+      () => ({ content: 'unused' }),
+      { keepAlive: false },
+    );
+    await rig.setup('acp advisor slash commands', {
+      settings: {
+        modelProviders: {
+          openai: [
+            {
+              id: 'request-model',
+              name: 'Request Model',
+              baseUrl: fakeServer.baseUrl,
+              envKey: 'OPENAI_API_KEY',
+            },
+            {
+              id: 'advisor-model',
+              name: 'Advisor Model',
+              baseUrl: fakeServer.baseUrl,
+              envKey: 'OPENAI_API_KEY',
+            },
+          ],
+        },
+        security: { auth: { selectedType: 'openai' } },
+      },
+    });
+
+    const { sendRequest, cleanup, stderr, sessionUpdates } = setupAcpTest(rig, {
+      env: {
+        OPENAI_API_KEY: 'fake-key',
+        OPENAI_BASE_URL: fakeServer.baseUrl,
+        OPENAI_MODEL: 'request-model',
+        QWEN_MODEL: 'request-model',
+      },
+    });
+
+    const slashOutputIncludes = (text: string) =>
+      sessionUpdates.some((update) =>
+        update.update?.content?.text?.includes(text),
+      );
+
+    try {
+      await sendRequest('initialize', {
+        protocolVersion: 1,
+        clientCapabilities: {
+          fs: { readTextFile: true, writeTextFile: true },
+        },
+      });
+      await sendRequest('authenticate', { methodId: 'openai' });
+
+      const newSession = (await sendRequest('session/new', {
+        cwd: rig.testDir!,
+        mcpServers: [],
+      })) as { sessionId: string };
+      expect(newSession.sessionId).toBeTruthy();
+
+      await sendRequest('session/prompt', {
+        sessionId: newSession.sessionId,
+        prompt: [{ type: 'text', text: '/advisor' }],
+      });
+      expect(
+        slashOutputIncludes('Use "/advisor <model-id>" to enable Advisor'),
+      ).toBe(true);
+
+      await sendRequest('session/prompt', {
+        sessionId: newSession.sessionId,
+        prompt: [{ type: 'text', text: '/advisor advisor-model' }],
+      });
+      expect(slashOutputIncludes('Advisor Model: advisor-model')).toBe(true);
+
+      await sendRequest('session/prompt', {
+        sessionId: newSession.sessionId,
+        prompt: [{ type: 'text', text: '/advisor off' }],
+      });
+      expect(slashOutputIncludes('Advisor disabled')).toBe(true);
+
+      expect(
+        fakeServer.requests.some(
+          (request) => request.body['model'] === 'advisor-model',
+        ),
+      ).toBe(false);
+    } catch (e) {
+      if (stderr.length) {
+        console.error('Agent stderr:', stderr.join(''));
+      }
+      throw e;
+    } finally {
+      await cleanup();
+      await fakeServer.close();
+    }
+  });
+
+  it('runs the native Advisor consult flow in ACP mode', async () => {
+    const rig = new TestRig();
+    let mainRequestIndex = 0;
+    const fakeServer = await startFakeOpenAIServer(
+      ({ body }) => {
+        if (body['model'] === 'advisor-model') {
+          return {
+            content: 'Advisor advice in ACP.',
+            usage: {
+              prompt_tokens: 30,
+              completion_tokens: 5,
+              total_tokens: 35,
+            },
+          };
+        }
+
+        if (body['stream'] !== true) {
+          return { content: '{"selected_memories":[]}' };
+        }
+
+        mainRequestIndex += 1;
+        if (mainRequestIndex === 1) {
+          return {
+            content: 'Consulting the configured reviewer.',
+            toolCalls: [fakeToolCall('advisor', {}, 'acp-advisor-call')],
+          };
+        }
+        if (mainRequestIndex === 2) {
+          return { content: 'ACP final after advisor.' };
+        }
+        return { content: 'ACP final with advisor disabled.' };
+      },
+      { keepAlive: false },
+    );
+
+    await rig.setup('acp native advisor consult flow', {
+      settings: {
+        modelProviders: {
+          openai: [
+            {
+              id: 'request-model',
+              name: 'Request Model',
+              baseUrl: fakeServer.baseUrl,
+              envKey: 'OPENAI_API_KEY',
+            },
+            {
+              id: 'advisor-model',
+              name: 'Advisor Model',
+              baseUrl: fakeServer.baseUrl,
+              envKey: 'OPENAI_API_KEY',
+            },
+          ],
+        },
+        security: { auth: { selectedType: 'openai' } },
+      },
+    });
+
+    const { sendRequest, cleanup, stderr } = setupAcpTest(rig, {
+      env: {
+        OPENAI_API_KEY: 'fake-key',
+        OPENAI_BASE_URL: fakeServer.baseUrl,
+        OPENAI_MODEL: 'request-model',
+        QWEN_MODEL: 'request-model',
+        NO_PROXY: '127.0.0.1,localhost',
+        no_proxy: '127.0.0.1,localhost',
+      },
+    });
+
+    try {
+      await sendRequest('initialize', {
+        protocolVersion: 1,
+        clientCapabilities: {
+          fs: { readTextFile: true, writeTextFile: true },
+        },
+      });
+      await sendRequest('authenticate', { methodId: 'openai' });
+
+      const newSession = (await sendRequest('session/new', {
+        cwd: rig.testDir!,
+        mcpServers: [],
+      })) as { sessionId: string };
+      expect(newSession.sessionId).toBeTruthy();
+
+      await sendRequest('session/prompt', {
+        sessionId: newSession.sessionId,
+        prompt: [{ type: 'text', text: '/advisor advisor-model' }],
+      });
+      await sendRequest('session/prompt', {
+        sessionId: newSession.sessionId,
+        prompt: [{ type: 'text', text: 'Use your reviewer, then answer.' }],
+      });
+      await sendRequest('session/prompt', {
+        sessionId: newSession.sessionId,
+        prompt: [{ type: 'text', text: '/advisor off' }],
+      });
+      await sendRequest('session/prompt', {
+        sessionId: newSession.sessionId,
+        prompt: [{ type: 'text', text: 'Now answer without optional help.' }],
+      });
+
+      const mainRequests = fakeServer.requests
+        .map((request) => request.body)
+        .filter(
+          (body) =>
+            body['stream'] === true && body['model'] === 'request-model',
+        );
+      const advisorRequests = fakeServer.requests
+        .map((request) => request.body)
+        .filter((body) => body['model'] === 'advisor-model');
+
+      expect(mainRequests).toHaveLength(3);
+      expect(advisorRequests).toHaveLength(1);
+      expect(toolNames(mainRequests[0]!)).toContain('advisor');
+      expect(allMessageText(mainRequests[0]!)).toContain(
+        "Call 'advisor' by itself",
+      );
+      expect(advisorRequests[0]).not.toHaveProperty('tools');
+      expect(allMessageText(mainRequests[1]!)).toContain(
+        'Advisor advice in ACP.',
+      );
+      expect(toolNames(mainRequests[2]!)).not.toContain('advisor');
+      expect(allMessageText(mainRequests[2]!)).not.toContain(
+        "Call 'advisor' by itself",
+      );
+    } catch (e) {
+      if (stderr.length) {
+        console.error('Agent stderr:', stderr.join(''));
+      }
+      throw e;
+    } finally {
+      await cleanup();
+      await fakeServer.close();
+    }
+  });
+
+  it('keeps ACP /advisor review out of the normal conversation turn', async () => {
+    const rig = new TestRig();
+    const reviewFocus = 'check ACP review routing';
+    const fakeServer = await startFakeOpenAIServer(
+      ({ body }) => {
+        if (body['stream'] !== true) {
+          return { content: '{"selected_memories":[]}' };
+        }
+
+        if (allMessageText(body).includes('You are acting as an ADVISOR')) {
+          return {
+            content: JSON.stringify({
+              verdict: 'Review command was handled.',
+              risks: 'None found',
+              missingEvidence: 'None found',
+              recommendation: 'Continue with the normal turn.',
+            }),
+          };
+        }
+
+        return { content: 'Normal ACP response.' };
+      },
+      { keepAlive: false },
+    );
+
+    await rig.setup('acp advisor review command routing', {
+      settings: {
+        modelProviders: {
+          openai: [
+            {
+              id: 'request-model',
+              name: 'Request Model',
+              baseUrl: fakeServer.baseUrl,
+              envKey: 'OPENAI_API_KEY',
+            },
+          ],
+        },
+        security: { auth: { selectedType: 'openai' } },
+      },
+    });
+
+    const { sendRequest, cleanup, stderr, sessionUpdates } = setupAcpTest(rig, {
+      env: {
+        OPENAI_API_KEY: 'fake-key',
+        OPENAI_BASE_URL: fakeServer.baseUrl,
+        OPENAI_MODEL: 'request-model',
+        QWEN_MODEL: 'request-model',
+        NO_PROXY: '127.0.0.1,localhost',
+        no_proxy: '127.0.0.1,localhost',
+      },
+    });
+
+    try {
+      await sendRequest('initialize', {
+        protocolVersion: 1,
+        clientCapabilities: {
+          fs: { readTextFile: true, writeTextFile: true },
+        },
+      });
+      await sendRequest('authenticate', { methodId: 'openai' });
+
+      const newSession = (await sendRequest('session/new', {
+        cwd: rig.testDir!,
+        mcpServers: [],
+      })) as { sessionId: string };
+      expect(newSession.sessionId).toBeTruthy();
+
+      await sendRequest('session/prompt', {
+        sessionId: newSession.sessionId,
+        prompt: [{ type: 'text', text: 'Prime the ACP session.' }],
+      });
+      await sendRequest('session/prompt', {
+        sessionId: newSession.sessionId,
+        prompt: [{ type: 'text', text: `/advisor review ${reviewFocus}` }],
+      });
+      await sendRequest('session/prompt', {
+        sessionId: newSession.sessionId,
+        prompt: [{ type: 'text', text: 'Continue after review.' }],
+      });
+
+      expect(
+        sessionUpdates.some((update) =>
+          update.update?.content?.text?.includes('## Verdict'),
+        ),
+      ).toBe(true);
+
+      const reviewRequests = fakeServer.requests
+        .map((request) => request.body)
+        .filter((body) =>
+          allMessageText(body).includes('You are acting as an ADVISOR'),
+        );
+      const mainRequests = fakeServer.requests
+        .map((request) => request.body)
+        .filter(
+          (body) =>
+            body['stream'] === true &&
+            body['model'] === 'request-model' &&
+            !allMessageText(body).includes('You are acting as an ADVISOR'),
+        );
+
+      expect(reviewRequests).toHaveLength(1);
+      expect(mainRequests).toHaveLength(2);
+      expect(allMessageText(mainRequests[1]!)).not.toContain('/advisor review');
+      expect(allMessageText(mainRequests[1]!)).not.toContain(reviewFocus);
+    } catch (e) {
+      if (stderr.length) {
+        console.error('Agent stderr:', stderr.join(''));
+      }
+      throw e;
+    } finally {
+      await cleanup();
+      await fakeServer.close();
     }
   });
 

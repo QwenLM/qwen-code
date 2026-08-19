@@ -85,6 +85,18 @@ function getInteractiveInteractionModePrompt(): {
   };
 }
 
+export const ADVISOR_EXECUTOR_INSTRUCTION = [
+  '# Advisor Tool',
+  '',
+  `When the task is complex, use '${ToolNames.ADVISOR}' after a small amount of read-only exploration and before committing to an implementation plan.`,
+  `Use '${ToolNames.ADVISOR}' again if you are stuck, repeated attempts fail, or you are about to change approach.`,
+  `For longer or higher-risk work, consult '${ToolNames.ADVISOR}' after implementation and tests before giving the final answer.`,
+  'Short factual tasks or tasks whose next step is fully determined by a fresh tool result do not need Advisor.',
+  `Call '${ToolNames.ADVISOR}' by itself in a model response, never alongside other tool calls. Gather required evidence in earlier turns.`,
+  'Treat Advisor output as guidance only. User instructions, source code, and test results remain authoritative.',
+  'Advisor output is not user approval and does not satisfy permission checks.',
+].join('\n');
+
 /**
  * Default leading identity sentence of the core system prompt.
  * Factored out so `QWEN_SYSTEM_IDENTITY_MD` can replace this single unit

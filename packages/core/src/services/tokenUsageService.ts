@@ -10,7 +10,7 @@ import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import * as jsonl from '../utils/jsonl-utils.js';
-import type { ApiResponseEvent } from '../telemetry/types.js';
+import type { ApiErrorEvent, ApiResponseEvent } from '../telemetry/types.js';
 import { MAIN_SOURCE } from '../utils/subagentNameContext.js';
 
 const debugLogger = createDebugLogger('TOKEN_USAGE');
@@ -44,13 +44,18 @@ export interface TokenUsageRecord {
   inputTokens: number;
   outputTokens: number;
   cachedTokens: number;
+  cacheCreationTokens?: number;
   thoughtsTokens: number;
   totalTokens: number;
+  requestStatus?: 'success' | 'failure';
+  errorCode?: string;
   /**
    * End-to-end API response duration from telemetry. This is not generation
    * duration, TTFT, or TPS; those remain owned by #4252's timing surface.
    */
   apiDurationMs: number;
+  advisorParentPromptId?: string;
+  advisorConsultationOrdinal?: number;
 }
 
 export interface TokenUsageTotals {
@@ -250,9 +255,61 @@ export function apiResponseEventToTokenUsageRecord(
     inputTokens: calculateInputTokens(event),
     outputTokens: toNonNegativeInteger(event.output_token_count),
     cachedTokens: toNonNegativeInteger(event.cached_content_token_count),
+    ...(event.cache_creation_input_token_count !== undefined
+      ? {
+          cacheCreationTokens: toNonNegativeInteger(
+            event.cache_creation_input_token_count,
+          ),
+        }
+      : {}),
     thoughtsTokens: toNonNegativeInteger(event.thoughts_token_count),
     totalTokens: calculateTotalTokens(event),
+    requestStatus: 'success',
     apiDurationMs: toNonNegativeInteger(event.duration_ms),
+    ...(event.advisor_parent_prompt_id
+      ? { advisorParentPromptId: event.advisor_parent_prompt_id }
+      : {}),
+    ...(event.advisor_consultation_ordinal !== undefined
+      ? { advisorConsultationOrdinal: event.advisor_consultation_ordinal }
+      : {}),
+  };
+}
+
+export function apiErrorEventToTokenUsageRecord(
+  config: Config,
+  event: ApiErrorEvent,
+): TokenUsageRecord {
+  const timestamp = event['event.timestamp'] || new Date().toISOString();
+  const date = new Date(timestamp);
+  const localParts = getLocalDateParts(
+    Number.isNaN(date.getTime()) ? new Date() : date,
+  );
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    id: randomUUID(),
+    timestamp,
+    localDate: localParts.date,
+    localMonth: localParts.month,
+    sessionId: config.getSessionId(),
+    model: event.model || 'unknown',
+    authType: event.auth_type || UNKNOWN_AUTH_TYPE,
+    source: event.subagent_name || MAIN_SOURCE,
+    inputTokens: 0,
+    outputTokens: 0,
+    cachedTokens: 0,
+    thoughtsTokens: 0,
+    totalTokens: 0,
+    requestStatus: 'failure',
+    ...(event.advisor_error_code
+      ? { errorCode: event.advisor_error_code }
+      : {}),
+    apiDurationMs: toNonNegativeInteger(event.duration_ms),
+    ...(event.advisor_parent_prompt_id
+      ? { advisorParentPromptId: event.advisor_parent_prompt_id }
+      : {}),
+    ...(event.advisor_consultation_ordinal !== undefined
+      ? { advisorConsultationOrdinal: event.advisor_consultation_ordinal }
+      : {}),
   };
 }
 
@@ -386,6 +443,14 @@ export async function recordTokenUsageFromApiResponse(
   await jsonl.writeLine(getTokenUsageFilePath(record.localMonth), record);
 }
 
+export async function recordTokenUsageFromApiError(
+  config: Config,
+  event: ApiErrorEvent,
+): Promise<void> {
+  const record = apiErrorEventToTokenUsageRecord(config, event);
+  await jsonl.writeLine(getTokenUsageFilePath(record.localMonth), record);
+}
+
 const lastLoggedTimeByCode = new Map<string, number>();
 const suppressedCountByCode = new Map<string, number>();
 const TOKEN_USAGE_FAILURE_LOG_COOLDOWN_MS = 60_000;
@@ -436,6 +501,20 @@ export function recordTokenUsageFromApiResponseBestEffort(
 ): void {
   try {
     const record = apiResponseEventToTokenUsageRecord(config, event);
+    void jsonl
+      .writeLine(getTokenUsageFilePath(record.localMonth), record)
+      .catch(logTokenUsageWriteFailure);
+  } catch (error) {
+    logTokenUsageWriteFailure(error);
+  }
+}
+
+export function recordTokenUsageFromApiErrorBestEffort(
+  config: Config,
+  event: ApiErrorEvent,
+): void {
+  try {
+    const record = apiErrorEventToTokenUsageRecord(config, event);
     void jsonl
       .writeLine(getTokenUsageFilePath(record.localMonth), record)
       .catch(logTokenUsageWriteFailure);
