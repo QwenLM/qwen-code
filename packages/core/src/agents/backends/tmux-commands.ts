@@ -200,12 +200,13 @@ export async function tmuxNewSession(
   name: string,
   opts?: { cols?: number; rows?: number; windowName?: string },
   serverName?: string,
-): Promise<void> {
+): Promise<string> {
   const args = ['new-session', '-d', '-s', name];
   if (opts?.windowName) args.push('-n', opts.windowName);
   if (opts?.cols) args.push('-x', String(opts.cols));
   if (opts?.rows) args.push('-y', String(opts.rows));
-  await tmux(args, serverName);
+  args.push('-P', '-F', '#{window_id}');
+  return (await tmux(args, serverName)).trim();
 }
 
 /**

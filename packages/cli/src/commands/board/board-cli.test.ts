@@ -106,6 +106,7 @@ describe('board rendering', () => {
       tasks: [task()],
       asks: [ask()],
       decisions: [decision()],
+      participantCount: 2,
     };
     const lines = renderBoard(snapshot, now).split('\n');
     const decisionAt = lines.findIndex((l) => l.includes('d-1'));
@@ -123,6 +124,7 @@ describe('board rendering', () => {
       tasks: [task({ status: 'completed' })],
       asks: [ask({ state: 'answered', answer: 'yes' })],
       decisions: [decision({ state: 'approved' })],
+      participantCount: 2,
     };
     const out = renderBoard(snapshot, now);
     expect(out).not.toContain('a-1');
@@ -130,18 +132,32 @@ describe('board rendering', () => {
     expect(out).toContain('1 done');
   });
 
-  it('counts participants across tasks and asks', () => {
+  it('shows the live participant count', () => {
     const out = renderBoard(
-      { board: 'demo', tasks: [task()], asks: [ask()], decisions: [] },
+      {
+        board: 'demo',
+        tasks: [task()],
+        asks: [ask()],
+        decisions: [],
+        participantCount: 2,
+      },
       now,
     );
-    // api-worker owns t-1 and raised a-1; web-worker is only its recipient.
     expect(out).toContain('2 participants');
   });
 
   it('says so when there is nothing on the board', () => {
     expect(
-      renderBoard({ board: 'demo', tasks: [], asks: [], decisions: [] }, now),
+      renderBoard(
+        {
+          board: 'demo',
+          tasks: [],
+          asks: [],
+          decisions: [],
+          participantCount: 0,
+        },
+        now,
+      ),
     ).toContain('(empty)');
   });
 

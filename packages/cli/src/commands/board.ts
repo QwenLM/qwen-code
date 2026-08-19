@@ -96,12 +96,19 @@ function mine(snap: BoardSnapshot, who: string): BoardSnapshot {
 }
 
 async function snapshot(name: string): Promise<BoardSnapshot> {
-  const [tasks, asks, decisions] = await Promise.all([
+  const [tasks, asks, decisions, participants] = await Promise.all([
     listBoardTasks(name),
     listAsks(name),
     listDecisions(name),
+    listParticipants(name),
   ]);
-  return { board: name, tasks, asks, decisions };
+  return {
+    board: name,
+    tasks,
+    asks,
+    decisions,
+    participantCount: participants.length,
+  };
 }
 
 export const boardCommand: CommandModule = {
@@ -149,19 +156,23 @@ export const boardCommand: CommandModule = {
         command: 'join',
         describe: 'Claim a name on the board so peers can address you',
         builder: (y: Argv) =>
-          y.option('kind', {
-            choices: ['interactive', 'daemon', 'spawned', 'foreign'] as const,
-            default: 'interactive' as const,
-          }),
+          y
+            .option('kind', {
+              choices: ['interactive', 'daemon', 'spawned', 'foreign'] as const,
+              default: 'interactive' as const,
+            })
+            .option('pid', { type: 'number', hidden: true }),
         handler: (argv) =>
           run(async () => {
             const a = argv as CommonArgs & {
               kind: 'interactive' | 'daemon' | 'spawned' | 'foreign';
+              pid?: number;
             };
             const rec = await joinBoard({
               board: board(a),
               name: participant(a),
               kind: a.kind,
+              pid: a.pid,
             });
             emit(
               a,

@@ -60,6 +60,7 @@ function paneCommand(
   board: string,
   as: string | undefined,
   command: string,
+  kind: 'interactive' | 'foreign' = 'interactive',
 ): string {
   const env = [`${BOARD_ENV}=${shellQuote(board)}`];
   if (as) env.push(`${PARTICIPANT_ENV}=${shellQuote(as)}`);
@@ -69,7 +70,7 @@ function paneCommand(
   // model to do it: a participant nobody registered cannot be addressed, and
   // that is too load-bearing to leave to whether an agent follows a prompt.
   return `${prefix} sh -c ${shellQuote(
-    `qwen board join >/dev/null 2>&1; exec ${command}`,
+    `qwen board join --kind ${kind} --pid $$ >/dev/null 2>&1; exec ${command}`,
   )}`;
 }
 
@@ -163,13 +164,10 @@ async function buildLayout(a: FleetUpArgs): Promise<void> {
   // destroy an earlier board.
   const inside = Boolean(process.env['TMUX']);
   const session = inside ? await tmuxCurrentSession() : a.session;
-  if (!inside && !(await tmuxHasSession(session))) {
-    await tmuxNewSession(session, { windowName: board });
-  }
-  // The window id comes from new-window itself. Asking tmux for "the
-  // current window" returns the one that invoked us — respawning its
-  // first pane would kill this very process.
-  const target = await tmuxNewWindow(session, board);
+  const target =
+    !inside && !(await tmuxHasSession(session))
+      ? await tmuxNewSession(session, { windowName: board })
+      : await tmuxNewWindow(session, board);
 
   // The window's existing pane becomes the board, respawned rather
   // than typed into: send-keys would race a shell that may not be
@@ -197,13 +195,10 @@ async function buildLayout(a: FleetUpArgs): Promise<void> {
   }
   a.with.forEach((cmd, i) => {
     const name = `ext-${i + 1}`;
-    // No prelude: most agent TUIs enter the alternate screen on start
-    // and discard whatever was printed before them, so a protocol
-    // banner here would be wiped before anyone read it. The operator is
-    // told once, after the layout is up, to paste `qwen board protocol`
-    // in — which is the honest mechanism, since nothing we control can
-    // reach a foreign agent's prompt.
-    specs.push({ name, command: paneCommand(board, name, cmd) });
+    specs.push({
+      name,
+      command: paneCommand(board, name, cmd, 'foreign'),
+    });
   });
 
   // No explicit sizes: an N-way split computed by hand hits `-l 100%`

@@ -20,6 +20,7 @@ export interface BoardSnapshot {
   tasks: BoardTaskRecord[];
   asks: AskRecord[];
   decisions: DecisionRecord[];
+  participantCount: number;
 }
 
 /**
@@ -72,16 +73,9 @@ export function renderBoard(snapshot: BoardSnapshot, now = Date.now()): string {
   const openAsks = snapshot.asks.filter((a) => a.state === 'open');
   const live = snapshot.tasks.filter((t) => t.status !== 'completed');
 
-  const participants = new Set<string>();
-  for (const t of snapshot.tasks) if (t.owner) participants.add(t.owner);
-  for (const a of snapshot.asks) {
-    participants.add(a.from);
-    participants.add(a.to);
-  }
-
   lines.push(
-    `board: ${snapshot.board}   ${participants.size} participant${
-      participants.size === 1 ? '' : 's'
+    `board: ${snapshot.board}   ${snapshot.participantCount} participant${
+      snapshot.participantCount === 1 ? '' : 's'
     }`,
   );
   lines.push('─'.repeat(46));
