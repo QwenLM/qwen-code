@@ -151,7 +151,7 @@ class RecordArtifactInvocation extends BaseToolInvocation<
     const rootName = path.posix.basename(locator.workspacePath);
     if (rootName && shouldSkipDirectoryArtifactName(rootName)) {
       const message = [
-        `Failed to record artifact: "${locator.workspacePath}" is a directory with no recordable files.`,
+        `Failed to record artifact: "${locator.workspacePath}" is a skipped directory and cannot be recorded.`,
         WORKSPACE_PATH_HINT,
       ].join('\n');
       return {
@@ -168,6 +168,7 @@ class RecordArtifactInvocation extends BaseToolInvocation<
       truncated: boolean;
       depthLimited: boolean;
       unreadable: boolean;
+      skippedUnrecordable: number;
     };
     try {
       collected = await collectRecordableWorkspaceFiles(
@@ -213,6 +214,18 @@ class RecordArtifactInvocation extends BaseToolInvocation<
       };
     }
 
+    if (metadataExceedsBudget(this.params.metadata)) {
+      const message =
+        'Failed to record artifact: metadata is too large to expand a directory.';
+      return {
+        llmContent: message,
+        returnDisplay: message,
+        error: {
+          message,
+          type: ToolErrorType.INVALID_TOOL_PARAMS,
+        },
+      };
+    }
     const parentTitle = this.params.title.trim();
     const parentDescription = trimOptional(this.params.description);
     const artifacts: ToolArtifact[] = [];
@@ -723,6 +736,7 @@ function formatDirectoryExpansion(
     truncated: boolean;
     depthLimited?: boolean;
     unreadable?: boolean;
+    skippedUnrecordable?: number;
   },
 ): string {
   const lines = [
@@ -744,7 +758,19 @@ function formatDirectoryExpansion(
   if (collected.unreadable) {
     lines.push('Skipped subdirectories that could not be read.');
   }
+  if ((collected.skippedUnrecordable ?? 0) > 0) {
+    lines.push(
+      `Skipped ${collected.skippedUnrecordable} files whose names cannot be recorded as artifact titles.`,
+    );
+  }
   return lines.join('\n');
+}
+
+function metadataExceedsBudget(
+  metadata: Record<string, string | number | boolean | null> | undefined,
+): boolean {
+  const withMarker = { ...metadata, expandedFromDirectory: true };
+  return Buffer.byteLength(JSON.stringify(withMarker), 'utf8') > 4096;
 }
 
 export function isRecordableDerivedChild(
@@ -981,6 +1007,13 @@ async function inspectWorkspaceCandidate(
     return locatorFailure(
       ToolErrorType.TARGET_NOT_REGULAR_FILE,
       `Failed to record artifact: "${resolved}" is not a regular file.\n${WORKSPACE_PATH_HINT}`,
+    );
+  }
+
+  if (st.isDirectory() && path.resolve(resolved) === path.resolve(cwd)) {
+    return locatorFailure(
+      ToolErrorType.TARGET_IS_DIRECTORY,
+      `Failed to record artifact: "${rawPath}" is the workspace root, which cannot be recorded as a directory artifact.`,
     );
   }
 

@@ -40,6 +40,7 @@ export type RecordableWorkspaceWalkResult = {
   truncated: boolean;
   depthLimited: boolean;
   unreadable: boolean;
+  skippedUnrecordable: number;
 };
 
 export function isOfficeDocumentExtension(ext: string): boolean {
@@ -79,20 +80,32 @@ async function walkRecordableWorkspaceFiles(
   files: string[],
   depth: number,
   isRecordable?: (relativePath: string) => boolean,
-): Promise<{ truncated: boolean; depthLimited: boolean; unreadable: boolean }> {
+): Promise<{
+  truncated: boolean;
+  depthLimited: boolean;
+  unreadable: boolean;
+  skippedUnrecordable: number;
+}> {
   if (files.length >= MAX_DIRECTORY_ARTIFACT_FILES) {
-    return { truncated: true, depthLimited: false, unreadable: false };
+    return {
+      truncated: true,
+      depthLimited: false,
+      unreadable: false,
+      skippedUnrecordable: 0,
+    };
   }
   if (depth > MAX_DIRECTORY_ARTIFACT_DEPTH) {
-    try {
-      return {
-        truncated: false,
-        depthLimited: await hasRecordableDescendant(absoluteDir, 8),
-        unreadable: false,
-      };
-    } catch {
-      return { truncated: false, depthLimited: false, unreadable: true };
-    }
+    return {
+      truncated: false,
+      depthLimited: await hasRecordableDescendant(
+        absoluteDir,
+        relativeDir,
+        8,
+        isRecordable,
+      ),
+      unreadable: false,
+      skippedUnrecordable: 0,
+    };
   }
   let entries;
   try {
@@ -101,7 +114,12 @@ async function walkRecordableWorkspaceFiles(
     if (depth === 0) {
       throw error;
     }
-    return { truncated: false, depthLimited: false, unreadable: true };
+    return {
+      truncated: false,
+      depthLimited: false,
+      unreadable: true,
+      skippedUnrecordable: 0,
+    };
   }
   entries.sort((left, right) =>
     left.name < right.name ? -1 : left.name > right.name ? 1 : 0,
@@ -109,9 +127,10 @@ async function walkRecordableWorkspaceFiles(
   let truncated = false;
   let depthLimited = false;
   let unreadable = false;
+  let skippedUnrecordable = 0;
   for (const entry of entries) {
     if (files.length >= MAX_DIRECTORY_ARTIFACT_FILES) {
-      return { truncated: true, depthLimited, unreadable };
+      return { truncated: true, depthLimited, unreadable, skippedUnrecordable };
     }
     if (entry.isSymbolicLink()) {
       continue;
@@ -139,8 +158,14 @@ async function walkRecordableWorkspaceFiles(
       truncated ||= nested.truncated;
       depthLimited ||= nested.depthLimited;
       unreadable ||= nested.unreadable;
+      skippedUnrecordable += nested.skippedUnrecordable;
       if (truncated && files.length >= MAX_DIRECTORY_ARTIFACT_FILES) {
-        return { truncated: true, depthLimited, unreadable };
+        return {
+          truncated: true,
+          depthLimited,
+          unreadable,
+          skippedUnrecordable,
+        };
       }
       continue;
     }
@@ -149,42 +174,62 @@ async function walkRecordableWorkspaceFiles(
         continue;
       }
       if (isRecordable && !isRecordable(relativePath)) {
+        skippedUnrecordable++;
         continue;
       }
       files.push(relativePath);
     }
   }
-  return { truncated, depthLimited, unreadable };
+  return { truncated, depthLimited, unreadable, skippedUnrecordable };
 }
 
 async function hasRecordableDescendant(
   absoluteDir: string,
+  relativeDir: string,
   remainingDepth: number,
+  isRecordable?: (relativePath: string) => boolean,
 ): Promise<boolean> {
   if (remainingDepth < 0) {
+    return true;
+  }
+  let entries;
+  try {
+    entries = await fs.readdir(absoluteDir, { withFileTypes: true });
+  } catch {
     return false;
   }
-  const entries = await fs.readdir(absoluteDir, { withFileTypes: true });
   for (const entry of entries) {
     if (entry.isSymbolicLink()) {
       continue;
     }
+    const relativePath = relativeDir
+      ? `${relativeDir}/${entry.name}`
+      : entry.name;
     if (
       entry.isFile() &&
       !entry.name.startsWith('.') &&
       !entry.name.startsWith('~$')
     ) {
-      return true;
+      if (!isRecordable || isRecordable(relativePath)) {
+        return true;
+      }
+      continue;
     }
-    if (
-      entry.isDirectory() &&
-      !shouldSkipDirectoryArtifactName(entry.name) &&
-      (await hasRecordableDescendant(
-        path.join(absoluteDir, entry.name),
-        remainingDepth - 1,
-      ))
-    ) {
-      return true;
+    if (entry.isDirectory() && !shouldSkipDirectoryArtifactName(entry.name)) {
+      try {
+        if (
+          await hasRecordableDescendant(
+            path.join(absoluteDir, entry.name),
+            relativePath,
+            remainingDepth - 1,
+            isRecordable,
+          )
+        ) {
+          return true;
+        }
+      } catch {
+        continue;
+      }
     }
   }
   return false;

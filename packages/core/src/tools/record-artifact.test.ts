@@ -529,6 +529,22 @@ describe('RecordArtifactTool', () => {
     expect(result.artifacts).toBeUndefined();
   });
 
+  it('rejects recording the worktree cwd as a directory', async () => {
+    const ws = await workspace(path.join('.qwen', 'worktrees', 'my-feature'));
+    await ws.write('keep.xlsx', 'xlsx');
+
+    const result = await ws.tool
+      .build({
+        title: 'Worktree root',
+        workspacePath: '.',
+      })
+      .execute(signal);
+
+    expect(result.error?.type).toBe(ToolErrorType.TARGET_IS_DIRECTORY);
+    expect(result.artifacts).toBeUndefined();
+    expect(String(result.llmContent)).toContain('workspace root');
+  });
+
   it('skips junk directories and lock files when expanding a directory', async () => {
     const ws = await workspace();
     await ws.write('reports/keep.xlsx', 'xlsx');

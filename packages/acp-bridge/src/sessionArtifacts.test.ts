@@ -2044,6 +2044,28 @@ describe('SessionArtifactStore', () => {
     ).rejects.toMatchObject({ field: 'metadata' });
   });
 
+  it('rejects directory expansion when expanded metadata would exceed the budget', async () => {
+    await fs.mkdir(path.join(workspace, 'reports-meta'));
+    await fs.writeFile(path.join(workspace, 'reports-meta', 'a.xlsx'), 'xlsx');
+    const store = new SessionArtifactStore({
+      sessionId: 's-dir-meta-budget',
+      workspaceCwd: workspace,
+    });
+
+    await expect(
+      store.upsertMany(
+        [
+          {
+            title: 'Reports',
+            workspacePath: 'reports-meta',
+            metadata: { note: 'n'.repeat(4080) },
+          },
+        ],
+        { strict: true },
+      ),
+    ).rejects.toMatchObject({ field: 'metadata' });
+  });
+
   it('rejects directory expansion when the parent title exceeds 200 characters', async () => {
     await fs.mkdir(path.join(workspace, 'reports-long'));
     await fs.writeFile(path.join(workspace, 'reports-long', 'a.xlsx'), 'xlsx');
@@ -2090,7 +2112,7 @@ describe('SessionArtifactStore', () => {
       );
       expect(
         expanded.changes.map((change) => change.artifact?.workspacePath),
-      ).toEqual(['real-reports/a.xlsx']);
+      ).toEqual(['reports-link/a.xlsx']);
 
       await expect(
         store.upsertMany([{ title: 'Escape', workspacePath: 'escape-dir' }], {

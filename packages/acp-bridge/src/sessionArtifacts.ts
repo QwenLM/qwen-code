@@ -1344,7 +1344,9 @@ export class SessionArtifactStore {
         return { inputs: [input] };
       }
       walkDir = realPath;
-      walkRelative = relative.split(path.sep).join('/');
+      // Keep the caller-facing symlink path so expansion and direct records
+      // share one identity; realPath is only used to read the directory.
+      walkRelative = normalizedPath;
     } else if (!stat.isDirectory()) {
       return { inputs: [input] };
     }
@@ -1353,7 +1355,7 @@ export class SessionArtifactStore {
       path.posix.basename(walkRelative) || path.basename(walkDir);
     if (walkRelative && shouldSkipDirectoryArtifactName(rootName)) {
       throw new SessionArtifactValidationError(
-        'workspacePath is a directory with no recordable files',
+        'workspacePath is a skipped directory and cannot be recorded',
         'workspacePath',
       );
     }
@@ -1395,6 +1397,16 @@ export class SessionArtifactStore {
         'metadata',
       );
     }
+    const childMetadata = {
+      ...(isPlainMetadataObject(input.metadata) ? input.metadata : {}),
+      expandedFromDirectory: true as const,
+    };
+    if (Buffer.byteLength(JSON.stringify(childMetadata), 'utf8') > 4096) {
+      throw new SessionArtifactValidationError(
+        'metadata is too large to expand a directory',
+        'metadata',
+      );
+    }
     const parentTitle =
       typeof input.title === 'string' ? input.title.trim() : '';
     if (parentTitle.length > 200) {
@@ -1423,6 +1435,11 @@ export class SessionArtifactStore {
         `workspacePath "${normalizedPath}" contained subdirectories that could not be read`,
       );
     }
+    if (collected.skippedUnrecordable > 0) {
+      warnings.push(
+        `workspacePath "${normalizedPath}" skipped ${collected.skippedUnrecordable} files whose names cannot be recorded as artifact titles`,
+      );
+    }
     return {
       inputs: collected.files.map((filePath) => {
         const title = path.posix.basename(filePath).trim();
@@ -1436,10 +1453,7 @@ export class SessionArtifactStore {
           kind: undefined,
           mimeType: undefined,
           sizeBytes: undefined,
-          metadata: {
-            ...(isPlainMetadataObject(input.metadata) ? input.metadata : {}),
-            expandedFromDirectory: true,
-          },
+          metadata: childMetadata,
           ...(description ? { description } : { description: undefined }),
         };
       }),

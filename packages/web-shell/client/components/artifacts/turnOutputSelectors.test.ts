@@ -156,7 +156,6 @@ describe('turnOutputSelectors', () => {
       {
         id: 'artifact-1',
         workspacePath: 'reports/day1.xlsx',
-        toolCallId: 'call-1',
       },
     ] as DaemonSessionArtifact[];
 

@@ -53,6 +53,22 @@ describe('collectRecordableWorkspaceFiles', () => {
     expect(collected.truncated).toBe(false);
     expect(collected.depthLimited).toBe(false);
     expect(collected.unreadable).toBe(false);
+    expect(collected.skippedUnrecordable).toBe(0);
+  });
+
+  it('counts files rejected by the recordable predicate', async () => {
+    const root = await workspace();
+    await writeFile(path.join(root, 'keep.txt'), 'ok');
+    await writeFile(path.join(root, '<draft>.txt'), 'bad');
+
+    const collected = await collectRecordableWorkspaceFiles(
+      root,
+      '',
+      root,
+      (relativePath) => !relativePath.includes('<'),
+    );
+    expect(collected.files).toEqual(['keep.txt']);
+    expect(collected.skippedUnrecordable).toBe(1);
   });
 
   it('records a regular file named after a skipped directory', async () => {
