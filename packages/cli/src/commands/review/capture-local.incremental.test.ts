@@ -23,6 +23,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { stateIdOf } from './lib/local-anchor.js';
 import { captureLocalCommand } from './capture-local.js';
 import { buildChunkAgentPrompt } from './agent-prompt.js';
 import { isolateHostGitConfig } from './lib/test-utils.js';
@@ -167,16 +168,18 @@ describe('capture-local — incremental local rounds', () => {
     ).toContain('bystander');
   });
 
-  it('an attribute flip refuses the anchor — including with NO worktree change', () => {
+  it('an attribute flip re-reviews the file — including with NO worktree change', () => {
     // What a round READS is the rendering. `binary` turns a file's section
     // into "Binary files … differ", so a round can end clean having read no
-    // content of it at all; drop the attribute and the same bytes render as
-    // text nobody has reviewed. The `<mode>:<blob>` identity cannot see that.
+    // content of it; drop the attribute and the same bytes are text nobody
+    // has reviewed. Mode and blob cannot see that.
     //
-    // The second half is why this needs its own digest rather than a file
-    // entry: `.git/info/attributes` is not in the worktree, so the delta is
-    // EMPTY and the round would report "no changes since the last local
-    // review round" over a capture whose diff had just become readable.
+    // The rendering attributes ride each file's IDENTITY now, asked of `git
+    // check-attr` rather than re-derived from the attribute sources — so a
+    // flip moves that one file and the round stays incremental, instead of
+    // refusing the whole anchor. The second half is why it cannot be derived
+    // by hand: `.git/info/attributes` is not in the worktree, so nothing
+    // about the tree changes at all.
     seedDirtyTree();
     write('.gitattributes', `${CHANGED} binary\n`);
     const cachePath = promoteCandidate(capture(), 'model-a');
@@ -184,38 +187,83 @@ describe('capture-local — incremental local rounds', () => {
     // (a) a tracked attributes file changes.
     write('.gitattributes', '\n');
     const viaWorktree = capture({ cache: cachePath, model: 'model-a' });
-    expect(viaWorktree.incremental).toBeUndefined();
-    expect(stderrLines.join('\n')).toContain('attribute state');
+    expect(viaWorktree.incremental).toBeDefined();
+    expect(viaWorktree.incremental!.scope!.deltaFiles).toContain(CHANGED);
 
-    // (b) the SAME flip through `.git/info/attributes`, which no file
-    // identity covers: nothing in the worktree moves at all.
-    write('.gitattributes', `${CHANGED} binary\n`);
+    // (b) the same KIND of flip through `.git/info/attributes`, which is not
+    // in the worktree at all — no file identity derived from the tree could
+    // ever cover it, and nothing about the tree moves. This is why the
+    // attributes are asked of git rather than read from the sources.
+    write('.gitattributes', '\n');
     const cache2 = promoteCandidate(capture(), 'model-a');
     mkdirSync(join(repo, '.git', 'info'), { recursive: true });
-    writeFileSync(join(repo, '.git', 'info', 'attributes'), '* -diff\n');
+    writeFileSync(
+      join(repo, '.git', 'info', 'attributes'),
+      `${CHANGED} binary\n`,
+    );
     const viaInfo = capture({ cache: cache2, model: 'model-a' });
-    expect(viaInfo.incremental).toBeUndefined();
-    expect(stderrLines.join('\n')).toContain('attribute state');
+    expect(viaInfo.incremental).toBeDefined();
+    expect(viaInfo.incremental!.scope!.deltaFiles).toContain(CHANGED);
   });
 
-  it('a cache written before the attribute digest is refused, not trusted', () => {
-    // Reading an absent digest as "no attribute state" would compare it equal
-    // to a repository that genuinely has none — the same hole by another
-    // route. One full round after an upgrade is the price.
+  it('a cache from before the rendering attributes re-reviews everything', () => {
+    // Identities written by an older CLI carry no attribute component, so
+    // every one of them compares unequal and every file re-enters scope. The
+    // round still runs — it is a wider scope, not a refusal — and nothing is
+    // skipped on a comparison that could not be made.
     seedDirtyTree();
     const cachePath = promoteCandidate(capture(), 'model-a');
-    const cache = JSON.parse(readFileSync(cachePath, 'utf8')) as Record<
-      string,
-      unknown
-    >;
-    delete cache['attrId'];
+    const cache = JSON.parse(readFileSync(cachePath, 'utf8')) as {
+      files: Record<string, string>;
+      headSha: string | null;
+      stateId: string;
+    };
+    // Strip the attribute half back to the old `<mode>:<blob>` shape.
+    for (const [path, id] of Object.entries(cache.files)) {
+      const parts = id.split(':');
+      cache.files[path] = parts.slice(0, 2).join(':');
+    }
+    // …and re-stamp `stateId`, or the integrity gate refuses first and this
+    // test would pass for the wrong reason.
+    cache.stateId = stateIdOf(cache.headSha, cache.files);
     writeFileSync(cachePath, JSON.stringify(cache));
-    expect(
-      capture({ cache: cachePath, model: 'model-a' }).incremental,
-    ).toBeUndefined();
-    expect(stderrLines.join('\n')).toContain(
-      'predates the attribute-state digest',
+    const plan = capture({ cache: cachePath, model: 'model-a' });
+    expect(plan.incremental!.scope!.deltaFiles.sort()).toEqual(
+      [BYSTANDER, CALLER, CHANGED].sort(),
     );
+  });
+
+  it('a pending DELETION lets the loop converge instead of re-arming for ever', () => {
+    // `UNHASHABLE` never equals itself, deliberately — state that could not
+    // be captured is re-reviewed rather than certified. But the "nothing
+    // changed, stop" decision used to key on that same list, which made the
+    // stop unreachable for any change set holding a deletion: round N+1
+    // re-hashed the section to UNHASHABLE, announced "1 changed file(s)" over
+    // a byte-identical diff, and re-armed itself for N+2 until HEAD moved.
+    seedDirtyTree();
+    rmSync(join(repo, CHANGED));
+    const cachePath = promoteCandidate(capture(), 'model-a');
+
+    // Nothing moves between the rounds.
+    stderrLines.length = 0;
+    const plan = capture({ cache: cachePath, model: 'model-a' });
+    // The stop is REACHABLE now: the round says nothing changed, because
+    // nothing did.
+    expect(stderrLines.join('\n')).toContain('No changes since the last local');
+    expect(stderrLines.join('\n')).not.toContain('changed file(s)');
+    // The deletion is still not CERTIFIED — the scope keeps the wider list on
+    // purpose, so an unreadable path is re-reviewed rather than skipped. Both
+    // facts are true at once, and separating them is the fix: the stop reads
+    // what MOVED, the scope reads what could not be ruled out.
+    expect(plan.incremental!.scope!.deltaFiles).toContain(CHANGED);
+
+    // With something genuinely new beside it, the round runs and the count a
+    // human reads names the unreadable path apart from the real change.
+    write('src/other.ts', 'export const o = 1;\n');
+    stderrLines.length = 0;
+    const next = capture({ cache: cachePath, model: 'model-a' });
+    expect(next.incremental!.scope!.deltaFiles).toContain('src/other.ts');
+    expect(stderrLines.join('\n')).toContain('unreadable path(s)');
   });
 
   it('an identical state under the same model and HEAD yields 0 chunks and says so', () => {

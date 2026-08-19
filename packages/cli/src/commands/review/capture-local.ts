@@ -20,7 +20,12 @@ import type { CommandModule } from 'yargs';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
-import { REVIEW_TMP_DIR, tmpFile } from './lib/paths.js';
+import {
+  repoRelativeOf,
+  REVIEW_TMP_DIR,
+  safeTarget,
+  tmpFile,
+} from './lib/paths.js';
 import { planEffortField } from './lib/effort.js';
 import type { ReviewEffort } from './parse-args.js';
 import { captureLocalDiff, type SkippedFile } from './lib/local-diff.js';
@@ -41,10 +46,10 @@ import { hasReviewDeadline } from './lib/deadline.js';
 import { gitOpt } from './lib/git.js';
 import {
   changedSince,
+  movedSince,
   hashWorktreeFiles,
   readLocalCache,
   stateIdOf,
-  attributeStateId,
   type LocalCacheCandidate,
 } from './lib/local-anchor.js';
 import {
@@ -105,8 +110,6 @@ function anchorRefusalReason(
   target: string,
   skippedCount: number,
   treeHeldStill: boolean,
-  /** This capture's attribute-state digest — see `attributeStateId`. */
-  attrId: string,
 ): string | null {
   if (!treeHeldStill) {
     // The hashes this scoping would compare against were computed over a tree
@@ -146,24 +149,6 @@ function anchorRefusalReason(
     // describes a different reviewed scope entirely.
     return `the cache belongs to target ${display(cache.target.slice(0, 64))}, not ${display(target)}`;
   }
-  if (cache.attrId === undefined || cache.attrId !== attrId) {
-    // What a round READS is the rendering, and `.gitattributes`,
-    // `.git/info/attributes` and `core.attributesFile` decide it — none of
-    // them visible to a `<mode>:<blob>` file identity. A file whose bytes
-    // never moved can go from "Binary files … differ" to a readable text
-    // section, and the scoping would slice that section out: the first round
-    // that CAN read the file never does. Two of the three sources are not in
-    // the worktree, so the delta is EMPTY in that case and the round would
-    // report "no changes" over a capture it had never read.
-    //
-    // An absent digest is a cache written before the field, and reading it as
-    // "no attribute state" would compare equal to a repository that genuinely
-    // has none — the same hole by another route. One full round after an
-    // upgrade is the price.
-    return cache.attrId === undefined
-      ? 'the cache predates the attribute-state digest'
-      : 'the attribute state that decides how these files render has changed';
-  }
   if (cache.stateId !== stateIdOf(cache.headSha, cache.files)) {
     // Integrity: a shape-valid cache whose hashes were edited without
     // recomputing stateId is not the state any clean round certified.
@@ -178,7 +163,28 @@ function anchorRefusalReason(
 }
 
 function runCaptureLocal(args: CaptureLocalArgs): void {
-  const { out, file, target } = args;
+  const { out, file } = args;
+  // DERIVED here when a file review does not name one, rather than recomputed
+  // by whoever calls this. `qwen review run` pins the artifact name it polls
+  // for from the same repo-relative path put through the same `safeTarget`,
+  // and the skill used to tell the orchestrator to apply that recipe BY HAND
+  // — character-class replacement, no canonicalisation. The two agreed only
+  // where the prose derivation happened to: `ln -s src srclink` then
+  // `qwen review run srclink/foo.ts` had the parent poll for
+  // `qwen-review-src_foo.ts-composed.json` while every child artifact was
+  // named `srclink_foo.ts`, so the poll never matched and a review that had
+  // already run — and with --comment, already posted — reported no verdict.
+  //
+  // One deriver, in code. A caller that passes an explicit `--target` still
+  // wins: the plain local review names `local`, and the cache-target gate
+  // below compares whatever was used.
+  const target =
+    file !== undefined && (args.target === undefined || args.target === 'local')
+      ? safeTarget(
+          repoRelativeOf(gitOpt('rev-parse', '--show-toplevel') ?? '.', file)
+            .rel,
+        )
+      : args.target;
 
   const capture = captureLocalDiff({
     file,
@@ -203,7 +209,29 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   const headSha = capture.unbornHead
     ? null
     : gitOpt('-C', capture.repoRoot, 'rev-parse', 'HEAD');
-  const planPaths = fullPlan.files.map((f) => f.path);
+  // A rename section names only its NEW side, so the deleted SOURCE would go
+  // unhashed and two captures differing only in which head file git paired as
+  // the source would compare as "no changes".
+  //
+  // DEFENSIVE at this commit, not a live fix: the local capture diffs `HEAD`
+  // against the worktree and nothing else, and `git diff -M HEAD` renders a
+  // move as delete + add rather than pairing it (measured — a staged move of
+  // a 95%-similar file still comes back as two sections). So no local plan
+  // carries `renamedFrom` today. The line is here because the cost is one
+  // set union and the failure it prevents is silent, and because the moment
+  // this capture grows a `--cached` range — the obvious next step for staged
+  // review — renames appear and the anchor would be wrong without it. There
+  // is deliberately no test: none could be written that exercises this rather
+  // than passing for another reason.
+  const planPaths = [
+    ...new Set(
+      fullPlan.files.flatMap((f) =>
+        f.renamedFrom && f.renamedFrom !== f.path
+          ? [f.path, f.renamedFrom]
+          : [f.path],
+      ),
+    ),
+  ];
   const hashes = hashWorktreeFiles(capture.repoRoot, planPaths);
   // TOCTOU guard: the diff was snapshotted before the hashes were computed,
   // and an editor save landing in that window makes the candidate certify
@@ -222,18 +250,12 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     includeUntracked: args.untracked,
   });
   const treeHeldStill = capture.diff.equals(recapture.diff);
-  // Computed once and used twice — written into the candidate this round
-  // promotes, and compared against the cached one below. Two calls could
-  // disagree if an attributes file moved between them, and the value that
-  // reaches disk must be the value the gate ruled on.
-  const attrId = attributeStateId(capture.repoRoot, planPaths);
   const candidate: LocalCacheCandidate = {
     v: 1,
     target,
     headSha,
     files: hashes,
     stateId: stateIdOf(headSha, hashes),
-    attrId,
   };
   const cacheCandidatePath = tmpFile(target, 'cache-candidate.json');
   if (treeHeldStill) {
@@ -260,7 +282,6 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
       target,
       capture.skipped.length,
       treeHeldStill,
-      attrId,
     );
     if (refusal !== null) {
       writeStderrLine(
@@ -273,6 +294,15 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
       // through the widening even though the path itself has no diff
       // section left to review.
       const stateChanged = changedSince(cache!.files, hashes);
+      // What actually MOVED, which is not the same list. A path that could
+      // not be hashed on either side is in `stateChanged` for ever — that is
+      // deliberate, so unreadable state is re-reviewed rather than certified
+      // — but keying the "nothing changed" stop on it made that stop
+      // unreachable for any change set holding a pending deletion, and told
+      // the user "1 changed file(s)" about a byte-identical diff every round.
+      // Scope keeps the wider list; the stop and the human-facing count take
+      // this one.
+      const stateMoved = movedSince(cache!.files, hashes);
       const changedSet = new Set(stateChanged);
       const changed = planPaths.filter((p) => changedSet.has(p));
       // One import hop over the still-clean SOURCE files, read from the LIVE
@@ -331,7 +361,7 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
         // The stop condition is the SYMMETRIC set: a deleted-since-cache
         // path with no diff section left is still a change, and "no
         // changes" must not be claimed over it.
-        stateChanged.length === 0
+        stateMoved.length === 0
           ? `No changes since the last local review round (same model, same ` +
               `HEAD, same content) — nothing to re-review.`
           : `Incremental scope since state ${display(
@@ -339,6 +369,10 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
             )}: ` +
               `${changed.length} changed file(s), ${interaction.size} ` +
               `interaction file(s) (one import hop), ` +
+              (stateChanged.length > stateMoved.length
+                ? `${stateChanged.length - stateMoved.length} unreadable ` +
+                  `path(s) re-reviewed every round (never certified), `
+                : '') +
               (removedCount > 0
                 ? `${removedCount} cached path(s) no longer present ` +
                   `(treated as changes for the widening), `
