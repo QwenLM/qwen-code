@@ -198,6 +198,20 @@ describe('managed Agent View resume guards', () => {
     expect(mockPatchAgentViewSessionState).not.toHaveBeenCalled();
   });
 
+  it('releases ownership when the worker env belongs to another session', async () => {
+    mockReadAgentViewSessionState.mockResolvedValue(state('managed', 'exited'));
+
+    await releaseExitedManagedSessionForContinue(
+      'session-1',
+      workerEnv('other-session'),
+    );
+
+    expect(mockPatchAgentViewSessionState).toHaveBeenCalledWith(
+      'session-1',
+      expect.objectContaining({ ownership: 'unmanaged' }),
+    );
+  });
+
   it('still releases ownership when only a stray worker marker is set', async () => {
     mockReadAgentViewSessionState.mockResolvedValue(state('managed', 'exited'));
 

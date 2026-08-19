@@ -156,6 +156,49 @@ describe('setupStartupWorktree', () => {
       cwd: tempRepo,
     });
     expect(stdout).not.toContain(res.context.worktreePath);
+    const { stdout: branches } = await exec(
+      'git',
+      ['branch', '--list', res.context.branch],
+      { cwd: tempRepo },
+    );
+    expect(branches.trim()).toBe('');
+  });
+
+  it('preserves a newly-created worktree when another process may own work', async () => {
+    tempRepo = await makeTempRepo();
+    process.chdir(tempRepo);
+
+    const res = await setupStartupWorktree('managed-resume-in-use');
+    expect(res?.ok).toBe(true);
+    if (!res?.ok) return;
+    const context = res.context;
+
+    const pendingPath = path.join(context.worktreePath, 'pending.txt');
+    await fs.writeFile(pendingPath, 'pending');
+    await expect(discardCreatedStartupWorktree(context)).resolves.toContain(
+      'uncommitted changes',
+    );
+    await fs.rm(pendingPath);
+
+    await writeWorktreeSessionMarker(context.worktreePath, 'other-session');
+    await expect(discardCreatedStartupWorktree(context)).resolves.toContain(
+      'owned by session other-session',
+    );
+    await fs.rm(path.join(context.worktreePath, '.qwen-session'));
+
+    await fs.writeFile(
+      path.join(context.worktreePath, 'committed.txt'),
+      'work',
+    );
+    await exec('git', ['add', 'committed.txt'], { cwd: context.worktreePath });
+    await exec('git', ['commit', '-m', 'work from another process'], {
+      cwd: context.worktreePath,
+    });
+    await expect(discardCreatedStartupWorktree(context)).resolves.toContain(
+      `branch ${context.branch} changed after startup`,
+    );
+
+    expect((await fs.stat(context.worktreePath)).isDirectory()).toBe(true);
   });
 
   it('keeps a reattached worktree on an early startup exit', async () => {

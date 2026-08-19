@@ -479,7 +479,7 @@ describe('parseArguments', () => {
     }
   });
 
-  it('fails loudly when agents list options have an unexpected positional', async () => {
+  it('rejects agents list options with an unexpected positional', async () => {
     process.argv = [
       'node',
       'script.js',
@@ -493,10 +493,11 @@ describe('parseArguments', () => {
     const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
       throw new Error('process.exit called');
     });
+    mockEnsureAgentViewSupervisor.mockClear();
 
     try {
-      await expect(parseArguments()).rejects.toThrow();
-      expect(mockWriteStderrLine).toHaveBeenCalled();
+      await expect(parseArguments()).rejects.toThrow('process.exit called');
+      expect(mockEnsureAgentViewSupervisor).not.toHaveBeenCalled();
     } finally {
       mockExit.mockRestore();
     }
@@ -933,6 +934,69 @@ describe('parseArguments', () => {
       }
     },
   );
+
+  it.each(['fix the bug', '--yolo'])(
+    'treats top-level `--` tail %j as a background prompt',
+    async (prompt) => {
+      process.argv = ['node', 'script.js', '--bg', '--', prompt];
+      const originalIsTTY = process.stdin.isTTY;
+      process.stdin.isTTY = true;
+      try {
+        const argv = await parseArguments();
+
+        expect(argv.background).toBe(true);
+        expect(argv.query).toBe(prompt);
+        expect(argv.yolo).toBe(false);
+      } finally {
+        process.stdin.isTTY = originalIsTTY;
+      }
+    },
+  );
+
+  it('rejects --prompt combined with a top-level `--` tail', async () => {
+    process.argv = ['node', 'script.js', '--prompt', 'first', '--', 'second'];
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    mockWriteStderrLine.mockClear();
+
+    try {
+      await expect(parseArguments()).rejects.toThrow('process.exit called');
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'Cannot use both a positional prompt and the --prompt',
+        ),
+      );
+    } finally {
+      mockExit.mockRestore();
+    }
+  });
+
+  it.each([
+    '--safeMode',
+    '--chatRecording',
+    '--openaiLogging',
+    '--screenReader',
+    '--telemetryLogPrompts',
+    '--listExtensions',
+    '--experimentalAcp',
+    '--experimentalLsp',
+  ])('rejects --bg combined with camelCase option %s', async (option) => {
+    process.argv = ['node', 'script.js', '--bg', 'background task', option];
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    mockWriteStderrLine.mockClear();
+
+    try {
+      await expect(parseArguments()).rejects.toThrow('process.exit called');
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        expect.stringContaining('Cannot use --bg/--background with'),
+      );
+    } finally {
+      mockExit.mockRestore();
+    }
+  });
 
   it('rejects --bg when stdin is piped', async () => {
     process.argv = ['node', 'script.js', '--bg', 'background task'];

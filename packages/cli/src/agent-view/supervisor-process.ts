@@ -2192,6 +2192,7 @@ class WorkerRegistry {
     const resumeLaunch = await writeResumeWorkerLaunch(
       launch,
       token,
+      refreshedState.initialPromptPending === true,
       this.store,
     );
     // The replacement worker must not inherit stop/redraw controls queued
@@ -3299,6 +3300,9 @@ async function applyWorkerEvent(
           : {}),
         activeCwd,
         updatedAt: now,
+        ...(event.type === 'state' && event.sessionState === 'working'
+          ? { initialPromptPending: undefined }
+          : {}),
         ...(event.type === 'ready' ? { lastError: undefined } : {}),
       };
     },
@@ -3800,22 +3804,36 @@ function stringArrayParam(
     : [];
 }
 
-function buildResumeWorkerArgv(sessionId: string): string[] {
+function buildResumeWorkerArgv(
+  sessionId: string,
+  initialPrompt?: string,
+): string[] {
   // Attached form: the id stays one token even if it starts with '-', so
   // the argument parser can never drop or reinterpret it as a flag.
-  return buildCurrentQwenCliArgv([`--resume=${sessionId}`]);
+  return buildCurrentQwenCliArgv([
+    `--resume=${sessionId}`,
+    ...(initialPrompt ? [`--prompt-interactive=${initialPrompt}`] : []),
+  ]);
 }
 
 function refreshResumeWorkerLaunch(
   launch: AgentViewLaunchFile,
   token?: string,
+  // Entrypoint migration runs after a respawn launch is built; preserve a
+  // still-pending initial prompt already encoded in that argv.
+  replayInitialPrompt = launch.argv.includes(
+    `--prompt-interactive=${launch.initialPrompt ?? ''}`,
+  ),
 ): AgentViewLaunchFile {
   return {
     ...launch,
     entrypoint: getCurrentQwenCliEntrypoint(),
     // --resume must keep the original spelling: the native session store
     // is case-sensitive and the canonical id may rewrite it.
-    argv: buildResumeWorkerArgv(launch.resumeSessionId ?? launch.sessionId),
+    argv: buildResumeWorkerArgv(
+      launch.resumeSessionId ?? launch.sessionId,
+      replayInitialPrompt ? launch.initialPrompt : undefined,
+    ),
     ...(token === undefined
       ? {}
       : { env: { ...launch.env, [QWEN_AGENT_VIEW_TOKEN]: token } }),
@@ -3825,9 +3843,14 @@ function refreshResumeWorkerLaunch(
 async function writeResumeWorkerLaunch(
   launch: AgentViewLaunchFile,
   token: string,
+  replayInitialPrompt: boolean,
   store: { globalDir?: string },
 ): Promise<AgentViewLaunchFile> {
-  const resumeLaunch = refreshResumeWorkerLaunch(launch, token);
+  const resumeLaunch = refreshResumeWorkerLaunch(
+    launch,
+    token,
+    replayInitialPrompt,
+  );
   await writeAgentViewLaunch(resumeLaunch, store);
   return resumeLaunch;
 }

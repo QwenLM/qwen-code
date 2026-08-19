@@ -559,12 +559,18 @@ function hasRawOption(
     0,
     separatorIndex === -1 ? rawArgv.length : separatorIndex,
   );
-  const negatedName = `--no-${longName.slice(2)}`;
+  const camelName = `--${longName
+    .slice(2)
+    .replace(/-([a-z])/g, (_, letter: string) => letter.toUpperCase())}`;
+  const longNames = camelName === longName ? [longName] : [longName, camelName];
   return optionTokens.some(
     (token) =>
-      token === longName ||
-      token.startsWith(`${longName}=`) ||
-      token === negatedName ||
+      longNames.some(
+        (name) =>
+          token === name ||
+          token.startsWith(`${name}=`) ||
+          token === `--no-${name.slice(2)}`,
+      ) ||
       token === shortName ||
       (shortName !== undefined && token.startsWith(`${shortName}=`)) ||
       (shortName !== undefined &&
@@ -1005,8 +1011,10 @@ function buildCliParser(rawArgv: string[]): Argv {
           const hasPositionalQuery = Array.isArray(query)
             ? query.length > 0
             : !!query;
+          const separatorTail = Array.isArray(argv['--']) ? argv['--'] : [];
+          const hasQuery = hasPositionalQuery || separatorTail.length > 0;
 
-          if (argv['background'] && !hasPositionalQuery) {
+          if (argv['background'] && !hasQuery) {
             return 'Cannot use --bg/--background without a positional prompt';
           }
           if (argv['background'] && argv['prompt'] !== undefined) {
@@ -1129,7 +1137,7 @@ function buildCliParser(rawArgv: string[]): Argv {
             // is positional here; the only actionable fix is a TTY.
             return 'Cannot use --bg/--background when stdin is not an interactive terminal; run it from a TTY';
           }
-          if (argv['prompt'] && hasPositionalQuery) {
+          if (argv['prompt'] && hasQuery) {
             return 'Cannot use both a positional prompt and the --prompt (-p) flag together';
           }
           if (argv['prompt'] && argv['promptInteractive']) {

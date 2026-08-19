@@ -70,7 +70,7 @@ export async function releaseExitedManagedSessionForContinue(
 ): Promise<void> {
   // Same strict predicate as the /resume block: a lone marker must not
   // suppress the release in an ordinary foreground session.
-  if (readAgentViewWorkerSidebandEnv(env) !== undefined) return;
+  if (isSessionWorker(sessionId, env)) return;
   const state = await readAgentViewSessionState(sessionId);
   if (
     state?.ownership !== 'managed' ||

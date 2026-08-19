@@ -340,9 +340,19 @@ export async function discardCreatedStartupWorktree(
   if (context === null || context.wasReattached) return undefined;
   try {
     process.chdir(context.repoRoot);
-    const result = await new GitWorktreeService(
-      context.repoRoot,
-    ).removeUserWorktree(context.slug, {
+    const service = new GitWorktreeService(context.repoRoot);
+    const owner = await readWorktreeSessionMarker(context.worktreePath);
+    if (owner !== null) {
+      return `worktree ${context.worktreePath} is owned by session ${owner}`;
+    }
+    if (await service.hasWorktreeChanges(context.worktreePath)) {
+      return `worktree ${context.worktreePath} has uncommitted changes`;
+    }
+    const branchHead = await service.resolveRef(context.branch);
+    if (branchHead !== context.originalHeadCommit) {
+      return `worktree branch ${context.branch} changed after startup`;
+    }
+    const result = await service.removeUserWorktree(context.slug, {
       deleteBranch: true,
       forceDeleteBranch: true,
     });

@@ -21,6 +21,7 @@ const agentViewHandoffMocks = vi.hoisted(() => ({
     () => undefined,
   ),
   sendWorkerEvent: vi.fn(async () => undefined),
+  reportWorkerState: vi.fn(async () => undefined),
 }));
 
 vi.mock('../agent-view/managed-detach.js', async (importOriginal) => {
@@ -39,6 +40,7 @@ vi.mock('../agent-view/worker-sideband.js', async (importOriginal) => {
     ...actual,
     readAgentViewWorkerSidebandEnv: agentViewHandoffMocks.readWorkerSideband,
     sendAgentViewWorkerEvent: agentViewHandoffMocks.sendWorkerEvent,
+    reportAgentViewWorkerState: agentViewHandoffMocks.reportWorkerState,
   };
 });
 
@@ -298,6 +300,7 @@ describe('AppContainer State Management', () => {
     });
     agentViewHandoffMocks.readWorkerSideband.mockReturnValue(undefined);
     agentViewHandoffMocks.sendWorkerEvent.mockResolvedValue(undefined);
+    agentViewHandoffMocks.reportWorkerState.mockResolvedValue(undefined);
     restoreCiEnv = clearCiEnv();
     vi.stubEnv('TERM', 'xterm-256color');
     originalStdoutIsTTY = process.stdout.isTTY;
@@ -735,6 +738,43 @@ describe('AppContainer State Management', () => {
   });
 
   describe('Basic Rendering', () => {
+    it('reports working after an Agent View worker starts responding', async () => {
+      agentViewHandoffMocks.readWorkerSideband.mockReturnValue({
+        sessionId: 'session-1',
+        sidebandEndpoint: '/tmp/agent-view.sock',
+        token: 'token',
+        activeCwd: '/test/workspace',
+      });
+      mockedUseGeminiStream.mockReturnValue({
+        pendingToolCalls: [],
+        streamingState: StreamingState.Responding,
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
+        clearPendingState: mockClearPendingState,
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await vi.waitFor(() => {
+        expect(agentViewHandoffMocks.reportWorkerState).toHaveBeenCalledWith({
+          sessionState: 'working',
+        });
+      });
+    });
+
     it('continues quitting when cancelling the active request fails', () => {
       vi.useFakeTimers();
       const cancelOngoingRequest = vi.fn(() => {
@@ -1998,6 +2038,7 @@ describe('AppContainer State Management', () => {
       const mockQueueMessage = vi.fn();
 
       mockedUseGeminiStream.mockReturnValue({
+        pendingToolCalls: [],
         streamingState: 'responding',
         submitQuery: mockSubmitQuery,
         initError: null,

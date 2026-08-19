@@ -304,6 +304,83 @@ describe('Agent View supervisor process helpers', () => {
     await fs.rm(globalDir, { recursive: true, force: true });
   });
 
+  it('replays the initial prompt until the worker reports working', async () => {
+    const globalDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-agent-view-store-'),
+    );
+    const hosts: FakePtyHost[] = [];
+    const launches: AgentViewLaunchFile[] = [];
+    const handler = createAgentViewSupervisorHandler({
+      globalDir,
+      platform: 'linux',
+      launchPtyHost: async (launch) => {
+        launches.push(launch);
+        const host = fakePtyHost(999_999_002 + hosts.length);
+        hosts.push(host);
+        return host;
+      },
+    });
+    const result = (await handler.dispatch?.({
+      prompt: 'write tests',
+      cwd: globalDir,
+    })) as { sessionId: string };
+    const firstToken = await readWorkerTokenForTest(
+      result.sessionId,
+      globalDir,
+    );
+    await handler.workerEvent?.({
+      type: 'ready',
+      sessionId: result.sessionId,
+      token: firstToken,
+      cwd: globalDir,
+    });
+    await expect(
+      readAgentViewSessionState(result.sessionId, { globalDir }),
+    ).resolves.toMatchObject({ initialPromptPending: true });
+
+    hosts[0]?.resolveExit(1);
+    await waitForSessionState(
+      result.sessionId,
+      globalDir,
+      (state) => state.processState === 'exited',
+    );
+    await handler.respawn?.({ sessionId: result.sessionId });
+    expect(launches[1]?.argv).toEqual(
+      expect.arrayContaining([
+        `--resume=${result.sessionId}`,
+        '--prompt-interactive=write tests',
+      ]),
+    );
+
+    const replacementToken = await readWorkerTokenForTest(
+      result.sessionId,
+      globalDir,
+    );
+    await handler.workerEvent?.({
+      type: 'state',
+      sessionId: result.sessionId,
+      token: replacementToken,
+      sessionState: 'working',
+    });
+    await expect(
+      readAgentViewSessionState(result.sessionId, { globalDir }),
+    ).resolves.not.toHaveProperty('initialPromptPending');
+
+    hosts[1]?.resolveExit(1);
+    await waitForSessionState(
+      result.sessionId,
+      globalDir,
+      (state) => state.processState === 'exited',
+    );
+    await handler.respawn?.({ sessionId: result.sessionId });
+    expect(launches[2]?.argv).toEqual(
+      expect.arrayContaining([`--resume=${result.sessionId}`]),
+    );
+    expect(launches[2]?.argv).not.toContain('--prompt-interactive=write tests');
+
+    await fs.rm(globalDir, { recursive: true, force: true });
+  });
+
   it('marks dispatch failed when the worker never reports ready', async () => {
     const globalDir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'qwen-agent-view-store-'),
@@ -2657,13 +2734,23 @@ describe('Agent View supervisor process helpers', () => {
     expect(hosts).toHaveLength(2);
     expect(launches[1]).toMatchObject({
       entrypoint: process.argv[1],
-      argv: [process.execPath, process.argv[1], `--resume=${result.sessionId}`],
+      argv: [
+        process.execPath,
+        process.argv[1],
+        `--resume=${result.sessionId}`,
+        '--prompt-interactive=write tests',
+      ],
     });
     await expect(
       readAgentViewLaunch(result.sessionId, { globalDir }),
     ).resolves.toMatchObject({
       entrypoint: process.argv[1],
-      argv: [process.execPath, process.argv[1], `--resume=${result.sessionId}`],
+      argv: [
+        process.execPath,
+        process.argv[1],
+        `--resume=${result.sessionId}`,
+        '--prompt-interactive=write tests',
+      ],
     });
     await expect(
       readAgentViewWorker(result.sessionId, { globalDir }),

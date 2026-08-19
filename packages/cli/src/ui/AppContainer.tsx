@@ -252,6 +252,7 @@ import {
 import { detachCurrentSessionToAgentView } from '../agent-view/managed-detach.js';
 import {
   readAgentViewWorkerSidebandEnv,
+  reportAgentViewWorkerState,
   sendAgentViewWorkerEvent,
 } from '../agent-view/worker-sideband.js';
 import type { AgentViewIdleGateState } from './commands/types.js';
@@ -2202,6 +2203,21 @@ export const AppContainer = (props: AppContainerProps) => {
       // indicator until the next keyword prompt re-arms it.
       setWorkflowKeywordActive(false);
     }
+  }, [streamingState]);
+
+  useEffect(() => {
+    if (readAgentViewWorkerSidebandEnv() === undefined) {
+      return undefined;
+    }
+    const sessionState =
+      streamingState === StreamingState.Responding
+        ? 'working'
+        : streamingState === StreamingState.WaitingForConfirmation
+          ? 'needs_input'
+          : 'idle';
+
+    void reportAgentViewWorkerState({ sessionState });
+    return undefined;
   }, [streamingState]);
 
   // Auto-open the skill-review dialog when idle and there are pending skills.
