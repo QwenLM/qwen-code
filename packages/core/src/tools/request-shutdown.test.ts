@@ -9,6 +9,7 @@ import { RequestShutdownTool } from './request-shutdown.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
 import type { ApprovalMode, Config } from '../config/config.js';
 import { runWithTeammateIdentity } from '../agents/team/identity.js';
+import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 
 const DEFAULT_MODE = 'default' as ApprovalMode;
 
@@ -105,5 +106,47 @@ describe('RequestShutdownTool', () => {
 
     expect(result.error).toBeDefined();
     expect(result.llmContent).toContain('not found');
+  });
+
+  // Absence from a subagent registry only covers registries built with
+  // `forSubAgent`. The workflow fast path reuses the leader's own registry
+  // untouched, and that one does contain this tool — so the runtime check has
+  // to catch any subagent-like context, not just a teammate identity.
+  it('refuses a workflow subagent reusing the leader registry', async () => {
+    const requestShutdown = vi.fn().mockResolvedValue(undefined);
+    const tool = new RequestShutdownTool(
+      makeTeamConfig({ teamManager: { requestShutdown } }),
+    );
+    const invocation = tool.build({ to: 'bob' });
+    const result = await runWithAgentContext('wf-1', () =>
+      invocation.execute(new AbortController().signal),
+    );
+    expect(result.error).toBeDefined();
+    expect(requestShutdown).not.toHaveBeenCalled();
+  });
+
+  // Pinned because the value is deliberate: 'allow' would let AUTO
+  // short-circuit the classifier for an action that ends another agent's
+  // participation.
+  it('defaults to ask so AUTO still routes through the classifier', async () => {
+    const tool = new RequestShutdownTool(makeTeamConfig());
+    const invocation = tool.build({ to: 'bob' });
+    await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
+  });
+
+  // The schema accepts '' and '   ' — `type: string` plus `required` does not
+  // exclude them — so the guard is reachable.
+  it('rejects an empty or whitespace-only recipient', async () => {
+    const requestShutdown = vi.fn().mockResolvedValue(undefined);
+    const tool = new RequestShutdownTool(
+      makeTeamConfig({ teamManager: { requestShutdown } }),
+    );
+    for (const to of ['', '   ']) {
+      const result = await tool
+        .build({ to })
+        .execute(new AbortController().signal);
+      expect(result.error).toBeDefined();
+    }
+    expect(requestShutdown).not.toHaveBeenCalled();
   });
 });

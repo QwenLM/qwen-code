@@ -18,7 +18,6 @@ function makeTeamConfig(opts?: {
   teamManager?: {
     sendMessage: (...args: unknown[]) => Promise<void>;
     broadcast: (...args: unknown[]) => Promise<void>;
-    requestShutdown?: (...args: unknown[]) => Promise<void>;
   } | null;
   approvalMode?: ApprovalMode;
 }) {
@@ -116,7 +115,7 @@ describe('SendMessageTool — team mode', () => {
     expect(JSON.stringify(schema)).not.toContain('shutdown_request');
   });
 
-  it('delivers a teammate\'s ordinary message to the leader', async () => {
+  it("delivers a teammate's ordinary message to the leader", async () => {
     const sendMessage = vi.fn().mockResolvedValue(undefined);
     const tool = new SendMessageTool(
       makeTeamConfig({

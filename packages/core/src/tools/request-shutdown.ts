@@ -27,10 +27,10 @@
 import type { Config } from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
-import { isTeammate } from '../agents/team/identity.js';
 import {
   getPlanRequiredTeammatePreApprovalMessage,
   isPlanRequiredTeammateAwaitingApproval,
+  isSubagentLikeExecutionContext,
 } from '../agents/runtime/subagent-plan-tool-policy.js';
 import {
   BaseDeclarativeTool,
@@ -78,12 +78,17 @@ class RequestShutdownInvocation extends BaseToolInvocation<
       return { llmContent: msg, returnDisplay: msg, error: { message: msg } };
     }
 
-    // Defence in depth. Registration already keeps this tool out of a
-    // teammate's registry, so reaching here as a teammate would mean the
-    // registry was assembled without `forSubAgent`. Fail closed rather than
-    // impersonate the leader: `requestShutdown` writes the mailbox entry with
-    // `from: LEADER_NAME` and arms shutdown_approved tracking for the target.
-    if (isTeammate()) {
+    // Absence from a subagent registry is the primary guarantee, but it only
+    // covers registries that were *built* with `forSubAgent`. Some dispatch
+    // paths reuse the parent's registry untouched — `runSingleDispatch`'s
+    // workflow fast path hands the leader's own registry to a subagent — and
+    // that registry does contain this tool. So the runtime check has to cover
+    // every subagent-like context, not just a teammate identity.
+    //
+    // Fail closed rather than impersonate the leader: `requestShutdown` writes
+    // the mailbox entry as `from: LEADER_NAME` and arms shutdown_approved
+    // tracking for the target.
+    if (isSubagentLikeExecutionContext()) {
       const msg = 'Only the team leader can request shutdowns.';
       return { llmContent: msg, returnDisplay: msg, error: { message: msg } };
     }
