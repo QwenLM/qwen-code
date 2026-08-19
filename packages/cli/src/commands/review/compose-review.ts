@@ -85,6 +85,7 @@ import { mdField } from './lib/md-field.js';
 import {
   diagnoseConvergence,
   renderConvergenceDiagnosis,
+  type CriticalFloorKind,
   type DraftedFinding,
   type PrevRound,
 } from './lib/convergence.js';
@@ -425,20 +426,33 @@ export function normalizeSeverityFloor(value: unknown): string | undefined {
  * `--severity-floor critical` inside the very body whose floor-enforcement
  * note says Suggestions were already moved past that floor.
  */
-export function criticalFloorInEffect(
+export function criticalFloorKind(
   severityFloor: unknown,
   contextUnavailable: boolean,
   prevRound: number,
-): boolean {
+): CriticalFloorKind | undefined {
   const floor = normalizeSeverityFloor(severityFloor);
   // `prevRound` is the PREVIOUS posted round, so the review being composed
   // is `prevRound + 1` — spelled out because the equivalent `prevRound >= 5`
   // reads as a fencepost error against SKILL Step 6's "from round 6 it is
   // critical".
   const thisRound = prevRound + 1;
+  if (floor === 'critical') return 'explicit';
+  if (floor === 'auto' && !contextUnavailable && thisRound >= 6) {
+    return 'auto-resolved';
+  }
+  return undefined;
+}
+
+/** Whether the floor resolved to `critical` at all — the enforcement reading. */
+export function criticalFloorInEffect(
+  severityFloor: unknown,
+  contextUnavailable: boolean,
+  prevRound: number,
+): boolean {
   return (
-    floor === 'critical' ||
-    (floor === 'auto' && !contextUnavailable && thisRound >= 6)
+    criticalFloorKind(severityFloor, contextUnavailable, prevRound) !==
+    undefined
   );
 }
 
@@ -1199,6 +1213,14 @@ export function composeReview(
     prevRound,
     Array.isArray(input.draftedComments) ? input.draftedComments : [],
   );
+  // The one resolution, read by the enforcement above and reported by the
+  // diagnosis below — and stamped into this round's marker, so the NEXT round
+  // can tell a posture change from a loop that will not settle.
+  const floorKind = criticalFloorKind(
+    input.severityFloor,
+    input.contextUnavailable === true,
+    prevRound,
+  );
   let effective = input;
   if (reroute.indices.length > 0) {
     const drop = new Set(reroute.indices);
@@ -1254,15 +1276,14 @@ export function composeReview(
         findings: prevFacts.findings,
         truncated: prevFacts.truncated,
         foreign: prevFacts.foreign,
+        ...(prevFacts.floor === undefined ? {} : { floor: prevFacts.floor }),
       },
       // Read from the same input `floorEnforcedReroute` just acted on, through
       // the one predicate both share — so the advice cannot recommend a floor
-      // the enforcement above already applied.
-      criticalFloorInEffect: criticalFloorInEffect(
-        input.severityFloor,
-        input.contextUnavailable === true,
-        prevRound,
-      ),
+      // the enforcement above already applied, nor name it a way the
+      // enforcement note in the same body contradicts.
+      floor: floorKind === undefined ? 'o' : 'c',
+      ...(floorKind === undefined ? {} : { criticalFloorKind: floorKind }),
     },
   );
   // The ledger marker rides the body THIS function returns, because this — not
@@ -1293,6 +1314,7 @@ export function composeReview(
     prevRound,
     postedInline,
     prevFacts.posted,
+    floorKind,
   );
   // `postedInline` came out of the body composer on the same input, so only
   // the predecessor's volume — which only this scope read — is added here.
@@ -1350,6 +1372,8 @@ function prevLedgerFacts(planPath: string | undefined): {
   truncated: boolean;
   /** It was recovered from a marker this account did not post. */
   foreign: boolean;
+  /** The posting floor it ran under, when its marker recorded one. */
+  floor?: 'c' | 'o';
 } {
   try {
     if (!planPath) return EMPTY_PREV_FACTS;
@@ -1411,6 +1435,13 @@ function prevLedgerFacts(planPath: string | undefined): {
       // account — so a cited round may be one this account never ran. The
       // rendering says so rather than publishing the citation bare.
       foreign: round !== 0 && prev.foreign === true,
+      // Travels with the volume it qualifies, and with the round, for the
+      // same reason both of those do.
+      ...(round === 0 ||
+      posted === undefined ||
+      !(prev.floor === 'c' || prev.floor === 'o')
+        ? {}
+        : { floor: prev.floor }),
     };
   } catch {
     return EMPTY_PREV_FACTS;
@@ -1432,6 +1463,7 @@ function ledgerMarkerFor(
   prevRound: number,
   postedInline: number,
   prevPostedInline: number | undefined,
+  floorKind: CriticalFloorKind | undefined,
 ): string | null {
   try {
     if (!input.planPath) return null;
@@ -1566,6 +1598,11 @@ function ledgerMarkerFor(
       ...(prevPostedInline === undefined
         ? {}
         : { prevPosted: prevPostedInline }),
+      // The posture that volume was produced under. Without it, the next
+      // round measures a FLOOR change as loop divergence: the volume under a
+      // critical floor and the volume under an open one are not two points
+      // on one trend. Decides nothing, sheds with the volume it qualifies.
+      floor: floorKind === undefined ? 'o' : 'c',
     });
   } catch {
     // A carry-forward convenience, never worth failing the verdict over.
@@ -1658,7 +1695,8 @@ function composeReviewBody(
    */
   convergence: {
     prev: PrevRound;
-    criticalFloorInEffect: boolean;
+    floor: 'c' | 'o';
+    criticalFloorKind?: CriticalFloorKind;
   } | null = null,
 ): ComposeReviewResult {
   // The posting set this body describes — `input` here is already the
@@ -1684,7 +1722,10 @@ function composeReviewBody(
         posted: postedInline,
         prev: convergence.prev,
         drafts: draftedFindingsOf(input.draftedComments ?? []),
-        criticalFloorInEffect: convergence.criticalFloorInEffect,
+        floor: convergence.floor,
+        ...(convergence.criticalFloorKind === undefined
+          ? {}
+          : { criticalFloorKind: convergence.criticalFloorKind }),
       })
     : null;
   const criticalsInline = toCount(input.criticalsInline, 'criticalsInline');
@@ -2645,6 +2686,7 @@ function composeReviewBody(
 
   /** What a rank drops, in the author's words — the note names it. */
   const RANK_NAMES: Record<number, { en: string; zh: string }> = {
+    0: { en: 'the convergence observation', zh: '收敛情况观察' },
     1: { en: 'the deferred-findings list', zh: '延后发现清单' },
     2: {
       en: 'the not-reviewed and non-blocking disclosures',
@@ -3440,14 +3482,21 @@ function composeReviewBody(
   // paragraph here that comments on the SHAPE of the review history rather
   // than on the diff.
   //
-  // `trim: 1` — the FIRST thing the overflow ladder sheds. An untagged block
+  // `trim: 0` — its OWN rank, shed before every other. An untagged block
   // ranks with the blockers and the verdict-qualifying sentences, and the
   // rounds this fires on are precisely the high-volume rounds most likely to
   // overflow: unranked, an advisory paragraph that decides nothing survived
   // while the deferral list and the not-reviewed disclosures were spent.
-  // Nothing here is load-bearing for the verdict, so it yields first.
+  //
+  // A rank of its own, not a share of the deferral list's: every notice
+  // surface keys on the RANK, not on what actually went — the rank's name,
+  // the artifact pointer, `bodyTrim.deferralList` — so sharing rank 1 made a
+  // round that shed only this paragraph post a notice naming a
+  // "deferred-findings list" that never existed and point the author at
+  // artifact entries that do not exist. Its own rank names itself, carries
+  // no artifact pointer, and leaves `deferralList` false.
   const convergenceBlock: Bi[] = diagnosis
-    ? [{ ...renderConvergenceDiagnosis(diagnosis), trim: 1 }]
+    ? [{ ...renderConvergenceDiagnosis(diagnosis), trim: 0 }]
     : [];
 
   // The resumed-run continuity note: the run reused certified work from an
@@ -4612,11 +4661,14 @@ export function buildLedger(
     // reads, and residue between the marker and a carried id would defeat the
     // id anchor and silently renumber the finding.
     const { id: carried, title } = readClaim(ledgerClaimLine(c.body));
-    const file = typeof c.path === 'string' ? c.path : LEDGER_UNKNOWN_FILE;
+    const pathless = typeof c.path !== 'string';
+    const file = pathless ? LEDGER_UNKNOWN_FILE : (c.path as string);
     findings.push({
       id: idFor(carried),
       sev: sev === 'critical' ? 'C' : 'S',
       file,
+      // Structural, so a real file NAMED like the stand-in is still a file.
+      ...(pathless ? { k: 'u' as const } : {}),
       ...(typeof c.line === 'number' ? { line: c.line } : {}),
       title: locatable(
         title,
@@ -4638,6 +4690,7 @@ export function buildLedger(
       id: idFor(carried),
       sev: 'C',
       file: LEDGER_BODY_FILE,
+      k: 'b' as const,
       title: locatable(title, 'the review body'),
     });
   }

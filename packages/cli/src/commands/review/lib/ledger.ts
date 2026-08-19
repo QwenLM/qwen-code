@@ -35,6 +35,14 @@ export interface LedgerFinding {
   /** `C` (Critical) or `S` (Suggestion). Compact on purpose — body bytes. */
   sev: 'C' | 'S';
   file: string;
+  /**
+   * Set when `file` is NOT a path but a stand-in: `b` for a body-only
+   * Critical, `u` for a comment that arrived without one. Structural, because
+   * the sentinels are legal filenames — git permits `(body)` — and a reader
+   * that recognised them BY VALUE excluded a real file of that name from
+   * clustering, silently. Compact for the same reason `sev` is.
+   */
+  k?: 'b' | 'u';
   line?: number;
   /** One line, capped — enough for the next round to re-locate the claim. */
   title: string;
@@ -114,6 +122,25 @@ export interface Ledger {
    * fail-open, decides-nothing contract as `posted`.
    */
   prevPosted?: number;
+  /**
+   * The posting floor this round RESOLVED to — `c` when the critical floor
+   * was in effect, `o` when Suggestions were postable.
+   *
+   * It qualifies `posted`, and travels and sheds with it. Without it the
+   * volume trend measures a POSTURE change as loop divergence: an operator
+   * who takes this pipeline's own advice and sets `--severity-floor
+   * critical` collapses the volume, and restoring it later produces a jump
+   * the trend reads as a loop that will not settle — and then advises
+   * re-tightening the floor just deliberately loosened. The bias is
+   * one-directional (loosening fires it, tightening only shrinks volume),
+   * and one transient `contextUnavailable` round under `auto` produces the
+   * same spike with no operator action at all.
+   *
+   * Same fail-open, decides-nothing contract as the volumes: absent means
+   * "not recorded", which leaves the trend evaluated as it was before this
+   * field existed.
+   */
+  floor?: 'c' | 'o';
 }
 
 /**
@@ -162,6 +189,19 @@ export const LEDGER_ID_TOKEN = String.raw`R\d+-\d+`;
 export const LEDGER_ID_READBACK = new RegExp(
   `^(${LEDGER_ID_TOKEN})[:.)\\]]?(?=\\s|$)\\s*`,
 );
+
+/**
+ * The id as a WHOLE string — nothing before it, nothing after. The one
+ * admission test, shared with presubmit's entry check.
+ *
+ * Anchored at both ends on purpose. A prefix-only test (`^R\d+-`) admitted
+ * ids the readers then interpreted differently from the test: every reader
+ * downstream trims before matching (`birthRound`, `readClaim`), so ` R9999-1`
+ * failed the untrimmed squat filter, was therefore never dropped, and read as
+ * round 9999 everywhere it mattered — pre-claiming the next round's id prefix
+ * and citing a round no account ever ran.
+ */
+export const LEDGER_ID_SHAPE = new RegExp(`^${LEDGER_ID_TOKEN}$`);
 
 /** Caps keep the marker a footnote, never a payload: GitHub's body limit is
  *  65,536 chars and the marker rides inside it. Every cap binds BOTH halves —
@@ -308,6 +348,12 @@ export function serializeLedger(ledger: Ledger): string {
     if (volume !== 'none') {
       const postedOut = volumeOf(ledger.posted);
       if (postedOut !== undefined) payload.posted = postedOut;
+      // The floor qualifies `posted`, so it rides with it and sheds with it:
+      // a floor recorded beside no volume qualifies nothing, and a volume
+      // recorded beside no floor is exactly the pre-field reading.
+      if (ledger.floor === 'c' || ledger.floor === 'o') {
+        payload.floor = ledger.floor;
+      }
       if (volume === 'both') {
         const prevPostedOut = volumeOf(ledger.prevPosted);
         if (prevPostedOut !== undefined) payload.prevPosted = prevPostedOut;
@@ -412,6 +458,12 @@ export function parseLedger(body: string | undefined): Ledger | null {
       (f): f is LedgerFinding =>
         !!f &&
         typeof f.id === 'string' &&
+        // The WHOLE shape, before anything reads a round out of it. The squat
+        // rule below is anchored and does not trim, while every downstream
+        // reader does — so an id with leading whitespace passed the rule that
+        // exists to stop it and then took full effect. Validated here, at the
+        // single entry point, the readers' trims are harmless.
+        LEDGER_ID_SHAPE.test(f.id) &&
         // An id claiming a FUTURE round is a squat, not a finding. The
         // pipeline's own ids obey `id round <= marker round` by construction —
         // a round stamps its new findings `R<round>-<n>` and carries older ids
@@ -429,6 +481,7 @@ export function parseLedger(body: string | undefined): Ledger | null {
           return m !== null && Number(m[1]) > raw.round;
         })() &&
         (f.sev === 'C' || f.sev === 'S') &&
+        (f.k === undefined || f.k === 'b' || f.k === 'u') &&
         typeof f.file === 'string' &&
         typeof f.title === 'string' &&
         (f.line === undefined || Number.isInteger(f.line)),
@@ -477,6 +530,13 @@ export function parseLedger(body: string | undefined): Ledger | null {
     // no gate reads.
     const posted = volumeOf(raw.posted);
     const prevPosted = volumeOf(raw.prevPosted);
+    // The floor qualifies `posted`, so it survives only beside it: a floor
+    // alone would let a later round compare postures across rounds whose
+    // volumes it does not have, which is not a comparison anyone can act on.
+    const floor =
+      posted !== undefined && (raw.floor === 'c' || raw.floor === 'o')
+        ? raw.floor
+        : undefined;
     return {
       v: 1,
       round: raw.round,
@@ -486,6 +546,7 @@ export function parseLedger(body: string | undefined): Ledger | null {
       ...(model ? { model } : {}),
       ...(posted === undefined ? {} : { posted }),
       ...(prevPosted === undefined ? {} : { prevPosted }),
+      ...(floor === undefined ? {} : { floor }),
     };
   } catch {
     return null;

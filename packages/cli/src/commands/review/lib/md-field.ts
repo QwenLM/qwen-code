@@ -21,11 +21,13 @@
  * Markdown in the bot's own public body.
  */
 export function mdField(s: unknown): string {
-  return (
-    '`' +
-    String(s)
-      .replace(/[`\r\n]+/g, ' ')
-      .trim() +
-    '`'
-  );
+  const inner = String(s)
+    .replace(/[`\r\n]+/g, ' ')
+    .trim();
+  // A value that strips to nothing would emit a bare pair of backticks, which
+  // is not a code span at all: two such runs in one paragraph pair up as
+  // opener and closer, and the bot's own prose between them renders as code.
+  // Git permits a filename that is nothing but backticks, so the empty case
+  // is PR-controlled like every other input here.
+  return '`' + (inner === '' ? '(unnamed)' : inner) + '`';
 }

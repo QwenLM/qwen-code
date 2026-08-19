@@ -29,9 +29,8 @@
 // review whose findings are shrinking deserves no interruption at all.
 
 import {
-  LEDGER_BODY_FILE,
   LEDGER_ID_TOKEN,
-  LEDGER_UNKNOWN_FILE,
+  LEDGER_MAX_ROUND,
   type LedgerFinding,
 } from './ledger.js';
 import { mdField } from './md-field.js';
@@ -103,6 +102,12 @@ export interface PrevRound {
    * reader who knows where it came from can check it.
    */
   foreign?: boolean;
+  /**
+   * The posting floor it ran under, when its marker recorded one. A round
+   * that posted under a different floor is not a comparable point on this
+   * loop's volume trend — the posture changed, not the loop.
+   */
+  floor?: 'c' | 'o';
 }
 
 export interface ConvergenceDiagnosis {
@@ -119,18 +124,20 @@ export interface ConvergenceDiagnosis {
   truncatedEvidence: boolean;
   foreignEvidence: boolean;
   /**
-   * The posting floor this round resolved to is already `critical`. The
-   * handling advice is matched to the telemetry's shape, so it must not
-   * recommend a posture the round is running under as it says it.
+   * HOW this round's floor resolved to `critical`, or null if it did not.
+   *
+   * The kind, not a boolean, because the advice quotes it back: `auto` is the
+   * default configuration, and wording an auto-resolved floor as an explicit
+   * `--severity-floor critical` setting claims a flag nobody passed — beside
+   * a floor-enforcement note in the same body that describes it accurately as
+   * the RESOLVED floor. Auto also fails open the moment context becomes
+   * unavailable, which an unconditional-sounding claim would misstate.
    */
-  criticalFloorInEffect: boolean;
+  criticalFloorKind?: CriticalFloorKind;
 }
 
-/** Pseudo-paths that name no file and therefore cannot cluster. */
-const PSEUDO_PATHS: ReadonlySet<string> = new Set([
-  LEDGER_BODY_FILE,
-  LEDGER_UNKNOWN_FILE,
-]);
+/** How a round's posting floor came to be `critical`. */
+export type CriticalFloorKind = 'explicit' | 'auto-resolved';
 
 /**
  * The diagnosis for this round, or null when the loop looks healthy.
@@ -167,13 +174,23 @@ export function diagnoseConvergence(input: {
   prev: PrevRound;
   /** This round's drafted comments. */
   drafts: readonly DraftedFinding[];
-  criticalFloorInEffect?: boolean;
+  /** The floor THIS round resolved to, for comparison against the previous. */
+  floor: 'c' | 'o';
+  criticalFloorKind?: CriticalFloorKind;
 }): ConvergenceDiagnosis | null {
   const priorByFile = new Map<string, Set<number>>();
   for (const f of input.prev.findings) {
     if (typeof f?.file !== 'string' || f.file.trim() === '') continue;
-    // A body-only Critical carries no real path; it cannot cluster.
-    if (PSEUDO_PATHS.has(f.file)) continue;
+    // A body-only Critical, or a comment that arrived without a path, names
+    // no file and cannot cluster — recognised by the STRUCTURAL flag the
+    // ledger stamps, never by the sentinel's text: git permits a file
+    // literally named `(body)`, and a value comparison excluded exactly that
+    // file from clustering while claiming to exclude a stand-in. (A marker
+    // written before the flag existed carries the sentinel with no flag; its
+    // pseudo-path entries therefore read as ordinary files for the round or
+    // two such a marker survives, which needs this round to draft a comment
+    // on a real file of that exact name to matter at all.)
+    if (f.k !== undefined) continue;
     const round = birthRound(f.id);
     if (round === undefined) continue;
     const set = priorByFile.get(f.file) ?? new Set<number>();
@@ -182,17 +199,26 @@ export function diagnoseConvergence(input: {
   }
 
   // Fresh: not a re-post of a finding minted in an earlier round. An id this
-  // round would mint is not "earlier", so the comparison is strict.
+  // round would mint is not "earlier", so the comparison is strict — except
+  // AT the round cap, where the id space collides: consecutive rounds at
+  // `LEDGER_MAX_ROUND` both stamp `R<cap>-*`, so a re-post of an unfixed
+  // Critical is indistinguishable from a fresh finding by its id alone.
+  // There the rule fails toward "carried", because the cost of the two
+  // errors is not symmetric: calling a re-post fresh narrates divergence at
+  // the steady state every round forever, while calling a fresh finding
+  // carried costs one round of silence.
+  const atCap = input.round >= LEDGER_MAX_ROUND;
   const fresh = input.drafts.filter((d) => {
     const minted = birthRound(d?.carriedId);
-    return minted === undefined || minted >= input.round;
+    if (minted === undefined) return true;
+    if (atCap && minted >= LEDGER_MAX_ROUND) return false;
+    return minted >= input.round;
   });
 
   const thisByFile = new Map<string, number>();
   for (const d of fresh) {
     const p = d?.file;
     if (typeof p !== 'string' || p.trim() === '') continue;
-    if (PSEUDO_PATHS.has(p)) continue;
     thisByFile.set(p, (thisByFile.get(p) ?? 0) + 1);
   }
 
@@ -231,10 +257,23 @@ export function diagnoseConvergence(input: {
   // against a zero predecessor is `N >= 0`, true for every N, so restarting
   // from a settled round would fire on the healthiest shape there is (fix
   // everything, settle at zero, push again, get new findings).
+  //
+  // And the two rounds must have posted under the SAME floor. A posture
+  // change is not loop behaviour: an operator who takes this module's own
+  // advice, sets `--severity-floor critical`, and later restores it produces
+  // a volume jump the trend would read as a loop that will not settle — and
+  // the advice would then recommend re-tightening the floor just
+  // deliberately loosened. One transient `contextUnavailable` round under
+  // `auto` produces the same spike with no operator action at all. A
+  // previous floor that was never recorded is not a floor that differs, so a
+  // pre-field marker evaluates exactly as it did before.
+  const floorChanged =
+    input.prev.floor !== undefined && input.prev.floor !== input.floor;
   const volumeNotShrinking =
     input.round >= 3 &&
     input.prev.posted !== undefined &&
     input.prev.posted > 0 &&
+    !floorChanged &&
     fresh.length > 0 &&
     input.posted >= input.prev.posted;
 
@@ -249,7 +288,9 @@ export function diagnoseConvergence(input: {
     volumeNotShrinking,
     truncatedEvidence: input.prev.truncated === true,
     foreignEvidence: input.prev.foreign === true,
-    criticalFloorInEffect: input.criticalFloorInEffect === true,
+    ...(input.criticalFloorKind === undefined
+      ? {}
+      : { criticalFloorKind: input.criticalFloorKind }),
   };
 }
 
@@ -317,25 +358,34 @@ export function renderConvergenceDiagnosis(d: ConvergenceDiagnosis): {
       ? `发现反复回到同一批文件：${clusterZh}${more > 0 ? `，另有 ${more} 个文件` : ''}。`
       : `发布量没有下降。`;
 
-  // Only the recurrence reading cites the previous work list, so only it can
-  // be qualified by how that list was obtained.
+  // A caveat attaches to the reading it actually bears on. Truncation
+  // affects only the WORK LIST, so it qualifies the recurrence reading
+  // alone. Provenance is broader: a foreign marker carries the previous
+  // round's VOLUME too, and the volume-only branch cites that number as this
+  // loop's own baseline — gated on clusters, the disclosure never reached
+  // exactly the branch an attacker-supplied `posted` controls.
+  const citesWorkList = d.clusters.length > 0;
+  const citesPrevVolume = d.prevPosted !== undefined;
   const caveatsEn: string[] = [];
   const caveatsZh: string[] = [];
-  if (d.clusters.length > 0) {
-    if (d.truncatedEvidence) {
-      caveatsEn.push(
-        `the previous round's work list was truncated to fit the marker, so the rounds named above may be an undercount`,
-      );
-      caveatsZh.push(`上一轮的工作清单为放进标记而被截断，上述轮次可能少计`);
-    }
-    if (d.foreignEvidence) {
-      caveatsEn.push(
-        `it was recovered from a marker this account did not post, so those rounds may not be this account's own`,
-      );
-      caveatsZh.push(
-        `该清单来自并非本账号发布的标记，上述轮次可能不属于本账号`,
-      );
-    }
+  if (citesWorkList && d.truncatedEvidence) {
+    caveatsEn.push(
+      `the previous round's work list was truncated to fit the marker, so the rounds named above may be an undercount`,
+    );
+    caveatsZh.push(`上一轮的工作清单为放进标记而被截断，上述轮次可能少计`);
+  }
+  if (d.foreignEvidence && (citesWorkList || citesPrevVolume)) {
+    const what = citesWorkList
+      ? citesPrevVolume
+        ? { en: `those rounds and its volume`, zh: `上述轮次与其发布量` }
+        : { en: `those rounds`, zh: `上述轮次` }
+      : { en: `that volume`, zh: `该发布量` };
+    caveatsEn.push(
+      `the previous round was recovered from a marker this account did not post, so ${what.en} may not be this account's own`,
+    );
+    caveatsZh.push(
+      `上一轮的数据来自并非本账号发布的标记，${what.zh}可能不属于本账号`,
+    );
   }
   const caveatEn =
     caveatsEn.length > 0 ? ` (Evidence: ${caveatsEn.join('; ')}.)` : '';
@@ -345,13 +395,27 @@ export function renderConvergenceDiagnosis(d: ConvergenceDiagnosis): {
   // The floor recommendation is dropped once the floor already resolves to
   // `critical`: advising a posture the round is running under, inside the
   // very body whose floor-enforcement note says so, reads as advice nobody
-  // checked.
-  const floorEn = d.criticalFloorInEffect
-    ? `Batching the remaining fixes and verifying them before the next push keeps the loop from re-deriving the same set; this PR's reviews are already at \`--severity-floor critical\`.`
-    : `Batching the remaining fixes and verifying them before the next push, or dropping this PR's reviews to \`--severity-floor critical\`, keeps the loop from re-deriving the same set.`;
-  const floorZh = d.criticalFloorInEffect
-    ? `把剩余修复攒成一批、验证后再推送，可以避免循环反复推导同一组发现；本 PR 的评审已处于 \`--severity-floor critical\`。`
-    : `把剩余修复攒成一批、验证后再推送，或将本 PR 的评审降到 \`--severity-floor critical\`，可以避免循环反复推导同一组发现。`;
+  // checked. And it names the posture the way that round actually got it —
+  // `auto` is the DEFAULT, so wording an auto-resolved floor as an explicit
+  // setting claims a flag nobody passed.
+  const batchEn = `Batching the remaining fixes and verifying them before the next push`;
+  const batchZh = `把剩余修复攒成一批、验证后再推送`;
+  const alreadyEn: Record<CriticalFloorKind, string> = {
+    explicit: `this PR's reviews are already at \`--severity-floor critical\``,
+    'auto-resolved': `this PR's reviews already resolve to a critical posting floor`,
+  };
+  const alreadyZh: Record<CriticalFloorKind, string> = {
+    explicit: `本 PR 的评审已处于 \`--severity-floor critical\``,
+    'auto-resolved': `本 PR 的评审已解析为 critical 发布下限`,
+  };
+  const floorEn =
+    d.criticalFloorKind === undefined
+      ? `${batchEn}, or dropping this PR's reviews to \`--severity-floor critical\`, keeps the loop from re-deriving the same set.`
+      : `${batchEn} keeps the loop from re-deriving the same set; ${alreadyEn[d.criticalFloorKind]}.`;
+  const floorZh =
+    d.criticalFloorKind === undefined
+      ? `${batchZh}，或将本 PR 的评审降到 \`--severity-floor critical\`，可以避免循环反复推导同一组发现。`
+      : `${batchZh}，可以避免循环反复推导同一组发现；${alreadyZh[d.criticalFloorKind]}。`;
 
   const adviceEn =
     d.clusters.length > 0

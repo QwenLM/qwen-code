@@ -943,7 +943,9 @@ export function recoverLedger(
   if (!best) return { recovered: null, sawOwnReview };
   // The anchor never crosses accounts. Dropped here, at the recovery seam, so
   // no consumer downstream has to remember the rule.
-  let ledger = best.foreign ? stripAnchor(best.ledger) : best.ledger;
+  let ledger = best.foreign
+    ? stripForeignVolume(stripAnchor(best.ledger))
+    : best.ledger;
   // A FOREIGN winner never DISPLACES this account's own findings — it is
   // merged over them. Round-first selection alone handed a drive-by poster a
   // one-comment suppression: a marker at `ownMax + 1` (deep inside the
@@ -1247,6 +1249,38 @@ export function persistRecoveredLedger(
 function stripAnchor(ledger: Ledger): Ledger {
   if (ledger.sha === undefined && ledger.model === undefined) return ledger;
   const { sha: _sha, model: _model, ...rest } = ledger;
+  return rest;
+}
+
+/**
+ * Drop the volume telemetry from a marker another account posted.
+ *
+ * The same reasoning as the anchor, applied to the other cross-account field:
+ * `posted` is the baseline the next round's volume trend is measured against,
+ * so a foreign value is not this loop's history — it is a number a stranger
+ * chose. And it is a number with leverage in BOTH directions: `posted: 1`
+ * makes every following round with any volume read as "not falling", while
+ * `posted: 100000` suppresses the signal for as long as the marker stands.
+ * Dropped rather than carried-and-disclosed, because unlike the work list
+ * there is nothing here for a reader to re-rule on: a volume is a single
+ * number with no evidence attached. Absence already reads as "not recorded",
+ * which degrades the trend exactly as a pre-telemetry predecessor does. The
+ * floor goes with it — it qualifies the volume and nothing else.
+ */
+function stripForeignVolume(ledger: Ledger): Ledger {
+  if (
+    ledger.posted === undefined &&
+    ledger.prevPosted === undefined &&
+    ledger.floor === undefined
+  ) {
+    return ledger;
+  }
+  const {
+    posted: _posted,
+    prevPosted: _prevPosted,
+    floor: _floor,
+    ...rest
+  } = ledger;
   return rest;
 }
 

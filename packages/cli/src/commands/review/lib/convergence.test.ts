@@ -12,7 +12,7 @@ import {
   type ConvergenceDiagnosis,
   type DraftedFinding,
 } from './convergence.js';
-import type { LedgerFinding } from './ledger.js';
+import { LEDGER_MAX_ROUND, type LedgerFinding } from './ledger.js';
 
 const f = (id: string, file: string): LedgerFinding => ({
   id,
@@ -36,6 +36,7 @@ describe('diagnoseConvergence — the trigger table', () => {
         posted: 2,
         prev: { posted: 7, findings: [f('R3-1', 'a.ts')] },
         drafts: [d('b.ts')],
+        floor: 'o',
       }),
     ).toBeNull();
   });
@@ -49,6 +50,7 @@ describe('diagnoseConvergence — the trigger table', () => {
         findings: [f('R2-1', 'a.ts'), f('R3-2', 'a.ts'), f('R3-3', 'z.ts')],
       },
       drafts: [d('a.ts'), d('a.ts'), d('new.ts')],
+      floor: 'o',
     })!;
     expect(r.clusters).toEqual([
       { file: 'a.ts', priorRounds: [2, 3], thisRound: 2 },
@@ -68,16 +70,18 @@ describe('diagnoseConvergence — the trigger table', () => {
         findings: [f('R2-1', 'a.ts'), f('R7-4', 'a.ts'), f('R5-9', 'a.ts')],
       },
       drafts: [d('a.ts')],
+      floor: 'o',
     })!;
     expect(r.clusters[0].priorRounds).toEqual([2, 5, 7]);
   });
 
-  it('ignores entries whose id is not one, and both pseudo-paths', () => {
+  it('ignores entries whose id is not one, and every non-path stand-in', () => {
     // A malformed side-file entry contributes no cluster rather than a
     // wrong one; `(body)` is where unanchorable Criticals live and
     // `(unknown)` is a comment that arrived without a path — neither is a
     // file anyone can cluster on, and neither may be NAMED as one in a
-    // posted paragraph.
+    // posted paragraph. Recognised by the ledger's structural flag, never by
+    // the sentinel text — see the real-file test below.
     expect(
       diagnoseConvergence({
         round: 4,
@@ -86,11 +90,12 @@ describe('diagnoseConvergence — the trigger table', () => {
           posted: 9,
           findings: [
             { id: 'nonsense', sev: 'C', file: 'a.ts', title: 't' },
-            f('R2-1', '(body)'),
-            f('R2-2', '(unknown)'),
+            { id: 'R2-1', sev: 'C', file: '(body)', title: 't', k: 'b' },
+            { id: 'R2-2', sev: 'S', file: '(unknown)', title: 't', k: 'u' },
           ],
         },
         drafts: [d('a.ts'), d('(body)'), d('(unknown)')],
+        floor: 'o',
       }),
     ).toBeNull();
   });
@@ -101,6 +106,7 @@ describe('diagnoseConvergence — the trigger table', () => {
       posted: 5,
       prev: { posted: 5, findings: [] },
       drafts: [d('a.ts')],
+      floor: 'o',
     })!;
     expect(flat.volumeNotShrinking).toBe(true);
     expect(flat.clusters).toEqual([]);
@@ -110,6 +116,7 @@ describe('diagnoseConvergence — the trigger table', () => {
       posted: 6,
       prev: { posted: 5, findings: [] },
       drafts: [d('a.ts')],
+      floor: 'o',
     })!;
     expect(grew.volumeNotShrinking).toBe(true);
   });
@@ -125,6 +132,7 @@ describe('diagnoseConvergence — the trigger table', () => {
         posted: 0,
         prev: { posted: 0, findings: [] },
         drafts: [],
+        floor: 'o',
       }),
     ).toBeNull();
     // And the round that lands on zero from above is the clearest possible
@@ -135,6 +143,7 @@ describe('diagnoseConvergence — the trigger table', () => {
         posted: 0,
         prev: { posted: 6, findings: [] },
         drafts: [],
+        floor: 'o',
       }),
     ).toBeNull();
   });
@@ -150,6 +159,7 @@ describe('diagnoseConvergence — the trigger table', () => {
         posted: 4,
         prev: { posted: 0, findings: [] },
         drafts: [d('a.ts')],
+        floor: 'o',
       }),
     ).toBeNull();
     // A genuine flat trend still fires.
@@ -159,6 +169,7 @@ describe('diagnoseConvergence — the trigger table', () => {
         posted: 2,
         prev: { posted: 2, findings: [] },
         drafts: [d('a.ts')],
+        floor: 'o',
       }),
     ).not.toBeNull();
   });
@@ -170,6 +181,7 @@ describe('diagnoseConvergence — the trigger table', () => {
         posted: 9,
         prev: { posted: 5, findings: [] },
         drafts: [d('a.ts')],
+        floor: 'o',
       }),
     ).toBeNull();
   });
@@ -183,6 +195,7 @@ describe('diagnoseConvergence — the trigger table', () => {
         posted: 9,
         prev: { findings: [] },
         drafts: [d('a.ts')],
+        floor: 'o',
       }),
     ).toBeNull();
   });
@@ -199,6 +212,7 @@ describe('diagnoseConvergence — the trigger table', () => {
         posted: 1,
         prev: { posted: 1, findings: [f('R2-1', 'src/parser.ts')] },
         drafts: [d('src/parser.ts', 'R2-1')],
+        floor: 'o',
       }),
     ).toBeNull();
   });
@@ -211,6 +225,7 @@ describe('diagnoseConvergence — the trigger table', () => {
       posted: 2,
       prev: { posted: 1, findings: [f('R2-1', 'src/parser.ts')] },
       drafts: [d('src/parser.ts', 'R2-1'), d('src/parser.ts')],
+      floor: 'o',
     })!;
     expect(r.clusters).toEqual([
       { file: 'src/parser.ts', priorRounds: [2], thisRound: 1 },
@@ -227,6 +242,7 @@ describe('diagnoseConvergence — the trigger table', () => {
       posted: 1,
       prev: { posted: 1, findings: [f('R2-1', 'a.ts')] },
       drafts: [d('a.ts', 'R3-1')],
+      floor: 'o',
     })!;
     expect(r.clusters[0].thisRound).toBe(1);
   });
@@ -245,6 +261,7 @@ describe('diagnoseConvergence — the trigger table', () => {
         ],
       },
       drafts: [d('persistent.ts'), d('busy.ts'), d('busy.ts'), d('quiet.ts')],
+      floor: 'o',
     })!;
     expect(r.clusters.map((c) => c.file)).toEqual([
       'persistent.ts',
@@ -263,8 +280,93 @@ describe('diagnoseConvergence — the trigger table', () => {
       posted: 2,
       prev: { posted: 9, findings: [f('R2-1', 'é.ts'), f('R2-2', 'z.ts')] },
       drafts: [d('é.ts'), d('z.ts')],
+      floor: 'o',
     })!;
     expect(r.clusters.map((c) => c.file)).toEqual(['z.ts', 'é.ts']);
+  });
+
+  it('clusters a real file whose name matches a stand-in', () => {
+    // The stand-ins are legal filenames — git permits `(body)` — so a reader
+    // that excluded them BY VALUE dropped exactly that file from clustering
+    // while claiming to drop a stand-in. The ledger's flag is what separates
+    // them, and a real file carries none.
+    const r = diagnoseConvergence({
+      round: 4,
+      posted: 1,
+      prev: { posted: 9, findings: [f('R2-1', '(body)')] },
+      drafts: [d('(body)')],
+      floor: 'o',
+    })!;
+    expect(r.clusters).toEqual([
+      { file: '(body)', priorRounds: [2], thisRound: 1 },
+    ]);
+  });
+
+  it('fails toward "carried" where the id space collides at the cap', () => {
+    // Consecutive rounds AT `LEDGER_MAX_ROUND` both stamp `R<cap>-*`, so a
+    // re-post is indistinguishable from a fresh finding by its id. The two
+    // errors do not cost the same: calling a re-post fresh narrates
+    // divergence at the steady state every round forever, calling a fresh
+    // finding carried costs one round of silence.
+    expect(
+      diagnoseConvergence({
+        round: LEDGER_MAX_ROUND,
+        posted: 1,
+        prev: {
+          posted: 1,
+          findings: [f(`R${LEDGER_MAX_ROUND}-1`, 'src/p.ts')],
+        },
+        drafts: [d('src/p.ts', `R${LEDGER_MAX_ROUND}-1`)],
+        floor: 'o',
+      }),
+    ).toBeNull();
+    // Below the cap the ids still separate the two, so the strict rule holds.
+    expect(
+      diagnoseConvergence({
+        round: 3,
+        posted: 1,
+        prev: { posted: 1, findings: [f('R2-1', 'src/p.ts')] },
+        drafts: [d('src/p.ts', 'R3-1')],
+        floor: 'o',
+      }),
+    ).not.toBeNull();
+  });
+
+  it('will not read a posture change as loop divergence', () => {
+    // An operator who takes this module's own advice, sets a critical floor,
+    // then restores it produces a volume jump that is a policy change, not a
+    // loop. Firing there would advise re-tightening the floor just
+    // deliberately loosened.
+    expect(
+      diagnoseConvergence({
+        round: 8,
+        posted: 5,
+        prev: { posted: 1, findings: [], floor: 'c' },
+        drafts: [d('a.ts'), d('b.ts')],
+        floor: 'o',
+      }),
+    ).toBeNull();
+    // Same floor, same numbers: a real flat trend still fires.
+    expect(
+      diagnoseConvergence({
+        round: 8,
+        posted: 5,
+        prev: { posted: 1, findings: [], floor: 'o' },
+        drafts: [d('a.ts'), d('b.ts')],
+        floor: 'o',
+      }),
+    ).not.toBeNull();
+    // A predecessor that recorded no floor is not one that differs — a
+    // pre-field marker evaluates exactly as it did before.
+    expect(
+      diagnoseConvergence({
+        round: 8,
+        posted: 5,
+        prev: { posted: 1, findings: [] },
+        drafts: [d('a.ts'), d('b.ts')],
+        floor: 'o',
+      }),
+    ).not.toBeNull();
   });
 
   it('carries the evidence qualifiers through to the rendering', () => {
@@ -278,11 +380,12 @@ describe('diagnoseConvergence — the trigger table', () => {
         foreign: true,
       },
       drafts: [d('a.ts')],
-      criticalFloorInEffect: true,
+      floor: 'o',
+      criticalFloorKind: 'explicit',
     })!;
     expect(r.truncatedEvidence).toBe(true);
     expect(r.foreignEvidence).toBe(true);
-    expect(r.criticalFloorInEffect).toBe(true);
+    expect(r.criticalFloorKind).toBe('explicit');
   });
 
   it('defaults every qualifier to false rather than undefined', () => {
@@ -291,10 +394,11 @@ describe('diagnoseConvergence — the trigger table', () => {
       posted: 1,
       prev: { posted: 9, findings: [f('R2-1', 'a.ts')] },
       drafts: [d('a.ts')],
+      floor: 'o',
     })!;
     expect(r.truncatedEvidence).toBe(false);
     expect(r.foreignEvidence).toBe(false);
-    expect(r.criticalFloorInEffect).toBe(false);
+    expect(r.criticalFloorKind).toBeUndefined();
   });
 });
 
@@ -307,7 +411,6 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
     volumeNotShrinking: true,
     truncatedEvidence: false,
     foreignEvidence: false,
-    criticalFloorInEffect: false,
   };
 
   it('states the measured facts before the reading of them', () => {
@@ -366,7 +469,7 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
     const r = renderConvergenceDiagnosis({
       ...base,
       clusters: [],
-      criticalFloorInEffect: true,
+      criticalFloorKind: 'explicit',
     });
     expect(r.en).not.toContain('dropping this PR');
     expect(r.en).toContain('already at `--severity-floor critical`');
@@ -406,17 +509,49 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
     expect(r.zh).toContain('并非本账号发布的标记');
   });
 
-  it('qualifies only the reading that rests on the previous work list', () => {
-    // The volume trend cites no work list, so a note about how that list was
-    // obtained would attach a caveat to a claim it does not bear on.
-    const r = renderConvergenceDiagnosis({
+  it('qualifies each reading by the evidence that reading rests on', () => {
+    // Truncation affects the WORK LIST only, so it says nothing about a
+    // volume-only reading. Provenance is broader: the previous round's
+    // volume comes from the same marker, and the volume-only branch cites
+    // that number as this loop's own baseline — which is exactly the branch
+    // an attacker-supplied `posted` controls.
+    const volumeOnly = renderConvergenceDiagnosis({
       ...base,
       clusters: [],
       truncatedEvidence: true,
       foreignEvidence: true,
     });
-    expect(r.en).not.toContain('undercount');
-    expect(r.zh).not.toContain('证据说明');
+    expect(volumeOnly.en).not.toContain('undercount');
+    expect(volumeOnly.en).toContain('that volume');
+    expect(volumeOnly.en).toContain('a marker this account did not post');
+    expect(volumeOnly.zh).toContain('该发布量');
+
+    // With no previous volume recovered and no cluster evidence in play,
+    // there is nothing for provenance to qualify.
+    const nothingCited = renderConvergenceDiagnosis({
+      round: 4,
+      posted: 3,
+      clusters: [],
+      volumeNotShrinking: false,
+      truncatedEvidence: true,
+      foreignEvidence: true,
+    });
+    expect(nothingCited.zh).not.toContain('证据说明');
+  });
+
+  it('names an auto-resolved floor as resolved, not as a flag nobody passed', () => {
+    // `auto` is the DEFAULT configuration, and it fails open the moment
+    // context becomes unavailable — so wording it as an explicit setting
+    // both claims a flag that was never passed and overstates how firmly it
+    // holds. The floor-enforcement note in the same body says "resolved".
+    const r = renderConvergenceDiagnosis({
+      ...base,
+      clusters: [],
+      criticalFloorKind: 'auto-resolved',
+    });
+    expect(r.en).toContain('already resolve to a critical posting floor');
+    expect(r.en).not.toContain('--severity-floor critical');
+    expect(r.zh).toContain('已解析为 critical 发布下限');
   });
 
   it('summarises the tail instead of listing every cluster', () => {
@@ -439,7 +574,6 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
       volumeNotShrinking: false,
       truncatedEvidence: false,
       foreignEvidence: false,
-      criticalFloorInEffect: false,
     });
     expect(r.en).toContain('round 4 posted 3 inline comment(s)');
     expect(r.en).not.toContain('the previous round posted');

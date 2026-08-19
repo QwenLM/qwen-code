@@ -5265,9 +5265,37 @@ describe('buildLedger', () => {
         id: 'R3-3',
         sev: 'C',
         file: '(body)',
+        // Structural, so a reader never has to recognise the stand-in by its
+        // text — `(body)` is a filename git permits.
+        k: 'b',
         title: '`src/d.ts` unanchorable blocker',
       },
     ]);
+  });
+
+  it('flags a pathless comment structurally, not by its stand-in text', () => {
+    const l = buildLedger(
+      2,
+      [{ line: 3, body: '**[Suggestion]** arrived without a path' }],
+      [],
+    );
+    expect(l.findings).toEqual([
+      {
+        id: 'R2-1',
+        sev: 'S',
+        file: '(unknown)',
+        k: 'u',
+        line: 3,
+        title: 'arrived without a path',
+      },
+    ]);
+    // A REAL file of that name carries no flag — it is a file.
+    const real = buildLedger(
+      2,
+      [{ path: '(unknown)', line: 3, body: '**[Suggestion]** a real file' }],
+      [],
+    );
+    expect(real.findings[0].k).toBeUndefined();
   });
 
   it('classifies through `severityOf`, whitespace and all', () => {
@@ -9195,8 +9223,80 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     });
     expect(r.body.length).toBeLessThanOrEqual(65536);
     expect(r.body).not.toContain('Convergence:');
-    // A rank-2 disclosure outlives it: the ladder reached this far and the
-    // paragraph went first.
+    // A lower-ranked disclosure outlives it: the ladder reached this far and
+    // the paragraph went first.
     expect(r.body).toContain('Not reviewed:');
+    // And the notice names what ACTUALLY went. Every notice surface keys on
+    // the rank, so sharing a rank with the deferral list made a round that
+    // shed only this paragraph announce a deferred-findings list that never
+    // existed and point the author at artifact entries that do not exist.
+    expect(r.body).toContain('the convergence observation');
+    expect(r.body).not.toContain('the deferred-findings list');
+    expect(r.body).not.toContain('findings artifact');
+    expect(r.bodyTrim.deferralList).toBe(false);
+  });
+
+  it('stamps the posting floor this round ran under beside its volume', () => {
+    // The next round measures its volume against this one's. Without the
+    // posture that produced it, a floor change reads as a loop that will not
+    // settle — and the advice then recommends re-tightening a floor the
+    // operator deliberately loosened.
+    const open = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: [
+        { path: 'a.ts', line: 1, body: '**[Suggestion]** one' },
+      ],
+    });
+    expect(parseLedger(open.body)?.floor).toBe('o');
+
+    const critical = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      severityFloor: 'critical',
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [{ path: 'a.ts', line: 1, body: '**[Critical]** boom' }],
+    });
+    expect(parseLedger(critical.body)?.floor).toBe('c');
+  });
+
+  it('will not narrate a floor change as a loop that is not settling', () => {
+    // The previous round ran under a critical floor and posted one comment;
+    // the floor is restored and this round posts five. That jump is policy,
+    // not loop behaviour.
+    sideFile({ round: 7, posted: 1, floor: 'c', findings: [] });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 5,
+      draftedComments: Array.from({ length: 5 }, (_, i) => ({
+        path: `f${i}.ts`,
+        line: 1,
+        body: `**[Suggestion]** ${i}`,
+      })),
+    });
+    expect(r.body).not.toContain('Convergence:');
+  });
+
+  it('names an auto-resolved floor the way the enforcement note does', () => {
+    // `auto` is the DEFAULT, so the explicit-flag wording claims a flag that
+    // was never passed — beside a floor-enforcement note in the same body
+    // that calls it the RESOLVED floor.
+    sideFile({ round: 5, posted: 1, floor: 'c', findings: [] });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      severityFloor: 'auto',
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [{ path: 'a.ts', line: 1, body: '**[Critical]** boom' }],
+    });
+    expect(r.body).toContain('The posting volume is not falling.');
+    expect(r.body).toContain('already resolve to a critical posting floor');
+    expect(r.body).not.toContain('--severity-floor critical');
   });
 });
