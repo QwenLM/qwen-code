@@ -94,23 +94,13 @@ vi.mock('../../config/settings.js', async (importOriginal) => {
   };
 });
 
-describe('tokenizeArgs', () => {
-  it('splits on whitespace and collapses runs', () => {
-    expect(tokenizeArgs('  6711   --comment ')).toEqual(['6711', '--comment']);
-  });
-
-  it('honours double- and single-quoted segments', () => {
-    expect(tokenizeArgs('"src/my file.ts" --effort low')).toEqual([
-      'src/my file.ts',
-      '--effort',
-      'low',
-    ]);
-    expect(tokenizeArgs("'a b' c")).toEqual(['a b', 'c']);
-  });
-
-  it('returns an empty list for an empty string', () => {
-    expect(tokenizeArgs('')).toEqual([]);
-    expect(tokenizeArgs('   ')).toEqual([]);
+describe('tokenizeArgs re-export', () => {
+  // The tokenizer's own suite is collocated at utils/shell-args.test.ts;
+  // this gate pins the re-export so the shared home cannot move without a
+  // test noticing.
+  it('is the shared utils/shell-args implementation', async () => {
+    const shared = await import('../../utils/shell-args.js');
+    expect(tokenizeArgs).toBe(shared.tokenizeArgs);
   });
 });
 
@@ -1482,8 +1472,8 @@ describe('parse-args warns when the bundle is not built from these sources', () 
   it('names the cause when the roots hold nothing the digest admits', () => {
     // A root that exists but holds only test files measures zero digested
     // files. That is "nothing found", not "something unreadable", and the
-    // docstring promises each unmeasurable case names itself. The other three
-    // roots come out of the fixture too, so the zero is complete, not the
+    // docstring promises each unmeasurable case names itself. Every other
+    // root comes out of the fixture too, so the zero is complete, not the
     // partial-checkout case.
     stamp(FOREIGN_DIGEST);
     const reviewDir = join(
@@ -1509,6 +1499,10 @@ describe('parse-args warns when the bundle is not built from these sources', () 
         'review-worktree-lease.ts',
       ),
     );
+    fsReal.rmSync(join(repo, 'packages', 'cli', 'src', 'utils'), {
+      recursive: true,
+      force: true,
+    });
     fsReal.rmSync(join(repo, 'packages', 'core'), {
       recursive: true,
       force: true,
@@ -1573,5 +1567,70 @@ describe('parse-args warns when the bundle is not built from these sources', () 
     stamp(FOREIGN_DIGEST);
     run();
     expect(writeStdoutLine).toHaveBeenCalled();
+  });
+});
+
+describe('--resume', () => {
+  it('is effective on a PR target', () => {
+    const r = parseReviewArgs('6711 --resume');
+    expect(r.resume).toEqual({ requested: true, effective: true });
+    expect(r.warnings).toEqual([]);
+  });
+
+  it('is effective on a PR URL target', () => {
+    const r = parseReviewArgs(
+      'https://github.com/QwenLM/qwen-code/pull/6711 --resume',
+    );
+    expect(r.resume).toEqual({ requested: true, effective: true });
+  });
+
+  it('is ignored with a warning on a local target', () => {
+    const r = parseReviewArgs('--resume');
+    expect(r.resume).toEqual({ requested: true, effective: false });
+    expect(r.warnings.some((w) => w.includes('`--resume`'))).toBe(true);
+  });
+
+  it('is ignored with a warning on a FILE target too', () => {
+    // The other member of the `!isPr` class, which SKILL.md names alongside
+    // local. A gate written as `target.type !== 'local'` reports the flag
+    // effective here — on a target shape with no `fetch-pr` call to consume
+    // it — and every local-target test stays green.
+    const r = parseReviewArgs('src/foo.ts --resume');
+    expect(r.resume).toEqual({ requested: true, effective: false });
+    expect(r.warnings.some((w) => w.includes('`--resume`'))).toBe(true);
+  });
+
+  it('is absent by default', () => {
+    const r = parseReviewArgs('6711');
+    expect(r.resume).toEqual({ requested: false, effective: false });
+  });
+
+  it('keeps an explicit effort untouched on the EFFECTIVE path', () => {
+    // The missing corner of the matrix: the other three cells are covered,
+    // and this is the one an effort-forcing mutation on the effective path
+    // would slip through — the shape the sibling `--comment` bug took when
+    // it shipped.
+    const r = parseReviewArgs('6711 --resume --effort low');
+    expect(r.resume).toEqual({ requested: true, effective: true });
+    expect(r.effort).toBe('low');
+    expect(r.effortSource).toBe('explicit');
+  });
+
+  it('does not change the effort resolution', () => {
+    const r = parseReviewArgs('6711 --resume');
+    expect(r.effort).toBe('high'); // the PR default, not a resume effect
+    expect(r.effortSource).toBe('default');
+  });
+
+  it('an IGNORED --resume must not change the effort either', () => {
+    // The sibling `--comment` has this test because the bug shipped once:
+    // a flag ignored for the target still forced the level.
+    const r = parseReviewArgs('--resume --effort low');
+    expect(r.resume).toEqual({ requested: true, effective: false });
+    expect(r.effort).toBe('low');
+    expect(r.effortSource).toBe('explicit');
+    const d = parseReviewArgs('--resume');
+    expect(d.effort).toBe('medium'); // the local default, untouched
+    expect(d.effortSource).toBe('default');
   });
 });

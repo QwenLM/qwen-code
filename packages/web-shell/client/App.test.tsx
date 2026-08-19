@@ -10397,6 +10397,55 @@ describe('App session callbacks', () => {
     expect(testState.latestToolApprovalKeyboardActive).toBe(true);
   });
 
+  it('hides the composer while a tool approval overlay is pending and restores it after resolution', async () => {
+    const { container, rerender } = renderApp();
+    await flush();
+
+    const composerWrapper = () =>
+      container.querySelector('[data-web-shell-composer]')?.parentElement;
+    expect(composerWrapper()?.className).not.toContain('composerHidden');
+
+    await act(async () => {
+      testState.blocks = [makePendingPermissionBlock()];
+      rerender();
+      await Promise.resolve();
+    });
+    expect(
+      document.querySelector('[data-testid="approval-overlay"]'),
+    ).not.toBeNull();
+    expect(composerWrapper()?.className).toContain('composerHidden');
+
+    await act(async () => {
+      testState.blocks = [];
+      rerender();
+      await Promise.resolve();
+    });
+    expect(
+      document.querySelector('[data-testid="approval-overlay"]'),
+    ).toBeNull();
+    expect(composerWrapper()?.className).not.toContain('composerHidden');
+  });
+
+  it('hides the composer while an ask-user question overlay is pending', async () => {
+    const { container, rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.blocks = [
+        makePendingPermissionBlock({ toolName: 'ask_user_question' }),
+      ];
+      rerender();
+      await Promise.resolve();
+    });
+    expect(
+      document.querySelector('[data-testid="approval-overlay"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-composer]')?.parentElement
+        ?.className,
+    ).toContain('composerHidden');
+  });
+
   it('does not show missing-session state for non-404/410 errors', async () => {
     mockConnection.status = 'disconnected';
     mockConnection.sessionId = undefined;
@@ -14030,6 +14079,7 @@ describe('App session callbacks', () => {
     });
     expect(sessionCatalogController.turnCompleted).toHaveBeenCalledWith(
       '/tmp/project',
+      'session-1',
     );
 
     onSessionChange.mockClear();
@@ -14084,6 +14134,7 @@ describe('App session callbacks', () => {
 
     expect(sessionCatalogController.turnCompleted).toHaveBeenCalledWith(
       '/tmp/project',
+      'session-late',
     );
     expect(onSessionChange).toHaveBeenCalledWith(
       expect.objectContaining({

@@ -42,6 +42,10 @@ export default defineConfig({
         __dirname,
         '../packages/sdk-typescript/dist/daemon/transports.js',
       ),
+      '@qwen-code/sdk/daemon/transcript': resolve(
+        __dirname,
+        '../packages/sdk-typescript/dist/daemon/transcript.js',
+      ),
       '@qwen-code/sdk/daemon': resolve(
         __dirname,
         '../packages/sdk-typescript/dist/daemon/index.js',
