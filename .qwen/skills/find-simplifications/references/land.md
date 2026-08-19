@@ -13,14 +13,21 @@ Stop and say why if any fails:
   no PR.
 - The id is not tombstoned.
 - The candidate is in landable territory (SKILL.md § Territory).
-- You are on a fresh branch off current `origin/main`, named
-  `simplify/<id>`, and no other `simplify/*` PR is open.
+- You are on a fresh branch off current `origin/main` — cut only after a
+  successful `git fetch origin || exit 1` — named `simplify/<id>`, and no
+  other `simplify/*` PR is open. Without the fetch, `git checkout -b` succeeds
+  against the stale cached ref exactly as `git worktree add` does in
+  `references/survey.md` § 0, and §1 below then re-certifies the survey's own
+  base as if it were current. Assent commonly arrives days or weeks after the
+  survey, so that drift is the design norm, not an edge case.
 
 ## 1 — Re-verify before touching anything
 
 The evidence was proven against the survey's base, which has since moved.
 Re-run the proof protocol's steps 2 through 5 (`references/survey.md` § 3)
-against the branch base. If a consumer now exists, or the surface has changed
+against the branch base — which is current `origin/main` only because the
+precondition above fetched first; against a stale ref every step re-passes
+vacuously. If a consumer now exists, or the surface has changed
 shape, **the candidate is stale**: record that on the ledger and stop. Do not
 adapt the deletion to fit new code.
 
