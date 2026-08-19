@@ -386,6 +386,161 @@ describe('updateConnectionFromDaemonEvent', () => {
     expect(selectGoalState(cleared, active)).toBe(cleared);
   });
 
+  it('does not resurrect a replaced Goal from a stale snapshot', () => {
+    // A replacement mints a new goalId and `goal-runtime` sends no
+    // `clearedGoal` tombstone for it, so the replaced goal's ordering identity
+    // is the only thing that can reject its late frames.
+    const replaced = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: 'goal-a',
+        revision: 4,
+        objective: 'first objective',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-a' },
+        turnCount: 2,
+        activeTimeMs: 2_000,
+        createdAt: 10,
+        updatedAt: 30,
+      },
+    };
+    const replacement = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: 'goal-b',
+        revision: 1,
+        objective: 'replacement objective',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-b' },
+        turnCount: 0,
+        activeTimeMs: 0,
+        createdAt: 40,
+        updatedAt: 50,
+      },
+    };
+
+    const current = selectGoalState(replaced, replacement);
+    expect(current).toBe(replacement);
+    expect(selectGoalState(current, replaced)).toBe(current);
+  });
+
+  it('keeps rejecting a replaced Goal across further replacements', () => {
+    const first = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: 'goal-a',
+        revision: 4,
+        objective: 'first objective',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-a' },
+        turnCount: 2,
+        activeTimeMs: 2_000,
+        createdAt: 10,
+        updatedAt: 30,
+      },
+    };
+    const second = {
+      ...first,
+      goal: {
+        ...first.goal,
+        goalId: 'goal-b',
+        revision: 1,
+        objective: 'second objective',
+        updatedAt: 50,
+      },
+    };
+    const third = {
+      ...first,
+      goal: {
+        ...first.goal,
+        goalId: 'goal-c',
+        revision: 1,
+        objective: 'third objective',
+        updatedAt: 70,
+      },
+    };
+
+    const current = selectGoalState(selectGoalState(first, second), third);
+    expect(current).toBe(third);
+    expect(selectGoalState(current, first)).toBe(current);
+    expect(selectGoalState(current, second)).toBe(current);
+  });
+
+  it('does not resurrect a cleared Goal after a new Goal starts', () => {
+    const active = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: 'goal-1',
+        revision: 7,
+        objective: 'ship safely',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 3,
+        activeTimeMs: 4_000,
+        createdAt: 10,
+        updatedAt: 30,
+      },
+    };
+    const cleared = selectGoalState(active, {
+      v: 2,
+      goal: null,
+      activity: 'idle',
+    });
+    const next = selectGoalState(cleared, {
+      ...active,
+      goal: {
+        ...active.goal,
+        goalId: 'goal-2',
+        revision: 1,
+        objective: 'next objective',
+        updatedAt: 60,
+      },
+    });
+
+    // The cleared goal's identity survives the new goal, so a frame the daemon
+    // emitted before the clear cannot come back over it.
+    expect(selectGoalState(next, active)).toBe(next);
+  });
+
+  it('accepts a superseded Goal again when the daemon advances its revision', () => {
+    const first = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: 'goal-a',
+        revision: 4,
+        objective: 'first objective',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-a' },
+        turnCount: 2,
+        activeTimeMs: 2_000,
+        createdAt: 10,
+        updatedAt: 30,
+      },
+    };
+    const second = {
+      ...first,
+      goal: {
+        ...first.goal,
+        goalId: 'goal-b',
+        revision: 1,
+        objective: 'second objective',
+        updatedAt: 50,
+      },
+    };
+    const revived = {
+      ...first,
+      goal: { ...first.goal, revision: 5, updatedAt: 80 },
+    };
+
+    const current = selectGoalState(first, second);
+    expect(selectGoalState(current, revived)).toBe(revived);
+  });
+
   it('does not apply a delayed clear tombstone to a replacement Goal', () => {
     const replacement = {
       v: 2 as const,

@@ -1784,22 +1784,32 @@ export function createDaemonSessionActions({
         'Load goal failed',
         'load_goal',
       );
+      // A read the daemon answered while goal-less can resolve after a
+      // concurrent create; its bare-null snapshot carries no `clearedGoal`
+      // tombstone, so reconciling it would wipe the new goal. Stamp the read
+      // with the goal observed at issue time: a bare-null response may only
+      // clear the goal it actually observed.
+      const observedGoalId = getConnection().goalState?.goal?.goalId;
       try {
         const response = await withActionTimeout(
           session.goal(),
           'Load goal timed out',
         );
-        setConnection((current) =>
-          current.sessionId === session.sessionId
-            ? {
-                ...current,
-                goalState: selectGoalState(
-                  current.goalState,
-                  response.snapshot,
-                ),
-              }
-            : current,
-        );
+        setConnection((current) => {
+          if (current.sessionId !== session.sessionId) return current;
+          if (
+            response.snapshot.goal === null &&
+            !response.snapshot.clearedGoal &&
+            current.goalState?.goal &&
+            current.goalState.goal.goalId !== observedGoalId
+          ) {
+            return current;
+          }
+          return {
+            ...current,
+            goalState: selectGoalState(current.goalState, response.snapshot),
+          };
+        });
         return response;
       } catch (error) {
         throw dispatchActionError(

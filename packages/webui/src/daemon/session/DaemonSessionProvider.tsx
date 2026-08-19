@@ -64,6 +64,7 @@ import {
   mapSessionContextReasoning,
   mapSupportedCommands,
   mapWorkspaceSkills,
+  selectGoalState,
   updateConnectionFromDaemonEvent,
 } from './mappers.js';
 import {
@@ -1881,13 +1882,19 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           const goalState =
             goalResult.status === 'fulfilled'
               ? goalResult.value.snapshot
-              : goalStateAtLoadStart === undefined
-                ? ({
-                    v: 2,
-                    goal: null,
-                    activity: 'idle',
-                  } satisfies GoalSnapshotV2)
-                : undefined;
+              : undefined;
+          // A failed goal fetch on a session with no known state still needs a
+          // snapshot so consumers stop treating the state as hydrating; it must
+          // never reconcile against a state a frame installed meanwhile.
+          const goalStateFallback =
+            goalResult.status === 'fulfilled' ||
+            goalStateAtLoadStart !== undefined
+              ? undefined
+              : ({
+                  v: 2,
+                  goal: null,
+                  activity: 'idle',
+                } satisfies GoalSnapshotV2);
           const loadWarningTexts = [
             providerResult?.status === 'rejected'
               ? loadWarningsRef.current?.models
@@ -1977,10 +1984,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               context: configSnapshotCurrent
                 ? (context ?? current.context)
                 : current.context,
-              goalState:
-                current.goalState === goalStateAtLoadStart
-                  ? (goalState ?? current.goalState)
-                  : current.goalState,
+              // Reconcile rather than reference-compare: the load response and
+              // any frame that arrived during the load window share a revision
+              // domain, and routing through `selectGoalState` is what registers
+              // the cleared-goal tombstone that keeps a later stale frame from
+              // resurrecting a cleared goal.
+              goalState: goalState
+                ? selectGoalState(current.goalState, goalState)
+                : (current.goalState ?? goalStateFallback),
               gitBranch:
                 gitResult.status === 'fulfilled'
                   ? gitBranch

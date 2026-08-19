@@ -4,6 +4,7 @@ import {
   DaemonPendingPromptLimitError,
   type DaemonCapabilities,
   type DaemonSessionClient,
+  type GoalSnapshotV2,
 } from '@qwen-code/sdk/daemon';
 import {
   createDaemonSessionActions,
@@ -1123,6 +1124,87 @@ describe('createDaemonSessionActions', () => {
     });
 
     expect(getConnection().goalState).toBe(current);
+  });
+
+  it('does not let a stale bare-null Goal read wipe a Goal created meanwhile', async () => {
+    // The daemon answered the read while the session was goal-less, so the
+    // response carries no `clearedGoal` tombstone. Reconciling it against the
+    // goal created while it was in flight would clear that goal outright.
+    const session = createMockSession('session-a');
+    let resolveRead:
+      | ((value: { snapshot: GoalSnapshotV2 }) => void)
+      | undefined;
+    session.goal.mockReturnValue(
+      new Promise<{ snapshot: GoalSnapshotV2 }>((resolve) => {
+        resolveRead = resolve;
+      }),
+    );
+    const { actions, getConnection, replaceConnection } = createActionsHarness({
+      connection: { status: 'connected', sessionId: 'session-a' },
+      session,
+    });
+
+    const read = actions.getGoal();
+    const created: GoalSnapshotV2 = {
+      v: 2,
+      activity: 'running',
+      goal: {
+        goalId: 'goal-new',
+        revision: 1,
+        objective: 'ship safely',
+        status: 'active',
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 0,
+        activeTimeMs: 0,
+        createdAt: 10,
+        updatedAt: 20,
+      },
+    };
+    replaceConnection({
+      status: 'connected',
+      sessionId: 'session-a',
+      goalState: created,
+    });
+    resolveRead?.({ snapshot: { v: 2, goal: null, activity: 'idle' } });
+    await read;
+
+    expect(getConnection().goalState).toBe(created);
+  });
+
+  it('applies a bare-null Goal read to the Goal it observed', async () => {
+    // Same shape, but nothing changed while the read was in flight: an older
+    // daemon that clears without a tombstone must still clear the UI.
+    const session = createMockSession('session-a');
+    const active: GoalSnapshotV2 = {
+      v: 2,
+      activity: 'running',
+      goal: {
+        goalId: 'goal-1',
+        revision: 7,
+        objective: 'ship safely',
+        status: 'active',
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 3,
+        activeTimeMs: 4_000,
+        createdAt: 10,
+        updatedAt: 30,
+      },
+    };
+    session.goal.mockResolvedValue({
+      snapshot: { v: 2, goal: null, activity: 'idle' },
+    });
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        goalState: active,
+      },
+      session,
+    });
+
+    await actions.getGoal();
+
+    expect(getConnection().goalState?.goal).toBeNull();
   });
 
   it('uploads prompt images and submits media references instead of base64', async () => {

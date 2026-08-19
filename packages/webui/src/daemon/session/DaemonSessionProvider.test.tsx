@@ -1610,6 +1610,72 @@ describe('DaemonSessionProvider', () => {
     expect(connection?.goalState).toBe(streamedGoal);
   });
 
+  it('applies a cleared session-load Goal snapshot over a stale active one', async () => {
+    // The load-time `goal()` is issued before the state below is installed, so
+    // a reference-equality guard would discard its authoritative cleared
+    // snapshot — and install no tombstone, leaving the stale goal to come back.
+    const pendingGoal = createDeferred<GoalStateResponse>();
+    const staleActive: GoalStateResponse['snapshot'] = {
+      v: 2,
+      activity: 'running',
+      goal: {
+        goalId: 'goal-stale',
+        revision: 1,
+        objective: 'stale objective',
+        status: 'active',
+        evidenceCursor: { recordId: 'goal-record' },
+        turnCount: 1,
+        activeTimeMs: 10,
+        createdAt: 1234,
+        updatedAt: 2345,
+      },
+    };
+    sdkMocks.sessions.push(
+      createMockSession({
+        goal: vi.fn(() => pendingGoal.promise),
+        controlGoal: vi.fn(async () => ({ snapshot: staleActive })),
+      }),
+    );
+    let connection: DaemonConnectionState | undefined;
+    let actions: DaemonSessionActions | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      actions = useDaemonActions();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: false,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    await act(async () => {
+      await actions?.controlGoal({
+        action: 'pause',
+        expectedGoalId: 'goal-stale',
+        expectedRevision: 1,
+      });
+    });
+    expect(connection?.goalState).toBe(staleActive);
+
+    pendingGoal.resolve({
+      snapshot: {
+        v: 2,
+        goal: null,
+        activity: 'idle',
+        clearedGoal: { goalId: 'goal-stale', revision: 3, updatedAt: 4567 },
+      },
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(connection?.goalState?.goal).toBeNull();
+  });
+
   it('releases unknown Goal state when the session-load Goal request fails', async () => {
     sdkMocks.sessions.push(
       createMockSession({

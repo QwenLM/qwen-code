@@ -366,6 +366,10 @@ export function selectGoalState(
   current: GoalSnapshotV2 | undefined,
   incoming: GoalSnapshotV2,
 ): GoalSnapshotV2 {
+  const supersededByCurrent = current
+    ? supersededGoals.get(current)
+    : undefined;
+  let displacedGoal: GoalOrderIdentity | undefined;
   if (incoming.goal === null) {
     const clearedGoal =
       incoming.clearedGoal ??
@@ -381,21 +385,30 @@ export function selectGoalState(
       ) {
         return current;
       }
-      clearedGoalOrder.set(incoming, {
+      displacedGoal = {
         goalId: clearedGoal.goalId,
         revision: clearedGoal.revision,
         updatedAt: clearedGoal.updatedAt,
-      });
+      };
+      clearedGoalOrder.set(incoming, displacedGoal);
     }
   }
   if (current?.goal === null && incoming.goal) {
     const clearedGoal = clearedGoalOrder.get(current);
     if (
       clearedGoal?.goalId === incoming.goal.goalId &&
-      (incoming.goal.revision < clearedGoal.revision ||
-        (incoming.goal.revision === clearedGoal.revision &&
-          incoming.goal.updatedAt <= clearedGoal.updatedAt))
+      isSupersededGoalFrame(clearedGoal, incoming.goal)
     ) {
+      return current;
+    }
+  }
+  if (current && incoming.goal) {
+    // A goal this session already cleared or replaced must not come back over
+    // its successor. `goal-runtime` attaches `clearedGoal` only to a clear, so
+    // for a replacement this ledger is the sole ordering identity a
+    // different-goalId frame can be judged against.
+    const superseded = supersededByCurrent?.get(incoming.goal.goalId);
+    if (superseded && isSupersededGoalFrame(superseded, incoming.goal)) {
       return current;
     }
   }
@@ -409,14 +422,82 @@ export function selectGoalState(
   ) {
     return current;
   }
+  if (
+    current?.goal &&
+    incoming.goal &&
+    current.goal.goalId !== incoming.goal.goalId
+  ) {
+    displacedGoal = {
+      goalId: current.goal.goalId,
+      revision: current.goal.revision,
+      updatedAt: current.goal.updatedAt,
+    };
+  }
+  rememberSupersededGoals(incoming, supersededByCurrent, displacedGoal);
   // Null and different-goal snapshots have no shared revision domain, so keep
   // their existing transport arrival-order semantics.
   return incoming;
 }
 
-const clearedGoalOrder = new WeakMap<
+interface GoalOrderIdentity {
+  goalId: string;
+  revision: number;
+  updatedAt: number;
+}
+
+/** True when `goal` is at or behind an identity the session already superseded. */
+function isSupersededGoalFrame(
+  superseded: GoalOrderIdentity,
+  goal: { revision: number; updatedAt: number },
+): boolean {
+  return (
+    goal.revision < superseded.revision ||
+    (goal.revision === superseded.revision &&
+      goal.updatedAt <= superseded.updatedAt)
+  );
+}
+
+/**
+ * Carry the superseded-goal ledger forward onto the accepted snapshot, adding
+ * the goal this snapshot displaces. The ledger is bounded: a session replaces
+ * goals a handful of times, and only the most recent identities can still have
+ * frames in flight.
+ */
+function rememberSupersededGoals(
+  snapshot: GoalSnapshotV2,
+  inherited: ReadonlyMap<string, GoalOrderIdentity> | undefined,
+  displaced: GoalOrderIdentity | undefined,
+): void {
+  if (!inherited && !displaced) return;
+  const next = new Map(inherited ?? []);
+  // An accepted goal is live again (a newer revision cleared the guard above),
+  // so its stale identity no longer applies.
+  if (snapshot.goal) next.delete(snapshot.goal.goalId);
+  if (displaced) {
+    next.delete(displaced.goalId);
+    next.set(displaced.goalId, displaced);
+  }
+  while (next.size > MAX_SUPERSEDED_GOALS) {
+    const oldest = next.keys().next();
+    if (oldest.done) break;
+    next.delete(oldest.value);
+  }
+  if (next.size === 0) return;
+  supersededGoals.set(snapshot, next);
+}
+
+const MAX_SUPERSEDED_GOALS = 8;
+
+const clearedGoalOrder = new WeakMap<GoalSnapshotV2, GoalOrderIdentity>();
+
+/**
+ * Identities of goals a snapshot has superseded (cleared or replaced),
+ * inherited forward so a late frame from any of them cannot resurrect over the
+ * goal that displaced it.
+ */
+const supersededGoals = new WeakMap<
   GoalSnapshotV2,
-  { goalId: string; revision: number; updatedAt: number }
+  ReadonlyMap<string, GoalOrderIdentity>
 >();
 
 function getGoalState(
