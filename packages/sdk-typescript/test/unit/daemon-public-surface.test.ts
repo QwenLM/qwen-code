@@ -20,6 +20,7 @@ import {
 // gap that two-layer SDK re-exports are easy to drift on.
 import type {
   DaemonClient,
+  WorkspaceDaemonClient,
   DaemonClientEvictedData,
   DaemonClientEvictedEvent,
   DaemonChannelControlState,
@@ -86,6 +87,10 @@ import type {
   DaemonSkillBatchToggleErrorCode,
   DaemonSkillBatchToggleItem,
   DaemonSkillBatchToggleResult,
+  ExtensionDefaultActivationBatchItem,
+  ExtensionMutationResponse,
+  ExtensionWorkspaceActivationBatchItem,
+  ExtensionWorkspaceBatchActivationState,
   DaemonSessionRecordingDegradedData,
   DaemonSessionRecordingDegradedEvent,
   DaemonSessionUpdateData,
@@ -324,6 +329,60 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
       reason?: 'not_user_invocable' | 'inactive_extension' | 'locked';
       lockedScope?: 'system' | 'user' | 'systemDefaults';
     }>();
+    expect(
+      typeof Public.DaemonClient.prototype.setExtensionDefaultActivations,
+    ).toBe('function');
+    expect(
+      typeof Public.WorkspaceDaemonClient.prototype.setExtensionActivations,
+    ).toBe('function');
+    expectTypeOf<
+      Awaited<ReturnType<DaemonClient['setExtensionDefaultActivations']>>
+    >().toEqualTypeOf<ExtensionMutationResponse>();
+    expectTypeOf<
+      Awaited<ReturnType<WorkspaceDaemonClient['setExtensionActivations']>>
+    >().toEqualTypeOf<ExtensionMutationResponse>();
+    expectTypeOf<
+      Parameters<DaemonClient['setExtensionDefaultActivations']>
+    >().toEqualTypeOf<
+      [
+        extensionNames: readonly string[],
+        state: 'enabled' | 'disabled',
+        clientId?: string,
+      ]
+    >();
+    expectTypeOf<
+      Parameters<WorkspaceDaemonClient['setExtensionActivations']>
+    >().toEqualTypeOf<
+      [
+        extensionNames: readonly string[],
+        state: ExtensionWorkspaceBatchActivationState,
+        clientId?: string,
+      ]
+    >();
+    expectTypeOf<ExtensionWorkspaceBatchActivationState>().toEqualTypeOf<
+      'enabled' | 'disabled' | 'inherit'
+    >();
+    expectTypeOf<ExtensionDefaultActivationBatchItem>().toEqualTypeOf<{
+      name: string;
+      defaultActivation: 'enabled' | 'disabled';
+    }>();
+    expectTypeOf<ExtensionWorkspaceActivationBatchItem>().toEqualTypeOf<{
+      name: string;
+      workspaceActivation: 'enabled' | 'disabled' | null;
+      effectiveActivation: 'enabled' | 'disabled';
+    }>();
+    expectTypeOf<
+      NonNullable<
+        NonNullable<
+          Awaited<ReturnType<DaemonClient['extensionOperation']>>['result']
+        >['results']
+      >
+    >().toEqualTypeOf<
+      Array<
+        | ExtensionDefaultActivationBatchItem
+        | ExtensionWorkspaceActivationBatchItem
+      >
+    >();
     // `GET /daemon/status` report surface (PR 5174 client coverage): the
     // envelope plus the sub-shapes UI dashboards need to type against.
     expectTypeOf<DaemonStatusReport>().not.toBeNever();
