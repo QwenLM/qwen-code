@@ -8,7 +8,21 @@ import { createHash } from 'node:crypto';
 import type { Stats } from 'node:fs';
 import { lstat, mkdir, realpath } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { hasVerifiableInode } from '@qwen-code/qwen-code-core';
+
+/**
+ * True iff `ino` can be used as proof of file identity.
+ *
+ * FAT/exFAT and some SMB-style filesystems do not expose inode numbers and
+ * report `Stats.ino === 0` for every entry, so comparing by `dev:ino` there
+ * collapses unrelated directories onto one identity.
+ *
+ * This restates core's `hasVerifiableInode()` rather than importing it: this
+ * module is reachable from the serve pre-listen fast path, and importing the
+ * core package barrel pulls its whole module graph into that bundle closure.
+ */
+function hasVerifiableInode(ino: number): boolean {
+  return Number(ino) !== 0;
+}
 
 export interface ConversationRootIdentity {
   readonly configuredRoot: string;
