@@ -3225,8 +3225,8 @@ describe('Session', () => {
       expect(() => session.restoreHistory([])).toThrow(
         'Cannot restore history while a prompt is running',
       );
-      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
-      expect(mockChat.setHistory).not.toHaveBeenCalled();
+      expect(mockGeminiClient.truncateHistory).not.toHaveBeenCalled();
+      expect(mockGeminiClient.setHistory).not.toHaveBeenCalled();
     });
 
     it('rejects history mutation while close is in progress', () => {
