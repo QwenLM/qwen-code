@@ -6378,6 +6378,7 @@ describe('CoreToolScheduler', () => {
         isInteractive: () => true,
         getMessageBus: vi.fn().mockReturnValue(undefined),
         getDisableAllHooks: vi.fn().mockReturnValue(true),
+        getDisabledTools: vi.fn().mockReturnValue(new Set<string>()),
       } as unknown as Config;
 
       const scheduler = new CoreToolScheduler({
@@ -6391,9 +6392,55 @@ describe('CoreToolScheduler', () => {
         await (scheduler as any).getToolNotFoundMessage('list_directory');
       expect(message).toContain('disabled by default');
       expect(message).toContain('tools.listDirectory.enabled');
-      expect(message).toContain('coreTools');
+      // The coreTools allowlist advice is deliberately absent: setting
+      // tools.core to ["list_directory"] alone would exclude every other tool.
+      expect(message).not.toContain('coreTools');
       // The generic Levenshtein path would suggest unrelated tools instead.
       expect(message).not.toContain('Did you mean');
+
+      // Alias forms resolve to the same explanation instead of falling
+      // through to the Levenshtein path.
+      for (const alias of ['ListFiles', 'ReadFolder']) {
+        const aliasMessage =
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          await (scheduler as any).getToolNotFoundMessage(alias);
+        expect(aliasMessage).toContain('disabled by default');
+        expect(aliasMessage).toContain('tools.listDirectory.enabled');
+        expect(aliasMessage).not.toContain('Did you mean');
+      }
+    });
+
+    it('should attribute a missing list_directory to the workspace tools toggle when it is disabled there', async () => {
+      const mockToolRegistry = {
+        getAllToolNames: () => ['glob', 'read_file'],
+        getTool: () => undefined,
+        ensureTool: async () => undefined,
+      } as unknown as ToolRegistry;
+
+      const mockConfig = {
+        getToolRegistry: () => mockToolRegistry,
+        getUseModelRouter: () => false,
+        getGeminiClient: () => null,
+        getPermissionsDeny: () => undefined,
+        isInteractive: () => true,
+        getMessageBus: vi.fn().mockReturnValue(undefined),
+        getDisableAllHooks: vi.fn().mockReturnValue(true),
+        getDisabledTools: vi
+          .fn()
+          .mockReturnValue(new Set<string>(['list_directory'])),
+      } as unknown as Config;
+
+      const scheduler = new CoreToolScheduler({
+        config: mockConfig,
+        getPreferredEditor: () => 'vscode',
+        onEditorClose: vi.fn(),
+      });
+
+      const message =
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await (scheduler as any).getToolNotFoundMessage('list_directory');
+      expect(message).toContain('disabled for this workspace');
+      expect(message).not.toContain('disabled by default');
     });
   });
 

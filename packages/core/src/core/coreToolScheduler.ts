@@ -64,6 +64,7 @@ import type {
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { ToolNames, canonicalToolName } from '../tools/tool-names.js';
+import { resolveToolName } from '../permissions/rule-parser.js';
 import { PLAN_EXIT_APPROVED_LLM_CONTENT_PREFIXES } from '../tools/exitPlanMode.js';
 import { approvedPlanRedactionText } from './geminiChat.js';
 import * as fsSync from 'node:fs';
@@ -2111,9 +2112,14 @@ export class CoreToolScheduler {
 
     // `list_directory` is an opt-in built-in: absent here means it was never
     // registered, so say how to turn it on instead of suggesting unrelated
-    // tools by edit distance.
-    if (unknownToolName === ToolNames.LS) {
-      return `Tool "${unknownToolName}" is a built-in tool that is disabled by default because glob covers directory listing in most cases. Enable it with the tools.listDirectory.enabled setting, or by adding it to the coreTools allowlist. Use glob instead.`;
+    // tools by edit distance. Resolve aliases (`ListFiles`, `ReadFolder`, ...)
+    // so an aliased call gets the same explanation.
+    const canonicalName = resolveToolName(unknownToolName);
+    if (canonicalName === ToolNames.LS) {
+      if (this.config.getDisabledTools().has(canonicalName)) {
+        return `Tool "${unknownToolName}" has been disabled for this workspace via the workspace tools toggle. Re-enable it there; the tools.listDirectory.enabled setting only controls whether the tool is registered by default.`;
+      }
+      return `Tool "${unknownToolName}" is a built-in tool that is disabled by default because glob covers directory listing in most cases. Enable it with the tools.listDirectory.enabled setting. Use glob instead.`;
     }
 
     // Standard "not found" message with Levenshtein suggestions
