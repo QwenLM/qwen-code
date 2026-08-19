@@ -30,9 +30,24 @@ export interface ConversationSessionMetadataStore {
 
 export type ConversationSessionKind = 'live' | 'standalone';
 
+export interface ConversationSessionLineage {
+  kind: ConversationSessionKind;
+  persistence: 'explicit' | 'legacy';
+}
+
 export interface LoadableConversationSession {
   kind: ConversationSessionKind;
   persistence: 'explicit' | 'legacy';
+  /**
+   * Classification of the persisted parent, set only when this session has a
+   * parent and that parent is still readable and classifies as top-level.
+   * Undefined for a top-level session, and for an explicit standalone child
+   * whose parent has been archived away or deleted: that child is
+   * self-describing, so a parent it can no longer produce is not evidence
+   * against it. Callers that require proven lineage must check this rather
+   * than infer it from `kind`.
+   */
+  parentSource?: ConversationSessionLineage;
   metadata: LiveSessionCreationMetadata;
 }
 
@@ -132,7 +147,26 @@ export async function readLoadableConversationSession(
     isReservedStandaloneSessionSource(metadata) &&
     metadata.sourceId === undefined
   ) {
-    return { kind: 'standalone', persistence: 'explicit', metadata };
+    // Self-describing: the reserved source decides the kind, so a parent that
+    // is gone cannot disqualify the child. A parent that is still readable and
+    // contradicts depth-1 standalone lineage can — which also rejects a
+    // grandchild or a lineage cycle, because neither parent classifies as
+    // top-level.
+    const parent = await readExistingMetadata(parentSessionId, store);
+    if (parent === undefined) {
+      return { kind: 'standalone', persistence: 'explicit', metadata };
+    }
+    const parentSource = classifyTopLevelConversationSource(parent);
+    if (parentSource?.kind !== 'standalone') return undefined;
+    return {
+      kind: 'standalone',
+      persistence: 'explicit',
+      parentSource: {
+        kind: parentSource.kind,
+        persistence: parentSource.persistence,
+      },
+      metadata,
+    };
   }
 
   if (metadata.sourceType !== undefined || metadata.sourceId !== undefined) {
@@ -146,6 +180,10 @@ export async function readLoadableConversationSession(
   return {
     kind: parentSource.kind,
     persistence: 'legacy',
+    parentSource: {
+      kind: parentSource.kind,
+      persistence: parentSource.persistence,
+    },
     metadata,
   };
 }
@@ -165,16 +203,11 @@ export async function readLoadableLiveConversationMetadata(
     result.kind === 'standalone' &&
     result.metadata.parentSessionId !== undefined
   ) {
-    const parent = await readExistingMetadata(
-      result.metadata.parentSessionId,
-      store,
-    );
-    const parentSource = parent
-      ? classifyTopLevelConversationSource(parent)
-      : undefined;
+    // The general reader already classified the parent; re-reading the store
+    // here would only duplicate that work.
     if (
-      parentSource?.kind !== 'standalone' ||
-      parentSource.persistence !== 'legacy'
+      result.parentSource?.kind !== 'standalone' ||
+      result.parentSource.persistence !== 'legacy'
     ) {
       return undefined;
     }

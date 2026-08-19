@@ -36,6 +36,7 @@ const ATTRIBUTED_STANDALONE_CHILD_ID = '550e8400-e29b-41d4-a716-446655440011';
 const STANDALONE_CHILD_OF_LIVE_ID = '550e8400-e29b-41d4-a716-446655440012';
 const STANDALONE_CYCLE_A_ID = '550e8400-e29b-41d4-a716-446655440013';
 const STANDALONE_CYCLE_B_ID = '550e8400-e29b-41d4-a716-446655440014';
+const STANDALONE_CHILD_OF_LEGACY_ID = '550e8400-e29b-41d4-a716-446655440015';
 
 function createStore(
   records: ReadonlyMap<string, LiveSessionCreationMetadata>,
@@ -96,9 +97,8 @@ describe('conversation session source classification', () => {
         parentSessionId: EXPLICIT_ID,
       },
     ],
-    // An explicit standalone child is self-describing: its reserved source
-    // decides the kind, so the parent's own source and continued existence
-    // are deliberately not consulted (depth-1 is enforced at creation).
+    // An explicit standalone child is self-describing, but a parent that is
+    // still readable and contradicts depth-1 standalone lineage disqualifies it.
     [
       STANDALONE_CHILD_OF_LIVE_ID,
       { sourceType: 'standalone', parentSessionId: LIVE_ID },
@@ -110,6 +110,10 @@ describe('conversation session source classification', () => {
     [
       STANDALONE_CYCLE_B_ID,
       { sourceType: 'standalone', parentSessionId: STANDALONE_CYCLE_A_ID },
+    ],
+    [
+      STANDALONE_CHILD_OF_LEGACY_ID,
+      { sourceType: 'standalone', parentSessionId: LEGACY_ID },
     ],
   ]);
   const store = createStore(records);
@@ -152,15 +156,46 @@ describe('conversation session source classification', () => {
     [EXPLICIT_ID, 'standalone', 'explicit'],
     [EXPLICIT_CHILD_ID, 'standalone', 'explicit'],
     [LEGACY_CHILD_OF_EXPLICIT_ID, 'standalone', 'legacy'],
-    // The reserved source decides these without reading the parent.
-    [STANDALONE_CHILD_OF_LIVE_ID, 'standalone', 'explicit'],
-    [STANDALONE_CYCLE_A_ID, 'standalone', 'explicit'],
+    [STANDALONE_CHILD_OF_LEGACY_ID, 'standalone', 'explicit'],
   ] as const)(
     'classifies %s as %s %s',
     async (sessionId, kind, persistence) => {
       await expect(
         readLoadableConversationSession(sessionId, store),
       ).resolves.toMatchObject({ kind, persistence });
+    },
+  );
+
+  it.each([
+    // Parent readable and classified: lineage is proven.
+    [LEGACY_CHILD_ID, { kind: 'standalone', persistence: 'legacy' }],
+    [
+      LEGACY_CHILD_OF_EXPLICIT_ID,
+      { kind: 'standalone', persistence: 'explicit' },
+    ],
+    [LIVE_CHILD_ID, { kind: 'live', persistence: 'explicit' }],
+    [
+      STANDALONE_CHILD_OF_LEGACY_ID,
+      { kind: 'standalone', persistence: 'legacy' },
+    ],
+  ] as const)(
+    'reports the proven parent lineage for %s',
+    async (sessionId, lineage) => {
+      await expect(
+        readLoadableConversationSession(sessionId, store),
+      ).resolves.toMatchObject({ parentSource: lineage });
+    },
+  );
+
+  it.each([EXPLICIT_ID, LEGACY_ID, LIVE_ID, EXPLICIT_CHILD_ID])(
+    'leaves the parent lineage unproven for %s',
+    async (sessionId) => {
+      // Top-level sessions have no parent, and an explicit standalone child
+      // whose parent was archived away or deleted cannot produce one. Callers
+      // that need proven lineage must reject on this rather than on `kind`.
+      const result = await readLoadableConversationSession(sessionId, store);
+      expect(result).toBeDefined();
+      expect(result?.parentSource).toBeUndefined();
     },
   );
 
@@ -174,6 +209,10 @@ describe('conversation session source classification', () => {
     MALFORMED_PARENT_STANDALONE_ID,
     ATTRIBUTED_STANDALONE_CHILD_ID,
     CYCLE_A_ID,
+    // Readable parent contradicting depth-1 standalone lineage.
+    STANDALONE_CHILD_OF_LIVE_ID,
+    STANDALONE_CYCLE_A_ID,
+    STANDALONE_CYCLE_B_ID,
   ])('rejects malformed or ambiguous lineage for %s', async (sessionId) => {
     await expect(
       readLoadableConversationSession(sessionId, store),
