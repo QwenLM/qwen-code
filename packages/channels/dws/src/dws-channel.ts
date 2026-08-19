@@ -1328,6 +1328,15 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         message.eventTime,
       );
       this.notificationWatermarkPulledBack = true;
+      // R6-1: the flag alone only covers a replay that lands while a poll's
+      // fetch is in flight — `pollOnce` clears it before every fetch, so a
+      // pullback arriving BETWEEN two polls is reset before it is ever read.
+      // A persisted multi-page checkpoint would then resume its own window,
+      // whose `startTime` is already past this replay, and finish by setting
+      // the watermark to `checkpoint.endTime` — pulling it forward again over
+      // a replay no window will ever cover. Drop the checkpoint here too, so
+      // the pullback survives regardless of when it arrived.
+      this.cursor.notificationCheckpoint = undefined;
       this.saveCursor();
       return;
     }
@@ -1514,9 +1523,18 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     const inFlight = this.processingMessages.get(notificationKey);
     if (inFlight) {
       await inFlight;
+      // R6-2: a pending entry means the in-flight turn PARKED the comment for
+      // a sender it would not serve — which says nothing about this caller.
+      // Marking here consumed an allowed sender's mention outright: replay
+      // only re-drives a parked entry whose own `senderId` passes the gate
+      // (the denied one never will), and this key is skipped by every later
+      // history poll, so the allowed user's request went unanswered forever.
+      // Mark only when the comment is genuinely done, or when this caller is
+      // no more entitled to it than the sender already parked.
       if (
         this.cursor.processedMessages.includes(notificationKey) ||
-        this.hasPendingDocumentNotification(notificationKey)
+        (this.hasPendingDocumentNotification(notificationKey) &&
+          !this.gate.isAllowed(message.senderId))
       ) {
         this.markProcessedMessage(key);
       }
@@ -1594,7 +1612,14 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         // forever, starving every newer notification behind it.
         if (
           this.recordInboundFailure(notificationKey, error, () => {
-            this.markProcessedMessage(notificationKey);
+            // R6-3: mark the failing MESSAGE, not the comment. Exhausting the
+            // budget takes five polls — ~25s of transient model or bridge
+            // trouble — and `notificationKey` carries no sender, so marking it
+            // dropped every future mention of that comment from anyone,
+            // silently and across restarts, exactly as the denied-sender
+            // comment above says the park mechanism exists to avoid. Marking
+            // `key` is what stops the window re-running this message, so the
+            // R4-1 starvation this budget closes stays closed.
             this.removePendingDocumentNotification(notificationKey);
             this.markProcessedMessage(key);
           })

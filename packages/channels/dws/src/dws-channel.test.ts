@@ -1054,6 +1054,64 @@ describe('DwsChannel', () => {
     expect(windows[1][0]).toBeLessThanOrEqual(replay.eventTime!);
   });
 
+  // R6-1: the flag `pollOnce` consults is cleared before every fetch, so it
+  // only ever covers a replay that landed DURING one. A pullback in the gap
+  // between two polls is reset before it is read, and a persisted multi-page
+  // checkpoint then resumes a window that starts after the replay and finishes
+  // by writing its own `endTime` back over the pulled-back watermark — the
+  // same permanent loss R4-4 closed, through the other door.
+  it('keeps a stale-replay pullback that arrives between two polls', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    const replay = message(
+      'user_im_message_receive_o2o_all',
+      'replayed-between-polls',
+      documentMentionCard('doc-between', 'comment-between'),
+      { eventTime: Date.now() - 60_000 },
+    );
+    const windows: Array<[number, number]> = [];
+    const listDirectMessages =
+      client.listDirectMessages.getMockImplementation();
+    client.listDirectMessages.mockImplementation(
+      async (startTime, endTime, signal, cursor) => {
+        windows.push([startTime, endTime]);
+        const page = await listDirectMessages!(
+          startTime,
+          endTime,
+          signal,
+          cursor,
+        );
+        // The first window is bounded, so the poll persists a checkpoint to
+        // resume from — the restart-after-downtime state.
+        return windows.length === 1
+          ? { ...page, nextCursor: 'cursor-page-2' }
+          : page;
+      },
+    );
+
+    await channel.poll();
+    expect(channel.notificationCheckpoint()).toEqual(
+      expect.objectContaining({ cursor: 'cursor-page-2' }),
+    );
+
+    // No poll is in flight here: this is the 5-second gap between them.
+    await client.emit(1, replay);
+    expect(channel.notificationCheckpoint()).toBeUndefined();
+
+    client.directMessages = [replay];
+    await channel.poll();
+
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({
+        chatId: 'doc-between',
+        threadId: 'comment-between',
+      }),
+    ]);
+    // The resumed checkpoint's window would have opened past the replay; the
+    // one actually issued has to reach back over it.
+    expect(windows[1][0]).toBeLessThanOrEqual(replay.eventTime!);
+  });
+
   it('accepts ordinary direct messages and replies to that user', async () => {
     const client = new FakeDwsClient();
     const channel = await readyChannel(client);
@@ -2965,6 +3023,76 @@ describe('DwsChannel', () => {
     expect(bridge.prompt).toHaveBeenCalledOnce();
   });
 
+  // R6-2: the same slot, taken concurrently. The test above lets the denied
+  // turn finish first; when it is still IN FLIGHT, the allowed sender joins
+  // the awaiter instead, and a parked outcome there used to mark the allowed
+  // sender's own message processed without ever running it. Replay re-drives
+  // a parked entry only for its own (denied) sender, and history skips a
+  // marked key forever -- so the allowed reviewer's request was answered by
+  // nothing, with no log, permanently.
+  it('lets an allowed sender through while a denied turn on the same comment is in flight', async () => {
+    const client = new FakeDwsClient();
+    let releaseDocument!: () => void;
+    const documentRead = new Promise<void>((resolve) => {
+      releaseDocument = resolve;
+    });
+    const readDocument = client.readDocument.getMockImplementation();
+    client.readDocument.mockImplementation(async (documentId, signal) => {
+      await documentRead;
+      return readDocument!(documentId, signal);
+    });
+    const { channel, bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({
+        groupPolicy: 'allowlist',
+        groups: {},
+        senderPolicy: 'allowlist',
+        allowedUsers: ['open-bob'],
+      }),
+    );
+
+    const denied = client.emit(
+      1,
+      message(
+        'user_im_message_receive_o2o_all',
+        'denied-document',
+        documentMentionCard('doc-1', 'comment-1'),
+      ),
+    );
+    // Bob mentions the bot on the same comment seconds later, while the first
+    // turn is still reading the document -- the ordinary multi-reviewer flow.
+    const allowed = client.emit(
+      1,
+      message(
+        'user_im_message_receive_o2o_all',
+        'allowed-document',
+        documentMentionCard('doc-1', 'comment-1'),
+        { senderId: 'open-bob', senderName: 'Bob' },
+      ),
+    );
+    releaseDocument();
+    await Promise.all([denied, allowed]);
+
+    // Bob's mention was left for the next poll rather than served inline, so
+    // history has to be able to reach it -- which it cannot once his message
+    // key is marked.
+    client.directMessages = [
+      message(
+        'user_im_message_receive_o2o_all',
+        'allowed-document',
+        documentMentionCard('doc-1', 'comment-1'),
+        { senderId: 'open-bob', senderName: 'Bob' },
+      ),
+    ];
+    await channel.poll();
+
+    expect(bridge.prompt).toHaveBeenCalledWith(
+      'session-1',
+      expect.stringContaining('doc-1'),
+      expect.any(Object),
+    );
+  });
+
   it('deduplicates a successful message across restarts', async () => {
     const client = new FakeDwsClient();
     const first = await readyChannel(client, makeConfig(), 'persistent-dws');
@@ -3130,6 +3258,55 @@ describe('DwsChannel', () => {
     expect(channel.inboundAttempts).toBe(6);
     expect(channel.inbound.map((envelope) => envelope.chatId)).toEqual([
       'doc-fresh',
+    ]);
+  });
+
+  // R6-3: exhausting that budget takes five polls -- about 25s of transient
+  // model or bridge trouble -- and the drop closure marked the sender-agnostic
+  // `notificationKey`. So one bad minute killed every FUTURE mention of that
+  // comment from anyone: `processedMessages` is persisted, and
+  // `processDocumentNotification` returns on it before doing anything else.
+  it('lets a later mention of a dropped comment retry with a fresh budget', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    const now = Date.now();
+    const commentKey = 'c'.repeat(45);
+    client.directMessages = [
+      message(
+        'user_im_message_receive_o2o_all',
+        'outage-notification',
+        documentMentionCard('doc-outage', commentKey),
+        { eventTime: now },
+      ),
+    ];
+    let bridgeIsDown = true;
+    channel.inboundHandler = async (envelope) => {
+      if (bridgeIsDown) throw new Error('agent unavailable');
+      channel.inbound.push(envelope);
+    };
+
+    for (let round = 0; round < 6; round += 1) {
+      await expect(channel.poll()).resolves.toBeUndefined();
+    }
+    expect(channel.inbound).toEqual([]);
+
+    // The outage passes, and a different reviewer mentions the bot on the very
+    // same comment. Nothing about the dropped message says anything about
+    // this one.
+    bridgeIsDown = false;
+    client.directMessages = [
+      message(
+        'user_im_message_receive_o2o_all',
+        'later-notification',
+        documentMentionCard('doc-outage', commentKey),
+        { eventTime: now + 1, senderId: 'open-bob', senderName: 'Bob' },
+      ),
+    ];
+
+    await channel.poll();
+
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({ chatId: 'doc-outage', senderId: 'open-bob' }),
     ]);
   });
 
