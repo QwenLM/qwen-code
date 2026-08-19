@@ -98,12 +98,14 @@
   cursor: default;
 }
 
+/*
+ * `.root` establishes the container, so it can only style its DESCENDANTS from
+ * here — an element is never its own container query target. Compacting the
+ * strip's own gap/padding would need a separate outer element carrying
+ * `container-type`; until then keep this block to what actually resolves,
+ * rather than leaving half a responsive rule that silently does nothing.
+ */
 @container (max-width: 620px) {
-  .root {
-    gap: 7px;
-    padding-inline: 8px;
-  }
-
   .activity,
   .separator,
   .elapsed {

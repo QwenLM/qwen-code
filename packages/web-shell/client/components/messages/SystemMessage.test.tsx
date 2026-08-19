@@ -348,38 +348,6 @@ describe('SystemMessage — background notification i18n body', () => {
   });
 });
 
-describe('SystemMessage — goal status activation', () => {
-  const content = serializeGoalStatusMessage({
-    kind: 'set',
-    condition: 'Ship safely',
-    setAt: 1,
-  });
-
-  it('keeps the existing interactive event behavior by default', () => {
-    const handler = vi.fn();
-    window.addEventListener('web-shell-goal-status-active', handler);
-    const container = render(
-      <SystemMessage content={content} variant="info" isLatest />,
-    );
-    expect(container.textContent).toContain('Ship safely');
-    expect(handler).toHaveBeenCalledOnce();
-    window.removeEventListener('web-shell-goal-status-active', handler);
-  });
-
-  it('does not dispatch the goal event in readonly mode', () => {
-    const handler = vi.fn();
-    window.addEventListener('web-shell-goal-status-active', handler);
-    const container = render(
-      <TranscriptRenderModeProvider value="readonly">
-        <SystemMessage content={content} variant="info" isLatest />
-      </TranscriptRenderModeProvider>,
-    );
-    expect(container.textContent).toContain('Ship safely');
-    expect(handler).not.toHaveBeenCalled();
-    window.removeEventListener('web-shell-goal-status-active', handler);
-  });
-});
-
 describe('SystemMessage — inline images', () => {
   it('renders image thumbnails when images prop is provided', () => {
     const container = render(

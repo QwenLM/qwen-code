@@ -5371,6 +5371,23 @@ export function App({
   } | null>(null);
   const onSessionCreatedRef = useRef(onSessionCreated);
   onSessionCreatedRef.current = onSessionCreated;
+  /**
+   * The session a failed Goal creation left behind.
+   *
+   * Creating a Goal from the Goals page allocates a fresh session and then
+   * installs the Goal in it; the daemon session is created lazily, so an
+   * attempt that fails leaves a session that exists but never got its Goal.
+   *
+   * The form keeps the condition and lets the user retry. Without this ref
+   * every retry would abandon that session and create another, piling up blank
+   * chats in the sidebar. Remembering it lets the retry reuse it — no session
+   * is ever deleted.
+   *
+   * Only valid while the Goals page stays mounted. The moment the user leaves,
+   * that session is reachable from the composer and may stop being a scratch
+   * session, so the effect below forgets it: a later Goal then starts a fresh
+   * session rather than landing on top of a conversation.
+   */
   const strandedGoalSessionRef = useRef<string | undefined>(undefined);
   useEffect(() => {
     if (mainView !== 'goals') strandedGoalSessionRef.current = undefined;
@@ -8971,8 +8988,14 @@ export function App({
               }
               const nextLanguage = normalizeLanguage(languageArg);
               const owner = { current: sessionOwnerGuard.capture() };
+              // The daemon sync is what keeps the agent answering in the
+              // language the chrome just switched to, so when it cannot run
+              // (turn in flight, or a Goal owning the session) refuse the
+              // command instead of switching the UI alone — the language
+              // picker treats the identical condition the same way.
+              if (promptBlocked) return blockLocalCommandDuringTurn();
               handleLanguageChange(nextLanguage);
-              if (!promptBlocked) {
+              {
                 const deferComposerCommit =
                   Boolean(onSubmitBeforeRef.current) ||
                   createSessionPromiseRef.current !== null;
@@ -12798,8 +12821,6 @@ export function App({
                               ? backgroundTasks
                               : []
                           }
-                          activeGoal={null}
-                          onOpenGoals={openGoals}
                           hideSettings={hideSettings}
                           onToggleShortcuts={handleToggleShortcuts}
                           compact={true}

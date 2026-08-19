@@ -32,7 +32,6 @@ interface MessageItemProps {
   /** Click an uploaded image in a user message to preview it in the right panel. */
   onImagePreview?: (src: string, alt?: string) => void;
   workspaceCwd?: string;
-  isLatest?: boolean;
   showRetryHint?: boolean;
   onRetryClick?: () => void;
   sendFailed?: boolean;
@@ -52,7 +51,6 @@ export const MessageItem = memo(function MessageItem({
   onShowContextDetail,
   onImagePreview,
   workspaceCwd,
-  isLatest = false,
   showRetryHint = false,
   onRetryClick,
   sendFailed = false,
@@ -145,7 +143,6 @@ export const MessageItem = memo(function MessageItem({
             images={message.images}
             onShowContextDetail={onShowContextDetail}
             onImagePreview={onImagePreview}
-            isLatest={isLatest}
             showRetryHint={showRetryHint && message.retryable === true}
             onRetryClick={onRetryClick}
           />
@@ -288,7 +285,6 @@ function areMessageItemPropsEqual(
   if (prev.onShowContextDetail !== next.onShowContextDetail) return false;
   if (prev.onImagePreview !== next.onImagePreview) return false;
   if (prev.workspaceCwd !== next.workspaceCwd) return false;
-  if (prev.isLatest !== next.isLatest) return false;
   if (prev.showRetryHint !== next.showRetryHint) return false;
   if (prev.onRetryClick !== next.onRetryClick) return false;
   if (prev.sendFailed !== next.sendFailed) return false;

@@ -10625,6 +10625,29 @@ describe('App session callbacks', () => {
     expect(activeGoals.at(-1)).toBeNull();
   });
 
+  it('refuses /language ui while a Goal owns the session', async () => {
+    // The daemon sync is what makes the agent answer in the new language; if
+    // it is skipped the chrome switches alone and the agent keeps replying in
+    // the old one for the rest of the Goal run.
+    const onToast = vi.fn();
+    mockConnection.goalState = activeGoalSnapshot('keep working');
+    renderApp({ onToast });
+    await flush();
+
+    let accepted: boolean | undefined;
+    await act(async () => {
+      accepted = testState.latestChatEditorProps?.onSubmit('/language ui zh');
+      await flush();
+    });
+
+    expect(accepted).toBe(false);
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(onToast).toHaveBeenCalledWith(
+      'error',
+      "Slash commands can't be queued while a turn is running.",
+    );
+  });
+
   it('holds a composer prompt while Goal state is still hydrating', async () => {
     // The session load clears `loadingTranscript` before its `goal()` fetch
     // resolves, so the composer is writable while the Goal state is unknown.

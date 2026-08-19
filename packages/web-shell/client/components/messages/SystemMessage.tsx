@@ -32,7 +32,6 @@ interface SystemMessageProps {
   onShowContextDetail?: () => void;
   /** Click an image to preview it in the right panel. */
   onImagePreview?: (src: string, alt?: string) => void;
-  isLatest?: boolean;
   showRetryHint?: boolean;
   onRetryClick?: () => void;
 }
@@ -45,7 +44,6 @@ export const SystemMessage = memo(function SystemMessage({
   images,
   onShowContextDetail,
   onImagePreview,
-  isLatest = false,
   showRetryHint = false,
   onRetryClick,
 }: SystemMessageProps) {
@@ -127,7 +125,7 @@ export const SystemMessage = memo(function SystemMessage({
   if (goalStatus) {
     return (
       <div className={styles.flushMessage}>
-        <GoalStatusMessage status={goalStatus} activateFooter={isLatest} />
+        <GoalStatusMessage status={goalStatus} />
       </div>
     );
   }
