@@ -24,7 +24,7 @@ import {
   resolveBoardPromptContext,
   joinBoard,
   leaveBoard,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/board';
 
 export const boardCommand: SlashCommand = {
   name: 'board',

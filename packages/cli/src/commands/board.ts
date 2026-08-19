@@ -41,7 +41,7 @@ import {
   leaveBoard,
   listParticipants,
   type DecisionKind,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/board';
 import {
   resolveBoardName,
   resolveParticipantName,

@@ -36,7 +36,7 @@ import {
   tmuxRespawnPane,
   tmuxListPanes,
   tmuxCurrentSession,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/board';
 import {
   resolveBoardName,
   BOARD_ENV,
@@ -155,7 +155,7 @@ async function buildLayout(a: FleetUpArgs): Promise<void> {
   const board = resolveBoardName({ board: a.board });
 
   if (a.goal) {
-    const { createBoardTask } = await import('@qwen-code/qwen-code-core');
+    const { createBoardTask } = await import('@qwen-code/qwen-code-core/board');
     await createBoardTask({ board, subject: a.goal });
   }
 

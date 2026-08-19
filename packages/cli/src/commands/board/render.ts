@@ -16,7 +16,7 @@ import type {
   AskRecord,
   BoardTaskRecord,
   DecisionRecord,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/board';
 import { sanitizeTerminalText } from '../../ui/utils/textUtils.js';
 
 export interface BoardSnapshot {

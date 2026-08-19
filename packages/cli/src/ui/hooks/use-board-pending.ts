@@ -9,7 +9,7 @@ import {
   resolveBoardPromptContext,
   listAsks,
   listDecisions,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/board';
 
 /**
  * How often an idle session looks at the board.

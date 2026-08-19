@@ -28,11 +28,11 @@ import * as os from 'node:os';
 export {
   BOARD_ENV,
   BOARD_PARTICIPANT_ENV as PARTICIPANT_ENV,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/board';
 import {
   BOARD_ENV as BOARD_ENV_NAME,
   BOARD_PARTICIPANT_ENV as PARTICIPANT_ENV_NAME,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/board';
 
 /**
  * Reduce an arbitrary directory name to something the board layout accepts:

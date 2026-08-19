@@ -20,7 +20,7 @@ import type {
   BoardTaskRecord,
   AskRecord,
   DecisionRecord,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/board';
 
 function task(over: Partial<BoardTaskRecord> = {}): BoardTaskRecord {
   return {

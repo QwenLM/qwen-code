@@ -375,18 +375,6 @@ export * from './services/monitorRegistry.js';
 export * from './services/backgroundShellRegistry.js';
 export * from './agents/workflow-run-registry.js';
 
-// Shared work board: task / ask / decision items plus the tmux wrappers the
-// board CLI and `fleet up` use. Exported because the command surface is the
-// contract — anything reachable only from inside a Qwen turn does not exist
-// for an agent we did not write.
-export * from './agents/team/board-lock.js';
-export * from './agents/team/board-tasks.js';
-export * from './agents/team/asks.js';
-export * from './agents/team/decisions.js';
-export * from './agents/team/board-prompt.js';
-export * from './agents/team/board-participants.js';
-export * from './agents/backends/tmux-commands.js';
-export * from './agents/workflow-snapshot.js';
 export {
   listSavedWorkflows,
   resolveSavedWorkflowScript,
