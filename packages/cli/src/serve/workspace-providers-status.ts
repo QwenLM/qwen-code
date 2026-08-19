@@ -79,11 +79,15 @@ async function buildWorkspaceProvidersStatus(
     );
     const settings = loaded.merged;
     const env = options.env ?? snapshotProcessEnv();
+    // Test-runner detection mirrors the CLI path and reads the daemon's own
+    // process env: the workspace effective env can carry NODE_ENV=test from
+    // a project .env file, which must not disable the catalog here while
+    // live sessions (gated on process.env) keep it.
     const modelMetadataCatalog =
       options.modelMetadataCatalog ??
-      (env['NODE_ENV'] === 'test' ||
-      env['VITEST'] !== undefined ||
-      env['VITEST_WORKER_ID'] !== undefined
+      (process.env['NODE_ENV'] === 'test' ||
+      process.env['VITEST'] !== undefined ||
+      process.env['VITEST_WORKER_ID'] !== undefined
         ? {}
         : await loadModelMetadataCatalog({
             proxyUrl:

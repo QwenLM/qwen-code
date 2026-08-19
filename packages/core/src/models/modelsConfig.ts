@@ -550,6 +550,12 @@ export class ModelsConfig {
   private shouldUpdateModelDerivedDefault(
     field: 'modalities' | 'contextWindowSize',
   ): boolean {
+    // Mirror hasExplicitModalities so raw setModel and registry switchModel
+    // classify modalities the same way: a value without a recorded source is
+    // caller-declared, not model-derived, and must survive both switch paths.
+    if (field === 'modalities' && this.hasExplicitModalities()) {
+      return false;
+    }
     const source = this.generationConfigSources[field];
     return (
       source === undefined ||

@@ -268,6 +268,27 @@ describe('getCatalogModalities', () => {
     ).toEqual({ image: true });
   });
 
+  it('ignores the Qwen OAuth placeholder baseUrl replayed by the registry', () => {
+    expect(
+      getCatalogModalities(
+        {
+          alibaba: {
+            models: {
+              'qwen3-omni-flash': {
+                modalities: { input: ['text', 'image', 'audio', 'video'] },
+              },
+            },
+          },
+        },
+        {
+          authType: 'qwen-oauth',
+          modelId: 'qwen3-omni-flash',
+          baseUrl: 'DYNAMIC_QWEN_OAUTH_BASE_URL',
+        },
+      ),
+    ).toEqual({ image: true, audio: true, video: true });
+  });
+
   it('suppresses auth-type fallback when credentials identify no provider', () => {
     expect(
       getCatalogModalities(

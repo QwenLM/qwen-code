@@ -2149,6 +2149,42 @@ describe('ModelsConfig', () => {
     ).toBeUndefined();
   });
 
+  it('preserves caller modalities without a source map across raw and registry model switches', async () => {
+    const rawConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      generationConfig: {
+        model: 'old-model',
+        modalities: { audio: true },
+      },
+    });
+
+    await rawConfig.setModel('new-unknown-model');
+
+    expect(rawConfig.getGenerationConfig().modalities).toEqual({
+      audio: true,
+    });
+    expect(
+      rawConfig.getGenerationConfigSources()['modalities'],
+    ).toBeUndefined();
+
+    const registryConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      modelProvidersConfig: {
+        openai: [{ id: 'old-model' }, { id: 'new-model' }],
+      },
+      generationConfig: {
+        model: 'old-model',
+        modalities: { audio: true },
+      },
+    });
+
+    await registryConfig.switchModel(AuthType.USE_OPENAI, 'new-model');
+
+    expect(registryConfig.getGenerationConfig().modalities).toEqual({
+      audio: true,
+    });
+  });
+
   it('preserves explicit settings modalities across auth sync and registry switches', async () => {
     const modelsConfig = new ModelsConfig({
       initialAuthType: AuthType.USE_OPENAI,

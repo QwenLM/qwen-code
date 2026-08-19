@@ -27,6 +27,10 @@ const FETCH_TIMEOUT_MS = 10_000;
 const MAX_CATALOG_BYTES = 32 * 1024 * 1024;
 const OPENROUTER_VARIANT_SUFFIX =
   /:(?:free|extended|thinking|online|nitro|floor|exacto)$/i;
+// Placeholder baseUrl stamped on Qwen OAuth models by ModelRegistry. It is
+// not a real endpoint and must not count as baseUrl evidence, or it
+// suppresses the 'qwen-oauth' → 'alibaba' protocol fallback.
+const QWEN_OAUTH_PLACEHOLDER_BASE_URL = 'DYNAMIC_QWEN_OAUTH_BASE_URL';
 
 const debugLogger = createDebugLogger('MODEL_METADATA_CATALOG');
 
@@ -484,7 +488,11 @@ function resolveCatalogProviderId(
   configuredProviderId: string | undefined,
 ): string | undefined {
   const sourceProviderId = configuredProviderId ?? lookup.providerId;
-  const normalizedBaseUrl = normalizeUrl(lookup.baseUrl);
+  const normalizedBaseUrl = normalizeUrl(
+    lookup.baseUrl === QWEN_OAUTH_PLACEHOLDER_BASE_URL
+      ? undefined
+      : lookup.baseUrl,
+  );
   if (normalizedBaseUrl) {
     const endpointMatches = Object.entries(catalog).filter(
       ([, provider]) => normalizeUrl(provider.api) === normalizedBaseUrl,
