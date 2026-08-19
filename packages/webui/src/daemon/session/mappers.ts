@@ -362,6 +362,35 @@ export function updateConnectionFromDaemonEvent(
   }
 }
 
+/**
+ * Reconcile a `goal()` READ against whatever landed while it was in flight.
+ *
+ * A read the daemon answered while goal-less carries no `clearedGoal`
+ * tombstone, so `selectGoalState` derives the clear target from the goal a
+ * concurrent create installed meanwhile — accepting the clear AND tombstoning
+ * that goal's identity, after which its own later frames at the same revision
+ * are rejected as superseded. Stamp the read with the goal observed when it was
+ * ISSUED: a bare-null response may only clear the goal it actually observed.
+ *
+ * Returns `current` unchanged when the read is stale, so callers can compare
+ * identity to skip the state write entirely.
+ */
+export function selectGoalStateFromRead(
+  current: GoalSnapshotV2 | undefined,
+  incoming: GoalSnapshotV2,
+  observedGoalId: string | undefined,
+): GoalSnapshotV2 {
+  if (
+    incoming.goal === null &&
+    !incoming.clearedGoal &&
+    current?.goal &&
+    current.goal.goalId !== observedGoalId
+  ) {
+    return current;
+  }
+  return selectGoalState(current, incoming);
+}
+
 export function selectGoalState(
   current: GoalSnapshotV2 | undefined,
   incoming: GoalSnapshotV2,

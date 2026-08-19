@@ -45,6 +45,7 @@ import {
   mapSessionContextReasoning,
   mapSupportedCommands,
   selectGoalState,
+  selectGoalStateFromRead,
 } from './mappers.js';
 import {
   daemonPromptImageToBlob,
@@ -1798,18 +1799,13 @@ export function createDaemonSessionActions({
         );
         setConnection((current) => {
           if (current.sessionId !== session.sessionId) return current;
-          if (
-            response.snapshot.goal === null &&
-            !response.snapshot.clearedGoal &&
-            current.goalState?.goal &&
-            current.goalState.goal.goalId !== observedGoalId
-          ) {
-            return current;
-          }
-          return {
-            ...current,
-            goalState: selectGoalState(current.goalState, response.snapshot),
-          };
+          const goalState = selectGoalStateFromRead(
+            current.goalState,
+            response.snapshot,
+            observedGoalId,
+          );
+          if (goalState === current.goalState) return current;
+          return { ...current, goalState };
         });
         return response;
       } catch (error) {

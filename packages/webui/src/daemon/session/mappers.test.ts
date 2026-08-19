@@ -14,6 +14,7 @@ import {
   getReplayTokenUsage,
   mapWorkspaceSkills,
   selectGoalState,
+  selectGoalStateFromRead,
   updateConnectionFromDaemonEvent,
 } from './mappers.js';
 import type { DaemonConnectionState } from './types.js';
@@ -359,6 +360,50 @@ describe('updateConnectionFromDaemonEvent', () => {
     };
 
     expect(selectGoalState(current, stale)).toBe(current);
+  });
+
+  it('holds a bare-null Goal read back from the Goal it never observed', () => {
+    // The stamp is what separates "the daemon cleared the goal I read" from
+    // "the daemon answered before the goal I now hold existed".
+    const created = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: 'goal-new',
+        revision: 1,
+        objective: 'ship safely',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 0,
+        activeTimeMs: 0,
+        createdAt: 10,
+        updatedAt: 20,
+      },
+    };
+    const bareNull = { v: 2 as const, goal: null, activity: 'idle' as const };
+
+    // Issued while goal-less: cannot clear the goal that landed meanwhile...
+    expect(selectGoalStateFromRead(created, bareNull, undefined)).toBe(created);
+    // ...and leaves no tombstone, so the goal's own later frames still apply.
+    expect(selectGoalState(created, { ...created, activity: 'idle' })).toEqual({
+      ...created,
+      activity: 'idle',
+    });
+    // Issued while holding this goal: the clear is authoritative.
+    expect(
+      selectGoalStateFromRead(created, bareNull, 'goal-new').goal,
+    ).toBeNull();
+    // A tombstoned clear is authoritative whatever the read observed.
+    expect(
+      selectGoalStateFromRead(
+        created,
+        {
+          ...bareNull,
+          clearedGoal: { goalId: 'goal-new', revision: 2, updatedAt: 30 },
+        },
+        undefined,
+      ).goal,
+    ).toBeNull();
   });
 
   it('does not resurrect a cleared Goal from a stale snapshot', () => {

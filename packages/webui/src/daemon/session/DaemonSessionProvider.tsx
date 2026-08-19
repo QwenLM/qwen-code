@@ -64,7 +64,7 @@ import {
   mapSessionContextReasoning,
   mapSupportedCommands,
   mapWorkspaceSkills,
-  selectGoalState,
+  selectGoalStateFromRead,
   updateConnectionFromDaemonEvent,
 } from './mappers.js';
 import {
@@ -1988,9 +1988,16 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               // any frame that arrived during the load window share a revision
               // domain, and routing through `selectGoalState` is what registers
               // the cleared-goal tombstone that keeps a later stale frame from
-              // resurrecting a cleared goal.
+              // resurrecting a cleared goal. The read is stamped with the goal
+              // observed when it was issued (`goalStateAtLoadStart`) — a create
+              // that lands inside the load window must not be wiped, and
+              // tombstoned, by a bare-null answer that predates it.
               goalState: goalState
-                ? selectGoalState(current.goalState, goalState)
+                ? selectGoalStateFromRead(
+                    current.goalState,
+                    goalState,
+                    goalStateAtLoadStart?.goal?.goalId,
+                  )
                 : (current.goalState ?? goalStateFallback),
               gitBranch:
                 gitResult.status === 'fulfilled'

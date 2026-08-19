@@ -1676,6 +1676,65 @@ describe('DaemonSessionProvider', () => {
     expect(connection?.goalState?.goal).toBeNull();
   });
 
+  it('does not let a stale bare-null session-load Goal read wipe a Goal created meanwhile', async () => {
+    // Mirrors actions.test.ts's `getGoal` case for the OTHER `goal()` reader.
+    // The load issues its read while the session is goal-less, so the response
+    // carries no `clearedGoal` tombstone; a goal created inside the load window
+    // (Web Shell allocates the session, then creates the goal on it) would
+    // otherwise be accepted as the clear target — wiping it AND tombstoning its
+    // identity, after which its own frames at the same revision are rejected as
+    // superseded and the composer stops holding prompts for the Goal queue.
+    const pendingGoal = createDeferred<GoalStateResponse>();
+    const created: GoalStateResponse['snapshot'] = {
+      v: 2,
+      activity: 'running',
+      goal: {
+        goalId: 'goal-new',
+        revision: 1,
+        objective: 'ship safely',
+        status: 'active',
+        evidenceCursor: { recordId: 'goal-record' },
+        turnCount: 0,
+        activeTimeMs: 0,
+        createdAt: 1234,
+        updatedAt: 2345,
+      },
+    };
+    sdkMocks.sessions.push(
+      createMockSession({ goal: vi.fn(() => pendingGoal.promise) }),
+    );
+    let connection: DaemonConnectionState | undefined;
+    let actions: DaemonSessionActions | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      actions = useDaemonActions();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: false,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    const sessionId = connection?.sessionId;
+    expect(sessionId).toBeDefined();
+    await act(async () => {
+      actions?.applyGoalSnapshot(sessionId!, created);
+    });
+    expect(connection?.goalState).toBe(created);
+
+    pendingGoal.resolve({ snapshot: { v: 2, goal: null, activity: 'idle' } });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(connection?.goalState).toBe(created);
+  });
+
   it('keeps a known Goal state when the session-load Goal request fails', async () => {
     // Only the fresh-connection branch synthesizes an idle snapshot; once a
     // state is known, a transient `goal()` failure must not replace a live goal
