@@ -1,10 +1,8 @@
 import {
   forwardRef,
-  useEffect,
   useImperativeHandle,
   useMemo,
   useRef,
-  useState,
   type KeyboardEvent,
 } from 'react';
 import type { DaemonSessionTaskStatus } from '@qwen-code/sdk/daemon';

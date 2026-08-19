@@ -3,8 +3,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../../i18n';
-import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
-import { serializeGoalStatusMessage } from './GoalStatusMessage';
 import { SystemMessage } from './SystemMessage';
 
 (
