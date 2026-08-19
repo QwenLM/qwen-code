@@ -549,7 +549,11 @@ export async function assertSessionLoadable(
     throw new SessionArchivedError(sessionId);
   }
   if (location === 'conflict') {
-    throw new SessionConflictError(sessionId);
+    // Both state copies are readable (a crash inside archiveSessions leaves
+    // that behind). Loading reads the active copy — parity with the CLI
+    // resume path — so the session is loadable; mutations keep refusing via
+    // assertSessionArchived and the archive pipeline's own conflict guard.
+    return 'active';
   }
   return location;
 }

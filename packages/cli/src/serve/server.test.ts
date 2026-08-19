@@ -12885,31 +12885,22 @@ describe('createServeApp', () => {
     );
 
     it.each(['load', 'resume'] as const)(
-      'converts a pre-guard both-states %s conflict to actionable session conflict',
+      'restores a case twin persisted in both states from its active copy on %s',
       async (action) => {
         const sessionId = '550e8400-e29b-41d4-a716-446655440147';
         const storageSessionId = sessionId.toUpperCase();
         const bridge = fakeBridge();
-        // Same spelling persisted in both active and archived states: the
-        // resolver carries the candidate spelling, so the conversion must
-        // re-check THAT spelling — the request-case id finds nothing on a
-        // case-sensitive filesystem and would skip SessionConflictError.
-        const conflict = new SessionIdCaseConflictError(
-          sessionId,
-          storageSessionId,
-        );
+        // Same spelling persisted in both active and archived states: loads
+        // read the active copy (CLI resume parity), so the twin restores
+        // instead of 409ing.
         const findSessionId = vi
           .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
-          .mockRejectedValue(conflict);
+          .mockResolvedValue(storageSessionId);
         const getSessionLocation = vi
           .spyOn(SessionService.prototype, 'getSessionLocation')
           .mockImplementation(async (candidateId) =>
             candidateId === storageSessionId ? 'conflict' : undefined,
           );
-        const runSharedMany = vi.spyOn(
-          SessionArchiveCoordinator.prototype,
-          'runSharedMany',
-        );
         const app = createServeApp(
           { ...baseOpts, workspace: WS_BOUND },
           undefined,
@@ -12922,19 +12913,13 @@ describe('createServeApp', () => {
             .set('Host', `127.0.0.1:${baseOpts.port}`)
             .send({});
 
-          expect(res.status).toBe(409);
-          expect(res.body.code).toBe('session_conflict');
-          expect(res.body.error).toContain(
-            'Delete the session with POST /sessions/delete',
-          );
-          expect(getSessionLocation).toHaveBeenCalledWith(storageSessionId);
-          // The pre-guard conversion must fire before the guard is entered,
-          // so the shared guard never runs.
-          expect(runSharedMany).not.toHaveBeenCalled();
-          expect(bridge.loadCalls).toEqual([]);
-          expect(bridge.resumeCalls).toEqual([]);
+          expect(res.status).toBe(200);
+          if (action === 'load') {
+            expect(bridge.loadCalls).toHaveLength(1);
+          } else {
+            expect(bridge.resumeCalls).toHaveLength(1);
+          }
         } finally {
-          runSharedMany.mockRestore();
           getSessionLocation.mockRestore();
           findSessionId.mockRestore();
         }
@@ -12947,13 +12932,16 @@ describe('createServeApp', () => {
         const sessionId = '550e8400-e29b-41d4-a716-446655440148';
         const storageSessionId = sessionId.toUpperCase();
         const bridge = fakeBridge();
+        // A multi-twin resolver conflict carries the candidate spelling, so
+        // the conversion must re-check THAT spelling — the request-case id
+        // finds nothing on a case-sensitive filesystem and would skip
+        // SessionConflictError.
         const conflict = new SessionIdCaseConflictError(
           sessionId,
           storageSessionId,
         );
         const findSessionId = vi
           .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
-          .mockResolvedValueOnce(storageSessionId)
           .mockRejectedValue(conflict);
         const getSessionLocation = vi
           .spyOn(SessionService.prototype, 'getSessionLocation')
@@ -12978,11 +12966,7 @@ describe('createServeApp', () => {
             'Delete the session with POST /sessions/delete',
           );
           expect(getSessionLocation).toHaveBeenCalledWith(storageSessionId);
-          // Without the call-count assertion below, replacing the in-guard
-          // re-resolve with the pre-guard result still yields the same 409
-          // via assertSessionLoadable's mocked 'conflict' location — the
-          // count is what pins the second resolution.
-          expect(findSessionId).toHaveBeenCalledTimes(2);
+          expect(findSessionId).toHaveBeenCalledTimes(1);
           expect(bridge.loadCalls).toEqual([]);
           expect(bridge.resumeCalls).toEqual([]);
         } finally {
@@ -25178,7 +25162,7 @@ describe('createServeApp', () => {
       expect(bridge.resumeCalls).toHaveLength(0);
     });
 
-    it('rejects load for active/archive conflicts with session_conflict', async () => {
+    it('loads active/archive conflicted sessions from the active copy', async () => {
       const sid = '44444444-bbbb-cccc-dddd-eeeeeeeeeeef';
       await writeSession(sid);
       await writeSession(sid, 'archived');
@@ -25189,15 +25173,10 @@ describe('createServeApp', () => {
         .post(`/session/${sid}/load`)
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .send({ cwd: wsDir });
-      expect(loadRes.status).toBe(409);
-      expect(loadRes.body).toMatchObject({
-        code: 'session_conflict',
-        sessionId: sid,
-      });
-      expect(loadRes.body.error).toContain(
-        'Delete the session with POST /sessions/delete',
-      );
-      expect(bridge.loadCalls).toHaveLength(0);
+      // Loads read the active copy (CLI resume parity): a session left in
+      // both states by a crashed archive stays loadable.
+      expect(loadRes.status).toBe(200);
+      expect(bridge.loadCalls).toHaveLength(1);
     });
 
     it('returns session_archiving for prompt while archive is in flight', async () => {

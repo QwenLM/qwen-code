@@ -4609,7 +4609,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     },
   );
 
-  it('session/load rejects active/archive conflicts', async () => {
+  it('session/load restores an active/archive conflicted session from its active copy', async () => {
     await withRuntimeDir(async () => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440321';
       await writeStoredSession(sessionId);
@@ -4628,18 +4628,14 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
 
       const [frame] = (await got) as Array<{
         id: number;
-        error: {
-          code: number;
-          message: string;
-          data?: { errorKind?: string };
-        };
+        result?: unknown;
+        error?: { code: number; message: string };
       }>;
+      // Loads read the active copy (CLI resume parity): a session left in
+      // both states by a crashed archive stays loadable over ACP.
       expect(frame.id).toBe(212);
-      expect(frame.error.code).toBe(-32603);
-      expect(frame.error.message).toContain(
-        'Delete the session with POST /sessions/delete',
-      );
-      expect(frame.error.data?.errorKind).toBe('session_conflict');
+      expect(frame.error).toBeUndefined();
+      expect(frame.result).toEqual(expect.any(Object));
     });
   });
 
@@ -5058,7 +5054,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   );
 
   it.each(['session/load', 'session/resume'] as const)(
-    '%s converts a pre-guard both-states conflict to actionable session conflict',
+    '%s restores a case twin persisted in both states from its active copy',
     async (method) => {
       await withRuntimeDir(async () => {
         const sessionId =
@@ -5078,14 +5074,11 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           method,
           params: { sessionId },
         });
+        // Loads read the active copy regardless of which spelling resolves,
+        // so the verdict cannot flip with the filesystem's case sensitivity.
         expect(await reader.next()).toMatchObject({
           id: 231,
-          error: {
-            message: expect.stringContaining(
-              'Delete the session with POST /sessions/delete',
-            ),
-            data: expect.objectContaining({ errorKind: 'session_conflict' }),
-          },
+          result: expect.any(Object),
         });
         reader.close();
       });
@@ -5107,7 +5100,6 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         );
         const findSessionId = vi
           .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
-          .mockResolvedValueOnce(storageSessionId)
           .mockRejectedValue(conflict);
         const getSessionLocation = vi
           .spyOn(SessionService.prototype, 'getSessionLocation')

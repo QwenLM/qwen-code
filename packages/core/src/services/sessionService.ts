@@ -793,12 +793,19 @@ export class SessionService {
   async findSessionIdIgnoringCase(
     sessionId: string,
   ): Promise<string | undefined> {
+    // Exact spelling first: a readable transcript under the requested
+    // spelling is what loading uses — even when both state copies exist,
+    // loads read the active copy, matching the CLI resume path. Only a
+    // request that resolves nothing pays for the case-twin scan below.
+    if ((await this.getSessionLocation(sessionId)) !== undefined) {
+      return sessionId;
+    }
     const expectedFileName = `${sessionId}.jsonl`.toLowerCase();
     const candidates = new Map<string, Set<SessionArchiveState>>();
     for (const state of ['active', 'archived'] as const) {
       let fileNames: string[];
       try {
-        fileNames = fs.readdirSync(this.getChatsDirForState(state));
+        fileNames = await fs.promises.readdir(this.getChatsDirForState(state));
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
         throw error;
@@ -824,11 +831,12 @@ export class SessionService {
     }> = [];
     for (const candidateSessionId of candidates.keys()) {
       const location = await this.getSessionLocation(candidateSessionId);
-      if (location === 'conflict') {
-        throw new SessionIdCaseConflictError(sessionId, candidateSessionId);
-      }
       if (location !== undefined) {
-        readable.push({ candidateSessionId, state: location });
+        readable.push({
+          candidateSessionId,
+          // Loads prefer the active copy when both states are readable.
+          state: location === 'conflict' ? 'active' : location,
+        });
       }
     }
     if (readable.length === 1) return readable[0].candidateSessionId;

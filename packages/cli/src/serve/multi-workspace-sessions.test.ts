@@ -4513,11 +4513,10 @@ describe('multi-workspace session dispatch', () => {
       const conflict = await request(trusted.app)
         .get(`/workspaces/secondary-id/session/${conflictId}/export`)
         .set('Host', host());
-      expect(conflict.status).toBe(409);
-      expect(conflict.body).toMatchObject({
-        code: 'session_conflict',
-        sessionId: conflictId,
-      });
+      // Reads resolve a both-states session to its active copy (CLI resume
+      // parity), so the active export succeeds; only the archived surface
+      // below keeps refusing the ambiguity.
+      expect(conflict.status).toBe(200);
 
       const invalidFormat = await request(trusted.app)
         .get(

@@ -1842,24 +1842,6 @@ export class AcpDispatcher {
             // of a caller id contends on one key), so the request spelling
             // alone covers the raw-spelled batch delete/archive/unarchive
             // locks (parity with the REST restore handler).
-            const guardSessionService = new SessionService(cwd, {
-              runtimeBaseDir: sessionRuntime.sessionRuntimeBaseDir,
-            });
-            let persistedGuardId: string | undefined;
-            try {
-              persistedGuardId =
-                await guardSessionService.findSessionIdIgnoringCase(sessionId);
-            } catch (error) {
-              if (
-                error instanceof SessionIdCaseConflictError &&
-                (await guardSessionService.getSessionLocation(
-                  error.candidateSessionId ?? sessionId,
-                )) === 'conflict'
-              ) {
-                throw new SessionConflictError(sessionId);
-              }
-              throw error;
-            }
             const restored = await this.archiveCoordinator.runSharedMany(
               [sessionId],
               async () => {
@@ -1867,7 +1849,7 @@ export class AcpDispatcher {
                 const sessionService = new SessionService(cwd, {
                   runtimeBaseDir: sessionRuntime.sessionRuntimeBaseDir,
                 });
-                let storageSessionId = persistedGuardId ?? sessionId;
+                let storageSessionId = sessionId;
                 let persistedSessionId: string | undefined;
                 try {
                   persistedSessionId =

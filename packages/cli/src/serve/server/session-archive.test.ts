@@ -67,7 +67,7 @@ describe('assertSessionLoadable', () => {
     expect(getLocationSpy).toHaveBeenCalledWith(sessionId);
   });
 
-  it('rejects active/archive conflicts using project-aware JSONL heads', async () => {
+  it('resolves active/archive conflicts to the active copy for loading', async () => {
     const sessionId = '550e8400-e29b-41d4-a716-446655440001';
     writeSessionFile(workspaceDir, sessionId, 'active');
     writeSessionFile(workspaceDir, sessionId, 'archived');
@@ -76,9 +76,11 @@ describe('assertSessionLoadable', () => {
       'getSessionLocation',
     );
 
-    await expect(
-      assertSessionLoadable(workspaceDir, sessionId),
-    ).rejects.toThrow(SessionConflictError);
+    // Loads read the active copy (CLI resume parity); only mutations refuse
+    // a session persisted in both states.
+    await expect(assertSessionLoadable(workspaceDir, sessionId)).resolves.toBe(
+      'active',
+    );
     expect(getLocationSpy).toHaveBeenCalledWith(sessionId);
   });
 

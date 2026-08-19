@@ -1641,14 +1641,20 @@ export function registerSessionRoutes(
     const activeInRuntime = async (
       runtime: WorkspaceRuntime,
     ): Promise<boolean> => {
-      const location = await assertSessionLoadable(
-        runtime.workspaceCwd,
-        sessionId,
-        runtime.sessionRuntimeBaseDir,
-      );
+      const service = createWorkspaceRuntimeSessionService(runtime);
+      const location = await service.getSessionLocation(sessionId);
+      if (location === 'archived') {
+        throw new SessionArchivedError(sessionId);
+      }
+      if (location === 'conflict') {
+        // Ownership arbitration stays strict: a conflicted copy must not
+        // claim a session another workspace serves from its active copy.
+        // Single-runtime read paths resolve conflicts to the active copy
+        // via assertSessionLoadable instead.
+        throw new SessionConflictError(sessionId);
+      }
       if (location !== 'active') return false;
       if (!isInternalWorkspaceRuntime(runtime)) return true;
-      const service = createWorkspaceRuntimeSessionService(runtime);
       return (
         (await readLoadableLiveConversationMetadata(sessionId, service)) !==
         undefined
@@ -3111,21 +3117,6 @@ export function registerSessionRoutes(
         // The coordinator canonicalizes lock keys (every case variant of a
         // caller id contends on one key), so the request spelling alone
         // covers the raw-spelled batch delete/archive/unarchive locks.
-        const guardSessionService =
-          createWorkspaceRuntimeSessionService(runtime);
-        try {
-          await guardSessionService.findSessionIdIgnoringCase(sessionId);
-        } catch (error) {
-          if (
-            error instanceof SessionIdCaseConflictError &&
-            (await guardSessionService.getSessionLocation(
-              error.candidateSessionId ?? sessionId,
-            )) === 'conflict'
-          ) {
-            throw new SessionConflictError(sessionId);
-          }
-          throw error;
-        }
         const session = await archiveCoordinator.runSharedMany(
           [sessionId],
           async () => {
