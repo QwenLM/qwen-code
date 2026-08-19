@@ -70,26 +70,67 @@ export function getReviewDownloadMimeType(value: string): string {
   return /\.html?$/i.test(value) ? 'text/html' : 'text/markdown';
 }
 
-export async function readWorkspaceFileAsBlob(
-  readFileBytes: (
+type WorkspaceFileByteReader = (
+  filePath: string,
+  opts?: { offset?: number; maxBytes?: number },
+) => Promise<
+  Pick<
+    DaemonWorkspaceFileBytes,
+    'contentBase64' | 'offset' | 'returnedBytes' | 'sizeBytes'
+  >
+>;
+
+interface WorkspaceFileReadOptions {
+  statFile: (
     filePath: string,
-    opts?: { offset?: number; maxBytes?: number },
-  ) => Promise<
-    Pick<
-      DaemonWorkspaceFileBytes,
-      'contentBase64' | 'offset' | 'returnedBytes' | 'sizeBytes'
-    >
-  >,
+  ) => Promise<{ sizeBytes: number; modifiedMs: number }>;
+  isCancelled?: () => boolean;
+  maxBytes?: number;
+}
+
+export async function readWorkspaceFileAsBlob(
+  readFileBytes: WorkspaceFileByteReader,
   filePath: string,
   mimeType: string,
-  options: {
-    statFile: (
-      filePath: string,
-    ) => Promise<{ sizeBytes: number; modifiedMs: number }>;
-    isCancelled?: () => boolean;
-    maxBytes?: number;
-  },
+  options: WorkspaceFileReadOptions,
 ): Promise<Blob> {
+  const chunks = await readWorkspaceFileChunks(
+    readFileBytes,
+    filePath,
+    options,
+  );
+  return new Blob(chunks, { type: mimeType });
+}
+
+/**
+ * Decodes the chunks directly rather than routing through a Blob, which would
+ * only be built to be taken apart again.
+ */
+export async function readWorkspaceFileAsText(
+  readFileBytes: WorkspaceFileByteReader,
+  filePath: string,
+  options: WorkspaceFileReadOptions,
+): Promise<string> {
+  const chunks = await readWorkspaceFileChunks(
+    readFileBytes,
+    filePath,
+    options,
+  );
+  const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const bytes = new Uint8Array(total);
+  let written = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, written);
+    written += chunk.length;
+  }
+  return new TextDecoder().decode(bytes);
+}
+
+async function readWorkspaceFileChunks(
+  readFileBytes: WorkspaceFileByteReader,
+  filePath: string,
+  options: WorkspaceFileReadOptions,
+): Promise<Uint8Array[]> {
   const chunks: Uint8Array[] = [];
   const maxBytes = options.maxBytes ?? MAX_WORKSPACE_FILE_BLOB_BYTES;
   const initialStat = await options.statFile(filePath);
@@ -135,7 +176,7 @@ export async function readWorkspaceFileAsBlob(
       ) {
         throw new Error('File changed while loading. Please retry.');
       }
-      return new Blob(chunks, { type: mimeType });
+      return chunks;
     }
   }
 }
@@ -250,4 +291,15 @@ function stripUnsafePreviewMarkup(html: string) {
       /<meta\b(?=[^>]*\bhttp-equiv\s*=\s*["']?Content-Security-Policy["']?)[^>]*>/gi,
       '',
     );
+}
+
+export function isHtmlArtifact(artifact: DaemonSessionArtifact): boolean {
+  const path = artifact.workspacePath?.toLowerCase() ?? '';
+  const mimeType = artifact.mimeType?.toLowerCase() ?? '';
+  return (
+    artifact.kind === 'html' ||
+    path.endsWith('.html') ||
+    path.endsWith('.htm') ||
+    mimeType === 'text/html'
+  );
 }

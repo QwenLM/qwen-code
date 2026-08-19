@@ -394,6 +394,26 @@ const EN: Messages = {
   'common.downloadFailed': (v) => `Download failed: ${v?.message ?? ''}`,
   'common.open': 'Open',
   'common.openFailed': (v) => `Could not open link: ${v?.message ?? ''}`,
+  'share.action': 'Share',
+  'share.title': 'Share HTML artifact',
+  'share.sharing': 'Sharing…',
+  'share.saveAndShare': 'Save and share',
+  'share.reconfigure': 'Change endpoint',
+  'share.endpointLabel': 'Share endpoint',
+  'share.endpointHint':
+    'Web Shell POSTs the HTML to this URL and expects a JSON reply of {"url": "..."}. No endpoint is configured by default — point it at a host you control.',
+  'share.endpointInvalid':
+    'Enter an https:// URL. http:// is accepted only for localhost.',
+  'share.tokenLabel': 'Access token (optional)',
+  'share.tokenHint':
+    'Sent as an Authorization: Bearer header. Stored in this browser only.',
+  'share.confirmWarning':
+    'This uploads the full artifact to the endpoint below. Anyone with the returned link can read it.',
+  'share.resultLabel': 'Share link',
+  'share.resultHint':
+    'The endpoint decides how long this link stays reachable.',
+  'share.copied': 'Copied',
+  'share.failed': (v) => `Share failed: ${v?.message ?? ''}`,
   'artifact.openLink': 'Open link',
   'common.na': 'N/A',
   'common.server': 'Server',
@@ -3397,6 +3417,24 @@ const ZH: Messages = {
   'common.downloadFailed': (v) => `下载失败：${v?.message ?? ''}`,
   'common.open': '打开',
   'common.openFailed': (v) => `无法打开链接：${v?.message ?? ''}`,
+  'share.action': '分享',
+  'share.title': '分享 HTML 产物',
+  'share.sharing': '正在分享…',
+  'share.saveAndShare': '保存并分享',
+  'share.reconfigure': '更改地址',
+  'share.endpointLabel': '分享服务地址',
+  'share.endpointHint':
+    'Web Shell 会将 HTML POST 到该地址，并期待返回 {"url": "..."} 格式的 JSON。默认不配置任何地址 —— 请填写你自己控制的服务。',
+  'share.endpointInvalid': '请输入 https:// 地址；仅 localhost 允许 http://。',
+  'share.tokenLabel': '访问令牌（可选）',
+  'share.tokenHint':
+    '以 Authorization: Bearer 请求头发送，仅保存在当前浏览器。',
+  'share.confirmWarning':
+    '这将把产物完整上传到下方地址，任何拿到链接的人都能访问。',
+  'share.resultLabel': '分享链接',
+  'share.resultHint': '链接的有效期由分享服务决定。',
+  'share.copied': '已复制',
+  'share.failed': (v) => `分享失败：${v?.message ?? ''}`,
   'artifact.openLink': '打开链接',
   'common.na': '不适用',
   'common.server': '服务器',

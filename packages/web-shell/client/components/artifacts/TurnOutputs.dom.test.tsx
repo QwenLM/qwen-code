@@ -641,3 +641,140 @@ describe('TurnOutputs artifact downloads', () => {
     act(() => root.unmount());
   });
 });
+
+describe('TurnOutputs artifact sharing', () => {
+  afterEach(() => {
+    window.localStorage.clear();
+    vi.unstubAllGlobals();
+  });
+
+  const renderArtifacts = (artifacts: DaemonSessionArtifact[]) => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TurnOutputs
+            turnId="turn-1"
+            workspaceCwd="/primary"
+            changes={[]}
+            artifacts={artifacts}
+            scheduledTasks={[]}
+            onReviewChanges={() => {}}
+            onOpenArtifact={() => {}}
+            onOpenScheduledTask={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+    return { container, root };
+  };
+
+  const shareButtons = (scope: ParentNode) =>
+    Array.from(scope.querySelectorAll('button')).filter(
+      (button) => button.textContent?.trim() === 'Share',
+    );
+
+  it.each([
+    [{ kind: 'html', workspacePath: 'output/report' }, true],
+    [{ kind: 'file', workspacePath: 'output/page.html' }, true],
+    [{ kind: 'file', workspacePath: 'output/page.HTML' }, true],
+    [{ kind: 'file', workspacePath: 'output/page.htm' }, true],
+    [
+      { kind: 'file', workspacePath: 'output/notes', mimeType: 'text/html' },
+      true,
+    ],
+    [{ kind: 'file', workspacePath: 'output/notes.md' }, false],
+    [{ kind: 'file', workspacePath: 'output/htmlish.txt' }, false],
+    [{ kind: 'image', workspacePath: 'output/chart.png' }, false],
+    [
+      { kind: 'file', workspacePath: 'output/data', mimeType: 'text/plain' },
+      false,
+    ],
+  ])('offers Share for %o only when it is HTML', (fields, shareable) => {
+    const { container, root } = renderArtifacts([
+      {
+        id: 'artifact-0',
+        storage: 'workspace',
+        status: 'available',
+        title: 'artifact',
+        ...fields,
+      } as DaemonSessionArtifact,
+    ]);
+
+    expect(shareButtons(container)).toHaveLength(shareable ? 1 : 0);
+
+    act(() => root.unmount());
+  });
+
+  it('hides Share for an artifact that is not readable from the workspace', () => {
+    const { container, root } = renderArtifacts([
+      {
+        id: 'artifact-pending',
+        kind: 'html',
+        storage: 'workspace',
+        status: 'pending',
+        title: 'pending report',
+        workspacePath: 'output/report.html',
+      } as DaemonSessionArtifact,
+    ]);
+
+    expect(shareButtons(container)).toHaveLength(0);
+
+    act(() => root.unmount());
+  });
+
+  it('uploads the artifact to the configured endpoint and shows the link', async () => {
+    window.localStorage.setItem(
+      'qwen-web-shell-share-endpoint',
+      'https://share.example.com/publish',
+    );
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response('{"url":"https://share.example.com/s/abc"}', {
+        status: 200,
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    readFileBytes.mockResolvedValue({
+      contentBase64: btoa('<h1>report</h1>'),
+      offset: 0,
+      returnedBytes: 15,
+      sizeBytes: 15,
+    });
+    stat.mockResolvedValue({ sizeBytes: 15, modifiedMs: 1 });
+
+    const { container, root } = renderArtifacts([
+      {
+        id: 'artifact-html',
+        kind: 'html',
+        storage: 'workspace',
+        status: 'available',
+        title: 'report',
+        workspacePath: 'output/report.html',
+      } as DaemonSessionArtifact,
+    ]);
+
+    await act(async () => {
+      shareButtons(container)[0]?.click();
+    });
+
+    const confirm = shareButtons(document.body).at(-1);
+    expect(confirm).toBeDefined();
+
+    await act(async () => {
+      confirm?.click();
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      'https://share.example.com/publish',
+    );
+    expect(fetchMock.mock.calls[0][1].body).toBe('<h1>report</h1>');
+    expect(
+      document.body.querySelector<HTMLInputElement>('#share-result-url')?.value,
+    ).toBe('https://share.example.com/s/abc');
+
+    act(() => root.unmount());
+  });
+});
