@@ -25,9 +25,11 @@
 
 import { spawn } from 'node:child_process';
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -68,6 +70,86 @@ export function composeCapture(scenario, json, res) {
 }
 
 /**
+ * Empty a capture directory before a drive writes into it, so a re-run cannot
+ * let an earlier run's files stand in for scenarios this run never captured.
+ *
+ * Guarded, because `outDir` comes straight off the command line and the
+ * documented local usage invites a mistyped or reused path: only a directory
+ * that already looks like a capture dir is deleted. In CI the capture dirs are
+ * also cleared by an unconditional workflow step, which covers the runs where
+ * an arm is skipped entirely and this function never executes at all.
+ */
+export function clearCaptureDir(outDir) {
+  if (!existsSync(outDir)) return;
+  const entries = readdirSync(outDir);
+  const looksLikeCaptures = entries.every(
+    (f) => f.endsWith('.json') || f === DRIVE_COMPLETE_MARKER,
+  );
+  if (!looksLikeCaptures) {
+    throw new Error(
+      `refusing to clear ${outDir}: it holds files that are not serve-ab captures (${entries
+        .slice(0, 5)
+        .join(', ')})`,
+    );
+  }
+  rmSync(outDir, { recursive: true, force: true });
+}
+
+/**
+ * Run every scenario against one daemon and write its capture.
+ *
+ * Extracted from {@link driveCli} so the ordering that matters can be tested
+ * without a daemon: the completion marker is written only after the LAST
+ * capture, so an abort part-way through leaves a capture dir the diff can
+ * recognise as truncated. Moving that write into a `finally` — a plausible
+ * "make sure the marker is always there" edit — would silently re-introduce the
+ * misreport the marker exists to prevent.
+ */
+export async function captureScenarios(scenarios, { request, ctx, outDir }) {
+  for (const s of scenarios) {
+    // Stage on-disk state (transcripts) before anything is requested.
+    s.fixtures?.(ctx);
+    // Run any setup requests (e.g. create a session) before the capture.
+    for (const step of s.setup ?? []) {
+      const r = await request(step);
+      // A failed setup (e.g. POST /session non-2xx) would let the capture
+      // reflect wrong state (0 sessions) and silently mask or fake a diff —
+      // fail loudly instead.
+      if (!r.ok) {
+        const body = await r.text().catch(() => '');
+        throw new Error(
+          `setup ${step.method} ${step.path} failed (HTTP ${r.status}) for "${s.name}": ${body.slice(0, 200)}`,
+        );
+      }
+    }
+    const res = await request(s);
+    const text = await res.text();
+    let json;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      json = { _nonJson: text.slice(0, 500) };
+    }
+    const captured = composeCapture(s, json, res);
+    writeFileSync(
+      join(outDir, `${s.name}.json`),
+      JSON.stringify(captured, null, 2) + '\n',
+    );
+    process.stderr.write(`  captured ${s.name} (HTTP ${res.status})\n`);
+    // Checked AFTER the capture is written, so a deviating response is on
+    // disk and in the log rather than lost to the abort.
+    assertCanaryStatus(s, res.status, text, captured);
+  }
+  // Completion marker, written only once every scenario is captured. An abort
+  // part-way through (a canary, a daemon crash) leaves a capture dir that LOOKS
+  // like a full baseline, and the scenarios it never reached would render as
+  // "this PR adds these responses". The diff treats a marker-less baseline as
+  // degraded and says so. Not a `.json` file: the diff enumerates those as
+  // scenarios.
+  writeFileSync(join(outDir, DRIVE_COMPLETE_MARKER), '');
+}
+
+/**
  * A canary scenario asserts its own precondition and aborts the drive when it
  * fails — publishing "no response changes" from a scenario set that never
  * created the state it believed it was probing is the failure this whole
@@ -82,8 +164,14 @@ export function composeCapture(scenario, json, res) {
  *   a precondition that just asks "did the daemon see the file I staged?": a
  *   404 says it did not, while any other answer proves it did and is a product
  *   decision worth capturing rather than a reason to suppress the whole report.
+ * - `expectReplay` — the restore must carry at least one replay entry. A status
+ *   check alone cannot see fixture rot: the product validates transcripts
+ *   record by record and fails OPEN (an unrecognised record is skipped), so a
+ *   fixture whose records stop validating restores as an EMPTY session and
+ *   still answers 200. Every staged scenario would then probe an empty daemon
+ *   identically on both arms and the A/B would report no changes.
  */
-export function assertCanaryStatus(scenario, status, bodyText = '') {
+export function assertCanaryStatus(scenario, status, bodyText = '', captured) {
   const fail = (expectation) => {
     throw new Error(
       `scenario "${scenario.name}" ${expectation} but got ${status}: ${String(
@@ -96,6 +184,15 @@ export function assertCanaryStatus(scenario, status, bodyText = '') {
   }
   if (scenario.rejectStatus !== undefined && status === scenario.rejectStatus) {
     fail(`must not answer HTTP ${scenario.rejectStatus}`);
+  }
+  if (scenario.expectReplay && !(captured?._replayItems > 0)) {
+    throw new Error(
+      `scenario "${scenario.name}" restored an EMPTY transcript (_replayItems=${
+        captured?._replayItems
+      }). The staged fixture no longer validates against this build — record ` +
+        `validation fails open, so every staged scenario below is probing an ` +
+        `empty daemon and would diff clean.`,
+    );
   }
 }
 
@@ -225,8 +322,17 @@ export const SCENARIOS = [
     path: `/session/${SID.healthy}/load`,
     auth: true,
     body: () => ({}),
-    project: admissionOnly,
+    // Keeps a replay-size witness on top of the admission decision. The count
+    // is stable (it is derived from the committed fixture), and it is the only
+    // field in any capture that would move if the fixture stopped validating.
+    project: (json, res) => ({
+      ...admissionOnly(json, res),
+      _replayItems: Array.isArray(json?.compactedReplay)
+        ? json.compactedReplay.length
+        : 0,
+    }),
     expectStatus: 200,
+    expectReplay: true,
   },
   {
     // Second canary, for the archive leaf. The healthy restore above certifies
@@ -359,9 +465,7 @@ async function waitForHealth(base, timeoutMs = 30000) {
 }
 
 export async function driveCli(cliEntry, outDir) {
-  // Start from an empty dir: a re-run (or a reused capture path) must not let
-  // an earlier run's files stand in for scenarios this run never captured.
-  rmSync(outDir, { recursive: true, force: true });
+  clearCaptureDir(outDir);
   mkdirSync(outDir, { recursive: true });
   const home = mkdtempSync(join(tmpdir(), 'serve-ab-home-'));
   const token = 'serve-ab-token';
@@ -417,46 +521,7 @@ export async function driveCli(cliEntry, outDir) {
         body,
       });
     };
-    for (const s of SCENARIOS) {
-      // Stage on-disk state (transcripts) before anything is requested.
-      s.fixtures?.(ctx);
-      // Run any setup requests (e.g. create a session) before the capture.
-      for (const step of s.setup ?? []) {
-        const r = await doRequest(step);
-        // A failed setup (e.g. POST /session non-2xx) would let the capture
-        // reflect wrong state (0 sessions) and silently mask or fake a diff —
-        // fail loudly instead.
-        if (!r.ok) {
-          const body = await r.text().catch(() => '');
-          throw new Error(
-            `setup ${step.method} ${step.path} failed (HTTP ${r.status}) for "${s.name}": ${body.slice(0, 200)}`,
-          );
-        }
-      }
-      const res = await doRequest(s);
-      const text = await res.text();
-      let json;
-      try {
-        json = JSON.parse(text);
-      } catch {
-        json = { _nonJson: text.slice(0, 500) };
-      }
-      const captured = composeCapture(s, json, res);
-      writeFileSync(
-        join(outDir, `${s.name}.json`),
-        JSON.stringify(captured, null, 2) + '\n',
-      );
-      process.stderr.write(`  captured ${s.name} (HTTP ${res.status})\n`);
-      // Checked AFTER the capture is written, so a deviating response is on
-      // disk and in the log rather than lost to the abort.
-      assertCanaryStatus(s, res.status, text);
-    }
-    // Completion marker. An abort part-way through (a canary, a daemon crash)
-    // leaves a capture dir that LOOKS like a full baseline, and the scenarios
-    // it never reached would render as "this PR adds these responses". The
-    // diff treats a marker-less baseline as degraded and says so. Not a
-    // `.json` file: the diff enumerates those as scenarios.
-    writeFileSync(join(outDir, DRIVE_COMPLETE_MARKER), '');
+    await captureScenarios(SCENARIOS, { request: doRequest, ctx, outDir });
   } finally {
     daemon.kill('SIGTERM');
     // Await exit so a hung daemon (pending async / open WebSockets) can't

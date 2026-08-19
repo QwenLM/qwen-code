@@ -192,6 +192,19 @@ jobs:
           cache: 'npm'
           cache-dependency-path: 'head/package-lock.json'
 
+      # Unconditional, and BEFORE either drive: on the persistent pool
+      # `${RUNNER_TEMP}` outlives a run, and the drive's own reset lives inside
+      # the script — which never executes when an arm is skipped by its `if:`
+      # (no merge-base resolved, base checkout failed) or dies during
+      # `npm ci`/`npm run build`. An inherited capture set from an earlier run
+      # carries its completion marker too, so neither degraded-baseline warning
+      # would fire and the comment would diff this head against another run's
+      # base.
+      - name: 'Clear stale capture dirs'
+        run: |-
+          set -euo pipefail
+          rm -rf "${RUNNER_TEMP}/before" "${RUNNER_TEMP}/after"
+
       - name: 'Build + drive the PR head'
         working-directory: 'head'
         run: |-

@@ -5,19 +5,27 @@
  */
 
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { readdirSync } from 'node:fs';
-
 import {
+  DRIVE_COMPLETE_MARKER,
   SCENARIOS,
   SID,
   admissionOnly,
   assertCanaryStatus,
+  captureScenarios,
   chatsDirFor,
+  clearCaptureDir,
   composeCapture,
   isPlainObject,
   readTranscriptFixture,
@@ -85,11 +93,29 @@ test('every scenario has a unique name, and every id in a path is a SID constant
   }
 });
 
+test('the restore scenario set is pinned by name, not by a slack count', () => {
+  // A lower bound lets a scenario be deleted or "consolidated" silently, and
+  // the surface it probed then drops out of the A/B with every test green.
+  // Adding one here is deliberate friction: say which surface it covers.
+  assert.deepEqual(
+    SCENARIOS.filter((s) => s.name.startsWith('session-restore-')).map(
+      (s) => s.name,
+    ),
+    [
+      'session-restore-healthy',
+      'session-restore-archived-only',
+      'session-restore-mixed-case',
+      'session-restore-case-twins',
+      'session-restore-unreadable',
+      'session-restore-active-and-archived',
+    ],
+  );
+});
+
 test('restore scenarios never share a session id (an attach also answers 200)', () => {
   const ids = SCENARIOS.filter((s) => s.name.startsWith('session-restore-'))
     .map((s) => /\/session\/([^/]+)\/load/.exec(s.path)?.[1])
     .map((id) => id?.toLowerCase());
-  assert.ok(ids.length >= 5, 'expected the staged restore scenarios');
   assert.ok(ids.every(Boolean));
   assert.equal(new Set(ids).size, ids.length);
 });
@@ -139,13 +165,16 @@ test('assertCanaryStatus enforces both canary shapes and leaves others alone', (
 });
 
 test('every staged scenario probes an id it actually staged', () => {
-  const home = mkdtempSync(join(tmpdir(), 'sad-'));
-  const workspace = join(home, 'ws');
-  const chats = chatsDirFor(home, workspace);
   for (const s of SCENARIOS) {
     if (!s.fixtures) continue;
     const probed = /\/session\/([^/]+)\//.exec(s.path)?.[1];
     if (!probed) continue;
+    // A FRESH home per scenario: sharing one would assert against the union of
+    // everything staged so far, so a scenario staging the wrong id would pass
+    // on an earlier scenario's file.
+    const home = mkdtempSync(join(tmpdir(), 'sad-one-'));
+    const workspace = join(home, 'ws');
+    const chats = chatsDirFor(home, workspace);
     s.fixtures({ home, workspace });
     const staged = [
       ...readdirSync(chats),
@@ -299,4 +328,132 @@ test('composeCapture defers to a scenario projection when one is declared', () =
     ),
     { _status: 409, code: 'x' },
   );
+});
+
+test('clearCaptureDir empties a capture dir and refuses anything else', () => {
+  const dir = join(mkdtempSync(join(tmpdir(), 'sad-clear-')), 'captures');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'health.json'), '{}');
+  writeFileSync(join(dir, DRIVE_COMPLETE_MARKER), '');
+  clearCaptureDir(dir);
+  assert.equal(existsSync(dir), false);
+
+  // `outDir` comes straight off the command line, so a mistyped or reused path
+  // must not be recursively deleted just because it exists.
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'notes.txt'), 'precious');
+  assert.throws(() => clearCaptureDir(dir), /refusing to clear/);
+  assert.equal(existsSync(join(dir, 'notes.txt')), true);
+
+  // A path that does not exist is simply nothing to do.
+  assert.doesNotThrow(() => clearCaptureDir(join(dir, 'nope')));
+});
+
+test('assertCanaryStatus fails a canary whose transcript restored empty', () => {
+  // Record validation fails OPEN in the product, so a rotted fixture answers
+  // 200 over an empty session. Status alone cannot see that.
+  const canary = { name: 'healthy', expectStatus: 200, expectReplay: true };
+  assert.doesNotThrow(() =>
+    assertCanaryStatus(canary, 200, '', { _status: 200, _replayItems: 3 }),
+  );
+  assert.throws(
+    () =>
+      assertCanaryStatus(canary, 200, '', { _status: 200, _replayItems: 0 }),
+    /restored an EMPTY transcript/,
+  );
+  assert.throws(
+    () => assertCanaryStatus(canary, 200, '', { _status: 200 }),
+    /restored an EMPTY transcript/,
+  );
+  // Scenarios that do not ask for the witness are unaffected.
+  assert.doesNotThrow(() =>
+    assertCanaryStatus({ name: 'plain' }, 200, '', { _status: 200 }),
+  );
+});
+
+test('the healthy canary keeps a replay witness in its capture', () => {
+  const canary = SCENARIOS.find((s) => s.name === 'session-restore-healthy');
+  assert.equal(canary.expectReplay, true);
+  assert.deepEqual(
+    canary.project(
+      { code: undefined, compactedReplay: [{ id: 1 }, { id: 2 }] },
+      { status: 200 },
+    ),
+    { _status: 200, _replayItems: 2 },
+  );
+  // A body without the field reads as zero, not as "unknown".
+  assert.deepEqual(canary.project({}, { status: 200 }), {
+    _status: 200,
+    _replayItems: 0,
+  });
+});
+
+test('captureScenarios writes the completion marker only after the last capture', async () => {
+  const outDir = mkdtempSync(join(tmpdir(), 'sad-cap-'));
+  const reply = (status, body) => ({
+    ok: status < 400,
+    status,
+    text: async () => JSON.stringify(body),
+  });
+  const scenarios = [
+    { name: 'first', path: '/a', method: 'GET' },
+    { name: 'second', path: '/b', method: 'GET' },
+  ];
+  await captureScenarios(scenarios, {
+    request: () => reply(200, { ok: true }),
+    ctx: {},
+    outDir,
+  });
+  assert.deepEqual(readdirSync(outDir).sort(), [
+    DRIVE_COMPLETE_MARKER,
+    'first.json',
+    'second.json',
+  ]);
+
+  // An abort part-way must leave the dir recognisably truncated: with a marker
+  // present the diff would report a partial baseline as a complete one.
+  const aborted = mkdtempSync(join(tmpdir(), 'sad-cap-'));
+  const canaryScenarios = [
+    { name: 'first', path: '/a', method: 'GET' },
+    { name: 'canary', path: '/b', method: 'GET', expectStatus: 200 },
+    { name: 'third', path: '/c', method: 'GET' },
+  ];
+  await assert.rejects(
+    captureScenarios(canaryScenarios, {
+      request: (s) => reply(s.name === 'canary' ? 500 : 200, { ok: true }),
+      ctx: {},
+      outDir: aborted,
+    }),
+    /scenario "canary" expected HTTP 200/,
+  );
+  const left = readdirSync(aborted).sort();
+  assert.deepEqual(left, ['canary.json', 'first.json']);
+  assert.ok(
+    !left.includes(DRIVE_COMPLETE_MARKER),
+    'a truncated run must not look complete',
+  );
+});
+
+test('captureScenarios stages fixtures before it requests', async () => {
+  const outDir = mkdtempSync(join(tmpdir(), 'sad-order-'));
+  const order = [];
+  await captureScenarios(
+    [
+      {
+        name: 'staged',
+        path: '/x',
+        method: 'GET',
+        fixtures: () => order.push('fixtures'),
+      },
+    ],
+    {
+      request: () => {
+        order.push('request');
+        return { ok: true, status: 200, text: async () => '{}' };
+      },
+      ctx: {},
+      outDir,
+    },
+  );
+  assert.deepEqual(order, ['fixtures', 'request']);
 });
