@@ -700,7 +700,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
     describe.each(['qwen3.8-max', 'qwen3.8-max-preview'])(
       '%s reasoning effort',
       (model) => {
-        it.each(['low', 'medium', 'high', 'xhigh', 'max'] as const)(
+        it.each(['low', 'medium', 'high', 'xhigh'] as const)(
           'passes %s through as reasoning_effort',
           (effort) => {
             const generator = new DashScopeOpenAICompatibleProvider(
@@ -727,6 +727,33 @@ describe('DashScopeOpenAICompatibleProvider', () => {
             expect(result['reasoning']).toBeUndefined();
           },
         );
+      },
+    );
+
+    describe.each(['qwen3.8-max', 'qwen3.8-max-preview'])(
+      '%s reasoning effort ceiling',
+      (model) => {
+        it('clamps the max tier to xhigh, the strongest tier DashScope accepts', () => {
+          const generator = new DashScopeOpenAICompatibleProvider(
+            {
+              ...mockContentGeneratorConfig,
+              model,
+              reasoning: { effort: 'max' },
+            } as ContentGeneratorConfig,
+            mockCliConfig,
+          );
+
+          const result = generator.buildRequest(
+            {
+              ...baseRequest,
+              model,
+              reasoning: { effort: 'max' },
+            } as unknown as Parameters<typeof generator.buildRequest>[0],
+            'test-prompt-id',
+          ) as unknown as Record<string, unknown>;
+
+          expect(result['reasoning_effort']).toBe('xhigh');
+        });
       },
     );
 

@@ -21,9 +21,26 @@ import {
   isQwenFamilyWireModel,
   isTieredEffortWireModel,
 } from '../../modalityDefaults.js';
+import type { ReasoningEffort } from '../../reasoning-effort.js';
+import { clampReasoningEffort } from '../../reasoning-effort.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
 
 const debugLogger = createDebugLogger('DashScopeOpenAICompatibleProvider');
+
+/**
+ * Tiers the qwen3.8-max family accepts in `reasoning_effort`. DashScope's
+ * ladder stops at `xhigh`; `max` exists only as a DeepSeek extension (see
+ * the Anthropic and DeepSeek providers) and is rejected here with a 400
+ * that then repeats on every later request in the session. Declaring the
+ * supported subset lets `clampReasoningEffort` cap the tier the same way
+ * the Anthropic generator caps tiers its model lacks.
+ */
+const DASHSCOPE_TIERED_EFFORTS: readonly ReasoningEffort[] = [
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+] as const;
 
 export type DashScopeThinkingKnobSelection = {
   source: 'extra_body' | 'samplingParams' | 'reasoning';
@@ -158,6 +175,8 @@ export const DASHSCOPE_REGIONAL_HOSTS: readonly string[] = [
 ];
 
 export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatibleProvider {
+  private effortClampWarned = false;
+
   constructor(
     contentGeneratorConfig: ContentGeneratorConfig,
     cliConfig: Config,
@@ -524,12 +543,33 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     }
     const wireModel = this.resolveWireModel(model);
     if (isTieredEffortWireModel(wireModel)) {
-      return { reasoning_effort: reasoning.effort };
+      return { reasoning_effort: this.clampTieredEffort(reasoning.effort) };
     }
     if (isQwenFamilyWireModel(wireModel)) {
       return { enable_thinking: true };
     }
     return {};
+  }
+
+  /**
+   * Cap a configured tier at what the qwen3.8-max family actually accepts.
+   * `max` is a DeepSeek extension DashScope rejects, and the rejection is a
+   * 400 on every subsequent request rather than a one-off, so the tier is
+   * clamped to the strongest supported tier and reported once. Only the
+   * configured `reasoning.effort` passes through here: an explicit
+   * `extra_body` / `samplingParams` `reasoning_effort` is a documented
+   * verbatim override and is merged after this, so it still ships unchanged.
+   */
+  private clampTieredEffort(effort: ReasoningEffort): ReasoningEffort {
+    const clamped = clampReasoningEffort(effort, DASHSCOPE_TIERED_EFFORTS);
+    if (clamped !== effort && !this.effortClampWarned) {
+      debugLogger.warn(
+        `reasoning.effort='${effort}' is not accepted by the DashScope ` +
+          `tiered-effort family; using '${clamped}'.`,
+      );
+      this.effortClampWarned = true;
+    }
+    return clamped;
   }
 
   /**

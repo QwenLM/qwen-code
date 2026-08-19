@@ -1074,6 +1074,60 @@ describe('ContentGenerationPipeline', () => {
       expect(apiCall.tool_choice).toBe('required');
     });
 
+    it('never ships the max tier to the tiered DashScope family end to end', async () => {
+      // `/effort max` writes the tier into config, so a raw pass-through
+      // 400s on this request and on every later one in the session. Drive
+      // the real provider through pipeline.execute and assert on the wire
+      // body the SDK is handed: the tier must arrive capped at xhigh.
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3.8-max',
+        authType: AuthType.QWEN_OAUTH,
+        reasoning: { effort: 'max' },
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const realProvider = new DashScopeOpenAICompatibleProvider(
+        mockContentGeneratorConfig,
+        {
+          getContentGeneratorConfig: () => ({ enableCacheControl: false }),
+        } as unknown as Config,
+      );
+      (mockProvider.buildRequest as Mock).mockImplementation((req) =>
+        realProvider.buildRequest(req, 'prompt-id'),
+      );
+
+      const request: GenerateContentParameters = {
+        model: 'qwen3.8-max',
+        contents: [{ parts: [{ text: 'Summarize' }], role: 'user' }],
+        config: { thinkingConfig: { includeThoughts: true } },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Summarize' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'prompt-id');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.reasoning_effort).toBe('xhigh');
+      // The tier ships alone — no competing nested knob.
+      expect(apiCall.reasoning).toBeUndefined();
+    });
+
     it('never ships the escape-hatch disable shape to a thinkingMandatory model end to end', async () => {
       // The provider canonicalizes the documented extra_body
       // `enable_thinking: false` escape hatch into the tiered family's
