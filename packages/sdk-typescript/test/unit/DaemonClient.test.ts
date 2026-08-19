@@ -3602,18 +3602,24 @@ describe('DaemonClient', () => {
         jsonResponse(200, {
           sessionId: 's-1',
           displayName: 'My Session',
+          titleSource: 'auto',
         }),
       );
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
       const result = await client.updateSessionMetadata('s-1', {
         displayName: 'My Session',
+        titleSource: 'auto',
       });
       expect(calls[0]?.url).toBe('http://daemon/session/s-1/metadata');
       expect(calls[0]?.method).toBe('PATCH');
       expect(JSON.parse(calls[0]!.body!)).toEqual({
         displayName: 'My Session',
+        titleSource: 'auto',
       });
-      expect(result).toEqual({ displayName: 'My Session' });
+      expect(result).toEqual({
+        displayName: 'My Session',
+        titleSource: 'auto',
+      });
     });
 
     it('sends client identity header', async () => {

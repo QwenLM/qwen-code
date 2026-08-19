@@ -1394,17 +1394,24 @@ export function createDaemonSessionActions({
           'rename_session',
         );
       }
+      const baseline = getConnection();
       try {
         const result = await withActionTimeout(
-          session.updateMetadata({ displayName }),
+          session.updateMetadata({
+            displayName,
+            ...(opts?.titleSource ? { titleSource: opts.titleSource } : {}),
+          }),
           'Rename session timed out',
         );
         setConnection((current) =>
-          current.sessionId === session.sessionId
+          current.sessionId === session.sessionId &&
+          current.displayName === baseline.displayName &&
+          current.titleSource === baseline.titleSource
             ? {
                 ...current,
                 displayName: result.displayName ?? displayName,
-                titleSource: 'manual',
+                titleSource:
+                  result.titleSource ?? opts?.titleSource ?? 'manual',
               }
             : current,
         );

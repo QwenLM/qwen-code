@@ -434,7 +434,7 @@ export interface DaemonSessionActions {
   }): Promise<DaemonSessionContextUsageStatus>;
   renameSession(
     displayName: string,
-    opts?: { silent?: boolean },
+    opts?: { silent?: boolean; titleSource?: 'manual' | 'auto' },
   ): Promise<SessionMetadataResult>;
   recapSession(): Promise<DaemonSessionRecapResult>;
   generateSessionContent(

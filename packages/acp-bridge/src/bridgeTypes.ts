@@ -505,13 +505,13 @@ export interface BridgeBranchSessionRequest {
 export interface BridgePersistedBranchedSession {
   sessionId: string;
   displayName: string;
-  titleSource: 'manual';
+  titleSource: 'manual' | 'auto';
   forkedFrom: { sessionId: string; displayName: string };
 }
 
 export interface BridgeBranchedSession extends BridgeRestoredSession {
   displayName: string;
-  titleSource: 'manual';
+  titleSource: 'manual' | 'auto';
   forkedFrom: { sessionId: string; displayName: string };
 }
 

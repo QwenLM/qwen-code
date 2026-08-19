@@ -145,6 +145,7 @@ export function sessionTools(state: BridgeState): any[] {
         const sessionId = resolveSessionId(state, args.session_id);
         const result = await state.client.updateSessionMetadata(sessionId, {
           displayName: args.display_name,
+          titleSource: 'auto',
         });
         return formatJsonResult(result);
       }),

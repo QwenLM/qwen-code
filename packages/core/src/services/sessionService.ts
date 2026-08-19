@@ -87,6 +87,7 @@ export class BranchPointInvalidError extends Error {
 export interface ForkSessionOptions {
   atRecordId?: string;
   title?: string;
+  titleSource?: TitleSource;
   source?: { sourceType: string; sourceId?: string };
 }
 
@@ -2092,7 +2093,7 @@ export class SessionService {
         version: records[0].version,
         systemPayload: {
           customTitle: options.title,
-          titleSource: 'manual',
+          titleSource: options.titleSource ?? 'manual',
         },
       };
       forked.push(titleRecord);

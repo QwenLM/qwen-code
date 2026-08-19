@@ -11289,6 +11289,16 @@ describe('DaemonSessionProvider', () => {
       callCount += 1;
       if (callCount === 1) {
         yield {
+          id: 4,
+          v: 1 as const,
+          type: 'session_metadata_updated' as const,
+          data: {
+            sessionId: 'session-1',
+            displayName: 'Live rename',
+            titleSource: 'manual' as const,
+          },
+        } satisfies DaemonEvent;
+        yield {
           id: 5,
           v: 1 as const,
           type: 'session_update' as const,
@@ -11326,9 +11336,11 @@ describe('DaemonSessionProvider', () => {
     const session = createMockSession({ events });
     sdkMocks.sessions.push(session);
     let blocks: readonly DaemonTranscriptBlock[] = [];
+    let connection: DaemonConnectionState | undefined;
 
     function Harness() {
       blocks = useDaemonTranscriptBlocks();
+      connection = useDaemonConnection();
       return null;
     }
 
@@ -11349,6 +11361,10 @@ describe('DaemonSessionProvider', () => {
     expect(blocks).toMatchObject([
       { kind: 'assistant', text: 'before error after resume' },
     ]);
+    expect(connection).toMatchObject({
+      displayName: 'Live rename',
+      titleSource: 'manual',
+    });
   });
 
   it('clears an existing error during autoReconnect backoff', async () => {

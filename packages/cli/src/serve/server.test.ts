@@ -25087,7 +25087,7 @@ describe('createServeApp', () => {
       const app = createServeApp(tokenOpts, undefined, { bridge });
       const res = await auth(
         request(app).patch('/session/session-A/metadata'),
-      ).send({ displayName: 'My Session' });
+      ).send({ displayName: 'My Session', titleSource: 'auto' });
       expect(res.status).toBe(200);
       expect(res.body).toEqual({
         sessionId: 'session-A',
@@ -25097,6 +25097,7 @@ describe('createServeApp', () => {
       expect(bridge.updateMetadataCalls[0]?.sessionId).toBe('session-A');
       expect(bridge.updateMetadataCalls[0]?.metadata).toEqual({
         displayName: 'My Session',
+        titleSource: 'auto',
       });
     });
 

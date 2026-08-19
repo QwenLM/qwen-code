@@ -1166,6 +1166,7 @@ describe('createAcpSessionBridge', () => {
       releaseFirstBranch.resolve();
       await expect(firstBranch).resolves.toMatchObject({
         sessionId: 'branch-1',
+        titleSource: 'auto',
       });
       await expect(queuedBranch).rejects.toBeInstanceOf(SessionNotFoundError);
       expect(branchCalls).toBe(1);

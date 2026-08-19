@@ -1090,13 +1090,13 @@ export interface DaemonBranchPoint {
 export interface DaemonPersistedBranchedSession {
   sessionId: string;
   displayName: string;
-  titleSource: 'manual';
+  titleSource: 'manual' | 'auto';
   forkedFrom: { sessionId: string; displayName: string };
 }
 
 export interface DaemonBranchedSession extends DaemonRestoredSession {
   displayName: string;
-  titleSource: 'manual';
+  titleSource: 'manual' | 'auto';
   forkedFrom: { sessionId: string; displayName: string };
 }
 
@@ -1399,6 +1399,7 @@ export interface DaemonUnarchiveSessionsResult {
 /** Effective mutable metadata returned from `PATCH /session/:id/metadata`. */
 export interface SessionMetadataResult {
   displayName?: string;
+  titleSource?: 'manual' | 'auto';
 }
 
 type OpenStringUnion<T extends string> = T | (string & {});

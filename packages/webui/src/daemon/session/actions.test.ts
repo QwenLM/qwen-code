@@ -227,6 +227,38 @@ describe('createDaemonSessionActions', () => {
     });
   });
 
+  it('does not overwrite a newer metadata event with a late rename result', async () => {
+    const session = createMockSession('session-a');
+    const rename = createDeferred<{
+      displayName: string;
+      titleSource: 'manual';
+    }>();
+    session.updateMetadata.mockReturnValueOnce(rename.promise);
+    const { actions, getConnection, replaceConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        displayName: 'Before',
+        titleSource: 'auto',
+      },
+      session,
+    });
+
+    const pending = actions.renameSession('First');
+    replaceConnection({
+      ...getConnection(),
+      displayName: 'Newer',
+      titleSource: 'manual',
+    });
+    rename.resolve({ displayName: 'First', titleSource: 'manual' });
+    await pending;
+
+    expect(getConnection()).toMatchObject({
+      displayName: 'Newer',
+      titleSource: 'manual',
+    });
+  });
+
   it('rejects a concurrent source-bound branch request', async () => {
     const source = createMockSession('session-a', 'client-a');
     const first = createDeferred<{

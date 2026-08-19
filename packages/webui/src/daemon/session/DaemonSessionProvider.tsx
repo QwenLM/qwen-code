@@ -934,6 +934,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       let userDeletedSession = false;
 
       while (!disposed && !abort.signal.aborted) {
+        let loadedSessionThisIteration = false;
         const skipMetadataRefreshThisIteration = skipMetadataRefresh;
         skipMetadataRefresh = false;
         let loadingRequestedSession = false;
@@ -1420,6 +1421,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             ];
             replayTokenUsage = getReplayTokenUsage(replayEvents);
             replayTokenCount = getTokenCountFromUsage(replayTokenUsage);
+            loadedSessionThisIteration = true;
             session = nextSession;
             reconnectSessionId = session.sessionId;
             shouldCreateFreshSession = false;
@@ -1795,7 +1797,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             setConnection((c) => ({ ...c, catchingUp: undefined }));
           }
           const restoredTitle = getRestoredSessionTitle(activeSession.session);
-          setConnection((current) => ({
+          setConnectionSynchronous((current) => ({
             ...current,
             status: 'connected',
             sessionId: activeSession.sessionId,
@@ -1803,13 +1805,17 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ? { clientId: activeSession.clientId }
               : {}),
             workspaceCwd: activeSession.workspaceCwd,
-            displayName:
-              getSessionDisplayName(activeSession.state) ??
-              restoredTitle.displayName ??
-              (current.sessionId === activeSession.sessionId
+            displayName: loadedSessionThisIteration
+              ? (getSessionDisplayName(activeSession.state) ??
+                restoredTitle.displayName)
+              : current.sessionId === activeSession.sessionId
                 ? current.displayName
-                : undefined),
-            titleSource: restoredTitle.titleSource,
+                : undefined,
+            titleSource: loadedSessionThisIteration
+              ? restoredTitle.titleSource
+              : current.sessionId === activeSession.sessionId
+                ? current.titleSource
+                : undefined,
             tokenUsage:
               replayTokenUsage !== undefined
                 ? replayTokenUsage
@@ -1971,9 +1977,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                       current.reasoning?.effort,
                     )
                   : current.reasoning,
-              displayName:
-                getSessionDisplayName(activeSession.state) ??
-                current.displayName,
               contextWindow: configSnapshotCurrent
                 ? (sessionContextWindow ?? current.contextWindow)
                 : current.contextWindow,

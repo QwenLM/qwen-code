@@ -3752,6 +3752,7 @@ describe('SessionService', () => {
       const result = await service.forkSession(oldId, newId, {
         atRecordId: 'checkpoint-1',
         title: 'Historical branch',
+        titleSource: 'auto',
       });
       const written = fs
         .readFileSync(result.filePath, 'utf8')
@@ -3768,7 +3769,10 @@ describe('SessionService', () => {
       expect(written[2].systemPayload).not.toHaveProperty('promptId');
       expect(written.at(-1)).toMatchObject({
         subtype: 'custom_title',
-        systemPayload: { customTitle: 'Historical branch' },
+        systemPayload: {
+          customTitle: 'Historical branch',
+          titleSource: 'auto',
+        },
       });
       expect(
         fs

@@ -5062,6 +5062,7 @@ export function registerSessionRoutes(
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
         const rawDisplayName = body['displayName'];
+        const rawTitleSource = body['titleSource'];
         if (
           rawDisplayName !== undefined &&
           typeof rawDisplayName !== 'string'
@@ -5073,6 +5074,18 @@ export function registerSessionRoutes(
           });
           return;
         }
+        if (
+          rawTitleSource !== undefined &&
+          rawTitleSource !== 'manual' &&
+          rawTitleSource !== 'auto'
+        ) {
+          res.status(400).json({
+            error: '`titleSource` must be manual or auto',
+            code: 'invalid_metadata',
+            field: 'titleSource',
+          });
+          return;
+        }
         const displayName =
           typeof rawDisplayName === 'string'
             ? rawDisplayName.slice(0, 256)
@@ -5081,7 +5094,12 @@ export function registerSessionRoutes(
         try {
           effective = runtime.bridge.updateSessionMetadata(
             sessionId,
-            { displayName },
+            {
+              displayName,
+              ...(rawTitleSource !== undefined
+                ? { titleSource: rawTitleSource }
+                : {}),
+            },
             clientId !== undefined ? { clientId } : undefined,
           );
         } finally {
@@ -5103,12 +5121,26 @@ export function registerSessionRoutes(
       if (sessionId === null) return;
       const clientId = parseClientIdHeader(req, res);
       if (clientId === null) return;
-      const rawDisplayName = safeBody(req)['displayName'];
+      const body = safeBody(req);
+      const rawDisplayName = body['displayName'];
+      const rawTitleSource = body['titleSource'];
       if (typeof rawDisplayName !== 'string') {
         res.status(400).json({
           error: '`displayName` must be a string',
           code: 'invalid_metadata',
           field: 'displayName',
+        });
+        return;
+      }
+      if (
+        rawTitleSource !== undefined &&
+        rawTitleSource !== 'manual' &&
+        rawTitleSource !== 'auto'
+      ) {
+        res.status(400).json({
+          error: '`titleSource` must be manual or auto',
+          code: 'invalid_metadata',
+          field: 'titleSource',
         });
         return;
       }
@@ -5166,11 +5198,19 @@ export function registerSessionRoutes(
             return;
           }
           await runWithWorkspaceRuntimeStorage(runtime, async () => {
-            let effective: { displayName?: string };
+            let effective: {
+              displayName?: string;
+              titleSource?: 'manual' | 'auto';
+            };
             try {
               effective = runtime.bridge.updateSessionMetadata(
                 sessionId,
-                { displayName },
+                {
+                  displayName,
+                  ...(rawTitleSource !== undefined
+                    ? { titleSource: rawTitleSource }
+                    : {}),
+                },
                 clientId !== undefined ? { clientId } : undefined,
               );
               assertRuntimeGenerationOpen?.();
@@ -5186,7 +5226,7 @@ export function registerSessionRoutes(
                 ? await service.renameSession(
                     sessionId,
                     displayName,
-                    'manual',
+                    rawTitleSource ?? 'manual',
                     location,
                   )
                 : false;
@@ -5199,7 +5239,10 @@ export function registerSessionRoutes(
               // catalog revision the live rename marks — otherwise
               // version-watching clients keep the stale name.
               runtime.bridge.markSessionCatalogChanged();
-              effective = { displayName: displayName || undefined };
+              effective = {
+                displayName: displayName || undefined,
+                titleSource: rawTitleSource ?? 'manual',
+              };
             }
             invalidateSessionLists(runtime, ['active', 'archived']);
             res.status(200).json({ sessionId, ...effective });

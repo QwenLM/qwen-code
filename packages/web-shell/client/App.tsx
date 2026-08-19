@@ -4936,6 +4936,9 @@ export function App({
       saveSplitSessions(splitSessionIds);
     }
   }, [mainView, splitSessionIds, externalSplitControlled]);
+  const pendingManualTitleRef = useRef<{ displayName: string } | undefined>(
+    undefined,
+  );
   // If the viewport shrinks below the large-screen breakpoint, fold away the
   // Session Overview panel and the split view — both are large-screen-only
   // surfaces whose entry points are hidden on small screens. The split is only
@@ -4943,9 +4946,6 @@ export function App({
   // transient resize is lossless. When a shrink folds the split, its panes
   // unmount and take keyboard focus with them; flag the composer to be refocused
   // once the chat is shown again.
-  const pendingManualTitleRef = useRef<{ displayName: string } | undefined>(
-    undefined,
-  );
   const focusComposerAfterSplitCloseRef = useRef(false);
   // True while the split view is only *temporarily* folded away because the
   // window is narrower than the large-screen breakpoint. Growing back past the

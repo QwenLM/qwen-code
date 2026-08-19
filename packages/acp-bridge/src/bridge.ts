@@ -9264,6 +9264,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             newSessionId: string;
             title?: string;
             displayName?: string;
+            titleSource?: 'manual' | 'auto';
           };
           try {
             result = (await Promise.race([
@@ -9300,12 +9301,17 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             typeof rawBranchName === 'string'
               ? rawBranchName
               : result.newSessionId.slice(0, 8);
+          const branchTitleSource =
+            result.titleSource ??
+            (typeof req.name === 'string' && req.name.trim()
+              ? 'manual'
+              : 'auto');
 
           if (!restoreBranch) {
             return {
               sessionId: result.newSessionId,
               displayName: branchDisplayName,
-              titleSource: 'manual' as const,
+              titleSource: branchTitleSource,
               forkedFrom: {
                 sessionId,
                 displayName: entry.displayName ?? sessionId.slice(0, 8),
@@ -9331,7 +9337,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   : {}),
                 ...source,
                 displayName: branchDisplayName,
-                titleSource: 'manual',
+                titleSource: branchTitleSource,
               },
               {
                 skipFreshSessionAdmission: true,
@@ -9406,7 +9412,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           return {
             ...restored,
             displayName: branchDisplayName,
-            titleSource: 'manual' as const,
+            titleSource: branchTitleSource,
             forkedFrom: {
               sessionId,
               displayName: entry.displayName ?? sessionId.slice(0, 8),

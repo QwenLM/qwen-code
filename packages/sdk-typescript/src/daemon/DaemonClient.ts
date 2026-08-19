@@ -5319,7 +5319,10 @@ export class DaemonClient {
    */
   async updateSessionMetadata(
     sessionId: string,
-    metadata: { displayName?: string },
+    metadata: {
+      displayName?: string;
+      titleSource?: 'manual' | 'auto';
+    },
     clientId?: string,
   ): Promise<SessionMetadataResult> {
     return await this.fetchWithTimeout(
@@ -5333,10 +5336,16 @@ export class DaemonClient {
         if (res.status === 200) {
           const body = (await res.json()) as {
             displayName?: unknown;
+            titleSource?: unknown;
           };
-          return typeof body.displayName === 'string'
-            ? { displayName: body.displayName }
-            : {};
+          return {
+            ...(typeof body.displayName === 'string'
+              ? { displayName: body.displayName }
+              : {}),
+            ...(body.titleSource === 'manual' || body.titleSource === 'auto'
+              ? { titleSource: body.titleSource }
+              : {}),
+          };
         }
         throw await this.failOnError(res, 'PATCH /session/:id/metadata');
       },
@@ -6094,7 +6103,10 @@ export class WorkspaceDaemonClient {
 
   updateSessionMetadata(
     sessionId: string,
-    metadata: { displayName: string },
+    metadata: {
+      displayName: string;
+      titleSource?: 'manual' | 'auto';
+    },
     clientId?: string,
   ): Promise<SessionMetadataResult> {
     return this.client.workspaceJsonRequest<SessionMetadataResult>(
