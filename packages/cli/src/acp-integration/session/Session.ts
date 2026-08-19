@@ -170,6 +170,7 @@ import {
   promptIdContext,
   todoWorkChainContext,
   dedupeToolCallsById,
+  getFunctionCallFingerprint,
   getProviderToolCallId,
   isReplayOfHandledToolCall,
   recordHandledToolCall,
@@ -8953,8 +8954,7 @@ export class Session implements SessionContext {
         ? isReplayOfHandledToolCall(
             handledToolCallFingerprints,
             providerCallId,
-            fc.name,
-            fc.args,
+            getFunctionCallFingerprint(fc),
           )
         : false;
     };
@@ -9090,8 +9090,7 @@ export class Session implements SessionContext {
         recordHandledToolCall(
           handledToolCallFingerprints,
           providerCallId,
-          fc.name,
-          fc.args,
+          getFunctionCallFingerprint(fc),
         );
       }
 

@@ -65,6 +65,7 @@ import {
   createDuplicateProviderToolCallResponse,
   markDuplicateProviderToolCallResponseSent,
   findRepeatedDuplicateProviderToolCall,
+  getCachedToolCallFingerprint,
   isReplayOfHandledToolCall,
   recordHandledToolCall,
   AutonomousLoopTickResolver,
@@ -2851,8 +2852,11 @@ export const useGeminiStream = (
             ? isReplayOfHandledToolCall(
                 handledToolCallFingerprints,
                 request.providerCallId,
-                request.name,
-                request.args,
+                getCachedToolCallFingerprint(
+                  request,
+                  request.name,
+                  request.args,
+                ),
               )
             : false;
         const repeatedDuplicateRequest = findRepeatedDuplicateProviderToolCall(
@@ -2895,17 +2899,20 @@ export const useGeminiStream = (
             continue;
           }
 
-          recordHandledToolCall(
-            handledToolCallFingerprints,
-            providerCallId,
+          const requestFingerprint = getCachedToolCallFingerprint(
+            request,
             request.name,
             request.args,
           );
           recordHandledToolCall(
+            handledToolCallFingerprints,
+            providerCallId,
+            requestFingerprint,
+          );
+          recordHandledToolCall(
             handledToolCallFingerprintsRef.current,
             providerCallId,
-            request.name,
-            request.args,
+            requestFingerprint,
           );
           executableToolCallRequests.push(request);
         }

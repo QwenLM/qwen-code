@@ -78,6 +78,7 @@ import { GeminiChat } from '../../core/geminiChat.js';
 import { assembleSystemPrompt } from '../../core/prompts.js';
 import {
   dedupeToolCallsById,
+  getFunctionCallFingerprint,
   getProviderToolCallId,
   isReplayOfHandledToolCall,
   recordHandledToolCall,
@@ -1581,8 +1582,7 @@ export class AgentCore {
         ? isReplayOfHandledToolCall(
             handledToolCallFingerprints,
             providerCallId,
-            fc.name,
-            fc.args,
+            getFunctionCallFingerprint(fc),
           )
         : false;
     };
@@ -1707,8 +1707,7 @@ export class AgentCore {
         recordHandledToolCall(
           handledToolCallFingerprints,
           providerCallId,
-          fc.name,
-          fc.args,
+          getFunctionCallFingerprint(fc),
         );
       }
       authorizedCalls.push(fc);

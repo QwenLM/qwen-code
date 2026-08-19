@@ -9,6 +9,7 @@ import type { Content, Part } from '@google/genai';
 import {
   collectToolCallIdsFromHistory,
   dedupeToolCallsById,
+  getCachedToolCallFingerprint,
   getProviderToolCallId,
   getToolCallFingerprint,
   isReplayOfHandledToolCall,
@@ -168,29 +169,41 @@ describe('toolCallIdUtils', () => {
   describe('replay detection fingerprints', () => {
     it('treats a handled id as a replay only when name and args match', () => {
       const handled = new Map<string, string>();
-      recordHandledToolCall(handled, 'shell_0', 'run_shell_command', {
-        command: 'ls -la',
-      });
+      recordHandledToolCall(
+        handled,
+        'shell_0',
+        getToolCallFingerprint('run_shell_command', { command: 'ls -la' }),
+      );
 
       expect(
-        isReplayOfHandledToolCall(handled, 'shell_0', 'run_shell_command', {
-          command: 'ls -la',
-        }),
+        isReplayOfHandledToolCall(
+          handled,
+          'shell_0',
+          getToolCallFingerprint('run_shell_command', { command: 'ls -la' }),
+        ),
       ).toBe(true);
       expect(
-        isReplayOfHandledToolCall(handled, 'shell_0', 'run_shell_command', {
-          command: 'git status',
-        }),
+        isReplayOfHandledToolCall(
+          handled,
+          'shell_0',
+          getToolCallFingerprint('run_shell_command', {
+            command: 'git status',
+          }),
+        ),
       ).toBe(false);
       expect(
-        isReplayOfHandledToolCall(handled, 'shell_0', 'read_file', {
-          command: 'ls -la',
-        }),
+        isReplayOfHandledToolCall(
+          handled,
+          'shell_0',
+          getToolCallFingerprint('read_file', { command: 'ls -la' }),
+        ),
       ).toBe(false);
       expect(
-        isReplayOfHandledToolCall(handled, 'shell_1', 'run_shell_command', {
-          command: 'ls -la',
-        }),
+        isReplayOfHandledToolCall(
+          handled,
+          'shell_1',
+          getToolCallFingerprint('run_shell_command', { command: 'ls -la' }),
+        ),
       ).toBe(false);
     });
 
@@ -203,24 +216,55 @@ describe('toolCallIdUtils', () => {
       );
     });
 
+    it('caches the fingerprint per carrier object, hashing args once', () => {
+      const request = {
+        name: 'run_shell_command',
+        args: { command: 'echo once' },
+      };
+      const first = getCachedToolCallFingerprint(
+        request,
+        request.name,
+        request.args,
+      );
+      expect(first).toBe(
+        getToolCallFingerprint('run_shell_command', { command: 'echo once' }),
+      );
+
+      // Mutating the args afterwards must not change the cached identity:
+      // the cache assumes a carrier's call identity never changes, so the
+      // second lookup is a pure cache hit with no re-hash.
+      request.args.command = 'echo mutated';
+      expect(
+        getCachedToolCallFingerprint(request, request.name, request.args),
+      ).toBe(first);
+    });
+
     it('keeps the first occurrence when recording a colliding id', () => {
       const handled = new Map<string, string>();
-      recordHandledToolCall(handled, 'shell_0', 'run_shell_command', {
-        command: 'first',
-      });
-      recordHandledToolCall(handled, 'shell_0', 'run_shell_command', {
-        command: 'second',
-      });
+      recordHandledToolCall(
+        handled,
+        'shell_0',
+        getToolCallFingerprint('run_shell_command', { command: 'first' }),
+      );
+      recordHandledToolCall(
+        handled,
+        'shell_0',
+        getToolCallFingerprint('run_shell_command', { command: 'second' }),
+      );
 
       expect(
-        isReplayOfHandledToolCall(handled, 'shell_0', 'run_shell_command', {
-          command: 'first',
-        }),
+        isReplayOfHandledToolCall(
+          handled,
+          'shell_0',
+          getToolCallFingerprint('run_shell_command', { command: 'first' }),
+        ),
       ).toBe(true);
       expect(
-        isReplayOfHandledToolCall(handled, 'shell_0', 'run_shell_command', {
-          command: 'second',
-        }),
+        isReplayOfHandledToolCall(
+          handled,
+          'shell_0',
+          getToolCallFingerprint('run_shell_command', { command: 'second' }),
+        ),
       ).toBe(false);
     });
   });

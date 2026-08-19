@@ -28441,13 +28441,14 @@ describe('Session', () => {
         canUpdateOutput: false,
         isOutputMarkdown: true,
       });
+      const seededFingerprints = new Map([
+        [
+          'dup_mid',
+          core.getToolCallFingerprint('read_file', { file_path: 'b.ts' }),
+        ],
+      ]);
       vi.mocked(mockChat.getHistoryToolCallFingerprints).mockReturnValue(
-        new Map([
-          [
-            'dup_mid',
-            core.getToolCallFingerprint('read_file', { file_path: 'b.ts' }),
-          ],
-        ]),
+        seededFingerprints,
       );
       const [duplicatePart] = core.normalizeModelToolCallIds(
         [
@@ -28484,6 +28485,19 @@ describe('Session', () => {
           'Duplicate provider tool call id "dup_mid"',
         ),
       });
+      // The accessor-owned map must stay untouched: runToolCalls records
+      // admitted calls only into its own defensive copy. Without this pin,
+      // dropping the copy would silently leak admitted-call entries into
+      // the accessor's map (a real replay misclassification once the
+      // accessor is ever memoized) while every test stays green.
+      expect(seededFingerprints).toEqual(
+        new Map([
+          [
+            'dup_mid',
+            core.getToolCallFingerprint('read_file', { file_path: 'b.ts' }),
+          ],
+        ]),
+      );
     });
 
     it('does not dedupe function calls with empty ids in one batch', async () => {

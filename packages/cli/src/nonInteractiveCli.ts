@@ -49,6 +49,7 @@ import {
   isSystemReminderContent,
   markDuplicateProviderToolCallResponseSent,
   findRepeatedDuplicateProviderToolCall,
+  getCachedToolCallFingerprint,
   isReplayOfHandledToolCall,
   recordHandledToolCall,
   isToolCallConcurrencySafe,
@@ -1758,8 +1759,11 @@ export async function runNonInteractive(
             ? isReplayOfHandledToolCall(
                 handledToolCallFingerprints,
                 providerCallId,
-                request.name,
-                request.args,
+                getCachedToolCallFingerprint(
+                  request,
+                  request.name,
+                  request.args,
+                ),
               )
             : false;
         };
@@ -1796,8 +1800,11 @@ export async function runNonInteractive(
             recordHandledToolCall(
               handledToolCallFingerprints,
               providerCallId,
-              requestInfo.name,
-              requestInfo.args,
+              getCachedToolCallFingerprint(
+                requestInfo,
+                requestInfo.name,
+                requestInfo.args,
+              ),
             );
             executableBatchRequests.push(requestInfo);
             continue;

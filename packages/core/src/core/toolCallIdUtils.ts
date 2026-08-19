@@ -13,10 +13,11 @@ const GENERATED_ID_PREFIX = 'call_qwen_';
 const PROVIDER_TOOL_CALL_ID = Symbol('providerToolCallId');
 const debugLogger = createDebugLogger('TOOL_CALL_IDS');
 
-// History functionCall parts are stable objects (accessors walk history in
-// place, without cloning), so fingerprints of large args — e.g. write_file
-// content — are computed once per call instead of once per dedup pass.
-const functionCallFingerprintCache = new WeakMap<FunctionCall, string>();
+// Fingerprints are cached against the stable carrier object — a history or
+// stream FunctionCall part, or a ToolCallRequestInfo — so the args of a
+// given call (e.g. write_file content) are hashed once, not once per dedup
+// pass over it (breaker scan, admission loop, recording).
+const toolCallFingerprintCache = new WeakMap<object, string>();
 
 type FunctionCallWithProviderId = FunctionCall & {
   [PROVIDER_TOOL_CALL_ID]?: string;
@@ -78,13 +79,31 @@ export function getToolCallFingerprint(
   return getToolCallRepeatKey(name ?? '', args ?? {});
 }
 
-export function getFunctionCallFingerprint(functionCall: FunctionCall): string {
-  let fingerprint = functionCallFingerprintCache.get(functionCall);
+/**
+ * WeakMap-cached variant of {@link getToolCallFingerprint}, keyed by the
+ * stable object carrying the call (a `FunctionCall` part or a
+ * `ToolCallRequestInfo`). Callers must pass the same `name`/`args` the
+ * carrier holds; the cache assumes a carrier's call identity never changes.
+ */
+export function getCachedToolCallFingerprint(
+  carrier: object,
+  name: string | undefined,
+  args: unknown,
+): string {
+  let fingerprint = toolCallFingerprintCache.get(carrier);
   if (fingerprint === undefined) {
-    fingerprint = getToolCallFingerprint(functionCall.name, functionCall.args);
-    functionCallFingerprintCache.set(functionCall, fingerprint);
+    fingerprint = getToolCallFingerprint(name, args);
+    toolCallFingerprintCache.set(carrier, fingerprint);
   }
   return fingerprint;
+}
+
+export function getFunctionCallFingerprint(functionCall: FunctionCall): string {
+  return getCachedToolCallFingerprint(
+    functionCall,
+    functionCall.name,
+    functionCall.args,
+  );
 }
 
 /**
@@ -93,18 +112,15 @@ export function getFunctionCallFingerprint(functionCall: FunctionCall): string {
  * matches the call that first executed under that id. An id collision with
  * a different fingerprint is a fresh call and must execute (under the
  * unique suffixed id assigned by {@link normalizeModelToolCallIds}).
+ * `fingerprint` is the incoming call's fingerprint, computed once per call
+ * object via {@link getCachedToolCallFingerprint}.
  */
 export function isReplayOfHandledToolCall(
   handledToolCallFingerprints: ReadonlyMap<string, string>,
   providerCallId: string,
-  name: string | undefined,
-  args: unknown,
+  fingerprint: string,
 ): boolean {
-  const handledFingerprint = handledToolCallFingerprints.get(providerCallId);
-  return (
-    handledFingerprint !== undefined &&
-    handledFingerprint === getToolCallFingerprint(name, args)
-  );
+  return handledToolCallFingerprints.get(providerCallId) === fingerprint;
 }
 
 /**
@@ -116,14 +132,10 @@ export function isReplayOfHandledToolCall(
 export function recordHandledToolCall(
   handledToolCallFingerprints: Map<string, string>,
   providerCallId: string,
-  name: string | undefined,
-  args: unknown,
+  fingerprint: string,
 ): void {
   if (!handledToolCallFingerprints.has(providerCallId)) {
-    handledToolCallFingerprints.set(
-      providerCallId,
-      getToolCallFingerprint(name, args),
-    );
+    handledToolCallFingerprints.set(providerCallId, fingerprint);
   }
 }
 
