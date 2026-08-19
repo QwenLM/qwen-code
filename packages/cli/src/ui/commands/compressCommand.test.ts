@@ -89,6 +89,7 @@ describe('compressCommand', () => {
           compressionStatus: CompressionStatus.COMPRESSED,
           originalTokenCount: 200,
           newTokenCount: 100,
+          compressionKind: 'summarize',
         },
       },
       expect.any(Number),

@@ -9,10 +9,23 @@ import { context, ROOT_CONTEXT } from '@opentelemetry/api';
 import type { Application, RequestHandler } from 'express';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DaemonLogContext, DaemonLogger } from '../daemon-logger.js';
+
+const telemetryMocks = vi.hoisted(() => ({
+  getDaemonTelemetryInboundTraceId: vi.fn((): string | undefined => undefined),
+}));
+
+// The access log reads the caller trace id through this seam; mocking it
+// keeps the suite off the real telemetry module (and its core import graph).
+vi.mock('./telemetry-context.js', () => ({
+  getDaemonTelemetryInboundTraceId:
+    telemetryMocks.getDaemonTelemetryInboundTraceId,
+}));
+
 import { installAccessLogMiddleware } from './access-log.js';
 
 afterEach(() => {
   vi.restoreAllMocks();
+  telemetryMocks.getDaemonTelemetryInboundTraceId.mockReset();
 });
 
 function fakeLogger(): DaemonLogger {
@@ -113,6 +126,30 @@ describe('installAccessLogMiddleware', () => {
       'request completed',
       expect.objectContaining({ route: 'GET /failure', status: 400 }),
     );
+  });
+
+  it('joins the request log line to the caller trace when telemetry is off', () => {
+    telemetryMocks.getDaemonTelemetryInboundTraceId.mockReturnValueOnce(
+      '3'.repeat(32),
+    );
+    const h = harness();
+    h.begin({ path: '/traced' }).response.emit('finish');
+
+    expect(h.logger.info).toHaveBeenCalledWith(
+      'request completed',
+      expect.objectContaining({ traceId: '3'.repeat(32) }),
+    );
+  });
+
+  it('omits the traceId field when no inbound trace id was captured', () => {
+    const h = harness();
+    h.begin({ path: '/untraced' }).response.emit('finish');
+
+    const context = vi.mocked(h.logger.info).mock.calls[0]?.[1] as
+      | DaemonLogContext
+      | undefined;
+    expect(context).toBeDefined();
+    expect('traceId' in (context ?? {})).toBe(false);
   });
 
   it('caps UTF-8 fields, uses the first raw client header, and tolerates clock retreat', () => {
