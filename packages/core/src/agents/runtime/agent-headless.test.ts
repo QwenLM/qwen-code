@@ -61,6 +61,8 @@ import { AgentTerminateMode } from './agent-types.js';
 import { WriteFileTool } from '../../tools/write-file.js';
 import { ToolNames } from '../../tools/tool-names.js';
 import { normalizeToolNameForProvider } from '../../utils/tool-name-utils.js';
+import { logSubagentExecution } from '../../telemetry/loggers.js';
+import type { SubagentExecutionEvent } from '../../telemetry/types.js';
 
 vi.mock('../../core/geminiChat.js');
 vi.mock('../../core/contentGenerator.js', async (importOriginal) => {
@@ -107,6 +109,10 @@ vi.mock('../../utils/environmentContext.js', () => ({
 vi.mock('../../core/nonInteractiveToolExecutor.js');
 vi.mock('../../ide/ide-client.js');
 vi.mock('../../core/client.js');
+vi.mock('../../telemetry/loggers.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../telemetry/loggers.js')>()),
+  logSubagentExecution: vi.fn(),
+}));
 
 vi.mock('../../skills/skill-manager.js', () => {
   const SkillManagerMock = vi.fn();
@@ -2410,6 +2416,123 @@ describe('subagent.ts', () => {
         expect(finishEvents[0].loopType).toBe(
           'consecutive_identical_tool_calls',
         );
+        // The telemetry completion record carries the same attribution; a
+        // SubagentExecutionEvent without loop_type would silently drop the
+        // spread and journal the stop as unattributable.
+        const completionEvents = vi
+          .mocked(logSubagentExecution)
+          .mock.calls.map((call) => call[1])
+          .filter(
+            (event): event is SubagentExecutionEvent =>
+              event.status !== 'started',
+          );
+        expect(completionEvents).toHaveLength(1);
+        expect(completionEvents[0]?.loop_type).toBe(
+          'consecutive_identical_tool_calls',
+        );
+      });
+
+      it('does not carry a stale loop attribution into a re-executed run (issue #9450)', async () => {
+        const taskListToolDef: FunctionDeclaration = {
+          name: 'task_list',
+          description: 'Lists team tasks',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+
+        const { config } = await createMockConfig({
+          getFunctionDeclarationsFiltered: vi
+            .fn()
+            .mockReturnValue([taskListToolDef]),
+          getTool: vi.fn().mockReturnValue(undefined),
+        });
+        const toolConfig: ToolConfig = { tools: ['task_list'] };
+        const taskListArgs = {
+          status: 'in_progress',
+          owner: 'peer-a',
+          blockedBy: '',
+        };
+
+        mockSendMessageStream.mockImplementation(
+          createMockStream([
+            ...Array.from({ length: 5 }, (_, index) => [
+              {
+                id: `poll_${index + 1}`,
+                name: 'task_list',
+                args: taskListArgs,
+              },
+            ]),
+            'stop',
+          ]),
+        );
+
+        const taskListInvocation = {
+          params: taskListArgs,
+          getDescription: vi.fn().mockReturnValue('List tasks'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          execute: vi.fn().mockResolvedValue({
+            llmContent: '#7 [in_progress] @peer-a — task',
+            returnDisplay: 'Listed tasks',
+          }),
+        };
+        const taskListTool = {
+          name: 'task_list',
+          displayName: 'Task List',
+          description: 'List tasks in the team task list',
+          kind: 'READ' as const,
+          schema: taskListToolDef,
+          build: vi.fn().mockImplementation(() => taskListInvocation),
+          canUpdateOutput: false,
+          isOutputMarkdown: false,
+        } as unknown as AnyDeclarativeTool;
+        vi.mocked(
+          (config.getToolRegistry() as unknown as ToolRegistry).getTool,
+        ).mockImplementation((name: string) =>
+          name === 'task_list' ? taskListTool : undefined,
+        );
+
+        const finishEvents: Array<{
+          loopType?: string;
+          terminateReason?: string;
+        }> = [];
+        const eventEmitter = new AgentEventEmitter();
+        eventEmitter.on(AgentEventType.FINISH, (event: unknown) => {
+          finishEvents.push(
+            event as { loopType?: string; terminateReason?: string },
+          );
+        });
+        eventEmitter.on(AgentEventType.ERROR, () => undefined);
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+          toolConfig,
+          eventEmitter,
+        );
+
+        // Run 1 halts on the frozen board with an attribution.
+        await scope.execute(new ContextState());
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.LOOP_DETECTED);
+
+        // Run 2 on the same instance (stop-hook continuation / resident
+        // turns) errors before any loop fires: it must not carry run 1's
+        // loopType into its FINISH/telemetry.
+        mockSendMessageStream.mockRejectedValueOnce(
+          new Error('simulated model error'),
+        );
+        await expect(scope.execute(new ContextState())).rejects.toThrow(
+          'simulated model error',
+        );
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.ERROR);
+
+        expect(finishEvents).toHaveLength(2);
+        expect(finishEvents[0].loopType).toBe(
+          'consecutive_identical_tool_calls',
+        );
+        expect(finishEvents[1].loopType).toBeUndefined();
       });
 
       it('should ignore duplicate provider tool-call ids already present in chat history', async () => {

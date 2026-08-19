@@ -242,10 +242,7 @@ export class LoopDetectionService {
   // callId → request pairing so results can be matched to their calls when
   // the runtime only has the response (populated on ToolCallRequest events,
   // consumed by recordToolResultByCallId).
-  private requestByCallId = new Map<
-    string,
-    { name: string; args: object; key: string }
-  >();
+  private requestByCallId = new Map<string, { name: string; args: object }>();
 
   // Loop type of the most recent firing. Bubbled up through the
   // LoopDetected event so callers (non-interactive CLI, telemetry) can tell
@@ -554,21 +551,22 @@ export class LoopDetectionService {
     // it (consecutive-identical and the adaptive cap's stuck tracker). Args
     // can be large (e.g. write_file content), so avoid recomputing per guard.
     const key = this.getToolCallKey(event.value);
+    const stateful = this.isStatefulReadTool(event.value.name);
 
     // Pair requests with their later results (recordToolResultByCallId).
-    if (event.value.callId) {
+    // Only stateful read tools participate: recordToolResult rejects every
+    // other tool, so tracking them would just accumulate full args objects
+    // (write_file args can carry whole file contents) until eviction.
+    if (event.value.callId && stateful) {
       this.requestByCallId.set(event.value.callId, {
         name: event.value.name,
         args: event.value.args,
-        key,
       });
       if (this.requestByCallId.size > MAX_TRACKED_TOOL_REQUESTS) {
         const oldest = this.requestByCallId.keys().next().value;
         if (oldest !== undefined) this.requestByCallId.delete(oldest);
       }
     }
-
-    const stateful = this.isStatefulReadTool(event.value.name);
 
     // Always-on stuck-repetition tracking for the adaptive cap (see
     // checkTurnToolCallCap): lets the cap tell a productive turn from a stuck

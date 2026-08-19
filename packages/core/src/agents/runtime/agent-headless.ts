@@ -219,6 +219,10 @@ export class AgentHeadless {
     this.executing = true;
     this.finalText = '';
     this.terminateMode = AgentTerminateMode.ERROR;
+    // A re-executed instance (stop-hook continuation, resident turns) must
+    // not carry the previous run's loop attribution into an ERROR/FINISH
+    // spread; the field is only meaningful for a LOOP_DETECTED stop.
+    this.loopType = null;
     const resetStats = options.resetStats !== false;
     if (resetStats) {
       this.core.resetExecutionStats();
