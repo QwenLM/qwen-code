@@ -2022,6 +2022,49 @@ describe('SessionArtifactStore', () => {
     expect(listed.artifacts[0]?.workspacePath).toBe('report.xlsx');
   });
 
+  it('rejects directory expansion when metadata is not a plain object', async () => {
+    await fs.mkdir(path.join(workspace, 'reports'));
+    await fs.writeFile(path.join(workspace, 'reports', 'a.xlsx'), 'xlsx');
+    const store = new SessionArtifactStore({
+      sessionId: 's-dir-meta',
+      workspaceCwd: workspace,
+    });
+
+    await expect(
+      store.upsertMany(
+        [
+          {
+            title: 'Reports',
+            workspacePath: 'reports',
+            metadata: ['a', 'b'] as never,
+          },
+        ],
+        { strict: true },
+      ),
+    ).rejects.toMatchObject({ field: 'metadata' });
+  });
+
+  it('rejects directory expansion when the parent title exceeds 200 characters', async () => {
+    await fs.mkdir(path.join(workspace, 'reports-long'));
+    await fs.writeFile(path.join(workspace, 'reports-long', 'a.xlsx'), 'xlsx');
+    const store = new SessionArtifactStore({
+      sessionId: 's-dir-long-title',
+      workspaceCwd: workspace,
+    });
+
+    await expect(
+      store.upsertMany(
+        [
+          {
+            title: 'x'.repeat(201),
+            workspacePath: 'reports-long',
+          },
+        ],
+        { strict: true },
+      ),
+    ).rejects.toMatchObject({ field: 'title' });
+  });
+
   it('keeps a curated title when a later directory expansion covers the same file', async () => {
     await fs.mkdir(path.join(workspace, 'reports'));
     await fs.writeFile(path.join(workspace, 'reports', 'q3.xlsx'), 'xlsx');

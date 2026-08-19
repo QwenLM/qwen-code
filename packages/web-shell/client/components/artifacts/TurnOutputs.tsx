@@ -71,9 +71,8 @@ export const TURN_OUTPUT_VISIBLE_LIMIT = 3;
 export function visibleTurnOutputs<T>(
   items: readonly T[],
   expanded: boolean,
-  limit = TURN_OUTPUT_VISIBLE_LIMIT,
 ): readonly T[] {
-  return expanded ? items : items.slice(0, limit);
+  return expanded ? items : items.slice(0, TURN_OUTPUT_VISIBLE_LIMIT);
 }
 
 export type TurnOutputOpenRequest = (

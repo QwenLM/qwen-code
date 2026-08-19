@@ -232,20 +232,6 @@ class RecordArtifactInvocation extends BaseToolInvocation<
         ...(description ? { description } : {}),
       });
     }
-    if (artifacts.length === 0) {
-      const message = [
-        `Failed to record artifact: "${locator.workspacePath}" is a directory with no recordable files.`,
-        WORKSPACE_PATH_HINT,
-      ].join('\n');
-      return {
-        llmContent: message,
-        returnDisplay: message,
-        error: {
-          message,
-          type: ToolErrorType.TARGET_IS_DIRECTORY,
-        },
-      };
-    }
     const message = formatDirectoryExpansion(locator, {
       ...collected,
       files: artifacts.map((artifact) => artifact.workspacePath!),
@@ -765,14 +751,16 @@ export function isRecordableDerivedChild(
   title: string,
   workspacePath: string,
 ): boolean {
+  const trimmedTitle = title.trim();
+  const trimmedPath = workspacePath.trim();
   return (
-    title.length > 0 &&
-    title.length <= ARTIFACT_TITLE_MAX_LENGTH &&
-    workspacePath.length <= ARTIFACT_WORKSPACE_PATH_MAX_LENGTH &&
-    !hasControlCharacter(title) &&
-    !hasUnsafeDisplayPayload(title) &&
-    !hasControlCharacter(workspacePath) &&
-    !hasUnsafeDisplayPayload(workspacePath)
+    trimmedTitle.length > 0 &&
+    trimmedTitle.length <= ARTIFACT_TITLE_MAX_LENGTH &&
+    trimmedPath.length <= ARTIFACT_WORKSPACE_PATH_MAX_LENGTH &&
+    !hasControlCharacter(trimmedTitle) &&
+    !hasUnsafeDisplayPayload(trimmedTitle) &&
+    !hasControlCharacter(trimmedPath) &&
+    !hasUnsafeDisplayPayload(trimmedPath)
   );
 }
 

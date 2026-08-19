@@ -1328,7 +1328,19 @@ export class SessionArtifactStore {
           'workspacePath',
         );
       }
-      const realStat = await fs.lstat(realPath);
+      let realStat: Stats;
+      try {
+        realStat = await fs.lstat(realPath);
+      } catch (error) {
+        if (isNotFoundError(error)) {
+          return { inputs: [input] };
+        }
+        const reason = error instanceof Error ? error.message : String(error);
+        throw new SessionArtifactValidationError(
+          `workspacePath could not be inspected: ${reason}`,
+          'workspacePath',
+        );
+      }
       if (!realStat.isDirectory()) {
         return { inputs: [input] };
       }
@@ -1375,8 +1387,23 @@ export class SessionArtifactStore {
       );
     }
 
+    if (
+      input.metadata !== undefined &&
+      !isPlainMetadataObject(input.metadata)
+    ) {
+      throw new SessionArtifactValidationError(
+        'metadata must be an object',
+        'metadata',
+      );
+    }
     const parentTitle =
       typeof input.title === 'string' ? input.title.trim() : '';
+    if (parentTitle.length > 200) {
+      throw new SessionArtifactValidationError(
+        'title exceeds 200 characters',
+        'title',
+      );
+    }
     const parentDescription =
       typeof input.description === 'string'
         ? input.description.trim()
@@ -1411,7 +1438,7 @@ export class SessionArtifactStore {
           mimeType: undefined,
           sizeBytes: undefined,
           metadata: {
-            ...input.metadata,
+            ...(isPlainMetadataObject(input.metadata) ? input.metadata : {}),
             expandedFromDirectory: true,
           },
           ...(description ? { description } : { description: undefined }),
@@ -3217,6 +3244,12 @@ function isNotFoundError(error: unknown): boolean {
   }
   const code = (error as { code?: unknown }).code;
   return code === 'ENOENT' || code === 'ENOTDIR';
+}
+
+function isPlainMetadataObject(
+  value: unknown,
+): value is Record<string, string | number | boolean | null> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function isNoFollowSymlinkError(error: unknown): boolean {

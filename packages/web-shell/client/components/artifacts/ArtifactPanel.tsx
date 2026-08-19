@@ -2572,7 +2572,10 @@ function DownloadableWorkspaceArtifact({
             onClick={() => {
               void download();
             }}
-            disabled={downloading}
+            disabled={
+              downloading ||
+              (artifact.status !== 'available' && artifact.status !== 'changed')
+            }
           >
             {downloading ? t('common.downloading') : t('common.download')}
           </button>

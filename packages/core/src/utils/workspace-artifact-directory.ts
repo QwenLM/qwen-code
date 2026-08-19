@@ -85,10 +85,22 @@ async function walkRecordableWorkspaceFiles(
   }
   if (depth > MAX_DIRECTORY_ARTIFACT_DEPTH) {
     try {
-      const peek = await fs.readdir(absoluteDir);
+      const peek = await fs.readdir(absoluteDir, { withFileTypes: true });
       return {
         truncated: false,
-        depthLimited: peek.length > 0,
+        depthLimited: peek.some((entry) => {
+          if (entry.isSymbolicLink()) {
+            return false;
+          }
+          if (entry.isDirectory()) {
+            return !shouldSkipDirectoryArtifactName(entry.name);
+          }
+          return (
+            entry.isFile() &&
+            !entry.name.startsWith('.') &&
+            !entry.name.startsWith('~$')
+          );
+        }),
         unreadable: false,
       };
     } catch {
