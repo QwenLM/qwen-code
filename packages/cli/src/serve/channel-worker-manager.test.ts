@@ -2425,16 +2425,20 @@ describe('createChannelWorkerManager', () => {
     expect(group.reconcile).toHaveBeenCalledTimes(1);
   });
 
-  it('retains a terminal mode-all worker carried names on a sibling enable rebuild (R19-1)', async () => {
-    // Mode-all sibling of the R15-17 names-mode rebuild fix: a mode-`all`
-    // commitment carries no name list, and committedChannelNames() skips
+  it('rejects starting a non-carried channel on a terminal mode-all worker instead of committing it (R19-1, R21-12)', async () => {
+    // Mode-all twin of the R21-12 names-mode pin: a mode-`all`
+    // commitment carries no name list, committedChannelNames() skips
     // terminal-failed workers wholesale (the R8-18 start/recovery
-    // contract), so rebuilding a sibling enable from that filtered view
-    // commits names=[new] — silently dropping the dead worker's carried
-    // channels from the committed selection until a daemon restart
-    // (every later reload-op resolve omits them, breaking the mode-`all`
-    // restore contract). The rebuild must union the carried names back
-    // in; the filtered view itself stays unchanged (R19-1).
+    // contract), and the NEW name is not in the dead worker's carried
+    // set — so its workspace rides preserveWorkspaceCwds and reconcile
+    // drops the target wholesale. Committing the name anyway would
+    // latch a phantom (changed:true, nothing running, every retry
+    // early-returns success), and the only alternative — replacing the
+    // terminal entry — resurrects the carried crash-loopers on a fresh
+    // budget. The start must fail fast and direct the user to the
+    // worker restart (R21-12). The carried-name union this shape used
+    // to pin stays covered by the carried-name relaunch pin above
+    // (#8975) and the disable-direction collapse pin below (R19-1).
     const group = fakeGroup();
     const test = setup(group);
     await test.manager.setSelection({ mode: 'all' });
@@ -2453,21 +2457,16 @@ describe('createChannelWorkerManager', () => {
     // The dead worker's names stay excluded from the filtered view.
     expect(test.manager.committedChannelNames()).toEqual([]);
 
-    const result = await test.manager.setChannelEnabled(
-      { name: 'slack', workspaceCwd: PRIMARY },
-      true,
-    );
+    await expect(
+      test.manager.setChannelEnabled(
+        { name: 'slack', workspaceCwd: PRIMARY },
+        true,
+      ),
+    ).rejects.toMatchObject({ code: 'channel_worker_start_failed' });
 
-    expect(result).toMatchObject({ changed: true });
-    expect(test.resolveGroups).toHaveBeenLastCalledWith(
-      { mode: 'names', names: ['telegram', 'feishu', 'slack'] },
-      'set',
-    );
-    expect(test.manager.state().selection).toEqual({
-      mode: 'names',
-      names: ['telegram', 'feishu', 'slack'],
-    });
-    expect(group.reconcile).toHaveBeenCalledTimes(1);
+    expect(group.reconcile).not.toHaveBeenCalled();
+    // The mode-`all` commitment stays intact — nothing was committed.
+    expect(test.manager.state().selection).toEqual({ mode: 'all' });
   });
 
   it('retains terminal mode-all carried names instead of collapsing to a whole-stop when the last live channel is disabled (R19-1)', async () => {
@@ -2651,6 +2650,112 @@ describe('createChannelWorkerManager', () => {
     expect(group.reconcile).toHaveBeenCalledTimes(1);
     const reconcileOptions = vi.mocked(group.reconcile).mock.calls[0]![1];
     expect(reconcileOptions?.preserveWorkspaceCwds).toBeUndefined();
+  });
+
+  it('preserves the terminal-failed workspace on a refreshWorkspaces reconcile (R21-11)', async () => {
+    // The routine attach/detach trigger reconciles the committed
+    // selection ghost names included (reloadSelection only filters
+    // persisted stopped records, which budget exhaustion never writes).
+    // Without the preserve guard the dead workspace's entry is replaced
+    // on a FRESH restart budget — the R20-3 resurrection reached through
+    // the reload-op path: every re-exhaustion plus next attach/detach
+    // relaunches the crash-looping channel again (R21-11).
+    const { group, test } = setupDeadSibling();
+    await test.manager.setSelection({
+      mode: 'names',
+      names: ['live', 'secondary-dead'],
+    });
+    vi.mocked(group.snapshots).mockReturnValue([
+      workerSnapshot({
+        channels: ['live'],
+        requestedChannels: ['live'],
+      }),
+      terminalSecondary(),
+    ]);
+
+    await test.manager.refreshWorkspaces();
+
+    // The resolve keeps the ghost name...
+    expect(test.resolveGroups).toHaveBeenLastCalledWith(
+      { mode: 'names', names: ['live', 'secondary-dead'] },
+      'reload',
+    );
+    // ...and the reconcile receives the terminal workspace as preserved.
+    expect(group.reconcile).toHaveBeenCalledTimes(1);
+    const reconcileOptions = vi.mocked(group.reconcile).mock.calls[0]![1];
+    expect(reconcileOptions?.preserveWorkspaceCwds).toEqual(
+      new Set([SECONDARY]),
+    );
+  });
+
+  it('preserves the terminal-failed workspace on a forced reload reconcile (R21-11)', async () => {
+    // reload()'s force:true skips the unchanged gate unconditionally, so
+    // the preserve check — which the entry loop runs BEFORE that gate —
+    // is the only thing standing between a routine reload and a fresh
+    // restart budget for the crash-looping channel (R21-11).
+    const { group, test } = setupDeadSibling();
+    await test.manager.setSelection({
+      mode: 'names',
+      names: ['live', 'secondary-dead'],
+    });
+    vi.mocked(group.snapshots).mockReturnValue([
+      workerSnapshot({
+        channels: ['live'],
+        requestedChannels: ['live'],
+      }),
+      terminalSecondary(),
+    ]);
+
+    await test.manager.reload();
+
+    expect(test.resolveGroups).toHaveBeenLastCalledWith(
+      { mode: 'names', names: ['live', 'secondary-dead'] },
+      'reload',
+    );
+    expect(group.reconcile).toHaveBeenCalledTimes(1);
+    const reconcileOptions = vi.mocked(group.reconcile).mock.calls[0]![1];
+    expect(reconcileOptions?.force).toBe(true);
+    expect(reconcileOptions?.preserveWorkspaceCwds).toEqual(
+      new Set([SECONDARY]),
+    );
+  });
+
+  it('rejects starting a channel the terminal-failed owner worker never carried (R21-12)', async () => {
+    // The owner workspace rides preserveWorkspaceCwds (a relaunch would
+    // resurrect the carried crash-looper on a fresh budget), so
+    // reconcile drops the new name's target wholesale. Committing the
+    // name anyway would latch a phantom: `currentlyEnabled` then
+    // early-returns success on every retry while nothing runs, and only
+    // a worker restart or daemon restart recovers it. The start must
+    // fail fast with a structured error instead (R21-12).
+    const { group, test } = setupDeadSibling();
+    await test.manager.setSelection({
+      mode: 'names',
+      names: ['live', 'secondary-dead'],
+    });
+    vi.mocked(group.snapshots).mockReturnValue([
+      workerSnapshot({
+        channels: ['live'],
+        requestedChannels: ['live'],
+      }),
+      terminalSecondary(),
+    ]);
+
+    await expect(
+      test.manager.setChannelEnabled(
+        { name: 'secondary-new', workspaceCwd: SECONDARY },
+        true,
+      ),
+    ).rejects.toMatchObject({ code: 'channel_worker_start_failed' });
+
+    expect(group.reconcile).not.toHaveBeenCalled();
+    // Nothing was committed — the phantom latch must not engage, and the
+    // dead sibling stays retained (R15-17).
+    expect(test.manager.state().selection).toEqual({
+      mode: 'names',
+      names: ['live', 'secondary-dead'],
+    });
+    expect(test.manager.committedChannelNames()).toEqual(['live']);
   });
 
   it('relaunches a terminal-failed mode-names worker on a per-channel start (#8975)', async () => {

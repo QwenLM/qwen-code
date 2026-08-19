@@ -1128,6 +1128,24 @@ export function createChannelWorkerManager(
               created: false,
             };
           }
+          // Starting a name the terminal-failed owner worker never
+          // carried must fail fast instead of commit-and-no-op: the
+          // owner workspace rides preserveWorkspaceCwds (correct —
+          // relaunching it would resurrect the carried crash-looper on
+          // a fresh budget), reconcile drops the new name's target
+          // wholesale, and committing it anyway latches a phantom —
+          // `currentlyEnabled` early-returns success on every retry
+          // while nothing runs, and only a worker restart (which also
+          // resurrects the carried channels) or a daemon restart
+          // recovers it. Starting a CARRIED name is unaffected: that
+          // workspace is not preserved, and the relaunch is the R8-18
+          // recovery contract (R21-12).
+          if (preserveWorkspaceCwds.has(owner.workspaceCwd)) {
+            throw new ChannelWorkerControlError(
+              'channel_worker_start_failed',
+              `Cannot start channel "${owner.name}": workspace "${owner.workspaceCwd}" has a terminally failed channel worker (restart budget exhausted) that never carried it. Restart that workspace's channel worker to recover it, then start the channel again.`,
+            );
+          }
           const selection: ServeChannelSelection = {
             mode: 'names',
             names: selectionNames.includes(owner.name)
@@ -1196,17 +1214,39 @@ export function createChannelWorkerManager(
           throw error;
         }
         if (hardKilled) throw drainingError();
+        // A reload-op reconciles every committed name — including the
+        // ghost names a terminal-failed worker still carries
+        // (reloadSelection only filters persisted `stopped` records,
+        // which budget exhaustion never writes). Without the preserve
+        // guard the dead workspace's entry — which force:true skips the
+        // unchanged gate for — is replaced by a fresh entry on a FRESH
+        // restart budget: the same resurrection setChannelEnabled guards
+        // against (R20-3), reached through the reload path. No
+        // `carriesName` exception here: reload-ops toggle no name
+        // (R21-11).
+        const preserveWorkspaceCwds = new Set(
+          group
+            .snapshots()
+            .filter(isTerminalFailedWorker)
+            .map((worker) => worker.workspaceCwd),
+        );
         try {
           await group.reconcile(targetGroups, {
             force: true,
             onRollingBack: () =>
               setTransition('rolling_back', committedSelection),
+            ...(preserveWorkspaceCwds.size > 0
+              ? { preserveWorkspaceCwds }
+              : {}),
           });
         } catch (error) {
           setTransition('idle');
           throw classifyFailure(error, 'channel_worker_start_failed');
         }
-        commit(filteredSelection, targetGroups);
+        commit(
+          filteredSelection,
+          committedGroupsForApply(targetGroups, preserveWorkspaceCwds),
+        );
         const snapshots = group.snapshots();
         return publicWorkerSnapshot(
           snapshots.find((worker) => worker.primary) ??
@@ -1372,13 +1412,30 @@ export function createChannelWorkerManager(
           throw error;
         }
         if (hardKilled) throw drainingError();
+        // Same preserve guard as reload(): this routine attach/detach
+        // trigger reconciles the committed selection ghost names
+        // included, and without it the terminal workspace's entry is
+        // replaced on a fresh restart budget (R21-11).
+        const preserveWorkspaceCwds = new Set(
+          group
+            .snapshots()
+            .filter(isTerminalFailedWorker)
+            .map((worker) => worker.workspaceCwd),
+        );
         try {
-          await group.reconcile(targetGroups);
+          if (preserveWorkspaceCwds.size > 0) {
+            await group.reconcile(targetGroups, { preserveWorkspaceCwds });
+          } else {
+            await group.reconcile(targetGroups);
+          }
         } catch (error) {
           setTransition('idle');
           throw classifyFailure(error, 'channel_worker_start_failed');
         }
-        commit(filteredSelection, targetGroups);
+        commit(
+          filteredSelection,
+          committedGroupsForApply(targetGroups, preserveWorkspaceCwds),
+        );
       });
     },
     workerChanged: notify,
