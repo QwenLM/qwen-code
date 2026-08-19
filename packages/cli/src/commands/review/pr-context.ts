@@ -14,6 +14,7 @@
 // comments, and issue comments.
 
 import type { CommandModule } from 'yargs';
+import { certifierMatchesRound, roundModelIdFrom } from './lib/round-model.js';
 import {
   mkdirSync,
   readFileSync,
@@ -39,6 +40,7 @@ import {
   stripLedgerMarker,
   type Ledger,
 } from './lib/ledger.js';
+import { commentMarkerSeverity } from './lib/review-footer.js';
 
 /**
  * Marker embedded in the "suggestion summary" issue comment that /review used
@@ -387,7 +389,12 @@ const NEGATION = new RegExp(
 );
 
 export function carriesBlockerSignal(body: string | undefined): boolean {
-  const b = (body ?? '').toLowerCase();
+  // Only RENDERED text can promote through this ungated channel: GitHub
+  // renders an HTML comment as nothing, so a planted `<!-- [critical] -->`
+  // would otherwise become an invisible, irrefutable blocker — the exact
+  // harm `isBlockerBody`'s identity gate exists to prevent, reached around
+  // it. An unclosed comment swallows the rest of the body, as on GitHub.
+  const b = (body ?? '').replace(/<!--[\s\S]*?(?:-->|$)/g, '').toLowerCase();
   return BLOCKER_PATTERNS.some((re) => {
     // Preserve the pattern's own flags (a future `i`/`u` must not be silently
     // dropped) and add `g` for the scan; dedupe so `g` is never doubled.
@@ -486,12 +493,65 @@ export interface InlineThreads {
 }
 
 /**
+ * The one blocker test, shared by pr-context's re-check section and
+ * comment-status's report: semantic blocker prose (humans and attributed
+ * posts), plus an attribution-off Critical recognized by its invisible
+ * severity marker — gated on the reviewing account, because the marker
+ * string is public and plantable, and a planted "critical" marker on an
+ * otherwise empty comment would otherwise become a permanent, irrefutable
+ * blocker that caps every later round at COMMENT. With `me` empty the
+ * marker disjunct never fires: under-promotion loses a re-check, while
+ * over-promotion loses approvability, so empty fails toward the former.
+ */
+export function isBlockerBody(
+  body: string | undefined,
+  author: string | undefined,
+  me: string,
+): boolean {
+  if (carriesBlockerSignal(body)) return true;
+  return (
+    me !== '' &&
+    (author ?? '').toLowerCase() === me.toLowerCase() &&
+    commentMarkerSeverity(body ?? '') === 'critical'
+  );
+}
+
+/**
+ * Whether any posted ROOT comment carries the invisible CRITICAL marker —
+ * exactly the signal authorship unlocks (`isBlockerBody`'s marker disjunct
+ * reads root bodies only, and only `critical` promotes). When identity
+ * lookup fails while one is present, the context must fail closed instead
+ * of proceeding with an empty `me`: an unresolved attribution-off Critical
+ * would classify as ordinary discussion and disappear from the blocker set
+ * later rounds use, and "could not tell" must not read the same as "was
+ * not". Firing on anything WIDER — a reply's marker, a suggestion marker —
+ * would fail closed on a signal the identity decides nothing about, and the
+ * marker string is public: a planted reply would then convert every
+ * transient identity blip into a repeating hard refusal.
+ */
+export function anyRootCarriesCriticalMarker(
+  comments: ReadonlyArray<{
+    body?: string | undefined;
+    in_reply_to_id?: number | null;
+  }>,
+): boolean {
+  return comments.some(
+    (c) =>
+      (c.in_reply_to_id === undefined || c.in_reply_to_id === null) &&
+      commentMarkerSeverity(c.body ?? '') === 'critical',
+  );
+}
+
+/**
  * Group the flat inline-comment list into threads and classify each root.
  * The single copy of this walk: `buildMarkdown` renders from it and the
  * stdout summary counts from it, so the reported count can never diverge
  * from what the file contains.
  */
-export function classifyInlineThreads(inline: RawComment[]): InlineThreads {
+export function classifyInlineThreads(
+  inline: RawComment[],
+  me: string = '',
+): InlineThreads {
   // Build a map id → comment, and group replies by root id, so each
   // already-discussed thread can be rendered with the reviewer's original
   // concern + the chronological reply chain. This is what tells review
@@ -526,18 +586,25 @@ export function classifyInlineThreads(inline: RawComment[]): InlineThreads {
   //
   // (This used to key on the literal `[Critical]` marker, which only /review
   // emits — a human blocker phrased any other way settled into "do NOT
-  // re-report". `carriesBlockerSignal` is the semantic test.)
+  // re-report". `isBlockerBody` is the semantic test. Attribution-off posts
+  // carry no prefix at all; their severity rides the invisible comment
+  // marker, so a posted Critical re-promotes through it every round —
+  // including from round N+2, where the ledger no longer resurfaces a
+  // "cannot tell" ruling. The marker disjunct is gated on the reviewing
+  // account: the string is public and plantable.)
+  const isBlockerRoot = (c: RawComment): boolean =>
+    isBlockerBody(c.body, c.user?.login, me);
   const repliedBlockerRoots = roots.filter(
-    (c) => repliesByRoot.has(c.id) && carriesBlockerSignal(c.body),
+    (c) => repliesByRoot.has(c.id) && isBlockerRoot(c),
   );
   const openBlockerRoots = roots.filter(
-    (c) => !repliesByRoot.has(c.id) && carriesBlockerSignal(c.body),
+    (c) => !repliesByRoot.has(c.id) && isBlockerRoot(c),
   );
   const repliedRoots = roots.filter(
-    (c) => repliesByRoot.has(c.id) && !carriesBlockerSignal(c.body),
+    (c) => repliesByRoot.has(c.id) && !isBlockerRoot(c),
   );
   const openRoots = roots.filter(
-    (c) => !repliesByRoot.has(c.id) && !carriesBlockerSignal(c.body),
+    (c) => !repliesByRoot.has(c.id) && !isBlockerRoot(c),
   );
 
   return {
@@ -720,7 +787,7 @@ export interface RecoveredLedger {
  * identity vouches for, and the round is full-range. That is the fallback's
  * price, paid only while the identity endpoint is down.
  */
-const FOREIGN_ROUND_HEADROOM = 64;
+export const FOREIGN_ROUND_HEADROOM = 64;
 
 /**
  * The latest machine ledger posted on this PR — with the trust surface split.
@@ -768,7 +835,19 @@ export function recoverLedger(
   login: string | null,
 ): {
   recovered:
-    | (RecoveredLedger & { foreign: boolean; author: string | null })
+    | (RecoveredLedger & {
+        foreign: boolean;
+        author: string | null;
+        /**
+         * True when the union fired: a foreign winner was merged OVER this
+         * account's own latest findings. The renderer keys its provenance
+         * wording on it — a merged list is NOT "another account's claims"
+         * (the own subset is this account's own), and its `dropped` sum
+         * spans two markers plus the re-cap, so the PARTIAL note must not
+         * attribute it to one round's size cap.
+         */
+        merged: boolean;
+      })
     | null;
   sawOwnReview: boolean;
 } {
@@ -870,7 +949,14 @@ export function recoverLedger(
   // shared id space — and the union is exactly what makes the headroom doc's
   // "re-ruled entry by entry" true for entries a displacement would have
   // removed from view.
-  if (best.foreign && bestOwn) {
+  let mergedOverOwn = false;
+  // Non-empty own list only: an ordinary LGTM round posts `"findings":[]`,
+  // and with zero own entries there is nothing to merge OVER — flagging that
+  // shape `merged` made the provenance wording claim own-certified entries
+  // exist when none do (and misattributed the PARTIAL note's sum). The
+  // foreign winner recovers as pure-foreign, which is exactly what it is.
+  if (best.foreign && bestOwn && bestOwn.ledger.findings.length > 0) {
+    mergedOverOwn = true;
     const ownIds = new Set(bestOwn.ledger.findings.map((f) => f.id));
     const merged = [
       ...bestOwn.ledger.findings,
@@ -894,6 +980,7 @@ export function recoverLedger(
       reviewId: best.id,
       foreign: best.foreign,
       author: best.author,
+      merged: mergedOverOwn,
     },
     sawOwnReview,
   };
@@ -903,20 +990,51 @@ export function recoverLedger(
 export function latestLedger(
   reviews: RawReview[],
   login: string | null,
-): { ledger: Ledger; foreign: boolean; author: string | null } | null {
+): {
+  ledger: Ledger;
+  foreign: boolean;
+  author: string | null;
+  merged: boolean;
+} | null {
   const { recovered } = recoverLedger(reviews, login);
   return recovered
     ? {
         ledger: recovered.ledger,
         foreign: recovered.foreign,
         author: recovered.author,
+        merged: recovered.merged,
       }
     : null;
 }
 
 /**
+ * The anchor sha the prev-ledger side file HOLDS, read back off disk.
+ *
+ * Not what this run recovered, and the difference is the point: the persist
+ * guard keeps a HIGHER-round side file when the recovery walk comes back
+ * short (a concurrent lane, a paginated fetch that returned less than it
+ * should, a latest review deleted or edited). Step 1 passes the file's sha,
+ * so the file's sha is what the section's verdict must rule on — see
+ * `anchorRuling`. Read rather than inferred, because the guard's decision is
+ * exactly the thing a caller would get wrong by reasoning about it.
+ *
+ * Null on an unreadable or shapeless file, which leaves the ruling to the
+ * recovered ledger alone — the behaviour before this read existed.
+ */
+export function persistedAnchorSha(sideFilePath: string): string | null {
+  try {
+    const raw = JSON.parse(readFileSync(sideFilePath, 'utf8')) as {
+      sha?: unknown;
+    };
+    return typeof raw.sha === 'string' && raw.sha !== '' ? raw.sha : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Persist (or degrade) the prev-ledger side file for this run's recovery.
- * Three outcomes, each honest about what this run learned:
+ * Four outcomes, each honest about what this run learned:
  *
  * - Recovered: the ledger's own fields plus `commitId`/`reviewId` — the age
  *   reference and its provenance for Step 6's convergence posture. Readers
@@ -963,9 +1081,14 @@ export function latestLedger(
 export function persistRecoveredLedger(
   sideFilePath: string,
   recovered: RecoveredLedger | null,
-  noOwnReview: boolean,
-  identityKnown: boolean,
+  // Named, not positional: the pair encodes a safety invariant (deletion is
+  // licensed only under a PROVEN identity) that two adjacent bare booleans
+  // could not defend — a swapped call compiled cleanly, and on an
+  // identity-known run whose recovery threw it deleted the side file and
+  // reset the id space with every suite green.
+  flags: { noOwnReview: boolean; identityKnown: boolean },
 ): void {
+  const { noOwnReview, identityKnown } = flags;
   // Unique per process: two same-PR fetches racing on one fixed `.tmp` can
   // rename each other's bytes (A renames B's write; B's ENOENT is
   // swallowed), leaving the side file disagreeing with the context A holds
@@ -1025,9 +1148,19 @@ export function persistRecoveredLedger(
         if (exRound >= recovered.ledger.round) {
           return;
         }
+        // The volumes go with the anchor and the age reference, and for the
+        // same reason: each is a fact ABOUT a specific round, and this branch
+        // is advancing the round counter past the one they describe. Keeping
+        // them would attribute this account's round-3 posting count to the
+        // foreign round 5 that won recovery — one fabricated point on a trend
+        // whose whole value is that its points are real. Absence is already
+        // the "not recorded" reading downstream, so dropping them degrades
+        // exactly as a pre-telemetry predecessor does.
         const {
           sha: _droppedSha,
           commitId: _droppedCommitId,
+          posted: _droppedPosted,
+          prevPosted: _droppedPrevPosted,
           ...kept
         } = existing;
         mkdirSync(dirname(sideFilePath), { recursive: true });
@@ -1086,24 +1219,144 @@ export function persistRecoveredLedger(
   }
 }
 
-/** The same ledger with its incremental anchor removed. */
+/**
+ * The same ledger with its incremental anchor removed.
+ *
+ * The PAIR, not just the sha. `model` is the identity that certified that sha
+ * and has no meaning without it: left behind it says a foreign round was
+ * certified by someone while the range it certified is gone, and every reader
+ * of this object — the side file, the rendered section's `by \`model\`` clause
+ * — would have to know to ignore it. They fall together everywhere else (the
+ * serializer writes `model` only beside a `sha`, and `compose-review` withholds
+ * both or neither), so they fall together here.
+ */
 function stripAnchor(ledger: Ledger): Ledger {
-  if (ledger.sha === undefined) return ledger;
-  const { sha: _dropped, ...rest } = ledger;
+  if (ledger.sha === undefined && ledger.model === undefined) return ledger;
+  const { sha: _sha, model: _model, ...rest } = ledger;
   return rest;
+}
+
+/**
+ * Whether the recovered anchor may scope this round, and the routing that
+ * follows from it — computed here, for the reason `renderLedgerSection`
+ * records.
+ *
+ * The ADMISSIBLE branch keeps the routing wording verbatim: every clause in it
+ * is one a mutation check found deletable while the suite stayed green (the
+ * antecedent that says what to pass, the command that takes the flag, what
+ * that command does with it, and the pre-condition that stops a
+ * deterministically-refused anchor being retried). The gate clause is the only
+ * part that changed — from an instruction to compare, into the comparison's
+ * result.
+ *
+ * Both branches name the identities involved, because a round that silently
+ * declines an anchor is indistinguishable from one that never had it, and the
+ * difference is what a maintainer asking "why is it still reviewing the full
+ * diff?" needs to see.
+ */
+function anchorRuling(
+  ledger: Ledger,
+  running: string,
+  code: (v: string) => string,
+  persistedSha: string | null,
+): string {
+  // The verdict must rule on the sha the orchestrator will actually PASS,
+  // and that comes out of the side file, not out of this ledger. They are
+  // normally the same object — this run recovered a round and persisted it —
+  // but `persistRecoveredLedger` deliberately keeps a HIGHER-round side file
+  // when the recovery walk comes back short (a concurrent lane, a paginated
+  // fetch that returned less than it should, a latest review deleted or
+  // edited). In that state a HOLDS verdict about the recovered sha would be
+  // obeyed against a different sha the file still holds — under another
+  // model, since alternating models is this feature's core scenario — and
+  // the round would scope past the range only that model reviewed. Compose's
+  // drift gate cannot catch it: the re-run re-stamps under the running
+  // model, so the stamp agrees with the runtime and nothing looks wrong.
+  //
+  // Divergence is therefore a NO-VERDICT state, ruled here so the
+  // orchestrator has nothing to reconcile.
+  if (persistedSha !== null && persistedSha !== ledger.sha) {
+    return (
+      `**Do NOT pass any sha as \`--since\`, and do not run git against ` +
+      `one yourself.** The anchor this round recovered ` +
+      `(\`${code(ledger.sha!)}\`) is not the one the side file holds ` +
+      `(\`${code(persistedSha)}\`): a higher-numbered round was persisted ` +
+      `by a run this one could not see, so nothing here can say who ` +
+      `reviewed the range you would be scoping past. Review the FULL range. ` +
+      `The findings below are still owed their rulings — the work list ` +
+      `carries, only the anchor does not.`
+    );
+  }
+  if (certifierMatchesRound(ledger.model, running)) {
+    return (
+      `The reviewed-at sha is the incremental anchor Step 1's ` +
+      `recovered-anchor check reads from the side file, and the \`model\` ` +
+      `beside it IS the identity running this review ` +
+      `(\`${code(running)}\`) — the same-model contract HOLDS, ruled here ` +
+      `rather than left for you to compare. So: when Step 1's ` +
+      `recovered-anchor check rules a re-run admissible, pass it as ` +
+      `\`--since <sha>\` on a \`fetch-pr\` re-run, which validates it ` +
+      `against the fetched history and scopes the diff and plan; never run ` +
+      `git against an anchor yourself.`
+    );
+  }
+  const certifier = ledger.model?.trim()
+    ? `\`${code(ledger.model.trim())}\``
+    : 'nothing — the marker predates the field, which counts as a mismatch';
+  const runner =
+    running !== '' ? `\`${code(running)}\`` : 'an unpublished identity';
+  return (
+    `**Do NOT pass the reviewed-at sha as \`--since\`, and do not run git ` +
+    `against it yourself.** It was certified by ${certifier}, and this ` +
+    `review runs as ${runner}: "clean up to that sha" is the recorded ` +
+    `identity's verdict, so scoping to it would carry this round past code ` +
+    `the current one never reviewed. Review the FULL range. The findings ` +
+    `below are still owed their rulings — the work list carries across ` +
+    `models, only the anchor does not.`
+  );
 }
 
 /**
  * Render the previous round's ledger for the context file.
  *
+ * `running` is the identity THIS round runs under (`roundModelIdFrom`). The
+ * same-model gate is ruled HERE rather than described for the orchestrator to
+ * apply, because the two strings are not comparable in prompt text: the
+ * marker's `model` is the provider-qualified identity the CLI wrote, while
+ * `{{model}}` — the only model value a skill body can interpolate — is
+ * `config.getModel()`, the bare id. Told to compare them, an orchestrator
+ * either finds them never equal (the recovery path silently never engages,
+ * which is this feature's whole payoff lost) or matches them loosely, which
+ * accepts another provider's same-named model and re-opens the scope-skip the
+ * digest exists to close. So the comparison happens in the process that holds
+ * both values, and what reaches the model is a verdict, not two operands.
+ *
  * `author` is set only when the marker came from ANOTHER account (the CI bot,
  * typically). The section then says whose claims these are and that no anchor
  * travelled with them, because a reader — human or model — must not read a
- * foreign work list as this account's own certified round.
+ * foreign work list as this account's own certified round. Such a ledger
+ * reaches here already stripped of its `sha`, so the gate above never rules
+ * on one: a foreign anchor is not withheld by comparison, it is absent.
+ * `merged` refines that: when the foreign winner was merged OVER this
+ * account's own findings (the union), the list is MIXED — calling it all
+ * "THEIR claims" gave false provenance for the own subset and inverted the
+ * exact trust distinction the author sentence exists to enforce — and its
+ * `dropped` sum spans two markers plus the merge re-cap, so the PARTIAL
+ * note must not pin the loss on one round's size cap (a Step 6 reader
+ * cross-referencing that round's body finds it complete and dismisses the
+ * warning as stale).
  */
 export function renderLedgerSection(
   ledger: Ledger,
+  running: string,
   author: string | null = null,
+  merged = false,
+  /**
+   * The `sha` the prev-ledger side file holds after this run's persist
+   * decision — what Step 1 will actually pass. Null when the file holds none
+   * or could not be read, which leaves the ruling to this ledger alone.
+   */
+  persistedSha: string | null = null,
 ): string {
   // Cell contents come from a marker in a PR body — untrusted text. A `|` or a
   // newline would break the table structure (and could forge rows), so both are
@@ -1127,13 +1380,15 @@ export function renderLedgerSection(
   return [
     '## Previous /review round (machine ledger)',
     '',
-    `Round ${ledger.round}${ledger.sha ? `, reviewed at \`${code(ledger.sha)}\`` : ''}, recovered from the marker ${author ? `**@${cell(author)}**'s last posted review carried — another account, so these are THEIR claims and no incremental anchor travelled with them (the sha never crosses accounts; this round is full-range unless a local cache supplies one)` : `this account's last posted review carried`}. **Every entry below is owed a this-round ruling** (fixed / still stands / cannot tell / superseded by <class-id>) under Step 6's previous-round rules — the ledger is a work list, not a verdict; re-assert each claim against the code before repeating or retiring it.${ledger.sha ? ` The reviewed-at sha is the incremental anchor Step 1's recovered-anchor check reads from the side file — when Step 1's recovered-anchor check rules a re-run admissible, pass it as \`--since <sha>\` on a \`fetch-pr\` re-run, which validates it against the fetched history and scopes the diff and plan; never run git against an anchor yourself.` : ''}`,
+    `Round ${ledger.round}${ledger.sha ? `, reviewed at \`${code(ledger.sha)}\`${ledger.model ? ` by \`${code(ledger.model)}\`` : ''}` : ''}, recovered from ${author ? (merged ? `**@${cell(author)}**'s round-${ledger.round} marker MERGED over this account's own latest findings — entries this account certified are its own claims, the rest are @${cell(author)}'s, and no incremental anchor travelled with the foreign marker (the sha never crosses accounts; this round is full-range unless a local cache supplies one)` : `the marker **@${cell(author)}**'s last posted review carried — another account, so these are THEIR claims and no incremental anchor travelled with them (the sha never crosses accounts; this round is full-range unless a local cache supplies one)`) : `the marker this account's last posted review carried`}. **Every entry below is owed a this-round ruling** (fixed / still stands / cannot tell / superseded by <class-id>) under Step 6's previous-round rules — the ledger is a work list, not a verdict; re-assert each claim against the code before repeating or retiring it.${ledger.sha ? ` ${anchorRuling(ledger, running, code, persistedSha)}` : ''}`,
     // A truncated ledger must not read like a complete one. `dropped` exists
     // to draw that line, and this is the only place a reader sees the list.
     ...(ledger.dropped
       ? [
           '',
-          `**This list is PARTIAL**: ${ledger.dropped} further finding(s) from round ${ledger.round} did not fit the marker's size cap and are not here. Absence below is not evidence a finding was fixed — say so rather than reporting the missing ones as retired.`,
+          merged
+            ? `**This list is PARTIAL**: ${ledger.dropped} further finding(s) did not survive into this merged list — lost to a source marker's size cap or to the merge's own re-cap, and not attributable to any single round's marker. Absence below is not evidence a finding was fixed — say so rather than reporting the missing ones as retired.`
+            : `**This list is PARTIAL**: ${ledger.dropped} further finding(s) from round ${ledger.round} did not fit the marker's size cap and are not here. Absence below is not evidence a finding was fixed — say so rather than reporting the missing ones as retired.`,
         ]
       : []),
     '',
@@ -1152,10 +1407,15 @@ export function buildMarkdown(
   issue: RawComment[],
   reviews: RawReview[],
   prevLedger: Ledger | null = null,
+  me: string = '',
   /** Set only when the ledger came from another account — see the section. */
   prevLedgerAuthor: string | null = null,
+  /** True when the ledger is the union of a foreign winner over own findings. */
+  prevLedgerMerged = false,
   /** The PR host (GitHub Enterprise); baked into the emitted refetch commands. */
   host?: string,
+  /** See `renderLedgerSection` — the anchor that survives on disk. */
+  persistedSha: string | null = null,
 ): string {
   const {
     openRoots,
@@ -1163,7 +1423,7 @@ export function buildMarkdown(
     repliedBlockerRoots,
     repliedRoots,
     repliesByRoot,
-  } = classifyInlineThreads(inline);
+  } = classifyInlineThreads(inline, me);
   // Both replied and un-replied blocker roots go to the re-check section,
   // rendered first and in full. Un-replied ones simply have no reply chain.
   const allBlockerRoots = [...repliedBlockerRoots, ...openBlockerRoots];
@@ -1230,7 +1490,15 @@ export function buildMarkdown(
   // applicable to the current diff"). Empty bodies and "LGTM" templates are
   // filtered to keep the section signal-rich.
   if (prevLedger) {
-    parts.push(renderLedgerSection(prevLedger, prevLedgerAuthor));
+    parts.push(
+      renderLedgerSection(
+        prevLedger,
+        roundModelIdFrom(process.env),
+        prevLedgerAuthor,
+        prevLedgerMerged,
+        persistedSha,
+      ),
+    );
   }
 
   const meaningfulReviews = reviews
@@ -1392,6 +1660,51 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
     `repos/${owner}/${repo}/pulls/${prNumber}/reviews`,
   ) as RawReview[];
 
+  // The reviewing account gates two things here: the ledger recovery's
+  // own/foreign split and the comment marker's blocker promotion.
+  // `currentUser()` is a network round-trip; with no reviews and no inline
+  // comments there is nothing for its answer to match against, so it is not
+  // made. A failed lookup fails CLOSED when a posted root comment carries a
+  // critical marker: with `me` empty the marker disjunct of `isBlockerBody`
+  // never fires, and an unresolved attribution-off Critical would classify
+  // as ordinary discussion and disappear from the blocker set later rounds
+  // use — "could not tell" must not read the same as "was not". Ledger
+  // recovery no longer depends on the identity — an anonymous recovery
+  // still walks, with every marker foreign (see `recoverLedger`) — so a
+  // lookup failure costs the anchor, never the run. An empty login is
+  // exit-0-with-empty-output — a stubbed or proxied `gh` shape, not a
+  // confirmed identity — and counts as unknown exactly like a throw.
+  let me = '';
+  let identityKnown = false;
+  if (reviews.length || inline.length) {
+    let lookupError: unknown = null;
+    try {
+      const login = currentUser();
+      identityKnown = login !== '';
+      me = login;
+    } catch (err) {
+      lookupError = err;
+    }
+    // Both unknown shapes fail closed identically — a thrown lookup AND an
+    // empty login (exit-0-with-empty-output, the stubbed/proxied `gh`
+    // shape named above): the check used to live in the `catch` branch
+    // only, so the empty login proceeded with `me = ''` while the marker
+    // disjunct of `isBlockerBody` never fires — an unresolved
+    // attribution-off Critical would classify as ordinary discussion and
+    // disappear from the blocker set later rounds use.
+    if (!identityKnown && anyRootCarriesCriticalMarker(inline)) {
+      throw new Error(
+        `cannot determine the reviewing account (${
+          lookupError === null
+            ? 'empty login'
+            : lookupError instanceof Error
+              ? lookupError.message
+              : String(lookupError)
+        }) while a posted root comment carries a Qwen critical marker — ` +
+          'the blocker re-check depends on it; re-run',
+      );
+    }
+  }
   // Recover the previous round's machine ledger from the LATEST posted review
   // carrying one, whoever posted it, and persist it beside the context file:
   // compose-review reads the side file for the round number, and Step 6 owes
@@ -1404,44 +1717,9 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
   let prevRecovered: ReturnType<typeof recoverLedger>['recovered'] = null;
   let recoveryThrew = false;
   let sawOwnReview = false;
-  /**
-   * Proof-of-absence needs a proven identity. When the lookup fails,
-   * `sawOwnReview` stays false because the walk had no name to look for — an
-   * unknown identity recorded as "no own review exists" licensed deleting the
-   * side file and resetting the round counter over a rate-limit blip, the
-   * exact id-space collision the recovery redesign exists to prevent. The
-   * pre-isolation code got this right by accident: the throw reached the
-   * outer catch and took the strip path.
-   */
-  let identityKnown = false;
   try {
-    // With no reviews on the PR there is nothing to recover from, so neither
-    // network round-trip is made.
     if (reviews.length) {
-      // The identity lookup is isolated, and its failure must not cost the
-      // recovery. Without this the transient case degraded to "no ledger",
-      // which leaves the machine-local side file at whatever round this
-      // machine last wrote — and compose stamps `prevRound + 1` from it, so a
-      // machine that missed rounds K+1..K+m re-issues ids the PR already
-      // carries. A null login is the cheap honest fallback: the work list
-      // still recovers (bounded to the foreign-round headroom, since there is
-      // no own base to measure from), it recovers as FOREIGN, and no anchor
-      // rides on an identity this run could not confirm.
-      let login: string | null = null;
-      try {
-        login = currentUser();
-        // An empty login is exit-0-with-empty-output — a stubbed or proxied
-        // `gh` shape, not a confirmed identity. `recoverLedger` already treats
-        // '' as unknown (its `me` is null), so counting it as KNOWN here let
-        // the deletion flag below fire over an identity that was never proven
-        // (sawOwnReview cannot become true for a null me), deleting the side
-        // file and resetting the round counter. Same precedent as presubmit's
-        // own '' handling: empty is unknown.
-        identityKnown = login !== '';
-      } catch {
-        login = null;
-      }
-      const outcome = recoverLedger(reviews, login);
+      const outcome = recoverLedger(reviews, identityKnown ? me : null);
       prevRecovered = outcome.recovered;
       sawOwnReview = outcome.sawOwnReview;
     }
@@ -1453,30 +1731,41 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
   const prevLedgerAuthor = prevRecovered?.foreign
     ? (prevRecovered.author ?? null)
     : null;
-  // The side file's three outcomes live in the helper: recovered → written
+  const prevLedgerMerged = prevRecovered?.merged ?? false;
+  // The side file's four outcomes live in the helper: recovered → written
   // whole (any account — the round counter is a shared id space, and the
   // anchor was already stripped at the seam for a foreign winner);
   // demonstrably no prior round for THIS account and none recovered from any
   // other → removed (a stale counter would stamp rounds nobody posted);
-  // recovery threw → round counter kept, age-sensitive `commitId`/`reviewId`
-  // stripped.
+  // recovered anonymously over an existing file → only the round counter and
+  // tiebreak advance, the persisted list survives and `sha`/`commitId` are
+  // dropped (an anonymous round cannot be re-vouched); recovery threw →
+  // round counter kept, age-sensitive `commitId`/`reviewId` stripped.
   persistRecoveredLedger(
     join(dirname(out), `qwen-review-pr-${prNumber}-prev-ledger.json`),
     prevRecovered,
-    // Deletion is licensed ONLY by proof of true absence: a CONFIRMED
-    // identity, and a non-empty list this run walked in which no submitted
-    // review by that identity exists. An empty `reviews` may be an error
-    // envelope ghApiAll flattened to []; an own review whose marker fails to
-    // parse is a persistent state, not absence; and a failed identity lookup
-    // proves nothing about anyone — all take the conservative strip path.
-    // (A recovered foreign ledger also protects the file, but through the
-    // helper's own recovered-first branch, not through this flag.)
-    reviews.length > 0 && identityKnown && !recoveryThrew && !sawOwnReview,
-    // Separately from deletion: an ANONYMOUS recovery (identity unknown)
-    // must not replace the persisted work list — the helper's fourth
-    // outcome. Every marker walks as foreign without a `me`, so the union
-    // never protected the own list this run.
-    identityKnown,
+    {
+      // Deletion is licensed ONLY by proof of true absence: a CONFIRMED
+      // identity, and a non-empty list this run walked in which no submitted
+      // review by that identity exists. An empty `reviews` may be an error
+      // envelope ghApiAll flattened to []; an own review whose marker fails
+      // to parse is a persistent state, not absence; and a failed identity
+      // lookup proves nothing about anyone — all take the conservative strip
+      // path. (A recovered foreign ledger also protects the file, but
+      // through the helper's own recovered-first branch, not through this
+      // flag.)
+      noOwnReview:
+        reviews.length > 0 && identityKnown && !recoveryThrew && !sawOwnReview,
+      // Separately from deletion: an ANONYMOUS recovery (identity unknown)
+      // must not replace the persisted work list — the helper's fourth
+      // outcome. Every marker walks as foreign without a `me`, so the union
+      // never protected the own list this run.
+      identityKnown,
+    },
+  );
+
+  const persistedSha = persistedAnchorSha(
+    join(dirname(out), `qwen-review-pr-${prNumber}-prev-ledger.json`),
   );
 
   // The effective host (explicit --host, else an operator-exported
@@ -1497,8 +1786,11 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
     issue,
     reviews,
     prevLedger,
+    me,
     prevLedgerAuthor,
+    prevLedgerMerged,
     bakeHost,
+    persistedSha,
   );
 
   mkdirSync(dirname(out), { recursive: true });
@@ -1508,7 +1800,7 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
   ).length;
   // Same walk buildMarkdown just rendered from — never a re-implementation,
   // so this count cannot silently diverge from the file's contents.
-  const threads = classifyInlineThreads(inline);
+  const threads = classifyInlineThreads(inline, me);
   const blockerCount =
     threads.repliedBlockerRoots.length +
     threads.openBlockerRoots.length +

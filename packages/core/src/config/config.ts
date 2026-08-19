@@ -238,7 +238,7 @@ import {
   SessionWriterLostError,
   SessionWriterUnavailableError,
 } from '../services/session-writer-lease.js';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { loadServerHierarchicalMemory } from '../utils/memoryDiscovery.js';
 import { ConditionalRulesRegistry } from '../utils/rulesDiscovery.js';
 import {
@@ -699,7 +699,16 @@ export type ExtensionNetworkPolicy = 'public';
 
 export interface ExtensionInstallMetadata {
   source: string;
-  type: 'git' | 'local' | 'link' | 'github-release' | 'npm' | 'archive-url';
+  type:
+    | 'git'
+    | 'local'
+    | 'link'
+    | 'github-release'
+    | 'npm'
+    | 'archive-url'
+    | 'snapshot';
+  installId?: string;
+  credentialPersistence?: 'stored';
   originSource?: ExtensionOriginSource;
   releaseTag?: string; // Only present for github-release and npm installs.
   gitCommit?: string; // Commit recorded when the installation source was cloned.
@@ -4003,6 +4012,10 @@ export class Config {
     this.getOwnActiveTodoReminderTurns().clear();
     setDebugLogSession(this);
     this.debugLogger = createDebugLogger();
+    // Pin the outgoing recorder to the session it wrote so late writes (a
+    // turn settling after this rotation) keep targeting that session's
+    // transcript instead of resolving the new session id from this Config.
+    outgoingChatRecordingService?.pinSessionIdentity(previousSessionId);
     this.chatRecordingService = this.chatRecordingEnabled
       ? this.createChatRecordingService()
       : undefined;
@@ -4318,10 +4331,46 @@ export class Config {
       return;
     }
     const model = this.getModel();
-    registerSessionModel(this.sessionId, model);
+    // Both registered per session: the identity is what /review's same-model
+    // gate compares, and in daemon mode one process-global slot holds
+    // whichever session booted first — handing a later session that value
+    // would qualify its model with ANOTHER session's provider, which passes
+    // gates the bare id would have failed.
+    registerSessionModel(this.sessionId, model, this.resolvedModelIdentity());
     if (this.ownsModelEnvSlot) {
       process.env['QWEN_CODE_MODEL'] = model;
+      process.env['QWEN_CODE_MODEL_IDENTITY'] = this.resolvedModelIdentity();
     }
+  }
+
+  /**
+   * The active model qualified by WHERE it resolves — what a bare id cannot
+   * say.
+   *
+   * A model id is unique only inside one provider configuration: two auth
+   * types, or two registry endpoints, can expose the same name over different
+   * underlying models. Anything that treats "same id" as "same model" is
+   * wrong across such a pair, and /review's incremental anchor is exactly
+   * that kind of consumer — it skips code on the strength of "the same model
+   * already reviewed this". The discriminators are hashed rather than spelled
+   * out because the value is persisted and displayed: a base URL can carry a
+   * tenant or a token-bearing host, and eight hex characters separate the
+   * configurations without publishing where they point. The bare id stays the
+   * readable half, so a mismatch still names the model a human recognises.
+   */
+  private resolvedModelIdentity(): string {
+    const model = this.getModel();
+    const authType = this.getContentGeneratorConfig()?.authType ?? '';
+    const baseUrl =
+      this.getContentGeneratorConfig()?.baseUrl ??
+      this.getCurrentModelRegistryBaseUrl() ??
+      '';
+    if (authType === '' && baseUrl === '') return model;
+    const digest = createHash('sha256')
+      .update(`${authType}\u0000${baseUrl}`)
+      .digest('hex')
+      .slice(0, 8);
+    return `${model}@${digest}`;
   }
 
   /**
@@ -8641,7 +8690,7 @@ export class Config {
         const { RecordArtifactTool } = await import(
           '../tools/record-artifact.js'
         );
-        return new RecordArtifactTool();
+        return new RecordArtifactTool(this);
       });
     }
     if (this.isLspEnabled() && this.getLspClient()) {

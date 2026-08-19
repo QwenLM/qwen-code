@@ -2584,6 +2584,47 @@ describe('GeminiChat', async () => {
       });
     });
 
+    it('reattaches stored image markers on later below-threshold requests', async () => {
+      vi.mocked(mockConfig.getChatCompression).mockReturnValue({
+        maxRecentImagesToRetain: 1,
+        imagePayloadThreshold: 1,
+      });
+      chat.setHistory([
+        {
+          role: 'user',
+          parts: [{ inlineData: { mimeType: 'image/png', data: 'old-shot' } }],
+        },
+        { role: 'model', parts: [{ text: 'I see the image' }] },
+      ]);
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streamResponse(stopResponse([{ text: 'response' }])),
+      );
+
+      for (const [message, promptId] of [
+        ['first question', 'prompt-id-image-refs-first'],
+        ['second question', 'prompt-id-image-refs-second'],
+      ] as const) {
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message },
+          promptId,
+        );
+        for await (const _ of stream) {
+          // consume stream
+        }
+      }
+
+      const durable = JSON.stringify(chat.getHistory());
+      expect(durable).toMatch(/Image #[a-f0-9]{12}/);
+      expect(durable).not.toContain('"data":"old-shot"');
+      const secondRequest = vi.mocked(
+        mockContentGenerator.generateContentStream,
+      ).mock.calls[1]?.[0];
+      expect(JSON.stringify(secondRequest?.contents)).toContain(
+        '"data":"old-shot"',
+      );
+    });
+
     it('coalesces startup reminders with the first user prompt for provider requests', async () => {
       chat.setHistory([
         {
@@ -2713,6 +2754,47 @@ describe('GeminiChat', async () => {
         }),
         'prompt-id-no-request-clone',
       );
+    });
+
+    it('excludes exact degraded placeholders without dropping legitimate mentions or tool calls', () => {
+      const toolCall = {
+        functionCall: { id: 'call-1', name: 'read_file', args: {} },
+      };
+      const functionResponse = {
+        functionResponse: {
+          id: 'call-1',
+          name: 'read_file',
+          response: { output: 'ok' },
+        },
+      };
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'what happened?' }] },
+        {
+          role: 'model',
+          parts: [{ text: 'The endpoint returned (request timeout) once.' }],
+        },
+        { role: 'user', parts: [{ text: 'continue' }] },
+        { role: 'model', parts: [{ text: ' (request timeout) ' }] },
+        { role: 'user', parts: [{ text: 'try again' }] },
+        {
+          role: 'model',
+          parts: [{ text: '(request timeout)' }, toolCall],
+        },
+        { role: 'user', parts: [functionResponse] },
+      ];
+      chat.setHistory(history);
+
+      expect(chat.getHistory(true)).toEqual([
+        history[0],
+        history[1],
+        {
+          role: 'user',
+          parts: [{ text: 'continue' }, { text: 'try again' }],
+        },
+        history[5],
+        history[6],
+      ]);
+      expect(chat.getHistory()).toEqual(history);
     });
 
     it('should not update global telemetry when no telemetryService is provided (subagent isolation)', async () => {
@@ -5687,19 +5769,29 @@ describe('GeminiChat', async () => {
   });
 
   describe('getHistoryShallow', () => {
-    it('copies containers without structured-cloning large part payloads', () => {
+    it('copies Part containers without cloning large leaf payloads', () => {
       const payload = { output: 'x'.repeat(128 * 1024) };
+      const topLevelInlineData = {
+        mimeType: 'image/png',
+        data: 'top-level-image',
+      };
+      const nestedInlineData = {
+        mimeType: 'image/png',
+        data: 'nested-image',
+      };
+      const topLevelPart: Part = { inlineData: topLevelInlineData };
+      const nestedPart: Part = { inlineData: nestedInlineData };
+      const functionResponsePart: Part = {
+        functionResponse: {
+          id: 'call-1',
+          name: 'read_file',
+          response: payload,
+          parts: [nestedPart],
+        },
+      };
       const content: Content = {
         role: 'user',
-        parts: [
-          {
-            functionResponse: {
-              id: 'call-1',
-              name: 'read_file',
-              response: payload,
-            },
-          },
-        ],
+        parts: [topLevelPart, functionResponsePart],
       };
       chat.addHistory(content);
       const structuredCloneSpy = vi
@@ -5714,7 +5806,25 @@ describe('GeminiChat', async () => {
       expect(history).toEqual([content]);
       expect(history[0]).not.toBe(content);
       expect(history[0]!.parts).not.toBe(content.parts);
-      const response = history[0]!.parts![0] as {
+      expect(history[0]!.parts![0]).not.toBe(topLevelPart);
+      expect(history[0]!.parts![0]!.inlineData).toBe(topLevelInlineData);
+      const copiedFunctionResponsePart = history[0]!.parts![1]!;
+      expect(copiedFunctionResponsePart).not.toBe(functionResponsePart);
+      expect(copiedFunctionResponsePart.functionResponse).not.toBe(
+        functionResponsePart.functionResponse,
+      );
+      const copiedNested = copiedFunctionResponsePart.functionResponse
+        ?.parts as Part[];
+      expect(copiedNested).not.toBe(
+        functionResponsePart.functionResponse?.parts,
+      );
+      expect(copiedNested[0]).not.toBe(nestedPart);
+      expect(copiedNested[0]!.inlineData).toBe(nestedInlineData);
+      delete history[0]!.parts![0]!.inlineData;
+      delete copiedNested[0]!.inlineData;
+      expect(topLevelPart.inlineData).toBe(topLevelInlineData);
+      expect(nestedPart.inlineData).toBe(nestedInlineData);
+      const response = copiedFunctionResponsePart as {
         functionResponse: { response: typeof payload };
       };
       expect(response.functionResponse.response).toBe(payload);
@@ -5925,6 +6035,120 @@ describe('GeminiChat', async () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+
+    it('retries a split degraded placeholder without yielding or persisting it', async () => {
+      vi.useFakeTimers();
+      try {
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockResolvedValueOnce(
+            streamResponse(
+              {
+                candidates: [{ content: { parts: [{ text: '(request ' }] } }],
+              } as unknown as GenerateContentResponse,
+              stopResponse([{ text: 'timeout)' }]),
+            ),
+          )
+          .mockResolvedValueOnce(
+            streamResponse(stopResponse([{ text: 'Recovered response' }])),
+          );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-id-degraded-placeholder',
+        );
+        const events = await collectStreamWithFakeTimers(stream);
+        const emitted = events
+          .filter((event) => event.type === StreamEventType.CHUNK)
+          .flatMap(
+            (event) =>
+              event.value.candidates?.[0]?.content?.parts?.map(
+                (part) => part.text,
+              ) ?? [],
+          );
+
+        expect(emitted).toEqual(['Recovered response']);
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(2);
+        expect(mockLogContentRetry).toHaveBeenCalledWith(
+          mockConfig,
+          expect.objectContaining({
+            error_type: 'UPSTREAM_DEGRADED_RESPONSE',
+          }),
+        );
+        expect(chat.getHistory()).toEqual([
+          { role: 'user', parts: [{ text: 'test' }] },
+          { role: 'model', parts: [{ text: 'Recovered response' }] },
+        ]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('passes through longer text that mentions the placeholder', async () => {
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        streamResponse(
+          stopResponse([
+            { text: 'The endpoint returned (request timeout) once.' },
+          ]),
+        ),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-id-placeholder-mention',
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) events.push(event);
+
+      expect(
+        events.some(
+          (event) =>
+            event.type === StreamEventType.CHUNK &&
+            event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+              'The endpoint returned (request timeout) once.',
+        ),
+      ).toBe(true);
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        1,
+      );
+    });
+
+    it('does not reject a placeholder turn that contains a function call', async () => {
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        streamResponse(
+          stopResponse([
+            { text: '(request timeout)' },
+            {
+              functionCall: { id: 'call-1', name: 'read_file', args: {} },
+            },
+          ]),
+        ),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-id-placeholder-tool-call',
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) events.push(event);
+
+      expect(
+        events.some(
+          (event) =>
+            event.type === StreamEventType.CHUNK &&
+            event.value.candidates?.[0]?.content?.parts?.some(
+              (part) => part.functionCall?.id === 'call-1',
+            ),
+        ),
+      ).toBe(true);
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        1,
+      );
     });
 
     it('should fail after all retries on persistent invalid content and report metrics', async () => {
@@ -7510,6 +7734,55 @@ describe('GeminiChat', async () => {
                 'Recovered after transport retry',
           ),
         ).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('replays after a transport cut without leaking a placeholder prefix', async () => {
+      vi.useFakeTimers();
+      try {
+        const transportError = Object.assign(new TypeError('terminated'), {
+          cause: Object.assign(new Error('other side closed'), {
+            code: 'UND_ERR_SOCKET',
+          }),
+        });
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield {
+                candidates: [{ content: { parts: [{ text: '(request ' }] } }],
+              } as unknown as GenerateContentResponse;
+              throw transportError;
+            })(),
+          )
+          .mockResolvedValueOnce(
+            streamResponse(stopResponse([{ text: 'Recovered response' }])),
+          );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-placeholder-prefix-transport-cut',
+        );
+        const events = await collectStreamWithFakeTimers(stream, 5_000);
+        const emittedText = events
+          .filter((event) => event.type === StreamEventType.CHUNK)
+          .flatMap(
+            (event) =>
+              event.value.candidates?.[0]?.content?.parts?.map(
+                (part) => part.text,
+              ) ?? [],
+          );
+
+        expect(emittedText).toEqual(['Recovered response']);
+        expect(
+          events.filter((event) => event.type === StreamEventType.RETRY),
+        ).toHaveLength(1);
+        expect(chat.getHistory()).toEqual([
+          { role: 'user', parts: [{ text: 'test' }] },
+          { role: 'model', parts: [{ text: 'Recovered response' }] },
+        ]);
       } finally {
         vi.useRealTimers();
       }
@@ -11998,6 +12271,66 @@ describe('GeminiChat', async () => {
     // tool_use ↔ tool_result wire invariant for the residual races
     // (`--resume` of a crashed session, Ctrl+Y before in-flight tool
     // finishes, scheduler abort before submitQuery, manual JSONL edits).
+
+    it('keeps a tool result adjacent across a removable degraded placeholder', () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'open /tmp/a.txt' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-1',
+                name: 'read_file',
+                args: { path: '/tmp/a.txt' },
+              },
+            },
+          ],
+        },
+        { role: 'model', parts: [{ text: '(request timeout)' }] },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call-1',
+                name: 'read_file',
+                response: { output: 'ok' },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call-1',
+                name: 'read_file',
+                response: { output: 'ok' },
+              },
+            },
+          ],
+        },
+      ];
+      const expectedHistory = structuredClone(history.slice(0, 4));
+      chat.setHistory(history);
+
+      expect(chat.repairOrphanedToolUseTurns()).toEqual({
+        injected: [],
+        droppedDuplicates: [{ callId: 'call-1', name: 'read_file' }],
+      });
+      expect(chat.repairOrphanedToolUseTurns()).toEqual({
+        injected: [],
+        droppedDuplicates: [],
+      });
+      expect(chat.getHistory()).toEqual(expectedHistory);
+      expect(chat.getHistory(true)).toEqual([
+        expectedHistory[0],
+        expectedHistory[1],
+        expectedHistory[3],
+      ]);
+    });
 
     it('injects a synthetic functionResponse for a trailing tool_use (Race B/C)', () => {
       // --resume of a session that crashed after the partial-tool_use push

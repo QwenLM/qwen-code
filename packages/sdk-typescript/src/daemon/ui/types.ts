@@ -1106,8 +1106,9 @@ export interface DaemonTranscriptState
   // lazy COW). Match the runtime contract at the type level so
   // consumers get a compile-time error for `state.blocks.sort()` /
   // `.push()` instead of a runtime `TypeError`. Internal reducer
-  // mutation goes through `takeBlocksOwnership` which casts away
-  // readonly after copying — the only place that's allowed.
+  // mutation goes through the ownership helpers which cast away readonly after
+  // copying — the only place that's allowed. The block index follows the same
+  // COW contract.
   blocks: readonly DaemonTranscriptBlock[];
   lastEventId?: number;
   activeUserBlockId?: string;
@@ -1115,7 +1116,7 @@ export interface DaemonTranscriptState
   activeThoughtBlockId?: string;
   activeAssistantBlockByParent: Record<string, string>;
   activeThoughtBlockByParent: Record<string, string>;
-  blockIndexById: Record<string, number>;
+  blockIndexById: Readonly<Record<string, number>>;
   toolBlockByCallId: Record<string, string>;
   trimmedToolNotificationByCallId: Record<string, true>;
   permissionBlockByRequestId: Record<string, string>;
