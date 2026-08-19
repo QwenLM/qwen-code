@@ -389,14 +389,14 @@ const {
         lastSkillMutationsByCwd: undefined as
           | Record<
               string,
-              {
+              Array<{
                 id: string;
                 kind: 'skill_toggle';
                 skills: Array<{ name: string; enabled: boolean }>;
                 activation: 'applied' | 'deferred' | 'partial';
                 sessionsRefreshed: number;
                 sessionsFailed: number;
-              }
+              }>
             >
           | undefined,
       },
@@ -4409,6 +4409,8 @@ function emitSkillMutation(
     sessionsFailed: activation === 'partial' ? 1 : 0,
   };
   const cwd = mockConnection.workspaceCwd;
+  const previousByCwd = testState.workspaceEventSignals.lastSkillMutationsByCwd;
+  const existing = cwd ? (previousByCwd?.[cwd] ?? []) : [];
   testState.workspaceEventSignals = {
     ...testState.workspaceEventSignals,
     skillsVersion: testState.workspaceEventSignals.skillsVersion + 1,
@@ -4416,8 +4418,10 @@ function emitSkillMutation(
     ...(cwd
       ? {
           lastSkillMutationsByCwd: {
-            ...testState.workspaceEventSignals.lastSkillMutationsByCwd,
-            [cwd]: mutation,
+            ...previousByCwd,
+            [cwd]: existing.some((entry) => entry.id === mutation.id)
+              ? existing
+              : [...existing, mutation],
           },
         }
       : {}),
@@ -10857,6 +10861,68 @@ describe('App session callbacks', () => {
       skillCommandFixture('web-search', 'Search the web'),
     ];
     mockConnection.skills = ['web-search'];
+    rerender();
+    await flush();
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.skills).toEqual([]);
+    });
+    expect(testState.latestChatEditorProps?.commands).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: 'web-search' })]),
+    );
+  });
+
+  it('keeps a batched partial Skill toggle when a later applied mutation arrives', async () => {
+    mockConnection.commands = [
+      skillCommandFixture('web-search', 'Search the web'),
+    ];
+    mockConnection.skills = ['web-search'];
+    mockWorkspaceActions.loadSkillsStatus
+      .mockResolvedValueOnce({
+        skills: [
+          {
+            name: 'web-search',
+            description: 'Search the web',
+            status: 'ok',
+          },
+        ],
+      })
+      .mockResolvedValue({
+        skills: [
+          {
+            name: 'web-search',
+            description: 'Search the web',
+            status: 'disabled',
+          },
+        ],
+      });
+
+    const { rerender } = renderApp();
+    await flush();
+
+    const partialDisable = {
+      id: 'partial-web-search-batch',
+      kind: 'skill_toggle' as const,
+      skills: [{ name: 'web-search', enabled: false }],
+      activation: 'partial' as const,
+      sessionsRefreshed: 0,
+      sessionsFailed: 1,
+    };
+    const appliedOther = {
+      id: 'applied-review-batch',
+      kind: 'skill_toggle' as const,
+      skills: [{ name: 'review', enabled: false }],
+      activation: 'applied' as const,
+      sessionsRefreshed: 1,
+      sessionsFailed: 0,
+    };
+    testState.workspaceEventSignals = {
+      ...testState.workspaceEventSignals,
+      skillsVersion: testState.workspaceEventSignals.skillsVersion + 2,
+      lastSkillMutation: appliedOther,
+      lastSkillMutationsByCwd: {
+        '/tmp/project': [partialDisable, appliedOther],
+      },
+    };
     rerender();
     await flush();
     await vi.waitFor(() => {

@@ -3901,9 +3901,10 @@ function bumpWorkspaceEventSignals(
   let agents = 0;
   let tools = 0;
   let settings = 0;
-  let lastSkillMutation:
-    | DaemonWorkspaceEventSignals['lastSkillMutation']
-    | undefined;
+  const skillMutations: Array<NonNullable<
+    DaemonWorkspaceEventSignals['lastSkillMutation']
+  >> = [];
+  const seenSkillMutationIds = new Set<string>();
   let mcp = 0;
   let extensions = 0;
   let artifacts = 0;
@@ -3926,7 +3927,10 @@ function bumpWorkspaceEventSignals(
         break;
       case 'workspace.settings.changed':
         if (event.mutation?.kind === 'skill_toggle') {
-          lastSkillMutation = event.mutation;
+          if (!seenSkillMutationIds.has(event.mutation.id)) {
+            seenSkillMutationIds.add(event.mutation.id);
+            skillMutations.push(event.mutation);
+          }
         } else {
           settings += 1;
         }
@@ -3968,6 +3972,8 @@ function bumpWorkspaceEventSignals(
     }
   }
 
+  const lastSkillMutation = skillMutations[skillMutations.length - 1];
+
   if (
     memory +
       agents +
@@ -3984,9 +3990,15 @@ function bumpWorkspaceEventSignals(
     return;
 
   setSignals((current) => {
-    const hasNewSkillMutation =
-      lastSkillMutation !== undefined &&
-      lastSkillMutation.id !== current.lastSkillMutation?.id;
+    const existing =
+      workspaceCwd && current.lastSkillMutationsByCwd
+        ? (current.lastSkillMutationsByCwd[workspaceCwd] ?? [])
+        : [];
+    const existingIds = new Set(existing.map((mutation) => mutation.id));
+    const toAppend = skillMutations.filter(
+      (mutation) => !existingIds.has(mutation.id),
+    );
+    const hasNewSkillMutation = toAppend.length > 0;
     if (
       memory +
         agents +
@@ -4003,10 +4015,10 @@ function bumpWorkspaceEventSignals(
       return current;
     }
     const lastSkillMutationsByCwd =
-      hasNewSkillMutation && workspaceCwd && lastSkillMutation
+      hasNewSkillMutation && workspaceCwd
         ? {
             ...current.lastSkillMutationsByCwd,
-            [workspaceCwd]: lastSkillMutation,
+            [workspaceCwd]: [...existing, ...toAppend],
           }
         : current.lastSkillMutationsByCwd;
     return {
@@ -4014,11 +4026,11 @@ function bumpWorkspaceEventSignals(
       agentsVersion: current.agentsVersion + agents,
       toolsVersion: current.toolsVersion + tools,
       settingsVersion: current.settingsVersion + settings,
-      skillsVersion: current.skillsVersion + (hasNewSkillMutation ? 1 : 0),
+      skillsVersion: current.skillsVersion + toAppend.length,
       mcpVersion: current.mcpVersion + mcp,
       extensionsVersion: current.extensionsVersion + extensions,
       artifactsVersion: current.artifactsVersion + artifacts,
-      ...(hasNewSkillMutation
+      ...(lastSkillMutation
         ? { lastSkillMutation }
         : current.lastSkillMutation
           ? { lastSkillMutation: current.lastSkillMutation }

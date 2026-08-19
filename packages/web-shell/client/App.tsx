@@ -510,19 +510,19 @@ function sessionSkillsReflectToggle(
   });
 }
 
-function skillMutationForWorkspace(
+function skillMutationsForWorkspace(
   signals:
     | {
         lastSkillMutation?: DaemonSkillToggleMutation;
-        lastSkillMutationsByCwd?: Record<string, DaemonSkillToggleMutation>;
+        lastSkillMutationsByCwd?: Record<string, DaemonSkillToggleMutation[]>;
       }
     | undefined,
   workspaceCwd?: string,
-): DaemonSkillToggleMutation | undefined {
+): DaemonSkillToggleMutation[] {
   if (workspaceCwd && signals?.lastSkillMutationsByCwd) {
-    return signals.lastSkillMutationsByCwd[workspaceCwd];
+    return signals.lastSkillMutationsByCwd[workspaceCwd] ?? [];
   }
-  return signals?.lastSkillMutation;
+  return signals?.lastSkillMutation ? [signals.lastSkillMutation] : [];
 }
 
 function mergeSkillToggles(
@@ -4562,7 +4562,7 @@ export function App({
     if (!connected) return;
     void reloadLoadedSkills(connection.workspaceCwd);
   }, [connected, connection.workspaceCwd, reloadLoadedSkills]);
-  const handledSkillMutationIdRef = useRef<string | undefined>(undefined);
+  const handledSkillMutationKeysRef = useRef<Set<string>>(new Set());
   const skillMutationOriginByIdRef = useRef<Map<string, string | undefined>>(
     new Map(),
   );
@@ -4574,43 +4574,56 @@ export function App({
     if (!connected) return;
     const sessionId = connection.sessionId;
     const workspaceCwd = connection.workspaceCwd;
-    const mutation = skillMutationForWorkspace(
+    const mutations = skillMutationsForWorkspace(
       workspaceEventSignals,
       workspaceCwd,
     );
-    if (mutation && !skillMutationOriginByIdRef.current.has(mutation.id)) {
-      skillMutationOriginByIdRef.current.set(mutation.id, workspaceCwd);
+    const unhandled: DaemonSkillToggleMutation[] = [];
+    for (const mutation of mutations) {
+      if (!skillMutationOriginByIdRef.current.has(mutation.id)) {
+        skillMutationOriginByIdRef.current.set(mutation.id, workspaceCwd);
+      }
+      if (
+        skillMutationOriginByIdRef.current.get(mutation.id) !== workspaceCwd
+      ) {
+        continue;
+      }
+      const handleKey = `${mutation.id}::${sessionId ?? ''}::${workspaceCwd ?? ''}`;
+      if (handledSkillMutationKeysRef.current.has(handleKey)) continue;
+      unhandled.push(mutation);
     }
-    if (
-      mutation &&
-      skillMutationOriginByIdRef.current.get(mutation.id) !== workspaceCwd
-    ) {
-      return;
-    }
-    const handleKey = mutation
-      ? `${mutation.id}::${sessionId ?? ''}::${workspaceCwd ?? ''}`
-      : undefined;
-    if (!mutation || handledSkillMutationIdRef.current === handleKey) return;
+    if (unhandled.length === 0) return;
+    const markHandled = () => {
+      for (const mutation of unhandled) {
+        handledSkillMutationKeysRef.current.add(
+          `${mutation.id}::${sessionId ?? ''}::${workspaceCwd ?? ''}`,
+        );
+      }
+    };
+    const priorPending = pendingSkillTogglesRef.current;
+    pendingSkillTogglesRef.current = mergeSkillToggles(
+      priorPending,
+      unhandled.flatMap((mutation) => mutation.skills),
+    );
     if (
       sessionId &&
-      mutation.activation === 'applied' &&
-      mutation.sessionsFailed === 0
+      priorPending.length === 0 &&
+      unhandled.every(
+        (mutation) =>
+          mutation.activation === 'applied' && mutation.sessionsFailed === 0,
+      )
     ) {
-      handledSkillMutationIdRef.current = handleKey;
+      markHandled();
       pendingSkillTogglesRef.current = [];
       fallbackWorkspaceCwdRef.current = undefined;
       setLoadedSkillsFallbackSessionId(undefined);
       return;
     }
-    pendingSkillTogglesRef.current = mergeSkillToggles(
-      pendingSkillTogglesRef.current,
-      mutation.skills,
-    );
     let cancelled = false;
     void reloadLoadedSkills(workspaceCwd, true).then((loaded) => {
       if (cancelled || !loaded) return;
       if (!sessionId) {
-        handledSkillMutationIdRef.current = handleKey;
+        markHandled();
         return;
       }
       const currentSnapshot = connectionSkillSnapshotRef.current;
@@ -4622,12 +4635,12 @@ export function App({
         )
       ) {
         pendingSkillTogglesRef.current = [];
-        handledSkillMutationIdRef.current = handleKey;
+        markHandled();
         return;
       }
       fallbackWorkspaceCwdRef.current = workspaceCwd;
       setLoadedSkillsFallbackSessionId(sessionId);
-      handledSkillMutationIdRef.current = handleKey;
+      markHandled();
     });
     return () => {
       cancelled = true;
@@ -4649,7 +4662,7 @@ export function App({
       connection.sessionId !== loadedSkillsFallbackSessionId ||
       fallbackWorkspaceCwdRef.current !== connection.workspaceCwd
     ) {
-      handledSkillMutationIdRef.current = undefined;
+      handledSkillMutationKeysRef.current.clear();
       fallbackWorkspaceCwdRef.current = undefined;
       setLoadedSkillsFallbackSessionId(undefined);
       return;
