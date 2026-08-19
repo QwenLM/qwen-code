@@ -93,7 +93,7 @@ export type FixtureFs = Pick<
 >;
 
 /**
- * A checkout-shaped tree holding all four review roots and a `dist/cli.js`
+ * A checkout-shaped tree holding all the review roots and a `dist/cli.js`
  * bundle — what the staleness check needs to reach a verdict. With only some
  * of the roots present the check answers 'could not check' instead.
  */
@@ -116,6 +116,11 @@ export function makeStaleBundleFixture(
     join(services, 'review-worktree-lease.ts'),
     'leases the review worktree',
   );
+  const utils = join(repo, 'packages', 'cli', 'src', 'utils');
+  fs.mkdirSync(utils, { recursive: true });
+  fs.writeFileSync(join(utils, 'findings.ts'), 'validates the findings');
+  fs.writeFileSync(join(utils, 'shell-args.ts'), 'tokenizes the args');
+  fs.writeFileSync(join(utils, 'paths.ts'), 'flattens the slug');
   const skillDir = join(
     repo,
     'packages',
