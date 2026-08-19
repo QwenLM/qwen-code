@@ -82,6 +82,22 @@ describe('resolveOrchestration — the gates', () => {
     expect(verdict.reason).toMatch(/workflows are not enabled/);
   });
 
+  // The same ordering, one rung down the ladder: with the runtime on but
+  // /review not opted in, a territory diff must still hear about the switch it
+  // can flip. Naming the fan-out first would send the reader off to split a
+  // diff that was never what stood in their way. This pins the gate order
+  // itself -- `structuralBlocker` runs LAST -- which the blocked-plan test
+  // above cannot see, because it has both gates open.
+  it('reports the /review gate before a structural blocker', () => {
+    const verdict = resolveOrchestration(
+      localPlan({ srcDiffLines: 2000, diffLines: 6000 }),
+      { QWEN_CODE_ENABLE_WORKFLOWS: '1' },
+    );
+    expect(verdict.mode).toBe('legacy');
+    expect(verdict.reason).toContain(REVIEW_WORKFLOW_ENV);
+    expect(verdict.reason).not.toMatch(/territory fan-out \(Step 3B\)/);
+  });
+
   // The gates opening must not demote a plan the script cannot express: the
   // routing verdict and the roster builder both read `structuralBlocker`, so
   // an ineligible plan falls back to the hand-launched roster instead of
