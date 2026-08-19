@@ -748,26 +748,6 @@ export function describeWorkerTlsTrustGaps(opts: {
   const operatorChain = opts.operatorCaCert
     ? loadableCertificates(opts.operatorCaCert.toString('utf8'))
     : undefined;
-  if (opts.operatorCaCertReadError !== undefined) {
-    gaps.push(
-      `NODE_EXTRA_CA_CERTS "${opts.operatorCaCertPath}" could not be read by ` +
-        `the daemon (${opts.operatorCaCertReadError}), so channel workers ` +
-        `receive no CA from it — a root-owned or mode-600 file is the usual ` +
-        `cause, and its contents are not the problem. Every worker handshake ` +
-        `to the daemon will fail UNABLE_TO_VERIFY_LEAF_SIGNATURE unless the ` +
-        `issuing CA is already in the workers' default trust store. Fix that ` +
-        `file's permissions or path and restart.`,
-    );
-  } else if (opts.operatorCaCert && !operatorChain) {
-    gaps.push(
-      `NODE_EXTRA_CA_CERTS "${opts.operatorCaCertPath}" holds no PEM ` +
-        `certificate block Node's loader can read — every ` +
-        `-----BEGIN/END CERTIFICATE----- marker must sit alone on its own ` +
-        `line and every block must decode, and a DER file is never read at ` +
-        `all. Channel workers therefore receive the daemon cert alone and ` +
-        `anchor nothing through this file. Re-export it as PEM and restart.`,
-    );
-  }
   // Same rule for the serving file — and when it fails, the merge does NOT
   // merge. `resolveWorkerCaCertPath` finds `daemonBlocks === undefined`,
   // discards the operator CA and hands workers the serving file alone, so
@@ -783,22 +763,6 @@ export function describeWorkerTlsTrustGaps(opts: {
   // zero gaps on the no-operator path while every worker restart-looped —
   // the same hole that was closed, and tested, only for the with-operator case.
   const operatorDiscarded = !servingBlocks && operatorChain !== undefined;
-  if (!servingBlocks) {
-    gaps.push(
-      `--tls-cert "${opts.certPath}" holds no PEM certificate block Node's ` +
-        `loader can read, so ` +
-        (operatorDiscarded
-          ? `the channel workers' bundle cannot be merged: they receive that ` +
-            `file alone and NODE_EXTRA_CA_CERTS "${opts.operatorCaCertPath}" ` +
-            `is discarded. `
-          : `the channel workers receive a bundle their loader takes nothing ` +
-            `from. `) +
-        `Every worker handshake to the daemon will fail ` +
-        `UNABLE_TO_VERIFY_LEAF_SIGNATURE. Re-export --tls-cert as PEM with ` +
-        `every -----BEGIN/END CERTIFICATE----- marker alone on its own line ` +
-        `and restart.`,
-    );
-  }
   // The fallback keeps a leaf to reason about rather than reporting phantom
   // gaps, but it must not pretend the operator CA reached the workers — and it
   // must reason from the SAME leaf boot parsed, so the loose split only ever
@@ -817,16 +781,88 @@ export function describeWorkerTlsTrustGaps(opts: {
   // terminates the chain — unless something else in the worker's bundle
   // carries the issuer that does.
   const anchorPath = walkWorkerAnchorPath(workerTrustStore);
-  if (anchorPath.nonCaTerminator) {
+  // R7-2: this gap is pushed only after the anchor walk, because the read
+  // error alone does not decide the outcome. `resolveWorkerCaCertPath`'s catch
+  // hands the workers the SERVING file as their extra-CA store, and a
+  // fullchain (certbot/mkcert's normal shape) anchors itself through it — the
+  // walk above returns `anchored: true` for exactly that shape while this
+  // message used to announce a certain UNABLE_TO_VERIFY_LEAF_SIGNATURE outage
+  // that never happens.
+  if (opts.operatorCaCertReadError !== undefined) {
     gaps.push(
-      `--tls-cert "${opts.certPath}" chains up to ` +
-        `"${anchorPath.nonCaTerminator.subject.replace(/\r?\n/g, ', ')}", ` +
-        `which is self-signed but carries basicConstraints CA:FALSE — ` +
-        `OpenSSL refuses to let it issue the certificates below it, so every ` +
-        `worker handshake to the daemon will fail INVALID_PURPOSE ` +
-        `("unsuitable certificate purpose"). Reissue that certificate with ` +
-        `CA:TRUE, or point NODE_EXTRA_CA_CERTS at a real CA that anchors the ` +
-        `chain, and restart.`,
+      `NODE_EXTRA_CA_CERTS "${opts.operatorCaCertPath}" could not be read by ` +
+        `the daemon (${opts.operatorCaCertReadError}), so channel workers ` +
+        `receive no CA from it — a root-owned or mode-600 file is the usual ` +
+        `cause, and its contents are not the problem. ` +
+        (anchorPath.anchored
+          ? `--tls-cert "${opts.certPath}" carries an anchor of its own, and ` +
+            `that file is what the workers fall back to, so their trust does ` +
+            `not rest on this one today — whatever it was meant to add ` +
+            `reaches nobody. `
+          : `Every worker handshake to the daemon will fail ` +
+            `UNABLE_TO_VERIFY_LEAF_SIGNATURE unless the issuing CA is ` +
+            `already in the workers' default trust store. `) +
+        `Fix that file's permissions or path and restart.`,
+    );
+  } else if (opts.operatorCaCert && !operatorChain) {
+    gaps.push(
+      `NODE_EXTRA_CA_CERTS "${opts.operatorCaCertPath}" holds no PEM ` +
+        `certificate block Node's loader can read — every ` +
+        `-----BEGIN/END CERTIFICATE----- marker must sit alone on its own ` +
+        `line and every block must decode, and a DER file is never read at ` +
+        `all. Channel workers therefore receive the daemon cert alone and ` +
+        `anchor nothing through this file. Re-export it as PEM and restart.`,
+    );
+  }
+  if (!servingBlocks) {
+    gaps.push(
+      `--tls-cert "${opts.certPath}" holds no PEM certificate block Node's ` +
+        `loader can read, so ` +
+        (operatorDiscarded
+          ? `the channel workers' bundle cannot be merged: they receive that ` +
+            `file alone and NODE_EXTRA_CA_CERTS "${opts.operatorCaCertPath}" ` +
+            `is discarded. `
+          : `the channel workers receive a bundle their loader takes nothing ` +
+            `from. `) +
+        `Every worker handshake to the daemon will fail ` +
+        `UNABLE_TO_VERIFY_LEAF_SIGNATURE. Re-export --tls-cert as PEM with ` +
+        `every -----BEGIN/END CERTIFICATE----- marker alone on its own line ` +
+        `and restart.`,
+    );
+  }
+  if (anchorPath.nonCaTerminator) {
+    // `cannotIssueCertificates` refuses a terminator for THREE independent
+    // reasons, and naming only the basicConstraints one sent the operator of a
+    // CA:TRUE root whose keyUsage omits keyCertSign round a reissue/restart
+    // loop: it was told its root "carries basicConstraints CA:FALSE" (false),
+    // that handshakes fail INVALID_PURPOSE (measured: "key usage does not
+    // include certificate signing"), and to reissue with CA:TRUE — which it
+    // already is. Same split the sibling `incapableIssuer` branch makes.
+    const terminatorSubject = anchorPath.nonCaTerminator.subject.replace(
+      /\r?\n/g,
+      ', ',
+    );
+    gaps.push(
+      issuerRefusedForKeyUsage(anchorPath.nonCaTerminator)
+        ? `--tls-cert "${opts.certPath}" chains up to ` +
+            `"${terminatorSubject}", which is self-signed but whose keyUsage ` +
+            `does not include keyCertSign, so OpenSSL refuses to let it issue ` +
+            `the certificates below it however its basicConstraints reads. ` +
+            `Every worker handshake to the daemon will fail "key usage does ` +
+            `not include certificate signing" even though the chain terminates ` +
+            `on a self-signed certificate. Reissue that certificate with ` +
+            `keyCertSign in its keyUsage and restart — CA:TRUE alone does not ` +
+            `fix it, and no NODE_EXTRA_CA_CERTS can anchor a self-signed ` +
+            `certificate through anything but itself.`
+        : `--tls-cert "${opts.certPath}" chains up to ` +
+            `"${terminatorSubject}", which is self-signed but is not a CA — it ` +
+            `carries basicConstraints CA:FALSE or, as an X.509 v3 certificate, ` +
+            `no basicConstraints at all, and OpenSSL refuses to let it issue ` +
+            `the certificates below it, so every worker handshake to the ` +
+            `daemon will fail INVALID_PURPOSE ("unsuitable certificate ` +
+            `purpose"). Reissue that certificate with CA:TRUE, or point ` +
+            `NODE_EXTRA_CA_CERTS at a real CA that anchors the chain, and ` +
+            `restart.`,
     );
   } else if (anchorPath.incapableIssuer) {
     const keyUsageIsTheCause = issuerRefusedForKeyUsage(

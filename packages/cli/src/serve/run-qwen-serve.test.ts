@@ -1808,6 +1808,56 @@ HVr9fDVzYBMysDqcBmD/p0vkVolkkgrxk1RaPHYWzh4CU6S3QHazTqU+wxFcC+HJ
 -----END CERTIFICATE-----
 `;
 
+/**
+ * A leaf signed by a SELF-SIGNED root carrying `basicConstraints critical
+ * CA:TRUE` but a keyUsage WITHOUT `keyCertSign` — the shape `openssl req -x509`
+ * produces from an extfile that spells keyUsage out and forgets certificate
+ * signing. Measured on Node v22.23.0 / OpenSSL 3.0.13: `openssl verify` reports
+ * `error 32 … key usage does not include certificate signing`, and the real
+ * worker-shape handshake (fullchain as the trust store) fails with that same
+ * text — NOT `INVALID_PURPOSE`, and not for the reason `CA:FALSE` would give.
+ */
+const TEST_TLS_CERT_FULLCHAIN_NO_KEY_CERT_SIGN_ROOT = `-----BEGIN CERTIFICATE-----
+MIIDODCCAiCgAwIBAgIUURD6Vxv0AXXGN/xK0YcSGqmSSQcwDQYJKoZIhvcNAQEL
+BQAwKzEpMCcGA1UEAwwgcXdlbiBDQS1UUlVFIG5vLWtleUNlcnRTaWduIHJvb3Qw
+IBcNMjYwODE5MjAyMDAwWhgPMjEyNjA3MjYyMDIwMDBaMBQxEjAQBgNVBAMMCWxv
+Y2FsaG9zdDCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAK7Zz4XfTUnj
+0Y5+DeP6Ei05GByWGZ331oBxdj/b0GrqQCZoAMMPQJqpugMNieCwYAsZ0Urb5cMG
+oC46lGti7LYgor63xEzkgdIUkzeAQbJtpBKsjWTrSD641qMaRrBfbNBju97eiuuk
+A66mW/onq4CK9IlajvA9m/wALTaJ/ESWtyb4VuLShLZeE02EynqcwLvr0cYvK4cW
+TzOtBeGwFpOfEjutuq73VKiZkBD28n1y10Iv7WroAZflZQpa/iPStHQMMM/FB3O2
+saZnS7zPn8woxK8ujW/EIDL84iP9GCWmg+3GKgJw+GaSoFLW4l716JGjR7yzoRx7
+bsb6k5ezoiMCAwEAAaNpMGcwCQYDVR0TBAIwADAaBgNVHREEEzARgglsb2NhbGhv
+c3SHBH8AAAEwHQYDVR0OBBYEFE+SZE5YcAJmUXqBL+m+6azUZhAPMB8GA1UdIwQY
+MBaAFGNjCta1mZzWt3LqXzvok+D0KdjAMA0GCSqGSIb3DQEBCwUAA4IBAQClqJU/
+Gjp14Ifu5lBy+ofBYDqKLpVB0osatui2JDj2ZS5pAcUBnws8Jc+3duygkh9erFlG
+ri1hTEh/xIiNMVOmAKZR04ynUfp1Po5jlz2/gAWl15VZtBIv4mNzufSQFaJNP/Li
+UXDKlsxWYzEPY7FOZDBn6PlzcF0wKUphBOXi08xfKsL84Qqd86K+LrM/1ljX6eKt
+i2SJktti2CrgcDJqZb91dyruvUiJQL14IiSttgHSipoIkwOlW+a/KbBPRnLvA3ch
+JZjfQ6wBBevbkaoKKTXzFV+sw9F9IItfJPrXrnMiqulqR7018gtuSovpBPodAjSg
+2fQmkJojRd/oyj6B
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDSTCCAjGgAwIBAgIUMsdEego3MpTS9isA461wuboYW+QwDQYJKoZIhvcNAQEL
+BQAwKzEpMCcGA1UEAwwgcXdlbiBDQS1UUlVFIG5vLWtleUNlcnRTaWduIHJvb3Qw
+IBcNMjYwODE5MjAyMDAwWhgPMjEyNjA3MjYyMDIwMDBaMCsxKTAnBgNVBAMMIHF3
+ZW4gQ0EtVFJVRSBuby1rZXlDZXJ0U2lnbiByb290MIIBIjANBgkqhkiG9w0BAQEF
+AAOCAQ8AMIIBCgKCAQEA2o7Q2xfnXyMgNzlG//yCNbTV+eJ2lZk34M+1iOIiH31z
+UDzt2ZJ3jgMLrijMrQAlWNO4daK9JMk3oyxs50pHlN6T46LHq2sQPSEyxOOOnRuZ
+8WvxWfFJ7SLUPrepvJ5o5Pg0oQDXR/mYq+BJCJY33RzE73yErPzGSyIKebRn3okb
+W3IbwQWMfM5Piza+VSRTWMKIr8JS5Fwk7cthd//1DntMg7sljrBfobdg2hrKOPL+
+o5KHR+SIxFfKfWb7iGiuh/RG7erulnS5e7n3Ua/rU+Yy1jpHuSvjzA8XZMbym22g
+XusuwHka7bmHmkMjH00apDgafQze/dikKv/QusF4KQIDAQABo2MwYTAdBgNVHQ4E
+FgQUY2MK1rWZnNa3cupfO+iT4PQp2MAwHwYDVR0jBBgwFoAUY2MK1rWZnNa3cupf
+O+iT4PQp2MAwDwYDVR0TAQH/BAUwAwEB/zAOBgNVHQ8BAf8EBAMCBaAwDQYJKoZI
+hvcNAQELBQADggEBAHYW0QOJ7OHjjav34scDKgF6LTeuPKdFr4hmYs9NFhmgz4ch
+sPnDu/D4mMF0FnMl5t6XrdaG8ZIdDJs2OFjCx+N4S31FMmSBA9nIOIbyuNwKXdkU
+mCAHQ66+9OGfwHPFNA2DgnQ/juQ9m47dclYFLRg01yKOgieLnBuXWE4hDOQrM1gs
+vUt+YTM9mOBn0Sxr4LTqfu/MOtsTDFnysLi5IWApa96cOfl3KoCvti5Gmx5crFTw
+DBgH1Rq+scl7kyyxeucobVMtUWK6eJRwZ5gfsrpeMH0nqCJLj7s80WMNL9BLojPm
+rv3eIL/tayAWGZDmOpAiQdZn5pxv2jCLmv06Ae4=
+-----END CERTIFICATE-----
+`;
 describe('describeWorkerTlsTrustGaps', () => {
   const daemonUrl = 'https://127.0.0.1:4170';
 
@@ -2241,6 +2291,95 @@ describe('describeWorkerTlsTrustGaps', () => {
       expect(gap).not.toContain('does not carry a certificate that anchors');
       expect(gap).not.toContain('Point NODE_EXTRA_CA_CERTS at the issuing CA');
     }
+  });
+
+  it('does not predict an outage when a read error leaves the serving file anchoring itself', () => {
+    // R7-2: `resolveWorkerCaCertPath`'s catch hands the workers the SERVING
+    // file as their extra-CA store, so a fullchain (certbot/mkcert's normal
+    // shape) anchors itself through it — the anchor walk in this very function
+    // returns `anchored: true` — while this gap still announced a certain
+    // "Every worker handshake ... will fail UNABLE_TO_VERIFY_LEAF_SIGNATURE".
+    // The one test that set `operatorCaCertReadError` used a leaf-only serving
+    // file, where the claim happens to hold.
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+      operatorCaCertPath: '/root/ca/rootCA.pem',
+      operatorCaCertReadError: 'EACCES',
+    });
+    // Control: the same serving file with no read error reports no gap at all,
+    // which is what makes the outage claim false rather than merely unproven.
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN),
+        certPath: '/certs/daemon.pem',
+        daemonUrl,
+      }),
+    ).toEqual([]);
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('could not be read by the daemon (EACCES)');
+    expect(gaps[0]).toContain('carries an anchor of its own');
+    expect(gaps[0]).toContain("Fix that file's permissions or path");
+    expect(gaps[0]).not.toContain('UNABLE_TO_VERIFY_LEAF_SIGNATURE');
+    // The leaf-only serving file DOES lose its anchor with the same read
+    // error, so the outage sentence has to survive there — this is a scoping
+    // fix, not a deletion.
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_LEAF_ONLY),
+        certPath: '/certs/daemon.pem',
+        daemonUrl,
+        operatorCaCertPath: '/root/ca/rootCA.pem',
+        operatorCaCertReadError: 'EACCES',
+      }).some((gap) =>
+        gap.includes(
+          'Every worker handshake to the daemon will fail ' +
+            'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+        ),
+      ),
+    ).toBe(true);
+  });
+
+  it('names a self-signed terminator refused for keyUsage, not for CA:FALSE', () => {
+    // R7-1: `cannotIssueCertificates` refuses a terminator for three
+    // independent reasons and this branch described only one. A CA:TRUE root
+    // whose keyUsage omits keyCertSign was told it "carries basicConstraints
+    // CA:FALSE" (false), that handshakes fail INVALID_PURPOSE (measured on
+    // Node v22.23.0 / OpenSSL 3.0.13: "key usage does not include certificate
+    // signing"), and to reissue with CA:TRUE — which it already is. Both
+    // remedies were no-ops, so the operator loops reissue/restart.
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_NO_KEY_CERT_SIGN_ROOT),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('CN=qwen CA-TRUE no-keyCertSign root');
+    expect(gaps[0]).toContain('keyUsage does not include keyCertSign');
+    expect(gaps[0]).toContain('key usage does not include certificate signing');
+    expect(gaps[0]).toContain('keyCertSign in its keyUsage');
+    // The three claims the old wording made about this certificate, each
+    // false: it is CA:TRUE, the code is not INVALID_PURPOSE, and reissuing it
+    // "with CA:TRUE" changes nothing.
+    expect(gaps[0]).not.toContain('basicConstraints CA:FALSE');
+    expect(gaps[0]).not.toContain('INVALID_PURPOSE');
+    expect(gaps[0]).not.toContain('Reissue that certificate with CA:TRUE');
+    // The CA:FALSE terminator keeps its own wording — the split must not
+    // collapse both causes onto the keyUsage branch.
+    const caFalseGaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_NON_CA_ROOT),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+    });
+    expect(
+      caFalseGaps.some(
+        (gap) =>
+          gap.includes('INVALID_PURPOSE') &&
+          gap.includes('is not a CA') &&
+          !gap.includes('keyCertSign'),
+      ),
+    ).toBe(true);
   });
 
   it('judges the leaf boot parsed, not the one a loose split matched first', () => {
