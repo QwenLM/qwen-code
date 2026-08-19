@@ -62,6 +62,10 @@ export class ZaiOpenAICompatibleProvider extends DefaultOpenAICompatibleProvider
   // Latch so the skipped-flatten warning fires once per provider lifetime.
   private nonZaiHostnameFlattenWarned = false;
 
+  protected override supportsMaxReasoningEffort(): boolean {
+    return isZaiHostname(this.contentGeneratorConfig);
+  }
+
   override buildRequest(
     request: OpenAI.Chat.ChatCompletionCreateParams,
     userPromptId: string,

@@ -81,6 +81,10 @@ export class DeepSeekOpenAICompatibleProvider extends DefaultOpenAICompatiblePro
   static isDeepSeekProvider = isDeepSeekProvider;
   static isDeepSeekHostname = isDeepSeekHostname;
 
+  protected override supportsMaxReasoningEffort(): boolean {
+    return isDeepSeekHostname(this.contentGeneratorConfig);
+  }
+
   /**
    * DeepSeek's API requires message content to be a plain string, not an
    * array of content parts. Flatten any text-part arrays into joined

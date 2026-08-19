@@ -113,11 +113,49 @@ export class DefaultOpenAICompatibleProvider
       ? requestWithTokenLimits.messages.map(mirrorReasoningContentToReasoning)
       : requestWithTokenLimits.messages;
 
-    return {
+    const builtRequest = {
       ...requestWithTokenLimits,
       messages,
       ...(extraBody ? extraBody : {}),
     };
+
+    return this.clampReasoningEffortForWire(builtRequest);
+  }
+
+  /**
+   * Generic OpenAI-compatible endpoints accept reasoning effort up to `xhigh`.
+   * Provider adapters with a documented `max` tier override
+   * {@link supportsMaxReasoningEffort} and keep the value for their own wire
+   * reshaping. This prevents a persisted `/effort max` from sending an invalid
+   * value to otherwise-generic compatible endpoints.
+   */
+  protected clampReasoningEffortForWire<T extends { model: string }>(
+    request: T,
+  ): T {
+    if (this.supportsMaxReasoningEffort()) {
+      return request;
+    }
+
+    const record = request as unknown as Record<string, unknown>;
+    const reasoning = record['reasoning'] as
+      | Record<string, unknown>
+      | undefined;
+    if (reasoning?.['effort'] !== 'max') {
+      return request;
+    }
+
+    return {
+      ...request,
+      reasoning: {
+        ...reasoning,
+        effort: 'xhigh',
+      },
+    } as T;
+  }
+
+  /** Providers with a documented native `max` effort override this. */
+  protected supportsMaxReasoningEffort(): boolean {
+    return false;
   }
 
   getDefaultGenerationConfig(): GenerateContentConfig {
@@ -211,9 +249,9 @@ export class DefaultOpenAICompatibleProvider
       }
     }
 
-    return {
+    return this.clampReasoningEffortForWire({
       ...request,
       max_tokens: effectiveMaxTokens,
-    };
+    });
   }
 }
