@@ -336,7 +336,6 @@ export class SessionArtifactStore {
       for (const input of inputs) {
         try {
           const expanded = await this.expandWorkspaceDirectoryInput(input);
-          let recorded = 0;
           for (const item of expanded.inputs) {
             try {
               normalizedResults.push(
@@ -347,7 +346,6 @@ export class SessionArtifactStore {
                   item === input ? {} : { hashWorkspaceContent: false },
                 ),
               );
-              recorded++;
             } catch (error) {
               if (validationStrict) {
                 throw error;
