@@ -62,6 +62,7 @@ import { findMonitorTaskForTool } from '../utils/monitorTasks';
 import { invokeSlashCommandHandler } from '../utils/slash-command-action';
 import { parseWebShellGoalCommand } from '../utils/goalCondition';
 import { buildGoalControlRequest } from '../utils/goalControlRequest';
+import { isGoalGateBlocked } from '../utils/goalGate';
 import type { WebShellSlashCommandHandler } from '../App';
 import { getModelDisplayName } from '../utils/modelDisplay';
 import {
@@ -584,10 +585,7 @@ export function ChatPane({
     canQueryMidTurn,
     canInjectMidTurnMedia,
     streamingState,
-    holdQueuedPromptsLocally:
-      connection.sessionId !== undefined &&
-      (connection.goalState === undefined ||
-        connection.goalState.goal?.status === 'active'),
+    holdQueuedPromptsLocally: isGoalGateBlocked(connection),
     sessionActions: actions,
     store,
     editorRef,
@@ -781,9 +779,16 @@ export function ChatPane({
           onFirstPromptAdmitted(trimmed);
         }
       };
+      // Fail CLOSED on a hydrating `goalState`, exactly as the local hold
+      // above does: the load makes the composer writable before `goal()`
+      // resolves, and the daemon has no server-side prompt gate for an active
+      // Goal, so a direct send in that window bypasses the Goal queue.
       if (
         streamingStateRef.current === 'idle' &&
-        connection.goalState?.goal?.status !== 'active'
+        !isGoalGateBlocked({
+          sessionId: connection.sessionId,
+          goalState: connection.goalState,
+        })
       ) {
         const admissionOwner = admissionOwnerRef.current;
         let admissionStarted = false;
@@ -857,7 +862,10 @@ export function ChatPane({
       admissionPayloadLocked,
       catalogOwnerCwd,
       clearFollowup,
-      connection.goalState?.goal?.status,
+      // The whole snapshot, not just the status: the gate distinguishes an
+      // absent (hydrating) snapshot from a Goal-less one, and both read as an
+      // undefined status.
+      connection.goalState,
       connection.sessionId,
       connection.status,
       controlGoal,

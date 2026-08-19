@@ -84,6 +84,9 @@ function mount(
   connected = false,
   writeBlocked = false,
   holdQueuedPromptsLocally = false,
+  // `null` = the workspace has not resolved yet (an explicit `undefined`
+  // argument would take the default).
+  workspaceCwd: string | null = '/workspace',
 ) {
   const editor = {
     getText: vi.fn(() => ''),
@@ -103,17 +106,19 @@ function mount(
     activeSessionId,
     blocked,
     hold,
+    cwd,
   }: {
     state: typeof streamingState;
     activeSessionId: string;
     blocked: boolean;
     hold: boolean;
+    cwd: string | null;
   }) {
     latest = useQueuedPrompts({
       connected,
       writeBlocked: blocked,
       sessionId: activeSessionId,
-      workspaceCwd: '/workspace',
+      workspaceCwd: cwd ?? undefined,
       clientId: 'client-1',
       canMutateMidTurn,
       // This suite pins the legacy local-fallback lifecycle.
@@ -133,17 +138,20 @@ function mount(
   let activeSessionId = 'session-1';
   let blocked = writeBlocked;
   let held = holdQueuedPromptsLocally;
+  let cwd = workspaceCwd;
   const render = (
     state: typeof streamingState,
     nextSessionId = activeSessionId,
     replaceOwner = false,
     nextWriteBlocked = blocked,
     nextHold = held,
+    nextCwd: string | null = cwd,
   ) => {
     if (replaceOwner) sdk.ownerVersion += 1;
     activeSessionId = nextSessionId;
     blocked = nextWriteBlocked;
     held = nextHold;
+    cwd = nextCwd;
     act(() =>
       root.render(
         <Harness
@@ -151,6 +159,7 @@ function mount(
           activeSessionId={activeSessionId}
           blocked={blocked}
           hold={held}
+          cwd={cwd}
         />,
       ),
     );
@@ -536,6 +545,51 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
       },
     ]);
     expect(actions.submitPrompt).not.toHaveBeenCalled();
+  });
+
+  it('settles an explicit insert into the stash a cwd relocation moved', async () => {
+    // The workspace half of the owner key resolves mid-insert, which relocates
+    // the whole stash onto the new key and DELETES the old one. Settling
+    // through the key captured when the insert started would write nothing:
+    // the row would come back from the stash still `isInserting`, and every
+    // release/edit/delete/clear path skips such a row — bricked until reload.
+    const { actions } = createActions();
+    const admission = deferred<{ accepted: boolean; messageId?: string }>();
+    vi.mocked(actions.enqueueMidTurnMessage).mockReturnValue(admission.promise);
+    const { render } = mount(
+      'responding',
+      actions,
+      true,
+      false,
+      false,
+      true,
+      null,
+    );
+
+    act(() => latest.enqueuePrompt('insert once'));
+    let insertion!: Promise<void>;
+    act(() => {
+      insertion = latest.insertQueuedPrompt(1);
+    });
+    // cwd resolves for the SAME session: the stash relocates.
+    render('responding', 'session-1', false, false, true, '/workspace');
+    // Then the user leaves, so the settle lands with the row stashed.
+    render('responding', 'session-2', false, false, true, '/workspace');
+
+    await act(async () => {
+      admission.resolve({ accepted: true, messageId: 'inserted-once' });
+      await insertion;
+    });
+    render('responding', 'session-1', false, false, true, '/workspace');
+
+    expect(latest.queuedPrompts).toMatchObject([
+      {
+        text: 'insert once',
+        midTurnState: 'queued',
+        midTurnMessageId: 'inserted-once',
+        isInserting: false,
+      },
+    ]);
   });
 
   it('keeps one explicit insert in flight across an A-to-B-to-A switch', async () => {

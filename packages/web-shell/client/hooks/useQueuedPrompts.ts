@@ -89,6 +89,30 @@ function queueOwnerKey(
   return sessionId ? `${workspaceCwd ?? ''}\u0000${sessionId}` : undefined;
 }
 
+/**
+ * Resolve the stash key holding `sessionId`'s prompts as of NOW.
+ *
+ * The workspace half of an owner key can resolve — or change — at any time, and
+ * the owner-change effect relocates the whole stash onto the new key and
+ * deletes the old one. A key captured when an insert started can therefore be
+ * gone by the time that insert settles; writing through it would silently drop
+ * the update. Session ids are unique (the same invariant the relocation itself
+ * relies on), so any stash whose session half matches belongs to this session.
+ */
+function resolveStashKey(
+  stash: ReadonlyMap<string, QueuedPrompt[]>,
+  capturedKey: string | undefined,
+  sessionId: string | undefined,
+): string | undefined {
+  if (capturedKey !== undefined && stash.has(capturedKey)) return capturedKey;
+  if (!sessionId) return capturedKey;
+  const suffix = `\u0000${sessionId}`;
+  for (const key of stash.keys()) {
+    if (key.endsWith(suffix)) return key;
+  }
+  return capturedKey;
+}
+
 function isLocallyHeldPrompt(prompt: QueuedPrompt): boolean {
   return (
     prompt.serverPromptId === undefined &&
@@ -2108,6 +2132,21 @@ export function useQueuedPrompts({
         latestWorkspaceCwdRef.current,
         targetSessionId,
       );
+      // Both resolved at USE time, not capture time: an owner change while the
+      // insert is in flight relocates the stash onto a new key without the row
+      // ever leaving the session it was started from.
+      const currentStashKey = () =>
+        resolveStashKey(
+          heldPromptsByOwnerRef.current,
+          promptOwnerKey,
+          targetSessionId,
+        );
+      // Compare the session half only — the workspace half resolving is not an
+      // owner change for a row already pinned to `targetSessionId`.
+      const insertOwnerMatches = () =>
+        targetSessionId === undefined
+          ? latestSessionIdRef.current === undefined
+          : latestSessionIdRef.current === targetSessionId;
       const insertionOwnerToken = ownerTokenRef.current;
       const insertionGeneration =
         (explicitInsertGenerationsRef.current.get(prompt.id) ?? 0) + 1;
@@ -2129,11 +2168,12 @@ export function useQueuedPrompts({
         > = { isInserting: false },
       ) => {
         setQueuedPromptFlags(prompt.id, flags);
-        if (!promptOwnerKey) return;
-        const stashed = heldPromptsByOwnerRef.current.get(promptOwnerKey);
+        const stashKey = currentStashKey();
+        if (!stashKey) return;
+        const stashed = heldPromptsByOwnerRef.current.get(stashKey);
         if (!stashed) return;
         heldPromptsByOwnerRef.current.set(
-          promptOwnerKey,
+          stashKey,
           stashed.map((item) =>
             item.id === prompt.id ? { ...item, ...flags } : item,
           ),
@@ -2147,11 +2187,12 @@ export function useQueuedPrompts({
           queuedPromptsRef.current = next;
           setQueuedPrompts(next);
         }
-        if (!promptOwnerKey) return;
-        const stashed = heldPromptsByOwnerRef.current.get(promptOwnerKey);
+        const stashKey = currentStashKey();
+        if (!stashKey) return;
+        const stashed = heldPromptsByOwnerRef.current.get(stashKey);
         if (!stashed) return;
         heldPromptsByOwnerRef.current.set(
-          promptOwnerKey,
+          stashKey,
           stashed.filter((item) => item.id !== prompt.id),
         );
       };
@@ -2165,10 +2206,7 @@ export function useQueuedPrompts({
       ): boolean => {
         const submitAtIdle =
           isCurrentOwnerTokenRef.current(insertionOwnerToken) &&
-          queueOwnerKey(
-            latestWorkspaceCwdRef.current,
-            latestSessionIdRef.current,
-          ) === promptOwnerKey &&
+          insertOwnerMatches() &&
           (latestStreamingStateRef.current as DaemonStreamingState) ===
             'idle' &&
           !writeBlockedRef.current &&
@@ -2214,11 +2252,7 @@ export function useQueuedPrompts({
           // hold rather than being dropped.
           finishInsertion();
           const stillOwned =
-            targetSessionId !== undefined &&
-            queueOwnerKey(
-              latestWorkspaceCwdRef.current,
-              latestSessionIdRef.current,
-            ) === promptOwnerKey;
+            targetSessionId !== undefined && insertOwnerMatches();
           const snapshot = stillOwned
             ? await reconcileMidTurnMessages(targetSessionId).catch(
                 () => undefined,
@@ -2256,12 +2290,7 @@ export function useQueuedPrompts({
           isInserting: false,
           midTurnMessageId: undefined,
         });
-        if (
-          queueOwnerKey(
-            latestWorkspaceCwdRef.current,
-            latestSessionIdRef.current,
-          ) === promptOwnerKey
-        ) {
+        if (insertOwnerMatches()) {
           reportError(error, t('queue.insertFailed'));
         }
         return;
@@ -2272,13 +2301,7 @@ export function useQueuedPrompts({
           isInserting: false,
           midTurnMessageId: undefined,
         });
-        if (
-          !submitted &&
-          queueOwnerKey(
-            latestWorkspaceCwdRef.current,
-            latestSessionIdRef.current,
-          ) === promptOwnerKey
-        ) {
+        if (!submitted && insertOwnerMatches()) {
           reportError(
             new Error('Queued message was not accepted for insertion'),
             t('queue.insertFailed'),
@@ -2290,18 +2313,16 @@ export function useQueuedPrompts({
       const current = queuedPromptsRef.current;
       const index = current.findIndex((item) => item.id === prompt.id);
       const acceptedAtLegacyIdle =
-        queueOwnerKey(
-          latestWorkspaceCwdRef.current,
-          latestSessionIdRef.current,
-        ) === promptOwnerKey &&
+        insertOwnerMatches() &&
         (latestStreamingStateRef.current as DaemonStreamingState) === 'idle' &&
         !canQueryMidTurn;
       if (index === -1) {
-        if (promptOwnerKey) {
-          const stashed = heldPromptsByOwnerRef.current.get(promptOwnerKey);
+        const stashKey = currentStashKey();
+        if (stashKey) {
+          const stashed = heldPromptsByOwnerRef.current.get(stashKey);
           if (stashed) {
             heldPromptsByOwnerRef.current.set(
-              promptOwnerKey,
+              stashKey,
               acceptedAtLegacyIdle
                 ? stashed.filter((item) => item.id !== prompt.id)
                 : stashed.map((item) =>

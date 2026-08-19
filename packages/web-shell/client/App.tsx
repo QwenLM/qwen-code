@@ -51,6 +51,7 @@ import type {
   GoalSnapshotV2,
 } from '@qwen-code/sdk/daemon';
 
+import { isGoalGateBlocked as isGoalGateBlockedFor } from './utils/goalGate';
 import { type SessionGitIntent } from './components/GitModePopover';
 import {
   SESSION_LIST_PAGE_SIZE,
@@ -5210,18 +5211,12 @@ export function App({
   connectionRef.current = connection;
   /**
    * Whether a local action must be held back because a Goal owns the session.
-   * Fails CLOSED while `connection.goalState` is still hydrating: the session
-   * load clears `loadingTranscript` (making the composer writable) before its
-   * `goal()` fetch resolves, so an unknown Goal state on a real session has to
-   * read as "a Goal may be active" — the same convention
-   * `holdQueuedPromptsLocally`, `enqueueManualRun` and `tryFireBoundRun`
-   * already follow.
+   * Reads the latest connection through the ref so callers get the gate as of
+   * call time; the fail-closed hydration convention lives in the shared
+   * predicate, which every Goal gate in the client shares.
    */
   const isGoalGateBlocked = useCallback(
-    () =>
-      connectionRef.current.sessionId !== undefined &&
-      (connectionRef.current.goalState === undefined ||
-        connectionRef.current.goalState.goal?.status === 'active'),
+    () => isGoalGateBlockedFor(connectionRef.current),
     [],
   );
   const refreshActiveSessionDisplayName = useCallback(async () => {

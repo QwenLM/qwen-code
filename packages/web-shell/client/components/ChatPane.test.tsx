@@ -378,6 +378,11 @@ beforeEach(() => {
     workspaceCwd: '/w',
     loadingTranscript: false,
     catchingUp: false,
+    // A loaded session always carries a Goal snapshot (the load falls back to
+    // an idle one when the fetch fails), and the Goal gates fail CLOSED on an
+    // absent one — leaving it out here would model a session that is still
+    // hydrating, not a Goal-less one.
+    goalState: { v: 2, activity: 'idle', goal: null },
   };
   streamingStateValue = 'idle';
   pendingPermission = null;
@@ -1566,6 +1571,42 @@ describe('ChatPane', () => {
     });
     expect(clearFollowup).not.toHaveBeenCalled();
     expect(enqueuePrompt).not.toHaveBeenCalled();
+  });
+
+  it('holds an idle prompt while the Goal state is still hydrating', () => {
+    // The session load clears `loadingTranscript` before its `goal()` fetch
+    // resolves, so the composer is writable with no snapshot yet. The daemon
+    // has no server-side prompt gate for an active Goal, so a direct send in
+    // that window bypasses the Goal queue outright — fail closed, exactly as
+    // the local hold does.
+    connectionState = { ...connectionState, goalState: undefined };
+    render();
+
+    act(() =>
+      testid('pane-submit')!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      ),
+    );
+
+    expect(sendPrompt).not.toHaveBeenCalled();
+    expect(enqueuePrompt).toHaveBeenCalled();
+
+    // ...and the gate reopens once the snapshot lands Goal-less — the window
+    // is a hold, not a lock.
+    act(() => {
+      connectionState = {
+        ...connectionState,
+        goalState: { v: 2, activity: 'idle', goal: null },
+      };
+      rerender();
+    });
+    act(() =>
+      testid('pane-submit')!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      ),
+    );
+
+    expect(sendPrompt).toHaveBeenCalledTimes(1);
   });
 
   it('lets the host handle a slash command', () => {
