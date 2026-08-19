@@ -325,30 +325,28 @@ export function redactStructuredOutputArgsForRecording(
 }
 
 /**
- * Project an in-memory history turn's parts into the message shape every
- * other `recordAssistantTurn` call site writes: optional thought part
- * first, then one trimmed `{text}` built from the non-thought text parts,
- * then functionCall parts passed through
- * `redactStructuredOutputArgsForRecording`. Anything else
- * (`inlineData`/`fileData`) is dropped — no other assistant record carries
- * those, and persisting them would both bloat the JSONL and hand transcript
- * consumers a message shape they never otherwise see.
- *
- * Exported for tests.
+ * Join thought parts into the single thought content part an assistant
+ * record carries: texts concatenated in order with `joinWith`, first
+ * `thoughtSignature` wins. The one implementation is shared by
+ * `processStreamResponse` (contiguous fragments of one thought, joined
+ * with `''`) and `buildRecordMessageFromHistoryParts` (one complete
+ * trimmed thought per merged attempt, joined with a blank line) so the
+ * record shape has a single owner.
  */
-/**
- * Join every thought part into the single thought content part an assistant
- * record carries: texts concatenated in order, first `thoughtSignature`
- * wins. The one implementation is shared by `processStreamResponse` (stream
- * consolidation) and `buildRecordMessageFromHistoryParts` (merged recovery
- * records) so the record shape has a single owner.
- */
-function buildThoughtContentPart(parts: readonly Part[]): Part | undefined {
-  const thoughtText = parts
+function buildThoughtContentPart(
+  parts: readonly Part[],
+  joinWith = '',
+): Part | undefined {
+  let texts = parts
     .filter((part) => part.thought)
-    .map((part) => (typeof part.text === 'string' ? part.text : ''))
-    .join('')
-    .trim();
+    .map((part) => (typeof part.text === 'string' ? part.text : ''));
+  if (joinWith !== '') {
+    // Complete per-thought pieces: trim each so the separator is the only
+    // boundary whitespace. Fragment joins (`''`) must keep interior
+    // whitespace untouched.
+    texts = texts.map((text) => text.trim()).filter((text) => text !== '');
+  }
+  const thoughtText = texts.join(joinWith).trim();
   if (thoughtText === '') {
     return undefined;
   }
@@ -362,13 +360,25 @@ function buildThoughtContentPart(parts: readonly Part[]): Part | undefined {
   return thoughtPart;
 }
 
+/**
+ * Project an in-memory history turn's parts into the message shape every
+ * other `recordAssistantTurn` call site writes: optional thought part
+ * first, then one trimmed `{text}` built from the non-thought text parts,
+ * then functionCall parts passed through
+ * `redactStructuredOutputArgsForRecording`. Anything else
+ * (`inlineData`/`fileData`) is dropped — no other assistant record carries
+ * those, and persisting them would both bloat the JSONL and hand transcript
+ * consumers a message shape they never otherwise see.
+ *
+ * Exported for tests.
+ */
 export function buildRecordMessageFromHistoryParts(parts: Part[]): Part[] {
   // A coalesced recovery turn carries one thought part per merged attempt,
   // and keeping only the first would silently drop each continuation's
   // thinking from the transcript. `buildThoughtContentPart` is shared with
   // `processStreamResponse` so the merged record's thought shape cannot
   // drift from the per-stream records around it.
-  const thoughtPart = buildThoughtContentPart(parts);
+  const thoughtPart = buildThoughtContentPart(parts, '\n\n');
   const contentText = parts
     .filter((part) => !part.thought && typeof part.text === 'string')
     .map((part) => part.text)
@@ -4708,12 +4718,14 @@ export class GeminiChat {
 
     let hasToolCall = false;
     let hasFinishReason = false;
-    // Finish-reason *value* seen anywhere in the stream, captured before the
-    // `isToolResultContinuation` block below can delete it off the chunk. Used
-    // only to decide record deferral for the MAX_TOKENS recovery flow — and
-    // only on non-tool-result streams: tool-result continuations defer based
-    // on the first-wins `deferredFinishReason` instead, because that is the
-    // value the outer loop's recovery-entry decision sees re-emitted.
+    // Last finish reason carried by a chunk this generator actually yielded,
+    // captured at the yield boundary below — after the
+    // `isToolResultContinuation` strip, so on tool-result continuations it
+    // stays undefined and the record-deferral decision falls back to the
+    // first-wins `deferredFinishReason` the synthetic trailing chunk
+    // re-emits. Both are therefore the value the outer loop's recovery-entry
+    // decision consumes; do not capture earlier or the two decisions can
+    // disagree on suppressed or stripped finish chunks.
     let yieldedFinishReason: FinishReason | undefined;
     const protocolTagDetector = new LeadingProtocolTagLeakDetector();
     let pendingProtocolParts: Part[] = [];

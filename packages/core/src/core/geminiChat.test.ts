@@ -13440,7 +13440,7 @@ describe('GeminiChat', async () => {
       ]);
       expect(message).toEqual([
         {
-          text: 'First thinking. More thinking.',
+          text: 'First thinking.\n\nMore thinking.',
           thought: true,
           thoughtSignature: 'sig-1',
         },
@@ -13546,7 +13546,7 @@ describe('GeminiChat', async () => {
       expect(thoughtParts).toHaveLength(1);
       // Each attempt's thought is trimmed when it lands in history, so the
       // join concatenates the trimmed texts without a synthetic separator.
-      expect(thoughtParts[0]!.text).toBe('First thinking.More thinking.');
+      expect(thoughtParts[0]!.text).toBe('First thinking.\n\nMore thinking.');
       // `recordedText` would return the thought part here; look up the
       // non-thought content part explicitly.
       const contentPart = recordedMessage.find(
