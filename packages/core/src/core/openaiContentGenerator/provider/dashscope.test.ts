@@ -807,7 +807,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(result['reasoning']).toEqual({ effort: 'xhigh' });
     });
 
-    it('keeps max for a GLM-5.2+ model served over DashScope', () => {
+    it('caps a GLM model served over DashScope, which is not a Z.ai host', () => {
       const generator = new DashScopeOpenAICompatibleProvider(
         {
           ...mockContentGeneratorConfig,
@@ -826,7 +826,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         'test-prompt-id',
       ) as unknown as Record<string, unknown>;
 
-      expect(result['reasoning']).toEqual({ effort: 'max' });
+      expect(result['reasoning']).toEqual({ effort: 'xhigh' });
     });
 
     it('lets extra_body override qwen3.8-max reasoning_effort', () => {

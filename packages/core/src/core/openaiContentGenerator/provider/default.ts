@@ -131,11 +131,17 @@ export class DefaultOpenAICompatibleProvider
   }
 
   /**
-   * Effort tiers this endpoint accepts. Override in a subclass whose endpoint
-   * takes `max` natively; the clamp reads it through `this`, so a subclass
-   * value applies even on the `super.buildRequest` path.
+   * Effort tiers this endpoint accepts for `model`. Takes the wire model
+   * rather than reading the configured one, because a request may override it
+   * (`pipeline.ts` resolves `request.model || contentGeneratorConfig.model`),
+   * and a capability answered for the wrong model is how an unaccepted tier
+   * reaches the wire. Override in a subclass whose endpoint takes `max`; the
+   * clamp calls it through `this`, so a subclass answer applies even on the
+   * `super.buildRequest` path.
    */
-  protected get supportedReasoningEfforts(): readonly ReasoningEffort[] {
+  protected supportedReasoningEffortsFor(
+    _model: string | undefined,
+  ): readonly ReasoningEffort[] {
     return OPENAI_COMPATIBLE_EFFORTS;
   }
 
@@ -167,7 +173,10 @@ export class DefaultOpenAICompatibleProvider
     }
     const clamped = clampReasoningEffort(
       effort as ReasoningEffort,
-      this.supportedReasoningEfforts,
+      this.supportedReasoningEffortsFor(
+        (loose['model'] as string | undefined) ??
+          this.contentGeneratorConfig.model,
+      ),
     );
     if (clamped === effort) {
       return request;

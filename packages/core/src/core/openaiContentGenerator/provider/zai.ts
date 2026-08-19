@@ -91,11 +91,13 @@ export class ZaiOpenAICompatibleProvider extends DefaultOpenAICompatibleProvider
    * Anything else keeps the generic ceiling, matching the hostname gate the
    * wire reshape below already uses.
    */
-  protected override get supportedReasoningEfforts(): readonly ReasoningEffort[] {
+  protected override supportedReasoningEffortsFor(
+    model: string | undefined,
+  ): readonly ReasoningEffort[] {
     return isZaiHostname(this.contentGeneratorConfig) &&
-      isGlmTieredEffortModel(this.contentGeneratorConfig.model)
+      isGlmTieredEffortModel(model ?? this.contentGeneratorConfig.model)
       ? REASONING_EFFORT_TIERS
-      : super.supportedReasoningEfforts;
+      : super.supportedReasoningEffortsFor(model);
   }
 
   override buildRequest(

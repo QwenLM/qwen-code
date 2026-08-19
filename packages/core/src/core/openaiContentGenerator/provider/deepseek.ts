@@ -91,10 +91,12 @@ export class DeepSeekOpenAICompatibleProvider extends DefaultOpenAICompatiblePro
    * decision about the wire shape DeepSeek's own API exposes uses
    * `isDeepSeekHostname`. Elsewhere the generic ceiling applies.
    */
-  protected override get supportedReasoningEfforts(): readonly ReasoningEffort[] {
+  protected override supportedReasoningEffortsFor(
+    model: string | undefined,
+  ): readonly ReasoningEffort[] {
     return isDeepSeekHostname(this.contentGeneratorConfig)
       ? REASONING_EFFORT_TIERS
-      : super.supportedReasoningEfforts;
+      : super.supportedReasoningEffortsFor(model);
   }
 
   /**

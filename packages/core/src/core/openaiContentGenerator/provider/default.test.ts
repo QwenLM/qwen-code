@@ -37,6 +37,16 @@ vi.mock('openai', () => ({
   })),
 }));
 
+const mockDebugLogger = vi.hoisted(() => ({
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}));
+vi.mock('../../../utils/debugLogger.js', () => ({
+  createDebugLogger: vi.fn(() => mockDebugLogger),
+}));
+
 vi.mock('../../../utils/runtimeFetchOptions.js', () => ({
   buildRuntimeFetchOptions: vi.fn(),
 }));
@@ -492,6 +502,33 @@ describe('DefaultOpenAICompatibleProvider', () => {
       ) as unknown as Record<string, unknown>;
 
       expect(result['reasoning']).toEqual({ effort: 'ludicrous' });
+    });
+
+    it('warns once however many requests the same provider clamps', () => {
+      mockDebugLogger.warn.mockClear();
+      const req = {
+        model: 'gpt-5.4',
+        messages: [{ role: 'user', content: 'Hello' }],
+        reasoning: { effort: 'max' },
+      } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+
+      provider.buildRequest(req, 'first');
+      provider.buildRequest(req, 'second');
+
+      expect(mockDebugLogger.warn).toHaveBeenCalledTimes(1);
+    });
+
+    it('answers the ceiling for the request model, not the configured one', () => {
+      const result = provider.buildRequest(
+        {
+          model: 'some-other-model',
+          messages: [{ role: 'user', content: 'Hello' }],
+          reasoning: { effort: 'max' },
+        } as unknown as OpenAI.Chat.ChatCompletionCreateParams,
+        'prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['reasoning']).toEqual({ effort: 'xhigh' });
     });
 
     it('leaves a samplingParams reasoning object verbatim', () => {

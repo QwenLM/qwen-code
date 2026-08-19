@@ -58,6 +58,26 @@ describe('ZaiOpenAICompatibleProvider', () => {
       ).toBe('xhigh');
     });
 
+    it('answers for the request model, not the configured one', () => {
+      // pipeline resolves `request.model || config.model`, so a capability
+      // answered off the configured model would ship max to a model that
+      // does not take it.
+      const provider = makeProvider({
+        baseUrl: 'https://api.z.ai/api/paas/v4',
+        model: 'glm-5.2',
+      });
+      const result = provider.buildRequest(
+        {
+          model: 'glm-4.6',
+          messages: [{ role: 'user', content: 'hi' }],
+          reasoning: { effort: 'max' },
+        } as unknown as OpenAI.Chat.ChatCompletionCreateParams,
+        userPromptId,
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['reasoning_effort']).toBe('xhigh');
+    });
+
     it('caps max for a glm-named model on an unverified host', () => {
       expect(
         build('https://llm.example.com/v1', 'glm-5.2')['reasoning'],
