@@ -999,6 +999,110 @@ describe('createChannelWorkerSupervisor', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it('keeps a failed mint in the registry, so the exit sweep still reclaims it', async () => {
+    // R5-9's own regression test. The fix moved `mintedWorkerCaBundleDirs.add`
+    // ahead of the bundle write so a throw there leaves a directory the exit
+    // hook can still see; nothing pinned that, because forcing the write to
+    // fail appeared to need `node:fs` mocked for the whole file, which would
+    // change how the other tests here resolve fs.
+    //
+    // It does not. `vi.doMock` is NOT hoisted, so it binds only to the dynamic
+    // import below: that one supervisor instance sees a throwing
+    // `writeFileSync`, and every other test in this file keeps the real
+    // `node:fs` it imported at module load. `vi.spyOn(fs, 'writeFileSync')` is
+    // what cannot work — an ESM module namespace is not configurable.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-ca-enospc-'));
+    const operatorCa = path.join(dir, 'operator.pem');
+    const daemonCa = path.join(dir, 'daemon.pem');
+    fs.writeFileSync(operatorCa, OPERATOR_CA_PEM);
+    fs.writeFileSync(daemonCa, DAEMON_CERT_PEM);
+    const mintedBefore = new Set(
+      fs
+        .readdirSync(os.tmpdir())
+        .filter((e) => e.startsWith('qwen-worker-ca-')),
+    );
+
+    vi.resetModules();
+    vi.doMock('node:fs', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('node:fs')>();
+      const writeFileSync: typeof actual.writeFileSync = (file, ...rest) => {
+        if (typeof file === 'string' && file.endsWith('ca-bundle.pem')) {
+          const enospc: NodeJS.ErrnoException = new Error(
+            'ENOSPC: no space left on device',
+          );
+          enospc.code = 'ENOSPC';
+          throw enospc;
+        }
+        return actual.writeFileSync(file, ...rest);
+      };
+      return {
+        ...actual,
+        default: { ...actual, writeFileSync },
+        writeFileSync,
+      };
+    });
+
+    let sweep: () => string[];
+    try {
+      const module = await import('./channel-worker-supervisor.js');
+      sweep = module.cleanupMintedWorkerCaBundleDirs;
+      const child = new FakeChild();
+      const spawnWorker = vi.fn(
+        (_execPath: string, _argv: string[], _options: unknown) => child,
+      );
+      const supervisor = module.createChannelWorkerSupervisor({
+        cliEntryPath: '/repo/dist/index.js',
+        daemonUrl: 'https://127.0.0.1:4170',
+        tlsCaCertPath: daemonCa,
+        workspace: '/workspace',
+        selection: { mode: 'names', names: ['telegram'] },
+        workerBaseEnv: { NODE_EXTRA_CA_CERTS: operatorCa },
+        spawnWorker,
+      });
+      const started = supervisor.start();
+      child.emit('message', {
+        type: 'ready',
+        pid: 54321,
+        channels: ['telegram'],
+        requestedChannels: ['telegram'],
+      });
+      await started;
+
+      // The merge threw, so workers fall back to the daemon cert alone —
+      // degraded but serving, which is the existing read-error contract.
+      const { env } = spawnWorker.mock.calls[0]![2] as {
+        env: NodeJS.ProcessEnv;
+      };
+      expect(env['NODE_EXTRA_CA_CERTS']).toBe(daemonCa);
+    } finally {
+      vi.doUnmock('node:fs');
+    }
+
+    const minted = fs
+      .readdirSync(os.tmpdir())
+      .filter(
+        (entry) =>
+          entry.startsWith('qwen-worker-ca-') && !mintedBefore.has(entry),
+      )
+      .map((entry) => path.join(os.tmpdir(), entry));
+    // The write failed after mkdtemp, so exactly one directory was minted and
+    // it is still on disk — deliberately, per the fix: reclaiming it belongs
+    // to the sweep, not to the failure path.
+    expect(minted).toHaveLength(1);
+
+    // The assertion the fix is actually about. Registered AFTER the write, as
+    // it was before, this directory is in no registry at all: the sweep below
+    // returns without it and it survives on disk, one 0700 orphan per failing
+    // respawn, holding nothing but reachable by nobody.
+    const swept = sweep!();
+    expect(swept).toContain(minted[0]);
+    expect(fs.existsSync(minted[0]!)).toBe(false);
+
+    vi.resetModules();
+    fs.rmSync(minted[0]!, { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it('rebuilds the bundle after a tmp cleaner removes it', async () => {
     // R2-4(b): systemd-tmpfiles-clean ages out /tmp. A path-only cache then
     // hands every future respawn a dead path — Node logs "Ignoring extra
