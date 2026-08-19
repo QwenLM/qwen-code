@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { StreamingState } from '../ui/types.js';
+import { StreamingState } from '../types.js';
 import {
   computeWindowTitle,
   writeTerminalTitle,

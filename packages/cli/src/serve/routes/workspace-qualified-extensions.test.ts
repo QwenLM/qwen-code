@@ -27,6 +27,7 @@ import {
   type WorkspaceRuntime,
 } from '../workspace-registry.js';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
+import { ConversationWorkspace } from '../conversations/conversation-workspace.js';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 
 const extensionId = 'a'.repeat(64);
@@ -92,7 +93,13 @@ function makeWorkspaceService(): DaemonWorkspaceService {
 
 function makeRuntime(
   workspaceCwd: string,
-  opts: { primary: boolean; trusted: boolean; workspaceId: string },
+  opts: {
+    primary: boolean;
+    trusted: boolean;
+    workspaceId: string;
+    provenance?: 'live-conversation';
+    removable?: boolean;
+  },
 ): WorkspaceRuntime {
   return {
     workspaceId: opts.workspaceId,
@@ -100,6 +107,8 @@ function makeRuntime(
     sessionRuntimeBaseDir: path.join(workspaceCwd, '.runtime'),
     primary: opts.primary,
     trusted: opts.trusted,
+    ...(opts.provenance ? { provenance: opts.provenance } : {}),
+    ...(opts.removable === undefined ? {} : { removable: opts.removable }),
     env: { mode: 'parent-process', overlayKeys: [] },
     bridge: makeBridge(),
     workspaceService: makeWorkspaceService(),
@@ -113,6 +122,7 @@ function makeRuntime(
 }
 
 async function makeHarness(opts?: {
+  internalRuntime?: boolean;
   secondaryTrusted?: boolean;
   singleWorkspace?: boolean;
 }) {
@@ -121,6 +131,9 @@ async function makeHarness(opts?: {
   );
   const primaryCwd = path.join(scratch, 'primary');
   const secondaryCwd = path.join(scratch, 'secondary');
+  const conversationWorkspace = opts?.internalRuntime
+    ? new ConversationWorkspace({ homeDir: scratch })
+    : undefined;
   await fsp.mkdir(primaryCwd, { recursive: true });
   await fsp.mkdir(secondaryCwd, { recursive: true });
   const canonicalPrimary = canonicalizeWorkspace(primaryCwd);
@@ -135,18 +148,41 @@ async function makeHarness(opts?: {
     trusted: opts?.secondaryTrusted ?? true,
     workspaceId: hashDaemonWorkspace(canonicalSecondary),
   });
+  const conversationRoot = conversationWorkspace
+    ? (await conversationWorkspace.getRoot()).canonicalRoot
+    : undefined;
+  const internal = conversationRoot
+    ? makeRuntime(conversationRoot, {
+        primary: false,
+        trusted: true,
+        workspaceId: hashDaemonWorkspace(conversationRoot),
+        provenance: 'live-conversation',
+        removable: false,
+      })
+    : undefined;
   const registry = createWorkspaceRegistry(
-    opts?.singleWorkspace ? [primary] : [primary, secondary],
+    opts?.singleWorkspace
+      ? [primary]
+      : [primary, secondary, ...(internal ? [internal] : [])],
   );
   const app = createServeApp(
     { ...baseOpts, workspace: canonicalPrimary, token: 'secret' },
     undefined,
     {
       workspaceRegistry: registry,
+      ...(conversationWorkspace
+        ? {
+            liveConversationWorkspace: conversationWorkspace,
+            conversationRuntimeOwnershipFactory: () => ({
+              acquire: vi.fn(async () => ({ reclaimed: false })),
+              release: vi.fn(async () => false),
+            }),
+          }
+        : {}),
     },
   );
   activeApps.add(app);
-  return { app, scratch, primary, secondary, registry };
+  return { app, scratch, primary, secondary, internal, registry };
 }
 
 function auth(pending: request.Test): request.Test {
@@ -827,8 +863,8 @@ describe('extension management v2 REST', () => {
     }
   });
 
-  it('fans a global default change out to every registered workspace', async () => {
-    const h = await makeHarness();
+  it('fans a global default change out to every registered runtime', async () => {
+    const h = await makeHarness({ internalRuntime: true });
     mockExtensionManager();
     try {
       const started = await auth(
@@ -845,7 +881,41 @@ describe('extension management v2 REST', () => {
       expect(
         h.secondary.bridge.refreshExtensionsForAllSessions,
       ).toHaveBeenCalledOnce();
+      expect(
+        h.internal?.bridge.refreshExtensionsForAllSessions,
+      ).toHaveBeenCalledOnce();
     } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('does not reconcile extension generations after runtime activity seals', async () => {
+    vi.useFakeTimers();
+    const h = await makeHarness({ internalRuntime: true });
+    mockExtensionManager();
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const activity = (
+      h.app.locals as {
+        conversationRuntimeActivity?: { sealAndWait(): Promise<void> };
+      }
+    ).conversationRuntimeActivity;
+    try {
+      expect(activity).toBeDefined();
+      await activity!.sealAndWait();
+
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(
+        h.primary.bridge.refreshExtensionsForAllSessions,
+      ).not.toHaveBeenCalled();
+      expect(
+        h.secondary.bridge.refreshExtensionsForAllSessions,
+      ).not.toHaveBeenCalled();
+      expect(
+        h.internal?.bridge.refreshExtensionsForAllSessions,
+      ).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
   });

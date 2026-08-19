@@ -156,6 +156,15 @@ async function mount({
   };
 }
 
+async function waitForImageIngestion() {
+  await vi.waitFor(async () => {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(latest!.pendingImageBatchCount).toBe(0);
+  });
+}
+
 afterEach(() => {
   act(() => root?.unmount());
   vi.useRealTimers();
@@ -528,7 +537,7 @@ describe('useComposerCore history and drafts', () => {
   it('commits a new-task prompt after its session is allocated', async () => {
     let commitPrompt: ComposerSubmitCommit | undefined;
     const onSubmit = vi.fn<UseComposerCoreOptions['onSubmit']>(
-      (_text, _images, commitAccepted) => {
+      (_text, _images, _files, commitAccepted) => {
         commitPrompt = commitAccepted;
         return false;
       },
@@ -558,7 +567,7 @@ describe('useComposerCore history and drafts', () => {
   it('commits a delayed queued prompt to history exactly once', async () => {
     let commitQueuedPrompt: ComposerSubmitCommit | undefined;
     const onSubmit = vi.fn<UseComposerCoreOptions['onSubmit']>(
-      (_text, _images, commitAccepted) => {
+      (_text, _images, _files, commitAccepted) => {
         commitQueuedPrompt = commitAccepted;
         return false;
       },
@@ -604,7 +613,7 @@ describe('useComposerCore history and drafts', () => {
     vi.useFakeTimers();
     let commitQueuedPrompt: ComposerSubmitCommit | undefined;
     const onSubmit = vi.fn<UseComposerCoreOptions['onSubmit']>(
-      (_text, _images, commitAccepted) => {
+      (_text, _images, _files, commitAccepted) => {
         commitQueuedPrompt = commitAccepted;
         return false;
       },
@@ -649,7 +658,7 @@ describe('useComposerCore history and drafts', () => {
   it('does not clear retyped identical input after delayed acceptance', async () => {
     let commitQueuedPrompt: ComposerSubmitCommit | undefined;
     const onSubmit = vi.fn<UseComposerCoreOptions['onSubmit']>(
-      (_text, _images, commitAccepted) => {
+      (_text, _images, _files, commitAccepted) => {
         commitQueuedPrompt = commitAccepted;
         return false;
       },
@@ -674,7 +683,7 @@ describe('useComposerCore history and drafts', () => {
   it('does not clear the next session when a delayed prompt is accepted', async () => {
     let commitQueuedPrompt: ComposerSubmitCommit | undefined;
     const onSubmit = vi.fn<UseComposerCoreOptions['onSubmit']>(
-      (_text, _images, commitAccepted) => {
+      (_text, _images, _files, commitAccepted) => {
         commitQueuedPrompt = commitAccepted;
         return false;
       },
@@ -714,7 +723,7 @@ describe('useComposerCore history and drafts', () => {
     vi.useFakeTimers();
     let commitQueuedPrompt: ComposerSubmitCommit | undefined;
     const onSubmit = vi.fn<UseComposerCoreOptions['onSubmit']>(
-      (_text, _images, commitAccepted) => {
+      (_text, _images, _files, commitAccepted) => {
         commitQueuedPrompt = commitAccepted;
         return false;
       },
@@ -836,9 +845,7 @@ describe('useComposerCore paste', () => {
     expect(onSubmit).not.toHaveBeenCalled();
     expect(latest!.pendingImageBatchCount).toBe(1);
 
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    });
+    await waitForImageIngestion();
     expect(latest!.pendingImageBatchCount).toBe(0);
     expect(latest!.pastedImages).toMatchObject([{ media_type: 'image/png' }]);
 
@@ -846,9 +853,94 @@ describe('useComposerCore paste', () => {
     expect(onSubmit).toHaveBeenCalledWith(
       '',
       [expect.objectContaining({ media_type: 'image/png' })],
+      undefined,
       expect.any(Function),
       undefined,
     );
+  });
+
+  it('ingests dropped text files, sanitizes names, and submits them', async () => {
+    const onSubmit = vi.fn();
+    await mount({ onSubmit });
+    const drop = (files: File[]) => {
+      const event = new Event('drop', { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'dataTransfer', {
+        value: { files, items: [], types: ['Files'], dropEffect: 'none' },
+      });
+      container!
+        .querySelector('[data-web-shell-composer-surface]')!
+        .dispatchEvent(event);
+    };
+
+    act(() => {
+      drop([
+        new File(['line1\nline2'], 'my app.log', { type: 'text/plain' }),
+        new File(['second'], 'my app.log', { type: '' }),
+      ]);
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+
+    expect(latest!.pastedFiles).toMatchObject([
+      { name: 'my_app.log', text: 'line1\nline2' },
+      { name: 'my_app.log-2', text: 'second' },
+    ]);
+    expect(latest!.hasAttachments).toBe(true);
+
+    act(() => latest!.submitText());
+    expect(onSubmit).toHaveBeenCalledWith(
+      '',
+      undefined,
+      [
+        expect.objectContaining({ name: 'my_app.log' }),
+        expect.objectContaining({ name: 'my_app.log-2' }),
+      ],
+      expect.any(Function),
+      undefined,
+    );
+  });
+
+  it('removes a pasted file via its chip index', async () => {
+    await mount();
+    const drop = (files: File[]) => {
+      const event = new Event('drop', { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'dataTransfer', {
+        value: { files, items: [], types: ['Files'], dropEffect: 'none' },
+      });
+      container!
+        .querySelector('[data-web-shell-composer-surface]')!
+        .dispatchEvent(event);
+    };
+
+    act(() => {
+      drop([
+        new File(['one'], 'one.log', { type: 'text/plain' }),
+        new File(['two'], 'two.log', { type: 'text/plain' }),
+      ]);
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(latest!.pastedFiles).toHaveLength(2);
+
+    act(() => latest!.removeFile(0));
+    expect(latest!.pastedFiles).toMatchObject([{ name: 'two.log' }]);
+  });
+
+  it('restores files with sanitized deduped names', async () => {
+    await mount();
+    act(() => {
+      latest!.handle.restoreFiles([
+        { name: 'app.log', media_type: 'text/plain', text: 'a' },
+        { name: 'app.log', media_type: 'text/plain', text: 'b' },
+      ]);
+    });
+
+    expect(latest!.pastedFiles).toMatchObject([
+      { name: 'app.log', text: 'a' },
+      { name: 'app.log-2', text: 'b' },
+    ]);
   });
 
   it('keeps drag feedback across composer children and clears it globally', async () => {
@@ -899,8 +991,8 @@ describe('useComposerCore paste', () => {
     const onImageIngestionNotice = vi.fn();
     await mount({ onImageIngestionNotice });
     const first = new File(['first'], 'first.bmp', { type: 'image/x-bmp' });
-    const unsupported = new File(['text'], 'notes.txt', {
-      type: 'text/plain',
+    const unsupported = new File(['zip'], 'archive.zip', {
+      type: 'application/zip',
     });
     const second = new File(['second'], 'second.png', { type: 'image/png' });
     const drop = (files: File[]) => {
@@ -917,9 +1009,7 @@ describe('useComposerCore paste', () => {
       drop([first, unsupported]);
       drop([second]);
     });
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 30));
-    });
+    await waitForImageIngestion();
 
     expect(latest!.pastedImages.map((image) => image.media_type)).toEqual([
       'image/bmp',
@@ -949,12 +1039,10 @@ describe('useComposerCore paste', () => {
     };
 
     act(() => {
-      drop([new File(['text'], 'notes.txt', { type: 'text/plain' })]);
+      drop([new File(['zip'], 'archive.zip', { type: 'application/zip' })]);
       drop([new File(['png'], 'photo.png', { type: 'image/png' })]);
     });
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 30));
-    });
+    await waitForImageIngestion();
 
     expect(onImageIngestionNotice).toHaveBeenCalledOnce();
     expect(latest!.pastedImages).toMatchObject([{ media_type: 'image/png' }]);
@@ -1028,6 +1116,7 @@ describe('useComposerCore tags', () => {
     expect(onSubmit).toHaveBeenCalledWith(
       '@file.ts\n\nfix it',
       undefined,
+      undefined,
       expect.any(Function),
       { inputAnnotations },
     );
@@ -1063,6 +1152,7 @@ describe('useComposerCore tags', () => {
     expect(onSubmit).toHaveBeenCalledWith(
       '@b new\n@a old',
       undefined,
+      undefined,
       expect.any(Function),
       {
         inputAnnotations: [
@@ -1095,6 +1185,7 @@ describe('useComposerCore tags', () => {
 
     expect(onSubmit).toHaveBeenCalledWith(
       'please @file.ts\n\nfix it',
+      undefined,
       undefined,
       expect.any(Function),
       {
@@ -1131,6 +1222,7 @@ describe('useComposerCore tags', () => {
 
     expect(onSubmit).toHaveBeenCalledWith(
       '@Xile.ts\n\nfix it',
+      undefined,
       undefined,
       expect.any(Function),
       undefined,
@@ -1454,6 +1546,7 @@ describe('useComposerCore tags', () => {
     expect(onSubmit).toHaveBeenCalledWith(
       '<table /> explain',
       undefined,
+      undefined,
       expect.any(Function),
       {
         inputAnnotations: [
@@ -1513,6 +1606,7 @@ describe('useComposerCore tags', () => {
     act(() => latest!.submitText());
     expect(onSubmit).toHaveBeenLastCalledWith(
       prompt,
+      undefined,
       undefined,
       expect.any(Function),
       {
@@ -1693,6 +1787,7 @@ describe('useComposerCore tags', () => {
     expect(onSubmit).toHaveBeenLastCalledWith(
       prompt,
       undefined,
+      undefined,
       expect.any(Function),
       {
         inputAnnotations: [
@@ -1753,6 +1848,7 @@ describe('useComposerCore tags', () => {
     expect(onSubmit).toHaveBeenLastCalledWith(
       prompt,
       undefined,
+      undefined,
       expect.any(Function),
       {
         inputAnnotations: [
@@ -1789,6 +1885,7 @@ describe('useComposerCore tags', () => {
 
     expect(onSubmit).toHaveBeenLastCalledWith(
       historyText,
+      undefined,
       undefined,
       expect.any(Function),
       undefined,
@@ -1834,6 +1931,7 @@ describe('useComposerCore tags', () => {
     expect(onSubmit).toHaveBeenLastCalledWith(
       prompt,
       undefined,
+      undefined,
       expect.any(Function),
       undefined,
     );
@@ -1868,6 +1966,7 @@ describe('useComposerCore tags', () => {
     const editor = container!.querySelector('.cm-content')!;
     expect(onSubmit).toHaveBeenLastCalledWith(
       prompt,
+      undefined,
       undefined,
       expect.any(Function),
       {

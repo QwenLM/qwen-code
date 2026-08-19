@@ -130,6 +130,7 @@ import {
   type ActiveWorkHeartbeatCapabilityV1,
   type ActiveWorkHoldCategory,
   type ActiveWorkSnapshotV1,
+  CHANNEL_PROMPT_META_KEY,
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
@@ -148,6 +149,7 @@ import {
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
   WORKTREE_MCP_DEFER_META_KEY,
   isValidTrustedModelPrompt,
+  sessionCloseDrainBudgetMs,
 } from './bridgeTypes.js';
 import { getChannelStartupProfileAttributes } from './channel-startup-profile.js';
 import type {
@@ -1086,6 +1088,15 @@ interface SessionEntry {
     code?: string;
     errorKind?: string;
   };
+  /**
+   * The journaled `turn_error` event behind `turnError`, when the failed
+   * turn published one. A bounded refresh replays it onto persisted
+   * history so the terminal survives a page refresh; any newer turn
+   * terminal — or newer turn content about to be folded by a queued
+   * terminal boundary — clears it so a stale error is never re-appended
+   * after newer content. Not part of the session summary.
+   */
+  turnErrorEvent?: BridgeEvent;
   retryAllowed: boolean;
   /** Prompt id whose `prompt_cancelled` event has already been broadcast. */
   cancelBroadcastPromptId?: string;
@@ -1531,18 +1542,46 @@ function broadcastTurnComplete(
   promptResult: { stopReason?: string; [k: string]: unknown },
   promptId: string | undefined,
   originatorClientId: string | undefined,
+  mutateTurnState: boolean,
 ): void {
   try {
-    entry.events.publish({
+    const meta =
+      promptResult['_meta'] && typeof promptResult['_meta'] === 'object'
+        ? (promptResult['_meta'] as Record<string, unknown>)
+        : undefined;
+    const rawBranchPoint =
+      meta?.['qwen.branchPoint'] && typeof meta['qwen.branchPoint'] === 'object'
+        ? (meta['qwen.branchPoint'] as Record<string, unknown>)
+        : undefined;
+    const branchPoint =
+      promptResult.stopReason === 'end_turn' &&
+      typeof rawBranchPoint?.['assistantRecordUuid'] === 'string' &&
+      CHAT_RECORD_UUID_RE.test(rawBranchPoint['assistantRecordUuid']) &&
+      typeof rawBranchPoint['checkpointUuid'] === 'string' &&
+      CHAT_RECORD_UUID_RE.test(rawBranchPoint['checkpointUuid'])
+        ? {
+            assistantRecordUuid: rawBranchPoint['assistantRecordUuid'],
+            checkpointUuid: rawBranchPoint['checkpointUuid'],
+          }
+        : undefined;
+    const published = entry.events.publish({
       type: 'turn_complete',
       ...(promptId ? { promptId } : {}),
       data: {
         sessionId,
         stopReason: promptResult.stopReason ?? 'end_turn',
         ...(promptId ? { promptId } : {}),
+        ...(branchPoint ? { branchPoint } : {}),
       },
       ...(originatorClientId ? { originatorClientId } : {}),
     });
+    // A newer turn terminal supersedes any pending refresh-append error —
+    // but only for a prompt that actually ran. A queued prompt's terminal
+    // (deadline expiry, queued removal) publishes the event alone without
+    // mutating turn state, so it must not erase the refresh-replay record
+    // of the active turn's failure either.
+    if (mutateTurnState && published !== undefined)
+      entry.turnErrorEvent = undefined;
   } catch {
     /* bus may be closed during session teardown */
   }
@@ -1584,6 +1623,17 @@ function extractJsonRpcErrorDetail(data: unknown): string | undefined {
   return undefined;
 }
 
+function extractJsonRpcErrorField(
+  err: unknown,
+  field: string,
+): string | undefined {
+  if (typeof err !== 'object' || err === null) return undefined;
+  const data = (err as { data?: unknown }).data;
+  if (typeof data !== 'object' || data === null) return undefined;
+  const value = (data as Record<string, unknown>)[field];
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
 export function extractErrorCode(err: unknown): string | undefined {
   if (typeof err !== 'object' || err === null || !('code' in err))
     return undefined;
@@ -1591,6 +1641,111 @@ export function extractErrorCode(err: unknown): string | undefined {
   if (typeof raw === 'string') return raw;
   if (typeof raw === 'number') return String(raw);
   return undefined;
+}
+
+/**
+ * Event types that may be published after a turn terminal without adding
+ * turn content (prompt-queue bookkeeping, config changes, and other
+ * idle-reachable session bookkeeping). The bounded refresh-append guard
+ * skips these when deciding whether the in-memory `turn_error` is still
+ * the newest meaningful terminal; any other event type blocks the append.
+ * `pending_prompt_started` is deliberately absent: it is published before
+ * admission clears `turnErrorEvent`, so blocking the append in that window
+ * keeps a stale error from trailing a turn that is already starting.
+ *
+ * Audit the full `broadcastWorkspaceEvent` vocabulary (and any other
+ * idle-reachable session-bus publish) before adding a new event type to
+ * the bus: every idle non-turn event belongs here, or an otherwise-idle
+ * activity — a model switch, an extension refresh, an MCP server change,
+ * a user-shell command — defeats the append and the loop terminal
+ * disappears from the refreshed transcript. `session_update` events are
+ * turn content except the idle bookkeeping subtypes skipped via
+ * `isIdleBookkeepingSessionUpdate`: the user-shell output stream (its
+ * history goes to the model conversation, not the persisted transcript
+ * the refresh pages) and the latest-wins state snapshots
+ * (`available_commands_update`, `current_mode_update`) that settings and
+ * approval-mode refreshes fan out to idle sessions.
+ */
+const REFRESH_APPEND_BOOKKEEPING_EVENT_TYPES = new Set([
+  'pending_prompt_added',
+  'pending_prompt_completed',
+  'prompt_cancelled',
+  'model_switched',
+  'model_switch_failed',
+  'approval_mode_changed',
+  'language_changed',
+  'session_metadata_updated',
+  'session_cwd_changed',
+  'artifact_changed',
+  'settings_changed',
+  'extensions_changed',
+  'mcp_server_changed',
+  'mcp_server_added',
+  'mcp_server_removed',
+  'user_shell_command',
+  'user_shell_result',
+  // Workspace-level fan-out (workspace service, git watcher, memory /
+  // agent CRUD, device-flow registry) reaches every session bus via
+  // `publishWorkspaceEvent` while idle. The `auth_device_flow_*` members
+  // mirror the closed `DeviceFlowEventEmission` union — audit that union
+  // when it grows.
+  'tool_toggled',
+  'workspace_initialized',
+  'mcp_server_restarted',
+  'mcp_server_restart_refused',
+  'settings_reloaded',
+  'trust_change_requested',
+  'memory_changed',
+  'agent_changed',
+  'git_status_changed',
+  'git_branch_changed',
+  'github_setup_completed',
+  'auth_device_flow_started',
+  'auth_device_flow_throttled',
+  'auth_device_flow_authorized',
+  'auth_device_flow_failed',
+  'auth_device_flow_cancelled',
+]);
+
+/**
+ * `session_update` frames published while idle that carry no turn content
+ * for the persisted transcript, so they must not defeat the refresh-append
+ * of a pending terminal error the way a real turn's `session_update` does:
+ * the user-shell output stream (injected into the model conversation
+ * history instead of the transcript the refresh pages) and the
+ * latest-wins state snapshots (`available_commands_update` from a
+ * skills/settings refresh, the legacy dual-emit `current_mode_update`).
+ */
+function isIdleBookkeepingSessionUpdate(event: BridgeEvent): boolean {
+  if (event.type !== 'session_update') return false;
+  const data = event.data;
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return false;
+  const update = (data as Record<string, unknown>)['update'];
+  if (!update || typeof update !== 'object' || Array.isArray(update))
+    return false;
+  const updateRecord = update as Record<string, unknown>;
+  const subtype = updateRecord['sessionUpdate'];
+  if (
+    subtype === 'available_commands_update' ||
+    subtype === 'current_mode_update'
+  ) {
+    return true;
+  }
+  const meta = updateRecord['_meta'];
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return false;
+  return (meta as Record<string, unknown>)['source'] === 'user-shell';
+}
+
+/**
+ * Turn-content test behind the refresh-append guard: everything that is
+ * neither idle bookkeeping nor the synthetic journal-truncation marker
+ * (which `liveJournalSnapshot` unshifts without ever ingesting it as
+ * content) counts as newer turn content.
+ */
+function isRefreshAppendTurnContent(event: BridgeEvent): boolean {
+  if (event.type === 'history_truncated') return false;
+  if (REFRESH_APPEND_BOOKKEEPING_EVENT_TYPES.has(event.type)) return false;
+  return !isIdleBookkeepingSessionUpdate(event);
 }
 
 export function classifyTurnErrorKind(
@@ -1610,8 +1765,13 @@ function broadcastTurnError(
   mutateTurnState: boolean,
 ): void {
   const message = extractErrorMessage(err);
-  const code = extractErrorCode(err);
-  const errorKind = classifyTurnErrorKind(message);
+  const structuredErrorKind = extractJsonRpcErrorField(err, 'errorKind');
+  const errorKind = structuredErrorKind ?? classifyTurnErrorKind(message);
+  const code =
+    structuredErrorKind !== undefined
+      ? (extractJsonRpcErrorField(err, 'code') ?? extractErrorCode(err))
+      : extractErrorCode(err);
+  const loopType = extractJsonRpcErrorField(err, 'loopType');
   if (errorKind) {
     writeServeDebugLine(
       `turn_error classified session=${JSON.stringify(sessionId)} ` +
@@ -1636,7 +1796,7 @@ function broadcastTurnError(
     };
   }
   try {
-    entry.events.publish({
+    const published = entry.events.publish({
       type: 'turn_error',
       ...(promptId ? { promptId } : {}),
       data: {
@@ -1644,10 +1804,21 @@ function broadcastTurnError(
         message,
         ...(code ? { code } : {}),
         ...(errorKind ? { errorKind } : {}),
+        ...(loopType ? { loopType } : {}),
         ...(promptId ? { promptId } : {}),
       },
       ...(originatorClientId ? { originatorClientId } : {}),
     });
+    if (mutateTurnState) {
+      // Undefined when the bus dropped the publish (closed mid-teardown);
+      // the refresh-append guard then simply has nothing to replay. A
+      // queued prompt's terminal (mutateTurnState=false) publishes the
+      // event alone and leaves the active turn's refresh-replay record
+      // untouched — the prompt never ran, so its terminal is not a newer
+      // turn boundary for the replay (but see `publishPromptTerminal`: a
+      // queued boundary that folds newer turn content supersedes it).
+      entry.turnErrorEvent = published;
+    }
   } catch {
     /* bus may be closed during session teardown */
   }
@@ -1690,6 +1861,26 @@ function publishPromptTerminal(
   }
   pendingEntry.terminalPublished = true;
   const originatorClientId = pendingEntry.originatorClientId;
+  // Only a running prompt's terminal belongs to the active turn. The
+  // `state === 'running'` gate (not `activePromptId`) is deliberate: on
+  // the normal settle path `settleActivePromptState` runs in
+  // `promptPromise.finally` BEFORE the terminal is published, so
+  // `activePromptId` is already cleared when a genuine active terminal
+  // lands here. Queued terminals publish their event alone and must
+  // neither set nor clear session-scoped turn state.
+  const mutateTurnState = pendingEntry.state === 'running';
+  if (!mutateTurnState && entry.turnErrorEvent) {
+    // A queued terminal is still a turn boundary on the bus: ingesting it
+    // folds and resets the live journal, erasing the guard's only evidence
+    // of newer turn content journaled since the pending error terminal.
+    // That content supersedes the stale error, so drop the refresh-replay
+    // record before the fold — otherwise the append would re-place the
+    // stale error AFTER the newer content.
+    const journal = entry.events.liveJournalSnapshot() ?? [];
+    if (journal.some(isRefreshAppendTurnContent)) {
+      entry.turnErrorEvent = undefined;
+    }
+  }
   if (terminal.kind === 'complete') {
     broadcastTurnComplete(
       entry,
@@ -1697,6 +1888,7 @@ function publishPromptTerminal(
       terminal.result,
       pendingEntry.promptId,
       originatorClientId,
+      mutateTurnState,
     );
   } else if (terminal.kind === 'cancelled') {
     broadcastTurnComplete(
@@ -1705,6 +1897,7 @@ function publishPromptTerminal(
       { stopReason: 'cancelled' },
       pendingEntry.promptId,
       originatorClientId,
+      mutateTurnState,
     );
   } else {
     broadcastTurnError(
@@ -1713,13 +1906,7 @@ function publishPromptTerminal(
       terminal.err,
       pendingEntry.promptId,
       originatorClientId,
-      // Only a running prompt's failure is the active turn's failure. The
-      // `state === 'running'` gate (not `activePromptId`) is deliberate:
-      // on the normal settle path `settleActivePromptState` runs in
-      // `promptPromise.finally` BEFORE the terminal is published, so
-      // `activePromptId` is already cleared when a genuine active failure
-      // lands here.
-      pendingEntry.state === 'running',
+      mutateTurnState,
     );
   }
 }
@@ -1835,6 +2022,8 @@ const MAX_MID_TURN_QUEUE_DEPTH = 20;
 const DEFAULT_MAX_SESSIONS = 32;
 // Keep in sync with CLI serve/server.ts and SDK DaemonClient.ts.
 const DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION = 5;
+const CHAT_RECORD_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 /**
  * Soft upper bound on `BridgeOptions.eventRingSize` to catch operator
  * typos before they OOM the daemon. At ~500 B per `BridgeEvent` an
@@ -2266,6 +2455,22 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     // can elapse inside a slow restore too.
     const owner = channelInfoForEntry(entry);
     if (owner?.pendingRestoreIds.has(entry.sessionId)) return false;
+    // A child that negotiated active-work but cannot report every category
+    // the daemon currently relies on must not authorize ordinary teardown.
+    // This differs from a legacy child that never negotiated at all: legacy
+    // cleanup keeps its historical behavior, while an incomplete negotiated
+    // answer is explicitly known not to cover the full retention predicate.
+    const capability = owner?.activeWork;
+    if (
+      capability &&
+      !owner.isQuarantined &&
+      !owner.restoreSettlementOverdue &&
+      ACTIVE_WORK_HOLD_CATEGORIES.some(
+        (category) => !capability.categories.includes(category),
+      )
+    ) {
+      return false;
+    }
     return !childReportsHeldWork(entry);
   }
 
@@ -2295,17 +2500,36 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     entry: SessionEntry,
     reason: string,
   ): Promise<void> {
-    if (!entryIsAutoCloseCandidate(entry)) return;
     // Note the asymmetry, preserved from the call sites this replaces: the
     // kill path keys off `attachCount`, the close path off `clientIds`. A
     // spawn owner that asked for a kill gets one once nothing is attached,
-    // even if some client id is still registered.
-    if (entry.spawnOwnerWantedKill && entry.attachCount === 0) {
+    // even if some client id is still registered. This is a deferred explicit
+    // kill, so incomplete child reporting must not turn it into ordinary
+    // cleanup or leave it pending forever.
+    //
+    // `activeWorkCloseInFlight` must stay excluded (the auto-close candidacy
+    // gate used to cover it): the reaper can be mid-probe on this same entry,
+    // holding the child's close gate for up to `ACTIVE_WORK_CLOSE_TIMEOUT_MS`.
+    // A kill fired in that window reaches `beginClose()` as 'Session close is
+    // already in progress', and `killSession` escalates any close error to a
+    // channel kill — taking down every sibling session with it. The in-flight
+    // probe resolves this entry one way or the other; if it retains, the
+    // tombstone completes on the next settle event.
+    if (
+      byId.get(entry.sessionId) === entry &&
+      !isClosingOrAuthorizingClose(entry) &&
+      entry.spawnOwnerWantedKill &&
+      entry.attachCount === 0
+    ) {
+      writeStderrLine(
+        `qwen serve: completing deferred kill of session ${JSON.stringify(entry.sessionId)} (${reason})`,
+      );
       await bridgeApi.killSession(entry.sessionId).catch(() => {
         /* best-effort; channel.exited will eventually reap anyway */
       });
       return;
     }
+    if (!entryIsAutoCloseCandidate(entry)) return;
     if (entry.clientIds.size > 0) return;
     await closeIfChildUnheld(entry, {
       trigger: reason,
@@ -2406,6 +2630,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         entry.connection.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, {
           sessionId: entry.sessionId,
           [ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM]: true,
+          drainTimeoutMs: sessionCloseDrainBudgetMs(
+            ACTIVE_WORK_CLOSE_TIMEOUT_MS,
+          ),
         }),
         ACTIVE_WORK_CLOSE_TIMEOUT_MS,
         SERVE_CONTROL_EXT_METHODS.sessionClose,
@@ -3032,6 +3259,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     action: 'load' | 'resume';
     historyReplay: 'stream' | 'response';
     historyPageSize?: number;
+    liveReplayMode: 'full' | 'summary';
     hideInheritedHistory: boolean;
     publicPromise: Promise<BridgeRestoredSession>;
     settlementPromise: Promise<void>;
@@ -3578,6 +3806,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                     [ACTIVE_WORK_HEARTBEAT_META_KEY]: {
                       v: ACTIVE_WORK_HEARTBEAT_VERSION,
                       intervalMs: ACTIVE_WORK_HEARTBEAT_INTERVAL_MS,
+                      categories: [...ACTIVE_WORK_HOLD_CATEGORIES],
                     },
                     [CHANNEL_STARTUP_PROFILE_META_KEY]: {
                       v: CHANNEL_STARTUP_PROFILE_VERSION,
@@ -4798,7 +5027,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         SERVE_CONTROL_EXT_METHODS.sessionClose,
         {
           sessionId: entry.sessionId,
-          drainTimeoutMs: Math.max(1, Math.floor(initTimeoutMs * 0.8)),
+          drainTimeoutMs: sessionCloseDrainBudgetMs(
+            opts?.timeoutMs ?? initTimeoutMs,
+          ),
           ...(opts?.requireFlush === true ? { requireFlush: true } : {}),
         },
       );
@@ -5393,6 +5624,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       | 'activePromptId'
     >,
     action: 'load' | 'resume',
+    liveReplayMode: 'full' | 'summary' = 'full',
   ): Pick<
     BridgeRestoredSession,
     | 'compactedReplay'
@@ -5418,7 +5650,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     // token must travel with it so a daemon restart between this response
     // and the first subscribe is detected (stale cursor + dead epoch).
     const eventEpoch = entry.events.epoch;
-    const snapshot = entry.events.snapshotReplay();
+    const snapshot = entry.events.snapshotReplay(liveReplayMode);
     if (!snapshot) {
       return {
         lastEventId: entry.events.lastEventId,
@@ -5543,6 +5775,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   async function refreshedReplayFieldsFor(
     entry: SessionEntry,
     historyPageSize: number,
+    liveReplayMode: 'full' | 'summary',
   ): Promise<ReturnType<typeof replayFieldsFor>> {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
@@ -5588,8 +5821,29 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           entry.events.epoch === eventEpoch &&
           entry.events.lastEventId === lastEventId
         ) {
+          let compactedReplay = page.events;
+          const turnErrorEvent = entry.turnErrorEvent;
+          if (turnErrorEvent) {
+            // Append only while no newer turn content was journaled after
+            // the in-memory terminal: automatic turns (cron/background
+            // notification) run without clearing entry.turnError, and
+            // re-appending the stale error after their newer content would
+            // misplace it in the refreshed transcript. Bookkeeping events
+            // carry no turn content and must not defeat the append; a
+            // newer turn terminal clears turnErrorEvent at broadcast. The
+            // journal holds exactly the events published since the last
+            // turn boundary (the terminal itself folds into the replay
+            // window), so no history scan is needed.
+            const journal = entry.events.liveJournalSnapshot() ?? [];
+            const hasNewerTurnContent = journal.some(
+              isRefreshAppendTurnContent,
+            );
+            if (!hasNewerTurnContent) {
+              compactedReplay = [...page.events, turnErrorEvent];
+            }
+          }
           return {
-            compactedReplay: page.events,
+            compactedReplay,
             liveJournal: [],
             lastEventId,
             eventEpoch,
@@ -5607,7 +5861,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         break;
       }
     }
-    return replayFieldsFor(entry, 'load');
+    return replayFieldsFor(entry, 'load', liveReplayMode);
   }
 
   /**
@@ -5723,6 +5977,18 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       action === 'load' && historyReplay === 'response'
         ? req.historyPageSize
         : undefined;
+    const requestedLiveReplayMode = req.liveReplayMode;
+    if (
+      requestedLiveReplayMode !== undefined &&
+      requestedLiveReplayMode !== 'full' &&
+      requestedLiveReplayMode !== 'summary'
+    ) {
+      throw new Error(
+        `Invalid liveReplayMode: ${JSON.stringify(requestedLiveReplayMode)}`,
+      );
+    }
+    const liveReplayMode =
+      action === 'load' ? (requestedLiveReplayMode ?? 'full') : 'full';
     if (
       historyPageSize !== undefined &&
       (!Number.isSafeInteger(historyPageSize) ||
@@ -5741,8 +6007,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       assertAttachableSessionEntry(req.sessionId, existing);
       const replayFields =
         historyPageSize !== undefined
-          ? await refreshedReplayFieldsFor(existing, historyPageSize)
-          : replayFieldsFor(existing, action);
+          ? await refreshedReplayFieldsFor(
+              existing,
+              historyPageSize,
+              liveReplayMode,
+            )
+          : replayFieldsFor(existing, action, liveReplayMode);
       // Backfill a pagination anchor when the snapshot's truncation
       // marker carries no recordId (live session, in-flight turn capped
       // the journal before any turn boundary). Best-effort; omitted on
@@ -5806,12 +6076,22 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // Cold restores only coalesce when their effective request shapes
       // match. Sharing across actions, replay transports, response pages, or
       // inherited-history policies can return replay selected for another
-      // caller. Same-shape coalescing is unaffected.
+      // caller. Same-shape coalescing is unaffected. The one directional
+      // exception is liveReplayMode: a summary request safely shares an
+      // in-flight full restore because once the restore settles the daemon
+      // recomputes the waiter's replay fields for its own mode from the
+      // registered entry — the two journals can diverge under cap pressure
+      // (each evicts independently against the shared caps), so the owner's
+      // projected fields can never be reused or filtered down for a waiter
+      // of a different mode. Only the reverse — a full request joining a
+      // summary restore — stays fenced: that projection lacks the nested
+      // detail the full client expects.
       if (
         inFlight.lifecycle.phase === 'abandoned' ||
         action !== inFlight.action ||
         historyReplay !== inFlight.historyReplay ||
         historyPageSize !== inFlight.historyPageSize ||
+        (inFlight.liveReplayMode === 'summary' && liveReplayMode === 'full') ||
         hideInheritedHistory !== inFlight.hideInheritedHistory
       ) {
         // An abandoned restore is fenced until the real ACP request and its
@@ -5863,6 +6143,36 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         entry.attachCount = Math.max(0, entry.attachCount - 1);
         throw error;
       }
+      // The owner's result carries replay fields selected for the OWNER'S
+      // live replay mode. A waiter whose mode differs (a summary load that
+      // joined a full restore — the only asymmetric direction the fence
+      // admits) recomputes its own fields from the registered entry, exactly
+      // as the existing-entry attach path above does — before registering —
+      // instead of inheriting the owner's unprojected full journal — which
+      // would include nested frames the summary client discards and the full
+      // journal's `history_truncated` marker even when the summary journal
+      // never truncated.
+      const waiterReplayFields =
+        liveReplayMode !== inFlight.liveReplayMode
+          ? historyPageSize !== undefined
+            ? await refreshedReplayFieldsFor(
+                entry,
+                historyPageSize,
+                liveReplayMode,
+              )
+            : replayFieldsFor(entry, action, liveReplayMode)
+          : undefined;
+      // `refreshedReplayFieldsFor` swallows fetch failures into the
+      // in-memory fallback, so re-assert after the await above: a channel
+      // death mid-fetch would otherwise attach the waiter to a session the
+      // daemon already tore down.
+      try {
+        assertAttachableSessionEntry(restored.sessionId, entry);
+      } catch (error) {
+        inFlight.coalesceState.count--;
+        entry.attachCount = Math.max(0, entry.attachCount - 1);
+        throw error;
+      }
       // NOTE: do NOT bump entry.attachCount here — `createSessionEntry`
       // already initialized it from coalesceState.count synchronously
       // when the IIFE registered the entry. Spread `restored` so the
@@ -5896,6 +6206,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         clientId,
         createdAt: entry.createdAt,
         hasActivePrompt: entry.promptActive,
+        ...(waiterReplayFields ?? {}),
       };
     }
 
@@ -6001,7 +6312,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 SERVE_CONTROL_EXT_METHODS.sessionClose,
                 {
                   sessionId: req.sessionId,
-                  drainTimeoutMs: Math.max(1, Math.floor(initTimeoutMs * 0.8)),
+                  drainTimeoutMs: sessionCloseDrainBudgetMs(initTimeoutMs),
                 },
               ),
               initTimeoutMs,
@@ -6340,7 +6651,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             : {}),
           state: racedEntry.restoreState ?? {},
           hasActivePrompt: racedEntry.promptActive,
-          ...replayFieldsFor(racedEntry, action),
+          ...replayFieldsFor(racedEntry, action, liveReplayMode),
         };
       }
 
@@ -6440,7 +6751,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           ? { artifactWarnings: artifactRestoreWarnings }
           : {}),
         hasActivePrompt: entry.promptActive,
-        ...replayFieldsFor(entry, action),
+        ...replayFieldsFor(entry, action, liveReplayMode),
       };
     })().finally(async () => {
       if (restoreLifecycle.phase === 'abandoned') return;
@@ -6516,6 +6827,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       action,
       historyReplay,
       ...(historyPageSize !== undefined ? { historyPageSize } : {}),
+      liveReplayMode,
       hideInheritedHistory,
       publicPromise: promise,
       settlementPromise,
@@ -7558,6 +7870,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   delete meta[DAEMON_CHANNEL_DELIVERY_META_KEY];
                   delete meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
                   delete meta[DAEMON_MODEL_PROMPT_META_KEY];
+                  // Channel classification is authenticated channel-worker
+                  // metadata; the daemon prompt route validates the worker
+                  // authorization and re-arms it through the trusted
+                  // `channelPrompt` context flag below.
+                  delete meta[CHANNEL_PROMPT_META_KEY];
                   if (isRetry) {
                     meta[DAEMON_RETRY_META_KEY] = true;
                   }
@@ -7575,6 +7892,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   if (modelPrompt !== undefined) {
                     meta[DAEMON_MODEL_PROMPT_META_KEY] = modelPrompt;
                   }
+                  if (context?.channelPrompt === true) {
+                    meta[CHANNEL_PROMPT_META_KEY] = true;
+                  }
                   meta[INVOCATION_CONTEXT_META_KEY] = invocationContext;
                   if (Object.keys(meta).length > 0) {
                     copy._meta = meta;
@@ -7587,6 +7907,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 entry.activePromptId = pendingEntry.promptId;
                 delete entry.cancelBroadcastWithoutPrompt;
                 delete entry.turnError;
+                delete entry.turnErrorEvent;
                 activePromptCounter++;
                 entry.sessionLastSeenAt = Date.now();
                 touchActivity();
@@ -7696,6 +8017,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                         writeStderrLine(
                           `sendPrompt: queued prompt removed before agent forward for session ${sessionId}`,
                         );
+                        return;
+                      }
+                      if (extractJsonRpcErrorField(err, 'errorKind')) {
+                        // Structured turn error (e.g. loop_detected): the
+                        // forward succeeded and the daemon rejected the turn
+                        // after running it. The formal turn_error terminal
+                        // already ends the turn visibly; a phantom
+                        // forward-failure line and prompt_cancelled broadcast
+                        // would misreport it.
+                        cancelPendingForSession(sessionId);
                         return;
                       }
                       writeStderrLine(
@@ -8165,64 +8496,110 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      if (isClosingOrAuthorizingClose(entry)) {
+        throw new SessionNotFoundError(sessionId, 'The session is closing');
+      }
       const source = parseSessionSource(req.sourceType, req.sourceId);
       if ('error' in source) {
         throw new InvalidSessionMetadataError('sourceType', source.error);
       }
       const isSideTask = source.sourceType === 'side_task';
+      const restoreBranch = isSideTask || req.atRecordId === undefined;
 
-      let originatorClientId: string | undefined;
       if (context?.clientId !== undefined) {
-        originatorClientId = resolveTrustedClientId(entry, context.clientId);
+        resolveTrustedClientId(entry, context.clientId);
       }
 
       const concurrentSideTask = isSideTask && entry.promptActive;
+      // Admission-time check: pendingPromptCount changes synchronously when a
+      // prompt is accepted, before its queue callback sets promptActive. A
+      // check inside the branch callback would observe post-prompt state and
+      // silently wait instead of rejecting.
+      if (!isSideTask && (entry.pendingPromptCount > 0 || entry.promptActive)) {
+        throw new BranchWhilePromptActiveError(sessionId);
+      }
       const branchResult = (
         concurrentSideTask ? Promise.resolve() : entry.promptQueue
       ).then(async () => {
-        if (entry.promptActive && !isSideTask) {
-          throw new BranchWhilePromptActiveError(sessionId);
+        if (
+          isClosingOrAuthorizingClose(entry) ||
+          byId.get(sessionId) !== entry
+        ) {
+          throw new SessionNotFoundError(sessionId, 'The session is closing');
         }
 
         assertFreshSessionsAvailable();
-        if (
-          byId.size + inFlightSpawns.size + inFlightRestores.size >=
-          maxSessions
-        ) {
-          throw new SessionLimitExceededError(maxSessions);
+        let admission: ReturnType<typeof reserveFreshSession> | undefined;
+        if (restoreBranch) {
+          if (
+            byId.size + inFlightSpawns.size + inFlightRestores.size >=
+            maxSessions
+          ) {
+            throw new SessionLimitExceededError(maxSessions);
+          }
+          admission = reserveFreshSession({
+            operation: 'branch',
+            workspaceCwd: boundWorkspace,
+            sourceSessionId: sessionId,
+          });
         }
-
-        const admission = reserveFreshSession({
-          operation: 'branch',
-          workspaceCwd: boundWorkspace,
-          sourceSessionId: sessionId,
-        });
         let admissionReleased = false;
         const releaseAdmissionOnce = () => {
-          if (admissionReleased) return;
+          if (admissionReleased || !admission) return;
           admissionReleased = true;
           releaseFreshSessionReservation(admission);
         };
         try {
-          assertLivePromptEntry(sessionId, entry);
-          const ci = channelInfoForEntry(entry)!;
-          const result = (await withTimeout(
-            Promise.race([
-              ci.connection.extMethod(
-                isSideTask
-                  ? SERVE_CONTROL_EXT_METHODS.sessionSideTask
-                  : SERVE_CONTROL_EXT_METHODS.sessionBranch,
-                {
-                  sessionId,
-                  cwd: boundWorkspace,
-                  name: req.name,
-                },
-              ),
+          // HAZARD: dispatch the source-session mutation on the entry's
+          // OWN connection, not `ci.connection` (the current attach
+          // target). During the channel-overlap window (A dying, B
+          // freshly spawned as `channelInfo`) the source session still
+          // lives on A; routing through B reports session-not-found or
+          // operates on the wrong runtime state. The NEW session's
+          // restore below stays on the intended channel.
+          const mutation = entry.connection.extMethod(
+            isSideTask
+              ? SERVE_CONTROL_EXT_METHODS.sessionSideTask
+              : SERVE_CONTROL_EXT_METHODS.sessionBranch,
+            {
+              sessionId,
+              cwd: boundWorkspace,
+              name: req.name,
+              ...(req.atRecordId !== undefined
+                ? { atRecordId: req.atRecordId }
+                : {}),
+            },
+          );
+          // ACP cannot cancel a branch after dispatch. Keep the queue and
+          // reservation until its real outcome is known so a caller never sees
+          // a timeout followed by an unobserved committed session. The
+          // transport-closed race rejects only when the channel exits — a
+          // branch whose channel died cannot be observed or delivered anyway —
+          // so a slow-but-alive fork still waits for its real outcome.
+          let result: {
+            newSessionId: string;
+            title?: string;
+            displayName?: string;
+          };
+          try {
+            result = (await Promise.race([
+              mutation,
               getTransportClosedReject(entry),
-            ]),
-            initTimeoutMs,
-            isSideTask ? 'createSideTaskSession' : 'branchSession',
-          )) as { newSessionId: string; title?: string; displayName?: string };
+            ])) as typeof result;
+          } catch (err) {
+            const data = (err as { data?: unknown })?.data;
+            if (
+              !isSideTask &&
+              data &&
+              typeof data === 'object' &&
+              (data as { errorKind?: unknown }).errorKind === 'session_busy'
+            ) {
+              const msg =
+                (err as { message?: string })?.message ?? 'Branch failed';
+              throw new SessionBusyError(sessionId, msg);
+            }
+            throw err;
+          }
 
           if (!result || typeof result.newSessionId !== 'string') {
             throw new Error(
@@ -8235,6 +8612,18 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               ? rawBranchName
               : result.newSessionId.slice(0, 8);
 
+          if (!restoreBranch) {
+            return {
+              sessionId: result.newSessionId,
+              displayName: branchDisplayName,
+              forkedFrom: {
+                sessionId,
+                displayName: entry.displayName ?? sessionId.slice(0, 8),
+              },
+            };
+          }
+
+          const ci = await ensureChannel();
           let restored;
           try {
             const hideInheritedHistory = req.replayInheritedHistory === false;
@@ -8259,7 +8648,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             releaseAdmissionOnce();
           } catch (restoreErr) {
             writeStderrLine(
-              `qwen serve: branchSession load failed for ${result.newSessionId}, attempting cleanup...`,
+              `qwen serve: branchSession load failed for ${result.newSessionId}; closing partial live state while preserving the committed session...`,
             );
             try {
               if (!ci.isDying) {
@@ -8270,6 +8659,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                       {
                         sessionId: result.newSessionId,
                         cwd: boundWorkspace,
+                        drainTimeoutMs:
+                          sessionCloseDrainBudgetMs(initTimeoutMs),
                       },
                     ),
                     channelUnavailableReject(
@@ -8283,7 +8674,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               }
             } catch (cleanupErr) {
               writeStderrLine(
-                `qwen serve: branchSession cleanup of ${result.newSessionId} failed: ${cleanupErr instanceof Error ? cleanupErr.message : cleanupErr}`,
+                `qwen serve: branchSession live-state close for ${result.newSessionId} failed: ${cleanupErr instanceof Error ? cleanupErr.message : cleanupErr}`,
               );
             }
             throw restoreErr;
@@ -8321,21 +8712,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             }
           }
 
-          if (!isSideTask) {
-            const eventData = {
-              sourceSessionId: sessionId,
-              newSessionId: result.newSessionId,
-              displayName: branchDisplayName,
-            };
-            const branchEnvelope = {
-              type: 'session_branched' as const,
-              data: eventData,
-              ...(originatorClientId ? { originatorClientId } : {}),
-            };
-            // The branch announcement belongs to the new session only.
-            newEntry?.events.publish(branchEnvelope);
-          }
-
           return {
             ...restored,
             displayName: branchDisplayName,
@@ -8369,7 +8745,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         },
         context,
       );
-      const { forkedFrom: _forkedFrom, ...sideTask } = result;
+      const restoredResult = result as typeof result & BridgeRestoredSession;
+      const { forkedFrom: _forkedFrom, ...sideTask } = restoredResult;
       return {
         ...sideTask,
         parentSessionId: sessionId,
@@ -10254,10 +10631,31 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         context?.clientId,
       );
 
-      let response: Record<string, unknown>;
-      try {
-        response = (await Promise.race([
-          withTimeout(
+      // Admission-time check: a rewind queued behind an active prompt runs
+      // after the prompt's `finally` clears the busy flags, and client-side
+      // timeouts cannot cancel queued work — the rewind would truncate
+      // history after the caller was told it failed. The agent-side
+      // `isTurnIdle()` guard never fires because the queue guarantees the turn
+      // is over before the rewind reaches the agent. Reject synchronously,
+      // matching branchSession and launchSessionForkAgent.
+      if (entry.pendingPromptCount > 0 || entry.promptActive) {
+        throw new SessionBusyError(
+          sessionId,
+          'Cannot rewind while a prompt is running',
+        );
+      }
+
+      const rewindResult = entry.promptQueue.then(async () => {
+        if (entry.closing) {
+          throw new SessionNotFoundError(sessionId, 'The session is closing');
+        }
+        let response: Record<string, unknown>;
+        try {
+          // ACP cannot cancel a rewind after dispatch. Keep the queue until
+          // its real outcome is known so a caller never sees a timeout
+          // followed by an unobserved history truncation + file restores —
+          // same hazard the branch path documents.
+          response = (await Promise.race([
             entry.connection.extMethod(
               SERVE_CONTROL_EXT_METHODS.sessionRewind,
               {
@@ -10266,107 +10664,113 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 rewindFiles: req.rewindFiles !== false,
               },
             ),
-            initTimeoutMs,
-            SERVE_CONTROL_EXT_METHODS.sessionRewind,
-          ),
-          getTransportClosedReject(entry),
-        ])) as Record<string, unknown>;
-      } catch (err) {
-        const data = (err as { data?: unknown })?.data;
-        if (data && typeof data === 'object' && 'errorKind' in data) {
-          const kind = (data as { errorKind: string }).errorKind;
-          const msg = (err as { message?: string })?.message ?? 'Rewind failed';
-          if (kind === 'session_busy') {
-            throw new SessionBusyError(sessionId, msg);
+            getTransportClosedReject(entry),
+          ])) as Record<string, unknown>;
+        } catch (err) {
+          const data = (err as { data?: unknown })?.data;
+          if (data && typeof data === 'object' && 'errorKind' in data) {
+            const kind = (data as { errorKind: string }).errorKind;
+            const msg =
+              (err as { message?: string })?.message ?? 'Rewind failed';
+            if (kind === 'session_busy') {
+              throw new SessionBusyError(sessionId, msg);
+            }
+            if (kind === 'invalid_rewind_target') {
+              throw new InvalidRewindTargetError(sessionId, msg);
+            }
           }
-          if (kind === 'invalid_rewind_target') {
-            throw new InvalidRewindTargetError(sessionId, msg);
-          }
+          throw err;
         }
-        throw err;
-      }
 
-      const targetTurnIndex = (response['targetTurnIndex'] as number) ?? 0;
-      const filesChanged = (response['filesChanged'] as string[]) ?? [];
-      const filesFailed = (response['filesFailed'] as string[]) ?? [];
-      const artifactSnapshot = restoredArtifactSnapshotFromState(
-        response as BridgeSessionState,
-      );
-      const artifactSnapshotUnavailable = artifactSnapshotUnavailableReason(
-        response as BridgeSessionState,
-      );
-      const beforeArtifacts = (await entry.artifacts.list()).artifacts;
-      const shouldRestoreArtifactSnapshot =
-        artifactSnapshot !== undefined &&
-        artifactSnapshotUnavailable === undefined;
-      const artifactRestoreWarnings =
-        artifactSnapshotUnavailable !== undefined
-          ? [
-              `artifact snapshot rebuild unavailable during rewind: ${artifactSnapshotUnavailable}`,
-            ]
-          : shouldRestoreArtifactSnapshot
-            ? await entry.artifacts.restore(artifactSnapshot, {
-                preserveLiveEphemeral: true,
-              })
-            : [];
-      const artifactRestoreFailed = artifactRestoreWarnings.some(
-        isArtifactRestoreFailureWarning,
-      );
-      const shouldRecordArtifactSnapshot =
-        shouldRestoreArtifactSnapshot && !artifactRestoreFailed;
-      const artifactSnapshotWarnings = shouldRecordArtifactSnapshot
-        ? await entry.artifacts.recordSnapshot()
-        : [];
-      const artifactWarnings = [
-        ...artifactRestoreWarnings,
-        ...artifactSnapshotWarnings,
-      ];
-      for (const warning of artifactRestoreWarnings) {
-        writeStderrLine(
-          `[artifacts] session=${entry.sessionId} action=rewind_restore_warning warning=${JSON.stringify(
-            warning,
-          )}`,
+        const targetTurnIndex = (response['targetTurnIndex'] as number) ?? 0;
+        const filesChanged = (response['filesChanged'] as string[]) ?? [];
+        const filesFailed = (response['filesFailed'] as string[]) ?? [];
+        const artifactSnapshot = restoredArtifactSnapshotFromState(
+          response as BridgeSessionState,
         );
-      }
-      for (const warning of artifactSnapshotWarnings) {
-        writeStderrLine(
-          `[artifacts] session=${entry.sessionId} action=rewind_snapshot_warning warning=${JSON.stringify(
-            warning,
-          )}`,
+        const artifactSnapshotUnavailable = artifactSnapshotUnavailableReason(
+          response as BridgeSessionState,
         );
-      }
-      const afterArtifacts = (await entry.artifacts.list()).artifacts;
-      publishArtifactChanges(
-        entry,
-        artifactReseedChanges(beforeArtifacts, afterArtifacts),
-        originatorClientId,
-      );
-      try {
-        entry.events.publish({
-          type: 'session_rewound',
-          data: {
-            sessionId,
-            promptId: req.promptId,
-            targetTurnIndex,
-            filesChanged,
-            filesFailed,
-            ...(artifactWarnings.length > 0
-              ? { warnings: artifactWarnings }
-              : {}),
-          },
-          ...(originatorClientId ? { originatorClientId } : {}),
-        });
-      } catch {
-        /* bus closed */
-      }
+        const beforeArtifacts = (await entry.artifacts.list()).artifacts;
+        const shouldRestoreArtifactSnapshot =
+          artifactSnapshot !== undefined &&
+          artifactSnapshotUnavailable === undefined;
+        const artifactRestoreWarnings =
+          artifactSnapshotUnavailable !== undefined
+            ? [
+                `artifact snapshot rebuild unavailable during rewind: ${artifactSnapshotUnavailable}`,
+              ]
+            : shouldRestoreArtifactSnapshot
+              ? await entry.artifacts.restore(artifactSnapshot, {
+                  preserveLiveEphemeral: true,
+                })
+              : [];
+        const artifactRestoreFailed = artifactRestoreWarnings.some(
+          isArtifactRestoreFailureWarning,
+        );
+        const shouldRecordArtifactSnapshot =
+          shouldRestoreArtifactSnapshot && !artifactRestoreFailed;
+        const artifactSnapshotWarnings = shouldRecordArtifactSnapshot
+          ? await entry.artifacts.recordSnapshot()
+          : [];
+        const artifactWarnings = [
+          ...artifactRestoreWarnings,
+          ...artifactSnapshotWarnings,
+        ];
+        for (const warning of artifactRestoreWarnings) {
+          writeStderrLine(
+            `[artifacts] session=${entry.sessionId} action=rewind_restore_warning warning=${JSON.stringify(
+              warning,
+            )}`,
+          );
+        }
+        for (const warning of artifactSnapshotWarnings) {
+          writeStderrLine(
+            `[artifacts] session=${entry.sessionId} action=rewind_snapshot_warning warning=${JSON.stringify(
+              warning,
+            )}`,
+          );
+        }
+        const afterArtifacts = (await entry.artifacts.list()).artifacts;
+        publishArtifactChanges(
+          entry,
+          artifactReseedChanges(beforeArtifacts, afterArtifacts),
+          originatorClientId,
+        );
+        try {
+          entry.events.publish({
+            type: 'session_rewound',
+            data: {
+              sessionId,
+              promptId: req.promptId,
+              targetTurnIndex,
+              filesChanged,
+              filesFailed,
+              ...(artifactWarnings.length > 0
+                ? { warnings: artifactWarnings }
+                : {}),
+            },
+            ...(originatorClientId ? { originatorClientId } : {}),
+          });
+        } catch {
+          /* bus closed */
+        }
 
-      return {
-        rewound: filesFailed.length === 0,
-        targetTurnIndex,
-        filesChanged,
-        filesFailed,
-        ...(artifactWarnings.length > 0 ? { warnings: artifactWarnings } : {}),
-      };
+        return {
+          rewound: filesFailed.length === 0,
+          targetTurnIndex,
+          filesChanged,
+          filesFailed,
+          ...(artifactWarnings.length > 0
+            ? { warnings: artifactWarnings }
+            : {}),
+        };
+      });
+      entry.promptQueue = rewindResult.then(
+        () => undefined,
+        () => undefined,
+      );
+      return rewindResult;
     },
 
     async manageMcpServer(serverName, action, originatorClientId) {
@@ -10791,6 +11195,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           timeoutMs: initTimeoutMs,
         });
       } catch (error) {
+        // A definitive refusal means the child is alive and kept the session:
+        // it already holds its own close gate (a cd or restore in progress —
+        // child-side state the daemon cannot see). Escalating that to a
+        // channel kill would take every sibling session down for a close
+        // that is already proceeding. Leave the kill pending instead; the
+        // deferred tombstone completes it on the next settle event.
+        if (isDefinitiveAcpRequestError(error)) {
+          entry.closing = false;
+          return false;
+        }
         if (ci) {
           await killChannelWithLog(
             ci,

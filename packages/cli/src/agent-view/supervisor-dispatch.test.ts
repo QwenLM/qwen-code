@@ -125,4 +125,22 @@ describe('dispatchAgentViewSession', () => {
     const jobs = await fs.readdir(paths.jobsDir);
     expect(jobs).toEqual([]);
   });
+
+  it('rejects oversized UTF-8 argv prompts before creating a session', async () => {
+    const prompt = '你'.repeat(Math.floor((16 * 1024) / 3) + 1);
+
+    await expect(
+      dispatchAgentViewSession(prompt, '/repo/pkg', {
+        globalDir: tempDir,
+      }),
+    ).rejects.toThrow('too large for argv');
+
+    const paths = getAgentViewStorePaths({ globalDir: tempDir });
+    await expect(fs.access(paths.jobsDir)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+    await expect(readAgentViewRoster({ globalDir: tempDir })).resolves.toEqual(
+      expect.objectContaining({ sessions: [] }),
+    );
+  });
 });

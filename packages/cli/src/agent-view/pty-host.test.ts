@@ -216,7 +216,10 @@ describe('launchAgentViewPtyHost', () => {
     pty.process.emitData(' world');
     pty.process.emitExit({ exitCode: 0 });
 
-    await expect(handle.exited).resolves.toEqual({ exitCode: 0 });
+    await expect(handle.exited).resolves.toEqual({
+      kind: 'exited',
+      exitCode: 0,
+    });
     expect(handle.output.toString()).toBe('lo world');
   });
 
@@ -593,7 +596,7 @@ describe('launchAgentViewPtyHost', () => {
     expect(pty.process.killCalls).toEqual(
       process.platform === 'win32' ? [undefined] : ['SIGTERM'],
     );
-    await expect(handle.exited).resolves.toEqual({ exitCode: 1 });
+    await expect(handle.exited).resolves.toEqual({ kind: 'unreachable' });
   });
 
   it.skipIf(process.platform === 'win32')(
