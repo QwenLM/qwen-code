@@ -5,7 +5,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { GoalControlRequest, GoalRecord } from '@qwen-code/sdk/daemon';
+import { buildGoalControlRequest } from '../../utils/goalControlRequest';
 import {
   useWorkspaceActions,
   type DaemonGoal,
@@ -35,19 +35,6 @@ interface GoalsDialogProps {
   /** Open the session driving a goal — its transcript IS the goal's history. */
   onOpenSession: (sessionId: string) => void;
   onError: (error: unknown, fallback: string) => void;
-}
-
-function versionedRequest(
-  goal: GoalRecord,
-  action: 'edit' | 'pause' | 'resume' | 'clear',
-  objective?: string,
-): GoalControlRequest {
-  return {
-    action,
-    ...(action === 'edit' ? { objective: objective ?? goal.objective } : {}),
-    expectedGoalId: goal.goalId,
-    expectedRevision: goal.revision,
-  } as GoalControlRequest;
 }
 
 export function GoalsDialog({
@@ -191,7 +178,10 @@ export function GoalsDialog({
         }
         await actions.controlGoal(
           currentEditingGoal.sessionId,
-          versionedRequest(goal, 'edit', trimmed),
+          buildGoalControlRequest('edit', goal, trimmed, {
+            emptyObjective: t('goals.error.emptyCondition'),
+            goalUnavailable: t('goals.error.goalUnavailable'),
+          }),
         );
       } else {
         const created = await onCreateGoal(trimmed);
@@ -234,7 +224,10 @@ export function GoalsDialog({
       try {
         await actions.controlGoal(
           item.sessionId,
-          versionedRequest(goal, action),
+          buildGoalControlRequest(action, goal, undefined, {
+            emptyObjective: t('goals.error.emptyCondition'),
+            goalUnavailable: t('goals.error.goalUnavailable'),
+          }),
         );
         await reload();
       } catch (err) {
