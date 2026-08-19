@@ -529,6 +529,74 @@ describe('reconcileDanglingPromptTerminals', () => {
     expect(readPromptLedgerRecords(fixture.ledgerPath)).toHaveLength(3);
   });
 
+  it('stays fail-closed behind a stale prompt_deadline_exceeded terminal', async () => {
+    const fixture = makeFixture();
+    // The deadline veto is intentionally unconditional: the append-only
+    // ledger never expires records, so a stale deadline terminal (here one
+    // hour before the target's admission, with a clean post-admission tail)
+    // still keeps the session permanently fail-closed. The trade is missing
+    // terminals over wrong ones; pin the behavior so any future recency
+    // bound is a deliberate change.
+    const staleDeadlineAt = RECORD_BASE_MS - 3_600_000;
+    const admissionAt = RECORD_BASE_MS - 1000;
+    writeLedger(fixture, [
+      { v: 1, promptId: 'p1', state: 'in_flight', at: staleDeadlineAt - 1000 },
+      {
+        v: 1,
+        promptId: 'p1',
+        terminal: 'error',
+        code: 'prompt_deadline_exceeded',
+        at: staleDeadlineAt,
+      },
+      { v: 1, promptId: 'p2', state: 'in_flight', at: admissionAt },
+    ]);
+    writeTranscript(fixture, [
+      record(fixture, 'u1', null, 'p2 question'),
+      record(fixture, 'a1', 'u1', 'p2 answer'),
+    ]);
+
+    await reconcileDanglingPromptTerminals(
+      fixture.sessionService,
+      fixture.sessionId,
+    );
+
+    expect(readPromptLedgerRecords(fixture.ledgerPath)).toHaveLength(3);
+  });
+
+  it('stays fail-closed when a prompt is admitted during the reconciliation window', async () => {
+    const fixture = makeFixture();
+    writeLedger(fixture, [
+      { v: 1, promptId: 'p-old', state: 'in_flight', at: 1 },
+    ]);
+    writeTranscript(fixture, [
+      record(fixture, 'u1', null, 'question'),
+      record(fixture, 'a1', 'u1', 'answer'),
+    ]);
+
+    // Race: a new prompt is admitted while `loadSession` runs, so its
+    // `in_flight` lands after reconcile's ledger snapshot — the visible
+    // tail may now belong to it, and the verdict computed from the
+    // snapshot must not be stamped onto p-old.
+    class RacingSessionService extends SessionService {
+      override async loadSession(sessionId: string) {
+        appendPromptLedgerRecord(this.getPromptLedgerPath(sessionId), {
+          v: 1,
+          promptId: 'p-new',
+          state: 'in_flight',
+          at: Date.now(),
+        });
+        return super.loadSession(sessionId);
+      }
+    }
+    const racing = new RacingSessionService(fixture.workspaceDir, {
+      runtimeBaseDir: fixture.runtimeBaseDir,
+    });
+
+    await reconcileDanglingPromptTerminals(racing, fixture.sessionId);
+
+    expect(readPromptLedgerRecords(fixture.ledgerPath)).toHaveLength(2);
+  });
+
   it('stays fail-closed when a compression checkpoint postdates the admission', async () => {
     const fixture = makeFixture();
     // A chat_compression record written after p1's admission replaces the

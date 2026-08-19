@@ -82,6 +82,7 @@ export async function reconcileDanglingPromptTerminals(
   } catch {
     return; // Unreadable ledger: no evidence, fail-closed.
   }
+  const snapshotLength = records.length;
   const dangling = danglingInFlightPromptIds(records);
   if (dangling.length === 0) return;
   // Fail closed on multiple dangling prompts. Under FIFO admission the
@@ -184,6 +185,18 @@ export async function reconcileDanglingPromptTerminals(
   // (`interrupted_turn` semantics).
   const interrupted =
     verdict.kind !== 'none' || tailHoldsAnyFunctionCall(historyTail);
+  // TOCTOU fence: a prompt admitted while `loadSession` ran appended its
+  // `in_flight` after the snapshot above, and the visible tail may now
+  // belong to it — the verdict computed from the snapshot must not be
+  // stamped onto the old dangling id. The ledger is append-only, so an
+  // unchanged length proves no record landed during the window.
+  let refetch: PromptLedgerRecord[];
+  try {
+    refetch = readPromptLedgerRecords(ledgerPath);
+  } catch {
+    return;
+  }
+  if (refetch.length !== snapshotLength) return;
   const record: PromptLedgerTerminalRecord = interrupted
     ? {
         v: 1,
