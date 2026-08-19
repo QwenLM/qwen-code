@@ -273,6 +273,11 @@ const {
       controlGoal: vi.fn().mockResolvedValue({
         snapshot: { v: 2, activity: 'idle', goal: null },
       }),
+      applyGoalSnapshot: vi.fn((sessionId: string, snapshot: unknown) => {
+        if (mockConnection.sessionId === sessionId) {
+          mockConnection.goalState = snapshot as never;
+        }
+      }),
       forkSession: vi.fn().mockResolvedValue({ launched: false }),
       sendShellCommand: vi.fn().mockResolvedValue(undefined),
       cancel: vi.fn().mockResolvedValue(undefined),
@@ -4502,7 +4507,9 @@ beforeEach(() => {
   };
   mockConnection.gitBranch = undefined;
   mockConnection.gitStatus = undefined;
-  mockConnection.goalState = undefined;
+  // A loaded session always carries a Goal snapshot; tests that exercise the
+  // hydration window (goalState still unknown) set it back to undefined.
+  mockConnection.goalState = { v: 2, activity: 'idle', goal: null };
   testState.ownerVersion = 0;
   mockWorkspace.capabilities = {
     workspaces: [{ id: 'primary', cwd: '/workspace', primary: true }],
@@ -10567,6 +10574,30 @@ describe('App session callbacks', () => {
 
     expect(snapshots.at(-1)).toBeNull();
     expect(activeGoals.at(-1)).toBeNull();
+  });
+
+  it('holds a composer prompt while Goal state is still hydrating', async () => {
+    // The session load clears `loadingTranscript` before its `goal()` fetch
+    // resolves, so the composer is writable while the Goal state is unknown.
+    // The queue-hold gate already fails closed on that state; a direct submit
+    // must too, or a prompt typed in that window is sent straight into a Goal
+    // the client has not learned about yet.
+    mockConnection.goalState = undefined;
+    renderApp();
+    await flush();
+
+    let accepted: boolean | undefined;
+    await act(async () => {
+      accepted = testState.latestChatEditorProps?.onSubmit(
+        'hello during hydration',
+      );
+      await flush();
+    });
+
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(rawEnqueuePrompt).toHaveBeenCalledTimes(1);
+    expect(rawEnqueuePrompt.mock.calls[0]?.[0]).toBe('hello during hydration');
+    expect(accepted).toBe(true);
   });
 
   it('holds queued prompts on the first render of an active Goal', async () => {
@@ -19755,6 +19786,56 @@ describe('App /goal command', () => {
       mockWorkspaceActions.controlGoal.mock.invocationCallOrder[0],
     ).toBeLessThan(mockSessionActions.getGoal.mock.invocationCallOrder[0]!);
     expect(mockConnection.goalState).toBe(active);
+  });
+
+  it('installs the allocated-session Goal before its re-sync resolves', async () => {
+    // `workspaceActions.controlGoal` does not write `connection.goalState`, so
+    // without installing the create response the state stays goal-less for a
+    // whole round trip (up to the action timeout if the GET stalls): the hold
+    // gate reads false and a prompt typed in that window bypasses the Goal
+    // queue entirely.
+    const active = activeGoalSnapshot('first objective');
+    mockConnection.sessionId = undefined;
+    mockSessionActions.createSession.mockResolvedValueOnce({
+      sessionId: 'session-created',
+    });
+    mockSessionActions.attachSession.mockImplementationOnce(async () => {
+      mockConnection.sessionId = 'session-created';
+      mockConnection.goalState = { v: 2, activity: 'idle', goal: null };
+    });
+    mockWorkspaceActions.controlGoal.mockResolvedValueOnce({
+      snapshot: active,
+    });
+    // The re-sync never resolves: the create response has to stand on its own.
+    mockSessionActions.getGoal.mockImplementationOnce(
+      () => new Promise(() => {}),
+    );
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/goal first objective';
+    await clickSubmit(container);
+    await vi.waitFor(() => {
+      expect(mockSessionActions.applyGoalSnapshot).toHaveBeenCalledWith(
+        'session-created',
+        active,
+      );
+    });
+    await flush();
+
+    expect(mockConnection.goalState).toBe(active);
+    expect(testState.queuedPromptHoldHistory.at(-1)).toBe(true);
+
+    rawEnqueuePrompt.mockClear();
+    mockSessionActions.sendPrompt.mockClear();
+    testState.prompt = 'bypass me';
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('bypass me');
+      await flush();
+    });
+
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(rawEnqueuePrompt.mock.calls[0]?.[0]).toBe('bypass me');
   });
 
   it('keeps /goal attachments in the composer instead of discarding them', async () => {

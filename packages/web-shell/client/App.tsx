@@ -5208,6 +5208,22 @@ export function App({
   }, []);
   const connectionRef = useRef(connection);
   connectionRef.current = connection;
+  /**
+   * Whether a local action must be held back because a Goal owns the session.
+   * Fails CLOSED while `connection.goalState` is still hydrating: the session
+   * load clears `loadingTranscript` (making the composer writable) before its
+   * `goal()` fetch resolves, so an unknown Goal state on a real session has to
+   * read as "a Goal may be active" — the same convention
+   * `holdQueuedPromptsLocally`, `enqueueManualRun` and `tryFireBoundRun`
+   * already follow.
+   */
+  const isGoalGateBlocked = useCallback(
+    () =>
+      connectionRef.current.sessionId !== undefined &&
+      (connectionRef.current.goalState === undefined ||
+        goalSnapshotRef.current?.goal?.status === 'active'),
+    [],
+  );
   const refreshActiveSessionDisplayName = useCallback(async () => {
     const activeConnection = connectionRef.current;
     if (!activeConnection.sessionId || !activeConnection.workspaceCwd) return;
@@ -5941,7 +5957,7 @@ export function App({
     if (
       sessionWriteBlockedRef.current ||
       promptPreparationOwnerRef.current ||
-      goalSnapshotRef.current?.goal?.status === 'active'
+      isGoalGateBlocked()
     ) {
       return;
     }
@@ -6078,6 +6094,7 @@ export function App({
     t,
     updateFailedPrompt,
     updateUnknownPromptAdmission,
+    isGoalGateBlocked,
   ]);
   const canMutateMidTurn =
     connection.capabilities?.features.includes(
@@ -6893,10 +6910,7 @@ export function App({
           reloadWorkspaceSettings(),
         ]);
       };
-      if (
-        streamingStateRef.current !== 'idle' ||
-        goalSnapshotRef.current?.goal?.status === 'active'
-      ) {
+      if (streamingStateRef.current !== 'idle' || isGoalGateBlocked()) {
         handleLanguageChange(previousLanguage);
         blockLocalCommandDuringTurn();
         return;
@@ -6919,6 +6933,7 @@ export function App({
       selectedLanguage,
       sessionActions,
       sessionOwnerGuard,
+      isGoalGateBlocked,
     ],
   );
 
@@ -8523,6 +8538,13 @@ export function App({
           action: 'create',
           objective,
         });
+        // The workspace-scoped control does not write `connection.goalState`
+        // the way `sessionActions.controlGoal` does, so install the create
+        // response directly. Until it lands, `holdQueuedPromptsLocally` reads
+        // false and the sync effect re-derives the local snapshot to null — a
+        // prompt typed in that window would go straight to the daemon instead
+        // of the Goal queue, and no Goal strip would render.
+        sessionActions.applyGoalSnapshot(sessionId, response.snapshot);
         if (
           !connectionRef.current.sessionId ||
           connectionRef.current.sessionId === sessionId
@@ -8537,7 +8559,7 @@ export function App({
         setGoalControlBusy(false);
       }
     },
-    [refreshGoal, workspaceActions],
+    [refreshGoal, sessionActions, workspaceActions],
   );
 
   const loadRewindSnapshots = useCallback(
@@ -8710,8 +8732,7 @@ export function App({
         return false;
       }
       const promptBlocked =
-        streamingStateRef.current !== 'idle' ||
-        goalSnapshotRef.current?.goal?.status === 'active';
+        streamingStateRef.current !== 'idle' || isGoalGateBlocked();
       const submitPromptFromEditor = (
         promptText: string,
         promptImages: PromptImage[] | undefined,
@@ -9842,6 +9863,7 @@ export function App({
       workspaceActions,
       updateFailedPrompt,
       updateUnknownPromptAdmission,
+      isGoalGateBlocked,
     ],
   );
 
@@ -9971,7 +9993,7 @@ export function App({
     if (
       sessionWriteBlockedRef.current ||
       promptPreparationOwnerRef.current ||
-      goalSnapshotRef.current?.goal?.status === 'active'
+      isGoalGateBlocked()
     ) {
       return;
     }
@@ -10168,6 +10190,7 @@ export function App({
     store,
     t,
     updateUnknownPromptAdmission,
+    isGoalGateBlocked,
   ]);
 
   useEffect(() => {
@@ -10557,10 +10580,7 @@ export function App({
 
   const handleFastModelSelect = useCallback(
     (modelId: string) => {
-      if (
-        streamingState !== 'idle' ||
-        goalSnapshotRef.current?.goal?.status === 'active'
-      ) {
+      if (streamingState !== 'idle' || isGoalGateBlocked()) {
         blockLocalCommandDuringTurn();
         return;
       }
@@ -10616,6 +10636,7 @@ export function App({
       reloadWorkspaceSettings,
       modelSettingScope,
       sessionOwnerGuard,
+      isGoalGateBlocked,
     ],
   );
 

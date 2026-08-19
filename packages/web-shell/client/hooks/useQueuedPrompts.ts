@@ -873,15 +873,26 @@ export function useQueuedPrompts({
     let heldPrompts = nextOwnerKey
       ? (heldPromptsByOwnerRef.current.get(nextOwnerKey) ?? [])
       : [];
-    if (
-      heldPrompts.length === 0 &&
-      nextOwnerKey &&
-      previousOwnerKey &&
-      previousOwner.sessionId === sessionId
-    ) {
-      heldPrompts = heldPromptsByOwnerRef.current.get(previousOwnerKey) ?? [];
-      heldPromptsByOwnerRef.current.delete(previousOwnerKey);
-      if (heldPrompts.length > 0) {
+    if (nextOwnerKey && sessionId) {
+      // The workspace half of the key can resolve at any time — including
+      // while the user is on a different session — so a stash written under an
+      // unresolved (or since-changed) cwd would be orphaned under a key nobody
+      // looks up again, silently losing the text. Session ids are unique, so
+      // any stash whose session half matches belongs to this owner: relocate
+      // them all and restore in queue order.
+      const suffix = `\u0000${sessionId}`;
+      const relocated: QueuedPrompt[] = [];
+      for (const [key, prompts] of [...heldPromptsByOwnerRef.current]) {
+        if (key === nextOwnerKey || !key.endsWith(suffix)) continue;
+        heldPromptsByOwnerRef.current.delete(key);
+        relocated.push(...prompts);
+      }
+      if (relocated.length > 0) {
+        const seen = new Set(heldPrompts.map((prompt) => prompt.id));
+        heldPrompts = [
+          ...heldPrompts,
+          ...relocated.filter((prompt) => !seen.has(prompt.id)),
+        ].sort((a, b) => a.id - b.id);
         heldPromptsByOwnerRef.current.set(nextOwnerKey, heldPrompts);
       }
     }

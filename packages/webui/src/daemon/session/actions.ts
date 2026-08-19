@@ -25,6 +25,7 @@ import type {
   DaemonTranscriptStore,
   DaemonCapabilities,
   GoalControlRequest,
+  GoalSnapshotV2,
   DaemonBranchSessionResult,
   DaemonBranchedSession,
   DaemonSessionMediaReference,
@@ -1819,6 +1820,17 @@ export function createDaemonSessionActions({
           'load_goal',
         );
       }
+    },
+
+    applyGoalSnapshot(sessionId: string, snapshot: GoalSnapshotV2) {
+      setConnection((current) =>
+        current.sessionId === sessionId
+          ? {
+              ...current,
+              goalState: selectGoalState(current.goalState, snapshot),
+            }
+          : current,
+      );
     },
 
     async controlGoal(request: GoalControlRequest) {

@@ -1126,6 +1126,42 @@ describe('createDaemonSessionActions', () => {
     expect(getConnection().goalState).toBe(current);
   });
 
+  it('installs an out-of-band Goal snapshot for the attached session only', () => {
+    const session = createMockSession('session-a');
+    const active: GoalSnapshotV2 = {
+      v: 2,
+      activity: 'running',
+      goal: {
+        goalId: 'goal-1',
+        revision: 3,
+        objective: 'ship safely',
+        status: 'active',
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 0,
+        activeTimeMs: 0,
+        createdAt: 10,
+        updatedAt: 20,
+      },
+    };
+    const { actions, getConnection } = createActionsHarness({
+      connection: { status: 'connected', sessionId: 'session-a' },
+      session,
+    });
+
+    actions.applyGoalSnapshot('session-b', active);
+    expect(getConnection().goalState).toBeUndefined();
+
+    actions.applyGoalSnapshot('session-a', active);
+    expect(getConnection().goalState).toBe(active);
+
+    // Reconciled like any other snapshot, so a stale one cannot regress it.
+    actions.applyGoalSnapshot('session-a', {
+      ...active,
+      goal: { ...active.goal!, revision: 2 },
+    });
+    expect(getConnection().goalState).toBe(active);
+  });
+
   it('does not let a stale bare-null Goal read wipe a Goal created meanwhile', async () => {
     // The daemon answered the read while the session was goal-less, so the
     // response carries no `clearedGoal` tombstone. Reconciling it against the

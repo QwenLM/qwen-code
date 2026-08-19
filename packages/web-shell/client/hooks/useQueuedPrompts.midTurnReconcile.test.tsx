@@ -1183,6 +1183,47 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     }
   });
 
+  it('retains held prompts when a session learns its workspace while away', async () => {
+    // The foreground variant below only covers a cwd that resolves while the
+    // session is displayed. Resolving it while the user is on another session
+    // leaves the stash under the old key, which nothing looks up again — the
+    // typed text is gone for good, reload included.
+    const harness = createHarness();
+    try {
+      await harness.render({
+        sessionId: 'session-a',
+        workspaceCwd: undefined,
+        streamingState: 'idle',
+        holdQueuedPromptsLocally: true,
+      });
+      await act(async () => {
+        harness.result().enqueuePrompt('typed while away');
+      });
+
+      await harness.render({
+        sessionId: 'session-b',
+        workspaceCwd: '/workspace-b',
+        streamingState: 'idle',
+        holdQueuedPromptsLocally: true,
+      });
+      expect(harness.result().queuedPrompts).toEqual([]);
+
+      await harness.render({
+        sessionId: 'session-a',
+        workspaceCwd: '/workspace-a',
+        streamingState: 'idle',
+        holdQueuedPromptsLocally: true,
+      });
+
+      expect(harness.result().queuedPrompts).toEqual([
+        expect.objectContaining({ text: 'typed while away' }),
+      ]);
+      expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
   it('retains held prompts when the same session learns a new workspace', async () => {
     const harness = createHarness();
     try {
