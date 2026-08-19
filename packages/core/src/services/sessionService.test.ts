@@ -2738,6 +2738,74 @@ describe('SessionService', () => {
         candidateSessionId: undefined,
       });
     });
+
+    it('reports a conflict rather than collapsing when the filesystem exposes no inode', async () => {
+      // FAT/exFAT and some SMB mounts report ino 0 for every file, so `dev:ino`
+      // cannot prove two spellings are one transcript. Without that proof the
+      // pair must stay a conflict instead of silently resolving to one.
+      const legacySessionId = sessionIdA.toUpperCase();
+      readdirSyncSpy
+        .mockReturnValueOnce([`${sessionIdA}.jsonl`] as never)
+        .mockReturnValueOnce([`${legacySessionId}.jsonl`] as never);
+      vi.spyOn(sessionService, 'getSessionLocation').mockResolvedValue(
+        'active',
+      );
+      statSyncSpy.mockReturnValue({
+        dev: 1,
+        ino: 0,
+        isFile: () => true,
+      } as fs.Stats);
+
+      await expect(
+        sessionService.findSessionIdIgnoringCase(sessionIdA),
+      ).rejects.toMatchObject({
+        name: 'SessionIdCaseConflictError',
+        sessionId: sessionIdA,
+      });
+    });
+
+    it('propagates an I/O failure instead of reporting it as a case conflict', async () => {
+      // A transient EACCES/EMFILE says nothing about aliasing; laundering it
+      // into `session_conflict` would report a retryable blip as permanent.
+      const legacySessionId = sessionIdA.toUpperCase();
+      readdirSyncSpy
+        .mockReturnValueOnce([`${sessionIdA}.jsonl`] as never)
+        .mockReturnValueOnce([`${legacySessionId}.jsonl`] as never);
+      vi.spyOn(sessionService, 'getSessionLocation').mockResolvedValue(
+        'active',
+      );
+      statSyncSpy.mockImplementation(() => {
+        throw Object.assign(new Error('permission denied'), {
+          code: 'EACCES',
+        });
+      });
+
+      await expect(
+        sessionService.findSessionIdIgnoringCase(sessionIdA),
+      ).rejects.toMatchObject({ code: 'EACCES' });
+    });
+
+    it('ignores a candidate whose transcript vanishes mid-resolution', async () => {
+      // The lowercase entry races away, so only the uppercase spelling is left
+      // to back the readable state and it resolves without a conflict.
+      const legacySessionId = sessionIdA.toUpperCase();
+      readdirSyncSpy
+        .mockReturnValueOnce([`${sessionIdA}.jsonl`] as never)
+        .mockReturnValueOnce([`${legacySessionId}.jsonl`] as never);
+      vi.spyOn(sessionService, 'getSessionLocation').mockImplementation(
+        async (id) => (id === legacySessionId ? 'archived' : 'active'),
+      );
+      statSyncSpy.mockImplementation((filePath: fs.PathLike) => {
+        if (String(filePath).includes(`${sessionIdA}.jsonl`)) {
+          throw Object.assign(new Error('gone'), { code: 'ENOENT' });
+        }
+        return { dev: 1, ino: 7, isFile: () => true } as fs.Stats;
+      });
+
+      await expect(
+        sessionService.findSessionIdIgnoringCase(sessionIdA),
+      ).resolves.toBe(legacySessionId);
+    });
   });
 
   describe('loadLastSession', () => {

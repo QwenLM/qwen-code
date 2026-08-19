@@ -31,6 +31,7 @@ import {
 import { SessionFileHistoryAccumulator } from './session-file-history-state.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { hasVerifiableInode } from '../utils/file-identity.js';
 import { readRuntimeStatus } from '../utils/runtimeStatus.js';
 import {
   LITE_READ_BUF_SIZE,
@@ -866,7 +867,9 @@ export class SessionService {
    * physical transcript, as happens on case-insensitive filesystems where
    * every spelling opens the same file. Returns the spelling whose own
    * directory entry backs that file, or undefined when the candidates are
-   * genuinely distinct transcripts (a real conflict).
+   * genuinely distinct transcripts (a real conflict) or when the filesystem
+   * cannot prove otherwise. An I/O failure other than a vanished file is not
+   * evidence of a conflict, so it propagates instead of being reported as one.
    */
   private resolveAliasedReadableCandidate(
     readable: Array<{
@@ -878,17 +881,20 @@ export class SessionService {
     const identities = new Set<string>();
     const owners: string[] = [];
     for (const { candidateSessionId, state } of readable) {
-      let stats;
+      let stats: fs.Stats;
       try {
         stats = fs.statSync(this.getSessionFilePath(candidateSessionId, state));
-      } catch {
-        return undefined;
+      } catch (error) {
+        // A transcript that raced away is no longer a competing spelling; any
+        // other failure says nothing about aliasing and must not be laundered
+        // into a permanent-looking conflict.
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        throw error;
       }
-      // Without a device/inode pair there is no proof the spellings alias one
-      // file, so fall back to reporting a conflict.
-      if (typeof stats.dev !== 'number' || typeof stats.ino !== 'number') {
-        return undefined;
-      }
+      // Filesystems that do not expose inodes report 0 for every file, so
+      // `dev:ino` would collapse genuinely distinct transcripts onto one
+      // identity. Without that proof, report a conflict rather than pick one.
+      if (!hasVerifiableInode(stats.ino)) return undefined;
       identities.add(`${stats.dev}:${stats.ino}`);
       if (identities.size > 1) return undefined;
       // The readable state was reached through a case-folded path unless this
