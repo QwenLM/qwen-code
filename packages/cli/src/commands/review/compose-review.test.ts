@@ -1007,7 +1007,7 @@ describe('repository context proof boundary', () => {
   });
 
   it('caps the unverified-dimension disclosure at five entries', () => {
-    // The schema admits 128 dimensions x 512 chars; joined into one
+    // The schema admits 256 dimensions x 512 chars; joined into one
     // disclosure that outruns the review body's own size budget — the same
     // cap discipline testPlanGate applies to its notes.
     const planPath = join(dir, 'capped-plan.json');
