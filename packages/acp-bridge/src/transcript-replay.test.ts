@@ -585,7 +585,7 @@ describe('createTranscriptReplayMachine', () => {
     const tagged =
       '<qwen:user-prompt-submit-context>\ninjected hook context\n</qwen:user-prompt-submit-context>';
 
-    it('replays daemon media references without embedding base64', () => {
+    it('replays daemon attachment references without embedding base64', () => {
       const projected = updates(
         createTranscriptReplayMachine(),
         record('user-media-ref', 'user', {
@@ -593,10 +593,10 @@ describe('createTranscriptReplayMachine', () => {
           systemPayload: {
             displayText: 'describe this',
             hookContext: '',
-            mediaReferences: [
+            attachmentReferences: [
               {
                 type: 'image',
-                mediaId: 'media-1',
+                attachmentId: 'media-1',
                 mimeType: 'image/png',
                 size: 3,
               },
@@ -614,9 +614,52 @@ describe('createTranscriptReplayMachine', () => {
           sessionUpdate: 'user_message_chunk',
           content: {
             type: 'image',
-            mediaId: 'media-1',
+            attachmentId: 'media-1',
             mimeType: 'image/png',
             size: 3,
+          },
+        },
+      ]);
+    });
+
+    it('replays file attachment references for hydration and preview', () => {
+      const projected = updates(
+        createTranscriptReplayMachine(),
+        record('user-file-ref', 'user', {
+          message: {
+            role: 'user',
+            parts: [{ text: 'check\n\n@attachment:///notes.json' }],
+          },
+          systemPayload: {
+            displayText: 'check\n\n@attachment:///notes.json',
+            hookContext: '',
+            attachmentReferences: [
+              {
+                type: 'resource',
+                attachmentId: 'notes.json',
+                mimeType: 'application/json',
+                size: 6,
+              },
+            ],
+          },
+        }),
+      );
+
+      expect(projected).toMatchObject([
+        {
+          sessionUpdate: 'user_message_chunk',
+          content: {
+            type: 'text',
+            text: 'check\n\n@attachment:///notes.json',
+          },
+        },
+        {
+          sessionUpdate: 'user_message_chunk',
+          content: {
+            type: 'resource',
+            attachmentId: 'notes.json',
+            mimeType: 'application/json',
+            size: 6,
           },
         },
       ]);
@@ -905,7 +948,7 @@ describe('createTranscriptReplayMachine', () => {
     });
   });
 
-  it('replays media references from a mid-turn user record', () => {
+  it('replays attachment references from a mid-turn user record', () => {
     const projected = updates(
       createTranscriptReplayMachine(),
       record('mid-turn-media', 'user', {
@@ -913,10 +956,10 @@ describe('createTranscriptReplayMachine', () => {
         message: { role: 'user', parts: [{ text: 'inspect image' }] },
         systemPayload: {
           displayText: 'inspect image',
-          mediaReferences: [
+          attachmentReferences: [
             {
               type: 'image',
-              mediaId: 'media-1',
+              attachmentId: 'media-1',
               mimeType: 'image/png',
               size: 3,
             },
@@ -938,7 +981,7 @@ describe('createTranscriptReplayMachine', () => {
         sessionUpdate: 'user_message_chunk',
         content: {
           type: 'image',
-          mediaId: 'media-1',
+          attachmentId: 'media-1',
           mimeType: 'image/png',
           size: 3,
         },
@@ -961,10 +1004,10 @@ describe('createTranscriptReplayMachine', () => {
         },
         systemPayload: {
           displayText: '',
-          mediaReferences: [
+          attachmentReferences: [
             {
               type: 'image',
-              mediaId: 'media-only',
+              attachmentId: 'media-only',
               mimeType: 'image/png',
               size: 3,
             },
@@ -978,7 +1021,7 @@ describe('createTranscriptReplayMachine', () => {
         sessionUpdate: 'user_message_chunk',
         content: {
           type: 'image',
-          mediaId: 'media-only',
+          attachmentId: 'media-only',
           mimeType: 'image/png',
           size: 3,
         },

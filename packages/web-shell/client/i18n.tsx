@@ -539,6 +539,15 @@ const EN: Messages = {
   'composer.upload.dismiss': 'Dismiss',
   'composer.upload.renamed': 'Saved as',
   'composer.upload.drop': 'Drop files',
+  'composer.dropChoice.title': (v) =>
+    Number(v?.count) === 1
+      ? 'Add dropped file'
+      : `Add ${v?.count ?? 0} dropped files`,
+  'composer.dropChoice.description':
+    'Attach the files to this message for the agent to read, or upload them to the workspace and insert @ references.',
+  'composer.dropChoice.cancel': 'Cancel',
+  'composer.dropChoice.upload': 'Upload to workspace',
+  'composer.dropChoice.reference': 'Attach to message',
   'at.category.mcpResources': 'MCP resources',
   'at.category.mcpResources.description': 'Reference MCP server resources',
   'at.menu': 'Reference menu',
@@ -1014,7 +1023,7 @@ const EN: Messages = {
   'editor.shellPlaceholder': 'Enter terminal command',
   'editor.send': 'Send message',
   'editor.imagesSkipped': (v) =>
-    `${v?.count ?? 0} unsupported file(s) were skipped.`,
+    `${v?.count ?? 0} file(s) were unavailable and skipped.`,
   'editor.imagesReadFailed': (v) =>
     `${v?.count ?? 0} file(s) could not be read.`,
   'editor.imagesTooLarge': (v) =>
@@ -1214,6 +1223,13 @@ const EN: Messages = {
   'sideTask.new': 'New',
   'sideTask.create': 'New side task',
   'rightPanel.add': 'Add panel',
+  'attachment.showPreview': 'Preview',
+  'attachment.showSource': 'Source',
+  'attachment.previewUnsupported':
+    'Preview is not available for this file type.',
+  'attachment.readFailed': 'Failed to read attachment.',
+  'attachment.loadingFile': 'Loading file...',
+  'attachment.loadingPreview': 'Loading preview...',
   'sideTask.creating': 'Creating side task…',
   'sideTask.createFailed': 'Failed to create side task',
   'sideTask.promptFailed': 'Failed to send the side-task question',
@@ -3540,6 +3556,12 @@ const ZH: Messages = {
   'composer.upload.dismiss': '关闭',
   'composer.upload.renamed': '已保存为',
   'composer.upload.drop': '拖放文件',
+  'composer.dropChoice.title': (v) => `添加拖入的 ${v?.count ?? 0} 个文件`,
+  'composer.dropChoice.description':
+    '可作为当前消息的附件供 Agent 读取，或上传到工作区并插入 @ 引用。',
+  'composer.dropChoice.cancel': '取消',
+  'composer.dropChoice.upload': '上传到工作区',
+  'composer.dropChoice.reference': '添加为附件',
   'at.category.mcpResources': 'MCP 资源',
   'at.category.mcpResources.description': '引用 MCP server 资源',
   'at.menu': '引用菜单',
@@ -3985,7 +4007,7 @@ const ZH: Messages = {
   'history.retry': '重试',
   'editor.shellPlaceholder': '请输入终端命令',
   'editor.send': '发送消息',
-  'editor.imagesSkipped': (v) => `已跳过 ${v?.count ?? 0} 个不支持的文件。`,
+  'editor.imagesSkipped': (v) => `已跳过 ${v?.count ?? 0} 个不可读取的文件。`,
   'editor.imagesReadFailed': (v) => `${v?.count ?? 0} 个文件读取失败。`,
   'editor.imagesTooLarge': (v) => `${v?.count ?? 0} 个文件超过附件大小限制。`,
   'editor.connectionDisconnected': '连接已中断，请在恢复后重试。',
@@ -4173,6 +4195,12 @@ const ZH: Messages = {
   'sideTask.new': '新增',
   'sideTask.create': '新建侧边任务',
   'rightPanel.add': '添加页签',
+  'attachment.showPreview': '预览',
+  'attachment.showSource': '源码',
+  'attachment.previewUnsupported': '暂不支持预览此文件类型。',
+  'attachment.readFailed': '读取附件失败。',
+  'attachment.loadingFile': '正在加载文件...',
+  'attachment.loadingPreview': '正在加载预览...',
   'sideTask.creating': '正在创建侧边任务…',
   'sideTask.createFailed': '创建侧边任务失败',
   'sideTask.promptFailed': '发送侧边任务问题失败',

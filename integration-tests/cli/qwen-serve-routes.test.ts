@@ -315,7 +315,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_side_task',
       'session_prompt',
       'session_turn_status',
-      'session_media',
+      'session_attachments',
       'session_mid_turn_message_mutation',
       'session_mid_turn_message_query',
       'session_cancel',

@@ -15,7 +15,8 @@ import type {
   DaemonInputAnnotation,
   DaemonSessionBtwResult,
   DaemonSessionGenerationEvent,
-  DaemonSessionMediaReference,
+  DaemonSessionAttachmentReference,
+  DaemonSessionAttachmentData,
   DaemonMidTurnMessageResult,
   DaemonMidTurnMessagesResult,
   DaemonRemoveMidTurnMessageResult,
@@ -209,6 +210,8 @@ export type DaemonNoticeOperation =
   | 'load_context_usage'
   | 'load_tasks'
   | 'load_artifacts'
+  | 'read_attachment'
+  | 'remove_attachment'
   | 'cancel_task'
   | 'clear_goal'
   | 'load_stats'
@@ -318,7 +321,8 @@ export interface DaemonPromptImage {
 
 export interface DaemonPromptFile {
   name: string;
-  text: string;
+  data?: Blob;
+  text?: string;
   mimeType?: string;
   mediaType?: string;
   media_type?: string;
@@ -446,17 +450,21 @@ export interface DaemonSessionActions {
     question: string,
     opts?: { signal?: AbortSignal },
   ): Promise<DaemonSessionBtwResult>;
-  uploadMedia(
+  uploadAttachment(
     image: DaemonPromptImage,
     opts?: { signal?: AbortSignal },
-  ): Promise<DaemonSessionMediaReference>;
-  removeMedia(mediaId: string, opts?: { sessionId?: string }): Promise<boolean>;
+  ): Promise<DaemonSessionAttachmentReference>;
+  readAttachment(attachmentId: string): Promise<DaemonSessionAttachmentData>;
+  removeAttachment(
+    attachmentId: string,
+    opts?: { sessionId?: string },
+  ): Promise<boolean>;
   /**
    * Queue a message typed while a turn is running. Calls without an id support
    * old daemons and are best-effort; calls with a stable `messageId` may reject
    * on an ambiguous transport failure so the caller can reconcile. `content`
    * carries image blocks — pre-flight the daemon's
-   * `session_media` capability before attaching them.
+   * `session_attachments` capability before attaching them.
    */
   enqueueMidTurnMessage(
     message: string,

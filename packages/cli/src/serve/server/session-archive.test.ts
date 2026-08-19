@@ -966,13 +966,18 @@ describe('deleteDaemonSessions', () => {
       },
     ]);
 
+    const deleteSessionAttachments = vi.fn().mockResolvedValue(undefined);
     const result = await deleteDaemonSessions({
       sessionIds: [sessionId],
       service: new SessionService(workspaceDir),
-      bridge: { closeSession: vi.fn().mockResolvedValue(undefined) },
+      bridge: {
+        closeSession: vi.fn().mockResolvedValue(undefined),
+        deleteSessionAttachments,
+      },
       coordinator: new SessionArchiveCoordinator(),
     });
     expect(result.removed).toEqual([sessionId]);
+    expect(deleteSessionAttachments).toHaveBeenCalledWith(sessionId);
 
     const ids = (await readCronTasks(workspaceDir)).map((t) => t.id).sort();
     expect(ids).toEqual(['other']); // bound task deleted, unbound survives
@@ -990,7 +995,10 @@ describe('deleteDaemonSessions', () => {
     const result = await deleteDaemonSessions({
       sessionIds: [sessionId],
       service,
-      bridge: { closeSession: vi.fn().mockResolvedValue(undefined) },
+      bridge: {
+        closeSession: vi.fn().mockResolvedValue(undefined),
+        deleteSessionAttachments: vi.fn().mockResolvedValue(undefined),
+      },
       coordinator: new SessionArchiveCoordinator(),
     });
     expect(result.removed).toEqual([]);
@@ -1005,6 +1013,36 @@ describe('deleteDaemonSessions', () => {
     );
 
     await lease.release();
+  });
+
+  it('reports attachment cleanup failures and allows an idempotent retry', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440075';
+    writeSessionFile(workspaceDir, sessionId, 'active');
+    const deleteSessionAttachments = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('cleanup failed'))
+      .mockResolvedValue(undefined);
+    const params = {
+      sessionIds: [sessionId],
+      service: new SessionService(workspaceDir),
+      bridge: {
+        closeSession: vi.fn().mockResolvedValue(undefined),
+        deleteSessionAttachments,
+      },
+      coordinator: new SessionArchiveCoordinator(),
+    };
+
+    await expect(deleteDaemonSessions(params)).resolves.toEqual({
+      removed: [],
+      notFound: [],
+      errors: [{ sessionId, error: 'cleanup failed' }],
+    });
+    await expect(deleteDaemonSessions(params)).resolves.toEqual({
+      removed: [],
+      notFound: [sessionId],
+      errors: [],
+    });
+    expect(deleteSessionAttachments).toHaveBeenCalledTimes(2);
   });
 
   it('reports a gate race per session after another batch item was deleted', async () => {
@@ -1032,6 +1070,7 @@ describe('deleteDaemonSessions', () => {
               );
             }
           }),
+          deleteSessionAttachments: vi.fn().mockResolvedValue(undefined),
         },
         coordinator,
       });
@@ -1088,7 +1127,10 @@ describe('deleteDaemonSessions', () => {
       deleteDaemonSessions({
         sessionIds: [sessionId],
         service: new SessionService(workspaceDir),
-        bridge: { closeSession: vi.fn().mockResolvedValue(undefined) },
+        bridge: {
+          closeSession: vi.fn().mockResolvedValue(undefined),
+          deleteSessionAttachments: vi.fn().mockResolvedValue(undefined),
+        },
         coordinator,
       }),
     ).rejects.toThrow(DaemonDrainingError);

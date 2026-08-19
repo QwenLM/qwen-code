@@ -21,6 +21,7 @@ import {
   useOptionalWorkspace,
 } from '@qwen-code/webui/daemon-react-sdk';
 import type { CommandInfo } from '../adapters/types';
+import type { AttachmentPreviewRequest } from '../adapters/messageTypes';
 import type { UseDaemonFollowupSuggestionReturn } from '@qwen-code/webui/daemon-react-sdk';
 import type {
   DaemonSessionGroupPresetColor,
@@ -55,6 +56,7 @@ import { cssUrlVar } from '../utils/cssUrlVar';
 import {
   getComposerTagIconUrl,
   isBuiltinComposerTagIconUrl,
+  isPreviewableFileComposerTag,
 } from '../utils/composerTag';
 import { isSafeImageSrc } from './messages/Markdown';
 import { ModeIcon } from './ModeIcon';
@@ -62,7 +64,6 @@ import { planSlashSectionRows } from '../utils/slashSectionPlan';
 import { getModelDisplayName } from '../utils/modelDisplay';
 import { getContextUsageLevel } from '../utils/contextUsage';
 import { formatContextUsageDetail } from '../utils/formatTokenCount';
-import { normalizeImageMediaType } from '../utils/imageIngestion';
 import { VoiceButton } from '../voice/VoiceButton';
 import { LiveVoiceButton } from '../live/LiveVoiceButton';
 import type {
@@ -80,12 +81,12 @@ import { WorkspaceIndicator } from './WorkspaceIndicator';
 import {
   ChevronDownIcon,
   ChevronRightIcon,
-  FileTextIcon,
   FolderClosedIcon,
   LoaderCircleIcon,
   UploadIcon,
   XIcon,
 } from 'lucide-react';
+import { FileTypeIcon } from './FileTypeIcon';
 import { WorkspaceSelector } from './WorkspaceSelector';
 import {
   Popover,
@@ -94,7 +95,17 @@ import {
   PopoverTrigger,
 } from './ui/popover';
 import { Input } from './ui/input';
+import { Button } from './ui/button';
 import { Switch } from './ui/switch';
+import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from './ui/dialog';
 import {
   Tooltip,
   TooltipContent,
@@ -251,6 +262,7 @@ interface ChatEditorProps {
   onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
   /** Click a pasted image in the composer to preview it in the right panel. */
   onImagePreview?: (src: string, alt?: string) => void;
+  onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
 }
 
 const CHAT_EDITOR_THEME = {
@@ -1493,6 +1505,7 @@ export const ChatEditor = memo(
       voiceStatusRevision,
       onImageIngestionNotice,
       onImagePreview,
+      onAttachmentPreview,
     } = props;
 
     const {
@@ -1564,6 +1577,12 @@ export const ChatEditor = memo(
     const uploadTargetKey = `${sessionId ?? '<no-session>'}:${
       uploadTarget?.targetKey ?? '<none>'
     }`;
+    const [pendingDropFiles, setPendingDropFiles] = useState<File[] | null>(
+      null,
+    );
+    useLayoutEffect(() => {
+      setPendingDropFiles(null);
+    }, [disabled, uploadTargetKey]);
 
     // -- File upload ----------------------------------------------------------
     // The hook's cancel/reset granularity includes the session: ChatEditor is
@@ -1598,6 +1617,19 @@ export const ChatEditor = memo(
       restore?.();
     }, [uploadTargetKey]);
 
+    const handleComposerTagClick = useCallback(
+      (info: Parameters<NonNullable<typeof onComposerTagClick>>[0]) => {
+        if (isPreviewableFileComposerTag(info.tag)) {
+          onAttachmentPreview?.({
+            name: info.tag.value.split(/[\\/]/).pop() ?? info.tag.value,
+            workspacePath: info.tag.value,
+          });
+        }
+        onComposerTagClick?.(info);
+      },
+      [onAttachmentPreview, onComposerTagClick],
+    );
+
     const core = useComposerCore({
       onSubmit,
       onInputTextChange,
@@ -1613,7 +1645,7 @@ export const ChatEditor = memo(
       onPopQueuedMessages,
       currentMode,
       onFocusFooter,
-      dialogOpen,
+      dialogOpen: dialogOpen || pendingDropFiles !== null,
       followupState,
       onAcceptFollowup,
       onDismissFollowup,
@@ -1629,6 +1661,7 @@ export const ChatEditor = memo(
       renderComposerTag,
       renderComposerTagTooltip,
       onComposerTagClick,
+      onFileTagClick: handleComposerTagClick,
       onImageIngestionNotice,
       onFileUploadRequest: uploadEnabled ? triggerFilePicker : undefined,
       workspaceUploadBusy: fileUpload.isBusy,
@@ -1760,30 +1793,42 @@ export const ChatEditor = memo(
           event.preventDefault();
           return;
         }
-        if (
-          !uploadEnabled ||
-          files.length === 0 ||
-          files.every((file) => normalizeImageMediaType(file.type, file.name))
-        ) {
+        if (!uploadEnabled || files.length === 0) {
           core.imageTransferHandlers.onDropCapture(event);
           return;
         }
         clearImageDragState();
         event.preventDefault();
         event.stopPropagation();
-        uploadFiles(files, fileUploadDirectory ?? '.', insertUploadReference);
+        setPendingDropFiles(files);
       },
       [
         core.imageTransferHandlers,
         clearImageDragState,
         disabled,
         fileUploadEnabled,
-        fileUploadDirectory,
         uploadEnabled,
-        uploadFiles,
-        insertUploadReference,
       ],
     );
+    const referenceDroppedFiles = useCallback(() => {
+      if (!pendingDropFiles) return;
+      core.ingestFiles(pendingDropFiles);
+      setPendingDropFiles(null);
+    }, [core, pendingDropFiles]);
+    const uploadDroppedFiles = useCallback(() => {
+      if (!pendingDropFiles) return;
+      uploadFiles(
+        pendingDropFiles,
+        fileUploadDirectory ?? '.',
+        insertUploadReference,
+      );
+      setPendingDropFiles(null);
+    }, [
+      fileUploadDirectory,
+      insertUploadReference,
+      pendingDropFiles,
+      uploadFiles,
+    ]);
     const handleUploadPickerChange = useCallback(
       (event: ReactChangeEvent<HTMLInputElement>) => {
         const files = Array.from(event.target.files ?? []);
@@ -1872,6 +1917,8 @@ export const ChatEditor = memo(
       mode: false,
       model: false,
     });
+    const toolbarLabelVisibilityRef = useRef(toolbarLabelVisibility);
+    toolbarLabelVisibilityRef.current = toolbarLabelVisibility;
     const [lastConfirmedModelLabel, setLastConfirmedModelLabel] = useState('');
     const slashMenu = core.slashMenu;
     const closeSlashMenu = core.closeSlashMenu;
@@ -2311,6 +2358,7 @@ export const ChatEditor = memo(
       }
 
       const update = () => {
+        const currentVisibility = toolbarLabelVisibilityRef.current;
         const expansionWidth = (id: string) => {
           const collapsed = measurements.querySelector<HTMLElement>(
             `[data-toolbar-measure="${id}:collapsed"]`,
@@ -2370,9 +2418,7 @@ export const ChatEditor = memo(
         const currentExpansionWidth = items.reduce(
           (total, item) =>
             total +
-            (toolbarLabelVisibility[
-              item.id as keyof typeof toolbarLabelVisibility
-            ]
+            (currentVisibility[item.id as keyof typeof currentVisibility]
               ? item.expansionWidth
               : 0),
           0,
@@ -2391,7 +2437,7 @@ export const ChatEditor = memo(
         const itemVisibility = getToolbarItemVisibilityWithHysteresis({
           availableWidth,
           items,
-          currentVisibility: toolbarLabelVisibility,
+          currentVisibility,
           // Aggregate scrollWidth can differ from the sum of individually
           // rounded replicas by one pixel per item. Apply that slack only when
           // expanding so a collapsed/expanded pair cannot form a two-cycle.
@@ -2404,20 +2450,19 @@ export const ChatEditor = memo(
           mode: itemVisibility.mode ?? false,
           model: itemVisibility.model ?? false,
         };
-        setToolbarLabelVisibility((current) => {
-          const unchanged = Object.keys(next).every(
-            (key) =>
-              current[key as keyof typeof current] ===
-              next[key as keyof typeof next],
-          );
-          return unchanged ? current : next;
-        });
+        const unchanged = Object.keys(next).every(
+          (key) =>
+            currentVisibility[key as keyof typeof currentVisibility] ===
+            next[key as keyof typeof next],
+        );
+        if (unchanged) return;
+        toolbarLabelVisibilityRef.current = next;
+        setToolbarLabelVisibility(next);
       };
 
       update();
       const resizeObserver = new ResizeObserver(update);
       resizeObserver.observe(toolbar);
-      resizeObserver.observe(toolbarLeading);
       resizeObserver.observe(toolbarRight);
       for (const child of measurements.children) {
         resizeObserver.observe(child);
@@ -2466,7 +2511,6 @@ export const ChatEditor = memo(
       sessionName,
       showModelAction,
       showModeAction,
-      toolbarLabelVisibility,
       workspaceIndicatorVisible,
       workspaceName,
       workspaceSelectVisible,
@@ -2504,26 +2548,43 @@ export const ChatEditor = memo(
             {fileUpload.uploads.map((upload) => {
               const busy =
                 upload.status === 'pending' || upload.status === 'uploading';
+              const previewable =
+                Boolean(onAttachmentPreview) &&
+                upload.status === 'done' &&
+                Boolean(upload.resultPath);
               return (
                 <div
                   key={upload.id}
                   className={styles.uploadRow}
                   data-status={upload.status}
+                  data-previewable={previewable || undefined}
                 >
-                  {busy ? (
-                    <LoaderCircleIcon
-                      className={styles.uploadRowSpinner}
-                      aria-hidden="true"
-                    />
-                  ) : (
-                    <UploadIcon aria-hidden="true" />
-                  )}
-                  <span className={styles.uploadRowName}>
-                    {upload.file.name}
-                  </span>
-                  <span className={styles.uploadRowStatus}>
-                    {uploadStatusText(upload)}
-                  </span>
+                  <button
+                    type="button"
+                    className={styles.uploadRowPreview}
+                    disabled={!previewable}
+                    onClick={() =>
+                      onAttachmentPreview?.({
+                        name: upload.file.name,
+                        workspacePath: upload.resultPath!,
+                      })
+                    }
+                  >
+                    {busy ? (
+                      <LoaderCircleIcon
+                        className={styles.uploadRowSpinner}
+                        aria-hidden="true"
+                      />
+                    ) : (
+                      <UploadIcon aria-hidden="true" />
+                    )}
+                    <span className={styles.uploadRowName}>
+                      {upload.file.name}
+                    </span>
+                    <span className={styles.uploadRowStatus}>
+                      {uploadStatusText(upload)}
+                    </span>
+                  </button>
                   <button
                     type="button"
                     className={styles.uploadRowAction}
@@ -2532,7 +2593,10 @@ export const ChatEditor = memo(
                         ? t('composer.upload.cancel')
                         : t('composer.upload.dismiss')
                     }
-                    onClick={() => fileUpload.removeUpload(upload.id)}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      fileUpload.removeUpload(upload.id);
+                    }}
                   >
                     <XIcon aria-hidden="true" />
                   </button>
@@ -2640,9 +2704,51 @@ export const ChatEditor = memo(
             </div>
           )}
           <div className={styles.content}>
-            {(core.composerTags.length > 0 ||
-              core.pastedImages.length > 0 ||
-              core.pastedFiles.length > 0) && (
+            {core.pastedImages.length > 0 && (
+              <div className={styles.images} data-web-shell-composer-images>
+                {core.pastedImages.map((img, i) => {
+                  const src = `data:${img.media_type};base64,${img.data}`;
+                  return (
+                    <div key={i} className={styles.imageThumb}>
+                      <img
+                        src={src}
+                        alt=""
+                        onClick={
+                          onImagePreview ? () => onImagePreview(src) : undefined
+                        }
+                      />
+                      <button
+                        type="button"
+                        className={styles.imageRemove}
+                        disabled={disabled}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (disabled) return;
+                          core.removeImage(i);
+                        }}
+                        aria-label="Remove image"
+                      >
+                        <svg
+                          width="8"
+                          height="8"
+                          viewBox="0 0 10 10"
+                          fill="none"
+                          aria-hidden="true"
+                        >
+                          <path
+                            d="M2 2l6 6M8 2l-6 6"
+                            stroke="currentColor"
+                            strokeWidth="1.5"
+                            strokeLinecap="round"
+                          />
+                        </svg>
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            {(core.composerTags.length > 0 || core.pastedFiles.length > 0) && (
               <div
                 className={styles.attachments}
                 data-web-shell-composer-attachments
@@ -2675,9 +2781,11 @@ export const ChatEditor = memo(
                             content={renderComposerTagContent(tag)}
                             tooltip={tooltip}
                             onActivate={
-                              onComposerTagClick
+                              onComposerTagClick ||
+                              (isPreviewableFileComposerTag(tag) &&
+                                onAttachmentPreview)
                                 ? (anchorRect) =>
-                                    onComposerTagClick({
+                                    handleComposerTagClick({
                                       ...tagInfo,
                                       anchorRect,
                                     })
@@ -2697,70 +2805,43 @@ export const ChatEditor = memo(
                     </div>
                   </TooltipPrimitive.Provider>
                 )}
-                {core.pastedImages.length > 0 && (
-                  <div className={styles.images}>
-                    {core.pastedImages.map((img, i) => {
-                      const src = `data:${img.media_type};base64,${img.data}`;
-                      return (
-                        <div key={i} className={styles.imageThumb}>
-                          <img
-                            src={src}
-                            alt=""
-                            onClick={
-                              onImagePreview
-                                ? () => onImagePreview(src)
-                                : undefined
-                            }
-                          />
-                          <button
-                            type="button"
-                            className={styles.imageRemove}
-                            disabled={disabled}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              if (disabled) return;
-                              core.removeImage(i);
-                            }}
-                            aria-label="Remove image"
-                          >
-                            <svg
-                              width="8"
-                              height="8"
-                              viewBox="0 0 10 10"
-                              fill="none"
-                              aria-hidden="true"
-                            >
-                              <path
-                                d="M2 2l6 6M8 2l-6 6"
-                                stroke="currentColor"
-                                strokeWidth="1.5"
-                                strokeLinecap="round"
-                              />
-                            </svg>
-                          </button>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
                 {core.pastedFiles.length > 0 && (
                   <div className={styles.files}>
                     {core.pastedFiles.map((file, i) => (
                       <div
                         key={`${file.name}-${i}`}
-                        className={styles.fileChip}
+                        className={`${styles.fileChip}${
+                          onAttachmentPreview
+                            ? ` ${styles.fileChipPreviewable}`
+                            : ''
+                        }`}
                       >
-                        <FileTextIcon
-                          size={14}
-                          className={styles.fileChipIcon}
-                          aria-hidden="true"
-                        />
-                        <span className={styles.fileChipName}>{file.name}</span>
-                        {file.size !== undefined && (
-                          <span className={styles.fileChipSize}>
-                            {formatAttachmentSize(file.size)}
+                        <button
+                          type="button"
+                          className={styles.fileChipPreview}
+                          disabled={!onAttachmentPreview}
+                          onClick={() =>
+                            onAttachmentPreview?.({
+                              name: file.name,
+                              mimeType: file.media_type,
+                              ...(file.data ? { data: file.data } : {}),
+                              ...(file.text !== undefined
+                                ? { text: file.text }
+                                : {}),
+                            })
+                          }
+                        >
+                          <FileTypeIcon
+                            name={file.name}
+                            mimeType={file.media_type}
+                            size={14}
+                            className={styles.fileChipIcon}
+                            aria-hidden="true"
+                          />
+                          <span className={styles.fileChipName}>
+                            {file.name}
                           </span>
-                        )}
+                        </button>
                         <button
                           type="button"
                           className={styles.fileChipRemove}
@@ -2772,7 +2853,20 @@ export const ChatEditor = memo(
                           }}
                           aria-label={`Remove ${file.name}`}
                         >
-                          ×
+                          <svg
+                            width="8"
+                            height="8"
+                            viewBox="0 0 10 10"
+                            fill="none"
+                            aria-hidden="true"
+                          >
+                            <path
+                              d="M2 2l6 6M8 2l-6 6"
+                              stroke="currentColor"
+                              strokeWidth="1.5"
+                              strokeLinecap="round"
+                            />
+                          </svg>
                         </button>
                       </div>
                     ))}
@@ -3407,6 +3501,64 @@ export const ChatEditor = memo(
             showKeyHints={!core.mobileComposer}
           />
         )}
+        <Dialog
+          open={pendingDropFiles !== null}
+          onOpenChange={(open) => {
+            if (!open) setPendingDropFiles(null);
+          }}
+        >
+          <DialogContent
+            data-web-shell-drop-choice-dialog
+            onCloseAutoFocus={(event) => {
+              event.preventDefault();
+              core.focus();
+            }}
+          >
+            <DialogHeader>
+              <DialogTitle>
+                {t('composer.dropChoice.title', {
+                  count: pendingDropFiles?.length ?? 0,
+                })}
+              </DialogTitle>
+              <DialogDescription>
+                {t('composer.dropChoice.description')}
+              </DialogDescription>
+            </DialogHeader>
+            <div className="max-h-32 overflow-auto rounded-lg border bg-background/70 px-3 py-2 text-xs">
+              {pendingDropFiles?.map((file, index) => (
+                <div
+                  key={`${file.name}:${file.size}:${index}`}
+                  className="flex items-center justify-between gap-3"
+                >
+                  <span className="min-w-0 truncate">{file.name}</span>
+                  <span className="shrink-0 text-muted-foreground">
+                    {formatAttachmentSize(file.size)}
+                  </span>
+                </div>
+              ))}
+            </div>
+            <DialogFooter>
+              <DialogClose asChild>
+                <Button variant="outline" data-drop-action="cancel">
+                  {t('composer.dropChoice.cancel')}
+                </Button>
+              </DialogClose>
+              <Button
+                variant="outline"
+                data-drop-action="upload"
+                onClick={uploadDroppedFiles}
+              >
+                {t('composer.dropChoice.upload')}
+              </Button>
+              <Button
+                data-drop-action="reference"
+                onClick={referenceDroppedFiles}
+              >
+                {t('composer.dropChoice.reference')}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       </div>
     );
   }),

@@ -104,7 +104,13 @@ export function appendLocalUserTranscriptMessage(
   text: string,
   opts: DaemonTranscriptReducerOptions & {
     images?: Array<{ data: string; mimeType: string }>;
-    files?: Array<{ name: string; mimeType: string }>;
+    files?: Array<{
+      name: string;
+      mimeType: string;
+      data?: Blob;
+      text?: string;
+      attachmentId?: string;
+    }>;
     meta?: DaemonTextDeltaMeta;
   } = {},
 ): DaemonTranscriptState {
@@ -182,6 +188,40 @@ export function rebuildDaemonTranscriptBlockIndex(
   return blockIndexById;
 }
 
+function userBlockForAttachment(
+  next: DaemonTranscriptState,
+  event: Extract<
+    DaemonUiEvent,
+    { type: 'user.image.delta' | 'user.file.delta' }
+  >,
+): DaemonTextTranscriptBlock {
+  const activeUserIndex = next.activeUserBlockId
+    ? next.blockIndexById[next.activeUserBlockId]
+    : undefined;
+  const activeUser =
+    activeUserIndex !== undefined ? next.blocks[activeUserIndex] : undefined;
+  if (
+    activeUser?.kind === 'user' &&
+    stringArraysEqual(activeUser.sourceRecordIds, event.sourceRecordIds)
+  ) {
+    const block = getWritableBlockById(next, activeUser.id);
+    if (block?.kind === 'user') return block;
+  }
+  const block = createTextBlock(
+    next,
+    'user',
+    '',
+    event.eventId,
+    event.serverTimestamp,
+    event.meta,
+    event.sourceRecordIds,
+    event.promptId,
+  ) as DaemonTextTranscriptBlock;
+  appendBlock(next, block);
+  next.activeUserBlockId = block.id;
+  return block;
+}
+
 function applyDaemonTranscriptEvent(
   next: DaemonTranscriptState,
   event: DaemonUiEvent,
@@ -228,44 +268,25 @@ function applyDaemonTranscriptEvent(
       appendTextDelta(next, 'user', 'activeUserBlockId', event.text, event);
       break;
     case 'user.image.delta': {
-      const activeUserIndex = next.activeUserBlockId
-        ? next.blockIndexById[next.activeUserBlockId]
-        : undefined;
-      const activeUser =
-        activeUserIndex !== undefined
-          ? next.blocks[activeUserIndex]
-          : undefined;
-      if (
-        activeUser?.kind !== 'user' ||
-        !stringArraysEqual(activeUser.sourceRecordIds, event.sourceRecordIds)
-      ) {
-        const block = createTextBlock(
-          next,
-          'user',
-          '',
-          event.eventId,
-          event.serverTimestamp,
-          event.meta,
-          event.sourceRecordIds,
-          event.promptId,
-        ) as DaemonTextTranscriptBlock;
-        block.images = [{ data: event.data, mimeType: event.mimeType }];
-        appendBlock(next, block);
-        next.activeUserBlockId = block.id;
-      } else {
-        // Use getWritableBlockById to ensure COW safety when mutating block.images
-        const block = getWritableBlockById(next, next.activeUserBlockId) as
-          | DaemonTextTranscriptBlock
-          | undefined;
-        if (block && block.kind === 'user') {
-          if (event.meta) block.meta = { ...block.meta, ...event.meta };
-          // Use immutable update to avoid mutating a shared array reference
-          block.images = [
-            ...(block.images ?? []),
-            { data: event.data, mimeType: event.mimeType },
-          ];
-        }
-      }
+      const block = userBlockForAttachment(next, event);
+      if (event.meta) block.meta = { ...block.meta, ...event.meta };
+      block.images = [
+        ...(block.images ?? []),
+        { data: event.data, mimeType: event.mimeType },
+      ];
+      break;
+    }
+    case 'user.file.delta': {
+      const block = userBlockForAttachment(next, event);
+      if (event.meta) block.meta = { ...block.meta, ...event.meta };
+      block.files = [
+        ...(block.files ?? []),
+        {
+          name: event.name,
+          mimeType: event.mimeType,
+          attachmentId: event.attachmentId,
+        },
+      ];
       break;
     }
     case 'assistant.text.delta':

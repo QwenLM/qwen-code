@@ -416,7 +416,7 @@ export interface ChatRecord {
 
 export interface NotificationRecordPayload {
   displayText: string;
-  mediaReferences?: UserPromptMediaReference[];
+  attachmentReferences?: UserPromptAttachmentReference[];
   backgroundTask?: {
     taskId: string;
     status: string;
@@ -438,13 +438,13 @@ export interface UserPromptRecordPayload {
   displayText: string;
   /** Sanitized hook context duplicated from the tagged model-bound part. */
   hookContext: string;
-  /** Daemon-owned media references used to restore prompt previews. */
-  mediaReferences?: UserPromptMediaReference[];
+  /** Daemon-owned attachment references used to restore prompt previews. */
+  attachmentReferences?: UserPromptAttachmentReference[];
 }
 
-export interface UserPromptMediaReference {
-  type: 'image' | 'audio';
-  mediaId: string;
+export interface UserPromptAttachmentReference {
+  type: 'image' | 'resource';
+  attachmentId: string;
   mimeType: string;
   size: number;
 }
@@ -1797,7 +1797,7 @@ export class ChatRecordingService {
     message: PartListUnion,
     displayText: string,
     goalContext?: GoalTurnPermit,
-    mediaReferences?: UserPromptMediaReference[],
+    attachmentReferences?: UserPromptAttachmentReference[],
   ): void {
     try {
       const record: ChatRecord = {
@@ -1807,7 +1807,7 @@ export class ChatRecordingService {
         message: createUserContent(message),
         systemPayload: {
           displayText,
-          ...(mediaReferences ? { mediaReferences } : {}),
+          ...(attachmentReferences ? { attachmentReferences } : {}),
         },
       };
       this.appendRecord(record);

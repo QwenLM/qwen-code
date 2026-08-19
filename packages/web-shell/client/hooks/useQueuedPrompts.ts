@@ -27,7 +27,7 @@ import type {
   DaemonInputAnnotation,
   DaemonMidTurnMessagesResult,
   DaemonPendingPromptSummary,
-  DaemonSessionMediaReference,
+  DaemonSessionAttachmentReference,
   DaemonTranscriptStore,
   PromptContentBlock,
 } from '@qwen-code/sdk/daemon';
@@ -63,7 +63,7 @@ interface UseQueuedPromptsArgs {
    */
   canQueryMidTurn: boolean;
   /**
-   * Whether the daemon advertises `session_media`. With it,
+   * Whether the daemon advertises `session_attachments`. With it,
    * images attached to a mid-turn send travel with the message and are
    * injected into the running turn; without it they stay queued for the next
    * turn (an older daemon would silently drop them).
@@ -164,9 +164,9 @@ function contentToImages(
   return images.length > 0 ? images : undefined;
 }
 
-// The SDK substitutes this text block for a media reference it could not
+// The SDK substitutes this text block for a attachment reference it could not
 // hydrate (DaemonSessionClient.hydrateBlock); keep in sync with the SDK.
-const MEDIA_UNAVAILABLE_PLACEHOLDER = '[Attached media is no longer available]';
+const MEDIA_UNAVAILABLE_PLACEHOLDER = '[Attachment is no longer available]';
 
 function contentHasDegradedMedia(
   content: readonly PromptContentBlock[] | undefined,
@@ -1309,22 +1309,12 @@ export function useQueuedPrompts({
         midTurnEnqueueAbortRef.current = abort;
         let enqueueStarted = false;
         let enqueueDispatched = false;
-        let uploadedMediaReferences: DaemonSessionMediaReference[] = [];
-        const removeUploadedMedia = async () => {
-          if (!targetSessionId) return;
-          await Promise.allSettled(
-            uploadedMediaReferences.map(
-              async (reference) =>
-                await sessionActions.removeMedia(reference.mediaId, {
-                  sessionId: targetSessionId,
-                }),
-            ),
-          );
-        };
+        let uploadedAttachmentReferences: DaemonSessionAttachmentReference[] =
+          [];
         void Promise.allSettled(
           imageList.map(
             async (image) =>
-              await sessionActions.uploadMedia(
+              await sessionActions.uploadAttachment(
                 {
                   data: image.data,
                   mimeType: image.media_type,
@@ -1334,7 +1324,7 @@ export function useQueuedPrompts({
           ),
         )
           .then(async (results) => {
-            uploadedMediaReferences = results.flatMap((result) =>
+            uploadedAttachmentReferences = results.flatMap((result) =>
               result.status === 'fulfilled' ? [result.value] : [],
             );
             const failure = results.find(
@@ -1342,7 +1332,6 @@ export function useQueuedPrompts({
                 result.status === 'rejected',
             );
             if (failure) {
-              void removeUploadedMedia();
               throw failure.reason;
             }
             if (
@@ -1350,7 +1339,6 @@ export function useQueuedPrompts({
               latestSessionIdRef.current !== targetSessionId ||
               latestWorkspaceCwdRef.current !== targetWorkspaceCwd
             ) {
-              void removeUploadedMedia();
               throw new DOMException('Session changed', 'AbortError');
             }
             enqueueStarted = true;
@@ -1360,8 +1348,8 @@ export function useQueuedPrompts({
               onAdmissionStarted: () => {
                 enqueueDispatched = true;
               },
-              ...(uploadedMediaReferences.length > 0
-                ? { content: uploadedMediaReferences }
+              ...(uploadedAttachmentReferences.length > 0
+                ? { content: uploadedAttachmentReferences }
                 : {}),
             });
           })
@@ -1371,7 +1359,6 @@ export function useQueuedPrompts({
                 enqueueStarted = false;
                 throw new Error('Mid-turn message was not dispatched');
               }
-              void removeUploadedMedia();
               completionCallbacksRef.current.delete(midTurnMessageId);
               pendingMidTurnAdmissionsRef.current.delete(midTurnMessageId);
               const next = queuedPromptsRef.current.filter(
