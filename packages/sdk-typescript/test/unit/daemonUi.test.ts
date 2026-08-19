@@ -5808,6 +5808,43 @@ describe('transcriptBlockToTerminalText (wenshao review — coverage)', () => {
 });
 
 describe('daemon UI WeakMap memo hits (wenshao glm-5.1 review)', () => {
+  it('shares the block index for text updates and copies it for appends', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'assistant.text.delta', text: 'first' } as never],
+      { now: 2 },
+    );
+    const firstState = state;
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'assistant.text.delta', text: ' second' } as never],
+      { now: 3 },
+    );
+
+    expect(state.blocks).not.toBe(firstState.blocks);
+    expect(state.blockIndexById).toBe(firstState.blockIndexById);
+    expect(Object.isFrozen(state.blockIndexById)).toBe(true);
+    expect(
+      () =>
+        ((state.blockIndexById as Record<string, number>)['assistant-1'] = 99),
+    ).toThrow(TypeError);
+    expect(state.blocks[0]).toMatchObject({ text: 'first second' });
+    expect(firstState.blocks[0]).toMatchObject({ text: 'first' });
+
+    const updatedState = state;
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'status', text: 'done' } as never],
+      { now: 4 },
+    );
+
+    expect(state.blockIndexById).not.toBe(updatedState.blockIndexById);
+    expect(updatedState.blockIndexById).not.toHaveProperty('status-2');
+    expect(state.blockIndexById).toHaveProperty('status-2', 1);
+  });
+
   // wenshao 5-23 13:03: lazy COW means non-block-mutating dispatches
   // preserve `state.blocks` reference, so the WeakMap caches actually hit
   // across renders. Verify by checking reference identity.

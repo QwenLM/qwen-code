@@ -45,7 +45,7 @@ export interface DaemonMessageToolCall {
   status: DaemonMessageToolCallStatus;
   parentToolCallId?: string;
   title?: string;
-  content?: DaemonMessageToolCallContent[];
+  content?: readonly DaemonMessageToolCallContent[];
   rawOutput?: unknown;
   locations?: DaemonMessageToolCallLocation[];
   kind?: DaemonMessageToolKind;
