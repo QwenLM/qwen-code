@@ -267,7 +267,7 @@ describe('readTranscripts — defensive parsing', () => {
           type: 'user',
           message: { role: 'user', parts: [{ text: 'chunk 1 of 1' }] },
         }),
-        ...call('read_file', { file_path: '/d.txt' }),
+        ...call('read_file', { file_path: '/d.txt', offset: 0, limit: 40 }),
         ...call('read_file', { file_path: '/d.txt.bak' }),
         ...call('run_shell_command', { command: 'rm /d.txt' }),
       ]
@@ -276,6 +276,11 @@ describe('readTranscripts — defensive parsing', () => {
     );
     const [rec] = readTranscripts(undefined, ENV, '/d.txt');
     expect(rec.diffToolCalls).toBe(1);
+    // The RANGE too, not only the count: `range` is wired through the same
+    // `namedTheDiff` decision, so dropping that wiring leaves the count
+    // right and every chunk-coverage ruling — which reads the lines, not
+    // the tally — with nothing to rule on.
+    expect(rec.diffReads).toEqual([[1, 40]]);
     // And with no diffPath the field stays 0, whatever was read.
     expect(readTranscripts(undefined, ENV)[0].diffToolCalls).toBe(0);
   });
