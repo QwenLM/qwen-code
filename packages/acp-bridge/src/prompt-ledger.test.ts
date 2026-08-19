@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
@@ -167,6 +167,79 @@ describe('appendPromptLedgerRecord + readPromptLedgerRecords', () => {
       { v: 1, promptId: 'p1', state: 'in_flight', at: 1 },
       { v: 1, promptId: 'p2', terminal: 'completed', at: 2 },
     ]);
+  });
+});
+
+describe('readPromptLedgerRecords tail window', () => {
+  it('returns all records when the file fits inside the window', () => {
+    const filePath = ledgerPath('tail-fits');
+    appendPromptLedgerRecord(filePath, {
+      v: 1,
+      promptId: 'p1',
+      state: 'in_flight',
+      at: 1,
+    });
+    appendPromptLedgerRecord(filePath, {
+      v: 1,
+      promptId: 'p1',
+      terminal: 'completed',
+      at: 2,
+    });
+
+    expect(readPromptLedgerRecords(filePath, { tailBytes: 4096 })).toEqual([
+      { v: 1, promptId: 'p1', state: 'in_flight', at: 1 },
+      { v: 1, promptId: 'p1', terminal: 'completed', at: 2 },
+    ]);
+  });
+
+  it('reads only the trailing window and drops the torn first line', () => {
+    const filePath = ledgerPath('tail-window');
+    const lines: string[] = [];
+    for (let i = 0; i < 6; i += 1) {
+      lines.push(
+        `${JSON.stringify({
+          v: 1,
+          promptId: `p${i}`,
+          state: 'in_flight',
+          at: i,
+        })}\n`,
+      );
+    }
+    writeFileSync(filePath, lines.join(''), 'utf8');
+    const lineLength = lines[0]?.length ?? 0;
+    const fileSize = statSync(filePath).size;
+    expect(fileSize).toBe(lineLength * 6);
+
+    // The window starts 10 bytes into p3's line (torn) and must still yield
+    // the two fully-contained trailing records.
+    const tailBytes = lineLength * 2 + 10;
+    expect(readPromptLedgerRecords(filePath, { tailBytes })).toEqual([
+      { v: 1, promptId: 'p4', state: 'in_flight', at: 4 },
+      { v: 1, promptId: 'p5', state: 'in_flight', at: 5 },
+    ]);
+  });
+
+  it('drops the first window line even when the window starts on a line boundary', () => {
+    const filePath = ledgerPath('tail-window-aligned');
+    const lines: string[] = [];
+    for (let i = 0; i < 4; i += 1) {
+      lines.push(
+        `${JSON.stringify({
+          v: 1,
+          promptId: `p${i}`,
+          state: 'in_flight',
+          at: i,
+        })}\n`,
+      );
+    }
+    writeFileSync(filePath, lines.join(''), 'utf8');
+    const lineLength = lines[0]?.length ?? 0;
+
+    // The window aligns exactly with p2's line start; p2 is dropped anyway
+    // per the documented "always drop the first window line" contract.
+    expect(
+      readPromptLedgerRecords(filePath, { tailBytes: lineLength * 2 }),
+    ).toEqual([{ v: 1, promptId: 'p3', state: 'in_flight', at: 3 }]);
   });
 });
 

@@ -172,6 +172,17 @@ function tailHoldsAnyFunctionCall(history: Content[]): boolean {
 }
 
 /**
+ * Tail byte window for load-response reads. Records are ~150 bytes and the
+ * response caps at 64 terminals, so 256 KiB holds hundreds of terminals even
+ * with in_flight lines interleaved — the response is the full trailing
+ * window for any realistic session while the per-load hot path never reads
+ * (or JSON-parses) a whole multi-megabyte ledger. Sessions whose ledger
+ * outgrows the window return a best-effort subset, which the response
+ * contract already allows.
+ */
+const RECENT_TERMINALS_TAIL_BYTES = 256 * 1024;
+
+/**
  * The most recent ledger terminals for the load response, or `undefined`
  * when there is no ledger evidence (field omitted entirely — old clients
  * and no-ledger sessions see the exact pre-existing response shape).
@@ -182,7 +193,9 @@ export function readRecentPromptTerminals(
 ): PromptLedgerTerminalRecord[] | undefined {
   try {
     const terminals = recentPromptTerminalRecords(
-      readPromptLedgerRecords(sessionService.getPromptLedgerPath(sessionId)),
+      readPromptLedgerRecords(sessionService.getPromptLedgerPath(sessionId), {
+        tailBytes: RECENT_TERMINALS_TAIL_BYTES,
+      }),
     );
     return terminals.length > 0 ? terminals : undefined;
   } catch {

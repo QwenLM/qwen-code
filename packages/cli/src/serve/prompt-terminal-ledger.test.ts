@@ -481,6 +481,39 @@ describe('readRecentPromptTerminals + withPromptTerminals', () => {
     ]);
   });
 
+  it('reads the trailing terminals from a ledger larger than the tail window', () => {
+    const fixture = makeFixture();
+    // ~290 KiB of fixed-length terminal records — beyond the 256 KiB read
+    // window — written in one shot (the per-record append path is not what
+    // this test exercises).
+    const lines: string[] = [];
+    for (let i = 0; i < 5000; i += 1) {
+      lines.push(
+        `${JSON.stringify({
+          v: 1,
+          promptId: `p${String(i).padStart(6, '0')}`,
+          terminal: 'completed',
+          at: i,
+        })}\n`,
+      );
+    }
+    mkdirSync(path.dirname(fixture.ledgerPath), { recursive: true });
+    writeFileSync(fixture.ledgerPath, lines.join(''), 'utf8');
+
+    const terminals = readRecentPromptTerminals(
+      fixture.sessionService,
+      fixture.sessionId,
+    );
+    expect(terminals).toHaveLength(64);
+    expect(terminals[63]).toMatchObject({
+      promptId: 'p004999',
+      terminal: 'completed',
+    });
+    // The window can only hold the tail, so even the oldest returned
+    // terminal must come from near the end of the file.
+    expect(terminals[0]?.at).toBeGreaterThan(4900);
+  });
+
   it('leaves the response untouched without terminals', () => {
     const session = {
       sessionId: 's1',

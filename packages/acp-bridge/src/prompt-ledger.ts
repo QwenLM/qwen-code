@@ -141,26 +141,72 @@ function coercePromptLedgerRecord(
   };
 }
 
+/** Options for {@link readPromptLedgerRecords}. */
+export interface ReadPromptLedgerOptions {
+  /**
+   * Read at most this many trailing bytes instead of the whole file. The
+   * first line of the window is dropped (the window start can tear a line
+   * in half), so callers must size the window for the records they need.
+   * Used by the per-request load path to avoid reading and parsing the
+   * entire ledger of a long session.
+   */
+  tailBytes?: number;
+}
+
 /**
  * Read all records in file order. A torn tail (crash mid-append) or any
  * malformed line is dropped rather than fatal: the ledger is advisory
  * evidence, and reconciliation treats "unreadable" the same as "absent"
  * (fail-closed). Only ENOENT maps to an empty ledger; other I/O errors
  * propagate to the caller.
+ *
+ * With `options.tailBytes`, files larger than the window are read from the
+ * tail only; the first line inside the window is always dropped because the
+ * window start may fall mid-line.
  */
 export function readPromptLedgerRecords(
   filePath: string,
+  options?: ReadPromptLedgerOptions,
 ): PromptLedgerRecord[] {
   let contents: string;
+  let dropFirstLine = false;
   try {
-    contents = readFileSync(filePath, 'utf8');
+    const tailBytes = options?.tailBytes;
+    if (tailBytes === undefined) {
+      contents = readFileSync(filePath, 'utf8');
+    } else {
+      const size = statSync(filePath).size;
+      if (size <= tailBytes) {
+        contents = readFileSync(filePath, 'utf8');
+      } else {
+        const fd = openSync(filePath, 'r');
+        try {
+          const buffer = Buffer.alloc(tailBytes);
+          const bytesRead = readSync(
+            fd,
+            buffer,
+            0,
+            tailBytes,
+            size - tailBytes,
+          );
+          // A UTF-8 sequence torn at the window start is replaced with
+          // U+FFFD by toString; that torn first line is dropped below anyway.
+          contents = buffer.subarray(0, bytesRead).toString('utf8');
+          dropFirstLine = true;
+        } finally {
+          closeSync(fd);
+        }
+      }
+    }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
     throw error;
   }
   const records: PromptLedgerRecord[] = [];
-  for (const line of contents.split('\n')) {
-    if (line.length === 0) continue;
+  const lines = contents.split('\n');
+  for (let i = dropFirstLine ? 1 : 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line === undefined || line.length === 0) continue;
     let parsed: unknown;
     try {
       parsed = JSON.parse(line);
