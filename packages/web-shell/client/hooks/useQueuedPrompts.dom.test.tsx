@@ -678,6 +678,47 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     ).toEqual(['first with media', 'second plain']);
   });
 
+  it('stops the release chain when the Goal re-activates mid-drain', async () => {
+    // The chain is built synchronously when the hold lifts, but each link runs
+    // only after the previous admission settles. Resuming the Goal inside that
+    // window must stop the remaining links — otherwise the queue keeps draining
+    // into an active Goal after the user changed their mind.
+    const { actions } = createActions();
+    const firstAdmission = deferred<{ promptId: string }>();
+    vi.mocked(actions.submitPrompt)
+      .mockReturnValueOnce(firstAdmission.promise as never)
+      .mockResolvedValue({ promptId: 'second' } as never);
+    const { render } = mount('responding', actions, true, false, false, true);
+
+    act(() => latest.enqueuePrompt('first'));
+    act(() => latest.enqueuePrompt('second'));
+
+    render('idle', 'session-1', false, false, false);
+    expect(
+      vi.mocked(actions.submitPrompt).mock.calls.map((call) => call[0]),
+    ).toEqual(['first']);
+
+    // Goal resumed while the first admission is still in flight.
+    render('idle', 'session-1', false, false, true);
+    await act(async () => {
+      firstAdmission.resolve({ promptId: 'first' });
+    });
+
+    expect(
+      vi.mocked(actions.submitPrompt).mock.calls.map((call) => call[0]),
+    ).toEqual(['first']);
+    // The unsent row goes back to held, so the next inactive transition
+    // re-drains it rather than stranding it as 'submitting'.
+    expect(latest.queuedPrompts).toMatchObject([
+      { text: 'second', serverState: undefined },
+    ]);
+
+    render('idle', 'session-1', false, false, false);
+    expect(
+      vi.mocked(actions.submitPrompt).mock.calls.map((call) => call[0]),
+    ).toEqual(['first', 'second']);
+  });
+
   it('keeps locally held Goal follow-ups isolated across session switches', () => {
     const { actions } = createActions();
     const { render } = mount('responding', actions, true, false, false, true);

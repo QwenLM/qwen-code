@@ -1790,7 +1790,28 @@ export function useQueuedPrompts({
       let release: Promise<void> | undefined;
       for (const prompt of next) {
         if (!localIds.has(prompt.id)) continue;
-        const submit = () => submitPendingPrompt(prompt).catch(() => undefined);
+        // Re-check the hold per link, not once for the whole batch: the chain
+        // is built synchronously when the hold lifts, but each link runs only
+        // after the previous admission settles. A Goal resumed inside that
+        // window (or a write block) must stop the remaining links instead of
+        // POSTing them against an active Goal — they return to held, and the
+        // next inactive transition re-drains them in order.
+        const submit = () => {
+          if (holdQueuedPromptsLocallyRef.current || writeBlockedRef.current) {
+            // Inline rather than `setQueuedPromptFlags`: that callback is
+            // declared below this effect, so naming it in the dep array would
+            // read it before its initializer.
+            const reverted = queuedPromptsRef.current.map((item) =>
+              item.id === prompt.id
+                ? { ...item, serverState: undefined }
+                : item,
+            );
+            queuedPromptsRef.current = reverted;
+            setQueuedPrompts(reverted);
+            return Promise.resolve();
+          }
+          return submitPendingPrompt(prompt).catch(() => undefined);
+        };
         // The first release stays synchronous, so a single held prompt reaches
         // the daemon exactly as it did before.
         release = release ? release.then(submit) : submit();
