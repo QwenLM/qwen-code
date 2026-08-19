@@ -1128,6 +1128,62 @@ describe('ContentGenerationPipeline', () => {
       expect(apiCall.reasoning).toBeUndefined();
     });
 
+    it('never ships the max tier to a generic OpenAI-compatible endpoint end to end', async () => {
+      // Same failure as the DashScope case, one layer up: the tier is
+      // persisted, so an endpoint that rejects it 400s every later request
+      // too. Assert on the body the SDK is handed, through the real default
+      // provider.
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://llm.example.com/v1',
+        model: 'gpt-5.4',
+        // The shared mock sets samplingParams, and the pipeline ships those
+        // keys verbatim instead of injecting `reasoning` at all. Clear it so
+        // this exercises the injected-tier path the clamp is meant to cap.
+        samplingParams: undefined,
+        reasoning: { effort: 'max' },
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const realProvider = new DefaultOpenAICompatibleProvider(
+        mockContentGeneratorConfig,
+        {
+          getContentGeneratorConfig: () => ({ enableCacheControl: false }),
+        } as unknown as Config,
+      );
+      (mockProvider.buildRequest as Mock).mockImplementation((req) =>
+        realProvider.buildRequest(req, 'prompt-id'),
+      );
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Summarize' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(
+        {
+          model: 'gpt-5.4',
+          contents: [{ parts: [{ text: 'Summarize' }], role: 'user' }],
+          config: { thinkingConfig: { includeThoughts: true } },
+        } as GenerateContentParameters,
+        'prompt-id',
+      );
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.reasoning).toEqual({ effort: 'xhigh' });
+    });
+
     it('never ships the escape-hatch disable shape to a thinkingMandatory model end to end', async () => {
       // The provider canonicalizes the documented extra_body
       // `enable_thinking: false` escape hatch into the tiered family's
