@@ -32318,4 +32318,112 @@ describe('createAcpSessionBridge — child-resource refresh', () => {
       await bridge.shutdown();
     }
   });
+
+  it('caches a well-formed child heap report', async () => {
+    const report = {
+      peakOldGenerationBytes: 900,
+      peakLiveSetBytes: 300,
+      peakTotalHeapBytes: 1_200,
+      majorGcCount: 4,
+      majorGcMs: 12.5,
+      unclassifiedSpaceNames: [],
+    };
+    const handle = makeChannel({
+      extMethodImpl: async (method) =>
+        method === SERVE_STATUS_EXT_METHODS.workspaceResource
+          ? { rssBytes: 1, cpuPercent: 2, heap: report }
+          : {},
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    try {
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await bridge.refreshChildResource!();
+      expect(bridge.getChildResourceSnapshot!()!.heap).toEqual(report);
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
+  it('leaves heap absent rather than zeroed when the child reports none', async () => {
+    // A child spawned outside the daemon sends no heap block. Absent and
+    // zeroed are different claims, and only the second would read as "this
+    // child needed no old generation".
+    const handle = makeChannel({
+      extMethodImpl: async (method) =>
+        method === SERVE_STATUS_EXT_METHODS.workspaceResource
+          ? { rssBytes: 1, cpuPercent: 2 }
+          : {},
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    try {
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await bridge.refreshChildResource!();
+      const snapshot = bridge.getChildResourceSnapshot!();
+      expect(snapshot).toMatchObject({ rssBytes: 1 });
+      expect(snapshot!.heap).toBeUndefined();
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
+  it('rejects a malformed heap report whole, keeping the last good one', async () => {
+    // Rejected as a unit rather than field-by-field: these figures decide
+    // whether a child fits a heap ceiling, and a report with some fields
+    // defaulted would understate a peak while looking complete.
+    const good = {
+      peakOldGenerationBytes: 900,
+      peakLiveSetBytes: 300,
+      peakTotalHeapBytes: 1_200,
+      majorGcCount: 4,
+      majorGcMs: 12.5,
+      unclassifiedSpaceNames: [],
+    };
+    // `typeof NaN === 'number'`, so a type check alone would admit the first
+    // two. A negative peak is a broken sender, not a degraded reading.
+    const malformed: unknown[] = [
+      { ...good, peakOldGenerationBytes: Number.NaN },
+      { ...good, peakLiveSetBytes: Number.POSITIVE_INFINITY },
+      { ...good, peakTotalHeapBytes: -1 },
+      { ...good, majorGcCount: '4' },
+      { ...good, unclassifiedSpaceNames: 'old_space' },
+      { ...good, unclassifiedSpaceNames: [1, 2] },
+      // The daemon caches this array for the child's lifetime and the child
+      // chooses its contents, so it is bounded on both axes.
+      {
+        ...good,
+        unclassifiedSpaceNames: Array.from({ length: 65 }, (_, i) => `s${i}`),
+      },
+      { ...good, unclassifiedSpaceNames: ['x'.repeat(65)] },
+      (() => {
+        const { majorGcMs: _omitted, ...rest } = good;
+        return rest;
+      })(),
+      'not an object',
+      null,
+    ];
+
+    let payload: unknown = good;
+    const handle = makeChannel({
+      extMethodImpl: async (method) =>
+        method === SERVE_STATUS_EXT_METHODS.workspaceResource
+          ? { rssBytes: 1, cpuPercent: 2, heap: payload }
+          : {},
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    try {
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await bridge.refreshChildResource!();
+      expect(bridge.getChildResourceSnapshot!()!.heap).toEqual(good);
+
+      for (const bad of malformed) {
+        payload = bad;
+        await bridge.refreshChildResource!();
+        // Still the last good report: high-water marks are cumulative and the
+        // child cannot resend history, so clearing them would lose it.
+        expect(bridge.getChildResourceSnapshot!()!.heap).toEqual(good);
+      }
+    } finally {
+      await bridge.shutdown();
+    }
+  });
 });
