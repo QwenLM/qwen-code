@@ -850,6 +850,8 @@ vi.mock('./session/Session.js', () => {
   SessionMock.prototype.collectActiveWorkHolds = () => [];
   return {
     Session: SessionMock,
+    // Awaited by every session creation before the session is published.
+    registerCreateSubSessionTool: vi.fn().mockResolvedValue(undefined),
     buildAvailableCommandsSnapshot: vi.fn().mockResolvedValue({
       availableCommands: [],
       availableSkills: [],
@@ -961,7 +963,11 @@ import {
 import { loadCliConfig, SessionIdConflictError } from '../config/config.js';
 import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js';
 import { AcpFileSystemService } from './service/filesystem.js';
-import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
+import {
+  Session,
+  buildAvailableCommandsSnapshot,
+  registerCreateSubSessionTool,
+} from './session/Session.js';
 import {
   SERVE_STATUS_EXT_METHODS,
   SERVE_CONTROL_EXT_METHODS,
@@ -4256,6 +4262,24 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await running.agent.newSession({ cwd: '/tmp', mcpServers: [] });
     return { ...running, sessionId };
   }
+
+  it('declares create_sub_session on the session it creates', async () => {
+    const innerConfig = await setupSessionMocks('session-sub-session-tool');
+    const { agent, agentPromise } = await bootAcpAgent();
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    // This session's registry was built by `config.initialize()`, before the
+    // Session wired the sub-session spawner, so the core-side gate in
+    // `createToolRegistry` cannot cover it — the daemon declares it here or
+    // nowhere.
+    expect(vi.mocked(registerCreateSubSessionTool).mock.calls[0]?.[0]).toBe(
+      innerConfig as unknown as Config,
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
 
   it('treats an idle session cancellation as a no-op', async () => {
     await setupSessionMocks('session-idle-cancel');

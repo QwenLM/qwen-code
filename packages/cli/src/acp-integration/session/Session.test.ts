@@ -16,6 +16,7 @@ import {
   computeInitialTurnFromHistory,
   fireSessionPermissionDeniedForAutoMode,
   LOOP_DETECTED_TURN_ERROR_MESSAGE,
+  registerCreateSubSessionTool,
   resolveExistingFile,
   resolveHomeLoopResolverRoots,
   Session,
@@ -2013,11 +2014,7 @@ describe('Session', () => {
     await expect(session.enableLiveScreenContext()).rejects.toThrow(
       /reserved for the trusted Live Appshot channel/u,
     );
-    // Scoped to the reserved tool: the constructor legitimately registers
-    // other tools (e.g. create_sub_session) before this call.
-    expect(mockToolRegistry.registerTool).not.toHaveBeenCalledWith(
-      expect.objectContaining({ name: CAPTURE_SCREEN_CONTEXT_TOOL_NAME }),
-    );
+    expect(mockToolRegistry.registerTool).not.toHaveBeenCalled();
   });
 
   it('attributes a delayed title notification to the persisted record session', () => {
@@ -6734,10 +6731,32 @@ describe('Session', () => {
       );
     });
 
-    it('registers the create_sub_session tool alongside the spawner', () => {
-      // The tool is daemon-only: it must exist exactly where the spawner is
-      // wired so the model can call it, and nowhere else.
+    it('registers the create_sub_session tool on the daemon session registry', async () => {
+      // The tool is daemon-only: it must exist on every session the daemon
+      // creates so the model can call it, and nowhere else.
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+
+      await registerCreateSubSessionTool(mockConfig);
+
       expect(mockToolRegistry.registerTool).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'create_sub_session' }),
+      );
+    });
+
+    it('skips create_sub_session when the permission manager disables it', async () => {
+      // A `tools.core` allowlist that omits the tool, or a whole-tool deny
+      // rule, must keep it out of the declarations too — advertising a tool
+      // whose every call ends in EXECUTION_DENIED is the pollution the
+      // daemon-only gate exists to remove.
+      const isToolEnabled = vi.fn().mockResolvedValue(false);
+      mockConfig.getPermissionManager = vi
+        .fn()
+        .mockReturnValue({ isToolEnabled });
+
+      await registerCreateSubSessionTool(mockConfig);
+
+      expect(isToolEnabled).toHaveBeenCalledWith('create_sub_session');
+      expect(mockToolRegistry.registerTool).not.toHaveBeenCalledWith(
         expect.objectContaining({ name: 'create_sub_session' }),
       );
     });

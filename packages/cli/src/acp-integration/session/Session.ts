@@ -1580,6 +1580,34 @@ function collectMcpServerMentionRefs(
   }
 }
 
+/**
+ * Register `create_sub_session` on a daemon session's tool registry — the one
+ * registry the core-side gate in `Config.createToolRegistry` cannot cover,
+ * because `config.initialize()` builds it before the {@link Session}
+ * constructor wires the sub-session spawner. Registries built later (sub-agent
+ * / override rebuilds) pick the tool up from that gate instead;
+ * `copyDiscoveredToolsFrom` never carries built-ins.
+ *
+ * Applies the same `PermissionManager.isToolEnabled()` check that gate does, so
+ * an operator's `tools.core` allowlist or a whole-tool deny rule keeps the tool
+ * out of the model's action space instead of only failing at execution. Being
+ * session-scoped, the tool is absent from the workspace tools inventory the
+ * daemon serves from its bootstrap registry — that panel lists workspace tools,
+ * and a daemon-only tool that exists per session is deliberately not one.
+ */
+export async function registerCreateSubSessionTool(
+  config: Config,
+): Promise<void> {
+  const permissionManager = config.getPermissionManager();
+  if (
+    permissionManager &&
+    !(await permissionManager.isToolEnabled(ToolNames.CREATE_SUB_SESSION))
+  ) {
+    return;
+  }
+  config.getToolRegistry().registerTool(new CreateSubSessionTool(config));
+}
+
 export interface AvailableCommandsSnapshot {
   availableCommands: AvailableCommand[];
   availableSkills?: string[];
@@ -2843,8 +2871,8 @@ export class Session implements SessionContext {
   /**
    * Wire the sub-session spawner to the daemon over the ACP `extMethod` request
    * channel. The `create_sub_session` tool (model-initiated) is its caller. ONLY
-   * the ACP/daemon session wires it — and the tool itself is registered here as
-   * well, so in interactive TUI / headless, where no bridge exists, the tool
+   * the ACP/daemon session wires it, so in interactive TUI / headless, where no
+   * bridge exists, {@link registerCreateSubSessionTool} never runs and the tool
    * is simply absent from the model's action space instead of being declared
    * and forever unable to run.
    *
@@ -2885,15 +2913,6 @@ export class Session implements SessionContext {
           : {}),
       };
     });
-    // Register the tool exactly where the spawner is wired: the registry is
-    // session-scoped, so every daemon session that can spawn sub-sessions
-    // declares the tool, and no non-daemon session ever does. This registry was
-    // already built by `config.initialize()`, before the spawner above existed;
-    // registries built later (sub-agent / override rebuilds) instead pick the
-    // tool up from `createToolRegistry`, which gates on the wired spawner.
-    this.config
-      .getToolRegistry()
-      .registerTool(new CreateSubSessionTool(this.config));
   }
 
   async enableLiveScreenContext(): Promise<void> {
