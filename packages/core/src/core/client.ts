@@ -662,6 +662,16 @@ export class GeminiClient {
   }
 
   /**
+   * Walk-only accessor for the handled tool-call id → (name, args)
+   * fingerprint map used by duplicate provider-id replay detection. Same
+   * no-clone rationale as {@link getHistoryFunctionResponseIds}. See
+   * `GeminiChat.getHistoryToolCallFingerprints` for the implementation.
+   */
+  getHistoryToolCallFingerprints(): Map<string, string> {
+    return this.getChat().getHistoryToolCallFingerprints();
+  }
+
+  /**
    * Pop orphaned trailing user entries from the in-memory chat history.
    * Used by:
    *   - The Retry submit path (sendMessageStream below), which drops a

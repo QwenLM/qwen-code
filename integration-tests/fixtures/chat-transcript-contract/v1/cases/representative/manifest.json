@@ -1,0 +1,32 @@
+{
+  "fixtureVersion": 1,
+  "name": "representative",
+  "generatorVersion": "chat-transcript-prevalidation-evidence-v1",
+  "sources": ["daemon", "acp", "chat-records"],
+  "consumers": ["web", "tauri", "vscode", "html"],
+  "capabilities": [
+    "semantic-projection",
+    "runtime-raw-compatibility",
+    "stable-identity-prepend-probe",
+    "export-document-schema",
+    "two-mr-migration-gate"
+  ],
+  "complete": true,
+  "expectedDiagnostics": [
+    "direct_daemon_unstable_identity",
+    "acp_unstable_identity"
+  ],
+  "normalizedFields": ["clientReceivedAt", "createdAt", "updatedAt"],
+  "hashes": {
+    "capability-matrix.md": "2f8925d7343b47f70ee66df15939ab5d1c1d2ee58dfd291ccaa3360d08a124ca",
+    "cases/representative/daemon-events.jsonl": "196d6d03c8e71545123a2be340f41f9ad128fe9a53ddb934511858c89e936041",
+    "cases/representative/acp-session-updates.jsonl": "7c7fc96fcf3768c8595ce21d069cb7e7cabccc2d5359596e2c442ff7df887a34",
+    "cases/representative/chat-records.jsonl": "b66abea928c3c65cdedc4ca1c455d86b1b0a46b90e2a6a186afefaa89e87db0e",
+    "cases/representative/expected-model.json": "c0380aac16a7d85e855148fff95959d58f9662ff4589b3a230452ef5ada7410e",
+    "cases/representative/expected-render-items.json": "d51acc8a0b6282898fec49f1870c0e78c901af5136b9866da3da874722d1db7b",
+    "cases/representative/expected-export.json": "964a55e8755c458d83d1932b7e5f3e9d8167894ac9f49cf5fdb097ad773e5672",
+    "cases/representative/expected-gate.json": "d644198a43a35b765672c407966ec99abedadd8c2de00a587e5e5d983bdd9acf",
+    "schema/export-transcript-document-v1.schema.json": "1c0a48d006d2906d6e527dd131c00ee67ac564028f8ffef7bf04407a9592ae9f",
+    "schema/manifest.schema.json": "c6c72f87a9fafff94ba62cd031259a6fdf7235277a8638be21aa26cc3366f3fa"
+  }
+}

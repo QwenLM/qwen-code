@@ -36,6 +36,7 @@ import {
   ToolErrorType,
   ToolConfirmationOutcome,
   getRuntimeContentGenerator,
+  getToolCallFingerprint,
   runWithRuntimeContentGenerator,
 } from '@qwen-code/qwen-code-core';
 import type { Part, PartListUnion } from '@google/genai';
@@ -76,6 +77,11 @@ const MockedGeminiClientClass = vi.hoisted(() =>
     this.getHistoryFunctionResponseIds = vi
       .fn()
       .mockReturnValue(new Set<string>());
+    // Stream-side duplicate provider-id replay detection consults the
+    // fingerprint map; default to empty (no handled calls in history).
+    this.getHistoryToolCallFingerprints = vi
+      .fn()
+      .mockReturnValue(new Map<string, string>());
     this.getChatRecordingService = vi.fn().mockReturnValue({
       recordThought: vi.fn(),
       initialize: vi.fn(),
@@ -5024,7 +5030,10 @@ describe('useGeminiStream', () => {
               callId: 'tool-dup',
               providerCallId: 'tool-dup',
               name: 'shell',
-              args: { command: 'echo second' },
+              // Exact replay of the first call (same args): a
+              // different-args id collision would be a fresh call and
+              // no longer receives a duplicate response.
+              args: { command: 'echo first' },
               isClientInitiated: false,
               prompt_id: 'prompt-tui-dup',
             },
@@ -5166,9 +5175,16 @@ describe('useGeminiStream', () => {
 
   it('submits a synthetic response for history-paired duplicate provider ids without scheduling', async () => {
     const client = new MockedGeminiClientClass(mockConfig);
-    client.getHistoryFunctionResponseIds = vi
+    client.getHistoryToolCallFingerprints = vi
       .fn()
-      .mockReturnValue(new Set(['tool-history']));
+      .mockReturnValue(
+        new Map([
+          [
+            'tool-history',
+            getToolCallFingerprint('shell', { command: 'echo duplicate' }),
+          ],
+        ]),
+      );
 
     mockSendMessageStream
       .mockReturnValueOnce(
@@ -5211,11 +5227,66 @@ describe('useGeminiStream', () => {
     expect(client.recordCompletedToolCall).not.toHaveBeenCalled();
   });
 
+  it('schedules an id-colliding tool call whose args differ from the handled call', async () => {
+    const client = new MockedGeminiClientClass(mockConfig);
+    client.getHistoryToolCallFingerprints = vi
+      .fn()
+      .mockReturnValue(
+        new Map([
+          [
+            'tool-history',
+            getToolCallFingerprint('shell', { command: 'echo duplicate' }),
+          ],
+        ]),
+      );
+
+    mockSendMessageStream.mockReturnValueOnce(
+      (async function* () {
+        yield {
+          type: ServerGeminiEventType.ToolCallRequest,
+          value: {
+            callId: 'tool-history__qwen_dup_2',
+            providerCallId: 'tool-history',
+            name: 'shell',
+            args: { command: 'echo fresh command' },
+            isClientInitiated: false,
+            prompt_id: 'prompt-tui-collision',
+          },
+        };
+      })(),
+    );
+
+    const { result } = renderTestHook([], client);
+
+    await act(async () => {
+      await result.current.submitQuery('run shell');
+    });
+
+    await waitFor(() => {
+      expect(mockScheduleToolCalls).toHaveBeenCalledTimes(1);
+    });
+    expect(mockScheduleToolCalls.mock.calls[0][0]).toEqual([
+      expect.objectContaining({
+        callId: 'tool-history__qwen_dup_2',
+        providerCallId: 'tool-history',
+        args: { command: 'echo fresh command' },
+      }),
+    ]);
+    expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+  });
+
   it('drops repeated history-paired duplicate provider ids after the first synthetic response', async () => {
     const client = new MockedGeminiClientClass(mockConfig);
-    client.getHistoryFunctionResponseIds = vi
+    client.getHistoryToolCallFingerprints = vi
       .fn()
-      .mockReturnValue(new Set(['tool-history']));
+      .mockReturnValue(
+        new Map([
+          [
+            'tool-history',
+            getToolCallFingerprint('shell', { command: 'echo duplicate' }),
+          ],
+        ]),
+      );
 
     mockSendMessageStream
       .mockReturnValueOnce(
@@ -5241,7 +5312,9 @@ describe('useGeminiStream', () => {
               callId: 'tool-history',
               providerCallId: 'tool-history',
               name: 'shell',
-              args: { command: 'echo duplicate again' },
+              // Exact replay (same args as the handled call): only a
+              // replay trips the repeated-duplicate circuit breaker.
+              args: { command: 'echo duplicate' },
               isClientInitiated: false,
               prompt_id: 'prompt-tui-history-loop',
             },

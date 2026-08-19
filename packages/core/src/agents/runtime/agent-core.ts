@@ -78,7 +78,10 @@ import { GeminiChat } from '../../core/geminiChat.js';
 import { assembleSystemPrompt } from '../../core/prompts.js';
 import {
   dedupeToolCallsById,
+  getFunctionCallFingerprint,
   getProviderToolCallId,
+  isReplayOfHandledToolCall,
+  recordHandledToolCall,
 } from '../../core/toolCallIdUtils.js';
 import type {
   PromptConfig,
@@ -869,7 +872,11 @@ export class AgentCore {
     let turnCounter = 0;
     let finalText = '';
     let terminateMode: AgentTerminateMode | null = null;
-    const handledProviderToolCallIds = chat.getHistoryFunctionResponseIds();
+    // Fresh map per call today; copy so a future cached accessor cannot
+    // turn this loop's cross-round recording into shared-state mutation.
+    const handledToolCallFingerprints = new Map(
+      chat.getHistoryToolCallFingerprints(),
+    );
     // Scoped to this reasoning loop. A second duplicate response for the same
     // provider id would keep deterministic providers in a tool-result loop.
     const duplicateProviderToolCallResponseIds = new Set<string>();
@@ -1138,7 +1145,7 @@ export class AgentCore {
             toolsList,
             currentResponseId,
             wasOutputTruncated,
-            handledProviderToolCallIds,
+            handledToolCallFingerprints,
             duplicateProviderToolCallResponseIds,
           );
           if (toolCallResult.repeatedDuplicateProviderToolCall) {
@@ -1546,7 +1553,7 @@ export class AgentCore {
     toolsList: FunctionDeclaration[],
     responseId?: string,
     wasOutputTruncated = false,
-    handledProviderToolCallIds = new Set<string>(),
+    handledToolCallFingerprints = new Map<string, string>(),
     duplicateProviderToolCallResponseIds = new Set<string>(),
   ): Promise<{
     messages: Content[];
@@ -1576,10 +1583,20 @@ export class AgentCore {
     // forks keep the parent's declaration prefix for cache sharing while
     // optionally narrowing which declared tools may actually run.
     const declaredToolNames = new Set(toolsList.map((t) => t.name));
+    const isReplayOfHandledCall = (fc: FunctionCall): boolean => {
+      const providerCallId = getProviderToolCallId(fc) ?? fc.id;
+      return providerCallId
+        ? isReplayOfHandledToolCall(
+            handledToolCallFingerprints,
+            providerCallId,
+            getFunctionCallFingerprint(fc),
+          )
+        : false;
+    };
     const repeatedDuplicateCall = findRepeatedDuplicateProviderToolCall(
       uniqueFunctionCalls,
       (fc) => getProviderToolCallId(fc) ?? fc.id,
-      handledProviderToolCallIds,
+      isReplayOfHandledCall,
       duplicateProviderToolCallResponseIds,
     );
     if (repeatedDuplicateCall) {
@@ -1648,7 +1665,7 @@ export class AgentCore {
       }
 
       if (providerCallId) {
-        if (handledProviderToolCallIds.has(providerCallId)) {
+        if (isReplayOfHandledCall(fc)) {
           markDuplicateProviderToolCallResponseSent(
             providerCallId,
             duplicateProviderToolCallResponseIds,
@@ -1694,7 +1711,11 @@ export class AgentCore {
           });
           continue;
         }
-        handledProviderToolCallIds.add(providerCallId);
+        recordHandledToolCall(
+          handledToolCallFingerprints,
+          providerCallId,
+          getFunctionCallFingerprint(fc),
+        );
       }
       authorizedCalls.push(fc);
     }

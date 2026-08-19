@@ -530,6 +530,12 @@ describe('AgentTool', () => {
       expect(properties.properties.run_in_background.description).toContain(
         'Nested agents run in the foreground unless run_in_background is explicitly true',
       );
+      expect(properties.properties.run_in_background.description).toContain(
+        'Named teammates are always concurrent',
+      );
+      expect(properties.properties.run_in_background.description).toContain(
+        'an explicit false is rejected',
+      );
     });
 
     it('declares the optional todo association', () => {
@@ -662,6 +668,12 @@ describe('AgentTool', () => {
       };
 
       expect(parameters.properties.name?.description).toContain('active team');
+      expect(parameters.properties.name?.description).toContain(
+        'always run concurrently',
+      );
+      expect(parameters.properties.name?.description).toContain(
+        'run_in_background: false instead',
+      );
     });
 
     it('exposes plan_mode_required only when teams are enabled', async () => {
@@ -817,6 +829,46 @@ describe('AgentTool', () => {
           model: 'high',
         }),
       ).toMatch(/not supported for a named teammate/i);
+    });
+
+    it('rejects run_in_background: false for a named teammate with an active team', () => {
+      vi.mocked(config.getTeamManager).mockReturnValue({
+        spawnTeammate: vi.fn(),
+      } as never);
+
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          name: 'helper',
+          run_in_background: false,
+        }),
+      ).toMatch(/cannot be false for a named teammate/i);
+    });
+
+    it('accepts run_in_background: true for a named teammate', () => {
+      vi.mocked(config.getTeamManager).mockReturnValue({
+        spawnTeammate: vi.fn(),
+      } as never);
+
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          name: 'helper',
+          run_in_background: true,
+        }),
+      ).toBeNull();
+    });
+
+    it('accepts run_in_background: false with a name when no team is active', () => {
+      // Without an active team the name falls through to a regular agent,
+      // where the foreground request stays valid.
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          name: 'helper',
+          run_in_background: false,
+        }),
+      ).toBeNull();
     });
 
     it.each(['all', '1', '12'] as const)(
@@ -1594,6 +1646,28 @@ describe('AgentTool', () => {
 
       expect(partToString(result.llmContent)).toMatch(
         /isolation.*named teammate/i,
+      );
+      expect(spawnTeammate).not.toHaveBeenCalled();
+    });
+
+    it('blocks run_in_background: false if a team becomes active after validation', async () => {
+      const spawnTeammate = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(config.getTeamManager).mockReturnValue({
+        spawnTeammate,
+      } as never);
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Search files',
+        prompt: 'Find the config',
+        name: 'searcher',
+        run_in_background: false,
+      });
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(partToString(result.llmContent)).toMatch(
+        /cannot be false for a named teammate/i,
       );
       expect(spawnTeammate).not.toHaveBeenCalled();
     });

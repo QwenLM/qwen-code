@@ -34,6 +34,7 @@ import {
   SendMessageType,
   SYSTEM_REMINDER_OPEN,
   LoopType,
+  getToolCallFingerprint,
   CronScheduler,
   AUTONOMOUS_SENTINEL_CRON,
   AUTONOMOUS_SENTINEL_DYNAMIC,
@@ -252,7 +253,7 @@ describe('runNonInteractive', () => {
     getChatRecordingService: Mock;
     getChat: Mock;
     stripOrphanedUserEntriesFromHistory: Mock;
-    getHistoryFunctionResponseIds: Mock;
+    getHistoryToolCallFingerprints: Mock;
     consumePendingMemoryTaskPromises: Mock;
     recordCompletedToolCall: Mock;
     addHistory: Mock;
@@ -330,7 +331,7 @@ describe('runNonInteractive', () => {
         recordToolCalls: vi.fn(),
       })),
       getChat: vi.fn(() => ({})),
-      getHistoryFunctionResponseIds: vi.fn(() => new Set<string>()),
+      getHistoryToolCallFingerprints: vi.fn(() => new Map<string, string>()),
     };
 
     let currentModel = 'test-model';
@@ -3333,8 +3334,10 @@ describe('runNonInteractive', () => {
 
   it('should stop repeated duplicate provider tool-call responses from drain items', async () => {
     setupMetricsMock();
-    mockGeminiClient.getHistoryFunctionResponseIds.mockReturnValue(
-      new Set(['tool-drain']),
+    mockGeminiClient.getHistoryToolCallFingerprints.mockReturnValue(
+      new Map([
+        ['tool-drain', getToolCallFingerprint('testTool', { arg1: 'value1' })],
+      ]),
     );
 
     const notificationXml =
@@ -3425,8 +3428,13 @@ describe('runNonInteractive', () => {
 
   it('should ignore duplicate provider tool-call ids already present in chat history', async () => {
     setupMetricsMock();
-    mockGeminiClient.getHistoryFunctionResponseIds.mockReturnValue(
-      new Set(['tool-history']),
+    mockGeminiClient.getHistoryToolCallFingerprints.mockReturnValue(
+      new Map([
+        [
+          'tool-history',
+          getToolCallFingerprint('testTool', { arg1: 'value1' }),
+        ],
+      ]),
     );
     const toolCallEvent: ServerGeminiStreamEvent = {
       type: GeminiEventType.ToolCallRequest,
@@ -3473,6 +3481,74 @@ describe('runNonInteractive', () => {
     expect(duplicateParts[0].functionResponse?.response?.['error']).toContain(
       'Duplicate provider tool call id "tool-history"',
     );
+    expect(processStdoutSpy).toHaveBeenCalledWith('Final answer\n');
+  });
+
+  it('executes an id-colliding tool call whose args differ from the handled call', async () => {
+    setupMetricsMock();
+    mockGeminiClient.getHistoryToolCallFingerprints.mockReturnValue(
+      new Map([
+        [
+          'tool-history',
+          getToolCallFingerprint('testTool', { arg1: 'value1' }),
+        ],
+      ]),
+    );
+    const toolCallEvent: ServerGeminiStreamEvent = {
+      type: GeminiEventType.ToolCallRequest,
+      value: {
+        callId: 'tool-history__qwen_dup_2',
+        providerCallId: 'tool-history',
+        name: 'testTool',
+        args: { arg1: 'value2' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-id-collision',
+      },
+    };
+    mockCoreExecuteToolCall.mockResolvedValueOnce({
+      callId: 'tool-history__qwen_dup_2',
+      responseParts: [
+        {
+          functionResponse: {
+            id: 'tool-history__qwen_dup_2',
+            name: 'testTool',
+            response: { output: 'fresh result' },
+          },
+        },
+      ],
+      resultDisplay: 'fresh result',
+      error: undefined,
+      errorType: undefined,
+    });
+
+    mockGeminiClient.sendMessageStream
+      .mockReturnValueOnce(createStreamFromEvents([toolCallEvent]))
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.Content, value: 'Final answer' },
+          {
+            type: GeminiEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 10 },
+            },
+          },
+        ]),
+      );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Use a tool',
+      'prompt-id-collision',
+    );
+
+    expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(1);
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(2);
+    const resultParts = mockGeminiClient.sendMessageStream.mock.calls[1][0];
+    expect(
+      JSON.stringify(resultParts[0].functionResponse?.response),
+    ).not.toContain('Duplicate provider tool call id');
     expect(processStdoutSpy).toHaveBeenCalledWith('Final answer\n');
   });
 
@@ -7382,7 +7458,10 @@ describe('runNonInteractive', () => {
           callId: 'tool-side',
           providerCallId: 'tool-side',
           name: 'side_effect_tool',
-          args: { path: '/tmp/second' },
+          // Same args as the first call: an exact replay of the handled
+          // provider id. A different-args collision would be a fresh call
+          // and no longer receives a duplicate response.
+          args: { path: '/tmp/first' },
           isClientInitiated: false,
           prompt_id: 'prompt-id-dup-structured',
         },

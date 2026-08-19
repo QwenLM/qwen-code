@@ -228,7 +228,12 @@ function buildApiErrorReportContext(chat: GeminiChat, req: PartListUnion) {
 }
 
 function duplicateProviderToolCallMessage(providerCallId: string): string {
-  return `Duplicate provider tool call id "${providerCallId}" was already handled. The duplicate tool call was ignored and not executed again.`;
+  return (
+    `Duplicate provider tool call id "${providerCallId}" was already handled. ` +
+    `The duplicate tool call was ignored and not executed again. If you ` +
+    `intended to run this tool again, re-issue the call with a new unique ` +
+    `tool-call id (or explicitly different arguments).`
+  );
 }
 
 export function createDuplicateProviderToolCallResponse(
@@ -261,16 +266,25 @@ export function markDuplicateProviderToolCallResponseSent(
   duplicateProviderToolCallResponseIds.add(providerCallId);
 }
 
+/**
+ * Finds the first tool call in `items` that must trip the repeated-duplicate
+ * circuit breaker. `isReplayOfHandled` decides whether an item replays an
+ * already-handled call (same provider id AND same (name, args) fingerprint
+ * — see `isReplayOfHandledToolCall`); an id collision with different args is
+ * not a replay and never trips the breaker. A replay trips it once a
+ * synthetic duplicate response was already sent for its provider id, or when
+ * the same handled id replays more than once within one batch.
+ */
 export function findRepeatedDuplicateProviderToolCall<T>(
   items: readonly T[],
   getProviderCallId: (item: T) => string | undefined,
-  handledProviderToolCallIds: ReadonlySet<string>,
+  isReplayOfHandled: (item: T) => boolean,
   duplicateProviderToolCallResponseIds: ReadonlySet<string>,
 ): T | undefined {
   const repeatedProviderIds = new Map<string, number>();
   for (const item of items) {
     const providerCallId = getProviderCallId(item);
-    if (!providerCallId || !handledProviderToolCallIds.has(providerCallId)) {
+    if (!providerCallId || !isReplayOfHandled(item)) {
       continue;
     }
     repeatedProviderIds.set(
@@ -283,7 +297,7 @@ export function findRepeatedDuplicateProviderToolCall<T>(
     const providerCallId = getProviderCallId(item);
     return (
       providerCallId !== undefined &&
-      handledProviderToolCallIds.has(providerCallId) &&
+      isReplayOfHandled(item) &&
       (duplicateProviderToolCallResponseIds.has(providerCallId) ||
         (repeatedProviderIds.get(providerCallId) ?? 0) > 1)
     );
