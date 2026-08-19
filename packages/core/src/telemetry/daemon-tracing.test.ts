@@ -17,6 +17,7 @@ import {
   type Span,
   type Tracer,
 } from '@opentelemetry/api';
+import { W3CTraceContextPropagator } from '@opentelemetry/core';
 
 vi.mock('./sdk.js', () => ({
   isTelemetrySdkInitialized: () => true,
@@ -32,11 +33,18 @@ import {
   hashDaemonWorkspace,
   injectDaemonTraceContext,
   runWithDaemonTelemetryContext,
+  setDaemonFallbackPropagator,
   withDaemonSpan,
   withDaemonRequestSpan,
   type DaemonRequestSpanOptions,
 } from './daemon-tracing.js';
 import { getSessionIdFromContext } from './session-context.js';
+
+// Mirror the post-init state: `sdk-impl.ts` injects the W3C fallback
+// propagator once the lazy SDK chunk assembles successfully (this suite
+// mocks `isTelemetrySdkInitialized` as true above, so the holder must be
+// populated the same way the real SDK would).
+setDaemonFallbackPropagator(new W3CTraceContextPropagator());
 
 // vitest transpiles without type-checking: this compile-time assertion keeps
 // the optional parentContext field from silently disappearing (only `tsc`
@@ -215,6 +223,28 @@ describe('daemon-tracing', () => {
     expect(
       extractDaemonHttpTraceContext({
         traceparent: `00-${'3'.repeat(32)}-${'4'.repeat(16)}-01-extra`,
+      }),
+    ).toBeUndefined();
+  });
+
+  it('yields no parent context until the SDK chunk injects the fallback propagator', async () => {
+    // Fresh module registry: daemon-tracing without the sdk-impl injection.
+    // The global propagator stays a no-op in tests (nothing registers one),
+    // so a valid traceparent resolves to nothing while the fallback holder
+    // is empty — the telemetry-off / SDK-chunk-not-loaded state.
+    vi.resetModules();
+    const fresh = await import('./daemon-tracing.js');
+
+    expect(
+      fresh.extractDaemonHttpTraceContext({
+        traceparent: `00-${'3'.repeat(32)}-${'4'.repeat(16)}-01`,
+      }),
+    ).toBeUndefined();
+    expect(
+      fresh.extractDaemonTraceContext({
+        _meta: {
+          [DAEMON_TRACEPARENT_META_KEY]: `00-${'1'.repeat(32)}-${'2'.repeat(16)}-01`,
+        },
       }),
     ).toBeUndefined();
   });

@@ -216,7 +216,10 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
     });
     expect(coreMocks.emitDaemonLog).toHaveBeenCalledWith(
       'Rejected invalid inbound traceparent header.',
-      { 'http.route': 'GET /daemon/status' },
+      {
+        'http.route': 'GET /daemon/status',
+        'http.request.header.traceparent': 'junk-header',
+      },
       {
         eventName: 'qwen-code.daemon.traceparent.invalid',
         severityNumber: 5,
@@ -225,6 +228,56 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
     const options = coreMocks.withDaemonRequestSpan.mock
       .calls[0]?.[0] as Record<string, unknown>;
     expect('parentContext' in options).toBe(false);
+  });
+
+  it('truncates the rejected traceparent header value in the breadcrumb', () => {
+    const longHeader = 'x'.repeat(300);
+    const res = mockRes(200);
+
+    daemonTelemetryMiddleware(() => '/ws')(
+      mockReq('GET', '/daemon/status', { traceparent: longHeader }),
+      res,
+      vi.fn() as unknown as NextFunction,
+    );
+    res.emit('finish');
+
+    expect(coreMocks.emitDaemonLog).toHaveBeenCalledWith(
+      'Rejected invalid inbound traceparent header.',
+      expect.objectContaining({
+        'http.request.header.traceparent': 'x'.repeat(128),
+      }),
+      expect.objectContaining({
+        eventName: 'qwen-code.daemon.traceparent.invalid',
+      }),
+    );
+  });
+
+  it('fails closed and settles the request when header extraction throws', () => {
+    coreMocks.extractDaemonHttpTraceContext.mockImplementationOnce(() => {
+      throw new Error('extract failed');
+    });
+    const res = mockRes(200);
+    const next = vi.fn() as unknown as NextFunction;
+
+    expect(() =>
+      daemonTelemetryMiddleware(() => '/ws')(
+        mockReq('GET', '/daemon/status', {
+          traceparent: `00-${'3'.repeat(32)}-${'4'.repeat(16)}-01`,
+        }),
+        res,
+        next,
+      ),
+    ).not.toThrow();
+    res.emit('finish');
+
+    // The request still settles normally through the telemetry pipeline.
+    expect(coreMocks.recordDaemonHttpRequest).toHaveBeenCalledTimes(1);
+    const options = coreMocks.withDaemonRequestSpan.mock
+      .calls[0]?.[0] as Record<string, unknown>;
+    expect('parentContext' in options).toBe(false);
+    // Fail-closed extraction counts as rejected, so the breadcrumb still
+    // fires for the present-but-unparsed header.
+    expect(coreMocks.emitDaemonLog).toHaveBeenCalledTimes(1);
   });
 
   it('does not log when extraction succeeds, no header, or an array header is sent', () => {

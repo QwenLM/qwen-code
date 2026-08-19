@@ -763,10 +763,16 @@ export function daemonTelemetryMiddleware(
       ) {
         // Leave a breadcrumb when a present-but-invalid header is rejected,
         // so a broken cross-service join is diagnosable from daemon logs
-        // alone instead of requiring a request replay.
+        // alone instead of requiring a request replay. Traceparent carries
+        // only trace-id/span-id/flags — no user content — so recording the
+        // rejected value (truncated) is privacy-safe and shows *why* the
+        // join failed.
         emitDaemonLog(
           'Rejected invalid inbound traceparent header.',
-          { 'http.route': route.route },
+          {
+            'http.route': route.route,
+            'http.request.header.traceparent': inboundTraceparent.slice(0, 128),
+          },
           {
             eventName: 'qwen-code.daemon.traceparent.invalid',
             severityNumber: 5, // SeverityNumber.DEBUG

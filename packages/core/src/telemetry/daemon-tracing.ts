@@ -16,9 +16,9 @@ import {
   TraceFlags,
   type Context,
   type Span,
+  type TextMapPropagator,
 } from '@opentelemetry/api';
 import { logs, type LogAttributes } from '@opentelemetry/api-logs';
-import { W3CTraceContextPropagator } from '@opentelemetry/core';
 import { SERVICE_NAME } from './constants.js';
 import { isTelemetrySdkInitialized } from './sdk.js';
 import { shouldForceSampled } from './tracer.js';
@@ -297,12 +297,31 @@ export function injectDaemonTraceContext<T extends object>(request: T): T {
   };
 }
 
-// The global propagator stays a no-op unless the daemon SDK registered one
-// (opt-in outbound propagation), so fall back to a direct W3C propagator
-// instance. Acceptance rules — future traceparent versions, tracestate,
-// all-zero ids — then match the registered path exactly, with or without an
-// initialized SDK.
-const w3cTraceContextPropagator = new W3CTraceContextPropagator();
+// Fallback propagator for `contextFromTraceparentValues` below. The global
+// propagator stays a no-op unless the daemon SDK registered one (opt-in
+// outbound propagation), so extraction needs a direct W3C instance to apply
+// the same acceptance rules — future traceparent versions, tracestate,
+// all-zero ids — as the registered path. The instance is injected by the
+// lazy SDK chunk (`sdk-impl.ts`) instead of being constructed here: this
+// module sits on every CLI launch's static startup graph, and
+// @opentelemetry/core is a CJS barrel that tree-shaking cannot slim down
+// (~65 KB per launch even with telemetry off). Until the SDK initializes,
+// the holder stays empty and extraction returns no parent context — the
+// telemetry-off state, with no OTel side effects.
+let daemonFallbackPropagator: TextMapPropagator | undefined;
+
+/**
+ * Install the W3C fallback propagator used by inbound traceparent
+ * extraction. Called by the dynamically imported SDK chunk (`sdk-impl.ts`)
+ * once telemetry is actually enabled, so @opentelemetry/core never enters
+ * the static startup graph (the `TextMapPropagator` type import above costs
+ * nothing at runtime).
+ */
+export function setDaemonFallbackPropagator(
+  propagator: TextMapPropagator,
+): void {
+  daemonFallbackPropagator = propagator;
+}
 
 function contextFromTraceparentValues(
   traceparent: string,
@@ -314,7 +333,8 @@ function contextFromTraceparentValues(
   }
   const extracted = propagation.extract(ROOT_CONTEXT, carrier);
   if (trace.getSpanContext(extracted)) return extracted;
-  const fallback = w3cTraceContextPropagator.extract(
+  if (!daemonFallbackPropagator) return undefined;
+  const fallback = daemonFallbackPropagator.extract(
     ROOT_CONTEXT,
     carrier,
     defaultTextMapGetter,
@@ -334,6 +354,10 @@ export function extractDaemonTraceContext(
   if (typeof traceparent !== 'string' || traceparent.length === 0) {
     return undefined;
   }
+  // Unlike the HTTP edge below, the _meta path deliberately skips
+  // shouldForceSampled: these values were injected by our own in-process
+  // bridge (injectDaemonTraceContext), a trusted source, whereas the HTTP
+  // header is external caller input. Keep this asymmetry when refactoring.
   return contextFromTraceparentValues(
     traceparent,
     record[DAEMON_TRACESTATE_META_KEY],
