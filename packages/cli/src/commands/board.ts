@@ -85,6 +85,19 @@ async function run(fn: () => Promise<void>): Promise<void> {
 }
 
 /**
+ * yargs `type: 'number'` delivers NaN for non-numeric input without failing,
+ * and arithmetic on NaN silently produces wrong behaviour (a NaN prune cutoff
+ * deletes everything, a NaN wait deadline never fires). Reject it here so the
+ * handler fails with one clear line instead of acting on a poisoned number.
+ */
+function finiteNumber(value: unknown, flag: string): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new Error(`${flag} must be a finite number`);
+  }
+  return value;
+}
+
+/**
  * Narrow a snapshot to one participant. Decisions are deliberately kept: they
  * are the human's, and a participant that hides them cannot tell the user what
  * is blocking the board.
@@ -211,7 +224,9 @@ export const boardCommand: CommandModule = {
           run(async () => {
             const a = argv as CommonArgs & { olderThan: number };
             const name = board(a);
-            const cutoff = Math.max(0, a.olderThan) * 86_400_000;
+            const cutoff =
+              Math.max(0, finiteNumber(a.olderThan, '--older-than')) *
+              86_400_000;
             // Manual by design: nothing here runs on a timer, because deleting
             // a record another participant may be mid-read on is a concurrency
             // problem worth not having.
@@ -301,7 +316,10 @@ export const boardCommand: CommandModule = {
             const name = board(argv as CommonArgs);
             const interval = Math.max(
               250,
-              (argv as { interval: number }).interval,
+              finiteNumber(
+                (argv as { interval: number }).interval,
+                '--interval',
+              ),
             );
             let stop = false;
             process.on('SIGINT', () => {
@@ -356,8 +374,8 @@ export const boardCommand: CommandModule = {
       })
 
       .command({
-        command: 'block <id> --on <blocker>',
-        describe: 'Record that <id> cannot start until <blocker> completes',
+        command: 'block <id>',
+        describe: 'Record that <id> cannot start until --on <blocker> completes',
         builder: (y: Argv) =>
           y
             .positional('id', { type: 'string', demandOption: true })
@@ -429,7 +447,9 @@ export const boardCommand: CommandModule = {
               to: a.to,
               question: a.question,
               aboutTask: a.about,
-              ...(a.ttl ? { ttlMs: a.ttl * 60_000 } : {}),
+              ...(a.ttl !== undefined
+                ? { ttlMs: finiteNumber(a.ttl, '--ttl') * 60_000 }
+                : {}),
             });
             if (!a.wait) {
               emit(a, ask, `${ask.id} → ${ask.to}`);
@@ -437,7 +457,8 @@ export const boardCommand: CommandModule = {
             }
             // Bounded on purpose: a foreign agent running this is blocking its
             // own turn, so an unbounded wait would hang it.
-            const deadline = Date.now() + a.timeout * 1000;
+            const deadline =
+              Date.now() + finiteNumber(a.timeout, '--timeout') * 1000;
             for (;;) {
               // Read the one item rather than listing the board: this runs
               // every 500ms and a board with many asks would pay a readdir
