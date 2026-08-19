@@ -180,7 +180,13 @@ describe('no-AK integration CI wiring', () => {
     expect(gateStep).toContain(
       "(github.event_name == 'pull_request' || github.event_name == 'merge_group')",
     );
+    const integrationTypecheckCommand =
+      'npx tsc -p integration-tests/tsconfig.json --pretty false';
+    expect(gateStep).toContain(integrationTypecheckCommand);
     expect(gateStep).toContain(`npm run ${NO_AK_SCRIPT}`);
+    expect(gateStep.indexOf(integrationTypecheckCommand)).toBeLessThan(
+      gateStep.indexOf(`npm run ${NO_AK_SCRIPT}`),
+    );
     expect(gateStep).toContain(
       "QWEN_HOME: '${{ runner.temp }}/qwen-no-ak-home/.qwen'",
     );

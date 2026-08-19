@@ -88,6 +88,24 @@ function sha256(path: string): string {
   return createHash('sha256').update(readFileSync(path)).digest('hex');
 }
 
+function findMatchingClosingBrace(
+  source: string,
+  openingBraceIndex: number,
+): number {
+  let depth = 0;
+  for (let index = openingBraceIndex; index < source.length; index += 1) {
+    if (source[index] === '{') {
+      depth += 1;
+    } else if (source[index] === '}') {
+      depth -= 1;
+      if (depth === 0) {
+        return index;
+      }
+    }
+  }
+  return -1;
+}
+
 function listFixtureEvidenceFiles(
   directory: string,
   relativeDirectory = '',
@@ -317,9 +335,27 @@ describe('chat transcript contract prevalidation', () => {
     expect(new Set(manifest.consumers)).toEqual(
       new Set(['web', 'tauri', 'vscode', 'html']),
     );
+    expect(manifest.name).toBe('representative');
+    expect(manifest.generatorVersion).toBe(
+      'chat-transcript-prevalidation-evidence-v1',
+    );
+    expect(new Set(manifest.capabilities)).toEqual(
+      new Set([
+        'semantic-projection',
+        'runtime-raw-compatibility',
+        'stable-identity-prepend-probe',
+        'export-document-schema',
+        'two-mr-migration-gate',
+      ]),
+    );
     expect(manifest.expectedDiagnostics).toEqual([
       'direct_daemon_unstable_identity',
       'acp_unstable_identity',
+    ]);
+    expect(manifest.normalizedFields).toEqual([
+      'clientReceivedAt',
+      'createdAt',
+      'updatedAt',
     ]);
     expect(manifestSchema['additionalProperties']).toBe(false);
     expect(exportSchema['additionalProperties']).toBe(false);
@@ -357,8 +393,12 @@ describe('chat transcript contract prevalidation', () => {
     const statusBlock = exportDefinitions['statusBlock'] as {
       properties: Record<string, unknown>;
     };
+    const errorBlock = exportDefinitions['errorBlock'] as {
+      properties: Record<string, unknown>;
+    };
     expect(toolBlock.properties).not.toHaveProperty('content');
     expect(statusBlock.properties).not.toHaveProperty('data');
+    expect(errorBlock.properties).not.toHaveProperty('data');
     expect(permissionOption.properties.raw.const).toBeNull();
     expect(expectedExport).toMatchObject({
       schemaVersion: 1,
@@ -578,6 +618,14 @@ describe('chat transcript contract prevalidation', () => {
     );
     const guardedBuildIndex =
       normalizedPrepareRuntime.indexOf('if (!skipBuild) {');
+    const guardedBuildOpeningBraceIndex = normalizedPrepareRuntime.indexOf(
+      '{',
+      guardedBuildIndex,
+    );
+    const guardedBuildClosingBraceIndex = findMatchingClosingBrace(
+      normalizedPrepareRuntime,
+      guardedBuildOpeningBraceIndex,
+    );
     const webShellBuildIndex = normalizedPrepareRuntime.indexOf(
       "'--workspace=packages/web-shell'",
     );
@@ -592,7 +640,13 @@ describe('chat transcript contract prevalidation', () => {
     );
     expect(skipBuildIndex).toBeGreaterThanOrEqual(0);
     expect(guardedBuildIndex).toBeGreaterThan(skipBuildIndex);
-    expect(webShellBuildIndex).toBeGreaterThan(guardedBuildIndex);
-    expect(distDirectoryIndex).toBeGreaterThan(webShellBuildIndex);
+    expect(guardedBuildOpeningBraceIndex).toBeGreaterThan(guardedBuildIndex);
+    expect(webShellBuildIndex).toBeGreaterThan(guardedBuildOpeningBraceIndex);
+    expect(guardedBuildClosingBraceIndex).toBeGreaterThan(webShellBuildIndex);
+    expect(
+      normalizedPrepareRuntime.split("'--workspace=packages/web-shell'")
+        .length - 1,
+    ).toBe(1);
+    expect(distDirectoryIndex).toBeGreaterThan(guardedBuildClosingBraceIndex);
   });
 });

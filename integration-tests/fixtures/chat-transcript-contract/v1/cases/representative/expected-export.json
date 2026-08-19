@@ -4,6 +4,7 @@
     "rawInput",
     "rawOutput",
     "eventId",
+    "uniqueFiles",
     "serverTimestamp",
     "promptId",
     "branchRecordId",
