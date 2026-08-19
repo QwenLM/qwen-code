@@ -59,14 +59,19 @@ listeners is irrelevant for the prefix.)
 Telemetry off — the default — there is no span, so the prefix never fires.
 A separate lightweight path keeps the log-based join alive with no telemetry
 config and no trace backend: the middleware parses the `traceparent` header
-with a plain regex (`extractInboundTraceId`, same shape/all-zero/`ff`
-rejections as the W3C propagator; future-version leniency and `tracestate`
-stay in the propagator path since a log line only needs a plausible trace
-id) and stores the trace id on the per-response telemetry context (the same
+with a plain regex (`extractInboundTraceId`, acceptance mirroring the vendored
+W3C propagator — same shape/all-zero/`ff` rejections, single optional
+leading/trailing whitespace, trailing extension fields above version `00` —
+so a header either joins on both paths or neither; `tracestate` stays in the
+propagator path since a log line only needs a plausible trace id) and stores
+the trace id on the per-response telemetry context (the same
 symbol the workspace hash uses). The access log's `finish` callback reads it
 back and emits it as the camelCase `traceId` field of `request completed` —
 distinct from the logger's reserved snake_case `trace_id` prefix keys, so a
-caller cannot spoof the span-derived prefix. The field is omitted, not
+caller cannot spoof the span-derived prefix. The camelCase field is captured
+in both telemetry modes whenever a valid header parses, so one log query
+shape works for every deployment; with telemetry on the snake_case span
+prefix carries the same id redundantly. The field is omitted, not
 empty, when no valid header is present, and every step stays fail-closed
 (telemetry must not affect request handling).
 
@@ -126,7 +131,8 @@ input exactly like the HTTP header and gets the same protection.
 - Unit (telemetry-off log join): `extractInboundTraceId` (valid / absent /
   malformed / all-zero ids / version `ff` / array value / future version,
   plus no-propagator-needed in the fresh-module state), middleware capture
-  (telemetry off with and without a header, telemetry on skipping capture,
+  (telemetry off with and without a header, telemetry on emitting the
+  camelCase field alongside the span prefix),
   handler-resolved context initialization not clobbering the stored id), and
   the access log emitting / omitting the `traceId` field.
 - Dry run: `serve` with `QWEN_TELEMETRY_OUTFILE`, one curl with a fixed

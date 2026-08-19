@@ -234,11 +234,22 @@ describe('daemon-tracing', () => {
         traceparent: `00-${'3'.repeat(32)}-${'4'.repeat(16)}-01`,
       }),
     ).toBe('3'.repeat(32));
-    // future versions pass the plain shape check; version-specific leniency
-    // (extension fields, tracestate) stays in the propagator path
     expect(
       extractInboundTraceId({
         traceparent: `01-${'3'.repeat(32)}-${'4'.repeat(16)}-01`,
+      }),
+    ).toBe('3'.repeat(32));
+    // Acceptance mirrors the vendored W3C propagator: a single optional
+    // whitespace on either edge, and trailing extension fields above
+    // version 00 — so a header joins on both paths or neither.
+    expect(
+      extractInboundTraceId({
+        traceparent: ` 00-${'3'.repeat(32)}-${'4'.repeat(16)}-01 `,
+      }),
+    ).toBe('3'.repeat(32));
+    expect(
+      extractInboundTraceId({
+        traceparent: `01-${'3'.repeat(32)}-${'4'.repeat(16)}-01-future-field`,
       }),
     ).toBe('3'.repeat(32));
   });
@@ -262,6 +273,12 @@ describe('daemon-tracing', () => {
     expect(
       extractInboundTraceId({
         traceparent: `ff-${'3'.repeat(32)}-${'4'.repeat(16)}-01`,
+      }),
+    ).toBeUndefined();
+    // version 00 must not carry extension fields — same as the propagator
+    expect(
+      extractInboundTraceId({
+        traceparent: `00-${'3'.repeat(32)}-${'4'.repeat(16)}-01-extra`,
       }),
     ).toBeUndefined();
     expect(

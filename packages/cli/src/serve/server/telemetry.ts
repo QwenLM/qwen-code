@@ -772,11 +772,18 @@ export function daemonTelemetryMiddleware(
     const deferredRuntime = getDeferredRuntimeRequestTiming(req);
     const startMs = deferredRuntime?.startedAt.getTime() ?? Date.now();
     // With telemetry on, extract the full W3C context (span parent + forced
-    // sampling). With telemetry off there is no span to parent, so only the
-    // trace id is parsed out for the access log — a single regex, no OTel
-    // machinery on the hot path.
+    // sampling). The camelCase `traceId` access-log field is captured in both
+    // modes whenever a valid header parses, so one log query shape works for
+    // every deployment; with telemetry on the span-derived snake_case prefix
+    // carries the same id redundantly, while telemetry-off logs have it as
+    // their only carrier — no telemetry config, no trace backend needed.
     let parentContext: ReturnType<typeof extractDaemonHttpTraceContext>;
     let inboundTraceId: string | undefined;
+    try {
+      inboundTraceId = extractInboundTraceId(req.headers);
+    } catch {
+      // Telemetry must not affect request handling.
+    }
     if (isTelemetrySdkInitialized()) {
       try {
         parentContext = extractDaemonHttpTraceContext(req.headers);
@@ -811,16 +818,6 @@ export function daemonTelemetryMiddleware(
             severityNumber: 5, // SeverityNumber.DEBUG
           },
         );
-      }
-    } else {
-      // With telemetry off there is no request span, so the log line's trace
-      // prefix never fires. Still surface the caller's trace id to the access
-      // log — a plain header parse keeps the log-based join alive with no
-      // telemetry config and no trace backend.
-      try {
-        inboundTraceId = extractInboundTraceId(req.headers);
-      } catch {
-        // Telemetry must not affect request handling.
       }
     }
     const telemetryRes = res as TelemetryResponse;

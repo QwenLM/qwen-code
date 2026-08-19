@@ -404,7 +404,7 @@ export function extractDaemonHttpTraceContext(
 }
 
 const TRACEPARENT_RE =
-  /^([0-9a-f]{2})-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/;
+  /^\s?([0-9a-f]{2})-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})(-.*)?\s?$/;
 const ALL_ZERO_TRACE_ID = '0'.repeat(32);
 const ALL_ZERO_SPAN_ID = '0'.repeat(16);
 
@@ -414,9 +414,10 @@ const ALL_ZERO_SPAN_ID = '0'.repeat(16);
  * (which builds a span parent and needs the W3C propagator — only installed
  * once the telemetry SDK starts), this is a plain format check so the daemon
  * log can carry the caller's trace id even with telemetry disabled: the
- * log-based join then works with no trace backend at all. Version-specific
- * leniency beyond the shape check (future versions, tracestate) stays in the
- * propagator path; a log line only needs a plausible, non-zero trace id.
+ * log-based join then works with no trace backend at all. The acceptance
+ * rules mirror the vendored W3C propagator exactly (single optional leading/
+ * trailing whitespace, trailing fields allowed above version `00`, `ff` and
+ * all-zero ids rejected), so a header either joins on both paths or neither.
  */
 export function extractInboundTraceId(
   headers: Record<string, unknown> | undefined,
@@ -427,7 +428,11 @@ export function extractInboundTraceId(
   }
   const match = TRACEPARENT_RE.exec(traceparent);
   if (!match) return undefined;
-  const [, version, traceId, spanId] = match;
+  // match: [full, version, traceId, spanId, flags, trailingFields]
+  const [, version, traceId, spanId, , trailing] = match;
+  // Version 00 must be exactly four fields; higher versions may carry
+  // trailing extension fields the parser ignores — same as the propagator.
+  if (version === '00' && trailing !== undefined) return undefined;
   if (version === 'ff') return undefined;
   if (traceId === ALL_ZERO_TRACE_ID || spanId === ALL_ZERO_SPAN_ID) {
     return undefined;

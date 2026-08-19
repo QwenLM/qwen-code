@@ -227,7 +227,8 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
     res.emit('finish');
   });
 
-  it('does not capture the inbound trace id when telemetry is on (the request span already carries it)', () => {
+  it('also captures the inbound trace id when telemetry is on (one log query shape for both modes)', () => {
+    coreMocks.extractInboundTraceId.mockReturnValueOnce('3'.repeat(32));
     const res = mockRes(200);
 
     daemonTelemetryMiddleware(() => '/ws')(
@@ -238,8 +239,13 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
       vi.fn() as unknown as NextFunction,
     );
 
-    expect(coreMocks.extractInboundTraceId).not.toHaveBeenCalled();
-    expect(getDaemonTelemetryInboundTraceId(res)).toBeUndefined();
+    // Telemetry on: the request span's snake_case prefix carries the same
+    // id, and the camelCase field is emitted too so a single saved query /
+    // alert works against both telemetry modes.
+    expect(coreMocks.extractInboundTraceId).toHaveBeenCalledWith({
+      traceparent: `00-${'3'.repeat(32)}-${'4'.repeat(16)}-01`,
+    });
+    expect(getDaemonTelemetryInboundTraceId(res)).toBe('3'.repeat(32));
 
     res.emit('finish');
   });
