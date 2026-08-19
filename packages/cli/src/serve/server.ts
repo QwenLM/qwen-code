@@ -2732,6 +2732,7 @@ export function createServeApp(
         cleanupSession: (sessionId) => cleanupSession(runtime, sessionId),
         onTasksRead: (tasks) =>
           registerScheduledTaskAuthorizations(runtime.workspaceCwd, tasks),
+        sessionArchiveCoordinator: archiveCoordinator,
       });
       rehydrateWorkspace(runtime);
       keepaliveStops.set(runtime.workspaceCwd, keepalive.stop);

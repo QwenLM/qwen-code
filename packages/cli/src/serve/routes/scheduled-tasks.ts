@@ -200,17 +200,28 @@ async function rollbackCronMutation(
 async function teardownBoundSession(
   target: ScheduledTaskTarget,
   sessionId: string,
+  coordinator?: SessionArchiveCoordinator,
 ): Promise<void> {
-  if (target.cleanupSession) {
-    await target.cleanupSession(sessionId).catch(() => {});
-  } else if (target.bridge) {
-    await target.bridge.closeSession(sessionId).catch(() => {});
-    const removed = await new SessionService(target.workspaceCwd, {
-      runtimeBaseDir: target.runtimeBaseDir,
-    })
-      .removeSession(sessionId)
-      .catch(() => false);
-    if (removed) target.bridge.markSessionCatalogChanged?.();
+  // Serialize with the reuse-create bind path on the session's key (#9415):
+  // a teardown from a stale snapshot must not land while a concurrent
+  // reuse-create holds the shared lease and is about to commit a reference.
+  const teardown = async (): Promise<void> => {
+    if (target.cleanupSession) {
+      await target.cleanupSession(sessionId).catch(() => {});
+    } else if (target.bridge) {
+      await target.bridge.closeSession(sessionId).catch(() => {});
+      const removed = await new SessionService(target.workspaceCwd, {
+        runtimeBaseDir: target.runtimeBaseDir,
+      })
+        .removeSession(sessionId)
+        .catch(() => false);
+      if (removed) target.bridge.markSessionCatalogChanged?.();
+    }
+  };
+  if (coordinator) {
+    await coordinator.runExclusiveMany([sessionId], teardown);
+  } else {
+    await teardown();
   }
 }
 
@@ -824,7 +835,11 @@ function registerScheduledTaskCrudRoutes(
             boundSessionId = session.sessionId;
             sessionMintedHere = true;
             if (!requireOpenGeneration(target, res)) {
-              await teardownBoundSession(target, boundSessionId);
+              await teardownBoundSession(
+                target,
+                boundSessionId,
+                sessionArchiveCoordinator,
+              );
               return;
             }
             // Name the session after the task so it's recognizable in the session
@@ -879,7 +894,11 @@ function registerScheduledTaskCrudRoutes(
       // open when the create fails.
       const rollbackSession = async () => {
         if (boundSessionId !== undefined && sessionMintedHere) {
-          await teardownBoundSession(target, boundSessionId);
+          await teardownBoundSession(
+            target,
+            boundSessionId,
+            sessionArchiveCoordinator,
+          );
         }
       };
 

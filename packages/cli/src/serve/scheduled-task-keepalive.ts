@@ -42,6 +42,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { MAX_SESSION_RESTORE_TIMEOUT_MS } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
 import { scheduledTaskSessionName } from './routes/scheduled-tasks.js';
+import type { SessionArchiveCoordinator } from './server/session-archive.js';
 
 const log = createDebugLogger('SCHED_KEEPALIVE');
 
@@ -136,7 +137,17 @@ async function bindAndNameSessions(
   spawnTimeoutMs: number,
   binding: Set<string>,
   cleanupSession: (sessionId: string) => Promise<unknown>,
+  sessionArchiveCoordinator?: SessionArchiveCoordinator,
 ): Promise<void> {
+  // Serialize teardown with the reuse-create bind path (#9415): a stale
+  // teardown must not land while a concurrent reuse-create holds the shared
+  // lease and is about to commit a reference to the session.
+  const teardownSession = (sessionId: string): Promise<unknown> =>
+    sessionArchiveCoordinator
+      ? sessionArchiveCoordinator.runExclusiveMany([sessionId], () =>
+          cleanupSession(sessionId),
+        )
+      : cleanupSession(sessionId);
   const unbound = tasks.filter(
     (t) =>
       !t.sessionId &&
@@ -175,7 +186,7 @@ async function bindAndNameSessions(
               task.id,
               sessionId,
             );
-            await cleanupSession(sessionId).catch(() => {});
+            await teardownSession(sessionId).catch(() => {});
           }
         })
         .catch(() => {})
@@ -275,7 +286,7 @@ async function bindAndNameSessions(
     } catch (err) {
       log.debug('keepalive: failed to bind task', task.id, err);
       if (spawnedSessionId !== undefined) {
-        await cleanupSession(spawnedSessionId).catch(() => {});
+        await teardownSession(spawnedSessionId).catch(() => {});
       }
     }
   }
@@ -312,6 +323,12 @@ export interface StartScheduledTaskKeepaliveOptions {
   /** Per-task spawn timeout; defaults to KEEPALIVE_SPAWN_TIMEOUT_MS. */
   spawnTimeoutMs?: number;
   onTasksRead?: (tasks: readonly DurableCronTask[]) => void;
+  /**
+   * Session-scoped serialization shared with the scheduled-tasks bind path
+   * (#9415): keepalive teardown acquires the exclusive lease so a concurrent
+   * reuse-create holding the shared lease is never torn down under it.
+   */
+  sessionArchiveCoordinator?: SessionArchiveCoordinator;
 }
 
 export function startScheduledTaskKeepalive(
@@ -449,6 +466,7 @@ export function startScheduledTaskKeepalive(
       spawnTimeoutMs,
       binding,
       cleanupSession,
+      opts.sessionArchiveCoordinator,
     );
   };
   const tick = (): Promise<void> =>
