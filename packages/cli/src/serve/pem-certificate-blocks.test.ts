@@ -150,6 +150,21 @@ describe('extractCertificateBlocks', () => {
     expect(extractCertificateBlocks(combined)).toEqual([ROOT_PEM.trim()]);
   });
 
+  // The key block above is LAST in every fixture that carries one — here and
+  // in the supervisor's combined-PEM test — so replacing the scan's `continue`
+  // with a `break` shipped green while silently dropping every certificate
+  // behind the key. Node's loader keeps them: measured, `rootA + PRIVATE KEY
+  // + rootB` as NODE_EXTRA_CA_CERTS authorizes where `rootA` alone fails
+  // UNABLE_TO_VERIFY_LEAF_SIGNATURE. cert+key+chain is an ordinary operator
+  // file shape, so the dropped certs would be the ones anchoring the workers.
+  it('keeps certificates that follow a non-certificate block', () => {
+    expect(
+      extractCertificateBlocks(
+        `${ROOT_PEM}-----BEGIN PRIVATE KEY-----\nQUJD\n-----END PRIVATE KEY-----\n${LEAF_PEM}`,
+      ),
+    ).toEqual([ROOT_PEM.trim(), LEAF_PEM.trim()]);
+  });
+
   it('normalizes CRLF and marker/body padding to canonical PEM', () => {
     // Oracle: authorized=true for both. The bundle this feeds is written to
     // disk, so the output has to be canonical whatever the input looked like.

@@ -65,6 +65,7 @@ import {
   type ChannelStartupReportMessage,
 } from '../../serve/channel-worker-startup-ipc.js';
 import { isLoopbackBind } from '../../serve/loopback-binds.js';
+import { isOwnInterfaceAddress } from '../../serve/local-bind-addresses.js';
 import { ChannelLoopMcpWorkerHost } from '../../serve/channel-loop-mcp-ipc.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { resolveProxyUrl } from './proxy.js';
@@ -324,9 +325,20 @@ function validateDaemonWorkerUrl(daemonUrl: string): void {
   } catch {
     throw new Error(`${QWEN_DAEMON_URL_ENV} must be a valid URL.`);
   }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(`${QWEN_DAEMON_URL_ENV} must use an http(s) loopback URL.`);
+  }
+  // Loopback is the common case and the cheapest to certify. A daemon bound
+  // to a concrete interface (`--hostname 192.168.1.100`) does NOT listen on
+  // loopback, so its workers must dial the bound address itself — rewriting
+  // to `127.0.0.1` would only trade this rejection for `ECONNREFUSED`. An
+  // own-interface address keeps the daemon token on this host just as
+  // loopback does, which is the property the rule protects; anything else
+  // (a routable third-party host, a DNS name we would have to resolve to
+  // find out) is still refused.
   if (
-    (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') ||
-    !isLoopbackBind(parsed.hostname)
+    !isLoopbackBind(parsed.hostname) &&
+    !isOwnInterfaceAddress(parsed.hostname)
   ) {
     throw new Error(`${QWEN_DAEMON_URL_ENV} must use an http(s) loopback URL.`);
   }

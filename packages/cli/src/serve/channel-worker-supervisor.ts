@@ -234,11 +234,16 @@ export interface CreateChannelWorkerSupervisorOptions {
    * it at every (re)spawn — while the daemon keeps serving the bytes it read
    * at boot. Rotating this file in place without restarting the daemon
    * therefore leaves respawned workers trusting the NEW contents against the
-   * OLD served cert, and they restart-loop until the daemon restarts. An
-   * operator CA gives no cover: `resolveWorkerCaCertPath` stamps BOTH sources,
-   * so rotating this file in place invalidates the merged bundle and rebuilds
-   * it from the NEW contents — the same restart loop. Either way, rotating
-   * `--tls-cert` requires a daemon restart; see the HTTPS / TLS notes in
+   * OLD served cert. Whether that breaks them depends on what rotated with
+   * it: the workers restart-loop exactly when the TRUST ANCHOR rotated out
+   * too — always for a self-signed cert, whose leaf is its own anchor
+   * (DEPTH_ZERO_SELF_SIGNED_CERT), and for a fullchain only when its root was
+   * replaced as well (SELF_SIGNED_CERT_IN_CHAIN). A fullchain rotated to a
+   * renewed leaf under the SAME carried root still verifies (measured), as
+   * does an operator CA that anchors both generations — though
+   * `resolveWorkerCaCertPath` stamps BOTH sources, so that rotation does
+   * invalidate and rebuild the merged bundle. Either way the serving side
+   * lags until the daemon restarts; see the HTTPS / TLS notes in
    * docs/users/qwen-serve.md.
    */
   tlsCaCertPath?: string;
@@ -477,6 +482,22 @@ function warnWorkerCaMergeFallback(
 const mintedWorkerCaBundleDirs = new Set<string>();
 let workerCaBundleExitHookRegistered = false;
 
+/**
+ * Remove every minted worker CA bundle directory this process still owns, and
+ * forget them.
+ *
+ * Registered as the `exit` hook, and named so the set's lifetime is testable:
+ * without the forget, a regression that stops untracking superseded bundles
+ * (or that drops this clear) leaks a 0700 directory per rotation for the
+ * daemon's whole life, and nothing observable turns red.
+ */
+export function cleanupMintedWorkerCaBundleDirs(): void {
+  for (const minted of mintedWorkerCaBundleDirs) {
+    cleanupWorkerCaBundleDir(minted);
+  }
+  mintedWorkerCaBundleDirs.clear();
+}
+
 function cleanupWorkerCaBundleDir(dir: string): void {
   try {
     fs.rmSync(dir, { recursive: true, force: true });
@@ -499,12 +520,7 @@ function writeMergedWorkerCaBundle(contents: string): string {
   mintedWorkerCaBundleDirs.add(dir);
   if (!workerCaBundleExitHookRegistered) {
     workerCaBundleExitHookRegistered = true;
-    process.once('exit', () => {
-      for (const minted of mintedWorkerCaBundleDirs) {
-        cleanupWorkerCaBundleDir(minted);
-      }
-      mintedWorkerCaBundleDirs.clear();
-    });
+    process.once('exit', cleanupMintedWorkerCaBundleDirs);
   }
   return bundlePath;
 }

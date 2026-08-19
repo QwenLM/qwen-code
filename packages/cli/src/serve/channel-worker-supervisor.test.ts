@@ -8,6 +8,7 @@ import {
   ChannelWorkerStartupError,
   createChannelWorkerSupervisor,
   type ChannelWorkerChild,
+  cleanupMintedWorkerCaBundleDirs,
 } from './channel-worker-supervisor.js';
 import { isChannelWorkerPromptAuthorized } from './channel-worker-prompt-authorization.js';
 import { CHANNEL_WORKER_HEARTBEAT_INTERVAL_MS } from './channel-worker-env.js';
@@ -779,6 +780,56 @@ describe('createChannelWorkerSupervisor', () => {
       recursive: true,
       force: true,
     });
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  // The exit hook and the supersede path each carry one bookkeeping statement
+  // that no test reached: deleting `mintedWorkerCaBundleDirs.delete(dir)` on
+  // supersede, or the hook's `.clear()`, both shipped green. Their cost is a
+  // 0700 directory leaked per rotation for the daemon's whole lifetime, so
+  // pin the set's lifetime through what the hook actually cleans.
+  it('cleans only the live bundle dir at exit, then forgets every dir', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-ca-minted-'));
+    const operatorCa = path.join(dir, 'operator.pem');
+    const daemonCa = path.join(dir, 'daemon.pem');
+    fs.writeFileSync(operatorCa, OPERATOR_CA_PEM);
+    fs.writeFileSync(daemonCa, DAEMON_CERT_PEM);
+
+    const bundlePaths: string[] = [];
+    for (let round = 0; round < 3; round += 1) {
+      fs.writeFileSync(
+        operatorCa,
+        round % 2 === 0 ? DAEMON_CERT_PEM : OPERATOR_CA_PEM,
+      );
+      const { env } = await startWorkerWithCaPaths(daemonCa, operatorCa);
+      bundlePaths.push(env['NODE_EXTRA_CA_CERTS']!);
+    }
+    const bundleDirs = bundlePaths.map((bundle) => path.dirname(bundle));
+
+    // The superseded dirs were already removed on supersede. Re-create them
+    // as sentinels: if the supersede path had stopped UNTRACKING them, the
+    // hook below would delete these again.
+    for (const superseded of bundleDirs.slice(0, -1)) {
+      fs.mkdirSync(superseded, { recursive: true });
+      fs.writeFileSync(path.join(superseded, 'sentinel'), 'x');
+    }
+
+    cleanupMintedWorkerCaBundleDirs();
+
+    for (const superseded of bundleDirs.slice(0, -1)) {
+      expect(fs.existsSync(superseded)).toBe(true);
+    }
+    expect(fs.existsSync(bundleDirs.at(-1)!)).toBe(false);
+
+    // And the set is emptied: a second run has nothing left to clean, so a
+    // re-created live dir survives it.
+    fs.mkdirSync(bundleDirs.at(-1)!, { recursive: true });
+    cleanupMintedWorkerCaBundleDirs();
+    expect(fs.existsSync(bundleDirs.at(-1)!)).toBe(true);
+
+    for (const bundleDir of bundleDirs) {
+      fs.rmSync(bundleDir, { recursive: true, force: true });
+    }
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
