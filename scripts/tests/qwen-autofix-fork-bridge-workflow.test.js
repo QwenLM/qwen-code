@@ -94,6 +94,14 @@ const expressionsIn = (text) => {
 const readsASecret = (text) =>
   expressionsIn(text).some((expression) => /\bsecrets\./.test(expression));
 
+// Four of the full-object-only names below are strict PREFIXES of fields the
+// simple object does deliver (`merged` ⊂ `merged_at`, `commits` ⊂ `commits_url`,
+// `comments` ⊂ `comments_url`, `review_comments` ⊂ `review_comments_url`), so a
+// substring test would also reject those legal conjuncts. Anchor on a word
+// boundary so only a reference to the field itself matches.
+const fullObjectOnlyReference = (field) =>
+  new RegExp(`pull_request\\.${field}\\b`);
+
 describe('qwen autofix fork bridge', () => {
   it('keeps the trigger name and dispatch target wired together', () => {
     // Cross-FILE contracts that no single file can be read to verify. Each
@@ -288,7 +296,24 @@ describe('qwen autofix fork bridge', () => {
       'review_comments',
     ];
     for (const field of fullObjectOnlyFields) {
-      expect(signalJob.if).not.toContain(`pull_request.${field}`);
+      expect(signalJob.if).not.toMatch(fullObjectOnlyReference(field));
+    }
+  });
+
+  it('rejects a full-object field without rejecting the fields it prefixes', () => {
+    const prefixPairs = [
+      ['merged', 'merged_at'],
+      ['commits', 'commits_url'],
+      ['comments', 'comments_url'],
+      ['review_comments', 'review_comments_url'],
+    ];
+    for (const [fullObjectOnly, delivered] of prefixPairs) {
+      expect(`github.event.pull_request.${delivered} == null`).not.toMatch(
+        fullObjectOnlyReference(fullObjectOnly),
+      );
+      expect(`github.event.pull_request.${fullObjectOnly} == false`).toMatch(
+        fullObjectOnlyReference(fullObjectOnly),
+      );
     }
   });
 
