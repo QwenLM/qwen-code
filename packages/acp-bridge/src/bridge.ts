@@ -191,6 +191,7 @@ import type {
   BridgePromptContentBlock,
   BridgePromptRequest,
   ChildHeapReport,
+  ComputerUseFrame,
   RuntimeMcpServerAddResult,
   RuntimeMcpServerRemoveResult,
 } from './bridgeTypes.js';
@@ -200,6 +201,7 @@ import {
   SessionMediaReferenceError,
   SessionMediaStore,
   withMediaDegradationMarker,
+  type SessionMediaReference,
 } from './sessionMedia.js';
 import type {
   BridgeFreshSessionAdmissionContext,
@@ -966,6 +968,13 @@ interface SessionEntry {
   artifacts: SessionArtifactStore;
   /** Session-owned temporary media referenced by prompts and SSE events. */
   media: SessionMediaStore;
+  /** Latest raw CUA frame, held outside events and transcript replay. */
+  computerUseFrame?: {
+    reference: SessionMediaReference;
+    version: number;
+  };
+  computerUseFrameGeneration: number;
+  computerUseFrameVersion: number;
   /** Sticky in-memory health state for the session's transcript recorder. */
   recordingDegraded: boolean;
   /** Set synchronously while agent-owned state and its writer lease close. */
@@ -2042,6 +2051,7 @@ function publishPromptTerminal(
     // watermark. A queued-only terminal is not conversation activity and
     // leaves the watermark alone.
     advanceTurnActivity(entry);
+    clearComputerUseFrame(entry);
   }
   if (!mutateTurnState && entry.turnErrorEvent) {
     // A queued terminal is still a turn boundary on the bus: ingesting it
@@ -2083,6 +2093,18 @@ function publishPromptTerminal(
       mutateTurnState,
     );
   }
+}
+
+function clearComputerUseFrame(entry: SessionEntry): void {
+  entry.computerUseFrameGeneration += 1;
+  const frame = entry.computerUseFrame;
+  delete entry.computerUseFrame;
+  if (!frame) return;
+  void entry.media.remove(frame.reference.mediaId).catch((error) => {
+    writeStderrLine(
+      `[computer-use-frame] session=${JSON.stringify(entry.sessionId)} failed to remove live frame: ${JSON.stringify(error instanceof Error ? error.message : String(error))}`,
+    );
+  });
 }
 
 /**
@@ -5916,6 +5938,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         persistence: createSessionArtifactPersistence(ci.connection, sessionId),
       }),
       media: retainSessionMedia(sessionId),
+      computerUseFrameGeneration: 0,
+      computerUseFrameVersion: 0,
       recordingDegraded: false,
       closing: false,
       cwdChangeQueue: Promise.resolve(),
@@ -8557,6 +8581,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 })();
                 entry.promptActive = true;
                 entry.activePromptId = pendingEntry.promptId;
+                clearComputerUseFrame(entry);
                 delete entry.cancelBroadcastWithoutPrompt;
                 delete entry.turnError;
                 delete entry.turnErrorEvent;
@@ -9000,6 +9025,22 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         }
       }
       return withSnapshot();
+    },
+
+    async readComputerUseFrame(
+      sessionId,
+    ): Promise<ComputerUseFrame | undefined> {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const frame = entry.computerUseFrame;
+      if (!frame) return undefined;
+      const media = await entry.media.read(frame.reference.mediaId);
+      if (entry.computerUseFrame !== frame) return undefined;
+      if (!media) {
+        delete entry.computerUseFrame;
+        return undefined;
+      }
+      return { ...media, version: frame.version };
     },
 
     getSessionLastEventId(sessionId) {

@@ -302,6 +302,54 @@ function reportingGrade(bridge: {
 }
 
 describe('createAcpSessionBridge', () => {
+  it('keeps a Computer Use frame live-only and drops it at the next prompt', async () => {
+    const prompt = deferred<PromptResponse>();
+    const handle = makeChannel({ promptImpl: () => prompt.promise });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    await handle.agentConnection.sessionUpdate({
+      sessionId: session.sessionId,
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'call-screen',
+        status: 'completed',
+        content: [],
+        _meta: {
+          toolName: 'computer_use__get_window_state',
+          qwenComputerUseFrame: {
+            mimeType: 'image/png',
+            data: 'aW1hZ2U=',
+          },
+        },
+      },
+    });
+    await vi.waitFor(async () => {
+      await expect(
+        bridge.readComputerUseFrame(session.sessionId),
+      ).resolves.toMatchObject({
+        data: Buffer.from('image'),
+        mimeType: 'image/png',
+        version: 1,
+      });
+    });
+
+    const running = bridge.sendPrompt(session.sessionId, {
+      sessionId: session.sessionId,
+      prompt: [{ type: 'text', text: 'start a new turn' }],
+    });
+    await vi.waitFor(async () => {
+      expect(handle.agent.promptCalls).toHaveLength(1);
+      await expect(
+        bridge.readComputerUseFrame(session.sessionId),
+      ).resolves.toBeUndefined();
+    });
+
+    prompt.resolve({ stopReason: 'end_turn' });
+    await running;
+    await bridge.shutdown();
+  });
+
   describe('active work', () => {
     it('negotiates the capability and counts accepted prompts locally', async () => {
       const prompt = deferred<PromptResponse>();

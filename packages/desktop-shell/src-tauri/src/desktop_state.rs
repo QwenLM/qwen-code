@@ -16,6 +16,7 @@ static NEXT_WRITE_ID: AtomicU64 = AtomicU64::new(1);
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct DesktopSettings {
+    pub always_hide_picture_in_picture: bool,
     pub workspace: Option<PathBuf>,
     pub window: Option<WindowState>,
 }
@@ -52,6 +53,14 @@ impl SettingsStore {
 
     pub fn workspace(&self) -> Option<PathBuf> {
         self.with_settings(|settings| settings.workspace.clone())
+    }
+
+    pub fn always_hide_picture_in_picture(&self) -> bool {
+        self.with_settings(|settings| settings.always_hide_picture_in_picture)
+    }
+
+    pub fn set_always_hide_picture_in_picture(&self, hidden: bool) -> Result<(), String> {
+        self.update(|settings| settings.always_hide_picture_in_picture = hidden)
     }
 
     pub fn set_workspace(&self, workspace: PathBuf) -> Result<(), String> {
@@ -232,6 +241,7 @@ mod tests {
         let settings: DesktopSettings = serde_json::from_str("{}").expect("settings");
         assert!(settings.workspace.is_none());
         assert!(settings.window.is_none());
+        assert!(!settings.always_hide_picture_in_picture);
     }
 
     #[test]

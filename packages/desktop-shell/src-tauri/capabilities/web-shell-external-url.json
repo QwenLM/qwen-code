@@ -6,6 +6,8 @@
   "remote": { "urls": ["http://127.0.0.1:*"] },
   "windows": ["main"],
   "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
     {
       "identifier": "opener:allow-open-url",
       "allow": [

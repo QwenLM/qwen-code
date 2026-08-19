@@ -10,6 +10,7 @@ import type {
   ToolResultBoundaryArtifact,
 } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
+import type { ComputerUseFramePayload } from '@qwen-code/acp-bridge/bridgeTypes';
 import type {
   SessionUpdate,
   ToolCallLocation,
@@ -127,6 +128,8 @@ export interface ToolCallResultParams {
   error?: Error;
   /** Structured artifacts produced by the tool result. */
   artifacts?: ToolArtifact[];
+  /** Raw driver frame for the daemon-owned desktop preview channel. */
+  computerUseFrame?: ComputerUseFramePayload;
   persistedOutputFiles?: string[];
   boundaryArtifact?: ToolResultBoundaryArtifact;
   /** Original args (fallback for TodoWriteTool todos extraction) */

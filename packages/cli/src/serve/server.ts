@@ -162,6 +162,7 @@ import {
 import { registerWorkspaceModelsRoutes } from './routes/workspace-models.js';
 import { WorkspaceVoiceCoordinator } from './voice/workspace-voice-coordinator.js';
 import { registerA2uiActionRoutes } from './routes/a2ui-action.js';
+import { registerComputerUseFrameRoutes } from './routes/computer-use-frame.js';
 import { setRateLimiter } from './rate-limit.js';
 import { resolveAcpHttpEnabled } from './acp-http-enabled.js';
 import { VirtualSubagentSessions } from './virtual-subagent-sessions.js';
@@ -2780,6 +2781,13 @@ export function createServeApp(
     writerIdleTimeoutMs: opts.writerIdleTimeoutMs,
     sendBridgeError,
     virtualSubagentSessions,
+  });
+
+  registerComputerUseFrameRoutes(app, {
+    workspaceRegistry,
+    daemonLog,
+    requireToken: mutate({ strict: true }),
+    sendBridgeError,
   });
 
   // Official ACP Streamable HTTP transport (RFD #721) mounted at `/acp`

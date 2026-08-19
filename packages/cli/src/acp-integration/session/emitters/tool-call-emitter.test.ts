@@ -329,6 +329,31 @@ describe('ToolCallEmitter', () => {
       );
     });
 
+    it('carries a Computer Use frame only in private update metadata', async () => {
+      await emitter.emitResult({
+        toolName: 'computer_use__get_window_state',
+        callId: 'call-screen',
+        success: true,
+        message: [],
+        computerUseFrame: {
+          mimeType: 'image/png',
+          data: 'aW1hZ2U=',
+        },
+      });
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          content: [],
+          _meta: expect.objectContaining({
+            qwenComputerUseFrame: {
+              mimeType: 'image/png',
+              data: 'aW1hZ2U=',
+            },
+          }),
+        }),
+      );
+    });
+
     it('places the vision bridge disclosure in ACP content on success', async () => {
       const resultDisplay = {
         type: 'vision_bridge_notice' as const,

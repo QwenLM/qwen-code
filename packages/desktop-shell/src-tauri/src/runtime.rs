@@ -123,6 +123,10 @@ impl DesktopRuntime {
         &self.base_url
     }
 
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
     pub fn authenticated_web_url(&self) -> Url {
         let mut url = self.base_url.clone();
         url.set_fragment(Some(&format!("token={}", self.token)));
@@ -552,10 +556,10 @@ mod tests {
         append_failure_output, parse_listening_url, resolve_workspace, runtime_arguments,
         DesktopRuntime, RuntimeStopped, FAILURE_OUTPUT_LIMIT,
     };
-    #[cfg(unix)]
-    use super::{stop_runtime_handle, wait_for_listening};
     #[cfg(windows)]
     use super::{layout_from_root, spawn_runtime_group};
+    #[cfg(unix)]
+    use super::{stop_runtime_handle, wait_for_listening};
     use std::path::Path;
     #[cfg(windows)]
     use std::path::PathBuf;

@@ -192,6 +192,12 @@ export const legacySessionTelemetryRoutes = [
     route: 'GET /session/:id/media/:mediaId',
   },
   {
+    method: 'GET',
+    path: '/session/:id/computer-use/frame',
+    attribution: 'handler_resolved',
+    route: 'GET /session/:id/computer-use/frame',
+  },
+  {
     method: 'DELETE',
     path: '/session/:id/media/:mediaId',
     attribution: 'handler_resolved',

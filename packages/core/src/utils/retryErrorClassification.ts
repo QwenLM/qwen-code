@@ -207,13 +207,22 @@ export function getTransportCode(error: unknown): string | undefined {
     if (typeof current !== 'object' || current === null) {
       return undefined;
     }
-    const code = (current as { code?: unknown }).code;
+    const code = safeReadProperty(current, 'code');
     if (typeof code === 'string' && isTransportCode(code)) {
       return code;
     }
-    current = current instanceof Error ? current.cause : undefined;
+    current =
+      current instanceof Error ? safeReadProperty(current, 'cause') : undefined;
   }
   return undefined;
+}
+
+function safeReadProperty(value: object, key: string): unknown {
+  try {
+    return Reflect.get(value, key);
+  } catch {
+    return undefined;
+  }
 }
 
 function isTransportCode(code: string): boolean {

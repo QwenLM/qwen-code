@@ -14,6 +14,12 @@ The Tauri app starts `qwen serve` on an ephemeral loopback port with a per-launc
 
 Use **Settings → Daemon → Local Control** to temporarily share the live daemon with a phone on the same Wi-Fi. The Web Shell displays a QR code, keeps the computer awake while sharing is enabled, and closes the LAN listener when the user turns it off.
 
+## Computer Use surfaces
+
+When the active session uses a `computer_use__*` tool, the desktop host shows an always-on-top activity indicator and an optional picture-in-picture preview. The indicator and preview remain visible when the main window is behind another application. Stop the turn from either surface or with Escape while the global shortcut is available.
+
+The Web Shell continues to render the ordinary tool timeline. Desktop-only controls are injected by the Tauri host, and the preview receives only the latest live driver frame through an authenticated loopback endpoint. Frames are not added to the Web Shell event stream, transcript, or telemetry and are removed at the next prompt, terminal turn, or session teardown.
+
 ## Local development
 
 From this directory:

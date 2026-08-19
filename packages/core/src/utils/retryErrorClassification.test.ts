@@ -331,6 +331,22 @@ describe('classifyRetryError', () => {
     });
   });
 
+  it('ignores malformed DOMException causes without masking the original error', () => {
+    const malformedDomException = Object.create(
+      DOMException.prototype,
+    ) as DOMException;
+    const error = new Error('Connection error.', {
+      cause: malformedDomException,
+    });
+
+    expect(() => classifyRetryError(error)).not.toThrow();
+    expect(classifyRetryError(error)).toMatchObject({
+      kind: 'unknown',
+      diagnosis: 'unknown',
+      reason: 'unclassified',
+    });
+  });
+
   it('prefers a transport cause over an HTTP status when both are present', () => {
     // An SDK error can surface an HTTP status while its underlying cause is a
     // socket-level failure. The transport cause is the more fundamental

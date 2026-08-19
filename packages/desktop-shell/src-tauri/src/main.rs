@@ -1,9 +1,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod computer_use;
 mod desktop_state;
 mod runtime;
 
 use command_group::GroupChild;
+use computer_use::{
+    create_surfaces, session_id_from_url, ComputerUseController, RuntimeConnection,
+    PIP_WINDOW_LABEL, STATUS_WINDOW_LABEL,
+};
 use desktop_state::{default_window_size, restore_window, SettingsStore};
 use runtime::{resolve_workspace, stop_runtime_handle, DesktopRuntime};
 use serde::{Deserialize, Serialize};
@@ -15,8 +20,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::webview::{DownloadEvent, NewWindowResponse, WebviewWindowBuilder};
 use tauri::{
-    AppHandle, Emitter, Listener, Manager, RunEvent, State, WebviewUrl, WebviewWindow,
-    WindowEvent,
+    AppHandle, Emitter, Listener, Manager, RunEvent, State, WebviewUrl, WebviewWindow, WindowEvent,
 };
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_updater::{Update, UpdaterExt};
@@ -71,6 +75,7 @@ impl PendingRuntime {
 }
 
 struct ApplicationState {
+    computer_use: ComputerUseController,
     runtime: Mutex<Option<DesktopRuntime>>,
     pending_runtime: Mutex<Option<PendingRuntime>>,
     settings: SettingsStore,
@@ -89,6 +94,7 @@ fn main() {
             focus_main_window(app);
         }))
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
@@ -97,6 +103,11 @@ fn main() {
             open_logs,
             restart_runtime,
             install_update,
+            computer_use_request_state,
+            computer_use_sync_session,
+            computer_use_stop,
+            computer_use_set_picture_in_picture_visible,
+            computer_use_set_always_hide_picture_in_picture,
         ])
         .setup(setup_app);
 
@@ -115,6 +126,10 @@ fn main() {
                     .state::<ApplicationState>()
                     .window_dirty
                     .store(true, Ordering::Relaxed);
+                app_handle
+                    .state::<ApplicationState>()
+                    .computer_use
+                    .reposition(app_handle);
             }
             #[cfg(target_os = "macos")]
             WindowEvent::Focused(true) => {
@@ -153,9 +168,26 @@ fn main() {
                 }
             }
             #[cfg(not(target_os = "macos"))]
-            WindowEvent::CloseRequested { .. } => save_window_state(app_handle),
+            WindowEvent::CloseRequested { .. } => {
+                save_window_state(app_handle);
+                // Hidden Computer Use surfaces keep Tauri's window set non-empty.
+                app_handle.exit(0);
+            }
             _ => {}
         },
+        RunEvent::WindowEvent { label, event, .. }
+            if label == PIP_WINDOW_LABEL || label == STATUS_WINDOW_LABEL =>
+        {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                if label == PIP_WINDOW_LABEL {
+                    app_handle
+                        .state::<ApplicationState>()
+                        .computer_use
+                        .hide_picture_in_picture(app_handle);
+                }
+            }
+        }
         RunEvent::Exit | RunEvent::ExitRequested { .. } => {
             save_window_state(app_handle);
             stop_runtime(app_handle);
@@ -180,6 +212,7 @@ fn main() {
 fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let handle = app.handle().clone();
     let settings = SettingsStore::load(&handle).map_err(std::io::Error::other)?;
+    let computer_use = ComputerUseController::new(settings.always_hide_picture_in_picture());
     let window_state = settings.window();
     let log_path = desktop_log_path(&handle).map_err(std::io::Error::other)?;
     if let Some(parent) = log_path.parent() {
@@ -210,6 +243,7 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .title("Qwen Code")
         .inner_size(width, height)
         .min_inner_size(900.0, 600.0)
+        .initialization_script(include_str!("../web-shell-computer-use.js"))
         .on_navigation(move |url| is_allowed_navigation(url, &navigation_origin))
         .on_new_window(|url, _features| {
             if is_safe_external_url(&url) {
@@ -235,6 +269,7 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     restore_window(&window, window_state.as_ref());
 
     handle.manage(ApplicationState {
+        computer_use,
         runtime: Mutex::new(None),
         pending_runtime: Mutex::new(None),
         settings,
@@ -246,6 +281,8 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         start_generation: AtomicU64::new(0),
         starting: AtomicU64::new(0),
     });
+    create_surfaces(&handle)?;
+    spawn_computer_use_session_observer(handle.clone());
 
     match initial_workspace(&handle) {
         Ok((workspace, create_if_missing)) => {
@@ -336,10 +373,7 @@ fn restart_runtime(webview: WebviewWindow, app: AppHandle) -> Result<(), String>
 }
 
 #[tauri::command]
-fn open_logs(
-    webview: WebviewWindow,
-    state: State<'_, ApplicationState>,
-) -> Result<(), String> {
+fn open_logs(webview: WebviewWindow, state: State<'_, ApplicationState>) -> Result<(), String> {
     require_bootstrap_origin(&webview)?;
     if let Some(parent) = state.log_path.parent() {
         fs::create_dir_all(parent)
@@ -483,6 +517,9 @@ fn start_runtime_async(app: AppHandle, workspace: PathBuf, create_if_missing: bo
                 }
                 *runtime_slot = Some(runtime);
                 drop(runtime_slot);
+                if let Ok(url) = window.url() {
+                    sync_computer_use_session(&app, &url);
+                }
                 clear_pending_runtime(&state, generation);
                 if state
                     .starting
@@ -517,6 +554,7 @@ fn emit_runtime_failure(app: &AppHandle, generation: u64, error: String) {
 
 fn stop_runtime(app: &AppHandle) {
     let state = app.state::<ApplicationState>();
+    state.computer_use.clear(app);
     state.start_generation.fetch_add(1, Ordering::SeqCst);
     state.starting.store(0, Ordering::SeqCst);
     let runtime = lock(&state.runtime).take();
@@ -530,6 +568,89 @@ fn stop_runtime(app: &AppHandle) {
     if let Some(pending) = pending {
         pending.stop();
     }
+}
+
+#[tauri::command]
+fn computer_use_sync_session(webview: WebviewWindow, app: AppHandle) -> Result<(), String> {
+    require_computer_use_window(&webview, true)?;
+    let url = webview
+        .url()
+        .map_err(|error| format!("Failed to read Web Shell URL: {error}"))?;
+    sync_computer_use_session(&app, &url);
+    Ok(())
+}
+
+#[tauri::command]
+fn computer_use_request_state(webview: WebviewWindow, app: AppHandle) -> Result<(), String> {
+    require_computer_use_window(&webview, false)?;
+    app.state::<ApplicationState>()
+        .computer_use
+        .emit_state_to(&app, webview.label());
+    Ok(())
+}
+
+#[tauri::command]
+fn computer_use_stop(webview: WebviewWindow, app: AppHandle) -> Result<(), String> {
+    require_computer_use_window(&webview, false)?;
+    app.state::<ApplicationState>().computer_use.stop(&app);
+    Ok(())
+}
+
+#[tauri::command]
+fn computer_use_set_picture_in_picture_visible(
+    webview: WebviewWindow,
+    app: AppHandle,
+    visible: bool,
+) -> Result<(), String> {
+    require_computer_use_window(&webview, false)?;
+    app.state::<ApplicationState>()
+        .computer_use
+        .set_picture_in_picture_visible(&app, visible);
+    Ok(())
+}
+
+#[tauri::command]
+fn computer_use_set_always_hide_picture_in_picture(
+    webview: WebviewWindow,
+    app: AppHandle,
+    hidden: bool,
+) -> Result<(), String> {
+    require_computer_use_window(&webview, false)?;
+    let state = app.state::<ApplicationState>();
+    state.settings.set_always_hide_picture_in_picture(hidden)?;
+    state
+        .computer_use
+        .set_always_hide_picture_in_picture(&app, hidden);
+    Ok(())
+}
+
+fn sync_computer_use_session(app: &AppHandle, url: &Url) {
+    let state = app.state::<ApplicationState>();
+    let session_id = session_id_from_url(url.as_str());
+    let connection = lock(&state.runtime)
+        .as_ref()
+        .map(|runtime| RuntimeConnection {
+            base_url: runtime.base_url().clone(),
+            token: runtime.token().to_string(),
+        });
+    if state.computer_use.matches_session(&session_id, &connection) {
+        return;
+    }
+    state.computer_use.set_session(app, session_id, connection);
+}
+
+fn require_computer_use_window(webview: &WebviewWindow, main_only: bool) -> Result<(), String> {
+    let allowed = if main_only {
+        webview.label() == "main"
+    } else {
+        matches!(
+            webview.label(),
+            "main" | STATUS_WINDOW_LABEL | PIP_WINDOW_LABEL
+        )
+    };
+    allowed
+        .then_some(())
+        .ok_or_else(|| "This command is unavailable from this window.".to_string())
 }
 
 fn clear_pending_runtime(state: &ApplicationState, generation: u64) {
@@ -562,10 +683,7 @@ fn default_workspace(app: &AppHandle) -> Result<(PathBuf, bool), String> {
         .path()
         .home_dir()
         .map_err(|error| format!("Failed to resolve the home directory: {error}"))?;
-    Ok((
-        default_workspace_path(&home, override_dir.as_deref()),
-        true,
-    ))
+    Ok((default_workspace_path(&home, override_dir.as_deref()), true))
 }
 
 // An empty override is treated as unset so the ~/Documents/Qwen default wins,
@@ -616,6 +734,18 @@ fn spawn_window_state_flusher(app: AppHandle) {
         let state = app.state::<ApplicationState>();
         if state.window_dirty.swap(false, Ordering::Relaxed) {
             save_window_state(&app);
+        }
+    });
+}
+
+fn spawn_computer_use_session_observer(app: AppHandle) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let Some(window) = app.get_webview_window("main") else {
+            return;
+        };
+        if let Ok(url) = window.url() {
+            sync_computer_use_session(&app, &url);
         }
     });
 }
@@ -775,15 +905,15 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(target_os = "macos")]
-    use super::{
-        cancel_pending_fullscreen_hide, should_restore_main_window, take_pending_fullscreen_hide,
-        FULLSCREEN_HIDE_GENERATION, FULLSCREEN_HIDE_PENDING,
-    };
     use super::{
         bootstrap_workspace, default_workspace_override_dir, default_workspace_path,
         ensure_workspace_dir, is_allowed_navigation, is_bootstrap_url, is_safe_external_url,
         is_same_origin, origin_of, BOOTSTRAP_URL,
+    };
+    #[cfg(target_os = "macos")]
+    use super::{
+        cancel_pending_fullscreen_hide, should_restore_main_window, take_pending_fullscreen_hide,
+        FULLSCREEN_HIDE_GENERATION, FULLSCREEN_HIDE_PENDING,
     };
     use std::ffi::OsString;
     use std::fs;
@@ -1002,9 +1132,7 @@ mod tests {
 
     #[test]
     fn allows_only_the_recorded_origin_once_it_is_set() {
-        let origin = Mutex::new(Some(
-            Url::parse("http://127.0.0.1:49152/").expect("origin"),
-        ));
+        let origin = Mutex::new(Some(Url::parse("http://127.0.0.1:49152/").expect("origin")));
         assert!(is_allowed_navigation(
             &Url::parse("http://127.0.0.1:49152/session/123").expect("same origin"),
             &origin,
@@ -1021,9 +1149,7 @@ mod tests {
 
     #[test]
     fn allows_bootstrap_even_after_origin_is_set() {
-        let origin = Mutex::new(Some(
-            Url::parse("http://127.0.0.1:49152/").expect("origin"),
-        ));
+        let origin = Mutex::new(Some(Url::parse("http://127.0.0.1:49152/").expect("origin")));
         assert!(is_allowed_navigation(
             &Url::parse(BOOTSTRAP_URL).expect("bootstrap"),
             &origin,

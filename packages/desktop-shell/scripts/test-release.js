@@ -647,8 +647,8 @@ function testBootstrapBridgeConfiguration() {
   );
   assert.deepEqual(
     tauriConfig.app?.security?.capabilities,
-    ['bootstrap', 'web-shell-external-url'],
-    'The local bootstrap and remote Web Shell capabilities must be enabled.',
+    ['bootstrap', 'computer-use-surfaces', 'web-shell-external-url'],
+    'The local bootstrap, Computer Use surfaces, and remote Web Shell capabilities must be enabled.',
   );
   const capability = JSON.parse(
     fs.readFileSync(
@@ -684,11 +684,46 @@ function testBootstrapBridgeConfiguration() {
   });
   assert.deepEqual(webShellCapability.windows, ['main']);
   assert.deepEqual(webShellCapability.permissions, [
+    'core:event:allow-listen',
+    'core:event:allow-unlisten',
     {
       identifier: 'opener:allow-open-url',
       allow: [{ url: 'http://*' }, { url: 'https://*' }, { url: 'mailto:*' }],
     },
   ]);
+
+  const computerUseCapability = JSON.parse(
+    fs.readFileSync(
+      path.join(
+        packageDir,
+        'src-tauri',
+        'capabilities',
+        'computer-use-surfaces.json',
+      ),
+      'utf8',
+    ),
+  );
+  assert.deepEqual(computerUseCapability.windows, [
+    'computer-use-status',
+    'computer-use-pip',
+  ]);
+  assert.deepEqual(computerUseCapability.permissions, [
+    'core:event:allow-listen',
+    'core:event:allow-unlisten',
+    'core:window:allow-start-dragging',
+  ]);
+  assert.equal(tauriConfig.app?.macOSPrivateApi, true);
+  for (const asset of [
+    'computer-use-status.html',
+    'computer-use-pip.html',
+    'computer-use-surface.css',
+    'computer-use-surface.js',
+  ]) {
+    assert.ok(
+      fs.existsSync(path.join(packageDir, 'bootstrap', asset)),
+      `The Computer Use surface asset must ship: ${asset}`,
+    );
+  }
 }
 
 function testResolveLogRoot() {

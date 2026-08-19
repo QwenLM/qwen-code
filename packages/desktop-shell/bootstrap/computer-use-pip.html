@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="stylesheet" href="./computer-use-surface.css" />
+    <script src="./computer-use-surface.js" defer></script>
+    <title>Qwen Code Computer Use</title>
+  </head>
+  <body data-mode="pip">
+    <section class="pip-surface" aria-label="Computer Use picture in picture">
+      <header data-tauri-drag-region>
+        <span class="pulse" aria-hidden="true"></span>
+        <strong data-value="action">Using the computer</strong>
+        <button
+          data-action="hide"
+          title="Hide picture in picture"
+          aria-label="Hide picture in picture"
+        >
+          ×
+        </button>
+      </header>
+      <div class="preview">
+        <img
+          data-value="screenshot"
+          alt="Current Computer Use activity"
+          hidden
+        />
+        <div class="empty" data-value="empty">
+          <span class="screen-icon" aria-hidden="true"></span>
+          <span data-value="waiting">Waiting for the screen</span>
+        </div>
+      </div>
+      <footer data-tauri-drag-region>
+        <span class="target"><span data-value="target"></span></span>
+        <button data-action="stop">Stop</button>
+      </footer>
+    </section>
+  </body>
+</html>

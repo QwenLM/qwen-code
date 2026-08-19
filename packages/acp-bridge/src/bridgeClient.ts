@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { Buffer } from 'node:buffer';
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
@@ -31,11 +32,14 @@ import {
   ACTIVE_WORK_MAX_SESSION_HOLDS,
   ACTIVE_WORK_MAX_SNAPSHOT_SESSIONS,
   ACTIVE_WORK_NOTIFICATION_METHOD,
+  COMPUTER_USE_FRAME_META_KEY,
+  MAX_COMPUTER_USE_FRAME_BYTES,
   MID_TURN_RECONCILIATION_RING_SIZE,
   MID_TURN_QUEUE_DRAIN_METHOD,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
   type ActiveWorkHoldV1,
   type ActiveWorkSnapshotV1,
+  type ComputerUseFramePayload,
 } from './bridgeTypes.js';
 import type {
   BridgeWorkspaceGenerationNotificationEvent,
@@ -455,6 +459,53 @@ function sanitizeSessionUpdateArtifacts(
   };
 }
 
+function extractComputerUseFrame(params: SessionNotification): {
+  frame?: ComputerUseFramePayload;
+  sanitizedParams: SessionNotification;
+} {
+  const update = params.update as Record<string, unknown>;
+  const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
+  if (!meta || !(COMPUTER_USE_FRAME_META_KEY in meta)) {
+    return { sanitizedParams: params };
+  }
+
+  const candidate = meta[COMPUTER_USE_FRAME_META_KEY];
+  const sanitizedMeta = { ...meta };
+  delete sanitizedMeta[COMPUTER_USE_FRAME_META_KEY];
+  const sanitizedParams = {
+    ...params,
+    update: {
+      ...update,
+      _meta: sanitizedMeta,
+    } as SessionNotification['update'],
+  };
+  const frame = isRecord(candidate) ? candidate : undefined;
+  const mimeType = frame?.['mimeType'];
+  const data = frame?.['data'];
+  const encodedLimit = Math.ceil((MAX_COMPUTER_USE_FRAME_BYTES * 4) / 3) + 4;
+  if (
+    update['sessionUpdate'] !== 'tool_call_update' ||
+    update['status'] !== 'completed' ||
+    typeof meta['toolName'] !== 'string' ||
+    !meta['toolName'].startsWith('computer_use__') ||
+    (mimeType !== 'image/png' &&
+      mimeType !== 'image/jpeg' &&
+      mimeType !== 'image/webp') ||
+    typeof data !== 'string' ||
+    data.length === 0 ||
+    data.length > encodedLimit ||
+    !/^[A-Za-z0-9+/]*={0,2}$/.test(data) ||
+    data.length % 4 === 1
+  ) {
+    return { sanitizedParams };
+  }
+  const decodedBytes = Buffer.byteLength(data, 'base64');
+  if (decodedBytes === 0 || decodedBytes > MAX_COMPUTER_USE_FRAME_BYTES) {
+    return { sanitizedParams };
+  }
+  return { frame: { data, mimeType }, sanitizedParams };
+}
+
 function isTrustedArtifactToolUpdate(
   params: SessionNotification,
   updateMeta: Record<string, unknown> | undefined,
@@ -616,6 +667,12 @@ export interface BridgeClientSessionEntry {
   events: EventBus;
   artifacts: SessionArtifactStore;
   media: SessionMediaStore;
+  computerUseFrame?: {
+    reference: SessionMediaReference;
+    version: number;
+  };
+  computerUseFrameGeneration: number;
+  computerUseFrameVersion: number;
   recordingDegraded: boolean;
   pendingPermissionIds: Set<string>;
   /** Pollable pending human interactions, keyed by permission request id. */
@@ -657,6 +714,7 @@ export interface BridgeClientSessionEntry {
 interface PreparedSessionUpdateFrames {
   frames: Array<Omit<BridgeEvent, 'id' | 'v'>>;
   artifacts: SessionArtifactInput[];
+  computerUseFrame?: ComputerUseFramePayload;
   trustedPublisher: boolean;
   turn: Pick<BridgeEvent, 'promptId' | 'originatorClientId'>;
 }
@@ -952,6 +1010,9 @@ export class BridgeClient implements Client {
     for (const frame of prepared.frames) {
       events.publish(frame);
     }
+    if (entry && prepared.computerUseFrame) {
+      await this.replaceComputerUseFrame(entry, prepared.computerUseFrame);
+    }
     // Daemon token-burn accounting for LIVE turns only (see method doc). Batch
     // load-replay routes through seedSessionUpdates, not here, so replayed
     // history never lands in the current metrics window. Wrapped so a throwing
@@ -978,6 +1039,8 @@ export class BridgeClient implements Client {
     params: SessionNotification,
     entry?: BridgeClientSessionEntry,
   ): PreparedSessionUpdateFrames {
+    const extractedFrame = extractComputerUseFrame(params);
+    params = extractedFrame.sanitizedParams;
     const turn = {
       ...(entry?.activePromptId ? { promptId: entry.activePromptId } : {}),
       ...(entry?.activePromptOriginatorClientId
@@ -1049,9 +1112,43 @@ export class BridgeClient implements Client {
     return {
       frames,
       artifacts,
+      ...(extractedFrame.frame
+        ? { computerUseFrame: extractedFrame.frame }
+        : {}),
       trustedPublisher: isTrustedArtifactToolUpdate(params, updateMeta),
       turn,
     };
+  }
+
+  private async replaceComputerUseFrame(
+    entry: BridgeClientSessionEntry,
+    frame: ComputerUseFramePayload,
+  ): Promise<void> {
+    const generation = ++entry.computerUseFrameGeneration;
+    try {
+      const reference = await entry.media.put(
+        Buffer.from(frame.data, 'base64'),
+        frame.mimeType,
+      );
+      if (
+        this.resolveEntry(entry.sessionId) !== entry ||
+        entry.computerUseFrameGeneration !== generation
+      ) {
+        await entry.media.remove(reference.mediaId);
+        return;
+      }
+      const previous = entry.computerUseFrame;
+      entry.computerUseFrameVersion += 1;
+      entry.computerUseFrame = {
+        reference,
+        version: entry.computerUseFrameVersion,
+      };
+      if (previous) await entry.media.remove(previous.reference.mediaId);
+    } catch (error) {
+      writeStderrLine(
+        `[computer-use-frame] session=${JSON.stringify(entry.sessionId)} failed to store live frame: ${JSON.stringify(error instanceof Error ? error.message : String(error))}`,
+      );
+    }
   }
 
   async seedSessionUpdates(
