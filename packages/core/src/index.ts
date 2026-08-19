@@ -215,12 +215,16 @@ export {
   OFFICE_DOCUMENT_EXTENSIONS,
   collectRecordableWorkspaceFiles,
   isOfficeDocumentExtension,
+  shouldSkipDirectoryArtifactName,
 } from './utils/workspace-artifact-directory.js';
 export type {
   ArtifactTool,
   ArtifactToolParams,
 } from './tools/artifact/artifact-tool.js';
-export { RecordArtifactTool } from './tools/record-artifact.js';
+export {
+  RecordArtifactTool,
+  isRecordableDerivedChild,
+} from './tools/record-artifact.js';
 export type { RecordArtifactParams } from './tools/record-artifact.js';
 export type {
   ArtifactPublisher,

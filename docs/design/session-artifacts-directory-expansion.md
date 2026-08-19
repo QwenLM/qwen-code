@@ -39,8 +39,6 @@ expand/collapse control already used for edited files.
   metadata, and infers kind from its own extension.
 - A leftover directory path (empty, unlistable, or not expanded) is
   rejected; it is never marked `available`.
-- Chat grouping treats a recorded directory path as a prefix, so
-  expanded files still attach to the same turn.
 - Word / Excel / PowerPoint / OpenDocument extensions map to
   `kind: document`. The client shows a type label and a download action
   instead of a CodeMirror text preview.

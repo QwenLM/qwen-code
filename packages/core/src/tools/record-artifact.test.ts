@@ -491,8 +491,42 @@ describe('RecordArtifactTool', () => {
         storage: 'workspace',
         workspacePath: 'reports/nested/c.pptx',
         description: 'Daily reports',
+        metadata: { expandedFromDirectory: true },
       },
     ]);
+  });
+
+  it('discloses the 100-file cap when expanding a large directory', async () => {
+    const ws = await workspace();
+    for (let index = 0; index < 101; index++) {
+      await ws.write(`reports/f${String(index).padStart(3, '0')}.txt`, 'x');
+    }
+
+    const result = await ws.tool
+      .build({
+        title: 'Many',
+        workspacePath: 'reports',
+      })
+      .execute(signal);
+
+    expect(result.error).toBeUndefined();
+    expect(result.artifacts).toHaveLength(100);
+    expect(String(result.llmContent)).toMatch(/first 100 files/i);
+  });
+
+  it('rejects expanding a junk directory root', async () => {
+    const ws = await workspace();
+    await ws.write('node_modules/pkg/index.js', 'js');
+
+    const result = await ws.tool
+      .build({
+        title: 'Deps',
+        workspacePath: 'node_modules',
+      })
+      .execute(signal);
+
+    expect(result.error?.type).toBe(ToolErrorType.TARGET_IS_DIRECTORY);
+    expect(result.artifacts).toBeUndefined();
   });
 
   it('skips junk directories and lock files when expanding a directory', async () => {

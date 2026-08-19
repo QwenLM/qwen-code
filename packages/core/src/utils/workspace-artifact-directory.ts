@@ -39,6 +39,7 @@ export type RecordableWorkspaceWalkResult = {
   files: string[];
   truncated: boolean;
   depthLimited: boolean;
+  unreadable: boolean;
 };
 
 export function isOfficeDocumentExtension(ext: string): boolean {
@@ -57,6 +58,7 @@ export async function collectRecordableWorkspaceFiles(
   absoluteDir: string,
   relativeDir: string,
   realWorkspace: string,
+  isRecordable?: (relativePath: string) => boolean,
 ): Promise<RecordableWorkspaceWalkResult> {
   const files: string[] = [];
   const walked = await walkRecordableWorkspaceFiles(
@@ -65,6 +67,7 @@ export async function collectRecordableWorkspaceFiles(
     realWorkspace,
     files,
     0,
+    isRecordable,
   );
   return { files, ...walked };
 }
@@ -75,12 +78,22 @@ async function walkRecordableWorkspaceFiles(
   realWorkspace: string,
   files: string[],
   depth: number,
-): Promise<{ truncated: boolean; depthLimited: boolean }> {
+  isRecordable?: (relativePath: string) => boolean,
+): Promise<{ truncated: boolean; depthLimited: boolean; unreadable: boolean }> {
   if (files.length >= MAX_DIRECTORY_ARTIFACT_FILES) {
-    return { truncated: true, depthLimited: false };
+    return { truncated: true, depthLimited: false, unreadable: false };
   }
   if (depth > MAX_DIRECTORY_ARTIFACT_DEPTH) {
-    return { truncated: false, depthLimited: true };
+    try {
+      const peek = await fs.readdir(absoluteDir);
+      return {
+        truncated: false,
+        depthLimited: peek.length > 0,
+        unreadable: false,
+      };
+    } catch {
+      return { truncated: false, depthLimited: false, unreadable: true };
+    }
   }
   let entries;
   try {
@@ -89,18 +102,19 @@ async function walkRecordableWorkspaceFiles(
     if (depth === 0) {
       throw error;
     }
-    return { truncated: false, depthLimited: false };
+    return { truncated: false, depthLimited: false, unreadable: true };
   }
   entries.sort((left, right) =>
     left.name < right.name ? -1 : left.name > right.name ? 1 : 0,
   );
   let truncated = false;
   let depthLimited = false;
+  let unreadable = false;
   for (const entry of entries) {
     if (files.length >= MAX_DIRECTORY_ARTIFACT_FILES) {
-      return { truncated: true, depthLimited };
+      return { truncated: true, depthLimited, unreadable };
     }
-    if (shouldSkipDirectoryArtifactName(entry.name) || entry.isSymbolicLink()) {
+    if (entry.isSymbolicLink()) {
       continue;
     }
     const relativePath = relativeDir
@@ -112,25 +126,36 @@ async function walkRecordableWorkspaceFiles(
       continue;
     }
     if (entry.isDirectory()) {
+      if (shouldSkipDirectoryArtifactName(entry.name)) {
+        continue;
+      }
       const nested = await walkRecordableWorkspaceFiles(
         absolutePath,
         relativePath,
         realWorkspace,
         files,
         depth + 1,
+        isRecordable,
       );
       truncated ||= nested.truncated;
       depthLimited ||= nested.depthLimited;
+      unreadable ||= nested.unreadable;
       if (truncated && files.length >= MAX_DIRECTORY_ARTIFACT_FILES) {
-        return { truncated: true, depthLimited };
+        return { truncated: true, depthLimited, unreadable };
       }
       continue;
     }
     if (entry.isFile()) {
+      if (entry.name.startsWith('.') || entry.name.startsWith('~$')) {
+        continue;
+      }
+      if (isRecordable && !isRecordable(relativePath)) {
+        continue;
+      }
       files.push(relativePath);
     }
   }
-  return { truncated, depthLimited };
+  return { truncated, depthLimited, unreadable };
 }
 
 function isOutsidePath(relative: string): boolean {

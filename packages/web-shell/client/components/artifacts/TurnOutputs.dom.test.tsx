@@ -113,6 +113,7 @@ describe('TurnOutputs artifact downloads', () => {
       'audio',
       'pdf',
       'notebook',
+      'document',
       'other',
     ];
     const artifacts = kinds.map(

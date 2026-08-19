@@ -11,12 +11,14 @@ import path from 'node:path';
 import {
   collectRecordableWorkspaceFiles,
   isOfficeDocumentExtension,
-  MAX_DIRECTORY_ARTIFACT_DEPTH,
   isPrototypeMetadataKey,
+  isRecordableDerivedChild,
   isReservedWorkspaceMetadataKey,
+  MAX_DIRECTORY_ARTIFACT_DEPTH,
   MAX_DIRECTORY_ARTIFACT_FILES,
   metadataBudgetBytes,
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
+  shouldSkipDirectoryArtifactName,
   stableSessionArtifactId,
   WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY,
   WORKSPACE_CONTENT_SHA256_METADATA_KEY,
@@ -359,7 +361,7 @@ export class SessionArtifactStore {
               );
             }
           }
-          if (expanded.warning && recorded > 0) {
+          if (expanded.warning) {
             warnings.push(expanded.warning);
           }
         } catch (error) {
@@ -1338,14 +1340,39 @@ export class SessionArtifactStore {
       return { inputs: [input] };
     }
 
-    const collected = await collectRecordableWorkspaceFiles(
-      walkDir,
-      walkRelative,
-      realWorkspace,
-    );
-    if (collected.files.length === 0) {
+    const rootName =
+      path.posix.basename(walkRelative) || path.basename(walkDir);
+    if (walkRelative && shouldSkipDirectoryArtifactName(rootName)) {
       throw new SessionArtifactValidationError(
         'workspacePath is a directory with no recordable files',
+        'workspacePath',
+      );
+    }
+
+    let collected: Awaited<ReturnType<typeof collectRecordableWorkspaceFiles>>;
+    try {
+      collected = await collectRecordableWorkspaceFiles(
+        walkDir,
+        walkRelative,
+        realWorkspace,
+        (filePath) =>
+          isRecordableDerivedChild(path.posix.basename(filePath), filePath),
+      );
+    } catch (error) {
+      if (isNotFoundError(error)) {
+        return { inputs: [input] };
+      }
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new SessionArtifactValidationError(
+        `workspacePath could not be inspected: ${reason}`,
+        'workspacePath',
+      );
+    }
+    if (collected.files.length === 0) {
+      throw new SessionArtifactValidationError(
+        collected.depthLimited
+          ? `workspacePath is a directory whose recordable files are deeper than ${MAX_DIRECTORY_ARTIFACT_DEPTH} levels`
+          : 'workspacePath is a directory with no recordable files',
         'workspacePath',
       );
     }
@@ -1359,12 +1386,17 @@ export class SessionArtifactStore {
     const warnings: string[] = [];
     if (collected.truncated) {
       warnings.push(
-        `workspacePath "${normalizedPath}" contained more than ${MAX_DIRECTORY_ARTIFACT_FILES} files; recorded the first ${MAX_DIRECTORY_ARTIFACT_FILES}`,
+        `workspacePath "${normalizedPath}" contained more than ${MAX_DIRECTORY_ARTIFACT_FILES} files; recorded the first ${collected.files.length}`,
       );
     }
     if (collected.depthLimited) {
       warnings.push(
         `workspacePath "${normalizedPath}" exceeded ${MAX_DIRECTORY_ARTIFACT_DEPTH} directory levels; some files were not recorded`,
+      );
+    }
+    if (collected.unreadable) {
+      warnings.push(
+        `workspacePath "${normalizedPath}" contained subdirectories that could not be read`,
       );
     }
     return {

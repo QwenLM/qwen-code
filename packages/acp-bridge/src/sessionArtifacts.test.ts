@@ -1420,6 +1420,9 @@ describe('SessionArtifactStore', () => {
       const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
       expect(logged).toContain('action=dropped');
       expect(logged).toContain('max artifacts exceeded');
+      expect(overflow.warnings?.join(' ') ?? '').toMatch(
+        /dropped 1 newly created artifacts because the store is full/,
+      );
     } finally {
       stderr.mockRestore();
     }
@@ -2017,6 +2020,45 @@ describe('SessionArtifactStore', () => {
     expect(listed.artifacts).toHaveLength(1);
     expect(listed.artifacts[0]?.status).not.toBe('available');
     expect(listed.artifacts[0]?.workspacePath).toBe('report.xlsx');
+  });
+
+  it('keeps a curated title when a later directory expansion covers the same file', async () => {
+    await fs.mkdir(path.join(workspace, 'reports'));
+    await fs.writeFile(path.join(workspace, 'reports', 'q3.xlsx'), 'xlsx');
+    const store = new SessionArtifactStore({
+      sessionId: 's-dir-keep-title',
+      workspaceCwd: workspace,
+    });
+    await store.upsertMany(
+      [
+        {
+          title: 'Q3 Financial Report',
+          workspacePath: 'reports/q3.xlsx',
+          toolName: 'record_artifact',
+          toolCallId: 'call-1',
+        },
+      ],
+      { strict: true },
+    );
+    await store.upsertMany(
+      [
+        {
+          title: 'Reports',
+          workspacePath: 'reports',
+          toolName: 'record_artifact',
+          toolCallId: 'call-2',
+        },
+      ],
+      { strict: true },
+    );
+
+    const listed = await store.list();
+    expect(listed.artifacts).toEqual([
+      expect.objectContaining({
+        title: 'Q3 Financial Report',
+        toolCallId: 'call-1',
+      }),
+    ]);
   });
 
   it('rejects an empty directory workspacePath', async () => {

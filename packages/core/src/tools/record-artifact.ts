@@ -12,8 +12,8 @@ import { isNodeError } from '../utils/errors.js';
 import { isWithinRoot } from '../utils/fileUtils.js';
 import {
   MAX_DIRECTORY_ARTIFACT_DEPTH,
-  MAX_DIRECTORY_ARTIFACT_FILES,
   collectRecordableWorkspaceFiles,
+  shouldSkipDirectoryArtifactName,
 } from '../utils/workspace-artifact-directory.js';
 import {
   resolveBoundWorkspaceRoot,
@@ -59,6 +59,7 @@ type WorkspaceLocatorSuccess = {
   ok: true;
   workspacePath: string;
   resolvedPath: string;
+  workspaceRoot: string;
   sizeBytes: number;
   isDirectory?: boolean;
 };
@@ -147,19 +148,37 @@ class RecordArtifactInvocation extends BaseToolInvocation<
   private async expandDirectoryLocator(
     locator: WorkspaceLocatorSuccess,
   ): Promise<ToolResult> {
-    const root = await resolveExistingDir(
-      resolveBoundWorkspaceRoot(this.config.getTargetDir()),
-    );
+    const rootName = path.posix.basename(locator.workspacePath);
+    if (rootName && shouldSkipDirectoryArtifactName(rootName)) {
+      const message = [
+        `Failed to record artifact: "${locator.workspacePath}" is a directory with no recordable files.`,
+        WORKSPACE_PATH_HINT,
+      ].join('\n');
+      return {
+        llmContent: message,
+        returnDisplay: message,
+        error: {
+          message,
+          type: ToolErrorType.TARGET_IS_DIRECTORY,
+        },
+      };
+    }
     let collected: {
       files: string[];
       truncated: boolean;
       depthLimited: boolean;
+      unreadable: boolean;
     };
     try {
       collected = await collectRecordableWorkspaceFiles(
         locator.resolvedPath,
         locator.workspacePath,
-        root,
+        locator.workspaceRoot,
+        (workspacePath) =>
+          isRecordableDerivedChild(
+            path.posix.basename(workspacePath),
+            workspacePath,
+          ),
       );
     } catch (error) {
       const failure = pathInspectFailure(
@@ -179,7 +198,9 @@ class RecordArtifactInvocation extends BaseToolInvocation<
     }
     if (collected.files.length === 0) {
       const message = [
-        `Failed to record artifact: "${locator.workspacePath}" is a directory with no recordable files.`,
+        collected.depthLimited
+          ? `Failed to record artifact: "${locator.workspacePath}" is a directory whose recordable files are deeper than ${MAX_DIRECTORY_ARTIFACT_DEPTH} levels.`
+          : `Failed to record artifact: "${locator.workspacePath}" is a directory with no recordable files.`,
         WORKSPACE_PATH_HINT,
       ].join('\n');
       return {
@@ -197,9 +218,6 @@ class RecordArtifactInvocation extends BaseToolInvocation<
     const artifacts: ToolArtifact[] = [];
     for (const workspacePath of collected.files) {
       const title = path.posix.basename(workspacePath);
-      if (!isRecordableDerivedChild(title, workspacePath)) {
-        continue;
-      }
       const description =
         parentDescription ||
         (parentTitle && parentTitle !== title ? parentTitle : undefined);
@@ -714,7 +732,12 @@ function formatWorkspaceSuccess(
 
 function formatDirectoryExpansion(
   locator: WorkspaceLocatorSuccess,
-  collected: { files: string[]; truncated: boolean; depthLimited?: boolean },
+  collected: {
+    files: string[];
+    truncated: boolean;
+    depthLimited?: boolean;
+    unreadable?: boolean;
+  },
 ): string {
   const lines = [
     `Expanded directory "${locator.workspacePath}" into ${collected.files.length} artifacts.`,
@@ -725,17 +748,20 @@ function formatDirectoryExpansion(
     ...collected.files.map((file) => `- ${file}`),
   ];
   if (collected.truncated) {
-    lines.push(`Recorded the first ${MAX_DIRECTORY_ARTIFACT_FILES} files.`);
+    lines.push(`Recorded the first ${collected.files.length} files.`);
   }
   if (collected.depthLimited) {
     lines.push(
       `Skipped files deeper than ${MAX_DIRECTORY_ARTIFACT_DEPTH} directory levels.`,
     );
   }
+  if (collected.unreadable) {
+    lines.push('Skipped subdirectories that could not be read.');
+  }
   return lines.join('\n');
 }
 
-function isRecordableDerivedChild(
+export function isRecordableDerivedChild(
   title: string,
   workspacePath: string,
 ): boolean {
@@ -972,6 +998,12 @@ async function inspectWorkspaceCandidate(
 
   const workspacePath = toCanonicalWorkspaceArtifactPath(resolved, cwd);
   if (!workspacePath) {
+    if (st.isDirectory()) {
+      return locatorFailure(
+        ToolErrorType.TARGET_IS_DIRECTORY,
+        `Failed to record artifact: "${rawPath}" is the workspace root, which cannot be recorded as a directory artifact.`,
+      );
+    }
     return locatorFailure(
       ToolErrorType.PATH_NOT_IN_WORKSPACE,
       `Failed to record artifact: "${rawPath}" could not be converted to a workspace-root-relative path.\n${WORKSPACE_PATH_HINT}`,
@@ -996,6 +1028,7 @@ async function inspectWorkspaceCandidate(
     ok: true,
     workspacePath,
     resolvedPath: resolved,
+    workspaceRoot: root,
     sizeBytes: st.isDirectory() ? 0 : st.size,
     ...(st.isDirectory() ? { isDirectory: true } : {}),
   };

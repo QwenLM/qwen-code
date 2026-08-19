@@ -52,6 +52,26 @@ describe('collectRecordableWorkspaceFiles', () => {
     expect(collected.files.sort()).toEqual(['keep/report.xlsx', 'real.txt']);
     expect(collected.truncated).toBe(false);
     expect(collected.depthLimited).toBe(false);
+    expect(collected.unreadable).toBe(false);
+  });
+
+  it('records a regular file named after a skipped directory', async () => {
+    const root = await workspace();
+    await writeFile(path.join(root, 'dist'), 'plain');
+    await writeFile(path.join(root, 'keep.xlsx'), 'xlsx');
+
+    const collected = await collectRecordableWorkspaceFiles(root, '', root);
+    expect(collected.files.sort()).toEqual(['dist', 'keep.xlsx']);
+  });
+
+  it('does not flag depth limits for an empty over-deep directory chain', async () => {
+    const root = await workspace();
+    await mkdir(path.join(root, 'a', 'b', 'c', 'd', 'e'), { recursive: true });
+    await writeFile(path.join(root, 'shallow.xlsx'), 'xlsx');
+
+    const collected = await collectRecordableWorkspaceFiles(root, '', root);
+    expect(collected.files).toEqual(['shallow.xlsx']);
+    expect(collected.depthLimited).toBe(false);
   });
 
   it('signals depth-limited truncation instead of silently dropping deep files', async () => {
