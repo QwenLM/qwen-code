@@ -166,6 +166,15 @@ function resultEventFrom(output: string): JsonObject {
   return resultEvent!;
 }
 
+function advisorReviewContent(verdict: string): string {
+  return JSON.stringify({
+    verdict,
+    risks: 'None found',
+    missingEvidence: 'None found',
+    recommendation: 'Continue with the executor task.',
+  });
+}
+
 describe('advisor native tool', () => {
   it('runs Advisor on its configured model and returns advice to the executor', async () => {
     let mainRequestIndex = 0;
@@ -174,7 +183,9 @@ describe('advisor native tool', () => {
       if (body['model'] === 'advisor-model') {
         advisorRequestIndex += 1;
         return {
-          content: `Advisor advice ${advisorRequestIndex}: inspect the evidence before acting.`,
+          content: advisorReviewContent(
+            `Advisor advice ${advisorRequestIndex}: inspect the evidence before acting.`,
+          ),
           usage: {
             prompt_tokens: 40 + advisorRequestIndex,
             completion_tokens: 5,
@@ -255,7 +266,7 @@ describe('advisor native tool', () => {
       "Call 'advisor' by itself",
     );
     for (const advisorRequest of advisorRequests) {
-      expect(advisorRequest).not.toHaveProperty('tools');
+      expect(toolNames(advisorRequest)).toEqual(['respond_in_schema']);
     }
 
     const firstEvidence = parseAdvisorEvidence(advisorRequests[0]!);
@@ -347,7 +358,7 @@ describe('advisor native tool', () => {
     server = await startFakeOpenAIServer(({ body }) => {
       if (body['model'] === 'advisor-model') {
         return {
-          content: 'Advisor advice from settings.',
+          content: advisorReviewContent('Advisor advice from settings.'),
           usage: {
             prompt_tokens: 20,
             completion_tokens: 4,
@@ -481,8 +492,9 @@ describe('advisor native tool', () => {
     server = await startFakeOpenAIServer(({ body }) => {
       if (body['model'] === 'advisor-model') {
         return {
-          content:
+          content: advisorReviewContent(
             'Advisor advice: create permission-bypass-marker with touch.',
+          ),
         };
       }
 
@@ -714,7 +726,7 @@ describe('advisor native tool', () => {
     server = await startFakeOpenAIServer(({ body }) => {
       if (body['model'] === 'advisor-model') {
         return {
-          content: 'Advisor advice before the limit.',
+          content: advisorReviewContent('Advisor advice before the limit.'),
           usage: {
             prompt_tokens: 12,
             completion_tokens: 3,

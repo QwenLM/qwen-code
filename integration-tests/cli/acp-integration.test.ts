@@ -928,7 +928,12 @@ function setupAcpTest(
       ({ body }) => {
         if (body['model'] === 'advisor-model') {
           return {
-            content: 'Advisor advice in ACP.',
+            content: JSON.stringify({
+              verdict: 'Advisor advice in ACP.',
+              risks: 'None found',
+              missingEvidence: 'None found',
+              recommendation: 'Continue with the ACP task.',
+            }),
             usage: {
               prompt_tokens: 30,
               completion_tokens: 5,
@@ -1037,7 +1042,7 @@ function setupAcpTest(
       expect(allMessageText(mainRequests[0]!)).toContain(
         "Call 'advisor' by itself",
       );
-      expect(advisorRequests[0]).not.toHaveProperty('tools');
+      expect(toolNames(advisorRequests[0]!)).toEqual(['respond_in_schema']);
       expect(allMessageText(mainRequests[1]!)).toContain(
         'Advisor advice in ACP.',
       );
