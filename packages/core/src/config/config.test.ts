@@ -2828,6 +2828,97 @@ describe('Server Config (config.ts)', () => {
       vi.mocked(uiTelemetryService.getMetricsForSession).mockReset();
     });
 
+    // R5-2: the twin of the test above for the WRITER-LEASE entrance. Under a
+    // lease the constructor parks the restore and `activateChatRecording()`
+    // starts it instead — still strictly before `initializeInternal` reaches
+    // `geminiClient.initialize()`, where the stored telemetry is replayed. So
+    // the deferral is load-bearing on this entrance too, but deleting its
+    // branch in `startPendingGoalRestore` left every suite green: the only
+    // lease restore test uses a PAUSED Goal and never calls `initialize()`, so
+    // it never mints a permit and never reads the meter.
+    it('opens a lease-restored Goal meter on the replayed totals, not an empty bucket', async () => {
+      const sessionId = 'lease-resume-session';
+      const telemetry = new UiTelemetryService();
+      vi.mocked(uiTelemetryService.getMetricsForSession).mockImplementation(
+        (requestedSessionId) =>
+          telemetry.getMetricsForSession(requestedSessionId),
+      );
+      const apiResponse = (
+        totalTokens: number,
+      ): ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE } =>
+        ({
+          'event.name': EVENT_API_RESPONSE,
+          model: 'model-a',
+          duration_ms: 1,
+          input_token_count: totalTokens - 15,
+          output_token_count: 15,
+          total_token_count: totalTokens,
+          cached_content_token_count: 0,
+          thoughts_token_count: 0,
+        }) as ApiResponseEvent & {
+          'event.name': typeof EVENT_API_RESPONSE;
+        };
+
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        experimentalZedIntegration: true,
+        sessionWriterLeaseEnabled: true,
+        sessionId,
+        sessionData: resumedGoalSession('active'),
+      });
+      const recorder = config.getChatRecordingService();
+      if (!recorder) throw new Error('expected a chat recording service');
+      vi.spyOn(recorder, 'recordGoalState').mockResolvedValue({} as ChatRecord);
+      // `initialize()` re-reads the transcript under the lease before it
+      // activates the recorder; this file has no session store behind it.
+      vi.spyOn(config.getSessionService(), 'loadSession').mockResolvedValue(
+        resumedGoalSession('active'),
+      );
+      // Under the lease the constructor parked the restore rather than running
+      // it, so there is nothing to hold back yet.
+      expect(recorder.hasWriteOwnership()).toBe(false);
+
+      let permit: GoalTurnPermit | undefined;
+      config.bindGoalTurnHost({
+        startGoalTurn: vi.fn(async (input) => {
+          permit = input.permit;
+        }),
+        preemptGoalTurn: vi.fn(),
+      });
+
+      // Stands in for `activateChatRecording()` handing the lease over — the
+      // entrance under test, and the one `initializeOnce` awaits strictly
+      // before the client replays.
+      vi.spyOn(recorder, 'hasWriteOwnership').mockReturnValue(true);
+      (
+        config as unknown as { startPendingGoalRestore(): void }
+      ).startPendingGoalRestore();
+      const runtime = await config.getGoalRuntimeReady();
+
+      // The Goal is ACTIVE and restored, but the client has not replayed the
+      // resumed session's telemetry into the bucket yet. A permit minted now
+      // would open its meter on 0.
+      expect(runtime.getSnapshot().goal?.status).toBe('active');
+      expect(permit).toBeUndefined();
+
+      // What `GeminiClient.initialize()` does for a resumed session.
+      telemetry.addEvent(apiResponse(200_000), sessionId);
+
+      await config.initialize();
+      await vi.waitFor(() => expect(permit).toBeDefined());
+
+      // The restored turn's own spend.
+      telemetry.addEvent(apiResponse(500), sessionId);
+      await runtime.finishTurn(permit!);
+
+      // 500, not 200_500 — the R4-4 regression this PR fixes for the
+      // constructor entrance, on the entrance a lease uses instead.
+      expect(runtime.getSnapshot().goal?.tokensUsed).toBe(500);
+
+      vi.mocked(uiTelemetryService.getMetricsForSession).mockReset();
+    });
+
     it('rebinds the current Goal host to every replacement runtime', async () => {
       const config = new Config({
         ...baseParams,

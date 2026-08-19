@@ -8001,11 +8001,24 @@ export class Config {
    * ~200k extra on its first turn, and that figure is persisted into
    * `GoalRecord.tokensUsed`.
    *
-   * The `/resume` and `/branch` hooks, the headless path and the ACP path all
-   * replay before they let the runtime activate; this closes the same gap on
-   * the cold-start entrance. It only applies to a resumed session — a fresh
-   * session has nothing to replay, and a swap-time restore (`startNewSession`)
-   * runs after the caller already replayed.
+   * The headless path and the ACP path replay before they let the runtime
+   * activate; this closes the same gap on the cold-start entrance. It only
+   * applies to a resumed session — a fresh session has nothing to replay.
+   *
+   * A swap-time restore is not deferred either, but NOT because the caller
+   * already replayed: the `/resume` and `/branch` hooks call
+   * `startNewSession()` FIRST, and that kicks `initializeGoalRuntime()` ->
+   * `runtime.restore()` synchronously, before their replay block. It is safe
+   * for two other reasons — `clientSessionTelemetryReplayed` is already set by
+   * the initial `initialize()` and is never cleared, so this predicate is false
+   * at a swap; and the hooks replay SYNCHRONOUSLY, with no `await` between
+   * `startNewSession()` and `markUiTelemetryEventsReplayed()`, so the restore's
+   * activation — a microtask — cannot run until the replay has landed. No
+   * `await` may be inserted between those two calls: at that await the
+   * activation would run `queueContinuation` -> `flushContinuation`, minting a
+   * permit that samples `readSessionTokens()` on the still-empty bucket, and
+   * the first restored turn would bill the whole replayed history — the exact
+   * regression this predicate exists to prevent, on a path it does not guard.
    */
   private shouldDeferGoalRestoreForTelemetryReplay(): boolean {
     return (

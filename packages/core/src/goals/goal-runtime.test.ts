@@ -3465,6 +3465,45 @@ describe('goal runtime', () => {
     expect(runtime.getSnapshot().activity).toBe('running');
   });
 
+  // R1-2: the fourth twin of the promotion meter tests. Of the six turn-start
+  // readings of `currentTurnTokensAtStart`, this was the last one no test
+  // reached: the promotion inside `handleStartFailure`. All four start-failure
+  // tests above build the runtime with NO `tokenMeter`, and the three metered
+  // promotion tests never make `startGoalTurn` reject — so deleting the reading
+  // on this path left the whole suite green while the promoted turn ran with
+  // `opened === undefined`, `takeTurnTokens()` returned 0, and the user turn's
+  // real spend vanished from `tokensUsed` on every host start failure.
+  it('bills the meter delta for user input promoted after a start failure', async () => {
+    const failedStart = deferred<void>();
+    let sessionTokens = 0;
+    const runtime = createGoalRuntime({
+      journal: fakeGoalJournal(),
+      tokenMeter: { readSessionTokens: () => sessionTokens },
+    });
+    runtime.bindHost({
+      startGoalTurn: () => failedStart.promise,
+      preemptGoalTurn: vi.fn(),
+    });
+    await runtime.dispatch({ action: 'create', objective: 'ship' });
+    expect(runtime.beginTurn('real-user')).toBeUndefined();
+
+    // Spend that lands before the host gives up. It belongs to the turn that
+    // never started, so the promotion must open its reading HERE, not at 0.
+    sessionTokens = 40;
+    failedStart.reject(new Error('host rejected'));
+    await vi.waitFor(() =>
+      expect(runtime.permitForTurn('real-user')).toBeDefined(),
+    );
+
+    sessionTokens = 65;
+    await runtime.finishTurn(runtime.permitForTurn('real-user')!);
+
+    // The promoted turn's own 25 — not 65, which is what a reading left at the
+    // start of the failed turn would bill, and not 0, which is what an unopened
+    // reading leaves behind.
+    expect(runtime.getSnapshot().goal?.tokensUsed).toBe(25);
+  });
+
   it('discards the rejected permit proposal before promoting queued user input', async () => {
     const failedStart = deferred<void>();
     const started: GoalTurnPermit[] = [];

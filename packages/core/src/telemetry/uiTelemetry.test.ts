@@ -1396,16 +1396,24 @@ describe('UiTelemetryService', () => {
       service.addEvent(makeApiEvent('m', 10), SESSION_B);
       service.removeSession(SESSION_B);
       service.setLastPromptTokenCount(7);
+      // R5-3: the cached-token field rides the same snapshot and had no
+      // assertion anywhere, so deleting its capture/restore pair shipped green
+      // while its sibling stayed guarded. `geminiChat` writes it on every live
+      // API response, so an in-flight response from the OUTGOING session
+      // landing inside a swap window is exactly what the rollback undoes.
+      service.setLastCachedContentTokenCount(42);
       const snapshot = service.snapshotForReplay(SESSION_B);
 
-      // A replay re-opens the closed session and moves the prompt count.
+      // A replay re-opens the closed session and moves both counts.
       service.resetSession(SESSION_B);
       service.addEvent(makeApiEvent('m', 300), SESSION_B);
       service.setLastPromptTokenCount(999);
+      service.setLastCachedContentTokenCount(1234);
 
       service.restoreFromReplaySnapshot(snapshot);
 
       expect(service.getLastPromptTokenCount()).toBe(7);
+      expect(service.getLastCachedContentTokenCount()).toBe(42);
       // Closed again: a late event must not resurrect the bucket.
       service.addEvent(makeApiEvent('m', 5), SESSION_B);
       expect(service.getMetricsForSession(SESSION_B).models).toEqual({});
