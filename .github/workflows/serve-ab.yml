@@ -34,9 +34,16 @@ on:
     # acceptable best-effort miss. Doc/UI-only PRs don't need an A/B either.
     paths:
       - 'packages/cli/src/serve/**'
+      # Two core files the daemon's session-admission answers are decided by:
+      # transcript lookup/creation-metadata reads and the JSONL recovery they
+      # sit on. Named individually rather than globbing `packages/core/**`,
+      # which would fire this 2x-build A/B on most core PRs for nothing.
+      - 'packages/core/src/services/sessionService.ts'
+      - 'packages/core/src/utils/jsonl-utils.ts'
       - '.github/workflows/serve-ab.yml'
       - '.github/scripts/serve-ab-diff.mjs'
       - '.github/scripts/serve-ab-drive.mjs'
+      - '.github/scripts/fixtures/serve-ab-session.jsonl'
 
 permissions:
   contents: 'read'

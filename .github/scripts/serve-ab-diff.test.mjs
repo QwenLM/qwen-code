@@ -14,6 +14,7 @@ import {
   buildComment,
   diffCaptureDirs,
   diffJson,
+  dropUnpairedStatus,
   isPrimitiveArray,
   maskPath,
   renderTable,
@@ -229,4 +230,48 @@ test('diffCaptureDirs: a base-only (removed) scenario is surfaced, not dropped',
     body,
     /Present in the base but absent from this PR: `capabilities`/,
   );
+});
+
+test('dropUnpairedStatus: a base predating `_status` does not report it as added', () => {
+  const before = { status: 'ok' };
+  const after = { _status: 200, status: 'ok' };
+  assert.deepEqual(dropUnpairedStatus(before, after), { status: 'ok' });
+});
+
+test('dropUnpairedStatus: once both sides carry `_status`, a change is reported', () => {
+  const before = { _status: 404, code: 'session_not_found' };
+  const after = { _status: 409, code: 'session_conflict' };
+  assert.deepEqual(dropUnpairedStatus(before, after), after);
+  const changes = diffJson(before, dropUnpairedStatus(before, after));
+  assert.deepEqual(changes.map((c) => c.path).sort(), ['_status', 'code']);
+});
+
+test('diffCaptureDirs: status-only change is a reported diff', () => {
+  const before = mkdtempSync(join(tmpdir(), 'sa-before-'));
+  const after = mkdtempSync(join(tmpdir(), 'sa-after-'));
+  // Same body, different status — invisible before `_status` was captured.
+  writeFileSync(
+    join(before, 'restore.json'),
+    JSON.stringify({ _status: 200, code: undefined }),
+  );
+  writeFileSync(join(after, 'restore.json'), JSON.stringify({ _status: 409 }));
+  const { sections } = diffCaptureDirs(before, after);
+  assert.deepEqual(sections[0].changes, [
+    { path: '_status', kind: 'changed', before: 200, after: 409 },
+  ]);
+});
+
+test('diffCaptureDirs: a scenario absent from the base still reports its status', () => {
+  const before = mkdtempSync(join(tmpdir(), 'sa-before-'));
+  const after = mkdtempSync(join(tmpdir(), 'sa-after-'));
+  // New scenario: no base capture at all. The shim must not swallow `_status`.
+  writeFileSync(
+    join(after, 'new-scenario.json'),
+    JSON.stringify({ _status: 400, code: 'reserved_session_source' }),
+  );
+  writeFileSync(join(before, 'health.json'), JSON.stringify({ status: 'ok' }));
+  writeFileSync(join(after, 'health.json'), JSON.stringify({ status: 'ok' }));
+  const { sections } = diffCaptureDirs(before, after);
+  const added = sections.find((s) => s.scenario === 'new-scenario');
+  assert.ok(added.changes.some((c) => c.path === '_status'));
 });

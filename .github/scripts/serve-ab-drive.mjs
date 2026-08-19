@@ -12,19 +12,109 @@
  *
  * Deterministic + credential-free: `/health` needs no auth; `/capabilities`
  * uses the local `--token`. No model is contacted (dummy OpenAI creds), so the
- * responses are stable and safe to diff. Scenarios that mutate state (create a
- * session, etc.) can be added here later — mask their volatile fields in
- * serve-ab-diff.mjs.
+ * responses are stable and safe to diff.
+ *
+ * A scenario may also stage ON-DISK state before its request (`fixtures`) and
+ * capture a reduced projection of the response (`project`). Without staging,
+ * every probe hits an empty daemon and the whole session-admission surface —
+ * case resolution, transcript integrity, archive conflicts, reserved sources —
+ * is unreachable, so a PR that rewrites it diffs as "no response changes".
  *
  *   node serve-ab-drive.mjs <cliEntry> <outDir>
  */
 
 import { spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { dirname, join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+
+/**
+ * Where the daemon persists a workspace's transcripts: `Storage.getProjectDir()`
+ * (`<runtimeBaseDir>/projects/<sanitized cwd>`) plus SessionService's `chats`
+ * leaf, with `archive/` under it. Kept in lockstep with `sanitizeCwd()` in
+ * packages/core/src/utils/paths.ts. The daemon canonicalizes its workspace
+ * path, so realpath first (`/tmp` is a symlink on some runners).
+ *
+ * If this ever drifts from the product code the staged fixtures land nowhere
+ * and every staged scenario would quietly answer 404 on BOTH arms — which is
+ * why `session-restore-healthy` below is a hard-failing canary.
+ */
+export function chatsDirFor(home, workspaceCwd) {
+  const projectId = workspaceCwd.replace(/[^a-zA-Z0-9]/g, '-');
+  return join(home, '.qwen', 'projects', projectId, 'chats');
+}
+
+/**
+ * The committed transcript fixture, recorded from a real CLI turn (a genuine
+ * `user` + `assistant` record pair) rather than hand-written: the loader
+ * rejects synthesized records that get details like `message.role` wrong, and a
+ * fixture that fails to load would silently neuter every scenario below.
+ */
+export function readTranscriptFixture() {
+  const raw = readFileSync(
+    join(HERE, 'fixtures', 'serve-ab-session.jsonl'),
+    'utf8',
+  );
+  return raw
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+}
+
+/** Re-point the fixture records at one session id + workspace. */
+export function retargetTranscript(records, sessionId, cwd) {
+  return (
+    records.map((r) => JSON.stringify({ ...r, sessionId, cwd })).join('\n') +
+    '\n'
+  );
+}
+
+// Session ids are hardcoded per scenario, never random: the base and head
+// daemons run as separate processes, so a random id would differ between the
+// two captures and diff as noise. Distinct ids also keep each scenario from
+// attaching to a live entry a previous scenario left behind — an attach also
+// answers 200 and would mask a restore-path difference.
+const SID = {
+  healthy: 'a0000000-0000-4000-8000-00000000da01',
+  mixedCase: 'A0000000-0000-4000-8000-00000000DA02',
+  twins: 'A0000000-0000-4000-8000-00000000DA03',
+  unreadable: 'a0000000-0000-4000-8000-00000000da04',
+  archived: 'a0000000-0000-4000-8000-00000000da05',
+};
+
+/** Stage transcripts for a scenario; returns nothing, throws on IO failure. */
+function stageTranscripts(ctx, entries) {
+  const chats = chatsDirFor(ctx.home, ctx.workspace);
+  mkdirSync(join(chats, 'archive'), { recursive: true });
+  const records = readTranscriptFixture();
+  for (const e of entries) {
+    const dir = e.archived ? join(chats, 'archive') : chats;
+    const body =
+      e.raw !== undefined
+        ? e.raw
+        : retargetTranscript(records, e.sessionId, ctx.workspace);
+    writeFileSync(join(dir, `${e.sessionId}.jsonl`), body);
+  }
+}
+
+// A restore answer is a decision, not a payload: keep the status and the error
+// discriminator and drop the session snapshot, whose replay ids, epochs and
+// per-record timestamps churn on every run and would bury the signal.
+const admissionOnly = (json, res) => ({
+  _status: res.status,
+  ...(json?.code === undefined ? {} : { code: json.code }),
+  ...(json?.error === undefined ? {} : { error: json.error }),
+});
 
 // The fixed scenarios. `auth` sends the bearer token; anything mutating the
 // daemon would push requests here in order.
@@ -45,12 +135,97 @@ export const SCENARIOS = [
         method: 'POST',
         path: '/session',
         auth: true,
-        body: ({ home }) => ({ clientId: 'serve-ab', workspaceCwd: home }),
+        // No `cwd`: the route falls back to the daemon's bound workspace,
+        // which is already canonicalized. (This used to send `workspaceCwd`,
+        // a key the route never reads.)
+        body: () => ({ clientId: 'serve-ab' }),
       },
     ],
     method: 'GET',
     path: '/health?deep=1',
     auth: true,
+  },
+
+  // --- session admission -----------------------------------------------
+  // These run last so the probes above still see the daemon they saw before.
+  // Each stages transcripts on disk first; without that the restore path only
+  // ever answers "no such session" and its guards are unreachable.
+  {
+    // Canary. A healthy transcript under its exact spelling must restore. If
+    // this stops answering 200 the fixture or the on-disk layout has drifted
+    // and every scenario below is meaningless — so the drive fails loudly
+    // instead of publishing a reassuring all-clear.
+    name: 'session-restore-healthy',
+    fixtures: (ctx) => stageTranscripts(ctx, [{ sessionId: SID.healthy }]),
+    method: 'POST',
+    path: `/session/${SID.healthy}/load`,
+    auth: true,
+    body: () => ({}),
+    project: admissionOnly,
+    expectStatus: 200,
+  },
+  {
+    // Legacy `uuidgen` spelling: only the uppercase file exists, the caller
+    // asks in lowercase.
+    name: 'session-restore-mixed-case',
+    fixtures: (ctx) => stageTranscripts(ctx, [{ sessionId: SID.mixedCase }]),
+    method: 'POST',
+    path: `/session/${SID.mixedCase.toLowerCase()}/load`,
+    auth: true,
+    body: () => ({}),
+    project: admissionOnly,
+  },
+  {
+    // Two persisted spellings of one id — possible on any case-sensitive
+    // filesystem, which is what CI runs on.
+    name: 'session-restore-case-twins',
+    fixtures: (ctx) =>
+      stageTranscripts(ctx, [
+        { sessionId: SID.twins },
+        { sessionId: SID.twins.toLowerCase() },
+      ]),
+    method: 'POST',
+    path: `/session/${SID.twins.toLowerCase()}/load`,
+    auth: true,
+    body: () => ({}),
+    project: admissionOnly,
+  },
+  {
+    // Crash-shaped damage: nothing in the head of the file parses.
+    name: 'session-restore-unreadable',
+    fixtures: (ctx) =>
+      stageTranscripts(ctx, [
+        { sessionId: SID.unreadable, raw: 'not json at all\n{"broken":\n' },
+      ]),
+    method: 'POST',
+    path: `/session/${SID.unreadable}/load`,
+    auth: true,
+    body: () => ({}),
+    project: admissionOnly,
+  },
+  {
+    // The same id persisted in both the active and the archive directory.
+    name: 'session-restore-active-and-archived',
+    fixtures: (ctx) =>
+      stageTranscripts(ctx, [
+        { sessionId: SID.archived },
+        { sessionId: SID.archived, archived: true },
+      ]),
+    method: 'POST',
+    path: `/session/${SID.archived}/load`,
+    auth: true,
+    body: () => ({}),
+    project: admissionOnly,
+  },
+  {
+    // Session creation carrying a source type. No fixtures needed; this is the
+    // admission decision on the request itself.
+    name: 'session-create-source-type',
+    method: 'POST',
+    path: '/session',
+    auth: true,
+    body: () => ({ clientId: 'serve-ab-source', sourceType: 'standalone' }),
+    project: admissionOnly,
   },
 ];
 
@@ -114,6 +289,11 @@ export async function driveCli(cliEntry, outDir) {
     },
   );
   const base = `http://127.0.0.1:${port}`;
+  // The daemon canonicalizes `--workspace`, and the on-disk project directory
+  // is derived from that canonical path — so fixtures must be staged under the
+  // realpath, not the (possibly symlinked) mkdtemp path.
+  const workspace = realpathSync(home);
+  const ctx = { home, workspace };
   try {
     await waitForHealth(base);
     const doRequest = (spec) => {
@@ -121,8 +301,7 @@ export async function driveCli(cliEntry, outDir) {
       let body;
       if (spec.body) {
         headers['Content-Type'] = 'application/json';
-        const b =
-          typeof spec.body === 'function' ? spec.body({ home }) : spec.body;
+        const b = typeof spec.body === 'function' ? spec.body(ctx) : spec.body;
         body = JSON.stringify(b);
       }
       return fetch(`${base}${spec.path}`, {
@@ -132,6 +311,8 @@ export async function driveCli(cliEntry, outDir) {
       });
     };
     for (const s of SCENARIOS) {
+      // Stage on-disk state (transcripts) before anything is requested.
+      s.fixtures?.(ctx);
       // Run any setup requests (e.g. create a session) before the capture.
       for (const step of s.setup ?? []) {
         const r = await doRequest(step);
@@ -146,16 +327,31 @@ export async function driveCli(cliEntry, outDir) {
         }
       }
       const res = await doRequest(s);
+      // A canary scenario asserts its own precondition. Failing here beats
+      // publishing "no response changes" from a scenario set that was silently
+      // probing state it never managed to create.
+      if (s.expectStatus !== undefined && res.status !== s.expectStatus) {
+        const body = await res.text().catch(() => '');
+        throw new Error(
+          `scenario "${s.name}" expected HTTP ${s.expectStatus} but got ${res.status}: ${body.slice(0, 300)}`,
+        );
+      }
       const text = await res.text();
       let json;
       try {
         json = JSON.parse(text);
       } catch {
-        json = { _status: res.status, _nonJson: text.slice(0, 500) };
+        json = { _nonJson: text.slice(0, 500) };
       }
+      // `_status` is always recorded: a status-only change (404 → 409, say)
+      // with an otherwise similar body is exactly the kind of admission
+      // difference these scenarios exist to catch.
+      const captured = s.project
+        ? s.project(json, res)
+        : { _status: res.status, ...json };
       writeFileSync(
         join(outDir, `${s.name}.json`),
-        JSON.stringify(json, null, 2) + '\n',
+        JSON.stringify(captured, null, 2) + '\n',
       );
       process.stderr.write(`  captured ${s.name} (HTTP ${res.status})\n`);
     }

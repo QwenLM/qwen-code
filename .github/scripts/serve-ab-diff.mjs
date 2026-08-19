@@ -44,6 +44,29 @@ export function maskPath(path, patterns = DEFAULT_VOLATILE) {
   return patterns.some((re) => re.test(path));
 }
 
+/**
+ * The drive script records `_status` on every capture; a base built from a
+ * commit predating that records none. Diffing across that boundary would report
+ * `_status` as "added" for every scenario — noise that says nothing about the
+ * PR. Drop the head-side `_status` when the base has no counterpart. Once the
+ * change is on `main` both sides carry it and this is a no-op, so it expires on
+ * its own rather than becoming a permanent blind spot.
+ */
+export function dropUnpairedStatus(before, after) {
+  const pairable =
+    before !== null &&
+    typeof before === 'object' &&
+    !Array.isArray(before) &&
+    after !== null &&
+    typeof after === 'object' &&
+    !Array.isArray(after);
+  if (!pairable) return after;
+  if ('_status' in before || !('_status' in after)) return after;
+  return Object.fromEntries(
+    Object.entries(after).filter(([k]) => k !== '_status'),
+  );
+}
+
 export function typeOf(v) {
   if (v === null) return 'null';
   if (Array.isArray(v)) return 'array';
@@ -220,8 +243,13 @@ export function diffCaptureDirs(beforeDir, afterDir) {
     // EXISTING but malformed base must surface (readJson throws) rather than be
     // silently treated as {}, which would report every field as "added".
     const beforePath = join(beforeDir, f);
-    const before = existsSync(beforePath) ? readJson(beforePath) : {};
-    return { scenario, changes: diffJson(before, after) };
+    const beforeExists = existsSync(beforePath);
+    const before = beforeExists ? readJson(beforePath) : {};
+    // Only reconcile `_status` against a base that actually captured this
+    // scenario; for a scenario the base never ran, the whole capture is new and
+    // reporting all of it — status included — is the honest answer.
+    const paired = beforeExists ? dropUnpairedStatus(before, after) : after;
+    return { scenario, changes: diffJson(before, paired) };
   });
   return { sections, baselineMissing, removed };
 }
