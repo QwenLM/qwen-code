@@ -53,6 +53,7 @@ export function isSkillBodyOutput(output: unknown): boolean {
 
 const SKILL_UNLOADED_PLACEHOLDER_PREFIX = `[Skill '`;
 const SKILL_UNLOADED_PLACEHOLDER_SUFFIX = `' unloaded via /unskill; invoke the Skill tool again to reload.]`;
+const SKILL_UNLOADED_CONFIRMATION_SUFFIX = `' unloaded via /unskill.]`;
 
 /** Placeholder `/unskill` writes in place of a blanked skill body. */
 export function skillUnloadedPlaceholder(skillName: string): string {
@@ -60,17 +61,28 @@ export function skillUnloadedPlaceholder(skillName: string): string {
 }
 
 /**
- * Whether a tool-result output is a `/unskill` placeholder. Microcompaction
- * treats it like its own cleared message: it must not absorb a keepRecent
- * protection slot, nor be re-blanked (which would silently replace the reload
- * hint with the generic cleared message without any eviction report, since
- * placeholders are not bodies).
+ * Short marker `/unskill` writes in place of a dedup confirmation.
+ * Strictly shorter than the confirmation it replaces, so unloading can
+ * never grow the prompt even when the body itself is tiny.
+ */
+export function skillUnloadedConfirmationMarker(skillName: string): string {
+  return `${SKILL_UNLOADED_PLACEHOLDER_PREFIX}${skillName}${SKILL_UNLOADED_CONFIRMATION_SUFFIX}`;
+}
+
+/**
+ * Whether a tool-result output is a `/unskill` placeholder (body) or
+ * confirmation marker. Microcompaction treats them like its own cleared
+ * message: they must not absorb a keepRecent protection slot, nor be
+ * re-blanked (which would silently replace the reload hint with the
+ * generic cleared message without any eviction report, since they are
+ * not bodies).
  */
 export function isSkillUnloadedPlaceholder(output: unknown): boolean {
   return (
     typeof output === 'string' &&
     output.startsWith(SKILL_UNLOADED_PLACEHOLDER_PREFIX) &&
-    output.endsWith(SKILL_UNLOADED_PLACEHOLDER_SUFFIX)
+    (output.endsWith(SKILL_UNLOADED_PLACEHOLDER_SUFFIX) ||
+      output.endsWith(SKILL_UNLOADED_CONFIRMATION_SUFFIX))
   );
 }
 

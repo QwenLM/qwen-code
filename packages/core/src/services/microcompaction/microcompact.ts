@@ -254,7 +254,11 @@ function isAlreadyCleared(part: Part): boolean {
   const output = part.functionResponse?.response?.['output'];
   return (
     output === MICROCOMPACT_CLEARED_MESSAGE ||
-    isSkillUnloadedPlaceholder(output)
+    // Scoped to Skill responses: only the Skill tool writes these
+    // markers, so a non-Skill result merely shaped like one stays
+    // compactable instead of evading every microcompaction mode.
+    (part.functionResponse?.name === ToolNames.SKILL &&
+      isSkillUnloadedPlaceholder(output))
   );
 }
 

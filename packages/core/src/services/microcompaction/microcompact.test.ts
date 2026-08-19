@@ -2394,4 +2394,31 @@ describe('microcompactHistory evictedSkillNames (issue #6762 sync)', () => {
       result.history[1]!.parts![0]!.functionResponse!.response!['output'],
     ).toBe(placeholder);
   });
+
+  it('does not let a non-Skill result impersonate the /unskill placeholder (R18-1)', () => {
+    // Only the Skill tool writes unload markers; a shell result merely
+    // shaped like one must stay compactable instead of evading every
+    // microcompaction mode and accumulating until a hard failure.
+    const impostor = skillUnloadedPlaceholder('demo-poem');
+    const history: Content[] = [
+      shellCall('c0'),
+      shellResult('c0', impostor),
+      shellCall('c1'),
+      shellResult('c1', 'older shell output '.repeat(50)),
+      shellCall('c2'),
+      shellResult('c2', 'newest shell output'),
+    ];
+
+    const result = microcompactHistory(history, TWO_HOURS_AGO, {
+      toolResultsThresholdMinutes: 5,
+      toolResultsNumToKeep: 1,
+    });
+
+    expect(result.meta).toBeDefined();
+    // The impostor is compactable like any other stale shell result.
+    expect(result.meta!.toolsCleared).toBe(2);
+    expect(
+      result.history[1]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+  });
 });

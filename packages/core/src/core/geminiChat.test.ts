@@ -291,6 +291,7 @@ describe('GeminiChat', async () => {
   describe('unloadSkillBody (/unskill)', () => {
     const UNSKILL_PLACEHOLDER =
       "[Skill 'demo' unloaded via /unskill; invoke the Skill tool again to reload.]";
+    const UNSKILL_CONFIRMATION_MARKER = "[Skill 'demo' unloaded via /unskill.]";
 
     const skillHistory = (): Content[] => [
       { role: 'user', parts: [{ text: 'use the skill' }] },
@@ -357,11 +358,103 @@ describe('GeminiChat', async () => {
 
       expect(result.cleared).toBe(true);
       expect(result.tokensSaved).toBeGreaterThan(0);
+      // Body gets the detailed reload hint; confirmations get the
+      // strictly shorter marker so unloading never grows the prompt.
       expect(skillOutputs(chat.getHistory())).toEqual([
         UNSKILL_PLACEHOLDER,
-        UNSKILL_PLACEHOLDER,
+        UNSKILL_CONFIRMATION_MARKER,
       ]);
       expect(chat.getLastPromptTokenCount()).toBeLessThan(1000);
+    });
+
+    it('never enlarges the prompt for a tiny body with many confirmations (R18-2)', () => {
+      const confirmation = 'Skill "demo" is already loaded in context.';
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'use the skill' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 's0',
+                name: 'skill',
+                args: { skill: 'demo' },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 's0',
+                name: 'skill',
+                response: { output: buildSkillLlmContent('/', '') },
+              },
+            },
+          ],
+        },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 's1',
+                name: 'skill',
+                args: { skill: 'demo' },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 's1',
+                name: 'skill',
+                response: { output: confirmation },
+              },
+            },
+          ],
+        },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 's2',
+                name: 'skill',
+                args: { skill: 'demo' },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 's2',
+                name: 'skill',
+                response: { output: confirmation },
+              },
+            },
+          ],
+        },
+      ];
+      chat.setHistory(history);
+
+      const result = chat.unloadSkillBody('demo');
+
+      expect(result.cleared).toBe(true);
+      expect(result.tokensSaved).toBeGreaterThan(0);
+      expect(skillOutputs(chat.getHistory())).toEqual([
+        UNSKILL_PLACEHOLDER,
+        UNSKILL_CONFIRMATION_MARKER,
+        UNSKILL_CONFIRMATION_MARKER,
+      ]);
     });
 
     it('NOOPs for a skill with no results in history', () => {

@@ -64,6 +64,7 @@ import {
   reconcileLoadedSkillTracking,
   resolveLoadedSkillNames,
   skillUnloadedPlaceholder,
+  skillUnloadedConfirmationMarker,
   unloadSkillsFromEntries,
 } from '../tools/skill-utils.js';
 import * as fs from 'node:fs';
@@ -2245,6 +2246,7 @@ export class GeminiChat {
     }
 
     const placeholder = skillUnloadedPlaceholder(skillName);
+    const confirmationMarker = skillUnloadedConfirmationMarker(skillName);
     const beforeEstimate = estimateContentTokens(this.history);
     let touched = false;
     const newHistory = this.history.map((content) => {
@@ -2269,8 +2271,18 @@ export class GeminiChat {
           return part;
         }
         changed = true;
+        // The detailed reload hint goes on the body; dedup confirmations
+        // get a strictly shorter marker so unloading never grows the
+        // prompt even when the body is tiny.
         return {
-          functionResponse: { ...fr, response: { output: placeholder } },
+          functionResponse: {
+            ...fr,
+            response: {
+              output: isSkillBodyOutput(output)
+                ? placeholder
+                : confirmationMarker,
+            },
+          },
         };
       });
       if (!changed) return content;
@@ -2283,7 +2295,14 @@ export class GeminiChat {
     }
 
     const afterEstimate = estimateContentTokens(newHistory);
-    const tokensSaved = Math.max(0, beforeEstimate - afterEstimate);
+    const tokensSaved = beforeEstimate - afterEstimate;
+    if (tokensSaved < 0) {
+      // Never enlarge the prompt: refuse the rewrite wholesale rather
+      // than apply a net-growing replacement. Reported as unresolvable
+      // so the command keeps the name tracked — un-tracking behind a
+      // still-resident body would let a duplicate injection through.
+      return { cleared: false, tokensSaved: 0, unresolvable: true };
+    }
     this.setHistory(newHistory);
     if (this.lastPromptTokenCount > 0 && tokensSaved > 0) {
       const adjusted = Math.max(0, this.lastPromptTokenCount - tokensSaved);
