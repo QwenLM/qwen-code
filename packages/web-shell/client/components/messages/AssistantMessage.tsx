@@ -16,7 +16,7 @@ interface AssistantMessageProps {
   content: string;
   isStreaming?: boolean;
   timestamp?: number;
-  onBranchSession?: () => void;
+  onBranchSession?: () => void | Promise<void>;
   showFooterActions?: boolean;
   showBranchAction?: boolean;
   isLocateFlashing?: boolean;
@@ -36,6 +36,7 @@ export const AssistantMessage = memo(function AssistantMessage({
   const { t } = useI18n();
   const { renderAssistantTurnFooter } = useWebShellCustomization();
   const [copied, setCopied] = useState(false);
+  const [branchPending, setBranchPending] = useState(false);
   const showFooter = !!content && !isStreaming && showFooterActions;
   const customFooter = useMemo(
     () =>
@@ -44,6 +45,17 @@ export const AssistantMessage = memo(function AssistantMessage({
         : undefined,
     [customFooterInfo, renderAssistantTurnFooter],
   );
+  const handleBranch = useCallback(async () => {
+    if (!onBranchSession || branchPending) return;
+    setBranchPending(true);
+    try {
+      await onBranchSession();
+    } catch {
+      // host owns error surfacing
+    } finally {
+      setBranchPending(false);
+    }
+  }, [branchPending, onBranchSession]);
   const handleCopy = useCallback(() => {
     const write = navigator.clipboard?.writeText(content);
     if (!write) {
@@ -93,7 +105,8 @@ export const AssistantMessage = memo(function AssistantMessage({
               className={styles.copyButton}
               title={t('assistant.branch')}
               aria-label={t('assistant.branch')}
-              onClick={onBranchSession}
+              disabled={branchPending}
+              onClick={() => void handleBranch()}
             >
               <BranchIcon />
             </button>
@@ -224,13 +237,17 @@ export const ThinkingMessage = memo(function ThinkingMessage({
   const sawActiveRef = useRef(thinkingActive);
   const [now, setNow] = useState(() => Date.now());
   const [finishedAt, setFinishedAt] = useState<number | null>(null);
+  // `content` grows on every streamed chunk; keying on the boolean instead of
+  // the string keeps the timer effect from tearing down and re-creating the
+  // interval per chunk, while still starting once content first appears.
+  const hasContent = Boolean(content);
 
   useEffect(() => {
-    if (!content || !thinkingActive) return;
+    if (!hasContent || !thinkingActive) return;
     setNow(Date.now());
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
-  }, [content, thinkingActive]);
+  }, [hasContent, thinkingActive]);
 
   useEffect(() => {
     if (!content) return;

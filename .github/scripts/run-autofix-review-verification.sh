@@ -84,6 +84,10 @@ git checkout "${BRANCH}"
 GATE_LOG="${WORKDIR}/gate-output.log"
 : > "${GATE_LOG}"
 rm -f "${GATE_LOG}.bite"
+# Single reset point for the gate-authored advisory file: every writer
+# below APPENDS, so no later section can wipe an earlier section's
+# advisory (the footprint advisory used to die to the shrink section's rm).
+rm -f "${WORKDIR}/gate-advisories.md"
 reject_fix() {
   local label="${1}"
   local preexisting="${2:-false}"
@@ -606,6 +610,96 @@ not_merge_freight() {
     git diff --quiet origin/main "${BRANCH}" -- "${f}" 2> /dev/null || printf '%s\0' "${f}"
   done
 }
+# --- Deny-by-default footprint areas ----------------------------------------
+# The class gate above protects an ENUMERATED surface, and enumeration is
+# never complete (a denylist is not a boundary). This check inverts the
+# default: every file a round touches is mapped to an AREA — its declared
+# workspace, else its top-level directory, else the root file itself — and
+# any area outside the PR's own footprint is surfaced. Consequence is
+# staged via QWEN_AUTOFIX_FOOTPRINT_ENFORCE: 'advisory' (default) writes a
+# gate-authored report section; 'reject' turns expansions into a retryable
+# rejection. Merge freight is excluded from the round side; deleted
+# workspaces degrade to their top-level segment (conservative: mismatch
+# surfaces rather than hides).
+list_areas() {
+  # $1: NUL-separated path file; $2: the REF whose recorded workspaces
+  # globs define membership. Ref-anchored on purpose: the round's on-disk
+  # manifest must not redefine its own footprint boundary. The ref's globs
+  # are read and translated ONCE per invocation (the per-file ancestor
+  # walk then matches in-bash — was_workspace_dir per (file×dir) re-ran
+  # git+jq+sed each time, ~21 ms a call). Longest ancestor wins (nested
+  # workspaces); non-workspace paths under packages/ keep TWO segments so
+  # sibling projects stay distinct areas. Emitted keys are printf %q —
+  # line-safe AND injective, so two distinct areas can never collapse
+  # into one comparison key (a lossy charset map hid expansions).
+  local ref="${2}" f d a g re
+  local -a ws_res=()
+  while IFS= read -r g; do
+    [[ -n "${g}" && "${g}" != '!'* ]] || continue
+    re="$(printf '%s' "${g}" | sed -e 's/[.^$+(){}|[]/\\&/g' -e 's/]/\\]/g' -e 's/\*\*/\x01/g' -e 's/\*/[^\/]*/g' -e 's/?/[^\/]/g' -e 's/\x01/.*/g')"
+    ws_res+=("${re}")
+  done < <(git show "${ref}:package.json" 2> /dev/null | jq -r '.workspaces[]?' 2> /dev/null)
+  while IFS= read -r -d '' f; do
+    [[ -n "${f}" ]] || continue
+    a=''
+    d="${f%/*}"
+    while [[ -n "${d}" && "${d}" != "${f}" ]]; do
+      for re in "${ws_res[@]}"; do
+        if [[ "${d}" =~ ^${re}$ ]]; then
+          a="${d}"
+          break 2
+        fi
+      done
+      [[ "${d}" == */* ]] || break
+      d="${d%/*}"
+    done
+    if [[ -z "${a}" ]]; then
+      if [[ "${f}" == packages/*/* ]]; then
+        a="${f#packages/}"
+        a="packages/${a%%/*}"
+      elif [[ "${f}" == */* ]]; then
+        a="${f%%/*}"
+      else
+        a="/${f}"
+      fi
+    fi
+    printf '%q\n' "${a}"
+  done < "${1}" | sort -u
+}
+FOOTPRINT_ENFORCE="${FOOTPRINT_ENFORCE:-advisory}"
+[[ "${FOOTPRINT_ENFORCE}" == 'reject' ]] || FOOTPRINT_ENFORCE='advisory'
+ROUND_FILES_Z="$(mktemp)"
+PR_FILES_Z="$(mktemp)"
+# Unmeasurable is a STATE here too: a failed producer (no merge base on an
+# orphan-history takeover, a transient git error) must skip the check
+# loudly, not shrink one side into a verdict — an empty PR side would
+# read as "every round area is an expansion".
+FOOTPRINT_MEASURED='true'
+git diff --name-only -z --no-renames "${ROUND_RANGE}" 2> /dev/null | not_merge_freight > "${ROUND_FILES_Z}" || FOOTPRINT_MEASURED='false'
+git diff --name-only -z --no-renames "${PR_RANGE}" 2> /dev/null > "${PR_FILES_Z}" || FOOTPRINT_MEASURED='false'
+if [[ "${FOOTPRINT_MEASURED}" != 'true' ]]; then
+  echo "🧭 footprint measurement UNAVAILABLE this round (diff producer failed) — check skipped" | tee -a "${GATE_LOG}"
+fi
+OUT_AREAS="$(comm -23 <(list_areas "${ROUND_FILES_Z}" "origin/${BRANCH}") <(list_areas "${PR_FILES_Z}" "origin/${BRANCH}"))" || OUT_AREAS=''
+rm -f "${ROUND_FILES_Z}" "${PR_FILES_Z}"
+if [[ "${FOOTPRINT_MEASURED}" == 'true' && -n "${OUT_AREAS}" ]]; then
+  if [[ "${FOOTPRINT_ENFORCE}" == 'reject' ]]; then
+    {
+      echo 'This round modified areas entirely outside the PR footprint:'
+      while IFS= read -r a; do [[ -n "${a}" ]] && echo "- ${a}"; done <<< "${OUT_AREAS}"
+      echo 'Footprint enforcement is set to reject: revert these files, or escalate the feedback that requires them to a maintainer as an open question.'
+    } >> "${GATE_LOG}"
+    reject_fix 'round expands into areas outside the PR footprint'
+  else
+    {
+      echo '🧭 **Gate advisory — this round modified areas outside the PR footprint** (machine-measured, not agent-authored):'
+      while IFS= read -r a; do [[ -n "${a}" ]] && echo "- ${a}"; done <<< "${OUT_AREAS}"
+      echo 'Review the expansion deliberately; the footprint gate is in advisory mode. · 本轮改动了 PR 足迹之外的区域（门自动测量，非 agent 文本），当前足迹门为 advisory 模式，请有意识地审阅该扩张。'
+    } >> "${WORKDIR}/gate-advisories.md"
+    echo "🧭 footprint expansion (advisory): $(tr '\n' ' ' <<< "${OUT_AREAS}")" | tee -a "${GATE_LOG}"
+  fi
+fi
+
 # Test-deletion advisory: deleting or shrinking tests is sometimes right
 # (the pinned behavior was wrong, or coverage is duplicated) and the agent
 # is required to justify it in its summary — but the SURFACING must not be
@@ -628,7 +722,6 @@ NET_TEST_LINES="$(git diff --numstat -z --no-renames "${ROUND_RANGE}" -- "${TEST
       [[ "${del}" != '-' ]] && total=$(( total - del ))
     done
     echo "${total}"; })"
-rm -f "${WORKDIR}/gate-advisories.md"
 if [[ -n "${DELETED_TESTS}" || "${NET_TEST_LINES}" -le -25 ]]; then
   {
     echo '⚖️ **Gate advisory — test coverage shrank this round** (machine-measured, not agent-authored): '"net ${NET_TEST_LINES} test lines."
@@ -646,7 +739,7 @@ if [[ -n "${DELETED_TESTS}" || "${NET_TEST_LINES}" -le -25 ]]; then
     fi
     echo
     echo 'The justification must be in the round summary above; a deletion is only sound when the pinned behavior itself was wrong (evidence shown) or the coverage demonstrably survives elsewhere. · 本轮测试覆盖净减少（门自动测量，非 agent 文本）；删除是否成立请对照上方轮次摘要中的理由——仅当被钉住的行为本身有误（需给出证据）或覆盖确有替代时才合理。'
-  } > "${WORKDIR}/gate-advisories.md"
+  } >> "${WORKDIR}/gate-advisories.md"
   echo '⚖️ test coverage shrank this round — advisory written for the report' | tee -a "${GATE_LOG}"
 fi
 
@@ -781,15 +874,18 @@ if [[ -s "${WORKDIR}/resolved-comments.txt" && -s "${WORKDIR}/rc.json" ]]; then
     | ($ids | split("\n")
         | map(sub("^rc:"; "") | sub("\r$"; "")
           | select(test("^[0-9]+$")) | tonumber)) as $resolved
-    | def critical($c):
+    | def cr_attached($x):
+        (($x.pull_request_review_id // null) as $review
+          | $review != null
+          and any($reviews[]; .id == $review and ((.state // "") == "CHANGES_REQUESTED")));
+      def critical($c):
         (($c.body // "") | contains("**[Critical]**"))
         or (($c.in_reply_to_id // null) as $root
           | $root != null
           and any($comments[];
-            .id == $root and ((.body // "") | contains("**[Critical]**"))))
-        or (($c.pull_request_review_id // null) as $review
-          | $review != null
-          and any($reviews[]; .id == $review and ((.state // "") == "CHANGES_REQUESTED")));
+            .id == $root
+            and (((.body // "") | contains("**[Critical]**")) or cr_attached(.))))
+        or cr_attached($c);
     any($comments[]; (.id as $id | $resolved | index($id) != null) and critical(.))' \
     "${WORKDIR}/rc.json" 2> /dev/null)" || BITE_ENFORCE='false'
   [[ "${BITE_ENFORCE}" == 'true' ]] || BITE_ENFORCE='false'
@@ -805,15 +901,18 @@ if [[ -s "${WORKDIR}/resolved-comments.txt" && -s "${WORKDIR}/rc.json" ]]; then
       | ($ids | split("\n")
           | map(sub("^rc:"; "") | sub("\r$"; "")
             | select(test("^[0-9]+$")) | tonumber)) as $resolved
-      | def critical($c):
+      | def cr_attached($x):
+          (($x.pull_request_review_id // null) as $review
+            | $review != null
+            and any($reviews[]; .id == $review and ((.state // "") == "CHANGES_REQUESTED")));
+        def critical($c):
           (($c.body // "") | contains("**[Critical]**"))
           or (($c.in_reply_to_id // null) as $root
             | $root != null
             and any($comments[];
-              .id == $root and ((.body // "") | contains("**[Critical]**"))))
-          or (($c.pull_request_review_id // null) as $review
-            | $review != null
-            and any($reviews[]; .id == $review and ((.state // "") == "CHANGES_REQUESTED")));
+              .id == $root
+              and (((.body // "") | contains("**[Critical]**")) or cr_attached(.))))
+          or cr_attached($c);
       [ $comments[]
         | select(.id as $id | $resolved | index($id) != null)
         | select(critical(.)) | (.path // "") ]

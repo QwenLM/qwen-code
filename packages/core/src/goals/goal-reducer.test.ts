@@ -6,6 +6,9 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON,
+  GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
+  goalLimitKindForReason,
   goalRequiresExactPermit,
   type GoalControlRequest,
   type GoalRecord,
@@ -305,6 +308,94 @@ describe('goal reducer', () => {
     });
   });
 
+  it.each(['evidence_catalog', 'checkpoint_request'] as const)(
+    'refuses to resume a Goal that carries limitKind %s',
+    (limitKind) => {
+      expect(() =>
+        reduceGoalControl(
+          goalRecord({
+            status: 'usage_limited',
+            revision: 4,
+            limitKind,
+            lastReason: 'a reason the guard no longer has to recognise',
+          }),
+          {
+            request: {
+              action: 'resume',
+              expectedGoalId: 'g-1',
+              expectedRevision: 4,
+            },
+            now: 200,
+            nextGoalId: 'unused',
+            cursor: { recordId: 'r-200' },
+          },
+        ),
+      ).toThrow(
+        'An evidence-limited Goal cannot be resumed; edit or replace the Goal first',
+      );
+    },
+  );
+
+  it.each([
+    [GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON, 'evidence_catalog'],
+    [GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON, 'checkpoint_request'],
+    ['An operational limit', undefined],
+  ] as const)(
+    'maps a Goal limit reason only to its canonical kind',
+    (reason, expected) => {
+      expect(goalLimitKindForReason(reason)).toBe(expected);
+    },
+  );
+
+  it.each([
+    GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
+    GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON,
+  ])(
+    'still refuses to resume a pre-limitKind Goal stopped by the sentinel prose',
+    (lastReason) => {
+      expect(() =>
+        reduceGoalControl(
+          goalRecord({ status: 'usage_limited', revision: 4, lastReason }),
+          {
+            request: {
+              action: 'resume',
+              expectedGoalId: 'g-1',
+              expectedRevision: 4,
+            },
+            now: 200,
+            nextGoalId: 'unused',
+            cursor: { recordId: 'r-200' },
+          },
+        ),
+      ).toThrow(GoalInvalidTransitionError);
+    },
+  );
+
+  it('clears limitKind when the objective is edited', () => {
+    const edited = reduceGoalControl(
+      goalRecord({
+        status: 'usage_limited',
+        revision: 4,
+        limitKind: 'evidence_catalog',
+        lastReason: GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
+      }),
+      {
+        request: {
+          action: 'edit',
+          objective: 'ship something else',
+          expectedGoalId: 'g-1',
+          expectedRevision: 4,
+        },
+        now: 200,
+        nextGoalId: 'unused',
+        cursor: { recordId: 'r-200' },
+      },
+    );
+
+    expect(edited?.limitKind).toBeUndefined();
+    expect(edited?.lastReason).toBeUndefined();
+  });
+
   it('rejects an unsupported control action instead of resuming', () => {
     expect(() =>
       reduceGoalControl(goalRecord({ status: 'paused' }), {
@@ -531,6 +622,39 @@ describe('goal reducer', () => {
       const value = { ...snapshot(goalRecord()), activity };
 
       expect(parseGoalSnapshotV2(value)).toEqual(value);
+    },
+  );
+
+  it.each(['evidence_catalog', 'checkpoint_request'] as const)(
+    'round-trips a %s limitKind through a persisted snapshot',
+    (limitKind) => {
+      const value = snapshot(
+        goalRecord({ status: 'usage_limited', limitKind }),
+      );
+
+      expect(parseGoalSnapshotV2(value)).toEqual(value);
+    },
+  );
+
+  it('rejects a snapshot carrying an unknown limitKind', () => {
+    const value = snapshot(
+      goalRecord({
+        status: 'usage_limited',
+        limitKind: 'something_else' as never,
+      }),
+    );
+
+    expect(parseGoalSnapshotV2(value)).toBeUndefined();
+  });
+
+  it.each(['active', 'paused', 'blocked', 'complete'] as const)(
+    'rejects a %s snapshot carrying a limitKind',
+    (status) => {
+      const value = snapshot(
+        goalRecord({ status, limitKind: 'evidence_catalog' }),
+      );
+
+      expect(parseGoalSnapshotV2(value)).toBeUndefined();
     },
   );
 

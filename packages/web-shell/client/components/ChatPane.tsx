@@ -41,7 +41,7 @@ import { useAnimationFrameTranscriptBlocks } from '../hooks/useAnimationFrameTra
 import { useMessagesFromBlocks } from '../hooks/useMessages';
 import { useSessionArtifacts } from '../hooks/useSessionArtifacts';
 import { extractPendingPermission } from '../adapters/transcriptAdapter';
-import type { PromptImage } from '../adapters/promptTypes';
+import type { PromptFile, PromptImage } from '../adapters/promptTypes';
 import type {
   ComposerSubmitCommit,
   ComposerSubmitMetadata,
@@ -190,8 +190,6 @@ export interface ChatPaneProps {
     artifacts: readonly DaemonSessionArtifact[],
   ) => void;
   messageTurnOutputs?: readonly TurnOutputKind[];
-  /** Allow prompt admission to recover a disconnected SSE stream. */
-  restartSseOnPrompt?: boolean;
   /** Render inside a parent surface that already provides its own frame. */
   embedded?: boolean;
   onFirstPromptAdmitted?: (text: string) => void;
@@ -226,7 +224,6 @@ export function ChatPane({
   onOpenMonitor,
   onPaneArtifactsChange,
   messageTurnOutputs,
-  restartSseOnPrompt = false,
   embedded = false,
   onFirstPromptAdmitted,
   reportCatalogTurnCompletion = true,
@@ -525,6 +522,8 @@ export function ChatPane({
     connection.capabilities?.features.includes(
       'session_mid_turn_message_query',
     ) === true;
+  const canInjectMidTurnMedia =
+    connection.capabilities?.features.includes('session_media') === true;
   const {
     queuedPrompts,
     queuedTexts,
@@ -533,8 +532,6 @@ export function ChatPane({
     editQueuedPrompt,
     editLastQueuedPrompt,
     clearQueuedPrompts,
-    restoreUnknownQueuedPrompt,
-    discardUnknownQueuedPrompt,
   } = useQueuedPrompts({
     connected: connection.status === 'connected',
     sessionId: connection.sessionId,
@@ -542,6 +539,7 @@ export function ChatPane({
     clientId: connection.clientId,
     canMutateMidTurn,
     canQueryMidTurn,
+    canInjectMidTurnMedia,
     streamingState,
     sessionActions: actions,
     store,
@@ -566,11 +564,13 @@ export function ChatPane({
     (
       text: string,
       images?: PromptImage[],
+      files?: PromptFile[],
       commitAccepted?: ComposerSubmitCommit,
       metadata?: ComposerSubmitMetadata,
     ): boolean => {
       const trimmed = text.trim();
-      if (!trimmed && (images?.length ?? 0) === 0) return false;
+      if (!trimmed && (images?.length ?? 0) === 0 && (files?.length ?? 0) === 0)
+        return false;
       if (admissionPayloadLocked) return false;
       if (
         trimmed &&
@@ -582,7 +582,6 @@ export function ChatPane({
         shouldBlockComposerSubmit({
           connectionStatus: connection.status,
           hasSession: Boolean(connection.sessionId),
-          restartSseOnPrompt,
         })
       ) {
         return false;
@@ -605,6 +604,7 @@ export function ChatPane({
         actions
           .sendPrompt(trimmed, {
             ...(images && images.length ? { images } : {}),
+            ...(files && files.length ? { files } : {}),
             ...(inputAnnotations ? { inputAnnotations } : {}),
             onAdmissionStarted: () => {
               admissionStarted = true;
@@ -651,10 +651,11 @@ export function ChatPane({
       }
       const queued =
         !trimmed && !inputAnnotations
-          ? enqueuePrompt(trimmed, images)
+          ? enqueuePrompt(trimmed, images, files)
           : enqueuePrompt(
               trimmed,
               images,
+              files,
               undefined,
               inputAnnotations,
               notifyFirstPromptAdmitted,
@@ -675,7 +676,6 @@ export function ChatPane({
       onFirstPromptAdmitted,
       onImageIngestionNotice,
       reportError,
-      restartSseOnPrompt,
       sessionCatalogController,
       t,
     ],
@@ -1043,81 +1043,86 @@ export function ChatPane({
             />
           </div>
         )}
-        {/* Panes keep the composer status compact: spinner + elapsed time +
-            token count + cancel hint, but no rotating "witty" loading phrase. */}
-        <StreamingStatus startedAt={activeTurnStartedAt} showPhrase={false} />
-        <QueuedPromptDisplay
-          prompts={queuedPrompts}
-          t={t}
-          canMutateMidTurn={canMutateMidTurn}
-          onDelete={removeQueuedPrompt}
-          onEdit={editQueuedPrompt}
-          onRestoreUnknown={restoreUnknownQueuedPrompt}
-          onDiscardUnknown={discardUnknownQueuedPrompt}
-        />
-        {unknownPromptAdmission && (
-          <div
-            className={styles.admissionUnknown}
-            role="status"
-            data-testid="pane-prompt-admission-unknown"
-          >
-            <span>{t('queue.admissionUnknown')}</span>
-            {unknownPromptAdmission.payloadAvailable && (
-              <span className={styles.admissionUnknownActions}>
-                <button type="button" onClick={continueEditingUnknownPrompt}>
-                  {t('queue.continueEditing')}
-                </button>
-                <button type="button" onClick={discardUnknownPromptPayload}>
-                  {t('queue.discardUnknown')}
-                </button>
-              </span>
-            )}
-          </div>
-        )}
-        <ChatEditor
-          ref={editorRef}
-          onSubmit={handleSubmit}
-          onCancel={handleCancel}
-          isRunning={isResponding}
-          commands={commands}
-          queuedMessages={queuedTexts}
-          onPopQueuedMessages={editLastQueuedPrompt}
-          onClearQueuedMessages={clearQueuedPrompts}
-          visibleToolbarActions={paneToolbarActions}
-          workspaceName={showWorkspaceChip ? workspaceLabel : undefined}
-          workspaceTitle={paneWorkspaceCwd}
-          workspaceColor={workspaceAccent}
-          currentMode={connection.currentMode ?? 'default'}
-          sessionWorkflowEnabled={sessionWorkflowEnabled}
-          currentModel={connection.currentModel ?? ''}
-          availableModels={availableModels}
-          onSelectMode={handleSelectMode}
-          onSelectModel={handleSelectModel}
-          reasoning={connection.reasoning}
-          onSelectReasoningEffort={handleSelectReasoningEffort}
-          dialogOpen={approvalActive}
-          disabled={approvalActive || admissionPayloadLocked}
-          voiceTarget={hidden ? undefined : voiceTarget}
-          voiceStatusRevision={voiceStatusRevision}
-          followupState={followupState}
-          onAcceptFollowup={onAcceptFollowup}
-          onDismissFollowup={onDismissFollowup}
-          onImageIngestionNotice={onImageIngestionNotice}
-          sessionId={connection.sessionId}
-          onImagePreview={handleImagePreview}
-          atWorkspaceCwd={paneWorkspaceCwd}
-          placeholderText={t('splitView.composerPlaceholder')}
-          animatePlaceholder={false}
-        />
-        {CustomComposerFooter && (
-          <CustomComposerFooter
-            disabled={approvalActive || admissionPayloadLocked}
-            isRunning={isResponding}
-            currentMode={connection.currentMode ?? 'default'}
-            currentModel={connection.currentModel ?? ''}
-            sessionName={connection.displayName}
+        {/* A pending approval owns the pane footer: the status/queue/editor
+            area below the approval drops out of layout (kept mounted so the
+            draft survives) instead of leaving a live input under the
+            dialog. */}
+        <div className={approvalActive ? styles.composerHidden : undefined}>
+          {/* Panes keep the composer status compact: spinner + elapsed time +
+              token count + cancel hint, but no rotating "witty" loading
+              phrase. */}
+          <StreamingStatus startedAt={activeTurnStartedAt} showPhrase={false} />
+          <QueuedPromptDisplay
+            prompts={queuedPrompts}
+            t={t}
+            canMutateMidTurn={canMutateMidTurn}
+            onDelete={removeQueuedPrompt}
+            onEdit={editQueuedPrompt}
+            onImagePreview={handleImagePreview}
           />
-        )}
+          {unknownPromptAdmission && (
+            <div
+              className={styles.admissionUnknown}
+              role="status"
+              data-testid="pane-prompt-admission-unknown"
+            >
+              <span>{t('queue.admissionUnknown')}</span>
+              {unknownPromptAdmission.payloadAvailable && (
+                <span className={styles.admissionUnknownActions}>
+                  <button type="button" onClick={continueEditingUnknownPrompt}>
+                    {t('queue.continueEditing')}
+                  </button>
+                  <button type="button" onClick={discardUnknownPromptPayload}>
+                    {t('queue.discardUnknown')}
+                  </button>
+                </span>
+              )}
+            </div>
+          )}
+          <ChatEditor
+            ref={editorRef}
+            onSubmit={handleSubmit}
+            onCancel={handleCancel}
+            isRunning={isResponding}
+            commands={commands}
+            queuedMessages={queuedTexts}
+            onPopQueuedMessages={editLastQueuedPrompt}
+            onClearQueuedMessages={clearQueuedPrompts}
+            visibleToolbarActions={paneToolbarActions}
+            workspaceName={showWorkspaceChip ? workspaceLabel : undefined}
+            workspaceTitle={paneWorkspaceCwd}
+            workspaceColor={workspaceAccent}
+            currentMode={connection.currentMode ?? 'default'}
+            sessionWorkflowEnabled={sessionWorkflowEnabled}
+            currentModel={connection.currentModel ?? ''}
+            availableModels={availableModels}
+            onSelectMode={handleSelectMode}
+            onSelectModel={handleSelectModel}
+            reasoning={connection.reasoning}
+            onSelectReasoningEffort={handleSelectReasoningEffort}
+            dialogOpen={approvalActive}
+            disabled={approvalActive || admissionPayloadLocked}
+            voiceTarget={hidden ? undefined : voiceTarget}
+            voiceStatusRevision={voiceStatusRevision}
+            followupState={followupState}
+            onAcceptFollowup={onAcceptFollowup}
+            onDismissFollowup={onDismissFollowup}
+            onImageIngestionNotice={onImageIngestionNotice}
+            sessionId={connection.sessionId}
+            onImagePreview={handleImagePreview}
+            atWorkspaceCwd={paneWorkspaceCwd}
+            placeholderText={t('splitView.composerPlaceholder')}
+          />
+          {CustomComposerFooter && (
+            <CustomComposerFooter
+              disabled={approvalActive || admissionPayloadLocked}
+              isRunning={isResponding}
+              currentMode={connection.currentMode ?? 'default'}
+              currentModel={connection.currentModel ?? ''}
+              sessionName={connection.displayName}
+            />
+          )}
+        </div>
       </div>
     </section>
   );

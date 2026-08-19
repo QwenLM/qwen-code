@@ -6,6 +6,7 @@ import {
   type DaemonChannelsSnapshot,
   type DaemonChannelPairingRequest,
   type DaemonChannelTypeCatalog,
+  type DaemonPersistedBranchedSession,
   type DaemonEvent,
   type DaemonRestoredSession,
   type DaemonSession,
@@ -13,6 +14,7 @@ import {
   type DaemonSessionArtifactsEnvelope,
   type DaemonSessionGroup,
   type DaemonSessionGroupCatalog,
+  type DaemonSessionCatalogVersion,
   type DaemonSessionState,
   type DaemonSessionSummary,
   type DaemonWorkspaceExtensionsStatus,
@@ -63,6 +65,7 @@ export interface WebShellDaemonScenario {
   pairingGroupApprovals: Record<string, string[]>;
   sessions: DaemonSessionSummary[];
   sessionGroups: DaemonSessionGroup[];
+  sessionCatalogVersion: DaemonSessionCatalogVersion;
   events: DaemonEvent[];
   state: DaemonSessionState;
   /** Artifact list returned by `GET /session/:id/artifacts`. */
@@ -87,6 +90,13 @@ export interface WebShellDaemonScenario {
   gitLog?: unknown;
   /** Response for `POST /session/:id/btw`. */
   btwAnswer?: string;
+  /** Stateful response and replay used by historical branch E2E flows. */
+  branch?: {
+    sessionId: string;
+    clientId?: string;
+    displayName: string;
+    events: DaemonEvent[];
+  };
 }
 
 export interface MockDaemonController {
@@ -98,6 +108,7 @@ export interface MockDaemonController {
   promptRequests(): DaemonRequestRecord[];
   permissionRequests(): DaemonRequestRecord[];
   modelRequests(): DaemonRequestRecord[];
+  branchRequests(): DaemonRequestRecord[];
   configOptionRequests(): DaemonRequestRecord[];
 }
 
@@ -119,6 +130,7 @@ type ScenarioOverrides = Partial<
     | 'pairingGroupApprovals'
     | 'sessions'
     | 'sessionGroups'
+    | 'sessionCatalogVersion'
     | 'state'
   >
 > & {
@@ -137,6 +149,7 @@ type ScenarioOverrides = Partial<
   pairingGroupApprovals?: Record<string, string[]>;
   sessions?: DaemonSessionSummary[];
   sessionGroups?: DaemonSessionGroup[];
+  sessionCatalogVersion?: DaemonSessionCatalogVersion;
   state?: Partial<DaemonSessionState>;
 };
 
@@ -353,6 +366,10 @@ export function createWebShellDaemonScenario(
     pairingGroupApprovals: overrides.pairingGroupApprovals ?? {},
     sessions,
     sessionGroups: overrides.sessionGroups ?? [],
+    sessionCatalogVersion: overrides.sessionCatalogVersion ?? {
+      generation: 'web-shell-e2e',
+      revision: 0,
+    },
     events: overrides.events ?? [],
     state,
     artifacts: overrides.artifacts ?? [],
@@ -363,6 +380,7 @@ export function createWebShellDaemonScenario(
     gitDiff: overrides.gitDiff,
     gitLog: overrides.gitLog,
     btwAnswer: overrides.btwAnswer,
+    branch: overrides.branch,
   };
 }
 
@@ -431,6 +449,10 @@ export async function installMockDaemon(
       requests.filter((request) =>
         /\/session\/[^/]+\/model$/.test(request.path),
       ),
+    branchRequests: () =>
+      requests.filter((request) =>
+        /\/session\/[^/]+\/branch\/?$/.test(request.path),
+      ),
     configOptionRequests: () =>
       requests.filter((request) =>
         /\/session\/[^/]+\/config-option$/.test(request.path),
@@ -454,13 +476,24 @@ export function userTextEvent(
 
 export function assistantTextEvent(
   text: string,
-  options: { id?: number; sessionId?: string } = {},
+  options: {
+    id?: number;
+    sessionId?: string;
+    branchRecordId?: string;
+  } = {},
 ): DaemonEvent {
   return sessionUpdateEvent(
     {
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'text', text },
       ...(options.sessionId ? { sessionId: options.sessionId } : {}),
+      ...(options.branchRecordId
+        ? {
+            _meta: {
+              qwenTranscript: { branchRecordId: options.branchRecordId },
+            },
+          }
+        : {}),
     },
     options.id,
   );
@@ -592,7 +625,9 @@ function isDaemonPath(path: string): boolean {
     /^\/workspaces\/[^/]+\/channels\/[^/]+\/?$/.test(path) ||
     /^\/workspace\/.+\/sessions\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/sessions\/?$/.test(path) ||
+    /^\/workspaces\/[^/]+\/sessions\/live-state\/?$/.test(path) ||
     /^\/workspace\/.+\/session-groups\/?$/.test(path) ||
+    /^\/workspaces\/[^/]+\/session-groups\/?$/.test(path) ||
     /^\/workspaces\/.+\/git\/?$/.test(path) ||
     /^\/workspaces\/.+\/git\/(branches|checkout|branch|push|pull|commit|diff|log)\/?$/.test(
       path,
@@ -608,7 +643,7 @@ function isDaemonPath(path: string): boolean {
     /^\/session\/[^/]+\/artifacts\/?$/.test(path) ||
     /^\/permission\/[^/]+\/?$/.test(path) ||
     /^\/session\/[^/]+\/pending-prompts(?:\/[^/]+)?\/?$/.test(path) ||
-    /^\/session\/[^/]+\/(load|resume|prompt|permission\/[^/]+|context|supported-commands|events|model|config-option|approval-mode|heartbeat|cancel|detach|btw)\/?$/.test(
+    /^\/session\/[^/]+\/(load|resume|branch|prompt|permission\/[^/]+|context|supported-commands|events|model|config-option|approval-mode|heartbeat|cancel|detach|btw)\/?$/.test(
       path,
     )
   );
@@ -665,12 +700,22 @@ function isDaemonRoute(method: string, path: string): boolean {
   }
   if (
     method === 'GET' &&
+    /^\/workspaces\/[^/]+\/sessions\/live-state\/?$/.test(path)
+  ) {
+    return true;
+  }
+  if (
+    method === 'GET' &&
     (/^\/workspace\/.+\/sessions\/?$/.test(path) ||
       /^\/workspaces\/[^/]+\/sessions\/?$/.test(path))
   ) {
     return true;
   }
-  if (method === 'GET' && /^\/workspace\/.+\/session-groups\/?$/.test(path)) {
+  if (
+    method === 'GET' &&
+    (/^\/workspace\/.+\/session-groups\/?$/.test(path) ||
+      /^\/workspaces\/[^/]+\/session-groups\/?$/.test(path))
+  ) {
     return true;
   }
   if (
@@ -752,7 +797,7 @@ function isDaemonRoute(method: string, path: string): boolean {
   }
   if (
     method === 'POST' &&
-    /^\/session\/[^/]+\/(load|resume|prompt|permission\/[^/]+|model|config-option|approval-mode|heartbeat|cancel|detach)\/?$/.test(
+    /^\/session\/[^/]+\/(load|resume|branch|prompt|permission\/[^/]+|model|config-option|approval-mode|heartbeat|cancel|detach)\/?$/.test(
       path,
     )
   ) {
@@ -880,6 +925,31 @@ async function handleDaemonRoute(
   }
   if (
     method === 'GET' &&
+    /^\/workspaces\/[^/]+\/sessions\/live-state\/?$/.test(path)
+  ) {
+    await json(route, {
+      v: 1,
+      catalogVersion: scenario.sessionCatalogVersion,
+      sessions: scenario.sessions
+        .filter(
+          (session) =>
+            (session.clientCount ?? 0) > 0 ||
+            session.hasActivePrompt === true ||
+            session.isWaitingForPermission === true ||
+            session.isWaitingForUserQuestion === true,
+        )
+        .map((session) => ({
+          sessionId: session.sessionId,
+          clientCount: session.clientCount ?? 0,
+          hasActivePrompt: session.hasActivePrompt ?? false,
+          isWaitingForPermission: session.isWaitingForPermission ?? false,
+          isWaitingForUserQuestion: session.isWaitingForUserQuestion ?? false,
+        })),
+    });
+    return;
+  }
+  if (
+    method === 'GET' &&
     (/^\/workspace\/.+\/sessions\/?$/.test(path) ||
       /^\/workspaces\/[^/]+\/sessions\/?$/.test(path))
   ) {
@@ -888,7 +958,11 @@ async function handleDaemonRoute(
     });
     return;
   }
-  if (method === 'GET' && /^\/workspace\/.+\/session-groups\/?$/.test(path)) {
+  if (
+    method === 'GET' &&
+    (/^\/workspace\/.+\/session-groups\/?$/.test(path) ||
+      /^\/workspaces\/[^/]+\/session-groups\/?$/.test(path))
+  ) {
     const catalog: DaemonSessionGroupCatalog = {
       groups: scenario.sessionGroups,
       colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
@@ -1276,6 +1350,23 @@ async function handleDaemonRoute(
       await json(route, restoredSessionEnvelope(scenario, sessionId));
       return;
     }
+    if (action === 'branch') {
+      if (!scenario.branch) {
+        await json(route, { error: 'Branch scenario is not configured.' }, 404);
+        return;
+      }
+      const branch = scenario.branch;
+      const response: DaemonPersistedBranchedSession = {
+        sessionId: branch.sessionId,
+        displayName: branch.displayName,
+        forkedFrom: {
+          sessionId,
+          displayName: scenario.displayName,
+        },
+      };
+      await json(route, response, 201);
+      return;
+    }
     if (action === 'artifacts') {
       await json(route, sessionArtifactsEnvelope(scenario, sessionId));
       return;
@@ -1430,17 +1521,22 @@ function restoredSessionEnvelope(
   scenario: WebShellDaemonScenario,
   sessionId: string,
 ): DaemonRestoredSession {
+  const branch =
+    scenario.branch?.sessionId === sessionId ? scenario.branch : undefined;
+  const events = branch?.events ?? scenario.events;
   return {
     sessionId,
     workspaceCwd: scenario.workspaceCwd,
     attached: true,
-    clientId: scenario.clientId,
+    clientId: branch?.clientId ?? scenario.clientId,
     createdAt: now,
     hasActivePrompt: false,
-    state: scenario.state,
-    compactedReplay: scenario.events,
+    state: branch
+      ? { ...scenario.state, displayName: branch.displayName }
+      : scenario.state,
+    compactedReplay: events,
     liveJournal: [],
-    lastEventId: maxEventId(scenario.events),
+    lastEventId: maxEventId(events),
   };
 }
 

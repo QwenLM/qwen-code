@@ -1,6 +1,12 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { act, createRef, type RefObject } from 'react';
+import {
+  act,
+  createRef,
+  startTransition,
+  Suspense,
+  type RefObject,
+} from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { Message } from '../adapters/types';
 import {
@@ -18,6 +24,7 @@ import flashStyles from './MessageLocateFlash.module.css';
 import styles from './MessageList.module.css';
 
 const virtualizerTestState = vi.hoisted(() => ({
+  getItemKeys: [] as Array<(index: number) => string | number>,
   itemSizeCache: new Map<string | number, number>(),
   resizeItem: vi.fn(),
   renderItems: true,
@@ -36,6 +43,9 @@ vi.mock('./MessageItem', async () => {
     MessageItem: ({
       message,
       showAssistantActions,
+      showAssistantBranch,
+      onBranchSession,
+      branchRecordId,
       isLocateFlashing,
       assistantTurnFooterInfo,
       sendFailed,
@@ -43,6 +53,9 @@ vi.mock('./MessageItem', async () => {
     }: {
       message: Message;
       showAssistantActions?: boolean;
+      showAssistantBranch?: boolean;
+      onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
+      branchRecordId?: string;
       isLocateFlashing?: boolean;
       assistantTurnFooterInfo?: WebShellAssistantTurnFooterRenderInfo;
       sendFailed?: boolean;
@@ -60,6 +73,8 @@ vi.mock('./MessageItem', async () => {
           'data-locate-flashing': isLocateFlashing ? 'true' : undefined,
           'data-send-failed': sendFailed ? 'true' : undefined,
           'data-timestamp': message.timestamp,
+          'data-message-content':
+            'content' in message ? message.content : undefined,
           'data-tool-ids':
             message.role === 'tool_group'
               ? message.tools.map((tool) => tool.callId).join(',')
@@ -82,6 +97,12 @@ vi.mock('./MessageItem', async () => {
               'data-testid': `disclosure-${message.id}`,
             })
           : null,
+        showAssistantBranch
+          ? React.createElement('button', {
+              'data-testid': `branch-${message.id}`,
+              onClick: () => onBranchSession?.(branchRecordId),
+            })
+          : null,
         assistantTurnFooter,
       );
     },
@@ -99,6 +120,7 @@ vi.mock('@tanstack/react-virtual', () => ({
     enabled: boolean;
     getItemKey: (index: number) => string | number;
   }) => {
+    virtualizerTestState.getItemKeys.push(getItemKey);
     const virtualItems =
       enabled && virtualizerTestState.renderItems
         ? Array.from({ length: Math.min(count, 5) }, (_, index) => ({
@@ -170,6 +192,7 @@ afterEach(() => {
   virtualizerTestState.itemSizeCache.clear();
   virtualizerTestState.resizeItem.mockClear();
   virtualizerTestState.renderItems = true;
+  virtualizerTestState.getItemKeys.length = 0;
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
@@ -304,6 +327,7 @@ function mount(
       cachedTokens?: number;
     };
     includeSubagentToolUsageInMetrics?: boolean;
+    onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
     onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
     customization?: WebShellCustomization;
     compactMode?: boolean;
@@ -343,6 +367,7 @@ function mount(
                 includeSubagentToolUsageInMetrics={
                   opts.includeSubagentToolUsageInMetrics
                 }
+                onBranchSession={opts.onBranchSession}
                 onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
                 failedPromptMessageId={opts.failedPromptMessageId}
                 onRetryFailedPrompt={opts.onRetryFailedPrompt}
@@ -412,6 +437,7 @@ function renderInto(
     loadingTranscript?: boolean;
     catchingUp?: boolean;
     isResponding?: boolean;
+    onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
     onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
   } = {},
 ) {
@@ -425,6 +451,7 @@ function renderInto(
           loadingTranscript={opts.loadingTranscript}
           catchingUp={opts.catchingUp}
           isResponding={opts.isResponding}
+          onBranchSession={opts.onBranchSession}
           onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
         />
       </I18nProvider>,
@@ -3183,6 +3210,155 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
   });
 
+  it.each([false, true])(
+    'renders the latest content through the streamed-tail fast path (compact: %s)',
+    (compactMode) => {
+      const assistant = {
+        ...asstMsg('a1'),
+        content: 'first chunk',
+        isStreaming: true,
+        timestamp: 1_001,
+      };
+      const messages = [userMsg('u1'), assistant];
+      const container = mount(messages, undefined, {
+        isResponding: true,
+        compactMode,
+      });
+      const getItemKey = virtualizerTestState.getItemKeys.at(-1);
+
+      rerenderMessages(
+        container,
+        [
+          messages[0],
+          {
+            ...assistant,
+            content: 'first chunk plus delta',
+            timestamp: 1_002,
+          },
+        ],
+        { isResponding: true, compactMode },
+      );
+
+      expect(
+        container
+          .querySelector('[data-testid="msg-a1"]')
+          ?.getAttribute('data-message-content'),
+      ).toBe('first chunk plus delta');
+      expect(virtualizerTestState.getItemKeys.at(-1)).toBe(getItemKey);
+    },
+  );
+
+  it('falls back safely when streamed assistant content is undefined', () => {
+    const assistant = {
+      ...asstMsg('a1'),
+      content: undefined as unknown as string,
+      isStreaming: true,
+    };
+    const messages = [userMsg('u1'), assistant];
+    const container = mount(messages, undefined, { isResponding: true });
+
+    rerenderMessages(container, [messages[0], { ...assistant }], {
+      isResponding: true,
+    });
+
+    expect(container.querySelector('[data-testid="msg-a1"]')).not.toBeNull();
+  });
+
+  it('does not reuse streamed-tail derivations when an earlier row changes', () => {
+    const assistant = {
+      ...asstMsg('a1'),
+      content: 'first chunk',
+      isStreaming: true,
+    };
+    const status = { ...systemMsg('s1'), timestamp: 1 };
+    const messages = [userMsg('u1'), status, assistant];
+    const container = mount(messages, undefined, { isResponding: true });
+
+    const changedStatus = { ...status, timestamp: 2 };
+    rerenderMessages(
+      container,
+      [
+        messages[0],
+        changedStatus,
+        { ...assistant, content: 'first chunk plus delta' },
+      ],
+      { isResponding: true },
+    );
+
+    expect(
+      container
+        .querySelector('[data-testid="msg-s1"]')
+        ?.getAttribute('data-timestamp'),
+    ).toBe('2');
+    expect(
+      container
+        .querySelector('[data-testid="msg-a1"]')
+        ?.getAttribute('data-message-content'),
+    ).toBe('first chunk plus delta');
+  });
+
+  it('does not reuse caches written by an abandoned concurrent render', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({
+      root,
+      container,
+      transcriptRenderMode: 'interactive',
+      compactMode: false,
+    });
+    const userA = { ...userMsg('u1'), content: 'committed' };
+    const assistant = {
+      ...asstMsg('a1'),
+      content: 'first chunk',
+      isStreaming: true,
+    };
+    const never = new Promise<void>(() => {});
+    const Suspend = () => {
+      throw never;
+    };
+    const render = (messages: Message[], suspend = false) =>
+      root.render(
+        <I18nProvider language="en">
+          <Suspense fallback={null}>
+            <MessageList
+              messages={messages}
+              pendingApproval={null}
+              isResponding
+            />
+            {suspend ? <Suspend /> : null}
+          </Suspense>
+        </I18nProvider>,
+      );
+
+    act(() => render([userA, assistant]));
+    const committedGetItemKey = virtualizerTestState.getItemKeys.at(-1);
+    await act(async () => {
+      startTransition(() =>
+        render(
+          [{ ...userA, id: 'u-abandoned', content: 'abandoned' }, assistant],
+          true,
+        ),
+      );
+      await Promise.resolve();
+    });
+    expect(committedGetItemKey?.(0)).toBe('msg:u1');
+    act(() =>
+      render([userA, { ...assistant, content: 'latest committed chunk' }]),
+    );
+
+    expect(
+      container
+        .querySelector('[data-testid="msg-u1"]')
+        ?.getAttribute('data-message-content'),
+    ).toBe('committed');
+    expect(
+      container
+        .querySelector('[data-testid="msg-a1"]')
+        ?.getAttribute('data-message-content'),
+    ).toBe('latest committed chunk');
+  });
+
   it('measures newly prepended virtual rows before they can overlap the anchor', async () => {
     Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
       configurable: true,
@@ -3231,6 +3407,8 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
 
     virtualizerTestState.resizeItem.mockClear();
+    await nextFrame();
+    await nextFrame();
     act(() => render([...earlierMessages, ...currentMessages]));
 
     expect(virtualizerTestState.resizeItem).toHaveBeenCalled();
@@ -3319,6 +3497,15 @@ describe('MessageList — turn collapse (DOM)', () => {
     await nextFrame();
 
     expect(onLoadOlderHistory).toHaveBeenCalledTimes(2);
+
+    for (let frame = 0; frame < 32; frame += 1) await nextFrame();
+    await act(async () => {
+      list.dispatchEvent(new WheelEvent('wheel', { deltaY: -1 }));
+      await Promise.resolve();
+    });
+    await nextFrame();
+
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(3);
   });
 
   it('waits for another upward scroll intent before retrying a failed underfill load', async () => {
@@ -3813,6 +4000,53 @@ describe('MessageList — turn collapse (DOM)', () => {
 
     expect(has(c, 'mid')).toBe(false);
     expect(assistantActions(c, 'a1')).toBe('true');
+  });
+
+  it('shows branch only for anchored replies and forwards the checkpoint', () => {
+    const onBranchSession = vi.fn();
+    const anchored = {
+      ...asstMsg('anchored'),
+      branchRecordId: 'checkpoint-1',
+    };
+    const c = mount(
+      [userMsg('u1'), anchored, userMsg('u2'), asstMsg('unanchored')],
+      undefined,
+      { onBranchSession },
+    );
+
+    expect(c.querySelector('[data-testid="branch-unanchored"]')).toBeNull();
+    click(c.querySelector('[data-testid="branch-anchored"]')!);
+    expect(onBranchSession).toHaveBeenCalledWith('checkpoint-1');
+  });
+
+  it('hides branch actions while a later turn is responding', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const onBranchSession = vi.fn();
+    const anchored = {
+      ...asstMsg('anchored'),
+      branchRecordId: 'checkpoint-1',
+    };
+    const messages = [userMsg('u1'), anchored, userMsg('u2'), asstMsg('live')];
+
+    renderInto(root, messages, undefined, {
+      isResponding: false,
+      onBranchSession,
+    });
+    expect(
+      container.querySelector('[data-testid="branch-anchored"]'),
+    ).not.toBeNull();
+
+    renderInto(root, messages, undefined, {
+      isResponding: true,
+      onBranchSession,
+    });
+
+    expect(
+      container.querySelector('[data-testid="branch-anchored"]'),
+    ).toBeNull();
   });
 
   it('reports when the user has scrolled away from the bottom', async () => {

@@ -630,6 +630,11 @@ export interface DaemonStatusReport {
     channelIdleTimeoutMs: number;
     sessionIdleTimeoutMs: number;
     acpConnectionCap: number | null;
+    acpPreAttachMaxFramesPerStream?: number | null;
+    acpPreAttachMaxFramesPerConnection?: number | null;
+    acpPreAttachMaxFramesGlobal?: number | null;
+    acpPreAttachMaxPayloadBytesPerConnection?: number | null;
+    acpPreAttachMaxPayloadBytesGlobal?: number | null;
     compactedReplayMaxBytes: number;
     maxJournalEvents: number;
     maxJournalBytes: number;
@@ -725,6 +730,16 @@ export interface DaemonStatusReport {
         sseStreams: number;
         wsStreams: number;
         pendingClientRequests: number;
+        preAttach?: {
+          bufferedConnectionFrames: number;
+          bufferedSessionFrames: number;
+          pendingDeliveryFrames: number;
+          usedFrames: number;
+          usedBytes: number;
+          highWaterFrames: number;
+          highWaterBytes: number;
+          guardFailures: number;
+        };
       };
     };
     rateLimit: {
@@ -782,6 +797,44 @@ export interface DaemonStatusReport {
          * `null` never means "fresh".
          */
         oldestReadingAgeMs: number | null;
+        /**
+         * Lifetime V8 old-generation high-water marks across the sampled
+         * children, as a **maximum, not a sum** — a heap ceiling applies per
+         * child, and the peaks were reached at different times.
+         *
+         * `null`, never a zeroed object, when no sampled child reported one.
+         * With no SSE/WS watcher attached nothing is sampled at all, so this
+         * is a routine state, and zeros there would assert that no child needs
+         * any heap.
+         *
+         * Optional for the same reason as the enclosing block: a daemon that
+         * predates the fields omits it. Observational — nothing here sizes a
+         * child or refuses a spawn.
+         */
+        heap?: {
+          /** Committed high-water. Rises with the ceiling the child was given,
+           *  so it bounds what the workload needs rather than stating it. */
+          peakOldGenerationBytes: number;
+          /** Retained-after-major-GC high-water, independent of the ceiling.
+           *  An upper bound rather than an exact live set: GC entries arrive
+           *  asynchronously, so allocation between the collection and the read
+           *  is counted. 0 when no major GC was observed — not a measured
+           *  zero. */
+          peakLiveSetBytes: number;
+          /** `total_heap_size` high-water; includes the young generation. */
+          peakTotalHeapBytes: number;
+          majorGcCount: number;
+          majorGcMs: number;
+          /**
+           * Heap spaces no reporting child could classify, unioned. Non-empty
+           * means the byte figures are incomplete and must not be read as a
+           * full measurement: V8 changes its space taxonomy between versions,
+           * and an unknown space is dropped from the sums, which under-counts.
+           */
+          unclassifiedSpaceNames: string[];
+          /** How many of `sampled` contributed a heap report. */
+          reported: number;
+        } | null;
       };
       modeled: {
         /** `null` when no workspace is registered. */
@@ -866,7 +919,26 @@ export interface DaemonStatusReport {
   /** Present only when requested with `detail=full`. */
   full?: {
     sessions: DaemonStatusReportSession[];
-    acpConnections: Array<Record<string, unknown>>;
+    /** Additive; absent when reading full status from an older daemon. */
+    acpMounts?: Array<{
+      workspaceId: string | null;
+      primary: boolean;
+      connectionCount: number;
+      wsStreams: number;
+      preAttachGuardFailures: number;
+    }>;
+    acpConnections: Array<{
+      connectionIdPrefix?: string;
+      workspaceId?: string | null;
+      workspaceCwd?: string;
+      primary?: boolean;
+      bufferedConnectionFrames?: number;
+      bufferedSessionFrames?: number;
+      pendingDeliveryFrames?: number;
+      preAttachOwnedFrames?: number;
+      preAttachOwnedBytes?: number;
+      [key: string]: unknown;
+    }>;
     workspace: Record<string, DaemonStatusReportSection>;
     auth: {
       supportedDeviceFlowProviders: string[];
@@ -998,10 +1070,32 @@ export interface BranchSessionRequest {
   name?: string;
 }
 
-export interface DaemonBranchedSession extends DaemonRestoredSession {
+export interface HistoricalBranchSessionRequest extends BranchSessionRequest {
+  atRecordId: string;
+}
+
+export type DaemonBranchSessionRequest =
+  | BranchSessionRequest
+  | HistoricalBranchSessionRequest;
+
+export interface DaemonBranchPoint {
+  assistantRecordUuid: string;
+  checkpointUuid: string;
+}
+
+export interface DaemonPersistedBranchedSession {
+  sessionId: string;
   displayName: string;
   forkedFrom: { sessionId: string; displayName: string };
 }
+
+export interface DaemonBranchedSession
+  extends DaemonRestoredSession,
+    DaemonPersistedBranchedSession {}
+
+export type DaemonBranchSessionResult =
+  | DaemonBranchedSession
+  | DaemonPersistedBranchedSession;
 
 export interface SideTaskSessionRequest {
   name?: string;
@@ -1242,6 +1336,33 @@ export interface DaemonSessionListPage {
   nextCursor?: string;
   liveMergeFailed?: boolean;
   truncated?: boolean;
+}
+
+export interface DaemonSessionCatalogVersion {
+  generation: string;
+  revision: number;
+}
+
+export interface DaemonSessionLiveState {
+  sessionId: string;
+  clientCount: number;
+  hasActivePrompt: boolean;
+  isWaitingForPermission: boolean;
+  isWaitingForUserQuestion: boolean;
+  /**
+   * Daemon-observed activity watermark: the newest terminal of a prompt that
+   * reached the running state in the current bridge, as an ISO timestamp.
+   * Absent before the first such terminal and after a bridge or runtime
+   * replacement. It is not proof that the transcript was flushed, so clients
+   * treat it as recency for ordering only.
+   */
+  updatedAt?: string;
+}
+
+export interface DaemonWorkspaceSessionLiveState {
+  v: 1;
+  catalogVersion: DaemonSessionCatalogVersion;
+  sessions: DaemonSessionLiveState[];
 }
 
 export interface DaemonWorkspaceSessionInfo {
@@ -2625,6 +2746,20 @@ export interface DaemonToolToggleResult {
 
 export type DaemonSkillToggleActivation = 'applied' | 'deferred' | 'partial';
 
+export interface DaemonSkillToggleMutationSkill {
+  name: string;
+  enabled: boolean;
+}
+
+export interface DaemonSkillToggleMutation {
+  id: string;
+  kind: 'skill_toggle';
+  skills: DaemonSkillToggleMutationSkill[];
+  activation: DaemonSkillToggleActivation;
+  sessionsRefreshed: number;
+  sessionsFailed: number;
+}
+
 export interface DaemonSkillToggleResult {
   skillName: string;
   enabled: boolean;
@@ -3090,11 +3225,14 @@ export interface DaemonRemoveMidTurnMessageResult {
 
 /**
  * One entry still waiting in the daemon's mid-turn queue (projection of the
- * bridge's `MidTurnQueueEntry`). The queue is session-global.
+ * bridge's `MidTurnQueueEntry`). The queue is session-global. `content` carries
+ * any image blocks attached to the message, so a refreshed client
+ * can rebuild its queued row with the attachments intact.
  */
 export interface DaemonMidTurnMessageSummary {
   messageId: string;
   text: string;
+  content?: PromptContentBlock[];
 }
 
 /**
@@ -3116,11 +3254,14 @@ export interface DaemonMidTurnMessagesResult {
 /**
  * One entry in the daemon's pending prompt queue. The `state` is
  * `'running'` for the currently dispatching prompt and `'queued'`
- * for prompts waiting in the FIFO.
+ * for prompts waiting in the FIFO. `content` carries any image blocks attached
+ * to the prompt, so a refreshed client can restore
+ * the full payload (text + images) instead of just the text.
  */
 export interface DaemonPendingPromptSummary {
   promptId: string;
   text: string;
+  content?: PromptContentBlock[];
   queuedAt: number;
   state: 'queued' | 'running';
   originatorClientId?: string;
@@ -3797,6 +3938,18 @@ export interface PromptTextContent {
   text: string;
 }
 
+export type DaemonSessionMediaReference = Record<string, unknown> & {
+  type: 'image';
+  mediaId: string;
+  mimeType: string;
+  size: number;
+};
+
+export interface DaemonSessionMediaData {
+  data: string;
+  mimeType: string;
+}
+
 /**
  * The set of content blocks the daemon's prompt route accepts. The full ACP
  * `ContentBlock` union is wider; SDK clients can pass any of those shapes
@@ -3807,6 +3960,7 @@ export type PromptContentBlock = PromptTextContent | Record<string, unknown>;
 /** Returned from `POST /session/:id/prompt`. */
 export interface PromptResult {
   stopReason: string;
+  branchPoint?: DaemonBranchPoint;
   [key: string]: unknown;
 }
 
@@ -4094,6 +4248,9 @@ export interface ExtensionManagementInstallRequest
 
 export type ExtensionActivationState = 'enabled' | 'disabled';
 export type ExtensionWorkspaceActivation = ExtensionActivationState | null;
+export type ExtensionWorkspaceBatchActivationState =
+  | ExtensionActivationState
+  | 'inherit';
 
 export interface ExtensionCatalogEntry {
   id: string;
@@ -4168,6 +4325,20 @@ export interface ExtensionOperationResult {
   updated?: boolean;
   reason?: string;
   states?: Record<string, DaemonExtensionUpdateState>;
+  results?: Array<
+    ExtensionDefaultActivationBatchItem | ExtensionWorkspaceActivationBatchItem
+  >;
+}
+
+export interface ExtensionDefaultActivationBatchItem {
+  name: string;
+  defaultActivation: ExtensionActivationState;
+}
+
+export interface ExtensionWorkspaceActivationBatchItem {
+  name: string;
+  workspaceActivation: ExtensionWorkspaceActivation;
+  effectiveActivation: ExtensionActivationState;
 }
 
 export interface ExtensionOperationStatus {

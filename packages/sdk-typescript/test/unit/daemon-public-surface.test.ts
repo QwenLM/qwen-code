@@ -20,6 +20,7 @@ import {
 // gap that two-layer SDK re-exports are easy to drift on.
 import type {
   DaemonClient,
+  WorkspaceDaemonClient,
   DaemonClientEvictedData,
   DaemonClientEvictedEvent,
   DaemonChannelControlState,
@@ -78,11 +79,18 @@ import type {
   DaemonSessionDiedData,
   DaemonSessionDiedEvent,
   DaemonSessionEvent,
+  DaemonSessionCatalogVersion,
+  DaemonSessionLiveState,
+  DaemonWorkspaceSessionLiveState,
   DaemonSessionRecapResult,
   DaemonSkillBatchToggleError,
   DaemonSkillBatchToggleErrorCode,
   DaemonSkillBatchToggleItem,
   DaemonSkillBatchToggleResult,
+  ExtensionDefaultActivationBatchItem,
+  ExtensionMutationResponse,
+  ExtensionWorkspaceActivationBatchItem,
+  ExtensionWorkspaceBatchActivationState,
   DaemonSessionRecordingDegradedData,
   DaemonSessionRecordingDegradedEvent,
   DaemonSessionUpdateData,
@@ -321,15 +329,143 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
       reason?: 'not_user_invocable' | 'inactive_extension' | 'locked';
       lockedScope?: 'system' | 'user' | 'systemDefaults';
     }>();
+    expect(
+      typeof Public.DaemonClient.prototype.setExtensionDefaultActivations,
+    ).toBe('function');
+    expect(
+      typeof Public.WorkspaceDaemonClient.prototype.setExtensionActivations,
+    ).toBe('function');
+    expectTypeOf<
+      Awaited<ReturnType<DaemonClient['setExtensionDefaultActivations']>>
+    >().toEqualTypeOf<ExtensionMutationResponse>();
+    expectTypeOf<
+      Awaited<ReturnType<WorkspaceDaemonClient['setExtensionActivations']>>
+    >().toEqualTypeOf<ExtensionMutationResponse>();
+    expectTypeOf<
+      Parameters<DaemonClient['setExtensionDefaultActivations']>
+    >().toEqualTypeOf<
+      [
+        extensionNames: readonly string[],
+        state: 'enabled' | 'disabled',
+        clientId?: string,
+      ]
+    >();
+    expectTypeOf<
+      Parameters<WorkspaceDaemonClient['setExtensionActivations']>
+    >().toEqualTypeOf<
+      [
+        extensionNames: readonly string[],
+        state: ExtensionWorkspaceBatchActivationState,
+        clientId?: string,
+      ]
+    >();
+    expectTypeOf<ExtensionWorkspaceBatchActivationState>().toEqualTypeOf<
+      'enabled' | 'disabled' | 'inherit'
+    >();
+    expectTypeOf<ExtensionDefaultActivationBatchItem>().toEqualTypeOf<{
+      name: string;
+      defaultActivation: 'enabled' | 'disabled';
+    }>();
+    expectTypeOf<ExtensionWorkspaceActivationBatchItem>().toEqualTypeOf<{
+      name: string;
+      workspaceActivation: 'enabled' | 'disabled' | null;
+      effectiveActivation: 'enabled' | 'disabled';
+    }>();
+    expectTypeOf<
+      NonNullable<
+        NonNullable<
+          Awaited<ReturnType<DaemonClient['extensionOperation']>>['result']
+        >['results']
+      >
+    >().toEqualTypeOf<
+      Array<
+        | ExtensionDefaultActivationBatchItem
+        | ExtensionWorkspaceActivationBatchItem
+      >
+    >();
     // `GET /daemon/status` report surface (PR 5174 client coverage): the
     // envelope plus the sub-shapes UI dashboards need to type against.
     expectTypeOf<DaemonStatusReport>().not.toBeNever();
     expectTypeOf<DaemonLogMode>().not.toBeNever();
     expectTypeOf<DaemonLogHealth>().not.toBeNever();
     expectTypeOf<DaemonLogIssue>().not.toBeNever();
-    expectTypeOf<DaemonStatusReport['limits']>().toMatchTypeOf<{
-      compactedReplayMaxBytes: number;
+    expectTypeOf<
+      DaemonStatusReport['limits']['compactedReplayMaxBytes']
+    >().toEqualTypeOf<number>();
+    expectTypeOf<
+      Pick<
+        DaemonStatusReport['limits'],
+        | 'acpPreAttachMaxFramesPerStream'
+        | 'acpPreAttachMaxFramesPerConnection'
+        | 'acpPreAttachMaxFramesGlobal'
+        | 'acpPreAttachMaxPayloadBytesPerConnection'
+        | 'acpPreAttachMaxPayloadBytesGlobal'
+      >
+    >().toEqualTypeOf<{
+      acpPreAttachMaxFramesPerStream?: number | null;
+      acpPreAttachMaxFramesPerConnection?: number | null;
+      acpPreAttachMaxFramesGlobal?: number | null;
+      acpPreAttachMaxPayloadBytesPerConnection?: number | null;
+      acpPreAttachMaxPayloadBytesGlobal?: number | null;
     }>();
+    expectTypeOf<
+      DaemonStatusReport['limits']['acpPreAttachMaxPayloadBytesGlobal']
+    >().toEqualTypeOf<number | null | undefined>();
+    expectTypeOf<
+      Pick<DaemonStatusReport['runtime']['transport']['acp'], 'preAttach'>
+    >().toEqualTypeOf<{
+      preAttach?: {
+        bufferedConnectionFrames: number;
+        bufferedSessionFrames: number;
+        pendingDeliveryFrames: number;
+        usedFrames: number;
+        usedBytes: number;
+        highWaterFrames: number;
+        highWaterBytes: number;
+        guardFailures: number;
+      };
+    }>();
+    expectTypeOf<undefined>().toMatchTypeOf<
+      DaemonStatusReport['runtime']['transport']['acp']['preAttach']
+    >();
+    expectTypeOf<
+      Pick<
+        NonNullable<DaemonStatusReport['full']>['acpConnections'][number],
+        | 'bufferedConnectionFrames'
+        | 'bufferedSessionFrames'
+        | 'pendingDeliveryFrames'
+        | 'preAttachOwnedFrames'
+        | 'preAttachOwnedBytes'
+      >
+    >().toEqualTypeOf<{
+      bufferedConnectionFrames?: number;
+      bufferedSessionFrames?: number;
+      pendingDeliveryFrames?: number;
+      preAttachOwnedFrames?: number;
+      preAttachOwnedBytes?: number;
+    }>();
+    expectTypeOf<
+      NonNullable<
+        DaemonStatusReport['full']
+      >['acpConnections'][number]['preAttachOwnedFrames']
+    >().toEqualTypeOf<number | undefined>();
+    const legacyAcpConnections: NonNullable<
+      DaemonStatusReport['full']
+    >['acpConnections'] = [{}];
+    expect(legacyAcpConnections).toHaveLength(1);
+    expectTypeOf<
+      NonNullable<
+        DaemonStatusReport['full']
+      >['acpConnections'][number]['connectionIdPrefix']
+    >().toEqualTypeOf<string | undefined>();
+    expectTypeOf<undefined>().toMatchTypeOf<
+      NonNullable<DaemonStatusReport['full']>['acpMounts']
+    >();
+    expectTypeOf<
+      NonNullable<
+        NonNullable<DaemonStatusReport['full']>['acpMounts']
+      >[number]['preAttachGuardFailures']
+    >().toEqualTypeOf<number>();
     expectTypeOf<DaemonStatusReport['daemon']>().toMatchTypeOf<{
       runId?: string;
       logMode?: DaemonLogMode;
@@ -343,6 +479,36 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonStatusReportLevel>().not.toBeNever();
     expectTypeOf<DaemonStatusReportSection>().not.toBeNever();
     expectTypeOf<DaemonStatusReportSession>().not.toBeNever();
+  });
+
+  it('exposes the workspace session live-state surface at the public entry', () => {
+    // The prototype checks execute under vitest (type-only imports are
+    // erased). The type shape assertions pin the wire contract via the
+    // package typecheck, which compiles this file through
+    // tsconfig.test-fence.json — the default tsconfig excludes test/.
+    expect(
+      typeof Public.DaemonClient.prototype.getWorkspaceSessionLiveState,
+    ).toBe('function');
+    expect(
+      typeof Public.WorkspaceDaemonClient.prototype.getSessionLiveState,
+    ).toBe('function');
+    expectTypeOf<DaemonSessionCatalogVersion>().toEqualTypeOf<{
+      generation: string;
+      revision: number;
+    }>();
+    expectTypeOf<DaemonSessionLiveState>().toEqualTypeOf<{
+      sessionId: string;
+      clientCount: number;
+      hasActivePrompt: boolean;
+      isWaitingForPermission: boolean;
+      isWaitingForUserQuestion: boolean;
+      updatedAt?: string;
+    }>();
+    expectTypeOf<DaemonWorkspaceSessionLiveState>().toEqualTypeOf<{
+      v: 1;
+      catalogVersion: DaemonSessionCatalogVersion;
+      sessions: DaemonSessionLiveState[];
+    }>();
   });
 
   it('exposes the PR 21 auth device-flow surface at the public entry', () => {

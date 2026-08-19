@@ -15,7 +15,6 @@ import type {
   MobileComposerBackend,
   SlashMenuState,
 } from '../hooks/useComposerCore';
-import type { UseDaemonFollowupSuggestionReturn } from '@qwen-code/webui/daemon-react-sdk';
 import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
 import { WebShellPortalRootContext } from '../portalRoot';
 
@@ -26,6 +25,12 @@ Element.prototype.scrollIntoView = vi.fn();
 const mockComposerCoreState = vi.hoisted(() => ({
   composerTags: [] as WebShellComposerTag[],
   pastedImages: [] as Array<{ data: string; media_type: string }>,
+  pastedFiles: [] as Array<{
+    name: string;
+    media_type: string;
+    text: string;
+    size?: number;
+  }>,
   removeTopTag: vi.fn(),
 }));
 
@@ -105,7 +110,6 @@ const composerCoreState = vi.hoisted(() => ({
   imageDropCapture: vi.fn(),
   clearImageDragState: vi.fn(),
   addTags: vi.fn(),
-  shellMode: false,
   imageDragActive: false,
   onFileUploadRequest: undefined as
     | ((targetDir: string, restoreQuery?: () => void) => void)
@@ -150,19 +154,26 @@ Object.defineProperty(window, 'matchMedia', {
   })),
 });
 
+const latestComposerCoreOptions = vi.hoisted(() => ({
+  current: null as Record<string, unknown> | null,
+}));
+
 vi.mock('../hooks/useComposerCore', async (importOriginal) => {
   const React = await import('react');
   const actual =
     await importOriginal<typeof import('../hooks/useComposerCore')>();
   return {
     ...actual,
-    useComposerCore: (options?: {
-      onFileUploadRequest?: (
-        targetDir: string,
-        restoreQuery?: () => void,
-      ) => void;
-      workspaceUploadBusy?: boolean;
-    }) => {
+    useComposerCore: (
+      options?: Record<string, unknown> & {
+        onFileUploadRequest?: (
+          targetDir: string,
+          restoreQuery?: () => void,
+        ) => void;
+        workspaceUploadBusy?: boolean;
+      },
+    ) => {
+      latestComposerCoreOptions.current = options ?? null;
       composerCoreState.onFileUploadRequest = options?.onFileUploadRequest;
       composerCoreState.workspaceUploadBusy =
         options?.workspaceUploadBusy ?? false;
@@ -177,6 +188,7 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
         hasInput: vi.fn(() => false),
         hasAttachments:
           mockComposerCoreState.pastedImages.length > 0 ||
+          mockComposerCoreState.pastedFiles.length > 0 ||
           mockComposerCoreState.composerTags.length > 0,
         hasContent: false,
         canSubmit: false,
@@ -197,10 +209,13 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
           submit: vi.fn(),
           hasAttachments: () =>
             mockComposerCoreState.pastedImages.length > 0 ||
+            mockComposerCoreState.pastedFiles.length > 0 ||
             mockComposerCoreState.composerTags.length > 0,
         },
         pastedImages: mockComposerCoreState.pastedImages,
         removeImage: vi.fn(),
+        pastedFiles: mockComposerCoreState.pastedFiles,
+        removeFile: vi.fn(),
         composerTags: mockComposerCoreState.composerTags,
         removeTopTag: mockComposerCoreState.removeTopTag,
         addTags: composerCoreState.addTags,
@@ -211,7 +226,7 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
         clear: vi.fn(),
         retryLast: vi.fn(),
         replaceEditorText: vi.fn(),
-        shellMode: composerCoreState.shellMode,
+        shellMode: false,
         setShellMode: vi.fn(),
         toggleShellMode: vi.fn(),
         currentMode: 'default',
@@ -269,12 +284,6 @@ vi.mock('../live/LiveVoiceButton', () => ({
   LiveVoiceButton: () => <span data-testid="live-voice-button" />,
 }));
 
-vi.mock('./SpecularComposerEffect', () => ({
-  SpecularComposerEffect: () => (
-    <span data-web-shell-composer-specular aria-hidden="true" />
-  ),
-}));
-
 const mounted: Array<{
   root: Root;
   container: HTMLDivElement;
@@ -283,7 +292,6 @@ const mounted: Array<{
 
 afterEach(() => {
   composerCoreState.slashMenu = null;
-  composerCoreState.shellMode = false;
   composerCoreState.focus.mockReset();
   composerCoreState.closeSlashMenu.mockReset();
   composerCoreState.mobileComposer = null;
@@ -301,13 +309,20 @@ afterEach(() => {
   }
   mockComposerCoreState.composerTags = [];
   mockComposerCoreState.pastedImages = [];
+  mockComposerCoreState.pastedFiles = [];
   mockComposerCoreState.removeTopTag.mockReset();
-  vi.useRealTimers();
+  latestComposerCoreOptions.current = null;
 });
 
 interface ChatEditorRenderProps {
   composerTags?: WebShellComposerTag[];
   pastedImages?: Array<{ data: string; media_type: string }>;
+  pastedFiles?: Array<{
+    name: string;
+    media_type: string;
+    text: string;
+    size?: number;
+  }>;
   gitBranch?: string;
   workspaceName?: string;
   workspaceTitle?: string;
@@ -325,13 +340,12 @@ interface ChatEditorRenderProps {
   tokenCount?: number;
   contextWindow?: number;
   onShowContextUsage?: () => void;
-  placeholderText?: string;
-  animatePlaceholder?: boolean;
   disabled?: boolean;
   atWorkspaceCwd?: string;
   sessionId?: string;
-  followupState?: UseDaemonFollowupSuggestionReturn['followupState'];
   customization?: WebShellCustomization;
+  builtinAtProviders?: WebShellCustomization['builtinAtProviders'];
+  atProviders?: WebShellCustomization['atProviders'];
 }
 
 function renderChatEditorInto(
@@ -342,6 +356,7 @@ function renderChatEditorInto(
   const {
     composerTags,
     pastedImages,
+    pastedFiles,
     customization,
     renderComposerTagTooltip,
     onComposerTagClick,
@@ -352,6 +367,9 @@ function renderChatEditorInto(
   }
   if (pastedImages) {
     mockComposerCoreState.pastedImages = pastedImages;
+  }
+  if (pastedFiles) {
+    mockComposerCoreState.pastedFiles = pastedFiles;
   }
 
   act(() => {
@@ -505,17 +523,16 @@ describe('ChatEditor context usage ring', () => {
     });
 
     expect(document.body.textContent).toContain('53.6k / 1.0M tokens (5.4%)');
-    // The arrow must be the Radix-positioned element: a pseudo-element pinned
-    // to the content center stops pointing at the trigger once collision
-    // avoidance shifts the content near the viewport edge. jsdom has no
-    // layout, so pin the positioning classes the rendered arrow depends on —
-    // a shadcn regeneration that drops them would detach the arrow visually
-    // while an existence check stayed green.
-    const arrowClass = document
-      .querySelector('[data-slot="tooltip-arrow"]')
-      ?.getAttribute('class');
-    expect(arrowClass).toContain('rotate-45');
-    expect(arrowClass).toContain('translate-y-[calc(-50%_-_2px)]');
+    const arrow = document.querySelector<SVGElement>(
+      '[data-slot="tooltip-arrow"]',
+    );
+    expect(arrow?.querySelectorAll('path')).toHaveLength(2);
+    expect(arrow?.style.transform).toBe(
+      'translateY(var(--floating-arrow-offset))',
+    );
+    expect(
+      arrow?.closest('[data-slot="tooltip-content"]')?.getAttribute('class'),
+    ).toContain('[--floating-arrow-offset:-1px]');
   });
 
   it('escalates the arc color at the /context panel thresholds', () => {
@@ -548,163 +565,6 @@ describe('ChatEditor context usage ring', () => {
     expect(button.getAttribute('aria-label')).toBe('150.0% context used');
     const arc = button.querySelectorAll('circle')[1];
     expect(arc.getAttribute('stroke-dashoffset')).toBe('0');
-  });
-});
-
-describe('ChatEditor animation layers', () => {
-  it('mounts the inert specular layer without replacing composer controls', () => {
-    const container = renderChatEditor({});
-
-    expect(
-      container.querySelector('[data-web-shell-composer-specular]'),
-    ).not.toBeNull();
-    expect(
-      container.querySelector('[data-web-shell-composer-editor]'),
-    ).not.toBeNull();
-    expect(
-      container.querySelector('[data-web-shell-composer-submit]'),
-    ).not.toBeNull();
-  });
-
-  it('keeps the typewriter visible through automatic focus', () => {
-    const container = renderChatEditor({});
-    const editor = container.querySelector<HTMLElement>(
-      '[data-web-shell-composer-editor]',
-    );
-    const outside = document.createElement('button');
-    container.appendChild(outside);
-    editor!.tabIndex = 0;
-
-    act(() => editor!.focus());
-    expect(container.querySelector('[data-typewriter-visible]')).not.toBeNull();
-
-    act(() => {
-      editor!.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
-    });
-    expect(container.querySelector('[data-typewriter-visible]')).toBeNull();
-
-    act(() => outside.focus());
-    expect(container.querySelector('[data-typewriter-visible]')).not.toBeNull();
-  });
-
-  it('plays the typewriter twice and then keeps the completed text', () => {
-    vi.useFakeTimers();
-    const container = renderChatEditor({ placeholderText: 'abc' });
-    const typewriter = () =>
-      container.querySelector('[data-web-shell-composer-typewriter]');
-
-    expect(typewriter()?.textContent).toBe('_');
-
-    act(() => vi.advanceTimersByTime(3 * 45));
-    expect(typewriter()?.textContent).toBe('abc_');
-
-    act(() => vi.advanceTimersByTime(3000));
-    expect(typewriter()?.textContent).toBe('_');
-
-    act(() => vi.advanceTimersByTime(3 * 45));
-    expect(typewriter()?.textContent).toBe('abc_');
-
-    act(() => vi.advanceTimersByTime(3001));
-    expect(typewriter()?.textContent).toBe('abc_');
-  });
-
-  it('does not mount the typewriter for an empty placeholder', () => {
-    const container = renderChatEditor({ placeholderText: '' });
-
-    expect(
-      container.querySelector('[data-web-shell-composer-typewriter]'),
-    ).toBeNull();
-    expect(container.querySelector('[data-typewriter-visible]')).toBeNull();
-  });
-
-  it('does not mount the typewriter when placeholder animation is disabled', () => {
-    const container = renderChatEditor({
-      placeholderText: 'abc',
-      animatePlaceholder: false,
-    });
-
-    expect(
-      container.querySelector('[data-web-shell-composer-typewriter]'),
-    ).toBeNull();
-    expect(container.querySelector('[data-typewriter-visible]')).toBeNull();
-  });
-
-  it('shows the full placeholder without a caret under prefers-reduced-motion', () => {
-    const originalMatchMedia = window.matchMedia;
-    window.matchMedia = vi.fn(
-      (query: string) =>
-        ({
-          matches: query === '(prefers-reduced-motion: reduce)',
-          media: query,
-          addEventListener: vi.fn(),
-          removeEventListener: vi.fn(),
-        }) as MediaQueryList,
-    );
-    try {
-      const container = renderChatEditor({ placeholderText: 'abc' });
-      const typewriter = container.querySelector(
-        '[data-web-shell-composer-typewriter]',
-      );
-
-      expect(typewriter?.textContent).toBe('abc');
-    } finally {
-      window.matchMedia = originalMatchMedia;
-    }
-  });
-
-  it('replays the typewriter sequence after the empty editor loses focus', () => {
-    vi.useFakeTimers();
-    const container = renderChatEditor({ placeholderText: 'abc' });
-    const editor = container.querySelector<HTMLElement>(
-      '[data-web-shell-composer-editor]',
-    );
-    const outside = document.createElement('button');
-    container.appendChild(outside);
-    editor!.tabIndex = 0;
-    const typewriter = () =>
-      container.querySelector('[data-web-shell-composer-typewriter]');
-
-    act(() => editor!.focus());
-    act(() => {
-      editor!.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
-    });
-    expect(typewriter()).toBeNull();
-
-    act(() => outside.focus());
-    expect(typewriter()?.textContent).toBe('_');
-
-    act(() => vi.advanceTimersByTime(3 * 45));
-    expect(typewriter()?.textContent).toBe('abc_');
-  });
-
-  it('hides the typewriter when disabled, in shell mode, or during a followup', () => {
-    const typewriterOf = (container: HTMLElement) =>
-      container.querySelector('[data-web-shell-composer-typewriter]');
-
-    expect(
-      typewriterOf(renderChatEditor({ placeholderText: 'abc' })),
-    ).not.toBeNull();
-
-    expect(
-      typewriterOf(
-        renderChatEditor({ placeholderText: 'abc', disabled: true }),
-      ),
-    ).toBeNull();
-
-    composerCoreState.shellMode = true;
-    expect(
-      typewriterOf(renderChatEditor({ placeholderText: 'abc' })),
-    ).toBeNull();
-    composerCoreState.shellMode = false;
-
-    expect(
-      typewriterOf(
-        renderChatEditor({
-          placeholderText: 'abc',
-          followupState: { suggestion: 'next', isVisible: true, shownAt: 0 },
-        }),
-      ),
-    ).toBeNull();
   });
 });
 
@@ -1459,6 +1319,63 @@ describe('ChatEditor mobile composer quick actions', () => {
   });
 });
 
+describe('ChatEditor at mention context fallback', () => {
+  const tablesProvider = {
+    id: 'tables',
+    label: 'Tables',
+    async search() {
+      return [];
+    },
+  };
+  const hostFilesProvider = {
+    id: 'files-host',
+    label: 'Host files',
+    async search() {
+      return [];
+    },
+  };
+
+  it('uses customization atProviders when ChatEditor props omit them', () => {
+    const contextProviders = [tablesProvider];
+    renderChatEditor({
+      customization: { atProviders: contextProviders },
+    });
+    expect(latestComposerCoreOptions.current?.atProviders).toBe(
+      contextProviders,
+    );
+  });
+
+  it('prefers explicit atProviders props over customization', () => {
+    const contextProviders = [tablesProvider];
+    const propProviders = [hostFilesProvider];
+    renderChatEditor({
+      customization: { atProviders: contextProviders },
+      atProviders: propProviders,
+    });
+    expect(latestComposerCoreOptions.current?.atProviders).toBe(propProviders);
+  });
+
+  it('uses customization builtinAtProviders when ChatEditor props omit them', () => {
+    const builtinAtProviders = { exclude: ['extensions'] as const };
+    renderChatEditor({
+      customization: { builtinAtProviders },
+    });
+    expect(latestComposerCoreOptions.current?.builtinAtProviders).toBe(
+      builtinAtProviders,
+    );
+  });
+
+  it('prefers explicit builtinAtProviders props over customization', () => {
+    renderChatEditor({
+      customization: { builtinAtProviders: { exclude: ['extensions'] } },
+      builtinAtProviders: { exclude: ['files'] },
+    });
+    expect(latestComposerCoreOptions.current?.builtinAtProviders).toEqual({
+      exclude: ['files'],
+    });
+  });
+});
+
 describe('ChatEditor file upload gating', () => {
   const makeWorkspace = (
     features: string[],
@@ -1519,6 +1436,97 @@ describe('ChatEditor file upload gating', () => {
     });
     expect(container.querySelector('[data-web-shell-upload-input]')).toBeNull();
     expect(composerCoreState.onFileUploadRequest).toBeUndefined();
+  });
+
+  it('fileUploadEnabled={false} disables file drag-and-drop in the composer core', () => {
+    uploadWorkspaceState.current = makeWorkspace(['workspace_file_upload']);
+    renderChatEditor({ customization: { fileUploadEnabled: false } });
+    expect(latestComposerCoreOptions.current?.fileDragEnabled).toBe(false);
+  });
+
+  it('enables file drag-and-drop in the composer core by default', () => {
+    uploadWorkspaceState.current = makeWorkspace(['workspace_file_upload']);
+    renderChatEditor({});
+    expect(latestComposerCoreOptions.current?.fileDragEnabled).toBe(true);
+  });
+
+  it('fileUploadEnabled={false} ingests nothing on file drop', () => {
+    const workspace = makeWorkspace(['workspace_file_upload']);
+    uploadWorkspaceState.current = workspace;
+    composerCoreState.imageDropCapture.mockImplementation((event: Event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    });
+    const container = renderChatEditor({
+      customization: { fileUploadEnabled: false },
+    });
+    const editor = container.querySelector('[data-web-shell-composer-editor]')!;
+    const drop = dispatchDrag(
+      editor,
+      'drop',
+      ['Files'],
+      [new File(['abc'], 'notes.txt')],
+    );
+    // Cancelled so the browser cannot navigate to the dropped file, but no
+    // lane — upload or inline image/text — reacts.
+    expect(drop.defaultPrevented).toBe(true);
+    expect(composerCoreState.imageDropCapture).not.toHaveBeenCalled();
+    expect(workspace.client.uploadWorkspaceFile).not.toHaveBeenCalled();
+    expect(composerCoreState.addTags).not.toHaveBeenCalled();
+    expect(container.querySelector('[data-web-shell-upload-strip]')).toBeNull();
+  });
+
+  it('uploads dropped files into the configured directory', async () => {
+    const workspace = makeWorkspace(['workspace_file_upload']);
+    workspace.client.uploadWorkspaceFile.mockResolvedValue({
+      kind: 'file_upload',
+      path: 'uploads/notes.txt',
+      sizeBytes: 3,
+      hash: `sha256:${'b'.repeat(64)}`,
+    });
+    uploadWorkspaceState.current = workspace;
+    const container = renderChatEditor({
+      customization: { fileUploadDirectory: 'uploads' },
+    });
+    const editor = container.querySelector('[data-web-shell-composer-editor]')!;
+    dispatchDrag(editor, 'drop', ['Files'], [new File(['abc'], 'notes.txt')]);
+    await act(async () => {});
+
+    expect(workspace.client.uploadWorkspaceFile).toHaveBeenCalledTimes(1);
+    expect(workspace.client.uploadWorkspaceFile.mock.calls[0][0].path).toBe(
+      'uploads/notes.txt',
+    );
+    // The directory flows through the whole chain: request path, server
+    // response, and the inserted @reference.
+    expect(composerCoreState.addTags).toHaveBeenCalledWith(
+      [
+        expect.objectContaining({
+          kind: 'file',
+          value: 'uploads/notes.txt',
+        }),
+      ],
+      { placement: 'inline', position: 'end' },
+    );
+  });
+
+  it('uploads dropped files to the workspace root by default', async () => {
+    const workspace = makeWorkspace(['workspace_file_upload']);
+    workspace.client.uploadWorkspaceFile.mockResolvedValue({
+      kind: 'file_upload',
+      path: 'notes.txt',
+      sizeBytes: 3,
+      hash: `sha256:${'d'.repeat(64)}`,
+    });
+    uploadWorkspaceState.current = workspace;
+    const container = renderChatEditor({});
+    const editor = container.querySelector('[data-web-shell-composer-editor]')!;
+    dispatchDrag(editor, 'drop', ['Files'], [new File(['abc'], 'notes.txt')]);
+    await act(async () => {});
+
+    expect(workspace.client.uploadWorkspaceFile).toHaveBeenCalledTimes(1);
+    expect(workspace.client.uploadWorkspaceFile.mock.calls[0][0].path).toBe(
+      'notes.txt',
+    );
   });
 
   it('fileUploadEnabled={true} still requires the capability (AND, not override)', () => {
