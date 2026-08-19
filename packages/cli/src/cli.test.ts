@@ -48,6 +48,7 @@ const mocks = vi.hoisted(() => ({
   mcpBuilder: vi.fn(),
   mcpListHandler: vi.fn(),
   mcpAddHandler: vi.fn(),
+  mcpRemoveHandler: vi.fn(),
   getCliVersion: vi.fn(),
   installManagedNpmUpdate: vi.fn(),
 }));
@@ -94,9 +95,22 @@ vi.mock('./commands/mcp.js', () => ({
           handler: mocks.mcpListHandler,
         })
         .command({
-          command: 'add <name>',
+          // Mirror the real add command's variadic tail and
+          // `unknown-options-as-args` so version-looking server args are
+          // captured into `args` exactly like production.
+          command: 'add <name> <commandOrUrl> [args...]',
           describe: 'Add a server',
+          builder: (subYargs: Argv) =>
+            subYargs.parserConfiguration({
+              'unknown-options-as-args': true,
+              'populate--': true,
+            }),
           handler: mocks.mcpAddHandler,
+        })
+        .command({
+          command: 'remove <name>',
+          describe: 'Remove a server',
+          handler: mocks.mcpRemoveHandler,
         })
         .demandCommand(1, 'You need at least one command before continuing.');
     },
@@ -108,7 +122,7 @@ describe('resolveBootstrapRoute', () => {
   it('routes top-level help, version, serve, and mcp correctly', async () => {
     expect(resolveBootstrapRoute(['--help'])).toBe('help');
     expect(resolveBootstrapRoute(['--version'])).toBe('version');
-    expect(resolveBootstrapRoute(['mcp', '--version'])).toBe('default');
+    expect(resolveBootstrapRoute(['mcp', '--version'])).toBe('version');
     expect(resolveBootstrapRoute(['serve', '--help'])).toBe('serve');
     expect(resolveBootstrapRoute(['mcp', '--help'])).toBe('mcp');
   });
@@ -255,14 +269,21 @@ describe('resolveBootstrapRoute', () => {
     expect(resolveBootstrapRoute(['--model', '-v'])).toBe('version');
   });
 
-  it('keeps command-prefixed version argv off the version fast path', () => {
+  it('routes command-prefixed version argv to the version fast path', () => {
     // Command builders disable version via `.version(false)` (mcp, hooks,
-    // extensions, channel, review, auth, sessions), so an exact `-v` /
-    // `--version` token after a command must stay on the slow path, which
-    // owns those argv shapes.
-    expect(resolveBootstrapRoute(['mcp', '--version'])).toBe('default');
-    expect(resolveBootstrapRoute(['mcp', 'list', '--version'])).toBe('default');
-    expect(resolveBootstrapRoute(['mcp', '-v'])).toBe('default');
+    // extensions, channel, review, auth, sessions) while the root parser's
+    // version alias still consumes the token — so the full parser EXECUTES
+    // the subcommand instead of printing the version (`mcp remove` deletes
+    // the server and its OAuth creds). Base printed the version for these
+    // argv shapes, so the bootstrap intercept restores that. The one
+    // exception is the mcp add variadic tail, where the token is a server
+    // argument.
+    expect(resolveBootstrapRoute(['mcp', '--version'])).toBe('version');
+    expect(resolveBootstrapRoute(['mcp', 'list', '--version'])).toBe('version');
+    expect(resolveBootstrapRoute(['mcp', '-v'])).toBe('version');
+    expect(
+      resolveBootstrapRoute(['mcp', 'add', 'my-server', 'node', '--version']),
+    ).toBe('mcp');
     // Version still wins for top-level argv with no command prefix.
     expect(resolveBootstrapRoute(['--model', '-v'])).toBe('version');
     expect(resolveBootstrapRoute(['-v'])).toBe('version');
@@ -289,9 +310,104 @@ describe('resolveBootstrapRoute', () => {
       resolveBootstrapRoute(['mcp', 'add', 'my-server', 'node', '--version']),
     ).toBe('mcp');
     // Controls: version tokens at the mcp level (or on a non-variadic
-    // subcommand) still demote to the full parser.
-    expect(resolveBootstrapRoute(['mcp', '--version'])).toBe('default');
-    expect(resolveBootstrapRoute(['mcp', 'list', '--version'])).toBe('default');
+    // subcommand) route to the version fast path — only the add tail keeps
+    // them on the mcp route.
+    expect(resolveBootstrapRoute(['mcp', '--version'])).toBe('version');
+    expect(resolveBootstrapRoute(['mcp', 'list', '--version'])).toBe('version');
+  });
+
+  it('restores base parity for command-prefixed version argv', () => {
+    // Base printed the version for ANY exact `-v`/`--version` token. The
+    // demotion to the full parser broke that destructively: `mcp remove x
+    // -v` deleted the server (root version alias consumed the token, the
+    // non-strict command tree executed), and option-shifted add argv
+    // persisted corrupted entries. The intercept prints the version again;
+    // only the mcp add variadic tail (≥2 positionals before the token)
+    // stays on the fast path.
+    expect(resolveBootstrapRoute(['mcp', 'remove', 'my-server', '-v'])).toBe(
+      'version',
+    );
+    expect(
+      resolveBootstrapRoute(['mcp', 'remove', 'my-server', '--version']),
+    ).toBe('version');
+    expect(
+      resolveBootstrapRoute(['extensions', 'uninstall', 'foo-ext', '-v']),
+    ).toBe('version');
+    expect(
+      resolveBootstrapRoute(['--debug', 'mcp', 'remove', 'victim', '-v']),
+    ).toBe('version');
+    expect(
+      resolveBootstrapRoute([
+        '--safe-mode',
+        'mcp',
+        'remove',
+        'victim',
+        '--version',
+      ]),
+    ).toBe('version');
+    // Option-shifted tokens before the two required add positionals are not
+    // the variadic tail.
+    expect(
+      resolveBootstrapRoute([
+        'mcp',
+        'add',
+        '--scope',
+        'user',
+        '-v',
+        'name',
+        'cmd',
+      ]),
+    ).toBe('version');
+    expect(
+      resolveBootstrapRoute([
+        'mcp',
+        'add',
+        '--transport',
+        'sse',
+        '-v',
+        'name',
+        'cmd',
+      ]),
+    ).toBe('version');
+    // Only one positional precedes the token: not the tail yet.
+    expect(resolveBootstrapRoute(['mcp', 'add', 'name', '-v'])).toBe('version');
+    // Two positionals precede: the variadic tail persists verbatim, also
+    // behind leading global flags or value-flag prefixes.
+    expect(
+      resolveBootstrapRoute([
+        'mcp',
+        'add',
+        '--scope',
+        'user',
+        'my-server',
+        'node',
+        '-v',
+      ]),
+    ).toBe('mcp');
+    expect(
+      resolveBootstrapRoute([
+        '--debug',
+        'mcp',
+        'add',
+        'my-server',
+        'node',
+        'server.js',
+        '-v',
+      ]),
+    ).toBe('mcp');
+    expect(
+      resolveBootstrapRoute([
+        '--model',
+        'gpt-4',
+        'mcp',
+        'add',
+        'my-server',
+        'node',
+        '-v',
+      ]),
+    ).toBe('mcp');
+    // serve argv is command-prefixed too.
+    expect(resolveBootstrapRoute(['serve', '--version'])).toBe('version');
   });
 
   it('demotes unrecognized short-option clusters to the slow path', () => {
@@ -306,39 +422,46 @@ describe('resolveBootstrapRoute', () => {
     expect(resolveBootstrapRoute(['mcp', '--', '--version'])).toBe('mcp');
   });
 
-  it('demotes every argv shape outside the known-safe fast-path grammar', () => {
+  it('keeps out-of-grammar argv off the help fast path; exact version tokens keep base parity', () => {
     // Structural close (not per-entrance patches): yargs' flag state is
     // last-wins and order-dependent, which exact-token scanning cannot
     // model. Each shape below was witnessed misfiring a fast path at some
     // point; all of them carry tokens outside the safe grammar (`=`-forms,
-    // `--no-` negations, short clusters, 3+ leading dashes) and must demote
-    // to the slow path, which owns the final flag state.
+    // `--no-` negations, short clusters) and must stay off the HELP fast
+    // path. Without an exact version token they demote to the slow path,
+    // which owns the final flag state.
     const misfires: readonly string[][] = [
       ['--help', '--no-help'],
-      ['-v', '--no-version'],
-      ['--version', '--no-version'],
-      ['-v', '--version=false'],
       ['--version=0'],
       ['--version=no'],
       ['--help', '--help=false'],
       ['-h', '-h=false'],
       ['--v=false'],
       ['--h=false'],
-      ['---help', '-v'],
-      ['-v', '---help'],
     ];
     for (const argv of misfires) {
       const route = resolveBootstrapRoute(argv);
       expect(route, `argv=${JSON.stringify(argv)}`).not.toBe('help');
       expect(route, `argv=${JSON.stringify(argv)}`).not.toBe('version');
     }
+    // Base parity: base printed the version for ANY argv carrying an exact
+    // `-v`/`--version` token, regardless of out-of-grammar siblings
+    // (`--no-version`, `--version=false`, `---help`); the command-prefixed
+    // intercept restores that class instead of demoting it.
+    expect(resolveBootstrapRoute(['-v', '--no-version'])).toBe('version');
+    expect(resolveBootstrapRoute(['--version', '--no-version'])).toBe(
+      'version',
+    );
+    expect(resolveBootstrapRoute(['-v', '--version=false'])).toBe('version');
+    expect(resolveBootstrapRoute(['---help', '-v'])).toBe('version');
+    expect(resolveBootstrapRoute(['-v', '---help'])).toBe('version');
     // Controls: the plain grammar stays on the fast paths.
     expect(resolveBootstrapRoute(['--help'])).toBe('help');
     expect(resolveBootstrapRoute(['-h'])).toBe('help');
     expect(resolveBootstrapRoute(['-v'])).toBe('version');
     expect(resolveBootstrapRoute(['--version'])).toBe('version');
     expect(resolveBootstrapRoute(['--model', 'x', '-v'])).toBe('version');
-    expect(resolveBootstrapRoute(['mcp', '--version'])).toBe('default');
+    expect(resolveBootstrapRoute(['mcp', '--version'])).toBe('version');
     expect(resolveBootstrapRoute([])).toBe('default');
   });
 });
@@ -536,6 +659,51 @@ describe('runCliEntry', () => {
     expect(process.exitCode).toBe(1);
     expect(stderr.join('')).toContain('Not enough non-option arguments');
     expect(mocks.mcpAddHandler).not.toHaveBeenCalled();
+    expect(mocks.main).not.toHaveBeenCalled();
+  });
+
+  it('prints the version instead of executing mcp remove on version argv', async () => {
+    await runCliEntry(['mcp', 'remove', 'victim', '-v']);
+
+    expect(stdout.join('')).toContain('9.9.9');
+    expect(mocks.mcpRemoveHandler).not.toHaveBeenCalled();
+    expect(mocks.mcpAddHandler).not.toHaveBeenCalled();
+    expect(mocks.main).not.toHaveBeenCalled();
+  });
+
+  it('prints the version for flag-prefixed mcp remove version argv', async () => {
+    await runCliEntry(['--debug', 'mcp', 'remove', 'victim', '-v']);
+
+    expect(stdout.join('')).toContain('9.9.9');
+    expect(mocks.mcpRemoveHandler).not.toHaveBeenCalled();
+    expect(mocks.mcpAddHandler).not.toHaveBeenCalled();
+    expect(mocks.main).not.toHaveBeenCalled();
+  });
+
+  it('prints the version instead of persisting an option-shifted mcp add', async () => {
+    await runCliEntry(['mcp', 'add', '--scope', 'user', '-v', 'name', 'cmd']);
+
+    expect(stdout.join('')).toContain('9.9.9');
+    expect(mocks.mcpAddHandler).not.toHaveBeenCalled();
+    expect(mocks.main).not.toHaveBeenCalled();
+  });
+
+  it('persists version-looking tail args through the flag-prefixed mcp add fast path', async () => {
+    await runCliEntry([
+      '--debug',
+      'mcp',
+      'add',
+      'my-server',
+      'node',
+      'server.js',
+      '-v',
+    ]);
+
+    expect(mocks.mcpAddHandler).toHaveBeenCalledTimes(1);
+    const addArgv = mocks.mcpAddHandler.mock.calls[0]?.[0] as
+      | { args?: string[] }
+      | undefined;
+    expect(addArgv?.args).toContain('-v');
     expect(mocks.main).not.toHaveBeenCalled();
   });
 
