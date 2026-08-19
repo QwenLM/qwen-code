@@ -79,6 +79,10 @@ export function resolveMergeBase(
   // Sticky across candidates: the tracking ref may fail to probe while the
   // local fallback answers a definitive "no ancestor", and a round that saw
   // one unanswerable probe has not established the deterministic shape.
+  // Stickiness serves that no-ancestor question ONLY: a resolution that
+  // succeeded is itself the deterministic shape — the clamp ran against a
+  // real sha — so the taint must not ride into it and misname a later
+  // capture failure `base-untrusted`.
   let probeUnavailable = false;
   for (const candidate of [
     `refs/remotes/${remote}/${baseRefName}`,
@@ -86,7 +90,9 @@ export function resolveMergeBase(
   ]) {
     if (!git.refExists(candidate)) continue;
     const mb = git.mergeBase(candidate, headRef);
-    if (mb.sha) return { sha: mb.sha, baseFetchFailed, probeUnavailable };
+    if (mb.sha) {
+      return { sha: mb.sha, baseFetchFailed, probeUnavailable: false };
+    }
     // Exit 1 is the answer "no common ancestor". Anything else — 128, or no
     // status at all from a kill or a spawn failure — is the probe failing to
     // answer, which says nothing about the histories.
