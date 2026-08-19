@@ -3228,7 +3228,8 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
       prHead = '',
       useInJobStep = false,
       reviews = '[]',
-      runStarted = '',
+      runCreated = '',
+      runStartedAttempt = '',
     } = {},
   ) {
     const dir = mkdtempSync(join(tmpdir(), 'fallback-comment-'));
@@ -3261,9 +3262,15 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
           'fi',
           'if [ "$cmd" = "run" ] && [ "$sub" = "view" ]; then',
           '  case "$*" in',
+          '    *createdAt*)',
+          '      [ "${SCENARIO:-}" = "runstart_fail" ] && exit 1',
+          '      printf "%s" "${RUN_CREATED:-}"; exit 0 ;;',
+          // Answered on purpose, and with a DIFFERENT value: the guard must
+          // read createdAt (attempt-stable), and a stub that returned one
+          // value for both fields could not tell the two apart.
           '    *startedAt*)',
           '      [ "${SCENARIO:-}" = "runstart_fail" ] && exit 1',
-          '      printf "%s" "${RUN_STARTED:-}"; exit 0 ;;',
+          '      printf "%s" "${RUN_STARTED_ATTEMPT:-}"; exit 0 ;;',
           '  esac',
           '  [ "${SCENARIO:-}" = "runview_fail" ] && exit 1',
           '  echo "${RUN_HEAD:-}"; exit 0',
@@ -3289,9 +3296,6 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
           '    *headRefOid*)',
           '      [ "${SCENARIO:-}" = "prview_fail" ] && exit 1',
           '      echo "${PR_HEAD:-}"; exit 0 ;;',
-          '    *state*)',
-          '      [ "${SCENARIO:-}" = "state_fail" ] && exit 1',
-          '      [ "${SCENARIO:-}" = "pr_closed" ] && echo "MERGED" || echo "OPEN"; exit 0 ;;',
           '  esac',
           'fi',
           'if [ "$cmd" = "pr" ] && [ "$sub" = "comment" ]; then',
@@ -3308,7 +3312,18 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
       try {
         stdout = execFileSync(
           'bash',
-          ['-c', useInJobStep ? inJobStep.run : step.run],
+          [
+            '-c',
+            // The runner substitutes `${{ vars.* }}` before bash ever sees the
+            // script; feeding the raw expression to bash is a `bad substitution`
+            // that skips the assignment and leaves the variable unset — the
+            // timeout body then compares against an empty string. Substituting
+            // here is what makes "the step's real bash" true.
+            (useInJobStep ? inJobStep.run : step.run).replace(
+              /\$\{\{ vars\.QWEN_REVIEW_MAX_TIMEOUT_MINUTES \}\}/g,
+              '180',
+            ),
+          ],
           {
             encoding: 'utf8',
             env: {
@@ -3332,7 +3347,8 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
               COMMENTS_FILE: commentsFile,
               POSTED: posted,
               REVIEWS_JSON: reviews,
-              RUN_STARTED: runStarted,
+              RUN_CREATED: runCreated,
+              RUN_STARTED_ATTEMPT: runStartedAttempt,
             },
           },
         );
@@ -3482,8 +3498,13 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
   // fresh ~3-hour review; the autofix takeover loop reads the same feed a
   // human does. The guard is a FILTER (author scope, head, submission
   // time), so these run the step's real bash over review fixtures.
-  const RUN_STARTED = '2026-08-18T09:08:38Z';
+  // The run was CREATED at 09:08:38Z; a re-run of its failed job later moved
+  // run-level startedAt to 11:30:00Z. Attempt 1's review sits between them —
+  // the shape that separates the two anchors.
+  const RUN_CREATED = '2026-08-18T09:08:38Z';
+  const RUN_RESTARTED = '2026-08-18T11:30:00Z';
   const AFTER = '2026-08-18T11:56:34Z';
+  const MID_RERUN = '2026-08-18T10:00:00Z';
   const BEFORE = '2026-08-17T10:00:00Z';
   const reviewFixture = (login, commit, submitted) =>
     JSON.stringify([
@@ -3497,7 +3518,8 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
       const r = runFallbackStep('default', {
         useInJobStep,
         prHead: 'HEADSHA1',
-        runStarted: RUN_STARTED,
+        runCreated: RUN_CREATED,
+        runStartedAttempt: RUN_RESTARTED,
         reviews: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', AFTER),
       });
       expect(r.status).toBe(0);
@@ -3521,21 +3543,64 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
         const r = runFallbackStep('default', {
           useInJobStep,
           prHead: 'HEADSHA1',
-          runStarted: RUN_STARTED,
+          runCreated: RUN_CREATED,
+          runStartedAttempt: RUN_RESTARTED,
           reviews,
         });
         expect(r.posted, name).not.toBe('');
       }
     });
 
-    it(`${site} posts when this run's start time is unavailable`, () => {
+    it(`${site} survives a job re-run: attempt 1's review still silences it`, () => {
+      // Re-running a failed job keeps the run id but moves run-level
+      // startedAt to the re-executed attempt (measured: runs 32219268680 and
+      // 32218596441 report startedAt ~28 and ~9 minutes after createdAt).
+      // Anchored there, attempt 1's review reads as older than "this run",
+      // and a re-run that fails before posting contradicts it — the very
+      // shape this guard exists to stop. The stub answers createdAt and
+      // startedAt with DIFFERENT values, so this fails if the guard reads
+      // the wrong field.
+      const r = runFallbackStep('default', {
+        useInJobStep,
+        prHead: 'HEADSHA1',
+        runCreated: RUN_CREATED,
+        runStartedAttempt: RUN_RESTARTED,
+        reviews: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', MID_RERUN),
+      });
+      expect(r.status).toBe(0);
+      expect(r.posted).toBe('');
+      expect(r.summary).toContain('already posted a review');
+    });
+
+    it(`${site} says so in the log when the guard cannot run`, () => {
+      // A lookup that DIED degrades to the false comment this change
+      // removes, and silence there leaves an oncall unable to tell it from
+      // "no review matched". Both unavailable paths announce themselves.
+      for (const scenario of ['runstart_fail', 'reviews_fail']) {
+        const r = runFallbackStep(scenario, {
+          useInJobStep,
+          prHead: 'HEADSHA1',
+          runCreated: RUN_CREATED,
+          runStartedAttempt: RUN_RESTARTED,
+          reviews: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', AFTER),
+        });
+        expect(r.posted, scenario).not.toBe('');
+        expect(r.stdout, scenario).toContain('::warning::already-posted guard');
+        expect(r.summary, scenario).toContain(
+          'Already-posted guard unavailable',
+        );
+      }
+    });
+
+    it(`${site} posts when this run's creation time is unavailable`, () => {
       // Without a start time there is no proof the review landed during THIS
       // run, and posting wins over silence — the same call the head-moved
       // guard makes when its comparison is unavailable.
       const r = runFallbackStep('runstart_fail', {
         useInJobStep,
         prHead: 'HEADSHA1',
-        runStarted: RUN_STARTED,
+        runCreated: RUN_CREATED,
+        runStartedAttempt: RUN_RESTARTED,
         reviews: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', AFTER),
       });
       expect(r.posted).not.toBe('');
@@ -3547,7 +3612,8 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
       const r = runFallbackStep('reviews_fail', {
         useInJobStep,
         prHead: 'HEADSHA1',
-        runStarted: RUN_STARTED,
+        runCreated: RUN_CREATED,
+        runStartedAttempt: RUN_RESTARTED,
         reviews: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', AFTER),
       });
       expect(r.posted).not.toBe('');
