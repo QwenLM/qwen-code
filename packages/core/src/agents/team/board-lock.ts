@@ -206,8 +206,19 @@ export async function pruneCollection(
         updatedAt?: number;
       };
       if (!isSettled(record)) continue;
-      const at = record.settledAt ?? record.resolvedAt ?? record.updatedAt ?? 0;
-      if (!at || now - at < olderThanMs) continue;
+      const raw = record.settledAt ?? record.resolvedAt ?? record.updatedAt;
+      if (raw === undefined || raw === null) continue;
+      // A non-numeric or unparseable timestamp must never read as "older than
+      // cutoff": `now - "…"` is NaN and `NaN < olderThanMs` is false, which
+      // would unlink a file the age gate exists to protect. Skip anything that
+      // does not resolve to a finite millisecond timestamp.
+      const at =
+        typeof raw === 'number'
+          ? raw
+          : typeof raw === 'string'
+            ? Date.parse(raw)
+            : NaN;
+      if (!Number.isFinite(at) || now - at < olderThanMs) continue;
       // Take the lock so a concurrent settle cannot be lost between the read
       // above and the unlink.
       await withItemLock(
