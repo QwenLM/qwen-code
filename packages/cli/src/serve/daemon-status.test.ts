@@ -297,7 +297,12 @@ describe('buildDaemonStatusResponse', () => {
       childRssCoverage: 'active_children',
       // No registry in this case, so there are no bridges to enumerate — the
       // honest reading is "nothing measured", not "no children".
-      children: { rssBytes: 0, sampled: 0, oldestReadingAgeMs: null },
+      children: {
+        rssBytes: 0,
+        sampled: 0,
+        oldestReadingAgeMs: null,
+        heap: null,
+      },
       modeled: {
         recommendedShareAtRegisteredMb: 15_360,
         recommendedShareAtActiveMb: 15_360,
@@ -343,7 +348,12 @@ describe('buildDaemonStatusResponse', () => {
       childRssCoverage: 'active_children',
       // No registry in this case, so there are no bridges to enumerate — the
       // honest reading is "nothing measured", not "no children".
-      children: { rssBytes: 0, sampled: 0, oldestReadingAgeMs: null },
+      children: {
+        rssBytes: 0,
+        sampled: 0,
+        oldestReadingAgeMs: null,
+        heap: null,
+      },
       modeled: {
         recommendedShareAtRegisteredMb: null,
         recommendedShareAtActiveMb: null,
@@ -489,6 +499,10 @@ describe('buildDaemonStatusResponse', () => {
       sampled: 2,
       // The oldest contributor, not the newest: the sum spans this much time.
       oldestReadingAgeMs: 9_000,
+      // Neither reporter carried a heap block, so there is nothing to
+      // aggregate — and null rather than zeros, which would claim a
+      // measurement.
+      heap: null,
     });
     // The gap is visible without the client having to know it exists.
     expect(response.runtime.memory!.children.sampled).toBeLessThan(
@@ -597,7 +611,131 @@ describe('buildDaemonStatusResponse', () => {
       rssBytes: 512,
       sampled: 1,
       oldestReadingAgeMs: null,
+      heap: null,
     });
+  });
+
+  it('reports the worst child heap peak, not the sum of them', async () => {
+    // A heap ceiling applies per child, and the peaks were reached at
+    // different times, so summing them would answer no question anybody has.
+    // The maximum names the single worst-off child, which is the figure a
+    // per-child ceiling has to be judged against.
+    const withHeap = (rss: number, peak: number, live: number, gc: number) =>
+      ({
+        getDaemonStatusSnapshot: () => BASE_BRIDGE_SNAPSHOT,
+        isChannelLive: () => true,
+        getChildResourceSnapshot: () => ({
+          rssBytes: rss,
+          cpuPercent: 1,
+          ageMs: 10,
+          heap: {
+            peakOldGenerationBytes: peak,
+            peakLiveSetBytes: live,
+            peakTotalHeapBytes: peak + 1_000,
+            majorGcCount: gc,
+            majorGcMs: gc * 2,
+            unclassifiedSpaceNames: [],
+          },
+        }),
+        lastActivityAt: null,
+      }) as unknown as AcpSessionBridge;
+
+    const bridges = [withHeap(100, 900, 300, 5), withHeap(200, 400, 700, 11)];
+    const runtimes = bridges.map((bridge, i) => ({
+      workspaceId: `w${i}`,
+      workspaceCwd: i === 0 ? BASE_WORKSPACE : `/work/w${i}`,
+      bridge,
+    }));
+    const options = makeOptions();
+    options.bridge = bridges[0];
+    options.workspaceRegistry = {
+      primary: { workspaceCwd: BASE_WORKSPACE, bridge: bridges[0] },
+      list: () => runtimes,
+      listManaged: () => runtimes,
+      listEntries: () => runtimes.map(() => ({})),
+    } as unknown as BuildDaemonStatusOptions['workspaceRegistry'];
+    options.opts.daemonMemoryBudget = resolveDaemonMemoryBudget({
+      availableMemoryMb: 32_768,
+    });
+
+    const response = await buildDaemonStatusResponse('summary', options);
+
+    // Each maximum is taken independently, so the reported figures need not
+    // come from the same child: 900 and 700 are from different ones.
+    expect(response.runtime.memory?.children.heap).toEqual({
+      peakOldGenerationBytes: 900,
+      peakLiveSetBytes: 700,
+      peakTotalHeapBytes: 1_900,
+      majorGcCount: 11,
+      majorGcMs: 22,
+      unclassifiedSpaceNames: [],
+      reported: 2,
+    });
+    // RSS stays a sum — the two fields answer different questions.
+    expect(response.runtime.memory?.children.rssBytes).toBe(300);
+  });
+
+  it('counts only the children that reported a heap block', async () => {
+    // A child spawned outside the daemon, or one predating the fields, sends
+    // no heap block. It must not be counted as a zero peak: that would drag
+    // nothing down (max ignores it) but would inflate `reported` into a
+    // dishonest denominator for the maxima beside it.
+    const withHeap = {
+      getDaemonStatusSnapshot: () => BASE_BRIDGE_SNAPSHOT,
+      isChannelLive: () => true,
+      getChildResourceSnapshot: () => ({
+        rssBytes: 10,
+        cpuPercent: 1,
+        ageMs: 1,
+        heap: {
+          peakOldGenerationBytes: 42,
+          peakLiveSetBytes: 7,
+          peakTotalHeapBytes: 99,
+          majorGcCount: 1,
+          majorGcMs: 3,
+          unclassifiedSpaceNames: ['some_future_v8_space'],
+        },
+      }),
+      lastActivityAt: null,
+    } as unknown as AcpSessionBridge;
+    const withoutHeap = {
+      getDaemonStatusSnapshot: () => BASE_BRIDGE_SNAPSHOT,
+      isChannelLive: () => true,
+      getChildResourceSnapshot: () => ({
+        rssBytes: 20,
+        cpuPercent: 1,
+        ageMs: 1,
+      }),
+      lastActivityAt: null,
+    } as unknown as AcpSessionBridge;
+
+    const bridges = [withHeap, withoutHeap];
+    const runtimes = bridges.map((bridge, i) => ({
+      workspaceId: `w${i}`,
+      workspaceCwd: i === 0 ? BASE_WORKSPACE : `/work/w${i}`,
+      bridge,
+    }));
+    const options = makeOptions();
+    options.bridge = bridges[0];
+    options.workspaceRegistry = {
+      primary: { workspaceCwd: BASE_WORKSPACE, bridge: bridges[0] },
+      list: () => runtimes,
+      listManaged: () => runtimes,
+      listEntries: () => runtimes.map(() => ({})),
+    } as unknown as BuildDaemonStatusOptions['workspaceRegistry'];
+    options.opts.daemonMemoryBudget = resolveDaemonMemoryBudget({
+      availableMemoryMb: 32_768,
+    });
+
+    const response = await buildDaemonStatusResponse('summary', options);
+
+    expect(response.runtime.memory?.children.sampled).toBe(2);
+    expect(response.runtime.memory?.children.heap?.reported).toBe(1);
+    // One child seeing an unknown space is enough to make the aggregate
+    // incomplete, and naming which space is the point of carrying it up.
+    expect(
+      response.runtime.memory?.children.heap?.unclassifiedSpaceNames,
+    ).toEqual(['some_future_v8_space']);
   });
 
   it('counts a draining workspace that still holds a live child', async () => {

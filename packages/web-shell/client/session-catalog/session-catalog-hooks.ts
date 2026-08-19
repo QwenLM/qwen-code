@@ -191,6 +191,7 @@ export function useSessionCatalogController(client: DaemonClient) {
       sessionCreated(workspaceCwd: string, _sessionId: string) {
         update(() => {
           store.invalidateWorkspace(workspaceCwd);
+          if (store.isWorkspaceLiveStateEnabled(workspaceCwd)) return;
           store.scheduleWorkspaceRefresh(workspaceCwd);
         });
       },
@@ -199,6 +200,7 @@ export function useSessionCatalogController(client: DaemonClient) {
           store.patchSession(workspaceCwd, sessionId, {
             hasActivePrompt: true,
           });
+          if (store.isWorkspaceLiveStateEnabled(workspaceCwd)) return;
           store.invalidateWorkspace(workspaceCwd);
           store.scheduleWorkspaceRefresh(workspaceCwd);
         });
@@ -206,6 +208,7 @@ export function useSessionCatalogController(client: DaemonClient) {
       promptAdmissionUncertain(workspaceCwd: string) {
         update(() => {
           store.invalidateWorkspace(workspaceCwd);
+          if (store.isWorkspaceLiveStateEnabled(workspaceCwd)) return;
           store.scheduleWorkspaceRefresh(workspaceCwd);
         });
       },
@@ -215,8 +218,15 @@ export function useSessionCatalogController(client: DaemonClient) {
           store.invalidateWorkspace(workspaceCwd);
         });
       },
-      turnCompleted(workspaceCwd: string) {
+      turnCompleted(workspaceCwd: string, sessionId: string) {
         update(() => {
+          if (store.isWorkspaceLiveStateEnabled(workspaceCwd)) {
+            // The catalog revision doesn't advance on turn completion; record
+            // the completion so the live-state loop can settle it from the
+            // response's updatedAt watermark instead of a full catalog scan.
+            store.recordSessionActivity(workspaceCwd, sessionId);
+            return;
+          }
           store.invalidateWorkspace(workspaceCwd);
           store.scheduleWorkspaceRefresh(workspaceCwd);
         });
