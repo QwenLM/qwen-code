@@ -395,6 +395,79 @@ describe('ProviderSetupSteps', () => {
     unmount();
   });
 
+  it('keeps an in-progress search and its focus across a recommendation swap', async () => {
+    // R4-6: the step used to be remounted by a `key` on the revision, which
+    // also re-ran its one-shot `useState` initializers — so a lookup landing
+    // while the user was mid-search (a window up to the 5s discovery timeout)
+    // wiped the query and dropped focus onto the custom-ids input. The rest of
+    // the search keystrokes then merged into the custom model IDs field and
+    // the Enter meant for the search box installed the provider with a junk id.
+    let swapFlow!: (next: ProviderSetupFlow) => void;
+    function FlowHarness({ first }: { first: ProviderSetupFlow }) {
+      const [flow, setFlow] = useState(first);
+      swapFlow = setFlow;
+      return <ProviderSetupSteps flow={flow} />;
+    }
+
+    const before = createModelIdsFlow({
+      modelIds: 'MiniMax-M3, discovered-only',
+    });
+    const beforeState = before.state as unknown as Record<string, unknown>;
+    beforeState['recommendedModels'] = [
+      { id: 'MiniMax-M3', contextWindowSize: 1000000 },
+      { id: 'MiniMax-M2.7', contextWindowSize: 204800 },
+      { id: 'discovered-only' },
+    ];
+    beforeState['discoveryStatus'] = 'loading';
+    beforeState['recommendedModelsRevision'] = 0;
+
+    const { lastFrame, unmount } = renderWithProviders(
+      <FlowHarness first={before} />,
+    );
+
+    // Focus the recommendations, then start typing a search.
+    await act(async () => {
+      pressLatestKey('down');
+    });
+    await act(async () => {
+      pressLatestKey('M', 'M');
+    });
+    expect(lastFrame() ?? '').toContain('> M');
+
+    // The endpoint resolves mid-typing and replaces the list.
+    const after = createModelIdsFlow({
+      modelIds: 'MiniMax-M3, discovered-only',
+    });
+    const afterState = after.state as unknown as Record<string, unknown>;
+    afterState['recommendedModels'] = [
+      { id: 'MiniMax-M3', contextWindowSize: 1000000 },
+      { id: 'MiniMax-M2.7', contextWindowSize: 204800 },
+    ];
+    afterState['discoveryStatus'] = 'success';
+    afterState['recommendedModelsRevision'] = 1;
+
+    await act(async () => {
+      swapFlow(after);
+    });
+
+    // The query survived the swap, and so did the list filtering it drives.
+    expect(lastFrame() ?? '').toContain('> M');
+    // The re-derive still ran: the id no longer on offer moved into the
+    // custom-ids input, where the user can see and remove it.
+    expect(lastFrame() ?? '').toContain('discovered-only');
+
+    // Focus survived too — the next keystroke still extends the search rather
+    // than merging into the custom model IDs field.
+    await act(async () => {
+      pressLatestKey('3', '3');
+    });
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('> M3');
+    expect(frame).toContain('MiniMax-M3');
+    expect(frame).not.toContain('MiniMax-M2.7');
+    unmount();
+  });
+
   it('notes a failed lookup without hiding the built-in recommendations', () => {
     const flow = createModelIdsFlow();
     const state = flow.state as unknown as Record<string, unknown>;

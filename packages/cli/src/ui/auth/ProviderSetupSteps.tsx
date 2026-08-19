@@ -330,6 +330,35 @@ function ModelIdsStep({
       modelOptionSearchText(item).includes(normalizedQuery),
     );
   }, [modelOptions, modelSearchQuery]);
+
+  // R4-6: this used to be a `key={models-${revision}}` remount at the call
+  // site. That did re-derive the selection split, but it also re-ran every
+  // one-shot `useState` initializer above — so a lookup that resolved while
+  // the user was typing a search (a window up to the 5s discovery timeout)
+  // cleared the query, snapped the list to the top and left focus on the
+  // custom-ids input. The remaining keystrokes then merged into the custom
+  // model IDs field, and the Enter meant for the search box submitted the
+  // provider with a junk id appended. Re-derive only what the swap
+  // invalidates, and leave the interaction state alone.
+  const recommendedModelsRevision = flow.state.recommendedModelsRevision ?? 0;
+  const [derivedModelsRevision, setDerivedModelsRevision] = useState(
+    recommendedModelsRevision,
+  );
+  if (derivedModelsRevision !== recommendedModelsRevision) {
+    setDerivedModelsRevision(recommendedModelsRevision);
+    setCustomModelIdsText(
+      getCustomModelIdsText(selectedModelIds, recommendedModelIds),
+    );
+    setSelectedRecommendationKeys(
+      getRecommendedSelections(selectedModelIds, modelOptions),
+    );
+    // The new list can be shorter than the old focus index. Clamp rather than
+    // reset: an empty result lands on the search input the query lives in.
+    setFocusedModelIndex((index) =>
+      index < 0 ? index : Math.min(index, filteredModelOptions.length - 1),
+    );
+  }
+
   const recommendedScrollOffset =
     focusedModelIndex < 0
       ? 0
@@ -446,7 +475,12 @@ function ModelIdsStep({
         </Box>
         <Box marginTop={1}>
           <TextInput
-            key="model-ids-input"
+            // `TextInput` seeds an uncontrolled buffer from `value` at mount,
+            // so the re-derived split above only reaches the screen if this
+            // one input remounts. Keying it on the revision does that without
+            // taking the search query and focus down with it, which is what
+            // remounting the whole step used to do.
+            key={`model-ids-input-${derivedModelsRevision}`}
             value={customModelIdsText}
             onChange={handleCustomModelIdsChange}
             onSubmit={handleSubmitModelIds}
@@ -826,16 +860,11 @@ export function ProviderSetupSteps({
       return <ApiKeyStep config={provider} flow={flow} />;
 
     case 'models':
-      // Remount when the recommendation list is replaced so the checkbox and
-      // custom-input state re-derive against the new set instead of holding
-      // selections that are no longer on offer.
-      return (
-        <ModelIdsStep
-          key={`models-${flow.state.recommendedModelsRevision ?? 0}`}
-          config={provider}
-          flow={flow}
-        />
-      );
+      // The checkbox and custom-input split re-derives against a replaced
+      // recommendation list inside the step (see `derivedModelsRevision`),
+      // not by remounting it from here: a remount also wiped the in-progress
+      // search query and dropped focus onto the custom-ids input.
+      return <ModelIdsStep config={provider} flow={flow} />;
 
     case 'advancedConfig':
       return <AdvancedConfigStep flow={flow} />;
