@@ -34,6 +34,11 @@ import {
   AGENT_PLUGIN_MCP_SCHEMA,
   AGENT_PLUGIN_SCHEMA,
 } from './agent-plugins-v1/index.js';
+import {
+  EXTENSION_GIT_CREDENTIAL_SELECTOR_FILENAME,
+  resolveStoredGitCredential,
+} from './extension-git-credentials.js';
+import { FileTokenStorage } from '../mcp/token-storage/file-token-storage.js';
 
 const mockGit = {
   clone: vi.fn(),
@@ -195,9 +200,11 @@ describe('extension tests', () => {
   let tempWorkspaceDir: string;
   let userExtensionsDir: string;
   let savedQwenHome: string | undefined;
+  let savedForceFileStorage: string | undefined;
 
   beforeEach(() => {
     savedQwenHome = process.env['QWEN_HOME'];
+    savedForceFileStorage = process.env['QWEN_CODE_FORCE_FILE_STORAGE'];
     delete process.env['QWEN_HOME'];
     tempHomeDir = fs.mkdtempSync(
       path.join(os.tmpdir(), 'qwen-code-test-home-'),
@@ -223,6 +230,11 @@ describe('extension tests', () => {
       delete process.env['QWEN_HOME'];
     } else {
       process.env['QWEN_HOME'] = savedQwenHome;
+    }
+    if (savedForceFileStorage === undefined) {
+      delete process.env['QWEN_CODE_FORCE_FILE_STORAGE'];
+    } else {
+      process.env['QWEN_CODE_FORCE_FILE_STORAGE'] = savedForceFileStorage;
     }
     vi.restoreAllMocks();
   });
@@ -528,6 +540,191 @@ describe('extension tests', () => {
       expect(
         fs.existsSync(path.join(installed.path, 'qwen-extension.json')),
       ).toBe(false);
+    });
+
+    it('persists a credentialed one-time install as a source-free snapshot', async () => {
+      mockGit.env.mockReturnValue(mockGit);
+      mockGit.clone.mockImplementation(async () => {
+        const destination = mockGit.path();
+        writeExtractedExtension(destination, 'one-time-extension');
+        fs.mkdirSync(path.join(destination, '.git'), { recursive: true });
+        fs.writeFileSync(
+          path.join(destination, '.git', 'config'),
+          'credential must not be copied',
+        );
+      });
+      mockGit.getRemotes.mockResolvedValue([
+        {
+          name: 'origin',
+          refs: { fetch: 'https://git.example.com/team/extension.git' },
+        },
+      ]);
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+
+      const prepared = await manager.prepareExtensionInstall({
+        installMetadata: {
+          type: 'git',
+          source: 'https://git.example.com/team/extension.git',
+        },
+        initialActivation: { scope: 'user' },
+        requestConsent: async () => {},
+        gitCredential: {
+          username: 'user',
+          password: 'fine-grained-token',
+          persistence: 'one_time',
+        },
+      });
+
+      expect(prepared.installMetadata).toMatchObject({
+        type: 'snapshot',
+        source: 'snapshot',
+        installId: expect.stringMatching(/^[a-f0-9]{64}$/),
+      });
+      expect(prepared.identity.id).toBe(prepared.installMetadata.installId);
+      expect(fs.existsSync(path.join(prepared.stagingDirectory, '.git'))).toBe(
+        false,
+      );
+      expect(
+        fs.existsSync(
+          path.join(
+            prepared.stagingDirectory,
+            EXTENSION_GIT_CREDENTIAL_SELECTOR_FILENAME,
+          ),
+        ),
+      ).toBe(false);
+      const stagedMetadata = fs.readFileSync(
+        path.join(prepared.stagingDirectory, INSTALL_METADATA_FILENAME),
+        'utf8',
+      );
+      expect(stagedMetadata).not.toContain('git.example.com');
+      expect(stagedMetadata).not.toContain('fine-grained-token');
+
+      mockLogExtensionInstallEvent.mockClear();
+      const committed = await manager.commitPreparedExtension(prepared);
+      expect(committed.extension?.id).toBe(prepared.identity.id);
+      expect(committed.extension?.installMetadata?.type).toBe('snapshot');
+      expect(mockLogExtensionInstallEvent).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          extension_source: 'snapshot',
+          status: 'success',
+        }),
+      );
+      const telemetryEvents = mockLogExtensionInstallEvent.mock.calls.map(
+        ([, event]) => event,
+      );
+      expect(JSON.stringify(telemetryEvents)).not.toContain('git.example.com');
+      expect(JSON.stringify(telemetryEvents)).not.toContain(
+        'fine-grained-token',
+      );
+      const reloadedManager = createExtensionManager();
+      await reloadedManager.refreshCache();
+      expect(reloadedManager.getLoadedExtensions()[0]?.id).toBe(
+        prepared.identity.id,
+      );
+      await expect(
+        reloadedManager.updateExtension(
+          reloadedManager.getLoadedExtensions()[0]!,
+          ExtensionUpdateState.UPDATE_AVAILABLE,
+          () => {},
+        ),
+      ).rejects.toMatchObject({ code: 'extension_not_updatable' });
+      await manager.disposePreparedExtension(prepared);
+    });
+
+    it('stores managed Git credentials separately from install metadata', async () => {
+      process.env['QWEN_HOME'] = tempHomeDir;
+      process.env['QWEN_CODE_FORCE_FILE_STORAGE'] = 'true';
+      mockGit.env.mockReturnValue(mockGit);
+      mockGit.clone.mockImplementation(async () => {
+        writeExtractedExtension(mockGit.path(), 'stored-extension');
+      });
+      mockGit.getRemotes.mockResolvedValue([
+        {
+          name: 'origin',
+          refs: { fetch: 'https://git.example.com/team/extension.git' },
+        },
+      ]);
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+
+      const prepared = await manager.prepareExtensionInstall({
+        installMetadata: {
+          type: 'git',
+          source: 'https://git.example.com/team/extension.git',
+        },
+        initialActivation: { scope: 'user' },
+        requestConsent: async () => {},
+        gitCredential: {
+          username: 'user',
+          password: 'fine-grained-token',
+          persistence: 'stored',
+        },
+      });
+
+      expect(prepared.installMetadata).toMatchObject({
+        type: 'git',
+        source: 'https://git.example.com/team/extension.git',
+        credentialPersistence: 'stored',
+        installId: expect.stringMatching(/^[a-f0-9]{64}$/),
+      });
+      const metadata = fs.readFileSync(
+        path.join(prepared.stagingDirectory, INSTALL_METADATA_FILENAME),
+        'utf8',
+      );
+      expect(metadata).not.toContain('fine-grained-token');
+
+      const committed = await manager.commitPreparedExtension(prepared);
+      const resolved = await resolveStoredGitCredential(
+        committed.extension!.path,
+      );
+      expect(resolved).toMatchObject({
+        credential: { username: 'user', password: 'fine-grained-token' },
+      });
+      const originalId = committed.identity.id;
+
+      await manager.updateExtension(
+        committed.extension!,
+        ExtensionUpdateState.UPDATE_AVAILABLE,
+        () => {},
+      );
+
+      expect(manager.getLoadedExtensions()[0]?.id).toBe(originalId);
+      expect(mockGit.clone).toHaveBeenLastCalledWith(
+        'https://git.example.com/team/extension.git',
+        './',
+        expect.any(Array),
+      );
+      expect(mockGit.env).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          GIT_CONFIG_KEY_0:
+            'http.https://git.example.com/team/extension.git.extraHeader',
+        }),
+      );
+      const storage = new FileTokenStorage(
+        'Qwen Code Extension Git Credentials',
+      );
+      await expect(
+        storage.getSecret(resolved.selector.secretKey),
+      ).resolves.not.toBeNull();
+
+      fs.writeFileSync(
+        path.join(
+          userExtensionsDir,
+          'stored-extension',
+          EXTENSIONS_CONFIG_FILENAME,
+        ),
+        '{',
+      );
+      const unloadedManager = createExtensionManager();
+      await unloadedManager.refreshCache();
+      expect(unloadedManager.getLoadedExtensions()).toEqual([]);
+      await unloadedManager.uninstallExtensionById(originalId, false);
+      await expect(
+        storage.getSecret(resolved.selector.secretKey),
+      ).resolves.toBeNull();
+      await manager.disposePreparedExtension(prepared);
     });
 
     it('installs and uninstalls within an injected extension store root', async () => {
@@ -3052,6 +3249,32 @@ describe('extension tests', () => {
   });
 
   describe('updateExtension', () => {
+    it('fails before Git access when managed credentials are unavailable', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        installMetadata: {
+          type: 'git',
+          source: 'https://git.example.com/team/extension.git',
+          gitCommit: 'sample-commit',
+          credentialPersistence: 'stored',
+          installId: 'a'.repeat(64),
+        },
+      });
+      const manager = createExtensionManager({ networkPolicy: 'public' });
+      await manager.refreshCache();
+      const extension = manager.getLoadedExtensions()[0]!;
+
+      await expect(
+        manager.updateExtension(
+          extension,
+          ExtensionUpdateState.UPDATE_AVAILABLE,
+          () => {},
+        ),
+      ).rejects.toMatchObject({ code: 'extension_credential_unavailable' });
+      expect(mockGit.clone).not.toHaveBeenCalled();
+      expect(mockGit.listRemote).not.toHaveBeenCalled();
+    });
+
     it('applies the update network policy without mutating cached metadata', async () => {
       createExtension({
         extensionsDir: userExtensionsDir,
@@ -3845,6 +4068,46 @@ describe('extension tests', () => {
     });
 
     describe('getExtensionId', () => {
+      it('uses a persisted install id instead of the source', () => {
+        const installId = 'a'.repeat(64);
+        expect(
+          getExtensionId(
+            { name: 'test-ext', version: '1.0.0' },
+            {
+              type: 'git',
+              source: 'https://example.com/repo',
+              installId,
+              credentialPersistence: 'stored',
+            },
+          ),
+        ).toBe(installId);
+      });
+
+      it('ignores install ids on unmanaged metadata', () => {
+        const config = { name: 'test-ext', version: '1.0.0' };
+        const source = 'https://example.com/repo';
+        expect(
+          getExtensionId(config, {
+            type: 'git',
+            source,
+            installId: 'a'.repeat(64),
+          }),
+        ).toBe(getExtensionId(config, { type: 'git', source }));
+      });
+
+      it('rejects an invalid persisted install id', () => {
+        expect(() =>
+          getExtensionId(
+            { name: 'test-ext', version: '1.0.0' },
+            {
+              type: 'snapshot',
+              source: 'snapshot',
+              installId: '../invalid',
+            },
+          ),
+        ).toThrow('Stored extension install id is invalid');
+      });
+
       it('should use hashed name when no install metadata', () => {
         const config: ExtensionConfig = { name: 'test-ext', version: '1.0.0' };
         const id = getExtensionId(config);

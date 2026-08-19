@@ -16,9 +16,13 @@ import type {
   DaemonTranscriptBlock,
   DaemonTranscriptStore,
   DaemonUiSessionActions,
+  DaemonUnrecognizedDiagnostic,
   PromptResult,
 } from '@qwen-code/sdk/daemon';
-import { DaemonHttpError } from '@qwen-code/sdk/daemon';
+import {
+  DaemonHttpError,
+  UNRECOGNIZED_DIAGNOSTICS_LIMIT,
+} from '@qwen-code/sdk/daemon';
 import {
   DaemonSessionProvider,
   useDaemonActions,
@@ -3419,8 +3423,10 @@ describe('DaemonSessionProvider', () => {
     });
     sdkMocks.sessions.push(session);
     let blocks: readonly DaemonTranscriptBlock[] = [];
+    let diagnostics: readonly DaemonUnrecognizedDiagnostic[] = [];
     function Harness() {
       blocks = useDaemonTranscriptBlocks();
+      diagnostics = useDaemonTranscriptState().unrecognizedDiagnostics;
       return null;
     }
 
@@ -3438,6 +3444,88 @@ describe('DaemonSessionProvider', () => {
     expect(assistantBlocks).toHaveLength(1);
     expect((assistantBlocks[0] as { text?: string }).text).toBe('first second');
     expect(blocks.some((b) => b.kind === 'debug')).toBe(false);
+    // The narrowed guard (#8823 review) lets `unrecognized_*` debug events
+    // through to the reducer: they route onto the sidechannel instead of
+    // `blocks[]`, so they cannot split the burst and must not be dropped
+    // before dispatch.
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toEqual(
+      expect.objectContaining({ debugReason: 'unrecognized_event' }),
+    );
+  });
+
+  it('keeps the burst in one block when a malformed_payload debug event interleaves', async () => {
+    // Sibling of the test above for the stimulus that STILL takes the block
+    // path: unrecognized_* diagnostics now route to the sidechannel without
+    // `clearActiveText`, so they can no longer discriminate the
+    // flush-before-guard fix (#7012) — deleting the guard leaves that test
+    // green. `malformed_payload` still appends a status block (with
+    // `clearActiveText`), so this interleaved frame splits the assistant
+    // burst unless the guard flushes first (#8823 review).
+    const burstDrained = createDeferred<void>();
+    const session = createMockSession({
+      events: async function* observerMalformedBurst(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        yield {
+          id: 1,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'first ' },
+            },
+          },
+        };
+        // An unusable session_update discriminator normalizes to a `debug`
+        // UI event with `debugReason: 'malformed_payload'`.
+        yield {
+          id: 2,
+          v: 1,
+          type: 'session_update',
+          data: { update: { sessionUpdate: 42 } },
+        };
+        yield {
+          id: 3,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'second' },
+            },
+          },
+        };
+        burstDrained.resolve();
+        await new Promise<void>((resolve) => {
+          if (opts.signal?.aborted) {
+            resolve();
+            return;
+          }
+          opts.signal?.addEventListener('abort', () => resolve(), {
+            once: true,
+          });
+        });
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+    function Harness() {
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await burstDrained.promise;
+      await flushPromises();
+      await flushTranscriptDispatch();
+    });
+
+    const assistantBlocks = blocks.filter((b) => b.kind === 'assistant');
+    expect(assistantBlocks).toHaveLength(1);
+    expect((assistantBlocks[0] as { text?: string }).text).toBe('first second');
   });
 
   it('does not insert abort errors from shell commands into the transcript', async () => {
@@ -4140,6 +4228,200 @@ describe('DaemonSessionProvider', () => {
       );
     },
   );
+
+  it('keeps history-sourced unrecognized diagnostics on the sidechannel when paging (#8823)', async () => {
+    // A session recorded by a newer daemon is exactly the forward-compat
+    // case the sidechannel exists for: unknown persisted session_update
+    // kinds normalize to `unrecognized_session_update` debug events in the
+    // throwaway history store, and applyTranscriptHistory must merge them
+    // onto the live store instead of dropping them.
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_transcript_pagination'],
+    });
+    const session = createMockSession({
+      replaySnapshot: {
+        compactedReplay: [
+          {
+            v: 1,
+            type: 'history_truncated',
+            data: {
+              reason: 'replay_window_exceeded',
+              truncatedEvents: 4,
+              retainedEvents: 1,
+              maxBytes: 512,
+              fullTranscriptAvailable: true,
+            },
+          },
+          {
+            id: 5,
+            v: 1,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'retained tail' },
+                _meta: {
+                  'qwen.session.recordId': 'record-retained',
+                  qwenTranscript: { sourceRecordIds: ['record-retained'] },
+                },
+              },
+            },
+          },
+        ],
+        liveJournal: [],
+      },
+      events: async function* liveDiagnostics(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        // LIMIT-2 live events so the post-merge total (live + the two
+        // fresh history entries, the overlap deduped away) lands exactly
+        // on the cap without newest-wins eviction.
+        for (
+          let index = 0;
+          index < UNRECOGNIZED_DIAGNOSTICS_LIMIT - 2;
+          index++
+        ) {
+          if (index === 0) {
+            yield {
+              id: 100,
+              v: 1,
+              type: 'session_update',
+              data: {
+                update: {
+                  sessionUpdate: 'mystery_kind_from_newer_daemon_overlap',
+                  // Production replay frames stamp BOTH keys (acp-bridge
+                  // buildUpdateMeta); the normalizer's dedupe reads
+                  // qwenTranscript.sourceRecordIds.
+                  _meta: {
+                    'qwen.session.recordId': 'record-overlap',
+                    qwenTranscript: { sourceRecordIds: ['record-overlap'] },
+                  },
+                },
+              },
+            };
+            continue;
+          }
+          yield {
+            id: 100 + index,
+            v: 1,
+            type: `mystery_live_event_${index}`,
+            data: { label: `live-${index}` },
+          };
+        }
+        await new Promise<void>((resolve) => {
+          if (opts.signal?.aborted) {
+            resolve();
+            return;
+          }
+          opts.signal?.addEventListener('abort', () => resolve(), {
+            once: true,
+          });
+        });
+      },
+    });
+    sdkMocks.sessions.push(session);
+    sdkMocks.getSessionTranscriptPage.mockResolvedValue({
+      v: 1,
+      sessionId: session.sessionId,
+      events: [
+        ...[1, 2].map((id) => ({
+          id,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: `mystery_kind_from_newer_daemon_${id}`,
+              _meta: {
+                'qwen.session.recordId': `record-old-${id}`,
+                qwenTranscript: { sourceRecordIds: [`record-old-${id}`] },
+              },
+            },
+          },
+        })),
+        {
+          id: 5,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'mystery_kind_from_newer_daemon_overlap',
+              _meta: {
+                'qwen.session.recordId': 'record-overlap',
+                qwenTranscript: { sourceRecordIds: ['record-overlap'] },
+              },
+            },
+          },
+        },
+      ],
+      hasMore: false,
+    });
+    let diagnostics: readonly DaemonUnrecognizedDiagnostic[] = [];
+    let history: ReturnType<typeof useDaemonTranscriptHistory> | undefined;
+
+    function Harness() {
+      diagnostics = useDaemonTranscriptState().unrecognizedDiagnostics;
+      history = useDaemonTranscriptHistory();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+      historyPageSize: 25,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(history?.hasMore).toBe(true);
+    await vi.waitFor(() =>
+      expect(diagnostics).toHaveLength(UNRECOGNIZED_DIAGNOSTICS_LIMIT - 2),
+    );
+
+    await act(async () => {
+      await history?.loadMore();
+      await flushPromises();
+    });
+
+    // Merge order: history entries first (older), then the live ones; the
+    // page's duplicate of the live overlap record is deduped away, so the
+    // two fresh history entries plus the live stream land exactly on the
+    // cap.
+    expect(diagnostics).toHaveLength(UNRECOGNIZED_DIAGNOSTICS_LIMIT);
+    expect(diagnostics[0]).toEqual(
+      expect.objectContaining({
+        debugReason: 'unrecognized_session_update',
+        sourceRecordIds: ['record-old-1'],
+      }),
+    );
+    expect(diagnostics[1]).toEqual(
+      expect.objectContaining({
+        debugReason: 'unrecognized_session_update',
+        sourceRecordIds: ['record-old-2'],
+      }),
+    );
+    expect(diagnostics[2]).toEqual(
+      expect.objectContaining({
+        debugReason: 'unrecognized_session_update',
+        sourceRecordIds: ['record-overlap'],
+      }),
+    );
+    expect(
+      diagnostics.filter((entry) =>
+        entry.sourceRecordIds?.includes('record-overlap'),
+      ),
+    ).toHaveLength(1);
+    expect(
+      diagnostics.filter((entry) =>
+        entry.sourceRecordIds?.includes('record-old-1'),
+      ),
+    ).toHaveLength(1);
+    expect(diagnostics[3]).toEqual(
+      expect.objectContaining({ debugReason: 'unrecognized_event' }),
+    );
+  });
 
   it('uses history_truncated marker recordId as pagination anchor when session_updates lack one', async () => {
     // Regression coverage: a live-journal truncation during a single long
