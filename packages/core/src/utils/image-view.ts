@@ -11,13 +11,13 @@ import type { Metadata } from 'sharp';
  * The callable `sharp` default export, including namespace members used by the
  * resize path (`sharp.kernel`).
  *
- * Not imported by name: `sharp` is declared `export = sharp`, a function merged
- * with a namespace, and exports no type describing that shape. The name this
- * file used before — `SharpConstructor` — does not exist in the version the
- * manifest declares, so the package failed to build against its own dependency
- * range.
+ * sharp is declared `export = sharp` — a function merged with a namespace — so
+ * the module type `typeof import('sharp')` IS the callable function+namespace.
+ * The `SharpConstructor` name this file used before does not exist in the
+ * version the manifest declares; indexing `['default']` would alias the
+ * module-namespace shape instead of the function, which is not callable.
  */
-type SharpConstructor = (typeof import('sharp'))['default'];
+type SharpConstructor = typeof import('sharp');
 
 const IMAGE_VIEW_MAX_EDGE = 1568;
 const IMAGE_VIEW_MAX_PATCHES = 1568;
