@@ -14,7 +14,7 @@ import { theme } from '../semantic-colors.js';
 import { ICON } from '../constants.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { t } from '../../i18n/index.js';
-import { AuthType } from '@qwen-code/qwen-code-core';
+import { AuthType, getDefaultModelIds } from '@qwen-code/qwen-code-core';
 import type {
   ProviderConfig,
   BaseUrlOption,
@@ -25,6 +25,7 @@ import type {
   ProviderSetupFlow,
 } from './useProviderSetupFlow.js';
 import { normalizeModelIds } from './useAuth.js';
+import { cpLen } from '../utils/textUtils.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -275,11 +276,22 @@ function getCustomModelIdsText(
  * they stay visible and removable. Segments that survive are kept verbatim, so
  * a re-derive that changes no id leaves the buffer byte-identical and the
  * caller can skip the remount entirely.
+ *
+ * R6-2: keeping every unoffered segment verbatim would defeat the prune
+ * `applyDiscoveredModels` just performed. That prune drops a built-in id the
+ * endpoint does not serve "whether it was checked by default or typed" — but a
+ * typed one also sits in this buffer, and the submit path never prunes again,
+ * so Enter would reinstall the stale id into the provider config and every
+ * later call against that endpoint would fail with model-not-found. Mirror the
+ * rule here: a built-in id the new list no longer offers goes, and only
+ * segments outside the built-in list (private deployments, aliases) survive
+ * verbatim — exactly the ids the prune deliberately leaves alone.
  */
 function resplitCustomModelIdsText(
   customModelIdsText: string,
   selectedModelIds: string[],
   recommendedModelIds: Set<string>,
+  builtInModelIds: Set<string>,
 ): string {
   const segments = customModelIdsText.split(',');
   const hasTrailingSeparator =
@@ -291,6 +303,9 @@ function resplitCustomModelIdsText(
   for (const segment of bodySegments) {
     const id = segment.trim();
     if (id.length === 0 || recommendedModelIds.has(id) || keptIds.has(id)) {
+      continue;
+    }
+    if (builtInModelIds.has(id)) {
       continue;
     }
     keptIds.add(id);
@@ -367,6 +382,13 @@ function ModelIdsStep({
     () => new Set(modelOptions.map((item) => item.key)),
     [modelOptions],
   );
+  // The prune in `applyDiscoveredModels` is keyed on the provider's built-in
+  // list, not on whatever is currently recommended, so the re-derive below
+  // needs the same key to mirror it.
+  const builtInModelIds = useMemo(
+    () => new Set(getDefaultModelIds(config)),
+    [config],
+  );
   const [focusedModelIndex, setFocusedModelIndex] = useState(
     MODEL_CUSTOM_INPUT_FOCUS_INDEX,
   );
@@ -406,16 +428,26 @@ function ModelIdsStep({
   // actually change — hence a key that moves only on a real edit, rather than
   // one that tracks the revision.
   const [modelIdsInputKey, setModelIdsInputKey] = useState(0);
+  // R6-1: the remount above reseeds the caret at offset 0, and the re-derive
+  // deliberately leaves focus where it was — so a swap that lands while the
+  // user is mid-id sends the rest of their keystrokes to the FRONT of the
+  // buffer, and Enter installs the garble. The ids the swap removes are the
+  // ones already finished (they moved to their checkbox); what is left is the
+  // segment still being typed, at the end. Reinstate the caret there so
+  // typing keeps appending across the remount.
+  const [modelIdsInputCursorOffset, setModelIdsInputCursorOffset] = useState(0);
   if (derivedModelsRevision !== recommendedModelsRevision) {
     setDerivedModelsRevision(recommendedModelsRevision);
     const nextCustomModelIdsText = resplitCustomModelIdsText(
       customModelIdsText,
       selectedModelIds,
       recommendedModelIds,
+      builtInModelIds,
     );
     if (nextCustomModelIdsText !== customModelIdsText) {
       setCustomModelIdsText(nextCustomModelIdsText);
       setModelIdsInputKey((key) => key + 1);
+      setModelIdsInputCursorOffset(cpLen(nextCustomModelIdsText));
     }
     setSelectedRecommendationKeys(
       getRecommendedSelections(selectedModelIds, modelOptions),
@@ -551,6 +583,7 @@ function ModelIdsStep({
             // the cursor on a swap that left the text alone.
             key={`model-ids-input-${modelIdsInputKey}`}
             value={customModelIdsText}
+            initialCursorOffset={modelIdsInputCursorOffset}
             onChange={handleCustomModelIdsChange}
             onSubmit={handleSubmitModelIds}
             onDown={() => {

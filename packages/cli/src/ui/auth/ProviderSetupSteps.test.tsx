@@ -536,6 +536,133 @@ describe('ProviderSetupSteps', () => {
     unmount();
   });
 
+  it('keeps typing at the caret when a swap moves an id out of the input', async () => {
+    // R6-1: the re-derive remounts the custom-ids input to show the new split,
+    // and a remount reseeds `useTextBuffer` at offset 0 — while the re-derive
+    // deliberately leaves focus on that input. A lookup resolving mid-id
+    // therefore sent the rest of the user's keystrokes to the FRONT of the
+    // buffer, and Enter installed the garble. The ids a swap removes are the
+    // finished ones (they move to their checkbox); what is left is the segment
+    // still being typed, at the end.
+    let swapFlow!: (next: ProviderSetupFlow) => void;
+    function FlowHarness({ first }: { first: ProviderSetupFlow }) {
+      const [flow, setFlow] = useState(first);
+      swapFlow = setFlow;
+      return <ProviderSetupSteps flow={flow} />;
+    }
+
+    const before = createModelIdsFlow({ modelIds: '' });
+    const beforeState = before.state as unknown as Record<string, unknown>;
+    beforeState['discoveryStatus'] = 'loading';
+    beforeState['recommendedModelsRevision'] = 0;
+
+    const { lastFrame, unmount } = renderWithProviders(
+      <FlowHarness first={before} />,
+    );
+
+    // The custom-ids input takes the initial focus. The user is partway
+    // through the second id when the endpoint answers.
+    for (const char of 'new-model-x,sec') {
+      await act(async () => {
+        pressLatestKey(char, char);
+      });
+    }
+    expect(lastFrame() ?? '').toContain('new-model-x,sec');
+
+    // The endpoint serves `new-model-x`, so it moves out to its checkbox and
+    // the buffer becomes just the half-typed `sec`.
+    const submitModelIds = vi.fn();
+    const after = createModelIdsFlow({
+      modelIds: 'new-model-x',
+      submitModelIds,
+    });
+    const afterState = after.state as unknown as Record<string, unknown>;
+    afterState['recommendedModels'] = [
+      { id: 'new-model-x' },
+      { id: 'MiniMax-M3', contextWindowSize: 1000000 },
+    ];
+    afterState['discoveryStatus'] = 'success';
+    afterState['recommendedModelsRevision'] = 1;
+
+    await act(async () => {
+      swapFlow(after);
+    });
+
+    // The rest of the id must append, not insert at offset 0.
+    for (const char of 'ond') {
+      await act(async () => {
+        pressLatestKey(char, char);
+      });
+    }
+    await act(async () => {
+      pressLatestKey('return');
+    });
+
+    expect(submitModelIds).toHaveBeenCalledWith({
+      modelIds: ['second', 'new-model-x'],
+    });
+    unmount();
+  });
+
+  it('drops a typed built-in id the new list no longer offers', async () => {
+    // R6-2: `applyDiscoveredModels` prunes a built-in id the endpoint does not
+    // serve "whether it was checked by default or typed" — but a typed one
+    // also sits in this buffer, which the re-derive kept verbatim, and the
+    // submit path never prunes again. Enter then reinstalled the stale id into
+    // the provider config and every later call against that endpoint failed
+    // with model-not-found. Ids outside the built-in list are a different
+    // case: they may be legitimately unlisted, so they must survive.
+    let swapFlow!: (next: ProviderSetupFlow) => void;
+    function FlowHarness({ first }: { first: ProviderSetupFlow }) {
+      const [flow, setFlow] = useState(first);
+      swapFlow = setFlow;
+      return <ProviderSetupSteps flow={flow} />;
+    }
+
+    const before = createModelIdsFlow({ modelIds: '' });
+    const beforeState = before.state as unknown as Record<string, unknown>;
+    beforeState['discoveryStatus'] = 'loading';
+    beforeState['recommendedModelsRevision'] = 0;
+
+    const { lastFrame, unmount } = renderWithProviders(
+      <FlowHarness first={before} />,
+    );
+
+    // Typed while the lookup is still in flight: one built-in id, one private
+    // deployment the built-in list has never heard of.
+    for (const char of 'MiniMax-M3,my-deploy') {
+      await act(async () => {
+        pressLatestKey(char, char);
+      });
+    }
+    expect(lastFrame() ?? '').toContain('MiniMax-M3,my-deploy');
+
+    // Discovery answers without `MiniMax-M3`: the flow pruned it out of
+    // `modelIds`, and the buffer must not hold it back.
+    const submitModelIds = vi.fn();
+    const after = createModelIdsFlow({
+      modelIds: 'MiniMax-M2.7',
+      submitModelIds,
+    });
+    const afterState = after.state as unknown as Record<string, unknown>;
+    afterState['recommendedModels'] = [{ id: 'MiniMax-M2.7' }];
+    afterState['discoveryStatus'] = 'success';
+    afterState['recommendedModelsRevision'] = 1;
+
+    await act(async () => {
+      swapFlow(after);
+    });
+
+    await act(async () => {
+      pressLatestKey('return');
+    });
+
+    expect(submitModelIds).toHaveBeenCalledWith({
+      modelIds: ['my-deploy', 'MiniMax-M2.7'],
+    });
+    unmount();
+  });
+
   it('notes a failed lookup without hiding the built-in recommendations', () => {
     const flow = createModelIdsFlow();
     const state = flow.state as unknown as Record<string, unknown>;
