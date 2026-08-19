@@ -5709,6 +5709,76 @@ describe('GeminiChat', async () => {
         getToolCallFingerprint('read_file', { file_path: 'a.ts' }),
       );
     });
+
+    it('keeps the first answered call for an id reused across turns and skips orphan response ids', () => {
+      // The stored fingerprint is the replay oracle at every entry point:
+      // for providers that reuse ids across turns, the id must keep naming
+      // the call that first executed under it, and a functionResponse with
+      // no matching functionCall must contribute nothing.
+      chat.setHistory([
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'cid_reused',
+                name: 'read_file',
+                args: { file_path: 'a.ts' },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'cid_reused',
+                name: 'read_file',
+                response: { output: 'a' },
+              },
+            },
+            {
+              functionResponse: {
+                id: 'cid_orphan',
+                name: 'read_file',
+                response: { output: 'x' },
+              },
+            },
+          ],
+        },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'cid_reused',
+                name: 'read_file',
+                args: { file_path: 'b.ts' },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'cid_reused',
+                name: 'read_file',
+                response: { output: 'b' },
+              },
+            },
+          ],
+        },
+      ]);
+
+      const fingerprints = chat.getHistoryToolCallFingerprints();
+      expect([...fingerprints.keys()]).toEqual(['cid_reused']);
+      expect(fingerprints.get('cid_reused')).toBe(
+        getToolCallFingerprint('read_file', { file_path: 'a.ts' }),
+      );
+    });
   });
 
   describe('getHistoryTail', () => {

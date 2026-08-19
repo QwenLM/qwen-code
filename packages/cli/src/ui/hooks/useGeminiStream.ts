@@ -2832,8 +2832,10 @@ export const useGeminiStream = (
           response: ToolCallResponseInfo;
         }> = [];
         let duplicatePromptId: string | undefined;
-        // Copied so per-batch recording never mutates the accessor-owned
-        // map; in-flight entries from this submit are merged on top.
+        // The accessor returns a fresh map per call; copy anyway so a future
+        // cached accessor cannot turn per-batch recording into shared-state
+        // mutation. In-flight entries from this submit fill ids not already
+        // present in history (the history fingerprint for an id wins).
         const handledToolCallFingerprints = new Map(
           geminiClient ? geminiClient.getHistoryToolCallFingerprints() : [],
         );

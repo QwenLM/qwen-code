@@ -21,7 +21,11 @@ function canonicalizeForHash(value: unknown): unknown {
   }
   if (value !== null && typeof value === 'object') {
     const source = value as Record<string, unknown>;
-    const sorted: Record<string, unknown> = {};
+    // Null prototype so a literal '__proto__' own key (JSON.parse preserves
+    // it) becomes a plain data property instead of routing through the
+    // inherited setter and vanishing — two args differing only in
+    // '__proto__' must not collide on the same repeat key.
+    const sorted = Object.create(null) as Record<string, unknown>;
     for (const key of Object.keys(source).sort()) {
       sorted[key] = canonicalizeForHash(source[key]);
     }

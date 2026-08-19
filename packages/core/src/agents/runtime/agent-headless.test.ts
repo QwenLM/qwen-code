@@ -2434,6 +2434,111 @@ describe('subagent.ts', () => {
         expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
       });
 
+      it('should keep suppressing replays of the original call after an id-colliding execution', async () => {
+        const listFilesToolDef: FunctionDeclaration = {
+          name: 'list_files',
+          description: 'Lists files',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+
+        const { config } = await createMockConfig({
+          getFunctionDeclarationsFiltered: vi
+            .fn()
+            .mockReturnValue([listFilesToolDef]),
+          getTool: vi.fn().mockReturnValue(undefined),
+        });
+        const toolConfig: ToolConfig = { tools: ['list_files'] };
+        // Rounds share one usedIds set so the collisions get _2 and _3
+        // suffixes, mirroring how normalization accumulates across rounds.
+        const usedIds = new Set(['call_1']);
+        const [round2Part] = normalizeModelToolCallIds(
+          [
+            {
+              functionCall: {
+                id: 'call_1',
+                name: 'list_files',
+                args: { path: 'src' },
+              },
+            },
+          ],
+          usedIds,
+          new Set<string>(),
+        );
+        const [round3Part] = normalizeModelToolCallIds(
+          [
+            {
+              functionCall: {
+                id: 'call_1',
+                name: 'list_files',
+                args: { path: '.' },
+              },
+            },
+          ],
+          usedIds,
+          new Set<string>(),
+        );
+
+        mockSendMessageStream.mockImplementation(
+          createMockStream([
+            [{ id: 'call_1', name: 'list_files', args: { path: '.' } }],
+            [round2Part!.functionCall!],
+            [round3Part!.functionCall!],
+            'stop',
+          ]),
+        );
+
+        const listFilesInvocation = {
+          params: { path: '.' },
+          getDescription: vi.fn().mockReturnValue('List files'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          execute: vi.fn().mockResolvedValue({
+            llmContent: 'file1.txt',
+            returnDisplay: 'Listed 1 file',
+          }),
+        };
+        const listFilesTool = {
+          name: 'list_files',
+          displayName: 'List Files',
+          description: 'List files in directory',
+          kind: 'READ' as const,
+          schema: listFilesToolDef,
+          build: vi.fn().mockImplementation(() => listFilesInvocation),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        } as unknown as AnyDeclarativeTool;
+        vi.mocked(
+          (config.getToolRegistry() as unknown as ToolRegistry).getTool,
+        ).mockImplementation((name: string) =>
+          name === 'list_files' ? listFilesTool : undefined,
+        );
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+          toolConfig,
+        );
+
+        await scope.execute(new ContextState());
+
+        // Round 1 (original) and round 2 (different-args collision) execute;
+        // round 3 replays the ORIGINAL call under the reused id and must be
+        // suppressed — first-occurrence recording keeps the id naming the
+        // round-1 call even after the collision executed.
+        expect(listFilesInvocation.execute).toHaveBeenCalledTimes(2);
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(4);
+        const fourthCallArgs = mockSendMessageStream.mock.calls[3][1];
+        const parts = fourthCallArgs.message as Part[];
+        expect(parts[0].functionResponse?.id).toBe('call_1__qwen_dup_3');
+        expect(parts[0].functionResponse?.response?.['error']).toContain(
+          'Duplicate provider tool call id "call_1"',
+        );
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+      });
+
       it('should execute only the first duplicate functionCall id in one model turn', async () => {
         const listFilesToolDef: FunctionDeclaration = {
           name: 'list_files',

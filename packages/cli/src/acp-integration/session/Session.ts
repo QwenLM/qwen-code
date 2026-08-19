@@ -8943,8 +8943,9 @@ export class Session implements SessionContext {
     };
     type Batch = ExecutableBatch | DuplicateBatch;
     const batches: Batch[] = [];
-    // Copied so per-batch recordHandledToolCall never mutates the
-    // accessor-owned map.
+    // The accessor returns a fresh map per call; copy anyway so a future
+    // cached accessor cannot turn per-batch recording into shared-state
+    // mutation.
     const handledToolCallFingerprints = new Map(
       this.#getCurrentChat().getHistoryToolCallFingerprints(),
     );

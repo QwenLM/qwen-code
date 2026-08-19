@@ -5,11 +5,12 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import type { Content, Part } from '@google/genai';
+import type { Content, FunctionCall, Part } from '@google/genai';
 import {
   collectToolCallIdsFromHistory,
   dedupeToolCallsById,
   getCachedToolCallFingerprint,
+  getFunctionCallFingerprint,
   getProviderToolCallId,
   getToolCallFingerprint,
   isReplayOfHandledToolCall,
@@ -237,6 +238,19 @@ describe('toolCallIdUtils', () => {
       expect(
         getCachedToolCallFingerprint(request, request.name, request.args),
       ).toBe(first);
+    });
+
+    it('serves getFunctionCallFingerprint cache hits without rehashing', () => {
+      const functionCall: FunctionCall = {
+        id: 'call_cache',
+        name: 'write_file',
+        args: { file_path: 'a.ts', content: 'original' },
+      };
+
+      const first = getFunctionCallFingerprint(functionCall);
+      (functionCall.args as Record<string, unknown>)['content'] = 'mutated';
+
+      expect(getFunctionCallFingerprint(functionCall)).toBe(first);
     });
 
     it('keeps the first occurrence when recording a colliding id', () => {

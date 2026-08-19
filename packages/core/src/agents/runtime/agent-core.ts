@@ -869,7 +869,11 @@ export class AgentCore {
     let turnCounter = 0;
     let finalText = '';
     let terminateMode: AgentTerminateMode | null = null;
-    const handledToolCallFingerprints = chat.getHistoryToolCallFingerprints();
+    // Fresh map per call today; copy so a future cached accessor cannot
+    // turn this loop's cross-round recording into shared-state mutation.
+    const handledToolCallFingerprints = new Map(
+      chat.getHistoryToolCallFingerprints(),
+    );
     // Scoped to this reasoning loop. A second duplicate response for the same
     // provider id would keep deterministic providers in a tool-result loop.
     const duplicateProviderToolCallResponseIds = new Set<string>();

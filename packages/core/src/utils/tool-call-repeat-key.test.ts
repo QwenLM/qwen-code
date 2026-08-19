@@ -31,4 +31,18 @@ describe('getToolCallRepeatKey', () => {
       getToolCallRepeatKey('read_file', { a: 2 }),
     );
   });
+
+  it('distinguishes args that differ only in a literal __proto__ own key', () => {
+    // JSON.parse preserves '__proto__' as an own enumerable key; the
+    // canonicalization must keep it as a data property instead of routing
+    // through the inherited setter, or two different calls collide on the
+    // same key — which the replay oracle would turn into a wrongly
+    // suppressed execution.
+    const plain = JSON.parse('{"a":1}');
+    const withProto = JSON.parse('{"a":1,"__proto__":{"x":1}}');
+
+    expect(getToolCallRepeatKey('edit', plain)).not.toBe(
+      getToolCallRepeatKey('edit', withProto),
+    );
+  });
 });

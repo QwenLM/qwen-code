@@ -225,7 +225,7 @@ function duplicateProviderToolCallMessage(providerCallId: string): string {
     `Duplicate provider tool call id "${providerCallId}" was already handled. ` +
     `The duplicate tool call was ignored and not executed again. If you ` +
     `intended to run this tool again, re-issue the call with a new unique ` +
-    `tool-call id.`
+    `tool-call id (or explicitly different arguments).`
   );
 }
 

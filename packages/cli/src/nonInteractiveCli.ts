@@ -1695,8 +1695,11 @@ export async function runNonInteractive(
        * helper returns (main-turn → emitStructuredSuccess(); drain-turn
        * → return so the post-drain code emits success).
        */
-      const handledToolCallFingerprints =
-        geminiClient.getHistoryToolCallFingerprints();
+      // Fresh map per call today; copy so a future cached accessor cannot
+      // turn this run's cross-turn recording into shared-state mutation.
+      const handledToolCallFingerprints = new Map(
+        geminiClient.getHistoryToolCallFingerprints(),
+      );
       // Tracks duplicate-error responses emitted during this headless run.
       // Once a provider id reaches this set, seeing it again is terminal for
       // the current tool batch so we do not send partial tool responses.
