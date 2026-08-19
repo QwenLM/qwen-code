@@ -264,6 +264,10 @@ function convertToHistoryItems(
   };
 
   for (const record of conversation.messages) {
+    const promptId =
+      typeof record.promptId === 'string' && record.promptId.length > 0
+        ? record.promptId
+        : undefined;
     // A detected history gap begins at this record — surface a visible divider
     // so the surviving turns below are not read as contiguous across the lost
     // segment. Flush any pending tool group first so the divider is not
@@ -417,7 +421,11 @@ function convertToHistoryItems(
             payload.userText ||
             (projection.displayText ?? extractTextFromParts(projection.parts));
           if (text) {
-            items.push({ type: 'user', text });
+            items.push({
+              type: 'user',
+              text,
+              ...(promptId ? { promptId } : {}),
+            });
           }
 
           const toolDisplays = buildAtCommandDisplays(payload);
@@ -451,7 +459,11 @@ function convertToHistoryItems(
             ? '[User message with attachments]'
             : extractTextFromParts(projection.parts));
         if (text) {
-          items.push({ type: 'user', text });
+          items.push({
+            type: 'user',
+            text,
+            ...(promptId ? { promptId } : {}),
+          });
         }
         break;
       }

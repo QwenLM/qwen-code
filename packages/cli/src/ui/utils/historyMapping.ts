@@ -8,6 +8,7 @@ import type { HistoryItem, HistoryItemUser } from '../types.js';
 import type { Content } from '@google/genai';
 import {
   CompressionStatus,
+  findApiHistoryPromptIndex,
   getStartupContextLength,
   isClearedMediaPlaceholder,
   isSystemReminderContent,
@@ -153,7 +154,12 @@ export function computeApiTruncationIndex(
   const compressionIndex = findLastSuccessfulCompressionIndex(uiHistory);
   if (compressionIndex !== -1 && targetIndex <= compressionIndex) return -1;
 
-  // Count how many UI user turns exist before the target
+  const target = uiHistory[targetIndex]!;
+  if (isRealUserTurn(target) && target.promptId) {
+    return findApiHistoryPromptIndex(apiHistory, target.promptId);
+  }
+
+  // Legacy sessions have no promptId and still need the positional fallback.
   let uiUserTurnCount = 0;
   for (
     let i = compressionIndex === -1 ? 0 : compressionIndex + 1;

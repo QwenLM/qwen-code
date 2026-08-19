@@ -729,6 +729,7 @@ describe('resumeHistoryUtils', () => {
       messages: [
         {
           type: 'user',
+          promptId: 'prompt-1',
           message: {
             parts: [
               { text: 'expanded model prompt' } as Part,
@@ -755,7 +756,14 @@ describe('resumeHistoryUtils', () => {
 
     const items = buildResumedHistoryItems(session, makeConfig({}), 30);
 
-    expect(items).toEqual([{ id: 31, type: 'user', text: 'raw @file prompt' }]);
+    expect(items).toEqual([
+      {
+        id: 31,
+        type: 'user',
+        text: 'raw @file prompt',
+        promptId: 'prompt-1',
+      },
+    ]);
   });
 
   it('projects the user turn when legacy @-command metadata has no userText', () => {

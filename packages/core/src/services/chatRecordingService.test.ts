@@ -189,7 +189,12 @@ describe('ChatRecordingService', () => {
   describe('recordUserMessage', () => {
     it('should record a user message immediately', async () => {
       const userParts: Part[] = [{ text: 'Hello, world!' }];
-      chatRecordingService.recordUserMessage(userParts);
+      chatRecordingService.recordUserMessage(
+        userParts,
+        undefined,
+        undefined,
+        'prompt-1',
+      );
       await chatRecordingService.flush();
 
       expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
@@ -205,6 +210,7 @@ describe('ChatRecordingService', () => {
       expect(record.version).toBe('1.0.0');
       expect(record.gitBranch).toBe('main');
       expect(record.provenance).toBe('real_user');
+      expect(record.promptId).toBe('prompt-1');
     });
 
     it('preserves model-bound parts and records clean display text', async () => {

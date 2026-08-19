@@ -523,6 +523,7 @@ export class Turn {
     private readonly chat: GeminiChat,
     private readonly prompt_id: string,
     goalContext?: GoalTurnPermit,
+    private readonly identifiesUserTurn = false,
   ) {
     this.goalContext = goalContext ? { ...goalContext } : undefined;
   }
@@ -545,6 +546,7 @@ export class Turn {
         },
         this.prompt_id,
         this.goalContext,
+        this.identifiesUserTurn ? { promptId: this.prompt_id } : undefined,
       );
 
       for await (const streamEvent of responseStream) {

@@ -103,6 +103,8 @@ import {
   getPlanModeSystemReminder,
   getArenaSystemReminder,
   getStartupContextLength,
+  getApiHistoryPromptId,
+  getApiHistoryPromptIndexes,
   isSystemReminderContent,
   buildSessionRecoveryPlanFromApiHistory,
   TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
@@ -3495,6 +3497,13 @@ export class Session implements SessionContext {
 
   getRewindableUserTurnCount(): number {
     const apiHistory = this.captureHistorySnapshot();
+    const identifiedTurns = getApiHistoryPromptIndexes(apiHistory);
+    if (identifiedTurns === undefined) {
+      return 0;
+    }
+    if (identifiedTurns.length > 0) {
+      return identifiedTurns.length;
+    }
     const startIndex = getStartupContextLength(apiHistory, {
       includeCompressed: true,
     });
@@ -3529,6 +3538,14 @@ export class Session implements SessionContext {
     apiHistory: Content[],
     targetTurnIndex: number,
   ): number {
+    const identifiedTurns = getApiHistoryPromptIndexes(apiHistory);
+    if (identifiedTurns === undefined) {
+      return -1;
+    }
+    if (identifiedTurns.length > 0) {
+      return identifiedTurns[targetTurnIndex] ?? -1;
+    }
+
     const startIndex = getStartupContextLength(apiHistory, {
       includeCompressed: true,
     });
@@ -4416,6 +4433,7 @@ export class Session implements SessionContext {
             // throws before re-pushing it, the orphan would be permanently lost
             // — so hold it (and a push-count snapshot) to restore on that path.
             let strippedOrphanEntries: Content[] | null = null;
+            let continuedPromptIdentity: string | undefined;
             let orphanPushCountSnapshot = 0;
             if (goalTurn?.origin === 'runtime') {
               this.config.getChatRecordingService()?.recordGoalRuntimeMessage(
@@ -4452,6 +4470,16 @@ export class Session implements SessionContext {
                 strippedOrphanEntries =
                   this.#getCurrentChat().stripOrphanedUserEntriesFromHistory() ??
                   null;
+                const promptIdentities = new Set(
+                  strippedOrphanEntries
+                    ?.map(getApiHistoryPromptId)
+                    .filter((value): value is string => value !== undefined),
+                );
+                if (promptIdentities.size === 1) {
+                  continuedPromptIdentity = promptIdentities
+                    .values()
+                    .next().value;
+                }
                 orphanPushCountSnapshot =
                   this.#getCurrentChat().getUserContentPushCount?.() ?? 0;
                 continuationParts = recoveryPlan.continuation.parts;
@@ -4480,15 +4508,30 @@ export class Session implements SessionContext {
               );
               const recorder = this.config.getChatRecordingService();
               if (promptDisplayText !== undefined || mediaReferences) {
-                recorder?.recordUserMessage(promptText, goalTurn?.permit, {
-                  displayText: promptDisplayText ?? promptText,
-                  hookContext: '',
-                  ...(mediaReferences ? { mediaReferences } : {}),
-                });
+                recorder?.recordUserMessage(
+                  promptText,
+                  goalTurn?.permit,
+                  {
+                    displayText: promptDisplayText ?? promptText,
+                    hookContext: '',
+                    ...(mediaReferences ? { mediaReferences } : {}),
+                  },
+                  promptId,
+                );
               } else if (goalTurn) {
-                recorder?.recordUserMessage(promptText, goalTurn.permit);
+                recorder?.recordUserMessage(
+                  promptText,
+                  goalTurn.permit,
+                  undefined,
+                  promptId,
+                );
               } else {
-                recorder?.recordUserMessage(promptText);
+                recorder?.recordUserMessage(
+                  promptText,
+                  undefined,
+                  undefined,
+                  promptId,
+                );
               }
             }
 
@@ -4562,14 +4605,29 @@ export class Session implements SessionContext {
               ) {
                 const recorder = this.config.getChatRecordingService();
                 if (promptDisplayText !== undefined) {
-                  recorder?.recordUserMessage(promptText, goalTurn?.permit, {
-                    displayText: promptDisplayText,
-                    hookContext: '',
-                  });
+                  recorder?.recordUserMessage(
+                    promptText,
+                    goalTurn?.permit,
+                    {
+                      displayText: promptDisplayText,
+                      hookContext: '',
+                    },
+                    promptId,
+                  );
                 } else if (goalTurn) {
-                  recorder?.recordUserMessage(promptText, goalTurn.permit);
+                  recorder?.recordUserMessage(
+                    promptText,
+                    goalTurn.permit,
+                    undefined,
+                    promptId,
+                  );
                 } else {
-                  recorder?.recordUserMessage(promptText);
+                  recorder?.recordUserMessage(
+                    promptText,
+                    undefined,
+                    undefined,
+                    promptId,
+                  );
                 }
               }
 
@@ -4835,7 +4893,15 @@ export class Session implements SessionContext {
                       promptId,
                       nextMessage?.parts ?? [],
                       pendingSend.signal,
-                      { modelOverride: fullTurnModelOverride },
+                      {
+                        modelOverride: fullTurnModelOverride,
+                        promptIdentity:
+                          turnCount === 1 && goalTurn?.origin !== 'runtime'
+                            ? isContinue
+                              ? continuedPromptIdentity
+                              : promptId
+                            : undefined,
+                      },
                     );
                   if (!sendResult.responseStream) {
                     this.todoStopGuard.suspend();
@@ -6393,6 +6459,7 @@ export class Session implements SessionContext {
       beforeSend?: (
         context: BeforeModelSendContext,
       ) => Promise<BeforeModelSendDecision>;
+      promptIdentity?: string;
     } = {},
   ): Promise<AutoCompressionSendResult> {
     const geminiClient = this.config.getGeminiClient()!;
@@ -6532,9 +6599,13 @@ export class Session implements SessionContext {
       },
     };
     const goalPermit = goalTurnContext.getStore();
-    const responseStream = goalPermit
-      ? await chat.sendMessageStream(model, request, promptId, goalPermit)
-      : await chat.sendMessageStream(model, request, promptId);
+    const responseStream = await chat.sendMessageStream(
+      model,
+      request,
+      promptId,
+      goalPermit,
+      options.promptIdentity ? { promptId: options.promptIdentity } : undefined,
+    );
     return { responseStream };
   }
 

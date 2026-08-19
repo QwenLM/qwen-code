@@ -10,6 +10,7 @@ import type { HistoryItem } from '../types.js';
 import type { Content, Part } from '@google/genai';
 import {
   CompressionStatus,
+  markApiHistoryPrompt,
   SYSTEM_REMINDER_OPEN,
   SYSTEM_REMINDER_CLOSE,
 } from '@qwen-code/qwen-code-core';
@@ -47,12 +48,14 @@ function userItem(
   id: number,
   text = `prompt ${id}`,
   sentToModel?: boolean,
+  promptId?: string,
 ): HistoryItem {
   return {
     type: 'user',
     id,
     text,
     ...(sentToModel === undefined ? {} : { sentToModel }),
+    ...(promptId ? { promptId } : {}),
   } as HistoryItem;
 }
 
@@ -683,6 +686,39 @@ describe('computeApiTruncationIndex', () => {
       expect(computeApiTruncationIndex(ui, 3, api)).toBe(5);
       // …while every later target fails loud (-1).
       expect(computeApiTruncationIndex(ui, 5, api)).toBe(-1);
+    });
+  });
+
+  describe('with stable prompt identities', () => {
+    it('maps ambiguous UI and API shapes by identity', () => {
+      const placeholder = '[Old inline media cleared: image/png]';
+      const ui: HistoryItem[] = [
+        userItem(1, 'hello', undefined, 'prompt-1'),
+        geminiItem(2),
+        userItem(3, placeholder, undefined, 'prompt-2'),
+        geminiItem(4),
+        userItem(5, 'world', undefined, 'prompt-3'),
+      ];
+      const api: Content[] = [
+        startupEntry(),
+        userContent('hello'),
+        modelContent('response hello'),
+        userContent(placeholder),
+        modelContent('response placeholder'),
+        userContent('world'),
+      ];
+      markApiHistoryPrompt(api[1]!, 'prompt-1');
+      markApiHistoryPrompt(api[3]!, 'prompt-2');
+      markApiHistoryPrompt(api[5]!, 'prompt-3');
+
+      expect(computeApiTruncationIndex(ui, 3, api)).toBe(3);
+      expect(computeApiTruncationIndex(ui, 5, api)).toBe(5);
+    });
+
+    it('fails closed when an identified target is absent from API history', () => {
+      const ui = [userItem(1, 'hello', undefined, 'prompt-1')];
+
+      expect(computeApiTruncationIndex(ui, 1, [userContent('hello')])).toBe(-1);
     });
   });
 
