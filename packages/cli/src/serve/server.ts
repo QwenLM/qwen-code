@@ -2614,6 +2614,7 @@ export function createServeApp(
         : undefined,
     cleanupSession,
     channelDeliveryAuthorizations: deps.channelDeliveryAuthorizations,
+    sessionArchiveCoordinator: archiveCoordinator,
   });
 
   // Workspace-wide active-goal listing (the Web Shell "Goals" page). Read-only
@@ -2638,6 +2639,7 @@ export function createServeApp(
     channelDeliveryAuthorizations: deps.channelDeliveryAuthorizations,
     cleanupSession,
     conversationRuntimeActivity,
+    sessionArchiveCoordinator: archiveCoordinator,
   });
 
   // Read-only token-usage dashboard (Daemon Status "统计" tab). Aggregate local

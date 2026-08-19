@@ -60,6 +60,7 @@ import {
   type PublicChannelDelivery,
 } from '../../runtime/channel-delivery.js';
 import type { ChannelDeliveryAuthorizationStore } from '../channel-delivery-authorization.js';
+import type { SessionArchiveCoordinator } from '../server/session-archive.js';
 import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
@@ -231,6 +232,12 @@ interface RegisterScheduledTaskCrudRoutesDeps {
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   safeBody: (req: Request) => Record<string, unknown>;
   channelDeliveryAuthorizations?: ChannelDeliveryAuthorizationStore;
+  /**
+   * Session-scoped serialization shared with the bind path: DELETE teardown
+   * and reuse-create binding acquire the same per-session lease so a close
+   * cannot land between a surviving task's validation and its commit (#9415).
+   */
+  sessionArchiveCoordinator?: SessionArchiveCoordinator;
 }
 
 interface RegisterScheduledTasksRoutesDeps {
@@ -249,6 +256,7 @@ interface RegisterScheduledTasksRoutesDeps {
     runtime: WorkspaceRuntime,
     sessionId: string,
   ) => Promise<unknown>;
+  sessionArchiveCoordinator?: SessionArchiveCoordinator;
 }
 
 interface RegisterWorkspaceQualifiedScheduledTasksRoutesDeps {
@@ -270,6 +278,7 @@ interface RegisterWorkspaceQualifiedScheduledTasksRoutesDeps {
     sessionId: string,
   ) => Promise<unknown>;
   conversationRuntimeActivity?: ConversationRuntimeActivityGate;
+  sessionArchiveCoordinator?: SessionArchiveCoordinator;
 }
 
 async function runWithScheduledTaskTarget<T>(
@@ -410,6 +419,7 @@ function registerScheduledTaskCrudRoutes(
     mutate,
     safeBody,
     channelDeliveryAuthorizations,
+    sessionArchiveCoordinator,
   } = deps;
   const base = `${prefix}/scheduled-tasks`;
 
@@ -878,8 +888,11 @@ function registerScheduledTaskCrudRoutes(
       let sessionGoneUnderLock = false;
       let rollbackBefore: DurableCronTask[] | undefined;
       let rollbackAfter: DurableCronTask[] | undefined;
-      try {
-        await runWithScheduledTaskTarget(target, () =>
+      // Serialize a reuse-create's commit with DELETE teardown on the reused
+      // session's key (#9415): while this shared lease is held, a concurrent
+      // DELETE cannot hold the exclusive lease and close the session under us.
+      const commitTask = () =>
+        runWithScheduledTaskTarget(target, () =>
           updateCronTasks(
             workspaceCwd,
             (tasks) => {
@@ -935,6 +948,13 @@ function registerScheduledTaskCrudRoutes(
             { assertCanCommit: target.assertGenerationOpen },
           ),
         );
+      try {
+        await (providedSessionId !== undefined && sessionArchiveCoordinator
+          ? sessionArchiveCoordinator.runSharedMany(
+              [providedSessionId],
+              commitTask,
+            )
+          : commitTask());
       } catch (err) {
         await rollbackSession();
         if (sendActivityGateError(res, err)) return;
@@ -1396,35 +1416,38 @@ function registerScheduledTaskCrudRoutes(
       // task, may be the user's live working session, and must survive the
       // task's deletion (same invariant the create path's rollback honors).
       if (boundSessionId && sessionOwnedByTask && bridge) {
-        // Re-read just before teardown: between the removal commit above and
-        // this close, a concurrent reuse-create can bind THIS session (its
-        // in-lock duplicate check legitimately passes once the old task is
-        // gone) — from that task's perspective the session IS caller-provided
-        // and must survive. Closing on the stale capture would tear down the
-        // surviving task's live session mid-use. Best-effort: a rebind that
-        // commits between this re-read and the close still slips through;
-        // fully closing that window needs session-scoped serialization shared
-        // with the bind path (tracked as follow-up). A read failure falls
-        // back to the pre-recheck behavior (close).
-        let claimedBySurvivingTask = false;
-        try {
-          const currentTasks = await runWithScheduledTaskTarget(target, () =>
-            readCronTasks(workspaceCwd),
-          );
-          claimedBySurvivingTask = currentTasks.some(
-            (t) => t.sessionId === boundSessionId,
-          );
-        } catch {
-          // Read failure → keep the historical behavior (close the session).
-        }
-        if (!claimedBySurvivingTask) {
+        // Serialize with the reuse-create bind path on the session's own key:
+        // the re-read below narrows the rebind window, and the exclusive lease
+        // closes it — a reuse-create holds the shared lease while validating
+        // and committing, so this teardown cannot land in between (#9415).
+        const teardownSession = async (): Promise<unknown> => {
+          let claimedBySurvivingTask = false;
           try {
-            await runWithScheduledTaskTarget(target, () =>
-              bridge.closeSession(boundSessionId!),
+            const currentTasks = await runWithScheduledTaskTarget(target, () =>
+              readCronTasks(workspaceCwd),
             );
-          } catch (error) {
-            if (sendActivityGateError(res, error)) return;
+            claimedBySurvivingTask = currentTasks.some(
+              (t) => t.sessionId === boundSessionId,
+            );
+          } catch {
+            // Read failure → keep the historical behavior (close the session).
           }
+          if (claimedBySurvivingTask) return;
+          return runWithScheduledTaskTarget(target, () =>
+            bridge.closeSession(boundSessionId!),
+          );
+        };
+        try {
+          if (sessionArchiveCoordinator) {
+            await sessionArchiveCoordinator.runExclusiveMany(
+              [boundSessionId],
+              teardownSession,
+            );
+          } else {
+            await teardownSession();
+          }
+        } catch (error) {
+          if (sendActivityGateError(res, error)) return;
         }
       }
       if (boundSessionId) {
@@ -1640,6 +1663,7 @@ export function registerScheduledTasksRoutes(
     mutate,
     safeBody,
     channelDeliveryAuthorizations,
+    sessionArchiveCoordinator: deps.sessionArchiveCoordinator,
   });
 }
 
@@ -1718,6 +1742,7 @@ export function registerWorkspaceQualifiedScheduledTasksRoutes(
     mutate,
     safeBody,
     channelDeliveryAuthorizations,
+    sessionArchiveCoordinator: deps.sessionArchiveCoordinator,
   });
 }
 
