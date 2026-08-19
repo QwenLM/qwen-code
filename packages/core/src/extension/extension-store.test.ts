@@ -602,11 +602,84 @@ describe('ExtensionStore', () => {
     });
   });
 
-  it('adopts a loaded manifest rename without resetting activation', async () => {
+  it('adopts a manifest rename and its declared activation', async () => {
     const store = makeStore();
     const identity = { id: 'd1'.repeat(32), name: 'before' };
-    await store.ensureInitialized([identity]);
+    const declaration = { id: 'd2'.repeat(32), name: 'after' };
+    const staging = await store.createStagingDirectory();
+    await fsp.writeFile(path.join(staging, 'version'), 'before');
+    await store.commitArtifact({
+      operation: 'install',
+      identity,
+      stagingDirectory: staging,
+      destinationDirectory: path.join(extensionsDir, identity.name),
+      initialActivation: { scope: 'user' },
+    });
+    const declared = await store.setDefaultActivations(
+      [declaration],
+      'disabled',
+    );
+
+    const renamed = await store.ensureInitialized([
+      { id: identity.id, name: declaration.name },
+    ]);
+
+    expect(renamed.generation).toBe(declared.generation + 1);
+    expect(renamed.extensions[declaration.id]).toBeUndefined();
+    expect(renamed.extensions[identity.id]).toMatchObject({
+      name: 'after',
+      artifactDirectory: 'before',
+      defaultActivation: 'disabled',
+    });
+    expect(renamed.extensions[identity.id]?.declarationOnly).toBeUndefined();
+    expect(renamed.extensions[identity.id]?.artifactGeneration).toBeDefined();
+    expect(fs.existsSync(path.join(extensionsDir, 'before'))).toBe(true);
+    expect(fs.existsSync(path.join(extensionsDir, 'after'))).toBe(false);
+    expect(renamed.legacyProjectionRemainder).toBeUndefined();
+    expect(JSON.parse(await fsp.readFile(enablementPath, 'utf8'))).toEqual({
+      after: { overrides: ['!/*'] },
+    });
+
+    const activated = await store.setDefaultActivations(
+      [{ id: identity.id, name: 'after' }],
+      'enabled',
+    );
+    expect(activated.extensions[identity.id]?.declarationOnly).toBeUndefined();
+
+    const uninstalled = await store.commitArtifact({
+      operation: 'uninstall',
+      identity: { id: identity.id, name: 'after' },
+      destinationDirectory: path.join(extensionsDir, 'after'),
+    });
+    expect(uninstalled.extensions[identity.id]).toBeUndefined();
+    expect(fs.existsSync(path.join(extensionsDir, 'before'))).toBe(false);
+    expect(fs.existsSync(path.join(extensionsDir, 'after'))).toBe(false);
+    expect((await store.ensureInitialized([])).extensions).toEqual({});
+  });
+
+  it('removes an obsolete old name from a newer V1 projection on rename', async () => {
+    const store = makeStore();
+    const identity = { id: 'd3'.repeat(32), name: 'before' };
+    const staging = await store.createStagingDirectory();
+    await fsp.writeFile(path.join(staging, 'version'), 'before');
+    await store.commitArtifact({
+      operation: 'install',
+      identity,
+      stagingDirectory: staging,
+      destinationDirectory: path.join(extensionsDir, identity.name),
+      initialActivation: { scope: 'user' },
+    });
     const disabled = await store.setDefaultActivation(identity, 'disabled');
+    await fsp.writeFile(
+      enablementPath,
+      JSON.stringify({
+        before: { overrides: ['!/*'] },
+        future: { overrides: ['!/future/*'] },
+      }),
+    );
+    const stateStat = await fsp.stat(path.join(storeDir, 'state.json'));
+    const newer = new Date(stateStat.mtimeMs + 10_000);
+    await fsp.utimes(enablementPath, newer, newer);
 
     const renamed = await store.ensureInitialized([
       { id: identity.id, name: 'after' },
@@ -617,9 +690,12 @@ describe('ExtensionStore', () => {
       name: 'after',
       defaultActivation: 'disabled',
     });
-    expect(renamed.legacyProjectionRemainder).toBeUndefined();
+    expect(renamed.legacyProjectionRemainder).toEqual({
+      future: { overrides: ['!/future/*'] },
+    });
     expect(JSON.parse(await fsp.readFile(enablementPath, 'utf8'))).toEqual({
       after: { overrides: ['!/*'] },
+      future: { overrides: ['!/future/*'] },
     });
   });
 

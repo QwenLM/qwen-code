@@ -22,6 +22,7 @@ export type WorkspaceActivation = ExtensionActivation | 'inherit';
 
 export interface ExtensionPolicy {
   name: string;
+  artifactDirectory?: string;
   artifactGeneration?: number;
   declarationOnly?: true;
   preserveActivationOnNextInstall?: true;
@@ -279,6 +280,9 @@ function parseState(
     return (
       typeof parsed.name === 'string' &&
       /^[a-zA-Z0-9-_.]+$/.test(parsed.name) &&
+      (parsed.artifactDirectory === undefined ||
+        (typeof parsed.artifactDirectory === 'string' &&
+          /^[a-zA-Z0-9-_.]+$/.test(parsed.artifactDirectory))) &&
       (parsed.artifactGeneration === undefined ||
         (Number.isSafeInteger(parsed.artifactGeneration) &&
           parsed.artifactGeneration >= 0)) &&
@@ -422,20 +426,39 @@ export class ExtensionStore {
         assertIdentity(identity);
         const directPolicy = existing.extensions[identity.id];
         if (directPolicy) {
-          if (directPolicy.name.toLowerCase() !== identity.name.toLowerCase()) {
+          if (directPolicy.name !== identity.name) {
             const nameOwner = Object.entries(existing.extensions).find(
               ([id, policy]) =>
                 id !== identity.id &&
                 policy.name.toLowerCase() === identity.name.toLowerCase(),
             );
-            if (nameOwner) {
+            if (nameOwner && !nameOwner[1].declarationOnly) {
               throw new ExtensionConflictError(
                 `Extension name "${identity.name}" conflicts with an installed extension.`,
               );
             }
-            renamedPolicyNames.add(directPolicy.name.toLowerCase());
-          }
-          if (directPolicy.name !== identity.name) {
+            if (!directPolicy.declarationOnly) {
+              directPolicy.artifactDirectory ??= directPolicy.name;
+            }
+            if (
+              directPolicy.name.toLowerCase() !== identity.name.toLowerCase()
+            ) {
+              renamedPolicyNames.add(directPolicy.name.toLowerCase());
+            }
+            if (nameOwner) {
+              const [declarationId, declaration] = nameOwner;
+              directPolicy.defaultActivation = declaration.defaultActivation;
+              directPolicy.workspaceOverrides = {
+                ...declaration.workspaceOverrides,
+              };
+              if (declaration.legacyPathRules) {
+                directPolicy.legacyPathRules = [...declaration.legacyPathRules];
+              } else {
+                delete directPolicy.legacyPathRules;
+              }
+              delete existing.extensions[declarationId];
+              changed = true;
+            }
             directPolicy.name = identity.name;
             changed = true;
           }
@@ -556,7 +579,7 @@ export class ExtensionStore {
         : importUnmappedLegacy
           ? legacy
           : (existing.legacyProjectionRemainder ?? {});
-      if (importUnmappedLegacy && renamedPolicyNames.size > 0) {
+      if (renamedPolicyNames.size > 0) {
         remainderSource = Object.fromEntries(
           Object.entries(remainderSource).filter(
             ([name]) => !renamedPolicyNames.has(name.toLowerCase()),
@@ -617,9 +640,12 @@ export class ExtensionStore {
         transactionId,
       );
       const journalPath = path.join(transactionsDir, `${transactionId}.json`);
-      const destinationExists = await this.pathExists(
-        input.destinationDirectory,
-      );
+      const currentPolicy = snapshot.extensions[input.identity.id];
+      const destinationDirectory =
+        input.operation !== 'install' && currentPolicy?.artifactDirectory
+          ? path.join(this.extensionsDir, currentPolicy.artifactDirectory)
+          : input.destinationDirectory;
+      const destinationExists = await this.pathExists(destinationDirectory);
       if (input.operation === 'install' && destinationExists) {
         throw new ExtensionConflictError(
           `Extension "${input.identity.name}" is installed.`,
@@ -638,20 +664,19 @@ export class ExtensionStore {
           extensionId !== input.identity.id &&
           policy.name.toLowerCase() === input.identity.name.toLowerCase(),
       );
-      const currentPolicy = snapshot.extensions[input.identity.id];
       const currentPolicyIsAdoptable =
         input.operation === 'install' &&
         !!currentPolicy &&
         (currentPolicy.declarationOnly ||
           (currentPolicy.preserveActivationOnNextInstall &&
-            !(await this.extensionArtifactExists(currentPolicy.name))));
+            !(await this.extensionArtifactExists(currentPolicy))));
       const nameConflictIsAdoptable =
         input.operation === 'install' &&
         !currentPolicy &&
         !!nameConflict &&
         (nameConflict[1].declarationOnly ||
           (nameConflict[1].preserveActivationOnNextInstall &&
-            !(await this.extensionArtifactExists(nameConflict[1].name))));
+            !(await this.extensionArtifactExists(nameConflict[1]))));
       if (
         input.operation !== 'uninstall' &&
         nameConflict &&
@@ -710,6 +735,7 @@ export class ExtensionStore {
           delete targetSnapshot.extensions[declarationId];
           delete policy.declarationOnly;
           delete policy.preserveActivationOnNextInstall;
+          delete policy.artifactDirectory;
           policy.name = input.identity.name;
           policy.artifactGeneration = targetSnapshot.generation + 1;
           targetSnapshot.extensions[input.identity.id] = policy;
@@ -763,7 +789,7 @@ export class ExtensionStore {
         transactionId,
         operation: input.operation,
         phase: 'prepared',
-        destinationDirectory: input.destinationDirectory,
+        destinationDirectory,
         ...(input.stagingDirectory
           ? { stagingDirectory: input.stagingDirectory }
           : {}),
@@ -781,17 +807,12 @@ export class ExtensionStore {
       let stateCommitted = false;
       try {
         if (destinationExists) {
-          await renameWithRetry(
-            input.destinationDirectory,
-            backupDirectory,
-            3,
-            50,
-          );
+          await renameWithRetry(destinationDirectory, backupDirectory, 3, 50);
         }
         if (input.operation !== 'uninstall') {
           await renameWithRetry(
             input.stagingDirectory!,
-            input.destinationDirectory,
+            destinationDirectory,
             3,
             50,
           );
@@ -1095,7 +1116,7 @@ export class ExtensionStore {
         if (
           !policy.declarationOnly &&
           policy.artifactGeneration !== undefined &&
-          !(await this.extensionArtifactExists(policy.name))
+          !(await this.extensionArtifactExists(policy))
         ) {
           delete policy.artifactGeneration;
           delete policy.preserveActivationOnNextInstall;
@@ -1119,8 +1140,13 @@ export class ExtensionStore {
     });
   }
 
-  private async extensionArtifactExists(name: string): Promise<boolean> {
-    if (await this.pathExists(path.join(this.extensionsDir, name))) return true;
+  private async extensionArtifactExists(
+    policy: ExtensionPolicy,
+  ): Promise<boolean> {
+    const directory = policy.artifactDirectory ?? policy.name;
+    if (await this.pathExists(path.join(this.extensionsDir, directory))) {
+      return true;
+    }
     let entries: string[];
     try {
       entries = await fsp.readdir(this.extensionsDir);
@@ -1128,7 +1154,7 @@ export class ExtensionStore {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
       throw error;
     }
-    const normalizedName = name.toLowerCase();
+    const normalizedName = directory.toLowerCase();
     return entries.some((entry) => entry.toLowerCase() === normalizedName);
   }
 
