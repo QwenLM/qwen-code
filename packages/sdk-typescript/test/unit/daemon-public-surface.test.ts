@@ -443,6 +443,7 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
       hasActivePrompt: boolean;
       isWaitingForPermission: boolean;
       isWaitingForUserQuestion: boolean;
+      updatedAt?: string;
     }>();
     expectTypeOf<DaemonWorkspaceSessionLiveState>().toEqualTypeOf<{
       v: 1;
