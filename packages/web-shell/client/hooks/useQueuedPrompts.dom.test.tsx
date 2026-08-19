@@ -719,6 +719,48 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     ).toEqual(['first', 'second']);
   });
 
+  it('stashes the undrained release chain when the session changes mid-drain', async () => {
+    // The chain marks the whole batch `submitting` up front and then releases
+    // it serially, so a switch inside that window used to orphan every row it
+    // had not reached: the stash only saved `serverState === undefined` rows,
+    // and the remaining links POSTed against the wrong session and were
+    // swallowed by the chain's own `.catch`. Both prompts were gone for good.
+    const { actions } = createActions();
+    const firstAdmission = deferred<{ promptId: string }>();
+    vi.mocked(actions.submitPrompt)
+      .mockReturnValueOnce(firstAdmission.promise as never)
+      .mockResolvedValue({ promptId: 'second' } as never);
+    const { render } = mount('responding', actions, true, false, false, true);
+
+    act(() => latest.enqueuePrompt('first with media'));
+    act(() => latest.enqueuePrompt('second plain'));
+
+    render('idle', 'session-1', false, false, false);
+    expect(
+      vi.mocked(actions.submitPrompt).mock.calls.map((call) => call[0]),
+    ).toEqual(['first with media']);
+
+    // The user switches away while the first admission is still in flight.
+    render('idle', 'session-2', false, false, false);
+    expect(latest.queuedPrompts).toEqual([]);
+    await act(async () => {
+      firstAdmission.resolve({ promptId: 'first' });
+    });
+
+    // The second link must not POST into session-2.
+    expect(
+      vi.mocked(actions.submitPrompt).mock.calls.map((call) => call[0]),
+    ).toEqual(['first with media']);
+
+    // Coming back, the row the chain never reached is in session-1's queue
+    // again and the fresh drain releases it -- to session-1, in order.
+    render('idle', 'session-1', false, false, false);
+    expect(latest.queuedPrompts).toMatchObject([{ text: 'second plain' }]);
+    expect(
+      vi.mocked(actions.submitPrompt).mock.calls.map((call) => call[0]),
+    ).toEqual(['first with media', 'second plain']);
+  });
+
   it('keeps locally held Goal follow-ups isolated across session switches', () => {
     const { actions } = createActions();
     const { render } = mount('responding', actions, true, false, false, true);

@@ -9,6 +9,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 
+import { GOAL_EVIDENCE_LIMIT_REASONS } from '../../utils/goalGate';
+
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
 interface MockGoal {
@@ -26,13 +28,14 @@ interface MockGoal {
       goalId: string;
       revision: number;
       objective: string;
-      status: 'active' | 'paused' | 'blocked' | 'usage_limited';
+      status: 'active' | 'paused' | 'blocked' | 'usage_limited' | 'complete';
       evidenceCursor: { recordId: string | null };
       turnCount: number;
       activeTimeMs: number;
       createdAt: number;
       updatedAt: number;
       lastReason?: string;
+      limitKind?: 'evidence_catalog' | 'checkpoint_request';
     };
   };
 }
@@ -200,6 +203,51 @@ describe('GoalsDialog', () => {
     await mount([baseGoal()]);
     expect(document.querySelector('[data-testid="goals-dropped"]')).toBeNull();
   });
+
+  const stopped = (
+    over: Partial<MockGoal['snapshot']['goal']> = {},
+  ): MockGoal => {
+    const base = baseGoal();
+    return {
+      ...base,
+      snapshot: {
+        ...base.snapshot,
+        goal: { ...base.snapshot.goal, status: 'usage_limited', ...over },
+      },
+    };
+  };
+
+  const resumeButton = () =>
+    document.querySelector('[aria-label="Resume goal"]');
+
+  it('offers resume for an ordinary usage-limited stop', async () => {
+    // Reverse control for the two tests below: operational stops carry prose
+    // in `lastReason` too and the reducer resumes them, so the evidence gate
+    // must not widen into "any usage_limited Goal with a reason".
+    await mount([stopped({ lastReason: 'The provider rate-limited us.' })]);
+    expect(resumeButton()).not.toBeNull();
+  });
+
+  it('hides resume for an evidence-limited Goal', async () => {
+    // The reducer refuses `resume` on a Goal stopped at an evidence bound, so
+    // offering the control only earns the user an invalid-transition 409.
+    await mount([stopped({ limitKind: 'evidence_catalog' })]);
+    expect(resumeButton()).toBeNull();
+  });
+
+  // One `it` per sentinel: `mount` installs a fresh container each call and
+  // only the last is torn down, so two mounts in one test strand a stale DOM
+  // that every later test then queries.
+  it.each([...GOAL_EVIDENCE_LIMIT_REASONS])(
+    'hides resume for a Goal evidence-limited before `limitKind` existed (%#)',
+    async (lastReason) => {
+      // The sentinel prose shipped before the `limitKind` field did: a Goal
+      // persisted in that window restores as `usage_limited` with no
+      // `limitKind`, and this gate used to read it as resumable.
+      await mount([stopped({ lastReason })]);
+      expect(resumeButton()).toBeNull();
+    },
+  );
 
   it('renders a goal with its condition, turn count and judge verdict', async () => {
     await mount([

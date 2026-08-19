@@ -3,6 +3,7 @@ import type { GoalSnapshotV2 } from '@qwen-code/sdk/daemon';
 import { Pause, Pencil, Play, Target, Trash2 } from 'lucide-react';
 import { useI18n } from '../i18n';
 import { formatRuntime } from '../utils/formatRuntime';
+import { canResumeGoal } from '../utils/goalGate';
 import styles from './GoalStatusStrip.module.css';
 
 const TICK_INTERVAL_MS = 1000;
@@ -50,12 +51,10 @@ export function GoalStatusStrip({
 
   const canPause = goal.status === 'active';
   // An evidence-limited stop is terminal for resume: the reducer rejects it
-  // with an invalid-transition 409, so the control must not be offered.
-  const canResume =
-    goal.limitKind === undefined &&
-    (goal.status === 'paused' ||
-      goal.status === 'blocked' ||
-      goal.status === 'usage_limited');
+  // with an invalid-transition 409, so the control must not be offered. The
+  // reducer's own rule lives in `canResumeGoal` -- keying off `limitKind`
+  // alone here missed Goals persisted before that field existed.
+  const canResume = canResumeGoal(goal);
 
   return (
     <div

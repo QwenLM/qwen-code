@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { GoalSnapshotV2 } from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../i18n';
+import { GOAL_EVIDENCE_LIMIT_REASONS } from '../utils/goalGate';
 import { GoalStatusStrip, getGoalActiveTimeMs } from './GoalStatusStrip';
 
 function snapshot(
@@ -130,6 +131,59 @@ describe('GoalStatusStrip', () => {
     expect(container.querySelector('[aria-label="Resume goal"]')).toBeNull();
     expect(
       container.querySelector('[data-testid="goal-status-strip"]'),
+    ).not.toBeNull();
+  });
+
+  it('hides resume for a Goal evidence-limited before `limitKind` existed', () => {
+    // The sentinel prose shipped before the `limitKind` field did, so a Goal
+    // persisted in that window restores as `usage_limited` with no `limitKind`
+    // at all. The reducer still refuses it; a gate keyed off `limitKind` alone
+    // offered a Resume button that could only ever earn a 409.
+    const limited = snapshot('usage_limited');
+    for (const lastReason of GOAL_EVIDENCE_LIMIT_REASONS) {
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <GoalStatusStrip
+              snapshot={{ ...limited, goal: { ...limited.goal!, lastReason } }}
+              onEdit={vi.fn()}
+              onPause={vi.fn()}
+              onResume={vi.fn()}
+              onClear={vi.fn()}
+            />
+          </I18nProvider>,
+        );
+      });
+      expect(container.querySelector('[aria-label="Resume goal"]')).toBeNull();
+    }
+  });
+
+  it('still offers resume for an ordinary usage-limited stop', () => {
+    // Reverse control for the test above: operational stops carry prose in
+    // `lastReason` too and the reducer resumes them, so the fallback must not
+    // widen into "any usage_limited Goal with a reason".
+    const limited = snapshot('usage_limited');
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <GoalStatusStrip
+            snapshot={{
+              ...limited,
+              goal: {
+                ...limited.goal!,
+                lastReason: 'The provider rate-limited this account.',
+              },
+            }}
+            onEdit={vi.fn()}
+            onPause={vi.fn()}
+            onResume={vi.fn()}
+            onClear={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+    expect(
+      container.querySelector('[aria-label="Resume goal"]'),
     ).not.toBeNull();
   });
 

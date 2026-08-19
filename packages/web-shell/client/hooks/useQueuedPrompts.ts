@@ -313,6 +313,13 @@ export function useQueuedPrompts({
       ownerTokenRef.current === token && token.snapshot.isCurrent(),
   );
   const queuedPromptsOwnerRef = useRef(ownerToken);
+  /**
+   * Prompts the serial release chain has stamped `submitting` but not yet
+   * handed to `submitPendingPrompt`. Each link drops its own id as it fires,
+   * and the owner-change effect empties the set after reading it, so at any
+   * owner change it holds exactly the rows the chain never got to POST.
+   */
+  const unreleasedPromptIdsRef = useRef<Set<number>>(new Set());
   const heldPromptsByOwnerRef = useRef<Map<string, QueuedPrompt[]>>(new Map());
   const nextQueuedPromptIdRef = useRef(1);
   const latestSessionIdRef = useRef(sessionId);
@@ -853,12 +860,29 @@ export function useQueuedPrompts({
       previousOwner.sessionId,
     );
     if (previousOwnerKey) {
-      const heldPrompts = queuedPromptsRef.current.filter(
-        (prompt) =>
-          isLocallyHeldPrompt(prompt) &&
-          (!prompt.midTurnMessageId ||
-            !pendingMidTurnAdmissionsRef.current.has(prompt.midTurnMessageId)),
-      );
+      const heldPrompts = queuedPromptsRef.current
+        .filter(
+          (prompt) =>
+            (isLocallyHeldPrompt(prompt) ||
+              // Rows the drain stamped `submitting` up front but never got to
+              // POST. Nothing exists for them on the daemon, so unlike a real
+              // in-flight admission (deliberately fenced and dropped here)
+              // they can be stashed with no risk of a duplicate — and they
+              // must be, or a mid-drain session switch loses the text.
+              unreleasedPromptIdsRef.current.has(prompt.id)) &&
+            (!prompt.midTurnMessageId ||
+              !pendingMidTurnAdmissionsRef.current.has(
+                prompt.midTurnMessageId,
+              )),
+        )
+        // Drop the optimistic stamp on the way in: the row has to come back as
+        // a plain held prompt, because `isLocallyHeldPrompt` is what both the
+        // next drain and the next owner change look for.
+        .map((prompt) =>
+          prompt.serverState === undefined
+            ? prompt
+            : { ...prompt, serverState: undefined },
+        );
       if (heldPrompts.length > 0) {
         heldPromptsByOwnerRef.current.set(previousOwnerKey, heldPrompts);
       } else {
@@ -930,6 +954,7 @@ export function useQueuedPrompts({
       controller.abort();
     }
     submitAbortControllersRef.current.clear();
+    unreleasedPromptIdsRef.current = new Set();
     removingServerPromptIdsRef.current = new Set();
     displayedServerPromptIdsRef.current = new Set();
     pendingStartedByPromptIdRef.current = new Map();
@@ -1788,6 +1813,12 @@ export function useQueuedPrompts({
       // admission POST, so firing the whole batch at once lets a later plain
       // prompt overtake it and reach the daemon's queue out of order.
       let release: Promise<void> | undefined;
+      // The chain is built synchronously, but each link runs only after the
+      // previous admission settles, so the session can change mid-drain.
+      // Pinned here rather than read per link: the guard has to ask "is this
+      // still the owner the chain was built for", not "is there an owner".
+      const chainOwner = ownerTokenRef.current;
+      for (const id of localIds) unreleasedPromptIdsRef.current.add(id);
       for (const prompt of next) {
         if (!localIds.has(prompt.id)) continue;
         // Re-check the hold per link, not once for the whole batch: the chain
@@ -1797,6 +1828,15 @@ export function useQueuedPrompts({
         // POSTing them against an active Goal — they return to held, and the
         // next inactive transition re-drains them in order.
         const submit = () => {
+          // Owner changed mid-drain: `submitPrompt` would throw on the session
+          // mismatch before POSTing and the `.catch` below would swallow it,
+          // dropping the prompt silently. Bail and leave the rows alone — the
+          // owner-change effect has already stashed them for the session they
+          // were typed in, and touching state here would fight it.
+          unreleasedPromptIdsRef.current.delete(prompt.id);
+          if (!isCurrentOwnerTokenRef.current(chainOwner)) {
+            return Promise.resolve();
+          }
           if (holdQueuedPromptsLocallyRef.current || writeBlockedRef.current) {
             // Inline rather than `setQueuedPromptFlags`: that callback is
             // declared below this effect, so naming it in the dep array would

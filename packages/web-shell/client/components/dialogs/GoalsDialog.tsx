@@ -6,6 +6,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { buildGoalControlRequest } from '../../utils/goalControlRequest';
+import { canResumeGoal } from '../../utils/goalGate';
 import {
   useWorkspaceActions,
   type DaemonGoal,
@@ -368,11 +369,8 @@ export function GoalsDialog({
           const canPause = goal.status === 'active';
           // An evidence-limited stop is terminal for resume: the reducer rejects it
           // with an invalid-transition 409, so the control must not be offered.
-          const canResume =
-            goal.limitKind === undefined &&
-            (goal.status === 'paused' ||
-              goal.status === 'blocked' ||
-              goal.status === 'usage_limited');
+          // Shared with `GoalStatusStrip` so the two gates cannot drift apart.
+          const canResume = canResumeGoal(goal);
           return (
             <div key={item.sessionId} className={styles.card} role="listitem">
               <div className={styles.cardHeader}>
