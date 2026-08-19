@@ -64,7 +64,7 @@ test('keeps the composer responsive during deterministic streaming @perf', async
   });
   streamEvents.push(
     assistantTextEvent('STREAM_COMPLETE_SENTINEL', { id: nextEventId++ }),
-    turnCompleteEvent('performance-prompt', { id: nextEventId++ }),
+    turnCompleteEvent('prompt-e2e', { id: nextEventId++ }),
   );
 
   const type = async () => {
@@ -83,6 +83,9 @@ test('keeps the composer responsive during deterministic streaming @perf', async
   await expect(page.locator('[data-web-shell-message-list]')).toContainText(
     'STREAM_COMPLETE_SENTINEL',
   );
+  await expect(
+    page.locator('[data-markdown-streaming-plain-text="true"]'),
+  ).toHaveCount(0);
   await page.waitForTimeout(100);
 
   const metrics = await readPerformanceMetrics(page);

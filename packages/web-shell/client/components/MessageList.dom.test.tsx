@@ -3217,6 +3217,7 @@ describe('MessageList — turn collapse (DOM)', () => {
         ...asstMsg('a1'),
         content: 'first chunk',
         isStreaming: true,
+        timestamp: 1_001,
       };
       const messages = [userMsg('u1'), assistant];
       const container = mount(messages, undefined, {
@@ -3227,7 +3228,14 @@ describe('MessageList — turn collapse (DOM)', () => {
 
       rerenderMessages(
         container,
-        [messages[0], { ...assistant, content: 'first chunk plus delta' }],
+        [
+          messages[0],
+          {
+            ...assistant,
+            content: 'first chunk plus delta',
+            timestamp: 1_002,
+          },
+        ],
         { isResponding: true, compactMode },
       );
 
@@ -3399,6 +3407,8 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
 
     virtualizerTestState.resizeItem.mockClear();
+    await nextFrame();
+    await nextFrame();
     act(() => render([...earlierMessages, ...currentMessages]));
 
     expect(virtualizerTestState.resizeItem).toHaveBeenCalled();
@@ -3487,6 +3497,15 @@ describe('MessageList — turn collapse (DOM)', () => {
     await nextFrame();
 
     expect(onLoadOlderHistory).toHaveBeenCalledTimes(2);
+
+    for (let frame = 0; frame < 32; frame += 1) await nextFrame();
+    await act(async () => {
+      list.dispatchEvent(new WheelEvent('wheel', { deltaY: -1 }));
+      await Promise.resolve();
+    });
+    await nextFrame();
+
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(3);
   });
 
   it('waits for another upward scroll intent before retrying a failed underfill load', async () => {

@@ -164,8 +164,7 @@ function isStreamingTailContentOnlyUpdate(
     (after.role !== 'assistant' && after.role !== 'thinking') ||
     (before.role !== 'assistant' && before.role !== 'thinking') ||
     before.isStreaming !== true ||
-    after.isStreaming !== true ||
-    before.timestamp !== after.timestamp
+    after.isStreaming !== true
   ) {
     return false;
   }
@@ -2673,6 +2672,9 @@ export const MessageList = memo(
     const { t } = useI18n();
     const transcriptRenderMode = useTranscriptRenderMode();
     const compactMode = useContext(CompactModeContext);
+    // Render-phase caches below are reusable only against this post-commit
+    // identity. An abandoned render cannot advance it, so its cache writes are
+    // rejected by the next committed render.
     const previousMessagesRef = useRef<Message[] | undefined>(undefined);
     const streamingTailContentOnly = isStreamingTailContentOnlyUpdate(
       previousMessagesRef.current,
@@ -3179,6 +3181,10 @@ export const MessageList = memo(
     } | null>(null);
     const restoringOlderHistoryRef = useRef(false);
     restoringOlderHistoryRef.current = olderHistoryAnchor?.virtual === true;
+    const mergedMessageCountRef = useRef(mergedMessages.length);
+    useLayoutEffect(() => {
+      mergedMessageCountRef.current = mergedMessages.length;
+    }, [mergedMessages.length]);
     const [
       suppressOlderHistoryLoadingStatus,
       setSuppressOlderHistoryLoadingStatus,
@@ -3917,19 +3923,35 @@ export const MessageList = memo(
         ? mergedMessages.length === olderHistoryAnchor.messageCount
         : current.scrollHeight === olderHistoryAnchor.scrollHeight;
       if (unchanged) {
+        olderHistoryLoadInFlight.current = false;
         if (olderHistoryAnchorFrame.current !== undefined) return;
-        olderHistoryAnchorFrame.current = requestAnimationFrame(() => {
+        // The loader can resolve before the parent commits prepended messages.
+        // Keep the anchor through a bounded frame grace instead of clearing it
+        // after one busy frame.
+        let remainingFrames = OLDER_HISTORY_ANCHOR_WAIT_FRAMES;
+        const waitForPrepend = () => {
           olderHistoryAnchorFrame.current = undefined;
           if (
             olderHistoryAnchor.generation !== olderHistoryLoadGeneration.current
           ) {
             return;
           }
-          olderHistoryLoadInFlight.current = false;
+          if (
+            mergedMessageCountRef.current !== olderHistoryAnchor.messageCount
+          ) {
+            return;
+          }
+          remainingFrames -= 1;
+          if (remainingFrames > 0) {
+            olderHistoryAnchorFrame.current =
+              requestAnimationFrame(waitForPrepend);
+            return;
+          }
           setOlderHistoryAnchor((anchor) =>
             anchor === olderHistoryAnchor ? null : anchor,
           );
-        });
+        };
+        olderHistoryAnchorFrame.current = requestAnimationFrame(waitForPrepend);
         return;
       }
       if (olderHistoryAnchorFrame.current !== undefined) {
@@ -4239,6 +4261,10 @@ export const MessageList = memo(
         olderHistoryRetryBlocked.current = false;
         olderHistoryLoadInFlight.current = true;
         const generation = ++olderHistoryLoadGeneration.current;
+        if (olderHistoryAnchorFrame.current !== undefined) {
+          cancelAnimationFrame(olderHistoryAnchorFrame.current);
+          olderHistoryAnchorFrame.current = undefined;
+        }
         setSuppressOlderHistoryLoadingStatus(!force);
         let virtualAnchor:
           | {

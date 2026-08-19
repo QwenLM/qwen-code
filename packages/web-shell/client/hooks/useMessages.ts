@@ -34,6 +34,9 @@ const BACKGROUND_AGENT_RECONCILIATION_MAX_ATTEMPTS = 8;
 // call appears in the transcript, so a first `session_not_found` can race
 // registration. Require repeated misses before treating the agent as gone.
 const MISSING_BACKGROUND_AGENT_GRACE_MISSES = 2;
+// Insight JSON can split one growing text block into multiple projected
+// messages, so prefix identity reuse is unsafe once its marker appears.
+const INSIGHT_CONTENT_MARKER = '"insight_';
 
 export interface BackgroundAgentResolution {
   status: string;
@@ -99,12 +102,11 @@ function reuseUnchangedProjectedPrefix(
     before.meta !== after.meta ||
     before.usage !== after.usage ||
     before.branchRecordId !== after.branchRecordId ||
-    before.serverTimestamp !== after.serverTimestamp ||
     before.clientReceivedAt !== after.clientReceivedAt ||
     typeof before.text !== 'string' ||
     typeof after.text !== 'string' ||
     !after.text.startsWith(before.text) ||
-    after.text.includes('"insight_')
+    after.text.includes(INSIGHT_CONTENT_MARKER)
   ) {
     return messages;
   }

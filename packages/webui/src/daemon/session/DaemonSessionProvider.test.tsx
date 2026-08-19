@@ -3209,6 +3209,79 @@ describe('DaemonSessionProvider', () => {
     createStoreSpy.mockRestore();
   });
 
+  it('coalesces streamed chunks arriving within the dispatch window', async () => {
+    vi.useFakeTimers();
+    const sdk = await import('@qwen-code/sdk/daemon');
+    const realCreateStore = sdk.createDaemonTranscriptStore;
+    const dispatchBatchSizes: number[] = [];
+    const createStoreSpy = vi
+      .spyOn(sdk, 'createDaemonTranscriptStore')
+      .mockImplementation((seed) => {
+        const store = realCreateStore(seed);
+        const realDispatch = store.dispatch.bind(store);
+        store.dispatch = (event) => {
+          dispatchBatchSizes.push(Array.isArray(event) ? event.length : 1);
+          return realDispatch(event);
+        };
+        return store;
+      });
+    try {
+      const firstQueued = createDeferred<void>();
+      const secondQueued = createDeferred<void>();
+      const event = (id: number, text: string): DaemonEvent => ({
+        id,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text },
+          },
+        },
+      });
+      const session = createMockSession({
+        events: async function* spacedEvents(
+          opts: { signal?: AbortSignal } = {},
+        ) {
+          yield event(1, 'first ');
+          firstQueued.resolve();
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          yield event(2, 'second');
+          secondQueued.resolve();
+          await new Promise<void>((resolve) => {
+            if (opts.signal?.aborted) {
+              resolve();
+              return;
+            }
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            });
+          });
+        },
+      });
+      sdkMocks.sessions.push(session);
+
+      await renderWithProvider(null, { autoConnect: true });
+      await act(async () => {
+        await firstQueued.promise;
+        await flushPromises();
+        await vi.advanceTimersByTimeAsync(5);
+        await secondQueued.promise;
+        await flushPromises();
+      });
+      expect(dispatchBatchSizes).toEqual([]);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(11);
+        await flushPromises();
+      });
+      expect(dispatchBatchSizes).toEqual([2]);
+    } finally {
+      createStoreSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it('flushes buffered transcript events on unmount instead of dropping them', async () => {
     // The SSE client advances lastSeenEventId as each event is yielded, before
     // the batched dispatch runs. If teardown dropped the pending buffer, a

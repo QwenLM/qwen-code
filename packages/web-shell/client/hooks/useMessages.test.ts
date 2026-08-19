@@ -109,6 +109,7 @@ describe('transcriptBlocksToLocalizedMessages', () => {
       kind: 'assistant',
       text: 'a',
       streaming: true,
+      serverTimestamp: 1_001,
     });
     function Consumer({ blocks }: { blocks: DaemonTranscriptBlock[] }) {
       latest = useMessagesFromBlocks(t, blocks);
@@ -119,7 +120,12 @@ describe('transcriptBlocksToLocalizedMessages', () => {
       root.render(createElement(Consumer, { blocks: [user, assistant] })),
     );
     const firstProjection = latest;
-    const grownAssistant = { ...assistant, text: 'ab', updatedAt: 2 };
+    const grownAssistant = {
+      ...assistant,
+      text: 'ab',
+      updatedAt: 2,
+      serverTimestamp: 1_002,
+    };
     await act(async () =>
       root.render(createElement(Consumer, { blocks: [user, grownAssistant] })),
     );
