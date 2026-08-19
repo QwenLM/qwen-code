@@ -205,14 +205,16 @@ export {
   buildRecordArtifactReminder,
   buildWorkspaceArtifactMetadata,
 } from './tools/write-file.js';
+export {
+  resolveBoundWorkspaceRoot,
+  toCanonicalWorkspaceArtifactPath,
+} from './utils/workspace-artifact-path.js';
 export type {
   ArtifactTool,
   ArtifactToolParams,
 } from './tools/artifact/artifact-tool.js';
-export type {
-  RecordArtifactTool,
-  RecordArtifactParams,
-} from './tools/record-artifact.js';
+export { RecordArtifactTool } from './tools/record-artifact.js';
+export type { RecordArtifactParams } from './tools/record-artifact.js';
 export type {
   ArtifactPublisher,
   PublishArtifactInput,
@@ -245,6 +247,7 @@ export {
   resolveSlimmingConfig,
   type ResolvedSlimmingConfig,
 } from './services/compactionInputSlimming.js';
+export { isClearedMediaPlaceholder } from './services/microcompaction/microcompact.js';
 export * from './services/chatRecordingService.js';
 export * from './services/branch-points.js';
 export * from './services/cronScheduler.js';
@@ -559,6 +562,7 @@ export * from './utils/getFolderStructure.js';
 export * from './utils/git-branches.js';
 export * from './utils/gitDiff.js';
 export * from './utils/gitDirect.js';
+export * from './utils/git-ignore.js';
 export * from './utils/gitIgnoreParser.js';
 export * from './utils/gitUtils.js';
 export * from './utils/github-prs.js';
