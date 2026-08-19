@@ -63,6 +63,7 @@ import {
   getArtifactImageMimeType,
   getImageMimeTypeFromPath,
   getReviewDownloadMimeType,
+  isHtmlArtifact,
   normalizePath,
   readWorkspaceFileAsBlob,
   withArtifactPreviewCsp,
@@ -2477,17 +2478,6 @@ function CodeReviewWorkspaceRequired() {
     <div className={styles.previewError} role="alert">
       {t('codeReview.workspaceRequired')}
     </div>
-  );
-}
-
-function isHtmlArtifact(artifact: DaemonSessionArtifact) {
-  const path = artifact.workspacePath?.toLowerCase() ?? '';
-  const mimeType = artifact.mimeType?.toLowerCase() ?? '';
-  return (
-    artifact.kind === 'html' ||
-    path.endsWith('.html') ||
-    path.endsWith('.htm') ||
-    mimeType === 'text/html'
   );
 }
 

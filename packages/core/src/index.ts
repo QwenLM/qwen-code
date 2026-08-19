@@ -217,9 +217,15 @@ export { RecordArtifactTool } from './tools/record-artifact.js';
 export type { RecordArtifactParams } from './tools/record-artifact.js';
 export type {
   ArtifactPublisher,
+  ArtifactOssConfig,
   PublishArtifactInput,
   PublishedArtifact,
 } from './tools/artifact/publisher.js';
+export { artifactIdFromPath } from './tools/artifact/publisher.js';
+export {
+  OssPublisher,
+  ossCredentialsFromEnv,
+} from './tools/artifact/oss-publisher.js';
 export type { CronCreateTool, CronCreateParams } from './tools/cron-create.js';
 export type { CronListTool, CronListParams } from './tools/cron-list.js';
 export type { CronDeleteTool, CronDeleteParams } from './tools/cron-delete.js';

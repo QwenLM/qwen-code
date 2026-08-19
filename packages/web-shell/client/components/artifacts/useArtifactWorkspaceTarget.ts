@@ -18,6 +18,8 @@ export type ArtifactWorkspaceActions = Pick<
   | 'listScheduledTasks'
   | 'updateScheduledTask'
   | 'deleteScheduledTask'
+  | 'artifactPublishConfig'
+  | 'publishArtifact'
 >;
 
 interface ArtifactWorkspaceOwner {
@@ -193,6 +195,24 @@ export function useArtifactWorkspaceTarget(
         requireScheduledTaskOwner(workspaceId);
         await primaryActions.deleteScheduledTask(id, workspaceId);
         requireScheduledTaskOwner(workspaceId);
+      },
+      async artifactPublishConfig() {
+        const current = requireOwner();
+        const result = await (current.primary
+          ? primaryActions.artifactPublishConfig()
+          : workspace.client
+              .workspaceByCwd(current.cwd)
+              .artifactPublishConfig());
+        requireOwner();
+        return result;
+      },
+      async publishArtifact(req) {
+        const current = requireOwner();
+        const result = await (current.primary
+          ? primaryActions.publishArtifact(req)
+          : workspace.client.workspaceByCwd(current.cwd).publishArtifact(req));
+        requireOwner();
+        return result;
       },
     };
   }, [authority, primaryActions, workspace.client]);

@@ -394,6 +394,38 @@ const EN: Messages = {
   'common.downloadFailed': (v) => `Download failed: ${v?.message ?? ''}`,
   'common.open': 'Open',
   'common.openFailed': (v) => `Could not open link: ${v?.message ?? ''}`,
+  'share.action': 'Share',
+  'share.title': 'Share HTML artifact',
+  'share.upload': 'Upload',
+  'share.uploading': 'Uploading…',
+  'share.endpointLabel': 'OSS endpoint',
+  'share.bucketLabel': 'Bucket',
+  'share.accessKeyIdLabel': 'AccessKey ID',
+  'share.accessKeySecretLabel': 'AccessKey Secret',
+  'share.credentialsHint':
+    'Leave both empty to use the credentials in the daemon environment.',
+  'share.credentialsFrom.env':
+    'Using the credentials found in the daemon environment. Fill these in to override them.',
+  'share.credentialsFrom.memory':
+    'Using the credentials entered earlier this run. Fill these in to replace them.',
+  'share.publicBaseUrlLabel': 'Public domain',
+  'share.publicBaseUrlHint':
+    'Leave empty to use the OSS default domain, which makes browsers download the page instead of opening it. Bind a custom domain to the bucket and enter it here for links that open directly.',
+  'share.storageNote':
+    'What you enter here is kept by the running daemon and forgotten when it exits. Nothing is written to disk.',
+  'share.destinationRequired': 'An endpoint and a bucket are required.',
+  'share.credentialsRequired':
+    'No credentials available — enter an AccessKey pair, or set them in the daemon environment.',
+  'share.resultLabel': 'Share link',
+  'share.reachableYes': 'The link is publicly reachable.',
+  'share.reachableNo': (v) =>
+    `Uploaded, but the link is not publicly reachable (HTTP ${v?.status ?? ''}). The bucket most likely blocks public access.`,
+  'share.reachableUnknown':
+    'Uploaded. The link could not be checked from the daemon, so its public visibility is unconfirmed.',
+  'share.copied': 'Copied',
+  'share.failed': (v) => `Share failed: ${v?.message ?? ''}`,
+  'share.configFailed': (v) =>
+    `Could not load the share destination: ${v?.message ?? ''}`,
   'artifact.openLink': 'Open link',
   'common.na': 'N/A',
   'common.server': 'Server',
@@ -3397,6 +3429,36 @@ const ZH: Messages = {
   'common.downloadFailed': (v) => `下载失败：${v?.message ?? ''}`,
   'common.open': '打开',
   'common.openFailed': (v) => `无法打开链接：${v?.message ?? ''}`,
+  'share.action': '分享',
+  'share.title': '分享 HTML 产物',
+  'share.upload': '上传',
+  'share.uploading': '正在上传…',
+  'share.endpointLabel': 'OSS Endpoint',
+  'share.bucketLabel': 'Bucket',
+  'share.accessKeyIdLabel': 'AccessKey ID',
+  'share.accessKeySecretLabel': 'AccessKey Secret',
+  'share.credentialsHint': '两项都留空则使用 daemon 环境变量里的凭据。',
+  'share.credentialsFrom.env':
+    '正在使用 daemon 环境变量中的凭据。填写此处可覆盖。',
+  'share.credentialsFrom.memory':
+    '正在使用本次运行中已输入的凭据。填写此处可替换。',
+  'share.publicBaseUrlLabel': '公网访问域名',
+  'share.publicBaseUrlHint':
+    '留空则使用 OSS 默认域名，浏览器会强制下载而不是打开页面。为 Bucket 绑定自定义域名并填在这里，链接才能直接预览。',
+  'share.storageNote':
+    '这里填写的内容仅保留在运行中的 daemon 里，退出即忘，不写入磁盘。',
+  'share.destinationRequired': 'Endpoint 和 Bucket 为必填。',
+  'share.credentialsRequired':
+    '没有可用凭据——请填写 AccessKey，或在 daemon 环境变量中配置。',
+  'share.resultLabel': '分享链接',
+  'share.reachableYes': '链接已可公开访问。',
+  'share.reachableNo': (v) =>
+    `已上传，但链接无法公开访问（HTTP ${v?.status ?? ''}）。多半是 Bucket 开启了阻止公共访问。`,
+  'share.reachableUnknown':
+    '已上传。daemon 无法检测该链接，公开可访问性未确认。',
+  'share.copied': '已复制',
+  'share.failed': (v) => `分享失败：${v?.message ?? ''}`,
+  'share.configFailed': (v) => `无法读取分享目标：${v?.message ?? ''}`,
   'artifact.openLink': '打开链接',
   'common.na': '不适用',
   'common.server': '服务器',

@@ -12,6 +12,9 @@ const {
   secondaryReadWorkspaceFile,
   secondaryStat,
   workspaceByCwd,
+  artifactPublishConfig,
+  publishArtifact,
+  setWorkspaceSetting,
 } = vi.hoisted(() => ({
   readFileBytes: vi.fn(),
   stat: vi.fn(),
@@ -19,15 +22,27 @@ const {
   secondaryReadWorkspaceFile: vi.fn(),
   secondaryStat: vi.fn(),
   workspaceByCwd: vi.fn(),
+  artifactPublishConfig: vi.fn(),
+  publishArtifact: vi.fn(),
+  setWorkspaceSetting: vi.fn(),
 }));
 
 vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useWorkspaceActions: () => ({
     readFileBytes,
     stat,
+    artifactPublishConfig,
+    publishArtifact,
+    setWorkspaceSetting,
   }),
   useWorkspace: () => ({
-    actions: { readFileBytes, stat },
+    actions: {
+      readFileBytes,
+      stat,
+      artifactPublishConfig,
+      publishArtifact,
+      setWorkspaceSetting,
+    },
     client: { workspaceByCwd },
     capabilities: {
       workspaceCwd: '/primary',
@@ -100,6 +115,9 @@ afterEach(() => {
   secondaryReadWorkspaceFile.mockReset();
   secondaryStat.mockReset();
   workspaceByCwd.mockReset();
+  artifactPublishConfig.mockReset();
+  publishArtifact.mockReset();
+  setWorkspaceSetting.mockReset();
 });
 
 describe('TurnOutputs artifact downloads', () => {
@@ -637,6 +655,362 @@ describe('TurnOutputs artifact downloads', () => {
 
     act(() => open?.click());
     expect(onOpenArtifact).not.toHaveBeenCalled();
+
+    act(() => root.unmount());
+  });
+});
+
+describe('TurnOutputs artifact sharing', () => {
+  afterEach(() => {
+    window.localStorage.clear();
+    vi.unstubAllGlobals();
+  });
+
+  const renderArtifacts = (artifacts: DaemonSessionArtifact[]) => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TurnOutputs
+            turnId="turn-1"
+            workspaceCwd="/primary"
+            changes={[]}
+            artifacts={artifacts}
+            scheduledTasks={[]}
+            onReviewChanges={() => {}}
+            onOpenArtifact={() => {}}
+            onOpenScheduledTask={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+    return { container, root };
+  };
+
+  const shareButtons = (scope: ParentNode) =>
+    Array.from(scope.querySelectorAll('button')).filter(
+      (button) => button.textContent?.trim() === 'Share',
+    );
+
+  it.each([
+    [{ kind: 'html', workspacePath: 'output/report' }, true],
+    [{ kind: 'file', workspacePath: 'output/page.html' }, true],
+    [{ kind: 'file', workspacePath: 'output/page.HTML' }, true],
+    [{ kind: 'file', workspacePath: 'output/page.htm' }, true],
+    [
+      { kind: 'file', workspacePath: 'output/notes', mimeType: 'text/html' },
+      true,
+    ],
+    [{ kind: 'file', workspacePath: 'output/notes.md' }, false],
+    [{ kind: 'file', workspacePath: 'output/htmlish.txt' }, false],
+    [{ kind: 'image', workspacePath: 'output/chart.png' }, false],
+    [
+      { kind: 'file', workspacePath: 'output/data', mimeType: 'text/plain' },
+      false,
+    ],
+  ])('offers Share for %o only when it is HTML', (fields, shareable) => {
+    const { container, root } = renderArtifacts([
+      {
+        id: 'artifact-0',
+        storage: 'workspace',
+        status: 'available',
+        title: 'artifact',
+        ...fields,
+      } as DaemonSessionArtifact,
+    ]);
+
+    expect(shareButtons(container)).toHaveLength(shareable ? 1 : 0);
+
+    act(() => root.unmount());
+  });
+
+  it('hides Share for an artifact that is not readable from the workspace', () => {
+    const { container, root } = renderArtifacts([
+      {
+        id: 'artifact-pending',
+        kind: 'html',
+        storage: 'workspace',
+        status: 'pending',
+        title: 'pending report',
+        workspacePath: 'output/report.html',
+      } as DaemonSessionArtifact,
+    ]);
+
+    expect(shareButtons(container)).toHaveLength(0);
+
+    act(() => root.unmount());
+  });
+
+  const renderHtmlArtifact = () =>
+    renderArtifacts([
+      {
+        id: 'artifact-html',
+        kind: 'html',
+        storage: 'workspace',
+        status: 'available',
+        title: 'report',
+        workspacePath: 'output/report.html',
+      } as DaemonSessionArtifact,
+    ]);
+
+  const openShareDialog = async (container: ParentNode) => {
+    await act(async () => {
+      shareButtons(container)[0]?.click();
+    });
+  };
+
+  const setInput = (selector: string, value: string) => {
+    const input = document.body.querySelector<HTMLInputElement>(selector);
+    if (!input) throw new Error(`missing input ${selector}`);
+    const setter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )?.set;
+    setter?.call(input, value);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  };
+
+  const submitShare = async () => {
+    const form = document.body.querySelector('form');
+    await act(async () => {
+      form?.dispatchEvent(
+        new Event('submit', { bubbles: true, cancelable: true }),
+      );
+    });
+  };
+
+  it('publishes through the daemon and shows the returned link', async () => {
+    artifactPublishConfig.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/primary',
+      publisher: 'local',
+      endpoint: 'oss-cn-hangzhou.aliyuncs.com',
+      bucket: 'my-bucket',
+      keyPrefix: 'artifacts',
+      publicBaseUrl: '',
+      credentialsSource: 'env',
+    });
+    publishArtifact.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/primary',
+      id: 'abc123',
+      url: 'https://my-bucket.oss-cn-hangzhou.aliyuncs.com/artifacts/abc123/index.html',
+      reachable: true,
+      reachableStatus: 200,
+    });
+
+    const { container, root } = renderHtmlArtifact();
+    await openShareDialog(container);
+    await submitShare();
+
+    expect(publishArtifact).toHaveBeenCalledTimes(1);
+    expect(publishArtifact.mock.calls[0][0]).toMatchObject({
+      path: 'output/report.html',
+      remember: 'memory',
+      config: { endpoint: 'oss-cn-hangzhou.aliyuncs.com', bucket: 'my-bucket' },
+    });
+    // Key prefix and public base URL are no longer part of the dialog.
+    expect(publishArtifact.mock.calls[0][0].config).not.toHaveProperty(
+      'keyPrefix',
+    );
+    // Credentials came from the daemon environment, so none are sent.
+    expect(publishArtifact.mock.calls[0][0].config).not.toHaveProperty(
+      'accessKeyId',
+    );
+    // 'memory' must never touch the settings file.
+    expect(setWorkspaceSetting).not.toHaveBeenCalled();
+    expect(
+      document.body.querySelector<HTMLInputElement>('#share-result-url')?.value,
+    ).toBe(
+      'https://my-bucket.oss-cn-hangzhou.aliyuncs.com/artifacts/abc123/index.html',
+    );
+    expect(
+      document.body.querySelector('[data-share-reachability]')?.textContent,
+    ).toContain('publicly reachable');
+
+    act(() => root.unmount());
+  });
+
+  it('reports an upload whose link is not publicly reachable', async () => {
+    artifactPublishConfig.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/primary',
+      publisher: 'local',
+      endpoint: 'oss-cn-hangzhou.aliyuncs.com',
+      bucket: 'my-bucket',
+      keyPrefix: 'artifacts',
+      publicBaseUrl: '',
+      credentialsSource: 'env',
+    });
+    publishArtifact.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/primary',
+      id: 'abc123',
+      url: 'https://my-bucket.oss-cn-hangzhou.aliyuncs.com/artifacts/abc123/index.html',
+      reachable: false,
+      reachableStatus: 403,
+    });
+
+    const { container, root } = renderHtmlArtifact();
+    await openShareDialog(container);
+    await submitShare();
+
+    const note = document.body.querySelector(
+      '[data-share-reachability]',
+    )?.textContent;
+    expect(note).toContain('403');
+    expect(note).toContain('blocks public access');
+
+    act(() => root.unmount());
+  });
+
+  it('refuses to upload without any credential source', async () => {
+    artifactPublishConfig.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/primary',
+      publisher: 'local',
+      endpoint: 'oss-cn-hangzhou.aliyuncs.com',
+      bucket: 'my-bucket',
+      keyPrefix: 'artifacts',
+      publicBaseUrl: '',
+      credentialsSource: 'none',
+    });
+
+    const { container, root } = renderHtmlArtifact();
+    await openShareDialog(container);
+    await submitShare();
+
+    expect(publishArtifact).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain('No credentials available');
+
+    act(() => root.unmount());
+  });
+
+  it('sends typed credentials and keeps them out of any settings write', async () => {
+    artifactPublishConfig.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/primary',
+      publisher: 'local',
+      endpoint: '',
+      bucket: '',
+      keyPrefix: 'artifacts',
+      publicBaseUrl: '',
+      credentialsSource: 'none',
+    });
+    publishArtifact.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/primary',
+      id: 'abc123',
+      url: 'https://typed-bucket.example.com/artifacts/abc123/index.html',
+      reachable: true,
+      reachableStatus: 200,
+    });
+
+    const { container, root } = renderHtmlArtifact();
+    await openShareDialog(container);
+
+    setInput('#share-endpoint', 'oss-cn-beijing.aliyuncs.com');
+    setInput('#share-bucket', 'typed-bucket');
+    setInput('#share-access-key-id', 'ak-id');
+    setInput('#share-access-key-secret', 'ak-secret');
+    await submitShare();
+
+    expect(publishArtifact).toHaveBeenCalledTimes(1);
+    expect(publishArtifact.mock.calls[0][0]).toMatchObject({
+      remember: 'memory',
+      config: {
+        endpoint: 'oss-cn-beijing.aliyuncs.com',
+        bucket: 'typed-bucket',
+        accessKeyId: 'ak-id',
+        accessKeySecret: 'ak-secret',
+      },
+    });
+    // Sharing never writes settings; the daemon holds this for its lifetime.
+    expect(setWorkspaceSetting).not.toHaveBeenCalled();
+
+    act(() => root.unmount());
+  });
+
+  it('sends the public domain so the link is not the default OSS one', async () => {
+    artifactPublishConfig.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/primary',
+      publisher: 'local',
+      endpoint: 'oss-cn-beijing.aliyuncs.com',
+      bucket: 'qqqys',
+      keyPrefix: 'artifacts',
+      publicBaseUrl: '',
+      credentialsSource: 'env',
+    });
+    publishArtifact.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/primary',
+      id: 'abc123',
+      url: 'https://cdn.example.com/artifacts/abc123/index.html',
+      reachable: true,
+      reachableStatus: 200,
+    });
+
+    const { container, root } = renderHtmlArtifact();
+    await openShareDialog(container);
+
+    setInput('#share-public-base-url', 'https://cdn.example.com');
+    await submitShare();
+
+    expect(publishArtifact.mock.calls[0][0].config.publicBaseUrl).toBe(
+      'https://cdn.example.com',
+    );
+
+    act(() => root.unmount());
+  });
+
+  it('prefills the public domain the daemon already resolves', async () => {
+    artifactPublishConfig.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/primary',
+      publisher: 'local',
+      endpoint: 'oss-cn-beijing.aliyuncs.com',
+      bucket: 'qqqys',
+      keyPrefix: 'artifacts',
+      publicBaseUrl: 'https://cdn.example.com',
+      credentialsSource: 'env',
+    });
+
+    const { container, root } = renderHtmlArtifact();
+    await openShareDialog(container);
+
+    expect(
+      document.body.querySelector<HTMLInputElement>('#share-public-base-url')
+        ?.value,
+    ).toBe('https://cdn.example.com');
+    expect(
+      document.body.querySelector('[data-share-public-base-url-hint]')
+        ?.textContent,
+    ).toContain('download the page instead of opening it');
+
+    act(() => root.unmount());
+  });
+
+  it('tells the user the destination is only kept for this run', async () => {
+    artifactPublishConfig.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/primary',
+      publisher: 'local',
+      endpoint: 'oss-cn-hangzhou.aliyuncs.com',
+      bucket: 'my-bucket',
+      keyPrefix: 'artifacts',
+      publicBaseUrl: '',
+      credentialsSource: 'env',
+    });
+
+    const { container, root } = renderHtmlArtifact();
+    await openShareDialog(container);
+
+    expect(
+      document.body.querySelector('[data-share-storage-note]')?.textContent,
+    ).toContain('forgotten when it exits');
 
     act(() => root.unmount());
   });

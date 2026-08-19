@@ -10,17 +10,20 @@ import {
   FileVideoIcon,
   LinkIcon,
   NotebookTabsIcon,
+  Share2Icon,
   type LucideIcon,
 } from 'lucide-react';
 import { memo, useEffect, useRef, useState } from 'react';
 import { useI18n } from '../../i18n';
 import { extractErrorDetail } from '../../utils/errorDetail';
 import { describeCron } from '../dialogs/scheduledTasksSchedule';
+import { ShareArtifactDialog } from '../dialogs/ShareArtifactDialog';
 import {
   formatArtifactSize,
   downloadWorkspaceFile,
   getArtifactTypeLabel,
   getImageMimeTypeFromPath,
+  isHtmlArtifact,
   isSamePath,
   normalizePath,
   stripWorkspacePath,
@@ -152,6 +155,8 @@ function TurnOutputsComponent({
   const workspaceTarget = useArtifactWorkspaceTarget(workspaceCwd);
   const workspaceActions = workspaceTarget?.actions;
   const [showAllChanges, setShowAllChanges] = useState(false);
+  const [sharedArtifact, setSharedArtifact] =
+    useState<DaemonSessionArtifact | null>(null);
   if (
     changes.length === 0 &&
     artifacts.length === 0 &&
@@ -361,6 +366,11 @@ function TurnOutputsComponent({
                   )
               : undefined
           }
+          onShare={
+            canShareArtifact(artifact) && workspaceActions
+              ? () => setSharedArtifact(artifact)
+              : undefined
+          }
         />
       ))}
 
@@ -372,6 +382,15 @@ function TurnOutputsComponent({
           onOpen={() => openScheduledTask(task)}
         />
       ))}
+
+      {sharedArtifact?.workspacePath && workspaceActions && (
+        <ShareArtifactDialog
+          workspacePath={sharedArtifact.workspacePath}
+          title={sharedArtifact.title}
+          workspaceActions={workspaceActions}
+          onClose={() => setSharedArtifact(null)}
+        />
+      )}
     </div>
   );
 }
@@ -380,11 +399,13 @@ function ArtifactCard({
   artifact,
   onOpen,
   onDownload,
+  onShare,
   onError,
 }: {
   artifact: DaemonSessionArtifact;
   onOpen?: () => void;
   onDownload?: (isCancelled: () => boolean) => Promise<void>;
+  onShare?: () => void;
   onError?: (error: unknown, fallback: string) => void;
 }) {
   const { t } = useI18n();
@@ -461,6 +482,17 @@ function ArtifactCard({
           >
             {t('common.open')}
           </button>
+          {onShare && (
+            <button
+              type="button"
+              className={styles.reviewButton}
+              onClick={onShare}
+              title={`${t('share.action')} ${downloadName}`}
+            >
+              <Share2Icon size={16} strokeWidth={1.8} aria-hidden="true" />
+              {t('share.action')}
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -685,6 +717,10 @@ export function getWorkspaceArtifactOpenBlockReason(
   return artifact.workspacePath
     ? t('turnOutputs.artifactUnavailable', { path: artifact.workspacePath })
     : t('turnOutputs.artifactMissing');
+}
+
+function canShareArtifact(artifact: DaemonSessionArtifact): boolean {
+  return canDownloadArtifact(artifact) && isHtmlArtifact(artifact);
 }
 
 export function displayPath(path: string, workspaceCwd?: string) {
