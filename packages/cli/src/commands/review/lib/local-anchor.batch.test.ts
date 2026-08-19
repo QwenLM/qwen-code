@@ -17,7 +17,19 @@ import { join } from 'node:path';
 const gitOpt = vi.fn<(...args: string[]) => string | null>();
 vi.mock('./git.js', () => ({
   gitOpt: (...args: string[]) => gitOpt(...args),
-  gitWithInput: vi.fn(() => 'link-oid'),
+  // Two consumers, told apart by the command: `hash-object --stdin` for a
+  // symlink's link text, `check-attr` for the rendering attributes. Without
+  // the second these tests would exercise the unknown-attributes fallback
+  // rather than the batching they are about.
+  gitWithInput: vi.fn((input: Buffer, args: string[]) =>
+    args.includes('check-attr')
+      ? String(input)
+          .split('\0')
+          .filter((p) => p !== '')
+          .map((p) => `${p}\0diff\0unspecified\0`)
+          .join('')
+      : 'link-oid',
+  ),
 }));
 
 import { hashWorktreeFiles, UNHASHABLE } from './local-anchor.js';
@@ -53,7 +65,8 @@ describe('hashWorktreeFiles — batching', () => {
     answerBatches();
     const out = hashWorktreeFiles(dir, paths);
     expect(Object.keys(out)).toHaveLength(201);
-    for (const p of paths) expect(out[p]).toBe(`100644:oid-${p}`);
+    for (const p of paths)
+      expect(out[p]).toBe(`100644:oid-${p}:diff=unspecified`);
     const batchSizes = gitOpt.mock.calls.map(
       (c) => c.slice(c.indexOf('--') + 1).length,
     );
@@ -73,7 +86,7 @@ describe('hashWorktreeFiles — batching', () => {
     const out = hashWorktreeFiles(dir, paths.slice(0, 10));
     expect(batchCalls).toBe(1);
     expect(out['f007.txt']).toBe(UNHASHABLE);
-    expect(out['f003.txt']).toBe('100644:oid-f003.txt');
+    expect(out['f003.txt']).toBe('100644:oid-f003.txt:diff=unspecified');
   });
 
   it('a mismatched batch reply (wrong line count) also takes the fallback', () => {
@@ -83,6 +96,7 @@ describe('hashWorktreeFiles — batching', () => {
       return `oid-${files[0]}`;
     });
     const out = hashWorktreeFiles(dir, paths.slice(0, 3));
-    for (const p of paths.slice(0, 3)) expect(out[p]).toBe(`100644:oid-${p}`);
+    for (const p of paths.slice(0, 3))
+      expect(out[p]).toBe(`100644:oid-${p}:diff=unspecified`);
   });
 });

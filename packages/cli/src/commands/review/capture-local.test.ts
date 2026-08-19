@@ -108,7 +108,7 @@ describe('capture-local (command boundary)', () => {
     expect(readFileSync(plan.diffPathAbsolute, 'utf8')).toBe(DIFF);
   });
 
-  it('refuses to write the candidate through a symlinked `.qwen/tmp`', () => {
+  it('drops the candidate — not the round — on a symlinked `.qwen/tmp`', () => {
     // `noFollow` guards only the final element, and this path is
     // deterministic and in-repo: a contributor branch can commit `.qwen/tmp`
     // as a link (gitignore does not stop `git add -f`), and the atomic
@@ -122,9 +122,19 @@ describe('capture-local (command boundary)', () => {
     symlinkSync(elsewhere, join(dir, '.qwen', 'tmp'));
     try {
       capture();
-      expect(() => run(join(dir, 'plan.json'))).toThrow(
-        /resolves to .*Refusing/s,
-      );
+      // The round COMPLETES — the guard costs the anchor, not the review.
+      // Letting it throw exited non-zero with no plan, no report and no diff
+      // after the capture, the hashing and the plan were all already done.
+      run(join(dir, 'plan.json'));
+      const plan = JSON.parse(
+        readFileSync(join(dir, 'plan.json'), 'utf8'),
+      ) as Record<string, unknown>;
+      expect(plan['diffPath']).toBeTruthy();
+      // …and says so, with the field ABSENT rather than naming a file this
+      // run refused to write: Step 8 branches on its presence, so a silent
+      // drop would send it promoting an earlier round's candidate.
+      expect(plan['cacheCandidatePath']).toBeUndefined();
+      expect(errs.join('\n')).toContain('Could not write the cache candidate');
       // Nothing was written through the link.
       expect(
         existsSync(join(elsewhere, 'qwen-review-local-cache-candidate.json')),

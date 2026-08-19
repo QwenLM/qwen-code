@@ -66,21 +66,19 @@ function readJsonObject(path: string, what: string): Record<string, unknown> {
 /** The candidate-owned fields — the ONLY keys a candidate may contribute.
  *  Everything else in a candidate file is ignored: an allowlist, so a
  *  tampered candidate cannot smuggle `round`, `verdict` or `findings` past
- *  the ledger, exactly as the ledger cannot overwrite the anchor. */
+ *  the ledger, exactly as the ledger cannot overwrite the anchor.
+ *
+ *  This list is the one place that decides what survives promotion, so a
+ *  field added on the producer side has to be added HERE too — a candidate
+ *  field the local flow wrote and this list omitted was silently dropped,
+ *  and the next round's gate then refused its own anchor for ever, blaming
+ *  a stale cache format. */
 const CANDIDATE_FIELDS = [
   'v',
   'target',
   'headSha',
   'files',
   'stateId',
-  // The local flow's attribute-state digest. Omitting it did not merely lose
-  // a field: `anchorRefusalReason` treats an absent `attrId` as a mismatch —
-  // deliberately, so a cache written before the digest cannot be read as "no
-  // attribute state" — so every promoted local cache refused its own anchor
-  // for ever, under a message blaming a stale cache format. The allowlist is
-  // the ONE place that decides what survives promotion, which is exactly why
-  // a field added on the producer side has to be added here too.
-  'attrId',
   'lastCommitSha',
   'mergeBaseSha',
   'fileVerdicts',
