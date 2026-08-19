@@ -180,9 +180,14 @@ describe('fetchProviderModelIds', () => {
     const [url, options] = fetchWithPolicyMock.mock.calls[0];
     expect(url).toBe('https://token-plan.example/compatible-mode/v1/models');
     expect(options.headers['Authorization']).toBe('Bearer sk-test');
+    expect(options.headers['Accept']).toBe('application/json');
     // The signal is the only wire for the wizard's unmount/re-key abort.
     expect(options.signal).toBe(controller.signal);
     expect(options.timeoutMs).toBe(MODEL_DISCOVERY_TIMEOUT_MS);
+    // Pin the budget itself, not just the wiring: the constant is short on
+    // purpose because the user is watching the model step while it runs, and
+    // comparing it against itself would let any value ship green.
+    expect(MODEL_DISCOVERY_TIMEOUT_MS).toBe(5_000);
     // 403 is classified as deterministic here, so the transport must not
     // re-send the request behind discovery's back.
     expect(options.retryTransientStatuses).toBe(false);

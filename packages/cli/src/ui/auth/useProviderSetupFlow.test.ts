@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import {
   CODING_PLAN_CHINA_BASE_URL,
+  CODING_PLAN_GLOBAL_BASE_URL,
   codingPlanProvider,
   openRouterProvider,
 } from '@qwen-code/qwen-code-core';
@@ -375,6 +376,133 @@ describe('useProviderSetupFlow model discovery', () => {
     await reenterModelStep(result, 'sk-sp-second-key');
     await waitFor(() =>
       expect(result.current.state.modelIds).toBe('region-b-live'),
+    );
+  });
+
+  it('does not record the fallback pick as authored when the step syncs an edit', async () => {
+    // Both catalogs are disjoint from the built-ins, so each pair prunes the
+    // selection empty and falls back to its own first live model.
+    fetchProviderModelIdsMock.mockResolvedValueOnce(
+      discovered(['region-a-preview']),
+    );
+    fetchProviderModelIdsMock.mockResolvedValueOnce(
+      discovered(['region-b-live']),
+    );
+
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+    await advanceToModelStep(result);
+    await waitFor(() =>
+      expect(result.current.state.modelIds).toBe('region-a-preview'),
+    );
+
+    // The step composes the custom input with every checked recommendation and
+    // syncs the whole selection back, so the wizard's fallback rides along on
+    // an edit that only typed `my-id`.
+    act(() => result.current.changeModelIds('my-id, region-a-preview'));
+
+    await reenterModelStep(result, 'sk-sp-second-key');
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('success'),
+    );
+    // Recorded as authored, the fallback would survive pair B's prune (it is
+    // not a built-in) and suppress pair B's own fallback.
+    expect(result.current.state.modelIds).toBe('my-id');
+  });
+
+  it('does not bake a pruned built-in out of the baseline on an edit', async () => {
+    fetchProviderModelIdsMock.mockResolvedValueOnce(discovered(SERVED_IDS));
+    fetchProviderModelIdsMock.mockResolvedValueOnce(discovered(BUILT_IN_IDS));
+
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+    await advanceToModelStep(result);
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('success'),
+    );
+    expect(result.current.state.modelIds).not.toContain(RETIRED_ID);
+
+    // One ordinary keystroke in the custom-ids input. The step syncs the whole
+    // composed selection, which by now is missing the id pair A retired.
+    const displayed = result.current.state.modelIds;
+    act(() => result.current.changeModelIds(`${displayed}, my-id`));
+
+    await reenterModelStep(result, 'sk-sp-second-key');
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('success'),
+    );
+    // Pair B serves the whole built-in list, and a prune can only remove ids —
+    // so the baseline is the only thing that can bring the retired id back.
+    expect(result.current.state.modelIds).toContain(RETIRED_ID);
+    expect(result.current.state.modelIds).toContain('my-id');
+  });
+
+  it('remounts the model step when a cache hit prunes the selection', async () => {
+    fetchProviderModelIdsMock.mockResolvedValue(discovered(SERVED_IDS));
+
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+    await advanceToModelStep(result);
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('success'),
+    );
+    expect(result.current.state.recommendedModelsRevision).toBe(1);
+
+    // The user types an id this endpoint no longer serves into the custom
+    // input, then leaves the step without submitting.
+    act(() =>
+      result.current.changeModelIds(
+        `${result.current.state.modelIds}, ${RETIRED_ID}`,
+      ),
+    );
+    act(() => {
+      result.current.goBack();
+    });
+    // Editing the key off-step releases the pair without replacing the list,
+    // so returning to it is served from the cache with the very same array.
+    act(() => result.current.changeApiKey('sk-sp-other-key'));
+    act(() => result.current.changeApiKey('sk-sp-test-key'));
+    await act(async () => {
+      result.current.submitApiKey('sk-sp-test-key');
+    });
+    await waitFor(() => expect(result.current.state.step).toBe('models'));
+
+    expect(fetchProviderModelIdsMock).toHaveBeenCalledTimes(1);
+    expect(result.current.state.modelIds).not.toContain(RETIRED_ID);
+    // Without the bump the mounted step keeps showing the retired id in its
+    // custom input, and submitting re-merges it back in.
+    await waitFor(() =>
+      expect(result.current.state.recommendedModelsRevision).toBe(2),
+    );
+  });
+
+  it('re-requests when the region changes under the same key', async () => {
+    fetchProviderModelIdsMock.mockResolvedValue(discovered(SERVED_IDS));
+
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+    await advanceToModelStep(result);
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('success'),
+    );
+    expect(fetchProviderModelIdsMock).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      result.current.goBack();
+    });
+    act(() => {
+      result.current.goBack();
+    });
+    expect(result.current.state.step).toBe('baseUrl');
+    act(() => result.current.selectBaseUrl(CODING_PLAN_GLOBAL_BASE_URL));
+    await act(async () => {
+      result.current.submitApiKey('sk-sp-test-key');
+    });
+    await waitFor(() => expect(result.current.state.step).toBe('models'));
+
+    // The other region is a different endpoint: its catalog is not the one the
+    // China entry answered with, so the pair key must not collapse to the key.
+    await waitFor(() =>
+      expect(fetchProviderModelIdsMock).toHaveBeenCalledTimes(2),
+    );
+    expect(fetchProviderModelIdsMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({ baseUrl: CODING_PLAN_GLOBAL_BASE_URL }),
     );
   });
 

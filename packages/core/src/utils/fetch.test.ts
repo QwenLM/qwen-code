@@ -370,19 +370,48 @@ describe('fetchWithPolicy retry', () => {
     },
   );
 
-  it('does not retry 403/429 when the caller opts out', async () => {
+  it.each([403, 429])(
+    'does not retry %i when the caller opts out',
+    async (status) => {
+      let calls = 0;
+      globalThis.fetch = vi.fn(async () => {
+        calls++;
+        return new Response('blocked', { status });
+      }) as typeof fetch;
+
+      const result = await fetchWithPolicy(
+        'https://example.com/deterministic',
+        { ...opts, retryTransientStatuses: false },
+      );
+      expect(calls).toBe(1);
+      if (result.kind === 'response') expect(result.status).toBe(status);
+    },
+  );
+
+  it('still retries a connection reset when the caller opts out', async () => {
+    // The opt-out is about status codes only. A reset means the request never
+    // got an answer, so the single retry that recovers it stays in force.
     let calls = 0;
     globalThis.fetch = vi.fn(async () => {
       calls++;
-      return new Response('blocked', { status: 403 });
+      if (calls === 1) {
+        const err = new TypeError('fetch failed') as TypeError & {
+          cause?: unknown;
+        };
+        err.cause = Object.assign(new Error('socket hang up'), {
+          code: 'ECONNRESET',
+        });
+        throw err;
+      }
+      return new Response('ok', { status: 200 });
     }) as typeof fetch;
 
-    const result = await fetchWithPolicy('https://example.com/deterministic', {
+    const result = await fetchWithPolicy('https://example.com/reset-opt-out', {
       ...opts,
       retryTransientStatuses: false,
     });
-    expect(calls).toBe(1);
-    if (result.kind === 'response') expect(result.status).toBe(403);
+    expect(calls).toBe(2);
+    if (result.kind === 'response') expect(result.status).toBe(200);
   });
 
   it('does not retry deterministic statuses like 404', async () => {

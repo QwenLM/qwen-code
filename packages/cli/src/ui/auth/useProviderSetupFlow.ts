@@ -168,6 +168,45 @@ export function useProviderSetupFlow(
   // displayed list actually changes without taking the state as a dependency
   // (which would re-run the effect on its own result).
   const discoveredModelsRef = useRef<ModelSpec[] | null>(null);
+  // Mirrors `modelIds` — the selection the model step currently shows. An edit
+  // arrives as the whole composed selection, so recording it as authored needs
+  // the previous one to tell the user's delta from what discovery had already
+  // done to it.
+  const displayedModelIdsRef = useRef('');
+  // The id `applyDiscoveredModels` checked on the user's behalf when the prune
+  // emptied the selection. It is the wizard's pick, so it is stripped back out
+  // of any edit before that edit becomes the authored baseline.
+  const injectedModelIdRef = useRef<string | null>(null);
+
+  const setDisplayedModelIds = useCallback((value: string) => {
+    displayedModelIdsRef.current = value;
+    setModelIds(value);
+  }, []);
+
+  /**
+   * Record a model-step edit as authorship. The step hands over the whole
+   * composed selection, which by then also carries discovery's own edits: ids
+   * the prune removed are absent and the fallback the wizard checked is
+   * present. Recording that verbatim would bake this pair's endpoint into the
+   * baseline, so the edit is applied to the baseline as a delta against what
+   * was on screen instead — ids the user never saw stay untouched, and the
+   * wizard's fallback never reads as typed.
+   */
+  const recordAuthoredModelIds = useCallback((value: string) => {
+    const injected = injectedModelIdRef.current;
+    const strip = (ids: string[]) =>
+      injected === null ? ids : ids.filter((id) => id !== injected);
+    const before = strip(normalizeModelIds(displayedModelIdsRef.current));
+    const after = strip(normalizeModelIds(value));
+    const removed = new Set(before.filter((id) => !after.includes(id)));
+    const authored = normalizeModelIds(authoredModelIdsRef.current).filter(
+      (id) => !removed.has(id),
+    );
+    for (const id of after) {
+      if (!authored.includes(id)) authored.push(id);
+    }
+    authoredModelIdsRef.current = authored.join(', ');
+  }, []);
 
   const currentStep = visibleSteps[stepIndex] ?? null;
 
@@ -178,6 +217,7 @@ export function useProviderSetupFlow(
     discoveryAbortRef.current = null;
     discoveryKeyRef.current = null;
     discoveredModelsRef.current = null;
+    injectedModelIdRef.current = null;
     setDiscoveredModels(null);
     setDiscoveryStatus('idle');
   }, []);
@@ -185,17 +225,23 @@ export function useProviderSetupFlow(
   /**
    * Swap the recommendation list the model step renders. The revision bump is
    * what remounts `ModelIdsStep` so its checkbox and custom-input state is
-   * re-derived; it is skipped when the list is unchanged, because a spurious
-   * remount would wipe the user's in-progress search and focus for nothing.
+   * re-derived; it is skipped when neither the list nor the selection changed,
+   * because a spurious remount would wipe the user's in-progress search and
+   * focus for nothing. A cache hit re-serves the same list yet can still prune
+   * the selection, and the step derives its checkboxes only at mount — so the
+   * caller passes `selectionChanged` for that case.
    */
-  const replaceRecommendations = useCallback((models: ModelSpec[] | null) => {
-    const previous = discoveredModelsRef.current;
-    discoveredModelsRef.current = models;
-    setDiscoveredModels(models);
-    if (previous !== models) {
-      setRecommendedModelsRevision((revision) => revision + 1);
-    }
-  }, []);
+  const replaceRecommendations = useCallback(
+    (models: ModelSpec[] | null, selectionChanged = false) => {
+      const previous = discoveredModelsRef.current;
+      discoveredModelsRef.current = models;
+      setDiscoveredModels(models);
+      if (previous !== models || selectionChanged) {
+        setRecommendedModelsRevision((revision) => revision + 1);
+      }
+    },
+    [],
+  );
 
   // Abort an in-flight lookup when the dialog goes away — nothing is left to
   // render its result into.
@@ -203,9 +249,6 @@ export function useProviderSetupFlow(
 
   const applyDiscoveredModels = useCallback(
     (config: ProviderConfig, models: ModelSpec[]) => {
-      replaceRecommendations(models);
-      setDiscoveryStatus('success');
-
       // Drop built-in ids the endpoint no longer serves from the pending
       // selection — leaving them checked would install exactly the stale
       // entries discovery exists to avoid. An unserved built-in id is dropped
@@ -224,10 +267,17 @@ export function useProviderSetupFlow(
       // baseline: carried into the next pair it would read as a typed id,
       // survive a prune the endpoint does not serve it through, and suppress
       // that pair's own fallback.
-      if (kept.length === 0 && models[0]) kept.push(models[0].id);
-      setModelIds(kept.join(', '));
+      injectedModelIdRef.current = null;
+      if (kept.length === 0 && models[0]) {
+        injectedModelIdRef.current = models[0].id;
+        kept.push(models[0].id);
+      }
+      const next = kept.join(', ');
+      replaceRecommendations(models, next !== displayedModelIdsRef.current);
+      setDiscoveryStatus('success');
+      setDisplayedModelIds(next);
     },
-    [replaceRecommendations],
+    [replaceRecommendations, setDisplayedModelIds],
   );
 
   useEffect(() => {
@@ -279,7 +329,8 @@ export function useProviderSetupFlow(
     // prune in place would show the full built-in list over a selection
     // missing ids from it — and if this pair's lookup fails, nothing else
     // ever re-derives the selection.
-    setModelIds(authoredModelIdsRef.current);
+    injectedModelIdRef.current = null;
+    setDisplayedModelIds(authoredModelIdsRef.current);
     setDiscoveryStatus('loading');
 
     void (async () => {
@@ -323,6 +374,7 @@ export function useProviderSetupFlow(
     apiKey,
     applyDiscoveredModels,
     replaceRecommendations,
+    setDisplayedModelIds,
   ]);
 
   // -- Lifecycle ------------------------------------------------------------
@@ -370,7 +422,8 @@ export function useProviderSetupFlow(
       const customIds = existingModelIds ?? [];
       const initialModelIds = [...defaultIds, ...customIds].join(', ');
       authoredModelIdsRef.current = initialModelIds;
-      setModelIds(initialModelIds);
+      injectedModelIdRef.current = null;
+      setDisplayedModelIds(initialModelIds);
       setModelIdsError(null);
       setThinkingEnabled(false);
       setModalityEnabled(false);
@@ -382,7 +435,7 @@ export function useProviderSetupFlow(
       setFocusedConfigIndex(0);
       resetDiscovery();
     },
-    [resetDiscovery],
+    [resetDiscovery, setDisplayedModelIds],
   );
 
   const reset = useCallback(() => {
@@ -515,11 +568,14 @@ export function useProviderSetupFlow(
     [provider],
   );
 
-  const changeModelIds = useCallback((value: string) => {
-    authoredModelIdsRef.current = value;
-    setModelIds(value);
-    setModelIdsError(null);
-  }, []);
+  const changeModelIds = useCallback(
+    (value: string) => {
+      recordAuthoredModelIds(value);
+      setDisplayedModelIds(value);
+      setModelIdsError(null);
+    },
+    [recordAuthoredModelIds, setDisplayedModelIds],
+  );
 
   const submitModelIds = useCallback(
     (overrides?: Partial<ProviderSetupInputs>): boolean => {
@@ -528,13 +584,16 @@ export function useProviderSetupFlow(
         setModelIdsError(t('Model IDs cannot be empty.'));
         return false;
       }
-      authoredModelIdsRef.current = normalized.join(', ');
-      setModelIds(authoredModelIdsRef.current);
+      const submitted = normalized.join(', ');
+      recordAuthoredModelIds(submitted);
+      // What is installed is the selection on screen, pruned; the baseline
+      // above only decides what a later pair change restores.
+      setDisplayedModelIds(submitted);
       setModelIdsError(null);
       submitOrNext({ ...overrides, modelIds: normalized });
       return true;
     },
-    [modelIds, submitOrNext],
+    [modelIds, recordAuthoredModelIds, setDisplayedModelIds, submitOrNext],
   );
 
   const advancedOptionCount = modalityEnabled ? 7 : 3;
