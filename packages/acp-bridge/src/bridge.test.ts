@@ -26439,6 +26439,18 @@ describe('createAcpSessionBridge', () => {
         displayName: 'Same title',
         titleSource: 'auto',
       });
+
+      await vi.waitFor(() => expect(titleUpdates).toHaveLength(1));
+      expect(titleUpdates[0]).toMatchObject({
+        displayName: 'Same title',
+        titleSource: 'auto',
+      });
+      const automatic = await bridge.loadSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+      });
+      expect(automatic.titleSource).toBe('auto');
+
       bridge.updateSessionMetadata(session.sessionId, {
         displayName: 'Same title',
       });
@@ -26487,8 +26499,17 @@ describe('createAcpSessionBridge', () => {
     });
 
     it('seeds known and unknown title sources on cold restore (#8977)', async () => {
+      const titleUpdates: unknown[] = [];
       const bridge = makeBridge({
-        channelFactory: async () => makeChannel().channel,
+        channelFactory: async () =>
+          makeChannel({
+            extMethodImpl: (method, params) => {
+              if (method === SERVE_CONTROL_EXT_METHODS.sessionTitle) {
+                titleUpdates.push(params);
+              }
+              return { persisted: true };
+            },
+          }).channel,
       });
 
       const restored = await bridge.loadSession({
@@ -26520,6 +26541,21 @@ describe('createAcpSessionBridge', () => {
       });
       expect(legacy.displayName).toBe('Legacy name');
       expect(legacy.titleSource).toBeUndefined();
+
+      const renamed = bridge.updateSessionMetadata(legacy.sessionId, {
+        displayName: 'Legacy name',
+      });
+      expect(renamed.titleSource).toBe('manual');
+      await vi.waitFor(() => expect(titleUpdates).toHaveLength(1));
+      expect(titleUpdates[0]).toMatchObject({
+        displayName: 'Legacy name',
+        titleSource: 'manual',
+      });
+      const reloaded = await bridge.loadSession({
+        sessionId: legacy.sessionId,
+        workspaceCwd: WS_A,
+      });
+      expect(reloaded.titleSource).toBe('manual');
 
       await bridge.shutdown();
     });

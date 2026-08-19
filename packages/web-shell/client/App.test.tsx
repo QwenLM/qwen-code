@@ -10331,6 +10331,46 @@ describe('App session callbacks', () => {
     });
   });
 
+  it('keeps the manual name when lazy session creation is retried (#8977)', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockConnection.titleSource = 'manual';
+    mockConnection.displayName = 'My manual name';
+    mockSessionActions.createSession
+      .mockRejectedValueOnce(new Error('session creation failed'))
+      .mockImplementationOnce(async () => {
+        mockConnection.sessionId = 'session-2';
+        return { sessionId: 'session-2' };
+      });
+    renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/clear');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+      });
+    });
+    mockConnection.sessionId = undefined;
+    mockConnection.displayName = undefined;
+    mockConnection.titleSource = undefined;
+
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('first attempt');
+    });
+    await flush();
+    expect(mockSessionActions.renameSession).not.toHaveBeenCalled();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('retry');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.renameSession).toHaveBeenCalledWith(
+          'My manual name',
+          { silent: true },
+        );
+      });
+    });
+  });
+
   it('keeps a manual session name across a repeated /clear (#8977)', async () => {
     mockConnection.titleSource = 'manual';
     mockConnection.displayName = 'My manual name';
