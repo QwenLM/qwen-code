@@ -1169,27 +1169,63 @@ jCELOKOvOESV6kWBGUcrj8rcXoaF3BABInxZURGMRqWuivfYSjkGj65Trf2sVCXS
 -----END CERTIFICATE-----
 `;
 
-// Self-signed, but its only SAN is a name the worker never dials — the
-// classic `openssl req -x509 -subj "/CN=localhost"` cert. Not a real secret.
+// Self-signed CA, but its only SAN is a name the worker never dials — issued
+// with `-addext "subjectAltName=DNS:example.invalid"`. Not a real secret.
+// A CN-only cert is NOT this shape: `openssl req -x509 -subj "/CN=localhost"`
+// emits no SAN at all, and Node then falls back to the CN and authorizes the
+// handshake — so regenerating from that recipe would silently drop the gap
+// these tests exist to pin.
 const TEST_TLS_CERT_NO_LOOPBACK_SAN = `-----BEGIN CERTIFICATE-----
-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
+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
 -----END CERTIFICATE-----
+`;
+
+// The key `TEST_TLS_CERT_NO_LOOPBACK_SAN` pairs with, so the SAN gap can be
+// reproduced through a real boot on IPv4 rather than only in-process.
+const TEST_TLS_KEY_NO_LOOPBACK_SAN = `-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDHHyq4qu8+9YSv
+ZxTQSt6C/cbo79+S1D0KrZTVRAMSVkyH58yXuG2TE99OGLIsvZt/ab5Fw2ZWSFiW
+L70yETE0yTlu/6eNTUnUYwFBohpmmeEe0QHRtGWl5pB6dsPgH2uM9gxK/0wtzfIr
+Xa2B1Ubd/A3y+jPuOe4YmMlN8xhRvYGyqc2ECesac39AUUu4zaqueRzqt9+SnHfa
+R/Rz/f3FvUzdGpm0d31uxpmdQI9CVaY0hFB20EXJAKyuVb5+9WO1dbBHuuvJU0gA
+besPi6Ep0DkVAj2tPjiXZQveXW3gDJHbot5AeXAcpC1pDNwP3d/zIdHZbrMeCfat
+b0lzW7ddAgMBAAECggEADaZt+qQtK8xk636jh0vlSRGLQI4BGO2tFD2mBaCt8o8x
+Ro0gvLM16m6NplWRu/jGNMvTnAYIeUMTCj384vZuwHGdmvsHn2t8SNpTTGPdGh9+
+YUButtN+YbXBPcPv1ZNnKg32oHAz5rKcNquAqMqCxdZGQTE0Z3utKMkrM57F51nO
+w+R74lkXMWUAPtiSPL2jmTjIFoST6i5KIQlUhvGtSPyyyiFD/gDwPiQPoiOtQEaw
+T+XapvLNo+fpaNmgPSrBLXlNXvMnnNhjMKTlA9EBHGFC2IxIcoBeTmg9F3U0fdOB
+ugtlNVoNV0fUu06hxUWzDorYScEA16ZBlY2XFIdAAQKBgQDly4HLpKdLPd0GmreT
+Aaw15vA7fuvvaMb8gS++NA6SuT5/szsnsgmO73r4wpeaTepYDv8X+HG4fIEaqKTV
+lKy0KrKlYxMPWcwHuIZ8vagB68kdTGkOtq3dZ9b/HMgTnhFFUzVE7LlOEXt15z45
+B/SMR7TGhrwwynGpmTYuO5ffXQKBgQDd1DSEngdT7zDWGwzgfWVvX8Ssu+ACUPzb
+iJw03dbJ+wWYUDMMsxiFXITtRjRx5kDNJPql0JsloKq5wIg9IIMNqbHS7Dkro+nd
+kVRmQ5EPQ/h9RXAjS05mulTUqlsev35YLsnzshQVqNsRqc5/3BDQv/HqlNYlS44M
+0H/0nY24AQKBgHX07e6D2aBE5DUkrEDY5fZRUlWoBCJDrYkmI0TGYgis8EkKzr3E
+pSVrBru0369EeZu0Lvu1+2IQ/xCZKuu7wp9FH6jH35vMo2//J4HWtOwvhW/1riPw
+X/U7/V+8/XMce48TdE+qGEDbtn1CM22BCOYNVN1ngiilcoz1aZt32bC9AoGATTsR
+Yc6nHHjdVt2qGQpvY1xDXCQ49HV/42rnf5xwqHel1gauD1DXS68PdJCJt9IDY6jp
+PwumyG3soqk+hZGpLvuStq2ZpfD2fjaX3NbPTTJL9ElVpmQUkr1yxWveN5FSCp+X
+nim0xmm4g6jMBUX38MWzEwnomKl6dkmtEtw7uAECgYEAh6xgjebA4n9vvKFeRvzH
+sfk2fwlnUGnqLmSwTHJX7raeBF+tsNgImKSHVSfKNuADxbITMj08efkvOZjZD/wB
+7sThxaEfOiVcfL70b6ib1yJlRFpMISYKxYULIEPGEkIkRvKhrlZM11Nu9uGG21iX
+dyDrncb+W7X61y5TGw19J1Y=
+-----END PRIVATE KEY-----
 `;
 
 // Self-signed and covering `::1` via an iPAddress SAN — the shape a daemon
@@ -1402,6 +1438,76 @@ b29oLD570mOcEx8MpOOnjuJfYxnBzZigkhZq6VLh27A64hgxQhKAoySGxGDjN+C1
 Zw3xJnGWe7k7KvOPWMsbVYH1D0QCeUlzqWSmAl3L+e42OynIvOnKj6Vuh4/SxVdX
 kBv3KlcMXmaGVC8AEo/M5Zzfkq/a+IC3aVYvhQPOkv1ByeObs5+Sjy2mKb2sNqU8
 sxyEYG5sNF7HPXac1j3PqROJ8O1X1lpXWyd2MChHhhCnFCteAQ==
+-----END CERTIFICATE-----
+`;
+
+/**
+ * leaf <- intermediate with an explicit `basicConstraints CA:FALSE` <- CA:TRUE
+ * self-signed root. Chain geometry is complete and the terminator IS a CA, so
+ * every check short of issuer capability blesses it. Measured on Node 22 /
+ * OpenSSL 3 with a real `tls.createServer`/`tls.connect` handshake using this
+ * exact file as both the served chain and the trust store:
+ * `authorized=false code=INVALID_PURPOSE`.
+ */
+const TEST_TLS_CERT_FULLCHAIN_NON_CA_INTERMEDIATE = `-----BEGIN CERTIFICATE-----
+MIIDNjCCAh6gAwIBAgIUefcAWISh+F6Emetu1Y++2m4bKd8wDQYJKoZIhvcNAQEL
+BQAwKDEmMCQGA1UEAwwdcXdlbiBub24tQ0EgdGVzdCBpbnRlcm1lZGlhdGUwHhcN
+MjYwODE5MDIyNzIzWhcNNDYwODE0MDIyNzIzWjAUMRIwEAYDVQQDDAlsb2NhbGhv
+c3QwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQCk3+570b8ulBlD9+nk
+AEuH5T4ptxIpEF1ICep6Lr6E+4a3e36Xw8Dj3pWLcbTzE2cWatxeBOfsxzAPTjPA
+ijHfn/7l4uEdj2VO2wdaCx+KnTY3dBDfcugsQJD1x3sRYaI2lEbql9dzlUQsoBFS
+vfOJvKAAf8ld2prnEgwK4iL8SXQxGpiRHRZxZSX5BD3hY9qNHPUg5UbxF/3bqeFd
+WRlw5clo+KmrIXZT/jpEaCUsJV4AsvzBa4T1lgfi1bXfJc13UcVuKSAdZwVBg86I
+ULLK/Tm6GxuCE5tz0mAIdVlHgLg0nZRRBqT+uCSpfYyM3ZjBntExCJVLtnpomHIL
+8YWRAgMBAAGjbDBqMBoGA1UdEQQTMBGCCWxvY2FsaG9zdIcEfwAAATAMBgNVHRMB
+Af8EAjAAMB0GA1UdDgQWBBRXeK7yvKdpEUq/SBpScRyrdPU91TAfBgNVHSMEGDAW
+gBSs7k1wDaAA+5+e9J7OaevGnakJ7TANBgkqhkiG9w0BAQsFAAOCAQEApurke98w
+xA8lUbXQUiqJ+7e5p2OeBmBklQ5ugac78ChVB60BQA4/eVQGKGU66FcbE4I9o0+6
+fbSwa8tZBF4VxDB++jF/m4v4UgldmxFSOq+zLuBdCcdvE4QDK32R+6B31qiNbaqw
+rDeT3cyugIHWz+gMt+X40HRoIHYHwvdEMgYh6xudQxycsqQNklkUsAMlEAMBGEp4
+TkiudWy9u1JbAAfrJ4SlR9BL7IlsgFK/xFntyDK4eFxC2cYPx/gayFBod/4W/msB
+KeYjaUsUyzO/D883ox2WMIFtYDIMLySoEcBro3y92MR8ncLRKk7wByZAhNXtYKCb
+g+/g99FTckehrQ==
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDMzCCAhugAwIBAgIUIqd02dCREIdTnnN3wt3E0a9Zcb8wDQYJKoZIhvcNAQEL
+BQAwLTErMCkGA1UEAwwicXdlbiBub24tQ0EgaW50ZXJtZWRpYXRlIHRlc3Qgcm9v
+dDAeFw0yNjA4MTkwMjI3MjNaFw00NjA4MTQwMjI3MjNaMCgxJjAkBgNVBAMMHXF3
+ZW4gbm9uLUNBIHRlc3QgaW50ZXJtZWRpYXRlMIIBIjANBgkqhkiG9w0BAQEFAAOC
+AQ8AMIIBCgKCAQEAslKbC3Lox1Zs6ikaKk7IgD/HzDdcqOpXtO+AIxJy2O7aZg6L
+im1qolayFT+88/arTIOxaq1KGGh3dexWBBCo6h363BYrx4OGAQjI+1GKs98DQO5Q
+1nnnadZRyU25D3ra0v78Bm+lJjCA3xsor7jfh7GUxBbxbPKfTI3OJ5QQH91OreCK
+Ctk9ONMNVz4nt1NvFnnUKSbPfm7HdMvquB16nXuyAB/Uqgj997w2EGfeNXRO2/7x
+64EbDtYgMjuraAiM8eD2cMluY74lb3sGRcCR/xMHBlpZeTpkXgjtc5VR14RygGv4
+1QTNNsNl34jsq9nfOTzUAUspkEqKmFf+nF46qQIDAQABo1AwTjAMBgNVHRMBAf8E
+AjAAMB0GA1UdDgQWBBSs7k1wDaAA+5+e9J7OaevGnakJ7TAfBgNVHSMEGDAWgBSK
+0a9cMx46PmKxxogtlcPWrbiyrzANBgkqhkiG9w0BAQsFAAOCAQEAOSUiVqnkGec6
+uRs4nXM0fR+ouwC0lxqc8E4BGdnv8crJYKjGWxIib1W/NES/zsnwasu5sglMY0Kh
+IkeHhiAYFNVir++alT5YPdUAXU8ckohhbzixPMgOSFvnyZ2xCO64fsDwb7tNe3/c
+7dtknvkngkGHJHKtKPKkZ0/jQu6LjsfcIIz5bruEfTeETY6joYjrwZL26NpYslgg
+OmOMAitXmMnbbUMEEIzIW7mXFPRBMu+Q5qp4KlD5gfJeu7upRn+NqvXu+Ne2Z0fZ
+Si8ev1QSbEku6WmNG9EFzwTC9Y8dQalrAgVegDBHsfTJWdEwfwVs2iApHB3Z+8YE
+98DkVAtPXg==
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDOzCCAiOgAwIBAgIUZ+xVhIOhGz7UzQUUPwJYZueIk/kwDQYJKoZIhvcNAQEL
+BQAwLTErMCkGA1UEAwwicXdlbiBub24tQ0EgaW50ZXJtZWRpYXRlIHRlc3Qgcm9v
+dDAeFw0yNjA4MTkwMjI3MjNaFw00NjA4MTQwMjI3MjNaMC0xKzApBgNVBAMMInF3
+ZW4gbm9uLUNBIGludGVybWVkaWF0ZSB0ZXN0IHJvb3QwggEiMA0GCSqGSIb3DQEB
+AQUAA4IBDwAwggEKAoIBAQCs+QZ+ov2ClU5axpK1Q7sWUS1f2+7s/2bClYk8L56d
+/jByGWD4HCsDNa39nn0Vgq98+4AO9WlpZQUcJlmd16yXusY078ZhNq382fJJ7cn3
+FZZBHBmESZMeHNx8HX9MslQjL29vmpHLTRWNSMO66VeTpkRpAnMY0KVrXvQV2nRp
+pulRVPagZ0DNgO6puxkJZpInyt/ieIwJ1ZU1gwF3wyX7FcSgN0UwrwBnVsCvXr62
+w3WsuXAllLf+YTys9NS7ZLqAFFyhez8lXhplx8dtNQi0iHLOF4jN5jAyCn19tVT5
+deQ6qtPVOd/7I9r5Ye6s8HaHa5peYTKn0zBocaiXcumnAgMBAAGjUzBRMB0GA1Ud
+DgQWBBSK0a9cMx46PmKxxogtlcPWrbiyrzAfBgNVHSMEGDAWgBSK0a9cMx46PmKx
+xogtlcPWrbiyrzAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IBAQA/
+q1Eu2qiT3/6c8A5o9La2dSwj15/MIgD7C5OauBTKtfhDoVqBVTCeYG/2I+wPm8PX
+6EXC7AC7S2Jy97g7F6q+2PgyNpGrk2iuwjfTLJxgpjGbDkej7qUpn1NqbnUQrQh6
+yurBZVQi9x6na4HX7pfLVPF76IYLKqdoRdqMtl2EZD1mol0tZGIimQoYqhInSwZ0
+3zXzQ+KDMBG1qC1TKQo/8WSiUncdGRzzGKStW+Fp/q1foZsp8bZ4/XNdoJV/ESkk
+RjOhHLQYLkulVXNP/fK0cm5haD9yiS11LoFqmscwb+NXdFanLn07ibbHx/DCyyOL
+E6mwm4nEjVj2B5cT62Pv
 -----END CERTIFICATE-----
 `;
 
@@ -1652,6 +1758,52 @@ describe('describeWorkerTlsTrustGaps', () => {
     expect(gaps[0]).toContain('qwen non-CA test issuer');
   });
 
+  it('names a chain that passes THROUGH an issuer that is not a CA', () => {
+    // R4-4: the CA-suitability check only covered the self-signed terminator,
+    // so a chain whose INTERMEDIATE carries basicConstraints CA:FALSE walked
+    // all the way to a real CA root and was reported anchored. Measured on
+    // Node 22 / OpenSSL 3 with this exact file as the served chain and the
+    // trust store: authorized=false, code=INVALID_PURPOSE — daemon green,
+    // /health green, every channel worker restart-looping with no boot hint.
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_NON_CA_INTERMEDIATE),
+      certPath: '/certs/fullchain.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('INVALID_PURPOSE');
+    expect(gaps[0]).toContain('qwen non-CA test intermediate');
+  });
+
+  it('reports the discarded operator CA when the serving file is unloadable', () => {
+    // R4-3: the model merged the operator CA into the serving chain
+    // unconditionally, but `resolveWorkerCaCertPath` does the opposite when
+    // the SERVING file yields no loadable block — `daemonBlocks === undefined`
+    // discards the operator CA and hands workers the serving file alone. Boot
+    // therefore reported no gap while every worker handshake failed.
+    const der = new X509Certificate(TEST_TLS_CERT_FULLCHAIN_LEAF_ONLY).raw;
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: der,
+      certPath: '/certs/daemon.der',
+      daemonUrl,
+      operatorCaCertPath: '/certs/rootCA.pem',
+      operatorCaCert: Buffer.from(fullchainRootPem()),
+    });
+    expect(gaps).toHaveLength(2);
+    expect(
+      gaps.some(
+        (gap) =>
+          gap.includes('/certs/daemon.der') &&
+          gap.includes('/certs/rootCA.pem') &&
+          gap.includes('is discarded'),
+      ),
+    ).toBe(true);
+    // The operator CA no longer anchors a chain the workers never receive.
+    expect(
+      gaps.some((gap) => gap.includes('UNABLE_TO_VERIFY_LEAF_SIGNATURE')),
+    ).toBe(true);
+  });
+
   it('keeps trusting a self-signed leaf that carries CA:FALSE', () => {
     // The constraint binds only past the leaf: a CA:FALSE self-signed cert in
     // its OWN trust store is verified at depth 0 and handshakes fine
@@ -1711,6 +1863,10 @@ describe('describeWorkerTlsTrustGaps', () => {
       operatorCaCertPath: '/certs/fused.pem',
       operatorCaCert: Buffer.from(fused),
     });
+    // R4-7: `.some()` alone lets a mutant that pushes the unanchored gap twice
+    // through, duplicating warnings in the log this diagnostic exists to keep
+    // readable. Every single-gap sibling here pins the count; so do these.
+    expect(gaps).toHaveLength(2);
     expect(gaps.some((gap) => gap.includes('/certs/fused.pem'))).toBe(true);
     expect(
       gaps.some((gap) =>
@@ -1735,7 +1891,16 @@ describe('describeWorkerTlsTrustGaps', () => {
       operatorCaCertPath: '/certs/root.der',
       operatorCaCert: der,
     });
+    // R4-7: gating the unreadable-file message on a `-----BEGIN` marker being
+    // present drops the DER diagnosis (DER has no markers) while the generic
+    // anchor gap still satisfies a bare `.some()` — the operator is then told
+    // the file 'does not carry a certificate that anchors it' instead of being
+    // told to re-export it as PEM. Pin the count and the DER-specific text.
+    expect(gaps).toHaveLength(2);
     expect(gaps.some((gap) => gap.includes('/certs/root.der'))).toBe(true);
+    expect(
+      gaps.some((gap) => gap.includes('a DER file is never read at all')),
+    ).toBe(true);
     expect(
       gaps.some((gap) => gap.includes('UNABLE_TO_VERIFY_LEAF_SIGNATURE')),
     ).toBe(true);
@@ -3895,9 +4060,6 @@ ARaOwZHpfsTw4Aq74yAWUKXumVGFXQpZMRj/QWgQEItTYF7rJVARIssv5miDbHvW
 -----END PRIVATE KEY-----
 `;
 
-// A self-signed localhost cert/key whose validity window is entirely in the
-// past (notAfter = 2020-01-02). Not a real secret — and doubly worthless
-// since it's already expired. Used to exercise the boot-time expiry guard.
 /**
  * A CA-issued serving cert (leaf alone) with the key it pairs with, plus the
  * root that signs it — the shape the documented `mkcert` flow produces. The
@@ -3979,6 +4141,9 @@ tsVzO5eP6Ln9kRVz9DhyN5a8ky1ceVOX/KsB0fS10e9Ortldm8lbFmcNDbpaVJy1
 -----END CERTIFICATE-----
 `;
 
+// A self-signed localhost cert/key whose validity window is entirely in the
+// past (notAfter = 2020-01-02). Not a real secret — and doubly worthless
+// since it's already expired. Used to exercise the boot-time expiry guard.
 const TEST_TLS_CERT_EXPIRED = `-----BEGIN CERTIFICATE-----
 MIIDCTCCAfGgAwIBAgIUW7rZvmhryKZI3pojRCfl3liQSEMwDQYJKoZIhvcNAQEL
 BQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTIwMDEwMTAwMDAwMFoXDTIwMDEw
@@ -9704,14 +9869,46 @@ describe('runQwenServe channel worker supervisor', () => {
     // this loop, inverting its `tlsOptions && tlsCertPath` guard or feeding it
     // unresolved values all shipped green — and operators were back in the
     // silent mode this diagnostic exists to end: daemon boots, /health green,
-    // every channel worker restart-looping with no log line saying why. The
-    // fixture cert covers 127.0.0.1 and localhost, so a ::1 bind is a real
-    // SAN gap on a cert that still pairs with its key and boots.
-    const log = await bootTlsDaemonForTrustGapLog('::1');
+    // every channel worker restart-looping with no log line saying why.
+    //
+    // R3-1: this used to bind `::1` to produce the gap, which fails
+    // EADDRNOTAVAIL — not skips — on the IPv6-less CI containers the sibling
+    // guard in server.test.ts names. The gap needs no IPv6: a serving cert
+    // whose only SAN is `example.invalid` is uncovered by the 127.0.0.1 the
+    // workers dial, so the same loop reports the same gap over IPv4 on every
+    // host. Measured against a real handshake: a client dialling 127.0.0.1
+    // with this cert as its CA fails ERR_TLS_CERT_ALTNAME_INVALID.
+    const log = await bootTlsDaemonForTrustGapLog('127.0.0.1', {
+      cert: TEST_TLS_CERT_NO_LOOPBACK_SAN,
+      key: TEST_TLS_KEY_NO_LOOPBACK_SAN,
+    });
 
     expect(log).toContain('ERR_TLS_CERT_ALTNAME_INVALID');
-    expect(log).toContain('::1');
+    expect(log).toContain('127.0.0.1');
   });
+
+  // Some CI containers disable IPv6 entirely; binding ::1 then fails with
+  // EADDRNOTAVAIL — the same guard server.test.ts puts on its own ::1 binds.
+  const hasIpv6Loopback = Object.values(os.networkInterfaces()).some(
+    (addresses) =>
+      addresses?.some(
+        (info) => info.family === 'IPv6' && info.address === '::1',
+      ),
+  );
+
+  it.skipIf(!hasIpv6Loopback)(
+    'names the IPv6 dial host in the boot gap, brackets stripped',
+    async () => {
+      // The IPv4 test above cannot catch a regression that formats the dialled
+      // host straight out of `URL.hostname` — `[::1]` — because IPv4 hostnames
+      // carry no brackets. This one pins that, where IPv6 is available.
+      const log = await bootTlsDaemonForTrustGapLog('::1');
+
+      expect(log).toContain('ERR_TLS_CERT_ALTNAME_INVALID');
+      expect(log).toContain('::1');
+      expect(log).not.toContain('[::1]');
+    },
+  );
 
   it('keeps the daemon log quiet when the serving cert covers the dialled host', async () => {
     // The other half of the wiring: a guard stuck on would bury real boot

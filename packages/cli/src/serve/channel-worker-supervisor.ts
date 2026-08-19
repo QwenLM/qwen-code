@@ -422,14 +422,37 @@ function sourceStamp(filePath: string): string {
  */
 const warnedWorkerCaMergeFallbacks = new Set<string>();
 
+/**
+ * The coarse reason a merge fell back, so a CHANGED failure mode re-warns once
+ * while a crash loop stays deduped. `reason` itself carries errno text and
+ * would let a flapping message defeat the dedup entirely; the paths alone
+ * swallowed the second, now-accurate diagnosis (`ENOENT` before a mount
+ * appears, then a DER export afterwards sends the operator to fix mounts).
+ */
+const WORKER_CA_MERGE_FALLBACK_FAMILIES = [
+  'read-error',
+  'no-operator-blocks',
+  'no-daemon-blocks',
+] as const;
+
+type WorkerCaMergeFallbackFamily =
+  (typeof WORKER_CA_MERGE_FALLBACK_FAMILIES)[number];
+
+function workerCaMergeFallbackKey(
+  operatorCaPath: string,
+  daemonCertPath: string,
+  family: WorkerCaMergeFallbackFamily,
+): string {
+  return `${operatorCaPath}\0${daemonCertPath}\0${family}`;
+}
+
 function warnWorkerCaMergeFallback(
   operatorCaPath: string,
   daemonCertPath: string,
+  family: WorkerCaMergeFallbackFamily,
   reason: string,
 ): void {
-  // Keyed on the paths alone: `reason` varies with errno text, and keying on
-  // it would let a flapping error message defeat the dedup.
-  const key = `${operatorCaPath}\0${daemonCertPath}`;
+  const key = workerCaMergeFallbackKey(operatorCaPath, daemonCertPath, family);
   if (warnedWorkerCaMergeFallbacks.has(key)) return;
   warnedWorkerCaMergeFallbacks.add(key);
   // Falling back to the daemon cert alone silently drops the operator CA
@@ -440,6 +463,26 @@ function warnWorkerCaMergeFallback(
       `with the daemon cert "${daemonCertPath}": ${reason}; channel ` +
       `workers will trust only the daemon cert`,
   );
+}
+
+/**
+ * Bundle directories minted this process, cleaned up together. One
+ * `process.once('exit')` per mint accumulated a listener, a closure and an
+ * orphaned directory per rebuild — and the merge cache is rebuilt on purpose
+ * (in-place operator CA rotation, tmp-cleaner aging), so a long-lived daemon
+ * crossed Node's `MaxListenersExceededWarning` threshold and printed that
+ * leak warning into the very log stream `warnWorkerCaMergeFallback` dedups to
+ * keep readable.
+ */
+const mintedWorkerCaBundleDirs = new Set<string>();
+let workerCaBundleExitHookRegistered = false;
+
+function cleanupWorkerCaBundleDir(dir: string): void {
+  try {
+    fs.rmSync(dir, { recursive: true, force: true });
+  } catch {
+    // Best effort: a tmp cleaner may already have taken it.
+  }
 }
 
 function writeMergedWorkerCaBundle(contents: string): string {
@@ -453,13 +496,16 @@ function writeMergedWorkerCaBundle(contents: string): string {
   const bundlePath = path.join(dir, 'ca-bundle.pem');
   fs.writeFileSync(bundlePath, contents, { mode: 0o600 });
   // Nothing else references this directory, so the daemon owns its lifetime.
-  process.once('exit', () => {
-    try {
-      fs.rmSync(dir, { recursive: true, force: true });
-    } catch {
-      // Best effort: the daemon is already exiting.
-    }
-  });
+  mintedWorkerCaBundleDirs.add(dir);
+  if (!workerCaBundleExitHookRegistered) {
+    workerCaBundleExitHookRegistered = true;
+    process.once('exit', () => {
+      for (const minted of mintedWorkerCaBundleDirs) {
+        cleanupWorkerCaBundleDir(minted);
+      }
+      mintedWorkerCaBundleDirs.clear();
+    });
+  }
   return bundlePath;
 }
 
@@ -508,8 +554,16 @@ function resolveWorkerCaCertPath(
       warnWorkerCaMergeFallback(
         existing,
         daemonCertPath,
+        'no-operator-blocks',
+        // Three causes reject a file, not one: markers, decoding, and DER.
+        // Blaming markers alone tells an operator whose CA is truncated or
+        // hand-edited to fix lines that are already correct — and after boot
+        // this warning is the only diagnostic they get, so it has to name the
+        // same three the boot-time check does.
         'it holds no PEM certificate block Node can load (every ' +
-          '-----BEGIN/END CERTIFICATE----- marker must sit alone on its line)',
+          '-----BEGIN/END CERTIFICATE----- marker must sit alone on its own ' +
+          'line and every block must decode, and a DER file is never read ' +
+          'at all)',
       );
       return daemonCertPath;
     }
@@ -520,6 +574,7 @@ function resolveWorkerCaCertPath(
       warnWorkerCaMergeFallback(
         existing,
         daemonCertPath,
+        'no-daemon-blocks',
         'the daemon cert holds no PEM certificate block to merge into',
       );
       return daemonCertPath;
@@ -527,12 +582,29 @@ function resolveWorkerCaCertPath(
     const bundlePath = writeMergedWorkerCaBundle(
       `${[...operatorBlocks, ...daemonBlocks].join('\n')}\n`,
     );
+    const superseded = mergedWorkerCaBundles.get(cacheKey);
     mergedWorkerCaBundles.set(cacheKey, { bundlePath, sourceStamps });
+    if (superseded) {
+      // This rebuild orphaned the previous bundle; the exit hook would hold
+      // one per rotation until the daemon stops.
+      const dir = path.dirname(superseded.bundlePath);
+      mintedWorkerCaBundleDirs.delete(dir);
+      cleanupWorkerCaBundleDir(dir);
+    }
+    // The merge works again, so a LATER failure of the same pair is new
+    // information — without this, the first failure's key silenced it forever
+    // and the workers restart-looped with no diagnostic at all.
+    for (const family of WORKER_CA_MERGE_FALLBACK_FAMILIES) {
+      warnedWorkerCaMergeFallbacks.delete(
+        workerCaMergeFallbackKey(existing, daemonCertPath, family),
+      );
+    }
     return bundlePath;
   } catch (err) {
     warnWorkerCaMergeFallback(
       existing,
       daemonCertPath,
+      'read-error',
       err instanceof Error ? err.message : String(err),
     );
     return daemonCertPath;
