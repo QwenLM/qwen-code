@@ -4248,6 +4248,9 @@ export interface ExtensionManagementInstallRequest
 
 export type ExtensionActivationState = 'enabled' | 'disabled';
 export type ExtensionWorkspaceActivation = ExtensionActivationState | null;
+export type ExtensionWorkspaceBatchActivationState =
+  | ExtensionActivationState
+  | 'inherit';
 
 export interface ExtensionCatalogEntry {
   id: string;
@@ -4322,6 +4325,20 @@ export interface ExtensionOperationResult {
   updated?: boolean;
   reason?: string;
   states?: Record<string, DaemonExtensionUpdateState>;
+  results?: Array<
+    ExtensionDefaultActivationBatchItem | ExtensionWorkspaceActivationBatchItem
+  >;
+}
+
+export interface ExtensionDefaultActivationBatchItem {
+  name: string;
+  defaultActivation: ExtensionActivationState;
+}
+
+export interface ExtensionWorkspaceActivationBatchItem {
+  name: string;
+  workspaceActivation: ExtensionWorkspaceActivation;
+  effectiveActivation: ExtensionActivationState;
 }
 
 export interface ExtensionOperationStatus {
