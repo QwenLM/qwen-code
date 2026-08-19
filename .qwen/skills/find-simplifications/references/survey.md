@@ -115,12 +115,25 @@ feature someone is still wiring up. (90 days is a heuristic, not a measured
 threshold; widen it for a large subsystem.) Proposing deletion of something
 that landed last week is the fastest way to lose a reviewer for good.
 
-**3 — Published-surface escape.** Is the symbol reachable from outside the
-repo? Everything under `packages/core/src` is, via that package's `"./src/*"`
+**3 — Published-surface escape.** Is the surface reachable from outside the
+repo? SKILL.md § Territory is the authoritative list; keep the two in step.
+Everything under `packages/core/src` is, via that package's `"./src/*"`
 export plus ~179 `export * from` lines in its `index.ts`; everything under
 `packages/audio-capture` and `packages/channels` is too — the release
-workflow npm-publishes all eight packages with `--access public`. Any hit →
-report-only, no matter how clean the consumer grep looks.
+workflow npm-publishes all eight packages with `--access public`. So is
+everything under `packages/sdk-*` and `packages/acp-bridge`:
+`release-sdk.yml:297` npm-publishes `packages/sdk-typescript` with
+`--access public`, `release-sdk-python.yml:346` ships the Python SDK to PyPI,
+`release-sdk-java.yml:206` deploys the Java SDK to Maven, and SDK consumers
+import from the registry, never from this repo.
+
+Reachability is not only an import. `packages/vscode-ide-companion`,
+`packages/chrome-extension` and `packages/zed-extension` are consumed as
+store-shipped manifests, and `.github/` is consumed GitHub-side — event
+triggers, branch-protection required checks, cross-repo `uses:` — so a
+zero-hit corpus grep says nothing about them (measured: 0 in-repo
+`uses: ./.github/workflows/…` references across all 52 workflow files).
+Any hit → report-only, no matter how clean the consumer grep looks.
 
 **4 — Full-corpus grep.** § 4 below. Any production consumer → drop.
 
