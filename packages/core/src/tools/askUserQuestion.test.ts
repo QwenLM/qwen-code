@@ -201,6 +201,25 @@ describe('AskUserQuestionTool', () => {
       const permission = await invocation.getDefaultPermission();
       expect(permission).toBe('allow');
     });
+
+    it('requires user interaction — blocks auto-approval', () => {
+      const params = {
+        questions: [
+          {
+            question: 'Test?',
+            header: 'Test',
+            options: [
+              { label: 'A', description: 'Option A' },
+              { label: 'B', description: 'Option B' },
+            ],
+            multiSelect: false,
+          },
+        ],
+      };
+
+      const invocation = tool.build(params);
+      expect(invocation.requiresUserInteraction()).toBe(true);
+    });
   });
 
   describe('execute', () => {
@@ -253,6 +272,40 @@ describe('AskUserQuestionTool', () => {
 
       const result = await invocation.execute(new AbortController().signal);
       expect(result.llmContent).toContain('declined to answer');
+    });
+
+    it('should surface cancelMessage from confirmation payload', async () => {
+      const params = {
+        questions: [
+          {
+            question: 'Test?',
+            header: 'Test',
+            options: [
+              { label: 'A', description: 'Option A' },
+              { label: 'B', description: 'Option B' },
+            ],
+            multiSelect: false,
+          },
+        ],
+      };
+
+      const invocation = tool.build(params);
+      const confirmation = await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      );
+
+      // Simulate cancellation with a specific cancel reason
+      await confirmation.onConfirm(ToolConfirmationOutcome.Cancel, {
+        cancelMessage: 'requires an explicit interactive approval surface',
+      });
+
+      const result = await invocation.execute(new AbortController().signal);
+      expect(result.llmContent).toBe(
+        'requires an explicit interactive approval surface',
+      );
+      expect(result.returnDisplay).toBe(
+        'requires an explicit interactive approval surface',
+      );
     });
 
     it('should return formatted answers when user provides them', async () => {

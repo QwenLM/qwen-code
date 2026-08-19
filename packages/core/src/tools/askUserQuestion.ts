@@ -158,6 +158,7 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
 > {
   private userAnswers: Record<string, string> = {};
   private wasAnswered = false;
+  private cancelMessage: string | undefined;
 
   constructor(
     private readonly _config: Config,
@@ -169,6 +170,15 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
   getDescription(): string {
     const questionCount = this.params.questions.length;
     return `Ask user ${questionCount} question${questionCount > 1 ? 's' : ''}`;
+  }
+
+  /**
+   * ask_user_question always requires user interaction so the user can
+   * provide answers. Permission rules and automatic approval modes cannot
+   * satisfy this requirement — the tool must show the question to the user.
+   */
+  override requiresUserInteraction(): boolean {
+    return true;
   }
 
   /**
@@ -208,6 +218,7 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
             break;
           case ToolConfirmationOutcome.Cancel:
             this.wasAnswered = false;
+            this.cancelMessage = payload?.cancelMessage;
             break;
           default:
             this.wasAnswered = true;
@@ -239,7 +250,7 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
       }
 
       if (!this.wasAnswered) {
-        const cancellationMessage = 'User declined to answer the questions.';
+        const cancellationMessage = this.cancelMessage ?? 'User declined to answer the questions.';
         return {
           llmContent: cancellationMessage,
           returnDisplay: cancellationMessage,
