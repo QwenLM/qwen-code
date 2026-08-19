@@ -94,6 +94,17 @@ const expressionsIn = (text) => {
 const readsASecret = (text) =>
   expressionsIn(text).some((expression) => /\bsecrets\./.test(expression));
 
+// GitHub Actions reaches a property through the documented `[ ]` index
+// operator as readily as through `.`, on any segment of the path, so
+// `pull_request['maintainer_can_modify']` resolves to the same absent field
+// as the dot form and closes the gate just as permanently. Rewriting the
+// index form to the dot form first means one matcher covers every
+// combination of the two, at any depth, instead of enumerating spellings.
+// (A `fromJSON(toJSON(github.event.pull_request))` round-trip still evades
+// this — no textual guard catches that one; it needs a live payload.)
+const asDotAccess = (text) =>
+  text.replace(/\[\s*(['"])([A-Za-z_][A-Za-z0-9_]*)\1\s*\]/g, '.$2');
+
 // Four of the full-object-only names below are strict PREFIXES of fields the
 // simple object does deliver (`merged` ⊂ `merged_at`, `commits` ⊂ `commits_url`,
 // `comments` ⊂ `comments_url`, `review_comments` ⊂ `review_comments_url`), so a
@@ -296,9 +307,24 @@ describe('qwen autofix fork bridge', () => {
       'review_comments',
     ];
     for (const field of fullObjectOnlyFields) {
-      expect(signalJob.if).not.toMatch(fullObjectOnlyReference(field));
+      expect(asDotAccess(signalJob.if)).not.toMatch(
+        fullObjectOnlyReference(field),
+      );
     }
   });
+
+  // Every spelling GitHub Actions accepts for one field reference. The gate
+  // is written in the dot form today, but an edit in any of the others reaches
+  // the same absent field and closes the gate just as permanently, so the
+  // guard has to see through all of them — and through none of them reject a
+  // delivered field that a full-object name merely prefixes.
+  const referenceSpellings = (field) => [
+    `github.event.pull_request.${field}`,
+    `github.event.pull_request['${field}']`,
+    `github.event.pull_request["${field}"]`,
+    `github.event['pull_request'].${field}`,
+    `github.event['pull_request']['${field}']`,
+  ];
 
   it('rejects a full-object field without rejecting the fields it prefixes', () => {
     const prefixPairs = [
@@ -308,11 +334,26 @@ describe('qwen autofix fork bridge', () => {
       ['review_comments', 'review_comments_url'],
     ];
     for (const [fullObjectOnly, delivered] of prefixPairs) {
-      expect(`github.event.pull_request.${delivered} == null`).not.toMatch(
-        fullObjectOnlyReference(fullObjectOnly),
-      );
-      expect(`github.event.pull_request.${fullObjectOnly} == false`).toMatch(
-        fullObjectOnlyReference(fullObjectOnly),
+      for (const spelling of referenceSpellings(delivered)) {
+        expect(asDotAccess(`${spelling} == null`)).not.toMatch(
+          fullObjectOnlyReference(fullObjectOnly),
+        );
+      }
+      for (const spelling of referenceSpellings(fullObjectOnly)) {
+        expect(asDotAccess(`${spelling} == false`)).toMatch(
+          fullObjectOnlyReference(fullObjectOnly),
+        );
+      }
+    }
+  });
+
+  it('sees a full-object field through the index operator', () => {
+    // The incident field, in the four non-dot spellings. Each is a legal
+    // expression resolving to the same absent property, so a guard blind to
+    // any of them lets the always-false gate return with this file green.
+    for (const spelling of referenceSpellings('maintainer_can_modify')) {
+      expect(asDotAccess(`${spelling} == true`)).toMatch(
+        fullObjectOnlyReference('maintainer_can_modify'),
       );
     }
   });
