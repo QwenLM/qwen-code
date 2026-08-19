@@ -816,7 +816,7 @@ describe('getHomebrewLatestVersion', () => {
       stderr: '',
     });
 
-    await expect(getHomebrewLatestVersion('qwen-code', run)).resolves.toBe(
+    await expect(getHomebrewLatestVersion(undefined, run)).resolves.toBe(
       '0.21.13',
     );
     expect(run).toHaveBeenCalledWith(

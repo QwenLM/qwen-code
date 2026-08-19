@@ -20,6 +20,16 @@ import { performStandaloneUpdate } from './standalone-update.js';
 import { MessageType } from '../ui/types.js';
 import os from 'node:os';
 
+const { mockT, identityT } = vi.hoisted(() => {
+  const identityT = (message: string, values?: Record<string, unknown>) =>
+    message.replace(/\{\{(\w+)\}\}/g, (placeholder, key: string) =>
+      values?.[key] === undefined ? placeholder : String(values[key]),
+    );
+  return { identityT, mockT: vi.fn(identityT) };
+});
+
+vi.mock('../i18n/index.js', () => ({ t: mockT }));
+
 vi.mock('./installationInfo.js', async () => {
   const actual = await vi.importActual('./installationInfo.js');
   return {
@@ -726,6 +736,7 @@ describe('handleAutoUpdate — Homebrew installs (#9493)', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockT.mockImplementation(identityT);
     emitSpy = vi.spyOn(updateEventEmitter, 'emit');
     mockSettings = {
       merged: { general: { enableAutoUpdate: true } },
@@ -768,13 +779,18 @@ describe('handleAutoUpdate — Homebrew installs (#9493)', () => {
 
   it('still notifies when Homebrew offers a newer version', async () => {
     mockGetHomebrewLatestVersion.mockResolvedValue('0.21.14');
+    mockT.mockImplementation((message: string) =>
+      message.startsWith('Installed via Homebrew')
+        ? 'translated Homebrew guidance'
+        : message,
+    );
 
     await handleAutoUpdate(mockUpdateInfo, mockSettings, '/root');
 
     expect(emitSpy).toHaveBeenCalledWith('update-received', {
       message:
         'Qwen Code update available! 0.21.13 → 0.21.14\n' +
-        'Installed via Homebrew. Please update with "brew upgrade".',
+        'translated Homebrew guidance',
     });
   });
 
@@ -790,7 +806,7 @@ describe('handleAutoUpdate — Homebrew installs (#9493)', () => {
     });
   });
 
-  it('does not query Homebrew for non-Homebrew installs', () => {
+  it('does not query Homebrew for non-Homebrew installs', async () => {
     mockGetInstallationInfo.mockReturnValue({
       updateCommand: undefined,
       updateMessage: 'Cannot determine update command.',
@@ -798,7 +814,7 @@ describe('handleAutoUpdate — Homebrew installs (#9493)', () => {
       packageManager: PackageManager.NPM,
     });
 
-    handleAutoUpdate(mockUpdateInfo, mockSettings, '/root');
+    await handleAutoUpdate(mockUpdateInfo, mockSettings, '/root');
 
     expect(mockGetHomebrewLatestVersion).not.toHaveBeenCalled();
   });

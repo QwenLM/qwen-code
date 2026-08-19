@@ -146,8 +146,7 @@ export interface InstallationInfo {
 
 const execFileAsync = promisify(childProcess.execFile);
 
-// Same budget as the npm-registry update check (see FETCH_TIMEOUT_MS in
-// ui/utils/updateCheck.ts): slow hosts must not hang startup on this lookup.
+// Slow hosts must not hang startup on this lookup.
 const HOMEBREW_INFO_TIMEOUT_MS = 5000;
 
 /**
