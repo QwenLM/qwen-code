@@ -737,6 +737,107 @@ describe('ChatPane', () => {
     expect(controlGoal).toHaveBeenCalledTimes(1);
   });
 
+  it('builds the control request from the freshly fetched Goal', async () => {
+    // `expectedGoalId`/`expectedRevision` must come from the getGoal round trip,
+    // not from the possibly-stale snapshot in connection state, or every
+    // control races the daemon's CAS.
+    const stale = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: 'goal-1',
+        revision: 5,
+        objective: 'ship it',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 1,
+        activeTimeMs: 10,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    };
+    const fresh = {
+      ...stale,
+      goal: { ...stale.goal, revision: 9 },
+    };
+    connectionState.goalState = stale;
+    getGoal.mockResolvedValue({ snapshot: fresh });
+    controlGoal.mockResolvedValue({ snapshot: fresh });
+    render({ onOpenGoals: vi.fn() });
+
+    act(() => {
+      container!
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="goal-status-strip"] button[aria-label="Pause goal"]',
+        )!
+        .click();
+    });
+    await vi.waitFor(() => expect(controlGoal).toHaveBeenCalledTimes(1));
+
+    expect(controlGoal).toHaveBeenCalledWith({
+      action: 'pause',
+      expectedGoalId: 'goal-1',
+      expectedRevision: 9,
+    });
+
+    // `/goal set` maps to a versioned replace against the same fresh snapshot.
+    act(() => {
+      latestOnSubmit!('/goal set ship the other thing');
+    });
+    await vi.waitFor(() => expect(controlGoal).toHaveBeenCalledTimes(2));
+    expect(controlGoal).toHaveBeenLastCalledWith({
+      action: 'replace',
+      objective: 'ship the other thing',
+      expectedGoalId: 'goal-1',
+      expectedRevision: 9,
+    });
+  });
+
+  it('closes the pane Goal edit dialog when its session changes', async () => {
+    // Left open, the dialog re-syncs its textarea from the new session's
+    // objective and the user edits that Goal believing it is the old one.
+    const goalA = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: 'goal-a',
+        revision: 5,
+        objective: 'session A objective',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 1,
+        activeTimeMs: 10,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    };
+    connectionState.goalState = goalA;
+    getGoal.mockResolvedValue({ snapshot: goalA });
+    render();
+
+    act(() => {
+      container!
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="goal-status-strip"] button[aria-label="Edit goal"]',
+        )!
+        .click();
+    });
+    expect(document.querySelector('textarea')).not.toBeNull();
+
+    act(() => {
+      connectionState = {
+        ...connectionState,
+        goalState: {
+          ...goalA,
+          goal: { ...goalA.goal, goalId: 'goal-b', objective: 'goal B' },
+        },
+      };
+      rerender();
+    });
+
+    expect(document.querySelector('textarea')).toBeNull();
+  });
+
   it('does not dispatch a Goal control after the pane session changes during refresh', async () => {
     const current = {
       v: 2 as const,
@@ -754,9 +855,10 @@ describe('ChatPane', () => {
       },
     };
     const pendingGoal = deferred<{ snapshot: typeof current }>();
+    const onError = vi.fn();
     connectionState.goalState = current;
     getGoal.mockReturnValueOnce(pendingGoal.promise);
-    render();
+    render({ onError });
 
     const pause = container!.querySelector<HTMLButtonElement>(
       '[data-testid="goal-status-strip"] button[aria-label="Pause goal"]',
@@ -766,11 +868,14 @@ describe('ChatPane', () => {
     act(() => {
       ownerVersion += 1;
       connectionState = { ...connectionState, sessionId: 'sess-2' };
-      rerender();
+      rerender({ onError });
     });
     await act(async () => pendingGoal.resolve({ snapshot: current }));
 
     expect(controlGoal).not.toHaveBeenCalled();
+    // The operation was dropped on purpose; reporting it would show a failure
+    // toast for a control the user's own session switch cancelled.
+    expect(onError).not.toHaveBeenCalled();
   });
 
   it('releases Goal control busy state after a same-session reattach', async () => {
@@ -864,7 +969,10 @@ describe('ChatPane', () => {
     );
 
     expect(onError).toHaveBeenCalledWith(
-      expect.any(Error),
+      // The guard that produces this message is the only protection the
+      // pause/resume/clear flows have against dereferencing a null goal, so
+      // pin the message rather than "some Error".
+      expect.objectContaining({ message: 'The goal is no longer available.' }),
       'Failed to edit the goal',
     );
   });

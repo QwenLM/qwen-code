@@ -656,11 +656,16 @@ export function ChatPane({
 
   const runGoalControl = useCallback(
     (action: 'pause' | 'resume' | 'clear') => {
+      const owner = sessionOwnerGuard.capture();
       void controlGoal(action).catch((error: unknown) => {
+        // A control dropped because the pane moved to another session is not a
+        // failure the user needs to see — `handleGoalEditSave` and the main
+        // composer swallow the same race.
+        if (!owner.isCurrent()) return;
         reportError(error, t(`goals.error.${action}Failed`));
       });
     },
-    [controlGoal, reportError, t],
+    [controlGoal, reportError, sessionOwnerGuard, t],
   );
 
   const handleGoalEditSave = useCallback(

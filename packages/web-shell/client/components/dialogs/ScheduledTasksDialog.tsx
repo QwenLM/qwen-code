@@ -1054,8 +1054,12 @@ export function ScheduledTasksDialog({
             onError(err, t('scheduledTasks.error.runFailed'));
           }
         } else {
-          // One-shot: /run IS its single fire — consume it before awaiting
-          // admission so the scheduler cannot fire the same prompt meanwhile.
+          // One-shot: /run IS its single fire — it deletes the task. Consume it
+          // BEFORE enqueuing so it can't ALSO fire at its own scheduled slot (a
+          // silent double execution). The trade-off is that a failed delivery
+          // leaves the task gone AND un-run — and reload() has already dropped
+          // it from the list — so surface THAT explicitly rather than the
+          // generic "run failed", which would hide the deletion.
           await actions.runScheduledTask(fresh.id, task.workspaceId);
           await reload();
           try {

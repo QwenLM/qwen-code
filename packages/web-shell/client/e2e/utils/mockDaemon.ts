@@ -1420,10 +1420,14 @@ async function handleDaemonRoute(
     return;
   }
   if (method === 'GET' && /^\/session\/[^/]+\/status\/?$/.test(path)) {
+    // The real route answers with a flat `DaemonSessionSummary`; a `{v, state}`
+    // envelope leaves every field the client reads (workspaceCwd, displayName,
+    // worktree, branch) undefined, so session metadata restoration silently
+    // does nothing in every scenario.
     await json(route, {
-      v: 1,
       sessionId: scenario.sessionId,
-      state: scenario.state,
+      workspaceCwd: scenario.workspaceCwd,
+      displayName: scenario.displayName,
     });
     return;
   }
@@ -1687,7 +1691,23 @@ function reduceMockGoal(
   const current = snapshot.goal;
   const timestamp = Date.now();
   if (request.action === 'clear') {
-    return { v: 2, goal: null, activity: 'idle' };
+    // The daemon attaches the tombstone on clear, and it is what stops a stale
+    // frame resurrecting the goal client-side — without it the e2e clear step
+    // cannot exercise that path at all.
+    return {
+      v: 2,
+      goal: null,
+      activity: 'idle',
+      ...(current
+        ? {
+            clearedGoal: {
+              goalId: current.goalId,
+              revision: current.revision + 1,
+              updatedAt: timestamp,
+            },
+          }
+        : {}),
+    };
   }
   if (request.action === 'create' || request.action === 'replace') {
     return {

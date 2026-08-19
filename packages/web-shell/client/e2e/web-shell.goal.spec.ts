@@ -37,6 +37,12 @@ test('creates a Goal directly from a new task before any chat', async ({
   await expect(page.getByTestId('goal-status-strip')).toContainText(
     'start without a prior chat message',
   );
+  // Re-check after the strip renders: a regression that forwards the objective
+  // as a prompt AFTER the create resolves would land its POST past the
+  // synchronous check above and still ship green.
+  await expect
+    .poll(() => daemon.promptRequests().length, { timeout: 2_000 })
+    .toBe(0);
 });
 
 test('runs the canonical Goal and explicit queue interaction chain @smoke', async ({
