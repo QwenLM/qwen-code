@@ -16,38 +16,6 @@ import globals from 'globals';
 import storybook from 'eslint-plugin-storybook';
 import checkFile from 'eslint-plugin-check-file';
 import { legacyFilenames } from './eslint.legacy-filenames.mjs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-import noServeBoundaryCross from './eslint-rules/no-serve-boundary-cross.js';
-
-// Resolution-based serve boundary guard (#8084, #9144 round-8 decision):
-// a local rule that RESOLVES each import-like specifier against the
-// importing file and reports anything landing inside src/serve/,
-// fail-closed on sources it cannot check statically. It replaces the
-// spelling-by-spelling regex/glob matrix (depth-enumerated globs,
-// per-shape selector regexes, percent/query/fragment/absolute/createRequire
-// special cases) — eight review rounds each demonstrated a new spelling
-// escaping that matrix, because every spelling is just another way to name
-// the same target.
-const serveBoundaryPlugin = {
-  rules: { 'no-serve-boundary-cross': noServeBoundaryCross },
-};
-const configDir = path.dirname(fileURLToPath(import.meta.url));
-const serveBoundaryOptions = {
-  serveDir: path.resolve(configDir, 'packages/cli/src/serve'),
-  baseUrlDir: path.resolve(configDir, 'packages/cli'),
-};
-
-const restrictedRequire = {
-  selector: 'CallExpression[callee.name="require"]',
-  message: 'Avoid using require(). Use ES6 imports instead.',
-};
-
-const restrictedStringThrow = {
-  selector: 'ThrowStatement > Literal:not([value=/^\\w+Error:/])',
-  message:
-    'Do not throw string literals or non-Error objects. Throw new Error("...") instead.',
-};
 
 export default tseslint.config(
   {
@@ -105,25 +73,44 @@ export default tseslint.config(
     },
   },
   {
-    // `runtime/` is the neutral layer acp-integration is directed to; it must
-    // not import `serve/` internals itself, or the #8084 boundary reforms
-    // transitively one hop away. Enforced by the resolution-based local rule
-    // (see serveBoundaryPlugin above).
-    files: ['packages/cli/src/runtime/**/*.{ts,tsx}'],
-    plugins: { 'qwen-boundary': serveBoundaryPlugin },
+    // ACP integration and the daemon are separate runtime surfaces that happen
+    // to share a package directory. ACP may consume neutral contracts under
+    // `runtime/`, but never `serve/` implementation modules — see #8084.
+    files: ['packages/cli/src/acp-integration/**/*.{ts,tsx}'],
     rules: {
-      'qwen-boundary/no-serve-boundary-cross': ['error', serveBoundaryOptions],
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['**/serve/*', '**/serve/**'],
+              message:
+                'acp-integration must not import serve/ internals. Put shared, lifecycle-free logic in packages/cli/src/runtime/ instead (#8084).',
+            },
+          ],
+        },
+      ],
     },
-  },  {
+  },
+  {
     // `utils/` is the layer every other directory imports, so it must not
     // import back into one. The daemon direction is clean and enforced here;
     // the remaining `ui/`, `config/`, `i18n/` and `nonInteractive/` edges are
     // tracked in #9146 and will be added to this group as they are resolved.
-    // Enforced by the resolution-based local rule (see serveBoundaryPlugin).
     files: ['packages/cli/src/utils/**/*.{ts,tsx}'],
-    plugins: { 'qwen-boundary': serveBoundaryPlugin },
     rules: {
-      'qwen-boundary/no-serve-boundary-cross': ['error', serveBoundaryOptions],
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['**/serve/*', '**/serve/**'],
+              message:
+                'packages/cli/src/utils must not import serve/. Move lifecycle-free logic down into utils/ instead (#9146).',
+            },
+          ],
+        },
+      ],
     },
   },
   {
@@ -203,8 +190,15 @@ export default tseslint.config(
       'no-duplicate-case': 'error',
       'no-restricted-syntax': [
         'error',
-        restrictedRequire,
-        restrictedStringThrow,
+        {
+          selector: 'CallExpression[callee.name="require"]',
+          message: 'Avoid using require(). Use ES6 imports instead.',
+        },
+        {
+          selector: 'ThrowStatement > Literal:not([value=/^\\w+Error:/])',
+          message:
+            'Do not throw string literals or non-Error objects. Throw new Error("...") instead.',
+        },
       ],
       'no-unsafe-finally': 'error',
       'no-console': 'error',
@@ -221,17 +215,6 @@ export default tseslint.config(
       'prefer-const': ['error', { destructuring: 'all' }],
       radix: 'error',
       'default-case': 'error',
-    },
-  },  {
-    // ACP integration and the daemon are separate runtime surfaces that happen
-    // to share a package directory. ACP may consume neutral contracts under
-    // `runtime/`, but never `serve/` implementation modules — see #8084.
-    // Enforced by the resolution-based local rule (see serveBoundaryPlugin);
-    // fixture coverage lives in scripts/tests/eslint-boundary-rules.test.js.
-    files: ['packages/cli/src/acp-integration/**/*.{ts,tsx}'],
-    plugins: { 'qwen-boundary': serveBoundaryPlugin },
-    rules: {
-      'qwen-boundary/no-serve-boundary-cross': ['error', serveBoundaryOptions],
     },
   },
   {
