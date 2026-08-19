@@ -1014,13 +1014,51 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     // executes, so it is a changed test file exactly like M.
     assert.match(
       recordStep.run,
-      /^\s*git -c core\.quotePath=false diff -z --name-only --diff-filter=ACMRT "\$BASE_OID" HEAD \\\n\s*> "\$GATE_HOME\/files-all"$/m,
+      /^\s*\/usr\/bin\/git -c core\.quotePath=false diff -z --name-only --diff-filter=ACMRT "\$BASE_OID" HEAD \\\n\s*> "\$\{RUNNER_TEMP:\?\}\/flake-record-files-all"$/m,
       'the NUL diff must flow straight into its file — $( ) strips NUL bytes, a pipeline swallows the exit status',
     );
     assert.match(
       recordStep.run,
-      /^\s*BASE_OID="\$\(cat "\$\{RUNNER_TEMP:\?\}\/verify-base-oid"\)"$/m,
+      /^\s*rm -rf -- "\$\{RUNNER_TEMP:\?\}\/flake-record-files-all"\n\s*\/usr\/bin\/git -c core\.quotePath=false diff -z/m,
+      'the staging path must be unlinked immediately before the redirect — a planted symlink or directory there makes root write through it or hard-fail the record step',
+    );
+    assert.match(
+      recordStep.run,
+      /^\s*BASE_OID="\$\(\/usr\/bin\/cat "\$\{RUNNER_TEMP:\?\}\/verify-base-oid"\)"$/m,
       'the record step must diff against the base OID captured while .git was root-owned, not re-resolve HEAD^1',
+    );
+    assert.match(
+      recordStep.run,
+      /^\s*case "\$BASE_OID" in$/m,
+      'the base OID must be shape-validated in the parent arm before the diff',
+    );
+    assert.match(
+      recordStep.run,
+      /^\s*\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\*\) ;;/m,
+      'the base OID shape must be an 8+-hex prefix — a planted valid OID would yield an empty diff and starve the gate into n/a',
+    );
+    assert.match(
+      recordStep.run,
+      /^\s*cp "\$\{RUNNER_TEMP:\?\}\/flake-record-files-all" "\$GATE_HOME\/files-all"$/m,
+      'the scrubbed child must copy the parent-recorded diff, never re-run git under env -i',
+    );
+    const recordDiffAt = recordStep.run.search(/^\s*\/usr\/bin\/git -c core\.quotePath=false diff -z/m);
+    const recordReExecAt = recordStep.run.search(/exec \/usr\/bin\/env -i/);
+    const recordCpAt = recordStep.run.search(/^\s*cp "\$\{RUNNER_TEMP:\?\}\/flake-record-files-all" "\$GATE_HOME\/files-all"$/m);
+    const recordInstallAt = recordStep.run.search(/^\s*install -d -m 0700 -o root -g root "\$GATE_HOME"$/m);
+    assert.ok(
+      recordDiffAt !== -1 && recordReExecAt !== -1 && recordCpAt !== -1 && recordInstallAt !== -1 &&
+        recordDiffAt < recordReExecAt && recordReExecAt < recordInstallAt && recordInstallAt < recordCpAt,
+      'the diff must be recorded in the parent arm before the env -i re-exec, and copied into the recreated root-only home',
+    );
+    // The scrubbed child must never re-run git under env -i: the ordering
+    // pin uses first-match semantics, so it cannot by itself forbid a
+    // second git in the child. Strip comments first (the child's own docs
+    // name `git diff` when describing what NOT to do) before asserting.
+    assert.doesNotMatch(
+      recordStep.run.slice(recordReExecAt).replace(/^\s*#.*$/gm, '').replace(/\\\n/g, ' '),
+      /\bgit\b[^\n]*\b(diff|log|show|whatchanged)\b/,
+      'the scrubbed child must never re-run git under env -i — that is the failure shape of run 32227155960',
     );
     assert.ok(
       recordStep.run.includes(

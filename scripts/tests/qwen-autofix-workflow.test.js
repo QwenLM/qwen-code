@@ -13285,7 +13285,7 @@ exit 1
       // cases; a runnerScript drives the tree-state-proving cases.
       writeFileSync(
         join(tools, 'resolve-owning-packages.sh'),
-        `printf '%s\\n' ${resolverLines.map((l) => `'${l}'`).join(' ')}\n`,
+        `cat > /dev/null\nprintf '%s\\n' ${resolverLines.map((l) => `'${l}'`).join(' ')}\n`,
       );
       writeFileSync(
         join(tools, 'bite-runner'),
