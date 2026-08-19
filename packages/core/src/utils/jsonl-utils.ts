@@ -195,8 +195,10 @@ async function closeLineReader(
 }
 
 /**
- * Reads the first N lines from a JSONL file efficiently.
- * Returns an array of parsed objects.
+ * Reads every record recovered from the first `count` non-empty lines of a
+ * JSONL file. The budget counts physical lines, not records, so `complete`
+ * always covers a fixed prefix of the file regardless of how many records a
+ * glued line recovers.
  */
 async function readLinesWithIntegrityInternal<T = unknown>(
   filePath: string,
@@ -217,14 +219,15 @@ async function readLinesWithIntegrityInternal<T = unknown>(
 
     const results: T[] = [];
     let complete = true;
+    let scannedLines = 0;
     for await (const line of rl) {
-      if (results.length >= count) break;
+      if (scannedLines >= count) break;
       const trimmed = line.trim();
       if (trimmed.length === 0) continue;
+      scannedLines++;
       const parsed = parseLineTolerantWithIntegrity<T>(trimmed, filePath);
       complete &&= parsed.complete;
       for (const obj of parsed.records) {
-        if (results.length >= count) break;
         results.push(obj);
       }
     }
@@ -251,11 +254,19 @@ export async function readLines<T = unknown>(
   count: number,
   options: JsonlReadLinesOptions = {},
 ): Promise<T[]> {
-  return (await readLinesWithIntegrityInternal<T>(filePath, count, options))
-    .records;
+  // The slice preserves this reader's record-budget contract: at most `count`
+  // records even when a glued line recovers several.
+  return (
+    await readLinesWithIntegrityInternal<T>(filePath, count, options)
+  ).records.slice(0, count);
 }
 
-/** Reports whether every scanned non-empty line was fully recoverable. */
+/**
+ * Reads every record from the first `count` non-empty lines. `complete`
+ * reports whether each of those lines was fully recoverable, so fail-closed
+ * callers get a deterministic line-prefix coverage rather than one that
+ * shrinks when early lines are `}{`-glued.
+ */
 export async function readLinesWithIntegrity<T = unknown>(
   filePath: string,
   count: number,

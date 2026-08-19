@@ -266,6 +266,24 @@ describe('read() / readLines() with malformed lines', () => {
     ).resolves.toMatchObject({ complete: false });
   });
 
+  it('measures completeness against a line budget, not a record budget', async () => {
+    // Line 1 alone satisfies a 2-record budget; the corrupt line 2 must still
+    // be scanned because the budget counts physical lines.
+    const file = tmpFile('{"i":1}{"i":2}\n{"i":\n');
+
+    await expect(
+      readLinesWithIntegrity<{ i: number }>(file, 2),
+    ).resolves.toMatchObject({ complete: false });
+  });
+
+  it('returns every record recovered from the scanned lines', async () => {
+    const file = tmpFile('{"i":1}{"i":2}\n{"i":3}\n');
+
+    await expect(
+      readLinesWithIntegrity<{ i: number }>(file, 1),
+    ).resolves.toEqual({ records: [{ i: 1 }, { i: 2 }], complete: true });
+  });
+
   it('skips blank lines', async () => {
     const file = tmpFile('{"a":1}\n\n{"a":2}\n');
     expect(await read<{ a: number }>(file)).toEqual([{ a: 1 }, { a: 2 }]);
@@ -357,7 +375,7 @@ describe('reader resource cleanup', () => {
       readLinesWithIntegrity<{ i: number }>(file, 1),
     );
 
-    expect(result).toEqual({ records: [{ i: 1 }], complete: true });
+    expect(result).toEqual({ records: [{ i: 1 }, { i: 2 }], complete: true });
   });
 
   it('closes the file stream after read consumes all lines', async () => {
