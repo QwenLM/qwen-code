@@ -33,6 +33,22 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
 }));
 
 const captures: Array<{ diff: Buffer }> = [];
+/**
+ * Successive `hashWorktreeFiles` answers, when a test needs the two passes to
+ * disagree. Empty means "use the real one" — every other test in this file
+ * hashes for real.
+ */
+const hashPasses: Array<Record<string, string>> = [];
+vi.mock('./lib/local-anchor.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('./lib/local-anchor.js')>();
+  return {
+    ...real,
+    hashWorktreeFiles: (...args: Parameters<typeof real.hashWorktreeFiles>) =>
+      hashPasses.length > 0
+        ? (hashPasses.shift() as Record<string, string>)
+        : real.hashWorktreeFiles(...args),
+  };
+});
 vi.mock('./lib/local-diff.js', async (importOriginal) => {
   const real = await importOriginal<typeof import('./lib/local-diff.js')>();
   return {
@@ -61,6 +77,7 @@ let gitIsolation: ReturnType<typeof isolateHostGitConfig>;
 beforeEach(() => {
   stderrLines.length = 0;
   captures.length = 0;
+  hashPasses.length = 0;
   repo = realpathSync(mkdtempSync(join(tmpdir(), 'review-toctou-')));
   cwd = process.cwd();
   process.chdir(repo);
@@ -159,6 +176,33 @@ describe('capture-local — TOCTOU candidate withholding', () => {
     );
     // The full capture is what the plan reviews.
     expect(readFileSync(report().diffPath).equals(DIFF_A)).toBe(true);
+  });
+
+  it('catches a same-bytes revert that STRADDLES the hash pass', () => {
+    // The hash pass sits BETWEEN the two diff snapshots, so a write that
+    // straddles it is invisible to the diffs alone: capture B0 → autosave
+    // writes B1 → the hashes read B1 → undo restores B0 → the re-capture
+    // reads B0. Both diffs agree and the candidate certifies B1's identity
+    // for a round that reviewed B0.
+    //
+    // The note here used to call that shape harmless and a
+    // different-bytes revert the uncatchable one — backwards: a
+    // different-bytes revert moves the endpoints and IS caught by the
+    // diffs. Re-hashing after the re-capture is what sees this one.
+    captures.push({ diff: DIFF_A }, { diff: Buffer.from(DIFF_A) });
+    // The two diffs AGREE — that is the point. What disagrees is the pair of
+    // hash passes that bracket the re-capture: the first read B1, the second
+    // reads B0.
+    hashPasses.push({ 'a.ts': '100644:oid-B1' }, { 'a.ts': '100644:oid-B0' });
+    run();
+    expect(
+      existsSync(
+        join(repo, '.qwen/tmp/qwen-review-local-cache-candidate.json'),
+      ),
+    ).toBe(false);
+    expect(stderrLines.join('\n')).toContain(
+      'working tree changed while the capture was being hashed',
+    );
   });
 
   it('a tree that held still writes the candidate and no warning', () => {

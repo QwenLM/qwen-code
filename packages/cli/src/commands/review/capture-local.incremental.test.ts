@@ -247,10 +247,17 @@ describe('capture-local — incremental local rounds', () => {
     // Nothing moves between the rounds.
     stderrLines.length = 0;
     const plan = capture({ cache: cachePath, model: 'model-a' });
-    // The stop is REACHABLE now: the round says nothing changed, because
-    // nothing did.
-    expect(stderrLines.join('\n')).toContain('No changes since the last local');
+    // The round says what is true, and the two halves match: no CONTENT
+    // moved, and the unhashable path is still in scope. The bare
+    // "nothing to re-review" sentence must NOT appear — SKILL.md stops the
+    // orchestrator on exactly that string, so printing it beside a plan that
+    // carries chunks stops the round over live scope.
+    expect(stderrLines.join('\n')).toContain('No content changes since');
+    expect(stderrLines.join('\n')).toContain('could not be hashed');
+    expect(stderrLines.join('\n')).toContain('Their sections are in scope');
+    expect(stderrLines.join('\n')).not.toContain('nothing to re-review');
     expect(stderrLines.join('\n')).not.toContain('changed file(s)');
+    expect((plan.chunks as unknown[]).length).toBeGreaterThan(0);
     // The deletion is still not CERTIFIED — the scope keeps the wider list on
     // purpose, so an unreadable path is re-reviewed rather than skipped. Both
     // facts are true at once, and separating them is the fix: the stop reads
@@ -264,6 +271,26 @@ describe('capture-local — incremental local rounds', () => {
     const next = capture({ cache: cachePath, model: 'model-a' });
     expect(next.incremental!.scope!.deltaFiles).toContain('src/other.ts');
     expect(stderrLines.join('\n')).toContain('unreadable path(s)');
+  });
+
+  it('a config-side diff driver moves the identity, like the attribute does', () => {
+    // `check-attr` answers attribute VALUES, and `diff=<driver>` is only a
+    // NAME: the behaviour lives in git config. `diff.<driver>.binary` flips a
+    // section between readable hunks and "Binary files … differ" while the
+    // attribute value, the mode and the blob all stand still — so the
+    // identity compared equal and the newly-readable section was sliced out,
+    // the loop certifying content the previous round had only seen as a
+    // marker.
+    seedDirtyTree();
+    write('.gitattributes', `${CHANGED} diff=mydrv\n`);
+    git('config', 'diff.mydrv.binary', 'true');
+    const cachePath = promoteCandidate(capture(), 'model-a');
+
+    // Only the CONFIG changes: no file in the tree moves, and `check-attr`
+    //答案 is identical before and after.
+    git('config', 'diff.mydrv.binary', 'false');
+    const plan = capture({ cache: cachePath, model: 'model-a' });
+    expect(plan.incremental!.scope!.deltaFiles).toContain(CHANGED);
   });
 
   it('an identical state under the same model and HEAD yields 0 chunks and says so', () => {
