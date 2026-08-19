@@ -4,6 +4,7 @@
   gap: 8px;
   padding-bottom: 12px;
   border-bottom: 1px solid var(--border);
+  container-type: inline-size;
 }
 
 .heading,
@@ -497,7 +498,7 @@ button.nestedExecution:not(:disabled):focus-visible {
   padding-top: 4px;
 }
 
-@media (max-width: 760px) {
+@container (max-width: 760px) {
   .overview {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }

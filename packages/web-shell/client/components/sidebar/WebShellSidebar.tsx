@@ -329,10 +329,6 @@ interface WebShellSidebarProps {
     sessionId: string,
     workspaceCwd?: string,
   ) => Promise<void> | void;
-  onOpenSessionWorkflow?: (
-    sessionId: string,
-    workspaceCwd?: string,
-  ) => Promise<void> | void;
   onSelectCurrentSession?: () => void;
   onSessionRenameConfirmed?: (
     workspaceCwd: string,
@@ -799,7 +795,6 @@ export function WebShellSidebar({
   canOpenSplitView,
   onNewSession,
   onLoadSession,
-  onOpenSessionWorkflow,
   onSelectCurrentSession,
   onSessionRenameConfirmed,
   onError,
@@ -3802,8 +3797,7 @@ export function WebShellSidebar({
         (showRename && !inlineActionItems.has('rename')) ||
         canOrganizeSession(session, 'group') ||
         (showExport && !inlineActionItems.has('export')) ||
-        (showDelete && !inlineActionItems.has('delete')) ||
-        onOpenSessionWorkflow != null;
+        (showDelete && !inlineActionItems.has('delete'));
       const sessionActionCount = inlineActionCount + Number(showMoreActions);
       return withDetails(
         <div
@@ -4029,20 +4023,6 @@ export function WebShellSidebar({
                           onCloseAutoFocus={handleSessionMenuCloseAutoFocus}
                         >
                           <DropdownMenuGroup>
-                                {onOpenSessionWorkflow && (
-                                  <DropdownMenuItem
-                                    disabled={busy}
-                                    onSelect={() =>
-                                      onOpenSessionWorkflow(
-                                        session.sessionId,
-                                        session.workspaceCwd,
-                                      )
-                                    }
-                                  >
-                                    <LayoutGridIcon />
-                                    Session Workflow
-                                  </DropdownMenuItem>
-                                )}
                             {showPin && !inlineActionItems.has('pin') && (
                               <DropdownMenuItem
                                 disabled={busy}
@@ -4144,8 +4124,6 @@ export function WebShellSidebar({
       getArchivedExportWorkspaceCwd,
       getActiveExportScope,
       getIdentityForSession,
-      onError,
-      onOpenSessionWorkflow,
       getSessionWorkspaceCwd,
       handleArchive,
       handleDeleteSession,

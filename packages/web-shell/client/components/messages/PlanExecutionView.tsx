@@ -233,7 +233,8 @@ function getPlanNodeStateFromIndex(
     return { status: 'running', attention };
   if (executionStatuses.includes('paused'))
     return { status: 'paused', attention };
-  if (todo.status === 'completed') return { status: 'completed', attention };
+  if (todo.status === 'completed')
+    return { status: 'completed', attention: false };
   const blocked = (todo.blockedBy ?? []).some(
     (id) => todosById.has(id) && todosById.get(id)?.status !== 'completed',
   );
@@ -302,6 +303,35 @@ function toolForNestedTask(
     status,
     rawOutput: { type: 'task_execution', status: task.status },
   };
+}
+
+export function getAttentionAgentTool(
+  tool: ACPToolCall,
+  tasks: readonly DaemonSessionTaskStatus[],
+): ACPToolCall | undefined {
+  const taskIndex = createTaskExecutionIndex(tasks);
+  const nestedTools = nestedAgentToolsForTool(tool);
+  const nestedToolByCallId = new Map(
+    nestedTools.map(({ tool: nestedTool }) => [nestedTool.callId, nestedTool]),
+  );
+  const failedTask = [...nestedTasksFromIndex(tool, taskIndex)]
+    .reverse()
+    .find(
+      ({ task }) => task.status === 'failed' || task.status === 'cancelled',
+    )?.task;
+  if (failedTask?.toolUseId) {
+    return (
+      nestedToolByCallId.get(failedTask.toolUseId) ??
+      toolForNestedTask(failedTask)
+    );
+  }
+  const failedTool = [...nestedTools].reverse().find(({ tool: nestedTool }) => {
+    const status = executionStatus(nestedTool, taskIndex);
+    return status === 'failed' || status === 'cancelled';
+  })?.tool;
+  if (failedTool) return failedTool;
+  const status = executionStatus(tool, taskIndex);
+  return status === 'failed' || status === 'cancelled' ? tool : undefined;
 }
 
 export function PlanExecutionView({

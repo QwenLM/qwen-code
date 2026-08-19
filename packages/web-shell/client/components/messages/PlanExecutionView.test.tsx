@@ -7,6 +7,7 @@ import type { DaemonSessionAgentTaskStatus } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall, TodoItem } from '../../adapters/types';
 import { I18nProvider } from '../../i18n';
 import {
+  getAttentionAgentTool,
   getPlanNodeState,
   layerPlanTodos,
   nestedAgentToolsForTool,
@@ -178,6 +179,9 @@ describe('PlanExecutionView', () => {
         [root, child],
       ),
     ).toEqual({ status: 'running', attention: true });
+    expect(
+      getAttentionAgentTool(agentTool('build'), [root, child]),
+    ).toMatchObject({ callId: 'call-child', toolName: 'Agent' });
   });
 
   it('surfaces a failed persisted descendant after live tasks disappear', () => {
@@ -197,6 +201,25 @@ describe('PlanExecutionView', () => {
       status: 'in_progress',
       attention: true,
     });
+    expect(getAttentionAgentTool(completedRoot, [])).toBe(failedChild);
+  });
+
+  it('clears resolved failures when their todo is completed', () => {
+    const completedTodo: TodoItem = {
+      id: 'build',
+      content: 'Build',
+      status: 'completed',
+    };
+    const failedAgent = { ...agentTool('build'), status: 'failed' as const };
+
+    expect(
+      getPlanNodeState(
+        completedTodo,
+        new Map([[completedTodo.id, completedTodo]]),
+        [failedAgent],
+        [],
+      ),
+    ).toEqual({ status: 'completed', attention: false });
   });
 
   it('keeps nested agents under their linked root execution', () => {

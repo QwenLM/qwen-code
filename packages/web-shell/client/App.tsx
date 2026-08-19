@@ -241,7 +241,6 @@ import {
   TasksStatusMessage,
   type SerializedTasksMessage,
 } from './components/messages/TasksStatusMessage';
-import { PlanExecutionView } from './components/messages/PlanExecutionView';
 import { SessionWorkflowCockpit } from './components/workflow/SessionWorkflowCockpit';
 import { serializeContextUsageMessage } from './components/messages/ContextUsageMessage';
 import {
@@ -1116,13 +1115,7 @@ function imageTabId(src: string): string {
   return `image:${hash.toString(36)}`;
 }
 type ChatWidthMode = `${typeof DEFAULT_CHAT_MAX_WIDTH}` | 'wide';
-type MainView =
-  | 'chat'
-  | 'cockpit'
-  | 'workflow'
-  | 'scheduledTasks'
-  | 'goals'
-  | 'split';
+type MainView = 'chat' | 'cockpit' | 'scheduledTasks' | 'goals' | 'split';
 
 const CHAT_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-chat-width';
 const CHAT_SHELL_HORIZONTAL_PADDING = 40;
@@ -4558,13 +4551,12 @@ export function App({
   // is one of the activePanel values below.)
   const [mainView, setMainView] = useState<MainView>('chat');
   const mainViewRef = useRef(mainView);
-  const workflowTabRef = useRef<HTMLButtonElement>(null);
   const showChat = useCallback(() => {
     if (cockpitViewRequested()) updateCockpitLocation(false);
     setMainView('chat');
   }, []);
   const useFloatingArtifactPanel =
-    !canDockArtifactPanel || mainView === 'split' || mainView === 'cockpit';
+    !canDockArtifactPanel || mainView === 'split';
   const deferSubagentMount =
     waitForSubagentPanelAnimation &&
     artifactPanelOpen &&
@@ -5123,12 +5115,15 @@ export function App({
     // need a pending-approval signal plumbed up through SplitView. Escape or
     // the toolbar exits fullscreen and reveals them.
     if (artifactPanelFullscreen) setArtifactPanelFullscreen(false);
-    // The Scheduled Tasks and Goals pages are full-pane overlays
+    // Workflow, Scheduled Tasks, and Goals are full-pane overlays
     // (position:absolute) that cover the chat footer too, so dismiss them for
     // the same reason. The split view is deliberately NOT dismissed: each pane
     // owns and renders its own session's approval, so an approval on the (outer)
     // main session must not yank the user out of the panes they are working in.
-    if (mainView === 'scheduledTasks' || mainView === 'goals') {
+    if (cockpitViewRequested()) updateCockpitLocation(false, true);
+    if (mainView === 'cockpit') {
+      setMainView('chat');
+    } else if (mainView === 'scheduledTasks' || mainView === 'goals') {
       setMainView('chat');
     }
   }, [
@@ -6637,23 +6632,11 @@ export function App({
         todo.blockedBy ?? [],
       ]),
   );
-  const sessionWorkflowGoal = useMemo(() => {
-    if (!sessionWorkflowEnabled) return undefined;
-    const sourceIndex = messages.findIndex(
-      (message) => message.id === sessionWorkflowTodosState.sourceMessageId,
-    );
-    for (let index = sourceIndex - 1; index >= 0; index--) {
-      const message = messages[index];
-      if (
-        message?.role === 'user' &&
-        message.source !== 'background_notification' &&
-        message.content.trim()
-      ) {
-        return message.content;
-      }
-    }
-    return undefined;
-  }, [messages, sessionWorkflowEnabled, sessionWorkflowTodosState]);
+  const floatingTodosUseSessionWorkflow =
+    sessionWorkflowEnabled &&
+    floatingTodosState.sourceMessageId !== null &&
+    floatingTodosState.sourceMessageId ===
+      sessionWorkflowTodosState.sourceMessageId;
   const environmentAgentTasks = useMemo(
     () => getEnvironmentAgentTasks(messages, sessionTasks),
     [messages, sessionTasks],
@@ -6663,7 +6646,7 @@ export function App({
       return getAgentToolsForPlan(messages, floatingTodosState);
     }
     if (!sessionWorkflowEnabled) return [];
-    if (mainView === 'workflow' || mainView === 'cockpit') {
+    if (mainView === 'cockpit') {
       return getAgentToolsForPlan(messages, sessionWorkflowTodosState);
     }
     return [];
@@ -6674,57 +6657,6 @@ export function App({
     sessionWorkflowEnabled,
     sessionWorkflowTodosState,
     tasksDialogMessage,
-  ]);
-  // A pending approval (a gated tool call or an AskUserQuestion) renders its
-  // overlay in the chat footer, which is hidden (display:none) while a panel is
-  // shown. Left alone, the turn would hang behind Settings/Status with no
-  // visible prompt. Close the panel so the approval surfaces. Only actionable
-  // approvals count — pendingToolApproval/pendingAskUserApproval already gate on
-  // canActOnPendingApproval, so a non-owner in a shared session isn't yanked out
-  // of Settings by someone else's prompt.
-  useEffect(() => {
-    if (!approvalOverlayActive) return;
-    // The approval overlay renders in the chat footer; dismiss anything layered
-    // over it so it's visible and actionable instead of trapped behind a
-    // backdrop — the panel itself and any DialogShell sub-dialog opened from it
-    // (model picker, approval-mode picker). Leaving the approval-mode picker up
-    // is also a security hole: the user could pick "yolo" and silently
-    // auto-approve a tool call they never saw (handleSetMode auto-approves
-    // pendingApprovalRef.current).
-    if (activePanel) setActivePanel(null);
-    if (modelDialogMode) setModelDialogMode(null);
-    if (showApprovalModeDialog) setShowApprovalModeDialog(false);
-    // The Scheduled Tasks and Goals pages are full-pane overlays
-    // (position:absolute) that cover the chat footer too, so dismiss them for
-    // the same reason. The split view is deliberately NOT dismissed: each pane
-    // owns and renders its own session's approval, so an approval on the (outer)
-    // main session must not yank the user out of the panes they are working in.
-    const pageCanShowApproval =
-      sessionWorkflowEnabled &&
-      (mainView === 'workflow' || mainView === 'cockpit') &&
-      ((isExitPlanApprovalRequest(pendingToolApproval) &&
-        approvalPlanTodos.length > 0) ||
-        (mainView === 'cockpit' &&
-          sessionWorkflowTodos.length > 0 &&
-          pendingToolApproval !== null));
-    if (
-      mainView === 'scheduledTasks' ||
-      mainView === 'goals' ||
-      ((mainView === 'workflow' || mainView === 'cockpit') &&
-        !pageCanShowApproval)
-    ) {
-      setMainView('chat');
-    }
-  }, [
-    approvalOverlayActive,
-    activePanel,
-    modelDialogMode,
-    showApprovalModeDialog,
-    mainView,
-    pendingToolApproval,
-    approvalPlanTodos,
-    sessionWorkflowEnabled,
-    sessionWorkflowTodos.length,
   ]);
   const reloadTargetedWorkspaceSettings = useCallback(async () => {
     const status = await reloadWorkspaceSettings();
@@ -8626,64 +8558,39 @@ export function App({
     sessionActions,
     sessionOwnerGuard,
   ]);
-  const openWorkflow = useCallback(() => {
-    if (!sessionWorkflowEnabled) return;
-    if (!requireActiveSessionForLocalCommand()) return;
-    if (cockpitViewRequested()) updateCockpitLocation(false);
-    setActivePanel(null);
-    setTasksDialogMessage(null);
-    setMainView('workflow');
-  }, [requireActiveSessionForLocalCommand, sessionWorkflowEnabled]);
   const openCockpit = useCallback(() => {
-    if (!sessionWorkflowEnabled) return;
+    if (!sessionWorkflowEnabled || approvalOverlayActive) return;
     if (!requireActiveSessionForLocalCommand()) return;
     if (!cockpitViewRequested()) updateCockpitLocation(true);
     setActivePanel(null);
     setTasksDialogMessage(null);
     setMainView('cockpit');
-  }, [requireActiveSessionForLocalCommand, sessionWorkflowEnabled]);
-  const closeCockpit = showChat;
-  const workflowApprovalRequest =
-    sessionWorkflowEnabled &&
-    isExitPlanApprovalRequest(pendingToolApproval) &&
-    approvalPlanTodos.length > 0
-      ? pendingToolApproval
-      : null;
-  useEffect(() => {
-    if (
-      mainView === 'workflow' &&
-      !workflowApprovalRequest &&
-      sessionWorkflowTodos.length === 0
-    ) {
-      showChat();
-    }
   }, [
-    mainView,
-    sessionWorkflowTodos.length,
-    showChat,
-    workflowApprovalRequest,
+    approvalOverlayActive,
+    requireActiveSessionForLocalCommand,
+    sessionWorkflowEnabled,
   ]);
-  const autoOpenedCockpitApprovalRef = useRef<string | null>(null);
+  const focusComposerAfterCockpitCloseRef = useRef(false);
+  const closeCockpit = useCallback(() => {
+    focusComposerAfterCockpitCloseRef.current = true;
+    showChat();
+  }, [showChat]);
   useEffect(() => {
-    if (!workflowApprovalRequest) {
-      autoOpenedCockpitApprovalRef.current = null;
+    if (mainView !== 'chat' || !focusComposerAfterCockpitCloseRef.current) {
       return;
     }
-    if (mainView === 'split') return;
-    if (autoOpenedCockpitApprovalRef.current === workflowApprovalRequest.id) {
-      return;
-    }
-    autoOpenedCockpitApprovalRef.current = workflowApprovalRequest.id;
-    openCockpit();
-  }, [mainView, openCockpit, workflowApprovalRequest]);
+    focusComposerAfterCockpitCloseRef.current = false;
+    if (!activePanel && !approvalOverlayActive) editorRef.current?.focus();
+  }, [activePanel, approvalOverlayActive, mainView]);
   useEffect(() => {
     if (!sessionWorkflowEnabled) {
-      if (mainView !== 'workflow' && mainView !== 'cockpit') return;
-      if (mainView === 'cockpit' && cockpitViewRequested()) {
+      if (mainView !== 'cockpit') return;
+      if (cockpitViewRequested()) {
         if (sessionWorkflowSettingsResolved) {
           updateCockpitLocation(false, true);
         }
       }
+      focusComposerAfterCockpitCloseRef.current = true;
       setMainView('chat');
       return;
     }
@@ -8701,28 +8608,30 @@ export function App({
     sessionWorkflowSettingsResolved,
   ]);
   useEffect(() => {
-    if (mainView === 'workflow' && !workflowApprovalRequest) {
-      workflowTabRef.current?.focus();
-    }
-  }, [mainView, workflowApprovalRequest]);
-  useEffect(() => {
     const handlePopState = () => {
       if (cockpitViewRequested()) {
-        if (sessionWorkflowEnabled) {
+        if (sessionWorkflowEnabled && !approvalOverlayActive) {
           setMainView('cockpit');
         } else {
           setMainView('chat');
-          if (sessionWorkflowSettingsResolved) {
+          if (approvalOverlayActive || sessionWorkflowSettingsResolved) {
             updateCockpitLocation(false, true);
           }
         }
       } else if (mainViewRef.current === 'cockpit') {
+        if (!approvalOverlayActive) {
+          focusComposerAfterCockpitCloseRef.current = true;
+        }
         setMainView('chat');
       }
     };
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
-  }, [sessionWorkflowEnabled, sessionWorkflowSettingsResolved]);
+  }, [
+    approvalOverlayActive,
+    sessionWorkflowEnabled,
+    sessionWorkflowSettingsResolved,
+  ]);
   useEffect(() => {
     if (
       mainView === 'cockpit' &&
@@ -11699,19 +11608,6 @@ export function App({
                     showChat();
                     return loadSidebarSession(sessionId, workspaceCwd);
                   }}
-                  onOpenSessionWorkflow={
-                    sessionWorkflowEnabled
-                      ? async (sessionId, workspaceCwd) => {
-                          closeMobileDrawer();
-                          await loadSidebarSession(sessionId, workspaceCwd);
-                          if (!cockpitViewRequested()) {
-                            updateCockpitLocation(true);
-                          }
-                          closePanel();
-                          setMainView('cockpit');
-                        }
-                      : undefined
-                  }
                   onSelectCurrentSession={() => {
                     closeMobileDrawer();
                     showChat();
@@ -11775,8 +11671,7 @@ export function App({
                 !isChatEmptyState &&
                 !activePanel &&
                 ((chatHeaderEnabled && mainView === 'chat') ||
-                  mainView === 'cockpit' ||
-                  mainView === 'workflow') && (
+                  mainView === 'cockpit') && (
                 <div className={styles.chatHeaderRow}>
                   {sidebarOptions.enabled &&
                     sidebarOptions.showCompactToggle && (
@@ -11860,7 +11755,6 @@ export function App({
                         onValueChange={(view) => {
                           if (view === 'chat') closeCockpit();
                           if (view === 'cockpit') openCockpit();
-                          if (view === 'workflow') openWorkflow();
                         }}
                       >
                         <ToggleGroupItem value="chat" data-testid="open-chat">
@@ -11868,19 +11762,11 @@ export function App({
                         </ToggleGroupItem>
                         <ToggleGroupItem
                           value="cockpit"
-                          data-testid="open-cockpit"
+                          data-testid="open-workflow"
+                          disabled={approvalOverlayActive}
                         >
-                          {t('workflow.cockpitTitle')}
+                          {t('workflow.title')}
                         </ToggleGroupItem>
-                        {sessionWorkflowTodos.length > 0 && (
-                          <ToggleGroupItem
-                            ref={workflowTabRef}
-                            value="workflow"
-                            data-testid="open-workflow"
-                          >
-                            {t('workflow.title')}
-                          </ToggleGroupItem>
-                        )}
                       </ToggleGroup>
                     )}
                 </div>
@@ -12350,51 +12236,7 @@ export function App({
                     {...(connection.workspaceCwd
                       ? { workspaceCwd: connection.workspaceCwd }
                       : {})}
-                    {...(sessionWorkflowGoal
-                      ? { goal: sessionWorkflowGoal }
-                      : {})}
-                    {...(workflowApprovalRequest
-                      ? {
-                          approval: {
-                            request: workflowApprovalRequest,
-                            todos: approvalPlanTodos,
-                            onConfirm: handleConfirm,
-                          },
-                        }
-                      : {})}
-                    {...(pendingToolApproval &&
-                    !isExitPlanApprovalRequest(pendingToolApproval) &&
-                    sessionWorkflowTodos.length > 0
-                      ? {
-                          decision: {
-                            request: pendingToolApproval,
-                            onConfirm: handleConfirm,
-                          },
-                        }
-                      : {})}
                   />
-                </div>
-              )}
-              {mainView === 'workflow' && (
-                <div className={styles.fullPage} data-testid="workflow-page">
-                  <div className={styles.workflowPageBody}>
-                    {workflowApprovalRequest ? (
-                      <ToolApproval
-                        request={workflowApprovalRequest}
-                        onConfirm={handleConfirm}
-                        variant="inline"
-                        keyboardActive={true}
-                        planTodos={approvalPlanTodos}
-                      />
-                    ) : (
-                      <PlanExecutionView
-                        todos={sessionWorkflowTodos}
-                        tools={planAgentTools}
-                        tasks={environmentAgentTasks}
-                        onOpenSubagent={openSubagentPanel}
-                      />
-                    )}
-                  </div>
                 </div>
               )}
               {mainView === 'split' && (
@@ -12734,8 +12576,8 @@ export function App({
                             statusItems={floatingBottomStatusItems}
                             onOpen={
                               showFloatingTodos
-                                ? sessionWorkflowEnabled
-                                  ? openWorkflow
+                                ? floatingTodosUseSessionWorkflow
+                                  ? openCockpit
                                   : openTasksPanel
                                 : undefined
                             }
@@ -12743,7 +12585,7 @@ export function App({
                         </div>
                       )}
                       {/* Only render the outer session's approval on the chat
-                          view. Under a full-page view (split / scheduled tasks)
+                          view. Under a full-page view (Workflow / split / scheduled tasks)
                           it would sit hidden and unreachable. Each split pane
                           surfaces its own approval. `keyboardActive` tells the
                           overlay to grab focus only when it's the topmost one. */}

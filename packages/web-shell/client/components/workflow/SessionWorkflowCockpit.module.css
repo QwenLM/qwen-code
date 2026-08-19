@@ -1,65 +1,20 @@
 .cockpit,
-.reviewShell,
 .emptyCockpit {
-  /* Local token patch: the radius scale reuses the app's --radius-sm/md/lg/xl
-   * tokens (see globals.css); these three are cockpit-only because nothing
-   * else in the app needs a tint scale or a shared "text on accent fill"
-   * color yet. Consolidating here keeps every card/badge/glow in this view
-   * drawing from the same handful of values instead of one-off numbers. */
-  --cockpit-tint-weak: 8%;
-  --cockpit-tint-ring: 14%;
-  --cockpit-tint-strong: 24%;
-  --cockpit-mono:
-    ui-monospace, 'SF Mono', 'SFMono-Regular', Menlo, Consolas, monospace;
-  --cockpit-on-accent: #fff;
-  --cockpit-shadow: 0 8px 28px
-    color-mix(in srgb, var(--foreground) 6%, transparent);
   color: var(--foreground);
   background: var(--background);
   font-family: inherit;
 }
 
 .cockpit button,
-.reviewShell button,
 .emptyCockpit button {
   color: inherit;
   font: inherit;
 }
 
 .cockpit button:focus-visible,
-.reviewShell button:focus-visible,
 .emptyCockpit button:focus-visible {
   outline: 3px solid var(--agent-blue-500);
   outline-offset: 2px;
-}
-
-.primaryButton,
-.secondaryButton {
-  min-height: 36px;
-  padding: 0 14px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--background);
-  cursor: pointer;
-  font-size: 13px;
-  font-weight: 700;
-  transition:
-    transform 160ms ease,
-    box-shadow 160ms ease,
-    background 160ms ease;
-}
-
-/* Qualified with the root scopes + `button` (not just `.primaryButton`) so
- * this naturally outranks the `.cockpit button { color: inherit }` reset
- * above on specificity instead of needing `!important`. */
-:is(.cockpit, .reviewShell, .emptyCockpit) button.primaryButton {
-  color: var(--cockpit-on-accent);
-  border-color: var(--agent-blue-500);
-  background: var(--agent-blue-500);
-}
-
-.secondaryButton:hover {
-  background: var(--accent);
 }
 
 .cockpit {
@@ -73,8 +28,155 @@
 .main {
   height: 100%;
   min-width: 0;
-  background: var(--background);
   overflow: auto;
+}
+
+.content,
+.attentionPage {
+  width: min(1400px, 100%);
+  margin: 0 auto;
+  padding: 24px 28px 34px;
+}
+
+.taskHeading,
+.attentionHeading {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+  margin-bottom: 18px;
+}
+
+.taskHeading > div:first-child,
+.attentionHeading > div:first-child {
+  min-width: 0;
+}
+
+.attentionHeading h1,
+.attentionHeading p {
+  margin: 0;
+}
+
+.attentionHeading h1 {
+  margin-top: 6px;
+  font-size: clamp(22px, 2.2vw, 30px);
+  letter-spacing: -0.035em;
+}
+
+.attentionHeading p {
+  margin-top: 7px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.reviewEyebrow {
+  color: var(--agent-blue-500);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.titleLine {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 11px;
+}
+
+.titleLine h1 {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  font-size: clamp(22px, 2.2vw, 30px);
+  letter-spacing: -0.035em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.titleLine > span {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 9px;
+  border-radius: var(--radius-sm);
+  color: var(--success-color);
+  background: var(--success-bg);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.titleLine > span::before {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  content: '';
+}
+
+.titleLine > span[data-status='running'] {
+  color: var(--agent-blue-500);
+  background: color-mix(in srgb, var(--agent-blue-500) 8%, var(--card));
+}
+
+.titleLine > span[data-status='attention'] {
+  color: var(--warning-color);
+  background: var(--warning-bg);
+}
+
+.titleLine > span[data-status='waiting'] {
+  color: var(--muted-foreground);
+  background: var(--muted);
+}
+
+.taskMeta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 17px;
+  margin-top: 9px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.taskMeta code {
+  font-size: 11px;
+}
+
+.headingActions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.backButton {
+  display: flex;
+  height: 38px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--muted-foreground);
+  background: var(--background);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.backButton:hover {
+  color: var(--foreground);
+  background: var(--accent);
+}
+
+.backButton svg {
+  width: 14px;
+  height: 14px;
 }
 
 .cockpitTabs {
@@ -141,12 +243,11 @@
   border-radius: var(--radius-md);
   color: var(--muted-foreground);
   background: var(--background);
-  font-family: var(--cockpit-mono);
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
   font-size: 12px;
 }
 
-.environment i,
-.stageTabs > span i {
+.environment i {
   width: 7px;
   height: 7px;
   border-radius: 50%;
@@ -159,221 +260,31 @@
   box-shadow: 0 0 0 4px var(--warning-bg);
 }
 
-.content,
-.attentionPage {
-  width: min(1540px, 100%);
-  margin: 0 auto;
-  padding: 24px 28px 34px;
-}
-
-.taskHeading,
-.attentionHeading {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 20px;
-  min-width: 0;
-  margin-bottom: 20px;
-}
-
-.taskHeading > div:first-child,
-.attentionHeading > div:first-child {
-  min-width: 0;
-}
-
-.headingActions {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 12px;
-}
-
-.titleLine {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: 11px;
-}
-
-.titleLine h1,
-.attentionHeading h1 {
-  margin: 0;
-  font-size: clamp(22px, 2.2vw, 30px);
-  letter-spacing: -0.035em;
-}
-
-.titleLine h1 {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.titleLine > span {
-  display: inline-flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 9px;
-  border-radius: var(--radius-sm);
-  color: var(--success-color);
-  background: var(--success-bg);
-  font-size: 12px;
-  font-weight: 800;
-}
-
-.titleLine > span::before {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--success-color);
-  content: '';
-}
-
-.titleLine > span[data-status='running'] {
-  color: var(--agent-blue-500);
-  background: color-mix(
-    in srgb,
-    var(--agent-blue-500) var(--cockpit-tint-weak),
-    var(--card)
-  );
-}
-
-.titleLine > span[data-status='running']::before {
-  background: var(--agent-blue-500);
-}
-
-.titleLine > span[data-status='attention'] {
-  color: var(--warning-color);
-  background: var(--warning-bg);
-}
-
-.titleLine > span[data-status='attention']::before {
-  background: var(--warning-color);
-}
-
-.titleLine > span[data-status='waiting'] {
-  color: var(--muted-foreground);
-  background: var(--muted);
-}
-
-.titleLine > span[data-status='waiting']::before {
-  background: var(--muted-foreground);
-}
-
-.taskMeta {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 17px;
-  margin-top: 9px;
-  color: var(--muted-foreground);
-  font-size: 12px;
-}
-
-.taskMeta code {
-  color: var(--muted-foreground);
-  font-size: 11px;
-}
-
-.stats {
-  display: grid;
-  grid-template-columns: 1.55fr repeat(4, 1fr);
+.workflowSurface,
+.panel,
+.attentionStats,
+.attentionWorkspace {
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: var(--radius-xl);
   background: var(--card);
-  box-shadow: var(--cockpit-shadow);
+  box-shadow: 0 8px 28px color-mix(in srgb, var(--foreground) 6%, transparent);
 }
 
-.statsCompleted {
-  grid-template-columns: 1.55fr repeat(3, 1fr);
+.workflowSurface > section {
+  padding: 16px;
+  border-bottom: 0;
 }
 
-.stats > div {
-  display: flex;
-  min-height: 76px;
-  flex-direction: column;
-  justify-content: center;
-  padding: 12px 18px;
-  border-right: 1px solid var(--border);
-}
-
-.stats > div:last-child {
-  border-right: 0;
-}
-
-.stats > div > strong {
-  font-size: 20px;
-  letter-spacing: -0.04em;
-}
-
-.stats > div > span {
-  margin-top: 3px;
-  color: var(--muted-foreground);
-  font-size: 11px;
-}
-
-.stats > div[data-attention='true'] strong {
-  color: var(--warning-color);
-}
-
-/* `.stats > div.progressStat` outranks `.stats > div`'s padding on
- * specificity, so this wins without `!important`. */
-.stats > div.progressStat {
-  gap: 11px;
-  padding: 15px 19px;
-}
-
-.progressStat > div:first-child {
-  display: flex;
-  justify-content: space-between;
-  color: var(--muted-foreground);
-  font-size: 12px;
-}
-
-.progressStat > div:first-child strong {
-  color: var(--foreground);
-  font-size: 12px;
-}
-
-.progressTrack {
-  height: 7px;
-  overflow: hidden;
-  border-radius: 999px;
-  background: var(--muted);
-}
-
-.progressTrack i {
-  display: block;
-  height: 100%;
-  border-radius: inherit;
-  /* Success-color, not agent-blue: this bar tracks completion, and every
-   * other "done" signal in the cockpit (phase checkmarks, PASS badges, the
-   * review banner) already reads as success-color. Matches the equivalent
-   * bar in the sibling PlanExecutionView. */
-  background: var(--success-color);
-  transition: width 300ms ease;
-}
-
-.workspace {
+.supportGrid {
   display: grid;
-  grid-template-columns: minmax(200px, 0.75fr) minmax(420px, 2fr) minmax(
-      230px,
-      0.85fr
-    );
+  grid-template-columns: minmax(0, 2fr) minmax(260px, 0.8fr);
   gap: 14px;
   margin-top: 14px;
 }
 
 .panel {
   min-width: 0;
-  overflow: hidden;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-xl);
-  background: var(--card);
-  box-shadow: var(--cockpit-shadow);
 }
 
 .panelHeader {
@@ -398,470 +309,24 @@
   font-size: 11px;
 }
 
-.panelHeader button {
-  border: 0;
-  color: var(--agent-blue-500);
-  background: transparent;
-  cursor: pointer;
-  font-size: 12px;
-}
-
-.panelHeader code {
-  color: var(--success-color);
-  font-size: 11px;
-}
-
-.workspace > aside:first-child {
-  display: flex;
-  min-height: 0;
-  flex-direction: column;
-}
-
-.phases {
+.activityList {
   display: grid;
-  flex: 1;
-  gap: 3px;
-  min-height: 0;
-  overflow-y: auto;
-  padding: 10px;
-  align-content: start;
-}
-
-.phase {
-  display: grid;
-  grid-template-columns: 26px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 9px;
-  width: 100%;
-  padding: 10px 9px;
-  border: 0;
-  border-radius: var(--radius-lg);
-  background: transparent;
-  cursor: pointer;
-  text-align: left;
-}
-
-.phase:hover {
-  background: var(--muted);
-}
-
-.phaseActive {
-  background: color-mix(
-    in srgb,
-    var(--agent-blue-500) var(--cockpit-tint-weak),
-    var(--card)
-  );
-  box-shadow: inset 3px 0 var(--agent-blue-500);
-}
-
-.phase > i {
-  display: grid;
-  width: 24px;
-  height: 24px;
-  place-items: center;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  color: var(--muted-foreground);
-  background: var(--card);
-  font-family: var(--cockpit-mono);
-  font-size: 11px;
-  font-style: normal;
-  font-weight: 700;
-}
-
-.phase[data-status='completed'] > i,
-.phase[data-status='running'] > i,
-.phase[data-status='in_progress'] > i {
-  color: var(--cockpit-on-accent);
-  border-color: var(--success-color);
-  background: var(--success-color);
-}
-
-.phase[data-status='running'] > i,
-.phase[data-status='in_progress'] > i {
-  border-color: var(--agent-blue-500);
-  background: var(--agent-blue-500);
-  box-shadow: 0 0 0 4px
-    color-mix(
-      in srgb,
-      var(--agent-blue-500) var(--cockpit-tint-ring),
-      transparent
-    );
-}
-
-.phase[data-status='blocked'] > i,
-.phase[data-status='paused'] > i {
-  color: var(--cockpit-on-accent);
-  border-color: var(--warning-color);
-  background: var(--warning-color);
-}
-
-.phase > span {
-  min-width: 0;
-}
-
-.phase > span strong,
-.phase > span small {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.phase > span strong {
-  display: -webkit-box;
-  font-size: 12px;
-  line-height: 1.35;
-  white-space: normal;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-}
-
-.phase > span small {
-  margin-top: 2px;
-  color: var(--muted-foreground);
-  font-size: 10px;
-  white-space: nowrap;
-}
-
-.phase > em {
-  color: var(--muted-foreground);
-  font-family: var(--cockpit-mono);
-  font-size: 10px;
-  font-style: normal;
-}
-
-.stage {
-  display: flex;
-  flex-direction: column;
-  min-height: 620px;
-}
-
-.stageTabs {
-  display: flex;
-  height: 57px;
-  align-items: stretch;
-  padding: 0 15px;
-  border-bottom: 1px solid var(--border);
-}
-
-.stageTabs button {
-  position: relative;
-  padding: 0 14px;
-  border: 0;
-  color: var(--muted-foreground);
-  background: transparent;
-  cursor: pointer;
-  font-size: 12px;
-}
-
-/* `.stageTabs button.stageTabActive` outranks `.stageTabs button` on
- * specificity, so this wins without `!important`. */
-.stageTabs button.stageTabActive {
-  color: var(--foreground);
-  font-weight: 800;
-}
-
-.stageTabActive::after {
-  position: absolute;
-  right: 13px;
-  bottom: -1px;
-  left: 13px;
-  height: 2px;
-  background: var(--agent-blue-500);
-  content: '';
-}
-
-.stageTabs > span {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-left: auto;
-  color: var(--success-color);
-  font-family: var(--cockpit-mono);
-  font-size: 10px;
-  font-weight: 700;
-}
-
-.workStage {
-  flex: 1;
-  min-height: 560px;
-  background: linear-gradient(180deg, var(--muted), var(--card) 28%);
-}
-
-.executionRailViewport {
-  overflow-x: auto;
-  overscroll-behavior-x: contain;
-}
-
-.executionRail {
-  position: relative;
-  height: 98px;
-  margin: 0 18px;
-  border-bottom: 1px solid var(--border);
-}
-
-.railLine {
-  position: absolute;
-  top: 49px;
-  right: 5%;
-  left: 5%;
-  height: 2px;
-  background: var(--border);
-}
-
-.railLine > i {
-  display: block;
-  height: 100%;
-  /* Same `progress` value as .progressTrack i above (steps completed /
-   * total) — success-color for the same reason: it tracks completion, and
-   * the current-step marker below is already the accent that reads "here". */
-  background: var(--success-color);
-}
-
-.executionRail > button {
-  position: absolute;
-  z-index: 1;
-  top: 37px;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  cursor: pointer;
-  transform: translateX(-50%);
-}
-
-.executionRail > button > i {
-  display: grid;
-  width: 25px;
-  height: 25px;
-  place-items: center;
-  border: 2px solid var(--border);
-  border-radius: 50%;
-  color: var(--muted-foreground);
-  background: var(--card);
-  font-family: var(--cockpit-mono);
-  font-size: 10px;
-  font-style: normal;
-  font-weight: 700;
-}
-
-/* `.executionRail > button.railCurrent > i` outranks
- * `.executionRail > button > i` on specificity, so this wins without
- * `!important`. */
-.executionRail > button.railCurrent > i {
-  color: var(--agent-blue-500);
-  border-color: var(--agent-blue-500);
-  box-shadow: 0 0 0 6px
-    color-mix(
-      in srgb,
-      var(--agent-blue-500) var(--cockpit-tint-ring),
-      transparent
-    );
-}
-
-.workDetail {
-  padding: 20px;
-}
-
-.workIdentity {
-  display: grid;
-  grid-template-columns: 42px minmax(0, 1fr) auto;
-  align-items: start;
-  gap: 12px;
-}
-
-.workIdentity > span,
-.agentCards button > span {
-  display: grid;
-  width: 40px;
-  height: 40px;
-  place-items: center;
-  border-radius: var(--radius-lg);
-  color: var(--agent-blue-500);
-  background: color-mix(
-    in srgb,
-    var(--agent-blue-500) var(--cockpit-tint-weak),
-    var(--card)
-  );
-  font-family: var(--cockpit-mono);
-  font-size: 12px;
-  font-weight: 900;
-}
-
-.workIdentity small {
-  color: var(--muted-foreground);
-  font-family: var(--cockpit-mono);
-  font-size: 10px;
-}
-
-.workIdentity h2 {
-  margin: 4px 0;
-  font-size: 15px;
-}
-
-.workIdentity p {
-  margin: 0;
-  color: var(--muted-foreground);
-  font-size: 11px;
-}
-
-.workIdentity > div,
-.agentCards button > div {
-  min-width: 0;
-}
-
-.workIdentity h2,
-.agentCards strong {
-  overflow-wrap: anywhere;
-}
-
-.runtime {
-  text-align: right;
-}
-
-.runtime strong,
-.runtime span {
-  display: block;
-}
-
-.runtime strong {
-  font-family: var(--cockpit-mono);
-  font-size: 13px;
-}
-
-.runtime span {
-  margin-top: 3px;
-  color: var(--muted-foreground);
-  font-size: 10px;
-}
-
-.currentAction {
-  margin-top: 16px;
-  padding: 12px 14px;
-  border-left: 3px solid var(--agent-blue-500);
-  border-radius: 0 var(--radius-md) var(--radius-md) 0;
-  color: var(--muted-foreground);
-  background: var(--muted);
-}
-
-.currentAction strong {
-  color: var(--foreground);
-  font-size: 11px;
-}
-
-.currentAction p {
-  margin: 4px 0 0;
-  font-size: 12px;
-  line-height: 1.6;
-}
-
-.dependencyCards {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 8px;
-  margin-top: 15px;
-}
-
-.dependencyCards > div {
-  padding: 11px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-}
-
-.dependencyCards span,
-.dependencyCards strong {
-  display: block;
-}
-
-.dependencyCards span {
-  color: var(--muted-foreground);
-  font-size: 11px;
-}
-
-.dependencyCards strong {
-  margin-top: 4px;
-  overflow-wrap: anywhere;
-  font-size: 12px;
-}
-
-.agentCards {
-  display: grid;
-  gap: 7px;
-  margin-top: 15px;
-}
-
-.agentCards button {
-  display: grid;
-  grid-template-columns: 40px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 11px;
-  width: 100%;
-  padding: 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  background: var(--card);
-  cursor: pointer;
-  text-align: left;
-}
-
-.agentCards button:hover {
-  border-color: color-mix(in srgb, var(--agent-blue-500) 38%, var(--border));
-  background: color-mix(
-    in srgb,
-    var(--agent-blue-500) var(--cockpit-tint-weak),
-    var(--card)
-  );
-}
-
-.agentCards button > span {
-  width: 35px;
-  height: 35px;
-  font-size: 10px;
-}
-
-.agentCards strong,
-.agentCards small {
-  display: block;
-}
-
-.agentCards strong {
-  font-size: 12px;
-}
-
-.agentCards small {
-  margin-top: 3px;
-  color: var(--muted-foreground);
-  font-size: 11px;
-}
-
-.agentCards em {
-  color: var(--agent-blue-500);
-  font-size: 11px;
-  font-style: normal;
-}
-
-.activityStage {
-  display: grid;
-  flex: 1;
-  gap: 0;
-  padding: 12px 18px;
 }
 
 .activityRow {
   display: grid;
-  grid-template-columns: 52px 28px minmax(0, 1fr) auto;
+  grid-template-columns: 52px 34px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 9px;
-  min-height: 58px;
+  gap: 10px;
+  min-width: 0;
+  padding: 12px 16px;
+  border: 0;
   border-bottom: 1px solid var(--border);
+  background: transparent;
+  text-align: left;
 }
 
 button.activityRow {
-  width: 100%;
-  padding-block: 0;
-  padding-right: 0;
-  color: inherit;
-  background: transparent;
-  text-align: left;
   cursor: pointer;
 }
 
@@ -869,51 +334,57 @@ button.activityRow:hover {
   background: var(--accent);
 }
 
-.activityRow time,
-.logRows time {
-  color: var(--muted-foreground);
-  font-family: var(--cockpit-mono);
-  font-size: 10px;
+.activityRow:last-child {
+  border-bottom: 0;
 }
 
-.activityRow > span,
-.logRows > button > span {
+.activityRow time,
+.activityRow em {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-style: normal;
+}
+
+.activityIdentity {
   display: grid;
-  width: 25px;
-  height: 25px;
+  width: 30px;
+  height: 30px;
   place-items: center;
   border-radius: var(--radius-sm);
   color: var(--agent-blue-500);
-  background: color-mix(
-    in srgb,
-    var(--agent-blue-500) var(--cockpit-tint-weak),
-    var(--card)
-  );
-  font-family: var(--cockpit-mono);
+  background: color-mix(in srgb, var(--agent-blue-500) 8%, var(--card));
   font-size: 10px;
   font-weight: 800;
 }
 
-.activityRow strong,
-.activityRow small {
-  display: block;
+.activityCopy {
+  min-width: 0;
 }
 
-.activityRow strong {
+.activityCopy strong,
+.activityCopy small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activityCopy strong {
   font-size: 12px;
 }
 
-.activityRow small {
+.activityCopy small {
   margin-top: 3px;
   color: var(--muted-foreground);
   font-size: 11px;
 }
 
-.activityRow em,
-.logRows em {
-  color: var(--success-color);
-  font-size: 10px;
-  font-style: normal;
+.activityCopy small.skillList {
+  color: var(--agent-blue-500);
+}
+
+.activityRow em[data-status='running'] {
+  color: var(--agent-blue-500);
 }
 
 .activityRow em[data-status='failed'],
@@ -921,264 +392,60 @@ button.activityRow:hover {
   color: var(--error-color);
 }
 
-.inlineEmpty {
-  padding: 24px;
-  color: var(--muted-foreground);
-  font-size: 12px;
-  text-align: center;
-}
-
-.reviewBanner {
-  margin: 12px;
-  padding: 13px;
-  border: 1px solid color-mix(in srgb, var(--success-color) 30%, var(--border));
-  border-radius: var(--radius-lg);
-  color: var(--success-color);
-  background: var(--success-bg);
-}
-
-.reviewBanner[data-attention='true'] {
-  color: var(--warning-color);
-  border-color: var(--warning-border);
-  background: var(--warning-bg);
-}
-
-.reviewBanner strong {
-  font-size: 12px;
-}
-
-.reviewBanner p {
-  margin: 5px 0 0;
-  font-size: 11px;
-  line-height: 1.5;
-}
-
-.checkList {
-  padding: 0 12px;
-}
-
-.checkList > div {
-  display: grid;
-  grid-template-columns: 20px minmax(0, 1fr) auto;
-  align-items: start;
-  gap: 8px;
-  padding: 11px 2px;
-  border-bottom: 1px solid var(--border);
-}
-
-.checkList > div > i {
-  display: grid;
-  width: 18px;
-  height: 18px;
-  place-items: center;
-  border-radius: var(--radius-sm);
-  color: var(--cockpit-on-accent);
-  background: var(--success-color);
-  font-size: 11px;
-  font-style: normal;
-  font-weight: 900;
-}
-
-.checkList > div[data-warning='true'] > i {
-  background: var(--warning-color);
-}
-
-.checkList strong,
-.checkList small {
-  display: block;
-}
-
-.checkList strong {
-  font-size: 12px;
-}
-
-.checkList small {
-  margin-top: 2px;
-  color: var(--muted-foreground);
-  font-size: 11px;
-  line-height: 1.4;
-}
-
-.checkList em {
-  padding: 4px 6px;
-  border-radius: 999px;
-  color: var(--success-color);
-  background: var(--success-bg);
-  font-family: var(--cockpit-mono);
-  font-size: 10px;
-  font-style: normal;
-  font-weight: 700;
-}
-
-.evidenceGrid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 6px;
-  margin: 12px;
-  padding: 10px;
-  border-radius: var(--radius-md);
-  background: var(--muted);
-}
-
-.evidenceGrid > div {
-  padding: 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--card);
-}
-
-.evidenceGrid strong,
-.evidenceGrid span {
-  display: block;
-}
-
-.evidenceGrid strong {
-  font-size: 12px;
-}
-
-.evidenceGrid span {
-  margin-top: 2px;
-  color: var(--muted-foreground);
-  font-size: 11px;
-}
-
-.reviewActions {
-  display: grid;
-  gap: 7px;
-  padding: 12px;
-  border-top: 1px solid var(--border);
-}
-
-.collaboration {
-  margin-top: 14px;
-}
-
-.collaborationBody {
-  display: grid;
-  grid-template-columns: 1.25fr 0.75fr;
-}
-
-.logRows {
-  padding: 12px 17px;
-  border-right: 1px solid var(--border);
-}
-
-.logRows > button {
-  display: grid;
-  grid-template-columns: 48px 25px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 8px;
-  min-height: 38px;
-  width: 100%;
-  padding: 0;
-  border: 0;
-  color: inherit;
-  background: transparent;
-  font-size: 11px;
-  text-align: left;
-}
-
-.logRows > button:not(:disabled) {
-  cursor: pointer;
-}
-
-.logRows > button:not(:disabled):hover {
-  background: var(--accent);
-}
-
-.logRows p {
-  margin: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .deliverables {
-  padding: 14px 17px;
-}
-
-.deliverables > div {
-  display: flex;
-  justify-content: space-between;
-  font-size: 12px;
-}
-
-.deliverables > div span {
-  color: var(--muted-foreground);
-  font-size: 10px;
-}
-
-.deliverables section {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 7px;
-  margin-top: 10px;
+  gap: 8px;
+  padding: 12px;
 }
 
-.deliverables section > button {
-  min-width: 0;
+.deliverables button {
+  display: grid;
+  gap: 3px;
   padding: 10px;
   border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  color: inherit;
-  background: transparent;
+  border-radius: var(--radius-lg);
+  background: var(--background);
+  cursor: pointer;
   text-align: left;
 }
 
-.deliverables section > button:not(:disabled) {
-  cursor: pointer;
-}
-
-.deliverables section > button:not(:disabled):hover {
+.deliverables button:hover:not(:disabled) {
   background: var(--accent);
 }
 
-.deliverables section strong,
-.deliverables section small {
-  display: block;
+.deliverables button:disabled {
+  cursor: default;
+}
+
+.deliverables strong {
   overflow: hidden;
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.deliverables section strong {
-  font-size: 11px;
-}
-
-.deliverables section small,
-.deliverables section p {
-  margin-top: 3px;
+.deliverables small,
+.deliverables p,
+.inlineEmpty {
+  margin: 0;
   color: var(--muted-foreground);
   font-size: 11px;
 }
 
-.attentionHeading p {
-  margin: 7px 0 0;
-  color: var(--muted-foreground);
-  font-size: 12px;
-}
-
-.reviewEyebrow,
-.permissionKicker {
-  color: var(--agent-blue-500);
-  font-family: var(--cockpit-mono);
-  font-size: 10px;
-  font-weight: 800;
-  letter-spacing: 0.13em;
+.inlineEmpty {
+  padding: 20px;
+  text-align: center;
 }
 
 .attentionStats {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  overflow: hidden;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-xl);
-  background: var(--card);
+  margin-bottom: 14px;
 }
 
 .attentionStats > div {
-  min-height: 76px;
-  padding: 15px 17px;
+  min-height: 72px;
+  padding: 14px 18px;
   border-right: 1px solid var(--border);
 }
 
@@ -1196,75 +463,65 @@ button.activityRow:hover {
 }
 
 .attentionStats span {
-  margin-top: 3px;
+  margin-top: 4px;
   color: var(--muted-foreground);
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .attentionWorkspace {
   display: grid;
-  grid-template-columns: minmax(300px, 0.8fr) minmax(480px, 1.4fr);
-  gap: 13px;
-  margin-top: 13px;
+  min-height: 420px;
+  grid-template-columns: minmax(300px, 0.75fr) minmax(0, 1.6fr);
 }
 
-.attentionList,
-.attentionDetail {
-  min-height: 470px;
-  overflow: hidden;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-xl);
-  background: var(--card);
+.attentionList {
+  border-right: 1px solid var(--border);
 }
 
 .attentionList header {
   display: flex;
-  height: 48px;
+  min-height: 48px;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
   padding: 0 14px;
   border-bottom: 1px solid var(--border);
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .attentionList header span {
   color: var(--muted-foreground);
-  font-size: 10px;
 }
 
 .attentionList > button {
   display: grid;
-  grid-template-columns: 30px minmax(0, 1fr);
-  align-items: center;
+  grid-template-columns: 28px minmax(0, 1fr);
   gap: 10px;
   width: 100%;
-  padding: 14px;
+  padding: 13px 14px;
   border: 0;
   border-bottom: 1px solid var(--border);
-  background: var(--card);
+  background: transparent;
   cursor: pointer;
   text-align: left;
 }
 
-/* `.attentionList > button.attentionActive` outranks
- * `.attentionList > button` on specificity, so this wins without
- * `!important`. */
+.attentionList > button:hover {
+  background: var(--accent);
+}
+
 .attentionList > button.attentionActive {
-  background: color-mix(
-    in srgb,
-    var(--agent-blue-500) var(--cockpit-tint-weak),
-    var(--card)
-  );
+  background: color-mix(in srgb, var(--agent-blue-500) 8%, var(--card));
   box-shadow: inset 3px 0 var(--agent-blue-500);
 }
 
 .attentionList > button > span {
   display: grid;
-  width: 29px;
-  height: 29px;
+  width: 25px;
+  height: 25px;
   place-items: center;
-  border-radius: var(--radius-md);
-  color: var(--cockpit-on-accent);
+  border-radius: var(--radius-sm);
+  color: var(--primary-foreground);
   background: var(--error-color);
   font-weight: 800;
 }
@@ -1276,12 +533,12 @@ button.activityRow:hover {
 
 .attentionList strong {
   font-size: 12px;
+  line-height: 1.4;
 }
 
 .attentionList small {
   margin-top: 4px;
   color: var(--muted-foreground);
-  font-family: var(--cockpit-mono);
   font-size: 10px;
 }
 
@@ -1294,9 +551,9 @@ button.activityRow:hover {
   font-size: 20px;
 }
 
-.attentionDetail p {
-  max-width: 650px;
-  margin: 0 0 20px;
+.attentionDetail > p {
+  max-width: 700px;
+  margin: 0 0 18px;
   color: var(--muted-foreground);
   font-size: 12px;
   line-height: 1.7;
@@ -1304,269 +561,51 @@ button.activityRow:hover {
 
 .attentionEmpty {
   display: grid;
-  min-height: 430px;
+  min-height: 320px;
   place-items: center;
   align-content: center;
-  margin-top: 13px;
-  border: 1px solid var(--border);
+  padding: 32px;
+  border: 1px dashed var(--border);
   border-radius: var(--radius-xl);
-  background: var(--card);
   text-align: center;
 }
 
 .attentionEmpty > span {
   display: grid;
-  width: 52px;
-  height: 52px;
+  width: 44px;
+  height: 44px;
   place-items: center;
-  /* Bespoke, not on the --radius-* scale on purpose: this and .emptyMark are
-   * the page's two hero icon marks, rounder than the card system by design. */
-  border-radius: 15px;
-  color: var(--cockpit-on-accent);
-  background: var(--success-color);
-  font-size: 22px;
+  border-radius: 50%;
+  color: var(--success-color);
+  background: var(--success-bg);
+  font-size: 20px;
 }
 
 .attentionEmpty h2 {
-  margin: 14px 0 5px;
-  font-size: 15px;
+  margin: 12px 0 5px;
+  font-size: 17px;
 }
 
 .attentionEmpty p {
   margin: 0;
   color: var(--muted-foreground);
-  font-size: 11px;
-}
-
-.reviewShell {
-  width: 100%;
-  height: 100%;
-  container-type: inline-size;
-  overflow: auto;
-}
-
-.reviewBody {
-  min-height: 100%;
-}
-
-.reviewSteps {
-  display: grid;
-  grid-template-columns: minmax(180px, 0.65fr) minmax(620px, 2fr);
-  align-items: center;
-  gap: 24px;
-  margin-bottom: 24px;
-  padding: 16px 18px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  background: var(--card);
-}
-
-.reviewStepsIntro strong,
-.reviewStepsIntro span {
-  display: block;
-}
-
-.reviewStepsIntro strong {
-  margin-top: 4px;
-  font-size: 13px;
-}
-
-.reviewStepsIntro span {
-  margin-top: 2px;
-  color: var(--muted-foreground);
   font-size: 12px;
 }
 
-.reviewStepList {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-}
-
-.reviewStep {
-  display: grid;
-  grid-template-columns: 29px minmax(0, 1fr);
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
-  padding: 2px 12px;
-  border-left: 1px solid var(--border);
-}
-
-.reviewStep > span {
-  display: grid;
-  width: 29px;
-  height: 29px;
-  place-items: center;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  color: var(--muted-foreground);
-  background: var(--background);
-  font-family: var(--cockpit-mono);
-  font-size: 10px;
+.primaryButton {
+  min-height: 36px;
+  padding: 0 14px;
+  border: 1px solid var(--agent-blue-500);
+  border-radius: var(--radius);
+  color: var(--primary-foreground);
+  background: var(--agent-blue-500);
+  cursor: pointer;
+  font-size: 13px;
   font-weight: 700;
 }
 
-.reviewStep strong,
-.reviewStep small {
-  display: block;
-}
-
-.reviewStep strong {
-  margin-top: 1px;
-  font-size: 12px;
-}
-
-.reviewStep small {
-  margin-top: 2px;
-  overflow: hidden;
-  color: var(--muted-foreground);
-  font-size: 10px;
-  line-height: 1.45;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.reviewStepDone > span {
-  color: var(--cockpit-on-accent);
-  border-color: var(--success-color);
-  background: var(--success-color);
-}
-
-.reviewStepActive {
-  color: var(--foreground);
-}
-
-.reviewStepActive > span {
-  color: var(--cockpit-on-accent);
-  border-color: var(--agent-blue-500);
-  background: var(--agent-blue-500);
-  box-shadow: 0 0 0 4px
-    color-mix(
-      in srgb,
-      var(--agent-blue-500) var(--cockpit-tint-ring),
-      transparent
-    );
-}
-
-.reviewMain {
-  width: min(1440px, 100%);
-  min-width: 0;
-  margin: 0 auto;
-  padding: 28px;
-}
-
-.reviewHeading {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 24px;
-}
-
-.reviewHeading > div:first-child > span {
-  color: var(--agent-blue-500);
-  font-family: var(--cockpit-mono);
-  font-size: 10px;
-  font-weight: 800;
-  letter-spacing: 0.13em;
-}
-
-.reviewHeading h2 {
-  display: -webkit-box;
-  min-width: 0;
-  margin: 9px 0 7px;
-  overflow: hidden;
-  font-size: clamp(24px, 3vw, 36px);
-  letter-spacing: -0.04em;
-  overflow-wrap: anywhere;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-}
-
-.reviewHeading p {
-  display: -webkit-box;
-  max-width: 720px;
-  margin: 0;
-  overflow: hidden;
-  color: var(--muted-foreground);
-  font-size: 12px;
-  line-height: 1.6;
-  overflow-wrap: anywhere;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
-}
-
-.planFacts {
-  display: flex;
-  overflow: hidden;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  background: var(--card);
-}
-
-.planFacts > div {
-  min-width: 90px;
-  padding: 12px 14px;
-  border-right: 1px solid var(--border);
-}
-
-.planFacts > div:last-child {
-  border-right: 0;
-}
-
-.planFacts strong,
-.planFacts span {
-  display: block;
-}
-
-.planFacts strong {
-  font-size: 17px;
-}
-
-.planFacts span {
-  margin-top: 2px;
-  color: var(--muted-foreground);
-  font-size: 10px;
-}
-
-.reviewGrid {
-  display: grid;
-  grid-template-columns: minmax(520px, 1.5fr) minmax(300px, 0.7fr);
-  gap: 14px;
-  margin-top: 20px;
-}
-
-.reviewGraphCard,
-.permissionCard {
-  min-width: 0;
-  padding: 20px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-xl);
-  background: var(--card);
-  box-shadow: var(--cockpit-shadow);
-}
-
-.reviewGraphCard > section {
-  border-bottom: 0;
-}
-
-.permissionCard h3 {
-  margin: 9px 0 6px;
-  font-size: 17px;
-}
-
-.permissionCard > p {
-  margin: 0 0 14px;
-  color: var(--muted-foreground);
-  font-size: 11px;
-  line-height: 1.6;
-}
-
-.permissionCard > div:last-child {
-  padding: 14px 0 0;
-  border: 0;
-  border-top: 1px solid var(--border);
-  border-radius: 0;
-  box-shadow: none;
+:is(.cockpit, .emptyCockpit) button.primaryButton {
+  color: var(--primary-foreground);
 }
 
 .emptyCockpit {
@@ -1585,21 +624,11 @@ button.activityRow:hover {
   height: 58px;
   margin-bottom: 16px;
   place-items: center;
-  border-radius: 17px;
-  color: var(--cockpit-on-accent);
-  background: linear-gradient(
-    145deg,
-    var(--agent-blue-400),
-    var(--agent-blue-500)
-  );
+  border-radius: var(--radius-xl);
+  color: var(--primary-foreground);
+  background: var(--agent-blue-500);
   font-size: 22px;
   font-weight: 900;
-  box-shadow: 0 16px 32px
-    color-mix(
-      in srgb,
-      var(--agent-blue-500) var(--cockpit-tint-strong),
-      transparent
-    );
 }
 
 .emptyCockpit h1 {
@@ -1615,48 +644,11 @@ button.activityRow:hover {
   line-height: 1.7;
 }
 
-@container (max-width: 960px) {
-  .workspace {
-    grid-template-columns: minmax(220px, 0.75fr) minmax(0, 2fr);
-  }
-
-  .workspace > aside:last-child {
-    grid-column: 1 / -1;
-  }
-
-  .checkList {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .evidenceGrid,
-  .reviewActions {
-    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  }
-
-  .reviewGrid {
-    grid-template-columns: 1fr;
-  }
-
-  .reviewSteps {
-    grid-template-columns: 1fr;
-    gap: 14px;
-  }
-}
-
 @container (max-width: 760px) {
-  .environment {
-    display: none;
-  }
-
   .content,
   .attentionPage {
     padding-right: 14px;
     padding-left: 14px;
-  }
-
-  .reviewHeading {
-    display: block;
   }
 
   .taskHeading,
@@ -1669,79 +661,56 @@ button.activityRow:hover {
     justify-content: space-between;
   }
 
-  .planFacts {
-    margin-top: 14px;
-  }
-
-  .stats {
-    grid-template-columns: 1fr 1fr;
-  }
-
-  .progressStat {
-    grid-column: 1 / -1;
-  }
-
-  .workspace,
-  .attentionWorkspace,
-  .collaborationBody,
-  .reviewGrid {
+  .supportGrid,
+  .attentionWorkspace {
     grid-template-columns: 1fr;
   }
 
-  .stage,
-  .workStage {
-    min-height: 0;
-  }
-
-  .reviewStepList {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    row-gap: 12px;
-  }
-
-  .reviewMain {
-    padding: 20px 14px;
-  }
-
-  .logRows {
+  .attentionList {
     border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .attentionStats {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .attentionStats > div:nth-child(2) {
+    border-right: 0;
+  }
+
+  .attentionStats > div:nth-child(-n + 2) {
     border-bottom: 1px solid var(--border);
   }
 }
 
 @container (max-width: 500px) {
+  .environment {
+    display: none;
+  }
+
   .cockpitTabs button span {
     display: none;
   }
 
   .cockpitTabs button {
-    width: 34px;
+    width: auto;
+    min-width: 34px;
     justify-content: center;
-    padding: 0;
+    padding: 0 6px;
   }
 
-  .workIdentity {
-    grid-template-columns: 42px minmax(0, 1fr);
+  .activityRow {
+    grid-template-columns: 34px minmax(0, 1fr) auto;
   }
 
-  .runtime,
-  .agentCards em {
-    grid-column: 2;
-    justify-self: start;
-    text-align: left;
-  }
-
-  .dependencyCards {
-    grid-template-columns: 1fr;
-  }
-
-  .agentCards button {
-    grid-template-columns: 35px minmax(0, 1fr);
+  .activityRow time {
+    display: none;
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .cockpit *,
-  .reviewShell * {
+  .cockpit * {
     transition-duration: 0.01ms !important;
   }
 }
