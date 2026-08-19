@@ -118,6 +118,7 @@ import {
 import { RETRYABLE_STREAM_TRANSPORT_CODES } from './stream-transport-retry.js';
 import {
   collectToolCallIdsFromHistory,
+  getFunctionCallFingerprint,
   normalizeModelToolCallIds,
   reserveModelToolCallId,
 } from './toolCallIdUtils.js';
@@ -4260,6 +4261,42 @@ export class GeminiChat {
       }
     }
     return ids;
+  }
+
+  /**
+   * Map of handled tool-call id → (name, args) fingerprint for duplicate
+   * provider-id replay detection: model-turn `functionCall`s whose id has a
+   * matching user-turn `functionResponse`. Walk-only, no clone, same
+   * rationale as {@link getHistoryFunctionResponseIds}; fingerprints of
+   * large args are cached per part object (see getFunctionCallFingerprint).
+   */
+  getHistoryToolCallFingerprints(): Map<string, string> {
+    const fingerprintsById = new Map<string, string>();
+    const respondedIds = new Set<string>();
+    for (const entry of this.history) {
+      if (entry.role === 'user') {
+        for (const part of entry.parts ?? []) {
+          const id = part.functionResponse?.id;
+          if (id) respondedIds.add(id);
+        }
+        continue;
+      }
+      for (const part of entry.parts ?? []) {
+        const functionCall = part.functionCall;
+        if (functionCall?.id && !fingerprintsById.has(functionCall.id)) {
+          fingerprintsById.set(
+            functionCall.id,
+            getFunctionCallFingerprint(functionCall),
+          );
+        }
+      }
+    }
+    const handled = new Map<string, string>();
+    for (const id of respondedIds) {
+      const fingerprint = fingerprintsById.get(id);
+      if (fingerprint !== undefined) handled.set(id, fingerprint);
+    }
+    return handled;
   }
 
   /**
