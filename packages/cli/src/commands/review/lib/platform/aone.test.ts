@@ -6,8 +6,17 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { a1JsonMock, ensureAuthMock, gitMock, gitRawMock } = vi.hoisted(() => ({
+const {
+  a1JsonMock,
+  a1JsonOnceMock,
+  a1OnceMock,
+  ensureAuthMock,
+  gitMock,
+  gitRawMock,
+} = vi.hoisted(() => ({
   a1JsonMock: vi.fn(),
+  a1JsonOnceMock: vi.fn(),
+  a1OnceMock: vi.fn(),
   ensureAuthMock: vi.fn(),
   gitMock: vi.fn(),
   gitRawMock: vi.fn(),
@@ -15,6 +24,8 @@ const { a1JsonMock, ensureAuthMock, gitMock, gitRawMock } = vi.hoisted(() => ({
 
 vi.mock('./aone-client.js', () => ({
   a1Json: a1JsonMock,
+  a1JsonOnce: a1JsonOnceMock,
+  a1Once: a1OnceMock,
   a1: vi.fn(),
   ensureAoneAuthenticated: ensureAuthMock,
 }));
@@ -24,7 +35,12 @@ vi.mock('../git.js', () => ({
   gitRaw: gitRawMock,
 }));
 
-import { aoneReader, parseRemoteUrl } from './aone.js';
+import {
+  AonePartialPostError,
+  aoneReader,
+  parseRemoteUrl,
+  submitAoneReview,
+} from './aone.js';
 import { PINNED_DIFF_CONFIG, PINNED_DIFF_FLAGS } from '../diff-flags.js';
 
 describe('parseRemoteUrl hardening', () => {
@@ -758,5 +774,180 @@ describe('aoneReader.fetchDiff', () => {
       'origin',
       '+refs/heads/master:refs/remotes/origin/master',
     );
+  });
+});
+
+describe('submitAoneReview (the a1 write path)', () => {
+  function mrView(head: string) {
+    // a1Json serves the READ calls (mr view); a1JsonOnce the writes.
+    a1JsonMock.mockImplementation((...args: string[]) => {
+      if (args.includes('view')) {
+        return {
+          mergeRequest: {
+            sourceBranch: head,
+            detailUrl: 'https://code.alibaba-inc.com/g/p/codereview/7',
+          },
+        };
+      }
+      throw new Error(`unexpected read call: ${args.join(' ')}`);
+    });
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mrView('sha-head');
+    a1JsonOnceMock.mockReturnValue({ id: 100 });
+  });
+
+  const req = (over: Record<string, unknown> = {}) => ({
+    prNumber: 7,
+    ownerRepo: 'g/p',
+    commitId: 'sha-head',
+    event: 'COMMENT' as const,
+    body: 'summary body',
+    comments: [
+      { path: 'a.ts', line: 3, body: '**[Critical]** one' },
+      { path: 'b.ts', line: 9, body: '**[Suggestion]** two' },
+    ],
+    ...over,
+  });
+
+  it('posts inline first, summary last — one comment create per finding', () => {
+    const result = submitAoneReview(req());
+    // Two inline creates + one summary create, in that order.
+    expect(a1JsonOnceMock).toHaveBeenCalledTimes(3);
+    const calls = a1JsonOnceMock.mock.calls.map((c) => c as string[]);
+    expect(calls[0]).toEqual([
+      'repo',
+      'mr',
+      'comment',
+      'create',
+      '--mr',
+      '7',
+      '--repo',
+      'g/p',
+      '--file',
+      'a.ts',
+      '--line',
+      '3',
+      '--message',
+      '**[Critical]** one',
+    ]);
+    expect(calls[1]).toContain('--file');
+    expect(calls[2]).toEqual([
+      'repo',
+      'mr',
+      'comment',
+      'create',
+      '--mr',
+      '7',
+      '--repo',
+      'g/p',
+      '--message',
+      'summary body',
+    ]);
+    // COMMENT posts no approval.
+    expect(a1OnceMock).not.toHaveBeenCalled();
+    expect(result.postedInline).toBe(2);
+    expect(result.summaryPosted).toBe(true);
+    expect(result.approved).toBe(false);
+    expect(result.webUrl).toBe('https://code.alibaba-inc.com/g/p/codereview/7');
+    expect(ensureAuthMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('APPROVE runs the native approve AFTER the summary lands', () => {
+    a1JsonOnceMock
+      .mockReturnValueOnce({ id: 101 })
+      .mockReturnValueOnce({ id: 102 })
+      .mockReturnValueOnce({ id: 103 });
+    const result = submitAoneReview(req({ event: 'APPROVE' }));
+    expect(a1OnceMock).toHaveBeenCalledTimes(1);
+    expect(a1OnceMock).toHaveBeenCalledWith(
+      'repo',
+      'mr',
+      'approve',
+      '7',
+      '--repo',
+      'g/p',
+    );
+    expect(result.approved).toBe(true);
+    expect(result.approveError).toBeUndefined();
+    expect(result.inlineCommentIds).toEqual([101, 102]);
+    expect(result.summaryCommentId).toBe(103);
+  });
+
+  it('REQUEST_CHANGES prefixes the blocking header (no native reject on Aone)', () => {
+    submitAoneReview(req({ event: 'REQUEST_CHANGES' }));
+    const calls = a1JsonOnceMock.mock.calls.map((c) => c as string[]);
+    const summaryMessage = calls[2][calls[2].length - 1];
+    expect(summaryMessage).toBe('**Request changes**\n\nsummary body');
+    expect(a1OnceMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses BEFORE writing when the head drifted', () => {
+    expect(() => submitAoneReview(req({ commitId: 'stale-sha' }))).toThrow(
+      /the MR head moved/,
+    );
+    expect(a1JsonOnceMock).not.toHaveBeenCalled();
+    expect(a1OnceMock).not.toHaveBeenCalled();
+  });
+
+  it('an empty sourceBranch cannot gate — the post proceeds unanchored', () => {
+    mrView('');
+    const result = submitAoneReview(req());
+    expect(result.postedInline).toBe(2);
+    expect(result.summaryPosted).toBe(true);
+  });
+
+  it('a mid-batch failure throws AonePartialPostError naming what landed', () => {
+    a1JsonOnceMock
+      .mockReturnValueOnce({ id: 101 })
+      .mockImplementationOnce(() => {
+        throw new Error('Command failed: boom');
+      });
+    let caught: unknown;
+    try {
+      submitAoneReview(req());
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(AonePartialPostError);
+    const partial = caught as AonePartialPostError;
+    expect(partial.postedInline).toBe(1);
+    expect(partial.inlineCommentIds).toEqual([101]);
+    expect(partial.summaryPosted).toBe(false);
+    expect(partial.message).toContain('1 of 2');
+    // The summary and any approve never ran.
+    expect(a1JsonOnceMock).toHaveBeenCalledTimes(2);
+    expect(a1OnceMock).not.toHaveBeenCalled();
+  });
+
+  it('an approve failure alone does not fail the post', () => {
+    a1OnceMock.mockImplementation(() => {
+      throw new Error('Command failed: approval denied');
+    });
+    const result = submitAoneReview(req({ event: 'APPROVE' }));
+    expect(result.approved).toBe(false);
+    expect(result.approveError).toContain('approval denied');
+    expect(result.postedInline).toBe(2);
+    expect(result.summaryPosted).toBe(true);
+  });
+
+  it('an empty summary body posts no summary comment', () => {
+    const result = submitAoneReview(req({ body: '   ' }));
+    expect(result.summaryPosted).toBe(false);
+    // Two inline creates only.
+    expect(a1JsonOnceMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('reads the created id back best-effort (nested shapes tolerated)', () => {
+    a1JsonOnceMock
+      .mockReturnValueOnce({ comment: { id: 201 } })
+      .mockReturnValueOnce({ note: { id: 202 } })
+      .mockReturnValueOnce({ unrelated: true });
+    const result = submitAoneReview(req());
+    expect(result.inlineCommentIds).toEqual([201, 202]);
+    expect(result.postedInline).toBe(2);
+    expect(result.summaryCommentId).toBeUndefined();
   });
 });

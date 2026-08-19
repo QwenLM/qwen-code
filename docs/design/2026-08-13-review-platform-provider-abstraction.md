@@ -272,6 +272,19 @@ Enterprise paragraph.
   exported-GH_HOST only, and "unavailable otherwise"), or gate it off
   explicitly on non-github.com runs. E2E: `--comment` against a
   scratch/test CR.
+  - **Landed (2026-08-19):** the `submit` slice. `submitAoneReview` in
+    `lib/platform/aone.ts` posts the review as N+1 calls — one
+    `a1 repo mr comment create` per inline finding, the summary comment
+    last (Q5 order), `a1 repo mr approve` on APPROVE (D6); writes ride a
+    no-retry transport (`a1Once`) so a transient retry can never
+    double-post. The commit_id gate GitHub enforces server-side lives in
+    the provider as a pre-write head-drift refusal; a mid-batch failure
+    throws `AonePartialPostError` naming exactly what landed, and
+    `submit` reports it exit-3 with do-not-re-run advice (a retry would
+    duplicate). REQUEST_CHANGES posts the blocking summary header (D6);
+    the recorded-but-hostless refusal stays fail-closed, now between two
+    WRITABLE platforms. Still open: `composeUrl`, cleanup audit,
+    AI-comment marking (Q4), the render-adjudication carve-out.
 - **Phase 4 — semantic gaps.** Incremental-cache ancestry fallback, build-test
   repo-config escape hatch, publish-assets gating polish, generic-GitLab
   (glab) evaluation.
