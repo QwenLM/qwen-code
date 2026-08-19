@@ -4853,7 +4853,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   );
 
   it.each(['session/load', 'session/resume'] as const)(
-    '%s hides explicit standalone transcripts from generic restore',
+    '%s restores reserved-source transcripts on the generic surface',
     async (method) => {
       await withRuntimeDir(async () => {
         const sessionId =
@@ -4873,14 +4873,20 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           method,
           params: { sessionId },
         });
+        // Generic (non-isolated) restore keeps loading legacy
+        // reserved-source transcripts; only the isolated Conversations
+        // surface hides them (parity with the REST restore handler).
         expect(await reader.next()).toMatchObject({
           id: 218,
-          error: { message: expect.stringContaining('No session with id') },
+          result: expect.any(Object),
         });
         reader.close();
 
-        expect(bridge.loadRequests).toHaveLength(loadCount);
-        expect(bridge.resumeRequests).toHaveLength(resumeCount);
+        expect(
+          method === 'session/load'
+            ? bridge.loadRequests.length
+            : bridge.resumeRequests.length,
+        ).toBe((method === 'session/load' ? loadCount : resumeCount) + 1);
       });
     },
   );
