@@ -636,6 +636,14 @@ export interface BridgeClientSessionEntry {
   settledMidTurnMessageIds: string[];
   /** Complete prompts waiting behind the currently running prompt. */
   pendingPromptList: PendingPromptEntry[];
+  /**
+   * True while a child-driven Goal turn is running. Set by the
+   * `_qwencode/start_turn` notification and cleared by the matching
+   * `_qwencode/end_turn`; OR-ed into `hasActivePrompt` summaries so
+   * live-state consumers (sidebar activity, daemon status) see Goal turns
+   * that never cross the bridge's `session/prompt` RPC boundary.
+   */
+  goalTurnActive?: boolean;
   /** Bridge prompt that owns the child Guard wait for this FIFO. */
   todoStopGuardAwaitingQueuedPromptOwnerPromptId?: string;
   /** True while a prompt is executing for this session. */
@@ -1958,6 +1966,20 @@ export class BridgeClient implements Client {
       }
       return;
     }
+    if (method === '_qwencode/start_turn') {
+      const sessionId = params['sessionId'];
+      if (
+        typeof sessionId !== 'string' ||
+        sessionId.length === 0 ||
+        params['source'] !== 'goal'
+      ) {
+        return;
+      }
+      const entry = this.resolveEntry(sessionId);
+      if (!entry || !this.ownsSession(sessionId)) return;
+      entry.goalTurnActive = true;
+      return;
+    }
     if (method === '_qwencode/end_turn') {
       const sessionId = params['sessionId'];
       const reason = params['reason'];
@@ -1975,6 +1997,7 @@ export class BridgeClient implements Client {
       const entry = this.resolveEntry(sessionId);
       if (!entry || !this.ownsSession(sessionId)) return;
       if (source === 'goal') {
+        entry.goalTurnActive = false;
         const promptId = params['promptId'];
         if (
           typeof promptId !== 'string' ||

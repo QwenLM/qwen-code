@@ -213,6 +213,39 @@ describe('BridgeClient — background notification turn boundary', () => {
     });
   });
 
+  it('marks the session active for a goal-turn start signal', async () => {
+    const sessionId = 'session-goal';
+    const publish = vi.fn();
+    const entry = { sessionId, events: { publish }, goalTurnActive: false };
+    const noFlow = () => {
+      throw new Error('test: permission flow should not run');
+    };
+    const client = new BridgeClient(
+      ((id: string) => (id === sessionId ? entry : undefined)) as never,
+      noFlow as never,
+      { request: noFlow } as never,
+      0,
+      Infinity,
+    );
+
+    await client.extNotification('_qwencode/start_turn', {
+      sessionId,
+      source: 'goal',
+    });
+
+    expect(entry.goalTurnActive).toBe(true);
+    expect(publish).not.toHaveBeenCalled();
+
+    await client.extNotification('_qwencode/end_turn', {
+      sessionId,
+      reason: 'end_turn',
+      source: 'goal',
+      promptId: 'session-goal########1',
+    });
+
+    expect(entry.goalTurnActive).toBe(false);
+  });
+
   it('publishes a real turn_complete for a goal-turn end signal', async () => {
     const sessionId = 'session-goal';
     const publish = vi.fn().mockReturnValue(true);

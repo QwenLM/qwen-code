@@ -1119,6 +1119,13 @@ interface SessionEntry {
    *  an originator clientId is known. Used by the session reaper to avoid
    *  killing sessions mid-prompt. */
   promptActive: boolean;
+  /**
+   * True while a child-driven Goal turn is running. Maintained by the
+   * `_qwencode/start_turn` / `_qwencode/end_turn` (source `goal`)
+   * notifications in `BridgeClient`; OR-ed into `hasActivePrompt`
+   * summaries because Goal turns never flip `promptActive`.
+   */
+  goalTurnActive?: boolean;
   /** Terminal error from the prior turn, cleared when the next turn starts. */
   turnError?: {
     message: string;
@@ -3541,7 +3548,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       ...(entry.sourceType ? { sourceType: entry.sourceType } : {}),
       ...(entry.sourceId !== undefined ? { sourceId: entry.sourceId } : {}),
       clientCount: entry.clientIds.size,
-      hasActivePrompt: entry.promptActive,
+      hasActivePrompt: entry.promptActive || entry.goalTurnActive === true,
       isWaitingForPermission,
       isWaitingForUserQuestion,
       pendingInteractionCount: entry.pendingInteractions.size,
@@ -6452,7 +6459,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // Late attachers get the same ACP state the original restore
         // caller saw; spawn-only sessions don't carry a state payload.
         state: existing.restoreState ?? {},
-        hasActivePrompt: existing.promptActive,
+        hasActivePrompt:
+          existing.promptActive || existing.goalTurnActive === true,
         ...replayFields,
         ...(historyAnchorRecordId !== undefined
           ? { historyAnchorRecordId }
@@ -6598,7 +6606,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         attached: true,
         clientId,
         createdAt: entry.createdAt,
-        hasActivePrompt: entry.promptActive,
+        hasActivePrompt: entry.promptActive || entry.goalTurnActive === true,
         ...(waiterReplayFields ?? {}),
       };
     }
@@ -7043,7 +7051,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             ? { sourceId: racedEntry.sourceId }
             : {}),
           state: racedEntry.restoreState ?? {},
-          hasActivePrompt: racedEntry.promptActive,
+          hasActivePrompt:
+            racedEntry.promptActive || racedEntry.goalTurnActive === true,
           ...replayFieldsFor(racedEntry, action, liveReplayMode),
         };
       }
@@ -7143,7 +7152,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         ...(artifactRestoreWarnings.length > 0
           ? { artifactWarnings: artifactRestoreWarnings }
           : {}),
-        hasActivePrompt: entry.promptActive,
+        hasActivePrompt: entry.promptActive || entry.goalTurnActive === true,
         ...replayFieldsFor(entry, action, liveReplayMode),
       };
     })().finally(async () => {
@@ -7561,7 +7570,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             attachCount: entry.attachCount,
             pendingPromptCount: entry.pendingPromptCount,
             pendingPermissionCount: entry.pendingPermissionIds.size,
-            hasActivePrompt: entry.promptActive,
+            hasActivePrompt:
+              entry.promptActive || entry.goalTurnActive === true,
             lastEventId: entry.events.lastEventId,
             ...(entry.sessionLastSeenAt !== undefined
               ? { lastSeenAt: entry.sessionLastSeenAt }
@@ -7825,7 +7835,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             ...(existing.sourceId !== undefined
               ? { sourceId: existing.sourceId }
               : {}),
-            hasActivePrompt: existing.promptActive,
+            hasActivePrompt:
+              existing.promptActive || existing.goalTurnActive === true,
           };
         }
         // Coalesce: if another caller is already mid-spawn for this same
@@ -7901,7 +7912,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             ...session,
             attached: true,
             clientId,
-            hasActivePrompt: attachedEntry.promptActive,
+            hasActivePrompt:
+              attachedEntry.promptActive ||
+              attachedEntry.goalTurnActive === true,
           };
         }
       }
@@ -8416,6 +8429,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   return copy;
                 })();
                 entry.promptActive = true;
+                // The child serializes Goal turns against RPC prompts, so a
+                // still-set flag here means the goal end_turn signal was
+                // lost; self-heal rather than pin the session active.
+                entry.goalTurnActive = false;
                 entry.activePromptId = pendingEntry.promptId;
                 delete entry.cancelBroadcastWithoutPrompt;
                 delete entry.turnError;

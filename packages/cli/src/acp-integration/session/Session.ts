@@ -2180,8 +2180,10 @@ export class Session implements SessionContext {
     this.goalProcessing = true;
     this.activeGoalTurn = turn;
     const parts = buildGoalContinuationParts(turn);
+    let result: PromptResponse | undefined;
+    await this.#emitGoalStartTurn();
     try {
-      await this.prompt(
+      result = await this.prompt(
         {
           sessionId: this.sessionId,
           prompt: parts.map((part) => ({
@@ -2211,6 +2213,7 @@ export class Session implements SessionContext {
         }`,
       );
     } finally {
+      await this.#emitGoalEndTurn(result);
       if (this.activeGoalTurn === turn) this.activeGoalTurn = undefined;
       this.goalProcessing = false;
       void this.#drainCronQueue();
@@ -4071,7 +4074,6 @@ export class Session implements SessionContext {
       }
       if (goalTurn) {
         await this.#settleGoalTurn(goalTurn, promptResult, promptFailed);
-        await this.#emitGoalEndTurn(promptResult);
       } else if (reservedGoalRuntime && reservedGoalTurnKey) {
         await reservedGoalRuntime.releaseTurn(reservedGoalTurnKey);
       }
@@ -8466,6 +8468,19 @@ export class Session implements SessionContext {
    * otherwise publish no `turn_complete` — leaving SSE clients (Web Shell,
    * SDK) with a streaming state that never settles.
    */
+  async #emitGoalStartTurn(): Promise<void> {
+    try {
+      await this.client.extNotification('_qwencode/start_turn', {
+        sessionId: this.sessionId,
+        source: 'goal',
+      });
+    } catch (error) {
+      debugLogger.debug(
+        `Goal start-turn extNotification dropped: ${this.#formatError(error)}`,
+      );
+    }
+  }
+
   async #emitGoalEndTurn(result: PromptResponse | undefined): Promise<void> {
     try {
       await this.client.extNotification('_qwencode/end_turn', {

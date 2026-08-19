@@ -17523,6 +17523,13 @@ describe('Session', () => {
             },
           );
         });
+        expect(mockClient.extNotification).toHaveBeenCalledWith(
+          '_qwencode/start_turn',
+          {
+            sessionId: 'test-session-id',
+            source: 'goal',
+          },
+        );
       });
 
       it('settles a Goal turn whose prompt rejects before the turn body runs', async () => {
