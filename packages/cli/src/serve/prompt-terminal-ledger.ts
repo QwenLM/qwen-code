@@ -5,11 +5,12 @@
  */
 
 import type { Content } from '@google/genai';
-import type { ChatRecord ,
+import {
   buildApiHistoryFromConversation,
   detectTurnInterruption,
   SessionService,
   TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
+  type ChatRecord,
   type ResumedSessionData,
 } from '@qwen-code/qwen-code-core';
 import {
