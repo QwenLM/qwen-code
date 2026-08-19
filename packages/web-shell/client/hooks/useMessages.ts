@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   DaemonHttpError,
   isSessionLevelNotFound,
@@ -34,6 +34,9 @@ const BACKGROUND_AGENT_RECONCILIATION_MAX_ATTEMPTS = 8;
 // call appears in the transcript, so a first `session_not_found` can race
 // registration. Require repeated misses before treating the agent as gone.
 const MISSING_BACKGROUND_AGENT_GRACE_MISSES = 2;
+// Insight JSON can split one growing text block into multiple projected
+// messages, so prefix identity reuse is unsafe once its marker appears.
+const INSIGHT_CONTENT_MARKER = '"insight_';
 
 export interface BackgroundAgentResolution {
   status: string;
@@ -59,6 +62,79 @@ export function transcriptBlocksToLocalizedMessages(
       loopDetected: t('error.loopDetected'),
     },
   });
+}
+
+function reuseUnchangedProjectedPrefix(
+  previous:
+    | {
+        blocks: readonly DaemonTranscriptBlock[];
+        messages: Message[];
+        t: Translator;
+      }
+    | undefined,
+  blocks: readonly DaemonTranscriptBlock[],
+  messages: Message[],
+  t: Translator,
+): Message[] {
+  if (
+    !previous ||
+    previous.t !== t ||
+    previous.blocks.length !== blocks.length ||
+    previous.messages.length !== messages.length ||
+    messages.length === 0 ||
+    blocks.length === 0
+  ) {
+    return messages;
+  }
+  for (let i = 0; i < blocks.length - 1; i += 1) {
+    if (previous.blocks[i] !== blocks[i]) return messages;
+  }
+  const before = previous.blocks[blocks.length - 1];
+  const after = blocks[blocks.length - 1];
+  if (
+    (before.kind !== 'assistant' && before.kind !== 'thought') ||
+    after.kind !== before.kind ||
+    before.id !== after.id ||
+    before.streaming !== true ||
+    after.streaming !== true ||
+    before.parentToolCallId !== undefined ||
+    after.parentToolCallId !== undefined ||
+    before.meta !== after.meta ||
+    before.usage !== after.usage ||
+    before.branchRecordId !== after.branchRecordId ||
+    before.clientReceivedAt !== after.clientReceivedAt ||
+    typeof before.text !== 'string' ||
+    typeof after.text !== 'string' ||
+    !after.text.startsWith(before.text) ||
+    after.text.includes(INSIGHT_CONTENT_MARKER)
+  ) {
+    return messages;
+  }
+  for (let i = 0; i < messages.length - 1; i += 1) {
+    const previousMessage = previous.messages[i];
+    const message = messages[i];
+    if (
+      previousMessage.id !== message.id ||
+      previousMessage.role !== message.role
+    ) {
+      return messages;
+    }
+  }
+  const previousTail = previous.messages[previous.messages.length - 1];
+  const tail = messages[messages.length - 1];
+  if (
+    previousTail.id !== tail.id ||
+    previousTail.role !== tail.role ||
+    (tail.role !== 'assistant' && tail.role !== 'thinking') ||
+    tail.isStreaming !== true
+  ) {
+    return messages;
+  }
+  const result = messages.slice();
+  for (let i = 0; i < result.length - 1; i += 1) {
+    result[i] = previous.messages[i];
+  }
+  return result;
 }
 
 function isTerminalBackgroundAgentStatus(status: string): boolean {
@@ -213,10 +289,27 @@ export function useMessagesFromBlocks(
 ): Message[] {
   const workspace = useWorkspace();
   const connection = useConnection();
+  const previousProjectionRef = useRef<
+    | {
+        blocks: readonly DaemonTranscriptBlock[];
+        messages: Message[];
+        t: Translator;
+      }
+    | undefined
+  >(undefined);
   const messages = useMemo(
-    () => transcriptBlocksToLocalizedMessages(blocks, t),
+    () =>
+      reuseUnchangedProjectedPrefix(
+        previousProjectionRef.current,
+        blocks,
+        transcriptBlocksToLocalizedMessages(blocks, t),
+        t,
+      ),
     [blocks, t],
   );
+  useLayoutEffect(() => {
+    previousProjectionRef.current = { blocks, messages, t };
+  }, [blocks, messages, t]);
   const [resolutionSnapshot, setResolutionSnapshot] = useState<{
     sessionId: string;
     resolutions: ReadonlyMap<string, BackgroundAgentResolution>;

@@ -15,6 +15,7 @@ import {
   reconcileBackgroundAgentResolutions,
   transcriptBlocksToLocalizedMessages,
   useMessages,
+  useMessagesFromBlocks,
 } from './useMessages';
 import type { Message } from '../adapters/types';
 
@@ -96,6 +97,87 @@ describe('transcriptBlocksToLocalizedMessages', () => {
       { content: 'localized:error.loopDetected' },
     ]);
   });
+
+  it('preserves projected history identity for a streaming tail update only', async () => {
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    const t = (key: string) => key;
+    let latest: Message[] = [];
+    const user = baseBlock({ id: 'user', kind: 'user', text: 'hello' });
+    const assistant = baseBlock({
+      id: 'assistant',
+      kind: 'assistant',
+      text: 'a',
+      streaming: true,
+      serverTimestamp: 1_001,
+    });
+    function Consumer({ blocks }: { blocks: DaemonTranscriptBlock[] }) {
+      latest = useMessagesFromBlocks(t, blocks);
+      return null;
+    }
+
+    await act(async () =>
+      root.render(createElement(Consumer, { blocks: [user, assistant] })),
+    );
+    const firstProjection = latest;
+    const grownAssistant = {
+      ...assistant,
+      text: 'ab',
+      updatedAt: 2,
+      serverTimestamp: 1_002,
+    };
+    await act(async () =>
+      root.render(createElement(Consumer, { blocks: [user, grownAssistant] })),
+    );
+
+    expect(latest[0]).toBe(firstProjection[0]);
+    expect(latest[1]).not.toBe(firstProjection[1]);
+    expect(latest[1]).toMatchObject({ content: 'ab', isStreaming: true });
+
+    const changedUser = { ...user, text: 'changed', updatedAt: 2 };
+    await act(async () =>
+      root.render(
+        createElement(Consumer, { blocks: [changedUser, grownAssistant] }),
+      ),
+    );
+    expect(latest[0]).not.toBe(firstProjection[0]);
+
+    await act(async () => root.unmount());
+  });
+
+  it.each([undefined, ''])(
+    'falls back safely when a streaming block has empty text (%j)',
+    async (text) => {
+      const container = document.createElement('div');
+      const root = createRoot(container);
+      const t = (key: string) => key;
+      let latest: Message[] = [];
+      const assistant = baseBlock({
+        id: 'assistant',
+        kind: 'assistant',
+        text: text as unknown as string,
+        streaming: true,
+      });
+      function Consumer({ blocks }: { blocks: DaemonTranscriptBlock[] }) {
+        latest = useMessagesFromBlocks(t, blocks);
+        return null;
+      }
+
+      await act(async () =>
+        root.render(createElement(Consumer, { blocks: [assistant] })),
+      );
+      await act(async () =>
+        root.render(
+          createElement(Consumer, {
+            blocks: [{ ...assistant, updatedAt: 2 }],
+          }),
+        ),
+      );
+
+      expect(latest).toEqual([]);
+      await act(async () => root.unmount());
+    },
+  );
 });
 
 function backgroundAgentMessage(status: 'pending' | 'completed' = 'pending') {
