@@ -612,4 +612,63 @@ describe('serve-ab pre-checkout workspace wipe', () => {
       }
     },
   );
+
+  it.skipIf(!hasGnuRealpath)(
+    'keeps a forged workflow command in the symlink target out of the log',
+    () => {
+      // The target is bytes a previous job chose, and the runner parses `::`
+      // at the start of ANY stdout line as a workflow command — so a target
+      // of $'…\n::error::forged' would forge an annotation from a step that
+      // is reporting corruption. The annotation carries no untrusted bytes
+      // and the target is printed on a prefixed line with its newlines gone.
+      const parent = mkdtempSync(join(tmpdir(), 'serve-ab-heal-inject-'));
+      const outside = mkdtempSync(join(tmpdir(), 'serve-ab-heal-outside-'));
+      const ws = join(parent, 'repo');
+      symlinkSync(`${outside}\n::error::forged-annotation`, ws);
+      try {
+        const out = runWipe({ GITHUB_WORKSPACE: ws, RUNNER_WORKSPACE: parent });
+        expect(out).toContain('healing workspace');
+        // The target is still reported — just never as a command.
+        expect(out).toContain('pointed at');
+        expect(out).toContain(basename(outside));
+        for (const line of out.split('\n')) {
+          expect(line.startsWith('::error::')).toBe(false);
+        }
+      } finally {
+        rmSync(parent, { recursive: true, force: true });
+        rmSync(outside, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!hasGnuRealpath)(
+    'fails closed when the healed workspace cannot be recreated',
+    () => {
+      // The mkdir leg's own refusal, reachable without a permission trick:
+      // `rm -f` returns 0 for a path whose parent is not a directory (it
+      // reads as "already absent"), and the mkdir that follows cannot
+      // succeed. Swallowed, the wipe would then run against a path that
+      // does not exist.
+      const parent = mkdtempSync(join(tmpdir(), 'serve-ab-heal-mkdir-'));
+      writeFileSync(join(parent, 'file'), 'not a directory');
+      try {
+        const res = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', wipe.run],
+          {
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              GITHUB_WORKSPACE: join(parent, 'file', 'sub'),
+              RUNNER_WORKSPACE: parent,
+            },
+          },
+        );
+        expect(res.status).not.toBe(0);
+        expect(res.stdout + res.stderr).toContain('could not recreate');
+      } finally {
+        rmSync(parent, { recursive: true, force: true });
+      }
+    },
+  );
 });

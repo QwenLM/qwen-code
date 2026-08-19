@@ -125,7 +125,17 @@ jobs:
             # The incident this heal exists for leaves no other trace: say what
             # was found, and where it pointed, before it is gone.
             if [ -L "$WS" ]; then
-              echo "::warning::healing workspace ${WS}: it was a symlink to $(readlink -- "$WS" 2>/dev/null || echo "<unreadable>")"
+              # The target is bytes a PREVIOUS job chose — on this pool that
+              # job may have run a contributor's code — and the runner parses
+              # `::` at the start of any stdout line as a workflow command. A
+              # target of $'x\n::error::forged' would therefore forge an
+              # annotation. Keep untrusted bytes off the command line itself,
+              # strip the line breaks that could start a new one, and cap the
+              # length.
+              heal_target="$(readlink -- "$WS" 2>/dev/null || printf '%s' '<unreadable>')"
+              heal_target="$(printf '%s' "$heal_target" | tr -d '\r\n' | cut -c1-200)"
+              echo "::warning::healing workspace ${WS}: it was a symlink"
+              printf 'heal: %s pointed at %s\n' "$WS" "$heal_target"
             else
               echo "::warning::healing workspace ${WS}: it was not a directory"
             fi

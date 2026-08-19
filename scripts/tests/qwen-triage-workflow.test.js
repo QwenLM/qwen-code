@@ -2046,6 +2046,78 @@ describe('qwen-triage verify hardening', () => {
     },
   );
 
+  it.skipIf(!hasGnuRealpath)(
+    'keeps a forged workflow command in the symlink target out of the log',
+    () => {
+      // On this lane the previous job may have run a contributor's code, and
+      // the runner parses `::` at the start of ANY stdout line as a workflow
+      // command — so a target of $'…\n::error::forged' would forge an
+      // annotation from the very step reporting the corruption.
+      const parent = mkdtempSync(join(tmpdir(), 'verify-heal-inject-'));
+      const outside = mkdtempSync(join(tmpdir(), 'verify-heal-outside-'));
+      const ws = join(parent, 'workspace');
+      symlinkSync(`${outside}\n::error::forged-annotation`, ws);
+      try {
+        const res = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', extractRun(WIPE_STEPS[0])],
+          {
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              GITHUB_WORKSPACE: ws,
+              RUNNER_WORKSPACE: parent,
+              GITHUB_STEP_SUMMARY: join(parent, 'summary'),
+            },
+          },
+        );
+        expect(res.status, res.stdout + res.stderr).toBe(0);
+        const out = res.stdout + res.stderr;
+        expect(out).toContain('healing workspace');
+        expect(out).toContain('pointed at');
+        for (const line of out.split('\n')) {
+          expect(line.startsWith('::error::')).toBe(false);
+        }
+      } finally {
+        rmSync(parent, { recursive: true, force: true });
+        rmSync(outside, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!hasGnuRealpath)(
+    'fails closed when the healed workspace cannot be recreated',
+    () => {
+      // The mkdir leg's own refusal, reachable without a permission trick:
+      // `rm -f` returns 0 for a path whose parent is not a directory, and
+      // the mkdir that follows cannot succeed. Swallowed, the wipe would run
+      // against a path that does not exist.
+      for (const stepName of WIPE_STEPS) {
+        const parent = mkdtempSync(join(tmpdir(), 'verify-heal-mkdir-'));
+        writeFileSync(join(parent, 'file'), 'not a directory');
+        try {
+          const res = spawnSync(
+            'bash',
+            ['-e', '-o', 'pipefail', '-c', extractRun(stepName)],
+            {
+              encoding: 'utf8',
+              env: {
+                ...process.env,
+                GITHUB_WORKSPACE: join(parent, 'file', 'sub'),
+                RUNNER_WORKSPACE: parent,
+                GITHUB_STEP_SUMMARY: join(parent, 'summary'),
+              },
+            },
+          );
+          expect(res.status, stepName).not.toBe(0);
+          expect(res.stdout + res.stderr).toContain('could not recreate');
+        } finally {
+          rmSync(parent, { recursive: true, force: true });
+        }
+      }
+    },
+  );
+
   it.skipIf(!hasGnuRealpath || process.getuid?.() === 0)(
     'fails closed when the corrupt workspace cannot be unlinked',
     () => {
