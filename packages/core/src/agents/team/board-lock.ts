@@ -117,36 +117,40 @@ export function createItemLock(options: {
       lock = new Mutex();
       fileLocks.set(filePath, lock);
     }
-    return lock.runExclusive(async () => {
-      let release: (() => Promise<void>) | undefined;
-      try {
-        release = await lockfile.lock(filePath, lockOptions);
-      } catch (err) {
-        if (isNodeError(err) && err.code === 'ENOENT' && onMissing) {
-          return onMissing();
-        }
-        throw err;
-      }
-      try {
-        return await fn();
-      } catch (err) {
-        if (isNodeError(err) && err.code === 'ENOENT' && onMissing) {
-          return onMissing();
-        }
-        throw err;
-      } finally {
+    return lock
+      .runExclusive(async () => {
+        let release: (() => Promise<void>) | undefined;
         try {
-          await release?.();
+          release = await lockfile.lock(filePath, lockOptions);
         } catch (err) {
-          debug.warn('failed to release lock:', err);
+          if (isNodeError(err) && err.code === 'ENOENT' && onMissing) {
+            return onMissing();
+          }
+          throw err;
         }
-        // Drop the mutex once nobody is queued on it. Keeping one per path for
-        // the process lifetime is unbounded growth for a long-lived reader,
-        // and re-creating an uncontended mutex costs nothing.
+        try {
+          return await fn();
+        } catch (err) {
+          if (isNodeError(err) && err.code === 'ENOENT' && onMissing) {
+            return onMissing();
+          }
+          throw err;
+        } finally {
+          try {
+            await release?.();
+          } catch (err) {
+            debug.warn('failed to release lock:', err);
+          }
+        }
+      })
+      .finally(() => {
+        // Drop the mutex once nobody is queued on it. This must run AFTER
+        // runExclusive releases the mutex — inside the callback isLocked() is
+        // always true because this caller itself holds it, so the delete was
+        // unreachable and the map grew without bound for a long-lived reader.
         const held = fileLocks.get(filePath);
         if (held && !held.isLocked()) fileLocks.delete(filePath);
-      }
-    });
+      });
   };
 
   /**
