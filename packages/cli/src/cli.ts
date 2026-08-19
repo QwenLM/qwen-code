@@ -107,32 +107,6 @@ for (const flag of ['--help', '-h', '--version', '-v']) {
 }
 KNOWN_FAST_PATH_FLAGS.add('--sandbox-session-id');
 
-// The value-taking option vocabulary of `qwen mcp add` — keep in sync with
-// the builder in commands/mcp/add.ts. Boolean options (`--trust`) consume
-// nothing. The add-tail scanner only ever affects version-token argv, and
-// drift here degrades to base-parity version printing, never a settings
-// write.
-const MCP_ADD_VALUE_FLAGS = new Set([
-  '--scope',
-  '-s',
-  '--transport',
-  '-t',
-  '--env',
-  '-e',
-  '--header',
-  '-H',
-  '--timeout',
-  '--description',
-  '--include-tools',
-  '--exclude-tools',
-  '--oauth-client-id',
-  '--oauth-client-secret',
-  '--oauth-redirect-uri',
-  '--oauth-authorization-url',
-  '--oauth-token-url',
-  '--oauth-scopes',
-]);
-
 function isValueToken(arg: string | undefined): arg is string {
   return arg !== undefined && arg !== '--' && !arg.startsWith('-');
 }
@@ -223,128 +197,22 @@ function hasFlag(
   return false;
 }
 
-// A version token demotes the mcp route only when the mcp fast path has no
-// option for it and would reject it via `.strict()`. `mcp add` is the one
-// subcommand that captures unknown options into its variadic `[args…]` tail
-// (`unknown-options-as-args`), so a `-v`/`--version` token there is a server
-// argument and must stay on the fast path — routing it to the full parser
-// would let the root `.version()` option consume it and silently drop it from
-// the persisted server config. `mcp --version`, `mcp -v`, and
-// `mcp <sub> --version` are version flags the `.strict()` parser has no option
-// for, so they demote to the full parser.
-function mcpVersionDemotes(argv: readonly string[]): boolean {
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i]!;
-    if (arg === '--') {
-      return false;
-    }
-    i = skipOptionValues(argv, i);
-    if (arg !== '--version' && arg !== '-v') {
-      continue;
-    }
-    // `mcp add <name> <commandOrUrl> [args…]`: the variadic tail starts after
-    // the two required positionals, so any token at index ≥ 4 is the server
-    // command's own argument, not an mcp-level flag.
-    if (argv[1] === 'add' && i >= 4) {
-      continue;
-    }
-    return true;
-  }
-  return false;
-}
-
-// Index of the exact `-v`/`--version` token before any `--`, walking with
-// the same skipOptionValues semantics as hasFlag/mcpVersionDemotes; -1 when
-// no such token exists.
+// Index of the exact `-v`/`--version` token before any `--`; -1 when no
+// such token exists. The scan deliberately does NOT model option-value
+// consumption: base did not either (`qwen --model -v`, `qwen -p -v -h`,
+// `qwen --resume -v --help` all printed the version — the token counts even
+// in a value slot). Tokens after `--` are positional data and never count.
 function versionTokenIndex(argv: readonly string[]): number {
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
     if (arg === '--') {
       return -1;
     }
-    i = skipOptionValues(argv, i);
     if (arg === '--version' || arg === '-v') {
       return i;
     }
   }
   return -1;
-}
-
-// The add-tail invariant: a `-v`/`--version` exact token inside `mcp add`'s
-// variadic `[args…]` tail — at least two positional tokens precede it inside
-// the add segment — is a server argument, not a version flag. Only that
-// shape keeps the token on the mcp fast path, which persists it verbatim;
-// every other version-token argv prints the version at bootstrap (base
-// parity).
-function mcpAddTailPreservesVersion(argv: readonly string[]): boolean {
-  // Locate the `mcp` positional. Leading tokens are only trusted when every
-  // dash token is a known-safe top-level flag and every non-dash token is a
-  // value consumed by skipOptionValues — `--bogus mcp …` (or a stray bare
-  // positional) stays out of the fast path.
-  let mcpIndex = -1;
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i]!;
-    if (arg === '--') {
-      return false;
-    }
-    if (arg === 'mcp') {
-      mcpIndex = i;
-      break;
-    }
-    if (!arg.startsWith('-') || !KNOWN_FAST_PATH_FLAGS.has(arg)) {
-      return false;
-    }
-    i = skipOptionValues(argv, i);
-  }
-  if (mcpIndex === -1) {
-    return false;
-  }
-
-  // The next positional after `mcp` must be exactly `add`.
-  let addIndex = -1;
-  for (let i = mcpIndex + 1; i < argv.length; i++) {
-    const arg = argv[i]!;
-    if (arg === '--') {
-      return false;
-    }
-    i = skipOptionValues(argv, i);
-    if (!arg.startsWith('-')) {
-      addIndex = i;
-      break;
-    }
-  }
-  if (addIndex === -1 || argv[addIndex] !== 'add') {
-    return false;
-  }
-
-  // Scan the add segment: dash tokens are add-level options (value-taking
-  // ones consume the following token, mirroring the builder), non-dash
-  // tokens are positionals. A version token preserves only when the
-  // variadic tail has already started.
-  let positionalsSeen = 0;
-  for (let i = addIndex + 1; i < argv.length; i++) {
-    const arg = argv[i]!;
-    if (arg === '--') {
-      return false;
-    }
-    if (arg === '--version' || arg === '-v') {
-      return positionalsSeen >= 2;
-    }
-    if (arg.startsWith('-')) {
-      const eq = arg.indexOf('=');
-      const flag = eq === -1 ? arg : arg.slice(0, eq);
-      if (
-        eq === -1 &&
-        MCP_ADD_VALUE_FLAGS.has(flag) &&
-        isValueToken(argv[i + 1])
-      ) {
-        i++;
-      }
-      continue;
-    }
-    positionalsSeen++;
-  }
-  return false;
 }
 
 async function buildTopLevelHelpParser() {
@@ -397,37 +265,39 @@ function normalizeMcpFastPathArgv(argv: readonly string[]): readonly string[] {
   return argv;
 }
 
-// Help states the exact-token scanner cannot see: yargs pops a trailing
-// positional literally named `help` into the help flag before deciding
-// between help and version (help wins in every ordering), `--help=*` reaches
-// the same flag through the parsed-value truthiness check, `--h` resolves
-// through the h→help alias, any short-option cluster containing `h`
-// (`-dh`, `-help`, `-h=true`) sets the help flag after yargs-parser expands
-// it letter-by-letter. When any of these is possible, the version fast path
-// must demote to the slow path, which prints exactly what the full parser
-// prints.
-function helpStatePossible(argv: readonly string[]): boolean {
-  return argv.some(
-    (token) =>
-      token === 'help' ||
-      token.startsWith('--h') ||
-      (token.startsWith('-') && !token.startsWith('--') && token.includes('h')),
-  );
-}
-
 export function resolveBootstrapRoute(
   rawArgv: readonly string[],
 ): BootstrapRoute {
   const argv = normalizeServeFastPathArgv(rawArgv);
 
+  // Base-parity version intercept (structural close). Base printed the
+  // version for ANY exact `-v`/`--version` token before any `--`, no matter
+  // what else the argv carries — top-level or command-prefixed, help tokens
+  // (`---help -v`, `-v help`, `--h -v`, `mcp remove victim -v help`), real
+  // options with h-prefixed names (`review fetch-pr … --host x -v`),
+  // option-shifted command argv (`mcp --debug add … -v`), even the
+  // variadic tail of `mcp add` (`mcp add name cmd server.js -v` prints the
+  // version and persists nothing). Verified by A/B probes against the base
+  // binary. The intercept therefore models nothing: an exact token before
+  // `--` IS the route. Printing the version is side-effect-free, while
+  // demoting to the full parser EXECUTES subcommands (observed: `mcp remove
+  // victim -v help` deleted the server and its OAuth creds on the full
+  // parser) — so the fail-closed direction is to intercept. The scan is
+  // unconditional on purpose: it consumes no option values (base counted a
+  // version token even in a value slot — `qwen --model -v` printed the
+  // version) and models no help state (base printed the version for every
+  // help-token sibling probed). Only tokens after `--` (positional data,
+  // e.g. `mcp add name cmd -- -v`, which the mcp fast path persists
+  // verbatim) and `=`-form tokens (`--model=-v` is one token, not an exact
+  // match) escape the intercept.
+  if (versionTokenIndex(argv) !== -1) {
+    return 'version';
+  }
+
   // Structural gate: unless every token is inside the known-safe grammar,
-  // both fast paths demote to the slow path (see argvSafeForFastPath). The
-  // per-condition guards below stay in place as belt and suspenders.
+  // the help fast path demotes to the slow path (see argvSafeForFastPath).
   const fastPathSafe = argvSafeForFastPath(argv);
 
-  // Help before version — yargs' precedence: `qwen --model -v --help` (a
-  // dash-token exposed in a value slot by the scanner) prints help on the
-  // full parser in every ordering, so the fast path must match.
   const firstPositional = firstPositionalArg(argv);
   if (
     fastPathSafe &&
@@ -437,60 +307,15 @@ export function resolveBootstrapRoute(
     return 'help';
   }
 
-  // Top-level version argv only: command-prefixed shapes are handled by the
-  // command-prefixed intercept below (base parity), not by this block.
-  if (
-    fastPathSafe &&
-    firstPositional === undefined &&
-    !hasFlag(argv, '--help', '-h') &&
-    !helpStatePossible(argv) &&
-    hasFlag(argv, '--version', '-v')
-  ) {
-    return 'version';
-  }
-
-  // Command-prefixed version argv: command builders disable version via
-  // `.version(false)` (mcp, hooks, extensions, channel, review, auth,
-  // sessions) while the root parser's `.version()` alias still consumes the
-  // exact token — so letting the full parser own these argv shapes EXECUTES
-  // the subcommand (`qwen mcp remove victim -v` deletes the server and its
-  // OAuth creds) or silently drops the token from a persisted `mcp add`
-  // config, instead of printing the version. Base printed the version for
-  // ANY exact `-v`/`--version` token before any `--`, so this restores that
-  // class. The one exception is the add-tail invariant: inside `mcp add`'s
-  // variadic `[args…]` tail the token is a server argument the fast path
-  // persists verbatim (see `mcpAddTailPreservesVersion`). Help states always
-  // win, matching the full parser's precedence.
-  const versionTokenIdx = versionTokenIndex(argv);
-  if (
-    versionTokenIdx !== -1 &&
-    !hasFlag(argv, '--help', '-h') &&
-    !helpStatePossible(argv) &&
-    !mcpAddTailPreservesVersion(argv)
-  ) {
-    return 'version';
-  }
-
   const firstArg = argv[0];
   if (firstArg === 'serve') {
     return 'serve';
   }
-  // Residual version-bearing mcp argv (help-state shapes such as
-  // `mcp -v --help`, where help wins on the full parser) must reach the full
-  // parser: `runMcpFastPath` registers no version option and runs
-  // `.strict()`, so it would exit 1 instead of printing help. Post-`--`
-  // version tokens and `mcp add`'s variadic tail stay on the fast path —
-  // there a version-looking token is positional data, not a flag (see
-  // `mcpVersionDemotes`). The add-tail route also admits argv with leading
-  // global flags (`--debug mcp add …`), which `runMcpFastPath` strips before
-  // parsing.
-  const addTailRoute = mcpAddTailPreservesVersion(argv);
+  // Version-bearing mcp argv never reaches here: the intercept above owns
+  // every exact version token before `--`, and post-`--` tokens are
+  // positional data the fast path persists verbatim.
   if (firstArg === 'mcp') {
-    if (addTailRoute || !mcpVersionDemotes(argv)) {
-      return 'mcp';
-    }
-  } else if (addTailRoute) {
-    return 'mcp'; // leading global flags are stripped in runMcpFastPath
+    return 'mcp';
   }
 
   return 'default';
@@ -526,26 +351,9 @@ async function printBootstrapVersion(): Promise<void> {
 }
 
 async function runMcpFastPath(rawArgv: readonly string[]): Promise<void> {
-  let argv: readonly string[] = normalizeMcpFastPathArgv(
+  const argv: readonly string[] = normalizeMcpFastPathArgv(
     normalizeServeFastPathArgv(rawArgv),
   );
-  // The add-tail route admits argv with leading global flags
-  // (`--debug mcp add …`); the fast-path parser models only the mcp tree,
-  // so the known-safe prefix is dropped before parsing (the alternative —
-  // the full parser — drops or corrupts the version-looking server arg).
-  if (argv[0] !== 'mcp') {
-    for (let i = 0; i < argv.length; i++) {
-      const arg = argv[i]!;
-      if (arg === '--') {
-        break;
-      }
-      i = skipOptionValues(argv, i);
-      if (arg === 'mcp') {
-        argv = argv.slice(i);
-        break;
-      }
-    }
-  }
   const hasSubcommand = argv.length > 1 && !argv[1]!.startsWith('-');
   if (!hasSubcommand) {
     printMcpHelp();
