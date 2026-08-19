@@ -23,7 +23,7 @@ import {
   resolveDecision,
 } from '@qwen-code/qwen-code-core/board';
 import { requireActorName, requireBoardName } from './board/context.js';
-import { renderBoard, type BoardSnapshot } from './board/render.js';
+import { oneLine, renderBoard, type BoardSnapshot } from './board/render.js';
 
 interface CommonArgs {
   board?: string;
@@ -32,7 +32,9 @@ interface CommonArgs {
 }
 
 function emit(argv: CommonArgs, value: unknown, human: string): void {
-  process.stdout.write(`${argv.json ? JSON.stringify(value) : human}\n`);
+  process.stdout.write(
+    `${argv.json ? JSON.stringify(value) : oneLine(human)}\n`,
+  );
 }
 
 async function run(fn: () => Promise<void>): Promise<void> {
@@ -40,7 +42,7 @@ async function run(fn: () => Promise<void>): Promise<void> {
     await fn();
   } catch (err) {
     process.stderr.write(
-      `${err instanceof Error ? err.message : String(err)}\n`,
+      `${oneLine(err instanceof Error ? err.message : String(err))}\n`,
     );
     process.exitCode = 1;
   }
@@ -198,7 +200,8 @@ export const boardCommand: CommandModule = {
             const deadline = Date.now() + waitMs;
             for (;;) {
               const current = await getAsk(board, ask.id);
-              if (current && current.state !== 'open') {
+              if (!current) throw new Error(`Ask "${ask.id}" not found.`);
+              if (current.state !== 'open') {
                 emit(
                   a,
                   current,

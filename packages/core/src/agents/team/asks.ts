@@ -23,7 +23,8 @@ const debug = createDebugLogger('BOARD_ASKS');
 export const ASKS_COLLECTION = 'asks';
 export const DEFAULT_ASK_TTL_MS = 15 * 60 * 1000;
 const MAX_TEXT_LENGTH = 65536;
-const ASK_FILE = /^a-[0-9a-f-]{36}\.json$/;
+const ASK_FILE =
+  /^a-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.json$/;
 
 export type AskState = 'open' | 'answered' | 'declined' | 'timeout';
 
@@ -172,7 +173,9 @@ export async function getAsk(
     throw err;
   }
   try {
-    return settleAsk(parseAsk(JSON.parse(raw)));
+    const ask = parseAsk(JSON.parse(raw));
+    if (ask.id !== id) throw new Error('Ask id does not match its filename.');
+    return settleAsk(ask);
   } catch (err) {
     debug.warn(`skipping invalid ask ${id}:`, err);
     return null;
@@ -214,6 +217,9 @@ async function settleOnDisk(
       const current = settleAsk(
         parseAsk(JSON.parse(await fs.readFile(target, 'utf8'))),
       );
+      if (current.id !== id) {
+        throw new Error('Ask id does not match its filename.');
+      }
       if (current.to !== by) {
         throw new Error(`Ask "${id}" is addressed to "${current.to}".`);
       }

@@ -106,9 +106,73 @@ describe('board asks and decisions', () => {
       path.join(asksDir, 'a-00000000-0000-4000-8000-000000000000.json'),
       JSON.stringify({ schemaVersion: 99 }),
     );
+    await fs.writeFile(
+      path.join(asksDir, 'a-00000000-0000-0000-0000-000000000000.json'),
+      '{}',
+    );
+    const decisionsDir = getCollectionDir('demo', 'decisions');
+    await fs.mkdir(decisionsDir, { recursive: true });
+    await fs.writeFile(
+      path.join(decisionsDir, 'd-00000000-0000-0000-0000-000000000000.json'),
+      '{}',
+    );
     await expect(listAsks('demo')).resolves.toMatchObject([
       { question: 'healthy' },
     ]);
+    await expect(listDecisions('demo')).resolves.toEqual([]);
+  });
+
+  it('rejects records whose id does not match the filename', async () => {
+    const firstAsk = await createAsk({
+      board: 'demo',
+      from: 'api',
+      to: 'web',
+      question: 'first',
+    });
+    const secondAsk = await createAsk({
+      board: 'demo',
+      from: 'api',
+      to: 'web',
+      question: 'second',
+    });
+    const firstAskPath = path.join(
+      getCollectionDir('demo', 'asks'),
+      `${firstAsk.id}.json`,
+    );
+    await fs.writeFile(
+      firstAskPath,
+      JSON.stringify({ ...firstAsk, id: secondAsk.id }),
+    );
+    await expect(listAsks('demo')).resolves.toMatchObject([
+      { question: 'second' },
+    ]);
+    await expect(answerAsk('demo', firstAsk.id, 'web', 'yes')).rejects.toThrow(
+      'does not match its filename',
+    );
+
+    const firstDecision = await raiseDecision({
+      board: 'demo',
+      raisedBy: 'worker',
+      question: 'first?',
+    });
+    const secondDecision = await raiseDecision({
+      board: 'demo',
+      raisedBy: 'worker',
+      question: 'second?',
+    });
+    await fs.writeFile(
+      path.join(
+        getCollectionDir('demo', 'decisions'),
+        `${firstDecision.id}.json`,
+      ),
+      JSON.stringify({ ...firstDecision, id: secondDecision.id }),
+    );
+    await expect(listDecisions('demo')).resolves.toMatchObject([
+      { question: 'second?' },
+    ]);
+    await expect(
+      resolveDecision('demo', firstDecision.id, 'human', 'approved'),
+    ).rejects.toThrow('does not match its filename');
   });
 
   it('re-checks prune eligibility while holding the item lock', async () => {

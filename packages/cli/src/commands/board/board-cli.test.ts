@@ -118,6 +118,29 @@ describe('board CLI', () => {
     expect(process.exitCode).toBe(4);
   });
 
+  it('reports an ask removed while waiting as missing', async () => {
+    core.createAsk.mockResolvedValue({ id: ASK_ID, to: 'web' });
+    core.getAsk.mockResolvedValue(null);
+    await parse(
+      'board ask web question --board demo --as api --wait --timeout 0 --ttl 1',
+    );
+    expect(stderr).toHaveBeenCalledWith(`Ask "${ASK_ID}" not found.\n`);
+    expect(process.exitCode).toBe(1);
+  });
+
+  it('sanitizes human output and errors', async () => {
+    core.createBoardTask.mockResolvedValue({
+      id: TASK_ID,
+      subject: 'check\x1b]52;c;pw\x07',
+    });
+    await parse('board task check --board demo --as author');
+    expect(stdout.mock.calls.flat().join('')).not.toMatch(/[\x1b\x07]/);
+
+    core.listBoardTasks.mockRejectedValue(new Error('bad\x1b]52;c;pw\x07'));
+    await parse('board show --board demo');
+    expect(stderr.mock.calls.flat().join('')).not.toMatch(/[\x1b\x07]/);
+  });
+
   it('rejects a negative prune cutoff before deleting', async () => {
     await parse('board prune --board demo --as human --older-than -1');
     expect(core.pruneAsks).not.toHaveBeenCalled();

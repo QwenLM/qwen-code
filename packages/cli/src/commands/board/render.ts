@@ -18,7 +18,7 @@ export interface BoardSnapshot {
   decisions: DecisionRecord[];
 }
 
-function oneLine(value: string): string {
+export function oneLine(value: string): string {
   return sanitizeTerminalText(value).replace(/[\r\n\t]+/g, ' ');
 }
 

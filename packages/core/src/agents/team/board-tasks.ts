@@ -22,7 +22,8 @@ const debug = createDebugLogger('BOARD_TASKS');
 
 export const TASKS_COLLECTION = 'tasks';
 const MAX_TEXT_LENGTH = 65536;
-const TASK_FILE = /^t-[0-9a-f-]{36}\.json$/;
+const TASK_FILE =
+  /^t-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.json$/;
 
 export type BoardTaskStatus = 'pending' | 'in_progress' | 'completed';
 
@@ -72,7 +73,7 @@ function parseTask(value: unknown): BoardTaskRecord {
   if (task.owner !== null && typeof task.owner !== 'string') {
     throw new Error('Task owner must be a name or null.');
   }
-  if (task.owner) assertSafeName('actor name', task.owner);
+  if (task.owner !== null) assertSafeName('actor name', task.owner);
   if (!['pending', 'in_progress', 'completed'].includes(task.status ?? '')) {
     throw new Error('Invalid task status.');
   }
@@ -100,7 +101,7 @@ export async function createBoardTask(opts: {
 }): Promise<BoardTaskRecord> {
   assertSafeName('actor name', opts.createdBy);
   assertText('subject', opts.subject);
-  if (opts.owner) assertSafeName('actor name', opts.owner);
+  if (opts.owner !== undefined) assertSafeName('actor name', opts.owner);
   const now = Date.now();
   return createBoardRecord(opts.board, TASKS_COLLECTION, 't', (id) => ({
     schemaVersion: 1,
@@ -129,7 +130,9 @@ async function getBoardTask(
     throw err;
   }
   try {
-    return parseTask(JSON.parse(raw));
+    const task = parseTask(JSON.parse(raw));
+    if (task.id !== id) throw new Error('Task id does not match its filename.');
+    return task;
   } catch (err) {
     debug.warn(`skipping invalid task ${id}:`, err);
     return null;
@@ -169,6 +172,9 @@ async function mutate(
     target,
     async () => {
       const current = parseTask(JSON.parse(await fs.readFile(target, 'utf8')));
+      if (current.id !== id) {
+        throw new Error('Task id does not match its filename.');
+      }
       const next = parseTask({ ...apply(current), updatedAt: Date.now() });
       await atomicWriteJSON(target, next, { mode: 0o600, forceMode: true });
       return next;

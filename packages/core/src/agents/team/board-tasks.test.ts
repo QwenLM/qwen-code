@@ -98,6 +98,13 @@ describe('board tasks', () => {
       `${malformedId}.json`,
     );
     await fs.writeFile(malformedPath, '{broken');
+    await fs.writeFile(
+      path.join(
+        getCollectionDir('demo', 'tasks'),
+        't-00000000-0000-0000-0000-000000000000.json',
+      ),
+      '{}',
+    );
     await expect(listBoardTasks('demo')).resolves.toMatchObject([
       { subject: 'healthy' },
     ]);
@@ -105,6 +112,40 @@ describe('board tasks', () => {
       'JSON',
     );
     await expect(fs.readFile(malformedPath, 'utf8')).resolves.toBe('{broken');
+  });
+
+  it('rejects empty owners and records whose id does not match the filename', async () => {
+    await expect(
+      createBoardTask({
+        board: 'demo',
+        createdBy: 'author',
+        subject: 'empty owner',
+        owner: '',
+      }),
+    ).rejects.toThrow('Invalid actor name');
+
+    const first = await createBoardTask({
+      board: 'demo',
+      createdBy: 'author',
+      subject: 'first',
+    });
+    const second = await createBoardTask({
+      board: 'demo',
+      createdBy: 'author',
+      subject: 'second',
+    });
+    const firstPath = path.join(
+      getCollectionDir('demo', 'tasks'),
+      `${first.id}.json`,
+    );
+    await fs.writeFile(firstPath, JSON.stringify({ ...first, id: second.id }));
+    await expect(listBoardTasks('demo')).resolves.toMatchObject([
+      { subject: 'second' },
+    ]);
+    await expect(claimBoardTask('demo', first.id, 'worker')).rejects.toThrow(
+      'does not match its filename',
+    );
+    await expect(fs.readFile(firstPath, 'utf8')).resolves.toContain(second.id);
   });
 
   it('creates private directories and files', async () => {

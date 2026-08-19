@@ -22,7 +22,8 @@ const debug = createDebugLogger('BOARD_DECISIONS');
 
 export const DECISIONS_COLLECTION = 'decisions';
 const MAX_TEXT_LENGTH = 65536;
-const DECISION_FILE = /^d-[0-9a-f-]{36}\.json$/;
+const DECISION_FILE =
+  /^d-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.json$/;
 
 export type DecisionState = 'open' | 'approved' | 'rejected';
 
@@ -157,7 +158,11 @@ async function getDecision(
     throw err;
   }
   try {
-    return parseDecision(JSON.parse(raw));
+    const decision = parseDecision(JSON.parse(raw));
+    if (decision.id !== id) {
+      throw new Error('Decision id does not match its filename.');
+    }
+    return decision;
   } catch (err) {
     debug.warn(`skipping invalid decision ${id}:`, err);
     return null;
@@ -201,6 +206,9 @@ export function resolveDecision(
       const current = parseDecision(
         JSON.parse(await fs.readFile(target, 'utf8')),
       );
+      if (current.id !== id) {
+        throw new Error('Decision id does not match its filename.');
+      }
       if (current.state !== 'open') {
         throw new Error(`Decision "${id}" is already ${current.state}.`);
       }
