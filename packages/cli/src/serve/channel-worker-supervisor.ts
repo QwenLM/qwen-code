@@ -55,6 +55,10 @@ import {
   type ChannelStartupFailure,
 } from './channel-worker-startup-ipc.js';
 import {
+  registerChannelWorkerPromptAuthorization,
+  revokeChannelWorkerPromptAuthorization,
+} from './channel-worker-prompt-authorization.js';
+import {
   CHANNEL_LOOP_MCP_IPC_TIMEOUT_MS,
   createChannelLoopMcpRequest,
   isChannelLoopMcpControlMessage,
@@ -492,6 +496,7 @@ export function createChannelWorkerSupervisor(
     );
   }
   let child: ChannelWorkerChild | undefined;
+  let activePromptAuthorization: string | undefined;
   let snapshot: ChannelWorkerSnapshot = {
     enabled: true,
     state: 'disabled',
@@ -787,6 +792,18 @@ export function createChannelWorkerSupervisor(
       ...(opts.daemonToken ? { daemonToken: opts.daemonToken } : {}),
       ...(opts.workerBaseEnv ? { baseEnv: opts.workerBaseEnv } : {}),
     });
+    const promptAuthorization = env[CHANNEL_DAEMON_WORKER_SENTINEL]!;
+    registerChannelWorkerPromptAuthorization(
+      promptAuthorization,
+      opts.workspace,
+    );
+    activePromptAuthorization = promptAuthorization;
+    const revokePromptAuthorization = () => {
+      revokeChannelWorkerPromptAuthorization(promptAuthorization);
+      if (activePromptAuthorization === promptAuthorization) {
+        activePromptAuthorization = undefined;
+      }
+    };
     const redaction = workerLogRedactionOptions(opts.daemonToken, env);
     const requestedChannels = requestedChannelNames(opts.selection);
     const startedAt = new Date().toISOString();
@@ -832,6 +849,7 @@ export function createChannelWorkerSupervisor(
         stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
       });
     } catch (err) {
+      revokePromptAuthorization();
       const message = err instanceof Error ? err.message : String(err);
       const error = sanitizeWorkerError(message, redaction);
       if (kind === 'initial') {
@@ -1247,6 +1265,7 @@ export function createChannelWorkerSupervisor(
       }
       function settleExit(code: number | null, signal: NodeJS.Signals | null) {
         if (child !== startedChild) return;
+        revokePromptAuthorization();
         exitObserved = true;
         cleanupLaunch();
         const state = ready ? 'exited' : 'failed';
@@ -1436,6 +1455,10 @@ export function createChannelWorkerSupervisor(
       clearRestartTimer();
       clearStaleHeartbeatTimer();
       stopping = true;
+      if (activePromptAuthorization) {
+        revokeChannelWorkerPromptAuthorization(activePromptAuthorization);
+        activePromptAuthorization = undefined;
+      }
       child.kill('SIGKILL');
       child = undefined;
       if (!preserveFailure) {

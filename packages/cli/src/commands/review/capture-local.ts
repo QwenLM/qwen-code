@@ -31,6 +31,8 @@ import {
   stringifyPlanReport,
   type PlanReport,
 } from './lib/report.js';
+import { operatorReviewSettings } from './lib/review-settings.js';
+import { hasReviewDeadline } from './lib/deadline.js';
 
 interface CaptureLocalArgs {
   out: string;
@@ -94,7 +96,10 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     // No ref to `git show` a pre-change file out of, so per-file line counts and
     // heaviness are unavailable — same as `plan-diff`. Chunk coverage, which is
     // what the topology needs, is not.
-    ...buildPlanReport(plan, null),
+    ...buildPlanReport(plan, null, {
+      operatorRoundCap: operatorReviewSettings().reverseAuditRounds,
+      hasDeadline: hasReviewDeadline(process.env),
+    }),
     untrackedFiles: capture.untracked,
     skippedFiles: capture.skipped,
     ...planEffortField(args.effort),

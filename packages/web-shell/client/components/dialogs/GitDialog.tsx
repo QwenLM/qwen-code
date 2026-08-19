@@ -21,6 +21,7 @@ import {
   SearchIcon,
 } from 'lucide-react';
 import { useI18n } from '../../i18n';
+import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
 import { Markdown } from '../messages/Markdown';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { DialogShell } from './DialogShell';
@@ -63,6 +64,7 @@ export function GitDialog({
   onClose: () => void;
 }) {
   const { t } = useI18n();
+  const openExternalLink = useExternalLinkOpener();
   const { client, capabilities } = useWorkspace();
   const prsSupported =
     capabilities?.features?.includes(GITHUB_PRS_FEATURE) === true;
@@ -781,6 +783,7 @@ export function GitDialog({
                     href={prStatus.url}
                     target="_blank"
                     rel="noopener noreferrer"
+                    onClick={(event) => openExternalLink(event, prStatus.url)}
                   >
                     {prStatus.msg}
                   </a>

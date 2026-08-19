@@ -44,6 +44,7 @@ import {
   ToolNames,
   PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
   createGoalRuntime,
+  GoalPersistenceUnavailableError,
 } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
 import { EventEmitter } from 'node:events';
@@ -70,6 +71,10 @@ import {
 
 // Mock core modules
 const runVisionBridgeSpy = vi.hoisted(() => vi.fn());
+const endInteractionSpanSpy = vi.hoisted(() => vi.fn());
+const getActiveInteractionSpanSpy = vi.hoisted(() => vi.fn());
+const addAgentOutputMessageAttributesSpy = vi.hoisted(() => vi.fn());
+const interactionSpan = vi.hoisted(() => ({}));
 vi.mock('./ui/hooks/atCommandProcessor.js');
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const original =
@@ -86,6 +91,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     ...original,
     executeToolCall: vi.fn(),
     runVisionBridge: runVisionBridgeSpy,
+    addAgentOutputMessageAttributes: addAgentOutputMessageAttributesSpy,
+    endInteractionSpan: endInteractionSpanSpy,
+    getActiveInteractionSpan: getActiveInteractionSpanSpy,
     shutdownTelemetry: vi.fn(),
     isTelemetrySdkInitialized: vi.fn().mockReturnValue(true),
     ChatRecordingService: MockChatRecordingService,
@@ -260,6 +268,10 @@ describe('runNonInteractive', () => {
 
     mockCoreExecuteToolCall = vi.mocked(executeToolCall);
     runVisionBridgeSpy.mockReset();
+    endInteractionSpanSpy.mockReset();
+    addAgentOutputMessageAttributesSpy.mockReset();
+    getActiveInteractionSpanSpy.mockReset();
+    getActiveInteractionSpanSpy.mockReturnValue(interactionSpan);
     mockShutdownTelemetry = vi.mocked(shutdownTelemetry);
     vi.mocked(isTelemetrySdkInitialized).mockReturnValue(true);
     mockGetDebugResponses = vi.fn().mockReturnValue([]);
@@ -618,6 +630,54 @@ describe('runNonInteractive', () => {
     },
   );
 
+  // `goalCommand` degrades a persistence-unavailable `status`/`clear` into a
+  // successful empty snapshot. The headless consumer then re-requests the
+  // very runtime that just failed, so without swallowing that rejection the
+  // degradation is defeated in this mode only (interactive and ACP were fine).
+  it.each([
+    { input: '/goal', expectedText: 'No Goal is set.' },
+    { input: '/goal clear', expectedText: 'Goal cleared.' },
+  ])(
+    'answers $input from the degraded snapshot when goals cannot be persisted',
+    async ({ input, expectedText }) => {
+      setupMetricsMock();
+      mockGetCommands.mockReturnValue([goalCommand]);
+      mockConfig.getChatRecordingService.mockReturnValue(undefined);
+      mockConfig.getGoalRuntimeReady = vi.fn(async () => {
+        throw new GoalPersistenceUnavailableError('chat recording is disabled');
+      });
+
+      const exitCode = await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        input,
+        `goal-degraded-${input}`,
+      );
+
+      expect(exitCode).toBe(0);
+      expect(mockGeminiClient.sendMessageStream).not.toHaveBeenCalled();
+      expect(processStdoutSpy).toHaveBeenCalledWith(`${expectedText}\n`);
+    },
+  );
+
+  it('still fails a Goal operation that genuinely needs persistence', async () => {
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    mockConfig.getGoalRuntimeReady = vi.fn(async () => {
+      throw new GoalPersistenceUnavailableError('chat recording is disabled');
+    });
+
+    const exitCode = await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal ship it',
+      'goal-degraded-set',
+    );
+
+    expect(exitCode).toBe(1);
+    expect(mockGeminiClient.sendMessageStream).not.toHaveBeenCalled();
+  });
+
   it('runs resume with the exact permit scheduled by Core', async () => {
     setupMetricsMock();
     mockGetCommands.mockReturnValue([goalCommand]);
@@ -714,6 +774,94 @@ describe('runNonInteractive', () => {
     expect(secondOptions.goalSignal).toBe(firstOptions.goalSignal);
   });
 
+  it('starts a teammate invocation when a message joins a Goal tool continuation', async () => {
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    await prepareGoalState('paused');
+    vi.spyOn(goalRuntime, 'finishTurn').mockResolvedValue(undefined);
+
+    let leaderMessageCallback: ((formatted: string) => void) | null = null;
+    const teamEvents = new EventEmitter();
+    const teamManager = {
+      setLeaderMessageCallback: vi.fn(
+        (callback: ((formatted: string) => void) | null) => {
+          leaderMessageCallback = callback;
+        },
+      ),
+      getEventEmitter: () => teamEvents,
+      hasActiveTeammates: () => false,
+      drainLeaderInbox: vi.fn().mockResolvedValue(undefined),
+    };
+    vi.mocked(mockConfig.getTeamManager).mockReturnValue(teamManager as never);
+
+    mockCoreExecuteToolCall.mockImplementation(async () => {
+      leaderMessageCallback?.('Teammate finished the delegated task.');
+      return {
+        responseParts: [{ text: 'tool response' }],
+      };
+    });
+    let requestCount = 0;
+    mockGeminiClient.sendMessageStream.mockImplementation(
+      (
+        _parts: Part[],
+        _signal: AbortSignal,
+        _promptId: string,
+        sendOptions: { goalPermit?: GoalTurnPermit },
+      ) => {
+        requestCount += 1;
+        if (requestCount === 1) {
+          return createStreamFromEvents([
+            {
+              type: GeminiEventType.ToolCallRequest,
+              value: {
+                callId: 'goal-tool-with-teammate',
+                name: 'testTool',
+                args: {},
+                isClientInitiated: false,
+                prompt_id: 'goal-teammate-handoff',
+                goalContext: sendOptions.goalPermit,
+              },
+            },
+          ]);
+        }
+        return createStreamFromEvents([
+          {
+            type: GeminiEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 0 },
+            },
+          },
+        ]);
+      },
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal resume',
+      'goal-teammate-handoff',
+    );
+
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(2);
+    const firstOptions = mockGeminiClient.sendMessageStream.mock.calls[0]![3];
+    const [, , secondPromptId, secondOptions] =
+      mockGeminiClient.sendMessageStream.mock.calls[1]!;
+    expect(secondPromptId).toBe('goal-teammate-handoff/teammate/2');
+    expect(secondOptions).toMatchObject({
+      type: SendMessageType.Teammate,
+      goalPermit: firstOptions.goalPermit,
+      goalTurnKey: firstOptions.goalTurnKey,
+      goalOrigin: 'runtime',
+    });
+    expect(endInteractionSpanSpy).toHaveBeenCalledWith('ok', {
+      promptId: 'goal-teammate-handoff',
+    });
+    expect(endInteractionSpanSpy.mock.invocationCallOrder[0]).toBeLessThan(
+      mockGeminiClient.sendMessageStream.mock.invocationCallOrder[1]!,
+    );
+  });
+
   it('ends a Goal turn without another model call after update_goal', async () => {
     setupMetricsMock();
     mockGetCommands.mockReturnValue([goalCommand]);
@@ -765,6 +913,9 @@ describe('runNonInteractive', () => {
       parts: [{ text: 'proposal recorded' }],
     });
     expect(finishTurn).toHaveBeenCalledOnce();
+    expect(endInteractionSpanSpy).toHaveBeenCalledWith('ok', {
+      promptId: 'goal-terminal-tool-result',
+    });
   });
 
   it('streams Goal state changes that happen while a headless turn settles', async () => {
@@ -978,6 +1129,16 @@ describe('runNonInteractive', () => {
         ),
       ),
     );
+    expect(endInteractionSpanSpy).toHaveBeenCalledWith('error', {
+      promptId: 'goal-explicit-budget',
+      errorMessage:
+        'Run aborted: tool-call budget of 0 exceeded (--max-tool-calls); observed 1.',
+      errorType: 'run_budget_exceeded',
+    });
+    expect(endInteractionSpanSpy).not.toHaveBeenCalledWith(
+      'cancelled',
+      expect.objectContaining({ promptId: 'goal-explicit-budget' }),
+    );
 
     expect(mockCoreExecuteToolCall).not.toHaveBeenCalled();
     expect(goalRuntime.getSnapshot()).toMatchObject({
@@ -986,6 +1147,67 @@ describe('runNonInteractive', () => {
     });
 
     void run;
+  });
+
+  it('records a budget error when an in-flight model stream rejects after abort', async () => {
+    setupMetricsMock();
+    vi.mocked(mockConfig.getMaxWallTimeSeconds).mockReturnValue(0.01);
+    const runAbortController = new AbortController();
+    let interactionOpen = true;
+    getActiveInteractionSpanSpy.mockImplementation(() =>
+      interactionOpen ? interactionSpan : undefined,
+    );
+    endInteractionSpanSpy.mockImplementation((_status, metadata) => {
+      if (metadata?.promptId === 'budget-stream-abort') {
+        interactionOpen = false;
+      }
+    });
+    mockGeminiClient.sendMessageStream.mockReturnValueOnce(
+      (async function* () {
+        yield { type: GeminiEventType.Content, value: 'partial response' };
+        if (!runAbortController.signal.aborted) {
+          await new Promise<void>((_, reject) => {
+            runAbortController.signal.addEventListener(
+              'abort',
+              () => {
+                if (
+                  getActiveInteractionSpanSpy('budget-stream-abort') ===
+                  interactionSpan
+                ) {
+                  endInteractionSpanSpy('cancelled', {
+                    promptId: 'budget-stream-abort',
+                  });
+                }
+                reject(new Error('stream aborted after budget expiry'));
+              },
+              { once: true },
+            );
+          });
+        }
+        throw new Error('stream aborted after budget expiry');
+      })(),
+    );
+
+    await expect(
+      runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'wait for the model',
+        'budget-stream-abort',
+        { abortController: runAbortController },
+      ),
+    ).rejects.toThrow('process.exit(55) called');
+
+    expect(endInteractionSpanSpy).toHaveBeenCalledWith('error', {
+      promptId: 'budget-stream-abort',
+      errorMessage:
+        'Run aborted: wall-clock budget of 0.01s exceeded (--max-wall-time).',
+      errorType: 'run_budget_exceeded',
+    });
+    expect(endInteractionSpanSpy).not.toHaveBeenCalledWith(
+      'cancelled',
+      expect.objectContaining({ promptId: 'budget-stream-abort' }),
+    );
   });
 
   it('interrupts Goal settlement when the explicit wall-clock budget expires', async () => {
@@ -1208,7 +1430,11 @@ describe('runNonInteractive', () => {
       [{ text: 'Test input' }],
       expect.any(AbortSignal),
       'prompt-id-1',
-      { type: SendMessageType.UserQuery },
+      {
+        type: SendMessageType.UserQuery,
+        modelOverride: undefined,
+        submittedPrompt: 'Test input',
+      },
     );
     expect(processStdoutSpy).toHaveBeenCalledWith('Hello World\n');
     expect(mockShutdownTelemetry).toHaveBeenCalled();
@@ -2081,7 +2307,11 @@ describe('runNonInteractive', () => {
       [{ text: 'Use a tool' }],
       expect.any(AbortSignal),
       'prompt-id-2',
-      { type: SendMessageType.UserQuery },
+      {
+        type: SendMessageType.UserQuery,
+        modelOverride: undefined,
+        submittedPrompt: 'Use a tool',
+      },
     );
     // Verify second call (after tool execution) has type: ToolResult
     expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
@@ -3381,7 +3611,7 @@ describe('runNonInteractive', () => {
 
   it('should exit with error if sendMessageStream throws initially', async () => {
     setupMetricsMock();
-    const apiError = new Error('API connection failed');
+    const apiError = new Error('API connection failed: token=secret');
     mockGeminiClient.sendMessageStream.mockImplementation(() => {
       throw apiError;
     });
@@ -3394,6 +3624,12 @@ describe('runNonInteractive', () => {
         'prompt-id-4',
       ),
     ).rejects.toThrow(apiError);
+
+    expect(endInteractionSpanSpy).toHaveBeenCalledWith('error', {
+      promptId: 'prompt-id-4',
+      errorMessage: 'headless invocation failed',
+      errorType: 'Error',
+    });
   });
 
   it('should not exit if a tool is not found, and should send error back to model', async () => {
@@ -3498,7 +3734,11 @@ describe('runNonInteractive', () => {
       processedParts,
       expect.any(AbortSignal),
       'prompt-id-7',
-      { type: SendMessageType.UserQuery },
+      {
+        type: SendMessageType.UserQuery,
+        modelOverride: undefined,
+        submittedPrompt: 'Summarize @file.txt',
+      },
     );
 
     // 6. Assert the final output is correct
@@ -3566,7 +3806,11 @@ describe('runNonInteractive', () => {
       headlessImageParts,
       expect.any(AbortSignal),
       'prompt-vision-route',
-      { type: SendMessageType.UserQuery, modelOverride: selector },
+      {
+        type: SendMessageType.UserQuery,
+        modelOverride: selector,
+        submittedPrompt: 'inspect @image.png',
+      },
     );
     expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
       2,
@@ -3686,7 +3930,11 @@ describe('runNonInteractive', () => {
       [{ text: 'machine transcription' }],
       expect.any(AbortSignal),
       'prompt-vision-bridge',
-      { type: SendMessageType.UserQuery },
+      {
+        type: SendMessageType.UserQuery,
+        modelOverride: undefined,
+        submittedPrompt: 'inspect @image.png',
+      },
     );
     expect(processStderrSpy).toHaveBeenCalledWith(
       expect.stringContaining('Converted 1 image(s)'),
@@ -3763,7 +4011,11 @@ describe('runNonInteractive', () => {
       [{ text: 'inspect this image' }],
       expect.any(AbortSignal),
       'prompt-vision-bridge-failed',
-      { type: SendMessageType.UserQuery },
+      {
+        type: SendMessageType.UserQuery,
+        modelOverride: undefined,
+        submittedPrompt: 'inspect @image.png',
+      },
     );
     expect(processStderrSpy).toHaveBeenCalledWith(
       'Vision bridge failed; proceeding without the image(s).\n',
@@ -3797,7 +4049,11 @@ describe('runNonInteractive', () => {
       [{ text: 'inspect this image' }],
       expect.any(AbortSignal),
       'prompt-vision-bridge-skipped',
-      { type: SendMessageType.UserQuery },
+      {
+        type: SendMessageType.UserQuery,
+        modelOverride: undefined,
+        submittedPrompt: 'inspect @image.png',
+      },
     );
     expect(processStderrSpy).toHaveBeenCalledWith(
       expect.stringContaining('Vision bridge cancelled.'),
@@ -3840,7 +4096,11 @@ describe('runNonInteractive', () => {
       ],
       expect.any(AbortSignal),
       'prompt-oversized-image',
-      { type: SendMessageType.UserQuery },
+      {
+        type: SendMessageType.UserQuery,
+        modelOverride: undefined,
+        submittedPrompt: 'inspect @image.png',
+      },
     );
   });
 
@@ -3893,7 +4153,11 @@ describe('runNonInteractive', () => {
       [{ text: 'Test input' }],
       expect.any(AbortSignal),
       'prompt-id-1',
-      { type: SendMessageType.UserQuery },
+      {
+        type: SendMessageType.UserQuery,
+        modelOverride: undefined,
+        submittedPrompt: 'Test input',
+      },
     );
 
     // JSON adapter emits array of messages, last one is result with stats
@@ -4048,7 +4312,11 @@ describe('runNonInteractive', () => {
       [{ text: 'Empty response test' }],
       expect.any(AbortSignal),
       'prompt-id-empty',
-      { type: SendMessageType.UserQuery },
+      {
+        type: SendMessageType.UserQuery,
+        modelOverride: undefined,
+        submittedPrompt: 'Empty response test',
+      },
     );
 
     // JSON adapter emits array of messages, last one is result with stats
@@ -4311,7 +4579,11 @@ describe('runNonInteractive', () => {
       [{ text: 'Prompt from command' }],
       expect.any(AbortSignal),
       'prompt-id-slash',
-      { type: SendMessageType.UserQuery },
+      {
+        type: SendMessageType.UserQuery,
+        modelOverride: undefined,
+        submittedPrompt: '/testcommand',
+      },
     );
 
     expect(processStdoutSpy).toHaveBeenCalledWith('Response from command\n');
@@ -4371,7 +4643,11 @@ describe('runNonInteractive', () => {
       [{ text: '/unknowncommand' }],
       expect.any(AbortSignal),
       'prompt-id-unknown',
-      { type: SendMessageType.UserQuery },
+      {
+        type: SendMessageType.UserQuery,
+        modelOverride: undefined,
+        submittedPrompt: '/unknowncommand',
+      },
     );
 
     expect(processStdoutSpy).toHaveBeenCalledWith('Response to unknown\n');
@@ -4567,6 +4843,9 @@ describe('runNonInteractive', () => {
       type: 'result',
       is_error: true,
       error: { message: 'Operation cancelled.' },
+    });
+    expect(endInteractionSpanSpy).toHaveBeenCalledWith('cancelled', {
+      promptId: 'prompt-recoverable-interrupt',
     });
   });
 
@@ -5482,7 +5761,11 @@ describe('runNonInteractive', () => {
       [{ text: 'Message from stream-json input' }],
       expect.any(AbortSignal),
       'prompt-envelope',
-      { type: SendMessageType.UserQuery },
+      {
+        type: SendMessageType.UserQuery,
+        modelOverride: undefined,
+        submittedPrompt: 'Message from stream-json input',
+      },
     );
   });
 
@@ -6156,7 +6439,11 @@ describe('runNonInteractive', () => {
       [{ text: 'Simple string content' }],
       expect.any(AbortSignal),
       'prompt-string-content',
-      { type: SendMessageType.UserQuery },
+      {
+        type: SendMessageType.UserQuery,
+        modelOverride: undefined,
+        submittedPrompt: 'Simple string content',
+      },
     );
 
     // UserMessage with array of text blocks
@@ -6189,7 +6476,11 @@ describe('runNonInteractive', () => {
       [{ text: 'First part' }, { text: 'Second part' }],
       expect.any(AbortSignal),
       'prompt-blocks-content',
-      { type: SendMessageType.UserQuery },
+      {
+        type: SendMessageType.UserQuery,
+        modelOverride: undefined,
+        submittedPrompt: 'First part Second part',
+      },
     );
   });
 
@@ -6339,6 +6630,18 @@ describe('runNonInteractive', () => {
       // abortAll() must be called so any in-flight background agents are
       // torn down before we emit the terminal result.
       expect(abortAllSpy).toHaveBeenCalledTimes(1);
+      expect(endInteractionSpanSpy).toHaveBeenCalledWith('ok', {
+        promptId: 'prompt-id-structured',
+      });
+      expect(addAgentOutputMessageAttributesSpy).toHaveBeenCalledWith(
+        mockConfig,
+        interactionSpan,
+        JSON.stringify(structuredArgs),
+        'tool_call',
+      );
+      expect(
+        addAgentOutputMessageAttributesSpy.mock.invocationCallOrder[0],
+      ).toBeLessThan(endInteractionSpanSpy.mock.invocationCallOrder[0]!);
 
       const events = writes
         .join('')
@@ -6750,6 +7053,11 @@ describe('runNonInteractive', () => {
         );
       expect(result?.is_error).toBe(true);
       expect(result?.error?.message).toMatch(/structured_output/);
+      expect(endInteractionSpanSpy).toHaveBeenCalledWith('error', {
+        promptId: 'prompt-id-plaintext',
+        errorMessage: 'model did not produce structured output',
+        errorType: 'structured_output_missing',
+      });
     });
 
     it('synthesises tool_result for suppressed sibling calls when structured_output fails validation', async () => {

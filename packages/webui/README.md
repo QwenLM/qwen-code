@@ -247,17 +247,17 @@ Do NOT nest multiple `<DaemonSessionProvider>` for the same session — that cre
 
 ### Session hooks
 
-| Hook                           | Returns                                                                                                 |
-| ------------------------------ | ------------------------------------------------------------------------------------------------------- |
-| `useTranscriptBlocks()`        | `readonly DaemonTranscriptBlock[]` (raw blocks)                                                         |
-| `useTranscriptState()`         | Full `DaemonTranscriptState` (blocks + metadata)                                                        |
-| `useActions()`                 | `{ sendPrompt, cancel, setModel, setApprovalMode, respondToPermission, loadSession, newSession, ... }`  |
-| `useConnection()`              | Connection metadata, including optional `sessionTransition` state for transactional cross-session loads |
-| `useDaemonSessionOwnerGuard()` | Captures the current attachment identity so stale async UI continuations can be ignored                 |
-| `useStreamingState()`          | `'idle' \| 'waiting' \| 'responding' \| 'thinking'`                                                     |
-| `usePromptStatus()`            | `'idle' \| 'waiting' \| 'streaming'`                                                                    |
-| `usePendingPermissions()`      | Unresolved permission blocks                                                                            |
-| `useActiveTodoList()`          | Latest todo list, only when it still has active items                                                   |
+| Hook                           | Returns                                                                                                                                                                                         |
+| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `useTranscriptBlocks()`        | `readonly DaemonTranscriptBlock[]` (raw blocks)                                                                                                                                                 |
+| `useTranscriptState()`         | Full `DaemonTranscriptState` (blocks + metadata)                                                                                                                                                |
+| `useActions()`                 | `{ sendPrompt, cancel, setModel, setApprovalMode, respondToPermission, loadSession, newSession, ... }`                                                                                          |
+| `useConnection()`              | `{ status, sessionId, clientId, workspaceCwd, currentModel, currentMode, capabilities, commands, skills, models, tokenCount, tokenUsage, contextWindow, loadingTranscript, missingSession, … }` |
+| `useDaemonSessionOwnerGuard()` | Captures the current attachment identity so stale async UI continuations can be ignored                                                                                                         |
+| `useStreamingState()`          | `'idle' \| 'waiting' \| 'responding' \| 'thinking'`                                                                                                                                             |
+| `usePromptStatus()`            | `'idle' \| 'waiting' \| 'streaming'`                                                                                                                                                            |
+| `usePendingPermissions()`      | Unresolved permission blocks                                                                                                                                                                    |
+| `useActiveTodoList()`          | Latest todo list, only when it still has active items                                                                                                                                           |
 
 ### Workspace hooks
 
@@ -282,19 +282,18 @@ All resource hooks accept `{ autoLoad?: boolean, enabled?: boolean }` and return
 
 **`DaemonSessionProviderProps`:**
 
-| Prop                        | Type               | Default   | Description                                                                                              |
-| --------------------------- | ------------------ | --------- | -------------------------------------------------------------------------------------------------------- |
-| `baseUrl`                   | `string?`          | inherited | Daemon HTTP base URL (inherited from `DaemonWorkspaceProvider` when nested; required in standalone mode) |
-| `token`                     | `string?`          | inherited | Bearer token (inherited from `DaemonWorkspaceProvider` when nested)                                      |
-| `workspaceCwd`              | `string?`          | —         | Override workspace path (uses capabilities if omitted)                                                   |
-| `sessionId`                 | `string?`          | —         | Restore a specific session and control later session transitions                                         |
-| `clientId`                  | `string?`          | —         | Override stable client ID (auto-generated if omitted)                                                    |
-| `autoConnect`               | `boolean`          | `true`    | Connect on mount                                                                                         |
-| `autoReconnect`             | `boolean`          | `true`    | Auto-reconnect on disconnect                                                                             |
-| `reconnectDelayMs`          | `number`           | `1000`    | Initial reconnect backoff                                                                                |
-| `maxReconnectDelayMs`       | `number`           | `10000`   | Max reconnect backoff                                                                                    |
-| `suppressOwnUserEcho`       | `boolean`          | `true`    | Suppress own user message echoes                                                                         |
-| `onSessionTransitionCommit` | `(target) => void` | —         | Runs synchronously after a transactional target becomes the owner and before the load promise resolves   |
+| Prop                  | Type      | Default   | Description                                                                                              |
+| --------------------- | --------- | --------- | -------------------------------------------------------------------------------------------------------- |
+| `baseUrl`             | `string?` | inherited | Daemon HTTP base URL (inherited from `DaemonWorkspaceProvider` when nested; required in standalone mode) |
+| `token`               | `string?` | inherited | Bearer token (inherited from `DaemonWorkspaceProvider` when nested)                                      |
+| `workspaceCwd`        | `string?` | —         | Override workspace path (uses capabilities if omitted)                                                   |
+| `sessionId`           | `string?` | —         | Restore a specific session and control later session switches                                            |
+| `clientId`            | `string?` | —         | Override stable client ID (auto-generated if omitted)                                                    |
+| `autoConnect`         | `boolean` | `true`    | Connect on mount                                                                                         |
+| `autoReconnect`       | `boolean` | `true`    | Auto-reconnect on disconnect                                                                             |
+| `reconnectDelayMs`    | `number`  | `1000`    | Initial reconnect backoff                                                                                |
+| `maxReconnectDelayMs` | `number`  | `10000`   | Max reconnect backoff                                                                                    |
+| `suppressOwnUserEcho` | `boolean` | `true`    | Suppress own user message echoes                                                                         |
 
 **`DaemonWorkspaceProviderProps`:**
 

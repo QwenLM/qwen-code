@@ -12,6 +12,7 @@ export type GoalStatusKind =
   | 'cleared'
   | 'failed'
   | 'aborted'
+  | 'paused'
   | 'checking';
 
 export interface SerializedGoalStatusMessage {
@@ -38,6 +39,10 @@ const VALID_GOAL_KINDS = new Set<string>([
   'cleared',
   'failed',
   'aborted',
+  // A paused goal is not running. Dropping it here left the footer and
+  // the active-goal derivation falling through to the previous `set`
+  // card, so the UI kept claiming autonomous work was under way.
+  'paused',
   'checking',
 ]);
 
@@ -127,6 +132,11 @@ function getTitle(
         title: t('goal.aborted'),
         colorClass: styles.warning,
       };
+    case 'paused':
+      return {
+        title: t('goal.paused'),
+        colorClass: styles.warning,
+      };
   }
 }
 
@@ -169,7 +179,8 @@ export function GoalStatusMessage({
     (status.kind === 'checking' ||
       status.kind === 'achieved' ||
       status.kind === 'failed' ||
-      status.kind === 'aborted') &&
+      status.kind === 'aborted' ||
+      status.kind === 'paused') &&
     status.lastReason?.trim();
   const reasonLabel =
     status.kind === 'checking' ? t('goal.judge') : t('goal.lastCheck');

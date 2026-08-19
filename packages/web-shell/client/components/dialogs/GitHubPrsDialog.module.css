@@ -29,6 +29,7 @@
   font: inherit;
   text-align: left;
   color: inherit;
+  text-decoration: none;
 }
 
 .prRow:hover {

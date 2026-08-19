@@ -15,7 +15,7 @@ on:
         default: 'main'
         type: 'string'
       electron_bridge:
-        description: 'Publish the one-time macOS Electron-to-Tauri update bridge.'
+        description: 'Publish the one-time Electron-to-Tauri update bridge for macOS, Windows, and Linux.'
         required: true
         default: false
         type: 'boolean'
@@ -44,7 +44,7 @@ permissions:
   contents: 'read'
 
 concurrency:
-  group: 'desktop-release-${{ inputs.version }}'
+  group: "desktop-release-${{ inputs.dry_run && inputs.version || 'publish' }}"
   cancel-in-progress: false
 
 env:
@@ -80,6 +80,10 @@ jobs:
           version="${INPUT_VERSION#v}"
           if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]; then
             echo "::error::Desktop version must be valid SemVer: $INPUT_VERSION"
+            exit 1
+          fi
+          if [ "$IS_PRERELEASE" = 'true' ] && [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+- ]]; then
+            echo "::error::Desktop prereleases must use a SemVer prerelease suffix, for example 0.2.1-rc.1: $INPUT_VERSION"
             exit 1
           fi
           if [ "$IS_DRY_RUN" = 'false' ] && [ "$IS_DRAFT" = 'false' ] && [ "$IS_PRERELEASE" = 'false' ] && [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -174,6 +178,20 @@ jobs:
           cache-dependency-path: |
             package-lock.json
             packages/desktop-shell/package-lock.json
+
+      - name: 'Configure bundled Node.js cache'
+        id: 'node-cache-path'
+        shell: 'bash'
+        run: |
+          cache_path="$RUNNER_TEMP/qwen-desktop-node-cache"
+          echo "QWEN_DESKTOP_NODE_CACHE_DIR=$cache_path" >> "$GITHUB_ENV"
+          echo "path=$cache_path" >> "$GITHUB_OUTPUT"
+
+      - uses: 'actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830' # v4
+        id: 'node-cache'
+        with:
+          path: '${{ steps.node-cache-path.outputs.path }}'
+          key: 'desktop-node-v2-${{ matrix.rust_target }}-${{ env.NODE_VERSION }}-${{ inputs.dry_run }}'
 
       - uses: 'dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4' # stable
         with:
@@ -322,6 +340,12 @@ jobs:
       - name: 'Prepare bundled runtime'
         working-directory: 'packages/desktop-shell'
         run: 'npm run build:runtime'
+
+      - uses: 'actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830' # v4
+        if: "${{ steps.node-cache.outputs.cache-hit != 'true' }}"
+        with:
+          path: '${{ steps.node-cache-path.outputs.path }}'
+          key: 'desktop-node-v2-${{ matrix.rust_target }}-${{ env.NODE_VERSION }}-${{ inputs.dry_run }}'
 
       - name: 'Run desktop tests'
         working-directory: 'packages/desktop-shell'
@@ -487,10 +511,20 @@ jobs:
               if [ -n "$extension" ]; then
                 name="${stem}-${{ matrix.rust_target }}${extension}"
               fi
+            elif [ "$RUNNER_OS" = 'Windows' ]; then
+              case "$name" in
+                *-setup.exe|*-setup.exe.sig) ;;
+                *) continue ;;
+              esac
+            elif [ "$RUNNER_OS" = 'Linux' ]; then
+              case "$name" in
+                *.AppImage|*.AppImage.sig|*.deb|*.deb.sig) ;;
+                *) continue ;;
+              esac
             fi
             name="${name// /-}"
             cp "$artifact" "$destination/$name"
-          done < <(find "$bundle_root" -type f \( -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.exe' -o -name '*.zip' -o -name '*.app.tar.gz' -o -name '*.sig' \) -print0)
+          done < <(find "$bundle_root" -mindepth 2 -maxdepth 2 -type f \( -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.exe' -o -name '*.zip' -o -name '*.app.tar.gz' -o -name '*.sig' \) -print0)
           if [ -z "$(find "$destination" -type f -print -quit)" ]; then
             echo '::error::No desktop artifacts were produced.'
             exit 1
@@ -547,10 +581,15 @@ jobs:
             --version "$RELEASE_VERSION" \
             --output desktop-latest.json
           if [ "$ELECTRON_BRIDGE" = 'true' ]; then
-            node ../.github/scripts/create-electron-bridge-manifest.mjs \
-              --assets . \
-              --version "$RELEASE_VERSION" \
-              --output latest-mac.yml
+            for manifest in macos:latest-mac.yml windows:latest.yml linux:latest-linux.yml; do
+              platform="${manifest%%:*}"
+              output="${manifest#*:}"
+              node ../.github/scripts/create-electron-bridge-manifest.mjs \
+                --assets . \
+                --platform "$platform" \
+                --version "$RELEASE_VERSION" \
+                --output "$output"
+            done
           fi
           sha256sum -- * > SHA256SUMS.txt
 
@@ -590,19 +629,48 @@ jobs:
           ELECTRON_BRIDGE: '${{ inputs.electron_bridge }}'
           GH_TOKEN: '${{ github.token }}'
           FEED_TAG: '${{ env.DESKTOP_FEED_TAG }}'
+          RELEASE_VERSION: '${{ needs.prepare.outputs.version }}'
         run: |
           set -euo pipefail
           feed_assets=(release-assets/desktop-latest.json)
           if [ "$ELECTRON_BRIDGE" = 'true' ]; then
+            shopt -s nullglob
+            windows_installers=(release-assets/*-setup.exe)
+            linux_appimages=(release-assets/*.AppImage)
+            if [ "${#windows_installers[@]}" -ne 1 ] || [ "${#linux_appimages[@]}" -ne 1 ]; then
+              echo '::error::The Electron bridge requires one Windows installer and one Linux AppImage.'
+              exit 1
+            fi
             feed_assets+=(
               release-assets/latest-mac.yml
+              release-assets/latest.yml
+              release-assets/latest-linux.yml
               release-assets/Qwen-Code-Desktop-arm64.zip
               release-assets/Qwen-Code-Desktop-x64.zip
               release-assets/Qwen-Code-Desktop-arm64.dmg
               release-assets/Qwen-Code-Desktop-x64.dmg
+              "${windows_installers[0]}"
+              "${linux_appimages[0]}"
             )
           fi
           if gh release view "$FEED_TAG" >/dev/null 2>&1; then
+            directory="$(mktemp -d)"
+            trap 'rm -rf "$directory"' EXIT
+            gh release download "$FEED_TAG" --dir "$directory" --pattern 'desktop-latest.json'
+            current="$(jq -r '.version' "$directory/desktop-latest.json")"
+            if [[ ! "$current" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::Current Desktop stable feed has an invalid version: $current"
+              exit 1
+            fi
+            newest="$(printf '%s\n%s\n' "$RELEASE_VERSION" "$current" | sort -V | tail -n 1)"
+            if [ "$current" != "$RELEASE_VERSION" ] && [ "$newest" = "$current" ]; then
+              if [ "$ELECTRON_BRIDGE" = 'true' ]; then
+                echo "::error::Electron bridge $RELEASE_VERSION cannot replace newer stable feed $current."
+                exit 1
+              fi
+              echo "::notice::Desktop $RELEASE_VERSION will not replace newer stable feed $current."
+              exit 0
+            fi
             gh release upload "$FEED_TAG" "${feed_assets[@]}" --clobber
           else
             gh release create "$FEED_TAG" "${feed_assets[@]}" --title 'Qwen Code Desktop latest' --notes 'Stable desktop updater feed.' --latest=false

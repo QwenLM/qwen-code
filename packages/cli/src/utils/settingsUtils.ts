@@ -13,7 +13,6 @@ import type {
 import type {
   SettingDefinition,
   SettingsSchema,
-  SettingsType,
   SettingsValue,
 } from '../config/settingsSchema.js';
 import { getSettingsSchema } from '../config/settingsSchema.js';
@@ -51,29 +50,6 @@ export function getFlattenedSchema() {
 
 function clearFlattenedSchema() {
   _FLATTENED_SCHEMA = undefined;
-}
-
-/**
- * Get all settings grouped by category
- */
-export function getSettingsByCategory(): Record<
-  string,
-  Array<SettingDefinition & { key: string }>
-> {
-  const categories: Record<
-    string,
-    Array<SettingDefinition & { key: string }>
-  > = {};
-
-  Object.values(getFlattenedSchema()).forEach((definition) => {
-    const category = definition.category;
-    if (!categories[category]) {
-      categories[category] = [];
-    }
-    categories[category].push(definition);
-  });
-
-  return categories;
 }
 
 /**
@@ -173,88 +149,6 @@ export function getEffectiveValue(
  */
 export function getAllSettingKeys(): string[] {
   return Object.keys(getFlattenedSchema());
-}
-
-/**
- * Get settings by type
- */
-export function getSettingsByType(
-  type: SettingsType,
-): Array<SettingDefinition & { key: string }> {
-  return Object.values(getFlattenedSchema()).filter(
-    (definition) => definition.type === type,
-  );
-}
-
-/**
- * Get settings that require restart
- */
-export function getSettingsRequiringRestart(): Array<
-  SettingDefinition & {
-    key: string;
-  }
-> {
-  return Object.values(getFlattenedSchema()).filter(
-    (definition) => definition.requiresRestart,
-  );
-}
-
-/**
- * Validate if a setting key exists in the schema
- */
-export function isValidSettingKey(key: string): boolean {
-  return key in getFlattenedSchema();
-}
-
-/**
- * Get the category for a setting
- */
-export function getSettingCategory(key: string): string | undefined {
-  return getFlattenedSchema()[key]?.category;
-}
-
-/**
- * Check if a setting should be shown in the settings dialog
- */
-export function shouldShowInDialog(key: string): boolean {
-  return getFlattenedSchema()[key]?.showInDialog ?? true; // Default to true for backward compatibility
-}
-
-/**
- * Get all settings that should be shown in the dialog, grouped by category
- */
-export function getDialogSettingsByCategory(): Record<
-  string,
-  Array<SettingDefinition & { key: string }>
-> {
-  const categories: Record<
-    string,
-    Array<SettingDefinition & { key: string }>
-  > = {};
-
-  Object.values(getFlattenedSchema())
-    .filter((definition) => definition.showInDialog !== false)
-    .forEach((definition) => {
-      const category = definition.category;
-      if (!categories[category]) {
-        categories[category] = [];
-      }
-      categories[category].push(definition);
-    });
-
-  return categories;
-}
-
-/**
- * Get settings by type that should be shown in the dialog
- */
-export function getDialogSettingsByType(
-  type: SettingsType,
-): Array<SettingDefinition & { key: string }> {
-  return Object.values(getFlattenedSchema()).filter(
-    (definition) =>
-      definition.type === type && definition.showInDialog !== false,
-  );
 }
 
 /**
@@ -388,46 +282,6 @@ export function getDialogSettingKeys(): string[] {
 // ============================================================================
 
 /**
- * Get the current value for a setting in a specific scope
- * Always returns a value (never undefined) - falls back to default if not set anywhere
- */
-export function getSettingValue(
-  key: string,
-  settings: Settings,
-  mergedSettings: Settings,
-): boolean {
-  const definition = getSettingDefinition(key);
-  if (!definition) {
-    return false; // Default fallback for invalid settings
-  }
-
-  const value = getEffectiveValue(key, settings, mergedSettings);
-  // Ensure we return a boolean value, converting from the more general type
-  if (typeof value === 'boolean') {
-    return value;
-  }
-  // Fall back to default value, ensuring it's a boolean
-  const defaultValue = definition.default;
-  if (typeof defaultValue === 'boolean') {
-    return defaultValue;
-  }
-  return false; // Final fallback
-}
-
-/**
- * Check if a setting value is modified from its default
- */
-export function isSettingModified(key: string, value: boolean): boolean {
-  const defaultValue = getDefaultValue(key);
-  // Handle type comparison properly
-  if (typeof defaultValue === 'boolean') {
-    return value !== defaultValue;
-  }
-  // If default is not a boolean, consider it modified if value is true
-  return value === true;
-}
-
-/**
  * Check if a setting exists in the original settings file for a scope
  */
 export function settingExistsInScope(
@@ -555,15 +409,6 @@ export function setPendingSettingValueAny(
 }
 
 /**
- * Check if any modified settings require a restart
- */
-export function hasRestartRequiredSettings(
-  modifiedSettings: Set<string>,
-): boolean {
-  return Array.from(modifiedSettings).some((key) => requiresRestart(key));
-}
-
-/**
  * Get the restart required settings from a set of modified settings
  */
 export function getRestartRequiredFromModified(
@@ -671,29 +516,6 @@ export function getDisplayValue(
  */
 export function isDefaultValue(key: string, settings: Settings): boolean {
   return !settingExistsInScope(key, settings);
-}
-
-/**
- * Check if a setting value is inherited (not set at current scope)
- */
-export function isValueInherited(
-  key: string,
-  settings: Settings,
-  _mergedSettings: Settings,
-): boolean {
-  return !settingExistsInScope(key, settings);
-}
-
-/**
- * Get the effective value for display, considering inheritance
- * Always returns a boolean value (never undefined)
- */
-export function getEffectiveDisplayValue(
-  key: string,
-  settings: Settings,
-  mergedSettings: Settings,
-): boolean {
-  return getSettingValue(key, settings, mergedSettings);
 }
 
 /**

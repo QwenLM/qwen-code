@@ -191,6 +191,7 @@ export function useSessionCatalogController(client: DaemonClient) {
       sessionCreated(workspaceCwd: string, _sessionId: string) {
         update(() => {
           store.invalidateWorkspace(workspaceCwd);
+          if (store.isWorkspaceLiveStateEnabled(workspaceCwd)) return;
           store.scheduleWorkspaceRefresh(workspaceCwd);
         });
       },
@@ -199,6 +200,7 @@ export function useSessionCatalogController(client: DaemonClient) {
           store.patchSession(workspaceCwd, sessionId, {
             hasActivePrompt: true,
           });
+          if (store.isWorkspaceLiveStateEnabled(workspaceCwd)) return;
           store.invalidateWorkspace(workspaceCwd);
           store.scheduleWorkspaceRefresh(workspaceCwd);
         });
@@ -206,6 +208,7 @@ export function useSessionCatalogController(client: DaemonClient) {
       promptAdmissionUncertain(workspaceCwd: string) {
         update(() => {
           store.invalidateWorkspace(workspaceCwd);
+          if (store.isWorkspaceLiveStateEnabled(workspaceCwd)) return;
           store.scheduleWorkspaceRefresh(workspaceCwd);
         });
       },
@@ -217,6 +220,13 @@ export function useSessionCatalogController(client: DaemonClient) {
       },
       turnCompleted(workspaceCwd: string) {
         update(() => {
+          if (store.isWorkspaceLiveStateEnabled(workspaceCwd)) {
+            // The catalog revision doesn't advance on turn completion and
+            // the live-state overlay carries no updatedAt — flag a
+            // rate-limited reconcile so activity stamps keep refreshing.
+            store.requestWorkspaceLiveStateInvalidation(workspaceCwd);
+            return;
+          }
           store.invalidateWorkspace(workspaceCwd);
           store.scheduleWorkspaceRefresh(workspaceCwd);
         });

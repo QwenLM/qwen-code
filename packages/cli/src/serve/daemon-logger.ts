@@ -8,6 +8,7 @@ import * as nodeFs from 'node:fs';
 import * as nodePath from 'node:path';
 import * as crypto from 'node:crypto';
 import { performance } from 'node:perf_hooks';
+import { isSpanContextValid, trace, TraceFlags } from '@opentelemetry/api';
 import lockfile from 'proper-lockfile';
 import {
   getGlobalQwenDirLite,
@@ -44,6 +45,11 @@ export interface DaemonLogContext {
   [key: string]: unknown;
 }
 
+interface DaemonTraceContext {
+  traceId: string;
+  spanId: string;
+}
+
 const FIXED_CTX_ORDER = [
   'route',
   'sessionId',
@@ -53,6 +59,10 @@ const FIXED_CTX_ORDER = [
 ] as const;
 
 const FIXED_CTX_SET: ReadonlySet<string> = new Set(FIXED_CTX_ORDER);
+const RESERVED_TRACE_CTX_KEYS: ReadonlySet<string> = new Set([
+  'trace_id',
+  'span_id',
+]);
 const ISSUE_ORDER: readonly DaemonLogIssue[] = [
   'init_failed',
   'rotation_failed',
@@ -98,13 +108,44 @@ function renderCtx(ctx: DaemonLogContext | undefined): string {
   const extraKeys = Object.keys(ctx)
     .filter(
       (key) =>
-        !FIXED_CTX_SET.has(key) && ctx[key] !== undefined && ctx[key] !== null,
+        !FIXED_CTX_SET.has(key) &&
+        !RESERVED_TRACE_CTX_KEYS.has(key) &&
+        ctx[key] !== undefined &&
+        ctx[key] !== null,
     )
     .sort();
   for (const key of extraKeys) {
     parts.push(`${key}=${renderCtxValue(ctx[key])}`);
   }
   return parts.length > 0 ? parts.join(' ') + ' ' : '';
+}
+
+function getActiveTraceContext(): DaemonTraceContext | undefined {
+  try {
+    const span = trace.getActiveSpan();
+    if (!span?.isRecording()) return undefined;
+    const spanContext = span.spanContext();
+    if (
+      !isSpanContextValid(spanContext) ||
+      (spanContext.traceFlags & TraceFlags.SAMPLED) === 0
+    ) {
+      return undefined;
+    }
+    return {
+      traceId: spanContext.traceId,
+      spanId: spanContext.spanId,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function renderTraceContext(
+  traceContext: DaemonTraceContext | undefined,
+): string {
+  return traceContext
+    ? `[trace_id=${traceContext.traceId} span_id=${traceContext.spanId}] `
+    : '';
 }
 
 function renderErr(err: Error | undefined): string {
@@ -126,14 +167,23 @@ export interface BuildDaemonLogLineArgs {
   err?: Error;
 }
 
-export function buildDaemonLogLine(args: BuildDaemonLogLineArgs): string {
+interface BuildDaemonLogRecordArgs extends BuildDaemonLogLineArgs {
+  traceContext?: DaemonTraceContext;
+}
+
+function formatDaemonLogLine(args: BuildDaemonLogRecordArgs): string {
   const ts = args.now.toISOString();
+  const traceStr = renderTraceContext(args.traceContext);
   const ctxStr = renderCtx(args.ctx);
-  return `${ts} [${args.level}] [DAEMON] ${ctxStr}${args.message}\n${renderErr(args.err)}`;
+  return `${ts} [${args.level}] [DAEMON] ${traceStr}${ctxStr}${args.message}\n${renderErr(args.err)}`;
+}
+
+export function buildDaemonLogLine(args: BuildDaemonLogLineArgs): string {
+  return formatDaemonLogLine(args);
 }
 
 function buildDaemonFileLogLine(
-  args: BuildDaemonLogLineArgs,
+  args: BuildDaemonLogRecordArgs,
   runId: string,
   pid: number,
 ): string {
@@ -144,8 +194,9 @@ function buildDaemonFileLogLine(
         ),
       )
     : undefined;
+  const traceStr = renderTraceContext(args.traceContext);
   const ctxStr = renderCtx(callerCtx);
-  return `${args.now.toISOString()} [${args.level}] [DAEMON] runId=${runId} pid=${pid} ${ctxStr}${args.message}\n${renderErr(args.err)}`;
+  return `${args.now.toISOString()} [${args.level}] [DAEMON] runId=${runId} pid=${pid} ${traceStr}${ctxStr}${args.message}\n${renderErr(args.err)}`;
 }
 
 export interface DaemonLogger {
@@ -345,13 +396,15 @@ function createStderrOnlyLogger(input: {
     ctx?: DaemonLogContext,
     err?: Error,
   ) => {
+    const traceContext = getActiveTraceContext();
     input.stderr(
-      buildDaemonLogLine({
+      formatDaemonLogLine({
         level,
         message,
         now: input.now(),
         ctx,
         err,
+        traceContext,
       }).trimEnd(),
     );
   };
@@ -1276,19 +1329,21 @@ function createConcreteLogger(input: {
     err?: Error,
   ): void => {
     const timestamp = input.now();
+    const traceContext = getActiveTraceContext();
     input.stderr(
-      buildDaemonLogLine({
+      formatDaemonLogLine({
         level,
         message,
         now: timestamp,
         ctx,
         err,
+        traceContext,
       }).trimEnd(),
     );
     submitFileRecord(
       capUtf8Record(
         buildDaemonFileLogLine(
-          { level, message, now: timestamp, ctx, err },
+          { level, message, now: timestamp, ctx, err, traceContext },
           input.runId,
           input.pid,
         ),

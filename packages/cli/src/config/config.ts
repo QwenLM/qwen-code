@@ -23,6 +23,7 @@ import {
   SessionService,
   ideContextStore,
   type ResumedSessionData,
+  type SessionRestoreProjection,
   type LspClient,
   type ToolName,
   type ToolInvocationGuard,
@@ -42,6 +43,7 @@ import {
   type SkillLevel,
   type WebSearchSettings,
   MAX_SUBAGENT_DEPTH_LIMIT,
+  addDaemonRequestAttribute,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
@@ -1557,6 +1559,11 @@ export async function loadCliConfig(
    */
   hostPolicy?: {
     toolInvocationGuard?: ToolInvocationGuard;
+    sessionRestore?: {
+      projectionSource: (
+        sessionId: string,
+      ) => Promise<SessionRestoreProjection | undefined>;
+    };
   },
 ): Promise<Config> {
   const debugMode = isDebugMode(argv);
@@ -1975,6 +1982,10 @@ export async function loadCliConfig(
 
   let sessionId: string | undefined;
   let sessionData: ResumedSessionData | undefined;
+  let sessionRestoreProjection: SessionRestoreProjection | undefined;
+  const sessionRestoreProjectionSource =
+    hostPolicy?.sessionRestore?.projectionSource;
+  let deferProjectionUntilWriterLease = false;
 
   if (argv.continue || argv.resume) {
     const sessionService = new SessionService(cwd);
@@ -1995,8 +2006,24 @@ export async function loadCliConfig(
       // session UUID by gemini.tsx (which handles custom title lookup and
       // the interactive picker for ambiguous matches).
       sessionId = argv.resume;
-      sessionData = await sessionService.loadSession(argv.resume);
-      if (!sessionData) {
+      deferProjectionUntilWriterLease =
+        sessionRestoreProjectionSource !== undefined &&
+        (argv.chatRecording ?? settings.general?.chatRecording ?? true) &&
+        isAcpMode === true &&
+        settings.experimental?.sessionWriterLease === true;
+      if (sessionRestoreProjectionSource) {
+        if (!deferProjectionUntilWriterLease && !argv.forkSession) {
+          addDaemonRequestAttribute(
+            'qwen-code.daemon.session_restore.projection_acquisition',
+            'preloaded',
+          );
+          sessionRestoreProjection =
+            await sessionRestoreProjectionSource(sessionId);
+        }
+      } else {
+        sessionData = await sessionService.loadSession(argv.resume);
+      }
+      if (!sessionRestoreProjectionSource && !sessionData) {
         const message = `No saved session found with ID ${argv.resume}. Run \`qwen --resume\` without an ID to choose from existing sessions.`;
         writeStderrLine(message);
         process.exit(1);
@@ -2015,10 +2042,22 @@ export async function loadCliConfig(
         process.exit(1);
       }
       sessionId = forkedSessionId;
-      sessionData = await sessionService.loadSession(forkedSessionId);
-      if (!sessionData) {
-        writeStderrLine(`Failed to load forked session ${forkedSessionId}.`);
-        process.exit(1);
+      if (sessionRestoreProjectionSource) {
+        sessionData = undefined;
+        if (!deferProjectionUntilWriterLease) {
+          addDaemonRequestAttribute(
+            'qwen-code.daemon.session_restore.projection_acquisition',
+            'preloaded',
+          );
+          sessionRestoreProjection =
+            await sessionRestoreProjectionSource(forkedSessionId);
+        }
+      } else {
+        sessionData = await sessionService.loadSession(forkedSessionId);
+        if (!sessionData) {
+          writeStderrLine(`Failed to load forked session ${forkedSessionId}.`);
+          process.exit(1);
+        }
       }
     }
   } else if (argv.sandboxSessionId) {
@@ -2047,6 +2086,11 @@ export async function loadCliConfig(
 
   const modelProvidersConfig = settings.modelProviders;
   const providerProtocolConfig = settings.providerProtocol;
+  const restoreSessionId = sessionId;
+  const boundSessionRestoreProjectionSource =
+    sessionRestoreProjectionSource && restoreSessionId
+      ? () => sessionRestoreProjectionSource(restoreSessionId)
+      : undefined;
 
   // Assemble MCP servers across all sources in precedence order (user/default
   // settings < project `.mcp.json` < workspace/system settings < `--mcp-config`)
@@ -2083,6 +2127,8 @@ export async function loadCliConfig(
   const configParams: ConfigParameters = {
     sessionId,
     sessionData,
+    sessionRestoreProjection,
+    sessionRestoreProjectionSource: boundSessionRestoreProjectionSource,
     embeddingModel: DEFAULT_QWEN_EMBEDDING_MODEL,
     sandbox: sandboxConfig,
     targetDir: cwd,

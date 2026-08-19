@@ -6,6 +6,11 @@
 
 export { createServeApp, type ServeAppDeps } from './server.js';
 export {
+  getServeAppLifecycle,
+  type ServeAppLifecycle,
+  type ServeAppLifecycleBindingOptions,
+} from './serve-app-lifecycle.js';
+export {
   runQwenServe,
   type RunHandle,
   type RunQwenServeDeps,

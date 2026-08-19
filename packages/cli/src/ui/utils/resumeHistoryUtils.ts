@@ -328,7 +328,11 @@ function convertToHistoryItems(
           | SlashCommandRecordPayload
           | undefined;
         if (!payload) continue;
-        if (payload.phase === 'invocation' && payload.rawCommand) {
+        if (
+          payload.phase === 'invocation' &&
+          payload.rawCommand &&
+          !payload.hiddenInvocation
+        ) {
           const sentToModel =
             typeof payload.sentToModel === 'boolean'
               ? payload.sentToModel
@@ -382,11 +386,16 @@ function convertToHistoryItems(
         }
         if (record.subtype === 'mid_turn_user_message') {
           const payload = record.systemPayload as
-            | { displayText?: string }
+            | { displayText?: string; mediaReferences?: unknown[] }
             | undefined;
+          const hasMediaReferences =
+            Array.isArray(payload?.mediaReferences) &&
+            payload.mediaReferences.length > 0;
           const text =
             payload?.displayText ||
-            extractTextFromParts(record.message?.parts as Part[]);
+            (hasMediaReferences
+              ? '[User message with attachments]'
+              : extractTextFromParts(record.message?.parts as Part[]));
           if (text) {
             items.push({ type: MessageType.USER, text, sentToModel: false });
           }
@@ -430,8 +439,17 @@ function convertToHistoryItems(
         }
 
         const projection = projectUserTranscriptForDisplay(record);
+        const payload = record.systemPayload as
+          | { mediaReferences?: unknown[] }
+          | undefined;
+        const hasMediaReferences =
+          Array.isArray(payload?.mediaReferences) &&
+          payload.mediaReferences.length > 0;
         const text =
-          projection.displayText ?? extractTextFromParts(projection.parts);
+          projection.displayText ||
+          (hasMediaReferences
+            ? '[User message with attachments]'
+            : extractTextFromParts(projection.parts));
         if (text) {
           items.push({ type: 'user', text });
         }

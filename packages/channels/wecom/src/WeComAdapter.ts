@@ -770,6 +770,10 @@ export class WeComChannel extends ChannelBase {
     switch (this.config.sessionScope) {
       case 'thread':
         return `${this.name}:${threadId || chatId}`;
+      case 'chat_thread':
+        return threadId
+          ? `${this.name}:${chatId}:${threadId}`
+          : `${this.name}:${chatId}`;
       case 'single':
         return `${this.name}:__single__`;
       case 'user':

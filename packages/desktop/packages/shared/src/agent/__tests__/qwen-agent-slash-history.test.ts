@@ -763,7 +763,7 @@ describe('QwenAgent slash command history', () => {
     agent.destroy();
   });
 
-  it('adds slash command invocations when their result produced output', () => {
+  it('adds only matched slash command invocations when results produce output', () => {
     const runtimeRoot = mkdtempSync(join(tmpdir(), 'qwen-runtime-'));
     const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
     tempRoots.push(runtimeRoot, cwd);
@@ -779,10 +779,14 @@ describe('QwenAgent slash command history', () => {
         timestamp: '2026-03-25T07:36:39.000Z',
         type: 'system',
         subtype: 'slash_command',
-        systemPayload: { phase: 'invocation', rawCommand: '/model' },
+        systemPayload: {
+          phase: 'invocation',
+          rawCommand: '/model',
+          hiddenInvocation: true,
+        },
       },
       {
-        uuid: 'model-result',
+        uuid: 'model-open-result',
         parentUuid: 'model-invocation',
         sessionId,
         timestamp: '2026-03-25T07:36:40.000Z',
@@ -792,6 +796,21 @@ describe('QwenAgent slash command history', () => {
           phase: 'result',
           rawCommand: '/model',
           outputHistoryItems: [],
+        },
+      },
+      {
+        uuid: 'model-result',
+        parentUuid: 'model-open-result',
+        sessionId,
+        timestamp: '2026-03-25T07:36:41.000Z',
+        type: 'system',
+        subtype: 'slash_command',
+        systemPayload: {
+          phase: 'result',
+          rawCommand: '/model',
+          outputHistoryItems: [
+            { type: 'info', text: 'Kept model as qwen3-max' },
+          ],
         },
       },
       {
@@ -820,6 +839,39 @@ describe('QwenAgent slash command history', () => {
           ],
         },
       },
+      {
+        uuid: 'theme-result',
+        parentUuid: 'insight-result',
+        sessionId,
+        timestamp: '2026-03-25T07:36:54.000Z',
+        type: 'system',
+        subtype: 'slash_command',
+        systemPayload: {
+          phase: 'result',
+          rawCommand: '/theme',
+          outputHistoryItems: [
+            {
+              type: 'error',
+              text: 'Theme changes are disabled when NO_COLOR is set.',
+            },
+          ],
+        },
+      },
+      {
+        uuid: 'auth-result',
+        parentUuid: 'startup-record',
+        sessionId,
+        timestamp: '2026-03-25T07:36:55.000Z',
+        type: 'system',
+        subtype: 'slash_command',
+        systemPayload: {
+          phase: 'result',
+          rawCommand: '/auth',
+          outputHistoryItems: [
+            { type: 'info', text: 'Authenticated successfully.' },
+          ],
+        },
+      },
     ]);
 
     const agent = createAgent(cwd);
@@ -844,14 +896,229 @@ describe('QwenAgent slash command history', () => {
         message.timestamp,
       ]),
     ).toEqual([
+      [
+        'assistant',
+        'Kept model as qwen3-max',
+        Date.parse('2026-03-25T07:36:41.000Z'),
+      ],
       ['user', '/insight', Date.parse(insightInvocation)],
       [
         'assistant',
         'This may take a couple minutes. Sit tight!',
         Date.parse(insightResult),
       ],
+      [
+        'assistant',
+        'Theme changes are disabled when NO_COLOR is set.',
+        Date.parse('2026-03-25T07:36:54.000Z'),
+      ],
+      [
+        'assistant',
+        'Authenticated successfully.',
+        Date.parse('2026-03-25T07:36:55.000Z'),
+      ],
     ]);
-    expect(messages[0]?.textElements).toBeUndefined();
+    expect(messages[1]?.textElements).toBeUndefined();
+  });
+
+  it('stops orphan result lookup at its user turn while preserving multi-hop results', () => {
+    const runtimeRoot = mkdtempSync(join(tmpdir(), 'qwen-runtime-'));
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    tempRoots.push(runtimeRoot, cwd);
+    process.env.QWEN_RUNTIME_DIR = runtimeRoot;
+
+    const sessionId = '0867dd2d-bcc6-44a1-9728-2740015de6d5';
+    const recapInvocation = '2026-03-25T08:00:00.000Z';
+    const doctorInvocation = '2026-03-25T08:01:00.000Z';
+    writeQwenTranscript(runtimeRoot, cwd, sessionId, [
+      {
+        uuid: 'recap-invocation',
+        sessionId,
+        timestamp: recapInvocation,
+        type: 'system',
+        subtype: 'slash_command',
+        systemPayload: { phase: 'invocation', rawCommand: '/recap' },
+      },
+      {
+        uuid: 'recap-result',
+        parentUuid: 'recap-invocation',
+        sessionId,
+        timestamp: '2026-03-25T08:00:01.000Z',
+        type: 'system',
+        subtype: 'slash_command',
+        systemPayload: {
+          phase: 'result',
+          rawCommand: '/recap',
+          outputHistoryItems: [{ type: 'info', text: 'Manual recap' }],
+        },
+      },
+      {
+        uuid: 'away-summary-user',
+        parentUuid: 'recap-result',
+        sessionId,
+        timestamp: '2026-03-25T08:00:02.000Z',
+        type: 'user',
+        message: { role: 'user', content: 'Summarize while I am away' },
+      },
+      {
+        uuid: 'away-summary-result',
+        parentUuid: 'away-summary-user',
+        sessionId,
+        timestamp: '2026-03-25T08:00:03.000Z',
+        type: 'system',
+        subtype: 'slash_command',
+        systemPayload: {
+          phase: 'result',
+          rawCommand: '/recap',
+          outputHistoryItems: [{ type: 'info', text: 'Automatic recap' }],
+        },
+      },
+      {
+        uuid: 'doctor-invocation',
+        parentUuid: 'away-summary-result',
+        sessionId,
+        timestamp: doctorInvocation,
+        type: 'system',
+        subtype: 'slash_command',
+        systemPayload: { phase: 'invocation', rawCommand: '/doctor' },
+      },
+      {
+        uuid: 'doctor-open-result',
+        parentUuid: 'doctor-invocation',
+        sessionId,
+        timestamp: '2026-03-25T08:01:01.000Z',
+        type: 'system',
+        subtype: 'slash_command',
+        systemPayload: {
+          phase: 'result',
+          rawCommand: '/doctor',
+          outputHistoryItems: [],
+        },
+      },
+      {
+        uuid: 'doctor-result',
+        parentUuid: 'doctor-open-result',
+        sessionId,
+        timestamp: '2026-03-25T08:01:02.000Z',
+        type: 'system',
+        subtype: 'slash_command',
+        systemPayload: {
+          phase: 'result',
+          rawCommand: '/doctor',
+          outputHistoryItems: [{ type: 'info', text: 'Doctor complete' }],
+        },
+      },
+    ]);
+
+    const agent = createAgent(cwd);
+    const messages = (
+      agent as unknown as QwenHistoryInternals
+    ).mergeSlashCommandInvocationMessages(sessionId, [], cwd);
+    agent.destroy();
+
+    expect(
+      messages.map((message) => [
+        message.role,
+        message.content,
+        message.timestamp,
+      ]),
+    ).toEqual([
+      ['user', '/recap', Date.parse(recapInvocation)],
+      [
+        'assistant',
+        'Manual recap',
+        Date.parse('2026-03-25T08:00:01.000Z'),
+      ],
+      [
+        'assistant',
+        'Automatic recap',
+        Date.parse('2026-03-25T08:00:03.000Z'),
+      ],
+      ['user', '/doctor', Date.parse(doctorInvocation)],
+      [
+        'assistant',
+        'Doctor complete',
+        Date.parse('2026-03-25T08:01:02.000Z'),
+      ],
+    ]);
+  });
+
+  it('emits the invocation row once when a same-name orphan result follows the paired result', () => {
+    const runtimeRoot = mkdtempSync(join(tmpdir(), 'qwen-runtime-'));
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    tempRoots.push(runtimeRoot, cwd);
+    process.env.QWEN_RUNTIME_DIR = runtimeRoot;
+
+    const sessionId = '7f2c9a14-5b1e-4f7a-9d3c-2e8b6a4c1f05';
+    const recapInvocation = '2026-03-25T09:00:00.000Z';
+    writeQwenTranscript(runtimeRoot, cwd, sessionId, [
+      {
+        uuid: 'recap-invocation',
+        sessionId,
+        timestamp: recapInvocation,
+        type: 'system',
+        subtype: 'slash_command',
+        systemPayload: { phase: 'invocation', rawCommand: '/recap' },
+      },
+      {
+        uuid: 'recap-result',
+        parentUuid: 'recap-invocation',
+        sessionId,
+        timestamp: '2026-03-25T09:00:01.000Z',
+        type: 'system',
+        subtype: 'slash_command',
+        systemPayload: {
+          phase: 'result',
+          rawCommand: '/recap',
+          outputHistoryItems: [{ type: 'info', text: 'Manual recap' }],
+        },
+      },
+      {
+        uuid: 'assistant-record',
+        parentUuid: 'recap-result',
+        sessionId,
+        timestamp: '2026-03-25T09:00:02.000Z',
+        type: 'assistant',
+        message: { role: 'assistant', content: 'Continuing the session' },
+      },
+      {
+        uuid: 'away-recap-result',
+        parentUuid: 'assistant-record',
+        sessionId,
+        timestamp: '2026-03-25T09:10:00.000Z',
+        type: 'system',
+        subtype: 'slash_command',
+        systemPayload: {
+          phase: 'result',
+          rawCommand: '/recap',
+          outputHistoryItems: [
+            { type: 'away_recap', text: 'Automatic recap' },
+          ],
+        },
+      },
+    ]);
+
+    const agent = createAgent(cwd);
+    const messages = (
+      agent as unknown as QwenHistoryInternals
+    ).mergeSlashCommandInvocationMessages(sessionId, [], cwd);
+    agent.destroy();
+
+    expect(
+      messages.map((message) => [
+        message.role,
+        message.content,
+        message.timestamp,
+      ]),
+    ).toEqual([
+      ['user', '/recap', Date.parse(recapInvocation)],
+      ['assistant', 'Manual recap', Date.parse('2026-03-25T09:00:01.000Z')],
+      [
+        'assistant',
+        'Automatic recap',
+        Date.parse('2026-03-25T09:10:00.000Z'),
+      ],
+    ]);
   });
 
   it('does not derive text elements from Qwen user history without metadata', () => {

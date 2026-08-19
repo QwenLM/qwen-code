@@ -4,7 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { lstatSync, readlinkSync, realpathSync } from 'node:fs';
+import fs from 'node:fs/promises';
 import path from 'node:path';
+import type { Config } from '../config/config.js';
+import { isNodeError } from '../utils/errors.js';
+import { isWithinRoot } from '../utils/fileUtils.js';
+import {
+  resolveBoundWorkspaceRoot,
+  toCanonicalWorkspaceArtifactPath,
+} from '../utils/workspace-artifact-path.js';
 import type {
   ToolArtifact,
   ToolArtifactKind,
@@ -13,6 +22,7 @@ import type {
   ToolResult,
 } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
+import { ToolErrorType } from './tool-error.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 
 export interface RecordArtifactParams {
@@ -28,28 +38,88 @@ export interface RecordArtifactParams {
   metadata?: Record<string, string | number | boolean | null>;
 }
 
-const DESCRIPTION = `Registers a session artifact so clients can show it in an artifacts panel. Use it after creating a useful file, URL, image, report, notebook, or other intermediate result that the user may want to open later, unless the producing tool already returned artifact metadata. For example, write_file automatically records HTML, image, PDF, and notebook files it writes inside the workspace, so do not call record_artifact again for the same workspacePath; still call it for other formats such as Markdown, CSV, JSON, and plain text, and for files produced outside write_file. When the session creates a remote resource, such as a pull request, issue, or comment submitted via gh, record its URL with kind "link" and the url locator so the user can reopen it later.
+const DESCRIPTION = `Registers a session artifact so clients can show it in an artifacts panel. Use it after creating a useful file, URL, image, report, notebook, or other intermediate result that the user may want to open later, unless the producing tool already returned artifact metadata. For example, write_file automatically records HTML, image, PDF, notebook, CSV, and Excel files it writes inside the workspace, so do not call record_artifact again for the same workspacePath; still call it for other formats such as Markdown, JSON, and plain text, and for files produced outside write_file. When the session creates a remote resource, such as a pull request, issue, or comment submitted via gh, record its URL with kind "link" and the url locator so the user can reopen it later.
 
-This tool only records metadata. It does not publish, upload, read, write, or verify the referenced resource. Provide exactly one locator: workspacePath, managedId, or url. Use the Artifact tool, not record_artifact, for published interactive HTML artifacts.`;
+Provide exactly one locator: workspacePath, managedId, or url. Do not use the old "path" field. Use the Artifact tool, not record_artifact, for published interactive HTML artifacts.
+
+For workspace files, workspacePath must be relative to the current execution directory (for example "report.csv" or "reports/summary.html") or an absolute path inside the bound workspace. Do not add workspace folder prefixes such as "w/agent/", and do not use ".." to walk up from a worktree. This tool resolves the file, verifies it exists as a regular file inside the workspace, then stores a workspace-root-relative canonical workspacePath. A successful result includes status=available, the canonical workspacePath, and resolvedPath. If verification fails, the tool returns an error — do not tell the user the artifact can be opened or downloaded.`;
 
 export const ARTIFACT_TITLE_MAX_LENGTH = 200;
 export const ARTIFACT_WORKSPACE_PATH_MAX_LENGTH = 500;
+
+const WORKSPACE_PATH_HINT =
+  '"workspacePath" must be relative to the current execution directory (for example "report.csv") or an absolute path inside the workspace. Do not add workspace folder prefixes such as "w/agent/".';
+
+type WorkspaceLocatorSuccess = {
+  ok: true;
+  workspacePath: string;
+  resolvedPath: string;
+  sizeBytes: number;
+};
+
+type WorkspaceLocatorFailure = {
+  ok: false;
+  message: string;
+  type: ToolErrorType;
+};
+
+type WorkspaceLocatorResult = WorkspaceLocatorSuccess | WorkspaceLocatorFailure;
 
 class RecordArtifactInvocation extends BaseToolInvocation<
   RecordArtifactParams,
   ToolResult
 > {
+  constructor(
+    params: RecordArtifactParams,
+    private readonly config: Config,
+  ) {
+    super(params);
+  }
+
   override getDescription(): string {
     return `Recording artifact ${this.params.title}`;
   }
 
-  execute(_signal: AbortSignal): Promise<ToolResult> {
+  async execute(_signal: AbortSignal): Promise<ToolResult> {
+    const workspacePathInput = trimOptional(this.params.workspacePath);
+    if (workspacePathInput) {
+      const locator = await resolveWorkspaceArtifactLocator(
+        workspacePathInput,
+        this.config,
+      );
+      if (!locator.ok) {
+        return {
+          llmContent: locator.message,
+          returnDisplay: locator.message,
+          error: {
+            message: locator.message,
+            type: locator.type,
+          },
+        };
+      }
+
+      const artifact: ToolArtifact = {
+        title: this.params.title.trim(),
+        kind: this.params.kind,
+        storage: 'workspace',
+        description: trimOptional(this.params.description),
+        workspacePath: locator.workspacePath,
+        mimeType: trimOptional(this.params.mimeType),
+        sizeBytes: this.params.sizeBytes ?? locator.sizeBytes,
+        metadata: this.params.metadata,
+      };
+      return {
+        llmContent: formatWorkspaceSuccess(artifact.title, locator),
+        returnDisplay: formatWorkspaceSuccess(artifact.title, locator),
+        artifacts: [artifact],
+      };
+    }
+
     const artifact: ToolArtifact = {
       title: this.params.title.trim(),
       kind: this.params.kind,
       storage: this.params.storage ?? inferStorage(this.params),
       description: trimOptional(this.params.description),
-      workspacePath: trimOptional(this.params.workspacePath),
       managedId: trimOptional(this.params.managedId),
       url: trimOptional(this.params.url),
       mimeType: trimOptional(this.params.mimeType),
@@ -57,11 +127,11 @@ class RecordArtifactInvocation extends BaseToolInvocation<
       metadata: this.params.metadata,
     };
 
-    return Promise.resolve({
+    return {
       llmContent: `Recorded artifact "${artifact.title}".`,
       returnDisplay: `Recorded artifact **${artifact.title}**.`,
       artifacts: [artifact],
-    });
+    };
   }
 }
 
@@ -71,7 +141,7 @@ export class RecordArtifactTool extends BaseDeclarativeTool<
 > {
   static readonly Name: string = ToolNames.RECORD_ARTIFACT;
 
-  constructor() {
+  constructor(private readonly config: Config) {
     super(
       RecordArtifactTool.Name,
       ToolDisplayNames.RECORD_ARTIFACT,
@@ -79,6 +149,7 @@ export class RecordArtifactTool extends BaseDeclarativeTool<
       Kind.Other,
       {
         type: 'object',
+        additionalProperties: false,
         properties: {
           title: {
             type: 'string',
@@ -112,7 +183,7 @@ export class RecordArtifactTool extends BaseDeclarativeTool<
           workspacePath: {
             type: 'string',
             description:
-              'Workspace-relative path for a file produced in the current workspace.',
+              'Path relative to the current execution directory, or an absolute path inside the bound workspace. The tool verifies the file and stores a workspace-root-relative canonical path.',
           },
           managedId: {
             type: 'string',
@@ -155,6 +226,16 @@ export class RecordArtifactTool extends BaseDeclarativeTool<
       false,
       'artifact url link file image report notebook dashboard',
     );
+  }
+
+  override validateToolParams(params: RecordArtifactParams): string | null {
+    if (hasLegacyPathField(params)) {
+      return (
+        '"path" is not supported; use "workspacePath" for a file in the current execution directory ' +
+        '(relative to that directory, or an absolute path inside the workspace). Example: "report.csv".'
+      );
+    }
+    return super.validateToolParams(params);
   }
 
   protected override validateToolParamValues(
@@ -214,7 +295,10 @@ export class RecordArtifactTool extends BaseDeclarativeTool<
     }
 
     if (params.workspacePath) {
-      const workspacePathError = validateWorkspacePath(params.workspacePath);
+      const workspacePathError = validateWorkspacePath(
+        params.workspacePath,
+        this.config.getTargetDir(),
+      );
       if (workspacePathError) {
         return workspacePathError;
       }
@@ -255,7 +339,7 @@ export class RecordArtifactTool extends BaseDeclarativeTool<
   protected createInvocation(
     params: RecordArtifactParams,
   ): ToolInvocation<RecordArtifactParams, ToolResult> {
-    return new RecordArtifactInvocation(params);
+    return new RecordArtifactInvocation(params, this.config);
   }
 }
 
@@ -362,23 +446,34 @@ export function hasUnsafeDisplayPayload(value: string): boolean {
   );
 }
 
-function validateWorkspacePath(value: string): string | null {
+function validateWorkspacePath(value: string, cwd: string): string | null {
   const trimmed = value.trim();
-  const stringError = validateString(
-    trimmed,
-    'workspacePath',
-    ARTIFACT_WORKSPACE_PATH_MAX_LENGTH,
-    true,
-  );
-  if (stringError) {
-    return stringError;
+  if (!trimmed) {
+    return 'Missing or empty "workspacePath"';
   }
-  if (
-    path.isAbsolute(trimmed) ||
-    path.win32.isAbsolute(trimmed) ||
-    /^[A-Za-z]:/.test(trimmed)
-  ) {
-    return '"workspacePath" must be relative to the workspace';
+  if (hasControlCharacter(trimmed) || hasUnsafeDisplayPayload(trimmed)) {
+    return hasControlCharacter(trimmed)
+      ? '"workspacePath" contains control characters'
+      : '"workspacePath" contains unsafe markup';
+  }
+  if (isRedirectorRoutedPath(trimmed) || isForeignWindowsAbsolute(trimmed)) {
+    return WORKSPACE_PATH_HINT;
+  }
+  if (isAbsoluteWorkspaceInput(trimmed)) {
+    if (trimmed.length > 4096) {
+      return '"workspacePath" exceeds 4096 characters';
+    }
+    const root = resolveBoundWorkspaceRoot(
+      tryResolveForContainment(path.resolve(cwd)) ?? path.resolve(cwd),
+    );
+    const comparable = tryResolveForContainment(path.resolve(trimmed));
+    if (comparable && !isWithinRoot(comparable, root)) {
+      return '"workspacePath" must stay inside the workspace';
+    }
+    return null;
+  }
+  if (trimmed.length > ARTIFACT_WORKSPACE_PATH_MAX_LENGTH) {
+    return `"workspacePath" exceeds ${ARTIFACT_WORKSPACE_PATH_MAX_LENGTH} characters`;
   }
   const portableNormalized = path.posix.normalize(trimmed.replace(/\\/g, '/'));
   if (
@@ -386,7 +481,7 @@ function validateWorkspacePath(value: string): string | null {
     portableNormalized.startsWith('../') ||
     path.posix.isAbsolute(portableNormalized)
   ) {
-    return '"workspacePath" must stay inside the workspace';
+    return '"workspacePath" must stay inside the current execution directory';
   }
   return null;
 }
@@ -450,4 +545,360 @@ function isArtifactKind(kind: string): kind is ToolArtifactKind {
     kind === 'notebook' ||
     kind === 'other'
   );
+}
+
+function hasLegacyPathField(params: RecordArtifactParams): boolean {
+  const raw = params as RecordArtifactParams & { path?: unknown };
+  return (
+    Object.prototype.hasOwnProperty.call(raw, 'path') &&
+    raw.path != null &&
+    raw.path !== ''
+  );
+}
+
+function isRedirectorRoutedPath(value: string): boolean {
+  // NT junctions often readlink as `\??\UNC\host\share`. Treat that as `\\?\`.
+  const slashes = value.replace(/\//g, '\\').replace(/^\\\?\?\\/, '\\\\?\\');
+  if (/\\Device\\Mup\\/i.test(slashes)) {
+    return true;
+  }
+  // On POSIX, `//repo/file` is a local absolute path, not SMB.
+  const posixDoubleSlash =
+    process.platform !== 'win32' &&
+    !value.includes('\\') &&
+    /^\/\//.test(value);
+  if (
+    !posixDoubleSlash &&
+    (/^\\\\[^\\?]+(?:\\|$)/.test(slashes) ||
+      /^\\\\\?\\[Uu][Nn][Cc]\\/.test(slashes))
+  ) {
+    return true;
+  }
+  // `\\?\C:\...` is a local drive; every other `\\?\` form (UNC, Mup,
+  // GLOBALROOT, Volume GUID) can leave the machine via the redirector.
+  return /^\\\\\?\\/.test(slashes) && !/^\\\\\?\\[A-Za-z]:\\/.test(slashes);
+}
+
+function isForeignWindowsAbsolute(value: string): boolean {
+  if (process.platform === 'win32') {
+    return false;
+  }
+  return /^[A-Za-z]:/.test(value) || value.startsWith('\\');
+}
+
+function isAbsoluteWorkspaceInput(value: string): boolean {
+  return (
+    path.isAbsolute(value) ||
+    (process.platform === 'win32' && path.win32.isAbsolute(value))
+  );
+}
+
+function formatWorkspaceSuccess(
+  title: string,
+  locator: WorkspaceLocatorSuccess,
+): string {
+  return [
+    `Recorded artifact "${title}".`,
+    'status: available',
+    `workspacePath: ${locator.workspacePath}`,
+    `resolvedPath: ${locator.resolvedPath}`,
+  ].join('\n');
+}
+
+function locatorFailure(
+  type: ToolErrorType,
+  message: string,
+): WorkspaceLocatorFailure {
+  return { ok: false, type, message };
+}
+
+async function resolveExistingDir(dir: string): Promise<string> {
+  const resolved = path.resolve(dir);
+  try {
+    return await fs.realpath(resolved);
+  } catch {
+    return resolved;
+  }
+}
+
+/**
+ * Compare absolute locators against a realpath'd workspace root. `path.resolve`
+ * alone keeps macOS `/var` vs `/private/var` (and similar symlink roots) in
+ * different namespaces and false-rejects files that are inside the workspace.
+ * Returns undefined when neither the path nor its parent can be realpath'd, so
+ * callers do not mix namespaces and call a missing-but-inside path "outside".
+ */
+function tryResolveForContainment(absolutePath: string): string | undefined {
+  const resolved = path.resolve(absolutePath);
+  if (pathHasRedirectorHop(resolved)) {
+    return undefined;
+  }
+  try {
+    return realpathSync(resolved);
+  } catch {
+    try {
+      const parent = path.dirname(resolved);
+      if (pathHasRedirectorHop(parent)) {
+        return undefined;
+      }
+      return path.join(realpathSync(parent), path.basename(resolved));
+    } catch {
+      return undefined;
+    }
+  }
+}
+
+const REDIRECTOR_HOP_LIMIT = 8;
+
+function pathHasRedirectorHop(absolutePath: string): boolean {
+  if (isRedirectorRoutedPath(absolutePath)) {
+    return true;
+  }
+  const resolved = path.resolve(absolutePath);
+  const root = path.parse(resolved).root;
+  const relative = path.relative(root, resolved);
+  if (!relative || relative.startsWith('..')) {
+    return symlinkChainHitsRedirector(resolved);
+  }
+  let acc = root;
+  for (const segment of relative.split(path.sep).filter(Boolean)) {
+    acc = path.join(acc, segment);
+    if (isRedirectorRoutedPath(acc) || symlinkChainHitsRedirector(acc)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function symlinkChainHitsRedirector(absolutePath: string): boolean {
+  let current = absolutePath;
+  for (let hop = 0; hop < REDIRECTOR_HOP_LIMIT; hop++) {
+    let lst;
+    try {
+      lst = lstatSync(current);
+    } catch {
+      return false;
+    }
+    if (!lst.isSymbolicLink()) {
+      return false;
+    }
+    let target: string;
+    try {
+      target = readlinkSync(current);
+    } catch {
+      return false;
+    }
+    if (isRedirectorRoutedPath(target)) {
+      return true;
+    }
+    const next = path.isAbsolute(target)
+      ? target
+      : path.resolve(path.dirname(current), target);
+    if (isRedirectorRoutedPath(next)) {
+      return true;
+    }
+    current = next;
+  }
+  return false;
+}
+
+async function resolveWorkspaceArtifactLocator(
+  rawPath: string,
+  config: Config,
+): Promise<WorkspaceLocatorResult> {
+  const cwd = await resolveExistingDir(config.getTargetDir());
+  const root = await resolveExistingDir(resolveBoundWorkspaceRoot(cwd));
+  const first = workspacePathCandidate(rawPath, cwd, root, true);
+  if (!first.ok) {
+    return first;
+  }
+  const inspected = await inspectWorkspaceCandidate(
+    first.path,
+    rawPath,
+    cwd,
+    root,
+  );
+  if (
+    inspected.ok ||
+    inspected.type !== ToolErrorType.FILE_NOT_FOUND ||
+    process.platform === 'win32' ||
+    !rawPath.includes('\\')
+  ) {
+    return inspected;
+  }
+  const fallback = workspacePathCandidate(rawPath, cwd, root, false);
+  if (!fallback.ok || fallback.path === first.path) {
+    return inspected;
+  }
+  return inspectWorkspaceCandidate(fallback.path, rawPath, cwd, root);
+}
+
+function workspacePathCandidate(
+  locator: string,
+  cwd: string,
+  root: string,
+  preservePosixBackslash: boolean,
+): { ok: true; path: string } | WorkspaceLocatorFailure {
+  if (isRedirectorRoutedPath(locator) || isForeignWindowsAbsolute(locator)) {
+    return locatorFailure(
+      ToolErrorType.INVALID_TOOL_PARAMS,
+      WORKSPACE_PATH_HINT,
+    );
+  }
+  if (isAbsoluteWorkspaceInput(locator)) {
+    const absolute = path.resolve(locator);
+    const comparable = tryResolveForContainment(absolute);
+    if (comparable && !isWithinRoot(comparable, root)) {
+      return locatorFailure(
+        ToolErrorType.PATH_NOT_IN_WORKSPACE,
+        `Failed to record artifact: "${locator}" is outside the workspace.\n${WORKSPACE_PATH_HINT}`,
+      );
+    }
+    return { ok: true, path: absolute };
+  }
+
+  const relative =
+    preservePosixBackslash && process.platform !== 'win32'
+      ? locator
+      : locator.replace(/\\/g, '/');
+  return { ok: true, path: path.resolve(cwd, relative) };
+}
+
+async function inspectWorkspaceCandidate(
+  candidate: string,
+  rawPath: string,
+  cwd: string,
+  root: string,
+): Promise<WorkspaceLocatorResult> {
+  if (pathHasRedirectorHop(candidate)) {
+    return locatorFailure(
+      ToolErrorType.PATH_NOT_IN_WORKSPACE,
+      `Failed to record artifact: "${rawPath}" resolves outside the workspace.\n${WORKSPACE_PATH_HINT}`,
+    );
+  }
+
+  let lst;
+  try {
+    lst = await fs.lstat(candidate);
+  } catch (error) {
+    return pathInspectFailure(
+      error,
+      candidate,
+      rawPath,
+      `Failed to record artifact: could not inspect "${candidate}" (${error instanceof Error ? error.message : String(error)}).`,
+    );
+  }
+
+  if (lst.isDirectory()) {
+    return locatorFailure(
+      ToolErrorType.TARGET_IS_DIRECTORY,
+      `Failed to record artifact: "${candidate}" is a directory, not a file.\n${WORKSPACE_PATH_HINT}`,
+    );
+  }
+
+  let resolved: string;
+  try {
+    resolved = await fs.realpath(candidate);
+  } catch (error) {
+    return pathInspectFailure(
+      error,
+      candidate,
+      rawPath,
+      `Failed to record artifact: could not resolve "${rawPath}" (${error instanceof Error ? error.message : String(error)}).`,
+    );
+  }
+
+  if (!isWithinRoot(resolved, root)) {
+    return locatorFailure(
+      ToolErrorType.PATH_NOT_IN_WORKSPACE,
+      `Failed to record artifact: "${rawPath}" resolves outside the workspace.\n${WORKSPACE_PATH_HINT}`,
+    );
+  }
+
+  let st;
+  try {
+    st = await fs.stat(resolved);
+  } catch (error) {
+    return pathInspectFailure(
+      error,
+      resolved,
+      rawPath,
+      `Failed to record artifact: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (!st.isFile()) {
+    return locatorFailure(
+      st.isDirectory()
+        ? ToolErrorType.TARGET_IS_DIRECTORY
+        : ToolErrorType.TARGET_NOT_REGULAR_FILE,
+      `Failed to record artifact: "${resolved}" is not a regular file.\n${WORKSPACE_PATH_HINT}`,
+    );
+  }
+
+  const workspacePath = toCanonicalWorkspaceArtifactPath(resolved, cwd);
+  if (!workspacePath) {
+    return locatorFailure(
+      ToolErrorType.PATH_NOT_IN_WORKSPACE,
+      `Failed to record artifact: "${rawPath}" could not be converted to a workspace-root-relative path.\n${WORKSPACE_PATH_HINT}`,
+    );
+  }
+  const canonicalError = validateString(
+    workspacePath,
+    'workspacePath',
+    ARTIFACT_WORKSPACE_PATH_MAX_LENGTH,
+    true,
+  );
+  if (canonicalError) {
+    return locatorFailure(
+      ToolErrorType.INVALID_TOOL_PARAMS,
+      canonicalError.includes('exceeds')
+        ? `Failed to record artifact: the stored workspace-root-relative path "${workspacePath}" exceeds ${ARTIFACT_WORKSPACE_PATH_MAX_LENGTH} characters.`
+        : canonicalError,
+    );
+  }
+
+  return {
+    ok: true,
+    workspacePath,
+    resolvedPath: resolved,
+    sizeBytes: st.size,
+  };
+}
+
+function classifyPathError(error: unknown): ToolErrorType {
+  if (!isNodeError(error)) {
+    return ToolErrorType.EXECUTION_FAILED;
+  }
+  if (error.code === 'ENOENT' || error.code === 'ENOTDIR') {
+    return ToolErrorType.FILE_NOT_FOUND;
+  }
+  if (error.code === 'EACCES' || error.code === 'EPERM') {
+    return ToolErrorType.PERMISSION_DENIED;
+  }
+  return ToolErrorType.EXECUTION_FAILED;
+}
+
+function pathInspectFailure(
+  error: unknown,
+  candidate: string,
+  rawPath: string,
+  fallbackMessage: string,
+): WorkspaceLocatorFailure {
+  const type = classifyPathError(error);
+  if (type === ToolErrorType.FILE_NOT_FOUND) {
+    return locatorFailure(
+      type,
+      [
+        `Failed to record artifact: file not found at "${candidate}".`,
+        WORKSPACE_PATH_HINT,
+      ].join('\n'),
+    );
+  }
+  if (type === ToolErrorType.PERMISSION_DENIED) {
+    return locatorFailure(
+      type,
+      `Failed to record artifact: permission denied for "${rawPath}".\n${WORKSPACE_PATH_HINT}`,
+    );
+  }
+  return locatorFailure(type, fallbackMessage);
 }

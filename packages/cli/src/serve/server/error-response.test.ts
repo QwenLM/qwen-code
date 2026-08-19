@@ -122,4 +122,20 @@ describe('sendBridgeError session writer errors', () => {
       errorKind: 'session_writer_unavailable',
     });
   });
+
+  it.each([
+    ['invalid_session_media_reference', 400],
+    ['session_media_gone', 410],
+  ] as const)('maps %s to %i', (code, expectedStatus) => {
+    const { response, status, json } = responseMock();
+    const error = Object.assign(new Error('media reference failed'), { code });
+
+    sendBridgeError(response, error);
+
+    expect(status).toHaveBeenCalledWith(expectedStatus);
+    expect(json).toHaveBeenCalledWith({
+      error: 'media reference failed',
+      code,
+    });
+  });
 });

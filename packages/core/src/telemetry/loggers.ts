@@ -426,13 +426,18 @@ export function logFileOperation(
   });
 }
 
-export function logApiRequest(config: Config, event: ApiRequestEvent): void {
+export function logApiRequest(
+  config: Config,
+  event: ApiRequestEvent,
+  sessionId?: string,
+): void {
   // QwenLogger.getInstance(config)?.logApiRequestEvent(event);
   if (!isTelemetrySdkInitialized()) return;
 
   const attributes: LogAttributes = {
     ...getCommonAttributes(config),
     ...event,
+    ...(sessionId ? { 'session.id': sessionId } : {}),
     'event.name': EVENT_API_REQUEST,
     'event.timestamp': new Date().toISOString(),
   };
@@ -513,7 +518,11 @@ export function logRipgrepRuntimeRecovery(
   logger.emit(logRecord);
 }
 
-export function logApiError(config: Config, event: ApiErrorEvent): void {
+export function logApiError(
+  config: Config,
+  event: ApiErrorEvent,
+  sessionId?: string,
+): void {
   const uiEvent = {
     ...event,
     'event.name': EVENT_API_ERROR,
@@ -532,6 +541,7 @@ export function logApiError(config: Config, event: ApiErrorEvent): void {
   const attributes: LogAttributes = {
     ...getCommonAttributes(config),
     ...event,
+    ...(sessionId ? { 'session.id': sessionId } : {}),
     'event.name': EVENT_API_ERROR,
     'event.timestamp': new Date().toISOString(),
     ['error.message']: event.error_message,
@@ -585,7 +595,11 @@ export function logApiCancel(config: Config, event: ApiCancelEvent): void {
   logger.emit(logRecord);
 }
 
-export function logApiResponse(config: Config, event: ApiResponseEvent): void {
+export function logApiResponse(
+  config: Config,
+  event: ApiResponseEvent,
+  sessionId?: string,
+): void {
   const uiEvent = {
     ...event,
     'event.name': EVENT_API_RESPONSE,
@@ -603,6 +617,7 @@ export function logApiResponse(config: Config, event: ApiResponseEvent): void {
   const attributes: LogAttributes = {
     ...getCommonAttributes(config),
     ...event,
+    ...(sessionId ? { 'session.id': sessionId } : {}),
     'event.name': EVENT_API_RESPONSE,
     'event.timestamp': new Date().toISOString(),
   };

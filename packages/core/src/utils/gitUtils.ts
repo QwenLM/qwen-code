@@ -139,6 +139,23 @@ export const getGitBranch = (cwd: string): string | undefined => {
   }
 };
 
+// Memoize git branch per cwd for the agent-launch path. `getGitBranch` shells
+// out to `git rev-parse` synchronously; caching avoids the per-launch execSync
+// on paths that run every time a subagent starts — AgentTool's foreground and
+// background launches, and every workflow `agent()` dispatch, which fans out
+// dozens at a time. Branches don't change within a process under normal use;
+// the transcript annotation is best-effort audit metadata, so a stale value
+// after a user `git checkout` mid-session is acceptable.
+const gitBranchCache = new Map<string, string | undefined>();
+
+/** {@link getGitBranch}, memoized per cwd for the agent-launch path. */
+export const getCachedGitBranch = (cwd: string): string | undefined => {
+  if (gitBranchCache.has(cwd)) return gitBranchCache.get(cwd);
+  const branch = getGitBranch(cwd);
+  gitBranchCache.set(cwd, branch);
+  return branch;
+};
+
 /**
  * Gets the git repository full name (owner/repo), if in a git repository.
  * Tries to get the name from the remote URL first, then falls back to the directory name.

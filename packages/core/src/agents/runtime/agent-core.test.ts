@@ -51,6 +51,20 @@ import {
 } from '../../utils/invocation-context.js';
 import { GeminiChat } from '../../core/geminiChat.js';
 import { ContextState } from './agent-headless.js';
+import type { ToolResultBoundaryObservation } from '../../utils/tool-result-boundary-diagnostics.js';
+
+const boundaryObserveMock = vi.hoisted(() =>
+  vi.fn((_observation: ToolResultBoundaryObservation) => false),
+);
+vi.mock(
+  '../../utils/tool-result-boundary-diagnostics.js',
+  async (importOriginal) => ({
+    ...(await importOriginal<
+      typeof import('../../utils/tool-result-boundary-diagnostics.js')
+    >()),
+    observeToolResultBoundary: boundaryObserveMock,
+  }),
+);
 
 describe('AgentCore.createChat manual plan-exit notice ownership', () => {
   it('enables notices only for interactive agent chats', async () => {
@@ -702,6 +716,7 @@ describe('AgentCore.prepareTools', () => {
   it.each([ToolNames.ENTER_PLAN_MODE, ToolNames.EXIT_PLAN_MODE])(
     'returns a dedicated message when filtered %s is called directly',
     async (toolName) => {
+      boundaryObserveMock.mockClear();
       const { core } = buildAgentForTools(undefined, []);
 
       const result = await runWithAgentContext('test-subagent', () =>
@@ -727,6 +742,13 @@ describe('AgentCore.prepareTools', () => {
       expect(response?.error).toContain('not available inside subagents');
       expect(response?.error).toContain('return your plan');
       expect(response?.error).not.toContain('not found');
+      const producerObservations = boundaryObserveMock.mock.calls
+        .map(([observation]) => observation)
+        .filter((observation) => observation.stage === 'producer');
+      expect(producerObservations).toHaveLength(1);
+      expect(producerObservations[0].artifacts).toEqual([
+        { state: 'none', kinds: [] },
+      ]);
     },
   );
 

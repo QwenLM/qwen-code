@@ -70,10 +70,12 @@ describe('useEffortCommand', () => {
 
   it('confirms the requested tier in-chat on success', () => {
     const addItem = vi.fn();
+    const recordSlashCommand = vi.fn();
     config = {
       setReasoningEffort,
       getReasoningEffort: vi.fn().mockReturnValue('xhigh'),
       getReasoningEffortOverride: vi.fn().mockReturnValue(undefined),
+      getChatRecordingService: vi.fn(() => ({ recordSlashCommand })),
     } as unknown as Config;
     const { result } = renderHook(() =>
       useEffortCommand(settings, config, addItem),
@@ -86,6 +88,11 @@ describe('useEffortCommand', () => {
     expect(item.type).toBe('info');
     expect(item.text).toContain('xhigh');
     expect(item.text).toContain('requested');
+    expect(recordSlashCommand).toHaveBeenCalledWith({
+      phase: 'result',
+      rawCommand: '/effort',
+      outputHistoryItems: [item],
+    });
   });
 
   it('warns in-chat when thinking is disabled (tier did not take effect)', () => {

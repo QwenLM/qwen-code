@@ -51,6 +51,11 @@ const mockStopNonInteractiveOpenAILogHousekeeping = vi.hoisted(() =>
 );
 const mockUpdateBeforeRelaunch = vi.hoisted(() => vi.fn());
 const mockGetInstallationInfo = vi.hoisted(() => vi.fn());
+const mockRegisterSession = vi.hoisted(
+  () =>
+    (..._args: unknown[]) =>
+      Promise.resolve(true),
+);
 const lspConfigWatcherMock = vi.hoisted(() => ({
   instances: [] as Array<{
     listener?: (event: unknown) => void | Promise<void>;
@@ -58,6 +63,14 @@ const lspConfigWatcherMock = vi.hoisted(() => ({
     stopWatching: ReturnType<typeof vi.fn>;
   }>,
 }));
+
+const sessionRegistryConfigStub = {
+  getTargetDir: () => '/tmp/project',
+  trackSessionRegistration: (registration: Promise<boolean>) => {
+    void registration.catch(() => undefined);
+  },
+  unregisterSessionRegistry: async () => {},
+};
 
 describe('gemini import boundary', () => {
   it('does not statically import ACP or noninteractive auth branches', () => {
@@ -99,6 +112,15 @@ vi.mock('./config/settings.js', async (importOriginal) => {
     ...actual,
     loadSettings: vi.fn(),
     createMinimalSettings: vi.fn(),
+  };
+});
+
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...actual,
+    registerSession: (...args: unknown[]) => mockRegisterSession(...args),
   };
 });
 
@@ -1684,6 +1706,7 @@ describe('gemini.tsx main function kitty protocol', () => {
         geminiMdFileCount: 0,
       });
     vi.mocked(loadCliConfig).mockResolvedValue({
+      ...sessionRegistryConfigStub,
       isInteractive: () => true,
       getQuestion: () => '',
       getSandbox: () => false,
@@ -1809,6 +1832,7 @@ describe('gemini.tsx main function kitty protocol', () => {
         geminiMdFileCount: 0,
       });
     vi.mocked(loadCliConfig).mockResolvedValue({
+      ...sessionRegistryConfigStub,
       isInteractive: () => true,
       getQuestion: () => 'hello from prompt-interactive',
       getSandbox: () => false,
@@ -1932,6 +1956,7 @@ describe('gemini.tsx main function kitty protocol', () => {
         geminiMdFileCount: 0,
       });
     vi.mocked(loadCliConfig).mockResolvedValue({
+      ...sessionRegistryConfigStub,
       isInteractive: () => true,
       getQuestion: () => '',
       getInputFile: () => '/tmp/qwen-input.jsonl',
@@ -2054,6 +2079,7 @@ describe('gemini.tsx main function kitty protocol', () => {
         geminiMdFileCount: 0,
       });
     vi.mocked(loadCliConfig).mockResolvedValue({
+      ...sessionRegistryConfigStub,
       isInteractive: () => true,
       getQuestion: () => '',
       getSandbox: () => false,
@@ -2194,6 +2220,7 @@ describe('gemini.tsx main function kitty protocol', () => {
     vi.mocked(
       loadCliConfig as (typeof import('./config/config.js'))['loadCliConfig'],
     ).mockResolvedValue({
+      ...sessionRegistryConfigStub,
       isInteractive: () => true,
       getQuestion: () => '',
       getSandbox: () => false,
@@ -2511,6 +2538,7 @@ describe('gemini.tsx main function kitty protocol', () => {
     }) as unknown as typeof process.exit);
 
     vi.mocked(loadCliConfig).mockResolvedValue({
+      ...sessionRegistryConfigStub,
       isInteractive: () => true,
       getJsonSchema: () => ({ type: 'object' }),
       getQuestion: () => '',
@@ -2607,6 +2635,8 @@ describe('validateDnsResolutionOrder', () => {
 describe('startInteractiveUI', () => {
   // Mock dependencies
   const mockConfig = {
+    ...sessionRegistryConfigStub,
+    getSessionId: () => 'test-session-id',
     getProjectRoot: () => '/root',
     getScreenReader: () => false,
     isTelemetryInitializationDeferred: () => true,
@@ -2925,7 +2955,7 @@ describe('startInteractiveUI', () => {
 
     // Verify all startup tasks were called
     expect(getCliVersion).toHaveBeenCalledTimes(1);
-    expect(registerCleanup).toHaveBeenCalledTimes(1);
+    expect(registerCleanup).toHaveBeenCalledTimes(2);
 
     // Verify cleanup handler is registered with unmount function
     const cleanupFn = vi.mocked(registerCleanup).mock.calls[0][0];
@@ -3027,7 +3057,7 @@ describe('startInteractiveUI', () => {
     );
 
     const { registerCleanup } = await import('./utils/cleanup.js');
-    const cleanupFn = vi.mocked(registerCleanup).mock.calls.at(-1)?.[0] as
+    const cleanupFn = vi.mocked(registerCleanup).mock.calls[0]?.[0] as
       | (() => Promise<void> | void)
       | undefined;
     expect(cleanupFn).toBeTypeOf('function');
@@ -3061,7 +3091,7 @@ describe('startInteractiveUI', () => {
     );
 
     const { registerCleanup } = await import('./utils/cleanup.js');
-    const cleanupFn = vi.mocked(registerCleanup).mock.calls.at(-1)?.[0] as
+    const cleanupFn = vi.mocked(registerCleanup).mock.calls[0]?.[0] as
       | (() => Promise<void> | void)
       | undefined;
     expect(cleanupFn).toBeTypeOf('function');
@@ -3094,7 +3124,7 @@ describe('startInteractiveUI', () => {
     );
 
     const { registerCleanup } = await import('./utils/cleanup.js');
-    const cleanupFn = vi.mocked(registerCleanup).mock.calls.at(-1)?.[0] as
+    const cleanupFn = vi.mocked(registerCleanup).mock.calls[0]?.[0] as
       | (() => Promise<void> | void)
       | undefined;
     await cleanupFn?.();
@@ -3128,7 +3158,7 @@ describe('startInteractiveUI', () => {
       );
 
       const { registerCleanup } = await import('./utils/cleanup.js');
-      const cleanupFn = vi.mocked(registerCleanup).mock.calls.at(-1)?.[0] as
+      const cleanupFn = vi.mocked(registerCleanup).mock.calls[0]?.[0] as
         | (() => Promise<void> | void)
         | undefined;
       expect(cleanupFn).toBeTypeOf('function');
@@ -3350,7 +3380,7 @@ describe('startInteractiveUI', () => {
       expect(beforeCleanup).toBeGreaterThan(0);
 
       const { registerCleanup } = await import('./utils/cleanup.js');
-      const cleanupFn = vi.mocked(registerCleanup).mock.calls.at(-1)?.[0] as
+      const cleanupFn = vi.mocked(registerCleanup).mock.calls[0]?.[0] as
         | (() => Promise<void> | void)
         | undefined;
       expect(cleanupFn).toBeTypeOf('function');

@@ -928,7 +928,7 @@ export function WorkspaceProjectTree({
         </DialogContent>
       </Dialog>
 
-      <div className="min-h-0 flex-1 overflow-y-auto pb-3 mask-fade-bottom">
+      <div className="min-h-0 flex-1 overflow-y-auto pb-3 mask-fade-bottom scrollbar-stable">
         <div className="flex shrink-0 items-center justify-between px-3 pb-2 pt-1">
           <span className="text-[12px] font-semibold text-muted-foreground">
             {t("sidebar.projects", "Workspaces")}

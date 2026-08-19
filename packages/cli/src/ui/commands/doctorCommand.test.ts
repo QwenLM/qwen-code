@@ -12,6 +12,7 @@ import * as doctorChecksModule from '../../utils/doctorChecks.js';
 import * as memoryDiagnosticsModule from '../../utils/memoryDiagnostics.js';
 import * as cpuProfilerModule from '../../utils/cpuProfiler.js';
 import { collectMemoryDiagnostics } from '@qwen-code/qwen-code-core';
+import type { Content } from '@google/genai';
 import type { DoctorCheckResult } from '../types.js';
 
 vi.mock('../../utils/doctorChecks.js');
@@ -779,6 +780,370 @@ describe('doctorCommand', () => {
     expect(collectMemoryDiagnostics).toHaveBeenCalledWith({
       sessionId: 'session-123',
       qwenVersion: '0.15.11',
+    });
+  });
+
+  describe('tool result retention', () => {
+    const history: Content[] = [
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'shell',
+              response: { output: 'x'.repeat(100) },
+            },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'shell',
+              response: { output: 'y'.repeat(65_000) },
+            },
+          },
+        ],
+      },
+    ];
+
+    function contextWithHistory(
+      history: Content[],
+      uiHistory: CommandContext['ui']['history'] = [],
+      options: { historyThrows?: boolean } = {},
+    ): CommandContext {
+      return createMockCommandContext({
+        executionMode: 'non_interactive',
+        services: {
+          config: {
+            getSessionId: () => 'test-session',
+            getCliVersion: () => '0.0.0',
+            getTruncateToolOutputThreshold: () => 25_000,
+            getGeminiClient: () => ({
+              getHistoryShallow: () => {
+                if (options.historyThrows) {
+                  throw new Error('history unavailable');
+                }
+                return history;
+              },
+            }),
+            getToolRegistry: () => ({
+              // Registry is keyed by canonical names (ShellTool 30k,
+              // grep_search 100); legacy aliases must be canonicalized
+              // before lookup.
+              getTool: (name: string) =>
+                name === 'shell'
+                  ? { maxOutputChars: 30_000 }
+                  : name === 'grep_search'
+                    ? { maxOutputChars: 100 }
+                    : name === 'mcp_tool'
+                      ? { maxOutputChars: 500_000 }
+                      : undefined,
+              // Display names as stored in IndividualToolCallDisplay.name;
+              // the diagnostics builds a displayName → budget map from
+              // these because UI history uses display names, not registry
+              // keys.
+              getAllTools: () => [
+                { displayName: 'Shell', maxOutputChars: 30_000 },
+                { displayName: 'Grep', maxOutputChars: 100 },
+                { displayName: 'MCP Tool', maxOutputChars: 500_000 },
+              ],
+            }),
+          },
+        },
+        ui: {
+          addItem: vi.fn(),
+          setPendingItem: vi.fn(),
+          history: uiHistory,
+        },
+      } as unknown as CommandContext);
+    }
+
+    it('should include retention stats in the readable report', async () => {
+      const result = await getMemoryCommand().action!(
+        contextWithHistory(history),
+        '',
+      );
+
+      const content = result?.type === 'message' ? result.content : '';
+      expect(content).toContain('Tool result retention');
+      expect(content).toContain('Tool results in history: 2');
+      expect(content).toContain('Oversized results (above tool budget): 1');
+      expect(content).toContain(
+        'Oversized also rendered in UI history: 0 item(s)',
+      );
+      expect(content).toContain(
+        'Oversized also in compression input: yes (shared by reference, no extra copy)',
+      );
+      expect(content).toContain('/compress can reclaim space');
+    });
+
+    it('should detect tool outputs rendered in UI history', async () => {
+      const uiHistory = [
+        {
+          type: 'tool_group',
+          tools: [
+            // Above 2x shell's 30k budget: counted.
+            { name: 'shell', resultDisplay: 'y'.repeat(65_000) },
+            // Compliant high-budget render: not counted.
+            { name: 'mcp_tool', resultDisplay: 'm'.repeat(40_000) },
+            { name: 'shell', resultDisplay: 'small' },
+          ],
+        },
+        // Model responses must not be counted as tool-output duplication.
+        { type: 'gemini', text: 'z'.repeat(35_000) },
+      ] as unknown as CommandContext['ui']['history'];
+
+      const result = await getMemoryCommand().action!(
+        contextWithHistory(history, uiHistory),
+        '',
+      );
+
+      const content = result?.type === 'message' ? result.content : '';
+      expect(content).toContain(
+        'Oversized also rendered in UI history: 1 item(s)',
+      );
+    });
+
+    it('should canonicalize legacy tool names when resolving budgets', async () => {
+      // History records the raw request name; 801 measured chars exceed
+      // 2x100+slack only when the alias resolves to grep_search's budget.
+      const aliasedHistory: Content[] = [
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'search_file_content',
+                response: { output: 'a'.repeat(801) },
+              },
+            },
+          ],
+        },
+      ];
+
+      const result = await getMemoryCommand().action!(
+        contextWithHistory(aliasedHistory),
+        '',
+      );
+
+      const content = result?.type === 'message' ? result.content : '';
+      expect(content).toContain('Oversized results (above tool budget): 1');
+    });
+
+    it('should resolve UI budgets by display name, not registry key', async () => {
+      // IndividualToolCallDisplay.name stores the tool's displayName
+      // (e.g. 'Shell'), not the registry key (e.g. 'shell'). Without the
+      // displayName → budget map, getTool('Shell') returns undefined and
+      // the budget falls back to the global threshold (25k), falsely
+      // counting a 28k output as oversized (28k > 25k). With the map,
+      // 'Shell' resolves to 30k and 28k < 30k → not oversized.
+      const uiHistory = [
+        {
+          type: 'tool_group',
+          tools: [{ name: 'Shell', resultDisplay: 'x'.repeat(28_000) }],
+        },
+      ] as unknown as CommandContext['ui']['history'];
+
+      const result = await getMemoryCommand().action!(
+        contextWithHistory(history, uiHistory),
+        '',
+      );
+
+      const content = result?.type === 'message' ? result.content : '';
+      expect(content).toContain(
+        'Oversized also rendered in UI history: 0 item(s)',
+      );
+    });
+
+    it('should include retention stats in --json output', async () => {
+      const result = await getMemoryCommand().action!(
+        contextWithHistory(history),
+        '--json',
+      );
+
+      const parsed = JSON.parse(
+        result?.type === 'message' ? result.content : '{}',
+      ) as { toolResultRetention?: Record<string, number> };
+      expect(parsed.toolResultRetention).toMatchObject({
+        toolResultCount: 2,
+        oversizedResultCount: 1,
+        // Fallback is the configured global threshold, not the constant.
+        oversizedThresholdChars: 25_000,
+        largeOutputsInUIHistory: 0,
+        presentInCompressionInput: true,
+      });
+      expect(
+        parsed.toolResultRetention?.['largestResultChars'],
+      ).toBeGreaterThan(40_000);
+    });
+
+    it('should omit toolResultRetention from --json when history is unavailable', async () => {
+      const result = await getMemoryCommand().action!(
+        createMockCommandContext({
+          executionMode: 'non_interactive',
+          ui: {
+            addItem: vi.fn(),
+            setPendingItem: vi.fn(),
+          },
+        } as unknown as CommandContext),
+        '--json',
+      );
+
+      const parsed = JSON.parse(
+        result?.type === 'message' ? result.content : '{}',
+      ) as Record<string, unknown>;
+      expect(parsed).not.toHaveProperty('toolResultRetention');
+    });
+
+    it('should not flag UI displays as oversized when truncation is disabled', async () => {
+      // When truncation is disabled, getTruncateToolOutputThreshold returns
+      // Infinity; UI displays must not be false-positive counted.
+      const uiHistory = [
+        {
+          type: 'tool_group',
+          tools: [{ name: 'shell', resultDisplay: 'x'.repeat(50_000) }],
+        },
+      ] as unknown as CommandContext['ui']['history'];
+      const ctx = createMockCommandContext({
+        executionMode: 'non_interactive',
+        services: {
+          config: {
+            getSessionId: () => 'test-session',
+            getCliVersion: () => '0.0.0',
+            getTruncateToolOutputThreshold: () => Number.POSITIVE_INFINITY,
+            getGeminiClient: () => ({
+              getHistoryShallow: () => [],
+            }),
+            getToolRegistry: () => ({
+              getTool: () => undefined,
+              getAllTools: () => [],
+            }),
+          },
+        },
+        ui: {
+          addItem: vi.fn(),
+          setPendingItem: vi.fn(),
+          history: uiHistory,
+        },
+      } as unknown as CommandContext);
+      const result = await getMemoryCommand().action!(ctx, '--json');
+      const parsed = JSON.parse(
+        result?.type === 'message' ? result.content : '{}',
+      ) as { toolResultRetention?: { largeOutputsInUIHistory?: number } };
+      expect(parsed.toolResultRetention?.largeOutputsInUIHistory).toBe(0);
+    });
+
+    it('should fall back to the global threshold for unresolvable tool names', async () => {
+      // A tool no longer in the registry (e.g. removed extension) falls
+      // back to the global threshold (25k); only displays above 2x that
+      // are counted.
+      const uiHistory = [
+        {
+          type: 'tool_group',
+          tools: [
+            // 50k > 2x25k: counted.
+            { name: 'removed_ext', resultDisplay: 'z'.repeat(50_001) },
+            // 40k < 2x25k: not counted.
+            { name: 'removed_ext', resultDisplay: 'z'.repeat(40_000) },
+          ],
+        },
+      ] as unknown as CommandContext['ui']['history'];
+      const result = await getMemoryCommand().action!(
+        contextWithHistory(history, uiHistory),
+        '',
+      );
+      const content = result?.type === 'message' ? result.content : '';
+      expect(content).toContain(
+        'Oversized also rendered in UI history: 1 item(s)',
+      );
+    });
+
+    it('should omit the retention section when reading history throws', async () => {
+      const result = await getMemoryCommand().action!(
+        contextWithHistory(history, [], { historyThrows: true }),
+        '',
+      );
+
+      const content = result?.type === 'message' ? result.content : '';
+      expect(content).not.toContain('Tool result retention');
+      // Graceful degradation only: the rest of the report must survive
+      // intact (a dropped guard would replace it with an error message).
+      expect(content).toContain('timestamp: 2026-05-01T10:00:00.000Z');
+      expect(result?.type).not.toBe('error');
+    });
+
+    it('should render the compliant-session shape without compression advice', async () => {
+      const compliantHistory: Content[] = [
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'shell',
+                response: { output: 'x'.repeat(100) },
+              },
+            },
+          ],
+        },
+      ];
+
+      const result = await getMemoryCommand().action!(
+        contextWithHistory(compliantHistory),
+        '',
+      );
+
+      const content = result?.type === 'message' ? result.content : '';
+      expect(content).toContain('Oversized results (above tool budget): 0');
+      expect(content).toContain('Oversized also in compression input: no');
+      expect(content).not.toContain('/compress can reclaim space');
+    });
+
+    it('should include retention stats in the interactive memory report', async () => {
+      const context = createMockCommandContext({
+        executionMode: 'interactive',
+        services: {
+          config: {
+            getSessionId: () => 'test-session',
+            getCliVersion: () => '0.0.0',
+            getGeminiClient: () => ({
+              getHistoryShallow: () => history,
+            }),
+          },
+        },
+        ui: {
+          addItem: vi.fn(),
+          setPendingItem: vi.fn(),
+        },
+      } as unknown as CommandContext);
+
+      await doctorCommand.action!(context, 'memory');
+
+      expect(context.ui.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'info',
+          text: expect.stringContaining('Tool result retention'),
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('should omit the retention section when no chat history is available', async () => {
+      const result = await getMemoryCommand().action!(
+        createMockCommandContext({
+          executionMode: 'non_interactive',
+          ui: {
+            addItem: vi.fn(),
+            setPendingItem: vi.fn(),
+          },
+        } as unknown as CommandContext),
+        '',
+      );
+
+      const content = result?.type === 'message' ? result.content : '';
+      expect(content).not.toContain('Tool result retention');
     });
   });
 

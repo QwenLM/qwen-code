@@ -21,7 +21,38 @@ vi.mock('./debugLogger.js', () => ({
   })),
 }));
 
-import { getRecentGitStatus } from './gitUtils.js';
+import { getCachedGitBranch, getRecentGitStatus } from './gitUtils.js';
+
+describe('getCachedGitBranch', () => {
+  it('caches each working directory independently', () => {
+    const execSyncSpy = vi
+      .spyOn(childProcess, 'execSync')
+      .mockReturnValueOnce('branch-a\n')
+      .mockReturnValueOnce('branch-b\n');
+
+    expect(getCachedGitBranch('/repo/cache-a')).toBe('branch-a');
+    expect(getCachedGitBranch('/repo/cache-a')).toBe('branch-a');
+    expect(getCachedGitBranch('/repo/cache-b')).toBe('branch-b');
+    expect(execSyncSpy).toHaveBeenCalledTimes(2);
+    expect(execSyncSpy).toHaveBeenNthCalledWith(
+      1,
+      'git rev-parse --abbrev-ref HEAD',
+      expect.objectContaining({ cwd: '/repo/cache-a' }),
+    );
+    expect(execSyncSpy).toHaveBeenNthCalledWith(
+      2,
+      'git rev-parse --abbrev-ref HEAD',
+      expect.objectContaining({ cwd: '/repo/cache-b' }),
+    );
+
+    execSyncSpy.mockImplementation(() => {
+      throw new Error('not a git repository');
+    });
+    expect(getCachedGitBranch('/repo/no-git')).toBeUndefined();
+    expect(getCachedGitBranch('/repo/no-git')).toBeUndefined();
+    expect(execSyncSpy).toHaveBeenCalledTimes(3);
+  });
+});
 
 describe('getRecentGitStatus', () => {
   beforeEach(() => {

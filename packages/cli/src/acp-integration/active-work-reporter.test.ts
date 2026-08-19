@@ -7,6 +7,7 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import {
   ACTIVE_WORK_HEARTBEAT_VERSION,
+  ACTIVE_WORK_HOLD_CATEGORIES,
   ACTIVE_WORK_NOTIFICATION_METHOD,
   type ActiveWorkHoldV1,
   type ActiveWorkSnapshotV1,
@@ -63,6 +64,7 @@ describe('ActiveWorkReporter', () => {
         source('s2', () => []),
       ],
       INTERVAL_MS,
+      ACTIVE_WORK_HOLD_CATEGORIES,
     );
     await reporter.flush();
 
@@ -76,13 +78,38 @@ describe('ActiveWorkReporter', () => {
   });
 
   it('increases seq monotonically across reports', async () => {
-    const reporter = new ActiveWorkReporter(send, () => [], INTERVAL_MS);
+    const reporter = new ActiveWorkReporter(
+      send,
+      () => [],
+      INTERVAL_MS,
+      ACTIVE_WORK_HOLD_CATEGORIES,
+    );
     await reporter.flush();
     await reporter.flush();
 
     const seqs = snapshots().map((s) => s.seq);
     expect(seqs).toEqual([...seqs].sort((a, b) => a - b));
     expect(new Set(seqs).size).toBe(seqs.length);
+    reporter.dispose();
+  });
+
+  it('filters only the wire snapshot to negotiated categories', async () => {
+    const collect = vi.fn().mockReturnValue([
+      { category: 'agent', id: 'a1' },
+      { category: 'shell', id: 'background-shells' },
+    ] satisfies ActiveWorkHoldV1[]);
+    const reporter = new ActiveWorkReporter(
+      send,
+      () => [source('s1', collect)],
+      INTERVAL_MS,
+      ['agent', 'notification'],
+    );
+    await reporter.flush();
+
+    expect(collect).toHaveBeenCalled();
+    expect(snapshots().at(-1)?.sessions).toEqual([
+      { sessionId: 's1', holds: [{ category: 'agent', id: 'a1' }] },
+    ]);
     reporter.dispose();
   });
 
@@ -96,6 +123,7 @@ describe('ActiveWorkReporter', () => {
           send,
           () => [throwingSource('s1')],
           INTERVAL_MS,
+          ACTIVE_WORK_HOLD_CATEGORIES,
         );
         // The constructor already published once; drive several more ticks.
         await vi.advanceTimersByTimeAsync(INTERVAL_MS * 3);
@@ -111,6 +139,7 @@ describe('ActiveWorkReporter', () => {
         send,
         () => [throwingSource('s1')],
         INTERVAL_MS,
+        ACTIVE_WORK_HOLD_CATEGORIES,
       );
       reporter.notifyChanged();
       // The coalesced publish runs in a microtask; if it threw, this await
@@ -125,6 +154,7 @@ describe('ActiveWorkReporter', () => {
         send,
         () => [throwingSource('s1')],
         INTERVAL_MS,
+        ACTIVE_WORK_HOLD_CATEGORIES,
       );
       await expect(reporter.flush()).resolves.toBeUndefined();
       reporter.dispose();
@@ -141,6 +171,7 @@ describe('ActiveWorkReporter', () => {
           throwingSource('broken'),
         ],
         INTERVAL_MS,
+        ACTIVE_WORK_HOLD_CATEGORIES,
       );
       await reporter.flush();
 
@@ -158,6 +189,7 @@ describe('ActiveWorkReporter', () => {
             : source('s1', () => [{ category: 'agent', id: 'a1' }]),
         ],
         INTERVAL_MS,
+        ACTIVE_WORK_HOLD_CATEGORIES,
       );
       await reporter.flush();
       expect(snapshots()).toHaveLength(0);
@@ -180,6 +212,7 @@ describe('ActiveWorkReporter', () => {
       },
       () => [source('s1', () => [])],
       INTERVAL_MS,
+      ACTIVE_WORK_HOLD_CATEGORIES,
     );
     await expect(reporter.flush()).resolves.toBeUndefined();
     await expect(reporter.flush()).resolves.toBeUndefined();
@@ -192,6 +225,7 @@ describe('ActiveWorkReporter', () => {
       send,
       () => [source('s1', () => [])],
       INTERVAL_MS,
+      ACTIVE_WORK_HOLD_CATEGORIES,
     );
     const before = snapshots().length;
     reporter.dispose();

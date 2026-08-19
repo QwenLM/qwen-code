@@ -9,6 +9,7 @@
  * retention limits cannot drift between the main and split views.
  */
 export const SESSION_LIST_PAGE_SIZE = 1000;
+export const SIDEBAR_SESSION_PREVIEW_LIMIT = 5;
 export const SESSION_ORGANIZATION_FEATURE = 'session_organization';
 export const SESSION_TRANSCRIPT_PAGINATION_FEATURE =
   'session_transcript_pagination';

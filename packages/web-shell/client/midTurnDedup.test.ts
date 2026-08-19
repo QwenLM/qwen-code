@@ -14,6 +14,7 @@ interface Item {
   id: number;
   text: string;
   images?: unknown[];
+  files?: unknown[];
   midTurnState?: 'submitting' | 'queued';
   midTurnMessageId?: string;
 }
@@ -88,17 +89,43 @@ describe('removeInjectedFromQueue', () => {
     ).toEqual(['other']);
   });
 
-  it('never matches an image-bearing entry (images are not pushed mid-turn)', () => {
+  it('never matches an image-bearing entry on the TEXT fallback', () => {
     const prompts = [q('with image', [{ data: 'x' }]), q('with image')];
     const next = removeInjectedFromQueue(
       prompts,
       [batch('s', 'with image')],
       's',
     );
-    // The text-only one is removed; the image-bearing one stays.
+    // The text-only one is removed; the image-bearing one stays — a text
+    // comparison can't verify its attachments.
     expect(next).not.toBeNull();
     expect(next).toHaveLength(1);
     expect(next?.[0].images).toEqual([{ data: 'x' }]);
+  });
+
+  it('removes an image-bearing entry on a strict id match', () => {
+    const imageRow = q('with image', [{ data: 'x' }]);
+    const prompts = [q('keep'), imageRow];
+    const next = removeInjectedFromQueue(
+      prompts,
+      [batchWithIds('s', ['with image'], [imageRow.midTurnMessageId!])],
+      's',
+    );
+    expect(next?.map((p) => p.text)).toEqual(['keep']);
+  });
+
+  it('never matches a file-bearing entry (files are not pushed mid-turn)', () => {
+    const withFile = { ...q('with file'), files: [{ name: 'app.log' }] };
+    const prompts = [withFile, q('with file')];
+    const next = removeInjectedFromQueue(
+      prompts,
+      [batch('s', 'with file')],
+      's',
+    );
+    // The text-only one is removed; the file-bearing one stays.
+    expect(next).not.toBeNull();
+    expect(next).toHaveLength(1);
+    expect(next?.[0]).toBe(withFile);
   });
 
   it('does not remove an ordinary queued prompt with the same text', () => {

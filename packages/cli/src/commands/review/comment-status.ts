@@ -25,10 +25,20 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD } from '@qwen-code/qwen-code-core';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
-import { ensureAuthenticated, gh, ghApiAll, setGhHost } from './lib/gh.js';
+import {
+  currentUser,
+  ensureAuthenticated,
+  gh,
+  ghApiAll,
+  setGhHost,
+} from './lib/gh.js';
 import { gitOpt } from './lib/git.js';
 import { worktreePath } from './lib/paths.js';
-import { carriesBlockerSignal, findRootId } from './pr-context.js';
+import {
+  anyRootCarriesCriticalMarker,
+  isBlockerBody,
+  findRootId,
+} from './pr-context.js';
 
 /** Inline review comment, as listed by `GET /pulls/{n}/comments`. */
 export interface RawStatusComment {
@@ -126,6 +136,7 @@ export function buildThreadStatuses(
   comments: RawStatusComment[],
   prAuthor: string,
   probe: CodeChangeProbe,
+  me: string = '',
 ): ThreadStatus[] {
   const byId = new Map<number, RawStatusComment>();
   for (const c of comments) byId.set(c.id, c);
@@ -160,7 +171,7 @@ export function buildThreadStatuses(
       path: root.path ?? '',
       author: root.user?.login ?? 'unknown',
       createdAt: root.created_at ?? '',
-      isBlocker: carriesBlockerSignal(root.body),
+      isBlocker: isBlockerBody(root.body, root.user?.login, me),
       anchor: {
         line: root.line ?? null,
         originalLine: root.original_line ?? null,
@@ -405,10 +416,41 @@ async function runCommentStatus(args: CommentStatusArgs): Promise<void> {
       worktreeHeadSha !== liveHeadAfter;
     const headDrift = headMovedDuringFetch || worktreeStale;
 
+    // The reviewing account gates the comment marker's blocker promotion —
+    // the same gate pr-context applies, so this report and the context file
+    // agree on what is a blocker. Both unknown shapes fail closed
+    // identically — a thrown lookup AND an empty login (a stubbed or
+    // proxied `gh` exiting 0 with no output) — when a posted root comment
+    // carries a critical marker: an index that silently undercounts
+    // blockers reads as complete, while the report's degradation contract
+    // is an `error` a consumer sees.
+    let me = '';
+    if (comments.length) {
+      let lookupError: unknown = null;
+      try {
+        me = currentUser();
+      } catch (err) {
+        lookupError = err;
+      }
+      if (me === '' && anyRootCarriesCriticalMarker(comments)) {
+        throw new Error(
+          `cannot determine the reviewing account (${
+            lookupError === null
+              ? 'empty login'
+              : lookupError instanceof Error
+                ? lookupError.message
+                : String(lookupError)
+          }) while a posted root comment carries a Qwen critical marker — ` +
+            'the blocker signal depends on it; re-run',
+        );
+      }
+    }
+
     const threads = buildThreadStatuses(
       comments,
       prAuthor,
       makeGitProbe(worktree),
+      me,
     );
     if (worktreeStale) {
       // Denormalize onto every thread: the code facts describe a superseded

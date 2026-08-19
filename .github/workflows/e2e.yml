@@ -1,5 +1,8 @@
 name: 'E2E Tests'
 
+permissions:
+  contents: 'read'
+
 on:
   # E2E is slow and currently flaky, so it is NOT in the merge queue (gating the
   # serial queue on it would stall every merge). It runs post-merge on `main`,

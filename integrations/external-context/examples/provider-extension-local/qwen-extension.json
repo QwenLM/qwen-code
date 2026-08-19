@@ -1,0 +1,25 @@
+{
+  "name": "provider-context-local-example",
+  "displayName": {
+    "en": "Provider Context Local Example",
+    "zh": "Provider 上下文本地示例"
+  },
+  "description": {
+    "en": "Example provider-owned local REST adapter for external context",
+    "zh": "由 Provider 团队维护的外部上下文本地 REST 适配示例"
+  },
+  "version": "1.0.0",
+  "mcpServers": {
+    "provider-context-local-example": {
+      "command": "node",
+      "args": ["${extensionPath}${/}dist${/}main.js"],
+      "cwd": "${extensionPath}",
+      "env": {
+        "PROVIDER_CONTEXT_BASE_URL": "${PROVIDER_CONTEXT_BASE_URL}",
+        "PROVIDER_CONTEXT_TOKEN": "${PROVIDER_CONTEXT_TOKEN}"
+      },
+      "timeout": 8000,
+      "includeTools": ["context_search"]
+    }
+  }
+}

@@ -5,6 +5,7 @@ on:
     paths:
       - '.github/workflows/live-host.yml'
       - '.github/workflows/live-host-release.yml'
+      - 'packages/cli/src/serve/conversations/**'
       - 'packages/cli/src/serve/live/**'
       - 'packages/desktop/apps/live-host/**'
       - 'packages/desktop/bun.lock'

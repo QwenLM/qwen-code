@@ -360,6 +360,7 @@ export function createAgentToolProgressHandler(
       toolCall.status === 'failed' ? ToolErrorType.EXECUTION_FAILED : undefined,
     resultDisplay: toolCall.resultDisplay,
     responseParts: toolCall.responseParts || [],
+    boundaryArtifact: toolCall.boundaryArtifact,
   });
 
   /**

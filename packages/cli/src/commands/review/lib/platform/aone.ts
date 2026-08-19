@@ -1,0 +1,595 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+// Aone Code provider for the review-platform read interface. Every platform
+// call is an `a1` invocation through aone-client.ts; git-local work (the
+// diff) reuses lib/git.ts. This module owns the Aone API *shapes* so the
+// subcommands and the skill prose never name an endpoint. See
+// docs/design/2026-08-15-review-aone-provider.md.
+
+import { git, gitRaw } from '../git.js';
+import { isOwnerRepo } from '../gh.js';
+import { PINNED_DIFF_CONFIG, PINNED_DIFF_FLAGS } from '../diff-flags.js';
+import { isAoneHostFamily } from '../remote-match.js';
+import { a1Json, ensureAoneAuthenticated } from './aone-client.js';
+import type {
+  ClosingIssueRef,
+  CommentKind,
+  FetchMeta,
+  IssueComment,
+  LinkedIssue,
+  PrMeta,
+  RepoIdentity,
+  ReviewPlatformReader,
+} from './types.js';
+
+function checkOwnerRepo(ownerRepo: string): void {
+  if (!isOwnerRepo(ownerRepo)) {
+    throw new TypeError(
+      `expected owner/repo, got ${JSON.stringify(ownerRepo)}`,
+    );
+  }
+}
+
+/** Shape of `a1 repo mr view <id>` (the fields we read). */
+interface AoneMrView {
+  mergeRequest?: {
+    sourceBranch?: string;
+    targetBranch?: string;
+    detailUrl?: string;
+    title?: string;
+    description?: string;
+    author?: { username?: string };
+    state?: string;
+  };
+}
+
+/** Shape of one `a1 repo mr workitem list` entry. */
+interface AoneWorkitemRef {
+  id: number;
+  subject?: string;
+  link?: string;
+}
+
+/** Shape of `a1 project workitem get <id>` (best-effort fields). */
+interface AoneWorkitem {
+  id?: number;
+  subject?: string;
+  title?: string;
+  description?: string;
+  body?: string;
+  comments?: Array<{
+    author?: { name?: string; username?: string } | string;
+    body?: string;
+    content?: string;
+    createdAt?: string;
+    created_at?: string;
+  }>;
+}
+
+/**
+ * Parse the clone's origin URL into host + group/project. Handles the URL
+ * form (`https://[user@]host/group[/subgroup]/project(.git)`), the scp-like
+ * form (`[user@]host:group[/subgroup]/project` — user@ optional for
+ * ssh-config/`insteadOf` setups), and nested groups (collapsed to the last
+ * two segments, mirroring remote-match). The URL form is tried first so the
+ * scheme is never swallowed by the scp branch.
+ */
+export function parseRemoteUrl(url: string): RepoIdentity | null {
+  const trimmed = url.trim();
+  const schemeForm = /^[a-z+]+:\/\//i.test(trimmed);
+  // Clean, per form:
+  //  - URL form: the AUTHORITY is the span between `//` and the first `/`.
+  //    Userinfo is consumed WHOLE within it — up to the authority's last
+  //    `@` — so multi-`@` tokens (`user:S1@S2@host`) and `?`/`#` inside
+  //    the secret (`https://user:pa?ss@host/…`) survive; a query strip run
+  //    first would truncate the secret mid-credential. The query/fragment
+  //    strip runs on the PATH portion only — an `@` inside a query or
+  //    fragment value is the credential's own character, and letting it
+  //    drive either strip fabricates coordinates from the query tail. A
+  //    `/`-bearing secret puts the `@` in PATH territory (the authority
+  //    ends at the first `/`): nothing is stripped, and the residue fails
+  //    closed in `take` — it must never fold into a fabricated host.
+  //  - scp form: parsed with GIT'S OWN grammar — hostinfo ends at the
+  //    FIRST `:`, and userinfo is `user@` where the user carries neither
+  //    `:` nor `/` (probed via GIT_TRACE: `git ls-remote
+  //    'ci-user:/tok@host:g/p.git'` connects to host `ci-user`). A
+  //    token-bearing origin (`oauth2:SECRET@host:…`) therefore has host
+  //    `oauth2` in git too — the parser must agree, and the `@` residue
+  //    fails closed in `take`. The earlier last-`@` consumption diverged
+  //    from git and let the same-repo guard pass while git fetched from a
+  //    DIFFERENT server than the parsed identity named. No userinfo
+  //    cleaning here — the parse regex owns it.
+  // The query string / fragment is then stripped on both forms: query-
+  // string credentials (`?private_token=…`, a real CI pattern) would
+  // otherwise become part of the repo coordinate; `[\s\S]*` eats newlines.
+  // Finally trailing slashes before `.git`, so `…/p.git//` cannot defeat
+  // the suffix strip. Git accepts all of these shapes.
+  let cleaned: string;
+  if (schemeForm) {
+    const parts = /^([a-z+]+:\/\/)([^/]*)([\s\S]*)$/i.exec(trimmed);
+    const authority = parts?.[2] ?? '';
+    const at = authority.lastIndexOf('@');
+    cleaned =
+      (parts?.[1] ?? '') +
+      (at === -1 ? authority : authority.slice(at + 1)) +
+      (parts?.[3] ?? '');
+  } else {
+    cleaned = trimmed;
+  }
+  cleaned = cleaned
+    .replace(/[?#][\s\S]*$/, '')
+    .replace(/\/+$/, '')
+    .replace(/\.git$/, '');
+  const take = (host: string, path: string): RepoIdentity | null => {
+    // Defense in depth: if any `@` survived the userinfo consumption into
+    // the host or a path segment, fail closed — a credential residue must
+    // never become part of a parsed coordinate (it would echo through
+    // meta's stdout and the HOSTNAME_RE refusal).
+    const parts = path.split('/').filter(Boolean);
+    if (parts.length < 2) return null;
+    if (host.includes('@') || parts.some((p) => p.includes('@'))) {
+      return null;
+    }
+    return {
+      host: host.toLowerCase(),
+      owner: parts[parts.length - 2],
+      repo: parts[parts.length - 1],
+      // The FULL path — the owner/repo collapse is non-injective on
+      // nested-group platforms; the identity gates compare this when both
+      // sides carry one.
+      groupPath: parts.join('/').toLowerCase(),
+    };
+  };
+  // URL form: scheme://[user@]host[:port]/group[/subgroup]/project. The
+  // port is matched explicitly and discarded — without `(?::\d+)?` the
+  // host capture stops at the port colon and the port number folds into
+  // the path segments (`https://h:8443/solo` would parse as owner `8443`).
+  // The path MUST start with `/`: a scheme input never falls through to
+  // the scp grammar — `https://user:pa/ss` (no `@`, no port) is malformed
+  // and fails closed instead of parsing host `user` from the userinfo
+  // position.
+  if (schemeForm) {
+    const m = /^[a-z+]+:\/\/(?:[^@/]+@)?([^:/]+)(?::\d+)?\/(.+)$/i.exec(
+      cleaned,
+    );
+    return m ? take(m[1], m[2]) : null;
+  }
+  // scp-like, GIT'S grammar: `[user@]host:path` — hostinfo ends at the
+  // FIRST `:`, userinfo is `user@` with no `:` or `/` in the user part.
+  // Token-bearing shapes (`oauth2:SECRET@host:…`, `ci-user:/tok@host:…`)
+  // parse host = the span before that first colon, exactly as git connects
+  // (GIT_TRACE-probed); their `@` residue lands in the path and fails
+  // closed in `take` instead of fabricating coordinates.
+  const m = /^(?:([^:@/]+)@)?([^:/]+):(?!\/\/)(.+)$/.exec(cleaned);
+  return m ? take(m[2], m[3]) : null;
+}
+
+/** Redact a URL before putting it in a message — the raw secret must not
+ *  reach stderr/logs/the transcript. Fail closed BY CONSTRUCTION: the split
+ *  at the last `@` redacts everything before it — but ONLY when that `@`
+ *  sits in the authority region. An `@` inside a query or fragment VALUE is
+ *  the credential's own character (`?private_token=prefix@SECRET` is the
+ *  shape this code's own cleaning comment calls "a real CI pattern"); there
+ *  is no safe tail to keep after it, so the display fails closed with a
+ *  constant instead of slicing around it. Six rounds of shape-by-shape
+ *  slicing each missed the next shape — the class is closed, not patched.
+ *  A userinfo-less origin carrying `@` only in the path is likewise a
+ *  constant. */
+function redactUrl(url: string): string {
+  const at = url.lastIndexOf('@');
+  if (at === -1) return url.replace(/[?#][\s\S]*$/, '');
+  const marker = url.search(/[?#]/);
+  if (marker !== -1 && marker < at) return '<redacted remote>';
+  const tail = url.slice(at + 1).replace(/[?#][\s\S]*$/, '');
+  return `<redacted>@${tail}`;
+}
+
+function mrView(
+  prNumber: number,
+  ownerRepo: string,
+): NonNullable<AoneMrView['mergeRequest']> {
+  const view = a1Json<AoneMrView>(
+    'repo',
+    'mr',
+    'view',
+    String(prNumber),
+    '--repo',
+    ownerRepo,
+  );
+  if (!view.mergeRequest) {
+    throw new Error(
+      `a1 returned no mergeRequest for #${prNumber} of ${ownerRepo}`,
+    );
+  }
+  return view.mergeRequest;
+}
+
+/** The MR-head refspec, stated ONCE for the provider: `fetchDiff` fetches
+ *  it for the diff evidence and `fetchHeadRefSpec` hands it to fetch-pr for
+ *  the worktree checkout — two copies would silently disagree if the Aone
+ *  ref namespace ever changed. */
+function mrHeadRefSpec(prNumber: number): string {
+  return `refs/merge-requests/${prNumber}/head`;
+}
+
+/**
+ * Allowlist shape for a server-controlled branch name reaching git's argv:
+ * a plain branch name and nothing else — no option spellings, no refspec
+ * shapes (`+`, `:`), no rev-parse metasyntax (`^`, `~`, `@{`), no ranges
+ * (`..`), never the reserved word `HEAD` (fetch serves it silently and
+ * merge-base resolves it through the stale clone-time symref), and never
+ * the pseudo-ref set — `FETCH_HEAD` resolves to the just-fetched MR head
+ * (an EMPTY diff beside full-range metadata), `ORIG_HEAD` to an arbitrary
+ * ancestor. Both shape-legal, both silently wrong. The match is
+ * CASE-INSENSITIVE: on case-insensitive filesystems (macOS/Windows
+ * defaults) `.git/fetch_head` folds onto `.git/FETCH_HEAD` the
+ * immediately-preceding fetch wrote, so lowercase spellings reach the same
+ * pseudo-refs. Fail closed: an unusual-but-legal name is refused with a
+ * clear metadata-stage error rather than guessed at inside a git
+ * invocation. `refs/`-prefixed names ride the same rejection: they are
+ * legal branch names (`git check-ref-format --branch` accepts
+ * `refs/heads/x`), but as a fetch/merge-base argument they resolve
+ * QUALIFIED refs the server controls (`refs/remotes/origin/HEAD` is the
+ * clone's default-branch symref) — a wrong base disclosed only by a
+ * misdescribing warning. fetch-pr's baseRefName guard carries the twin of
+ * this check.
+ */
+const GIT_PSEUDO_REFS =
+  /^(FETCH|ORIG|MERGE|CHERRY_PICK|REVERT|REBASE|BISECT)_HEAD$/i;
+
+function isPlainBranchName(name: string): boolean {
+  return (
+    name.toUpperCase() !== 'HEAD' &&
+    !GIT_PSEUDO_REFS.test(name) &&
+    !name.includes('..') &&
+    !/^refs\//i.test(name) &&
+    /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(name)
+  );
+}
+
+/** The full repository path named by the MR's own detail URL
+ *  (`…/<group>[/subgroup…]/<project>/codereview/<id>`) — authoritative for
+ *  which repo the MR lives in. Lowercased to compare against the parsed
+ *  origin's groupPath. Undefined when absent or not the CR shape. */
+function mrRepoPath(detailUrl: string | undefined): string | undefined {
+  if (!detailUrl) return undefined;
+  const m = /^[a-z+]+:\/\/[^/]+\/(.+)\/codereview\/\d+(?:$|[/?#])/i.exec(
+    detailUrl.trim(),
+  );
+  return m?.[1]?.toLowerCase();
+}
+
+export const aoneReader: ReviewPlatformReader = {
+  kind: 'aone',
+
+  ensureAuthenticated: ensureAoneAuthenticated,
+
+  resolveRepo(): RepoIdentity {
+    // Aone has no `repo view` default-repo resolution like gh — the identity
+    // comes from the clone's own origin remote. There is no fork-parent hop:
+    // the reviewer clones the repo the CR lives in.
+    let url: string;
+    try {
+      url = git('remote', 'get-url', 'origin').trim();
+    } catch (err) {
+      // execFileSync failure messages BEGIN with the fixed preamble
+      // "Command failed: git remote get-url origin"; git's actual error is
+      // the first NON-empty line after it (same pitfall aone-client
+      // documents). `.split('\n')[0]` would render only the preamble.
+      const cause =
+        (err as Error).message
+          .split('\n')
+          .slice(1)
+          .map((l) => l.trim())
+          .find(Boolean) ?? '';
+      throw new Error(
+        `cannot resolve the repository: no \`origin\` remote` +
+          (cause ? ` (${cause})` : ''),
+      );
+    }
+    const identity = parseRemoteUrl(url);
+    if (!identity) {
+      // Redact a `user:token@` prefix — token-bearing origins are common in
+      // CI and the raw URL must not reach stderr/logs/the transcript.
+      throw new Error(
+        `cannot parse the origin remote ${JSON.stringify(redactUrl(url))} into group/project`,
+      );
+    }
+    // Detection can be steered onto this reader by an explicit `--host`
+    // while the cwd clone sits on a DIFFERENT platform (the common
+    // dual-remote Aone-migration setup: origin is a GitHub mirror). The
+    // fetchDiff origin guard applies this same predicate for the same
+    // reason; without it here the discovery branch emits a
+    // self-contradictory identity ({platform:'aone', host:'github.com'})
+    // and queries a1 with the mirror's coordinates.
+    if (!isAoneHostFamily(identity.host)) {
+      throw new Error(
+        `cannot resolve an Aone repository: this clone's origin is on ` +
+          `${JSON.stringify(identity.host)}, not the Aone host family — ` +
+          `run from inside an Aone clone`,
+      );
+    }
+    return identity;
+  },
+
+  getPrMeta(prNumber: number, ownerRepo: string): PrMeta {
+    checkOwnerRepo(ownerRepo);
+    const view = mrView(prNumber, ownerRepo);
+    return {
+      number: prNumber,
+      headSha: view.sourceBranch ?? '',
+      webUrl: view.detailUrl ?? '',
+    };
+  },
+
+  getClosingIssues(prNumber: number, ownerRepo: string): ClosingIssueRef[] {
+    checkOwnerRepo(ownerRepo);
+    // Aone links Aone workitems, not repo issues. There is no cross-repo
+    // notion, so every reference carries the PR's own repo coordinate.
+    const items = a1Json<AoneWorkitemRef[]>(
+      'repo',
+      'mr',
+      'workitem',
+      'list',
+      '--mr',
+      String(prNumber),
+      '--repo',
+      ownerRepo,
+    );
+    return (items ?? []).map((item) => ({
+      number: item.id,
+      ownerRepo,
+    }));
+  },
+
+  getIssue(issueNumber: number, ownerRepo: string): LinkedIssue {
+    checkOwnerRepo(ownerRepo);
+    const item = a1Json<AoneWorkitem>(
+      'project',
+      'workitem',
+      'get',
+      String(issueNumber),
+    );
+    const comments: IssueComment[] = (item.comments ?? []).map((c) => ({
+      author:
+        (typeof c.author === 'string'
+          ? c.author
+          : (c.author?.name ?? c.author?.username)) ?? '',
+      body: c.body ?? c.content ?? '',
+      createdAt: c.createdAt ?? c.created_at ?? '',
+    }));
+    return {
+      number: issueNumber,
+      ownerRepo,
+      title: item.subject ?? item.title ?? '',
+      body: item.description ?? item.body ?? '',
+      comments,
+    };
+  },
+
+  fetchDiff(prNumber: number, ownerRepo: string): string {
+    checkOwnerRepo(ownerRepo);
+    // Aone has no `gh pr diff`; the diff is git-local and fetched from
+    // `origin`. Verify origin IS the repo the seam was called with — the
+    // GitHub path's `gh pr diff <n> --repo <o/r>` provided that scoping; a
+    // lightweight run from a DIFFERENT Aone clone would otherwise fetch the
+    // ref from the wrong repository (ref-not-found, or a wrong MR's diff
+    // written as evidence if the global id happens to exist there).
+    let originUrl: string | undefined;
+    try {
+      originUrl = git('remote', 'get-url', 'origin').trim();
+    } catch {
+      originUrl = undefined;
+    }
+    const originIdentity = originUrl ? parseRemoteUrl(originUrl) : null;
+    // The MR view is consulted BEFORE the guard: its detailUrl names the
+    // repo the MR actually lives in — authoritative identity, where the
+    // seam's `ownerRepo` is only the collapsed last-two form. The collapse
+    // is non-injective on nested-group platforms, so a different group's
+    // same-tail clone would pass an owner/repo comparison and serve the
+    // ref-fetch; comparing FULL paths (origin's parsed groupPath against
+    // the detailUrl's path) closes it. Without a detailUrl the guard falls
+    // back to the collapsed comparison (plus the host check).
+    const view = mrView(prNumber, ownerRepo);
+    const mrPath = mrRepoPath(view.detailUrl);
+    // The comparison carries the origin's HOST too — owner/repo equality
+    // alone lets a same-named repo on a DIFFERENT platform pass the guard
+    // and serve the ref-fetch. The host arm keys on the CANONICAL Aone
+    // family predicate (port/trailing-dot/case normalized) — detection
+    // accepts a dotted-FQDN origin as Aone, so the diff gate must too; a
+    // harder comparison here refused a genuine clone with a misdirecting
+    // remedy.
+    const sameRepo =
+      originIdentity !== null &&
+      isAoneHostFamily(originIdentity.host) &&
+      (mrPath !== undefined
+        ? originIdentity.groupPath === mrPath
+        : `${originIdentity.owner}/${originIdentity.repo}` === ownerRepo);
+    if (!sameRepo) {
+      throw new Error(
+        `the cwd clone is ${
+          originIdentity
+            ? `${originIdentity.host}/${originIdentity.owner}/${originIdentity.repo}`
+            : 'not a readable git clone'
+        }, not ${ownerRepo} — run from inside a clone of the target repo`,
+      );
+    }
+    // Aone has no `gh pr diff`; the diff is git-local. Fetch the MR head into
+    // a throwaway ref, merge-base it against the target branch, and diff.
+    const target = view.targetBranch ?? 'master';
+    // The target branch is SERVER-controlled metadata reaching git's argv.
+    // Validate ALLOWLIST-style — accept only a plain branch name — because
+    // a denylist of hostile spellings cannot enumerate the channels, and
+    // each admitted one has a distinct wrong outcome:
+    //  - dash-leading parses as an option: `git fetch origin
+    //    --upload-pack=<payload>` executes the attacker-named program on
+    //    the remote host with the reviewer's credentials (creatable by
+    //    full-refname push);
+    //  - leading `+` parses as a FORCE refspec after `--` — `+master`
+    //    silently fetches the wrong head (stale evidence, no WARNING);
+    //  - a colon parses as `src:dst` refspec — force-moving the
+    //    just-fetched throwaway ref or a reviewer-local branch;
+    //  - `HEAD` makes `git fetch origin -- HEAD` exit 0 SILENTLY and
+    //    merge-base resolves through the stale clone-time symref
+    //    (wrong-base diff, zero disclosure);
+    //  - rev-parse metasyntax (`master^`, `~1`, `@{…}`) rev-parses to a
+    //    WRONG base under a WARNING that misdescribes the state;
+    //  - the empty string degrades the run to a garbled diff-less
+    //    fallback instead of this clean metadata-stage refusal.
+    // The character class is git's branch-name shape (no `..`, no leading
+    // dot); `HEAD` is reserved. The `--` below also ends option parsing
+    // for whatever reaches the fetch.
+    if (!isPlainBranchName(target)) {
+      throw new Error(
+        `refusing target branch ${JSON.stringify(target)} from the MR ` +
+          `metadata — not a plain branch name`,
+      );
+    }
+    // The throwaway ref is suffixed with the pid: two concurrent fetchDiff
+    // runs for the same MR in one clone (two /review sessions; a review
+    // worktree shares refs/heads with the main clone) would otherwise
+    // share the name — session A's finally-delete kills session B between
+    // fetch and diff (`unknown revision` mid-review), and a pre-existing
+    // local branch of the reserved name is force-moved by the `+` fetch,
+    // then deleted, reflog and all (fsck dangling-commit recovery only).
+    const ref = `__qwen-review-diff-${prNumber}-${process.pid}`;
+    try {
+      // Force-fetch (`+`): a stale throwaway ref left by an interrupted
+      // earlier run would otherwise make this fetch fail whenever the MR head
+      // was rewritten — the normal AGit-Flow iteration shape.
+      git('fetch', 'origin', `+${mrHeadRefSpec(prNumber)}:${ref}`);
+      // Fetch the target branch so the merge-base is current. If the fetch
+      // fails (transient network, expired credential), DISCLOSE it: merge-base
+      // then resolves against a possibly-stale local ref, and the diff may
+      // carry every commit merged into the target since the clone. Mirrors
+      // fetch-pr's `baseFetchFailed` → WARNING. The fetch is an EXPLICIT
+      // BRANCH REFSPEC: a bare `git fetch origin -- <target>` dwims onto a
+      // same-named TAG (exit 0, FETCH_HEAD-only, tracking ref untouched —
+      // the stale-base state above with no WARNING, since the "fetch
+      // succeeded").
+      try {
+        git(
+          'fetch',
+          'origin',
+          `+refs/heads/${target}:refs/remotes/origin/${target}`,
+        );
+      } catch {
+        process.stderr.write(
+          `WARNING: could not fetch origin/${target} — the merge-base is ` +
+            `resolved from a possibly stale local ref, so the diff may not be ` +
+            `the one under review.\n`,
+        );
+      }
+      let base: string;
+      try {
+        // QUALIFIED tracking ref: git resolves an unqualified
+        // `origin/<target>` in refs/tags and refs/heads BEFORE refs/remotes,
+        // so a tag or branch literally named `origin/<targetBranch>` — a
+        // PUSHABLE refname any user with push access (e.g. the MR author)
+        // can create, and a fresh clone auto-carries — would shadow the
+        // just-fetched tracking ref and silently move the merge base.
+        base = git(
+          'merge-base',
+          `refs/remotes/origin/${target}`,
+          // QUALIFIED head side: an unqualified throwaway-ref name resolves
+          // in refs/tags before refs/heads — same shadow class as the base
+          // arm, on the head.
+          `refs/heads/${ref}`,
+        );
+      } catch {
+        // Target branch not present locally — fall back to diffing the head
+        // against its first parent (single-commit AGit-Flow CRs). DISCLOSE:
+        // a multi-commit MR then gets only its LAST commit served as the
+        // complete diff, and the target-fetch WARNING above (if it fired)
+        // reads as though a merge-base were still resolved — it was not.
+        // fetch-pr's GitHub path is loud about this same class
+        // (`baseFetchFailed` → WARNING); silence here would let the skill
+        // review and post findings over a fragment of the change.
+        process.stderr.write(
+          `WARNING: no merge-base with origin/${target} — diffing the head ` +
+            `against its first parent; a multi-commit MR's diff may be ` +
+            `incomplete.\n`,
+        );
+        base = `refs/heads/${ref}~1`;
+      }
+      // gitRaw, not git(): git() has no maxBuffer (1 MiB default → ENOBUFS on
+      // a routine monorepo diff), rewrites \r\n→\n (altering every CRLF-file
+      // hunk), and decodes utf8 while fetch-diff writes latin1 (dropping CJK
+      // bytes). gitRaw is 512 MiB, no CRLF rewrite; latin1 matches the write.
+      // Spread the pinned diff config/flags (as fetch-pr/local-diff do): an
+      // un-pinned `color.diff=always` makes every `diff --git` line
+      // unrecognisable and computeDiffStats returns zeros.
+      return gitRaw(
+        ...PINNED_DIFF_CONFIG,
+        'diff',
+        ...PINNED_DIFF_FLAGS,
+        // Head side qualified — same shadow class as the merge-base reads.
+        `${base}..refs/heads/${ref}`,
+      ).toString('latin1');
+    } finally {
+      try {
+        git('branch', '-D', ref);
+      } catch {
+        // The ref may not exist if the fetch failed; nothing to clean.
+      }
+    }
+  },
+
+  getCommentBody(
+    kind: CommentKind,
+    id: number,
+    ownerRepo: string,
+    prNumber?: number,
+  ): string {
+    checkOwnerRepo(ownerRepo);
+    if (prNumber === undefined) {
+      throw new TypeError(
+        'aone comment bodies are addressed per-MR — pass `--pr <mr id>`',
+      );
+    }
+    // Aone has one flat comment collection per MR; the text is in `note`.
+    const comments = a1Json<
+      Array<{ id: number; note?: string; body?: string }>
+    >(
+      'repo',
+      'mr',
+      'comment',
+      'list',
+      '--mr',
+      String(prNumber),
+      '--repo',
+      ownerRepo,
+    );
+    const found = (comments ?? []).find((c) => c.id === id);
+    // Throw on a miss — returning '' would be indistinguishable from a
+    // genuinely-empty body, and the orchestrator would proceed on corrupted
+    // evidence (the GitHub provider 404s on a bad id; keep the seam aligned).
+    if (!found) {
+      throw new Error(
+        `comment ${id} not found in MR ${prNumber} of ${ownerRepo}`,
+      );
+    }
+    return found.note ?? found.body ?? '';
+  },
+
+  fetchHeadRefSpec(prNumber: number): string {
+    return mrHeadRefSpec(prNumber);
+  },
+
+  getFetchMeta(prNumber: number, ownerRepo: string): FetchMeta {
+    checkOwnerRepo(ownerRepo);
+    const view = mrView(prNumber, ownerRepo);
+    return {
+      headRefOid: view.sourceBranch ?? '',
+      baseRefName: view.targetBranch ?? 'master',
+      // The reviewer clones the repo the CR lives in — never cross-repo.
+      isCrossRepository: false,
+      body: view.description,
+      // Aone does not report diff stats; fetch-pr computes them locally.
+    };
+  },
+};

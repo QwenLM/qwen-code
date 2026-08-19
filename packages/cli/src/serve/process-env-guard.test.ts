@@ -168,8 +168,9 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     'packages/cli/src/serve/server/fs-factory.ts',
     {
       reason:
-        'Embedded server construction keeps a process-environment compatibility fallback.',
-      accesses: { 'computed:IDE_WORKSPACE_PATH_ENV_VAR': 1 },
+        'Embedded server construction keeps a process-environment compatibility fallback, ' +
+        'and the new-file-mode policy parser defaults to the daemon process environment.',
+      accesses: { 'computed:IDE_WORKSPACE_PATH_ENV_VAR': 1, whole: 1 },
     },
   ],
   [

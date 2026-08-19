@@ -301,7 +301,7 @@ export class SendMessageTool extends BaseDeclarativeTool<
         'For teams, set "to" to a bare teammate name (no @) or "*" to broadcast. ' +
         'For background tasks, set "task_id" to the id from the launch response or list_agents. ' +
         'Running tasks receive it at the next tool-round boundary; paused recovered tasks resume with the message as their first continuation instruction; completed tasks continue on their resident runtime when available and otherwise revive from their transcript and continue with your message. ' +
-        'Your text output is NOT visible to other agents — use this tool to communicate.',
+        'Your text output is NOT visible to peer teammates — use this tool to communicate.',
       Kind.Other,
       {
         type: 'object',

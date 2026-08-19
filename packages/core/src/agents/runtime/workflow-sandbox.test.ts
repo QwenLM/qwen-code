@@ -1126,6 +1126,7 @@ describe('createWorkflowSandbox security', () => {
     // never re-armed would leave a script hung in ungated code pending
     // forever (no settlement, snapshot, or telemetry). The abort must
     // re-arm the banked remainder.
+    vi.useFakeTimers();
     const scheduler = new WorkflowDispatchScheduler(1);
     const abortOnTimeout = new AbortController();
     let finish: ((value: string) => void) | undefined;
@@ -1139,24 +1140,31 @@ describe('createWorkflowSandbox security', () => {
       scheduler,
       abortOnTimeout,
     });
-    // Consume most of the budget BEFORE pausing so the banked remainder
-    // (~80 ms) is distinguishable from a fresh full budget (200 ms).
     const run = sandbox.run(`await agent('a'); return new Promise(() => {});`);
-    await vi.waitFor(() => expect(finish).toBeDefined());
-    await new Promise((resolve) => setTimeout(resolve, 120));
-    expect(scheduler.pause()).toBe(true);
-    finish?.('done');
-    await vi.waitFor(() => expect(scheduler.snapshot().state).toBe('paused'));
+    let settled = false;
+    const settlement = run.catch(() => {
+      settled = true;
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      expect(finish).toBeDefined();
+      await vi.advanceTimersByTimeAsync(120);
+      expect(scheduler.pause()).toBe(true);
+      finish?.('done');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(scheduler.snapshot().state).toBe('paused');
 
-    abortOnTimeout.abort();
-    const rearmAt = Date.now();
-    await expect(run).rejects.toThrow(/exceeded 200 ms of active time/);
-    // The banked remainder (~80 ms) bounds the settle: pre-fix the race
-    // never settled at all, a fresh-budget re-arm would overshoot the
-    // upper bound, and a zero-remainder re-arm would fire before the
-    // lower bound.
-    expect(Date.now() - rearmAt).toBeLessThan(150);
-    expect(Date.now() - rearmAt).toBeGreaterThan(40);
+      abortOnTimeout.abort();
+      await vi.advanceTimersByTimeAsync(20);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(100);
+      await expect(run).rejects.toThrow(/exceeded 200 ms of active time/);
+    } finally {
+      abortOnTimeout.abort();
+      await vi.runAllTimersAsync();
+      await settlement;
+      vi.useRealTimers();
+    }
   });
 
   it('keeps the watchdog armed when a post-abort drain lands paused', async () => {
@@ -1650,6 +1658,94 @@ describe('createWorkflowSandbox security', () => {
     expect((seen[0].opts as { isolation?: unknown }).isolation).toBe(
       'worktree',
     );
+  });
+
+  it('agent({workingDir}) is passed through to dispatch', async () => {
+    const seen: Array<{ prompt: string; opts: unknown }> = [];
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async (prompt, opts) => {
+        seen.push({ prompt, opts });
+        return 'done';
+      },
+    });
+    const result = await sandbox.run(
+      `return await agent("x", { workingDir: ".qwen/tmp/review-pr-7" });`,
+    );
+    expect(result).toBe('done');
+    expect((seen[0].opts as { workingDir?: unknown }).workingDir).toBe(
+      '.qwen/tmp/review-pr-7',
+    );
+  });
+
+  it('agent({workingDir}) rejects invalid values', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    await expect(
+      sandbox.run(`return agent("x", { workingDir: 7 });`),
+    ).rejects.toThrow(/workingDir.*non-empty string/);
+    await expect(
+      sandbox.run(`return agent("x", { workingDir: "" });`),
+    ).rejects.toThrow(/workingDir.*non-empty string/);
+    // Whitespace-only used to clear both entrance gates and was refused only
+    // deep in the registration gate with a message blaming the directory
+    // instead of the argument.
+    await expect(
+      sandbox.run(`return agent("x", { workingDir: " " });`),
+    ).rejects.toThrow(/workingDir.*non-empty string/);
+  });
+
+  // The two options make opposite claims about who owns the directory's
+  // lifetime, so the contradiction is named rather than resolved by
+  // precedence — a script that got a silent winner would believe it was
+  // isolated when it was pinned, or vice versa.
+  it('agent({workingDir, isolation}) rejects the combination', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    await expect(
+      sandbox.run(
+        `return agent("x", { workingDir: "wt", isolation: "worktree" });`,
+      ),
+    ).rejects.toThrow(/incompatible options/);
+  });
+
+  // The schema advertises "0 disables the watchdog", but a non-number used
+  // to be silently dropped downstream where the DEFAULT watchdog applied —
+  // the dispatch the author meant to leave unwatched got aborted + retried.
+  it('agent({stallMs}) rejects non-numeric values', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    await expect(
+      sandbox.run(`return agent("x", { stallMs: "0" });`),
+    ).rejects.toThrow(/stallMs.*finite number/);
+    await expect(
+      sandbox.run(`return agent("x", { stallMs: NaN });`),
+    ).rejects.toThrow(/stallMs.*finite number/);
+    await expect(
+      sandbox.run(`return agent("x", { stallMs: true });`),
+    ).rejects.toThrow(/stallMs.*finite number/);
+  });
+
+  it('agent({stallMs: 0}) passes through and disables the watchdog', async () => {
+    const seen: Array<{ prompt: string; opts: unknown }> = [];
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async (prompt, opts) => {
+        seen.push({ prompt, opts });
+        return 'done';
+      },
+    });
+    const result = await sandbox.run(
+      `return await agent("x", { stallMs: 0 });`,
+    );
+    expect(result).toBe('done');
+    expect((seen[0].opts as { stallMs?: unknown }).stallMs).toBe(0);
   });
 
   it('agent({isolation:"remote"}) is passed through to dispatch in P3', async () => {

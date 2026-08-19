@@ -17,6 +17,7 @@ import { EventEmitter } from 'events';
 import type {
   ToolCallConfirmationDetails,
   ToolConfirmationOutcome,
+  ToolResultBoundaryArtifact,
   ToolResultDisplay,
 } from '../../tools/tools.js';
 import type { Part, GenerateContentResponseUsageMetadata } from '@google/genai';
@@ -136,6 +137,7 @@ export interface AgentToolResultEvent {
   resultDisplay?: ToolResultDisplay;
   /** Path to the temp file where oversized output was saved. */
   outputFile?: string;
+  boundaryArtifact?: ToolResultBoundaryArtifact;
   durationMs?: number;
   timestamp: number;
 }

@@ -21,6 +21,9 @@ type HookResult = ReturnType<typeof useAtMentionMenu>;
 let latest: HookResult | null = null;
 let container: HTMLDivElement | null = null;
 let root: Root | null = null;
+// Stable identity across renders (like useComposerCore's ref) so tests can
+// flip disabled mid-interaction without remounting.
+const harnessDisabledRef = { current: false };
 
 function makeView(doc: string): EditorView {
   return {
@@ -53,6 +56,7 @@ function Harness({
   shellMode = false,
   view,
   createInlineTagEffect,
+  onUploadRequest,
 }: {
   actions?: AtMentionWorkspaceActions;
   disabled?: boolean;
@@ -65,15 +69,18 @@ function Harness({
     to: number;
     tag: WebShellComposerTag;
   }) => StateEffect<unknown>;
+  onUploadRequest?: (targetDir: string, restoreQuery?: () => void) => void;
 }) {
+  harnessDisabledRef.current = disabled;
   latest = useAtMentionMenu({
     viewRef: { current: view ?? null },
-    disabledRef: { current: disabled },
+    disabledRef: harnessDisabledRef,
     shellModeRef: { current: shellMode },
     workspaceActionsRef: { current: actions },
     builtinProviders,
     providers,
     createInlineTagEffect,
+    onUploadRequest,
   });
   return null;
 }
@@ -86,6 +93,7 @@ function mount({
   shellMode,
   view,
   createInlineTagEffect,
+  onUploadRequest,
 }: {
   actions?: AtMentionWorkspaceActions;
   disabled?: boolean;
@@ -98,6 +106,7 @@ function mount({
     to: number;
     tag: WebShellComposerTag;
   }) => StateEffect<unknown>;
+  onUploadRequest?: (targetDir: string, restoreQuery?: () => void) => void;
 } = {}) {
   container = document.createElement('div');
   document.body.appendChild(container);
@@ -112,6 +121,7 @@ function mount({
         shellMode={shellMode}
         view={view}
         createInlineTagEffect={createInlineTagEffect}
+        onUploadRequest={onUploadRequest}
       />,
     );
   });
@@ -170,6 +180,290 @@ describe('useAtMentionMenu', () => {
     expect(latest!.state?.providers.map((provider) => provider.id)).toEqual([
       'files',
     ]);
+  });
+
+  it('removes the triggering mention before opening the upload picker', async () => {
+    vi.useFakeTimers();
+    const view = makeView('@');
+    const onUploadRequest = vi.fn();
+    mount({
+      view,
+      builtinProviders: ['files'],
+      onUploadRequest,
+      actions: {
+        listDirectory: vi.fn().mockResolvedValue({
+          kind: 'list',
+          path: '.',
+          entries: [],
+          truncated: false,
+        }),
+      },
+    });
+
+    const order: string[] = [];
+    view.dispatch = vi.fn(() => {
+      order.push('dispatch');
+    });
+    onUploadRequest.mockImplementation(() => {
+      order.push('upload');
+    });
+
+    act(() => latest!.refreshForView(view));
+    act(() => latest!.enterCategory(0));
+    await runDebounce();
+    act(() => expect(latest!.accept(0)).toBe(true));
+
+    expect(view.dispatch).toHaveBeenCalledWith({
+      changes: { from: 0, to: 1, insert: '' },
+      selection: { anchor: 0 },
+    });
+    expect(onUploadRequest).toHaveBeenCalledWith('.', expect.any(Function));
+    // The mention must be removed before the picker opens: the native file
+    // dialog blocks the event loop, so anything deferred until after it
+    // would stay visible (or be skipped) for the whole picker session.
+    expect(order).toEqual(['dispatch', 'upload']);
+  });
+
+  it('restores the removed mention through the restore callback', async () => {
+    vi.useFakeTimers();
+    const view = makeView('hello @src/');
+    const dispatched: unknown[] = [];
+    view.dispatch = vi.fn((tr: unknown) => {
+      dispatched.push(tr);
+    });
+    let restoreQuery: (() => void) | undefined;
+    const onUploadRequest = vi.fn(
+      (_targetDir: string, restore?: () => void) => {
+        restoreQuery = restore;
+      },
+    );
+    mount({
+      view,
+      builtinProviders: ['files'],
+      onUploadRequest,
+      actions: {
+        listDirectory: vi.fn().mockResolvedValue({
+          kind: 'list',
+          path: 'src',
+          entries: [],
+          truncated: false,
+        }),
+      },
+    });
+
+    act(() => latest!.refreshForView(view));
+    await runDebounce();
+    expect(latest!.state?.items[0]?.id).toBe('upload-file');
+    act(() => expect(latest!.accept(0)).toBe(true));
+    expect(dispatched).toHaveLength(1);
+
+    // A picker canceled without an upload must give the typed query back.
+    act(() => restoreQuery!());
+    expect(dispatched).toHaveLength(2);
+    expect(dispatched[1]).toEqual({
+      changes: { from: 6, insert: '@src/' },
+      selection: { anchor: 11 },
+    });
+  });
+
+  it('does not restore a removed mention into a different document', async () => {
+    vi.useFakeTimers();
+    const view = makeView('@src/');
+    let restoreQuery: (() => void) | undefined;
+    const onUploadRequest = vi.fn(
+      (_targetDir: string, restore?: () => void) => {
+        restoreQuery = restore;
+      },
+    );
+    mount({
+      view,
+      builtinProviders: ['files'],
+      onUploadRequest,
+      actions: {
+        listDirectory: vi.fn().mockResolvedValue({
+          kind: 'list',
+          path: 'src',
+          entries: [],
+          truncated: false,
+        }),
+      },
+    });
+
+    act(() => latest!.refreshForView(view));
+    await runDebounce();
+    act(() => expect(latest!.accept(0)).toBe(true));
+    setViewState(view, 'new session draft');
+
+    act(() => restoreQuery!());
+
+    expect(view.dispatch).toHaveBeenCalledOnce();
+  });
+
+  it('restores the mention when an end-placed upload tag landed mid-picker', async () => {
+    vi.useFakeTimers();
+    const view = makeView('hello @src/');
+    const dispatched: unknown[] = [];
+    view.dispatch = vi.fn((tr: unknown) => {
+      dispatched.push(tr);
+    });
+    let restoreQuery: (() => void) | undefined;
+    const onUploadRequest = vi.fn(
+      (_targetDir: string, restore?: () => void) => {
+        restoreQuery = restore;
+      },
+    );
+    mount({
+      view,
+      builtinProviders: ['files'],
+      onUploadRequest,
+      actions: {
+        listDirectory: vi.fn().mockResolvedValue({
+          kind: 'list',
+          path: 'src',
+          entries: [],
+          truncated: false,
+        }),
+      },
+    });
+
+    act(() => latest!.refreshForView(view));
+    await runDebounce();
+    act(() => expect(latest!.accept(0)).toBe(true));
+
+    // While the OS picker is open, an earlier upload completes and appends
+    // its @file tag at the doc end. Canceling must still give the typed
+    // query back: the append does not move the insertion point.
+    setViewState(view, 'hello @src/@report.pdf ');
+
+    act(() => restoreQuery!());
+    expect(dispatched).toHaveLength(2);
+    expect(dispatched[1]).toEqual({
+      changes: { from: 6, insert: '@src/' },
+      selection: { anchor: 11 },
+    });
+  });
+
+  it('uploads into the directory shown by a typed path query', async () => {
+    vi.useFakeTimers();
+    const view = makeView('@src/');
+    const onUploadRequest = vi.fn();
+    mount({
+      view,
+      builtinProviders: ['files'],
+      onUploadRequest,
+      actions: {
+        listDirectory: vi.fn().mockResolvedValue({
+          kind: 'list',
+          path: 'src',
+          entries: [],
+          truncated: false,
+        }),
+      },
+    });
+
+    act(() => latest!.refreshForView(view));
+    await runDebounce();
+
+    // The menu browses `src/` from the typed query even though
+    // fileDirectoryRef still holds the click-navigation value ('.'), so the
+    // upload item must target the displayed directory.
+    expect(latest!.state?.items[0]?.id).toBe('upload-file');
+    act(() => expect(latest!.accept(0)).toBe(true));
+    expect(onUploadRequest).toHaveBeenCalledWith('src', expect.any(Function));
+  });
+
+  it('hides the upload item while filtering files with an entry query', async () => {
+    vi.useFakeTimers();
+    const listDirectory = vi.fn().mockResolvedValue({
+      kind: 'list',
+      path: '.',
+      entries: [
+        { name: 'file-0.ts', kind: 'file', ignored: false },
+        { name: 'other.txt', kind: 'file', ignored: false },
+      ],
+      truncated: false,
+    });
+    mount({
+      actions: { listDirectory },
+      onUploadRequest: vi.fn(),
+    });
+
+    act(() => latest!.refreshForView(makeView('@file-0')));
+    await runDebounce();
+
+    expect(latest!.state?.items.some((item) => item.id === 'upload-file')).toBe(
+      false,
+    );
+    expect(latest!.state?.items.map((item) => item.label)).toContain(
+      'file-0.ts',
+    );
+  });
+
+  it('closes the upload item without dispatching once the composer is disabled', async () => {
+    vi.useFakeTimers();
+    const view = makeView('@');
+    const onUploadRequest = vi.fn();
+    mount({
+      view,
+      builtinProviders: ['files'],
+      onUploadRequest,
+      actions: {
+        listDirectory: vi.fn().mockResolvedValue({
+          kind: 'list',
+          path: '.',
+          entries: [],
+          truncated: false,
+        }),
+      },
+    });
+
+    act(() => latest!.refreshForView(view));
+    act(() => latest!.enterCategory(0));
+    await runDebounce();
+    harnessDisabledRef.current = true;
+    act(() => expect(latest!.accept(0)).toBe(true));
+
+    expect(view.dispatch).not.toHaveBeenCalled();
+    expect(onUploadRequest).not.toHaveBeenCalled();
+    expect(latest!.state).toBeNull();
+  });
+
+  it('keeps the typed query when a stale upload item outlives the handler', async () => {
+    vi.useFakeTimers();
+    const view = makeView('@src/');
+    const onUploadRequest = vi.fn();
+    const actions = {
+      listDirectory: vi.fn().mockResolvedValue({
+        kind: 'list' as const,
+        path: 'src',
+        entries: [],
+        truncated: false,
+      }),
+    };
+    mount({ view, builtinProviders: ['files'], onUploadRequest, actions });
+
+    act(() => latest!.refreshForView(view));
+    await runDebounce();
+    expect(latest!.state?.items[0]?.id).toBe('upload-file');
+
+    // Upload availability can vanish while the menu stays open (items are
+    // only recomputed on a workspace-key change): accepting the stale item
+    // must close the menu without eating the typed query.
+    act(() => {
+      root!.render(
+        <Harness
+          view={view}
+          builtinProviders={['files']}
+          onUploadRequest={undefined}
+          actions={actions}
+        />,
+      );
+    });
+    act(() => expect(latest!.accept(0)).toBe(true));
+
+    expect(view.dispatch).not.toHaveBeenCalled();
+    expect(onUploadRequest).not.toHaveBeenCalled();
+    expect(latest!.state).toBeNull();
   });
 
   it('reuses an unchanged category menu and limits rendered providers', () => {
@@ -924,6 +1218,62 @@ describe('useAtMentionMenu', () => {
     expect(latest!.state?.items).toHaveLength(51);
     expect(latest!.state?.items[0]?.id).toBe('current:.');
     expect(latest!.state?.items[50]?.label).toBe('file-49.ts');
+  });
+
+  it('keeps fifty file entries when the upload item is prepended', async () => {
+    vi.useFakeTimers();
+    const listDirectory = vi.fn().mockResolvedValue({
+      kind: 'list',
+      path: '.',
+      entries: Array.from({ length: 55 }, (_, index) => ({
+        name: `file-${String(index).padStart(2, '0')}.ts`,
+        kind: 'file',
+        ignored: false,
+      })),
+      truncated: false,
+    });
+    mount({
+      actions: { listDirectory },
+      onUploadRequest: vi.fn(),
+    });
+
+    act(() => latest!.refreshForView(makeView('@')));
+    act(() => latest!.enterCategory(0));
+    await runDebounce();
+
+    expect(latest!.state?.items).toHaveLength(52);
+    expect(latest!.state?.items[0]?.id).toBe('upload-file');
+    expect(latest!.state?.items[1]?.id).toBe('current:.');
+    expect(latest!.state?.items[51]?.label).toBe('file-49.ts');
+  });
+
+  it('keeps prefix items for directory queries like @src/', async () => {
+    vi.useFakeTimers();
+    const listDirectory = vi.fn().mockResolvedValue({
+      kind: 'list',
+      path: 'src',
+      entries: Array.from({ length: 55 }, (_, index) => ({
+        name: `file-${String(index).padStart(2, '0')}.ts`,
+        kind: 'file',
+        ignored: false,
+      })),
+      truncated: false,
+    });
+    mount({
+      actions: { listDirectory },
+      onUploadRequest: vi.fn(),
+    });
+
+    // The entry query is empty here too, so the provider prepends the same
+    // two prefix items and the menu cap must grant the extra slots.
+    act(() => latest!.refreshForView(makeView('@src/')));
+    await runDebounce();
+
+    expect(latest!.state?.query).toBe('src/');
+    expect(latest!.state?.items).toHaveLength(52);
+    expect(latest!.state?.items[0]?.id).toBe('upload-file');
+    expect(latest!.state?.items[1]?.id).toBe('current:src');
+    expect(latest!.state?.items[51]?.label).toBe('file-49.ts');
   });
 
   it('keeps built-in providers when custom provider ids collide', () => {

@@ -21,9 +21,9 @@
  * key, and so on — so the cache naturally invalidates from the edit point.
  *
  * The `canonicalOpts` projection keeps only the dispatch-affecting opts
- * (`schema`, `model`, `isolation`, `agentType`) with object keys sorted, so
- * cosmetic opt differences (a re-ordered schema, a `label` change) don't
- * bust the cache.
+ * (`schema`, `model`, `isolation`, `agentType`, `workingDir`) with object keys
+ * sorted, so cosmetic opt differences (a re-ordered schema, a `label` change)
+ * don't bust the cache.
  *
  * Determinism requirement: workflow scripts are deterministic (`Date.now`
  * / `Math.random` throw in the sandbox), so the sequence of `agent()`
@@ -66,14 +66,25 @@ export interface JournalReplay {
 
 /**
  * Project the dispatch-affecting opts into a stable canonical string. Only
- * `schema` / `model` / `isolation` / `agentType` change what the dispatch
- * does; `label` / `phase` / `stallMs` are cosmetic or operational and must
- * NOT bust the cache. Object keys are sorted recursively so a re-serialized
- * schema with reordered keys hashes the same.
+ * `schema` / `model` / `isolation` / `agentType` / `workingDir` change what
+ * the dispatch does; `label` / `phase` / `stallMs` are cosmetic or
+ * operational and must NOT bust the cache. Object keys are sorted recursively
+ * so a re-serialized schema with reordered keys hashes the same.
+ *
+ * `workingDir` is dispatch-affecting for the same reason it exists: the same
+ * prompt run against two different worktrees is two different questions. Were
+ * it projected away, a resume that changed only the directory would replay
+ * the previous tree's answers as if they were this one's.
  */
 export function canonicalizeAgentOpts(opts: WorkflowAgentOpts): string {
   const projected: Record<string, unknown> = {};
-  for (const k of ['schema', 'model', 'isolation', 'agentType'] as const) {
+  for (const k of [
+    'schema',
+    'model',
+    'isolation',
+    'agentType',
+    'workingDir',
+  ] as const) {
     const v = opts[k];
     if (v === undefined || typeof v === 'function') continue;
     projected[k] = v;

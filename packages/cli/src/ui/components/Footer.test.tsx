@@ -6,8 +6,10 @@
 
 import { render } from 'ink-testing-library';
 import { render as inkRender } from 'ink';
+import type { DOMElement } from 'ink';
 import stripAnsi from 'strip-ansi';
 import { EventEmitter } from 'node:events';
+import { createRef, type RefObject } from 'react';
 import { act } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Footer } from './Footer.js';
@@ -200,6 +202,7 @@ const renderAtLayoutWidth = (
   columns: number,
   uiState: UIState,
   backgroundEntries: readonly DialogEntry[] = [],
+  containerRef?: RefObject<DOMElement | null>,
 ) => {
   useTerminalSizeMock.mockReturnValue({ columns, rows: 24 });
   let lastFrame = '';
@@ -231,10 +234,10 @@ const renderAtLayoutWidth = (
       <BackgroundTaskViewStateContext.Provider
         value={createBackgroundTaskState(backgroundEntries)}
       >
-        <Footer />
+        <Footer containerRef={containerRef} />
       </BackgroundTaskViewStateContext.Provider>
     ) : (
-      <Footer />
+      <Footer containerRef={containerRef} />
     );
   const instance = inkRender(
     <SettingsContext.Provider value={mockSettings}>
@@ -278,6 +281,19 @@ describe('<Footer />', () => {
       connectingCount: 0,
       connectedCount: 0,
     });
+  });
+
+  it('attaches the selectable-region ref to its outer box', () => {
+    const containerRef = createRef<DOMElement>();
+    const { unmount } = renderAtLayoutWidth(
+      80,
+      createMockUIState(),
+      [],
+      containerRef,
+    );
+
+    expect(containerRef.current).not.toBeNull();
+    unmount();
   });
 
   it('passes the left-column width after a right pill reserves space', async () => {

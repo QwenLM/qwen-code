@@ -237,6 +237,14 @@ describe('BuiltinCommandLoader', () => {
     expect(forkCmd?.kind).toBe(CommandKind.BUILT_IN);
   });
 
+  it('should always register the /advisor command', async () => {
+    const loader = new BuiltinCommandLoader(mockConfig);
+    const commands = await loader.loadCommands(new AbortController().signal);
+    const advisorCmd = commands.find((c) => c.name === 'advisor');
+    expect(advisorCmd).toBeDefined();
+    expect(advisorCmd?.kind).toBe(CommandKind.BUILT_IN);
+  });
+
   it('should include lsp command only when LSP is enabled', async () => {
     const disabledLoader = new BuiltinCommandLoader(mockConfig);
     const disabledCommands = await disabledLoader.loadCommands(

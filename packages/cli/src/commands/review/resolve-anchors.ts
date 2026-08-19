@@ -141,6 +141,9 @@ function runResolveAnchors(args: ResolveAnchorsArgs): void {
       // finding is fine; the agent's counting was not. Worth seeing.
       drifted: resolved.filter((r) => (r.drift ?? 0) > 0).length,
       loose: resolved.filter((r) => r.tier?.startsWith('loose')).length,
+      // A fragment matched inside a longer hunk line — anchored, and the
+      // weakest claim about WHICH line, so it is worth a second look.
+      substring: resolved.filter((r) => r.tier?.startsWith('substring')).length,
     },
   };
 
@@ -158,6 +161,9 @@ function runResolveAnchors(args: ResolveAnchorsArgs): void {
       (s.ambiguous ? `, ${s.ambiguous} ambiguous` : '') +
       (s.loose
         ? `, ${s.loose} matched only after normalising indentation`
+        : '') +
+      (s.substring
+        ? `, ${s.substring} matched inside a longer hunk line`
         : '') +
       (s.unmatched ? `, ${s.unmatched} UNMATCHED` : ''),
   );

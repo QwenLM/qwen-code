@@ -34,11 +34,27 @@ export function getSelectedText(
     }
     const startX = y === sy ? sx : 0;
     const endX = y === ey ? ex : row.length - 1;
+    let rowText = '';
+    let skippedLayoutGap = false;
     for (let x = Math.max(0, startX); x <= endX && x < row.length; x++) {
-      if (row[x].selectable) {
-        text += row[x].value;
+      const cell = row[x];
+      if (cell.selectable) {
+        if (
+          skippedLayoutGap &&
+          rowText.length > 0 &&
+          cell.value !== '' &&
+          !/\s$/u.test(rowText) &&
+          !/^\s/u.test(cell.value)
+        ) {
+          rowText += ' ';
+        }
+        rowText += cell.value;
+        skippedLayoutGap = false;
+      } else if (rowText.length > 0) {
+        skippedLayoutGap = true;
       }
     }
+    text += rowText;
     if (y < ey) {
       text += boundaryJoiner(frame, selection, y);
     }

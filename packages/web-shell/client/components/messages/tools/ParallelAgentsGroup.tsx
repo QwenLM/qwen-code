@@ -4,12 +4,7 @@ import type { ACPToolCall, PermissionRequest } from '../../../adapters/types';
 import { hasActiveAgents } from '../../../adapters/toolClassification';
 import { useI18n } from '../../../i18n';
 import { useSubagentDetails } from '../../../subagentDetailsContext';
-import {
-  formatElapsed,
-  formatLiveElapsed,
-  StatusIcon,
-  truncateText,
-} from './toolDisplay';
+import { formatElapsed, formatLiveElapsed, truncateText } from './toolDisplay';
 import {
   getTaskExecutionRecord,
   getAgentType,
@@ -357,19 +352,15 @@ export function ParallelAgentsGroup({
   const doneCount = agents.filter(
     (a) => a.status === 'completed' || a.status === 'failed',
   ).length;
+  const failedCount = agents.filter(
+    (a) => getAgentDisplayStatus(a) === 'failed',
+  ).length;
   const total = agents.length;
 
   const showGroup = groupExpanded || !!approvalAgent;
   const renderGroup = showGroup || automaticCollapseAnimating;
   const automaticCollapseClosing =
     automaticCollapseAnimating && !hasApprovalAgent;
-  const summaryStatus = agents.some(
-    (a) => getAgentDisplayStatus(a) === 'failed',
-  )
-    ? 'failed'
-    : hasActive
-      ? 'in_progress'
-      : 'completed';
 
   return (
     <div className={styles.wrap} ref={wrapRef}>
@@ -396,15 +387,9 @@ export function ParallelAgentsGroup({
         aria-expanded={showGroup}
         title={showGroup ? t('tool.collapseHint') : t('tool.expand')}
       >
-        {summaryStatus === 'failed' ? (
-          <span className={styles.summaryStatus}>
-            <StatusIcon status={summaryStatus} />
-          </span>
-        ) : (
-          <span className={styles.summaryIcon} aria-hidden="true">
-            <ToolGroupIcon />
-          </span>
-        )}
+        <span className={styles.summaryIcon} aria-hidden="true">
+          <ToolGroupIcon />
+        </span>
         <span
           className={
             hasActive
@@ -414,6 +399,14 @@ export function ParallelAgentsGroup({
         >
           {t('parallelAgents.title')}
           {runningDuration && <> {runningDuration}</>}
+          {/* Ahead of the done counter so it survives the summaryText
+              tail truncation in narrow layouts. */}
+          {failedCount > 0 && (
+            <>
+              <span className={styles.summaryDot}>·</span>
+              {t('parallelAgents.failed', { count: failedCount })}
+            </>
+          )}
           <span className={styles.summaryDot}>·</span>
           {t('parallelAgents.done', { done: doneCount, total })}
         </span>
@@ -458,78 +451,106 @@ export function ParallelAgentsGroup({
                         ? t('subagent.failed')
                         : t('subagent.completed');
                   const isExpanded = expandedId === agent.callId;
+                  // While the agent's own launch approval is unanswered there
+                  // is nothing to show yet — keep the row compact and
+                  // non-interactive, mirroring ToolLine's pending guard.
+                  const approvalPending =
+                    pendingApproval?.toolCallId === agent.callId;
+                  const statusLabel = approvalPending
+                    ? t('subagent.pending')
+                    : rowStatusLabel;
                   const localizedAgentType = localizeAgentTypeName(
                     agentType,
                     t,
                   );
                   const showAgentType =
                     !!desc && !isDefaultAgentType(agentType);
-                  return (
-                    <div key={agent.callId}>
-                      <button
-                        type="button"
-                        className={
-                          rowStatus === 'active'
-                            ? `${styles.row} ${styles.rowActive}`
-                            : styles.row
-                        }
-                        data-agent-status={rowStatus}
-                        data-detail-mode={subagentDetails ? 'panel' : 'inline'}
-                        aria-expanded={subagentDetails ? undefined : isExpanded}
-                        title={
-                          subagentDetails
-                            ? t('planExecution.openDetails')
-                            : t('subagent.toggleStream')
-                        }
-                        onClick={() => {
-                          if (subagentDetails) subagentDetails.onOpen(agent);
-                          else setExpandedId(isExpanded ? null : agent.callId);
-                        }}
+                  const rowContent = (
+                    <>
+                      <span
+                        className={styles.rowStatus}
+                        // role="img" makes the span nameable; aria-label on a
+                        // bare <span> (generic role) is not exposed to
+                        // assistive tech (see ChatPane's workspace tag).
+                        role="img"
+                        aria-label={statusLabel}
+                        title={statusLabel}
                       >
-                        <span
-                          className={styles.rowStatus}
-                          // role="img" makes the span nameable; aria-label on a
-                          // bare <span> (generic role) is not exposed to
-                          // assistive tech (see ChatPane's workspace tag).
-                          role="img"
-                          aria-label={rowStatusLabel}
-                          title={rowStatusLabel}
-                        >
-                          {rowStatus === 'active'
-                            ? '●'
-                            : rowStatus === 'failed'
-                              ? '×'
-                              : '✓'}
-                        </span>
-                        <span className={styles.rowText}>
-                          {showAgentType && (
-                            <span className={styles.rowType}>
-                              {truncateText(localizedAgentType, 50)}:
-                            </span>
-                          )}
-                          <span className={styles.rowTask}>
-                            {truncateText(desc || localizedAgentType, 50)}
-                          </span>
-                          {activity && (
-                            <span className={styles.rowActivity}>
-                              ({activity})
-                            </span>
-                          )}
-                        </span>
-                        {(stats.duration || stats.tokens) && (
-                          <span className={styles.rowStats}>
-                            {stats.duration && <span>{stats.duration}</span>}
-                            {stats.duration && stats.tokens && (
-                              <span aria-hidden="true"> · </span>
-                            )}
-                            {stats.tokens && <span>{stats.tokens}</span>}
+                        {rowStatus === 'active'
+                          ? '●'
+                          : rowStatus === 'failed'
+                            ? '×'
+                            : '✓'}
+                      </span>
+                      <span className={styles.rowText}>
+                        {showAgentType && (
+                          <span className={styles.rowType}>
+                            {truncateText(localizedAgentType, 50)}:
                           </span>
                         )}
-                        <ChevronRightIcon
-                          className={styles.rowAction}
-                          aria-hidden="true"
-                        />
-                      </button>
+                        <span className={styles.rowTask}>
+                          {truncateText(desc || localizedAgentType, 50)}
+                        </span>
+                        {activity && (
+                          <span className={styles.rowActivity}>
+                            ({activity})
+                          </span>
+                        )}
+                      </span>
+                      {(stats.duration || stats.tokens) && (
+                        <span className={styles.rowStats}>
+                          {stats.duration && <span>{stats.duration}</span>}
+                          {stats.duration && stats.tokens && (
+                            <span aria-hidden="true"> · </span>
+                          )}
+                          {stats.tokens && <span>{stats.tokens}</span>}
+                        </span>
+                      )}
+                    </>
+                  );
+                  return (
+                    <div key={agent.callId}>
+                      {approvalPending ? (
+                        <div
+                          className={styles.row}
+                          data-agent-status={rowStatus}
+                          aria-disabled="true"
+                        >
+                          {rowContent}
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          className={
+                            rowStatus === 'active'
+                              ? `${styles.row} ${styles.rowActive}`
+                              : styles.row
+                          }
+                          data-agent-status={rowStatus}
+                          data-detail-mode={
+                            subagentDetails ? 'panel' : 'inline'
+                          }
+                          aria-expanded={
+                            subagentDetails ? undefined : isExpanded
+                          }
+                          title={
+                            subagentDetails
+                              ? t('planExecution.openDetails')
+                              : t('subagent.toggleStream')
+                          }
+                          onClick={() => {
+                            if (subagentDetails) subagentDetails.onOpen(agent);
+                            else
+                              setExpandedId(isExpanded ? null : agent.callId);
+                          }}
+                        >
+                          {rowContent}
+                          <ChevronRightIcon
+                            className={styles.rowAction}
+                            aria-hidden="true"
+                          />
+                        </button>
+                      )}
                       {!subagentDetails && isExpanded && (
                         <div className={styles.detail}>
                           <SubAgentPanel tool={agent} hideHeader />

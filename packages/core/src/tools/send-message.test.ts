@@ -35,6 +35,14 @@ describe('SendMessageTool — team mode', () => {
     expect(tool.name).toBe('send_message');
   });
 
+  it('describes text invisibility as peer-only for teammates', () => {
+    const tool = new SendMessageTool(makeTeamConfig());
+    expect(tool.description).toContain(
+      'Your text output is NOT visible to peer teammates',
+    );
+    expect(tool.description).not.toContain('NOT visible to other agents');
+  });
+
   it('sends a message via TeamManager', async () => {
     const sendMessage = vi.fn().mockResolvedValue(undefined);
     const tool = new SendMessageTool(

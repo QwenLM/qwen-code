@@ -1,27 +1,32 @@
 name: 'Auto-minimize spam comments'
 
-# Periodically scan recent issue/PR comments and minimize any from
-# users listed in .github/spam-blocklist.txt. This cleans up spam
-# comments that were posted before a block was applied, and catches
-# any that slip through during the window between a spam comment
-# and the manual block action.
+# Minimize new issue/PR comments from users listed in
+# .github/spam-blocklist.txt. Comment events check only the triggering
+# comment; blocklist updates and the hourly scan clean up older comments
+# and cover events that run with a read-only token.
 #
 # The blocklist is a plain-text file in the repo — one username per
 # line, case-insensitive, # for comments. No special API scopes
 # needed beyond issues:write + pull-requests:write.
 #
-# Note: the lookback window (LOOKBACK_HOURS) only filters issues —
-# the GraphQL pullRequests connection has no `since` filter, so PRs
-# are always scoped to the 100 most recently updated.
+# Note: the lookback window (LOOKBACK_HOURS) filters issues and inline
+# review comments. The GraphQL pullRequests connection has no `since`
+# filter, so PRs are always scoped to the 100 most recently updated.
 #
-# Coverage limits: only issue-style comments are scanned — PR review
-# (inline) comments, review bodies, and Discussions are not.
+# Coverage limits: review bodies and Discussions are not scanned.
 # comments(last: 30) means a >30-comment flood on a single thread is
 # only partially cleaned per run.
 
 on:
   schedule:
     - cron: '30 * * * *' # Every hour at :30
+  issue_comment:
+    types: ['created']
+  pull_request_review_comment:
+    types: ['created']
+  push:
+    branches: ['main']
+    paths: ['.github/spam-blocklist.txt']
   workflow_dispatch:
     inputs:
       hours:
@@ -36,12 +41,31 @@ permissions:
   pull-requests: 'write'
 
 concurrency:
-  group: 'auto-minimize-spam'
+  group: "auto-minimize-spam-${{ github.event.comment.node_id || 'scan' }}"
   cancel-in-progress: false
 
 jobs:
   minimize:
-    if: "${{ github.repository == 'QwenLM/qwen-code' }}"
+    if: >-
+      ${{
+        github.repository == 'QwenLM/qwen-code' &&
+        (
+          github.event_name == 'schedule' ||
+          github.event_name == 'workflow_dispatch' ||
+          github.event_name == 'push' ||
+          (
+            github.event.comment.user.type != 'Bot' &&
+            !contains(
+              fromJSON('["OWNER","MEMBER","COLLABORATOR"]'),
+              github.event.comment.author_association
+            ) &&
+            (
+              github.event_name != 'pull_request_review_comment' ||
+              github.event.pull_request.head.repo.full_name == github.repository
+            )
+          )
+        )
+      }}
     runs-on: 'ubuntu-latest'
     timeout-minutes: 10
     steps:
@@ -49,12 +73,15 @@ jobs:
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           sparse-checkout: '.github/spam-blocklist.txt'
+          ref: '${{ github.event.repository.default_branch }}'
           persist-credentials: false
 
       - name: 'Minimize comments from blocklisted users'
         env:
-          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
-          LOOKBACK_HOURS: "${{ inputs.hours || '2' }}"
+          GH_TOKEN: '${{ github.token }}'
+          LOOKBACK_HOURS: "${{ inputs.hours || (github.event_name == 'push' && '72') || '2' }}"
+          EVENT_COMMENT_LOGIN: '${{ github.event.comment.user.login }}'
+          EVENT_COMMENT_NODE_ID: '${{ github.event.comment.node_id }}'
         run: |-
           set -euo pipefail
 
@@ -65,7 +92,11 @@ jobs:
           write_summary() {
             {
               echo "## Summary"
-              echo "- Scanned comments since: ${SINCE}"
+              if [ -n "$EVENT_COMMENT_NODE_ID" ]; then
+                echo "- Scanned comment: ${EVENT_COMMENT_NODE_ID}"
+              else
+                echo "- Scanned comments since: ${SINCE}"
+              fi
               echo "- Blocklisted users: ${BLOCKED_COUNT}"
               echo "- Comments minimized: $1"
             } >> "$GITHUB_STEP_SUMMARY"
@@ -96,38 +127,55 @@ jobs:
             exit 0
           fi
 
-          # ── 2. Fetch recent unminimized comments via GraphQL ──────────
-          ALL_UNMINIMIZED="$(
-            gh api graphql -f query="
-              query {
-                repository(owner: \"${REPO%%/*}\", name: \"${REPO##*/}\") {
-                  issues(first: 100, orderBy: {field: UPDATED_AT, direction: DESC}, filterBy: {since: \"${SINCE}\"}) {
-                    nodes {
-                      number
-                      comments(last: 30) {
-                        nodes { id author { login } isMinimized }
+          # ── 2. Select the triggering comment or scan recent comments ────
+          if [ -n "$EVENT_COMMENT_NODE_ID" ]; then
+            ALL_CANDIDATES="${EVENT_COMMENT_LOGIN}"$'\t'"${EVENT_COMMENT_NODE_ID}"
+          else
+            ALL_UNMINIMIZED="$(
+              gh api graphql -f query="
+                query {
+                  repository(owner: \"${REPO%%/*}\", name: \"${REPO##*/}\") {
+                    issues(first: 100, orderBy: {field: UPDATED_AT, direction: DESC}, filterBy: {since: \"${SINCE}\"}) {
+                      nodes {
+                        number
+                        comments(last: 30) {
+                          nodes { id author { login } isMinimized }
+                        }
                       }
                     }
-                  }
-                  pullRequests(first: 100, orderBy: {field: UPDATED_AT, direction: DESC}) {
-                    nodes {
-                      number
-                      comments(last: 30) {
-                        nodes { id author { login } isMinimized }
+                    pullRequests(first: 100, orderBy: {field: UPDATED_AT, direction: DESC}) {
+                      nodes {
+                        number
+                        comments(last: 30) {
+                          nodes { id author { login } isMinimized }
+                        }
                       }
                     }
                   }
                 }
-              }
-            " --jq '
-              [
-                .data.repository.issues.nodes[].comments.nodes[],
-                .data.repository.pullRequests.nodes[].comments.nodes[]
-              ]
-              | map(select(.isMinimized == false and .author != null))
-              | .[] | "\(.author.login)\t\(.id)"
-            '
-          )"
+              " --jq '
+                [
+                  .data.repository.issues.nodes[].comments.nodes[],
+                  .data.repository.pullRequests.nodes[].comments.nodes[]
+                ]
+                | map(select(.isMinimized == false and .author != null))
+                | .[] | "\(.author.login)\t\(.id)"
+              '
+            )"
+
+            REVIEW_CANDIDATES="$(
+              gh api --method GET --paginate \
+                "repos/${REPO}/pulls/comments" \
+                -f since="$SINCE" \
+                -F per_page=100 \
+                --jq '
+                  .[]
+                  | select(.user != null and .node_id != null)
+                  | "\(.user.login)\t\(.node_id)"
+                '
+            )"
+            ALL_CANDIDATES="${ALL_UNMINIMIZED}"$'\n'"${REVIEW_CANDIDATES}"
+          fi
 
           MATCHED_IDS=""
           MATCHED_COUNT=0
@@ -135,11 +183,24 @@ jobs:
             [ -z "$login" ] && continue
             login_lc="$(printf '%s' "$login" | tr '[:upper:]' '[:lower:]')"
             if printf '%s\n' "$BLOCKED_USERS" | grep -qxF "$login_lc"; then
+              if ! is_minimized="$(
+                gh api graphql -F id="$node_id" -f query="
+                  query(\$id: ID!) {
+                    node(id: \$id) {
+                      ... on Minimizable { isMinimized }
+                    }
+                  }
+                " --jq 'if .data.node == null then "missing" else .data.node.isMinimized end'
+              )"; then
+                is_minimized="missing"
+              fi
+              [ "$is_minimized" = "missing" ] && continue
+              [ "$is_minimized" = "true" ] && continue
               MATCHED_IDS="${MATCHED_IDS}${node_id}"$'\n'
               MATCHED_COUNT=$((MATCHED_COUNT + 1))
               echo "  matched: @${login} → ${node_id}"
             fi
-          done <<< "$ALL_UNMINIMIZED"
+          done <<< "$ALL_CANDIDATES"
 
           echo "Unminimized comments from blocklisted users: ${MATCHED_COUNT}"
           if [ "$MATCHED_COUNT" -eq 0 ]; then

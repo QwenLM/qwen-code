@@ -131,8 +131,9 @@ describe('createSpawnChannelFactory env policy', () => {
     });
 
     const spawnOptions = mockSpawn.mock.calls[0]?.[2] as
-      | { env?: NodeJS.ProcessEnv }
+      | { env?: NodeJS.ProcessEnv; windowsHide?: boolean }
       | undefined;
+    expect(spawnOptions?.windowsHide).toBe(true);
     expect(spawnOptions?.env).not.toHaveProperty('QWEN_CODE_SIMPLE');
     expect(spawnOptions?.env).not.toHaveProperty('QWEN_SERVER_TOKEN');
     expect(spawnOptions?.env).not.toHaveProperty(
@@ -410,6 +411,28 @@ describe('createSpawnChannelFactory env policy', () => {
       channel.transportGuard?.reservePreparedResponse(response),
     ).toThrow('NDJSON decoded queue is full');
     expect(elementReads).toBeLessThan(1_000);
+    await expect(channel.transportFailed).resolves.toMatchObject({
+      code: 'ndjson_queue_limit_exceeded',
+    });
+  });
+
+  it('charges JSON string escaping before admitting prepared responses', async () => {
+    const child = createFakeChildProcess();
+    mockSpawn.mockReturnValue(child);
+    const channel = await createSpawnChannelFactory({
+      pipeLimits: {
+        maxFrameBytes: 64_000,
+        maxQueuedMessages: 2,
+        maxQueuedBytes: 6_000,
+      },
+    })('/tmp/project');
+    const response = {
+      content: '\u0001'.repeat(700),
+    };
+
+    expect(() =>
+      channel.transportGuard?.reservePreparedResponse(response),
+    ).toThrow('NDJSON decoded queue is full');
     await expect(channel.transportFailed).resolves.toMatchObject({
       code: 'ndjson_queue_limit_exceeded',
     });

@@ -17,6 +17,7 @@ import {
   DashScopeOpenAICompatibleProvider,
   selectDashScopeThinkingKnob,
 } from './dashscope.js';
+import { determineProvider } from '../index.js';
 import type { Config } from '../../../config/config.js';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
 import { AuthType } from '../../contentGenerator.js';
@@ -246,6 +247,42 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(result).toBe(true);
     });
 
+    it('should return true for alicloudapi.com subdomain', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://api-id.cn-hangzhou.alicloudapi.com/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(true);
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'DashScope provider activated via alicloudapi origin: api-id.cn-hangzhou.alicloudapi.com',
+      );
+    });
+
+    it('should return true for port-bearing alicloudapi.com URL', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://gateway.alicloudapi.com:8443/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(true);
+    });
+
+    it('should return false for bare alicloudapi.com domain', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://alicloudapi.com/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(false);
+    });
+
     it('should return false for bare alibaba-inc.com domain', () => {
       const config = {
         authType: AuthType.USE_OPENAI,
@@ -276,6 +313,8 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         'https://aliyun-inc.com.evil.com/v1',
         'https://not-token-plan.cn-beijing.maas.aliyuncs.com/v1',
         'https://token-plan.cn-beijing.maas.aliyuncs.com.evil.com/v1',
+        'https://notalicloudapi.com/v1',
+        'https://alicloudapi.com.evil.com/v1',
       ];
 
       configs.forEach((baseUrl) => {
@@ -437,6 +476,42 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       const result =
         DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
       expect(result).toBe(true);
+    });
+  });
+
+  // Guards the full acceptance path end-to-end: an alicloudapi.com base URL
+  // must route through the DashScope provider so buildRequest injects the
+  // session-tracking metadata into the request body.
+  describe('determineProvider routing for alicloudapi.com', () => {
+    const alicloudapiConfig = {
+      authType: AuthType.USE_OPENAI,
+      baseUrl: 'https://api-id.cn-hangzhou.alicloudapi.com/v1',
+      model: 'qwen-max',
+    } as ContentGeneratorConfig;
+
+    it('routes alicloudapi.com base URLs to the DashScope provider', () => {
+      const routed = determineProvider(alicloudapiConfig, mockCliConfig);
+      expect(routed).toBeInstanceOf(DashScopeOpenAICompatibleProvider);
+    });
+
+    it('injects session-tracking metadata into the request body', () => {
+      const routed = determineProvider(
+        alicloudapiConfig,
+        mockCliConfig,
+      ) as DashScopeOpenAICompatibleProvider;
+
+      const result = routed.buildRequest(
+        {
+          model: 'qwen-max',
+          messages: [{ role: 'user', content: 'Hello!' }],
+        },
+        'test-prompt-id',
+      );
+
+      expect(result.metadata).toEqual({
+        sessionId: 'test-session-id',
+        promptId: 'test-prompt-id',
+      });
     });
   });
 

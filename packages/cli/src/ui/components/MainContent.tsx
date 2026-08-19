@@ -4,8 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Box, Static } from 'ink';
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Box, Static, type DOMElement } from 'ink';
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type RefObject,
+} from 'react';
 import type { HistoryItem, HistoryItemWithoutId } from '../types.js';
 import {
   isHistoryItemVisibleAfterRestore,
@@ -32,6 +40,7 @@ import {
   type ScrollableListRef,
 } from './shared/ScrollableList.js';
 import { TextSelectionController } from '../selection/use-text-selection.js';
+import { measureElementPosition } from '../utils/measure-element-position.js';
 
 // Limit Gemini messages to a very high number of lines to mitigate performance
 // issues in the worst case if we somehow get an enormous response from Gemini.
@@ -114,7 +123,11 @@ const virtualKeyExtractor = (item: VpItem) =>
 const virtualIsStaticItem = (item: VpItem) =>
   item.type === 'vp-banner' || item.id > 0;
 
-export const MainContent = () => {
+interface MainContentProps {
+  footerRef?: RefObject<DOMElement | null>;
+}
+
+export const MainContent = ({ footerRef }: MainContentProps) => {
   const { version } = useAppContext();
   const uiState = useUIState();
   const { allExpanded: fullDetail } = useThoughtExpanded();
@@ -460,6 +473,11 @@ export const MainContent = () => {
         <TextSelectionController
           isActive={!uiState.dialogsVisible}
           getViewportRect={() => scrollRef.current?.getViewportRect() ?? null}
+          getAdditionalSelectableRects={() =>
+            footerRef?.current
+              ? [measureElementPosition(footerRef.current)]
+              : []
+          }
           getScrollState={() =>
             scrollRef.current?.getScrollState() ?? {
               scrollTop: 0,

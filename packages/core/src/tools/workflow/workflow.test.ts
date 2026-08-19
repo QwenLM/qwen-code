@@ -17,6 +17,8 @@ import {
   DEFAULT_MAX_AGENTS_PER_RUN,
   MAX_WORKFLOW_AGENTS_ENV,
   MAX_WORKFLOW_CONCURRENCY_ENV,
+  WORKFLOW_SUBAGENT_MAX_MINUTES_ENV,
+  WORKFLOW_SUBAGENT_MAX_TURNS_ENV,
 } from '../../agents/runtime/workflow-orchestrator.js';
 import { Storage } from '../../config/storage.js';
 
@@ -65,7 +67,7 @@ describe('WorkflowTool', () => {
   // would notice — so anchor the load-bearing claims.
   it('description carries both the runtime facts and the orchestration policy', () => {
     const { description } = new WorkflowTool(fakeConfig());
-    // Every env knob the description names is anchored. The two that the
+    // Every env knob the description names is anchored. The four that the
     // orchestrator exports are anchored *through the exported constant*, so
     // a rename on the runtime side fails here too — a hardcoded literal
     // would only have caught a description-side typo, and the model would
@@ -76,6 +78,8 @@ describe('WorkflowTool', () => {
       'min(16, cpus-2)',
       MAX_WORKFLOW_AGENTS_ENV,
       MAX_WORKFLOW_CONCURRENCY_ENV,
+      WORKFLOW_SUBAGENT_MAX_TURNS_ENV,
+      WORKFLOW_SUBAGENT_MAX_MINUTES_ENV,
       'QWEN_CODE_MAX_WORKFLOW_SECONDS',
       'resumeFromRunId',
       '/workflows',
@@ -83,6 +87,12 @@ describe('WorkflowTool', () => {
     ]) {
       expect(description).toContain(anchor);
     }
+    // The per-call options this half of the description advertises are
+    // anchored too — a refactor that drops their sentences leaves the
+    // capabilities undiscoverable from the tool surface and no other test
+    // would notice.
+    expect(description).toContain('workingDir');
+    expect(description).toMatch(/no-progress stall watchdog/);
     // One anchor per policy section — dropping any whole section has to
     // turn this test red, which is the regression it exists to catch.
     expect(description).toMatch(/Parallelism on its own is not a reason/);
@@ -349,6 +359,32 @@ describe('WorkflowTool', () => {
     };
 
     await expect(run(false)).resolves.toEqual(await run(undefined));
+  });
+
+  // A headless run (`qwen --prompt`, CI, a cron job) has no TUI, no approval
+  // bridge, and a closed stdin. `getDefaultPermission()` is 'ask', which the
+  // scheduler resolves against the run's approval mode — but nothing INSIDE
+  // the tool or the runner may reach for interactivity, or the foreground
+  // call would hang forever on a prompt no one can answer. This is the
+  // regression test for that contract; the background half is already
+  // refused explicitly (see the interactive-TUI guard above).
+  it('foreground execute() completes with no interactive session or completion channel', async () => {
+    const registry = new WorkflowRunRegistry();
+    const config = {
+      isInteractive: () => false,
+      getWorkflowRunRegistry: () => registry,
+      getSkipWorkflowUsageWarning: () => true,
+    } as unknown as Config;
+    expect(registry.hasCompletionCallback()).toBe(false);
+
+    const result = await new WorkflowTool(config, {
+      dispatch: async (prompt) => `answered:${prompt}`,
+    })
+      .build({ script: `return await agent('what is it');` })
+      .execute(new AbortController().signal);
+
+    expect(result.error).toBeUndefined();
+    expect(JSON.stringify(result.llmContent)).toContain('answered:what is it');
   });
 
   it('execute() loads a saved-workflow scriptPath and records its provenance', async () => {

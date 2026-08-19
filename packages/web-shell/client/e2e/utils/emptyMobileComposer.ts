@@ -8,7 +8,6 @@ import { expect, type Page } from '@playwright/test';
 
 export const emptyMobileComposerSelectors = {
   composerSurface: '[data-web-shell-composer-surface]',
-  dotField: '[data-web-shell-new-session-dot-field]',
   welcomeFooter: '[data-e2e-mobile-welcome-footer]',
   welcomeHeader: '[data-e2e-mobile-welcome-header]',
 } as const;
@@ -19,10 +18,6 @@ export interface EmptyMobileComposerLayout {
   chatViewPosition: string;
   chatViewZIndex: string;
   composerTop: number;
-  dotFieldAnchoredToChatPane: boolean;
-  dotFieldCoversChatPane: boolean;
-  dotFieldPointerEvents: string;
-  dotFieldZIndex: string;
   footerAnchoredToChatPane: boolean;
   footerBottom: number;
   footerPosition: string;
@@ -59,7 +54,6 @@ export async function expectEmptyMobileWelcomeChromeVisible(
   const welcomeHeader = page.locator(
     emptyMobileComposerSelectors.welcomeHeader,
   );
-  const dotField = page.locator(emptyMobileComposerSelectors.dotField);
 
   await expect(composer).toBeVisible();
   await expect(welcomeHeader).toBeVisible();
@@ -72,7 +66,6 @@ export async function expectEmptyMobileWelcomeChromeVisible(
       page.locator(emptyMobileComposerSelectors.welcomeFooter),
     ).toHaveCount(0);
   }
-  await expect(dotField.locator('canvas')).toBeVisible();
 }
 
 export async function emptyMobileComposerLayout(
@@ -86,15 +79,11 @@ export async function emptyMobileComposerLayout(
       const welcomeFooter = Array.from(
         chatPane.querySelectorAll<HTMLElement>(selectors.welcomeFooter),
       ).find((candidate) => candidate.getClientRects().length > 0);
-      const dotField = chatPane.querySelector<HTMLElement>(selectors.dotField);
       if (!composer) {
         throw new Error('Expected the empty mobile composer to be rendered.');
       }
       if (!welcomeHeader) {
         throw new Error('Expected the mobile welcome header to be rendered.');
-      }
-      if (!dotField) {
-        throw new Error('Expected the new-session dot field to be rendered.');
       }
       if (requireWelcomeFooter && !welcomeFooter) {
         throw new Error('Expected the mobile welcome footer to be rendered.');
@@ -130,8 +119,6 @@ export async function emptyMobileComposerLayout(
       const chatPaneRect = chatPane.getBoundingClientRect();
       const chatPaneStyle = getComputedStyle(chatPane);
       const chatViewStyle = getComputedStyle(chatView);
-      const dotFieldRect = dotField.getBoundingClientRect();
-      const dotFieldStyle = getComputedStyle(dotField);
       const footerRect = footer.getBoundingClientRect();
       const welcomeFooterRect = welcomeFooter?.getBoundingClientRect();
 
@@ -143,14 +130,6 @@ export async function emptyMobileComposerLayout(
         chatViewPosition: chatViewStyle.position,
         chatViewZIndex: chatViewStyle.zIndex,
         composerTop: composer.getBoundingClientRect().top,
-        dotFieldAnchoredToChatPane: dotField.offsetParent === chatPane,
-        dotFieldCoversChatPane:
-          Math.abs(dotFieldRect.top - chatPaneRect.top) <= 1 &&
-          Math.abs(dotFieldRect.right - chatPaneRect.right) <= 1 &&
-          Math.abs(dotFieldRect.bottom - chatPaneRect.bottom) <= 1 &&
-          Math.abs(dotFieldRect.left - chatPaneRect.left) <= 1,
-        dotFieldPointerEvents: dotFieldStyle.pointerEvents,
-        dotFieldZIndex: dotFieldStyle.zIndex,
         footerAnchoredToChatPane: footer.offsetParent === chatPane,
         footerBottom: footerRect.bottom,
         footerPosition: getComputedStyle(footer).position,
@@ -176,14 +155,8 @@ export function expectEmptyMobileComposerAnchored(
   ).toBeLessThanOrEqual(1);
   expect(layout.chatViewPosition).toBe('static');
   expect(layout.chatViewIsPaneFlexItem).toBe(true);
-  expect(layout.chatViewZIndex).toBe('1');
+  expect(layout.chatViewZIndex).toBe('auto');
   expect(layout.footerAnchoredToChatPane).toBe(true);
-  expect(layout.dotFieldAnchoredToChatPane).toBe(true);
-  expect(layout.dotFieldCoversChatPane).toBe(true);
-  expect(layout.dotFieldPointerEvents).toBe('none');
-  expect(Number(layout.chatViewZIndex)).toBeGreaterThan(
-    Number(layout.dotFieldZIndex),
-  );
 
   if (options.requireWelcomeFooter !== false) {
     if (

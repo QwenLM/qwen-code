@@ -50,6 +50,7 @@ import {
 import type {
   ToolConfirmationOutcome,
   ToolCallConfirmationDetails,
+  ToolArtifact,
   ToolResultDisplay,
 } from '../../tools/tools.js';
 import { isShellProgressData } from '../../tools/tools.js';
@@ -58,6 +59,12 @@ import {
   finalizeToolResponses,
   type ToolResponseBudgetEntry,
 } from '../../utils/tool-response-finalizer.js';
+import {
+  isToolResultBoundaryDiagnosticsEnabled,
+  observeToolResultBoundary,
+  toolResultBoundaryArtifact,
+  toolResultPartDiagnosticValues,
+} from '../../utils/tool-result-boundary-diagnostics.js';
 import { FinishReason } from '../../core/genai-compat.js';
 import type {
   Content,
@@ -1398,6 +1405,25 @@ export class AgentCore {
 
   // ─── Tool Execution ───────────────────────────────────────
 
+  private observeSyntheticToolResultProducer(params: {
+    callId: string;
+    name: string;
+    responseParts: Part[];
+  }): void {
+    try {
+      observeToolResultBoundary({
+        stage: 'producer',
+        sessionId: this.runtimeContext.getSessionId?.(),
+        toolCallId: params.callId,
+        toolName: params.name,
+        artifacts: [toolResultBoundaryArtifact([], [])],
+        values: () => toolResultPartDiagnosticValues(params.responseParts),
+      });
+    } catch {
+      // Diagnostics must not affect agent execution.
+    }
+  }
+
   private emitSyntheticToolError(params: {
     callId: string;
     name: string;
@@ -1419,6 +1445,8 @@ export class AgentCore {
       timestamp: Date.now(),
     } as AgentToolCallEvent);
 
+    this.observeSyntheticToolResultProducer(params);
+
     this.eventEmitter?.emit(AgentEventType.TOOL_RESULT, {
       subagentId: this.subagentId,
       round: params.currentRound,
@@ -1428,6 +1456,9 @@ export class AgentCore {
       error: params.errorMessage,
       responseParts: params.responseParts,
       resultDisplay: params.resultDisplay,
+      ...(isToolResultBoundaryDiagnosticsEnabled()
+        ? { boundaryArtifact: toolResultBoundaryArtifact([], []) }
+        : {}),
       durationMs: params.durationMs ?? 0,
       timestamp: Date.now(),
     } as AgentToolResultEvent);
@@ -1524,6 +1555,7 @@ export class AgentCore {
         toolName: string;
         responseParts: Part[];
         persistedOutputFiles?: string[];
+        artifacts?: ToolArtifact[];
         durationMs?: number;
       }
     >();
@@ -1678,6 +1710,7 @@ export class AgentCore {
     const executionStartedEmitted = new Set<string>();
     const scheduler = new CoreToolScheduler({
       config: this.runtimeContext,
+      shouldObserveProducer: (callId) => !emittedCallIds.has(callId),
       outputUpdateHandler: (callId, outputChunk) => {
         // Shell liveness heartbeats have no subagent consumer; broadcasting
         // one would overwrite the live output view kept in liveOutputs.
@@ -1719,6 +1752,14 @@ export class AgentCore {
             error: errorMessage,
             responseParts: call.response.responseParts,
             resultDisplay: call.response.resultDisplay,
+            ...(isToolResultBoundaryDiagnosticsEnabled()
+              ? {
+                  boundaryArtifact: toolResultBoundaryArtifact(
+                    call.response.persistedOutputFiles,
+                    call.response.artifacts,
+                  ),
+                }
+              : {}),
             durationMs: duration,
             timestamp: Date.now(),
           } as AgentToolResultEvent);
@@ -1739,6 +1780,7 @@ export class AgentCore {
             toolName,
             responseParts: call.response.responseParts,
             persistedOutputFiles: call.response.persistedOutputFiles,
+            artifacts: call.response.artifacts,
             durationMs: duration,
           });
         }
@@ -1920,6 +1962,12 @@ export class AgentCore {
           ];
           this.recordToolCallStats(req.name, false, 0, errorMessage);
 
+          this.observeSyntheticToolResultProducer({
+            callId: req.callId,
+            name: req.name,
+            responseParts,
+          });
+
           this.eventEmitter?.emit(AgentEventType.TOOL_RESULT, {
             subagentId: this.subagentId,
             round: currentRound,
@@ -1929,6 +1977,9 @@ export class AgentCore {
             error: errorMessage,
             responseParts,
             resultDisplay: errorMessage,
+            ...(isToolResultBoundaryDiagnosticsEnabled()
+              ? { boundaryArtifact: toolResultBoundaryArtifact([], []) }
+              : {}),
             durationMs: 0,
             timestamp: Date.now(),
           } as AgentToolResultEvent);
@@ -1970,6 +2021,7 @@ export class AgentCore {
             toolName: response.toolName,
             responseParts: response.responseParts,
             persistedOutputFiles: response.persistedOutputFiles,
+            artifacts: response.artifacts,
           },
         ];
       });
@@ -1988,6 +2040,7 @@ export class AgentCore {
     const finalizedResponses = await finalizeToolResponses(
       this.runtimeContext,
       orderedResponses,
+      new Map(orderedResponses.map((response) => [response.callId, promptId])),
     );
     const toolResponseParts = finalizedResponses.flatMap(
       (response) => response.responseParts,

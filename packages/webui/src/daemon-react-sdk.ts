@@ -46,13 +46,13 @@ export { useDaemonActions as useActions } from './daemon/index.js';
 /** Connection status, capabilities, and model info. */
 export { useDaemonConnection as useConnection } from './daemon/index.js';
 
-export { useDaemonSessionOwnerGuard } from './daemon/session/DaemonSessionProvider.js';
-
 /** Current session metadata (id, model, approval mode). */
 export { useDaemonSession as useSession } from './daemon/index.js';
 
 /** Classified session notices for host-owned UI such as toast or banners. */
 export { useDaemonSessionNotices as useSessionNotices } from './daemon/index.js';
+
+export { useDaemonSessionOwnerGuard } from './daemon/index.js';
 
 /** Streaming state: `'idle' | 'thinking' | 'responding'`. */
 export { useDaemonStreamingState as useStreamingState } from './daemon/index.js';
@@ -211,10 +211,13 @@ export type {
   DaemonStreamingState,
   /** Prompt submission status: `'idle' | 'waiting' | 'streaming'`. */
   DaemonPromptStatus,
+  DaemonReasoningControls,
   /** Hook return value for daemon follow-up suggestions. */
   UseDaemonFollowupSuggestionReturn,
   /** Image attachment (base64 data + MIME type) for prompt submission. */
   DaemonPromptImage,
+  /** Text file attachment (name + text content) for prompt submission. */
+  DaemonPromptFile,
   /** Permission approval level: `'plan' | 'default' | 'auto-edit' | 'auto' | 'yolo'`. */
   DaemonApprovalMode,
   DaemonAuthProviderBaseUrlOption,
@@ -229,6 +232,8 @@ export type {
   DaemonContextToolDetail,
   DaemonSessionContextUsage,
   DaemonSessionContextUsageStatus,
+  DaemonSessionOwnerGuard,
+  DaemonSessionOwnerSnapshot,
   /** Per-model API and token metrics within a stats response. */
   DaemonSessionStatsModelMetrics,
   /** Structured session statistics from `GET /session/:id/stats`. */
@@ -244,11 +249,6 @@ export type {
   /** Result of non-blocking `submitPrompt()`: the daemon-assigned promptId. */
   SubmitPromptResult,
 } from './daemon/index.js';
-export type {
-  DaemonSessionOwnerGuard,
-  DaemonSessionOwnerSnapshot,
-  DaemonSessionTransition,
-} from './daemon/session/types.js';
 
 // ── Types: Todos ─────────────────────────────────────────────────
 

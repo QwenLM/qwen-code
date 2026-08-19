@@ -364,6 +364,27 @@ describe('presubmitCommand', () => {
     }
   });
 
+  // Shared by both existing-comment classification describes; the wider
+  // `id?` entry type covers the carried-id (#9208) tests unchanged.
+  async function presubmitWithComments(
+    comments: Array<Record<string, unknown>>,
+    newFindings: Array<{ path: string; line: number; id?: string }>,
+  ) {
+    ghApiAllMock.mockReturnValue(comments);
+    ghApiMock.mockReturnValue(null);
+    readFileSyncMock.mockReturnValue(JSON.stringify(newFindings));
+    const handler = presubmitCommand.handler;
+    if (!handler) throw new Error('presubmit handler missing');
+    await handler({
+      ...baseArgs,
+      'new-findings': '/tmp/findings.json',
+    } as unknown as Parameters<typeof handler>[0]);
+    const [, content] = writeFileSyncMock.mock.calls.find(
+      ([path]) => path === '/tmp/presubmit.json',
+    ) ?? [null, null];
+    return JSON.parse(String(content));
+  }
+
   it('sets downgradeApprove — not just a reason — when every check was skipped', async () => {
     // The bug this guards was found by dogfooding /review on this very change:
     // `downgradeReasons` gained a "CI did not run" entry while `downgradeApprove`
@@ -694,6 +715,819 @@ describe('presubmitCommand', () => {
     }
     expect(setGhHostMock).toHaveBeenCalledWith(undefined);
   });
+
+  describe('existing-comment classification — self-comment detection', () => {
+    // The dedup set used to key on the attribution footer ALONE: with
+    // `review.attribution` off, every earlier post is footer-less, and the
+    // overlap/stale classification (and the blockOnExistingComments gate)
+    // went blind to them — a probe watched an identical finding re-post as a
+    // visual duplicate while a live comment sat on the same (path, line).
+    // Authorship of the reviewing account's own top-level comments is the
+    // footer-independent fallback.
+
+    const FINDINGS = [{ path: 'a.ts', line: 12 }];
+
+    it('admits a footer-bearing comment regardless of account — the footer is qwen provenance', async () => {
+      // The footer is generated only by qwen's submit, so any comment
+      // carrying it is a qwen post to dedup against, even one posted from a
+      // different bot account (an earlier CI run) — gating it on the account
+      // would miss those and duplicate-post. #9212 pins this ungated footer
+      // match; the plantability tradeoff is accepted there. The SHORT marker
+      // and bare finding shape stay authorship-gated (covered below).
+      const result = await presubmitWithComments(
+        [
+          {
+            id: 1,
+            body: '**[Critical]** x _— model via Qwen Code /review (v0.21.2)_',
+            path: 'a.ts',
+            line: 12,
+            commit_id: 'abc123',
+            user: { login: 'someone-else' },
+          },
+        ],
+        FINDINGS,
+      );
+      expect(result.existingComments.total).toBe(1);
+    });
+
+    it('classifies a footer-bearing prose comment by the reviewing account', async () => {
+      // Prose, not finding-shaped: only the footer disjunct recognizes this
+      // attributed post for dedup — deleting it reddens here.
+      const result = await presubmitWithComments(
+        [
+          {
+            id: 1,
+            body: 'looks good overall _— model via Qwen Code /review (v0.21.2)_',
+            path: 'a.ts',
+            line: 12,
+            commit_id: 'abc123',
+            user: { login: 'qwen-code-ci-bot' },
+          },
+        ],
+        FINDINGS,
+      );
+      expect(result.existingComments.total).toBe(1);
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.blockOnExistingComments).toBe(true);
+    });
+
+    it('classifies a footer-less comment by the reviewing account (attribution-off dedup)', async () => {
+      // Case-insensitive login match, as with self-PR detection. The
+      // severityOf branch remains for posts made before the comment marker
+      // existed.
+      const result = await presubmitWithComments(
+        [
+          {
+            id: 2,
+            body: '**[Critical]** x',
+            path: 'a.ts',
+            line: 12,
+            commit_id: 'abc123',
+            user: { login: 'QWEN-code-ci-bot' },
+          },
+        ],
+        FINDINGS,
+      );
+      expect(result.existingComments.total).toBe(1);
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.blockOnExistingComments).toBe(true);
+    });
+
+    it('classifies the shape attribution-off actually posts — markerless body, trailing marker, reviewing account', async () => {
+      // `submit` strips the severity prefix and appends the comment marker;
+      // GitHub stores exactly this. The marker only counts together with
+      // authorship — the string is public and renders invisibly.
+      const result = await presubmitWithComments(
+        [
+          {
+            id: 2,
+            body: 'x\n\n<!-- qwen-review critical -->',
+            path: 'a.ts',
+            line: 12,
+            commit_id: 'abc123',
+            user: { login: 'qwen-code-ci-bot' },
+          },
+        ],
+        FINDINGS,
+      );
+      expect(result.existingComments.total).toBe(1);
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.blockOnExistingComments).toBe(true);
+    });
+
+    it('does not admit a marker-carrying comment from another account — the marker is plantable', async () => {
+      // The adversarial shape: a PR author who read the setting description
+      // plants the invisible marker on the line they expect a blocker on.
+      // Authorship is the gate that keeps this out of the dedup set.
+      const result = await presubmitWithComments(
+        [
+          {
+            id: 2,
+            body: 'x\n\n<!-- qwen-review critical -->',
+            path: 'a.ts',
+            line: 12,
+            commit_id: 'abc123',
+            user: { login: 'someone-else' },
+          },
+        ],
+        FINDINGS,
+      );
+      expect(result.existingComments.total).toBe(0);
+      expect(result.blockOnExistingComments).toBe(false);
+    });
+
+    it('does not admit a marker-carrying reply either — quote-reply copies the marker', async () => {
+      // GitHub's quote-reply copies raw markdown, so a reply to an
+      // attribution-off finding carries the marker and inherits the
+      // finding's path:line anchor. The reply guard keeps it out.
+      const result = await presubmitWithComments(
+        [
+          {
+            id: 4,
+            body: 'x\n\n<!-- qwen-review critical -->',
+            path: 'a.ts',
+            line: 12,
+            commit_id: 'abc123',
+            in_reply_to_id: 1,
+            user: { login: 'qwen-code-ci-bot' },
+          },
+        ],
+        FINDINGS,
+      );
+      expect(result.existingComments.total).toBe(0);
+      expect(result.blockOnExistingComments).toBe(false);
+    });
+
+    it('ignores a footer-less, marker-less comment from another account', async () => {
+      // No footer, no comment marker, and not the reviewing account's:
+      // nothing presubmit can attribute — it stays outside the dedup set.
+      const result = await presubmitWithComments(
+        [
+          {
+            id: 3,
+            body: '**[Critical]** x',
+            path: 'a.ts',
+            line: 12,
+            commit_id: 'abc123',
+            user: { login: 'someone-else' },
+          },
+        ],
+        FINDINGS,
+      );
+      expect(result.existingComments.total).toBe(0);
+      expect(result.blockOnExistingComments).toBe(false);
+    });
+
+    it('does not author-match replies — even a finding-shaped reply is not a posted finding', async () => {
+      // Finding-shaped on purpose: the body PASSES the severityOf shape
+      // gate, so deleting the !c.in_reply_to_id reply guard makes this test
+      // red (mutation-verified) — only that term keeps the reply out of the
+      // dedup set.
+      const result = await presubmitWithComments(
+        [
+          {
+            id: 4,
+            body: '**[Critical]** confirmed, thanks',
+            path: 'a.ts',
+            line: 12,
+            commit_id: 'abc123',
+            in_reply_to_id: 1,
+            user: { login: 'qwen-code-ci-bot' },
+          },
+        ],
+        FINDINGS,
+      );
+      expect(result.existingComments.total).toBe(0);
+      expect(result.blockOnExistingComments).toBe(false);
+    });
+
+    it('does not author-match hand-written top-level comments — only finding-shaped bodies', async () => {
+      // Every posted finding opens with a severity prefix (submit refuses
+      // unmarked comments), so the authorship fallback gates on it. Without
+      // the gate, a hand comment at the same path:line lands in overlap and
+      // the blockOnExistingComments rule silently withholds a genuinely new
+      // finding — probe-verified before the gate existed.
+      const result = await presubmitWithComments(
+        [
+          {
+            id: 5,
+            body: 'nit: hand-written note on the same line',
+            path: 'a.ts',
+            line: 12,
+            commit_id: 'abc123',
+            user: { login: 'qwen-code-ci-bot' },
+          },
+        ],
+        FINDINGS,
+      );
+      expect(result.existingComments.total).toBe(0);
+      expect(result.blockOnExistingComments).toBe(false);
+    });
+
+    it('classifies a footer-less finding whose body opens with whitespace', async () => {
+      // submit posts through the trimming severityOf, so a drafted body with
+      // a leading newline goes out verbatim; the authorship fallback must
+      // classify through the same predicate and see that post back, or the
+      // dedup gate re-posts an identical finding as a visual duplicate.
+      const result = await presubmitWithComments(
+        [
+          {
+            id: 6,
+            body: '\n**[Critical]** x',
+            path: 'a.ts',
+            line: 12,
+            commit_id: 'abc123',
+            user: { login: 'qwen-code-ci-bot' },
+          },
+        ],
+        FINDINGS,
+      );
+      expect(result.existingComments.total).toBe(1);
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.blockOnExistingComments).toBe(true);
+    });
+  });
+
+  describe('existing-comment classification — carried-id re-posts (#9208)', () => {
+    // The overlap gate used to be purely location-based: a Step 6 ledger
+    // re-post lands on the original thread's line by construction, collided
+    // with the very comment it re-posts, and was dropped — so the carried id
+    // never rode the round's ledger marker. A re-post is recognized by its
+    // `R<round>-<n>` id appearing in the existing comment at the same
+    // location; those comments are additionally bucketed as `repost` with the
+    // matched ids so the drop rule can exempt them.
+
+    const CARRIED_COMMENT = {
+      id: 7,
+      body: '**[Critical]** R3-2: eq-form rescue asymmetry _— model via Qwen Code /review (v0.21.3)_',
+      path: 'src/parse-args.ts',
+      line: 44,
+      commit_id: 'abc123',
+      user: { login: 'qwen-code-ci-bot' },
+    };
+
+    it('marks an id-matched overlap comment as a re-post target', async () => {
+      const result = await presubmitWithComments(
+        [CARRIED_COMMENT],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(1);
+      expect(result.existingComments.repost[0].id).toBe(7);
+      expect(result.existingComments.repost[0].matchedIds).toEqual(['R3-2']);
+      // Still an overlap as far as the block gate goes: other findings at
+      // the same location without the carried id are still dropped.
+      expect(result.blockOnExistingComments).toBe(true);
+    });
+
+    it('reports only the matched ids when several findings share the location', async () => {
+      const result = await presubmitWithComments(
+        [CARRIED_COMMENT],
+        [
+          { path: 'src/parse-args.ts', line: 44, id: 'R3-2' },
+          { path: 'src/parse-args.ts', line: 44, id: 'R4-1' },
+        ],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(1);
+      expect(result.existingComments.repost[0].matchedIds).toEqual(['R3-2']);
+    });
+
+    it("does not treat a different account's colliding id as a re-post", async () => {
+      // Ledger ids are per-account: another reviewer's `R3-2` at the same
+      // line is a plain location overlap, not a re-post target — exempting
+      // it would post the duplicate the gate exists to prevent.
+      const result = await presubmitWithComments(
+        [{ ...CARRIED_COMMENT, user: { login: 'maintainer-dev' } }],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(0);
+      // The report names the author: an authorship-refused exemption must be
+      // self-explanatory next to a drop line whose visible id matches.
+      expect(result.existingComments.overlap[0].user).toBe('maintainer-dev');
+    });
+
+    it('extracts the carried id from a carried body longer than the 80-char report excerpt', async () => {
+      // The report's `CommentSummary.body` is an 80-char excerpt, but
+      // extraction reads the FULL body. A carried id leads the claim line
+      // right after the severity marker by construction, so it extracts
+      // however long the claim runs after it.
+      const longClaim = 'x'.repeat(90);
+      const result = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            body: `**[Critical]** R3-2: ${longClaim} _— model via Qwen Code /review_`,
+          },
+        ],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.repost).toBe(1);
+      expect(result.existingComments.repost[0].matchedIds).toEqual(['R3-2']);
+    });
+
+    it('keeps the id-less fallback off when the only id token sits past the 80-char summary slice (#9212)', async () => {
+      // The no-token check reads the FULL body, not the 80-char
+      // `CommentSummary.body` excerpt: a long id-less claim whose one
+      // id-shaped cross-reference lands past char 80 is still not a truly
+      // id-less original, and the fallback must stay off.
+      const longClaim = 'x'.repeat(90);
+      const result = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            body: `**[Critical]** ${longClaim} (see R3-2 for context) _— model via Qwen Code /review_`,
+          },
+        ],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(0);
+    });
+
+    it('extracts the carried id from a Suggestion-severity re-post (#9212)', async () => {
+      // Both severity markers must strip: every other carried body in the
+      // suite leads with **[Critical]**, which left the Suggestion half of
+      // the marker strip invisible.
+      const result = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            body: '**[Suggestion]** R3-2: eq-form rescue asymmetry _— model via Qwen Code /review_',
+          },
+        ],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(1);
+      expect(result.existingComments.repost[0].matchedIds).toEqual(['R3-2']);
+    });
+
+    it('extracts the carried id when a colon follows the marker directly (#9212)', async () => {
+      // The strip tolerates a colon right after the severity marker — the
+      // shape the compose side's own fixtures use ('**[Critical]**: ...').
+      // The strip is now one shared statement (carriedClaimLine), and this
+      // pins its colon branch on the presubmit side, which no fixture here
+      // exercised before (#9212 review).
+      const result = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            body: '**[Critical]**: R3-2: eq-form rescue asymmetry _— model via Qwen Code /review_',
+          },
+        ],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(1);
+      expect(result.existingComments.repost[0].matchedIds).toEqual(['R3-2']);
+    });
+
+    it('extracts the carried id from the attribution-off posted shape', async () => {
+      // An attribution-off re-post carries NO severity prefix — submit
+      // strips it before posting — and its severity rides the trailing
+      // invisible marker. The carried id still leads the first line;
+      // without reading it back off the marker-less body, the re-post
+      // lands as a plain overlap and is dedup-dropped from round 3
+      // onward, while the surviving id token bars the id-less fallback —
+      // a still-standing carried Critical the verdict then flips past.
+      const result = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            body: 'R3-2: eq-form rescue asymmetry\n\n<!-- qwen-review critical -->',
+          },
+        ],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(1);
+      expect(result.existingComments.repost[0].matchedIds).toEqual(['R3-2']);
+    });
+
+    it('keeps a marker-carrying id-less comment out of the repost bucket when the location is ambiguous', async () => {
+      // The attribution-off shape without a carried id: the id-less
+      // fallback stays off while two ids share the location, so the
+      // comment is a plain overlap — exactly the strictness the marked
+      // bodies get.
+      const result = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            body: 'eq-form rescue asymmetry\n\n<!-- qwen-review critical -->',
+          },
+        ],
+        [
+          { path: 'src/parse-args.ts', line: 44, id: 'R3-2' },
+          { path: 'src/parse-args.ts', line: 44, id: 'R3-3' },
+        ],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(0);
+    });
+
+    it('reads no carried id out of an unmarked body (#9212)', async () => {
+      // A re-post always leads with its severity marker — `submit` refuses
+      // to post an unmarked finding — so an unmarked body is not a re-post
+      // even when its first line opens with an id-shaped token: exempting
+      // it would vouch a comment that was never the finding's thread.
+      // buildLedger skips unmarked bodies when WRITING the ledger; the
+      // shared strip refuses them when READING it back, so the two ends can
+      // no longer disagree about what "marked" means (#9212 review).
+      const result = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            body: 'R3-2: discussed offline, keeping this thread _— model via Qwen Code /review_',
+          },
+        ],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(0);
+    });
+
+    it('does not exempt a lone comment that only cross-references the id mid-body (#9212)', async () => {
+      // "see R3-2 for context" mentions the id without being its thread. The
+      // strict prefix match must not fire on it, and the id-less fallback
+      // must not swallow it either: the body still carries an id-shaped
+      // token, so the comment is not a truly id-less original. Single
+      // comment on purpose — at the unambiguous count the fallback WOULD
+      // fire if it keyed on the prefix extractor's [] alone.
+      const referenced = {
+        ...CARRIED_COMMENT,
+        body: '**[Critical]** unrelated claim (see R3-2 for context) _— model via Qwen Code /review_',
+      };
+      const result = await presubmitWithComments(
+        [referenced],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(0);
+    });
+
+    it('does not match an id embedded in a longer hyphen run (#9212)', async () => {
+      // `R3-2-1` leads the claim line, but it is not the ledger id `R3-2`:
+      // the prefix readback requires the id to end the token, and the
+      // hyphen-run token keeps the id-less fallback off too.
+      const extended = {
+        ...CARRIED_COMMENT,
+        body: '**[Critical]** R3-2-1: extended claim _— model via Qwen Code /review_',
+      };
+      const result = await presubmitWithComments(
+        [extended],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(0);
+    });
+
+    it('sees an id wrapped in Markdown emphasis as an id token (#9212)', async () => {
+      // `_R3-2_` defeats `\b` anchors (`_` is a word character), but the
+      // id-less fallback's no-token check is unbounded on purpose: the
+      // mention still marks the comment as belonging to a specific finding.
+      const emphasised = {
+        ...CARRIED_COMMENT,
+        body: '**[Critical]** unrelated claim (see _R3-2_ for context) _— model via Qwen Code /review_',
+      };
+      const result = await presubmitWithComments(
+        [emphasised],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(0);
+    });
+
+    it('exempts an id-less first-round original when the target is unambiguous (#9208)', async () => {
+      // First-round originals carry no id token in the body (buildLedger
+      // assigns first-round ids positionally). With exactly one own-account
+      // comment at the location and one carried finding, the re-post must
+      // still be exempted instead of dropped.
+      const result = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            body: '**[Critical]** some claim without an id',
+          },
+        ],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(1);
+      expect(result.existingComments.repost[0].matchedIds).toEqual(['R3-2']);
+    });
+
+    it('keeps the strict match when the id-less target is ambiguous (#9208)', async () => {
+      // Two id-less own-account comments at the same location: the re-post
+      // target is ambiguous, so no exemption — the drop stays visible in the
+      // drop log rather than silently picking one thread.
+      const first = {
+        ...CARRIED_COMMENT,
+        id: 10,
+        body: '**[Critical]** claim A without an id',
+      };
+      const second = {
+        ...CARRIED_COMMENT,
+        id: 11,
+        body: '**[Critical]** claim B without an id',
+      };
+      const result = await presubmitWithComments(
+        [first, second],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(2);
+      expect(result.existingComments.byBucket.repost).toBe(0);
+    });
+
+    it('keeps the id-less exemption off when several findings share the location (#9212)', async () => {
+      // Two CARRIED findings at one id-less location: `wantedIds.size === 1`
+      // is the unambiguity precondition, and exempting here would re-post
+      // BOTH findings under one thread that belongs to only one of them.
+      const result = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            body: '**[Critical]** some claim without an id',
+          },
+        ],
+        [
+          { path: 'src/parse-args.ts', line: 44, id: 'R3-2' },
+          { path: 'src/parse-args.ts', line: 44, id: 'R4-1' },
+        ],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(0);
+    });
+
+    it('keeps the id-less exemption off when the current user login is unknown (#9212)', async () => {
+      // With no authenticated login the authorship gate cannot vouch for ANY
+      // comment, so the exemption must stay off even at an unambiguous
+      // location — the drop still applies and stays visible. The bodies keep
+      // their footer so the comments ARE recognized; only the gate can
+      // block. The second comment covers the author-less shape (`user`
+      // absent, e.g. a deleted account): with the login unknown it must not
+      // be counted as own-account and ride the fallback either.
+      currentUserMock.mockReturnValue('');
+      const result = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            body: '**[Critical]** some claim without an id _— model via Qwen Code /review_',
+          },
+          {
+            ...CARRIED_COMMENT,
+            id: 8,
+            user: undefined,
+            body: '**[Critical]** author-less claim without an id _— model via Qwen Code /review_',
+          },
+        ],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(2);
+      expect(result.existingComments.byBucket.repost).toBe(0);
+    });
+
+    it('keeps an author-less carried id out of the repost gate when the login is unknown (#9212)', async () => {
+      // The unknown-login test above covers id-LESS bodies; this one pins
+      // the gate itself: with no authenticated login, a comment whose
+      // author is absent (`user` undefined, e.g. a deleted account) must
+      // not ride its carried id into the repost bucket. If the
+      // `currentUserLogin !== ''` guard were forced true, the author-less
+      // comparison degenerates to `'' === ''` and WOULD match — nothing
+      // may be vouched as own-account while the login is unknown, id
+      // match or not (R2-7, #9212 review).
+      currentUserMock.mockReturnValue('');
+      const result = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            user: undefined,
+            body: '**[Critical]** R3-2: eq-form rescue asymmetry _— model via Qwen Code /review_',
+          },
+        ],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(0);
+    });
+
+    it('counts no comment as own while the login is unknown (#9212)', async () => {
+      // The ambiguity pre-count is wrapped in the same unknown-login guard
+      // as the gate: with no authenticated login, nothing may be vouched
+      // own-account. An author-less comment must not ride the degenerate
+      // `'' === ''` comparison into the count and fire the id-less fallback
+      // on a comment nobody proved belongs to this account (#9212 review).
+      currentUserMock.mockReturnValue('');
+      const result = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            user: undefined,
+            body: '**[Critical]** author-less claim without an id _— model via Qwen Code /review_',
+          },
+        ],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(0);
+    });
+
+    it('counts only current-SHA own comments for the id-less fallback (#9212)', async () => {
+      // The ambiguity count must ignore this account's comments at OTHER
+      // SHAs: a stale same-location comment of the same account inflates
+      // the count to 2 and disables the fallback if the commit filter in
+      // the counting loop is dropped (#9212 review).
+      const result = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            id: 10,
+            body: '**[Critical]** current claim without an id',
+          },
+          {
+            ...CARRIED_COMMENT,
+            id: 11,
+            commit_id: 'stale-sha',
+            body: '**[Critical]** stale claim without an id',
+          },
+        ],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(1);
+      expect(result.existingComments.repost[0].id).toBe(10);
+      expect(result.existingComments.repost[0].matchedIds).toEqual(['R3-2']);
+    });
+
+    it('counts only own-account comments for the id-less fallback (#9212)', async () => {
+      // Another Qwen account's comment at the same location must not
+      // inflate the ambiguity count: dropping the login filter in the
+      // counting loop reaches 2 and disables the fallback for a genuinely
+      // unambiguous own-account original (#9212 review).
+      const result = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            id: 10,
+            body: '**[Critical]** own claim without an id',
+          },
+          {
+            ...CARRIED_COMMENT,
+            id: 11,
+            user: { login: 'qwen-other-bot' },
+            body: '**[Critical]** other-account claim without an id _— model via Qwen Code /review_',
+          },
+        ],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(2);
+      expect(result.existingComments.byBucket.repost).toBe(1);
+      expect(result.existingComments.repost[0].id).toBe(10);
+      expect(result.existingComments.repost[0].matchedIds).toEqual(['R3-2']);
+    });
+
+    it('matches authorship case-insensitively through gate and count (#9212)', async () => {
+      // The login comparison lowercases both sides at BOTH sites — the
+      // repost gate and the ambiguity-count loop. This fixture rides the
+      // id-less FALLBACK, which passes through both comparisons, so
+      // dropping `.toLowerCase()` at either site breaks it: the case
+      // variant of the same account must still count as own-account
+      // (#9212 review).
+      const result = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            user: { login: 'Qwen-Code-CI-Bot' },
+            body: '**[Critical]** case-variant claim without an id',
+          },
+        ],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(1);
+      expect(result.existingComments.repost[0].matchedIds).toEqual(['R3-2']);
+    });
+
+    it('extracts the carried id when the claim line starts past the 80-char summary slice (#9212)', async () => {
+      // Extraction reads the FULL body, not the 80-char `CommentSummary.body`
+      // excerpt: padding after the marker can push the id-led claim line
+      // past char 80, where reading the excerpt would find no id, drop the
+      // strict match, and — the body still carries an id token — the id-less
+      // fallback cannot rescue it either (#9212 review).
+      const padding = ' '.repeat(70);
+      const result = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            body: `**[Critical]**${padding}R3-2: eq-form rescue asymmetry _— model via Qwen Code /review_`,
+          },
+        ],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(1);
+      expect(result.existingComments.repost[0].matchedIds).toEqual(['R3-2']);
+    });
+
+    it('exempts the carried finding when a fresh id-less finding shares the location (#9212)', async () => {
+      // The findings file carries ids on carried-forward findings only; the
+      // fresh finding of this round omits it. The exemption must still fire
+      // on the single CARRIED id, not be crowded out by the fresh entry.
+      const result = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            body: '**[Critical]** some claim without an id',
+          },
+        ],
+        [
+          { path: 'src/parse-args.ts', line: 44, id: 'R1-2' },
+          { path: 'src/parse-args.ts', line: 44 },
+        ],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(1);
+      expect(result.existingComments.repost[0].matchedIds).toEqual(['R1-2']);
+    });
+
+    it('matches a prior re-post as the target when it carries the id (#9212)', async () => {
+      // A same-SHA re-run sees the original AND the re-post already made for
+      // it; only the comment leading with the id is a strict match. The
+      // duplication this can produce on further re-runs is disclosed in the
+      // Known-limitation paragraph — detecting "already re-posted" needs a
+      // carry-forward channel and is a follow-up.
+      const original = {
+        ...CARRIED_COMMENT,
+        id: 10,
+        body: '**[Critical]** some claim without an id',
+      };
+      const priorRepost = {
+        ...CARRIED_COMMENT,
+        id: 11,
+        body: '**[Critical]** R1-2: the same claim, re-reported _— model via Qwen Code /review_',
+      };
+      const result = await presubmitWithComments(
+        [original, priorRepost],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R1-2' }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(2);
+      expect(result.existingComments.byBucket.repost).toBe(1);
+      expect(result.existingComments.repost[0].id).toBe(11);
+      expect(result.existingComments.repost[0].matchedIds).toEqual(['R1-2']);
+    });
+
+    it('counts a replied-to original toward the id-less ambiguity decision (#9212)', async () => {
+      // A replied-to original is bucketed `resolved`, but it is still an
+      // original at the location: leaving it out of the count handed the
+      // exemption to a sibling comment belonging to a DIFFERENT finding.
+      const repliedOriginal = {
+        ...CARRIED_COMMENT,
+        id: 10,
+        body: '**[Critical]** claim A without an id',
+      };
+      const maintainerReply = {
+        id: 12,
+        body: 'fixing this, thanks',
+        path: 'src/parse-args.ts',
+        line: 44,
+        commit_id: 'abc123',
+        in_reply_to_id: 10,
+        user: { login: 'maintainer-dev' },
+      };
+      const siblingOriginal = {
+        ...CARRIED_COMMENT,
+        id: 11,
+        body: '**[Critical]** claim B without an id',
+      };
+      const result = await presubmitWithComments(
+        [repliedOriginal, maintainerReply, siblingOriginal],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R2-1' }],
+      );
+      expect(result.existingComments.byBucket.resolved).toBe(1);
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(0);
+    });
+
+    it('does not match a different carried id', async () => {
+      const result = await presubmitWithComments(
+        [CARRIED_COMMENT],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-9' }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(0);
+    });
+
+    it('does not match an id carried at a different location', async () => {
+      const result = await presubmitWithComments(
+        [{ ...CARRIED_COMMENT, line: 45 }],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(0);
+      expect(result.existingComments.byBucket.repost).toBe(0);
+      expect(result.existingComments.byBucket.noConflict).toBe(1);
+    });
+  });
 });
 
 // The PR advancing mid-review means commits exist that no agent read. An
@@ -857,6 +1691,28 @@ describe('parseFindingsFile (via mocked fs)', () => {
     ['[{"line":5}]', null], // entry without a string path → reject WHOLE file
     ['[{"path":"a.ts","line":5}]', [{ path: 'a.ts', line: 5 }]],
     ['[{"path":"a.ts"}]', [{ path: 'a.ts', line: 0 }]], // missing line → 0
+    // Carried ledger id for the re-post exemption (#9208); a present-but-
+    // non-string id rejects the WHOLE file, same fail-safe as `path`.
+    [
+      '[{"path":"a.ts","line":5,"id":"R3-2"}]',
+      [{ path: 'a.ts', line: 5, id: 'R3-2' }],
+    ],
+    ['[{"path":"a.ts","line":5,"id":42}]', null],
+    // `null` means "no id" (JSON has no undefined) — a missing optional
+    // field, not a malformed file; the entry survives without an id.
+    ['[{"path":"a.ts","line":5,"id":null}]', [{ path: 'a.ts', line: 5 }]],
+    // Present-but-misshapen ids are rejected too: a typo'd id can never
+    // match the extractor, and accepting it would silently disable the
+    // re-post exemption (#9212 review).
+    ['[{"path":"a.ts","line":5,"id":"r3-2"}]', null],
+    ['[{"path":"a.ts","line":5,"id":"R3-2 "}]', null],
+    ['[{"path":"a.ts","line":5,"id":""}]', null],
+    // The SHAPE check is fully anchored: a padded or prefixed id contains a
+    // valid `R\d+-\d+` substring, so dropping either anchor would accept it
+    // — and an accepted `' R3-2'` can never round-trip against the
+    // extractor's `'R3-2'`, silently disabling the exemption (#9212 review).
+    ['[{"path":"a.ts","line":5,"id":" R3-2"}]', null],
+    ['[{"path":"a.ts","line":5,"id":"XR3-2"}]', null],
     ['[]', []],
   ];
   it.each(cases)('rejects/normalizes %s', (raw, expected) => {

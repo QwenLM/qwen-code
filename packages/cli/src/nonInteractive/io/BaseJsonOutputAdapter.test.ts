@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { Buffer } from 'node:buffer';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   GeminiEventType,
@@ -28,6 +29,10 @@ import {
   extractTextFromBlocks,
   createExtendedUsage,
 } from './BaseJsonOutputAdapter.js';
+import {
+  HEADLESS_TOOL_RESULT_TEXT_JSON_BYTE_BUDGET,
+  HEADLESS_TOOL_RESULT_TEXT_TRUNCATION_MARKER,
+} from './headless-tool-result-text-projection.js';
 
 /**
  * Test implementation of BaseJsonOutputAdapter for unit testing.
@@ -1060,6 +1065,164 @@ describe('BaseJsonOutputAdapter', () => {
       if (message.type === 'user') {
         expect(message.parent_tool_use_id).toBe('parent-tool-1');
       }
+    });
+
+    const persistedOutputCases: Array<[string, string[] | undefined]> = [
+      ['unhandled', undefined],
+      ['handled without artifact', []],
+      ['reusable artifact', ['/tmp/private-output.txt']],
+    ];
+    it.each(persistedOutputCases)(
+      'bounds %s tool display without mutating or serializing persistence metadata',
+      (_name, persistedOutputFiles) => {
+        const display = 'HEAD-' + 'x'.repeat(100_000) + '-TAIL';
+        const request = {
+          callId: 'tool-large',
+          name: 'test_tool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-1',
+        };
+        const response = {
+          callId: 'tool-large',
+          responseParts: [],
+          resultDisplay: display,
+          error: undefined,
+          errorType: undefined,
+          persistedOutputFiles,
+        };
+
+        adapter.emitToolResult(request, response, 'parent-tool-1');
+
+        const message = adapter.emittedMessages[0];
+        expect(message).toMatchObject({
+          type: 'user',
+          parent_tool_use_id: 'parent-tool-1',
+        });
+        if (message.type !== 'user') throw new Error('Expected user message');
+        const block = message.message.content[0];
+        if (
+          typeof block !== 'object' ||
+          block === null ||
+          block.type !== 'tool_result' ||
+          typeof block.content !== 'string'
+        ) {
+          throw new Error('Expected textual tool result');
+        }
+
+        expect(
+          Buffer.byteLength(JSON.stringify(block.content), 'utf8'),
+        ).toBeLessThanOrEqual(HEADLESS_TOOL_RESULT_TEXT_JSON_BYTE_BUDGET);
+        expect(block.content).toContain(
+          HEADLESS_TOOL_RESULT_TEXT_TRUNCATION_MARKER,
+        );
+        expect(block.content.startsWith('HEAD-')).toBe(true);
+        expect(block.content.endsWith('-TAIL')).toBe(true);
+        expect(JSON.stringify(block)).not.toContain('/tmp/private-output.txt');
+        expect(response.resultDisplay).toBe(display);
+        expect(response.persistedOutputFiles).toBe(persistedOutputFiles);
+      },
+    );
+
+    it('keeps content omitted when semantic selection yields no text', () => {
+      const request = {
+        callId: 'tool-empty',
+        name: 'test_tool',
+        args: {},
+        isClientInitiated: false,
+        prompt_id: 'prompt-1',
+      };
+
+      adapter.emitToolResult(request, {
+        callId: 'tool-empty',
+        responseParts: [],
+        resultDisplay: undefined,
+        error: undefined,
+        errorType: undefined,
+      });
+
+      const message = adapter.emittedMessages[0];
+      if (message.type !== 'user') throw new Error('Expected user message');
+      const block = message.message.content[0];
+      if (
+        typeof block !== 'object' ||
+        block === null ||
+        block.type !== 'tool_result'
+      ) {
+        throw new Error('Expected tool result');
+      }
+      expect(Object.hasOwn(block, 'content')).toBe(false);
+    });
+
+    it.each([
+      {
+        name: 'responseParts fallback',
+        response: {
+          responseParts: [
+            {
+              functionResponse: {
+                response: {
+                  output: 'HEAD-' + 'p'.repeat(100_000) + '-TAIL',
+                },
+              },
+            },
+          ],
+          resultDisplay: undefined,
+          error: undefined,
+        },
+      },
+      {
+        name: 'top-level error',
+        response: {
+          responseParts: [],
+          resultDisplay: 'ignored display',
+          error: new Error('HEAD-' + 'e'.repeat(100_000) + '-TAIL'),
+        },
+      },
+      {
+        name: 'vision bridge notice',
+        response: {
+          responseParts: [],
+          resultDisplay: 'HEAD-' + 'v'.repeat(100_000) + '-TAIL',
+          visionBridgeNotice: 'Vision disclosure',
+          error: undefined,
+        },
+      },
+    ])('projects oversized $name after semantic selection', ({ response }) => {
+      adapter.emitToolResult(
+        {
+          callId: 'tool-semantic',
+          name: 'test_tool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-1',
+        },
+        {
+          callId: 'tool-semantic',
+          errorType: undefined,
+          ...response,
+        },
+      );
+
+      const message = adapter.emittedMessages[0];
+      if (message.type !== 'user') throw new Error('Expected user message');
+      const block = message.message.content[0];
+      if (
+        typeof block !== 'object' ||
+        block === null ||
+        block.type !== 'tool_result' ||
+        typeof block.content !== 'string'
+      ) {
+        throw new Error('Expected textual tool result');
+      }
+
+      expect(
+        Buffer.byteLength(JSON.stringify(block.content), 'utf8'),
+      ).toBeLessThanOrEqual(HEADLESS_TOOL_RESULT_TEXT_JSON_BYTE_BUDGET);
+      expect(block.content).toContain(
+        HEADLESS_TOOL_RESULT_TEXT_TRUNCATION_MARKER,
+      );
+      expect(block.content.endsWith('-TAIL')).toBe(true);
     });
   });
 

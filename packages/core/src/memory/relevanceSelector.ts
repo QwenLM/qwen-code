@@ -35,6 +35,8 @@ interface RecallSelectorResponse {
   selected_memories: string[];
 }
 
+const MAX_MODEL_MANIFEST_BYTES = 25_000;
+
 /**
  * Format memory headers as a text manifest: one line per file with
  * [type] filePath (ISO-timestamp): description.
@@ -49,16 +51,32 @@ interface RecallSelectorResponse {
  * Selector sees only the header (type, path, age, description), not the
  * body content.
  */
-function formatMemoryManifest(docs: ScannedAutoMemoryDocument[]): string {
-  return docs
-    .map((doc) => {
-      const tag = `[${doc.type}] `;
-      const ts = new Date(doc.mtimeMs).toISOString();
-      return doc.description
-        ? `- ${tag}${doc.filePath} (${ts}): ${doc.description}`
-        : `- ${tag}${doc.filePath} (${ts})`;
-    })
-    .join('\n');
+function formatMemoryManifest(docs: ScannedAutoMemoryDocument[]): {
+  manifest: string;
+  includedDocs: ScannedAutoMemoryDocument[];
+} {
+  const lines: string[] = [];
+  const includedDocs: ScannedAutoMemoryDocument[] = [];
+  let bytes = 0;
+
+  for (const doc of docs) {
+    const tag = `[${doc.type}] `;
+    const ts = new Date(doc.mtimeMs).toISOString();
+    const line = doc.description
+      ? `- ${tag}${doc.filePath} (${ts}): ${doc.description.slice(0, 512).replace(/[\uD800-\uDBFF]$/, '')}`
+      : `- ${tag}${doc.filePath} (${ts})`;
+    const nextBytes = Buffer.byteLength(
+      `${lines.length > 0 ? '\n' : ''}${line}`,
+    );
+    if (bytes + nextBytes > MAX_MODEL_MANIFEST_BYTES) {
+      continue;
+    }
+    lines.push(line);
+    includedDocs.push(doc);
+    bytes += nextBytes;
+  }
+
+  return { manifest: lines.join('\n'), includedDocs };
 }
 
 export async function selectRelevantAutoMemoryDocumentsByModel(
@@ -73,7 +91,10 @@ export async function selectRelevantAutoMemoryDocumentsByModel(
     return [];
   }
 
-  const manifest = formatMemoryManifest(docs);
+  const { manifest, includedDocs } = formatMemoryManifest(docs);
+  if (includedDocs.length === 0) {
+    return [];
+  }
 
   // When the assistant is actively using a tool, surfacing that tool's
   // reference docs is noise.  Pass the tool list so the selector can skip them.
@@ -93,8 +114,8 @@ export async function selectRelevantAutoMemoryDocumentsByModel(
     },
   ];
 
-  const validFilePaths = new Set(docs.map((doc) => doc.filePath));
-  const byFilePath = new Map(docs.map((doc) => [doc.filePath, doc]));
+  const validFilePaths = new Set(includedDocs.map((doc) => doc.filePath));
+  const byFilePath = new Map(includedDocs.map((doc) => [doc.filePath, doc]));
 
   const response = await runSideQuery<RecallSelectorResponse>(config, {
     purpose: 'auto-memory-recall',

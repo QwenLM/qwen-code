@@ -32,6 +32,7 @@ import {
   withDaemonSpan,
   withDaemonRequestSpan,
 } from './daemon-tracing.js';
+import { getSessionIdFromContext } from './session-context.js';
 
 describe('daemon-tracing', () => {
   afterEach(() => {
@@ -195,6 +196,37 @@ describe('daemon-tracing', () => {
       expect.any(Function),
     );
     expect(span.end).toHaveBeenCalledOnce();
+  });
+
+  it('binds an explicit daemon session to the callback context', async () => {
+    const span = {
+      setStatus: vi.fn(),
+      end: vi.fn(),
+    } as unknown as Span;
+    vi.spyOn(trace, 'getTracer').mockReturnValue({
+      startActiveSpan: vi.fn(
+        async (
+          _name: string,
+          _options: unknown,
+          fn: (span: Span) => Promise<string>,
+        ) => await fn(span),
+      ),
+    } as unknown as Tracer);
+    let scopedSessionId: string | undefined;
+    vi.spyOn(otelContext, 'with').mockImplementation(
+      (ctx, fn: () => Promise<string>) => {
+        scopedSessionId = getSessionIdFromContext(ctx);
+        return fn();
+      },
+    );
+
+    await withDaemonSpan(
+      'daemon-session',
+      { 'session.id': 'daemon-session-B' },
+      async () => 'ok',
+    );
+
+    expect(scopedSessionId).toBe('daemon-session-B');
   });
 
   it('strips reserved metadata when no active daemon span exists', () => {

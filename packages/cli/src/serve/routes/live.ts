@@ -8,20 +8,28 @@ import type { Application, RequestHandler } from 'express';
 import { safeBody } from '../server/request-helpers.js';
 import { LiveUnavailableError } from '../live/live-host-coordinator.js';
 import type { LiveHostCoordinator } from '../live/live-host-coordinator.js';
+import { ConversationRuntimeOwnershipError } from '../conversations/conversation-runtime-errors.js';
 
 export interface RegisterLiveRoutesDeps {
   coordinator: LiveHostCoordinator;
+  ensureRuntimeReady?: () => Promise<void>;
   mutate: (options?: { strict?: boolean }) => RequestHandler;
   persistShortcut?: (shortcut: string) => Promise<void>;
 }
 
 function sendUnavailable(res: Parameters<RequestHandler>[1], error: unknown) {
+  if (error instanceof ConversationRuntimeOwnershipError) {
+    res.status(error.status).json({
+      error: error.message,
+      code: error.code,
+      retryable: error.retryable,
+    });
+    return true;
+  }
   if (!(error instanceof LiveUnavailableError)) return false;
-  res.status(503).json({
-    error: error.message,
-    code: error.code,
-    status: error.status,
-  });
+  res
+    .status(503)
+    .json({ error: error.message, code: error.code, status: error.status });
   return true;
 }
 
@@ -33,8 +41,9 @@ export function registerLiveRoutes(
     res.status(200).json(deps.coordinator.getStatus());
   });
 
-  app.post('/live/start', deps.mutate(), (_req, res) => {
+  app.post('/live/start', deps.mutate(), async (_req, res) => {
     try {
+      await deps.ensureRuntimeReady?.();
       res.status(200).json(deps.coordinator.start('resume').status);
     } catch (error) {
       if (sendUnavailable(res, error)) return;
@@ -42,8 +51,9 @@ export function registerLiveRoutes(
     }
   });
 
-  app.post('/live/new', deps.mutate(), (_req, res) => {
+  app.post('/live/new', deps.mutate(), async (_req, res) => {
     try {
+      await deps.ensureRuntimeReady?.();
       res.status(200).json(deps.coordinator.start('new').status);
     } catch (error) {
       if (sendUnavailable(res, error)) return;

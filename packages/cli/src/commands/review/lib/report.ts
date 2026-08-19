@@ -13,7 +13,11 @@ import { statSync } from 'node:fs';
 import { writeStderrLine } from '../../../utils/stdioHelpers.js';
 import { classifyHeavy } from './heavy.js';
 import type { DiffChunk, DiffPlan, PathKind } from './diff-plan.js';
-import { reviewBudget, type ReviewBudget } from './budget.js';
+import {
+  reviewBudget,
+  type BudgetContext,
+  type ReviewBudget,
+} from './budget.js';
 import type { RepositoryContext } from './repository-context.js';
 
 export interface FileMetric {
@@ -106,10 +110,21 @@ export interface PlanReport {
  * `postImageLines` resolves a path's line count in the post-change tree. It is
  * null when there is no tree to resolve against — a bare diff file — in which
  * case heaviness cannot be decided and no file is heavy.
+ *
+ * `context` carries the two facts about the machine that the round cap depends
+ * on — the operator's `review.reverseAuditRounds` ceiling and whether this run
+ * has a deadline — and is a **required** parameter, deliberately not resolved
+ * in here. Three capture commands build a plan; an optional parameter is one a
+ * call site can quietly omit, and a policy that silently applies to two of the
+ * three review entry points is worse than one that applies to none. Passing
+ * `{}` is how a caller says "neither applies" — visibly, at the call site.
+ * Resolving them here instead would make this builder's tests depend on the
+ * machine's own `~/.qwen` and on its environment.
  */
 export function buildPlanReport(
   plan: DiffPlan,
   postImageLines: ((path: string) => number) | null,
+  context: BudgetContext,
 ): PlanReport {
   const files = plan.files.map((f): FileMetric => {
     const changedLines = f.addedLines + f.removedLines;
@@ -162,10 +177,13 @@ export function buildPlanReport(
     generatedDiffLines: plan.generatedDiffLines,
     chunks: plan.chunks,
     files,
-    budget: reviewBudget({
-      srcDiffLines: plan.srcDiffLines,
-      diffLines: plan.diffLines,
-    }),
+    budget: reviewBudget(
+      {
+        srcDiffLines: plan.srcDiffLines,
+        diffLines: plan.diffLines,
+      },
+      context,
+    ),
   };
 }
 

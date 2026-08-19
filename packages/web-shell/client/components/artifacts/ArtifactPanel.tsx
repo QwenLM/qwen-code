@@ -36,6 +36,7 @@ import {
 } from 'react';
 import { useI18n } from '../../i18n';
 import { extractErrorDetail } from '../../utils/errorDetail';
+import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
 import { formatRelativeTime } from '../../utils/formatRelativeTime';
 import { DialogShell } from '../dialogs/DialogShell';
 import { isSafeHref, Markdown } from '../messages/Markdown';
@@ -2336,6 +2337,8 @@ function ArtifactDetail({
   workspaceActions: ArtifactWorkspaceActions;
   previewContent?: string;
 }) {
+  const { t } = useI18n();
+  const openExternalLink = useExternalLinkOpener();
   const location = getArtifactLocation(artifact);
   const safeUrl = isSafeHref(artifact.url) ? artifact.url : undefined;
   const isAutomationSnapshot =
@@ -2430,14 +2433,26 @@ function ArtifactDetail({
         <div className={styles.section}>
           <div className={styles.sectionTitle}>Location</div>
           {safeUrl ? (
-            <a
-              className={styles.link}
-              href={safeUrl}
-              target="_blank"
-              rel="noreferrer"
-            >
-              {safeUrl}
-            </a>
+            <div className={styles.locationRow}>
+              <a
+                className={styles.link}
+                href={safeUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={(event) => openExternalLink(event, safeUrl)}
+              >
+                {safeUrl}
+              </a>
+              <a
+                className={styles.openButton}
+                href={safeUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={(event) => openExternalLink(event, safeUrl)}
+              >
+                {t('artifact.openLink')}
+              </a>
+            </div>
           ) : (
             <div className={styles.meta}>{location}</div>
           )}

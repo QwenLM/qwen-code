@@ -18,6 +18,7 @@ import {
 import { AgentTerminateMode } from './runtime/agent-types.js';
 import { AgentHeadless, ContextState } from './runtime/agent-headless.js';
 import {
+  buildAgentTranscriptAttach,
   getAgentJsonlPath,
   getAgentMetaPath,
   getSubagentSessionDir,
@@ -35,7 +36,6 @@ import {
   buildMcpServerInstructionsReminder,
   getInitialChatHistory,
 } from '../utils/environmentContext.js';
-import { getGitBranch } from '../utils/gitUtils.js';
 import { runWithInvocationContext } from '../utils/invocation-context.js';
 import { PermissionMode, type StopHookOutput } from '../hooks/types.js';
 import {
@@ -1028,19 +1028,20 @@ export class BackgroundAgentResumeService {
         subagentDispose = result.dispose;
       }
 
-      const projectRoot = this.config.getProjectRoot();
-      cleanupJsonl = attachJsonlTranscriptWriter(bgEventEmitter, outputFile, {
-        agentId: meta.agentId,
-        agentName: target.agentName,
-        agentColor: target.subagentConfig?.color ?? meta.agentColor,
-        sessionId: meta.parentSessionId,
-        cwd: projectRoot,
-        version: this.config.getCliVersion() || 'unknown',
-        gitBranch: getGitBranch(projectRoot),
-        initialUserPrompt: writerInitialPrompt,
-        appendToExisting: true,
-        initialParentUuid: recovery.lastStableUuid,
-      }).cleanup;
+      const { jsonlPath, options: transcriptAttachOptions } =
+        buildAgentTranscriptAttach(this.config, meta.agentId, {
+          sessionId: meta.parentSessionId,
+          agentName: target.agentName,
+          agentColor: target.subagentConfig?.color ?? meta.agentColor,
+          initialUserPrompt: writerInitialPrompt,
+          appendToExisting: true,
+          initialParentUuid: recovery.lastStableUuid,
+        });
+      cleanupJsonl = attachJsonlTranscriptWriter(
+        bgEventEmitter,
+        jsonlPath,
+        transcriptAttachOptions,
+      ).cleanup;
 
       const nextResumeCount = (meta.resumeCount ?? 0) + 1;
       patchAgentMeta(metaPath, {

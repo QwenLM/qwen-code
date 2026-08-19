@@ -373,6 +373,111 @@ describe('ChatRecordingService - auto-title trigger', () => {
     );
   });
 
+  it('passes the latest user display projection to auto-title generation', async () => {
+    mockOk('Answer greeting');
+    chatRecordingService.recordUserMessage(
+      [{ text: 'hidden channel instructions' }],
+      undefined,
+      { displayText: '你好', hookContext: '' },
+    );
+
+    chatRecordingService.recordAssistantTurn({
+      model: 'qwen-plus',
+      message: [{ text: 'reply' }],
+    });
+    await flushMicrotasks();
+
+    expect(tryGenerateSessionTitleMock).toHaveBeenCalledWith(
+      mockConfig,
+      expect.any(AbortSignal),
+      ['你好'],
+    );
+  });
+
+  it('restores channel display projections for automatic rename and retries', async () => {
+    const messages: ChatRecord[] = [
+      {
+        uuid: 'user-1',
+        parentUuid: null,
+        sessionId: 'test-session-id',
+        timestamp: '2026-01-01T00:00:00.000Z',
+        type: 'user',
+        provenance: 'real_user',
+        cwd: '/test/project/root',
+        version: '1.0.0',
+        message: { role: 'user', parts: [{ text: 'hidden first prompt' }] },
+        systemPayload: { displayText: '你好', hookContext: '' },
+      },
+      {
+        uuid: 'assistant-1',
+        parentUuid: 'user-1',
+        sessionId: 'test-session-id',
+        timestamp: '2026-01-01T00:00:01.000Z',
+        type: 'assistant',
+        provenance: 'assistant_output',
+        cwd: '/test/project/root',
+        version: '1.0.0',
+        message: { role: 'model', parts: [{ text: 'First reply' }] },
+      },
+      {
+        uuid: 'user-2',
+        parentUuid: 'assistant-1',
+        sessionId: 'test-session-id',
+        timestamp: '2026-01-01T00:00:02.000Z',
+        type: 'user',
+        provenance: 'real_user',
+        cwd: '/test/project/root',
+        version: '1.0.0',
+        message: { role: 'user', parts: [{ text: 'hidden second prompt' }] },
+        systemPayload: { displayText: '再见', hookContext: '' },
+      },
+    ];
+    const resumedConfig = {
+      ...mockConfig,
+      getResumedSessionData: vi.fn().mockReturnValue({
+        conversation: { messages },
+        lastCompletedUuid: 'user-2',
+      }),
+    } as unknown as Config;
+    const service = activateRecording(
+      new ChatRecordingService(resumedConfig, undefined, true),
+      resumedConfig,
+    );
+
+    expect(service.getUserDisplayTextsForTitle()).toEqual(['你好', '再见']);
+
+    mockOk('Answer greetings');
+    service.recordAssistantTurn({
+      model: 'qwen-plus',
+      message: [{ text: 'reply' }],
+    });
+    await flushMicrotasks();
+
+    expect(tryGenerateSessionTitleMock).toHaveBeenCalledWith(
+      resumedConfig,
+      expect.any(AbortSignal),
+      ['你好', '再见'],
+    );
+  });
+
+  it('retains only display projections relevant to recent title history', () => {
+    for (let index = 0; index < 21; index++) {
+      chatRecordingService.recordUserMessage(
+        [{ text: `hidden ${index}` }],
+        undefined,
+        {
+          displayText: `visible ${index}`,
+          hookContext: '',
+        },
+      );
+    }
+
+    expect(chatRecordingService.getUserDisplayTextsForTitle()).toHaveLength(20);
+    expect(chatRecordingService.getUserDisplayTextsForTitle()[0]).toBe(
+      'visible 1',
+    );
+  });
+
   it('does not trigger in headless CLI mode (non-interactive, non-ACP)', async () => {
     vi.mocked(mockConfig.isInteractive).mockReturnValue(false);
     vi.mocked(mockConfig.getExperimentalZedIntegration).mockReturnValue(false);

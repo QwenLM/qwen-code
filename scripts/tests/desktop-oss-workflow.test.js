@@ -23,6 +23,9 @@ const tauriConfig = JSON.parse(
 describe('Desktop OSS mirror workflow', () => {
   it('mirrors only published stable Desktop releases', () => {
     expect(syncWorkflow).not.toContain('pull_request:');
+    expect(releaseWorkflow).toContain(
+      "desktop-release-${{ inputs.dry_run && inputs.version || 'publish' }}",
+    );
     const prepare = getWorkflowStep(
       getWorkflowJob(releaseWorkflow, 'prepare'),
       'Resolve version',
@@ -32,6 +35,9 @@ describe('Desktop OSS mirror workflow', () => {
     expect(prepare).toContain("IS_PRERELEASE: '${{ inputs.prerelease }}'");
     expect(prepare).toContain(
       'Published stable Desktop versions must use X.Y.Z',
+    );
+    expect(prepare).toContain(
+      'Desktop prereleases must use a SemVer prerelease suffix',
     );
 
     const syncOss = getWorkflowJob(releaseWorkflow, 'sync-oss');
@@ -96,12 +102,26 @@ describe('Desktop OSS mirror workflow', () => {
   });
 
   it('advances the OSS feed only for the current GitHub stable version', () => {
+    const publish = getWorkflowJob(releaseWorkflow, 'publish');
+    const updateFeed = getWorkflowStep(publish, 'Update stable updater feed');
+    expect(updateFeed).toContain('sort -V');
+    expect(updateFeed).toContain(
+      'Desktop $RELEASE_VERSION will not replace newer stable feed $current',
+    );
+
     const sync = getWorkflowJob(syncWorkflow, 'sync');
     const check = getWorkflowStep(
       sync,
       'Check whether release matches GitHub stable feed',
     );
     expect(check).toContain("gh release download 'desktop-latest'");
+    expect(check).toContain("SOURCE: '${{ steps.release.outputs.source }}'");
+    expect(check).toContain('elif [ "$SOURCE" = \'artifact\' ]; then');
+    expect(check).toContain('sort -V');
+    expect(check).toContain('GitHub stable feed is already newer at $actual');
+    expect(check).toContain(
+      'GitHub stable feed is $actual after publishing Desktop $expected',
+    );
     expect(check).toContain('echo \'matches=true\' >> "$GITHUB_OUTPUT"');
     expect(check).toContain('echo \'matches=false\' >> "$GITHUB_OUTPUT"');
     expect(check).toContain(

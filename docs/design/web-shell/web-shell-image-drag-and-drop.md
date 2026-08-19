@@ -4,6 +4,9 @@
 
 针对 [#8321](https://github.com/QwenLM/qwen-code/issues/8321) 的实现方案。初始实现由
 `48d1e1d69` 落地，review 修正由 `afb55ebae` 补齐 admission、恢复和资源边界。
+其中队列展示和 admission 失败语义已由
+[Web Shell backend-authoritative queue display](../web-shell-backend-authoritative-queue-display.md)
+取代；下文相关内容仅保留为历史记录。
 
 该功能只补齐 Web Shell composer 的图片拖放入口，并复用现有图片粘贴、
 附件预览、prompt 提交和多模态模型链路。daemon wire format、ACP、Core 和公开

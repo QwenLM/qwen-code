@@ -26,7 +26,11 @@ export interface WebShellWithProvidersProps extends WebShellProps {
   lockWorkspaceCwd?: string;
   /** Client identity to reuse when attaching to an externally created session. */
   clientId?: string;
-  /** Restart the SSE event stream after each accepted prompt. Disabled by default. */
+  /**
+   * Restart a live SSE event stream after each accepted prompt. Disabled by
+   * default. A stream that is already down is always rebuilt immediately on
+   * prompt admission, regardless of this flag.
+   */
   restartSseOnPrompt?: boolean;
   /** Persisted transcript records requested per page. Defaults to 100; valid range is 1–500. */
   historyPageSize?: number;

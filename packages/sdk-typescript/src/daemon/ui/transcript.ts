@@ -104,6 +104,7 @@ export function appendLocalUserTranscriptMessage(
   text: string,
   opts: DaemonTranscriptReducerOptions & {
     images?: Array<{ data: string; mimeType: string }>;
+    files?: Array<{ name: string; mimeType: string }>;
     meta?: DaemonTextDeltaMeta;
   } = {},
 ): DaemonTranscriptState {
@@ -120,22 +121,25 @@ export function appendLocalUserTranscriptMessage(
   if (opts.images && opts.images.length > 0) {
     (block as DaemonTextTranscriptBlock).images = [...opts.images];
   }
+  if (opts.files && opts.files.length > 0) {
+    (block as DaemonTextTranscriptBlock).files = [...opts.files];
+  }
   appendBlock(next, block);
   next.activeUserBlockId = block.id;
   return trimTranscriptState(next);
 }
 
-// Freeze retained blocks at the dispatch boundary to catch consumers that
-// mutate a COW-shared blocks array in place (see reduceDaemonTranscriptEvents).
-// This is a dev/CI safety net; in production it is pure O(blocks) overhead on
-// every dispatch and the reducer's own mutation discipline (takeBlocksOwnership)
-// does not depend on it, so skip it there. App bundlers statically replace
-// `process.env.NODE_ENV`, folding the check to `false`. The `typeof process`
-// guard keeps an unbundled browser consumer from throwing a ReferenceError —
+// Freeze retained COW collections at the dispatch boundary to catch consumers
+// that mutate a shared snapshot (see reduceDaemonTranscriptEvents). This is a
+// dev/CI safety net; the reducer's own ownership discipline does not depend on
+// it, so skip the O(blocks) freeze in production. App bundlers statically
+// replace `process.env.NODE_ENV`, folding the check to `false`. The `typeof
+// process` guard keeps an unbundled browser consumer from throwing a
+// ReferenceError —
 // this module sits on the browser-hostile `daemon/ui` surface and Vite lib
 // builds preserve `process.env.NODE_ENV` in their output — matching the
 // existing SDK idiom (see ProcessTransport, cliPath).
-const FREEZE_TRANSCRIPT_BLOCKS =
+const FREEZE_TRANSCRIPT_COLLECTIONS =
   typeof process !== 'undefined' && process.env.NODE_ENV !== 'production';
 
 export function reduceDaemonTranscriptEvents(
@@ -147,17 +151,12 @@ export function reduceDaemonTranscriptEvents(
   const next = cloneTranscriptState(state, opts);
   for (const event of events) applyDaemonTranscriptEvent(next, event);
   const result = trimTranscriptState(next);
-  // With lazy COW, `state.blocks` is shared across
-  // sidechannel-only snapshots. A misbehaving consumer doing
-  // `(state.blocks as DaemonTranscriptBlock[]).sort()` would corrupt
-  // EVERY snapshot that shares the reference (previously only the
-  // current one). Freeze the array at the dispatch boundary so external
-  // in-place mutation throws in strict mode instead of silently
-  // poisoning future snapshots. Internal reducer mutation goes through
-  // `takeBlocksOwnership` which copies BEFORE mutating, so the frozen
-  // shared reference is never touched in-place by the next dispatch.
-  if (FREEZE_TRANSCRIPT_BLOCKS) {
+  // With lazy COW, blocks and their index can be shared across snapshots.
+  // Freeze both at the dispatch boundary so external in-place mutation throws
+  // in strict mode instead of poisoning every snapshot sharing the reference.
+  if (FREEZE_TRANSCRIPT_COLLECTIONS) {
     Object.freeze(result.blocks);
+    Object.freeze(result.blockIndexById);
   }
   return result;
 }
@@ -169,6 +168,7 @@ export function finalizeOfflineDaemonTranscriptState(
   finishAssistant(next);
   next.activeUserBlockId = undefined;
   Object.freeze(next.blocks);
+  Object.freeze(next.blockIndexById);
   return next;
 }
 
@@ -245,8 +245,9 @@ function applyDaemonTranscriptEvent(
           '',
           event.eventId,
           event.serverTimestamp,
-          undefined,
+          event.meta,
           event.sourceRecordIds,
+          event.promptId,
         ) as DaemonTextTranscriptBlock;
         block.images = [{ data: event.data, mimeType: event.mimeType }];
         appendBlock(next, block);
@@ -257,6 +258,7 @@ function applyDaemonTranscriptEvent(
           | DaemonTextTranscriptBlock
           | undefined;
         if (block && block.kind === 'user') {
+          if (event.meta) block.meta = { ...block.meta, ...event.meta };
           // Use immutable update to avoid mutating a shared array reference
           block.images = [
             ...(block.images ?? []),
@@ -277,6 +279,23 @@ function applyDaemonTranscriptEvent(
       );
       break;
     case 'assistant.done':
+      if (
+        event.branchRecordId &&
+        event.promptId &&
+        event.reason === 'end_turn'
+      ) {
+        const assistant = getWritableBlockById(
+          next,
+          findFinalVisibleAssistantForPrompt(next, event.promptId),
+        );
+        if (assistant?.kind === 'assistant') {
+          assistant.branchRecordId = event.branchRecordId;
+          assistant.sourceRecordIds = unionStrings(
+            assistant.sourceRecordIds,
+            event.sourceRecordIds,
+          );
+        }
+      }
       finishAssistant(next, event);
       // PR-E cancellation propagation: when the assistant turn ENDS
       // abnormally, any in-flight tool block whose status the daemon
@@ -655,6 +674,15 @@ function appendTextDelta(
     if ('meta' in event && event.meta) {
       existing.meta = { ...existing.meta, ...event.meta };
     }
+    // The merge predicate admits deltas when one side omits `promptId`;
+    // backfill so a late exact-promptId lookup (e.g. `assistant.done`
+    // attaching the branch checkpoint) still matches the merged block.
+    if (existing.promptId === undefined && event.promptId !== undefined) {
+      existing.promptId = event.promptId;
+    }
+    if (kind === 'assistant' && event.branchRecordId) {
+      existing.branchRecordId = event.branchRecordId;
+    }
     if (kind !== 'user') existing.streaming = true;
     return;
   }
@@ -671,7 +699,11 @@ function appendTextDelta(
     event.serverTimestamp,
     'meta' in event ? event.meta : undefined,
     event.sourceRecordIds,
+    event.promptId,
   );
+  if (kind === 'assistant' && event.branchRecordId) {
+    block.branchRecordId = event.branchRecordId;
+  }
   if (kind !== 'user') block.streaming = true;
   if (kind === 'thought') block.collapsed = true;
   if (parentId != null) {
@@ -711,10 +743,34 @@ function canMergeTextDelta(
     return false;
   }
   if (existing.meta?.qwenDiscreteMessage === true) return false;
+  if (
+    existing.promptId !== undefined &&
+    event.promptId !== undefined &&
+    existing.promptId !== event.promptId
+  )
+    return false;
   if (!stringArraysEqual(existing.sourceRecordIds, event.sourceRecordIds)) {
     return false;
   }
   return !('meta' in event) || event.meta?.qwenDiscreteMessage !== true;
+}
+
+function findFinalVisibleAssistantForPrompt(
+  state: DaemonTranscriptState,
+  promptId: string,
+): string | undefined {
+  for (let index = state.blocks.length - 1; index >= 0; index--) {
+    const block = state.blocks[index];
+    if (
+      block?.kind === 'assistant' &&
+      block.parentToolCallId === undefined &&
+      block.promptId === promptId &&
+      block.text.trim().length > 0
+    ) {
+      return block.id;
+    }
+  }
+  return undefined;
 }
 
 function finishAssistant(
@@ -942,6 +998,8 @@ function discardToolBlock(
   takeBlocksOwnership(state);
   state.blocks = state.blocks.filter((block) => block.id !== blockId);
   state.blockIndexById = rebuildDaemonTranscriptBlockIndex(state.blocks);
+  ownedBlocks.set(state, state.blocks);
+  ownedBlockIndexes.set(state, state.blockIndexById);
   delete state.toolBlockByCallId[toolCallId];
   delete state.toolProgress[toolCallId];
   if (state.currentToolCallId === toolCallId) {
@@ -1298,6 +1356,7 @@ function createTextBlock(
   serverTimestamp?: number,
   meta?: Record<string, unknown>,
   sourceRecordIds?: readonly string[],
+  promptId?: string,
 ): DaemonTextTranscriptBlock {
   const blockId = allocateBlockId(state, kind);
   return {
@@ -1310,6 +1369,7 @@ function createTextBlock(
     ...(eventId !== undefined ? { eventId } : {}),
     ...(serverTimestamp !== undefined ? { serverTimestamp } : {}),
     ...(sourceRecordIds ? { sourceRecordIds: [...sourceRecordIds] } : {}),
+    ...(promptId ? { promptId } : {}),
     ...(meta ? { meta: { ...meta } } : {}),
   };
 }
@@ -1381,10 +1441,10 @@ function trimTranscriptState(
   const keptIds = new Set(blocks.map((block) => block.id));
   state.blocks = blocks;
   state.blockIndexById = rebuildDaemonTranscriptBlockIndex(blocks);
-  // Trim replaces both arrays with fresh objects; register that this
-  // state now owns its blocks so future appends in the same dispatch
-  // don't double-copy.
+  // Trim replaces both collections with fresh objects; register ownership so
+  // future appends in the same dispatch don't copy them again.
   ownedBlocks.set(state, state.blocks);
+  ownedBlockIndexes.set(state, state.blockIndexById);
   for (const [toolCallId, blockId] of Object.entries(state.toolBlockByCallId)) {
     if (!keptIds.has(blockId)) {
       state.toolBlockByCallId[toolCallId] = TRIMMED_TOOL_BLOCK_ID;
@@ -1458,7 +1518,7 @@ function shouldRecreateTrimmedToolBlock(
 }
 
 /**
- * Lazy copy-on-write for `state.blocks` / `state.blockIndexById`.
+ * Lazy copy-on-write for `state.blocks`.
  *
  * `cloneTranscriptState` shares the parent's `blocks` reference (not
  * eager-copies) so non-block-mutating events keep the same array
@@ -1476,12 +1536,21 @@ const ownedBlocks = new WeakMap<
   DaemonTranscriptState,
   readonly DaemonTranscriptBlock[]
 >();
+const ownedBlockIndexes = new WeakMap<
+  DaemonTranscriptState,
+  Readonly<Record<string, number>>
+>();
 
 function takeBlocksOwnership(state: DaemonTranscriptState): void {
   if (ownedBlocks.get(state) === state.blocks) return;
   state.blocks = [...state.blocks];
-  state.blockIndexById = createIndex(state.blockIndexById);
   ownedBlocks.set(state, state.blocks);
+}
+
+function takeBlockIndexOwnership(state: DaemonTranscriptState): void {
+  if (ownedBlockIndexes.get(state) === state.blockIndexById) return;
+  state.blockIndexById = createIndex(state.blockIndexById);
+  ownedBlockIndexes.set(state, state.blockIndexById);
 }
 
 // Applies a daemon rewind event to this in-memory transcript only. The target
@@ -1517,6 +1586,7 @@ function truncateTranscriptBeforeBlock(
   state.blocks = state.blocks.slice(0, blockIndex);
   ownedBlocks.set(state, state.blocks);
   rebuildTranscriptIndexes(state);
+  ownedBlockIndexes.set(state, state.blockIndexById);
 }
 
 function rebuildTranscriptIndexes(state: DaemonTranscriptState): void {
@@ -1555,7 +1625,9 @@ function appendBlock(
   block: DaemonTranscriptBlock,
 ): void {
   takeBlocksOwnership(state);
-  state.blockIndexById[block.id] = state.blocks.length;
+  takeBlockIndexOwnership(state);
+  (state.blockIndexById as Record<string, number>)[block.id] =
+    state.blocks.length;
   (state.blocks as DaemonTranscriptBlock[]).push(block);
 }
 

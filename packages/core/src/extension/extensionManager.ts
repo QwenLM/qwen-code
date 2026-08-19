@@ -103,8 +103,10 @@ import {
   ExtensionStore,
   type ExtensionActivation,
   type ExtensionActivationResult,
+  type ExtensionIdentity,
   type ExtensionStoreSnapshot,
   type InitialExtensionActivation,
+  type WorkspaceActivation,
 } from './extension-store.js';
 import {
   AGENT_PLUGIN_MANIFEST,
@@ -322,6 +324,7 @@ export interface CommittedExtensionMutation {
 
 export interface ExtensionStoreMutationResult extends ExtensionStoreSnapshot {
   warnings?: Array<{ code: string; error: string }>;
+  updated?: boolean;
 }
 
 export type ExtensionCommitCallback = (generation: number) => void;
@@ -748,10 +751,22 @@ export class ExtensionManager {
     workspacePath: string = this.workspaceDir,
   ): ExtensionActivationResult {
     const extension = this.findExtensionById(extensionId);
+    return this.getExtensionActivationForIdentityFromSnapshot(
+      { id: extension.id, name: extension.name },
+      snapshot,
+      workspacePath,
+    );
+  }
+
+  getExtensionActivationForIdentityFromSnapshot(
+    identity: ExtensionIdentity,
+    snapshot: ExtensionStoreSnapshot,
+    workspacePath: string = this.workspaceDir,
+  ): ExtensionActivationResult {
     const activation = this.extensionStore.getActivation(
       snapshot,
-      extension.id,
-      extension.name,
+      identity.id,
+      identity.name,
       workspacePath,
     );
     if (this.enabledExtensionNamesOverride.length === 0) {
@@ -759,9 +774,35 @@ export class ExtensionManager {
     }
     return {
       ...activation,
-      effective: this.isEnabled(extension.name) ? 'enabled' : 'disabled',
+      effective: this.isEnabled(identity.name) ? 'enabled' : 'disabled',
       source: 'cli_override',
     };
+  }
+
+  getExtensionActivationForNameFromSnapshot(
+    name: string,
+    snapshot: ExtensionStoreSnapshot,
+    workspacePath: string = this.workspaceDir,
+  ): ExtensionActivationResult {
+    const entry = Object.entries(snapshot.extensions).find(
+      ([, policy]) => policy.name.toLowerCase() === name.toLowerCase(),
+    );
+    if (!entry) {
+      const cliOverride = this.enabledExtensionNamesOverride.length > 0;
+      return {
+        default: 'enabled',
+        workspace: 'inherit',
+        effective:
+          cliOverride && !this.isEnabled(name) ? 'disabled' : 'enabled',
+        source: cliOverride ? 'cli_override' : 'default',
+      };
+    }
+    const [id, policy] = entry;
+    return this.getExtensionActivationForIdentityFromSnapshot(
+      { id, name: policy.name },
+      snapshot,
+      workspacePath,
+    );
   }
 
   async setExtensionDefaultActivation(
@@ -779,6 +820,29 @@ export class ExtensionManager {
       onCommitted?.(snapshot.generation);
       this.applyStoreActivation(snapshot);
       const warning = await this.refreshToolsAfterActivation(extension.name);
+      return warning ? { ...snapshot, warnings: [warning] } : snapshot;
+    } finally {
+      endMutation();
+    }
+  }
+
+  async setExtensionDefaultActivations(
+    names: readonly string[],
+    activation: ExtensionActivation,
+    onCommitted?: ExtensionCommitCallback,
+  ): Promise<ExtensionStoreMutationResult> {
+    const endMutation = this.beginMutation('setExtensionDefaultActivations');
+    try {
+      const identities = this.resolveBatchExtensionIdentities(names);
+      const snapshot = await this.extensionStore.setDefaultActivations(
+        identities,
+        activation,
+      );
+      onCommitted?.(snapshot.generation);
+      this.applyStoreActivation(snapshot);
+      const warning = await this.refreshToolsAfterActivation(
+        `${identities.length} extensions`,
+      );
       return warning ? { ...snapshot, warnings: [warning] } : snapshot;
     } finally {
       endMutation();
@@ -827,6 +891,65 @@ export class ExtensionManager {
     } finally {
       endMutation();
     }
+  }
+
+  async setExtensionWorkspaceActivations(
+    names: readonly string[],
+    workspacePath: string,
+    activation: WorkspaceActivation,
+    onCommitted?: ExtensionCommitCallback,
+  ): Promise<ExtensionStoreMutationResult> {
+    const endMutation = this.beginMutation('setExtensionWorkspaceActivations');
+    try {
+      const identities = this.resolveBatchExtensionIdentities(names);
+      let snapshot: ExtensionStoreSnapshot;
+      let updated = true;
+      if (activation === 'inherit') {
+        const outcome = await this.extensionStore.clearWorkspaceActivations(
+          identities,
+          workspacePath,
+        );
+        snapshot = outcome.snapshot;
+        updated = outcome.updated;
+      } else {
+        snapshot = await this.extensionStore.setWorkspaceActivations(
+          identities,
+          workspacePath,
+          activation,
+        );
+      }
+      if (!updated) {
+        this.applyStoreActivation(snapshot);
+        return { ...snapshot, updated: false };
+      }
+      onCommitted?.(snapshot.generation);
+      this.applyStoreActivation(snapshot);
+      const warning = await this.refreshToolsAfterActivation(
+        `${identities.length} extensions`,
+      );
+      return warning
+        ? { ...snapshot, updated: true, warnings: [warning] }
+        : { ...snapshot, updated: true };
+    } finally {
+      endMutation();
+    }
+  }
+
+  private resolveBatchExtensionIdentities(
+    names: readonly string[],
+  ): ExtensionIdentity[] {
+    const loadedByName = new Map(
+      this.getLoadedExtensions().map((extension) => [
+        extension.name.toLowerCase(),
+        extension,
+      ]),
+    );
+    return names.map((name) => {
+      const loaded = loadedByName.get(name.toLowerCase());
+      return loaded
+        ? { id: loaded.id, name: loaded.name }
+        : { id: hashValue(name.toLowerCase()), name };
+    });
   }
 
   async clearExtensionWorkspaceActivation(
@@ -2600,7 +2723,7 @@ export class ExtensionManager {
     try {
       const snapshot = await this.extensionStore.readSnapshot();
       const policy = snapshot.extensions[extensionId];
-      if (!policy) return snapshot;
+      if (!policy || policy.declarationOnly) return snapshot;
       const extension = this.getLoadedExtensions().find(
         (candidate) => candidate.id === extensionId,
       );

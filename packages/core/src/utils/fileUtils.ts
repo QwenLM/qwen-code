@@ -51,6 +51,7 @@ import {
   ImageViewError,
   renderImageOverview,
 } from './image-view.js';
+import { PIPELINE_IMAGE_MIME_TYPES } from './request-tokenizer/supportedImageFormats.js';
 
 const debugLogger = createDebugLogger('FILE_UTILS');
 const CANONICAL_IMAGE_MIME_TYPES = new Set([
@@ -58,6 +59,17 @@ const CANONICAL_IMAGE_MIME_TYPES = new Set([
   'image/png',
   'image/webp',
 ]);
+
+// Image MIME types a model endpoint can safely consume as-is. Anything else
+// (image/heic, image/tiff, ...) must never be forwarded verbatim: providers
+// reject the unknown media during request validation, and the resulting 400
+// aborts the whole session instead of surfacing a recoverable result (#9291).
+// Derived from PIPELINE_IMAGE_MIME_TYPES in
+// request-tokenizer/supportedImageFormats.ts so the read-path gate and the
+// contract advertised to users cannot drift apart.
+const PROVIDER_SAFE_IMAGE_MIME_TYPES = new Set<string>(
+  PIPELINE_IMAGE_MIME_TYPES,
+);
 
 // Default values for encoding and separator format
 export const DEFAULT_ENCODING: BufferEncoding = 'utf-8';
@@ -1489,11 +1501,8 @@ export async function processSingleFileContent(
           } catch (error) {
             signal?.throwIfAborted();
             if (error instanceof ImageViewError) {
-              // Non-size render failures (sharp missing, animated,
-              // unsupported, or corrupt input) fall through to the legacy
-              // inline-bytes branch below rather than hard-failing the read,
-              // matching main's forward-verbatim behaviour. The size codes
-              // stay a hard error because that branch cannot shrink them.
+              // Size failures stay a hard error: the raw-bytes branch below
+              // cannot shrink them either.
               if (
                 error.code === 'source_too_large' ||
                 error.code === 'output_too_large'
@@ -1506,12 +1515,84 @@ export async function processSingleFileContent(
                   errorType: ToolErrorType.FILE_TOO_LARGE,
                 };
               }
+              // Undecodable bytes must NOT fall through to the raw-bytes
+              // branch: forwarding corrupt media lets the provider reject the
+              // whole request with a 400 that aborts the session. Omit the
+              // image and stay in-band instead (#9291).
+              if (
+                (error.code === 'decode_failed' ||
+                  error.code === 'unsupported_image') &&
+                !preserveUnsupportedImage
+              ) {
+                const notice =
+                  `Image ${relativePathForDisplay} could not be decoded ` +
+                  '(corrupt or unsupported encoding), so its data was omitted ' +
+                  'from the model request. Ask the user for a readable PNG, ' +
+                  'JPEG, or WebP version if the image content matters.';
+                return {
+                  llmContent: notice,
+                  returnDisplay: `Omitted undecodable image: ${relativePathForDisplay}`,
+                };
+              }
+              // Remaining non-size failures (renderer unavailable, animated
+              // input) fall through to the legacy inline-bytes branch rather
+              // than hard-failing the read, matching main's forward-verbatim
+              // behaviour.
             } else {
               throw error;
             }
           }
         }
+        if (
+          !PROVIDER_SAFE_IMAGE_MIME_TYPES.has(mediaMimeType) &&
+          !preserveUnsupportedImage
+        ) {
+          // The overview renderer never ran for this MIME, and providers
+          // reject media they cannot consume with a request-validation 400
+          // that aborts the whole session (image/heic on Responses-compatible
+          // routes). Omit the unsafe media and deliver an in-band notice so
+          // the turn continues and the model can explain the gap (#9291).
+          const notice =
+            `Image format ${mediaMimeType} (${relativePathForDisplay}) cannot ` +
+            'be safely sent to the model, so its data was omitted from the ' +
+            'request. Ask the user for a PNG, JPEG, WebP, or GIF version if ' +
+            'the image content matters.';
+          return {
+            llmContent: notice,
+            returnDisplay: `Omitted unsupported image format: ${relativePathForDisplay} (${mediaMimeType})`,
+          };
+        }
         const contentBuffer = await fs.promises.readFile(filePath);
+        if (mediaMimeType === 'image/gif') {
+          // GIFs skip the overview renderer, so nothing has validated the
+          // bytes yet: a corrupt or mislabeled .gif would reach the provider
+          // and trip the same request-validation 400 that aborts the session
+          // (#9291). Validate decodability before forwarding; when sharp is
+          // unavailable, keep the legacy forward-verbatim behaviour.
+          const sharpModule = await import('sharp').catch(() => undefined);
+          if (sharpModule) {
+            try {
+              await sharpModule
+                .default(contentBuffer, {
+                  failOn: 'error',
+                })
+                .metadata();
+            } catch {
+              signal?.throwIfAborted();
+              if (!preserveUnsupportedImage) {
+                const notice =
+                  `Image ${relativePathForDisplay} could not be decoded ` +
+                  '(corrupt or unsupported encoding), so its data was omitted ' +
+                  'from the model request. Ask the user for a readable PNG, ' +
+                  'JPEG, WebP, or GIF version if the image content matters.';
+                return {
+                  llmContent: notice,
+                  returnDisplay: `Omitted undecodable image: ${relativePathForDisplay}`,
+                };
+              }
+            }
+          }
+        }
         const base64Data = contentBuffer.toString('base64');
         const base64SizeInMB = base64Data.length / (1024 * 1024);
         if (base64SizeInMB > 9.9) {

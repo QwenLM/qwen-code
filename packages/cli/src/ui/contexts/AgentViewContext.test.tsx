@@ -5,9 +5,19 @@
  */
 
 import { render } from 'ink-testing-library';
+import { Text } from 'ink';
+import { act, useEffect, useRef } from 'react';
 import { describe, it, expect, vi } from 'vitest';
-import type { Config } from '@qwen-code/qwen-code-core';
-import { AgentViewProvider } from './AgentViewContext.js';
+import {
+  ApprovalMode,
+  type AgentInteractive,
+  type Config,
+} from '@qwen-code/qwen-code-core';
+import {
+  AgentViewProvider,
+  useAgentViewActions,
+  useAgentViewState,
+} from './AgentViewContext.js';
 
 /**
  * Minimal Config stub exposing only the manager-subscription surface the
@@ -45,5 +55,118 @@ describe('AgentViewProvider in-process bridges', () => {
     render(<AgentViewProvider config={config}>{null}</AgentViewProvider>);
 
     expect(config.onArenaManagerChange).toHaveBeenCalled();
+  });
+
+  it('clears embedded shell focus when switching agent tabs', async () => {
+    const config = makeConfig();
+    const interactiveAgent = {
+      getCore: () => ({
+        runtimeContext: { getApprovalMode: () => ApprovalMode.DEFAULT },
+      }),
+    } as AgentInteractive;
+
+    function Probe() {
+      const state = useAgentViewState();
+      const actions = useAgentViewActions();
+      const seeded = useRef(false);
+
+      useEffect(() => {
+        if (seeded.current) return;
+        seeded.current = true;
+        actions.registerAgent('mate@team', interactiveAgent, 'model', 'cyan');
+        actions.setAgentShellFocused(true);
+      }, [actions]);
+
+      useEffect(() => {
+        if (state.agentShellFocused) {
+          actions.switchToAgent('mate@team');
+        }
+      }, [actions, state.agentShellFocused]);
+
+      return (
+        <Text>
+          {state.activeView}:{String(state.agentShellFocused)}
+        </Text>
+      );
+    }
+
+    const { lastFrame } = render(
+      <AgentViewProvider config={config}>
+        <Probe />
+      </AgentViewProvider>,
+    );
+
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(lastFrame()).toContain('mate@team:false');
+  });
+
+  it('clears embedded shell focus when the focused agent unregisters', async () => {
+    // unregisterAgent bounces activeView back to 'main' without going
+    // through switchToAgent/Next/Previous — the switch resets alone never
+    // run, so the view-change effect is the only reset on this path.
+    // Without it a stale true would keyboard-lock the tab bar on main
+    // (#9290 review). Stages are driven imperatively via act() so each
+    // state change lands in its own commit (the production focus seed is
+    // a keypress in a commit well after the tab switch).
+    const config = makeConfig();
+    const interactiveAgent = {
+      getCore: () => ({
+        runtimeContext: { getApprovalMode: () => ApprovalMode.DEFAULT },
+      }),
+    } as AgentInteractive;
+
+    const probeActions: {
+      registerAgent?: (
+        agentId: string,
+        agent: AgentInteractive,
+        modelId: string,
+        color: string,
+      ) => void;
+      switchToAgent?: (agentId: string) => void;
+      setAgentShellFocused?: (focused: boolean) => void;
+      unregisterAgent?: (agentId: string) => void;
+    } = {};
+
+    function Probe() {
+      const state = useAgentViewState();
+      const actions = useAgentViewActions();
+      probeActions.registerAgent = actions.registerAgent;
+      probeActions.switchToAgent = actions.switchToAgent;
+      probeActions.setAgentShellFocused = actions.setAgentShellFocused;
+      probeActions.unregisterAgent = actions.unregisterAgent;
+      return (
+        <Text>
+          {state.activeView}:{String(state.agentShellFocused)}
+        </Text>
+      );
+    }
+
+    const { lastFrame } = render(
+      <AgentViewProvider config={config}>
+        <Probe />
+      </AgentViewProvider>,
+    );
+
+    await act(async () => {
+      probeActions.registerAgent?.('mate@team', interactiveAgent, 'm', 'c');
+    });
+    await act(async () => {
+      probeActions.switchToAgent?.('mate@team');
+    });
+    expect(lastFrame()).toContain('mate@team:false');
+    await act(async () => {
+      probeActions.setAgentShellFocused?.(true);
+    });
+    expect(lastFrame()).toContain('mate@team:true');
+
+    await act(async () => {
+      probeActions.unregisterAgent?.('mate@team');
+    });
+
+    expect(lastFrame()).toContain('main:false');
   });
 });

@@ -39,17 +39,19 @@ describe('workspace trust routes', () => {
   it.each([
     [
       'managed-scratch',
+      409,
       'managed_scratch_trust_fixed',
       'Managed scratch workspace trust cannot be changed',
     ],
     [
       'live-conversation',
-      'live_conversation_trust_fixed',
-      'Live conversation workspace trust cannot be changed',
+      400,
+      'workspace_mismatch',
+      '`:workspace` must decode to a workspace id or absolute path',
     ],
   ] as const)(
     'rejects manual trust changes for %s provenance',
-    async (provenance, code, error) => {
+    async (provenance, status, code, error) => {
       const selected = runtime(provenance);
       const primary = runtime('existing', true);
       const app = express();
@@ -66,7 +68,7 @@ describe('workspace trust routes', () => {
         )
         .send({ desiredState: 'untrusted' });
 
-      expect(response.status).toBe(409);
+      expect(response.status).toBe(status);
       expect(response.body).toEqual({ code, error });
       expect(
         selected.workspaceService.requestWorkspaceTrustChange,

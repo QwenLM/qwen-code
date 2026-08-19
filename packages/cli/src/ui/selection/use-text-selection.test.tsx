@@ -121,6 +121,8 @@ const makeEvent = (
   button: 'left',
 });
 
+const flushMicrotasks = (): Promise<void> => Promise.resolve();
+
 describe('TextSelectionController', () => {
   let frame: ReadonlyFrame;
   let setSelection: ReturnType<typeof vi.fn>;
@@ -131,6 +133,12 @@ describe('TextSelectionController', () => {
     innerHeight: number;
   };
   let viewportRect: { x: number; y: number; width: number; height: number };
+  let additionalSelectableRects: Array<{
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  }>;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -139,6 +147,7 @@ describe('TextSelectionController', () => {
     listener = undefined;
     scrollState = { scrollTop: 0, scrollHeight: 1, innerHeight: 1 };
     viewportRect = { x: 0, y: 0, width: frame.width, height: 1 };
+    additionalSelectableRects = [];
     vi.mocked(copyToClipboard).mockResolvedValue(undefined);
     vi.mocked(getScreenBuffer).mockReturnValue({
       get frame() {
@@ -162,6 +171,7 @@ describe('TextSelectionController', () => {
       <TextSelectionController
         isActive
         getViewportRect={() => viewportRect}
+        getAdditionalSelectableRects={() => additionalSelectableRects}
         getScrollState={() => scrollState}
         hitTestScrollbar={() => false}
       />,
@@ -200,6 +210,56 @@ describe('TextSelectionController', () => {
       ey: 0,
     });
     expect(copyToClipboard).toHaveBeenCalledWith('hello');
+  });
+
+  it('turns a footer drag into a highlight and clipboard payload', () => {
+    frame = makeTwoLineFrame('hello', 'status');
+    viewportRect = { x: 0, y: 0, width: 5, height: 1 };
+    additionalSelectableRects = [{ x: 0, y: 1, width: 6, height: 1 }];
+    const handler = mount();
+
+    handler(makeEvent('left-press', 1, 2));
+    handler(makeEvent('move', 6, 2));
+    handler(makeEvent('left-release', 6, 2));
+
+    expect(setSelection).toHaveBeenLastCalledWith({
+      sx: 0,
+      sy: 1,
+      ex: 5,
+      ey: 1,
+    });
+    expect(copyToClipboard).toHaveBeenCalledWith('status');
+  });
+
+  it('clamps a footer drag to the footer when it enters history', () => {
+    frame = makeTwoLineFrame('hello', 'status');
+    viewportRect = { x: 0, y: 0, width: 5, height: 1 };
+    additionalSelectableRects = [{ x: 0, y: 1, width: 6, height: 1 }];
+    const handler = mount();
+
+    handler(makeEvent('left-press', 1, 2));
+    handler(makeEvent('move', 3, 1));
+    handler(makeEvent('left-release', 3, 1));
+
+    expect(setSelection).toHaveBeenLastCalledWith({
+      sx: 0,
+      sy: 1,
+      ex: 2,
+      ey: 1,
+    });
+    expect(copyToClipboard).toHaveBeenCalledWith('sta');
+  });
+
+  it('does not select frame content outside registered regions', () => {
+    frame = makeTwoLineFrame('hello', 'input');
+    viewportRect = { x: 0, y: 0, width: 5, height: 1 };
+    const handler = mount();
+
+    handler(makeEvent('left-press', 1, 2));
+    handler(makeEvent('left-release', 5, 2));
+
+    expect(setSelection).not.toHaveBeenCalled();
+    expect(copyToClipboard).not.toHaveBeenCalled();
   });
 
   it('does not treat a click after a drag as a double-click', () => {
@@ -363,6 +423,85 @@ describe('TextSelectionController', () => {
     expect(copyToClipboard).toHaveBeenLastCalledWith('x');
   });
 
+  it('triple-clicks history text from non-selectable trailing padding', () => {
+    const content = makeFrame('history').cells[0];
+    const padding = Array.from({ length: 3 }, () => ({
+      type: 'char' as const,
+      value: ' ',
+      fullWidth: false,
+      styles: [],
+      selectable: false,
+      flowId: null,
+    }));
+    frame = {
+      width: 10,
+      height: 1,
+      cells: [[...content, ...padding]],
+      boundaries: [Array.from({ length: 10 }, () => null)],
+    };
+    viewportRect = { x: 0, y: 0, width: 10, height: 1 };
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1000);
+    const handler = mount();
+
+    for (let click = 0; click < 3; click++) {
+      handler(makeEvent('left-press', 10));
+      handler(makeEvent('left-release', 10));
+    }
+    nowSpy.mockRestore();
+
+    expect(setSelection).toHaveBeenLastCalledWith({
+      sx: 0,
+      sy: 0,
+      ex: 6,
+      ey: 0,
+    });
+    expect(copyToClipboard).toHaveBeenLastCalledWith('history');
+  });
+
+  it('keeps a line drag aligned when it moves into trailing padding', () => {
+    const first = makeFrame('hello').cells[0];
+    const second = makeFrame('world').cells[0];
+    const padding = Array.from({ length: 3 }, () => ({
+      type: 'char' as const,
+      value: ' ',
+      fullWidth: false,
+      styles: [],
+      selectable: false,
+      flowId: null,
+    }));
+    frame = {
+      width: 8,
+      height: 2,
+      cells: [
+        [...first, ...padding],
+        [...second, ...padding],
+      ],
+      boundaries: [
+        Array.from({ length: 8 }, () => null),
+        Array.from({ length: 8 }, () => null),
+      ],
+    };
+    viewportRect = { x: 0, y: 0, width: 8, height: 2 };
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1000);
+    const handler = mount();
+    handler(makeEvent('left-press', 2, 1));
+    handler(makeEvent('left-release', 2, 1));
+    handler(makeEvent('left-press', 2, 1));
+    handler(makeEvent('left-release', 2, 1));
+    handler(makeEvent('left-press', 2, 1));
+    handler(makeEvent('move', 8, 2));
+    handler(makeEvent('left-release', 8, 2));
+    nowSpy.mockRestore();
+
+    expect(setSelection).toHaveBeenLastCalledWith({
+      sx: 0,
+      sy: 0,
+      ex: 4,
+      ey: 1,
+    });
+    expect(copyToClipboard).toHaveBeenLastCalledWith('hello\nworld');
+  });
+
   it('extends a word drag to the release cell when no move event is emitted', () => {
     frame = makeFrame('foo bar baz');
     viewportRect = { x: 0, y: 0, width: 11, height: 1 };
@@ -521,23 +660,25 @@ describe('TextSelectionController', () => {
     );
   });
 
-  it('clears a completed selection when scrollTop changes', () => {
+  it('clears a completed selection when scrollTop changes', async () => {
     const handler = mount();
     selectHello(handler);
     setSelection.mockClear();
 
     scrollState = { ...scrollState, scrollTop: 1 };
     listener!(frame);
+    await flushMicrotasks();
 
     expect(setSelection).toHaveBeenCalledWith(null);
   });
 
-  it('clears a completed selection when same-size frame content changes', () => {
+  it('clears a completed selection when same-size frame content changes', async () => {
     const handler = mount();
     selectHello(handler);
     setSelection.mockClear();
 
     listener!(makeFrame('hullo'));
+    await flushMicrotasks();
 
     expect(setSelection).toHaveBeenCalledWith(null);
   });
@@ -562,5 +703,99 @@ describe('TextSelectionController', () => {
     listener!(makeTwoLineFrame('hello', 'footer'));
 
     expect(setSelection).not.toHaveBeenCalled();
+  });
+
+  it('clears a footer selection when footer content changes', async () => {
+    frame = makeTwoLineFrame('hello', 'status');
+    viewportRect = { x: 0, y: 0, width: 5, height: 1 };
+    additionalSelectableRects = [{ x: 0, y: 1, width: 6, height: 1 }];
+    const handler = mount();
+    handler(makeEvent('left-press', 1, 2));
+    handler(makeEvent('left-release', 6, 2));
+    setSelection.mockClear();
+
+    listener!(makeTwoLineFrame('hullo', 'status'));
+    expect(setSelection).not.toHaveBeenCalled();
+
+    listener!(makeTwoLineFrame('hello', 'footer'));
+    await flushMicrotasks();
+
+    expect(setSelection).toHaveBeenCalledWith(null);
+  });
+
+  it('clears a footer selection when its layout changes', async () => {
+    frame = makeTwoLineFrame('hello', 'status');
+    viewportRect = { x: 0, y: 0, width: 5, height: 1 };
+    additionalSelectableRects = [{ x: 0, y: 1, width: 6, height: 1 }];
+    const handler = mount();
+    handler(makeEvent('left-press', 1, 2));
+    handler(makeEvent('left-release', 6, 2));
+    setSelection.mockClear();
+
+    additionalSelectableRects = [{ x: 0, y: 2, width: 6, height: 1 }];
+    listener!(frame);
+    await flushMicrotasks();
+
+    expect(setSelection).toHaveBeenCalledWith(null);
+  });
+
+  it('keeps a footer selection while history scrolls', async () => {
+    frame = makeTwoLineFrame('hello', 'status');
+    viewportRect = { x: 0, y: 0, width: 5, height: 1 };
+    additionalSelectableRects = [{ x: 0, y: 1, width: 6, height: 1 }];
+    const handler = mount();
+    handler(makeEvent('left-press', 1, 2));
+    handler(makeEvent('left-release', 6, 2));
+    setSelection.mockClear();
+
+    scrollState = { ...scrollState, scrollTop: 1, scrollHeight: 2 };
+    listener!(frame);
+    await flushMicrotasks();
+
+    expect(setSelection).not.toHaveBeenCalled();
+  });
+
+  it('keeps a footer drag active while history scrolls', () => {
+    frame = makeTwoLineFrame('hello', 'status');
+    viewportRect = { x: 0, y: 0, width: 5, height: 1 };
+    additionalSelectableRects = [{ x: 0, y: 1, width: 6, height: 1 }];
+    const handler = mount();
+    handler(makeEvent('left-press', 1, 2));
+    setSelection.mockClear();
+
+    scrollState = { ...scrollState, scrollTop: 1 };
+    handler(makeEvent('move', 5, 2));
+
+    expect(setSelection).toHaveBeenLastCalledWith({
+      sx: 0,
+      sy: 1,
+      ex: 4,
+      ey: 1,
+    });
+  });
+
+  it('does not let stale invalidation clear a newer selection', () => {
+    const handler = mount();
+    selectHello(handler);
+    setSelection.mockClear();
+
+    const queued: Array<() => void> = [];
+    const queueSpy = vi
+      .spyOn(globalThis, 'queueMicrotask')
+      .mockImplementation((callback) => queued.push(callback));
+    frame = makeFrame('hullo');
+    listener!(frame);
+
+    handler(makeEvent('left-press', 1));
+    handler(makeEvent('left-release', 5));
+    queued[0]();
+    queueSpy.mockRestore();
+
+    expect(setSelection).toHaveBeenLastCalledWith({
+      sx: 0,
+      sy: 0,
+      ex: 4,
+      ey: 0,
+    });
   });
 });

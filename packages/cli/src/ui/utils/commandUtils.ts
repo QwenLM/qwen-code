@@ -47,7 +47,20 @@ export const isAtCommand = (query: string): boolean =>
 
 const SLASH_PATH_SEPARATOR_RE = /[/\\]/;
 
-const getSlashCommandFirstToken = (query: string): string =>
+export const SLASH_COMMANDS_SKIP_RECORDING: ReadonlySet<string> = new Set([
+  'quit',
+  'exit',
+  'clear',
+  'reset',
+  'new',
+  'resume',
+  'delete',
+  'branch',
+  'btw',
+  'history',
+]);
+
+export const getSlashCommandFirstToken = (query: string): string =>
   query.slice(1).trimStart().split(/\s+/u)[0] ?? '';
 
 export const hasSlashCommandPathSeparator = (query: string): boolean =>

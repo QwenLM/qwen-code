@@ -304,6 +304,37 @@ describe('workspace Channel management routes', () => {
     expect(liveService.upsert).not.toHaveBeenCalled();
   });
 
+  it('fails closed before internal channel reads when the activity gate is absent', async () => {
+    const primary = runtime('primary', '/work/primary');
+    const live = runtime(
+      'conversations',
+      '/work/Conversations',
+      true,
+      'live-conversation',
+    );
+    const liveService = service();
+    const resolveService = vi.fn(() => liveService);
+    const app = express();
+    app.use(express.json());
+    registerWorkspaceChannelManagementRoutes(app, {
+      primaryRuntime: primary,
+      workspaceRegistry: createWorkspaceRegistry([primary, live]),
+      resolveService,
+      mutate: () => (_req, _res, next) => next(),
+      safeBody: (req) => (req.body ?? {}) as Record<string, unknown>,
+      parseAndValidateClientId: () => undefined,
+    });
+
+    const response = await request(app).get(
+      '/workspaces/conversations/channels',
+    );
+
+    expect(response.status).toBe(503);
+    expect(response.body.code).toBe('conversation_runtime_unavailable');
+    expect(resolveService).not.toHaveBeenCalled();
+    expect(liveService.list).not.toHaveBeenCalled();
+  });
+
   it('fails closed for an untrusted secondary workspace', async () => {
     const { app, primaryService, secondaryService } = mount(false);
 

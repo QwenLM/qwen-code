@@ -207,6 +207,7 @@ type HistoryCollector = {
 type SlashCommandInvocation = {
   rawCommand: string;
   timestamp: number;
+  hidden: boolean;
 };
 
 const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
@@ -3476,7 +3477,8 @@ export class QwenAgent extends BaseAgent {
     if (record.type === 'user') return true;
     if (record.type !== 'system' || record.subtype !== 'slash_command')
       return false;
-    return toRecord(record.systemPayload).phase === 'invocation';
+    const payload = toRecord(record.systemPayload);
+    return payload.phase === 'invocation' && payload.hiddenInvocation !== true;
   }
 
   private async persistQwenTranscriptTextElements(
@@ -4597,8 +4599,13 @@ export class QwenAgent extends BaseAgent {
     const transcriptPath = getQwenTranscriptPath(sessionId, cwd);
     if (!existsSync(transcriptPath)) return [];
 
+    const parentUuidByUuid = new Map<string, string>();
+    const userRecordUuids = new Set<string>();
     const invocations = new Map<string, SlashCommandInvocation>();
     const seenResults = new Set<string>();
+    // An invocation pairs with at most one result, so a later same-name
+    // orphan result cannot re-emit an already-paired invocation's user row.
+    const consumedInvocations = new Set<string>();
     const messages: Message[] = [];
     let idCounter = 0;
 
@@ -4615,6 +4622,13 @@ export class QwenAgent extends BaseAgent {
           continue;
         }
 
+        const uuid = asString(record.uuid);
+        if (uuid) {
+          if (record.type === 'user') userRecordUuids.add(uuid);
+          const parentUuidValue = asString(record.parentUuid);
+          if (parentUuidValue) parentUuidByUuid.set(uuid, parentUuidValue);
+        }
+
         if (record.type !== 'system' || record.subtype !== 'slash_command')
           continue;
 
@@ -4625,8 +4639,13 @@ export class QwenAgent extends BaseAgent {
         const phase = asString(payload.phase);
         const timestamp = parseQwenTimestamp(record.timestamp) ?? Date.now();
         if (phase === 'invocation') {
-          const uuid = asString(record.uuid);
-          if (uuid) invocations.set(uuid, { rawCommand, timestamp });
+          if (uuid) {
+            invocations.set(uuid, {
+              rawCommand,
+              timestamp,
+              hidden: payload.hiddenInvocation === true,
+            });
+          }
           continue;
         }
 
@@ -4646,14 +4665,38 @@ export class QwenAgent extends BaseAgent {
         if (seenResults.has(resultKey)) continue;
         seenResults.add(resultKey);
 
-        const invocation = parentUuid ? invocations.get(parentUuid) : undefined;
-        const userContent = invocation?.rawCommand || rawCommand;
-        messages.push({
-          id: `qwen-${sessionId}-slash-${++idCounter}`,
-          role: 'user',
-          content: userContent,
-          timestamp: invocation?.timestamp ?? timestamp,
-        });
+        let ancestorUuid = parentUuid;
+        const visited = new Set<string>();
+        let invocation: SlashCommandInvocation | undefined;
+        let invocationUuid: string | undefined;
+        const resultCommandName = rawCommand.split(/\s+/, 1)[0];
+        while (ancestorUuid && !visited.has(ancestorUuid)) {
+          visited.add(ancestorUuid);
+          if (userRecordUuids.has(ancestorUuid)) break;
+          const candidate = invocations.get(ancestorUuid);
+          if (candidate) {
+            if (
+              candidate.rawCommand.split(/\s+/, 1)[0] === resultCommandName &&
+              !consumedInvocations.has(ancestorUuid)
+            ) {
+              invocation = candidate;
+              invocationUuid = ancestorUuid;
+            }
+            break;
+          }
+          ancestorUuid = parentUuidByUuid.get(ancestorUuid);
+        }
+        if (invocation && invocationUuid) {
+          consumedInvocations.add(invocationUuid);
+          if (!invocation.hidden) {
+            messages.push({
+              id: `qwen-${sessionId}-slash-${++idCounter}`,
+              role: 'user',
+              content: invocation.rawCommand,
+              timestamp: invocation.timestamp,
+            });
+          }
+        }
         messages.push({
           id: `qwen-${sessionId}-slash-${++idCounter}`,
           role: 'assistant',

@@ -7,6 +7,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
+import { SessionService } from '@qwen-code/qwen-code-core';
 
 /** Captures the launcher's operator-facing stderr output. */
 const { stderrLines } = vi.hoisted(() => ({ stderrLines: [] as string[] }));
@@ -178,6 +179,9 @@ function makeFakeBridge(opts?: {
       kills.push(sessionId);
       return opts?.killSessionResult ?? true;
     },
+    // Present so a rollback mark cannot fail silently inside its swallowing
+    // catch — the production bridge always implements it.
+    markSessionCatalogChanged: vi.fn(),
     detachClient: async (sessionId: string, clientId?: string) => {
       operations.push(`detach:${sessionId}`);
       detaches.push({ sessionId, ...(clientId ? { clientId } : {}) });
@@ -1073,6 +1077,44 @@ describe('sub-session launcher', () => {
       'provider unavailable',
     );
     launcher.stop();
+  });
+
+  it('sent mode: rollback marks the catalog revision after removing the undispatched transcript', async () => {
+    // Spawn succeeded but materializing the isolated workspace fails before any
+    // prompt is dispatched → the rollback kills the fresh session, removes its
+    // transcript, and that persisted removal must advance the catalog clock.
+    const fake = makeFakeBridge();
+    const discarded: string[] = [];
+    const removeSpy = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+      notifySentCompletion: true,
+      isolatedWorkspace: {
+        materializeDirectory: () => Promise.reject(new Error('disk full')),
+        discardEmptyDirectory: async (sessionId) => {
+          discarded.push(sessionId);
+        },
+      },
+    });
+    try {
+      await expect(
+        launcher.launch({
+          prompt: 'research it',
+          completion: 'sent',
+          callerSessionId: 'parent-1',
+        }),
+      ).rejects.toThrow('disk full');
+      expect(fake.kills).toHaveLength(1);
+      expect(removeSpy).toHaveBeenCalledWith(fake.kills[0]);
+      expect(discarded).toEqual(fake.kills);
+      expect(fake.bridge.markSessionCatalogChanged).toHaveBeenCalledTimes(1);
+    } finally {
+      removeSpy.mockRestore();
+      launcher.stop();
+    }
   });
 
   it('first-turn: reports "incomplete" when the stream ends before the turn does', async () => {

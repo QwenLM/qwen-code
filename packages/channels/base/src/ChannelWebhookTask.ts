@@ -108,6 +108,32 @@ export function buildChannelWebhookPrompt(
   return truncateCodePoints(lines.join('\n'), MAX_WEBHOOK_PROMPT_CHARS);
 }
 
+/**
+ * User-visible projection of a webhook task (session-bus displayText,
+ * transcript). Mirrors the model-prompt treatment in
+ * buildChannelWebhookPrompt — same per-field caps and sanitizePromptText —
+ * so an oversized or crafted title/summary cannot reach the transcript
+ * uncapped while the model side stays bounded and sanitized.
+ */
+export function buildChannelWebhookDisplayText(
+  task: ChannelWebhookTask,
+): string {
+  const title = truncateCodePoints(
+    sanitizePromptText(task.title),
+    MAX_WEBHOOK_TITLE_CHARS,
+  );
+  const summary =
+    task.summary === undefined
+      ? undefined
+      : truncateCodePoints(
+          sanitizePromptText(task.summary),
+          MAX_WEBHOOK_SUMMARY_CHARS,
+        );
+  return [title, summary]
+    .filter((part): part is string => Boolean(part))
+    .join('\n\n');
+}
+
 function truncateCodePoints(text: string, maxChars: number): string {
   const chars = Array.from(text);
   return chars.length > maxChars ? chars.slice(0, maxChars).join('') : text;

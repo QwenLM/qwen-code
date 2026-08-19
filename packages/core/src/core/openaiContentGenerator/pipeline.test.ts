@@ -117,6 +117,9 @@ describe('ContentGenerationPipeline', () => {
     mockContentGeneratorConfig = {
       model: 'test-model',
       authType: 'openai' as AuthType,
+      // Official endpoint so response_format assertions exercise the
+      // buildResponseFormat gate (custom endpoints suppress it).
+      baseUrl: 'https://api.openai.com/v1',
       samplingParams: {
         temperature: 0.7,
         top_p: 0.9,
@@ -4349,6 +4352,60 @@ describe('ContentGenerationPipeline', () => {
     });
   });
 
+  describe('buildResponseFormat endpoint gate', () => {
+    const jsonModeRequest = {
+      model: 'test-model',
+      contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+      config: { responseMimeType: 'application/json' },
+    };
+
+    it('omits response_format on custom OpenAI-compatible endpoints', () => {
+      mockContentGeneratorConfig.baseUrl = 'https://api.custom-provider.com/v1';
+      const body = pipeline['buildResponseFormat'](jsonModeRequest);
+      expect(body.response_format).toBeUndefined();
+    });
+
+    it('keeps json_object response_format on the official endpoint', () => {
+      const body = pipeline['buildResponseFormat'](jsonModeRequest);
+      expect(body.response_format).toEqual({ type: 'json_object' });
+    });
+
+    it('falls back to json_object when required is partial (goalJudge shape)', () => {
+      const body = pipeline['buildResponseFormat']({
+        model: 'test-model',
+        contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+        config: {
+          responseMimeType: 'application/json',
+          responseJsonSchema: {
+            type: 'object',
+            properties: {
+              ok: { type: 'boolean' },
+              note: { type: 'string' },
+            },
+            required: ['ok'],
+          },
+        },
+      });
+      expect(body.response_format).toEqual({ type: 'json_object' });
+    });
+
+    it('falls back to json_object when a property lacks a type', () => {
+      const body = pipeline['buildResponseFormat']({
+        model: 'test-model',
+        contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+        config: {
+          responseMimeType: 'application/json',
+          responseJsonSchema: {
+            type: 'object',
+            properties: { ok: {} },
+            required: ['ok'],
+          },
+        },
+      });
+      expect(body.response_format).toEqual({ type: 'json_object' });
+    });
+  });
+
   describe('buildRequest', () => {
     it('should build request with sampling parameters', async () => {
       // Arrange
@@ -4435,11 +4492,12 @@ describe('ContentGenerationPipeline', () => {
       );
     });
 
-    it('should allow provider to enhance request', async () => {
+    it('should map JSON mode before provider enhancement', async () => {
       // Arrange
       const request: GenerateContentParameters = {
         model: 'test-model',
         contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        config: { responseMimeType: 'application/json' },
       };
       const userPromptId = 'test-prompt-id';
       const mockMessages = [
@@ -4474,6 +4532,7 @@ describe('ContentGenerationPipeline', () => {
         expect.objectContaining({
           model: 'test-model',
           messages: mockMessages,
+          response_format: { type: 'json_object' },
         }),
         userPromptId,
       );
@@ -4484,6 +4543,151 @@ describe('ContentGenerationPipeline', () => {
         expect.objectContaining({
           signal: undefined,
         }),
+      );
+    });
+
+    it('uses json_schema when a response schema is present', async () => {
+      const schema = {
+        type: 'object',
+        properties: { verdict: { type: 'string' } },
+        required: ['verdict'],
+        additionalProperties: false,
+      };
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        config: {
+          responseMimeType: 'application/json',
+          responseJsonSchema: schema,
+        },
+      };
+      const userPromptId = 'test-prompt-id';
+      const mockMessages = [
+        { role: 'user', content: 'Hello' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[];
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+        mockMessages,
+      );
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'test',
+        choices: [{ message: { content: 'response' } }],
+      });
+
+      await pipeline.execute(request, userPromptId);
+
+      expect(mockProvider.buildRequest).toHaveBeenCalledWith(
+        expect.objectContaining({
+          response_format: {
+            type: 'json_schema',
+            json_schema: {
+              name: 'response',
+              schema,
+              strict: true,
+            },
+          },
+        }),
+        userPromptId,
+      );
+    });
+
+    it('normalizes responseJsonSchema before strict OpenAI output', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        config: {
+          responseMimeType: 'application/json',
+          responseJsonSchema: {
+            type: 'object',
+            properties: {
+              verdict: { type: 'string', minLength: 1 },
+            },
+            required: ['verdict'],
+          },
+        },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Hello' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'test',
+        choices: [{ message: { content: 'response' } }],
+      });
+
+      await pipeline.execute(request, 'test-prompt-id');
+
+      expect(mockProvider.buildRequest).toHaveBeenCalledWith(
+        expect.objectContaining({
+          response_format: {
+            type: 'json_schema',
+            json_schema: {
+              name: 'response',
+              schema: {
+                type: 'object',
+                properties: { verdict: { type: 'string' } },
+                required: ['verdict'],
+                additionalProperties: false,
+              },
+              strict: true,
+            },
+          },
+        }),
+        'test-prompt-id',
+      );
+    });
+
+    it('uses json_schema for compatible Gemini responseSchema configs', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: 'OBJECT',
+            properties: { ok: { type: 'BOOLEAN' } },
+            required: ['ok'],
+            additionalProperties: false,
+          },
+        },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Hello' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'test',
+        choices: [{ message: { content: 'response' } }],
+      });
+
+      await pipeline.execute(request, 'test-prompt-id');
+
+      expect(mockProvider.buildRequest).toHaveBeenCalledWith(
+        expect.objectContaining({
+          response_format: {
+            type: 'json_schema',
+            json_schema: {
+              name: 'response',
+              schema: {
+                type: 'object',
+                properties: { ok: { type: 'boolean' } },
+                required: ['ok'],
+                additionalProperties: false,
+              },
+              strict: true,
+            },
+          },
+        }),
+        'test-prompt-id',
       );
     });
 

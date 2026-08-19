@@ -357,6 +357,52 @@ describe('parseDiff', () => {
     expect(files[0].binary).toBe(true);
     expect(files[0].hunks).toEqual([]);
   });
+  it('closes a hunk at the next header, not by its declared counts', () => {
+    // Which mechanism closes a hunk decides what a count-mismatched capture
+    // parses to, and three fixture comments elsewhere in the tree asserted
+    // the opposite (that a short body swallows the following header). It is
+    // structural: the declared counts only compute `newEnd`. A count-based
+    // mutant reports ONE hunk here and leaves every consumer green.
+    const short = [
+      'diff --git a/a.ts b/a.ts',
+      '--- a/a.ts',
+      '+++ b/a.ts',
+      '@@ -1,0 +1,5 @@', // declares five new lines…
+      '+one', // …and emits one
+      '@@ -50,0 +50,1 @@',
+      '+later',
+      '',
+    ].join('\n');
+    const f = parseDiff(short).files[0];
+    expect(f.hunks.map((h) => [h.newStart, h.newEnd])).toEqual([
+      [1, 5],
+      [50, 50],
+    ]);
+  });
+
+  it('spends no new-side line on the no-newline marker', () => {
+    // `\ No newline at end of file` belongs to neither side. Counting it as
+    // a body line advances the new-side cursor and shifts every range after
+    // it — and it is the most common real-world diff artifact there is, yet
+    // nothing pinned it.
+    const withMarker = [
+      'diff --git a/a.ts b/a.ts',
+      '--- a/a.ts',
+      '+++ b/a.ts',
+      '@@ -1,2 +1,2 @@',
+      ' kept',
+      '-old',
+      '\\ No newline at end of file',
+      '+new',
+      '',
+    ].join('\n');
+    const f = parseDiff(withMarker).files[0];
+    expect(f.addedLines).toBe(1);
+    expect(f.removedLines).toBe(1);
+    // The added line is at new-side 2; a marker counted as a body line pushes
+    // the cursor and reports 3.
+    expect(f.addedRanges).toEqual([{ start: 2, end: 2 }]);
+  });
 });
 
 describe('planChunks', () => {

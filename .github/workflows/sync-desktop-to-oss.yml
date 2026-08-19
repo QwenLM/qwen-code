@@ -182,6 +182,7 @@ jobs:
         id: 'latest'
         env:
           GH_TOKEN: '${{ github.token }}'
+          SOURCE: '${{ steps.release.outputs.source }}'
         run: |
           set -euo pipefail
           directory="$(mktemp -d)"
@@ -191,6 +192,12 @@ jobs:
           actual="$(jq -r '.version' "$directory/desktop-latest.json")"
           if [ "$actual" = "$expected" ]; then
             echo 'matches=true' >> "$GITHUB_OUTPUT"
+          elif [[ "$actual" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && [ "$(printf '%s\n%s\n' "$expected" "$actual" | sort -V | tail -n 1)" = "$actual" ]; then
+            echo 'matches=false' >> "$GITHUB_OUTPUT"
+            echo "::notice::GitHub stable feed is already newer at $actual; mirrored version $expected will not replace the OSS latest feed."
+          elif [ "$SOURCE" = 'artifact' ]; then
+            echo "::error::GitHub stable feed is $actual after publishing Desktop $expected."
+            exit 1
           else
             echo 'matches=false' >> "$GITHUB_OUTPUT"
             echo "::notice::GitHub stable feed is $actual; mirrored version $expected will not replace the OSS latest feed."

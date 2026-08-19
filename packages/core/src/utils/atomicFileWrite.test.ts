@@ -1045,6 +1045,31 @@ describe('noFollow option — symlink protection', () => {
     expect(await fs.readFile(real, 'utf-8')).toBe('ORIGINAL');
   });
 
+  it.skipIf(
+    process.platform === 'win32' || typeof process.geteuid !== 'function',
+  )(
+    'atomicWriteFile: noFollow still replaces a symlink when ownership differs',
+    async () => {
+      const real = path.join(tmpDir, 'owned-by-another-user.txt');
+      const link = path.join(tmpDir, 'record.json');
+      await fs.writeFile(real, 'ORIGINAL');
+      await fs.symlink(real, link);
+
+      const realGeteuid = process.geteuid!;
+      const targetStat = await fs.stat(real);
+      process.geteuid = () => targetStat.uid + 1;
+      try {
+        await atomicWriteFile(link, 'NEW', { noFollow: true, mode: 0o600 });
+      } finally {
+        process.geteuid = realGeteuid;
+      }
+
+      expect((await fs.lstat(link)).isSymbolicLink()).toBe(false);
+      expect(await fs.readFile(link, 'utf-8')).toBe('NEW');
+      expect(await fs.readFile(real, 'utf-8')).toBe('ORIGINAL');
+    },
+  );
+
   it('atomicWriteFileSync: noFollow replaces a pre-placed symlink instead of writing through it', () => {
     const real = path.join(tmpDir, 'real.txt');
     const link = path.join(tmpDir, 'link.txt');

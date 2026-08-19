@@ -37,6 +37,7 @@ import { NotificationType } from '../hooks/types.js';
 import type { PostToolBatchToolCall } from '../hooks/types.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
 import {
+  COMBINED_PASS_TOLERANCE_FACTOR,
   truncateLlmContent,
   truncateToolOutput,
   TOOL_OUTPUT_TRUNCATED_PREFIX,
@@ -61,6 +62,7 @@ import type {
   PartListUnion,
 } from '@google/genai';
 import { fileURLToPath } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 import { ToolNames, canonicalToolName } from '../tools/tool-names.js';
 import { PLAN_EXIT_APPROVED_LLM_CONTENT_PREFIXES } from '../tools/exitPlanMode.js';
 import { approvedPlanRedactionText } from './geminiChat.js';
@@ -75,6 +77,13 @@ import {
   promptIdContext,
   todoWorkChainContext,
 } from '../utils/promptIdContext.js';
+import {
+  isToolResultBoundaryDiagnosticsEnabled,
+  observeToolResultBoundary,
+  toolResultBoundaryArtifact,
+  toolResultPartDiagnosticValues,
+  type ToolResultBoundaryValue,
+} from '../utils/tool-result-boundary-diagnostics.js';
 import { unescapePath, PATH_ARG_KEYS } from '../utils/paths.js';
 import type { MemoryPressureMonitor } from '../services/memoryPressureMonitor.js';
 import { CONCURRENCY_SAFE_KINDS, isShellProgressData } from '../tools/tools.js';
@@ -345,6 +354,7 @@ function setToolSpanFailure(
 ): void {
   try {
     span.setAttribute(TOOL_FAILURE_KIND_ATTRIBUTE, failureKind);
+    span.setAttribute('error.type', failureKind);
     // Always write `success: false` so trace backends can filter tool
     // failures with the same query they use for llm_request spans —
     // mirrors the unconditional `success` attribute on llm_request.
@@ -1205,6 +1215,8 @@ interface CoreToolSchedulerOptions {
    */
   chatRecordingService?: ChatRecordingService;
   onToolResultFullTurnModel?: (model: string) => boolean;
+  /** Lets an outer owner suppress a scheduler result it already emitted. */
+  shouldObserveProducer?: (callId: string) => boolean;
 }
 
 // ─── Tool Concurrency Helpers ────────────────────────────────
@@ -1312,6 +1324,61 @@ function partitionToolCalls(calls: ScheduledToolCall[]): ToolBatch[] {
   return partitionByConcurrencySafety(calls, isConcurrencySafe);
 }
 
+function producerInputDropsStructuredContent(
+  input: PartListUnion | null | undefined,
+): boolean {
+  if (input === null || input === undefined || typeof input === 'string') {
+    return false;
+  }
+
+  const contentToProcess =
+    Array.isArray(input) && input.length === 1 ? input[0] : input;
+  if (typeof contentToProcess === 'string') return false;
+
+  const hasOnlyKeys = (part: Part, ...keys: string[]) =>
+    Object.entries(part).every(
+      ([key, value]) => value === undefined || keys.includes(key),
+    );
+  if (Array.isArray(contentToProcess)) {
+    return contentToProcess.some((part) => {
+      if (typeof part === 'string') return false;
+      if (part.text !== undefined) return !hasOnlyKeys(part, 'text');
+      if (part.inlineData !== undefined) {
+        return !hasOnlyKeys(part, 'inlineData');
+      }
+      if (part.fileData !== undefined) return !hasOnlyKeys(part, 'fileData');
+      return true;
+    });
+  }
+
+  if (contentToProcess.functionResponse !== undefined) {
+    return Boolean(contentToProcess.functionResponse.response?.['content']);
+  }
+  if (
+    contentToProcess.inlineData !== undefined ||
+    contentToProcess.fileData !== undefined
+  ) {
+    return !hasOnlyKeys(contentToProcess, 'inlineData', 'fileData');
+  }
+  if (contentToProcess.text !== undefined) {
+    return !hasOnlyKeys(contentToProcess, 'text');
+  }
+  return true;
+}
+
+function producerContentEqual(
+  toolName: string,
+  callId: string,
+  input: PartListUnion | null | undefined,
+  output: PartListUnion,
+): boolean {
+  if (producerInputDropsStructuredContent(input)) return false;
+  return isDeepStrictEqual(
+    convertToFunctionResponse(toolName, callId, input ?? ''),
+    output,
+  );
+}
+
 export class CoreToolScheduler {
   private toolRegistry: ToolRegistry;
   private toolCalls: ToolCall[] = [];
@@ -1323,6 +1390,7 @@ export class CoreToolScheduler {
   private onEditorClose: () => void;
   private chatRecordingService?: ChatRecordingService;
   private onToolResultFullTurnModel?: (model: string) => boolean;
+  private shouldObserveProducer: (callId: string) => boolean;
   private isFinalizingToolCalls = false;
   private postToolBatchEnabledForBatch = false;
   private postToolBatchSpanCallId: string | undefined;
@@ -1392,6 +1460,7 @@ export class CoreToolScheduler {
     this.onEditorClose = options.onEditorClose;
     this.chatRecordingService = options.chatRecordingService;
     this.onToolResultFullTurnModel = options.onToolResultFullTurnModel;
+    this.shouldObserveProducer = options.shouldObserveProducer ?? (() => true);
   }
 
   private get memoryMonitor(): MemoryPressureMonitor | undefined {
@@ -1757,7 +1826,8 @@ export class CoreToolScheduler {
    * second call for the same callId is a no-op.
    *
    * No `metadata` parameter: every caller pre-sets span status via
-   * `setToolSpan{Failure,Cancelled,Ok}` before this call (#4321 review).
+   * `setToolSpan{Failure,Cancelled}` or the success path before this call
+   * (#4321 review).
    */
   private finalizeToolSpan(callId: string, force = false): void {
     // Terminal-state cleanup: drop any PreToolUse 'ask' bounce markers so
@@ -4180,10 +4250,10 @@ export class CoreToolScheduler {
     } catch (error) {
       this.bouncedAwaitingApproval.delete(callId);
       this.bouncedToolUseId.delete(callId);
-      // _executeToolCallBody pre-sets span status (OK / FAILURE /
-      // CANCELLED) only AFTER its main try/catch is entered. Throws
-      // from the prelude — for example getMessageBus — happen BEFORE
-      // the `scheduled → executing` transition, so the span would end
+      // _executeToolCallBody records the span outcome only AFTER its main
+      // try/catch is entered: ERROR or CANCELLED, while success remains
+      // UNSET. Throws from the prelude — for example getMessageBus — happen
+      // BEFORE the `scheduled → executing` transition, so the span would end
       // UNSET with no failure_kind AND the tool call would stay in
       // `scheduled` forever (checkAndNotifyCompletion never sees a
       // terminal state). Set failure status + error response here so
@@ -4225,8 +4295,8 @@ export class CoreToolScheduler {
       // a race where a STREAM_JSON client answers the confirmation
       // synchronously and flips status to 'scheduled' before this runs.
       if (!this.bouncedAwaitingApproval.has(callId)) {
-        // _executeToolCallBody pre-sets status (OK / FAILURE / CANCELLED)
-        // via setToolSpan*; finalize without metadata to preserve that.
+        // _executeToolCallBody records the outcome via setToolSpan*; finalize
+        // without metadata to preserve ERROR / UNSET status semantics.
         this.finalizeToolSpan(callId);
       }
       this.memoryMonitor?.scheduleCheck();
@@ -4384,6 +4454,41 @@ export class CoreToolScheduler {
     // Get MessageBus for hook execution
     const messageBus = this.config.getMessageBus() as MessageBus | undefined;
     const hooksEnabled = !this.config.getDisableAllHooks();
+    let producerObserved = false;
+    const observeSyntheticProducer = (
+      response: CoreToolCallResponseInfo,
+    ): void => {
+      try {
+        if (producerObserved || !this.shouldObserveProducer(callId)) return;
+        producerObserved = true;
+        observeToolResultBoundary({
+          stage: 'producer',
+          sessionId: this.config.getSessionId(),
+          promptId: scheduledCall.request.prompt_id,
+          toolCallId: callId,
+          toolName: canonicalName,
+          artifacts: [
+            toolResultBoundaryArtifact(
+              response.persistedOutputFiles ?? [],
+              response.artifacts ?? [],
+            ),
+          ],
+          values: () => [
+            ...toolResultPartDiagnosticValues(response.responseParts),
+            ...(typeof response.resultDisplay === 'string'
+              ? [
+                  {
+                    representation: 'display' as const,
+                    value: response.resultDisplay,
+                  },
+                ]
+              : []),
+          ],
+        });
+      } catch {
+        // Diagnostics must not affect tool execution.
+      }
+    };
 
     // PreToolUse Hook — skipped on a post-'ask' re-execution (the hook
     // already ran and the user already confirmed; re-firing would loop).
@@ -4459,6 +4564,7 @@ export class CoreToolScheduler {
           ToolErrorType.EXECUTION_DENIED,
           'not_started',
         );
+        observeSyntheticProducer(errorResponse);
         this.setStatusInternal(callId, 'error', errorResponse);
         setToolSpanFailure(
           span,
@@ -4479,19 +4585,19 @@ export class CoreToolScheduler {
           toolName: canonicalName,
           args: invocation.params as Record<string, unknown>,
           signal,
+          sessionId: this.config.getSessionId(),
+          cwd: this.config.getTargetDir(),
           ...(invocationContext ? { invocationContext } : {}),
         },
       );
       if (signal.aborted) {
-        this.setStatusInternal(
-          callId,
-          'cancelled',
-          createCancelledResponse(
-            scheduledCall.request,
-            'Tool call cancelled before execution.',
-            'not_started',
-          ),
+        const cancelledResponse = createCancelledResponse(
+          scheduledCall.request,
+          'Tool call cancelled before execution.',
+          'not_started',
         );
+        observeSyntheticProducer(cancelledResponse);
+        this.setStatusInternal(callId, 'cancelled', cancelledResponse);
         if (this.toolSpans.has(callId)) {
           setToolSpanCancelled(span);
         }
@@ -4504,6 +4610,7 @@ export class CoreToolScheduler {
           ToolErrorType.EXECUTION_DENIED,
           'not_started',
         );
+        observeSyntheticProducer(errorResponse);
         this.setStatusInternal(callId, 'error', errorResponse);
         setToolSpanFailure(
           span,
@@ -4524,15 +4631,13 @@ export class CoreToolScheduler {
         currentCall.status !== 'error' &&
         currentCall.status !== 'cancelled'
       ) {
-        this.setStatusInternal(
-          callId,
-          'cancelled',
-          createCancelledResponse(
-            scheduledCall.request,
-            'Tool call cancelled before execution.',
-            'not_started',
-          ),
+        const cancelledResponse = createCancelledResponse(
+          scheduledCall.request,
+          'Tool call cancelled before execution.',
+          'not_started',
         );
+        observeSyntheticProducer(cancelledResponse);
+        this.setStatusInternal(callId, 'cancelled', cancelledResponse);
         if (this.toolSpans.has(callId)) {
           setToolSpanCancelled(span);
         }
@@ -4581,6 +4686,8 @@ export class CoreToolScheduler {
     let executionStatus: ToolExecutionStatus = 'not_started';
     let executionSettled = false;
     let execSpan: Span | undefined;
+    let producerToolResult: ToolResult | null | undefined;
+    let observeProducerOutput = observeSyntheticProducer;
     try {
       let promise: Promise<ToolResult>;
 
@@ -4742,6 +4849,92 @@ export class CoreToolScheduler {
       } else {
         toolResult = await promise;
       }
+      producerToolResult = toolResult;
+      observeProducerOutput = (response: CoreToolCallResponseInfo) => {
+        try {
+          if (producerObserved || !this.shouldObserveProducer(callId)) return;
+          producerObserved = true;
+          let producerInputValues: ToolResultBoundaryValue[] | undefined;
+          const getProducerInputValues = () =>
+            (producerInputValues ??= [
+              ...toolResultPartDiagnosticValues(producerToolResult?.llmContent),
+              ...(typeof producerToolResult?.returnDisplay === 'string'
+                ? [
+                    {
+                      representation: 'display' as const,
+                      value: producerToolResult.returnDisplay,
+                    },
+                  ]
+                : []),
+            ]);
+          let producerOutputValues: ToolResultBoundaryValue[] | undefined;
+          const getProducerOutputValues = () =>
+            (producerOutputValues ??= [
+              ...toolResultPartDiagnosticValues(response.responseParts),
+              ...(typeof response.resultDisplay === 'string'
+                ? [
+                    {
+                      representation: 'display' as const,
+                      value: response.resultDisplay,
+                    },
+                  ]
+                : []),
+              ...(typeof response.visionBridgeNotice === 'string'
+                ? [
+                    {
+                      representation: 'display' as const,
+                      value: response.visionBridgeNotice,
+                    },
+                  ]
+                : []),
+            ]);
+          const inputArtifact = toolResultBoundaryArtifact(
+            producerToolResult?.persistedOutputFiles,
+            producerToolResult?.artifacts,
+          );
+          const outputArtifact = toolResultBoundaryArtifact(
+            response.persistedOutputFiles,
+            response.artifacts,
+          );
+          let mutated: boolean | undefined;
+          const isMutated = () =>
+            (mutated ??=
+              producerToolResult == null ||
+              !producerContentEqual(
+                toolName,
+                callId,
+                producerToolResult.llmContent,
+                response.responseParts,
+              ) ||
+              !isDeepStrictEqual(
+                producerToolResult.returnDisplay,
+                response.resultDisplay,
+              ) ||
+              !isDeepStrictEqual(inputArtifact, outputArtifact) ||
+              typeof response.visionBridgeNotice === 'string');
+          const observation = {
+            sessionId: this.config.getSessionId(),
+            promptId: scheduledCall.request.prompt_id,
+            toolCallId: callId,
+            toolName: canonicalName,
+            mutated: isMutated,
+          };
+          observeToolResultBoundary({
+            ...observation,
+            stage: 'producer_input',
+            artifacts: [inputArtifact],
+            values: getProducerInputValues,
+          });
+          observeToolResultBoundary({
+            ...observation,
+            stage: 'producer_output',
+            artifacts: [outputArtifact],
+            values: getProducerOutputValues,
+          });
+        } catch {
+          // Diagnostics must not affect tool execution.
+        }
+      };
       // A tool that observes signal.aborted and resolves with a normal
       // ToolResult (no .error field) would otherwise close the execution
       // sub-span as success while the parent tool span ends as cancelled.
@@ -4815,17 +5008,15 @@ export class CoreToolScheduler {
           }
           failureHookArtifacts = failureHookResult.artifacts;
         }
-        this.setStatusInternal(
-          callId,
-          'cancelled',
-          createCancelledResponse(
-            scheduledCall.request,
-            cancelMessage,
-            executionStatus,
-            failureHookArtifacts,
-            toolResult.persistedOutputFiles,
-          ),
+        const cancelledResponse = createCancelledResponse(
+          scheduledCall.request,
+          cancelMessage,
+          executionStatus,
+          failureHookArtifacts,
+          toolResult.persistedOutputFiles,
         );
+        observeProducerOutput(cancelledResponse);
+        this.setStatusInternal(callId, 'cancelled', cancelledResponse);
         setToolSpanCancelled(span);
         return; // Both code paths should return here
       }
@@ -4840,19 +5031,17 @@ export class CoreToolScheduler {
         if (!signal.aborted || (isTimeout && parentAbortedAtExecutionSettle)) {
           return false;
         }
-        this.setStatusInternal(
-          callId,
-          'cancelled',
-          createCancelledResponse(
-            scheduledCall.request,
-            // Reached only after `execute()` settled with a result.
-            TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE,
-            executionStatus,
-            artifacts,
-            preserved?.persistedOutputFiles,
-            preserved?.visionBridgeNotice,
-          ),
+        const cancelledResponse = createCancelledResponse(
+          scheduledCall.request,
+          // Reached only after `execute()` settled with a result.
+          TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE,
+          executionStatus,
+          artifacts,
+          preserved?.persistedOutputFiles,
+          preserved?.visionBridgeNotice,
         );
+        observeProducerOutput(cancelledResponse);
+        this.setStatusInternal(callId, 'cancelled', cancelledResponse);
         setToolSpanCancelled(span);
         return true;
       };
@@ -4950,6 +5139,7 @@ export class CoreToolScheduler {
             if (persistedOutputFiles !== undefined) {
               errorResponse.persistedOutputFiles = persistedOutputFiles;
             }
+            observeProducerOutput(errorResponse);
             this.setStatusInternal(callId, 'error', errorResponse);
             setToolSpanFailure(
               span,
@@ -5161,7 +5351,7 @@ export class CoreToolScheduler {
             perToolMax !== undefined
               ? Number.POSITIVE_INFINITY
               : this.config.getTruncateToolOutputLines() * 2;
-          if (content.length > baseThreshold * 2) {
+          if (content.length > baseThreshold * COMBINED_PASS_TOLERANCE_FACTOR) {
             try {
               const contentBeforeRecombination = content;
               const recombined = await truncateToolOutput(
@@ -5169,7 +5359,7 @@ export class CoreToolScheduler {
                 toolName,
                 content,
                 {
-                  threshold: baseThreshold * 2,
+                  threshold: baseThreshold * COMBINED_PASS_TOLERANCE_FACTOR,
                   lines: combinedLines,
                   keep: perToolKeep,
                 },
@@ -5308,8 +5498,8 @@ export class CoreToolScheduler {
         ) {
           return;
         }
+        observeProducerOutput(successResponse);
         this.setStatusInternal(callId, 'success', successResponse);
-        safeSetStatus(span, { code: SpanStatusCode.OK });
         // Mirrors setToolSpanFailure/setToolSpanCancelled — every tool span
         // ends with an explicit `success` attribute so backends can filter
         // failures the same way they filter llm_request failures.
@@ -5420,7 +5610,7 @@ export class CoreToolScheduler {
           ) {
             return;
           }
-          this.setStatusInternal(callId, 'error', {
+          const timeoutResponse: CoreToolCallResponseInfo = {
             callId,
             responseParts,
             resultDisplay: this.compactResultDisplayForInteractiveHistory(
@@ -5440,7 +5630,9 @@ export class CoreToolScheduler {
               ? { visionBridgeNotice: processedImages.visionBridgeNotice }
               : {}),
             ...(artifacts.length > 0 ? { artifacts } : {}),
-          });
+          };
+          observeProducerOutput(timeoutResponse);
+          this.setStatusInternal(callId, 'error', timeoutResponse);
           setToolSpanFailure(
             span,
             TOOL_FAILURE_KIND_TIMEOUT,
@@ -5548,6 +5740,7 @@ export class CoreToolScheduler {
         ) {
           return;
         }
+        observeProducerOutput(errorResponse);
         this.setStatusInternal(callId, 'error', errorResponse);
         setToolSpanFailure(
           span,
@@ -5636,16 +5829,14 @@ export class CoreToolScheduler {
           }
           failureHookArtifacts = failureHookResult.artifacts;
         }
-        this.setStatusInternal(
-          callId,
-          'cancelled',
-          createCancelledResponse(
-            scheduledCall.request,
-            cancelMessage,
-            executionStatus,
-            failureHookArtifacts,
-          ),
+        const cancelledResponse = createCancelledResponse(
+          scheduledCall.request,
+          cancelMessage,
+          executionStatus,
+          failureHookArtifacts,
         );
+        observeProducerOutput(cancelledResponse);
+        this.setStatusInternal(callId, 'cancelled', cancelledResponse);
         setToolSpanCancelled(span);
         return;
       } else {
@@ -5681,36 +5872,32 @@ export class CoreToolScheduler {
           failureHookArtifacts = failureHookResult.artifacts;
         }
         if (signal.aborted && !executionTimedOut) {
-          this.setStatusInternal(
-            callId,
-            'cancelled',
-            createCancelledResponse(
-              scheduledCall.request,
-              // The abort landed while the failure hook was running; the
-              // tool's own outcome is still what `executionThrew` says.
-              executionThrew
-                ? TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE
-                : TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE,
-              executionStatus,
-              failureHookArtifacts,
-            ),
+          const cancelledResponse = createCancelledResponse(
+            scheduledCall.request,
+            // The abort landed while the failure hook was running; the
+            // tool's own outcome is still what `executionThrew` says.
+            executionThrew
+              ? TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE
+              : TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE,
+            executionStatus,
+            failureHookArtifacts,
           );
+          observeProducerOutput(cancelledResponse);
+          this.setStatusInternal(callId, 'cancelled', cancelledResponse);
           setToolSpanCancelled(span);
           return;
         }
-        this.setStatusInternal(
-          callId,
-          'error',
-          createErrorResponse(
-            scheduledCall.request,
-            executionError instanceof Error
-              ? new Error(exceptionErrorMessage)
-              : new Error(String(executionError)),
-            exceptionErrorType,
-            executionStatus,
-            failureHookArtifacts,
-          ),
+        const errorResponse = createErrorResponse(
+          scheduledCall.request,
+          executionError instanceof Error
+            ? new Error(exceptionErrorMessage)
+            : new Error(String(executionError)),
+          exceptionErrorType,
+          executionStatus,
+          failureHookArtifacts,
         );
+        observeProducerOutput(errorResponse);
+        this.setStatusInternal(callId, 'error', errorResponse);
         setToolSpanFailure(
           span,
           TOOL_FAILURE_KIND_TOOL_EXCEPTION,
@@ -5758,7 +5945,11 @@ export class CoreToolScheduler {
       }
       try {
         const batchBudget = this.config.getToolOutputBatchBudget?.();
-        if (batchBudget !== undefined && Number.isFinite(batchBudget)) {
+        if (
+          messageBus &&
+          batchBudget !== undefined &&
+          Number.isFinite(batchBudget)
+        ) {
           completedCalls = await this.applyBatchOutputBudget(completedCalls);
         }
 
@@ -5936,8 +6127,13 @@ export class CoreToolScheduler {
   ): Promise<CompletedToolCall[]> {
     const budget =
       this.config.getToolOutputBatchBudget?.() ?? Number.POSITIVE_INFINITY;
-    if (!Number.isFinite(budget) || budget <= 0) return completedCalls;
-
+    const observeFinalizerBoundary = isToolResultBoundaryDiagnosticsEnabled();
+    if (
+      (!Number.isFinite(budget) || budget <= 0) &&
+      !observeFinalizerBoundary
+    ) {
+      return completedCalls;
+    }
     const finalized = await finalizeToolResponses(
       this.config,
       completedCalls.map((call) => ({
@@ -5945,7 +6141,16 @@ export class CoreToolScheduler {
         toolName: call.request.name,
         responseParts: call.response.responseParts,
         persistedOutputFiles: call.response.persistedOutputFiles,
+        artifacts: call.response.artifacts,
       })),
+      new Map(
+        completedCalls.map((call) => [
+          call.request.callId,
+          call.request.prompt_id,
+        ]),
+      ),
+      observeFinalizerBoundary,
+      observeFinalizerBoundary,
     );
 
     return completedCalls.map((call, index) => ({
@@ -5968,6 +6173,8 @@ export class CoreToolScheduler {
         status: call.status,
         executionStatus: call.response.executionStatus,
         resultDisplay: call.response.resultDisplay,
+        persistedOutputFiles: call.response.persistedOutputFiles,
+        artifacts: call.response.artifacts,
         ...(call.response.visionBridgeNotice !== undefined
           ? { visionBridgeNotice: call.response.visionBridgeNotice }
           : {}),

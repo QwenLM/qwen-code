@@ -19,7 +19,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Session } from './Session.js';
 import type { Config, GeminiChat } from '@qwen-code/qwen-code-core';
-import { ApprovalMode, AuthType, Storage } from '@qwen-code/qwen-code-core';
+import {
+  ApprovalMode,
+  AuthType,
+  GoalPersistenceUnavailableError,
+  Storage,
+} from '@qwen-code/qwen-code-core';
 import * as core from '@qwen-code/qwen-code-core';
 import type {
   AgentSideConnection,
@@ -120,6 +125,12 @@ describe('Session.pendingWorktreeNotice', () => {
       getUsageStatisticsEnabled: vi.fn().mockReturnValue(false),
       getContentGeneratorConfig: vi.fn().mockReturnValue(undefined),
       getChatRecordingService: vi.fn().mockReturnValue({
+        getBranchCheckpointCursor: vi.fn().mockReturnValue({
+          recordId: null,
+          activeRecordCount: 0,
+          pendingToolCalls: [],
+        }),
+        recordBranchCheckpointTransaction: vi.fn().mockResolvedValue(undefined),
         recordUserMessage: vi.fn(),
         recordUiTelemetryEvent: vi.fn(),
         recordToolResult: vi.fn(),
@@ -168,9 +179,22 @@ describe('Session.pendingWorktreeNotice', () => {
       }),
       getBackgroundShellRegistry: vi.fn().mockReturnValue({
         setNotificationCallback: vi.fn(),
+        setStatusChangeCallback: vi.fn(),
+        clearStatusChangeCallback: vi.fn(),
+        hasRunningEntries: vi.fn().mockReturnValue(false),
       }),
       setSubSessionSpawner: vi.fn(),
       getSubSessionSpawner: vi.fn(),
+      // The Session constructor and Session.prompt both reach for the
+      // canonical Goal runtime. A real Config throws this exact error when
+      // Goal persistence is off, and both call sites are written to fall
+      // through on it — which is the shape these worktree-notice tests want.
+      getGoalRuntime: vi.fn(() => {
+        throw new GoalPersistenceUnavailableError();
+      }),
+      getGoalRuntimeReady: vi
+        .fn()
+        .mockRejectedValue(new GoalPersistenceUnavailableError()),
     } as unknown as Config;
 
     mockClient = {

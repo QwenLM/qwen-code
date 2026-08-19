@@ -67,11 +67,73 @@ describe('wordSpanAt', () => {
 describe('lineSpanAt', () => {
   it('spans from column 0 to the last non-space cell', () => {
     const frame = frameFromLines(['  hi there   ']);
-    expect(lineSpanAt(frame, 0)).toEqual({ sx: 0, sy: 0, ex: 9, ey: 0 });
+    expect(lineSpanAt(frame, 4, 0)).toEqual({ sx: 0, sy: 0, ex: 9, ey: 0 });
   });
 
   it('returns null for a blank line', () => {
     const frame = frameFromLines(['     ']);
-    expect(lineSpanAt(frame, 0)).toBeNull();
+    expect(lineSpanAt(frame, 2, 0)).toBeNull();
+  });
+
+  it('stops at a non-selectable layout gap', () => {
+    const frame = frameFromLines(['status    42%']);
+    for (let x = 6; x < 10; x++) {
+      (frame.cells[0][x] as FrameCell).selectable = false;
+    }
+
+    expect(lineSpanAt(frame, 2, 0)).toEqual({
+      sx: 0,
+      sy: 0,
+      ex: 5,
+      ey: 0,
+    });
+    expect(lineSpanAt(frame, 7, 0)).toEqual({
+      sx: 0,
+      sy: 0,
+      ex: 5,
+      ey: 0,
+    });
+    expect(lineSpanAt(frame, 9, 0)).toEqual({
+      sx: 10,
+      sy: 0,
+      ex: 12,
+      ey: 0,
+    });
+  });
+
+  it('snaps non-selectable history padding and gutters to visible content', () => {
+    const padded = frameFromLines(['history   ']);
+    for (let x = 7; x < padded.cells[0].length; x++) {
+      (padded.cells[0][x] as FrameCell).selectable = false;
+    }
+    expect(lineSpanAt(padded, 9, 0)).toEqual({
+      sx: 0,
+      sy: 0,
+      ex: 6,
+      ey: 0,
+    });
+
+    const gutter = frameFromLines(['  1 code']);
+    for (let x = 0; x < 4; x++) {
+      (gutter.cells[0][x] as FrameCell).selectable = false;
+    }
+    expect(lineSpanAt(gutter, 1, 0)).toEqual({
+      sx: 4,
+      sy: 0,
+      ex: 7,
+      ey: 0,
+    });
+  });
+
+  it('snaps a non-selectable wide-character spacer to its glyph', () => {
+    const frame = frameFromLines(['中']);
+    (frame.cells[0][1] as FrameCell).selectable = false;
+
+    expect(lineSpanAt(frame, 1, 0)).toEqual({
+      sx: 0,
+      sy: 0,
+      ex: 0,
+      ey: 0,
+    });
   });
 });

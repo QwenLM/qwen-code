@@ -11,7 +11,12 @@
 
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
-import { getCacheSafeParams, runForkedAgent } from '../utils/forkedAgent.js';
+import {
+  getCacheSafeParams,
+  getCacheSafeParamsSessionId,
+  runForkedAgent,
+  type CacheSafeParams,
+} from '../utils/forkedAgent.js';
 import { runSideQuery } from '../utils/sideQuery.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
@@ -101,13 +106,36 @@ export async function generatePromptSuggestion(
 
   try {
     // Try cache-aware forked query if enabled and params available
-    const cacheSafe = options?.enableCacheSharing ? getCacheSafeParams() : null;
+    const sessionId = config.getSessionId();
+    const cacheSafeSessionId = options?.enableCacheSharing
+      ? getCacheSafeParamsSessionId()
+      : undefined;
+    const cacheSafe =
+      cacheSafeSessionId === sessionId ? getCacheSafeParams() : null;
+    // The cache-safe slot is a process-global: in a multi-session daemon it
+    // can hold ANOTHER session's transcript + systemInstruction. Only use it
+    // when it belongs to THIS session; otherwise fall back to the
+    // session-safe base-LLM path (#9233).
+    const sessionCacheSafe =
+      cacheSafe && cacheSafe.sessionId === config.getSessionId()
+        ? cacheSafe
+        : null;
     const modelOverride = options?.model;
+    const cacheSharingState = sessionCacheSafe
+      ? 'true'
+      : cacheSafeSessionId
+        ? 'session_mismatch'
+        : 'false';
     debugLogger.debug(
-      `Generating suggestion: cacheSharing=${!!cacheSafe}, model=${modelOverride || '(default)'}`,
+      `Generating suggestion: cacheSharing=${cacheSharingState}, model=${modelOverride || '(default)'}`,
     );
-    const raw = cacheSafe
-      ? await generateViaForkedQuery(config, abortSignal, modelOverride)
+    const raw = sessionCacheSafe
+      ? await generateViaForkedQuery(
+          config,
+          sessionCacheSafe,
+          abortSignal,
+          modelOverride,
+        )
       : await generateViaBaseLlm(
           config,
           conversationHistory,
@@ -144,11 +172,10 @@ export async function generatePromptSuggestion(
 /** Generate suggestion via cache-aware forked query */
 async function generateViaForkedQuery(
   config: Config,
+  cacheSafeParams: CacheSafeParams,
   abortSignal: AbortSignal,
   modelOverride?: string,
 ): Promise<string | null> {
-  const cacheSafeParams = getCacheSafeParams();
-  if (!cacheSafeParams) return null;
   const model = modelOverride ?? config.getFastModel() ?? cacheSafeParams.model;
   const result = await runForkedAgent({
     config,
@@ -157,6 +184,7 @@ async function generateViaForkedQuery(
     jsonSchema: SUGGESTION_SCHEMA,
     model,
     preserveTools: model === cacheSafeParams.model,
+    abortSignal,
   });
 
   if (result.jsonResult) {

@@ -443,6 +443,11 @@ export type StreamEvent =
   | { type: StreamEventType.COMPRESSED; info: ChatCompressionInfo }
   | { type: StreamEventType.MODEL_FALLBACK; info: ModelFallbackInfo };
 
+export interface GeminiChatSendOptions {
+  /** Skip only the configured model fallback chain for this request. */
+  disableModelFallbacks?: boolean;
+}
+
 interface TryCompressOptions {
   originalTokenCountOverride?: number;
   trigger?: CompactTrigger;
@@ -2194,6 +2199,7 @@ export class GeminiChat {
     params: SendMessageParameters,
     prompt_id: string,
     goalContext?: GoalTurnPermit,
+    options?: GeminiChatSendOptions,
   ): Promise<AsyncGenerator<StreamEvent>> {
     const turnGoalContext = goalContext ? { ...goalContext } : undefined;
     const fullTurnRoute = model.endsWith('\0');
@@ -3617,9 +3623,10 @@ export class GeminiChat {
           // - Maximum 3 fallback transitions (capped by config normalization).
           // - Fallback is only for capacity/availability errors (429/503/529),
           //   not for auth/billing/client errors.
-          const fallbackModels = exactRoute
-            ? []
-            : self.config.getModelFallbacks();
+          const fallbackModels =
+            exactRoute || options?.disableModelFallbacks
+              ? []
+              : self.config.getModelFallbacks();
 
           if (
             fallbackModels.length > 0 &&

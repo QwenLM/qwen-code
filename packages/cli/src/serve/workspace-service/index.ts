@@ -13,6 +13,7 @@
  * takes no direct reference to the bridge.
  */
 
+import { randomUUID } from 'node:crypto';
 import { promises as fs, constants as fsConstants } from 'node:fs';
 import * as path from 'node:path';
 
@@ -88,6 +89,7 @@ import type {
   WorkspaceSkillBatchToggleResult,
   WorkspaceSkillToggleError,
   WorkspaceSkillToggleResult,
+  WorkspaceSkillToggleActivation,
   PersistDisabledSkillsBatchResult,
   WorkspaceSkillInstallRequest,
   WorkspaceSkillMutationResult,
@@ -129,6 +131,25 @@ export {
 // ---------------------------------------------------------------------------
 
 const WORKSPACE_SKILLS_SNAPSHOT_TTL_MS = 5_000;
+
+function createSkillToggleMutation(input: {
+  skills: ReadonlyArray<{ name: string; enabled: boolean }>;
+  activation: WorkspaceSkillToggleActivation;
+  sessionsRefreshed: number;
+  sessionsFailed: number;
+}) {
+  return {
+    id: randomUUID(),
+    kind: 'skill_toggle' as const,
+    skills: input.skills.map((skill) => ({
+      name: skill.name,
+      enabled: skill.enabled,
+    })),
+    activation: input.activation,
+    sessionsRefreshed: input.sessionsRefreshed,
+    sessionsFailed: input.sessionsFailed,
+  };
+}
 
 /**
  * Walk up from `inputPath` until we find an ancestor that exists on disk,
@@ -908,6 +929,12 @@ export function createDaemonWorkspaceService(
               persisted.disabled.length > 0 ? persisted.disabled : undefined,
           },
         ];
+        const mutation = createSkillToggleMutation({
+          skills: [{ name: skill.name, enabled }],
+          activation,
+          sessionsRefreshed,
+          sessionsFailed,
+        });
         for (const change of settingsChanges) {
           publishWorkspaceEvent({
             type: 'settings_changed',
@@ -915,6 +942,7 @@ export function createDaemonWorkspaceService(
               key: change.key,
               value: change.value,
               scope: 'workspace',
+              mutation,
             },
             originatorClientId: ctx.originatorClientId,
           });
@@ -959,10 +987,12 @@ export function createDaemonWorkspaceService(
       for (const requestedName of requestedSkillNames) {
         const normalizedName = requestedName.trim().toLowerCase();
         const skill = skillsByName.get(normalizedName);
-        let domainError: unknown;
         if (!skill) {
-          domainError = new WorkspaceSkillNotFoundError(requestedName);
-        } else if (skill.userInvocable === false) {
+          targets.push({ requestedName, skillName: requestedName });
+          continue;
+        }
+        let domainError: unknown;
+        if (skill.userInvocable === false) {
           domainError = new WorkspaceSkillNotToggleableError(
             skill.name,
             'not_user_invocable',
@@ -990,7 +1020,7 @@ export function createDaemonWorkspaceService(
           if (!error) throw domainError;
           targets.push({ requestedName, error });
         } else {
-          targets.push({ requestedName, skillName: skill!.name });
+          targets.push({ requestedName, skillName: skill.name });
         }
       }
 
@@ -1080,10 +1110,21 @@ export function createDaemonWorkspaceService(
           invalidateWorkspaceSkillsSnapshot();
         }
         assertActiveGeneration();
+        const mutation = createSkillToggleMutation({
+          skills: results
+            .filter((result) => result.changed)
+            .map((result) => ({
+              name: result.skillName,
+              enabled: result.enabled,
+            })),
+          activation,
+          sessionsRefreshed,
+          sessionsFailed,
+        });
         for (const change of persisted.settingsChanges) {
           publishWorkspaceEvent({
             type: 'settings_changed',
-            data: { ...change, scope: 'workspace' },
+            data: { ...change, scope: 'workspace', mutation },
             originatorClientId: ctx.originatorClientId,
           });
         }

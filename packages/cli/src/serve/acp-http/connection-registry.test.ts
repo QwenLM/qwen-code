@@ -5,8 +5,11 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
+import { EventEmitter } from 'node:events';
 import { ConnectionRegistry } from './connection-registry.js';
-import type { TransportStream } from './transport-stream.js';
+import { AcpPreAttachBudget } from './pre-attach-budget.js';
+import type { DeliveryResult, TransportStream } from './transport-stream.js';
+import { WsStream } from './ws-stream.js';
 
 class FakeStream implements TransportStream {
   isClosed = false;
@@ -19,8 +22,79 @@ class FakeStream implements TransportStream {
     this.sent.push({ message, id });
   }
 
+  async sendSerialized(payload: Buffer, id?: number): Promise<DeliveryResult> {
+    this.sent.push({ message: JSON.parse(payload.toString('utf8')), id });
+    return this.isClosed ? 'closed' : 'delivered';
+  }
+
   close(): void {
     this.isClosed = true;
+  }
+}
+
+class ControlledStream implements TransportStream {
+  isClosed = false;
+  private settle: ((result: DeliveryResult) => void) | undefined;
+
+  constructor(readonly kind: 'sse' | 'ws' = 'sse') {}
+
+  async send(): Promise<void> {}
+
+  sendSerialized(): Promise<DeliveryResult> {
+    return new Promise((resolve) => {
+      this.settle = resolve;
+    });
+  }
+
+  complete(result: DeliveryResult): void {
+    this.settle?.(result);
+  }
+
+  close(): void {
+    this.isClosed = true;
+  }
+}
+
+class PendingSessionStream implements TransportStream {
+  isClosed = false;
+  readonly sent: Array<{ message: unknown; id?: number }> = [];
+  private readonly settles: Array<(result: DeliveryResult) => void> = [];
+
+  readonly kind = 'sse' as const;
+
+  async send(): Promise<void> {}
+
+  sendSerialized(payload: Buffer, id?: number): Promise<DeliveryResult> {
+    this.sent.push({ message: JSON.parse(payload.toString('utf8')), id });
+    return new Promise((resolve) => this.settles.push(resolve));
+  }
+
+  completeAll(result: DeliveryResult): void {
+    for (const settle of this.settles.splice(0)) settle(result);
+  }
+
+  close(): void {
+    this.isClosed = true;
+  }
+}
+
+class PendingWebSocket extends EventEmitter {
+  readonly OPEN = 1;
+  readyState = this.OPEN;
+  callback: ((err?: Error) => void) | undefined;
+
+  send(_data: unknown, ...args: unknown[]): void {
+    const callback = args.at(-1);
+    this.callback =
+      typeof callback === 'function'
+        ? (callback as (err?: Error) => void)
+        : undefined;
+  }
+
+  ping(): void {}
+
+  close(): void {
+    this.readyState = 3;
   }
 }
 
@@ -133,6 +207,237 @@ describe('ConnectionRegistry.getSnapshot', () => {
     }
   });
 
+  it('keeps session frames buffered when only the connection SSE stream is live', async () => {
+    const budget = new AcpPreAttachBudget({ maxFrames: 4, maxBytes: 1024 });
+    const registry = new ConnectionRegistry(
+      undefined,
+      undefined,
+      2,
+      30 * 60_000,
+      budget,
+    );
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      const connectionStream = new FakeStream('sse');
+      conn.attachConnStream(connectionStream);
+      conn.ownSession('sess-1');
+      conn.getOrCreateSession('sess-1');
+
+      const eventDelivery = conn.sendSession('sess-1', { event: true }, 7);
+      const replyDelivery = conn.sendSessionReply('sess-1', { reply: true });
+
+      expect(connectionStream.sent).toEqual([]);
+      expect(registry.getSnapshot()).toMatchObject({
+        bufferedSessionFrames: 2,
+        preAttachOwnedFrames: 2,
+      });
+      expect(budget.snapshot().usedFrames).toBe(2);
+
+      const sessionStream = new FakeStream('sse');
+      conn.attachSessionStream('sess-1', sessionStream, new AbortController());
+
+      await expect(eventDelivery).resolves.toBe('delivered');
+      await expect(replyDelivery).resolves.toBe('delivered');
+      expect(sessionStream.sent).toEqual([
+        { message: { event: true }, id: 7 },
+        { message: { reply: true }, id: undefined },
+      ]);
+      expect(budget.snapshot().usedFrames).toBe(0);
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('hands pending gap replies to a replacement session stream without releasing their leases', async () => {
+    const budget = new AcpPreAttachBudget({ maxFrames: 4, maxBytes: 1024 });
+    const registry = new ConnectionRegistry(
+      undefined,
+      undefined,
+      2,
+      30 * 60_000,
+      budget,
+    );
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      conn.ownSession('sess-1');
+      conn.getOrCreateSession('sess-1');
+
+      const first = conn.sendSessionReply('sess-1', { reply: 1 });
+      const second = conn.sendSessionReply('sess-1', { reply: 2 });
+      const streamA = new PendingSessionStream();
+      conn.attachSessionStream('sess-1', streamA, new AbortController());
+      expect(streamA.sent).toEqual([
+        { message: { reply: 1 }, id: undefined },
+        { message: { reply: 2 }, id: undefined },
+      ]);
+      expect(budget.snapshot()).toMatchObject({
+        usedFrames: 2,
+        pendingDeliveryFrames: 2,
+      });
+
+      const streamB = new PendingSessionStream();
+      conn.attachSessionStream('sess-1', streamB, new AbortController());
+      streamA.completeAll('outcome_unknown');
+      expect(budget.snapshot()).toMatchObject({
+        usedFrames: 2,
+        pendingDeliveryFrames: 2,
+      });
+
+      const streamC = new PendingSessionStream();
+      conn.attachSessionStream('sess-1', streamC, new AbortController());
+      streamB.completeAll('outcome_unknown');
+      expect(budget.snapshot()).toMatchObject({
+        usedFrames: 2,
+        pendingDeliveryFrames: 2,
+      });
+      streamC.completeAll('delivered');
+
+      await expect(first).resolves.toBe('delivered');
+      await expect(second).resolves.toBe('delivered');
+      expect(streamC.sent).toEqual([
+        { message: { reply: 1 }, id: undefined },
+        { message: { reply: 2 }, id: undefined },
+      ]);
+      expect(budget.snapshot()).toMatchObject({
+        usedFrames: 0,
+        usedBytes: 0,
+        pendingDeliveryFrames: 0,
+      });
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('hands a pending live reply to a replacement session stream', async () => {
+    const registry = new ConnectionRegistry();
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      conn.ownSession('sess-1');
+      const streamA = new PendingSessionStream();
+      conn.attachSessionStream('sess-1', streamA, new AbortController());
+
+      const delivery = conn.sendSessionReply('sess-1', { reply: 'live' });
+      expect(streamA.sent).toEqual([
+        { message: { reply: 'live' }, id: undefined },
+      ]);
+
+      const streamB = new PendingSessionStream();
+      conn.attachSessionStream('sess-1', streamB, new AbortController());
+      streamA.completeAll('outcome_unknown');
+      streamB.completeAll('delivered');
+
+      await expect(delivery).resolves.toBe('delivered');
+      expect(streamB.sent).toEqual([
+        { message: { reply: 'live' }, id: undefined },
+      ]);
+      expect(registry.getSnapshot()).toMatchObject({
+        preAttachOwnedFrames: 0,
+        preAttachOwnedBytes: 0,
+      });
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('buffers a pending live reply when disconnect precedes the replacement stream', async () => {
+    const budget = new AcpPreAttachBudget({ maxFrames: 4, maxBytes: 1024 });
+    const registry = new ConnectionRegistry(
+      undefined,
+      undefined,
+      2,
+      30 * 60_000,
+      budget,
+    );
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      conn.ownSession('sess-1');
+      const streamA = new PendingSessionStream();
+      conn.attachSessionStream('sess-1', streamA, new AbortController());
+
+      const delivery = conn.sendSessionReply('sess-1', { reply: 'live' }, 7);
+      streamA.close();
+      streamA.completeAll('outcome_unknown');
+      conn.detachSessionStream('sess-1', streamA, 10_000);
+      await Promise.resolve();
+      expect(registry.getSnapshot()).toMatchObject({
+        bufferedSessionFrames: 1,
+        pendingDeliveryFrames: 1,
+        preAttachOwnedFrames: 1,
+        preAttachOwnedBytes: Buffer.byteLength('{"reply":"live"}'),
+      });
+      expect(budget.snapshot()).toMatchObject({
+        usedFrames: 1,
+        pendingDeliveryFrames: 1,
+      });
+
+      const streamB = new PendingSessionStream();
+      conn.attachSessionStream('sess-1', streamB, new AbortController(), 5);
+      expect(streamB.sent).toEqual([]);
+      conn.releaseDeferredSessionReplies('sess-1', 7);
+      streamB.completeAll('delivered');
+
+      await expect(delivery).resolves.toBe('delivered');
+      expect(streamB.sent).toEqual([
+        { message: { reply: 'live' }, id: undefined },
+      ]);
+      expect(budget.snapshot()).toMatchObject({
+        usedFrames: 0,
+        usedBytes: 0,
+        pendingDeliveryFrames: 0,
+      });
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('defers handed-off gap replies behind a replacement stream replay', async () => {
+    const budget = new AcpPreAttachBudget({ maxFrames: 4, maxBytes: 1024 });
+    const registry = new ConnectionRegistry(
+      undefined,
+      undefined,
+      2,
+      30 * 60_000,
+      budget,
+    );
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      conn.ownSession('sess-1');
+      conn.getOrCreateSession('sess-1');
+
+      const delivery = conn.sendSessionReply('sess-1', { reply: true });
+      const streamA = new PendingSessionStream();
+      conn.attachSessionStream('sess-1', streamA, new AbortController());
+
+      const streamB = new PendingSessionStream();
+      conn.attachSessionStream('sess-1', streamB, new AbortController(), 5);
+      streamA.completeAll('outcome_unknown');
+      expect(streamB.sent).toEqual([]);
+      expect(budget.snapshot()).toMatchObject({
+        usedFrames: 1,
+        pendingDeliveryFrames: 1,
+      });
+
+      conn.endReplayDeferral('sess-1', 5);
+      streamB.completeAll('delivered');
+      await expect(delivery).resolves.toBe('delivered');
+      expect(streamB.sent).toEqual([
+        { message: { reply: true }, id: undefined },
+      ]);
+      expect(budget.snapshot()).toMatchObject({
+        usedFrames: 0,
+        usedBytes: 0,
+        pendingDeliveryFrames: 0,
+      });
+    } finally {
+      registry.dispose();
+    }
+  });
+
   it('on resume, skips id-bearing buffered frames (ring owns them) AND defers id-less replies until flushBufferedSessionFrames (post-replay order)', () => {
     // Two regressions in one path:
     //  (1) silent-frame-loss: a frame sent to the dead socket (id below the
@@ -201,12 +506,7 @@ describe('ConnectionRegistry.getSnapshot', () => {
     }
   });
 
-  it('under a content flood the pre-attach buffer evicts id-bearing (ring-replayable) frames and keeps the irreplaceable id-less reply', () => {
-    // The buffer cap (256) is shared between id-bearing bus events (the ring
-    // redelivers them on reconnect) and id-less deferred JSON-RPC replies (the
-    // ring does NOT track them). A fast model flooding content during a detach
-    // gap must not evict the `session/prompt` reply — that would hang the
-    // caller. Eviction must prefer the replayable id-bearing frames.
+  it('retires the exact session instead of silently evicting a pre-attach frame', async () => {
     const registry = new ConnectionRegistry();
     try {
       const conn = registry.create(true);
@@ -214,104 +514,860 @@ describe('ConnectionRegistry.getSnapshot', () => {
       conn.ownSession('sess-1');
       conn.getOrCreateSession('sess-1');
 
-      // One irreplaceable id-less reply lands first, then a flood of id-bearing
-      // content frames well past the 256 cap.
-      conn.sendSessionReply('sess-1', { promptResult: true });
-      for (let i = 1; i <= 400; i++)
-        conn.sendSession('sess-1', { chunk: i }, i);
-
-      // Fresh reconnect flushes whatever survived. The id-less reply must be
-      // among the flushed frames (id-bearing frames were evicted preferentially).
-      const s = new FakeStream('sse');
-      conn.attachSessionStream('sess-1', s, new AbortController());
-      const replyDelivered = s.sent.some(
-        (x) =>
-          (x.message as { promptResult?: boolean }).promptResult === true &&
-          x.id === undefined,
-      );
-      expect(replyDelivered).toBe(true);
+      for (let i = 0; i < 256; i++) {
+        void conn.sendSession('sess-1', { chunk: i }, i);
+      }
+      await expect(
+        conn.sendSession('sess-1', { chunk: 256 }, 256),
+      ).resolves.toBe('failed');
+      expect(conn.sessions.has('sess-1')).toBe(false);
+      expect(conn.destroyed).toBe(false);
     } finally {
       registry.dispose();
     }
   });
 
-  it('never evicts an irreplaceable id-less reply even when the buffer is ENTIRELY id-less replies (no id-bearing frame to drop)', () => {
-    // Degenerate case wenshao flagged: if the gap buffer fills with only id-less
-    // deferred replies, there is no replayable frame to evict — dropping one
-    // would silently hang its caller. So pushCapped must NOT drop; it lets the
-    // irreplaceable replies exceed the soft cap (they're bounded by real
-    // in-flight RPC count, not a content flood). Every reply must survive.
-    const registry = new ConnectionRegistry();
-    const stderr = vi
-      .spyOn(process.stderr, 'write')
-      .mockImplementation(() => true);
+  it('contains a throwing detach callback during session resource failure', async () => {
+    const onDetach = vi.fn(() => {
+      throw new Error('detach failed');
+    });
+    const registry = new ConnectionRegistry(undefined, onDetach);
     try {
       const conn = registry.create(true);
       if (!conn) return;
       conn.ownSession('sess-1');
       conn.getOrCreateSession('sess-1');
+      for (let i = 0; i < 256; i++) {
+        void conn.sendSession('sess-1', { chunk: i }, i);
+      }
 
-      // Far past the 256 soft cap but under the 1024 hard cap: ALL id-less
-      // replies (no id-bearing frames).
-      const N = 300;
-      for (let i = 0; i < N; i++) conn.sendSessionReply('sess-1', { reply: i });
-
-      // Fresh reconnect flushes everything — not one reply was evicted.
-      const s = new FakeStream('sse');
-      conn.attachSessionStream('sess-1', s, new AbortController());
-      const replyIds = s.sent
-        .map((x) => (x.message as { reply?: number }).reply)
-        .filter((v) => typeof v === 'number');
-      expect(replyIds).toHaveLength(N);
-      expect(new Set(replyIds).size).toBe(N); // all distinct, none lost
-
-      // The soft-cap warning is the operator's only signal it was exceeded —
-      // assert it fired (exactly once, at the transition, not per push).
-      const softCapLogs = stderr.mock.calls.filter((c) =>
-        String(c[0]).includes('pre-attach buffer over soft cap'),
-      );
-      expect(softCapLogs).toHaveLength(1);
+      await expect(
+        conn.sendSession('sess-1', { chunk: 256 }, 256),
+      ).resolves.toBe('failed');
+      expect(onDetach).toHaveBeenCalledOnce();
+      expect(conn.sessions.has('sess-1')).toBe(false);
+      expect(registry.get(conn.connectionId)).toBe(conn);
     } finally {
-      stderr.mockRestore();
       registry.dispose();
     }
   });
 
-  it('enforces a HARD ceiling on all-id-less buffer growth (defense-in-depth) — drops oldest and logs loudly past 4× the soft cap', () => {
-    // The soft cap never drops id-less replies, but an UNBOUNDED heap is worse
-    // than a hung caller — so past the 1024 hard cap pushCapped drops the oldest
-    // id-less reply and logs loudly. Bounds a pathological / buggy producer.
+  it('retires the connection when its connection-scoped stream reaches the hard frame cap', async () => {
+    const registry = new ConnectionRegistry(undefined, undefined, 2);
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      for (let i = 0; i < 256; i++) void conn.sendConn({ reply: i });
+      await expect(conn.sendConn({ reply: 256 })).resolves.toBe('failed');
+      expect(registry.get(conn.connectionId)).toBeUndefined();
+      expect(conn.destroyed).toBe(true);
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('discards every provisional receipt when overflow retires a connection', async () => {
     const registry = new ConnectionRegistry();
-    const stderr = vi
-      .spyOn(process.stderr, 'write')
-      .mockImplementation(() => true);
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      const delivered = vi.fn();
+      const discarded = vi.fn();
+      for (let i = 0; i < 256; i++) {
+        void conn.sendConn({ reply: i }, { delivered, discarded });
+      }
+      await expect(
+        conn.sendConn({ reply: 256 }, { delivered, discarded }),
+      ).resolves.toBe('failed');
+      expect(delivered).not.toHaveBeenCalled();
+      expect(discarded).toHaveBeenCalledTimes(257);
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('bounds retained serialized payload bytes before stream attachment', async () => {
+    const registry = new ConnectionRegistry(
+      undefined,
+      undefined,
+      2,
+      30 * 60_000,
+      undefined,
+      1024,
+      1024,
+    );
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      await expect(conn.sendConn({ value: 'x'.repeat(2048) })).resolves.toBe(
+        'failed',
+      );
+      expect(conn.destroyed).toBe(true);
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('enforces the connection frame cap across distinct session streams', async () => {
+    const registry = new ConnectionRegistry(
+      undefined,
+      undefined,
+      2,
+      30 * 60_000,
+      undefined,
+      2,
+    );
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      for (const sessionId of ['sess-1', 'sess-2', 'sess-3']) {
+        conn.ownSession(sessionId);
+        conn.getOrCreateSession(sessionId);
+      }
+      void conn.sendSession('sess-1', { first: true });
+      void conn.sendSession('sess-2', { second: true });
+
+      await expect(
+        conn.sendSession('sess-3', { overflow: true }),
+      ).resolves.toBe('failed');
+      expect(registry.get(conn.connectionId)).toBeUndefined();
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('accepts the exact byte limit and rejects the next byte', async () => {
+    const exactFrame = { value: 'exact' };
+    const exactBytes = Buffer.byteLength(JSON.stringify(exactFrame));
+    const registry = new ConnectionRegistry(
+      undefined,
+      undefined,
+      2,
+      30 * 60_000,
+      undefined,
+      1024,
+      exactBytes,
+    );
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      void conn.sendConn(exactFrame);
+      expect(registry.getSnapshot().preAttachOwnedBytes).toBe(exactBytes);
+      await expect(conn.sendConn('x')).resolves.toBe('failed');
+      expect(conn.destroyed).toBe(true);
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('freezes a buffered frame at serialization time', async () => {
+    const registry = new ConnectionRegistry();
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      const frame = { value: 'before' };
+      void conn.sendConn(frame);
+      frame.value = 'after';
+      const stream = new FakeStream('sse');
+      conn.attachConnStream(stream);
+      expect(stream.sent).toEqual([
+        { message: { value: 'before' }, id: undefined },
+      ]);
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('limits a live session serialization failure to its independent stream', async () => {
+    const registry = new ConnectionRegistry();
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      conn.ownSession('sess-1');
+      conn.attachSessionStream(
+        'sess-1',
+        new FakeStream('sse'),
+        new AbortController(),
+      );
+      const frame: { self?: unknown } = {};
+      frame.self = frame;
+      await expect(conn.sendSession('sess-1', frame)).resolves.toBe('failed');
+      expect(conn.sessions.has('sess-1')).toBe(false);
+      expect(registry.get(conn.connectionId)).toBe(conn);
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it.each([
+    ['BigInt', { value: 1n }],
+    ['undefined', undefined],
+  ])(
+    'retires the exact buffered owner for an unserializable %s frame',
+    async (_, frame) => {
+      const registry = new ConnectionRegistry();
+      try {
+        const conn = registry.create(true);
+        if (!conn) return;
+        conn.ownSession('sess-1');
+        conn.getOrCreateSession('sess-1');
+
+        await expect(conn.sendSession('sess-1', frame)).resolves.toBe('failed');
+        expect(conn.sessions.has('sess-1')).toBe(false);
+        expect(registry.get(conn.connectionId)).toBe(conn);
+      } finally {
+        registry.dispose();
+      }
+    },
+  );
+
+  it('shares the daemon budget across workspace registries', async () => {
+    const budget = new AcpPreAttachBudget({ maxFrames: 2, maxBytes: 1024 });
+    const primary = new ConnectionRegistry(
+      undefined,
+      undefined,
+      2,
+      30 * 60_000,
+      budget,
+    );
+    const secondary = new ConnectionRegistry(
+      undefined,
+      undefined,
+      2,
+      30 * 60_000,
+      budget,
+    );
+    try {
+      const primaryConn = primary.create(true);
+      const secondaryConn = secondary.create(true);
+      if (!primaryConn || !secondaryConn) return;
+      void primaryConn.sendConn({ source: 'primary' });
+      void secondaryConn.sendConn({ source: 'secondary' });
+      expect(budget.snapshot().usedFrames).toBe(2);
+
+      await expect(
+        secondaryConn.sendConn({ source: 'overflow' }),
+      ).resolves.toBe('failed');
+      expect(secondary.get(secondaryConn.connectionId)).toBeUndefined();
+      expect(primary.get(primaryConn.connectionId)).toBe(primaryConn);
+      expect(budget.snapshot().usedFrames).toBe(1);
+
+      primary.dispose();
+      expect(budget.snapshot().usedFrames).toBe(0);
+    } finally {
+      primary.dispose();
+      secondary.dispose();
+    }
+  });
+
+  it('shares the daemon byte budget across workspace registries', async () => {
+    const frame = { value: 'payload' };
+    const bytes = Buffer.byteLength(JSON.stringify(frame));
+    const budget = new AcpPreAttachBudget({ maxFrames: 10, maxBytes: bytes });
+    const primary = new ConnectionRegistry(
+      undefined,
+      undefined,
+      2,
+      30 * 60_000,
+      budget,
+    );
+    const secondary = new ConnectionRegistry(
+      undefined,
+      undefined,
+      2,
+      30 * 60_000,
+      budget,
+    );
+    try {
+      const primaryConn = primary.create(true);
+      const secondaryConn = secondary.create(true);
+      if (!primaryConn || !secondaryConn) return;
+      void primaryConn.sendConn(frame);
+
+      await expect(secondaryConn.sendConn(frame)).resolves.toBe('failed');
+      expect(secondary.get(secondaryConn.connectionId)).toBeUndefined();
+      expect(primary.get(primaryConn.connectionId)).toBe(primaryConn);
+      expect(budget.snapshot().usedBytes).toBe(bytes);
+    } finally {
+      primary.dispose();
+      secondary.dispose();
+    }
+  });
+
+  it('keeps a lease until an in-flight delivery settles after teardown', async () => {
+    const budget = new AcpPreAttachBudget({ maxFrames: 4, maxBytes: 1024 });
+    const registry = new ConnectionRegistry(
+      undefined,
+      undefined,
+      2,
+      30 * 60_000,
+      budget,
+    );
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      const delivery = conn.sendConn({ buffered: true });
+      const stream = new ControlledStream();
+      conn.attachConnStream(stream);
+      expect(budget.snapshot()).toMatchObject({
+        usedFrames: 1,
+        pendingDeliveryFrames: 1,
+      });
+
+      registry.delete(conn.connectionId);
+      expect(budget.snapshot()).toMatchObject({
+        usedFrames: 1,
+        pendingDeliveryFrames: 1,
+      });
+
+      stream.complete('closed');
+      await expect(delivery).resolves.toBe('closed');
+      expect(budget.snapshot()).toMatchObject({
+        usedFrames: 0,
+        usedBytes: 0,
+        pendingDeliveryFrames: 0,
+      });
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('requeues a connection reply when its live stream closes before delivery', async () => {
+    const budget = new AcpPreAttachBudget({ maxFrames: 4, maxBytes: 1024 });
+    const registry = new ConnectionRegistry(
+      undefined,
+      undefined,
+      2,
+      30 * 60_000,
+      budget,
+    );
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      const first = new ControlledStream();
+      conn.attachConnStream(first);
+      const delivered = vi.fn();
+      const discarded = vi.fn();
+      const frame = { id: 42, result: { ok: true } };
+      const delivery = conn.sendConn(frame, { delivered, discarded });
+
+      first.close();
+      first.complete('closed');
+      await vi.waitFor(() =>
+        expect(registry.getSnapshot().bufferedConnectionFrames).toBe(1),
+      );
+      expect(budget.snapshot()).toMatchObject({
+        usedFrames: 1,
+        usedBytes: Buffer.byteLength(JSON.stringify(frame)),
+      });
+      expect(delivered).not.toHaveBeenCalled();
+      expect(discarded).not.toHaveBeenCalled();
+
+      const replacement = new FakeStream('sse');
+      conn.attachConnStream(replacement);
+      await expect(delivery).resolves.toBe('delivered');
+      expect(replacement.sent).toEqual([
+        { message: { id: 42, result: { ok: true } }, id: undefined },
+      ]);
+      expect(delivered).toHaveBeenCalledOnce();
+      expect(discarded).not.toHaveBeenCalled();
+      expect(budget.snapshot()).toMatchObject({
+        usedFrames: 0,
+        usedBytes: 0,
+        pendingDeliveryFrames: 0,
+      });
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('settles a pending delivery against its original session binding', async () => {
+    const budget = new AcpPreAttachBudget({ maxFrames: 4, maxBytes: 1024 });
+    const registry = new ConnectionRegistry(
+      undefined,
+      undefined,
+      2,
+      30 * 60_000,
+      budget,
+    );
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      conn.ownSession('sess-1');
+      const original = conn.getOrCreateSession('sess-1');
+      const originalDelivery = conn.sendSession('sess-1', { original: true });
+      const stream = new ControlledStream();
+      conn.attachSessionStream('sess-1', stream, new AbortController());
+
+      conn.closeSessionStream('sess-1');
+      conn.ownSession('sess-1');
+      const replacement = conn.getOrCreateSession('sess-1');
+      const replacementDelivery = conn.sendSession('sess-1', {
+        replacement: true,
+      });
+      expect(original.ownedFrames).toBe(1);
+      expect(replacement.ownedFrames).toBe(1);
+
+      stream.complete('closed');
+      await expect(originalDelivery).resolves.toBe('closed');
+      expect(original.ownedFrames).toBe(0);
+      expect(replacement.ownedFrames).toBe(1);
+      expect(budget.snapshot().usedFrames).toBe(1);
+
+      conn.closeSessionStream('sess-1');
+      await expect(replacementDelivery).resolves.toBe('closed');
+      expect(budget.snapshot().usedFrames).toBe(0);
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('tombstones session ownership before teardown callbacks can re-enter', () => {
+    const registry = new ConnectionRegistry();
     try {
       const conn = registry.create(true);
       if (!conn) return;
       conn.ownSession('sess-1');
       conn.getOrCreateSession('sess-1');
+      const identity = conn.captureSessionOwnershipIdentity('sess-1');
 
-      const N = 1100; // past the 1024 hard cap
-      for (let i = 0; i < N; i++) conn.sendSessionReply('sess-1', { reply: i });
+      conn.closeSessionStream('sess-1');
 
-      const s = new FakeStream('sse');
-      conn.attachSessionStream('sess-1', s, new AbortController());
-      const replyIds = s.sent
-        .map((x) => (x.message as { reply?: number }).reply)
-        .filter((v): v is number => typeof v === 'number');
-
-      // Buffer bounded at the hard cap (1024); the OLDEST were dropped, so the
-      // most-recent survive.
-      expect(replyIds).toHaveLength(1024);
-      expect(replyIds).toContain(N - 1); // newest kept
-      expect(replyIds).not.toContain(0); // oldest dropped
-      expect(
-        stderr.mock.calls.some((c) =>
-          String(c[0]).includes('HARD buffer cap breached'),
-        ),
-      ).toBe(true);
+      expect(conn.canCommitSessionOwnership('sess-1', identity)).toBe(false);
     } finally {
-      stderr.mockRestore();
+      registry.dispose();
+    }
+  });
+
+  it('rejects a deferred ownership grant after the same session was closed', () => {
+    const registry = new ConnectionRegistry();
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      const first = conn.captureSessionOwnershipIdentity('sess-1');
+      const deferred = conn.captureSessionOwnershipIdentity('sess-1');
+
+      expect(conn.canCommitSessionOwnership('sess-1', first)).toBe(true);
+      conn.getOrCreateSession('sess-1');
+      conn.ownSession('sess-1');
+      conn.releaseSessionOwnershipIdentity('sess-1', first);
+      conn.closeSessionStream('sess-1');
+
+      expect(conn.canCommitSessionOwnership('sess-1', deferred)).toBe(false);
+      conn.releaseSessionOwnershipIdentity('sess-1', deferred);
+
+      const replacement = conn.captureSessionOwnershipIdentity('sess-1');
+      expect(conn.canCommitSessionOwnership('sess-1', replacement)).toBe(true);
+      expect(replacement.generation).toBe(0);
+      conn.releaseSessionOwnershipIdentity('sess-1', replacement);
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('rejects an ownership commit while session/close is in flight', () => {
+    const registry = new ConnectionRegistry();
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      const identity = conn.captureSessionOwnershipIdentity('sess-1');
+      conn.closingSessions.add('sess-1');
+
+      expect(conn.canCommitSessionOwnership('sess-1', identity)).toBe(false);
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('treats session overflow as connection-fatal on a shared WebSocket before lazy attachment', async () => {
+    const registry = new ConnectionRegistry();
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      conn.ownSession('sess-1');
+      conn.getOrCreateSession('sess-1');
+      for (let i = 0; i < 256; i++) {
+        void conn.sendSession('sess-1', { chunk: i }, i);
+      }
+      conn.attachConnStream(new ControlledStream('ws'));
+
+      await expect(
+        conn.sendSession('sess-1', { chunk: 256 }, 256),
+      ).resolves.toBe('failed');
+      expect(registry.get(conn.connectionId)).toBeUndefined();
+      expect(conn.destroyed).toBe(true);
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('limits an independently attached SSE session without closing its WebSocket connection', async () => {
+    const registry = new ConnectionRegistry();
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      conn.attachConnStream(new FakeStream('ws'));
+      conn.ownSession('sess-1');
+      const sessionStream = new FakeStream('sse');
+      conn.attachSessionStream('sess-1', sessionStream, new AbortController());
+      const frame: { self?: unknown } = {};
+      frame.self = frame;
+
+      await expect(conn.sendSession('sess-1', frame)).resolves.toBe('failed');
+      expect(conn.sessions.has('sess-1')).toBe(false);
+      expect(registry.get(conn.connectionId)).toBe(conn);
+      expect(conn.destroyed).toBe(false);
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('limits a detached SSE session without closing its WebSocket connection', async () => {
+    const registry = new ConnectionRegistry();
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      const connectionStream = new FakeStream('ws');
+      conn.attachConnStream(connectionStream);
+      conn.ownSession('sess-1');
+      const sessionStream = new FakeStream('sse');
+      conn.attachSessionStream('sess-1', sessionStream, new AbortController());
+      conn.detachSessionStream('sess-1', sessionStream, 10_000);
+      const frame: { self?: unknown } = {};
+      frame.self = frame;
+
+      await expect(conn.sendSession('sess-1', frame)).resolves.toBe('failed');
+      expect(conn.sessions.has('sess-1')).toBe(false);
+      expect(registry.get(conn.connectionId)).toBe(conn);
+      expect(connectionStream.isClosed).toBe(false);
+      expect(conn.destroyed).toBe(false);
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('discards a live provisional receipt when teardown beats delivery', async () => {
+    const registry = new ConnectionRegistry();
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      const stream = new ControlledStream();
+      conn.attachConnStream(stream);
+      const delivered = vi.fn();
+      const discarded = vi.fn();
+      const send = conn.sendConn(
+        { sessionId: 'provisional' },
+        { delivered, discarded },
+      );
+
+      registry.delete(conn.connectionId);
+      await vi.waitFor(() => expect(discarded).toHaveBeenCalledOnce());
+      expect(delivered).not.toHaveBeenCalled();
+
+      stream.complete('delivered');
+      await expect(send).resolves.toBe('delivered');
+      expect(discarded).toHaveBeenCalledOnce();
+      expect(delivered).not.toHaveBeenCalled();
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('commits a provisional receipt when local delivery is ambiguous', async () => {
+    const registry = new ConnectionRegistry();
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      const stream = new ControlledStream();
+      conn.attachConnStream(stream);
+      const delivered = vi.fn();
+      const discarded = vi.fn();
+      const send = conn.sendConn(
+        { sessionId: 'provisional' },
+        { delivered, discarded },
+      );
+
+      stream.complete('outcome_unknown');
+      await expect(send).resolves.toBe('outcome_unknown');
+      expect(delivered).toHaveBeenCalledOnce();
+      expect(discarded).not.toHaveBeenCalled();
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('lets an ambiguous delivery settle before destroy discards receipts', async () => {
+    const registry = new ConnectionRegistry();
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      const stream = new ControlledStream();
+      conn.attachConnStream(stream);
+      const delivered = vi.fn();
+      const discarded = vi.fn();
+      const outcomeUnknown = vi.fn();
+      const send = conn.sendConn(
+        { sessionId: 'provisional' },
+        { delivered, discarded, outcomeUnknown },
+      );
+
+      registry.delete(conn.connectionId);
+      stream.complete('outcome_unknown');
+      await expect(send).resolves.toBe('outcome_unknown');
+      expect(outcomeUnknown).toHaveBeenCalledOnce();
+      expect(delivered).not.toHaveBeenCalled();
+      expect(discarded).not.toHaveBeenCalled();
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('preserves an active WebSocket receipt when close makes delivery ambiguous', async () => {
+    const registry = new ConnectionRegistry();
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      const socket = new PendingWebSocket();
+      conn.attachConnStream(new WsStream(socket as never));
+      const delivered = vi.fn();
+      const discarded = vi.fn();
+      const outcomeUnknown = vi.fn();
+      const send = conn.sendConn(
+        { sessionId: 'provisional' },
+        { delivered, discarded, outcomeUnknown },
+      );
+      await vi.waitFor(() => expect(socket.callback).toBeDefined());
+
+      registry.delete(conn.connectionId);
+
+      await expect(send).resolves.toBe('outcome_unknown');
+      expect(outcomeUnknown).toHaveBeenCalledOnce();
+      expect(delivered).not.toHaveBeenCalled();
+      expect(discarded).not.toHaveBeenCalled();
+      socket.callback?.();
+      expect(outcomeUnknown).toHaveBeenCalledOnce();
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('preserves an active WebSocket receipt when peer loss reaches the send callback first', async () => {
+    const registry = new ConnectionRegistry();
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      const socket = new PendingWebSocket();
+      conn.attachConnStream(
+        new WsStream(socket as never, () => registry.delete(conn.connectionId)),
+      );
+      const delivered = vi.fn();
+      const discarded = vi.fn();
+      const outcomeUnknown = vi.fn();
+      const send = conn.sendConn(
+        { sessionId: 'provisional' },
+        { delivered, discarded, outcomeUnknown },
+      );
+      await vi.waitFor(() => expect(socket.callback).toBeDefined());
+
+      socket.callback?.(new Error('socket closed'));
+      socket.readyState = 3;
+      socket.emit('close');
+
+      await expect(send).resolves.toBe('outcome_unknown');
+      expect(outcomeUnknown).toHaveBeenCalledOnce();
+      expect(delivered).not.toHaveBeenCalled();
+      expect(discarded).not.toHaveBeenCalled();
+      expect(registry.get(conn.connectionId)).toBeUndefined();
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it.each([
+    ['live', { value: 1n }],
+    [
+      'buffered',
+      (() => {
+        const frame: { self?: unknown } = {};
+        frame.self = frame;
+        return frame;
+      })(),
+    ],
+  ])(
+    'contains a %s connection response serialization failure to one frame',
+    async (mode, frame) => {
+      const registry = new ConnectionRegistry();
+      try {
+        const conn = registry.create(true);
+        if (!conn) return;
+        for (const sessionId of ['sess-1', 'sess-2']) {
+          conn.ownSession(sessionId);
+          conn.getOrCreateSession(sessionId);
+        }
+        if (mode === 'live') conn.attachConnStream(new FakeStream('sse'));
+
+        await expect(conn.sendConn(frame)).resolves.toBe('failed');
+        expect(registry.get(conn.connectionId)).toBe(conn);
+        expect(conn.destroyed).toBe(false);
+        expect(conn.ownedSessions).toEqual(new Set(['sess-1', 'sess-2']));
+        expect(conn.sessions.get('sess-1')?.abort.signal.aborted).toBe(false);
+        expect(conn.sessions.get('sess-2')?.abort.signal.aborted).toBe(false);
+      } finally {
+        registry.dispose();
+      }
+    },
+  );
+
+  it('settles delivery when a delivered receipt callback throws', async () => {
+    const budget = new AcpPreAttachBudget({ maxFrames: 1, maxBytes: 1024 });
+    const registry = new ConnectionRegistry(
+      undefined,
+      undefined,
+      2,
+      30 * 60_000,
+      budget,
+    );
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      const delivery = conn.sendConn(
+        { reply: true },
+        {
+          delivered: () => {
+            throw new Error('delivered callback failed');
+          },
+          discarded: vi.fn(),
+        },
+      );
+
+      conn.attachConnStream(new FakeStream('sse'));
+
+      await expect(delivery).resolves.toBe('delivered');
+      expect(budget.snapshot().usedFrames).toBe(0);
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('continues teardown when a discarded receipt callback throws', async () => {
+    const registry = new ConnectionRegistry();
+    const conn = registry.create(true);
+    if (!conn) return;
+    const delivery = conn.sendConn(
+      { reply: true },
+      {
+        delivered: vi.fn(),
+        discarded: () => {
+          throw new Error('discarded callback failed');
+        },
+      },
+    );
+
+    expect(() => registry.delete(conn.connectionId)).not.toThrow();
+    await expect(delivery).resolves.toBe('closed');
+    registry.dispose();
+  });
+
+  it('revalidates connection identity after serialization re-entry', async () => {
+    const budget = new AcpPreAttachBudget({ maxFrames: 4, maxBytes: 1024 });
+    const registry = new ConnectionRegistry(
+      undefined,
+      undefined,
+      2,
+      30 * 60_000,
+      budget,
+    );
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      const frame = {
+        toJSON: () => {
+          registry.delete(conn.connectionId);
+          return { stale: true };
+        },
+      };
+      await expect(conn.sendConn(frame)).resolves.toBe('closed');
+      expect(budget.snapshot()).toMatchObject({ usedFrames: 0, usedBytes: 0 });
+      expect(registry.get(conn.connectionId)).toBeUndefined();
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('revalidates connection identity after getter re-entry', async () => {
+    const budget = new AcpPreAttachBudget({ maxFrames: 4, maxBytes: 1024 });
+    const registry = new ConnectionRegistry(
+      undefined,
+      undefined,
+      2,
+      30 * 60_000,
+      budget,
+    );
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      const frame = Object.defineProperty({}, 'value', {
+        enumerable: true,
+        get: () => {
+          registry.delete(conn.connectionId);
+          return 'stale';
+        },
+      });
+
+      await expect(conn.sendConn(frame)).resolves.toBe('closed');
+      expect(budget.snapshot()).toMatchObject({ usedFrames: 0, usedBytes: 0 });
+      expect(registry.get(conn.connectionId)).toBeUndefined();
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('rejects a buffered frame when serialization re-entry replaces its stream', async () => {
+    const budget = new AcpPreAttachBudget({ maxFrames: 4, maxBytes: 1024 });
+    const registry = new ConnectionRegistry(
+      undefined,
+      undefined,
+      2,
+      30 * 60_000,
+      budget,
+    );
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      const replacement = new FakeStream('sse');
+      const frame = Object.defineProperty({}, 'value', {
+        enumerable: true,
+        get: () => {
+          conn.attachConnStream(replacement);
+          return 'stale';
+        },
+      });
+
+      await expect(conn.sendConn(frame)).resolves.toBe('closed');
+      expect(replacement.sent).toEqual([]);
+      expect(budget.snapshot()).toMatchObject({ usedFrames: 0, usedBytes: 0 });
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('does not fail a replacement stream when stale serialization re-entry throws', async () => {
+    const registry = new ConnectionRegistry();
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      const replacement = new FakeStream('sse');
+      const frame = {
+        toJSON: () => {
+          conn.attachConnStream(replacement);
+          throw new Error('stale serialization failed');
+        },
+      };
+
+      await expect(conn.sendConn(frame)).resolves.toBe('closed');
+      expect(conn.destroyed).toBe(false);
+      expect(conn.connStream).toBe(replacement);
+    } finally {
       registry.dispose();
     }
   });
@@ -675,6 +1731,39 @@ describe('ConnectionRegistry.getSnapshot', () => {
         { message: { chunk: 8 }, id: 8 },
         { message: { chunk: 9 }, id: 9 },
         { message: { promptResult: true }, id: undefined },
+      ]);
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('does not let a later reply overtake an earlier watermark-gated reply after replay completes', () => {
+    const registry = new ConnectionRegistry();
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      conn.ownSession('sess-1');
+      conn.getOrCreateSession('sess-1');
+
+      const stream = new FakeStream('sse');
+      conn.attachSessionStream('sess-1', stream, new AbortController(), 5);
+
+      void conn.sendSessionReply('sess-1', { first: true }, 9);
+      conn.endReplayDeferral('sess-1', 7);
+      expect(stream.sent).toEqual([]);
+
+      void conn.sendSessionReply('sess-1', { second: true }, 10);
+      expect(stream.sent).toEqual([]);
+
+      conn.releaseDeferredSessionReplies('sess-1', 9);
+      expect(stream.sent).toEqual([
+        { message: { first: true }, id: undefined },
+      ]);
+
+      conn.releaseDeferredSessionReplies('sess-1', 10);
+      expect(stream.sent).toEqual([
+        { message: { first: true }, id: undefined },
+        { message: { second: true }, id: undefined },
       ]);
     } finally {
       registry.dispose();

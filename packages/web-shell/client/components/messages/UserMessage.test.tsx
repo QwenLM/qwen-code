@@ -368,6 +368,17 @@ describe('UserMessage', () => {
     );
   });
 
+  it('renders file attachment chips when provided', () => {
+    const container = render(
+      <UserMessage
+        content="check this"
+        files={[{ name: 'app.log', mimeType: 'text/plain' }]}
+      />,
+    );
+    expect(container.textContent).toContain('check this');
+    expect(container.textContent).toContain('app.log');
+  });
+
   it('uses a custom content renderer when provided', () => {
     const container = render(
       <WebShellCustomizationProvider
