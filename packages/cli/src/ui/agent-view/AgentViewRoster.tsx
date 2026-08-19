@@ -30,6 +30,7 @@ import { FOCUS_IN, FOCUS_OUT } from '../hooks/useFocus.js';
 import {
   cleanSingleLineText,
   stripUnsafeCharacters,
+  truncateToWidth,
 } from '../utils/textUtils.js';
 
 export interface AgentViewHeaderInfo {
@@ -287,6 +288,7 @@ export function AgentViewRoster({
       if (peekInputActive) {
         const submittedPeekPrompt = `${peekPromptRef.current}${returnPrefix}`;
         if (submittedPeekPrompt.trim()) {
+          peekPromptRef.current = '';
           onSubmitPeekPrompt(submittedPeekPrompt);
         } else if (rows.length > 0) {
           onAttachSelected(peekRow?.sessionId);
@@ -1097,18 +1099,6 @@ function formatRosterRowColumns({
     output: truncateToWidth(output, outputWidth),
     ageLabel,
   };
-}
-
-function truncateToWidth(value: string, width: number): string {
-  if (stringWidth(value) <= width) return value;
-  let result = '';
-  for (const char of [...value]) {
-    if (stringWidth(`${result}${char}...`) > width) {
-      return `${result}...`;
-    }
-    result += char;
-  }
-  return result;
 }
 
 function padEndToWidth(value: string, width: number): string {

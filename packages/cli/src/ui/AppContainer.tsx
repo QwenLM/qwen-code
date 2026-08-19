@@ -2324,7 +2324,6 @@ export const AppContainer = (props: AppContainerProps) => {
     dialogOpen: bgTasksDialogOpen,
     entries: bgTaskEntries,
     livePanelFocused: bgLivePanelFocused,
-    pillFocused: bgPillFocused,
   } = useBackgroundTaskViewState();
   const { closeDialog: closeBgTasksDialog } = useBackgroundTaskViewActions();
 
@@ -4239,27 +4238,6 @@ export const AppContainer = (props: AppContainerProps) => {
         return;
       }
 
-      if (
-        key.name === 'left' &&
-        !key.ctrl &&
-        !key.meta &&
-        !key.shift &&
-        agentViewState.activeView === 'main' &&
-        !agentViewState.agentTabBarFocused &&
-        !agentViewState.agentShellFocused &&
-        !bgLivePanelFocused &&
-        !bgPillFocused &&
-        !activePtyId &&
-        !embeddedShellFocused &&
-        buffer.text.length === 0 &&
-        !dialogsVisibleRef.current
-      ) {
-        if (readAgentViewWorkerSidebandEnv() !== undefined) {
-          void detachAgentViewSession();
-        }
-        return;
-      }
-
       if (keyMatchers[Command.QUIT](key)) {
         if (isAuthenticating) {
           return;
@@ -4500,11 +4478,6 @@ export const AppContainer = (props: AppContainerProps) => {
       buffer,
       handleSlashCommand,
       activePtyId,
-      agentViewState.activeView,
-      agentViewState.agentShellFocused,
-      agentViewState.agentTabBarFocused,
-      bgLivePanelFocused,
-      bgPillFocused,
       embeddedShellFocused,
       btwItem,
       setBtwItem,
@@ -4520,7 +4493,6 @@ export const AppContainer = (props: AppContainerProps) => {
       vimEnabled,
       vimMode,
       setThoughtExpanded,
-      detachAgentViewSession,
     ],
   );
 

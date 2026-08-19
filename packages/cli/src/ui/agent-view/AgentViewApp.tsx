@@ -510,6 +510,7 @@ export function AgentViewApp({
       if (!remove) {
         showRemoveHint('Stopped. Press Ctrl+X again to remove.');
       }
+      const stopRequest = remove ? undefined : lastStopRequestRef.current;
       void (async () => {
         try {
           if (remove) {
@@ -522,16 +523,20 @@ export function AgentViewApp({
             setNotice({ lines: ['Removed.'] });
           }
         } catch (error) {
-          if (!remove) {
+          const ownsStopRequest =
+            remove || lastStopRequestRef.current === stopRequest;
+          if (!remove && ownsStopRequest) {
             lastStopRequestRef.current = undefined;
             if (stopRemoveTimerRef.current) {
               clearTimeout(stopRemoveTimerRef.current);
               stopRemoveTimerRef.current = undefined;
             }
           }
-          setNotice({
-            lines: [error instanceof Error ? error.message : String(error)],
-          });
+          if (ownsStopRequest) {
+            setNotice({
+              lines: [error instanceof Error ? error.message : String(error)],
+            });
+          }
         }
       })();
     },

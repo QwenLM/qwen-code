@@ -610,6 +610,31 @@ describe('agents command', () => {
     expect(renderCount).toBe(2);
   });
 
+  it('renders an error panel when the initial roster load fails', async () => {
+    const supervisor = {
+      ...mockSupervisor,
+      list: vi.fn(async () => {
+        throw new Error('supervisor unavailable');
+      }),
+    };
+
+    await expect(
+      runAgentsInteractiveSession({
+        cwd: '/tmp/workspace',
+        supervisor,
+        renderRoster: async (rows, _actions, initialPeekPanel) => {
+          expect(rows).toEqual([]);
+          expect(initialPeekPanel).toEqual({
+            title: 'Agent View',
+            lines: ['supervisor unavailable'],
+            error: true,
+          });
+          return { type: 'exit' };
+        },
+      }),
+    ).resolves.toBeUndefined();
+  });
+
   it('adopts a picked history session when the roster requests resume', async () => {
     let renderCount = 0;
     const supervisor = {
@@ -731,6 +756,30 @@ describe('agents command', () => {
         return { type: 'exit' };
       },
     });
+  });
+
+  it('shows picker failures in a persistent error panel', async () => {
+    mockShowResumeSessionPickerItem.mockRejectedValueOnce(
+      new Error('cannot read session history'),
+    );
+    let renderCount = 0;
+
+    await runAgentsInteractiveSession({
+      cwd: '/tmp/workspace',
+      supervisor: mockSupervisor,
+      renderRoster: async (_rows, _actions, initialPeekPanel) => {
+        renderCount += 1;
+        if (renderCount === 1) return { type: 'resume' };
+        expect(initialPeekPanel).toEqual({
+          title: 'Resume',
+          lines: ['cannot read session history'],
+          error: true,
+        });
+        return { type: 'exit' };
+      },
+    });
+
+    expect(renderCount).toBe(2);
   });
 
   it('sends and answers selected sessions through the supervisor', async () => {

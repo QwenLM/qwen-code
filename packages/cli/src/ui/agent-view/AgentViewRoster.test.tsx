@@ -378,6 +378,26 @@ describe('AgentViewRoster', () => {
     expect(onSubmitPeekPrompt).toHaveBeenCalledWith('x');
   });
 
+  it('does not resurrect a submitted peek reply in the same tick', () => {
+    const onPeekPromptChange = vi.fn();
+    const onSubmitPeekPrompt = vi.fn();
+
+    renderRoster({
+      peekPanel: { title: 'alpha', lines: ['Result: ready'] },
+      peekInputMode: 'send',
+      peekInputTarget: 'alpha',
+      onPeekPromptChange,
+      onSubmitPeekPrompt,
+    });
+
+    press('x', {});
+    press('', { return: true });
+    press('y', {});
+
+    expect(onSubmitPeekPrompt).toHaveBeenCalledWith('x');
+    expect(onPeekPromptChange).toHaveBeenLastCalledWith('y');
+  });
+
   it('submits a non-empty peek prompt on Enter', () => {
     const onSubmitPeekPrompt = vi.fn();
 

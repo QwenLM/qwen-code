@@ -728,6 +728,46 @@ describe('AgentViewApp', () => {
     expect(removeSession).toHaveBeenCalledWith('session-1');
   });
 
+  it('preserves another session remove window when an earlier stop fails', async () => {
+    let rejectFirstStop: (error: Error) => void = () => {};
+    const rows = [row('session-a'), row('session-b')];
+    const stopSession = vi.fn((sessionId: string) =>
+      sessionId === 'session-a'
+        ? new Promise<never>((_resolve, reject) => {
+            rejectFirstStop = reject;
+          })
+        : Promise.resolve({ stopped: true }),
+    );
+    const removeSession = vi.fn(async () => ({ removed: true }));
+    const { stdin } = render(
+      <AgentViewApp
+        rows={rows}
+        actions={actions({
+          stopSession,
+          removeSession,
+          loadRows: vi.fn(async () => rows),
+        })}
+        onExit={vi.fn()}
+      />,
+    );
+
+    stdin.write('\x18');
+    await settleInput();
+    stdin.write('\u001b[B');
+    await flushInk();
+    stdin.write('\x18');
+    await flushInk();
+
+    rejectFirstStop(new Error('session-a stop failed'));
+    await flushInk();
+    stdin.write('\x18');
+    await flushInk();
+
+    expect(stopSession).toHaveBeenCalledWith('session-a');
+    expect(stopSession).toHaveBeenCalledWith('session-b');
+    expect(removeSession).toHaveBeenCalledWith('session-b');
+  });
+
   it('expires the Ctrl+X remove confirmation window', async () => {
     vi.useFakeTimers();
     const stopSession = vi.fn(async () => ({ stopped: true }));

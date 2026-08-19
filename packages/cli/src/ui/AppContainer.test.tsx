@@ -4545,6 +4545,43 @@ describe('AppContainer State Management', () => {
       expect(mockHandleSlashCommand).not.toHaveBeenCalledWith('/background');
     });
 
+    it('does not use left arrow as an Agent View detach shortcut', () => {
+      agentViewHandoffMocks.readWorkerSideband.mockReturnValue({
+        sessionId: 'session-1',
+        sidebandEndpoint: '/tmp/agent-view.sock',
+        token: 'token',
+        activeCwd: '/repo',
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      const leftKey: Key = {
+        name: 'left',
+        ctrl: false,
+        meta: false,
+        shift: false,
+        paste: false,
+        sequence: '\u001b[D',
+      };
+      for (const handleKeypress of mockedUseKeypress.mock.calls
+        .map((call) => call[0])
+        .filter(
+          (handler): handler is (key: Key) => void =>
+            typeof handler === 'function',
+        )) {
+        handleKeypress(leftKey);
+      }
+
+      expect(agentViewHandoffMocks.sendWorkerEvent).not.toHaveBeenCalled();
+    });
+
     it('does not route non-empty left arrow to Agent View background handoff', async () => {
       const mockHandleSlashCommand = vi.fn();
       mockedUseSlashCommandProcessor.mockReturnValue({

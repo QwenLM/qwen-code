@@ -149,7 +149,16 @@ export async function runAgentsInteractiveSession({
   const foregroundSubscription = supervisor.subscribe(() => {});
   try {
     while (true) {
-      const rows = await loadRows();
+      let rows: AgentRosterRow[] = [];
+      try {
+        rows = await loadRows();
+      } catch (error) {
+        initialPeekPanel = {
+          title: 'Agent View',
+          lines: [error instanceof Error ? error.message : String(error)],
+          error: true,
+        };
+      }
       const result = await renderRoster(
         rows,
         actions,
@@ -163,7 +172,18 @@ export async function runAgentsInteractiveSession({
       if (result.type === 'resume') {
         resetTerminalForRoster();
         await waitForTerminalHandoff();
-        initialPeekPanel = await adoptResumeSessionFromPicker(cwd, supervisor);
+        try {
+          initialPeekPanel = await adoptResumeSessionFromPicker(
+            cwd,
+            supervisor,
+          );
+        } catch (error) {
+          initialPeekPanel = {
+            title: 'Resume',
+            lines: [error instanceof Error ? error.message : String(error)],
+            error: true,
+          };
+        }
         resetTerminalForRoster();
         await waitForTerminalHandoff();
         continue;
