@@ -11,10 +11,10 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import {
+  DRIVE_COMPLETE_MARKER,
   buildComment,
   diffCaptureDirs,
   diffJson,
-  dropUnpairedStatus,
   isPrimitiveArray,
   maskPath,
   renderTable,
@@ -232,20 +232,6 @@ test('diffCaptureDirs: a base-only (removed) scenario is surfaced, not dropped',
   );
 });
 
-test('dropUnpairedStatus: a base predating `_status` does not report it as added', () => {
-  const before = { status: 'ok' };
-  const after = { _status: 200, status: 'ok' };
-  assert.deepEqual(dropUnpairedStatus(before, after), { status: 'ok' });
-});
-
-test('dropUnpairedStatus: once both sides carry `_status`, a change is reported', () => {
-  const before = { _status: 404, code: 'session_not_found' };
-  const after = { _status: 409, code: 'session_conflict' };
-  assert.deepEqual(dropUnpairedStatus(before, after), after);
-  const changes = diffJson(before, dropUnpairedStatus(before, after));
-  assert.deepEqual(changes.map((c) => c.path).sort(), ['_status', 'code']);
-});
-
 test('diffCaptureDirs: status-only change is a reported diff', () => {
   const before = mkdtempSync(join(tmpdir(), 'sa-before-'));
   const after = mkdtempSync(join(tmpdir(), 'sa-after-'));
@@ -261,10 +247,10 @@ test('diffCaptureDirs: status-only change is a reported diff', () => {
   ]);
 });
 
-test('diffCaptureDirs: a scenario absent from the base still reports its status', () => {
+test('diffCaptureDirs: a scenario absent from the base reports as an addition', () => {
   const before = mkdtempSync(join(tmpdir(), 'sa-before-'));
   const after = mkdtempSync(join(tmpdir(), 'sa-after-'));
-  // New scenario: no base capture at all. The shim must not swallow `_status`.
+  // New scenario: no base capture at all — every field reads as added.
   writeFileSync(
     join(after, 'new-scenario.json'),
     JSON.stringify({ _status: 400, code: 'reserved_session_source' }),
@@ -274,4 +260,59 @@ test('diffCaptureDirs: a scenario absent from the base still reports its status'
   const { sections } = diffCaptureDirs(before, after);
   const added = sections.find((s) => s.scenario === 'new-scenario');
   assert.ok(added.changes.some((c) => c.path === '_status'));
+});
+
+test('diffCaptureDirs: a base that never finished is reported as incomplete', () => {
+  const before = mkdtempSync(join(tmpdir(), 'sa-before-'));
+  const after = mkdtempSync(join(tmpdir(), 'sa-after-'));
+  // The base drive stopped after one scenario; the head captured two. Without
+  // the completion marker the second reads as "this PR adds this response".
+  writeFileSync(join(before, 'health.json'), JSON.stringify({ _status: 200 }));
+  writeFileSync(join(after, 'health.json'), JSON.stringify({ _status: 200 }));
+  writeFileSync(join(after, 'restore.json'), JSON.stringify({ _status: 409 }));
+  const partial = diffCaptureDirs(before, after);
+  assert.equal(partial.baselineIncomplete, true);
+  assert.equal(partial.baselineMissing, false);
+  assert.match(
+    buildComment(partial.sections, {
+      shortSha: 'x',
+      baselineIncomplete: partial.baselineIncomplete,
+    }),
+    /PR-base drive did not finish/,
+  );
+
+  // With the marker the same dirs are a complete baseline and say nothing.
+  writeFileSync(join(before, DRIVE_COMPLETE_MARKER), '');
+  const complete = diffCaptureDirs(before, after);
+  assert.equal(complete.baselineIncomplete, false);
+  assert.doesNotMatch(
+    buildComment(complete.sections, {
+      shortSha: 'x',
+      baselineIncomplete: complete.baselineIncomplete,
+    }),
+    /PR-base drive did not finish/,
+  );
+});
+
+test('diffCaptureDirs: an empty base stays "missing", not "incomplete"', () => {
+  const before = mkdtempSync(join(tmpdir(), 'sa-before-'));
+  const after = mkdtempSync(join(tmpdir(), 'sa-after-'));
+  writeFileSync(join(after, 'health.json'), JSON.stringify({ _status: 200 }));
+  const r = diffCaptureDirs(before, after);
+  assert.equal(r.baselineMissing, true);
+  assert.equal(r.baselineIncomplete, false);
+});
+
+test('the marker is not itself enumerated as a scenario', () => {
+  const before = mkdtempSync(join(tmpdir(), 'sa-before-'));
+  const after = mkdtempSync(join(tmpdir(), 'sa-after-'));
+  for (const d of [before, after]) {
+    writeFileSync(join(d, 'health.json'), JSON.stringify({ _status: 200 }));
+    writeFileSync(join(d, DRIVE_COMPLETE_MARKER), '');
+  }
+  const { sections } = diffCaptureDirs(before, after);
+  assert.deepEqual(
+    sections.map((s) => s.scenario),
+    ['health'],
+  );
 });

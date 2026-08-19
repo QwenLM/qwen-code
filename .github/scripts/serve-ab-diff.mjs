@@ -45,27 +45,12 @@ export function maskPath(path, patterns = DEFAULT_VOLATILE) {
 }
 
 /**
- * The drive script records `_status` on every capture; a base built from a
- * commit predating that records none. Diffing across that boundary would report
- * `_status` as "added" for every scenario — noise that says nothing about the
- * PR. Drop the head-side `_status` when the base has no counterpart. Once the
- * change is on `main` both sides carry it and this is a no-op, so it expires on
- * its own rather than becoming a permanent blind spot.
+ * Written by the drive script once every scenario has been captured. Both arms
+ * are driven by the HEAD checkout's drive script, so the two capture dirs always
+ * have the same scenario set — unless one of them aborted, which is what this
+ * marker distinguishes.
  */
-export function dropUnpairedStatus(before, after) {
-  const pairable =
-    before !== null &&
-    typeof before === 'object' &&
-    !Array.isArray(before) &&
-    after !== null &&
-    typeof after === 'object' &&
-    !Array.isArray(after);
-  if (!pairable) return after;
-  if ('_status' in before || !('_status' in after)) return after;
-  return Object.fromEntries(
-    Object.entries(after).filter(([k]) => k !== '_status'),
-  );
-}
+export const DRIVE_COMPLETE_MARKER = '.drive-complete';
 
 export function typeOf(v) {
   if (v === null) return 'null';
@@ -188,6 +173,17 @@ export function buildComment(sections, ctx = {}) {
     out.push('— _Qwen Code · serve A/B_');
     return out.join('\n') + '\n';
   }
+  // Partial run: the base produced SOME captures and then stopped (a canary
+  // deviation, a daemon crash). The scenarios it never reached have no
+  // baseline, so they would render as "this PR adds these responses" — the same
+  // shape a genuinely new scenario produces. Disclose it rather than let the
+  // reader mistake a truncated baseline for a complete one.
+  if (ctx.baselineIncomplete) {
+    out.push(
+      '⚠️ _The PR-base drive did not finish, so its capture set is partial. Scenarios it never reached appear below as additions rather than as a before/after — treat those tables as unverified._',
+    );
+    out.push('');
+  }
   if (ctx.removed?.length) {
     out.push(
       `⚠️ _Present in the base but absent from this PR: ${ctx.removed
@@ -210,11 +206,16 @@ export function buildComment(sections, ctx = {}) {
 }
 
 /**
- * Read a capture dir's `<scenario>.json` files → `{ sections, baselineMissing }`.
- * Each section diffs an after-capture against the same-named base file. When the
- * base captures are ENTIRELY absent (a failed base build/drive) but head
- * captures exist, `baselineMissing` is set so the caller reports "diff skipped"
- * rather than misreporting every field as added. This is the function the CI
+ * Read a capture dir's `<scenario>.json` files →
+ * `{ sections, baselineMissing, baselineIncomplete, removed }`. Each section
+ * diffs an after-capture against the same-named base file.
+ *
+ * Two degraded baselines are distinguished, because both would otherwise read
+ * as an ordinary diff. `baselineMissing`: the base produced NO captures (a
+ * failed base build/drive), so nothing was compared. `baselineIncomplete`: the
+ * base drive started and stopped part-way, so the scenarios it never reached
+ * have no baseline and render as pure additions — indistinguishable, on the
+ * page, from a scenario this PR genuinely adds. This is the function the CI
  * `comment` subcommand actually invokes, so it is exported + covered.
  */
 export function diffCaptureDirs(beforeDir, afterDir) {
@@ -228,6 +229,10 @@ export function diffCaptureDirs(beforeDir, afterDir) {
   const afterFiles = jsonFiles(afterDir).sort();
   const beforeFiles = jsonFiles(beforeDir);
   const baselineMissing = afterFiles.length > 0 && beforeFiles.length === 0;
+  const baselineIncomplete =
+    !baselineMissing &&
+    beforeFiles.length > 0 &&
+    !existsSync(join(beforeDir, DRIVE_COMPLETE_MARKER));
   const afterSet = new Set(afterFiles);
   // Scenarios present in the base but gone from the head — a removed or broken
   // scenario would otherwise vanish silently and lower the "across N" count,
@@ -243,28 +248,26 @@ export function diffCaptureDirs(beforeDir, afterDir) {
     // EXISTING but malformed base must surface (readJson throws) rather than be
     // silently treated as {}, which would report every field as "added".
     const beforePath = join(beforeDir, f);
-    const beforeExists = existsSync(beforePath);
-    const before = beforeExists ? readJson(beforePath) : {};
-    // Only reconcile `_status` against a base that actually captured this
-    // scenario; for a scenario the base never ran, the whole capture is new and
-    // reporting all of it — status included — is the honest answer.
-    const paired = beforeExists ? dropUnpairedStatus(before, after) : after;
-    return { scenario, changes: diffJson(before, paired) };
+    const before = existsSync(beforePath) ? readJson(beforePath) : {};
+    return { scenario, changes: diffJson(before, after) };
   });
-  return { sections, baselineMissing, removed };
+  return { sections, baselineMissing, baselineIncomplete, removed };
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   const [cmd, ...rest] = process.argv.slice(2);
   if (cmd === 'comment') {
     const [beforeDir, afterDir, shortSha, bodyFile] = rest;
-    const { sections, baselineMissing, removed } = diffCaptureDirs(
-      beforeDir,
-      afterDir,
-    );
+    const { sections, baselineMissing, baselineIncomplete, removed } =
+      diffCaptureDirs(beforeDir, afterDir);
     writeFileSync(
       bodyFile,
-      buildComment(sections, { shortSha, baselineMissing, removed }),
+      buildComment(sections, {
+        shortSha,
+        baselineMissing,
+        baselineIncomplete,
+        removed,
+      }),
     );
     const total = baselineMissing
       ? 0

@@ -29,6 +29,7 @@ import {
   mkdtempSync,
   readFileSync,
   realpathSync,
+  rmSync,
   writeFileSync,
 } from 'node:fs';
 import { createServer } from 'node:net';
@@ -37,6 +38,16 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
+
+/**
+ * Written into a capture dir once every scenario has been captured. Its absence
+ * means the drive aborted part-way and the dir is only a partial baseline.
+ */
+export const DRIVE_COMPLETE_MARKER = '.drive-complete';
+
+export function isPlainObject(v) {
+  return v !== null && typeof v === 'object' && !Array.isArray(v);
+}
 
 /**
  * Where the daemon persists a workspace's transcripts: `Storage.getProjectDir()`
@@ -84,12 +95,13 @@ export function retargetTranscript(records, sessionId, cwd) {
 // two captures and diff as noise. Distinct ids also keep each scenario from
 // attaching to a live entry a previous scenario left behind — an attach also
 // answers 200 and would mask a restore-path difference.
-const SID = {
+export const SID = {
   healthy: 'a0000000-0000-4000-8000-00000000da01',
   mixedCase: 'A0000000-0000-4000-8000-00000000DA02',
   twins: 'A0000000-0000-4000-8000-00000000DA03',
   unreadable: 'a0000000-0000-4000-8000-00000000da04',
   archived: 'a0000000-0000-4000-8000-00000000da05',
+  archivedOnly: 'a0000000-0000-4000-8000-00000000da06',
 };
 
 /** Stage transcripts for a scenario; returns nothing, throws on IO failure. */
@@ -110,7 +122,7 @@ function stageTranscripts(ctx, entries) {
 // A restore answer is a decision, not a payload: keep the status and the error
 // discriminator and drop the session snapshot, whose replay ids, epochs and
 // per-record timestamps churn on every run and would bury the signal.
-const admissionOnly = (json, res) => ({
+export const admissionOnly = (json, res) => ({
   _status: res.status,
   ...(json?.code === undefined ? {} : { code: json.code }),
   ...(json?.error === undefined ? {} : { error: json.error }),
@@ -135,10 +147,12 @@ export const SCENARIOS = [
         method: 'POST',
         path: '/session',
         auth: true,
-        // No `cwd`: the route falls back to the daemon's bound workspace,
-        // which is already canonicalized. (This used to send `workspaceCwd`,
-        // a key the route never reads.)
-        body: () => ({ clientId: 'serve-ab' }),
+        // Empty on purpose. `cwd` is omitted so the route falls back to the
+        // daemon's bound workspace, which is already canonicalized; the
+        // previous `workspaceCwd` and `clientId` keys were both inert (the
+        // route reads `cwd`, and the client id only from `X-Qwen-Client-Id`),
+        // and an inert key reads like a probe that identifies itself.
+        body: () => ({}),
       },
     ],
     method: 'GET',
@@ -163,6 +177,23 @@ export const SCENARIOS = [
     body: () => ({}),
     project: admissionOnly,
     expectStatus: 200,
+  },
+  {
+    // Second canary, for the archive leaf. The healthy restore above certifies
+    // the sanitized project directory, the `chats` leaf and the fixture; only
+    // this one certifies that the daemon reads the `chats/archive` leaf the
+    // harness writes to. Without it, a drifted archive name would leave the
+    // active/archived conflict scenario below loading from active on both arms
+    // — identical captures, and a conflict-admission regression diffing clean.
+    name: 'session-restore-archived-only',
+    fixtures: (ctx) =>
+      stageTranscripts(ctx, [{ sessionId: SID.archivedOnly, archived: true }]),
+    method: 'POST',
+    path: `/session/${SID.archivedOnly}/load`,
+    auth: true,
+    body: () => ({}),
+    project: admissionOnly,
+    expectStatus: 409,
   },
   {
     // Legacy `uuidgen` spelling: only the uppercase file exists, the caller
@@ -218,13 +249,30 @@ export const SCENARIOS = [
     project: admissionOnly,
   },
   {
-    // Session creation carrying a source type. No fixtures needed; this is the
-    // admission decision on the request itself.
-    name: 'session-create-source-type',
+    // The source today's daemon actually reserves: `default` +
+    // `realtime_voice:`, refused with 400 reserved_session_source. This is the
+    // scenario that pins the existing refusal — rewrite the predicate or the
+    // response and it moves.
+    name: 'session-create-reserved-source',
     method: 'POST',
     path: '/session',
     auth: true,
-    body: () => ({ clientId: 'serve-ab-source', sourceType: 'standalone' }),
+    body: () => ({
+      sourceType: 'default',
+      sourceId: 'realtime_voice:serve-ab',
+    }),
+    project: admissionOnly,
+  },
+  {
+    // An ordinary, currently-unreserved source type. Admitted today; the point
+    // is that a PR which starts reserving one shows up here as 200 → 400
+    // instead of diffing clean, which is how the harness missed exactly that
+    // change once already.
+    name: 'session-create-unreserved-source',
+    method: 'POST',
+    path: '/session',
+    auth: true,
+    body: () => ({ sourceType: 'standalone' }),
     project: admissionOnly,
   },
 ];
@@ -255,6 +303,9 @@ async function waitForHealth(base, timeoutMs = 30000) {
 }
 
 export async function driveCli(cliEntry, outDir) {
+  // Start from an empty dir: a re-run (or a reused capture path) must not let
+  // an earlier run's files stand in for scenarios this run never captured.
+  rmSync(outDir, { recursive: true, force: true });
   mkdirSync(outDir, { recursive: true });
   const home = mkdtempSync(join(tmpdir(), 'serve-ab-home-'));
   const token = 'serve-ab-token';
@@ -327,15 +378,6 @@ export async function driveCli(cliEntry, outDir) {
         }
       }
       const res = await doRequest(s);
-      // A canary scenario asserts its own precondition. Failing here beats
-      // publishing "no response changes" from a scenario set that was silently
-      // probing state it never managed to create.
-      if (s.expectStatus !== undefined && res.status !== s.expectStatus) {
-        const body = await res.text().catch(() => '');
-        throw new Error(
-          `scenario "${s.name}" expected HTTP ${s.expectStatus} but got ${res.status}: ${body.slice(0, 300)}`,
-        );
-      }
       const text = await res.text();
       let json;
       try {
@@ -345,16 +387,36 @@ export async function driveCli(cliEntry, outDir) {
       }
       // `_status` is always recorded: a status-only change (404 → 409, say)
       // with an otherwise similar body is exactly the kind of admission
-      // difference these scenarios exist to catch.
+      // difference these scenarios exist to catch. A non-object body (scalar,
+      // null, array) is nested rather than spread, which would drop or re-key
+      // it — the capture has to survive whatever a future scenario probes.
       const captured = s.project
         ? s.project(json, res)
-        : { _status: res.status, ...json };
+        : isPlainObject(json)
+          ? { _status: res.status, ...json }
+          : { _status: res.status, _body: json };
       writeFileSync(
         join(outDir, `${s.name}.json`),
         JSON.stringify(captured, null, 2) + '\n',
       );
       process.stderr.write(`  captured ${s.name} (HTTP ${res.status})\n`);
+      // A canary scenario asserts its own precondition. Checked AFTER the
+      // capture is written, so the deviating response is on disk and in the
+      // log rather than lost to the abort. Failing beats publishing "no
+      // response changes" from a scenario set that never created the state it
+      // believed it was probing.
+      if (s.expectStatus !== undefined && res.status !== s.expectStatus) {
+        throw new Error(
+          `scenario "${s.name}" expected HTTP ${s.expectStatus} but got ${res.status}: ${text.slice(0, 300)}`,
+        );
+      }
     }
+    // Completion marker. An abort part-way through (a canary, a daemon crash)
+    // leaves a capture dir that LOOKS like a full baseline, and the scenarios
+    // it never reached would render as "this PR adds these responses". The
+    // diff treats a marker-less baseline as degraded and says so. Not a
+    // `.json` file: the diff enumerates those as scenarios.
+    writeFileSync(join(outDir, DRIVE_COMPLETE_MARKER), '');
   } finally {
     daemon.kill('SIGTERM');
     // Await exit so a hung daemon (pending async / open WebSockets) can't
