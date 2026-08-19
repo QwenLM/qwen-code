@@ -1457,38 +1457,55 @@ describe('fetch-pr report assembly', () => {
     expect(report.diffPath).not.toBeNull();
   });
 
-  it('refuses to scope when NO base resolved — nothing to be contained in', async () => {
-    // This used to scope, on the reasoning that the delta range needs no base
-    // and so a deleted or renamed base branch should not cost a valid anchor
-    // its scope. The capture reasoning is right; the SCOPE reasoning is not.
-    // With no base there is no PR diff to check the delta against, and "no
-    // diff to check against" is the absence of proof, not proof — it was the
-    // one arm where an uncontained delta shipped by design, and the shape it
-    // ships is the same "undo per feedback" revert every sibling arm refuses.
-    // `base-untrusted` still means a base that cannot be TRUSTED; this is a
-    // base that does not exist, and the reason says the oracle could not rule.
+  it('splits a base-free round by WHY there is no base', async () => {
+    // No base at all used to scope anyway, on the reasoning that the delta
+    // range needs no base. The capture reasoning is right; the SCOPE
+    // reasoning is not — with no PR diff there is nothing to narrow from.
+    // But `mergeBaseSha === null` has two causes and only one is retryable,
+    // which is the distinction SKILL.md's recovery paragraph already draws
+    // and this pair holds the code to.
+    //
+    // The fetch FAILED: infrastructure, and the re-run re-runs the component
+    // that failed, so the reason must be the retryable one.
     anchorIsValid();
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: null,
       baseFetchFailed: true,
     });
     servesBothRanges();
-    const report = await reportFor({ since: ANCHOR });
-    // Not `capture-failed`: nothing threw. The fetch succeeded and
-    // `git merge-base` found no common ancestor, which a re-run reproduces
-    // exactly — so the reason is the deterministic one, and the recovery
-    // flow does not retry it as infrastructure.
-    expect(report.incremental).toEqual({
+    const fetchFailed = await reportFor({ since: ANCHOR });
+    expect(fetchFailed.incremental).toEqual({
+      since: ANCHOR,
+      effective: false,
+      reason: 'capture-failed',
+    });
+
+    // The fetch SUCCEEDED and `git merge-base` found no common ancestor — an
+    // unrelated-history PR. Nothing threw, and a re-run reproduces it exactly,
+    // so the reason is the deterministic one and the recovery flow must not
+    // spend a re-run on it.
+    vi.clearAllMocks();
+    producerMocks.writeFileSync.mockImplementation(() => undefined);
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: null,
+      baseFetchFailed: false,
+    });
+    servesBothRanges();
+    const noAncestor = await reportFor({ since: ANCHOR });
+    expect(noAncestor.incremental).toEqual({
       since: ANCHOR,
       effective: false,
       reason: 'nothing-to-narrow',
     });
-    // Nothing is published, which is what a base-free round does ANYWAY: with
-    // no merge base there is no full range either, and the command already
-    // tells agents to fall back to running `git diff` themselves. So this
-    // costs no review that existed — it removes the one arm that shipped a
-    // scope no containment check had ever seen.
-    expect(report.diffPath).toBeNull();
+
+    // Either way nothing is published, which is what a base-free round does
+    // ANYWAY: with no merge base there is no full range either, and the
+    // command already tells agents to fall back to running `git diff`
+    // themselves. The reason is what differs, and it is what the recovery
+    // flow acts on.
+    expect(fetchFailed.diffPath).toBeNull();
+    expect(noAncestor.diffPath).toBeNull();
   });
 
   it('keeps upToDate through a partition failure — the stop flow needs no plan', async () => {

@@ -942,8 +942,16 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         // below for the flows that continue anyway (a model change,
         // --comment).
         anchor.incremental.upToDate = true;
+      } else if (mergeBaseSha === null && baseFetchFailed) {
+        // No merge base because the FETCH failed, and no local base ref
+        // remained to resolve one from — a fresh CI clone whose base fetch hit
+        // a transient fault. Something did fail, and the re-run re-runs
+        // exactly the component that failed, so this is the retryable class:
+        // the same split SKILL.md's recovery paragraph already draws for a
+        // planless `partition-failed`.
+        demote('capture-failed');
       } else if (mergeBaseSha === null) {
-        // No merge base at all: the fetch succeeded and `git merge-base` found
+        // No merge base although the fetch SUCCEEDED: `git merge-base` found
         // no common ancestor — an unrelated-history PR. There is no PR diff to
         // narrow against, so no scope is built; but nothing THREW, and calling
         // it `capture-failed` asserts an infrastructure fault that did not
