@@ -50,6 +50,7 @@ export function ShareArtifactDialog({
   const [bucket, setBucket] = useState('');
   const [accessKeyId, setAccessKeyId] = useState('');
   const [accessKeySecret, setAccessKeySecret] = useState('');
+  const [publicBaseUrl, setPublicBaseUrl] = useState('');
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -77,6 +78,7 @@ export function ShareArtifactDialog({
         setConfig(loaded);
         setEndpoint(loaded.endpoint);
         setBucket(loaded.bucket);
+        setPublicBaseUrl(loaded.publicBaseUrl);
       })
       .catch((err: unknown) => {
         if (!mountedRef.current) return;
@@ -107,6 +109,7 @@ export function ShareArtifactDialog({
         config: {
           endpoint: endpoint.trim(),
           bucket: bucket.trim(),
+          publicBaseUrl: publicBaseUrl.trim(),
           ...(typedCredentials
             ? {
                 accessKeyId: accessKeyId.trim(),
@@ -251,15 +254,41 @@ export function ShareArtifactDialog({
                 disabled={uploading}
                 autoComplete="off"
               />
-              <FieldDescription data-share-credential-status>
+              <FieldDescription
+                className="text-xs"
+                data-share-credential-status
+              >
                 {credentialsDetected
                   ? t(`share.credentialsFrom.${config?.credentialsSource}`)
                   : t('share.credentialsHint')}
               </FieldDescription>
             </Field>
+            <Field>
+              <FieldLabel htmlFor="share-public-base-url">
+                {t('share.publicBaseUrlLabel')}
+              </FieldLabel>
+              <Input
+                id="share-public-base-url"
+                type="text"
+                placeholder="https://share.example.com"
+                value={publicBaseUrl}
+                onChange={(event) => setPublicBaseUrl(event.target.value)}
+                disabled={uploading}
+                autoCapitalize="off"
+                autoCorrect="off"
+                autoComplete="off"
+                spellCheck={false}
+              />
+              <FieldDescription
+                className="text-xs"
+                data-share-public-base-url-hint
+              >
+                {t('share.publicBaseUrlHint')}
+              </FieldDescription>
+            </Field>
           </FieldGroup>
 
-          <FieldDescription data-share-storage-note>
+          <FieldDescription className="text-xs" data-share-storage-note>
             {t('share.storageNote')}
           </FieldDescription>
 

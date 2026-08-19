@@ -933,6 +933,66 @@ describe('TurnOutputs artifact sharing', () => {
     act(() => root.unmount());
   });
 
+  it('sends the public domain so the link is not the default OSS one', async () => {
+    artifactPublishConfig.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/primary',
+      publisher: 'local',
+      endpoint: 'oss-cn-beijing.aliyuncs.com',
+      bucket: 'qqqys',
+      keyPrefix: 'artifacts',
+      publicBaseUrl: '',
+      credentialsSource: 'env',
+    });
+    publishArtifact.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/primary',
+      id: 'abc123',
+      url: 'https://cdn.example.com/artifacts/abc123/index.html',
+      reachable: true,
+      reachableStatus: 200,
+    });
+
+    const { container, root } = renderHtmlArtifact();
+    await openShareDialog(container);
+
+    setInput('#share-public-base-url', 'https://cdn.example.com');
+    await submitShare();
+
+    expect(publishArtifact.mock.calls[0][0].config.publicBaseUrl).toBe(
+      'https://cdn.example.com',
+    );
+
+    act(() => root.unmount());
+  });
+
+  it('prefills the public domain the daemon already resolves', async () => {
+    artifactPublishConfig.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/primary',
+      publisher: 'local',
+      endpoint: 'oss-cn-beijing.aliyuncs.com',
+      bucket: 'qqqys',
+      keyPrefix: 'artifacts',
+      publicBaseUrl: 'https://cdn.example.com',
+      credentialsSource: 'env',
+    });
+
+    const { container, root } = renderHtmlArtifact();
+    await openShareDialog(container);
+
+    expect(
+      document.body.querySelector<HTMLInputElement>('#share-public-base-url')
+        ?.value,
+    ).toBe('https://cdn.example.com');
+    expect(
+      document.body.querySelector('[data-share-public-base-url-hint]')
+        ?.textContent,
+    ).toContain('download the page instead of opening it');
+
+    act(() => root.unmount());
+  });
+
   it('tells the user the destination is only kept for this run', async () => {
     artifactPublishConfig.mockResolvedValue({
       v: 1,

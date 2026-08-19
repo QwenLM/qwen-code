@@ -408,6 +408,9 @@ const EN: Messages = {
     'Using the credentials found in the daemon environment. Fill these in to override them.',
   'share.credentialsFrom.memory':
     'Using the credentials entered earlier this run. Fill these in to replace them.',
+  'share.publicBaseUrlLabel': 'Public domain',
+  'share.publicBaseUrlHint':
+    'Leave empty to use the OSS default domain, which makes browsers download the page instead of opening it. Bind a custom domain to the bucket and enter it here for links that open directly.',
   'share.storageNote':
     'What you enter here is kept by the running daemon and forgotten when it exits. Nothing is written to disk.',
   'share.destinationRequired': 'An endpoint and a bucket are required.',
@@ -3439,6 +3442,9 @@ const ZH: Messages = {
     '正在使用 daemon 环境变量中的凭据。填写此处可覆盖。',
   'share.credentialsFrom.memory':
     '正在使用本次运行中已输入的凭据。填写此处可替换。',
+  'share.publicBaseUrlLabel': '公网访问域名',
+  'share.publicBaseUrlHint':
+    '留空则使用 OSS 默认域名，浏览器会强制下载而不是打开页面。为 Bucket 绑定自定义域名并填在这里，链接才能直接预览。',
   'share.storageNote':
     '这里填写的内容仅保留在运行中的 daemon 里，退出即忘，不写入磁盘。',
   'share.destinationRequired': 'Endpoint 和 Bucket 为必填。',
