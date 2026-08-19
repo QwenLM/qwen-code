@@ -193,7 +193,7 @@ function auth(pending: request.Test): request.Test {
 }
 
 function mockExtensionManager(
-  installType: 'archive-url' | 'local' = 'archive-url',
+  installType: 'archive-url' | 'local' | 'snapshot' = 'archive-url',
 ): Extension {
   const extension = {
     id: extensionId,
@@ -207,7 +207,9 @@ function mockExtensionManager(
       source:
         installType === 'archive-url'
           ? 'https://example.com/demo.zip'
-          : '/extensions/demo.zip',
+          : installType === 'snapshot'
+            ? 'snapshot'
+            : '/extensions/demo.zip',
     },
     contextFiles: [],
   } as Extension;
@@ -312,6 +314,7 @@ describe('extension management v2 REST', () => {
       const response = await auth(request(h.app).get('/capabilities'));
       expect(response.status).toBe(200);
       expect(response.body.features).toContain('extension_management_v2');
+      expect(response.body.features).toContain('extension_git_credentials');
       expect(response.body.features).not.toContain(
         'workspace_qualified_extensions',
       );
@@ -1086,6 +1089,89 @@ describe('extension management v2 REST', () => {
     }
   });
 
+  it.each([
+    { persistence: undefined, expected: 'one_time' as const },
+    { persistence: 'one_time' as const, expected: 'one_time' as const },
+    { persistence: 'stored' as const, expected: 'stored' as const },
+  ])(
+    'installs a credentialed HTTPS Git source through V2 with $expected persistence',
+    async ({ persistence, expected }) => {
+      const h = await makeHarness();
+      mockExtensionManager();
+      const prepareInstall = vi
+        .spyOn(ExtensionManager.prototype, 'prepareExtensionInstall')
+        .mockResolvedValue({
+          ...(expected === 'stored'
+            ? { credentialStorage: 'encrypted_file' }
+            : {}),
+        } as never);
+      vi.spyOn(
+        ExtensionManager.prototype,
+        'commitPreparedExtension',
+      ).mockResolvedValue({
+        identity: { id: extensionId, name: 'demo' },
+        version: '1.0.0',
+        generation: 7,
+      } as never);
+      vi.spyOn(
+        ExtensionManager.prototype,
+        'disposePreparedExtension',
+      ).mockResolvedValue();
+      try {
+        const started = await request(h.app)
+          .post('/extensions/install')
+          .set('Host', host())
+          .set('Authorization', 'Bearer secret')
+          .send({
+            source:
+              'https://user:fine-grained-token@git.example.com/org/repository.git',
+            consent: true,
+            activation: { scope: 'user' },
+            ...(persistence ? { credentialPersistence: persistence } : {}),
+          });
+
+        expect(started.status).toBe(202);
+        const operation = await pollOperation(h.app, started.body.operationId);
+        expect(operation).toMatchObject({
+          status: 'succeeded',
+          result: {
+            status: 'installed',
+            name: 'demo',
+            credentialPersistence: expected,
+            ...(expected === 'stored'
+              ? {
+                  source: 'https://git.example.com/org/repository.git',
+                  credentialStorage: 'encrypted_file',
+                }
+              : {}),
+          },
+        });
+        if (expected === 'one_time') {
+          expect(operation.result).not.toHaveProperty('source');
+        }
+        expect(prepareInstall).toHaveBeenCalledWith(
+          expect.objectContaining({
+            installMetadata: expect.objectContaining({
+              source: 'https://git.example.com/org/repository.git',
+              type: 'git',
+            }),
+            gitCredential: {
+              username: 'user',
+              password: 'fine-grained-token',
+              persistence: expected,
+            },
+          }),
+        );
+        expect(JSON.stringify(operation)).not.toContain('fine-grained-token');
+        expect(JSON.stringify(h.primary.bridge)).not.toContain(
+          'fine-grained-token',
+        );
+      } finally {
+        await fsp.rm(h.scratch, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('preserves prototype-named extension update states', async () => {
     const h = await makeHarness();
     mockExtensionManager();
@@ -1400,9 +1486,9 @@ describe('extension management v2 REST', () => {
     }
   });
 
-  it('still rejects non-updatable extensions through the global V2 route', async () => {
+  it('returns the stable not-updatable code for snapshot extensions', async () => {
     const h = await makeHarness();
-    mockExtensionManager('local');
+    mockExtensionManager('snapshot');
     vi.spyOn(process.stderr, 'write').mockReturnValue(true);
     const prepareUpdate = vi.spyOn(
       ExtensionManager.prototype,
@@ -1418,6 +1504,7 @@ describe('extension management v2 REST', () => {
         pollOperation(h.app, started.body.operationId),
       ).resolves.toMatchObject({
         status: 'failed',
+        code: 'extension_not_updatable',
         error: 'Extension "demo" is not remotely updatable.',
       });
       expect(prepareUpdate).not.toHaveBeenCalled();

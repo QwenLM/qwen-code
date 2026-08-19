@@ -4115,7 +4115,8 @@ export type DaemonExtensionInstallType =
   | 'link'
   | 'archive-url'
   | 'github-release'
-  | 'npm';
+  | 'npm'
+  | 'snapshot';
 
 export type DaemonExtensionOriginSource =
   | 'QwenCode'
@@ -4170,6 +4171,7 @@ export interface DaemonExtensionEntry {
   originSource?: DaemonExtensionOriginSource;
   ref?: string;
   autoUpdate?: boolean;
+  credentialPersistence?: 'stored' | 'one_time';
   updateState?: DaemonExtensionUpdateState;
   capabilities: DaemonExtensionCapabilities;
   details?: DaemonExtensionDetails;
@@ -4185,6 +4187,7 @@ export interface DaemonWorkspaceExtensionsStatus {
 
 export interface ExtensionInstallRequest {
   source: string;
+  credentialPersistence?: 'stored' | 'one_time';
   ref?: string;
   autoUpdate?: boolean;
   allowPreRelease?: boolean;
@@ -4216,6 +4219,7 @@ export interface ExtensionCatalogEntry {
   name: string;
   version: string;
   installType?: DaemonExtensionInstallType;
+  credentialPersistence?: 'stored' | 'one_time';
   defaultActivation: ExtensionActivationState;
   workspaceOverrideCount: number;
 }
@@ -4278,6 +4282,8 @@ export interface ExtensionOperationResult {
   source?: string;
   name?: string;
   version?: string;
+  credentialPersistence?: 'stored' | 'one_time';
+  credentialStorage?: 'keychain' | 'encrypted_file';
   refreshed?: number;
   failed?: number;
   error?: string;
