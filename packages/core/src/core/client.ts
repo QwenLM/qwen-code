@@ -3373,6 +3373,7 @@ export class GeminiClient {
               type: GeminiEventType.LoopDetected,
               ...(loopType && { value: { loopType } }),
             };
+            await arenaAgentClient?.reportError('Loop detected');
             this.lastApiCompletionTimestamp = Date.now();
             endCurrentInteraction('error', 'loop detected', 'loop_detected');
             this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
