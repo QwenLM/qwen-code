@@ -14,6 +14,7 @@
 
 import type { BoardTaskRecord } from '@qwen-code/qwen-code-core';
 import type { AskRecord, DecisionRecord } from '@qwen-code/qwen-code-core';
+import { sanitizeTerminalText } from '../../ui/utils/textUtils.js';
 
 export interface BoardSnapshot {
   board: string;
@@ -68,13 +69,14 @@ function pad(value: string, width: number): string {
 }
 
 export function renderBoard(snapshot: BoardSnapshot, now = Date.now()): string {
+  const s = sanitizeTerminalText;
   const lines: string[] = [];
   const openDecisions = snapshot.decisions.filter((d) => d.state === 'open');
   const openAsks = snapshot.asks.filter((a) => a.state === 'open');
   const live = snapshot.tasks.filter((t) => t.status !== 'completed');
 
   lines.push(
-    `board: ${snapshot.board}   ${snapshot.participantCount} participant${
+    `board: ${s(snapshot.board)}   ${snapshot.participantCount} participant${
       snapshot.participantCount === 1 ? '' : 's'
     }`,
   );
@@ -82,33 +84,35 @@ export function renderBoard(snapshot: BoardSnapshot, now = Date.now()): string {
 
   // Needs a human. First because nothing else unblocks it.
   for (const d of openDecisions) {
-    const about = d.about ? ` (${d.about})` : '';
-    lines.push(`⚠ ${pad(d.id, 5)} ${d.kind}${about}  ${age(d.createdAt, now)}`);
-    lines.push(`      ${d.question}`);
+    const about = d.about ? ` (${s(d.about)})` : '';
+    lines.push(
+      `⚠ ${pad(s(d.id), 5)} ${s(d.kind)}${about}  ${age(d.createdAt, now)}`,
+    );
+    lines.push(`      ${s(d.question)}`);
   }
 
   // Mutual waits, before the asks themselves: a pair that cannot resolve
   // itself needs a person, and nothing else on the board will surface it.
   for (const [x, y] of findDeadlocks(snapshot.asks)) {
-    lines.push(`⇄ ${x} ⇄ ${y}  each waiting on the other`);
+    lines.push(`⇄ ${s(x)} ⇄ ${s(y)}  each waiting on the other`);
   }
 
   // Blocked on a peer.
   for (const a of openAsks) {
     lines.push(
-      `? ${pad(a.id, 5)} ${a.from} → ${a.to}  ${age(a.createdAt, now)}`,
+      `? ${pad(s(a.id), 5)} ${s(a.from)} → ${s(a.to)}  ${age(a.createdAt, now)}`,
     );
-    lines.push(`      ${a.question}`);
+    lines.push(`      ${s(a.question)}`);
   }
 
   if (openDecisions.length || openAsks.length) lines.push('');
 
   // Work in flight. Last: it is moving, so it needs nothing from anyone.
   for (const t of live) {
-    const owner = t.owner ?? '—';
+    const owner = t.owner ? s(t.owner) : '—';
     const mark = t.status === 'in_progress' ? '·' : ' ';
     lines.push(
-      `${mark} ${pad(t.id, 5)} ${pad(t.subject, 22)} ${pad(owner, 12)} ${age(
+      `${mark} ${pad(s(t.id), 5)} ${pad(s(t.subject), 22)} ${pad(owner, 12)} ${age(
         t.updatedAt,
         now,
       )}`,
