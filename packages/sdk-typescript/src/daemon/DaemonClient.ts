@@ -190,6 +190,7 @@ import type {
   ExtensionArchiveInstallRequest,
   ExtensionManagementInstallRequest,
   ExtensionActivationState,
+  ExtensionWorkspaceBatchActivationState,
   ExtensionCatalog,
   ExtensionInstallResponse,
   ExtensionInteractionResponse,
@@ -1650,6 +1651,23 @@ export class DaemonClient {
       `/extensions/${urlEncode(extensionId)}/activation`,
       'PUT /extensions/:extensionId/activation',
       { method: 'PUT', body: { state }, clientId, mode: 'rest' },
+    );
+  }
+
+  async setExtensionDefaultActivations(
+    extensionNames: readonly string[],
+    state: ExtensionActivationState,
+    clientId?: string,
+  ): Promise<ExtensionMutationResponse> {
+    return await this.jsonRequest<ExtensionMutationResponse>(
+      '/extensions/activation',
+      'PUT /extensions/activation',
+      {
+        method: 'PUT',
+        body: { extensionNames: [...extensionNames], state },
+        clientId,
+        mode: 'rest',
+      },
     );
   }
 
@@ -6479,6 +6497,24 @@ export class WorkspaceDaemonClient {
       `/extensions/${urlEncode(extensionId)}/activation`,
       'PUT /workspaces/:workspace/extensions/:extensionId/activation',
       { method: 'PUT', body: { state }, clientId, mode: 'rest' },
+    );
+  }
+
+  setExtensionActivations(
+    extensionNames: readonly string[],
+    state: ExtensionWorkspaceBatchActivationState,
+    clientId?: string,
+  ): Promise<ExtensionMutationResponse> {
+    return this.client.workspaceJsonRequest<ExtensionMutationResponse>(
+      this.workspaceSelector,
+      '/extensions/activation',
+      'PUT /workspaces/:workspace/extensions/activation',
+      {
+        method: 'PUT',
+        body: { extensionNames: [...extensionNames], state },
+        clientId,
+        mode: 'rest',
+      },
     );
   }
 

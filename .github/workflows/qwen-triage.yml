@@ -2903,6 +2903,25 @@ jobs:
                 /usr/bin/printf '::error::flake-gate record: step script changed between open and re-exec snapshot — refusing to run\n'
                 exit 1
               fi
+              # Record the changed-test list in the PARENT's normal environment,
+              # before the env -i re-exec: the scrubbed child cannot read the
+              # shallow merge-ref objects — git's `safe.directory` global config
+              # lives under HOME, which `env -i` strips, so git refuses to read
+              # the base commit object and the diff fails with
+              # "Could not access <base-oid>". The diff reads git metadata only
+              # and executes no PR code, so running it here is safe, and the
+              # "Pin agent inputs" step already proved this environment reads
+              # the base. Write the NUL-delimited list under RUNNER_TEMP, which
+              # the re-exec forwards; the clean child copies it into the gate
+              # home below.
+              BASE_OID="$(/usr/bin/cat "${RUNNER_TEMP:?}/verify-base-oid")"
+              case "$BASE_OID" in
+                [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
+                *) /usr/bin/printf '::error::No trusted base OID recorded; refusing to record the flakiness-gate file list.\n'; exit 1 ;;
+              esac
+              rm -rf -- "${RUNNER_TEMP:?}/flake-record-files-all"
+              /usr/bin/git -c core.quotePath=false diff -z --name-only --diff-filter=ACMRT "$BASE_OID" HEAD \
+                > "${RUNNER_TEMP:?}/flake-record-files-all"
               LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= exec /usr/bin/env -i \
                 PATH="$PATH" RUNNER_TEMP="${RUNNER_TEMP:-}" \
                 GITHUB_OUTPUT="${GITHUB_OUTPUT:-}" GITHUB_STEP_SUMMARY="${GITHUB_STEP_SUMMARY:-}" \
@@ -2975,8 +2994,11 @@ jobs:
           # T (typechange) included: a symlink->regular flip changes what
           # the runner executes, so it is a changed test file exactly
           # like M — excluding it silently drops the file from the gate.
-          git -c core.quotePath=false diff -z --name-only --diff-filter=ACMRT 'HEAD^1' HEAD \
-            > "$GATE_HOME/files-all"
+          # The diff was already computed in the parent (before the env -i
+          # re-exec, where git can read the shallow merge-ref objects) and
+          # staged under RUNNER_TEMP; this scrubbed child only copies it
+          # into the root-only gate home.
+          cp "${RUNNER_TEMP:?}/flake-record-files-all" "$GATE_HOME/files-all"
           # .mts/.cts included: vitest's default include set collects them.
           # Only a no-match (status 1) may yield an empty list: a grep
           # error (status 2, e.g. ENOSPC opening the output) is

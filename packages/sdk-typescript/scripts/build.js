@@ -97,13 +97,19 @@ const rootDir = join(__dirname, '..');
 // identity-stable transcript block indexes used by browser renderers, and the
 // daemon transcript-retention work (replay-snapshot release + capped debug
 // payloads, #9303) landing on top of the session media references bundle.
-// Bumped from 197KB to 198KB for the retention byte budget (block byte
+// Bumped from 197KB to 198KB for the unrecognized-diagnostic sidechannel
+// (`unrecognizedDiagnostics` routing + selector, #8823).
+// Bumped from 198KB to 199KB for the retention byte budget (block byte
 // estimation + budget-aware trimming) and backing-store-detached string caps
 // (#9303 review round 3).
-// Bumped from 198KB to 199KB for the pagination/eviction reconciliation
-// (#9303 review rounds 9-10): eviction-direction signal, rewind truncation
-// callback, and the trimmed-tool sentinel helper.
-const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 199 * 1024;
+// Bumped from 199KB to 200KB for the pagination/eviction reconciliation
+// (#9303 review rounds 9-11): eviction-direction signal, rewind truncation
+// callback, trimmed tool/permission sentinel helpers, and the record-boundary
+// eviction snap.
+// Bumped from 200KB to 206KB when #8823 (unrecognized-diagnostic sidechannel)
+// merged into the same branch as #9303: each bump above budgeted its own delta
+// in isolation, and the two feature sets together land ~5KB past 200KB.
+const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 206 * 1024;
 // The opt-in `daemon/transports` browser bundle legitimately ships the concrete
 // ACP transports (AcpHttpTransport/AcpWsTransport/AutoReconnect + negotiate), so
 // it's larger than the default barrel — but still budgeted so a future PR can't

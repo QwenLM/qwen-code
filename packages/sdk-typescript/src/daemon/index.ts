@@ -94,6 +94,7 @@ export {
   DAEMON_GOAL_STATUS_SENTINEL_PREFIX,
   DAEMON_PLAN_TOOL_CALL_ID,
   DAEMON_UI_DEBUG_REASONS,
+  DAEMON_UI_UNRECOGNIZED_DIAGNOSTIC_REASONS,
   daemonBlockToHtml,
   daemonBlockToMarkdown,
   daemonBlockToPlainText,
@@ -109,6 +110,7 @@ export {
   isSubagentChildBlock,
   isTrimmedPermissionBlockId,
   isTrimmedToolBlockId,
+  isUnrecognizedDiagnosticReason,
   normalizeDaemonEvent,
   redactDaemonUiSensitiveFields,
   rebuildDaemonTranscriptBlockIndex,
@@ -123,9 +125,11 @@ export {
   selectToolProgress,
   selectTranscriptBlocks,
   selectTranscriptBlocksOrderedByEventId,
+  selectUnrecognizedDiagnostics,
   stringifyJson as stringifyDaemonUiJson,
   stripOscSequences as stripDaemonOscSequences,
   transcriptBlockToTerminalText,
+  UNRECOGNIZED_DIAGNOSTICS_LIMIT,
   DAEMON_UI_CONFORMANCE_FIXTURES,
 } from './ui/index.js';
 export type {
@@ -198,6 +202,8 @@ export type {
   DaemonUiWorkspaceInitializedEvent,
   DaemonUiWorkspaceMemoryChangedEvent,
   DaemonUiWorkspaceToolToggledEvent,
+  DaemonUnrecognizedDiagnostic,
+  DaemonUnrecognizedDiagnosticReason,
   NormalizeDaemonEventOptions,
 } from './ui/index.js';
 export {
@@ -683,6 +689,7 @@ export type {
   ExtensionInitialActivation,
   ExtensionActivationState,
   ExtensionWorkspaceActivation,
+  ExtensionWorkspaceBatchActivationState,
   ExtensionCatalogEntry,
   ExtensionCatalog,
   WorkspaceExtensionProjectionEntry,
@@ -695,6 +702,8 @@ export type {
   ExtensionMarketplacePluginInteraction,
   ExtensionSettingInteraction,
   ExtensionOperationResult,
+  ExtensionDefaultActivationBatchItem,
+  ExtensionWorkspaceActivationBatchItem,
   ExtensionOperationState,
   ExtensionOperationStatus,
   ExtensionActiveOperations,

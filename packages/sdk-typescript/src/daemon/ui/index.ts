@@ -28,6 +28,8 @@ export {
   selectToolProgress,
   selectTranscriptBlocks,
   selectTranscriptBlocksOrderedByEventId,
+  selectUnrecognizedDiagnostics,
+  UNRECOGNIZED_DIAGNOSTICS_LIMIT,
 } from './transcript.js';
 export { createDaemonTranscriptStore } from './store.js';
 export { DAEMON_GOAL_STATUS_SENTINEL_PREFIX } from './sentinels.js';
@@ -62,7 +64,12 @@ export {
   stringifyJson,
   stripOscSequences,
 } from './utils.js';
-export { DAEMON_PLAN_TOOL_CALL_ID, DAEMON_UI_DEBUG_REASONS } from './types.js';
+export {
+  DAEMON_PLAN_TOOL_CALL_ID,
+  DAEMON_UI_DEBUG_REASONS,
+  DAEMON_UI_UNRECOGNIZED_DIAGNOSTIC_REASONS,
+  isUnrecognizedDiagnosticReason,
+} from './types.js';
 export type { DaemonUiContentPart } from './utils.js';
 export type {
   DaemonShellTranscriptBlock,
@@ -85,6 +92,8 @@ export type {
   DaemonTranscriptState,
   DaemonTranscriptStore,
   DaemonTranscriptTruncationDetail,
+  DaemonUnrecognizedDiagnostic,
+  DaemonUnrecognizedDiagnosticReason,
   // Chat-stream events
   DaemonUiAssistantDoneEvent,
   DaemonUiDebugReason,

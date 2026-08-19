@@ -300,6 +300,64 @@ export const DAEMON_UI_DEBUG_REASONS = [
 
 export type DaemonUiDebugReason = (typeof DAEMON_UI_DEBUG_REASONS)[number];
 
+/**
+ * Debug reasons that classify forward-compatibility noise — frames this
+ * normalizer has no case for. These diagnostics are routed to the bounded
+ * `unrecognizedDiagnostics` sidechannel instead of `blocks[]`; `malformed_*`
+ * diagnostics stay in the transcript because they signal an actual defect.
+ *
+ * A runtime const array (the package's established pattern for reason
+ * unions, see `DAEMON_UI_DEBUG_REASONS`): type-only exports are erased by
+ * esbuild, so a type-level subset gives the router nothing to test against,
+ * and a third reason added only to the type would compile cleanly while
+ * falling through to `appendStatusBlock` (#8823 review).
+ */
+export const DAEMON_UI_UNRECOGNIZED_DIAGNOSTIC_REASONS = [
+  'unrecognized_event',
+  'unrecognized_session_update',
+] as const satisfies readonly DaemonUiDebugReason[];
+
+export type DaemonUnrecognizedDiagnosticReason =
+  (typeof DAEMON_UI_UNRECOGNIZED_DIAGNOSTIC_REASONS)[number];
+
+/**
+ * Membership over the runtime reason array, exported so every routing guard
+ * (reducer sidechannel here, provider flush/drop guard pair in webui)
+ * classifies against one source. A reason added to the array routes onto the
+ * sidechannel everywhere without hand-editing each consumer (#8823 review).
+ */
+export function isUnrecognizedDiagnosticReason(
+  reason: DaemonUiDebugReason | string | undefined,
+): reason is DaemonUnrecognizedDiagnosticReason {
+  return (
+    reason !== undefined &&
+    (DAEMON_UI_UNRECOGNIZED_DIAGNOSTIC_REASONS as readonly string[]).includes(
+      reason,
+    )
+  );
+}
+
+/**
+ * One forward-compatibility diagnostic mirrored onto the transcript
+ * sidechannel. Carries the normalizer classification, the correlation
+ * fields `createBase` stamps onto every normalized projection, and the SSE
+ * envelope coordinates a developer console needs — without ever entering
+ * `blocks[]` (so it cannot finalize a streaming assistant/thought block or
+ * consume the `maxBlocks` budget).
+ */
+export interface DaemonUnrecognizedDiagnostic {
+  debugReason: DaemonUnrecognizedDiagnosticReason;
+  text: string;
+  promptId?: string;
+  sourceRecordIds?: readonly string[];
+  branchRecordId?: string;
+  originatorClientId?: string;
+  eventId?: number;
+  serverTimestamp?: number;
+  /** Reducer receive time (`state.now` at dispatch). */
+  clientReceivedAt: number;
+}
+
 export interface DaemonUiStatusEvent extends DaemonUiEventBase {
   type: 'status' | 'debug';
   text: string;
@@ -1024,6 +1082,16 @@ export interface DaemonTranscriptSidechannelState {
     suggestion: string;
     promptId: string;
   };
+  /**
+   * Bounded sidechannel for forward-compatibility diagnostics
+   * (`unrecognized_event` / `unrecognized_session_update`). These never
+   * enter `blocks[]`, so they cannot finalize a streaming assistant/thought
+   * block (orphaning a subsequent `assistant.usage` frame) and cannot
+   * consume the `maxBlocks` budget that real conversation content relies
+   * on. Newest entries are kept; the array is capped at
+   * `UNRECOGNIZED_DIAGNOSTICS_LIMIT`.
+   */
+  unrecognizedDiagnostics: readonly DaemonUnrecognizedDiagnostic[];
   pendingUserShellCommand?: {
     command: string;
     cwd?: string;
