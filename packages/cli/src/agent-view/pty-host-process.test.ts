@@ -646,7 +646,10 @@ describe('Agent View PTY host process server', () => {
     connected.kill('SIGKILL');
 
     await waitFor(() => host.killedWith === 'SIGKILL');
-    await expect(connected.exited).resolves.toEqual({ exitCode: 1 });
+    await expect(connected.exited).resolves.toEqual({
+      exitCode: 1,
+      observed: false,
+    });
   });
 
   it('only resolves exited on SIGKILL for a connected (childless) handle', async () => {
@@ -680,7 +683,10 @@ describe('Agent View PTY host process server', () => {
 
     // Only SIGKILL cannot be trapped, so it resolves immediately.
     connected.kill('SIGKILL');
-    await expect(connected.exited).resolves.toEqual({ exitCode: 1 });
+    await expect(connected.exited).resolves.toEqual({
+      exitCode: 1,
+      observed: false,
+    });
   });
 
   it('keeps exited pending when the kill or shutdown RPC never lands', async () => {
@@ -743,7 +749,10 @@ describe('Agent View PTY host process server', () => {
       await server.close();
       await vi.advanceTimersByTimeAsync(10000);
 
-      await expect(connected.exited).resolves.toEqual({ exitCode: 1 });
+      await expect(connected.exited).resolves.toEqual({
+        exitCode: 1,
+        observed: false,
+      });
     } finally {
       vi.useRealTimers();
     }
@@ -781,7 +790,10 @@ describe('Agent View PTY host process server', () => {
     connected.dispose();
 
     await waitFor(() => host.shutdowns === 1);
-    await expect(connected.exited).resolves.toEqual({ exitCode: 1 });
+    await expect(connected.exited).resolves.toEqual({
+      exitCode: 1,
+      observed: false,
+    });
   });
 
   it('rejects input written before an attach stream is established', async () => {
@@ -1094,7 +1106,10 @@ describe('Agent View PTY host process server', () => {
 
       await waitFor(() => operations.includes('shutdown'));
       expect(child.killedWith).toBeUndefined();
-      await expect(handle.exited).resolves.toEqual({ exitCode: 1 });
+      await expect(handle.exited).resolves.toEqual({
+        exitCode: 1,
+        observed: false,
+      });
     } finally {
       server.close();
       await fs.rm(globalDir, { recursive: true, force: true });
@@ -1150,6 +1165,7 @@ describe('Agent View PTY host process server', () => {
 
       await expect(handle.exited).resolves.toEqual({
         exitCode: 1,
+        observed: true,
         signal: os.constants.signals.SIGKILL,
       });
     } finally {

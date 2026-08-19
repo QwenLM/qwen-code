@@ -82,6 +82,7 @@ export interface AgentViewPtyHostOptions {
 export interface AgentViewPtyHostExit {
   exitCode: number;
   signal?: number;
+  observed?: boolean;
 }
 
 export interface AgentViewPtyHostHandle {
@@ -367,7 +368,7 @@ export async function launchAgentViewPtyHost(
   const exited = new Promise<AgentViewPtyHostExit>((resolve) => {
     resolveExit = resolve;
     const exitDisposable = ptyProcess.onExit((event) => {
-      resolveExitOnce(event);
+      resolveExitOnce({ ...event, observed: true });
     });
     if (exitDisposable) {
       disposables.push(exitDisposable);
@@ -410,7 +411,7 @@ export async function launchAgentViewPtyHost(
       // Match shutdown(): node-pty's signal-less kill falls back to SIGHUP on
       // POSIX, which nohup-style workers ignore.
       ptyProcess.kill(process.platform === 'win32' ? undefined : 'SIGTERM');
-      resolveExitOnce({ exitCode: 1 });
+      resolveExitOnce({ exitCode: 1, observed: false });
       for (const disposable of disposables.splice(0)) {
         disposable.dispose();
       }

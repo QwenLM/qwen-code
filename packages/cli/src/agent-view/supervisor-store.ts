@@ -301,21 +301,25 @@ export async function patchAgentViewSessionStateIf(
     existing: AgentViewSessionStateFile,
   ) => Partial<AgentViewSessionStateFile> | undefined,
   options: StoreOptions = {},
-): Promise<void> {
-  return mutateAgentViewState(sessionId, options, async () => {
+): Promise<boolean> {
+  let applied = false;
+  await mutateAgentViewState(sessionId, options, async () => {
     const paths = getAgentViewSessionPaths(sessionId, options);
-    const existing = await readJsonRecordForWrite(paths.statePath);
+    const existing = await readJsonRecordForConditionalWrite(paths.statePath);
     if (existing === undefined) {
       return;
     }
     const normalized = normalizeSessionState(existing, sessionId);
     if (normalized === undefined) {
-      return;
+      throw new Error(
+        `Agent View session state at ${paths.statePath} is incomplete.`,
+      );
     }
     const patch = decidePatch(normalized);
     if (patch === undefined) {
       return;
     }
+    applied = true;
     await writeJsonFile(paths.statePath, {
       ...existing,
       ...patch,
@@ -323,6 +327,7 @@ export async function patchAgentViewSessionStateIf(
     });
     await fs.mkdir(paths.tmpDir, { recursive: true });
   });
+  return applied;
 }
 
 export async function listAgentViewSessionStates(
@@ -362,7 +367,9 @@ export async function listAgentViewSessionSnapshots(
       launch: redactAgentViewLaunch(
         await readAgentViewLaunch(state.sessionId, options),
       ),
-      activity: await readAgentViewActivity(state.sessionId, options),
+      activity: redactAgentViewActivity(
+        await readAgentViewActivity(state.sessionId, options),
+      ),
       worker: redactAgentViewWorker(
         await readAgentViewWorker(state.sessionId, options),
       ),
@@ -591,6 +598,32 @@ async function readJsonRecordForWrite(
   }
 }
 
+async function readJsonRecordForConditionalWrite(
+  filePath: string,
+): Promise<JsonRecord | undefined> {
+  let text: string;
+  try {
+    text = await fs.readFile(filePath, 'utf8');
+  } catch (error) {
+    if (isNodeError(error) && error.code === 'ENOENT') {
+      return undefined;
+    }
+    throw error;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    throw new Error(`Agent View record at ${filePath} is corrupt.`, {
+      cause: error,
+    });
+  }
+  if (!isRecord(parsed)) {
+    throw new Error(`Agent View record at ${filePath} is not a JSON object.`);
+  }
+  return parsed;
+}
+
 async function withMutationQueue<T>(
   queues: Map<string, Promise<void>>,
   key: string,
@@ -801,9 +834,22 @@ function normalizeActivity(
     lastResult: stringValue(raw['lastResult']),
     queuedPromptCount: numberValue(raw['queuedPromptCount']),
     queuedPromptPreview: stringValue(raw['queuedPromptPreview']),
+    queuedPromptId: stringValue(raw['queuedPromptId']),
+    queuedPromptText: stringValue(raw['queuedPromptText']),
     lastQueuedPromptAt: stringValue(raw['lastQueuedPromptAt']),
     lastActivityAt,
     capabilities: stringArrayValue(raw['capabilities']),
+  }) as AgentViewActivityFile;
+}
+
+export function redactAgentViewActivity(
+  activity: AgentViewActivityFile | undefined,
+): AgentViewActivityFile | undefined {
+  if (!activity) return undefined;
+  return stripUndefined({
+    ...activity,
+    queuedPromptId: undefined,
+    queuedPromptText: undefined,
   }) as AgentViewActivityFile;
 }
 

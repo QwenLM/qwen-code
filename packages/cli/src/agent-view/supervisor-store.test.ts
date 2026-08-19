@@ -14,6 +14,7 @@ import {
   listAgentViewSessionSnapshots,
   listAgentViewSessionStates,
   patchAgentViewSessionState,
+  patchAgentViewSessionStateIf,
   readAgentViewRoster,
   readAgentViewSessionState,
   removeAgentViewRosterEntry,
@@ -298,6 +299,22 @@ describe('agent view supervisor store', () => {
         { globalDir: tempDir },
       ),
     ).resolves.toBeUndefined();
+  });
+
+  it('rejects a conditional verdict write when state is corrupt', async () => {
+    const paths = getAgentViewSessionPaths('corrupt', {
+      globalDir: tempDir,
+    });
+    fs.mkdirSync(paths.sessionDir, { recursive: true });
+    fs.writeFileSync(paths.statePath, '{');
+
+    await expect(
+      patchAgentViewSessionStateIf(
+        'corrupt',
+        () => ({ processState: 'exited' }),
+        { globalDir: tempDir },
+      ),
+    ).rejects.toThrow('is corrupt');
   });
 
   it('lists valid session states sorted by most recent update', async () => {

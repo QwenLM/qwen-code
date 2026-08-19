@@ -294,7 +294,7 @@ function createRemotePtyHostHandle({
           // not before: an RPC that never lands must leave the exit poller
           // running, exactly like the trappable SIGINT/SIGTERM cases.
           if (!child && allowedSignal === 'SIGKILL') {
-            exitTracker.resolve({ exitCode: 1 });
+            exitTracker.resolve({ exitCode: 1, observed: false });
           }
         },
         () => {
@@ -317,7 +317,7 @@ function createRemotePtyHostHandle({
         child?.kill('SIGTERM');
       });
       attachSocket?.destroy();
-      exitTracker.resolve({ exitCode: 1 });
+      exitTracker.resolve({ exitCode: 1, observed: false });
     },
   };
 }
@@ -333,6 +333,7 @@ function createChildExitTracker(child: ChildProcess): {
       const signalNumber = signal ? os.constants.signals[signal] : undefined;
       resolve({
         exitCode: typeof code === 'number' ? code : 1,
+        observed: true,
         ...(signalNumber ? { signal: signalNumber } : {}),
       });
     });
@@ -360,7 +361,7 @@ function createRemoteExitTracker(
       })
       .catch(() => {
         if (++consecutiveFailures >= 2) {
-          resolveExitOnce({ exitCode: 1 });
+          resolveExitOnce({ exitCode: 1, observed: false });
         }
       });
   }, REMOTE_HOST_EXIT_POLL_MS);
