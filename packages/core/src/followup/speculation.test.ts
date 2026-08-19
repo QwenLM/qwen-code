@@ -12,15 +12,19 @@ import {
 } from './speculation.js';
 import type { Content } from '@google/genai';
 import { ApprovalMode, type Config } from '../config/config.js';
+import type { CacheSafeParams } from '../utils/forkedAgent.js';
 import type { ToolResultBoundaryObservation } from '../utils/tool-result-boundary-diagnostics.js';
 
 const forkedAgentMocks = vi.hoisted(() => ({
-  getCacheSafeParams: vi.fn(() => ({
+  getCacheSafeParams: vi.fn<
+    (expectedSessionId?: string) => CacheSafeParams | null
+  >(() => ({
     generationConfig: {},
     history: [],
     model: 'qwen-fast',
     version: 1,
   })),
+  createForkedChat: vi.fn(),
   runForkedAgent: vi.fn(),
   sendMessageStream: vi.fn(),
 }));
@@ -40,9 +44,11 @@ vi.mock(
 
 vi.mock('../utils/forkedAgent.js', () => ({
   getCacheSafeParams: forkedAgentMocks.getCacheSafeParams,
-  createForkedChat: vi.fn(() => ({
-    sendMessageStream: forkedAgentMocks.sendMessageStream,
-  })),
+  createForkedChat: forkedAgentMocks.createForkedChat.mockImplementation(
+    () => ({
+      sendMessageStream: forkedAgentMocks.sendMessageStream,
+    }),
+  ),
   runForkedAgent: forkedAgentMocks.runForkedAgent,
   runWithForkedChatModel: vi.fn(
     async (
@@ -58,6 +64,20 @@ afterEach(() => {
 });
 
 describe('startSpeculation', () => {
+  it('does not start when the session-scoped lookup returns null', async () => {
+    const config = {
+      getSessionId: vi.fn().mockReturnValue('spec-session'),
+    } as unknown as Config;
+    forkedAgentMocks.getCacheSafeParams.mockReturnValueOnce(null);
+
+    await expect(startSpeculation(config, 'read a.ts')).rejects.toThrow(
+      'CacheSafeParams not available for speculation',
+    );
+
+    expect(forkedAgentMocks.createForkedChat).not.toHaveBeenCalled();
+    expect(forkedAgentMocks.runForkedAgent).not.toHaveBeenCalled();
+  });
+
   it('stops at a boundary when the host guard denies a speculative invocation', async () => {
     const execute = vi.fn();
     const guard = vi.fn().mockResolvedValue({
@@ -599,6 +619,42 @@ describe('startSpeculation', () => {
       /omitted during speculative execution/i,
     );
     expect(speculativeResponse).not.toHaveProperty('parts');
+
+    await abortSpeculation(state);
+  });
+
+  it('does not generate a pipelined suggestion when its scoped lookup returns null', async () => {
+    const config = {
+      getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+      getCwd: vi.fn().mockReturnValue(process.cwd()),
+      getFastModel: vi.fn().mockReturnValue(undefined),
+      getSessionId: vi.fn().mockReturnValue('spec-session'),
+    } as unknown as Config;
+    forkedAgentMocks.getCacheSafeParams
+      .mockReturnValueOnce({
+        generationConfig: {},
+        history: [],
+        model: 'qwen-fast',
+        version: 1,
+      })
+      .mockReturnValueOnce(null);
+    forkedAgentMocks.sendMessageStream.mockImplementation(async function* () {
+      yield {
+        type: 'chunk',
+        value: {
+          candidates: [{ content: { parts: [{ text: 'done' }] } }],
+        },
+      };
+    });
+
+    const state = await startSpeculation(config, 'do something');
+    await vi.waitFor(() => expect(state.status).toBe('completed'));
+    await vi.waitFor(() =>
+      expect(forkedAgentMocks.getCacheSafeParams).toHaveBeenCalledTimes(2),
+    );
+
+    expect(forkedAgentMocks.runForkedAgent).not.toHaveBeenCalled();
+    expect(state.pipelinedSuggestion).toBeUndefined();
 
     await abortSpeculation(state);
   });

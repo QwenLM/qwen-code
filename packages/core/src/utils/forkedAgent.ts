@@ -152,6 +152,9 @@ export function getCacheSafeParams(
     expectedSessionId !== undefined &&
     currentCacheSafeParams.sessionId !== expectedSessionId
   ) {
+    debugLogger.debug(
+      `CacheSafeParams session_mismatch: requested=${expectedSessionId}, cached=${currentCacheSafeParams.sessionId ?? '(none)'}`,
+    );
     return null;
   }
   return {

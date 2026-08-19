@@ -23,6 +23,7 @@ import {
   rebuildManagedAutoMemoryIndex,
   rebuildUserAutoMemoryIndex,
 } from './indexer.js';
+import { getCacheSafeParamsSessionId } from '../utils/forkedAgent.js';
 import { refreshMemoryInstruction } from './refresh.js';
 import {
   type AutoMemoryExtractCursor,
@@ -38,7 +39,8 @@ export interface AutoMemoryExtractResult {
     | 'already_running'
     | 'queued'
     | 'memory_tool'
-    | 'memory_pressure';
+    | 'memory_pressure'
+    | 'session_mismatch';
   systemMessage?: string;
   cursor: AutoMemoryExtractCursor;
 }
@@ -157,6 +159,22 @@ export async function runAutoMemoryExtract(params: {
     };
     await writeExtractCursor(params.projectRoot, cursor);
     return { touchedTopics: [], cursor };
+  }
+
+  const cachedSessionId = getCacheSafeParamsSessionId();
+  if (
+    cachedSessionId !== undefined &&
+    cachedSessionId !== params.config.getSessionId()
+  ) {
+    debugLogger.debug('Skipping auto-memory extract: session_mismatch.');
+    return {
+      touchedTopics: [],
+      skippedReason: 'session_mismatch',
+      cursor: {
+        sessionId: params.sessionId,
+        updatedAt: now.toISOString(),
+      },
+    };
   }
 
   const agentResult = await runAutoMemoryExtractionByAgent(
