@@ -178,6 +178,8 @@ You can merge-forward a run of messages from another chat to the bot (DingTalk's
 
 Long records are **capped, and the cap is announced**: at most 50 messages, at most 4000 characters in total, and at most 500 characters per message. Whatever is cut is reported to the agent in the same text — a trailing `[N more message(s) not shown]` line for dropped messages, and a ` [truncated]` marker on any message that was shortened. So the agent knows it is answering about a partial record; if you need the whole thing, forward it in smaller batches.
 
+A record you are **replying to** is quoted rather than sent, and quoted text is capped at 500 characters on every channel — so the record is rendered to that 500-character budget instead of the 4000-character one, and the same announcements apply within it. Expect a replied record to carry its header and the first message or two; forward it as its own message to give the agent the whole thing.
+
 Because a forwarded record is written by people other than you, everything lifted out of it — titles, sender names, message bodies — is neutralized before it reaches the agent, so a forwarded message cannot pose as an instruction to the bot.
 
 The multi-line layout above is what the agent sees in a 1:1 chat. In a group the whole message is neutralized a second time before it reaches the agent, which folds it onto one line and drops the square brackets around the markers; the content and the cap announcements are the same either way.

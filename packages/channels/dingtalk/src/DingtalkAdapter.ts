@@ -188,12 +188,53 @@ function bracketSafeChatRecordField(value: string): string {
  * forge a prompt line from mid-line and should reach the model intact.
  */
 function startOfLineSafeChatRecordField(value: string): string {
-  let current = sanitizeChatRecordField(value);
+  const sanitized = sanitizeChatRecordField(value);
+  if (!sanitized.startsWith('[')) return sanitized;
+  // ONE linear pass, not a fixpoint loop over the whole string: the loop this
+  // replaces rebuilt the entire value for every bracket pair, which is
+  // quadratic — a 62,889-char nested `[[[...]]]` summary (authorable by any
+  // group member, and the header caps below only run AFTER this) cost ~212 ms
+  // of synchronous event-loop stall, ~4 s at 200 KB.
+  //
+  // Same peel, simulated in place. Each pass of that loop deleted exactly two
+  // characters — the leading `[` and the FIRST `]` (its `[^\]]*` window can
+  // match no other) — so instead of re-copying between passes, mark the pairs
+  // and emit what survives. `open` walks the head of the current string (past
+  // what is already deleted and past the whitespace `trim()` would take off);
+  // `close` never rewinds because every `]` it passed is already deleted.
+  const deleted = new Uint8Array(sanitized.length);
+  let open = 0;
+  let close = 0;
   for (;;) {
-    const next = current.replace(/^\[([^\]]*)\](:?)/, '$1$2').trim();
-    if (next === current) return current;
-    current = next;
+    while (
+      open < sanitized.length &&
+      (deleted[open] === 1 || /\s/.test(sanitized[open]!))
+    ) {
+      open += 1;
+    }
+    if (sanitized[open] !== '[') break;
+    let next = Math.max(close, open + 1);
+    while (
+      next < sanitized.length &&
+      (deleted[next] === 1 || sanitized[next] !== ']')
+    ) {
+      next += 1;
+    }
+    if (next >= sanitized.length) break;
+    deleted[open] = 1;
+    deleted[next] = 1;
+    open += 1;
+    close = next + 1;
   }
+  const parts: string[] = [];
+  let cut = 0;
+  for (let i = 0; i < sanitized.length; i++) {
+    if (deleted[i] === 0) continue;
+    if (i > cut) parts.push(sanitized.slice(cut, i));
+    cut = i + 1;
+  }
+  parts.push(sanitized.slice(cut));
+  return parts.join('').trim();
 }
 
 /**
@@ -205,11 +246,55 @@ function startOfLineSafeChatRecordField(value: string): string {
 const MAX_CHAT_RECORD_ENTRIES = 50;
 const MAX_CHAT_RECORD_CHARS = 4000;
 const MAX_CHAT_RECORD_LINE_CHARS = 500;
+/**
+ * The budget a record gets on the REPLY leg. `ChannelBase` renders
+ * `envelope.referencedText` through `sanitizeQuotedText(..., 500)`, which cuts
+ * at 500 code points unconditionally — so a record rendered to the 4000-char
+ * budget arrives with everything past the header gone and, worse, its own
+ * `[N more message(s) not shown]` announcement cut off with it, leaving a bare
+ * `…`. Render to the transport's budget instead, so the announcement lands
+ * INSIDE the quote. `sanitizeQuotedText` only substitutes characters (brackets
+ * and newlines become spaces), so a text within this budget is never cut.
+ */
+const MAX_QUOTED_CHAT_RECORD_CHARS = 500;
+const CHAT_RECORD_ENTRIES_LABEL = '[Chat record messages]';
+const CHAT_RECORD_HEADER_LEAD = (title: string) => `[Chat record: ${title}] `;
+/** `parts.join('\n\n')`. */
+const CHAT_RECORD_PART_GAP = 2;
 
-function capChatRecordLines(lines: string[]): string[] {
+function announcedDrop(count: number): string {
+  return `[${count} more message(s) not shown]`;
+}
+
+/**
+ * What the announcement costs a budget worst case: its own text plus the `\n`
+ * that joins it to the last kept line. `lines.length` bounds the drop count, so
+ * the real announcement is never longer than the one measured here.
+ */
+function chatRecordAnnouncementCost(lines: string[]): number {
+  return lines.length > 0 ? announcedDrop(lines.length).length + 1 : 0;
+}
+
+/**
+ * @param budget Hard ceiling, in UTF-16 units, on everything returned —
+ *   announcement included. UTF-16 length is an upper bound on code-point
+ *   count, so a caller measuring in code points (the quote leg) is safe.
+ */
+function capChatRecordLines(lines: string[], budget: number): string[] {
   const kept: string[] = [];
   let dropped = 0;
   let total = 0;
+  // Reserve the announcement up front rather than appending it over the top of
+  // a full budget: on the quote leg the budget is small enough that the
+  // overshoot is what the transport cuts, which loses exactly the sentence
+  // telling the model the record is partial. `lines.length` bounds `dropped`,
+  // so the reservation is never short.
+  const spendable = budget - chatRecordAnnouncementCost(lines);
+  // Below its own announcement there is nothing this function can say inside
+  // the budget, and saying it anyway is what overflows onto the transport's
+  // cut. Callers reserve the announcement (`chatRecordAnnouncementCost`), so
+  // this is a floor, not a path.
+  if (spendable < 0) return [];
   // Both caps STOP at the first line they reject rather than skipping it and
   // trying the next: the announcement below reads as a tail cut, so letting a
   // later shorter line slip past the size cap would drop messages out of the
@@ -232,14 +317,18 @@ function capChatRecordLines(lines: string[]): string[] {
         ? line
         : truncateCodePoints(line, MAX_CHAT_RECORD_LINE_CHARS);
     const bounded = boundedRaw === line ? line : `${boundedRaw} [truncated]`;
-    if (kept.length > 0 && total + bounded.length > MAX_CHAT_RECORD_CHARS) {
+    // No first-line exemption: with the per-line cap at 500 the first line
+    // always fits the 4000 budget anyway, so the exemption only ever fired on
+    // the quote leg's budget — where keeping a line the transport then cuts is
+    // exactly the silent truncation this block exists to prevent.
+    if (total + bounded.length > spendable) {
       dropped = lines.length - index;
       break;
     }
     kept.push(bounded);
     total += bounded.length + 1;
   }
-  if (dropped > 0) kept.push(`[${dropped} more message(s) not shown]`);
+  if (dropped > 0) kept.push(announcedDrop(dropped));
   return kept;
 }
 
@@ -326,6 +415,7 @@ interface FormattedChatRecord {
 
 function formatChatRecord(
   content?: DingTalkMessageContent,
+  budget: number = MAX_CHAT_RECORD_CHARS,
 ): FormattedChatRecord {
   const title = nonEmptyString(content?.title);
   const rawSummary = nonEmptyString(content?.summary);
@@ -350,7 +440,6 @@ function formatChatRecord(
         .map((line) =>
           startOfLineSafeChatRecordField(nonEmptyString(line) || ''),
         ) || [];
-  const summary = summaryLines.filter(Boolean).join('\n');
   const rawEntries =
     content?.chatRecord ?? content?.records ?? content?.messages;
   const entries = parseJsonArray(rawEntries);
@@ -387,13 +476,48 @@ function formatChatRecord(
       })
     : [];
 
+  // The header is record content too, and it was inside NO cap — per-line,
+  // total or code-point — while `capChatRecordLines` bounded only the entry
+  // lines: a 62,889-char `summary` reached the prompt intact, ~15x the total
+  // this function documents, displacing the user's own request. Spend one
+  // budget across header then entries, in render order, reserving what the
+  // entries need to announce their own cut.
+  const entriesFloor =
+    recordLines.length > 0
+      ? CHAT_RECORD_ENTRIES_LABEL.length +
+        1 +
+        chatRecordAnnouncementCost(recordLines)
+      : 0;
+  const headerBudget = Math.max(
+    budget - CHAT_RECORD_PART_GAP - entriesFloor,
+    0,
+  );
+  const summaryDisplayLines = summaryLines.filter(Boolean);
   // The title is wrapped in brackets below, so bracket-safety on top of
   // sanitization; `|| undefined` keeps the 'Chat record' fallback for a title
-  // that was nothing but brackets or whitespace.
+  // that was nothing but brackets or whitespace. It is one line of the record,
+  // so the per-line cap bounds it — and then the header budget bounds that,
+  // leaving the summary room to announce its own cut. Uncapped, a 5,000-char
+  // title ate the whole header budget on its own.
   const safeTitle = title
-    ? bracketSafeChatRecordField(title) || undefined
+    ? truncateCodePoints(
+        bracketSafeChatRecordField(title),
+        Math.max(
+          Math.min(
+            MAX_CHAT_RECORD_LINE_CHARS,
+            headerBudget -
+              CHAT_RECORD_HEADER_LEAD('').length -
+              chatRecordAnnouncementCost(summaryDisplayLines),
+          ),
+          0,
+        ),
+      ) || undefined
     : undefined;
-  const boundedLines = capChatRecordLines(recordLines);
+  const headerLead = CHAT_RECORD_HEADER_LEAD(safeTitle || 'untitled');
+  const summary = capChatRecordLines(
+    summaryDisplayLines,
+    Math.max(headerBudget - headerLead.length, 0),
+  ).join('\n');
   const parts: string[] = [];
   // The tag NAME is fixed and the title goes inside it, never the other way
   // round. `bracketSafeChatRecordField` is a no-op for a title that carries no
@@ -402,12 +526,20 @@ function formatChatRecord(
   // wrapper manufacture a clean start-of-line `[SYSTEM]` — a forge created
   // AFTER sanitization, which no amount of sanitizing the title can prevent.
   if (summary) {
-    parts.push(`[Chat record: ${safeTitle || 'untitled'}] ${summary}`);
+    parts.push(`${headerLead}${summary}`);
   } else if (safeTitle) {
     parts.push(`[Chat record: ${safeTitle}]`);
   }
+  const spent = parts.reduce(
+    (used, part) => used + part.length + CHAT_RECORD_PART_GAP,
+    0,
+  );
+  const boundedLines = capChatRecordLines(
+    recordLines,
+    Math.max(budget - spent - CHAT_RECORD_ENTRIES_LABEL.length - 1, 0),
+  );
   if (boundedLines.length > 0) {
-    parts.push(`[Chat record messages]\n${boundedLines.join('\n')}`);
+    parts.push(`${CHAT_RECORD_ENTRIES_LABEL}\n${boundedLines.join('\n')}`);
   }
   return {
     text: parts.join('\n\n'),
@@ -1764,7 +1896,15 @@ export class DingtalkChannel extends ChannelBase {
     }
 
     if (msgType === 'chatRecord') {
-      const { text, entriesDropped } = formatChatRecord(content);
+      // The quote budget, not the record budget: this text becomes
+      // `envelope.referencedText`, which `ChannelBase` renders through
+      // `sanitizeQuotedText(..., 500)`. Rendered to 4000 the quote arrives cut
+      // at 500 with a bare `…` — announcement and all — so the model is told
+      // nothing about what it is missing.
+      const { text, entriesDropped } = formatChatRecord(
+        content,
+        MAX_QUOTED_CHAT_RECORD_CHARS,
+      );
       if (!text) this.warnEmptyChatRecord(content);
       else if (entriesDropped) this.warnUnreadableChatRecordEntries(content);
       return text;

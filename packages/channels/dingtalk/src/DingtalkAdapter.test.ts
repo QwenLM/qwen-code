@@ -3156,6 +3156,69 @@ describe('DingtalkChannel chat records', () => {
     expect(text).not.toContain('more message(s) not shown');
   });
 
+  // R6-1: the record's `summary`/`title` header was inside NO cap -- per-line,
+  // total or code-point -- while `capChatRecordLines` bounded only the entry
+  // lines under it. A 62,889-char summary reached `envelope.text` intact,
+  // ~15x the total the docs and the cap block's own comment promise.
+  it('caps the record HEADER, not just the entry lines', () => {
+    const channel = createChannel();
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(
+      chatRecordDownstream(
+        {
+          title: 'T'.repeat(5000),
+          summary: Array.from(
+            { length: 40 },
+            (_, i) => `U${i}: ${'s'.repeat(400)}`,
+          ).join('\n'),
+          chatRecord: [{ senderName: 'Zoe', content: 'last' }],
+        },
+        'chat-record-header-cap',
+      ),
+    );
+
+    const text = inboundText(channel);
+    // The documented total, header included. Measured in code points because
+    // that is the unit the docs and the quote transport both use.
+    expect(Array.from(text).length).toBeLessThanOrEqual(4000);
+    // The title alone used to run to 5000 characters.
+    expect(text).not.toContain('T'.repeat(600));
+    // Bounded VISIBLY: a header cut the model cannot see is a record it
+    // reasons about as if it were complete.
+    expect(text).toMatch(/\[\d+ more message\(s\) not shown\]/);
+  });
+
+  // R6-1 (second symptom, same root): a summary deeper than sanitizePromptText's
+  // `{1,64}` unwrap window fell through to the bracket peel, which re-copied the
+  // whole string per pair. Quadratic, and the peel runs BEFORE the cap above, so
+  // capping the header alone does not bound it: 200 KB of nesting measured
+  // ~4.1 s of synchronous event-loop stall against ~2 ms for the linear peel.
+  // The threshold sits ~4x under the quadratic cost and ~400x over the linear
+  // one, so it separates the two without pinning a machine speed.
+  it('peels a deeply nested summary without a quadratic stall', () => {
+    const channel = createChannel();
+    const depth = 100000;
+    const started = Date.now();
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(
+      chatRecordDownstream(
+        {
+          summary: `${'['.repeat(depth)}nested${']'.repeat(depth)}`,
+          chatRecord: [{ senderName: 'Ann', content: 'hi' }],
+        },
+        'chat-record-nested-stall',
+      ),
+    );
+    expect(Date.now() - started).toBeLessThan(1000);
+
+    // Still peeled to a fixpoint -- the speed-up must not cost the defence.
+    const text = inboundText(channel);
+    expect(text).toContain('nested');
+    expect(text).not.toContain('[[');
+  });
+
   it('warns when a record renders a summary but no entry is readable', () => {
     const channel = createChannel();
     const stderr = vi
@@ -3287,6 +3350,68 @@ describe('DingtalkChannel chat records', () => {
       .referencedText;
     expect(referenced).toContain('[Chat record: Group chat history] Alice: a');
     expect(referenced).toContain('[Chat record messages]\nAlice: a\nBob: b');
+  });
+
+  // R6-2: the reply leg rendered a record to the 4000-char record budget, but
+  // its consumer -- ChannelBase's `sanitizeQuotedText(referencedText, 500)` --
+  // cuts at 500 code points unconditionally. So for any non-trivial record the
+  // expansion arrived headless of everything past the header, INCLUDING its own
+  // `[N more message(s) not shown]` announcement: the model was handed a
+  // partial record with nothing but a bare ellipsis to say so. The R4-9 test
+  // above asserts `referencedText` on a mocked handleInbound, so it stayed
+  // green while delivered behaviour truncated -- this one carries the quote
+  // through the real sanitizer instead.
+  it('renders a replied record inside the quote budget, announcement included', () => {
+    const channel = createChannel();
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage({
+      data: JSON.stringify({
+        msgId: 'chat-record-reply-budget',
+        conversationType: '2',
+        conversationId: 'cid-chat-record',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        chatbotUserId: 'bot-1',
+        isInAtList: true,
+        text: {
+          content: '@DingTalkTest what was that?',
+          isReplyMsg: true,
+          repliedMsg: {
+            msgId: 'forwarded-record-big',
+            msgType: 'chatRecord',
+            senderId: 'sender-1',
+            content: {
+              title: 'Release thread',
+              chatRecord: Array.from({ length: 40 }, (_, i) => ({
+                senderName: `U${i}`,
+                // Sized so the kept lines land just under the entry budget:
+                // that is where appending the announcement on TOP of a full
+                // budget overflows onto the transport's cut, which is the
+                // whole failure. A comfortable shape does not exercise it.
+                content: `message ${i} ${'w'.repeat(126)}`,
+              })),
+            },
+          },
+        },
+      }),
+      headers: { messageId: 'chat-record-reply-budget' },
+    } as unknown as DWClientDownStream);
+
+    const referenced = vi.mocked(channel.handleInbound).mock.calls[0]![0]
+      .referencedText!;
+    // The delivered-behaviour invariant, in the unit ChannelBase measures:
+    // `sanitizeQuotedText` only SUBSTITUTES characters (brackets and newlines
+    // become spaces) before its 500-code-point cut, so a quote that fits here
+    // is passed through whole -- and one that does not is cut, ellipsis only.
+    expect(Array.from(referenced).length).toBeLessThanOrEqual(500);
+    // Which means the record's own account of what it cut now lands INSIDE the
+    // quote, instead of being the first thing the transport throws away.
+    expect(referenced).toMatch(/\[\d+ more message\(s\) not shown\]/);
+    expect(referenced).toContain('U0: message 0');
   });
 
   // R4-9: the reply path's own entriesDropped warning had zero coverage --
