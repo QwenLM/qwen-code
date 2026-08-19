@@ -852,6 +852,32 @@ describe('DwsChannel', () => {
     }
   });
 
+  // R4-3: `retryable: false` is terminal before ready (`retryLimit` returns
+  // 0), but `scheduleImRestart` never consulted it, and `startImSource` resets
+  // `restartAttempts` to 0 every time a subscription becomes ready — so the
+  // backoff exponent stayed at 0 and a permanently denied consumer was
+  // respawned at a constant ~3s, forever, while the channel reported itself
+  // connected and delivered nothing for that source.
+  it('stops restarting a source that died permanently after becoming ready', async () => {
+    vi.useFakeTimers();
+    try {
+      const client = new FakeDwsClient();
+      await readyChannel(client);
+
+      client.streams[0]?.onError(
+        new DwsEventProcessError('subscription is not allowed', false),
+      );
+      client.streams[0]?.subscription.close();
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      // No respawn — the two streams `readyChannel` opened, and nothing more.
+      expect(client.streams).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('resets restart allowance when a replacement stream becomes ready', async () => {
     vi.useFakeTimers();
     try {
@@ -3020,6 +3046,74 @@ describe('DwsChannel', () => {
     // And the watermark is free to move again, so the query window stops
     // growing and newer mentions are no longer starved behind this one.
     expect(channel.mentionWatermark()).toBeGreaterThan(0);
+  });
+
+  // R4-1: the budget above was wired into the mention path only. A document
+  // notification whose turn throws escaped `pollOnce`'s sorted loop, so
+  // nothing was marked processed, the checkpoint and watermark never advanced,
+  // and every 5s poll re-ran the same full agent turn — starving every newer
+  // notification behind it, forever.
+  it('drops a document notification whose turn keeps failing, and stops starving newer ones', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    const now = Date.now();
+    client.directMessages = [
+      message(
+        'user_im_message_receive_o2o_all',
+        'poison-notification',
+        documentMentionCard('doc-poison', 'a'.repeat(45)),
+        { eventTime: now },
+      ),
+      message(
+        'user_im_message_receive_o2o_all',
+        'fresh-notification',
+        documentMentionCard('doc-fresh', 'b'.repeat(45)),
+        { eventTime: now + 1 },
+      ),
+    ];
+    channel.inboundHandler = async (envelope) => {
+      if (envelope.chatId === 'doc-poison')
+        throw new Error('agent unavailable');
+      channel.inbound.push(envelope);
+    };
+
+    for (let round = 0; round < 8; round += 1) {
+      await expect(channel.poll()).resolves.toBeUndefined();
+    }
+
+    // Five turns for the poison notification, then one for the newer one that
+    // it used to stand in front of. Unbounded before, and `doc-fresh` was
+    // never reached at all.
+    expect(channel.inboundAttempts).toBe(6);
+    expect(channel.inbound.map((envelope) => envelope.chatId)).toEqual([
+      'doc-fresh',
+    ]);
+  });
+
+  // R4-1: `pollTodos` remembers a fingerprint only on success, so a todo whose
+  // turn keeps throwing was re-fetched and re-run as a full agent turn on
+  // every poll, forever.
+  it('drops a native todo whose turn keeps failing', async () => {
+    const client = new FakeDwsClient();
+    client.todoTasks = [todoTask('task-existing', 'Historical task')];
+    const channel = await readyChannel(
+      client,
+      makeConfig({ watchTodos: true }),
+    );
+    await channel.poll();
+    expect(channel.inboundAttempts).toBe(0);
+
+    client.todoTasks = [
+      ...client.todoTasks,
+      todoTask('task-poison', 'Unrunnable task'),
+    ];
+    channel.inboundError = new Error('agent unavailable');
+
+    for (let round = 0; round < 8; round += 1) {
+      await expect(channel.poll()).resolves.toBeUndefined();
+    }
+
+    expect(channel.inboundAttempts).toBe(5);
   });
 
   it('uses the originating message for an idempotent final reply', async () => {

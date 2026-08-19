@@ -319,6 +319,11 @@ function stableTodoValue(value: unknown, key = ''): unknown {
   );
 }
 
+/** Failure-budget key for a todo, kept out of the message key namespace. */
+function todoFailureKey(taskId: string): string {
+  return `todo-failure:${taskId}`;
+}
+
 function todoFingerprint(task: DwsTodoTask): string {
   return createHash('sha256')
     .update(JSON.stringify(stableTodoValue(task.data)))
@@ -1071,6 +1076,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       if (states.get(task.taskId)?.fingerprint === fingerprint) continue;
       try {
         if (await this.processTodoTask(task, fingerprint, signal)) {
+          this.clearInboundFailure(todoFailureKey(task.taskId));
           this.rememberTodoState(task.taskId, fingerprint);
           processedTaskIds.add(task.taskId);
           this.saveCursor();
@@ -1079,6 +1085,13 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         if (signal.aborted || !this.connected) return;
         process.stderr.write(
           `[Channel:${this.name}] failed to process DWS todo ${sanitizeLogText(task.taskId, 120)}: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
+        );
+        // R4-1: the fingerprint is remembered only on success, so a todo
+        // whose turn keeps throwing was re-fetched and re-run on every 30s
+        // poll, forever. Give it the message path's budget, and record the
+        // fingerprint once that budget is spent so the loop stops.
+        this.recordInboundFailure(todoFailureKey(task.taskId), error, () =>
+          this.rememberTodoState(task.taskId, fingerprint),
         );
       }
     }
@@ -1220,6 +1233,20 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
   ): void {
     if (!this.connected || state.retryTimer) return;
     const resolvedError = error ?? new DwsEventProcessError('stream stopped');
+    // R4-3: `retryable: false` is terminal before ready — `retryLimit`
+    // returns 0 — but this post-ready path ignored it, and `startImSource`
+    // resets `restartAttempts` to 0 every time a subscription becomes ready.
+    // The backoff exponent therefore stayed at 0 and a permanently denied
+    // consumer was respawned at a constant ~3s, forever, while the channel
+    // reported itself connected and delivered nothing for that source.
+    if (resolvedError.retryable === false) {
+      process.stderr.write(
+        `[Channel:${this.name}] DWS ${sanitizeLogText(sourceLabel(state.source), 120)} ` +
+          `stream is permanently unavailable; not restarting: ` +
+          `${sanitizeLogText(resolvedError.message, 300)}\n`,
+      );
+      return;
+    }
     const delay = Math.min(
       EVENT_RESTART_MAX_DELAY_MS,
       retryDelay(resolvedError) * 2 ** Math.min(state.restartAttempts, 8),
@@ -1405,8 +1432,17 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
    * error is swallowed: the throw used to abort the caller's sorted loop, so
    * one poison message starved every newer message behind it and never
    * cleared, because nothing ever marked it processed.
+   *
+   * `dropMessage` is what "stop re-running this" means for the caller's
+   * surface. Marking the key processed is right for a message, but a todo is
+   * re-fetched by fingerprint and a document notification carries its own
+   * key, so those pass their own.
    */
-  private recordInboundFailure(key: string, error: unknown): boolean {
+  private recordInboundFailure(
+    key: string,
+    error: unknown,
+    dropMessage: () => void = () => this.markProcessedMessage(key),
+  ): boolean {
     const failures = (this.cursor.inboundFailures ?? []).filter(
       (failure) => failure.key !== key,
     );
@@ -1419,10 +1455,10 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       300,
     );
     if (attempts >= MAX_INBOUND_ATTEMPTS) {
-      // Budget spent: mark it processed so the checkpoint and the watermark
-      // can move past it. Dropping one message is strictly better than
-      // re-running it — and starving everything newer — forever.
-      this.markProcessedMessage(key);
+      // Budget spent: drop it so the checkpoint and the watermark can move
+      // past it. Dropping one message is strictly better than re-running it
+      // — and starving everything newer — forever.
+      dropMessage();
       this.cursor.inboundFailures = failures.slice(-MAX_PROCESSED_ITEMS);
       process.stderr.write(
         `[Channel:${this.name}] dropping a DWS message after ` +
@@ -1534,7 +1570,27 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     })();
     this.processingMessages.set(notificationKey, task);
     try {
-      await task;
+      try {
+        await task;
+      } catch (error) {
+        // R4-1: this path had no budget, so it kept open the exact failure
+        // mode the mention path's budget closes. The throw escapes
+        // `pollOnce`'s sorted loop, nothing is marked processed, and the
+        // checkpoint and watermark (both assigned after the loop) never
+        // advance — so every 5s poll re-ran the same full agent turn,
+        // forever, starving every newer notification behind it.
+        if (
+          this.recordInboundFailure(notificationKey, error, () => {
+            this.markProcessedMessage(notificationKey);
+            this.removePendingDocumentNotification(notificationKey);
+            this.markProcessedMessage(key);
+          })
+        ) {
+          throw error;
+        }
+        return;
+      }
+      this.clearInboundFailure(notificationKey);
       if (
         this.cursor.processedMessages.includes(notificationKey) ||
         this.hasPendingDocumentNotification(notificationKey)
