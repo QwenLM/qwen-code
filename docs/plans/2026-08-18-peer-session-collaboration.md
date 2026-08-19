@@ -65,9 +65,9 @@ Directories use mode `0700`; files use `0600`. Each item is one versioned JSON o
 Identifiers have a type prefix and UUID suffix. Creating an item never scans for or reuses a
 numeric id.
 
-All read-modify-write transitions and pruning run under the same board lock. Creation uses
-exclusive semantics. A command must not decide that a target is stale and then mutate it
-after releasing the lock.
+All read-modify-write transitions and pruning use the same per-item lock discipline. Creation
+uses exclusive semantics. A command must not decide that a target is stale and then mutate
+it after releasing the lock.
 
 Readers validate each record. A list operation reports and skips malformed records so one
 bad file does not hide the rest of the board. A mutation targeting a malformed record fails
