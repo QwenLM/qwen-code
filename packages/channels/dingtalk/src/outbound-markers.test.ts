@@ -563,3 +563,45 @@ describe('R3 round-3 Critical regressions', () => {
     expect(truncated).toContain('y'.repeat(40));
   });
 });
+
+describe('R5 round-5 Critical regressions', () => {
+  // R5-2/R5-3: the guard's marker pre-filter folds case with `toUpperCase`
+  // (`ı` -> `I`, `ﬁ` -> `FI`) while its confirming gates used an `iu`-flagged
+  // regex, which folds neither (`/I/iu.test('ı')` is `false`). Those shapes
+  // entered the marker branch, failed both gates, and fell back to the raw
+  // cut — dropping the opening `[` and leaving a bracket-less absolute path
+  // that `stripPartialOutboundMediaMarker`, which walks backward from a `[`,
+  // can never recognise. The path then shipped to the card as literal text.
+  const FOLDED_NAMES = ['FıLE', 'ﬁle', 'IMAGE'.replace('I', 'ı')];
+
+  it.each(FOLDED_NAMES)(
+    'advances past a closed `[%s: …]` opening the stripper would strip',
+    (name) => {
+      const path = '/abs/secret/key.pdf';
+      const text = `${'x'.repeat(100)}[${name}: ${path}] tail prose kept`;
+      const truncated = truncateOutboundMediaText(text, 44, '[…]');
+      expect(truncated).not.toContain(path);
+      expect(truncated).toContain('tail prose kept');
+      // Whatever survives must also survive the display sanitizer unchanged —
+      // a leaked fragment is one no later layer can clean up.
+      expect(stripPartialOutboundMediaMarker(truncated, 'FILE', '')).toBe(
+        truncated,
+      );
+      expect(stripPartialOutboundMediaMarker(truncated, 'IMAGE', '')).toBe(
+        truncated,
+      );
+    },
+  );
+
+  it.each(FOLDED_NAMES)(
+    'advances past an unclosed streaming `[%s: …` opening',
+    (name) => {
+      const path = '/abs/secret/key.pdf';
+      const text = `${'x'.repeat(100)}[${name}: ${path}`;
+      // Cut inside the marker name, where the raw cut used to drop the `[`.
+      const limit = path.length + name.length + 4;
+      const truncated = truncateOutboundMediaText(text, limit, '[…]');
+      expect(truncated).not.toContain(path);
+    },
+  );
+});

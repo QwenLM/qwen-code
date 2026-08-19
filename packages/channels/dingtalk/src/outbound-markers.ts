@@ -8,16 +8,31 @@ const MEDIA_MARKER_PREFIXES = ['IMAGE:', 'FILE:'];
 const MARKER_NAME_GROUP = `(?:${MEDIA_MARKER_PREFIXES.join('|')})`;
 
 /**
- * A marker opening with its full name directly (or after spaces) following
- * the `[`. Shared by the truncation guard and the display stripper so both
- * layers agree on what a marker opening is — a bare name prefix (`[i`,
- * `[im`) is prose, while a spaced opening (`[ FILE: /path]`) matches no
- * delivery grammar and can only ever ship its path as literal text.
+ * Whether the `[` at `open` opens a marker: its full name follows directly,
+ * or after spaces, on the SAME line. A bare name prefix (`[i`, `[im`) is
+ * prose, while a spaced opening (`[ FILE: /path]`) matches no delivery
+ * grammar and can only ever ship its path as literal text.
+ *
+ * R5-2/R5-3: recognition folds case through `toUpperCase`, the way
+ * {@link stripPartialOutboundMediaMarker} does, rather than through an
+ * `iu`-flagged regex. The two disagree wherever uppercasing is not a simple
+ * fold — `'ı'.toUpperCase()` is `'I'` and `'ﬁ'.toUpperCase()` is `'FI'`,
+ * while `/I/iu.test('ı')` is `false`. A regex gate therefore rejected
+ * `[FıLE: …]` / `[ﬁle: …]` openings that the stripper does strip, and the
+ * truncation guard fell back to the raw cut: that drops the opening `[` and
+ * leaves a bracket-less absolute path which `stripPartialOutboundMediaMarker`
+ * — it walks backward from a `[` — can never recognise, so the path ships to
+ * the card as literal text. One shared recogniser keeps the guard's R2-7
+ * invariant (advance exactly as far as the stripper strips) true by
+ * construction.
  */
-const OPENS_MARKER_PATTERN = new RegExp(
-  `^\\[[^\\S\\r\\n]*${MARKER_NAME_GROUP}`,
-  'iu',
-);
+function opensMediaMarker(text: string, open: number): boolean {
+  const rest = text.slice(open + 1);
+  const eol = rest.search(/[\r\n]/u);
+  const line = (eol === -1 ? rest : rest.slice(0, eol)).toUpperCase();
+  const trimmed = line.replace(/^[^\S\r\n]+/u, '');
+  return MEDIA_MARKER_PREFIXES.some((prefix) => trimmed.startsWith(prefix));
+}
 
 /**
  * A well-formed marker as the finder's delivery grammar accepts it: full
@@ -277,7 +292,7 @@ function markerSafeTruncationStart(text: string, start: number): number {
           // R2-7: advance exactly as far as the display stripper strips —
           // including a path line on the next line — so a cross-line marker
           // never deposits a bare path at the head of the retained tail.
-          if (!OPENS_MARKER_PATTERN.test(text.slice(open))) return start;
+          if (!opensMediaMarker(text, open)) return start;
           return partialMarkerResidueEnd(text, open, text.slice(open + 1));
         }
         // R1-11: only skip when the span really completes a marker. A prose
@@ -294,7 +309,7 @@ function markerSafeTruncationStart(text: string, start: number): number {
           // marker. Returning the raw cut here dropped the opening bracket and
           // retained a bracket-less `FILE: /abs/path …` fragment that no
           // downstream sanitizer recognises.
-          if (!OPENS_MARKER_PATTERN.test(text.slice(open))) return start;
+          if (!opensMediaMarker(text, open)) return start;
           // R3-8: advance past the span's balanced bracket extent. End-of-line
           // collapsed the ENTIRE retained window to the truncation marker when
           // a bracketed marker sat on the final line.

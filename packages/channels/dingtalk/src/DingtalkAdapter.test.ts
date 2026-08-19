@@ -4190,6 +4190,69 @@ describe('DingtalkChannel outbound file delivery', () => {
     }
   });
 
+  it('fails the turn when the card path has no webhook for the chat', async () => {
+    // Behaviour flip (R5-1): `sendReplyFiles` used to `return` on a missing
+    // webhook, so this resolved. The card path runs `prepareOutgoingContent`
+    // unconditionally — the upload has happened and `[File sent: …]` is baked
+    // into a card `closeOutput` delivers through the robot/card API, which
+    // does not consult the webhook map. A DM whose payload carries no
+    // `conversationId` routes as `chatId = sessionWebhook` while the map is
+    // keyed on `conversationId` only, so it lands here with no entry: the file
+    // was never delivered, nothing was emitted, and the turn was booked a
+    // success behind a permanent receipt. The notice needs the same missing
+    // webhook, so failing the send is the only visible outcome left.
+    const file = createTempFile();
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      // Deliberately no seedWebhook: this is the unmapped sessionWebhook DM.
+      const { events, fileCalls, uploadCalls } = stubFileReplyFetch();
+      const closeOutput = vi.fn().mockImplementation(() => {
+        events.push('card');
+        return Promise.resolve(true);
+      });
+      (
+        channel as unknown as {
+          interactionPresenter: { closeOutput: typeof closeOutput };
+        }
+      ).interactionPresenter = { closeOutput };
+      const segment = {
+        channelName: 'dingtalk',
+        sessionId: 'session-1',
+        runId: 'run-1',
+        segmentId: 'segment-1',
+        owner: { kind: 'channel_user', id: 'owner-1' },
+        target: {
+          channelName: 'dingtalk',
+          chatId: 'https://oapi.dingtalk.com/robot/send?access_token=token',
+          senderId: 'owner-1',
+          isGroup: false,
+        },
+      } as ChannelOutputSegmentContext;
+
+      await expect(
+        getCompleteHook(channel)(
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+          `[FILE: ${file.path}]`,
+          'session-1',
+          segment,
+        ),
+      ).rejects.toThrow(/no delivered notice: report\.txt/);
+
+      // The receipt did ship and the file did not — which is exactly why the
+      // silent return was wrong, and why the throw has to be the outcome.
+      expect(closeOutput).toHaveBeenCalledWith(
+        'segment-1',
+        '[File sent: report.txt]',
+        'completed',
+        segment,
+      );
+      expect(uploadCalls()).toHaveLength(1);
+      expect(fileCalls()).toHaveLength(0);
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
   it('reuses the prepared file when status-card finalization falls back', async () => {
     const file = createTempFile();
     try {

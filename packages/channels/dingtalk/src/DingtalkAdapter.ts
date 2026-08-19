@@ -1210,7 +1210,23 @@ export class DingtalkChannel extends ChannelBase {
   ): Promise<void> {
     if (files.length === 0) return;
     const webhook = this.webhooks.get(chatId);
-    if (!webhook) return;
+    if (!webhook) {
+      // R5-1: returning here drops every prepared file silently. The card path
+      // in `onResponseComplete` runs `prepareOutgoingContent` unconditionally,
+      // so the uploads have already happened and the `[File sent: …]` receipts
+      // are already baked into a card that `closeOutput` delivers through the
+      // robot/card API — which does not need this map. A DM whose payload has
+      // no `conversationId` routes as `chatId = sessionWebhook` (the map is
+      // keyed on `conversationId` only), so it reaches exactly this branch and
+      // the turn would resolve successfully while the chat keeps a permanent
+      // receipt for a file that was never delivered. The notice itself needs
+      // the same missing webhook, so there is nothing to emit: fail the send.
+      throw new Error(
+        `DingTalk file delivery failed with no delivered notice: ${files
+          .map((file) => sanitizeLogText(file.fileName, 255))
+          .join(', ')}`,
+      );
+    }
 
     // R2-9: the `[File delivery failed: …]` notice is the only correction the
     // user ever sees once the `[File sent: …]` receipt has shipped, and it goes
