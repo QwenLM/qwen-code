@@ -16,7 +16,9 @@
  * bubbles up to a container's `onMouseDown`. There we detect double/triple
  * clicks (reusing the ported tracker from `mouse-selection.ts`), resolve the
  * word/line span from the rendered buffer, and rewrite the framework's point
- * selection to the span by simulating a drag across it. Highlighting, text
+ * selection to the span: `startSelection` re-anchors at the span start (the
+ * press point would otherwise anchor mid-word and clip the selection), then
+ * `updateSelection` drags the focus to the span end. Highlighting, text
  * extraction, and the copy-on-release pipeline are all handled by the
  * framework (`emit("selection")` → `useSelectionHandler` → `copyText`).
  *
@@ -40,6 +42,11 @@ import {
  */
 export interface SelectionHost {
   getSelection(): { isDragging: boolean } | null;
+  startSelection(
+    renderable: { selectable: boolean },
+    x: number,
+    y: number,
+  ): void;
   updateSelection(
     currentRenderable: undefined,
     x: number,
@@ -54,6 +61,8 @@ export interface MultiClickPointer {
   y: number;
   button: number;
   modifiers: { ctrl: boolean };
+  /** The hit renderable that started the framework selection on this press. */
+  target: { selectable: boolean } | null;
 }
 
 /**
@@ -118,11 +127,12 @@ export class MultiClickSelectionController {
     if (!row) return;
     const x = snapOffSpacer(row, e.x);
     const span = count === 2 ? wordSpanAt([row], x, 0) : lineSpanAt([row], 0);
-    if (!span) return;
-    // Simulate a drag across the span (anchor is this press's position, so
-    // the final bounds cover the span exactly). The framework's up/drag
-    // paths finish or extend the selection.
-    this.host.updateSelection(undefined, span.sx, e.y);
+    if (!span || !e.target) return;
+    // Re-anchor at the span start (the framework anchored on the press point,
+    // which clips the selection when the press is mid-word/mid-line), then
+    // drag the focus to the span end. The framework's up/drag paths finish or
+    // extend the selection from there.
+    this.host.startSelection(e.target, span.sx, e.y);
     this.host.updateSelection(undefined, span.ex, e.y);
   }
 }
