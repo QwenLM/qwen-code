@@ -619,7 +619,7 @@ describe('Gemini Client (client.ts)', () => {
         toolResultsThresholdMinutes: 60,
         toolResultsNumToKeep: 5,
       }),
-      getSessionTokenLimit: vi.fn().mockReturnValue(32000),
+      getSessionTokenLimit: vi.fn().mockReturnValue(0),
       getNoBrowser: vi.fn().mockReturnValue(false),
       getUsageStatisticsEnabled: vi.fn().mockReturnValue(true),
       getTelemetryIncludeSensitiveSpanAttributes: vi
@@ -654,6 +654,7 @@ describe('Gemini Client (client.ts)', () => {
           .mockReturnValue('/test/project/root/.gemini/projects/test-project'),
       },
       getContentGenerator: vi.fn().mockReturnValue(mockContentGenerator),
+      getModelRouteIdentity: vi.fn().mockReturnValue('test-route'),
       getEffectiveInputModalities: vi.fn().mockReturnValue({}),
       getBaseLlmClient: vi.fn(),
       getSkipLoopDetection: vi.fn().mockReturnValue(false),
@@ -3018,6 +3019,7 @@ describe('Gemini Client (client.ts)', () => {
         addHistory,
         getHistory: vi.fn().mockReturnValue([]),
         getHistoryLength: vi.fn().mockReturnValue(1),
+        getLastPromptTokenCount: vi.fn().mockReturnValue(101),
         // Send is skipped, so the push counter never advances → restore.
         getUserContentPushCount: vi.fn().mockReturnValue(0),
         stripOrphanedUserEntriesFromHistory: vi
@@ -3042,6 +3044,45 @@ describe('Gemini Client (client.ts)', () => {
       expect(events[0]?.type).toBe(GeminiEventType.SessionTokenLimitExceeded);
       expect(mockTurnRunFn).not.toHaveBeenCalled();
       expect(addHistory).toHaveBeenCalledWith(retryEntry);
+    });
+
+    it('invalidates a foreign route count before the session limit gate', async () => {
+      let route = 'route-a';
+      let telemetryCount = 691_000;
+      vi.mocked(mockConfig.getModelRouteIdentity).mockImplementation(
+        () => route,
+      );
+      vi.mocked(mockConfig.getSessionTokenLimit).mockReturnValue(100_000);
+      vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockImplementation(
+        () => telemetryCount,
+      );
+      vi.mocked(uiTelemetryService.setLastPromptTokenCount).mockImplementation(
+        (count) => {
+          telemetryCount = count;
+        },
+      );
+      client.getChat().setLastPromptTokenCount(telemetryCount);
+      route = 'route-b';
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: GeminiEventType.Content, value: 'response' };
+        })(),
+      );
+
+      const events = await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'new route' }],
+          new AbortController().signal,
+          'prompt-route-switch',
+        ),
+      );
+
+      expect(events).not.toContainEqual(
+        expect.objectContaining({
+          type: GeminiEventType.SessionTokenLimitExceeded,
+        }),
+      );
+      expect(telemetryCount).toBe(0);
     });
   });
 

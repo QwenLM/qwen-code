@@ -6923,6 +6923,7 @@ describe('GeminiChat', async () => {
                   finishReason: 'STOP',
                 },
               ],
+              usageMetadata: { promptTokenCount: 99_999 },
             } as unknown as GenerateContentResponse;
           })(),
         );
@@ -6947,6 +6948,9 @@ describe('GeminiChat', async () => {
       vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
         resolveForModel,
       } as unknown as ReturnType<typeof mockConfig.getBaseLlmClient>);
+      vi.mocked(mockConfig.getModelRouteIdentity).mockImplementation((model) =>
+        model ? `${model}@route` : 'gemini-pro@test0001',
+      );
       vi.mocked(mockConfig.getEffectiveInputModalities).mockReturnValue({
         pdf: true,
       });
@@ -6999,6 +7003,7 @@ describe('GeminiChat', async () => {
       for await (const _ of stream) {
         /* consume */
       }
+      expect(chat.getLastPromptTokenCount()).toBe(0);
 
       expect(resolveForModel).toHaveBeenCalledOnce();
       expect(resolveForModel).toHaveBeenCalledWith(routeSelector, {
@@ -7160,6 +7165,9 @@ describe('GeminiChat', async () => {
       vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
         resolveForModel,
       } as unknown as ReturnType<typeof mockConfig.getBaseLlmClient>);
+      vi.mocked(mockConfig.getModelRouteIdentity).mockImplementation((model) =>
+        model ? `${model}@route` : 'gemini-pro@test0001',
+      );
 
       const capacityError = Object.assign(
         new StreamContentError(
@@ -7198,6 +7206,7 @@ describe('GeminiChat', async () => {
                 finishReason: 'STOP',
               },
             ],
+            usageMetadata: { promptTokenCount: 99_999 },
           } as unknown as GenerateContentResponse;
         })(),
       );
@@ -7265,6 +7274,7 @@ describe('GeminiChat', async () => {
       ).toContain('fallback-image');
       expect(fallbackAGenerateContentStream).toHaveBeenCalledTimes(1);
       expect(fallbackBGenerateContentStream).toHaveBeenCalledTimes(1);
+      expect(chat.getLastPromptTokenCount()).toBe(0);
       expect(
         events.some(
           (event) =>
@@ -15532,6 +15542,37 @@ describe('GeminiChat', async () => {
       chat.setLastPromptTokenCount(120_000, false);
       expect(chat.getLastPromptTokenCount()).toBe(120_000);
       expect(chat.isLastPromptTokenCountEstimated()).toBe(false);
+    });
+
+    it('invalidates a stale count before sending on the new route', async () => {
+      chat.setLastPromptTokenCount(691_000, false);
+      switchRoute('anthropic-model@beef1234');
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => {
+          expect(
+            uiTelemetryService.setLastPromptTokenCount,
+          ).toHaveBeenCalledWith(0);
+          return (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: { parts: [{ text: 'ok' }] },
+                  finishReason: 'STOP',
+                },
+              ],
+            } as unknown as GenerateContentResponse;
+          })();
+        },
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'new route' },
+        'prompt-route-switch',
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
     });
   });
 

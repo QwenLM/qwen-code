@@ -3132,8 +3132,7 @@ export class GeminiClient {
       // forceFullIdeContext flip).
       const sessionTokenLimit = this.config.getSessionTokenLimit();
       if (sessionTokenLimit > 0) {
-        const lastPromptTokenCount =
-          uiTelemetryService.getLastPromptTokenCount();
+        const lastPromptTokenCount = this.getChat().getLastPromptTokenCount();
         if (lastPromptTokenCount > sessionTokenLimit) {
           this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
           yield {

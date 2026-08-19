@@ -1995,10 +1995,7 @@ export class GeminiChat {
       `[token-counts] route changed; invalidating counts recorded for ` +
         `${this.tokenCountsRouteKey ?? 'unknown'} (now ${currentRoute})`,
     );
-    this.lastPromptTokenCount = 0;
-    this.lastPromptTokenCountIsEstimated = false;
-    this.lastOutputTokenCount = 0;
-    this.tokenCountsRouteKey = currentRoute;
+    this.setLastPromptTokenCount(0);
     // Keep the telemetry mirror in sync, or the session token-limit gate
     // and compression banners keep reading the foreign count.
     this.telemetryService?.setLastPromptTokenCount(0);
@@ -2392,6 +2389,12 @@ export class GeminiChat {
     if (exactRoute) {
       model = exactRoute.model;
     }
+    const requestRouteKey = exactRoute
+      ? this.config.getModelRouteIdentity(
+          model,
+          exactRoute.contentGeneratorConfig,
+        )
+      : this.currentRouteKey();
     const requestModalities =
       exactRoute?.contentGeneratorConfig.modalities ??
       this.config.getEffectiveInputModalities();
@@ -2968,6 +2971,7 @@ export class GeminiChat {
               params,
               prompt_id,
               requestOverrides,
+              requestRouteKey,
               turnGoalContext,
               // Captured by value, so the attempt records exactly the prefix
               // `buildAttemptContents()` just asked the model to resume from,
@@ -3500,6 +3504,7 @@ export class GeminiChat {
                 attemptState.params,
                 prompt_id,
                 requestOverrides,
+                requestRouteKey,
                 turnGoalContext,
               );
               for await (const chunk of stream) {
@@ -3845,6 +3850,7 @@ export class GeminiChat {
                 let fallbackRetryErrorCodes: readonly number[] | undefined;
                 let resolvedFallbackModel: string;
                 let fallbackModalities: InputModalities | undefined;
+                let fallbackRouteKey: string;
                 try {
                   const resolved = await self.config
                     .getBaseLlmClient()
@@ -3855,6 +3861,10 @@ export class GeminiChat {
                   resolvedFallbackModel = resolved.model;
                   fallbackModalities =
                     resolved.contentGeneratorConfig?.modalities;
+                  fallbackRouteKey = self.config.getModelRouteIdentity(
+                    resolved.model,
+                    resolved.contentGeneratorConfig,
+                  );
                 } catch (resolveError) {
                   if (isAbortError(resolveError)) throw resolveError;
                   const resolveErrorMessage =
@@ -3919,6 +3929,7 @@ export class GeminiChat {
                     fallbackGenerator,
                     fallbackRetryAuthType,
                     fallbackRetryErrorCodes,
+                    fallbackRouteKey,
                     turnGoalContext,
                   )) {
                     const emittedUserVisibleOutput =
@@ -4073,6 +4084,7 @@ export class GeminiChat {
       retryAuthType?: string;
       retryErrorCodes?: readonly number[];
     },
+    routeKey = this.currentRouteKey(),
     goalContext?: GoalTurnPermit,
     transportContinuationPrefix?: string,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
@@ -4154,6 +4166,7 @@ export class GeminiChat {
     return this.processStreamResponse(
       model,
       rejectDegradedPlaceholderResponse(streamResponse),
+      routeKey,
       goalContext,
       transportContinuationPrefix,
     );
@@ -4167,6 +4180,7 @@ export class GeminiChat {
     contentGenerator: ContentGenerator,
     retryAuthType?: string,
     retryErrorCodes?: readonly number[],
+    routeKey?: string,
     goalContext?: GoalTurnPermit,
   ): AsyncGenerator<StreamEvent> {
     const stream = await this.makeApiCallAndProcessStream(
@@ -4175,6 +4189,7 @@ export class GeminiChat {
       params,
       prompt_id,
       { contentGenerator, retryAuthType, retryErrorCodes },
+      routeKey,
       goalContext,
     );
 
@@ -4665,6 +4680,7 @@ export class GeminiChat {
   private async *processStreamResponse(
     model: string,
     streamResponse: AsyncGenerator<GenerateContentResponse>,
+    routeKey: string,
     goalContext?: GoalTurnPermit,
     transportContinuationPrefix?: string,
   ): AsyncGenerator<GenerateContentResponse> {
@@ -4883,7 +4899,7 @@ export class GeminiChat {
               : 0;
             // Attribute these counts to the route that reported them so a
             // later model switch invalidates them (#9454).
-            this.tokenCountsRouteKey = this.currentRouteKey();
+            this.tokenCountsRouteKey = routeKey;
             // Mirror to the global telemetry only when wired — subagents
             // pass `telemetryService=undefined` to keep their context usage
             // out of the main session's UI counters.
