@@ -33,6 +33,15 @@ const DEFAULT_MAX_BLOCKS = 1_000;
 const DEFAULT_MAX_RETAINED_BYTES = 128 * 1024 * 1024;
 const TRIMMED_TOOL_BLOCK_ID = '__trimmed_tool_block__';
 const TRIMMED_PERMISSION_BLOCK_ID = '__trimmed_permission_block__';
+
+/**
+ * True when a `toolBlockByCallId` entry is the trimmed-block sentinel (the
+ * original block was evicted by retention trimming). Lets consumers merge a
+ * pagination-resurrected real mapping without letting the stale sentinel win.
+ */
+export function isTrimmedToolBlockId(blockId: string | undefined): boolean {
+  return blockId === TRIMMED_TOOL_BLOCK_ID;
+}
 const MAX_TEXT_BLOCK_LENGTH = 100_000;
 const TEXT_TRUNCATED_SUFFIX = '\n[truncated]\n';
 const MAX_CLONE_DEPTH = 16;
@@ -1569,6 +1578,7 @@ function trimTranscriptState(
   truncationCallbacks.get(state)?.({
     kind: 'blocks',
     oldestRetainedRecordId: oldestRetainedBlock?.sourceRecordIds?.[0],
+    evictedOldest: true,
     blockCount: state.blocks.length,
     retainedBytes: state.retainedBytes,
     maxBlocks: state.maxBlocks,
@@ -1652,6 +1662,7 @@ function truncateTranscriptBeforeBlock(
   blockIndex: number,
 ): void {
   takeBlocksOwnership(state);
+  const originalLength = state.blocks.length;
   let droppedBytes = 0;
   for (let index = blockIndex; index < state.blocks.length; index += 1) {
     const block = state.blocks[index];
@@ -1662,6 +1673,25 @@ function truncateTranscriptBeforeBlock(
   ownedBlocks.set(state, state.blocks);
   rebuildTranscriptIndexes(state);
   ownedBlockIndexes.set(state, state.blockIndexById);
+  if (state.blocks.length < originalLength) {
+    // A rewind frees retention capacity just like an eviction does. Fire the
+    // same 'blocks' truncation signal so consumers reconciling a pagination
+    // capacity latch on freed capacity observe rewinds too. `evictedOldest`
+    // is false: a rewind drops the NEWEST blocks, so the oldest pagination
+    // anchor stays valid and must not be re-anchored.
+    const oldestRetainedBlock = state.blocks.find(
+      (block) => (block.sourceRecordIds?.length ?? 0) > 0,
+    );
+    truncationCallbacks.get(state)?.({
+      kind: 'blocks',
+      oldestRetainedRecordId: oldestRetainedBlock?.sourceRecordIds?.[0],
+      evictedOldest: false,
+      blockCount: state.blocks.length,
+      retainedBytes: state.retainedBytes,
+      maxBlocks: state.maxBlocks,
+      maxRetainedBytes: state.maxRetainedBytes,
+    });
+  }
 }
 
 function rebuildTranscriptIndexes(state: DaemonTranscriptState): void {

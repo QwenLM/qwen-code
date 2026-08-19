@@ -13465,13 +13465,13 @@ describe('DaemonSessionProvider', () => {
       },
     });
     sdkMocks.sessions.push(session);
+    // A single-block page cannot join the saturated 2/2 window (count), but a
+    // lone block is below the block cap, so it routes to the re-openable
+    // latch rather than the terminal branch; the latch records its footprint.
     sdkMocks.getSessionTranscriptPage.mockResolvedValue({
       v: 1,
       sessionId: session.sessionId,
-      events: [
-        chunk(10, 'user_message_chunk', 'older prompt', 'record-a'),
-        chunk(11, 'agent_message_chunk', 'older answer', 'record-b'),
-      ],
+      events: [chunk(10, 'user_message_chunk', 'older prompt', 'record-a')],
       hasMore: true,
     });
     let history: ReturnType<typeof useDaemonTranscriptHistory> | undefined;
@@ -13810,20 +13810,25 @@ describe('DaemonSessionProvider', () => {
       sessionId: 'session-history-capacity',
       historyHasMore: true,
       replaySnapshot: {
-        compactedReplay: [replayEvent(2, 'recent prompt', 'record-2')],
+        compactedReplay: [
+          replayEvent(1, 'replay prompt', 'record-1'),
+          replayEvent(2, 'replay answer', 'record-2', 'agent_message_chunk'),
+        ],
         liveJournal: [],
       },
     });
     sdkMocks.sessions.push(session);
-    // Two older blocks (distinct kinds so they do not merge): with the
-    // retained block they overflow the cap, so the terminal page must be
-    // rejected atomically instead of partially prepended.
+    // Three older blocks (alternating kinds so they do not merge): with the
+    // two retained blocks they overflow the cap (2 + 3 > 4), but the page
+    // alone is below the cap, so it is rejected atomically into the
+    // re-openable latch rather than partially prepended.
     sdkMocks.getSessionTranscriptPage.mockResolvedValue({
       v: 1,
       sessionId: session.sessionId,
       events: [
-        replayEvent(0, 'older prompt'),
-        replayEvent(1, 'older answer', undefined, 'agent_message_chunk'),
+        replayEvent(10, 'older prompt'),
+        replayEvent(11, 'older answer', undefined, 'agent_message_chunk'),
+        replayEvent(12, 'older follow-up'),
       ],
       hasMore: false,
     });
@@ -13836,12 +13841,13 @@ describe('DaemonSessionProvider', () => {
       return null;
     }
 
-    // maxBlocks 2 leaves headroom over the single retained replay block so
-    // the load actually proceeds and exercises the atomic page rejection.
+    // maxBlocks 4 keeps the 3-block page below the cap (so the rejection is
+    // count-based, not the terminal impossible branch) while the merged total
+    // still overflows the cap.
     await renderWithProvider(<Harness />, {
       autoConnect: true,
       historyPageSize: 25,
-      maxBlocks: 2,
+      maxBlocks: 4,
     });
     await act(async () => {
       await history?.loadMore();
@@ -13853,7 +13859,10 @@ describe('DaemonSessionProvider', () => {
       loading: false,
       capacityReached: true,
     });
-    expect(blocks).toMatchObject([{ kind: 'user', text: 'recent prompt' }]);
+    expect(blocks).toMatchObject([
+      { kind: 'user', text: 'replay prompt' },
+      { kind: 'assistant', text: 'replay answer' },
+    ]);
   });
 
   it('uses a full load for a legacy controlled clientId rebind', async () => {

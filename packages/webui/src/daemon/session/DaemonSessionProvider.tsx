@@ -23,6 +23,7 @@ import {
   createDaemonTranscriptStore,
   estimateDaemonTranscriptBlockBytes,
   extractServerTimestamp,
+  isTrimmedToolBlockId,
   matchTurnEvent,
   normalizeDaemonEvent,
   type CreateSessionRequest,
@@ -31,6 +32,7 @@ import {
   type DaemonTranscriptBlock,
   type DaemonTranscriptState,
   type DaemonTranscriptStore,
+  type DaemonTranscriptTruncationDetail,
   type DaemonTurnCompleteData,
   type DaemonUiEvent,
 } from '@qwen-code/sdk/daemon';
@@ -312,6 +314,15 @@ function materializeTranscriptHistory(
     pageBytes += estimateDaemonTranscriptBlockBytes(block);
   }
   const pageBlocks = history.blocks.length;
+  // `impossible` must be evaluated across BOTH dimensions, regardless of
+  // which branch rejects: a page that alone fills the whole block window can
+  // never be admitted (an anchored window always retains at least one block),
+  // and likewise for the byte budget. Equality is already impossible, hence
+  // `>=`. A page rejected by one dimension but impossible in the other would
+  // route to the re-openable latch whose re-open gate is then unsatisfiable —
+  // terminal either way.
+  const impossible =
+    pageBlocks >= maxBlocks || pageBytes >= current.maxRetainedBytes;
   // Count admission: an over-count merge stays untrimmed while the session
   // is idle, and the next live trim evicts the freshly prepended oldest
   // records, which the exclusive pagination anchor can never re-fetch — a
@@ -322,9 +333,7 @@ function materializeTranscriptHistory(
       reason: 'count',
       pageBlocks,
       pageBytes,
-      // A page that alone exceeds the whole block window can never be
-      // admitted, in any occupancy state.
-      impossible: pageBlocks > maxBlocks,
+      impossible,
     };
   }
   // Byte-budget admission: same silent-gap hazard as the count cap — an
@@ -335,9 +344,7 @@ function materializeTranscriptHistory(
       reason: 'bytes',
       pageBlocks,
       pageBytes,
-      // A page that alone exceeds the whole byte budget can never be
-      // admitted, even into an empty window.
-      impossible: pageBytes > current.maxRetainedBytes,
+      impossible,
     };
   }
   return {
@@ -356,15 +363,39 @@ function applyTranscriptHistory(
   current: DaemonTranscriptState,
   history: TranscriptHistoryMaterialization,
 ): DaemonTranscriptState {
+  // A page-resurrected real block mapping must win over the current window's
+  // TRIMMED sentinel for the same callId — otherwise the resurrected block is
+  // orphaned and every later live update for that tool hits the sentinel
+  // branch (a false "output trimmed" error block plus dropped updates).
+  // Real-vs-real collisions cannot occur (the recordId dedup filter drops
+  // already-displayed records before materialization).
+  const toolBlockByCallId: Record<string, string> = {
+    ...history.toolBlockByCallId,
+  };
+  for (const [callId, blockId] of Object.entries(current.toolBlockByCallId)) {
+    if (
+      isTrimmedToolBlockId(blockId) &&
+      toolBlockByCallId[callId] !== undefined
+    ) {
+      continue;
+    }
+    toolBlockByCallId[callId] = blockId;
+  }
+  // A resurrected tool is live content again; clear its trimmed-notification
+  // flag so a future re-trim reports it once instead of staying silent.
+  const trimmedToolNotificationByCallId: Record<string, true> = {
+    ...current.trimmedToolNotificationByCallId,
+  };
+  for (const callId of Object.keys(history.toolBlockByCallId)) {
+    delete trimmedToolNotificationByCallId[callId];
+  }
   return {
     ...current,
     blocks: [...history.blocks, ...current.blocks],
     retainedBytes: current.retainedBytes + history.retainedBytes,
     nextOrdinal: history.nextOrdinal,
-    toolBlockByCallId: {
-      ...history.toolBlockByCallId,
-      ...current.toolBlockByCallId,
-    },
+    toolBlockByCallId,
+    trimmedToolNotificationByCallId,
     permissionBlockByRequestId: {
       ...history.permissionBlockByRequestId,
       ...current.permissionBlockByRequestId,
@@ -678,12 +709,42 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           // Trimming evicts oldest-first, so it can remove the very record
           // the exclusive `beforeRecordId` anchor points at; the daemon
           // never returns the anchor itself, so the evicted stretch would
-          // become unreachable. Re-anchor to the oldest retained record.
-          if (detail.oldestRetainedRecordId !== undefined) {
-            history.beforeRecordId = detail.oldestRetainedRecordId;
+          // become unreachable. Re-anchor to the oldest retained record and
+          // atomically drop a stale cursor (loadMore prefers cursor over
+          // beforeRecordId, and a cursor-addressed position can never be
+          // re-based after the blocks it points past are evicted). A rewind
+          // (`evictedOldest === false`) drops the newest blocks and leaves
+          // the oldest anchor intact, so it must not trigger re-anchoring.
+          if (detail.evictedOldest !== false) {
+            if (detail.oldestRetainedRecordId !== undefined) {
+              history.beforeRecordId = detail.oldestRetainedRecordId;
+              history.cursor = undefined;
+            } else {
+              // Re-anchor uncomputable — no retained block carries a
+              // recordId. The current anchor points at an evicted record the
+              // exclusive pagination contract can never return again; fail
+              // closed instead of offering an affordance that skips the
+              // evicted band.
+              history.beforeRecordId = undefined;
+              history.cursor = undefined;
+              if (history.hasMore) {
+                history.hasMore = false;
+                setTranscriptHistoryState({
+                  hasMore: false,
+                  loading: history.loading,
+                  capacityReached: history.capacityReached,
+                  paginationError: history.paginationError,
+                });
+              }
+            }
           }
-          // Any eviction can invalidate an in-flight page's anchor.
-          paginationGenerationRef.current += 1;
+          // Oldest-first eviction can invalidate an in-flight page's anchor;
+          // bump the generation so the stale page is dropped on resolve. A
+          // rewind leaves the anchor band untouched, so in-flight pages stay
+          // valid and must not be dropped.
+          if (detail.evictedOldest !== false) {
+            paginationGenerationRef.current += 1;
+          }
           if (history.capacityReached) {
             // Eviction freed retention capacity, so the page rejected at the
             // latch may fit now — re-open the load-older affordance, but
@@ -1801,6 +1862,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               (group) => group.transcript,
             );
             let replayExceededCapacity = false;
+            let replayTrimmed = false;
             let replayTrimmedAnchor: string | undefined;
             const rebuildReplay =
               repairingEpisode !== undefined ||
@@ -1818,12 +1880,21 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 repairingEpisode && markerStillVisible
                   ? repairingEpisode.checkpoint.maxBlocks
                   : maxBlocks;
-              let replayTrimmed = false;
+              const observeReplayTrim = (
+                detail: DaemonTranscriptTruncationDetail,
+              ) => {
+                if (detail.kind === 'blocks') replayTrimmed = true;
+              };
+              // Both rebuild branches can trim (count cap or byte budget), so
+              // both observe it — a marker-visible repair seeded from the
+              // checkpoint is just as able to evict the pagination anchor as
+              // an ordinary rebuild.
               const replayStore = createDaemonTranscriptStore(
                 repairingEpisode && markerStillVisible
                   ? {
                       ...repairingEpisode.checkpoint,
                       maxBlocks: replayMaxBlocks,
+                      onTruncation: observeReplayTrim,
                     }
                   : {
                       maxBlocks: replayMaxBlocks,
@@ -1837,9 +1908,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                       // The count cap and the default byte budget can both
                       // evict mid-rebuild; observe either so the pagination
                       // anchor and capacity indicator reconcile below.
-                      onTruncation: (detail) => {
-                        if (detail.kind === 'blocks') replayTrimmed = true;
-                      },
+                      onTruncation: observeReplayTrim,
                     },
               );
               let nextCheckpoint: DaemonTranscriptState | undefined;
@@ -1859,9 +1928,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               // A rebuild trim (count cap or byte budget) evicted older
               // blocks; a merely saturated window leaves no in-store room
               // for pagination either way — surface capacityReached for both.
+              // Repair rebuilds reconcile too: they evict the anchor just as
+              // an ordinary rebuild does.
               replayExceededCapacity =
-                repairingEpisode === undefined &&
-                (replayTrimmed || replayState.blocks.length >= maxBlocks);
+                replayTrimmed || replayState.blocks.length >= replayMaxBlocks;
               if (replayExceededCapacity) {
                 // The pre-trim anchor can sit inside the trimmed stretch;
                 // re-anchor below to the oldest RETAINED record so
@@ -1930,20 +2000,53 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               );
             }
             if (replayExceededCapacity) {
-              if (replayTrimmedAnchor !== undefined) {
-                transcriptHistoryRef.current.beforeRecordId =
-                  replayTrimmedAnchor;
+              if (replayTrimmed) {
+                if (replayTrimmedAnchor !== undefined) {
+                  transcriptHistoryRef.current.beforeRecordId =
+                    replayTrimmedAnchor;
+                } else {
+                  // The rebuild trimmed but no retained block carries a
+                  // recordId, so a re-anchor to a retained record is
+                  // uncomputable. Whether the pre-trim anchor
+                  // (firstPersistedRecordId) is still safe depends on the
+                  // evicted band: if the pre-trim replay carried several
+                  // distinct recordIds, evicting every recordId-bearing block
+                  // skips the non-oldest ones — a silent gap — so fail closed
+                  // (drop the anchor; the affordance closes below). With zero
+                  // or one recordId there is no such band, so the pre-trim
+                  // anchor remains a valid exclusive-before base.
+                  const replayRecordIds = new Set<string>();
+                  for (const replayEvent of replayEvents) {
+                    const recordId = getPersistedReplayRecordId(replayEvent);
+                    if (recordId !== undefined) {
+                      replayRecordIds.add(recordId);
+                    }
+                  }
+                  if (replayRecordIds.size > 1) {
+                    transcriptHistoryRef.current.beforeRecordId = undefined;
+                  }
+                }
+                // A rebuild trim can evict the records a cursor points past;
+                // drop it so the beforeRecordId (re-anchored or pre-trim) is
+                // authoritative.
+                transcriptHistoryRef.current.cursor = undefined;
               }
-              // Trimmed replay content stays persisted daemon-side and is
-              // fetchable through pagination (for live sessions too), so
-              // keep the load-older affordance instead of dropping the
-              // content silently.
+              // Trimmed/saturated replay content stays persisted daemon-side
+              // and is fetchable through pagination, so keep the load-older
+              // affordance — but only while admission has real headroom: a
+              // positional anchor and byte-budget room. Without byte-budget
+              // headroom (e.g. a single oversized block whose estimate alone
+              // exceeds the budget) no page can ever be admitted, so offering
+              // the affordance would burn it on the first click with no
+              // terminal signal.
+              const postRebuild = store.getSnapshot();
               const olderHistoryReachable =
                 Array.isArray(capabilities?.features) &&
                 capabilities.features.includes(
                   SESSION_TRANSCRIPT_PAGINATION_FEATURE,
                 ) &&
-                transcriptHistoryRef.current.beforeRecordId !== undefined;
+                transcriptHistoryRef.current.beforeRecordId !== undefined &&
+                postRebuild.retainedBytes < postRebuild.maxRetainedBytes;
               transcriptHistoryRef.current.hasMore = olderHistoryReachable;
               transcriptHistoryRef.current.capacityReached = true;
               setTranscriptHistoryState({

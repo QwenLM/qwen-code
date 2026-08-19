@@ -100,7 +100,10 @@ const rootDir = join(__dirname, '..');
 // Bumped from 197KB to 198KB for the retention byte budget (block byte
 // estimation + budget-aware trimming) and backing-store-detached string caps
 // (#9303 review round 3).
-const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 198 * 1024;
+// Bumped from 198KB to 199KB for the pagination/eviction reconciliation
+// (#9303 review rounds 9-10): eviction-direction signal, rewind truncation
+// callback, and the trimmed-tool sentinel helper.
+const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 199 * 1024;
 // The opt-in `daemon/transports` browser bundle legitimately ships the concrete
 // ACP transports (AcpHttpTransport/AcpWsTransport/AutoReconnect + negotiate), so
 // it's larger than the default barrel — but still budgeted so a future PR can't

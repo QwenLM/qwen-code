@@ -16,6 +16,7 @@ export {
   estimateDaemonTranscriptBlockBytes,
   formatBlockTimestamp,
   isSubagentChildBlock,
+  isTrimmedToolBlockId,
   rebuildDaemonTranscriptBlockIndex,
   reduceDaemonTranscriptEvents,
   selectApprovalMode,
@@ -82,6 +83,7 @@ export type {
   DaemonTranscriptSidechannelState,
   DaemonTranscriptState,
   DaemonTranscriptStore,
+  DaemonTranscriptTruncationDetail,
   // Chat-stream events
   DaemonUiAssistantDoneEvent,
   DaemonUiDebugReason,
