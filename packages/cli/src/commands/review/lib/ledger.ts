@@ -107,6 +107,33 @@ export interface Ledger {
    * the measurement is true either way.
    */
   src0?: number;
+  /**
+   * How many inline comments this round posted — convergence telemetry, and
+   * the ONLY field here that decides nothing.
+   *
+   * Every other field gates something (`findings` is the next round's work
+   * list, `sha`/`model` scope its diff, `dropped` withholds that scoping),
+   * which is why they all fail closed. These two are read by no gate: they
+   * exist so a later round — or a caller applying its own policy — can see
+   * whether the loop's posting volume is shrinking, without asking the
+   * model or counting a comment list that cannot distinguish this account's
+   * rounds from anyone else's. A tampered or absent value costs a trend
+   * line and nothing else, so they fail OPEN (absent) rather than
+   * withholding anything.
+   *
+   * Kept across a truncated list on purpose, unlike the anchor pair: a
+   * `dropped` work list says the next round cannot scope from here, not
+   * that this round posted a different number of comments than it did.
+   */
+  posted?: number;
+  /**
+   * The PREVIOUS round's `posted`, carried forward so one marker holds a
+   * two-round window: a round reading this marker knows its predecessor's
+   * volume AND the one before that, which is the shortest window in which
+   * "still shrinking" is a statement rather than a single step. Same
+   * fail-open, decides-nothing contract as `posted`.
+   */
+  prevPosted?: number;
 }
 
 /**
@@ -197,6 +224,36 @@ export const LEDGER_MAX_ID = 24;
 export const LEDGER_MAX_ROUND = 10_000;
 
 /**
+ * The volume fields' ceiling. A round posting more than this many inline
+ * comments is past anything the API or a human review surface tolerates, and
+ * the cap exists for the same reason the round's does: the number is written
+ * from a count this module does not own, and an unbounded one spends the
+ * marker's byte budget on digits.
+ */
+export const LEDGER_MAX_VOLUME = 100_000;
+
+/**
+ * The ONE reading of a volume field: a non-negative whole number, clamped to
+ * the cap — or `undefined` for anything else.
+ *
+ * Shared by every boundary that reads one (the serializer, the parser, and
+ * `compose-review`'s side-file recovery) because the shape check and the
+ * clamp have to travel together: a boundary that validated without clamping
+ * let one compose emit an uncapped number to its terminal line while its own
+ * marker recorded the capped one — two outputs of a single round disagreeing
+ * about the same count.
+ *
+ * Zero survives on purpose: "this round posted nothing" is exactly the
+ * observation a convergence trend is looking for, and dropping it would make
+ * a converged round indistinguishable from one that never recorded a volume.
+ */
+export function volumeOf(n: unknown): number | undefined {
+  return typeof n === 'number' && Number.isInteger(n) && n >= 0
+    ? Math.min(n, LEDGER_MAX_VOLUME)
+    : undefined;
+}
+
+/**
  * ...and a cap on the WHOLE marker, because the per-field ones do not bound it:
  * fifty findings at full width serialize to just under 17,000 characters.
  *
@@ -238,6 +295,7 @@ export function serializeLedger(ledger: Ledger): string {
     findings: LedgerFinding[],
     dropped: number,
     anchor: boolean,
+    volume: 'both' | 'posted' | 'none',
   ): string => {
     const payload: Ledger = {
       v: 1,
@@ -246,6 +304,20 @@ export function serializeLedger(ledger: Ledger): string {
       round: Math.min(ledger.round, LEDGER_MAX_ROUND),
       findings,
     };
+    // The volume telemetry rides OUTSIDE the truncation rule that governs the
+    // anchor — it qualifies no range, so a partial work list says nothing
+    // about it — but it is the FIRST thing the byte budget sheds (see the
+    // cascade below). Bounded like every other written field: a non-integer
+    // or negative count is not a volume, and the cap keeps a forged marker
+    // from spending the byte budget on digits.
+    if (volume !== 'none') {
+      const postedOut = volumeOf(ledger.posted);
+      if (postedOut !== undefined) payload.posted = postedOut;
+      if (volume === 'both') {
+        const prevPostedOut = volumeOf(ledger.prevPosted);
+        if (prevPostedOut !== undefined) payload.prevPosted = prevPostedOut;
+      }
+    }
     if (dropped > 0) payload.dropped = dropped;
     // A truncated list must not certify a range: the dropped entries reference
     // code at or before the anchored head, and a next round scoped to
@@ -286,7 +358,28 @@ export function serializeLedger(ledger: Ledger): string {
   // 51 findings in, 24 kept, and it said 26 missing.
   const total = ledger.findings.length;
   let kept = capped.length;
-  let marker = render(capped, total - kept, true);
+  let marker = render(capped, total - kept, true, 'both');
+  if (marker.length > LEDGER_MAX_BYTES) {
+    // Between "both volumes" and "no volume" there is a rung worth having:
+    // the CARRIED value goes first, this round's own count second. The
+    // carried one only gives THIS marker a two-round window; `posted` is
+    // the next link in the chain — the value the next compose reads back
+    // and stamps as its own `prevPosted` — so shedding them as one unit
+    // dropped a count that still fitted, and broke the chain a round
+    // earlier than the budget required.
+    marker = render(capped, total - kept, true, 'posted');
+  }
+  if (marker.length > LEDGER_MAX_BYTES) {
+    // The VOLUME sheds first — it is the only thing here that decides
+    // nothing, and its absence is a documented, free reading ("not
+    // recorded"). Everything below it buys something the next round spends:
+    // the anchor scopes that round's diff, and a finding is a ruling it
+    // owes. Written unconditionally, ~27 bytes of telemetry could push a
+    // marker that fit WITH its anchor over the cap and make the re-render
+    // pay with the anchor instead — trading a full-diff re-review for a
+    // trend line.
+    marker = render(capped, total - kept, true, 'none');
+  }
   if (marker.length > LEDGER_MAX_BYTES) {
     // Shed the anchor PAIR before any finding: `dropped` withholds the pair
     // the moment a finding goes anyway, so the old order paid a ruling from
@@ -294,11 +387,11 @@ export function serializeLedger(ledger: Ledger): string {
     // first keeps the whole work list — recovery degrades to the full diff,
     // which the findings survive — and findings start going only when the
     // anchorless form still exceeds the cap.
-    marker = render(capped, total - kept, false);
+    marker = render(capped, total - kept, false, 'none');
   }
   while (marker.length > LEDGER_MAX_BYTES && kept > 0) {
     kept--;
-    marker = render(capped.slice(0, kept), total - kept, false);
+    marker = render(capped.slice(0, kept), total - kept, false, 'none');
   }
   return marker;
 }
@@ -396,6 +489,14 @@ export function parseLedger(body: string | undefined): Ledger | null {
       Number.isInteger(raw.src0) && (raw.src0 as number) > 0
         ? (raw.src0 as number)
         : undefined;
+    // The volume fields are normalised on READ exactly as they are bounded
+    // on write, and independently of `dropped`: they qualify no range, so a
+    // truncated work list has no bearing on them. A shape the serializer
+    // would not have written (a float, a negative, a string) simply does not
+    // survive — the trend loses a point, which is the whole cost of a field
+    // no gate reads.
+    const posted = volumeOf(raw.posted);
+    const prevPosted = volumeOf(raw.prevPosted);
     return {
       v: 1,
       round: raw.round,
@@ -404,6 +505,8 @@ export function parseLedger(body: string | undefined): Ledger | null {
       ...(sha ? { sha } : {}),
       ...(model ? { model } : {}),
       ...(src0 ? { src0 } : {}),
+      ...(posted === undefined ? {} : { posted }),
+      ...(prevPosted === undefined ? {} : { prevPosted }),
     };
   } catch {
     return null;

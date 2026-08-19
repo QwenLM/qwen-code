@@ -1322,6 +1322,44 @@ describe('Markdown custom code block rendering', () => {
     });
     container.remove();
   });
+
+  it('applies transformMarkdown to a large streaming response', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const rawContent = `raw prefix ${'streaming text '.repeat(3_000)}`;
+    const transformMarkdown = vi.fn((content: string) =>
+      content.replace('raw prefix', 'transformed prefix'),
+    );
+
+    await act(async () => {
+      root.render(
+        createElement(
+          WebShellCustomizationProvider,
+          { value: { markdown: { transformMarkdown } } },
+          createElement(Markdown, {
+            content: rawContent,
+            source: 'assistant',
+            isStreaming: true,
+          }),
+        ),
+      );
+    });
+
+    expect(
+      container.querySelector('[data-markdown-streaming-plain-text="true"]'),
+    ).not.toBeNull();
+    expect(transformMarkdown).toHaveBeenCalledWith(rawContent, {
+      source: 'assistant',
+    });
+    expect(container.textContent).toContain('transformed prefix');
+    expect(container.textContent).not.toContain('raw prefix');
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
 });
 
 describe('Markdown code highlighting while streaming', () => {

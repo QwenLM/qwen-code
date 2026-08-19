@@ -19,6 +19,7 @@ import {
   LEDGER_MAX_TITLE,
   LEDGER_MAX_BYTES,
   LEDGER_MAX_MODEL,
+  LEDGER_MAX_VOLUME,
   type Ledger,
   type LedgerFinding,
 } from './ledger.js';
@@ -529,5 +530,172 @@ describe('ledger src0 — the approach-signal baseline', () => {
     );
     expect(parsed?.src0).toBe(512);
     expect(parsed?.findings[0].title).toBe('rejects --unsafe');
+  });
+});
+
+describe('the volume fields — telemetry across the untrusted boundary', () => {
+  // This suite is the marker's untrusted-input boundary: `parseLedger` reads
+  // PR bodies any account can write, so the volume fields are pinned here
+  // rather than only through the serializer that always writes them well.
+  const base = { v: 1 as const, round: 3, findings: [] };
+
+  it('round-trips both volumes', () => {
+    const l = parseLedger(
+      serializeLedger({ ...base, posted: 4, prevPosted: 9 }),
+    )!;
+    expect(l.posted).toBe(4);
+    expect(l.prevPosted).toBe(9);
+  });
+
+  it('keeps zero — a converged round is the observation', () => {
+    const l = parseLedger(
+      serializeLedger({ ...base, posted: 0, prevPosted: 0 }),
+    )!;
+    expect(l.posted).toBe(0);
+    expect(l.prevPosted).toBe(0);
+  });
+
+  it.each([
+    ['a float', 2.5],
+    ['a negative', -1],
+    ['a string', '7'],
+    ['null', null],
+    ['a NaN', Number.NaN],
+  ])(
+    'refuses %s in a hand-crafted marker without losing the ledger',
+    (_label, bad) => {
+      // The real input domain: a body another account wrote. A volume that
+      // does not parse costs the trend a point; the work list it rides beside
+      // must survive it.
+      const marker = `<!-- qwen-review-ledger ${JSON.stringify({
+        v: 1,
+        round: 5,
+        findings: [{ id: 'R5-1', sev: 'S', file: 'a.ts', title: 'x' }],
+        posted: bad,
+      })} -->`;
+      const l = parseLedger(marker)!;
+      expect(l.round).toBe(5);
+      expect(l.findings).toHaveLength(1);
+      expect(l.posted).toBeUndefined();
+    },
+  );
+
+  it('clamps to the cap on write AND on read', () => {
+    const over = LEDGER_MAX_VOLUME + 1;
+    // Assert the RAW serialized text, not only the round trip: the parser
+    // clamps independently, so a round-trip assertion alone passes even when
+    // the write side emits the uncapped digits — the byte-budget hazard the
+    // cap exists for would reach the posted marker unobserved.
+    const written = serializeLedger({
+      ...base,
+      posted: over,
+      prevPosted: over,
+    });
+    expect(written).toContain(`"posted":${LEDGER_MAX_VOLUME}`);
+    expect(written).toContain(`"prevPosted":${LEDGER_MAX_VOLUME}`);
+    expect(written).not.toContain(String(over));
+    expect(
+      parseLedger(serializeLedger({ ...base, posted: over }))?.posted,
+    ).toBe(LEDGER_MAX_VOLUME);
+    // Read side, independently: a hand-crafted marker cannot exceed what the
+    // serializer would have written.
+    const marker = `<!-- qwen-review-ledger ${JSON.stringify({
+      v: 1,
+      round: 2,
+      findings: [],
+      posted: over,
+      prevPosted: over,
+    })} -->`;
+    const l = parseLedger(marker)!;
+    expect(l.posted).toBe(LEDGER_MAX_VOLUME);
+    expect(l.prevPosted).toBe(LEDGER_MAX_VOLUME);
+  });
+
+  it('sheds itself before the anchor when the byte budget binds', () => {
+    // The reported window: a ledger that fits WITH its anchor, plus the
+    // bytes of volume, crosses the cap — and the re-render must pay with the
+    // telemetry, not with the anchor that scopes the next round's diff.
+    //
+    // The guard at the end counts PRESSURE windows, not comfortable ones.
+    // An earlier version counted every window whose anchor survived without
+    // volume, which a sweep can satisfy 100+ times while executing the shed
+    // cascade zero times — the assertions would then be vacuous exactly
+    // where they matter, and the sweep could drift off the narrow band
+    // without anything noticing.
+    let pressure = 0;
+    for (let n = 24; n <= 32; n++) {
+      for (let title = 20; title <= 40; title++) {
+        const findings = Array.from({ length: n }, (_, i) => ({
+          id: `R3-${i + 1}`,
+          sev: 'S' as const,
+          file: `src/${'p'.repeat(LEDGER_MAX_FILE - 10)}${i}.ts`.slice(
+            0,
+            LEDGER_MAX_FILE,
+          ),
+          title: 't'.repeat(title),
+        }));
+        const bare: Ledger = {
+          v: 1,
+          round: 3,
+          findings,
+          sha: 'deadbeef00112233',
+          model: 'qwen3.8-max',
+        };
+        const bareMarker = serializeLedger(bare);
+        const withoutVolume = parseLedger(bareMarker);
+        // Only windows whose anchor survives WITHOUT volume can regress.
+        if (!withoutVolume?.sha || withoutVolume.dropped) continue;
+        const withVolume = parseLedger(
+          serializeLedger({ ...bare, posted: 12, prevPosted: 9 }),
+        )!;
+        // The anchor and the work list never pay for telemetry.
+        expect(withVolume.sha).toBe('deadbeef00112233');
+        expect(withVolume.findings).toHaveLength(withoutVolume.findings.length);
+        // A window is under pressure when both volumes would not have fit.
+        if (
+          bareMarker.length + '"posted":12,"prevPosted":9,'.length >
+          LEDGER_MAX_BYTES
+        ) {
+          pressure++;
+          // The carried value sheds first, this round's own count second:
+          // `posted` is the next link in the chain the next round reads
+          // back, so it survives a rung longer whenever it still fits.
+          if (bareMarker.length + '"posted":12,'.length <= LEDGER_MAX_BYTES) {
+            expect(withVolume.posted).toBe(12);
+            expect(withVolume.prevPosted).toBeUndefined();
+          }
+        }
+      }
+    }
+    // The sweep must actually reach the band where the cascade runs, or
+    // every assertion above is about comfortable markers only.
+    expect(pressure).toBeGreaterThan(0);
+  });
+
+  it('survives a truncated work list, unlike the anchor pair', () => {
+    // The anchor is withheld when the list is partial because a partial list
+    // cannot certify a range. A volume certifies nothing, and a trend that
+    // went blank exactly on the rounds that overflow would be blind where it
+    // matters most.
+    const findings = Array.from(
+      { length: LEDGER_MAX_FINDINGS + 5 },
+      (_, i) => ({
+        id: `R3-${i + 1}`,
+        sev: 'S' as const,
+        file: `f${i}.ts`,
+        title: `finding ${i}`,
+      }),
+    );
+    const l = parseLedger(
+      serializeLedger({
+        ...base,
+        findings,
+        sha: 'deadbeef00112233',
+        posted: 12,
+      }),
+    )!;
+    expect(l.dropped).toBeGreaterThan(0);
+    expect(l.sha).toBeUndefined();
+    expect(l.posted).toBe(12);
   });
 });

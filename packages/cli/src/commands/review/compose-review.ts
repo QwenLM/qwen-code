@@ -38,11 +38,8 @@ import {
   type Severity,
   type Source,
 } from './findings.js';
+import { BRIEFS } from './lib/agent-briefs.js';
 import {
-  BUDGET_STOP_PHRASE,
-  BUDGET_STOP_PHRASE_ZH,
-  ROUND_CAP_PHRASE,
-  ROUND_CAP_PHRASE_ZH,
   budgetStopDisclosure,
   budgetStopEntry,
   budgetStopEntryZh,
@@ -77,6 +74,7 @@ import {
   LEDGER_MAX_BYTES,
   LEDGER_MAX_ROUND,
   serializeLedger,
+  volumeOf,
   type Ledger,
   type LedgerFinding,
 } from './lib/ledger.js';
@@ -733,6 +731,21 @@ export interface ComposeReviewResult {
    */
   floorEnforced: number[];
   /**
+   * How many inline comments this round will post — the posting set after
+   * floor enforcement, i.e. what `submit` sends. Convergence telemetry: it
+   * rides the ledger marker for the next round to read, and the terminal
+   * report states it so the operator sees this round's contribution to the
+   * PR's comment volume without counting threads by hand. Decides nothing.
+   */
+  postedInline: number;
+  /**
+   * The previous round's `postedInline`, recovered from the side file when
+   * it recorded one. Absent on round 1, on a recovery miss, and on any
+   * predecessor that predates the field — none of which is "posted
+   * nothing", which is why absence is distinct from zero here.
+   */
+  prevPostedInline?: number;
+  /**
    * What the body budget had to give up to fit GitHub's limit, when it did.
    * On the result because `verdictLine` — printed to stderr, persisted in
    * the composed JSON, copied into the archived report — otherwise keeps
@@ -824,21 +837,69 @@ export interface ComposeReviewResult {
 }
 
 /**
+ * A dimension head reduced to its comparable core: lowercased, `&` read as
+ * `and`, hyphen/space runs collapsed to one hyphen, and the label dressing
+ * (`the …`, `… check`, `… verification`) stripped — so the orchestrator's
+ * prose variants (`build-and-test`, `build & test`, `the build-and-test
+ * check`) all reduce to the same core as the brief's `publicLabel`.
+ */
+function canonicalDimensionHead(s: string): string {
+  return (
+    s
+      .toLowerCase()
+      // Spaced, not bare: a tight ampersand (`build&test`) must gain its
+      // separators BEFORE the hyphen collapse, or it canonicalises to
+      // `buildandtest` while the derived set holds `build-and-test` — the
+      // replaced regex accepted the tight form via `[-\s]?`.
+      .replace(/&/g, ' and ')
+      .replace(/[-\s]+/g, '-')
+      .replace(/^the-/, '')
+      .replace(/-(?:check|verification)$/, '')
+  );
+}
+
+/** The fully separator-less spelling — the loosest form the old regex took. */
+function squashedDimensionHead(s: string): string {
+  return canonicalDimensionHead(s).replace(/-/g, '');
+}
+
+/**
+ * The exempt heads, DERIVED from the briefs rather than restated: every role
+ * whose brief sets `readsDiff: false`, by its `publicLabel`. A hardcoded
+ * head list drifted from the machine source of truth it documented — a
+ * label rename (or a second non-diff role) would silently stop or fail to
+ * extend the exemption, and every budget-stopped round on a large repo
+ * would withhold the incremental anchor again: the full-diff re-review loop
+ * this exemption exists to kill, back by way of a string.
+ */
+const NON_DIFF_DIMENSION_HEADS: ReadonlySet<string> = new Set(
+  Object.values(BRIEFS)
+    .filter((b) => !b.readsDiff)
+    .map((b) => canonicalDimensionHead(b.publicLabel)),
+);
+/** Squashed twins of the set above, for the separator-less prose spellings
+ *  (`buildandtest`, `build andtest`) the replaced regex accepted via its
+ *  optional separators — refusing them re-opened the anchor-withholding
+ *  cost on a rare variant, in the safe but expensive direction. */
+const NON_DIFF_DIMENSION_HEADS_SQUASHED: ReadonlySet<string> = new Set(
+  [...NON_DIFF_DIMENSION_HEADS].map((h) => h.replace(/-/g, '')),
+);
+
+/**
  * Does this `unreviewedDimensions` entry name a dimension that reads no diff?
  *
  * Entries are prose the orchestrator writes, in the shape the skill documents:
  * a dimension name, optionally followed by its own reason after an em-dash
  * (`build-and-test — the integration suite never ran`). Only the head is
- * matched, and only against the ONE dimension whose brief sets
- * `readsDiff: false`.
+ * matched, and only against dimensions whose brief sets `readsDiff: false`
+ * (English labels only — the entries are the orchestrator's English prose;
+ * `publicLabelZh` is a rendering concern).
  */
 export function isNonDiffDimensionGap(entry: string): boolean {
-  const head = entry
-    .split(/[—–-]{1,2}\s/)[0]
-    .trim()
-    .toLowerCase();
-  return /^(?:the\s+)?build[-\s]?(?:and|&)[-\s]?test(?:\s+check|\s+verification)?$/.test(
-    head,
+  const head = entry.split(/[—–-]{1,2}\s/)[0].trim();
+  return (
+    NON_DIFF_DIMENSION_HEADS.has(canonicalDimensionHead(head)) ||
+    NON_DIFF_DIMENSION_HEADS_SQUASHED.has(squashedDimensionHead(head))
   );
 }
 
@@ -1134,9 +1195,11 @@ export function composeReview(
   // One read, one round: the deferred-suggestions clause and the ledger
   // marker both name this round, and each reading the side file for itself
   // would let a mid-compose update publish two different round numbers in
-  // one review.
-  const prevLedger = prevLedgerFor(input.planPath);
-  const prevRound = prevLedger.round;
+  // one review. The approach baseline and the previous volume ride out of
+  // the same read for the same reason — a marker pairing one round's number
+  // with another's baseline or count is a record nobody can read back.
+  const prevFacts = prevLedgerFacts(input.planPath);
+  const prevRound = prevFacts.round;
   // The floor, enforced before anything is composed or counted: everything
   // downstream — the counts, the body, the ledger marker — must describe
   // the set that actually posts. `contextUnavailable` is read leniently
@@ -1186,7 +1249,7 @@ export function composeReview(
     cliVersion,
     attribution,
     prevRound,
-    prevLedger.src0,
+    prevFacts.src0,
     reroute,
   );
   // The ledger marker rides the body THIS function returns, because this — not
@@ -1200,6 +1263,13 @@ export function composeReview(
   // Absent means "not recorded", never "proven" — fail closed, as the field's
   // own contract says. This module always sets it, so the fallback is for a
   // result assembled elsewhere.
+  // The volume this round puts on the PR: the posting set AFTER floor
+  // enforcement removed what it moved, because that is what `submit` sends
+  // and therefore what the next round will see on the pull request. Taken
+  // from the body composer's own result rather than re-derived here — one
+  // count, one origin, so the marker and the reported number cannot drift
+  // apart under a later edit to either.
+  const postedInline = result.postedInline;
   const marker = ledgerMarkerFor(
     effective,
     result.cappedBy,
@@ -1208,28 +1278,52 @@ export function composeReview(
     attribution,
     runtimeModelId,
     prevRound,
-    prevLedger.src0,
+    prevFacts.src0,
+    postedInline,
+    prevFacts.posted,
   );
-  return marker ? { ...result, body: `${result.body}\n\n${marker}` } : result;
+  // `postedInline` came out of the body composer on the same input, so only
+  // the predecessor's volume — which only this scope read — is added here.
+  const withVolume: ComposeReviewResult = {
+    ...result,
+    ...(prevFacts.posted === undefined
+      ? {}
+      : { prevPostedInline: prevFacts.posted }),
+  };
+  return marker
+    ? { ...withVolume, body: `${withVolume.body}\n\n${marker}` }
+    : withVolume;
 }
 
 /**
- * The previous posted round's number, recovered from the side file
- * `pr-context` wrote — never from the model. 0 when the plan names no PR or
- * no previous round was recovered: this is round 1. Shared by the marker
- * (which stamps `prevRound + 1`), the deferred-suggestions clause (which
- * names the round the posture engaged on), and the approach signal, so none
- * of the three can disagree about which round this is.
+ * The previous posted round's number, its approach baseline AND its posting
+ * volume, recovered from the side file `pr-context` wrote — never from the
+ * model.
  *
- * `src0` rides along because it is recovered from the same file by the same
- * read — see `Ledger.src0`. Every failure path returns zeros, so a force-push
- * or an account switch that loses the side file reads as round 1 and disarms
- * the approach signal rather than misreporting it. That direction is
+ * The round is 0 when the plan names no PR or no previous round was
+ * recovered: this is round 1. It is shared by the marker (which stamps
+ * `Math.min(prevRound + 1, LEDGER_MAX_ROUND)`), the deferred-suggestions
+ * clause (which names the round the posture engaged on, clamped
+ * identically), and the approach signal, so none of the three can disagree
+ * about which round this is — at the cap included, where an unclamped
+ * `prevRound + 1` on either side would name round 10001 beside a
+ * round-10000 marker.
+ *
+ * Three facts, one read, on purpose: reading the file twice would let a
+ * mid-compose rewrite pair round N's number with round N+1's baseline or
+ * volume in a single marker. They degrade independently — the side file is
+ * a best-effort recovery, and a round with no volume recorded (every round
+ * before the field shipped) is not a round that posted nothing.
+ *
+ * `src0` is 0 on every failure path — see `Ledger.src0`. A force-push or an
+ * account switch that loses the side file therefore reads as round 1 and
+ * disarms the approach signal rather than misreporting it. That direction is
  * deliberate: the signal is advisory, so its failure mode should be silence.
  */
-function prevLedgerFor(planPath: string | undefined): {
+function prevLedgerFacts(planPath: string | undefined): {
   round: number;
   src0: number;
+  posted?: number;
 } {
   const none = { round: 0, src0: 0 };
   try {
@@ -1246,12 +1340,27 @@ function prevLedgerFor(planPath: string | undefined): {
         'utf8',
       ),
     ) as Ledger;
+    const round =
+      Number.isInteger(prev.round) && prev.round > 0 ? prev.round : 0;
+    const src0 =
+      Number.isInteger(prev.src0) && (prev.src0 as number) > 0
+        ? (prev.src0 as number)
+        : 0;
+    // Read through the ledger's own volume reader rather than a local
+    // restatement: the side file is a JSON `pr-context` wrote, not a marker
+    // `parseLedger` already normalised, and a boundary that checked the
+    // shape without applying the cap let this round's terminal line and its
+    // own marker disagree about the same number.
+    const posted = volumeOf(prev.posted);
+    // The volume travels WITH its round or not at all. A side file carrying
+    // a volume but no usable round (partially written, hand-edited) would
+    // otherwise attribute it to round 0 — and a round-1 marker would ship
+    // `prevPosted` for a round that never existed, against this field's own
+    // "absent on round 1" contract.
     return {
-      round: Number.isInteger(prev.round) && prev.round > 0 ? prev.round : 0,
-      src0:
-        Number.isInteger(prev.src0) && (prev.src0 as number) > 0
-          ? (prev.src0 as number)
-          : 0,
+      round,
+      src0,
+      ...(posted === undefined || round === 0 ? {} : { posted }),
     };
   } catch {
     return none;
@@ -1272,6 +1381,8 @@ function ledgerMarkerFor(
   runtimeModelId: string | undefined,
   prevRound: number,
   prevSrc0: number,
+  postedInline: number,
+  prevPostedInline: number | undefined,
 ): string | null {
   try {
     if (!input.planPath) return null;
@@ -1415,6 +1526,15 @@ function ledgerMarkerFor(
       // a diff that shrinks rewrite its own baseline and erase the growth it
       // already accumulated.
       ...(src0 > 0 ? { src0 } : {}),
+      // Volume telemetry: unconditional, unlike everything above it. The
+      // anchor pair is withheld whenever the round could not certify its
+      // scope, but "how many comments did this round post" stays true on a
+      // fail-closed round — and a trend that goes blank exactly when a PR
+      // starts capping would be blind on the rounds it exists to describe.
+      posted: postedInline,
+      ...(prevPostedInline === undefined
+        ? {}
+        : { prevPosted: prevPostedInline }),
     });
   } catch {
     // A carry-forward convenience, never worth failing the verdict over.
@@ -1501,6 +1621,10 @@ function composeReviewBody(
     entries: [],
   },
 ): ComposeReviewResult {
+  // The posting set this body describes — `input` here is already the
+  // post-enforcement one, so the count needs no second derivation and
+  // cannot disagree with the marker's.
+  const postedInline = (input.draftedComments ?? []).length;
   const criticalsInline = toCount(input.criticalsInline, 'criticalsInline');
   const suggestionsInline = toCount(
     input.suggestionsInline,
@@ -1645,27 +1769,31 @@ function composeReviewBody(
   // (the stderr instruction asks for one) is a courtesy to the terminal
   // reader, and a run that drops the sentence still cannot approve past a
   // truncated audit. Rendered STRUCTURAL, both languages, like every other
-  // coverage entry — the orchestrator's relayed copy is English-only prose,
-  // so the marker's phrase dedups it out and the two channels never say it
-  // twice.
+  // coverage entry — the orchestrator's compliant relay is byte-identical
+  // canonical text, so the canonical-entry splice dedups it out and the two
+  // channels never say it twice.
   // The marker's entry is tracked by reference: its relays are deduped by
-  // the phrase splice here, so the caller-echo filter below must NOT also
+  // the canonical-entry splice here, so the caller-echo filter below must NOT also
   // prefix-match on its `reverse audit` subject — that shadow silently
   // dropped every OTHER reverse-audit scope the orchestrator disclosed
   // (`reverse audit — chunk 2's auditor returned nothing substantive
   // twice`), in exactly the runs where a partial audit makes such scopes
   // likeliest.
   /**
-   * Entries the budget-phrase splice below removes from the rendered list.
+   * Entries the canonical-relay splice below removes from the rendered list.
    *
    * The splice exists so the body does not say the same gap twice, and it
-   * matches on a PHRASE — so an entry that merely mentions the review time
+   * matches entries CONTAINING a full canonical stop entry — verbatim relays
+   * and prefix-reshaped ones alike ("step 5 — " ahead of the subject), which
+   * the coverage prefix filter cannot see. An earlier match on the bare stop
+   * PHRASE spliced more: an entry that merely mentioned the review time
    * budget in its free-form reason ("security — the review time budget ended
-   * the round before the security relaunch returned evidence") is spliced out
-   * too. Harmless while every cap withheld the anchor; not harmless now that
-   * one cap does not, because the spliced entry is exactly the line-coverage
-   * claim the anchor decision must see. Kept here so the decision can read the
-   * list AS DISCLOSED while the body renders the spliced one.
+   * the round before the security relaunch returned evidence") was dropped
+   * from the posted body, though it is exactly the line-coverage claim both
+   * the author and the anchor decision must see. Such entries now stay in
+   * `unreviewed` — rendered and capping. The spliced relays are kept here so
+   * the decision can read the list AS DISCLOSED while the body renders the
+   * structural stop line once.
    *
    * Collected rather than snapshotted: the deterministic gates push their own
    * machine-owed debts into `unreviewed` AFTER this point, and a snapshot
@@ -1703,25 +1831,34 @@ function composeReviewBody(
               budgetStopEntryZh(stop.round ?? undefined),
             ]);
       // A round-cap stop and a time-budget stop both cap the verdict, but
-      // read differently and dedup against a different relayed phrase. The
-      // marker's `cause` picks which; an absent cause is a time stop, for
-      // markers written before the cause field existed.
+      // read differently. The marker's `cause` picks which pair of canonical
+      // entries exists; an absent cause is a time stop, for markers written
+      // before the cause field existed.
       const isRoundCap = stop.cause === 'round-cap';
       // Corroborating text for the approach signal below. Read-only: the
       // entry keeps its existing coverage cap untouched, and this flag is
       // never a trigger on its own — only a clause appended when the signal
       // has already fired on rounds and growth.
       roundCapStopped = isRoundCap;
-      // BOTH languages: the exemption admits the Chinese pair as a compliant
-      // relay, so the splice must retire it too — an English-only phrase let
-      // a relayed `budgetStopEntryZh` survive into the whiffed-dimension
-      // rendering beside the structural stop line, the same gap said twice
-      // with the wrong cause on one of them.
-      const phrases = isRoundCap
-        ? [ROUND_CAP_PHRASE, ROUND_CAP_PHRASE_ZH]
-        : [BUDGET_STOP_PHRASE, BUDGET_STOP_PHRASE_ZH];
+      // Spliced on the FULL canonical entry text (both languages: the
+      // exemption admits the Chinese pair as a compliant relay, so the
+      // splice must retire it too, or the same gap renders twice beside the
+      // structural stop line) — as a substring, because an orchestrator
+      // relay arrives verbatim OR reshaped with a prefix ("step 5 — " ahead
+      // of the subject), and the coverage prefix filter cannot see the
+      // reshaped one. What the predicate must NOT be is the bare stop
+      // PHRASE: that retired more than the relays — a genuine line-coverage
+      // disclosure that merely mentions the budget in its free-form reason
+      // ("security — the review time budget ended the round before the
+      // security relaunch returned evidence") was dropped from the posted
+      // body, and the module's contract is that a disclosed gap reaches the
+      // author. Such entries now stay in `unreviewed` — rendered AND
+      // capping. (The anchor DECISION below stays exact-text: a reshaped
+      // relay spliced here still withholds, over-withholding being the safe
+      // direction.)
+      const entries = [...canonicalStopEntries];
       for (let i = unreviewed.length - 1; i >= 0; i--) {
-        if (phrases.some((ph) => unreviewed[i].includes(ph))) {
+        if (entries.some((c) => unreviewed[i].includes(c))) {
           splicedForBudgetPhrase.push(unreviewed[i]);
           unreviewed.splice(i, 1);
         }
@@ -2293,7 +2430,8 @@ function composeReviewBody(
   // both before this line (the orchestrator's own entries) and after the
   // snapshot an earlier fix took (the script-lint and layer-audit gates, whose
   // debts are machine-owed line-coverage claims). Reading it here plus the
-  // entries the phrase splice removed is the only list that sees every writer.
+  // entries the canonical-entry splice removed is the only list that sees
+  // every writer.
   //
   // The stop's own relayed entry classifies as DEPTH, and only against the
   // marker. A budget/round-cap stop truncates how many audit PASSES ran over
@@ -2308,9 +2446,10 @@ function composeReviewBody(
   // head-plus-phrase, and that shape also covers a genuine line-coverage claim
   // whose whiffed scope IS the reverse audit — `reverse audit — the review
   // time budget ended the round before the chunk-2 relaunch returned
-  // evidence` — which the phrase splice then also removes from the rendered
-  // body, so the anchor rode past a whiffed audit while the posted review
-  // showed only the benign disclosure. The machinery mints its entries from
+  // evidence` — which the then-substring splice also removed from the
+  // rendered body, so the anchor rode past a whiffed audit while the posted
+  // review showed only the benign disclosure (both predicates are exact
+  // now). The machinery mints its entries from
   // one generator pair, the stderr instruction relays them verbatim, and only
   // that text is exempt: marker-anchored (no marker, no exemption) AND
   // text-anchored (an edited or paraphrased entry withholds — over-withholding
@@ -3214,7 +3353,12 @@ function composeReviewBody(
     .map(renderDeferredEntry)
     .map(boundDeferredLine);
   const deferredMore = deferredSuggestions.length - deferredShown.length;
-  const deferredRound = deferredSuggestions.length ? prevRound + 1 : 0;
+  // Clamped exactly as the marker stamp is: `prevRound` can BE the cap
+  // (parseLedger accepts round == LEDGER_MAX_ROUND), and an unclamped +1
+  // here named a past-cap round beside a round-at-cap marker.
+  const deferredRound = deferredSuggestions.length
+    ? Math.min(prevRound + 1, LEDGER_MAX_ROUND)
+    : 0;
   // The unlicensed-deferral disclosure precedes the list it disclaims: the
   // findings stay visible, but nothing may read the paragraph below as a
   // sanctioned deferral when the posture never licensed one.
@@ -3367,6 +3511,7 @@ function composeReviewBody(
       remediation,
       deferredCount: deferredSuggestions.length,
       floorEnforced: reroute.indices,
+      postedInline,
       bodyTrim,
       lowSignal,
       scopeUnproven,
@@ -3425,6 +3570,7 @@ function composeReviewBody(
       remediation,
       deferredCount: deferredSuggestions.length,
       floorEnforced: reroute.indices,
+      postedInline,
       bodyTrim,
       lowSignal,
       scopeUnproven,
@@ -3645,6 +3791,7 @@ function composeReviewBody(
     remediation,
     deferredCount: deferredSuggestions.length,
     floorEnforced: reroute.indices,
+    postedInline,
     bodyTrim,
     lowSignal,
     scopeUnproven,
@@ -4355,6 +4502,20 @@ export const composeReviewCommand: CommandModule = {
     for (const fix of result.remediation) {
       writeStderrLine(`FIX: ${fix}`);
     }
+    // The volume this round adds to the pull request, stated rather than
+    // left to be counted by hand — and beside the previous round's when the
+    // marker recorded one, because a single number says nothing about a
+    // trend. Facts only: no threshold, no advice, no judgement about
+    // whether the number is too large. The operator owns that reading; this
+    // line only makes it available. (Printed on every compose, not only on
+    // posting runs: a report-only round's volume is what the NEXT round's
+    // trend is measured against.)
+    writeStderrLine(
+      `VOLUME: ${result.postedInline} inline comment(s) this round` +
+        (result.prevPostedInline === undefined
+          ? ''
+          : ` (previous round: ${result.prevPostedInline})`),
+    );
     writeStderrLine(verdictLine(result));
   },
 };
