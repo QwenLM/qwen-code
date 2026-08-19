@@ -23,7 +23,7 @@ describe('main CI failure issue workflow', () => {
     );
     expect(workflow).toContain("types: ['completed']");
     // 'Qwen Code CI' joined the list when the macOS and Windows lanes got a
-    // nightly run on main (#9265): that run is their only trigger outside a
+    // nightly run on main: that run is their only trigger outside a
     // pull request, and a red lane nobody is told about is the same silence
     // the merge-queue-only gate produced. It completes on every pull request
     // too, so the branch filter keeps those events out entirely rather than

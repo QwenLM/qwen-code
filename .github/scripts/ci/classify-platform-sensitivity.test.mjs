@@ -95,6 +95,20 @@ test('platform-coupled subsystems match on segments, not substrings', () => {
   ]) {
     assert.equal(classifyChangedFiles([file]), PLATFORM_SENSITIVE, file);
   }
+  // A compound that names something else. `packages/web-shell/**` is one of
+  // this repository's largest packages and a browser UI, not a shell: the
+  // first spelling of this rule split on dashes anywhere in a segment and
+  // summoned both expensive lanes on every change to it. A directory that IS
+  // named for the subsystem still counts, wherever it sits.
+  for (const [file, expected] of [
+    ['packages/web-shell/client/App.tsx', PLATFORM_INSENSITIVE],
+    ['packages/web-shell/client/index.html', PLATFORM_INSENSITIVE],
+    ['packages/web-shell/client/components/shell/Term.tsx', PLATFORM_SENSITIVE],
+    ['packages/cli/src/pty-host/index.ts', PLATFORM_SENSITIVE],
+  ]) {
+    assert.equal(classifyChangedFiles([file]), expected, file);
+  }
+
   // The substring trap: these contain "shell", "pty", "os" or "platform"
   // inside a longer word and must NOT drag both lanes in.
   for (const file of [

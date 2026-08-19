@@ -49,11 +49,30 @@ const RUNNER_CONFIG = /(?:^|\/)vitest(?:\.[^/]*)?\.config\.[cm]?[jt]s$/i;
 // an optional per-platform dependency changes what each lane executes.
 const MANIFEST = new Set(['package.json', 'package-lock.json']);
 
-// Source subtrees whose subject IS the host. Matched on whole path segments and
-// on the dot/dash/underscore-separated parts of a basename, so `pty-host.ts`
-// and `src/sandbox/index.ts` match while `computed.ts` and `spatial/` do not.
-const PLATFORM_SUBSYSTEM =
-  /(?:^|[/\-._])(?:pty|tty|sandbox|seatbelt|shell|terminal|clipboard|platform|posix|darwin|macos|windows|win32|linux|keychain|codesign|installer|filesystem)(?:[/\-._]|$)/i;
+// Source subtrees whose subject IS the host.
+//
+// A keyword counts when it NAMES the thing: a whole path segment
+// (`src/sandbox/index.ts`, `src/platform/paths.ts`) or the head of a file's
+// stem (`pty-host.ts`, `win32.ts`, `shell.ts`). It does not count inside a
+// compound that names something else — `packages/web-shell/**` is a browser
+// UI, not a shell, and matching it there summoned both expensive lanes on
+// every change to one of this repository's largest packages. Nor inside a
+// longer word: `Shellfish.tsx`, `plateauDetector.ts`, `cryptic.ts`.
+const SUBSYSTEMS =
+  'pty|tty|sandbox|seatbelt|shell|terminal|clipboard|platform|posix|darwin|macos|windows|win32|linux|keychain|codesign|installer|filesystem';
+// A directory or file segment that IS the keyword (optionally with an
+// extension): `sandbox/`, `shell.ts`, `win32.test.ts`.
+const SUBSYSTEM_SEGMENT = new RegExp(
+  `(?:^|/)(?:${SUBSYSTEMS})(?:\\.[^/]*)?(?:/|$)`,
+  'i',
+);
+// Or the keyword as the head of a hyphen/underscore-separated stem:
+// `pty-host.ts`, `shell_exec.ts`. The head only — a trailing part belongs to
+// whatever the leading word names.
+const SUBSYSTEM_STEM_HEAD = new RegExp(
+  `(?:^|/)(?:${SUBSYSTEMS})[-_][^/]*(?:/|$)`,
+  'i',
+);
 
 function isSensitivePath(file) {
   const p = String(file).replace(/\\/g, '/').replace(/^\.\//, '');
@@ -64,7 +83,8 @@ function isSensitivePath(file) {
     SCRIPT_LAYER.test(p) ||
     RUNNER_CONFIG.test(p) ||
     MANIFEST.has(p) ||
-    PLATFORM_SUBSYSTEM.test(p)
+    SUBSYSTEM_SEGMENT.test(p) ||
+    SUBSYSTEM_STEM_HEAD.test(p)
   );
 }
 
