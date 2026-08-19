@@ -5872,6 +5872,12 @@ export function registerSessionRoutes(
           hasActivePrompt: session.hasActivePrompt,
           isWaitingForPermission: session.isWaitingForPermission ?? false,
           isWaitingForUserQuestion: session.isWaitingForUserQuestion ?? false,
+          // Bridge-local activity watermark, absent until a running prompt in
+          // this bridge publishes its first terminal. Reading it costs nothing
+          // extra: the summary is already in memory.
+          ...(session.updatedAt !== undefined
+            ? { updatedAt: session.updatedAt }
+            : {}),
         }));
       assertRuntimeOpen?.();
       lastExposedCatalogVersions.set(bridge, catalogVersion);

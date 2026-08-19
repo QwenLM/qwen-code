@@ -1079,7 +1079,8 @@ export type ServeExtensionInstallType =
   | 'link'
   | 'github-release'
   | 'npm'
-  | 'archive-url';
+  | 'archive-url'
+  | 'snapshot';
 
 export type ServeExtensionOriginSource =
   | 'QwenCode'
@@ -1134,6 +1135,7 @@ export interface ServeExtensionEntry {
   originSource?: ServeExtensionOriginSource;
   ref?: string;
   autoUpdate?: boolean;
+  credentialPersistence?: 'stored' | 'one_time';
   updateState?: ServeExtensionUpdateState;
   capabilities: ServeExtensionCapabilities;
   details?: ServeExtensionDetails;
