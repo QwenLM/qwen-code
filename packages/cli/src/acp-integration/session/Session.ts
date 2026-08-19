@@ -200,6 +200,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import { CHANNEL_PROMPT_META_KEY } from '@qwen-code/channel-base';
+import { QWEN_CODE_SERVE_ENV } from '../../config/acp-channel-fallback.js';
 import { ENV_ACP_REPEATED_TOOL_FAILURE_GUARD } from '../../config/shared-env-keys.js';
 // Single source of truth shared with the daemon-side answerer (BridgeClient),
 // so a rename can't desync caller and answerer into a silent -32601 latch.
@@ -1588,6 +1589,12 @@ function collectMcpServerMentionRefs(
  * / override rebuilds) pick the tool up from that gate instead;
  * `copyDiscoveredToolsFrom` never carries built-ins.
  *
+ * Gated on the spawner being wired: only daemon-backed sessions wire it (see
+ * {@link Session.#registerSubSessionSpawner}). A standalone `--acp` session's
+ * peer is the editor, which does not implement the bridge's `qwen/control/*`
+ * methods — declaring the tool there would only advertise an action whose
+ * every call fails with JSON-RPC -32601.
+ *
  * Applies the same `PermissionManager.isToolEnabled()` check that gate does, so
  * an operator's `tools.core` allowlist or a whole-tool deny rule keeps the tool
  * out of the model's action space instead of only failing at execution. Being
@@ -1598,6 +1605,9 @@ function collectMcpServerMentionRefs(
 export async function registerCreateSubSessionTool(
   config: Config,
 ): Promise<void> {
+  if (!config.getSubSessionSpawner()) {
+    return;
+  }
   const permissionManager = config.getPermissionManager();
   if (
     permissionManager &&
@@ -1605,7 +1615,16 @@ export async function registerCreateSubSessionTool(
   ) {
     return;
   }
-  config.getToolRegistry().registerTool(new CreateSubSessionTool(config));
+  const toolRegistry = config.getToolRegistry();
+  toolRegistry.registerTool(new CreateSubSessionTool(config));
+  // The registration lands after `config.initialize()` → `startChat()` already
+  // snapshotted the chat's tool declarations, and the tool is deferred — so it
+  // stays filtered out of the declarations until revealed. Reveal it and
+  // refresh the snapshot so the model is actually offered the tool this
+  // session; otherwise only a `/clear`-style `startChat` re-run would pick it
+  // up (via the startup preload), silently defeating the registration.
+  toolRegistry.revealDeferredTool(ToolNames.CREATE_SUB_SESSION);
+  await config.getGeminiClient().setTools();
 }
 
 export interface AvailableCommandsSnapshot {
@@ -2870,17 +2889,26 @@ export class Session implements SessionContext {
 
   /**
    * Wire the sub-session spawner to the daemon over the ACP `extMethod` request
-   * channel. The `create_sub_session` tool (model-initiated) is its caller. ONLY
-   * the ACP/daemon session wires it, so in interactive TUI / headless, where no
-   * bridge exists, {@link registerCreateSubSessionTool} never runs and the tool
-   * is simply absent from the model's action space instead of being declared
-   * and forever unable to run.
+   * channel. The `create_sub_session` tool (model-initiated) is its caller.
+   * Wired only on daemon-backed sessions: the daemon stamps every child it
+   * spawns with `QWEN_CODE_SERVE=1` (see `acp-bridge/src/spawnChannel.ts` and
+   * `serve/channel-worker-supervisor.ts`). A standalone `--acp` session — an
+   * editor companion spawning the same command line — hosts its peer in the
+   * editor, which does not implement the bridge's `qwen/control/*` methods, so
+   * a spawner there would only power a tool whose every call fails with
+   * JSON-RPC -32601. Interactive TUI / headless never construct a Session at
+   * all. Where no spawner is wired, {@link registerCreateSubSessionTool} and
+   * the core-side registry gate leave the tool out of the model's action space
+   * instead of declaring it forever unable to run.
    *
    * A tool-initiated request runs while the caller's turn is suspended in the
    * tool await — safe because the ACP channel supports concurrent bidirectional
    * in-flight requests and prompts serialize per-session, not per-child.
    */
   #registerSubSessionSpawner(): void {
+    if (process.env[QWEN_CODE_SERVE_ENV] !== '1') {
+      return;
+    }
     this.config.setSubSessionSpawner(async (req) => {
       const resp = await this.client.extMethod(
         SERVE_CONTROL_EXT_METHODS.createSubSession,
