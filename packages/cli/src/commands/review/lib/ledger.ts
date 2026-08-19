@@ -36,13 +36,22 @@ export interface LedgerFinding {
   sev: 'C' | 'S';
   file: string;
   /**
-   * Set when `file` is NOT a path but a stand-in: `b` for a body-only
-   * Critical, `u` for a comment that arrived without one. Structural, because
-   * the sentinels are legal filenames — git permits `(body)` — and a reader
-   * that recognised them BY VALUE excluded a real file of that name from
-   * clustering, silently. Compact for the same reason `sev` is.
+   * Set only when `file` is a LITERAL path that happens to equal one of the
+   * stand-in names below — `(body)`, `(unknown)`. Git permits both as
+   * filenames, so the sentinels alone cannot separate "no path to give" from
+   * "a file with that name", and a reader keying on the value excluded a
+   * real file of that name from clustering, silently.
+   *
+   * The flag marks the EXCEPTION rather than the rule on purpose. Flagging
+   * the stand-ins would have cost bytes on every body Critical, which is
+   * routine — and this field rides through all four rungs of the shed
+   * cascade, where the serializer's own comment prices ~27 bytes of
+   * telemetry at a lost anchor or a lost ruling. Flagging the pathological
+   * filename instead costs nothing on any normal round, and it lets a marker
+   * written before this field existed read correctly: its sentinels carry no
+   * flag, which is exactly what they mean.
    */
-  k?: 'b' | 'u';
+  k?: 1;
   line?: number;
   /** One line, capped — enough for the next round to re-locate the claim. */
   title: string;
@@ -141,6 +150,22 @@ export interface Ledger {
    * field existed.
    */
   floor?: 'c' | 'o';
+  /**
+   * How many of `posted` were findings this round REPORTED FOR THE FIRST
+   * TIME — not re-posts of still-standing entries from earlier rounds.
+   *
+   * The number the convergence trend is actually about. `posted` is the
+   * round's whole output, and Step 6 re-posts every unfixed ledger Critical
+   * under its original id, so the re-post floor only ever rises: a loop whose
+   * NEW findings collapsed from five to one still posts more comments than
+   * the round before, and a trend measured on the totals reads that
+   * convergence as divergence, permanently. Absent means "not recorded",
+   * which leaves the trend unevaluable rather than measured on the wrong
+   * number.
+   *
+   * Rides and sheds with `posted`, which it qualifies.
+   */
+  fresh?: number;
 }
 
 /**
@@ -225,6 +250,15 @@ export const LEDGER_MAX_FILE = 200;
  */
 export const LEDGER_BODY_FILE = '(body)';
 export const LEDGER_UNKNOWN_FILE = '(unknown)';
+
+/**
+ * Is this path spelled like one of the stand-ins? The one place that
+ * question is asked, so the writer's exception flag and the reader's
+ * exclusion cannot disagree about which names need disambiguating.
+ */
+export function isStandInName(file: string): boolean {
+  return file === LEDGER_BODY_FILE || file === LEDGER_UNKNOWN_FILE;
+}
 /**
  * The longest model id the marker can carry — and it carries one WHOLE or
  * not at all: a truncated id is a prefix, and a prefix can equal a DIFFERENT
@@ -320,12 +354,21 @@ const CLOSE = ' -->';
  * `Ledger` later cannot reintroduce the hazard by being forgotten below.
  */
 export function serializeLedger(ledger: Ledger): string {
-  const capped = ledger.findings.slice(0, LEDGER_MAX_FINDINGS).map((f) => ({
-    ...f,
-    id: f.id.slice(0, LEDGER_MAX_ID),
-    title: f.title.slice(0, LEDGER_MAX_TITLE),
-    file: f.file.slice(0, LEDGER_MAX_FILE),
-  }));
+  const capped = ledger.findings
+    .slice(0, LEDGER_MAX_FINDINGS)
+    .map((f) => ({
+      ...f,
+      id: f.id.slice(0, LEDGER_MAX_ID),
+      title: f.title.slice(0, LEDGER_MAX_TITLE),
+      file: f.file.slice(0, LEDGER_MAX_FILE),
+    }))
+    // Re-validated AFTER the slice, because the slice can create what the
+    // parser refuses: an over-long id cut mid-token
+    // (`R123456789012345678901234-7` → `R12345678901234567890123`) is no
+    // longer the grammar, so the next round's filter drops the entry — the
+    // posted finding retires with no ruling, and the loss is invisible
+    // unless it is counted. Dropped here, where `dropped` still counts it.
+    .filter((f) => LEDGER_ID_SHAPE.test(f.id));
   const render = (
     findings: LedgerFinding[],
     dropped: number,
@@ -348,11 +391,17 @@ export function serializeLedger(ledger: Ledger): string {
     if (volume !== 'none') {
       const postedOut = volumeOf(ledger.posted);
       if (postedOut !== undefined) payload.posted = postedOut;
-      // The floor qualifies `posted`, so it rides with it and sheds with it:
-      // a floor recorded beside no volume qualifies nothing, and a volume
-      // recorded beside no floor is exactly the pre-field reading.
-      if (ledger.floor === 'c' || ledger.floor === 'o') {
-        payload.floor = ledger.floor;
+      // The floor and the fresh count qualify `posted`, so they ride with the
+      // volume that actually SURVIVED — not merely with the rung that admits
+      // the group. A volume that fails `volumeOf` leaves them qualifying
+      // nothing, which is bytes spent on this same ladder that the parser
+      // then discards.
+      if (postedOut !== undefined) {
+        if (ledger.floor === 'c' || ledger.floor === 'o') {
+          payload.floor = ledger.floor;
+        }
+        const freshOut = volumeOf(ledger.fresh);
+        if (freshOut !== undefined) payload.fresh = freshOut;
       }
       if (volume === 'both') {
         const prevPostedOut = volumeOf(ledger.prevPosted);
@@ -431,6 +480,78 @@ export function serializeLedger(ledger: Ledger): string {
 }
 
 /**
+ * Is this a ledger finding this pipeline would admit, against the round the
+ * marker (or side file) claims?
+ *
+ * The ONE admission test. `parseLedger` applies it to a marker recovered from
+ * a posted body; `compose-review`'s side-file read applies it to the JSON
+ * `pr-context` wrote — the same untrusted shape arriving by a different
+ * route. That read restated two of these checks and skipped the rest, which
+ * is how a side file written before the id hardening could keep an id the
+ * marker path now rejects and publish a round number off it: a reader that
+ * trims is only as strict as the admission test in front of it.
+ */
+export function isLedgerFinding(
+  f: unknown,
+  markerRound: number,
+): f is LedgerFinding {
+  const c = f as LedgerFinding | null | undefined;
+  if (!c || typeof c.id !== 'string') return false;
+  // The WHOLE shape, before anything reads a round out of it. A prefix-only
+  // test admitted ids the readers then interpreted differently from the test:
+  // every reader downstream trims before matching, so ` R9999-1` failed the
+  // untrimmed squat rule that exists to stop it and took full effect
+  // everywhere else.
+  if (!LEDGER_ID_SHAPE.test(c.id)) return false;
+  // An id claiming a FUTURE round is a squat, not a finding. The pipeline's
+  // own ids obey `id round <= marker round` by construction — a round stamps
+  // its new findings `R<round>-<n>` and carries older ids forward — so a
+  // legitimate marker can never violate this. A foreign one can, and recovery
+  // reads foreign markers: a marker at round N carrying `R<N+1>-*` ids would
+  // pre-claim exactly the prefix the next compose stamps, splitting one claim
+  // across two ids and renumbering every genuinely new finding past the
+  // squatted block.
+  //
+  // Bounded by the CAP as well as by the claimed round, because the claimed
+  // round is not always one the caller clamped: the side file's is whatever
+  // was written to it, and an unbounded id round is printed verbatim in a
+  // public body ("findings in round 100000000000000000000").
+  const idRound = Number(c.id.slice(1).split('-')[0]);
+  if (!Number.isSafeInteger(idRound)) return false;
+  if (idRound > Math.min(markerRound, LEDGER_MAX_ROUND)) return false;
+  return (
+    (c.sev === 'C' || c.sev === 'S') &&
+    typeof c.file === 'string' &&
+    typeof c.title === 'string' &&
+    (c.line === undefined || Number.isInteger(c.line))
+  );
+}
+
+/**
+ * A finding normalised to the caps the serializer writes under. Applied on
+ * READ too: the caps are the serializer's contract, and neither a
+ * hand-edited marker nor a side file is bound by it.
+ */
+export function normalizeLedgerFinding(f: LedgerFinding): LedgerFinding {
+  const { k: _k, ...rest } = f;
+  return {
+    ...rest,
+    id: f.id.slice(0, LEDGER_MAX_ID),
+    title: f.title.slice(0, LEDGER_MAX_TITLE),
+    file: f.file.slice(0, LEDGER_MAX_FILE),
+    // Normalised to absent, never used to REJECT the entry. `k` is a
+    // clustering hint that decides nothing, and the marker is a
+    // cross-environment carrier by design: a later version adding a third
+    // kind, a hand edit, or a foreign marker would otherwise make every
+    // older CLI drop those findings from the work list — they would owe no
+    // Step 6 ruling and retire with nobody ruling on them. Its
+    // decides-nothing siblings (`posted`, `prevPosted`, `floor`) are all
+    // normalised the same way.
+    ...(f.k === 1 ? { k: 1 as const } : {}),
+  };
+}
+
+/**
  * Parse the ledger out of a posted review body. Null on absence or ANY
  * malformation — the body is another account's writable surface, and a marker
  * that does not parse contributes nothing rather than throwing.
@@ -454,48 +575,12 @@ export function parseLedger(body: string | undefined): Ledger | null {
       return null;
     }
     if (!Array.isArray(raw.findings)) return null;
-    const valid = raw.findings.filter(
-      (f): f is LedgerFinding =>
-        !!f &&
-        typeof f.id === 'string' &&
-        // The WHOLE shape, before anything reads a round out of it. The squat
-        // rule below is anchored and does not trim, while every downstream
-        // reader does — so an id with leading whitespace passed the rule that
-        // exists to stop it and then took full effect. Validated here, at the
-        // single entry point, the readers' trims are harmless.
-        LEDGER_ID_SHAPE.test(f.id) &&
-        // An id claiming a FUTURE round is a squat, not a finding. The
-        // pipeline's own ids obey `id round <= marker round` by construction —
-        // a round stamps its new findings `R<round>-<n>` and carries older ids
-        // forward — so a legitimate marker can never violate this. A foreign
-        // one can, and recovery now reads foreign markers: a marker at round N
-        // carrying `R<N+1>-*` ids would pre-claim exactly the prefix the next
-        // compose stamps, splitting one claim across two ids and renumbering
-        // every genuinely new finding past the squatted block. Read-side only,
-        // deliberately: the pipeline's one writer stamps
-        // `min(prevRound + 1, LEDGER_MAX_ROUND)` (compose-review), so its ids
-        // never exceed the round it writes — the coexisting round clamp below
-        // cannot reintroduce the mismatch this filter would then hide.
-        !(() => {
-          const m = /^R(\d+)-/.exec(f.id);
-          return m !== null && Number(m[1]) > raw.round;
-        })() &&
-        (f.sev === 'C' || f.sev === 'S') &&
-        (f.k === undefined || f.k === 'b' || f.k === 'u') &&
-        typeof f.file === 'string' &&
-        typeof f.title === 'string' &&
-        (f.line === undefined || Number.isInteger(f.line)),
+    const valid = raw.findings.filter((f): f is LedgerFinding =>
+      isLedgerFinding(f, raw.round),
     );
     const findings = valid
       .slice(0, LEDGER_MAX_FINDINGS)
-      // Normalise on READ too: the caps are the serializer's contract, and a
-      // hand-edited marker is not bound by it.
-      .map((f) => ({
-        ...f,
-        id: f.id.slice(0, LEDGER_MAX_ID),
-        title: f.title.slice(0, LEDGER_MAX_TITLE),
-        file: f.file.slice(0, LEDGER_MAX_FILE),
-      }));
+      .map(normalizeLedgerFinding);
     const declared =
       Number.isInteger(raw.dropped) && (raw.dropped as number) > 0
         ? (raw.dropped as number)
@@ -504,7 +589,16 @@ export function parseLedger(body: string | undefined): Ledger | null {
     // parser sliced off ARE dropped findings, and a hand-edited marker whose
     // list was truncated here must not read as complete — nor keep an anchor
     // the serializer's own truncation path would have refused to certify.
-    const dropped = declared + (valid.length - findings.length) || undefined;
+    // Both losses count, not only the cap's. Entries this parser's own
+    // filter rejected are findings the next round will never rule on, and a
+    // list short by them must not read as complete — nor keep an anchor the
+    // serializer's truncation path would have refused to certify. The
+    // filter's share was uncounted while the reasons to reject were few and
+    // pipeline-impossible; it is now the larger share, and `dropped` is no
+    // longer internal — it publishes the "may be an undercount" caveat.
+    const rejected = raw.findings.length - valid.length;
+    const dropped =
+      declared + rejected + (valid.length - findings.length) || undefined;
     const sha =
       // Normalised on READ as the serializer holds on WRITE: a hand-edited
       // marker carrying both `dropped` and `sha` would certify a range its
@@ -537,6 +631,14 @@ export function parseLedger(body: string | undefined): Ledger | null {
       posted !== undefined && (raw.floor === 'c' || raw.floor === 'o')
         ? raw.floor
         : undefined;
+    // Bounded by the total it is a part of: a "fresh" count exceeding the
+    // round's whole output is not a count of anything, and a forged one
+    // would let a marker's trend beat a real one's.
+    const freshRaw = posted === undefined ? undefined : volumeOf(raw.fresh);
+    const fresh =
+      freshRaw !== undefined && posted !== undefined && freshRaw <= posted
+        ? freshRaw
+        : undefined;
     return {
       v: 1,
       round: raw.round,
@@ -547,6 +649,7 @@ export function parseLedger(body: string | undefined): Ledger | null {
       ...(posted === undefined ? {} : { posted }),
       ...(prevPosted === undefined ? {} : { prevPosted }),
       ...(floor === undefined ? {} : { floor }),
+      ...(fresh === undefined ? {} : { fresh }),
     };
   } catch {
     return null;

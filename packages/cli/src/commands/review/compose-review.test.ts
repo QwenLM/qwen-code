@@ -2666,7 +2666,9 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
         input: inputPath,
         comments: commentsPath,
       });
-      expect(stderr()).toContain('VOLUME: 2 inline comment(s) this round');
+      expect(stderr()).toContain(
+        'VOLUME: 2 inline comment(s) this round (2 reported for the first time)',
+      );
 
       // With a recorded predecessor the previous round rides along.
       (writeStderrLine as ReturnType<typeof vi.fn>).mockClear();
@@ -2680,7 +2682,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
         comments: commentsPath,
       });
       expect(stderr()).toContain(
-        'VOLUME: 2 inline comment(s) this round (previous round: 9)',
+        'VOLUME: 2 inline comment(s) this round (2 reported for the first time) (previous round: 9)',
       );
 
       // A CONVERGED predecessor: zero is a recorded value, not an absence.
@@ -2698,7 +2700,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
         comments: commentsPath,
       });
       expect(stderr()).toContain(
-        'VOLUME: 2 inline comment(s) this round (previous round: 0)',
+        'VOLUME: 2 inline comment(s) this round (2 reported for the first time) (previous round: 0)',
       );
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -4147,6 +4149,7 @@ describe('verdictLine — the terminal verdict, and its dangling colon', () => {
       downgraded: false,
       floorEnforced: [],
       postedInline: 0,
+      postedFresh: 0,
       downgradedFrom: null,
       remediation: [],
       deferredCount: 0,
@@ -5265,37 +5268,38 @@ describe('buildLedger', () => {
         id: 'R3-3',
         sev: 'C',
         file: '(body)',
-        // Structural, so a reader never has to recognise the stand-in by its
-        // text — `(body)` is a filename git permits.
-        k: 'b',
         title: '`src/d.ts` unanchorable blocker',
       },
     ]);
   });
 
-  it('flags a pathless comment structurally, not by its stand-in text', () => {
-    const l = buildLedger(
+  it('flags the real file spelled like a stand-in, not the stand-in', () => {
+    // The flag marks the EXCEPTION, so the routine stand-ins cost the marker
+    // no bytes — it rides through every rung of the shed cascade, where the
+    // serializer prices telemetry at a lost anchor or a lost ruling — and a
+    // marker written before the flag existed still reads correctly, because
+    // its unflagged stand-ins are stand-ins.
+    const standIn = buildLedger(
       2,
       [{ line: 3, body: '**[Suggestion]** arrived without a path' }],
       [],
     );
-    expect(l.findings).toEqual([
+    expect(standIn.findings).toEqual([
       {
         id: 'R2-1',
         sev: 'S',
         file: '(unknown)',
-        k: 'u',
         line: 3,
         title: 'arrived without a path',
       },
     ]);
-    // A REAL file of that name carries no flag — it is a file.
+    // A REAL file of that name is flagged, so it is not mistaken for one.
     const real = buildLedger(
       2,
       [{ path: '(unknown)', line: 3, body: '**[Suggestion]** a real file' }],
       [],
     );
-    expect(real.findings[0].k).toBeUndefined();
+    expect(real.findings[0].k).toBe(1);
   });
 
   it('classifies through `severityOf`, whitespace and all', () => {
@@ -8994,7 +8998,7 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     // The floor moves both Suggestions out of the posting set, so the round
     // posts one comment — and the diagnosis must describe that number, not
     // the drafts, or the paragraph disagrees with the PR it sits on.
-    sideFile({ round: 5, posted: 1, findings: [] });
+    sideFile({ round: 5, posted: 1, fresh: 1, floor: 'c', findings: [] });
     const r = composeReview({
       planPath: plan(),
       modelId: 'm',
@@ -9008,7 +9012,9 @@ describe('convergence diagnosis reaches the POSTED body', () => {
       ],
     });
     expect(r.floorEnforced).toHaveLength(2);
-    expect(r.body).toContain('round 6 posted 1 inline comment(s)');
+    expect(r.body).toContain(
+      'round 6 posted 1 inline comment(s), 1 of them reported for the first time',
+    );
   });
 
   it('names the same round the marker stamps, at the cap', () => {
@@ -9179,7 +9185,7 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     // The same body carries the floor-enforcement note. Telling the author
     // to drop to `--severity-floor critical` beside it is advice nobody
     // checked against the round it ships in.
-    sideFile({ round: 5, posted: 1, findings: [] });
+    sideFile({ round: 5, posted: 1, fresh: 1, floor: 'c', findings: [] });
     const r = composeReview({
       planPath: plan(),
       modelId: 'm',
@@ -9188,9 +9194,43 @@ describe('convergence diagnosis reaches the POSTED body', () => {
       suggestionsInline: 0,
       draftedComments: [{ path: 'a.ts', line: 1, body: '**[Critical]** boom' }],
     });
-    expect(r.body).toContain('The posting volume is not falling.');
+    expect(r.body).toContain('The rate of new findings is not falling.');
     expect(r.body).not.toContain('dropping this PR');
     expect(r.body).toContain('already at `--severity-floor critical`');
+  });
+
+  it('reaches a REQUEST_CHANGES body — the verdict a diverging loop produces', () => {
+    // The block is spliced into three separately-maintained clause lists,
+    // and every other test here composes a plan that trips a coverage cap
+    // and lands on COMMENT. REQUEST_CHANGES — unfixed Criticals, round after
+    // round — is the feature's primary audience, and its copy of the list
+    // was unasserted: deleting the splice left the whole suite green.
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      fetchedSha: 'deadbeef00112233',
+    });
+    writeFileSync(
+      join(dirname(planPath), 'qwen-review-pr-8255-prev-ledger.json'),
+      JSON.stringify({
+        v: 1,
+        round: 4,
+        posted: 9,
+        fresh: 9,
+        findings: [{ id: 'R2-1', sev: 'C', file: 'src/a.ts', title: 'x' }],
+      }),
+    );
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/a.ts', line: 1, body: '**[Critical]** a new one here' },
+      ],
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.body).toContain('Convergence:');
   });
 
   it('yields the whole paragraph before any disclosure that qualifies the verdict', () => {
@@ -9244,6 +9284,7 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     const open = composeReview({
       planPath: plan(),
       modelId: 'm',
+      severityFloor: 'suggestion',
       criticalsInline: 0,
       suggestionsInline: 1,
       draftedComments: [
@@ -9251,6 +9292,21 @@ describe('convergence diagnosis reaches the POSTED body', () => {
       ],
     });
     expect(parseLedger(open.body)?.floor).toBe('o');
+
+    // A state that named no floor records none: `Ledger.floor` reserves
+    // absence for "not recorded", and stamping a positive claim over a
+    // posture this module had to guess at makes it a durable comparison
+    // point a later round measures against.
+    const unknown = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: [
+        { path: 'a.ts', line: 1, body: '**[Suggestion]** one' },
+      ],
+    });
+    expect(parseLedger(unknown.body)?.floor).toBeUndefined();
 
     const critical = composeReview({
       planPath: plan(),
@@ -9267,10 +9323,11 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     // The previous round ran under a critical floor and posted one comment;
     // the floor is restored and this round posts five. That jump is policy,
     // not loop behaviour.
-    sideFile({ round: 7, posted: 1, floor: 'c', findings: [] });
+    sideFile({ round: 7, posted: 1, fresh: 1, floor: 'c', findings: [] });
     const r = composeReview({
       planPath: plan(),
       modelId: 'm',
+      severityFloor: 'suggestion',
       criticalsInline: 0,
       suggestionsInline: 5,
       draftedComments: Array.from({ length: 5 }, (_, i) => ({
@@ -9282,11 +9339,97 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     expect(r.body).not.toContain('Convergence:');
   });
 
+  it('will not cite a round off an id the marker path would refuse', () => {
+    // The side file is the same untrusted shape as a marker, by a different
+    // route: one written before the id hardening can still hold ` R9999-1`,
+    // and `birthRound` trims before matching, so the round would be printed
+    // verbatim in a body this account posts.
+    sideFile({
+      round: 4,
+      posted: 9,
+      fresh: 9,
+      findings: [{ id: ' R9999-1', sev: 'S', file: 'src/a.ts', title: 'x' }],
+    });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: [
+        { path: 'src/a.ts', line: 1, body: '**[Suggestion]** again' },
+      ],
+    });
+    expect(r.body).not.toContain('Convergence:');
+    expect(r.body).not.toContain('9999');
+  });
+
+  it('leaves a terminal copy of the paragraph the ladder sheds first', () => {
+    // Rank 0 goes first, and the trim notice tells the author the trimmed
+    // sections "still hold — read them in the terminal report". Unlike the
+    // deferral list (findings artifact) and the not-reviewed disclosures
+    // (the model's own inputs), a diagnosis derived from the side file has
+    // no other copy anywhere unless the composed result carries one.
+    sideFile({
+      round: 4,
+      posted: 9,
+      fresh: 9,
+      findings: [{ id: 'R2-1', sev: 'S', file: 'src/a.ts', title: 'x' }],
+    });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: [
+        { path: 'src/a.ts', line: 1, body: '**[Suggestion]** again' },
+      ],
+    });
+    expect(r.body).toContain('Convergence:');
+    expect(r.convergence?.en).toContain('Convergence:');
+    expect(r.convergence?.zh).toContain('收敛情况：');
+  });
+
+  it("counts only marked drafts as this round's new findings", () => {
+    // An unmarked comment is not a finding — it enters no work list — so
+    // counting it as fresh activity inflates a cluster and satisfies the
+    // guard that alone keeps the trend off a settled round.
+    sideFile({ round: 4, posted: 9, fresh: 9, findings: [] });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: [
+        { path: 'a.ts', line: 1, body: '**[Suggestion]** one' },
+        { path: 'b.ts', line: 2, body: 'no marker at all' },
+      ],
+    });
+    expect(r.postedFresh).toBe(1);
+  });
+
+  it('reads a floor the state never named as `auto`, like the composer does', () => {
+    // The value is model-written and the SKILL's field list is prefaced
+    // "omit what does not apply", so absence is reachable. Read as "no floor
+    // at all", the round advises dropping to a floor SKILL Step 6's prose
+    // posture already had it running under.
+    sideFile({ round: 5, posted: 1, fresh: 1, findings: [] });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [{ path: 'a.ts', line: 1, body: '**[Critical]** boom' }],
+    });
+    expect(r.body).toContain('The rate of new findings is not falling.');
+    expect(r.body).toContain('already resolve to a critical posting floor');
+    expect(r.body).not.toContain('dropping this PR');
+  });
+
   it('names an auto-resolved floor the way the enforcement note does', () => {
     // `auto` is the DEFAULT, so the explicit-flag wording claims a flag that
     // was never passed — beside a floor-enforcement note in the same body
     // that calls it the RESOLVED floor.
-    sideFile({ round: 5, posted: 1, floor: 'c', findings: [] });
+    sideFile({ round: 5, posted: 1, fresh: 1, floor: 'c', findings: [] });
     const r = composeReview({
       planPath: plan(),
       modelId: 'm',
@@ -9295,7 +9438,7 @@ describe('convergence diagnosis reaches the POSTED body', () => {
       suggestionsInline: 0,
       draftedComments: [{ path: 'a.ts', line: 1, body: '**[Critical]** boom' }],
     });
-    expect(r.body).toContain('The posting volume is not falling.');
+    expect(r.body).toContain('The rate of new findings is not falling.');
     expect(r.body).toContain('already resolve to a critical posting floor');
     expect(r.body).not.toContain('--severity-floor critical');
   });

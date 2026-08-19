@@ -760,6 +760,8 @@ export interface RecoveredLedger {
    * disclose where it came from instead of publishing it bare.
    */
   foreign: boolean;
+  /** That foreign winner was merged over this account's own findings. */
+  merged: boolean;
   /**
    * The winning review's own id — persisted so Step 6 can find WHICH body's
    * not-reviewed disclosures bind the code-age rule: with several summaries
@@ -943,9 +945,16 @@ export function recoverLedger(
   if (!best) return { recovered: null, sawOwnReview };
   // The anchor never crosses accounts. Dropped here, at the recovery seam, so
   // no consumer downstream has to remember the rule.
-  let ledger = best.foreign
-    ? stripForeignVolume(stripAnchor(best.ledger))
-    : best.ledger;
+  // The anchor is stripped whenever the winner is foreign, INCLUDING the
+  // anonymous case: without a `me` every marker walks as foreign, and a
+  // drive-by anchor must not decide which lines this pipeline stops looking
+  // at. The volume is different. `foreign` there means "another account
+  // chose this number", and on an anonymous walk it means only "this run
+  // could not ask who". Stripping on that reading let one blip in
+  // `gh api user` break this account's own trend chain for two rounds — and
+  // record its own marker as a stranger's.
+  let ledger = best.foreign ? stripAnchor(best.ledger) : best.ledger;
+  if (me && best.foreign) ledger = stripForeignVolume(ledger);
   // A FOREIGN winner never DISPLACES this account's own findings — it is
   // merged over them. Round-first selection alone handed a drive-by poster a
   // one-comment suppression: a marker at `ownMax + 1` (deep inside the
@@ -982,6 +991,24 @@ export function recoverLedger(
       ...ledger,
       findings: capped,
       ...(dropped > 0 ? { dropped } : {}),
+      // The union exists so a foreign marker cannot erase own data, and the
+      // volume is own data too: this account's own marker was walked in the
+      // same pass and its counts are trustworthy. Restoring only `findings`
+      // let any second bot or maintainer posting one parseable marker at a
+      // round at-or-above this account's blind the trend for that round,
+      // with a good count in hand.
+      ...(bestOwn.ledger.posted === undefined
+        ? {}
+        : { posted: bestOwn.ledger.posted }),
+      ...(bestOwn.ledger.prevPosted === undefined
+        ? {}
+        : { prevPosted: bestOwn.ledger.prevPosted }),
+      ...(bestOwn.ledger.fresh === undefined
+        ? {}
+        : { fresh: bestOwn.ledger.fresh }),
+      ...(bestOwn.ledger.floor === undefined
+        ? {}
+        : { floor: bestOwn.ledger.floor }),
     };
   }
   return {
@@ -1170,10 +1197,11 @@ export function persistRecoveredLedger(
         const {
           sha: _droppedSha,
           commitId: _droppedCommitId,
-          posted: _droppedPosted,
-          prevPosted: _droppedPrevPosted,
-          ...kept
+          ...rest
         } = existing;
+        // Through the shared projection, not a second hand-kept list: the
+        // volume group grew twice and this branch was updated neither time.
+        const kept = withoutVolume(rest);
         mkdirSync(dirname(sideFilePath), { recursive: true });
         writeAtomic(
           JSON.stringify(
@@ -1181,6 +1209,13 @@ export function persistRecoveredLedger(
               ...kept,
               round: recovered.ledger.round,
               reviewId: recovered.reviewId,
+              // Provenance is UNKNOWN on this path — the identity lookup is
+              // what failed, so every marker walked as foreign including
+              // this account's own. A stale flag from a previous run must
+              // not ride: absent reads as "not recorded", which withholds a
+              // caveat rather than publishing a false one in either
+              // direction.
+              foreign: false,
             },
             null,
             2,
@@ -1199,7 +1234,38 @@ export function persistRecoveredLedger(
             // when false, so the field's absence means only "a version
             // before this wrote the file" — which degrades to no disclosure,
             // the same reading a pre-telemetry predecessor already gets.
-            foreign: recovered.foreign,
+            //
+            // Two qualifications on the value:
+            //
+            // - An UNKNOWN identity is not a foreign author. Without a `me`
+            //   every marker walks as foreign, so recording `true` there
+            //   publishes a caveat about a marker this account may well have
+            //   posted.
+            // - It is STICKY while the work list is non-empty. Step 6
+            //   re-posts still-standing entries under their ORIGINAL ids, so
+            //   a foreign round's entries — and the round numbers a cluster
+            //   cites off them — survive into this account's own next
+            //   marker, where recovery would compute `foreign: false` and
+            //   the caveat would vanish while the citations remained. It
+            //   clears when the list empties, which is the point at which no
+            //   carried id can still name a round this account never ran.
+            //   That over-discloses on a list whose foreign entries are gone
+            //   but whose own entries are not; over-disclosing a caveat is
+            //   the safe direction.
+            foreign:
+              (identityKnown && recovered.foreign) ||
+              (existing?.['foreign'] === true &&
+                recovered.ledger.findings.length > 0),
+            // Whether that foreign winner was MERGED over this account's own
+            // findings. `renderLedgerSection` already draws this line for the
+            // model ("entries this account certified are its own claims");
+            // dropped on the way to disk, the posted caveat could not, and
+            // said a predominantly own work list "may not be this account's
+            // own".
+            merged:
+              (identityKnown && recovered.merged) ||
+              (existing?.['merged'] === true &&
+                recovered.ledger.findings.length > 0),
           },
           null,
           2,
@@ -1267,21 +1333,32 @@ function stripAnchor(ledger: Ledger): Ledger {
  * which degrades the trend exactly as a pre-telemetry predecessor does. The
  * floor goes with it — it qualifies the volume and nothing else.
  */
+export const VOLUME_FIELDS = [
+  'posted',
+  'prevPosted',
+  'fresh',
+  'floor',
+] as const;
+
+/**
+ * Drop the whole volume group from a record, whatever shape it is in.
+ *
+ * ONE list, because there are two seams that must shed it — this one and the
+ * anonymous-recovery branch that rewrites the side file by hand — and a
+ * hand-kept field list on each is how `floor` came to be shed at one seam
+ * and kept at the other, recorded for a round whose volume had been
+ * deliberately discarded.
+ */
+export function withoutVolume<T extends Record<string, unknown>>(record: T): T {
+  const out = { ...record };
+  for (const field of VOLUME_FIELDS) delete out[field];
+  return out;
+}
+
 function stripForeignVolume(ledger: Ledger): Ledger {
-  if (
-    ledger.posted === undefined &&
-    ledger.prevPosted === undefined &&
-    ledger.floor === undefined
-  ) {
-    return ledger;
-  }
-  const {
-    posted: _posted,
-    prevPosted: _prevPosted,
-    floor: _floor,
-    ...rest
-  } = ledger;
-  return rest;
+  return withoutVolume(
+    ledger as unknown as Record<string, unknown>,
+  ) as unknown as Ledger;
 }
 
 /**

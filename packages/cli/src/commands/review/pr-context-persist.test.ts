@@ -44,7 +44,13 @@ describe('persistRecoveredLedger', () => {
     try {
       persistRecoveredLedger(
         side,
-        { ledger, commitId: 'a'.repeat(40), reviewId: 42, foreign: false },
+        {
+          ledger,
+          commitId: 'a'.repeat(40),
+          reviewId: 42,
+          foreign: false,
+          merged: false,
+        },
         { noOwnReview: true, identityKnown: true },
       );
       const written = JSON.parse(readFileSync(side, 'utf8'));
@@ -53,6 +59,7 @@ describe('persistRecoveredLedger', () => {
         commitId: 'a'.repeat(40),
         reviewId: 42,
         foreign: false,
+        merged: false,
       });
       expect(written.sha).toBe('deadbeef00112233');
     } finally {
@@ -71,10 +78,89 @@ describe('persistRecoveredLedger', () => {
     try {
       persistRecoveredLedger(
         side,
-        { ledger, commitId: null, reviewId: 9, foreign: true },
+        { ledger, commitId: null, reviewId: 9, foreign: true, merged: false },
         { noOwnReview: false, identityKnown: true },
       );
       expect(JSON.parse(readFileSync(side, 'utf8')).foreign).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps disclosing foreign provenance while the work list carries it', () => {
+    // Step 6 re-posts still-standing entries under their ORIGINAL ids, so a
+    // foreign round's entries — and the round numbers a cluster cites off
+    // them — survive into this account's own next marker. Recomputed from
+    // the winning review's author alone, the flag flips false after exactly
+    // one round and the caveat vanishes while the citations remain.
+    const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
+    const side = join(dir, 'side.json');
+    try {
+      persistRecoveredLedger(
+        side,
+        {
+          ledger: { ...ledger, round: 5 },
+          commitId: null,
+          reviewId: 9,
+          foreign: true,
+          merged: false,
+        },
+        { noOwnReview: false, identityKnown: true },
+      );
+      expect(JSON.parse(readFileSync(side, 'utf8')).foreign).toBe(true);
+      // Next round recovers this account's OWN marker, still carrying the
+      // foreign-minted ids.
+      persistRecoveredLedger(
+        side,
+        {
+          ledger: { ...ledger, round: 6 },
+          commitId: null,
+          reviewId: 10,
+          foreign: false,
+          merged: false,
+        },
+        { noOwnReview: false, identityKnown: true },
+      );
+      expect(JSON.parse(readFileSync(side, 'utf8')).foreign).toBe(true);
+      // It clears when the list empties — the point at which no carried id
+      // can still name a round this account never ran.
+      persistRecoveredLedger(
+        side,
+        {
+          ledger: { v: 1, round: 7, findings: [] },
+          commitId: null,
+          reviewId: 11,
+          foreign: false,
+          merged: false,
+        },
+        { noOwnReview: false, identityKnown: true },
+      );
+      expect(JSON.parse(readFileSync(side, 'utf8')).foreign).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('records whether the foreign winner was merged over own entries', () => {
+    // The union restores this account's own certified entries under their own
+    // ids. Without this flag the side file cannot tell a pure-foreign list
+    // from an own+foreign one, and the next body says a predominantly own
+    // work list "may not be this account's own".
+    const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
+    const side = join(dir, 'side.json');
+    try {
+      persistRecoveredLedger(
+        side,
+        {
+          ledger,
+          commitId: null,
+          reviewId: 9,
+          foreign: true,
+          merged: true,
+        },
+        { noOwnReview: false, identityKnown: true },
+      );
+      expect(JSON.parse(readFileSync(side, 'utf8')).merged).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -103,6 +189,8 @@ describe('persistRecoveredLedger', () => {
           // exactly the rounds this path exists to protect.
           posted: 4,
           prevPosted: 2,
+          fresh: 3,
+          floor: 'c',
         }),
       );
       persistRecoveredLedger(side, null, {
@@ -110,7 +198,13 @@ describe('persistRecoveredLedger', () => {
         identityKnown: true,
       });
       const written = JSON.parse(readFileSync(side, 'utf8'));
-      expect(written).toEqual({ ...ledger, posted: 4, prevPosted: 2 });
+      expect(written).toEqual({
+        ...ledger,
+        posted: 4,
+        prevPosted: 2,
+        fresh: 3,
+        floor: 'c',
+      });
       expect(written.round).toBe(3);
       expect(written.sha).toBe('deadbeef00112233');
     } finally {
@@ -157,6 +251,7 @@ describe('persistRecoveredLedger', () => {
           commitId: 'a'.repeat(40),
           reviewId: 20,
           foreign: false,
+          merged: false,
         },
         { noOwnReview: false, identityKnown: true },
       );
@@ -169,6 +264,7 @@ describe('persistRecoveredLedger', () => {
           commitId: null,
           reviewId: 60,
           foreign: false,
+          merged: false,
         },
         { noOwnReview: false, identityKnown: true },
       );
@@ -181,6 +277,7 @@ describe('persistRecoveredLedger', () => {
           commitId: null,
           reviewId: 80,
           foreign: false,
+          merged: false,
         },
         { noOwnReview: false, identityKnown: true },
       );
@@ -231,6 +328,7 @@ describe('persistRecoveredLedger', () => {
           commitId: 'c'.repeat(40),
           reviewId: 101,
           foreign: false,
+          merged: false,
         },
         { noOwnReview: false, identityKnown: false },
       );
@@ -259,13 +357,18 @@ describe('persistRecoveredLedger', () => {
           round: 7,
           reviewId: 100,
           commitId: 'b'.repeat(40),
-          // The volumes belong to round 7. This branch advances the counter
-          // past it, so they must go the way the anchor and the age
-          // reference go — kept, they would attribute this account's round-7
+          // The volume group belongs to round 7. This branch advances the
+          // counter past it, so it must go the way the anchor and the age
+          // reference go — kept, it would attribute this account's round-7
           // posting count to the foreign round that won recovery, and the
-          // next compose would stamp it as `prevPosted`.
+          // next compose would stamp it as `prevPosted`. The floor and the
+          // fresh count qualify that volume, so they go with it: a posture
+          // recorded for a round whose volume was deliberately discarded
+          // qualifies nothing.
           posted: 4,
           prevPosted: 2,
+          fresh: 3,
+          floor: 'c',
         }),
       );
       persistRecoveredLedger(
@@ -280,6 +383,7 @@ describe('persistRecoveredLedger', () => {
           commitId: 'c'.repeat(40),
           reviewId: 200,
           foreign: false,
+          merged: false,
         },
         { noOwnReview: true, identityKnown: false },
       );
@@ -289,6 +393,11 @@ describe('persistRecoveredLedger', () => {
         round: 8,
         findings: ledger.findings,
         reviewId: 200,
+        // Provenance is UNKNOWN on this path — the identity lookup is what
+        // failed, so every marker walked as foreign including this account's
+        // own. A stale `true` from a previous run must not ride into a
+        // posted caveat about a marker this account did post.
+        foreign: false,
       });
       expect(written.sha).toBeUndefined();
       expect(written.commitId).toBeUndefined();
@@ -311,6 +420,7 @@ describe('persistRecoveredLedger', () => {
           commitId: null,
           reviewId: 40,
           foreign: false,
+          merged: false,
         },
         { noOwnReview: false, identityKnown: false },
       );

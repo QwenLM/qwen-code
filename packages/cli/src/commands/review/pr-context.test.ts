@@ -1544,6 +1544,55 @@ describe('latestLedger — the split trust surface', () => {
     expect(found?.ledger.findings.map((f) => f.id)).toEqual(['R9-1']);
   });
 
+  it('keeps the volume when the identity lookup is what failed', () => {
+    // Without a `me` EVERY marker walks as foreign, this account's own
+    // included. Stripping the volume on that reading let one blip in
+    // `gh api user` break this account's own trend chain for two rounds. The
+    // anchor still goes — a drive-by anchor must not decide which lines this
+    // pipeline stops looking at — but a number nobody can attribute is not
+    // the same as a number somebody else chose.
+    const own =
+      'x <!-- qwen-review-ledger {"v":1,"round":9,"findings":[],' +
+      '"posted":4,"prevPosted":2,"fresh":3,"floor":"c",' +
+      '"sha":"deadbeef00112233"} -->';
+    const anonymous = latestLedger(
+      [review('maintainer', '2026-01-09T00:00:00Z', own)],
+      null,
+    );
+    expect(anonymous?.foreign).toBe(true);
+    expect(anonymous?.ledger.posted).toBe(4);
+    expect(anonymous?.ledger.fresh).toBe(3);
+    expect(anonymous?.ledger.floor).toBe('c');
+    expect(anonymous?.ledger.sha).toBeUndefined();
+  });
+
+  it("restores this account's own volume when it restores its own findings", () => {
+    // The union exists so a foreign marker cannot erase own data, and the
+    // volume is own data: this account's own marker is walked in the same
+    // pass. Restoring only `findings` let any second bot posting one
+    // parseable marker at a round at-or-above this account's blind the
+    // trend for that round with a good count in hand.
+    const own =
+      'x <!-- qwen-review-ledger {"v":1,"round":7,"findings":[' +
+      '{"id":"R7-1","sev":"C","file":"a.ts","title":"certified"}' +
+      '],"posted":6,"fresh":4,"floor":"c"} -->';
+    const foreign =
+      'y <!-- qwen-review-ledger {"v":1,"round":8,"findings":[' +
+      '{"id":"R8-1","sev":"S","file":"b.ts","title":"theirs"}' +
+      '],"posted":1,"fresh":1,"floor":"o"} -->';
+    const found = latestLedger(
+      [
+        review('bot', '2026-01-01T00:00:00Z', own),
+        review('stranger', '2026-01-02T00:00:00Z', foreign),
+      ],
+      'bot',
+    );
+    expect(found?.merged).toBe(true);
+    expect(found?.ledger.posted).toBe(6);
+    expect(found?.ledger.fresh).toBe(4);
+    expect(found?.ledger.floor).toBe('c');
+  });
+
   it('merges a foreign winner OVER the own findings — displacement is dead', () => {
     // One comment used to suppress a certified entry: a drive-by marker at
     // ownMax + 1 with empty findings won round-first selection, the own

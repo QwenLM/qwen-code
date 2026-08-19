@@ -90,8 +90,8 @@ describe('diagnoseConvergence — the trigger table', () => {
           posted: 9,
           findings: [
             { id: 'nonsense', sev: 'C', file: 'a.ts', title: 't' },
-            { id: 'R2-1', sev: 'C', file: '(body)', title: 't', k: 'b' },
-            { id: 'R2-2', sev: 'S', file: '(unknown)', title: 't', k: 'u' },
+            f('R2-1', '(body)'),
+            f('R2-2', '(unknown)'),
           ],
         },
         drafts: [d('a.ts'), d('(body)'), d('(unknown)')],
@@ -104,7 +104,7 @@ describe('diagnoseConvergence — the trigger table', () => {
     const flat = diagnoseConvergence({
       round: 3,
       posted: 5,
-      prev: { posted: 5, findings: [] },
+      prev: { posted: 5, fresh: 1, findings: [] },
       drafts: [d('a.ts')],
       floor: 'o',
     })!;
@@ -114,8 +114,8 @@ describe('diagnoseConvergence — the trigger table', () => {
     const grew = diagnoseConvergence({
       round: 3,
       posted: 6,
-      prev: { posted: 5, findings: [] },
-      drafts: [d('a.ts')],
+      prev: { posted: 5, fresh: 1, findings: [] },
+      drafts: [d('a.ts'), d('b.ts')],
       floor: 'o',
     })!;
     expect(grew.volumeNotShrinking).toBe(true);
@@ -130,7 +130,7 @@ describe('diagnoseConvergence — the trigger table', () => {
       diagnoseConvergence({
         round: 7,
         posted: 0,
-        prev: { posted: 0, findings: [] },
+        prev: { posted: 0, fresh: 0, findings: [] },
         drafts: [],
         floor: 'o',
       }),
@@ -141,7 +141,7 @@ describe('diagnoseConvergence — the trigger table', () => {
       diagnoseConvergence({
         round: 7,
         posted: 0,
-        prev: { posted: 6, findings: [] },
+        prev: { posted: 6, fresh: 6, findings: [] },
         drafts: [],
         floor: 'o',
       }),
@@ -157,7 +157,7 @@ describe('diagnoseConvergence — the trigger table', () => {
       diagnoseConvergence({
         round: 5,
         posted: 4,
-        prev: { posted: 0, findings: [] },
+        prev: { posted: 4, fresh: 0, findings: [] },
         drafts: [d('a.ts')],
         floor: 'o',
       }),
@@ -167,7 +167,7 @@ describe('diagnoseConvergence — the trigger table', () => {
       diagnoseConvergence({
         round: 5,
         posted: 2,
-        prev: { posted: 2, findings: [] },
+        prev: { posted: 2, fresh: 1, findings: [] },
         drafts: [d('a.ts')],
         floor: 'o',
       }),
@@ -179,21 +179,32 @@ describe('diagnoseConvergence — the trigger table', () => {
       diagnoseConvergence({
         round: 2,
         posted: 9,
-        prev: { posted: 5, findings: [] },
+        prev: { posted: 5, fresh: 5, findings: [] },
         drafts: [d('a.ts')],
         floor: 'o',
       }),
     ).toBeNull();
   });
 
-  it('cannot evaluate a volume it never recovered', () => {
+  it('cannot evaluate a trend it never recovered', () => {
     // Absence makes the signal unevaluable, never true: a predecessor that
-    // recorded no volume is not a predecessor that posted nothing.
+    // recorded no counts is not a predecessor that posted nothing.
     expect(
       diagnoseConvergence({
         round: 6,
         posted: 9,
         prev: { findings: [] },
+        drafts: [d('a.ts')],
+        floor: 'o',
+      }),
+    ).toBeNull();
+    // A total without a fresh count is the pre-field marker: the trend runs
+    // on new findings, so it is unevaluable rather than measured on totals.
+    expect(
+      diagnoseConvergence({
+        round: 6,
+        posted: 9,
+        prev: { posted: 4, findings: [] },
         drafts: [d('a.ts')],
         floor: 'o',
       }),
@@ -215,6 +226,25 @@ describe('diagnoseConvergence — the trigger table', () => {
         floor: 'o',
       }),
     ).toBeNull();
+  });
+
+  it('treats a stray id that names no standing entry as a new finding', () => {
+    // Step 6 teaches the model to lead a re-post with `R1-2: <the claim>`,
+    // and models emit stray ids at the head of a claim line. Trusted on the
+    // token alone, a genuinely new finding written that way vanishes from
+    // both signals — out of its file's cluster and out of the activity
+    // guard — and a round of real new work reads as the steady state.
+    const r = diagnoseConvergence({
+      round: 4,
+      posted: 1,
+      prev: { posted: 1, fresh: 1, findings: [f('R2-1', 'src/a.ts')] },
+      drafts: [d('src/a.ts', 'R2-99')],
+      floor: 'o',
+    })!;
+    expect(r.clusters).toEqual([
+      { file: 'src/a.ts', priorRounds: [2], thisRound: 1 },
+    ]);
+    expect(r.fresh).toBe(1);
   });
 
   it('still clusters a genuinely new finding in a re-posted file', () => {
@@ -247,7 +277,11 @@ describe('diagnoseConvergence — the trigger table', () => {
     expect(r.clusters[0].thisRound).toBe(1);
   });
 
-  it('orders clusters by persistence, then by this round, then by path', () => {
+  it('orders clusters by new work now, then by depth, then by path', () => {
+    // This round's count leads: the prior-round depth measures the wrong
+    // thing for the sentence it ranks — the previous ledger is a POSTING
+    // set, so depth grows exactly where nothing is being fixed — and it is
+    // the key a stranger can set with one marker full of legal ids.
     const r = diagnoseConvergence({
       round: 5,
       posted: 4,
@@ -264,8 +298,8 @@ describe('diagnoseConvergence — the trigger table', () => {
       floor: 'o',
     })!;
     expect(r.clusters.map((c) => c.file)).toEqual([
-      'persistent.ts',
       'busy.ts',
+      'persistent.ts',
       'quiet.ts',
     ]);
   });
@@ -293,7 +327,10 @@ describe('diagnoseConvergence — the trigger table', () => {
     const r = diagnoseConvergence({
       round: 4,
       posted: 1,
-      prev: { posted: 9, findings: [f('R2-1', '(body)')] },
+      prev: {
+        posted: 9,
+        findings: [{ id: 'R2-1', sev: 'S', file: '(body)', title: 't', k: 1 }],
+      },
       drafts: [d('(body)')],
       floor: 'o',
     })!;
@@ -341,7 +378,7 @@ describe('diagnoseConvergence — the trigger table', () => {
       diagnoseConvergence({
         round: 8,
         posted: 5,
-        prev: { posted: 1, findings: [], floor: 'c' },
+        prev: { posted: 1, fresh: 1, findings: [], floor: 'c' },
         drafts: [d('a.ts'), d('b.ts')],
         floor: 'o',
       }),
@@ -351,7 +388,7 @@ describe('diagnoseConvergence — the trigger table', () => {
       diagnoseConvergence({
         round: 8,
         posted: 5,
-        prev: { posted: 1, findings: [], floor: 'o' },
+        prev: { posted: 1, fresh: 1, findings: [], floor: 'o' },
         drafts: [d('a.ts'), d('b.ts')],
         floor: 'o',
       }),
@@ -362,11 +399,102 @@ describe('diagnoseConvergence — the trigger table', () => {
       diagnoseConvergence({
         round: 8,
         posted: 5,
-        prev: { posted: 1, findings: [] },
+        prev: { posted: 1, fresh: 1, findings: [] },
         drafts: [d('a.ts'), d('b.ts')],
         floor: 'o',
       }),
     ).not.toBeNull();
+  });
+
+  it('measures the trend on new findings, not on the round total', () => {
+    // Step 6 re-posts every unfixed ledger Critical, so the re-post floor
+    // only ever rises. A loop whose NEW findings collapsed 5 -> 1 still
+    // posts more comments than the round before, and a trend on the totals
+    // calls that convergence "not falling" — forever.
+    const carried = Array.from({ length: 30 }, (_, i) =>
+      d(`old${i}.ts`, `R2-${i + 1}`),
+    );
+    const standing = Array.from({ length: 30 }, (_, i) =>
+      f(`R2-${i + 1}`, `old${i}.ts`),
+    );
+    expect(
+      diagnoseConvergence({
+        round: 4,
+        posted: 31,
+        prev: { posted: 30, fresh: 5, findings: standing },
+        drafts: [...carried, d('new.ts')],
+        floor: 'o',
+      }),
+    ).toBeNull();
+  });
+
+  it('holds the recurrence signal until round 3 — one step is not a trend', () => {
+    // A round-1 finding fixed and one new finding landing in the same file
+    // is the ordinary healthy re-review; on a single-file PR the "split it
+    // into its own pull request" advice has no referent at all.
+    expect(
+      diagnoseConvergence({
+        round: 2,
+        posted: 1,
+        prev: { posted: 3, fresh: 3, findings: [f('R1-1', 'src/foo.ts')] },
+        drafts: [d('src/foo.ts')],
+        floor: 'o',
+      }),
+    ).toBeNull();
+  });
+
+  it('ranks the file producing new work over the file with a backlog', () => {
+    // `priorRounds` deepens only where nothing is being fixed: a fixed
+    // finding is not re-posted and its round leaves the list, an unfixed one
+    // keeps contributing its mint round forever. Ranked by depth, the
+    // backlog file took the top slot and the advice explained it as "a
+    // cluster that keeps producing siblings" — about a file where no fix
+    // happened.
+    const r = diagnoseConvergence({
+      round: 6,
+      posted: 6,
+      prev: {
+        posted: 6,
+        fresh: 2,
+        findings: [
+          f('R1-1', 'src/never-fixed.ts'),
+          f('R2-1', 'src/never-fixed.ts'),
+          f('R3-1', 'src/never-fixed.ts'),
+          f('R4-1', 'src/never-fixed.ts'),
+          f('R5-1', 'src/regenerating.ts'),
+        ],
+      },
+      drafts: [
+        d('src/never-fixed.ts', 'R1-1'),
+        d('src/never-fixed.ts'),
+        d('src/regenerating.ts'),
+        d('src/regenerating.ts'),
+      ],
+      floor: 'o',
+    })!;
+    expect(r.clusters.map((c) => c.file)).toEqual([
+      'src/regenerating.ts',
+      'src/never-fixed.ts',
+    ]);
+  });
+
+  it('matches a truncated ledger entry by prefix, keeping the real path', () => {
+    // The ledger caps `file` at 200 chars. Truncating the drafted side to
+    // meet it does not prevent prefix collisions, it creates them — and it
+    // would post a 200-char prefix as a path that exists in no repository.
+    const deep = `src/${'nested/'.repeat(44)}leaf.ts`;
+    const r = diagnoseConvergence({
+      round: 4,
+      posted: 1,
+      prev: {
+        posted: 9,
+        fresh: 9,
+        findings: [f('R2-1', deep.slice(0, 200))],
+      },
+      drafts: [d(deep)],
+      floor: 'o',
+    })!;
+    expect(r.clusters[0].file).toBe(deep);
   });
 
   it('carries the evidence qualifiers through to the rendering', () => {
@@ -406,19 +534,24 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
   const base: ConvergenceDiagnosis = {
     round: 6,
     posted: 4,
+    fresh: 2,
     prevPosted: 4,
+    prevFresh: 2,
     clusters: [{ file: 'src/a.ts', priorRounds: [3, 5], thisRound: 2 }],
     volumeNotShrinking: true,
     truncatedEvidence: false,
     foreignEvidence: false,
+    mergedEvidence: false,
   };
 
   it('states the measured facts before the reading of them', () => {
     const r = renderConvergenceDiagnosis(base);
-    expect(r.en).toContain('round 6 posted 4 inline comment(s)');
+    expect(r.en).toContain(
+      'round 6 posted 4 inline comment(s), 2 of them reported for the first time',
+    );
     expect(r.en).toContain('the previous round posted 4');
     expect(r.en).toContain('`src/a.ts` (findings in rounds 3, 5, 2 more now)');
-    expect(r.zh).toContain('第 6 轮发布了 4 条行内评论');
+    expect(r.zh).toContain('第 6 轮发布了 4 条行内评论，其中 2 条是首次提出');
     expect(r.zh).toContain('第 3、5 轮已出过发现');
   });
 
@@ -457,7 +590,7 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
 
   it('falls back to the volume reading when nothing recurs', () => {
     const r = renderConvergenceDiagnosis({ ...base, clusters: [] });
-    expect(r.en).toContain('posting volume is not falling');
+    expect(r.en).toContain('The rate of new findings is not falling.');
     expect(r.en).toContain('--severity-floor critical');
   });
 
@@ -522,19 +655,21 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
       foreignEvidence: true,
     });
     expect(volumeOnly.en).not.toContain('undercount');
-    expect(volumeOnly.en).toContain('that volume');
+    expect(volumeOnly.en).toContain('those counts');
     expect(volumeOnly.en).toContain('a marker this account did not post');
-    expect(volumeOnly.zh).toContain('该发布量');
+    expect(volumeOnly.zh).toContain('该计数');
 
     // With no previous volume recovered and no cluster evidence in play,
     // there is nothing for provenance to qualify.
     const nothingCited = renderConvergenceDiagnosis({
       round: 4,
       posted: 3,
+      fresh: 3,
       clusters: [],
       volumeNotShrinking: false,
       truncatedEvidence: true,
       foreignEvidence: true,
+      mergedEvidence: false,
     });
     expect(nothingCited.zh).not.toContain('证据说明');
   });
@@ -554,6 +689,32 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
     expect(r.zh).toContain('已解析为 critical 发布下限');
   });
 
+  it('reports both readings when both signals fired', () => {
+    // Discriminating on the clusters alone made the volume sentence — and
+    // with it the whole floor recommendation — unreachable on the shape this
+    // feature exists for: recurrence and a flat trend together.
+    const r = renderConvergenceDiagnosis(base);
+    expect(r.en).toContain('Findings keep coming back to the same files');
+    expect(r.en).toContain('The rate of new findings is not falling.');
+    expect(r.en).toContain('shared root cause');
+    expect(r.en).toContain('--severity-floor critical');
+    expect(r.zh).toContain('新发现的产出速度没有下降。');
+  });
+
+  it('says "some of" when the foreign list was merged over this account\'s own', () => {
+    // The union restores this account's own certified entries under their
+    // own ids, so an unqualified "may not be this account's own" overstates
+    // by exactly the part the union protected.
+    const r = renderConvergenceDiagnosis({
+      ...base,
+      foreignEvidence: true,
+      mergedEvidence: true,
+    });
+    expect(r.en).toContain("merged over this account's own entries");
+    expect(r.en).toContain('so some of those rounds');
+    expect(r.zh).toContain('并与本账号自己的条目合并');
+  });
+
   it('summarises the tail instead of listing every cluster', () => {
     const many = Array.from({ length: MAX_RENDERED_CLUSTERS + 2 }, (_, i) => ({
       file: `f${i}.ts`,
@@ -570,10 +731,12 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
     const r = renderConvergenceDiagnosis({
       round: 4,
       posted: 3,
+      fresh: 3,
       clusters: base.clusters,
       volumeNotShrinking: false,
       truncatedEvidence: false,
       foreignEvidence: false,
+      mergedEvidence: false,
     });
     expect(r.en).toContain('round 4 posted 3 inline comment(s)');
     expect(r.en).not.toContain('the previous round posted');
