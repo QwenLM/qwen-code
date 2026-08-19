@@ -283,8 +283,15 @@ Enterprise paragraph.
     `submit` reports it exit-3 with do-not-re-run advice (a retry would
     duplicate). REQUEST_CHANGES posts the blocking summary header (D6);
     the recorded-but-hostless refusal stays fail-closed, now between two
-    WRITABLE platforms. Still open: `composeUrl`, cleanup audit,
-    AI-comment marking (Q4), the render-adjudication carve-out.
+    WRITABLE platforms. The created-comment read-back is tolerant: an
+    exec failure still propagates, but an ACCEPTED write whose answer
+    fails to parse degrades to "landed, id unknown" — counting it as
+    unposted would re-post it on a retry. Two deliberate trade-offs to
+    revisit when the Q4-era response changes land: the head-drift gate is
+    fail-OPEN on an empty `sourceBranch` (a `mr view` shape regression
+    must not brick posting), and the id read-back parses a set of
+    tolerated shapes best-effort. Still open: `composeUrl`, cleanup
+    audit, AI-comment marking (Q4), the render-adjudication carve-out.
 - **Phase 4 — semantic gaps.** Incremental-cache ancestry fallback, build-test
   repo-config escape hatch, publish-assets gating polish, generic-GitLab
   (glab) evaluation.
