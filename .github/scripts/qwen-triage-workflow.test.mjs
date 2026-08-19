@@ -1014,18 +1014,26 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     // executes, so it is a changed test file exactly like M.
     assert.match(
       recordStep.run,
-      /^\s*git -c core\.quotePath=false diff -z --name-only --diff-filter=ACMRT "\$BASE_OID" HEAD \\\n\s*> "\$\{RUNNER_TEMP:\?\}\/flake-record-files-all"$/m,
+      /^\s*\/usr\/bin\/git -c core\.quotePath=false diff -z --name-only --diff-filter=ACMRT "\$BASE_OID" HEAD \\\n\s*> "\$\{RUNNER_TEMP:\?\}\/flake-record-files-all"$/m,
       'the NUL diff must flow straight into its file — $( ) strips NUL bytes, a pipeline swallows the exit status',
     );
     assert.match(
       recordStep.run,
-      /^\s*BASE_OID="\$\(cat "\$\{RUNNER_TEMP:\?\}\/verify-base-oid"\)"$/m,
+      /^\s*BASE_OID="\$\(\/usr\/bin\/cat "\$\{RUNNER_TEMP:\?\}\/verify-base-oid"\)"$/m,
       'the record step must diff against the base OID captured while .git was root-owned, not re-resolve HEAD^1',
     );
     assert.match(
       recordStep.run,
       /^\s*cp "\$\{RUNNER_TEMP:\?\}\/flake-record-files-all" "\$GATE_HOME\/files-all"$/m,
       'the scrubbed child must copy the parent-recorded diff, never re-run git under env -i',
+    );
+    const recordDiffAt = recordStep.run.search(/^\s*\/usr\/bin\/git -c core\.quotePath=false diff -z/m);
+    const recordReExecAt = recordStep.run.search(/exec \/usr\/bin\/env -i/);
+    const recordCpAt = recordStep.run.search(/^\s*cp "\$\{RUNNER_TEMP:\?\}\/flake-record-files-all" "\$GATE_HOME\/files-all"$/m);
+    assert.ok(
+      recordDiffAt !== -1 && recordReExecAt !== -1 && recordCpAt !== -1 &&
+        recordDiffAt < recordReExecAt && recordReExecAt < recordCpAt,
+      'the diff must be recorded in the parent arm before the env -i re-exec, and copied by the scrubbed child',
     );
     assert.ok(
       recordStep.run.includes(
