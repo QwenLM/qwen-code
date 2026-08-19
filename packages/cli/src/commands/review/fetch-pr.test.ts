@@ -1806,12 +1806,23 @@ describe('fetch-pr report assembly', () => {
     expect(legitimate.includes(0xef)).toBe(true); // the code point IS present
     expect(decodeWasLossy(legitimate)).toBe(false);
 
-    // An invalid byte does not round-trip: the substitution is three bytes
-    // where the original was one.
+    // An invalid byte is lossy.
     expect(decodeWasLossy(Buffer.from([0x61, 0xe9, 0x62]))).toBe(true);
     // …and a truncated multi-byte sequence, the other shape a capture cut
     // mid-character produces.
     expect(decodeWasLossy(Buffer.from([0xe4, 0xb8]))).toBe(true);
+
+    // LENGTH-PRESERVING substitutions, which a byte-length round-trip calls
+    // clean: Node emits one U+FFFD per maximal ill-formed subpart, and a
+    // 3-byte subpart substitutes to a 3-byte replacement character. These are
+    // exactly the shape a capture cut mid-character produces, and they are
+    // the ones that collide two filenames onto one string.
+    expect(decodeWasLossy(Buffer.from([0xf0, 0x9f, 0x98]))).toBe(true);
+    expect(decodeWasLossy(Buffer.from([0xf0, 0x9f, 0x98, 0x41]))).toBe(true);
+    expect(decodeWasLossy(Buffer.from([0xf4, 0x8f, 0xbf]))).toBe(true);
+    expect(
+      decodeWasLossy(Buffer.from([0x61, 0xf1, 0x80, 0x80, 0x62])),
+    ).toBe(true);
     // Ordinary multi-byte content is clean.
     expect(decodeWasLossy(Buffer.from('héllo 世界', 'utf8'))).toBe(false);
   });

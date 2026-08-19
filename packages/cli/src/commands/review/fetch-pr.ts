@@ -739,18 +739,33 @@ function tryResume(
 }
 
 /**
- * Did decoding these bytes as UTF-8 LOSE information?
+ * Are these bytes valid UTF-8 — i.e. would decoding them lose information?
  *
- * Re-encode the decode and compare byte lengths: a substitution replaces an
- * invalid sequence with U+FFFD, whose UTF-8 form is three bytes, so any
- * substitution changes the length. A buffer that legitimately CONTAINS
- * U+FFFD round-trips unchanged, which is the whole distinction — the code
- * point is ordinary content, and the collision hazard comes from invalid
- * bytes collapsing onto one name, never from the character itself.
+ * Asked of the decoder, which is the only thing that knows. The distinction
+ * that matters is between an invalid sequence SUBSTITUTED with U+FFFD and the
+ * code point appearing as ordinary content: the first collides two filenames
+ * onto one string, the second is a character like any other, and this
+ * repository carries four literal ones in its own source.
+ *
+ * A byte-length round-trip looks like it answers this and does not. Node
+ * emits one U+FFFD per maximal ill-formed subpart, and a 3-byte ill-formed
+ * subpart substitutes to a 3-byte U+FFFD — `F0 9F 98`, a truncated
+ * 4-byte sequence, decodes to one replacement character of exactly the
+ * length it replaced. Every length-preserving substitution passed as clean,
+ * which left the collision this guards wide open for precisely the shape a
+ * truncated capture produces.
  */
 export function decodeWasLossy(bytes: Buffer): boolean {
-  return Buffer.byteLength(bytes.toString('utf8'), 'utf8') !== bytes.length;
+  try {
+    STRICT_UTF8.decode(bytes);
+    return false;
+  } catch {
+    return true;
+  }
 }
+
+/** Constructed once: a decoder is stateless here and the guard runs per round. */
+const STRICT_UTF8 = new TextDecoder('utf-8', { fatal: true });
 
 async function runFetchPr(args: FetchPrArgs): Promise<void> {
   // Sampled HERE, at the start of the round: see `reviewModelId`.
