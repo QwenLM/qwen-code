@@ -26,18 +26,19 @@ function definitionFiles(pattern) {
 const definitions = [
   {
     symbol: 'LIVE_TASK_TOOL_NAMES',
-    pattern: '^(export )?(const|let|var) LIVE_TASK_TOOL_NAMES[[:space:]]*=',
+    pattern: '^(export )?(const|let|var) LIVE_TASK_TOOL_NAMES[[:space:]]*[:=]',
     owner: 'packages/acp-bridge/src/bridgeOptions.ts',
   },
   {
     symbol: 'LiveTaskToolName',
-    pattern: '^(export )?type LiveTaskToolName[[:space:]]*=',
+    pattern:
+      '^(export )?type LiveTaskToolName[[:space:]]*(<[^>]+>)?[[:space:]]*=',
     owner: 'packages/acp-bridge/src/bridgeOptions.ts',
   },
   {
     symbol: 'MAX_SUB_SESSION_PROMPT_CHARS',
     pattern:
-      '^(export )?(const|let|var) MAX_SUB_SESSION_PROMPT_CHARS[[:space:]]*=',
+      '^(export )?(const|let|var) MAX_SUB_SESSION_PROMPT_CHARS[[:space:]]*[:=]',
     owner: 'packages/core/src/tools/sub-session-constants.ts',
   },
 ];
@@ -92,7 +93,8 @@ const imports = [
 it.each(imports)('%s is imported by %s', (symbol, path, source) => {
   const text = readFileSync(join(root, path), 'utf8');
   const escapedSource = source.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const statements = text.match(/^import[\s\S]*?;$/gm) ?? [];
+  const statements =
+    text.replace(/\/\/.*$/gm, '').match(/^import[\s\S]*?;$/gm) ?? [];
   expect(
     statements.some(
       (statement) =>
