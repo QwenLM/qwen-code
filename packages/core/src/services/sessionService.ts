@@ -148,15 +148,22 @@ export class SessionIdCaseConflictError extends Error {
 
   // `candidateSessionId` is set only when one exact spelling was found
   // persisted in both active and archived states, so callers can re-check
-  // the persisted spelling instead of the request-case id.
+  // the persisted spelling instead of the request-case id. `reason`
+  // separates a genuinely conflicted pair from a single transcript whose
+  // head is unreadable yet still occupies the id.
   constructor(
     readonly sessionId: string,
     readonly candidateSessionId?: string,
+    readonly reason:
+      | 'case_conflict'
+      | 'unreadable_transcript' = 'case_conflict',
   ) {
     super(
-      candidateSessionId === undefined
-        ? `Multiple persisted sessions match "${sessionId}" by case.`
-        : `Session "${candidateSessionId}" is persisted in both active and archived states.`,
+      reason === 'unreadable_transcript'
+        ? `Session "${candidateSessionId ?? sessionId}" is persisted but its transcript head is unreadable.`
+        : candidateSessionId === undefined
+          ? `Multiple persisted sessions match "${sessionId}" by case.`
+          : `Session "${candidateSessionId}" is persisted in both active and archived states.`,
     );
   }
 }
@@ -796,6 +803,11 @@ export class SessionService {
           }
         }
         if (!anyPresent) return undefined;
+        throw new SessionIdCaseConflictError(
+          sessionId,
+          undefined,
+          'unreadable_transcript',
+        );
       }
       throw new SessionIdCaseConflictError(sessionId);
     }
@@ -815,7 +827,11 @@ export class SessionService {
     // away mid-resolution is genuinely absent.
     for (const state of states) {
       if (fs.existsSync(this.getSessionFilePath(candidateSessionId, state))) {
-        throw new SessionIdCaseConflictError(sessionId, candidateSessionId);
+        throw new SessionIdCaseConflictError(
+          sessionId,
+          candidateSessionId,
+          'unreadable_transcript',
+        );
       }
     }
     return undefined;

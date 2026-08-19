@@ -11964,7 +11964,7 @@ describe('createServeApp', () => {
     });
 
     it.each(['load', 'resume'] as const)(
-      'hides explicit standalone transcripts from generic %s',
+      'restores legacy reserved-source transcripts on ordinary workspace runtimes (%s)',
       async (action) => {
         const bridge = fakeBridge();
         const readCreationMetadata = vi
@@ -11982,10 +11982,14 @@ describe('createServeApp', () => {
             .set('Host', `127.0.0.1:${baseOpts.port}`)
             .send({});
 
-          expect(res.status).toBe(404);
-          expect(res.body.code).toBe('session_not_found');
-          expect(bridge.loadCalls).toEqual([]);
-          expect(bridge.resumeCalls).toEqual([]);
+          // Create-side admission already blocks new reserved-source
+          // transcripts, so one found on an ordinary store predates the
+          // gate and stays loadable; only the internal Conversations
+          // runtime hides it.
+          expect(res.status).toBe(200);
+          const calls =
+            action === 'load' ? bridge.loadCalls : bridge.resumeCalls;
+          expect(calls).toHaveLength(1);
         } finally {
           readCreationMetadata.mockRestore();
         }
@@ -11993,7 +11997,7 @@ describe('createServeApp', () => {
     );
 
     it.each(['load', 'resume'] as const)(
-      'hides mixed-case explicit standalone transcripts from generic %s',
+      'restores mixed-case reserved-source transcripts on ordinary workspace runtimes (%s)',
       async (action) => {
         const sessionId = '550e8400-e29b-41d4-a716-446655440140';
         const storageSessionId = sessionId.toUpperCase();
@@ -12020,12 +12024,12 @@ describe('createServeApp', () => {
             .set('Host', `127.0.0.1:${baseOpts.port}`)
             .send({});
 
-          expect(res.status).toBe(404);
-          expect(res.body.code).toBe('session_not_found');
+          expect(res.status).toBe(200);
           expect(findSessionId).toHaveBeenCalledWith(sessionId);
           expect(readCreationMetadata).toHaveBeenCalledWith(storageSessionId);
-          expect(bridge.loadCalls).toEqual([]);
-          expect(bridge.resumeCalls).toEqual([]);
+          const calls =
+            action === 'load' ? bridge.loadCalls : bridge.resumeCalls;
+          expect(calls).toHaveLength(1);
         } finally {
           findSessionId.mockRestore();
           readCreationMetadata.mockRestore();

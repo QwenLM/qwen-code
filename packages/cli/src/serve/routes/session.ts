@@ -3060,9 +3060,16 @@ export function registerSessionRoutes(
                 : await sessionService.readCreationMetadata(
                     restoredStorageSessionId,
                   );
+            // The reserved standalone source is hidden only on the internal
+            // Conversations runtime. Ordinary workspace restores keep
+            // loading legacy transcripts that happen to carry the reserved
+            // source string — create-side admission already blocks new ones,
+            // so every such transcript on an ordinary store predates the
+            // gate and must not become unreachable.
             if (
               metadata === undefined ||
-              isReservedStandaloneSessionSource(metadata)
+              (isInternalWorkspaceRuntime(runtime) &&
+                isReservedStandaloneSessionSource(metadata))
             ) {
               throw new SessionNotFoundError(sessionId);
             }

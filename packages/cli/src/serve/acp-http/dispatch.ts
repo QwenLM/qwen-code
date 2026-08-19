@@ -1890,9 +1890,14 @@ export class AcpDispatcher {
                       sessionService,
                     )
                   : await sessionService.readCreationMetadata(storageSessionId);
+                // The reserved standalone source is hidden only on the
+                // isolated Conversations surface (parity with the REST
+                // restore handler); generic restores keep loading legacy
+                // transcripts that carry the reserved source string.
                 if (
                   metadata === undefined ||
-                  isReservedStandaloneSessionSource(metadata)
+                  (this.liveSessionIsolation !== undefined &&
+                    isReservedStandaloneSessionSource(metadata))
                 ) {
                   throw new SessionNotFoundError(sessionId);
                 }

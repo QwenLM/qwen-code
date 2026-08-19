@@ -2532,10 +2532,10 @@ describe('SessionService', () => {
           `${sessionIdA.toUpperCase()}.jsonl`,
         ] as never)
         .mockReturnValueOnce([] as never);
-      // Both heads fail content validation but the files are still on
-      // disk — occupancy, not absence.
-      existsSyncSpy.mockReturnValue(true);
-      const getLocation = vi.spyOn(sessionService, 'getSessionLocation');
+      // Both candidates are genuinely readable — a true conflict.
+      const getLocation = vi
+        .spyOn(sessionService, 'getSessionLocation')
+        .mockResolvedValue('active');
 
       await expect(
         sessionService.findSessionIdIgnoringCase(sessionIdA),
@@ -2546,6 +2546,29 @@ describe('SessionService', () => {
         message: `Multiple persisted sessions match "${sessionIdA}" by case.`,
       });
       expect(getLocation).toHaveBeenCalledTimes(2);
+    });
+
+    it('rejects case-only duplicates whose heads are all unreadable as occupying the id', async () => {
+      readdirSyncSpy
+        .mockReturnValueOnce([
+          `${sessionIdA}.jsonl`,
+          `${sessionIdA.toUpperCase()}.jsonl`,
+        ] as never)
+        .mockReturnValueOnce([] as never);
+      // Neither head recovers records, but both files persist on disk.
+      vi.spyOn(sessionService, 'getSessionLocation').mockResolvedValue(
+        undefined,
+      );
+      existsSyncSpy.mockReturnValue(true);
+
+      await expect(
+        sessionService.findSessionIdIgnoringCase(sessionIdA),
+      ).rejects.toMatchObject({
+        name: 'SessionIdCaseConflictError',
+        sessionId: sessionIdA,
+        candidateSessionId: undefined,
+        reason: 'unreadable_transcript',
+      });
     });
 
     it('rejects one spelling that exists in both active and archive state', async () => {
@@ -2583,6 +2606,8 @@ describe('SessionService', () => {
         name: 'SessionIdCaseConflictError',
         sessionId: sessionIdA,
         candidateSessionId: legacySessionId,
+        reason: 'unreadable_transcript',
+        message: `Session "${legacySessionId}" is persisted but its transcript head is unreadable.`,
       });
     });
 
