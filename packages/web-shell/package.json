@@ -55,6 +55,7 @@
     "rehype-katex": "^7.0.1",
     "remark-gfm": "^4.0.0",
     "remark-math": "^6.0.0",
+    "remark-cjk-friendly": "^2.3.1",
     "shiki": "^1.29.2",
     "tailwind-merge": "^3.6.0",
     "vaul": "^1.1.2"
