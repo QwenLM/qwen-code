@@ -29,22 +29,30 @@ const SAFE_TARGET_MAX_CHARS = 200;
  * packages/core (agent-transcript.ts) answers the same question for
  * transcript/monitor names and flattens dots instead — the two stay separate
  * on that deliberate difference.
+ *
+ * Dashes are flattened too, on purpose: the slugs are prefix-scanned with a
+ * dash boundary (`qwen-review-<slug>-` in review's cleanup), and a slug that
+ * itself contained `-` — natively, or via the truncation join — could extend
+ * a shorter slug, letting one target's cleanup sweep a DISTINCT target's
+ * artifacts. With `-` out of the slug alphabet the space is prefix-free at
+ * that boundary by construction.
  */
 export function safeTarget(target: string): string {
   let flat = target
-    .replace(/[^A-Za-z0-9._-]/g, '_') // separators and anything odd → underscore
+    .replace(/[^A-Za-z0-9._]/g, '_') // separators, dashes, anything odd → underscore
     .replace(/\.\.+/g, '_'); // no run of dots survives as a traversal token
   // A deep nested target flattens past the one-component byte cap
   // (ENAMETOOLONG): truncate and keep uniqueness with a hash of the
-  // ORIGINAL target, so distinct long paths stay distinct.
+  // ORIGINAL target, so distinct long paths stay distinct. The digest joins
+  // with `_` — the one dash in a filename is the prefix-scan boundary.
   if (flat.length > SAFE_TARGET_MAX_CHARS) {
     const digest = createHash('sha256')
       .update(target)
       .digest('hex')
       .slice(0, 12);
-    flat = `${flat.slice(0, SAFE_TARGET_MAX_CHARS - digest.length - 1)}-${digest}`;
+    flat = `${flat.slice(0, SAFE_TARGET_MAX_CHARS - digest.length - 1)}_${digest}`;
   }
-  // Leading dashes too: a dash-leading slug is parsed as short flags when a
-  // consumer passes it as a spaced CLI argument value.
-  return flat.replace(/^[._-]+/, '') || 'target';
+  // Leading dots/underscores too: a dash-leading slug is no longer possible
+  // (dashes flatten), and a dot-leading component reads as a hidden file.
+  return flat.replace(/^[._]+/, '') || 'target';
 }

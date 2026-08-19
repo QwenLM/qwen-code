@@ -25,9 +25,9 @@ describe('PARSE_ARGS_REPORT', () => {
 });
 
 describe('tmpFile — target is a single safe component', () => {
-  it('keeps ordinary labels intact', () => {
+  it('flattens ordinary labels to the prefix-free slug', () => {
     expect(tmpFile('pr-6771', 'diff.txt')).toContain(
-      'qwen-review-pr-6771-diff.txt',
+      'qwen-review-pr_6771-diff.txt',
     );
     expect(tmpFile('local', 'plan.json')).toContain(
       'qwen-review-local-plan.json',

@@ -2781,7 +2781,7 @@ describe('what the reviewer caught in this change', () => {
 // receipt lands there.
 describe('submit receipt (producer half of the audit contract)', () => {
   const receiptPath = () =>
-    join(dir, '.qwen', 'tmp', 'qwen-review-pr-6771-submit-receipt.json');
+    join(dir, '.qwen', 'tmp', 'qwen-review-pr_6771-submit-receipt.json');
 
   const authorizedPost = (over: Record<string, unknown> = {}) =>
     args({ userAuthorized: true, ...over });

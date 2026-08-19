@@ -38,6 +38,23 @@ describe('safeTarget', () => {
     expect(safeTarget('///')).toBe('target');
   });
 
+  it('keeps the slug space prefix-free at the dash boundary', () => {
+    // Review's cleanup sweeps `.qwen/tmp/` by `qwen-review-<slug>-` prefix:
+    // if a slug could contain `-` — natively, or via the truncation join —
+    // one target's slug could extend another's, and the shorter target's
+    // cleanup would delete the longer target's artifacts. `-` is therefore
+    // out of the slug alphabet entirely.
+    expect(safeTarget('foo-bar')).toBe('foo_bar');
+    const shortSlug = safeTarget('foo');
+    expect(safeTarget('foo-bar').startsWith(`${shortSlug}-`)).toBe(false);
+    const shared = Array.from({ length: 30 }, (_, i) => `level${i}`).join('/');
+    const deepSlug = safeTarget(`${shared}/alpha`);
+    expect(deepSlug).not.toContain('-');
+    // The short-vs-truncated direction too: a truncated slug never starts
+    // with `<short slug>-`, whatever the short target is.
+    expect(deepSlug.startsWith(`${safeTarget(shared)}-`)).toBe(false);
+  });
+
   it('bounds deep targets to the one-component cap, keeping them distinct', () => {
     // Deep nested paths flatten past POSIX's 255-byte filename component cap
     // (ENAMETOOLONG): truncate and carry a hash of the ORIGINAL target so

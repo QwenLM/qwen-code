@@ -80,7 +80,7 @@ import {
 import { runCleanup } from './cleanup.js';
 
 const PLAN = {
-  diffPathAbsolute: '/abs/.qwen/tmp/qwen-review-pr-9206-diff.txt',
+  diffPathAbsolute: '/abs/.qwen/tmp/qwen-review-pr_9206-diff.txt',
   chunks: [
     {
       id: 13,
@@ -502,7 +502,7 @@ describe('issue #9206 — Step 9 cleanup must not destroy a non-converged run’
       dir,
       '.qwen',
       'tmp',
-      'qwen-review-pr-9206-fetch.json',
+      'qwen-review-pr_9206-fetch.json',
     );
     writeFileSync(planPath, JSON.stringify({ prNumber: '9206' }));
     const recordDir = promptRecordDir(planPath);
@@ -533,7 +533,7 @@ describe('issue #9206 — Step 9 cleanup must not destroy a non-converged run’
       dir,
       '.qwen',
       'tmp',
-      'qwen-review-pr-9206-fetch.json',
+      'qwen-review-pr_9206-fetch.json',
     );
     writeFileSync(planPath, JSON.stringify({ prNumber: '9206' }));
     const recordDir = promptRecordDir(planPath);
@@ -564,7 +564,7 @@ describe('issue #9206 — Step 9 cleanup must not destroy a non-converged run’
       dir,
       '.qwen',
       'tmp',
-      'qwen-review-pr-9206-fetch.json',
+      'qwen-review-pr_9206-fetch.json',
     );
     const recordDir = promptRecordDir(planPath);
     mkdirSync(recordDir, { recursive: true });
@@ -601,7 +601,7 @@ describe('issue #9206 — Step 9 cleanup must not destroy a non-converged run’
       dir,
       '.qwen',
       'tmp',
-      'qwen-review-pr-9206-fetch.json',
+      'qwen-review-pr_9206-fetch.json',
     );
     const recordDir = promptRecordDir(planPath);
     mkdirSync(recordDir, { recursive: true });
@@ -634,7 +634,7 @@ describe('issue #9206 — Step 9 cleanup must not destroy a non-converged run’
       dir,
       '.qwen',
       'tmp',
-      'qwen-review-pr-9206-fetch.json',
+      'qwen-review-pr_9206-fetch.json',
     );
     writeFileSync(planPath, JSON.stringify({ prNumber: '9206' }));
     const recordDir = promptRecordDir(planPath);
@@ -657,7 +657,7 @@ describe('issue #9206 — Step 9 cleanup must not destroy a non-converged run’
       dir,
       '.qwen',
       'tmp',
-      'qwen-review-pr-9206-fetch.json',
+      'qwen-review-pr_9206-fetch.json',
     );
     writeFileSync(planPath, JSON.stringify({ prNumber: '9206' }));
     const recordDir = promptRecordDir(planPath);
