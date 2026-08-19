@@ -282,7 +282,9 @@ function parseState(
       /^[a-zA-Z0-9-_.]+$/.test(parsed.name) &&
       (parsed.artifactDirectory === undefined ||
         (typeof parsed.artifactDirectory === 'string' &&
-          /^[a-zA-Z0-9-_.]+$/.test(parsed.artifactDirectory))) &&
+          /^[a-zA-Z0-9-_.]+$/.test(parsed.artifactDirectory) &&
+          parsed.artifactDirectory !== '.' &&
+          parsed.artifactDirectory !== '..')) &&
       (parsed.artifactGeneration === undefined ||
         (Number.isSafeInteger(parsed.artifactGeneration) &&
           parsed.artifactGeneration >= 0)) &&
@@ -645,6 +647,7 @@ export class ExtensionStore {
         input.operation !== 'install' && currentPolicy?.artifactDirectory
           ? path.join(this.extensionsDir, currentPolicy.artifactDirectory)
           : input.destinationDirectory;
+      this.assertArtifactDestination(destinationDirectory);
       const destinationExists = await this.pathExists(destinationDirectory);
       if (input.operation === 'install' && destinationExists) {
         throw new ExtensionConflictError(
@@ -1449,14 +1452,7 @@ export class ExtensionStore {
   }
 
   private assertArtifactPaths(input: CommitExtensionArtifactInput): void {
-    const extensionsRoot = path.resolve(this.extensionsDir);
-    const destination = path.resolve(input.destinationDirectory);
-    if (
-      path.dirname(destination) !== extensionsRoot ||
-      destination === extensionsRoot
-    ) {
-      throw new Error('Extension destination must be a direct child.');
-    }
+    this.assertArtifactDestination(input.destinationDirectory);
     if (input.operation === 'uninstall') {
       if (input.stagingDirectory !== undefined) {
         throw new Error('Uninstall does not accept a staging directory.');
@@ -1470,6 +1466,17 @@ export class ExtensionStore {
     const staging = path.resolve(input.stagingDirectory);
     if (path.dirname(staging) !== stagingRoot) {
       throw new Error('Extension staging directory is outside the store.');
+    }
+  }
+
+  private assertArtifactDestination(destinationDirectory: string): void {
+    const extensionsRoot = path.resolve(this.extensionsDir);
+    const destination = path.resolve(destinationDirectory);
+    if (
+      path.dirname(destination) !== extensionsRoot ||
+      destination === extensionsRoot
+    ) {
+      throw new Error('Extension destination must be a direct child.');
     }
   }
 

@@ -1344,6 +1344,47 @@ describe('ExtensionStore', () => {
     expect(fs.existsSync(path.join(storeDir, 'state.json'))).toBe(true);
   });
 
+  it('rejects an artifact directory that resolves to the extensions root', async () => {
+    const identity = { id: 'ee'.repeat(32), name: 'demo' };
+    const unrelated = path.join(extensionsDir, 'unrelated');
+    const sentinel = path.join(extensionsDir, 'sentinel');
+    await fsp.mkdir(path.join(extensionsDir, identity.name), {
+      recursive: true,
+    });
+    await fsp.mkdir(unrelated);
+    await fsp.writeFile(sentinel, 'keep');
+    await fsp.mkdir(storeDir, { recursive: true });
+    await fsp.writeFile(
+      path.join(storeDir, 'state.json'),
+      JSON.stringify({
+        version: 2,
+        generation: 1,
+        legacyProjectionHash: '0'.repeat(64),
+        extensions: {
+          [identity.id]: {
+            name: identity.name,
+            artifactDirectory: '.',
+            artifactGeneration: 1,
+            defaultActivation: 'enabled',
+            workspaceOverrides: {},
+          },
+        },
+      }),
+    );
+    const store = makeStore();
+
+    await expect(
+      store.commitArtifact({
+        operation: 'uninstall',
+        identity,
+        destinationDirectory: path.join(extensionsDir, identity.name),
+      }),
+    ).rejects.toBeInstanceOf(ExtensionStoreCorruptError);
+    expect(fs.existsSync(path.join(extensionsDir, identity.name))).toBe(true);
+    expect(fs.existsSync(unrelated)).toBe(true);
+    expect(fs.existsSync(sentinel)).toBe(true);
+  });
+
   it('commits an installed artifact and its initial activation together', async () => {
     const store = makeStore();
     const identity = { id: 'f'.repeat(64), name: 'demo' };
