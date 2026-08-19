@@ -87,6 +87,10 @@ export function installBrowserPanel(
       '--qwen-desktop-browser-width',
       `${panelWidth}px`,
     );
+    document.documentElement.style.setProperty(
+      '--qwen-desktop-browser-width',
+      `${panelWidth}px`,
+    );
     shell.append(elements.panel);
     bindPanelEvents(elements);
     if (typeof ResizeObserver !== 'undefined') {
@@ -155,6 +159,10 @@ export function installBrowserPanel(
           '--qwen-desktop-browser-width',
           `${panelWidth}px`,
         );
+        document.documentElement.style.setProperty(
+          '--qwen-desktop-browser-width',
+          `${panelWidth}px`,
+        );
         syncBounds();
       };
       const stop = (): void => {
@@ -198,6 +206,9 @@ export function installBrowserPanel(
     boundsObserver?.disconnect();
     document.removeEventListener('click', handleLinkClick, true);
     window.removeEventListener('resize', syncBounds);
+    document.documentElement.style.removeProperty(
+      '--qwen-desktop-browser-width',
+    );
     elements?.panel.remove();
   };
 }

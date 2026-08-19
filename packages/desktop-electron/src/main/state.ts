@@ -14,8 +14,13 @@ const MIN_WIDTH = 900;
 const MIN_HEIGHT = 600;
 
 export interface DesktopState {
+  computerUse?: ComputerUseState;
   window?: WindowState;
   workspace?: string;
+}
+
+export interface ComputerUseState {
+  alwaysHidePictureInPicture: boolean;
 }
 
 export interface WindowState extends Rectangle {
@@ -44,10 +49,24 @@ export function normalizeDesktopState(value: unknown): DesktopState {
   const window =
     normalizeWindowState(candidate['window']) ??
     normalizeWindowState(legacyWindows[0]);
+  const computerUse = normalizeComputerUseState(candidate['computerUse']);
   return {
+    ...(computerUse ? { computerUse } : {}),
     ...(workspace ? { workspace } : {}),
     ...(window ? { window } : {}),
   };
+}
+
+function normalizeComputerUseState(
+  value: unknown,
+): ComputerUseState | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const hidden = (value as Record<string, unknown>)[
+    'alwaysHidePictureInPicture'
+  ];
+  return typeof hidden === 'boolean'
+    ? { alwaysHidePictureInPicture: hidden }
+    : undefined;
 }
 
 export function initialWindowBounds(

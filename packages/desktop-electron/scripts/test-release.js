@@ -18,9 +18,12 @@ const tauriManifest = readJson(
 );
 const main = read('src/main/index.ts');
 const browserPanel = read('src/main/browser-panel.ts');
+const computerUse = read('src/main/computer-use.ts');
 const preload = read('src/preload/index.ts');
+const preloadComputerUse = read('src/preload/computer-use.ts');
 const preloadPanel = read('src/preload/browser-panel.ts');
 const sharedBrowserPanel = read('src/shared/browser-panel.ts');
+const sharedComputerUse = read('src/shared/computer-use.ts');
 const runtime = read('src/main/runtime.ts');
 const runtimeBuilder = read('scripts/prepare-runtime.js');
 const entitlements = read('build/entitlements.mac.plist');
@@ -41,7 +44,7 @@ const rootCiWorkflow = fs.readFileSync(
 testPackageIdentity();
 testSecurityBoundary();
 testStandaloneWebShellOwnership();
-testRemovedDesktopSurfaces();
+testDesktopSurfaceScope();
 testReleaseWorkflow();
 testVersionSynchronization();
 console.log('Electron desktop isolation and Web Shell parity checks passed.');
@@ -69,6 +72,7 @@ function testPackageIdentity() {
   assert.deepEqual(manifest.build.files, [
     'dist/main/**/*',
     'dist/preload/**/*',
+    'dist/renderer/**/*',
     'package.json',
   ]);
   assert.deepEqual(manifest.build.extraResources, [
@@ -121,6 +125,23 @@ function testSecurityBoundary() {
   assert.match(preloadPanel, /shouldOpenLinkInApp/);
   assert.match(preloadPanel, /event\.stopImmediatePropagation\(\)/);
   assert.doesNotMatch(preload, /contextBridge|exposeInMainWorld/);
+  assert.doesNotMatch(computerUse, /desktopCapturer/);
+  assert.match(computerUse, /Authorization: `Bearer \$\{runtime\.token\}`/);
+  assert.match(
+    computerUse,
+    /\/session\/\$\{encodeURIComponent\(sessionId\)\}\/events/,
+  );
+  assert.match(computerUse, /'Last-Event-ID': '0'/);
+  assert.match(computerUse, /\/computer-use\/frame/);
+  assert.match(computerUse, /\/cancel/);
+  assert.match(computerUse, /setContentProtection\(true\)/);
+  assert.match(computerUse, /contextIsolation: true/);
+  assert.match(computerUse, /nodeIntegration: false/);
+  assert.match(computerUse, /sandbox: true/);
+  assert.match(computerUse, /event\.sender\.id === window\.webContents\.id/);
+  assert.match(preloadComputerUse, /installComputerUseControl/);
+  assert.match(sharedComputerUse, /computer_use__/);
+  assert.doesNotMatch(preloadComputerUse, /contextBridge|exposeInMainWorld/);
 }
 
 function testStandaloneWebShellOwnership() {
@@ -142,7 +163,7 @@ function testStandaloneWebShellOwnership() {
   }
 }
 
-function testRemovedDesktopSurfaces() {
+function testDesktopSurfaceScope() {
   assert.doesNotMatch(main, /new-chat-window|voice-overlay/);
   assert.doesNotMatch(entitlements, /audio-input/);
   for (const permission of [
@@ -159,15 +180,22 @@ function testRemovedDesktopSurfaces() {
     sourceFiles.map((file) => path.relative(packageDir, file)).sort(),
     [
       'src/main/browser-panel.ts',
+      'src/main/computer-use.ts',
       'src/main/index.ts',
       'src/main/runtime.test.ts',
       'src/main/runtime.ts',
       'src/main/state.test.ts',
       'src/main/state.ts',
       'src/preload/browser-panel.ts',
+      'src/preload/computer-use-surface.ts',
+      'src/preload/computer-use.ts',
       'src/preload/index.ts',
+      'src/renderer/computer-use-surface.css',
+      'src/renderer/computer-use-surface.html',
       'src/shared/browser-panel.test.ts',
       'src/shared/browser-panel.ts',
+      'src/shared/computer-use.test.ts',
+      'src/shared/computer-use.ts',
     ],
   );
   const productionFiles = sourceFiles.filter(

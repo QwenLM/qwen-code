@@ -17,7 +17,19 @@ providers, routing, settings, plugins, sessions, tools, permissions, MCP, and
 all other product UI come from `lib/web-shell` in the bundled Qwen runtime.
 This keeps product rendering parity as a build invariant; Electron-owned CSS
 is limited to macOS window drag regions, the sidebar window-control inset, a
-Chromium tooltip hit-testing workaround, and the optional in-app browser host.
+Chromium tooltip hit-testing workaround, the optional in-app browser host, and
+the Electron-owned Computer Use control and native activity surfaces.
+
+Computer Use remains a Core/runtime capability, while its desktop activity UI
+is owned by this package. Electron observes the active session's existing SSE
+stream and presents a native status overlay plus an optional picture-in-picture
+preview of the exact cua-driver frame captured from the tool result before
+model-specific vision postprocessing. The daemon keeps only the latest frame in
+live-session memory and exposes it through a token-protected, loopback-only
+endpoint; it strips the private frame metadata before publishing the normal
+session stream. Escape and the surface controls cancel through the existing
+daemon route. The controls are mounted by the isolated preload, so the
+canonical Web Shell and its generic tool projection stay unchanged.
 
 The main process also follows Web Shell's standard `theme-color` metadata so
 the operating-system appearance and window background switch between light and

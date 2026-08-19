@@ -16,8 +16,10 @@ import {
   shell,
 } from 'electron';
 import { BrowserPanelController } from './browser-panel';
+import { ComputerUseController } from './computer-use';
 import { DesktopRuntime } from './runtime';
 import { BROWSER_PANEL_CSS } from '../shared/browser-panel';
+import { COMPUTER_USE_CONTROL_CSS } from '../shared/computer-use';
 import {
   captureWindowState,
   initialWindowBounds,
@@ -34,6 +36,7 @@ let statePath = '';
 let hostLogPath = '';
 let stateTimer: NodeJS.Timeout | undefined;
 let quitting = false;
+let computerUse: ComputerUseController | undefined;
 const browserPanel = new BrowserPanelController(() => mainWindow);
 
 const MACOS_TITLE_BAR_CSS = `
@@ -111,6 +114,8 @@ app.on('before-quit', () => {
     flushDesktopState();
   } finally {
     browserPanel.close();
+    computerUse?.dispose();
+    computerUse = undefined;
     runtime?.stop();
     runtime = undefined;
   }
@@ -136,6 +141,19 @@ async function startApplication(): Promise<void> {
   hostLogPath = path.join(app.getPath('logs'), 'desktop-host.log');
   desktopState = readDesktopState(statePath);
   browserPanel.registerIpc();
+  computerUse = new ComputerUseController({
+    getAlwaysHidePictureInPicture: () =>
+      desktopState.computerUse?.alwaysHidePictureInPicture ?? false,
+    getMainWindow: () => mainWindow,
+    getRuntime: () => runtime,
+    language: app.getLocale(),
+    log: appendHostLog,
+    setAlwaysHidePictureInPicture: (hidden) => {
+      desktopState.computerUse = { alwaysHidePictureInPicture: hidden };
+      flushDesktopState();
+    },
+  });
+  computerUse.registerIpc();
 
   const workspace = await resolveWorkspace();
   if (!workspace) {
@@ -180,6 +198,8 @@ async function showMainWindow(
   try {
     await window.loadURL(runtime.authenticatedWebUrl());
     await window.webContents.insertCSS(BROWSER_PANEL_CSS);
+    await window.webContents.insertCSS(COMPUTER_USE_CONTROL_CSS);
+    computerUse?.setSessionFromUrl(window.webContents.getURL());
     if (process.platform === 'darwin') {
       await window.webContents.insertCSS(MACOS_TITLE_BAR_CSS);
       window.show();
@@ -224,8 +244,15 @@ function createMainWindow(savedBounds?: WindowState): BrowserWindow {
   window.webContents.on('did-change-theme-color', (_event, color) => {
     applyWebShellNativeTheme(window, color);
   });
-  window.webContents.once('did-finish-load', () => {
+  window.webContents.on('did-finish-load', () => {
     appendHostLog(`web shell ready at ${runtime?.baseUrl ?? 'unknown'}`);
+    computerUse?.setSessionFromUrl(window.webContents.getURL());
+  });
+  window.webContents.on('did-navigate', (_event, url) => {
+    computerUse?.setSessionFromUrl(url);
+  });
+  window.webContents.on('did-navigate-in-page', (_event, url) => {
+    computerUse?.setSessionFromUrl(url);
   });
   window.webContents.on(
     'did-start-navigation',
@@ -233,14 +260,24 @@ function createMainWindow(savedBounds?: WindowState): BrowserWindow {
       if (isMainFrame && !isInPlace && isRuntimeUrl(url)) browserPanel.close();
     },
   );
-  window.webContents.on('render-process-gone', () => browserPanel.close());
-  window.on('move', scheduleDesktopStateSave);
-  window.on('resize', scheduleDesktopStateSave);
+  window.webContents.on('render-process-gone', () => {
+    browserPanel.close();
+    computerUse?.suspend();
+  });
+  window.on('move', () => {
+    scheduleDesktopStateSave();
+    computerUse?.reposition();
+  });
+  window.on('resize', () => {
+    scheduleDesktopStateSave();
+    computerUse?.reposition();
+  });
   window.on('maximize', scheduleDesktopStateSave);
   window.on('unmaximize', scheduleDesktopStateSave);
   window.on('close', flushDesktopState);
   window.on('closed', () => {
     browserPanel.close();
+    computerUse?.suspend();
     if (mainWindow === window) mainWindow = undefined;
   });
   window.webContents.on('will-navigate', (event, url) => {

@@ -25,6 +25,19 @@ describe('Electron desktop state', () => {
     });
   });
 
+  it('keeps the Electron-owned Computer Use preference', () => {
+    expect(
+      normalizeDesktopState({
+        computerUse: { alwaysHidePictureInPicture: true },
+      }),
+    ).toEqual({ computerUse: { alwaysHidePictureInPicture: true } });
+    expect(
+      normalizeDesktopState({
+        computerUse: { alwaysHidePictureInPicture: 'yes' },
+      }),
+    ).toEqual({});
+  });
+
   it('migrates the first legacy chat window into the single window', () => {
     expect(
       normalizeDesktopState({

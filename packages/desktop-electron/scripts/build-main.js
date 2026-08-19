@@ -37,4 +37,21 @@ await build({
   sourcemap: false,
 });
 
-console.log('Built Electron main process and preload.');
+await build({
+  entryPoints: [path.join(packageDir, 'src/preload/computer-use-surface.ts')],
+  outfile: path.join(outDir, 'preload/computer-use-surface.cjs'),
+  bundle: true,
+  platform: 'node',
+  format: 'cjs',
+  target: 'node22',
+  external: ['electron'],
+  sourcemap: false,
+});
+
+fs.cpSync(
+  path.join(packageDir, 'src/renderer'),
+  path.join(outDir, 'renderer'),
+  { recursive: true },
+);
+
+console.log('Built Electron main process, preloads, and native surfaces.');

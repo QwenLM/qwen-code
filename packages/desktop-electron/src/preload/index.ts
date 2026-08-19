@@ -11,6 +11,12 @@ import {
   type BrowserPanelState,
 } from '../shared/browser-panel';
 import { installBrowserPanel } from './browser-panel';
+import {
+  COMPUTER_USE_CHANNELS,
+  type ComputerUseApi,
+  type ComputerUseSurfaceState,
+} from '../shared/computer-use';
+import { installComputerUseControl } from './computer-use';
 
 const api: BrowserPanelApi = {
   open: (url, bounds) =>
@@ -48,4 +54,28 @@ const api: BrowserPanelApi = {
   },
 };
 
+const computerUseApi: ComputerUseApi = {
+  onStateChanged: (callback) => {
+    const listener = (
+      _event: Electron.IpcRendererEvent,
+      state: ComputerUseSurfaceState,
+    ) => callback(state);
+    ipcRenderer.on(COMPUTER_USE_CHANNELS.stateChanged, listener);
+    return () =>
+      ipcRenderer.removeListener(COMPUTER_USE_CHANNELS.stateChanged, listener);
+  },
+  setAlwaysHidePictureInPicture: (hidden) =>
+    ipcRenderer.invoke(
+      COMPUTER_USE_CHANNELS.setAlwaysHidePictureInPicture,
+      hidden,
+    ) as Promise<void>,
+  setPictureInPictureVisible: (visible) =>
+    ipcRenderer.invoke(
+      COMPUTER_USE_CHANNELS.setPictureInPictureVisible,
+      visible,
+    ) as Promise<void>,
+  stop: () => ipcRenderer.invoke(COMPUTER_USE_CHANNELS.stop) as Promise<void>,
+};
+
 installBrowserPanel(api, process.platform);
+installComputerUseControl(computerUseApi);

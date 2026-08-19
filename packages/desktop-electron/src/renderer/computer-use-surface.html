@@ -1,0 +1,59 @@
+<!doctype html>
+<!--
+  @license
+  Copyright 2026 Qwen Team
+  SPDX-License-Identifier: Apache-2.0
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; img-src data:; style-src 'self'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="stylesheet" href="./computer-use-surface.css" />
+    <title>Qwen Code Computer Use</title>
+  </head>
+  <body>
+    <section class="status-surface" aria-live="polite">
+      <span class="pulse" aria-hidden="true"></span>
+      <div class="status-copy">
+        <strong data-value="title">Qwen Code is using your computer</strong>
+        <span
+          ><span data-value="action"></span><span data-value="target"></span
+        ></span>
+      </div>
+      <span class="shortcut" data-value="shortcut">Esc to cancel</span>
+    </section>
+
+    <section class="pip-surface" aria-label="Computer Use picture in picture">
+      <header>
+        <span class="pulse" aria-hidden="true"></span>
+        <strong data-value="action">Using the computer</strong>
+        <button
+          data-action="hide"
+          title="Hide picture in picture"
+          aria-label="Hide picture in picture"
+        >
+          ×
+        </button>
+      </header>
+      <div class="preview">
+        <img
+          data-value="screenshot"
+          alt="Current Computer Use activity"
+          hidden
+        />
+        <div class="empty" data-value="empty">
+          <span class="screen-icon" aria-hidden="true"></span>
+          <span data-value="waiting">Waiting for the screen</span>
+        </div>
+      </div>
+      <footer>
+        <span class="target"><span data-value="target"></span></span>
+        <button data-action="stop">Stop</button>
+      </footer>
+    </section>
+  </body>
+</html>

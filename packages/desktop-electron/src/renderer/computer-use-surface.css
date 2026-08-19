@@ -1,0 +1,220 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+:root {
+  color-scheme: light dark;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  background: transparent;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  width: 100%;
+}
+
+body[data-mode='status'] .pip-surface,
+body[data-mode='pip'] .status-surface {
+  display: none;
+}
+
+.status-surface,
+.pip-surface {
+  app-region: drag;
+  backdrop-filter: blur(24px) saturate(1.2);
+  background: rgb(28 28 30 / 88%);
+  border: 1px solid rgb(255 255 255 / 12%);
+  box-shadow: 0 12px 36px rgb(0 0 0 / 30%);
+  color: #f5f5f7;
+}
+
+.status-surface {
+  align-items: center;
+  border-radius: 18px;
+  display: flex;
+  gap: 11px;
+  height: 56px;
+  margin: 4px;
+  padding: 0 15px;
+}
+
+.pulse {
+  background: #35c759;
+  border-radius: 999px;
+  box-shadow: 0 0 0 5px rgb(53 199 89 / 14%);
+  flex: 0 0 auto;
+  height: 8px;
+  width: 8px;
+}
+
+.status-copy {
+  display: grid;
+  flex: 1;
+  gap: 2px;
+  min-width: 0;
+}
+
+.status-copy strong {
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.status-copy > span,
+.shortcut {
+  color: rgb(245 245 247 / 62%);
+  font-size: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shortcut {
+  flex: 0 0 auto;
+}
+
+.pip-surface {
+  border-radius: 18px;
+  display: grid;
+  grid-template-rows: 43px 1fr 42px;
+  height: calc(100% - 8px);
+  margin: 4px;
+  overflow: hidden;
+  width: calc(100% - 8px);
+}
+
+.pip-surface header,
+.pip-surface footer {
+  align-items: center;
+  display: flex;
+  gap: 9px;
+  padding: 0 12px;
+}
+
+.pip-surface header strong {
+  flex: 1;
+  font-size: 12px;
+  font-weight: 650;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+button {
+  app-region: no-drag;
+  border: 0;
+  cursor: pointer;
+  font: inherit;
+}
+
+.pip-surface header button {
+  background: transparent;
+  border-radius: 7px;
+  color: rgb(245 245 247 / 68%);
+  font-size: 18px;
+  height: 26px;
+  line-height: 22px;
+  width: 26px;
+}
+
+.preview {
+  background: #101011;
+  min-height: 0;
+  overflow: hidden;
+  position: relative;
+}
+
+.preview img {
+  height: 100%;
+  object-fit: contain;
+  width: 100%;
+}
+
+.empty {
+  align-items: center;
+  color: rgb(245 245 247 / 45%);
+  display: flex;
+  flex-direction: column;
+  font-size: 11px;
+  gap: 9px;
+  height: 100%;
+  justify-content: center;
+}
+
+.empty[hidden],
+.preview img[hidden] {
+  display: none;
+}
+
+.screen-icon {
+  border: 1.5px solid currentColor;
+  border-radius: 4px;
+  height: 24px;
+  position: relative;
+  width: 34px;
+}
+
+.screen-icon::after {
+  background: currentColor;
+  bottom: -5px;
+  content: '';
+  height: 1px;
+  left: 10px;
+  position: absolute;
+  width: 14px;
+}
+
+.pip-surface footer {
+  justify-content: space-between;
+}
+
+.target {
+  color: rgb(245 245 247 / 52%);
+  flex: 1;
+  font-size: 10px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pip-surface footer button {
+  background: rgb(255 69 58 / 18%);
+  border-radius: 8px;
+  color: #ff6961;
+  font-size: 11px;
+  padding: 6px 10px;
+}
+
+.pip-surface footer button:disabled {
+  opacity: 0.5;
+}
+
+@media (prefers-color-scheme: light) {
+  .status-surface,
+  .pip-surface {
+    background: rgb(248 248 250 / 90%);
+    border-color: rgb(0 0 0 / 10%);
+    color: #202124;
+  }
+
+  .status-copy > span,
+  .shortcut,
+  .target,
+  .pip-surface header button,
+  .empty {
+    color: rgb(32 33 36 / 56%);
+  }
+
+  .preview {
+    background: #ececee;
+  }
+}
