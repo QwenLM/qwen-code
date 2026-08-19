@@ -647,6 +647,15 @@ export interface AoneSubmitResult {
  * A write that FAILED MID-BATCH. The MR already carries part of the
  * review; the structured counts keep submit's report exact, and its
  * do-not-re-run advice keeps a retry from double-posting what landed.
+ *
+ * `ambiguous` says the FAILED write itself may have reached the server:
+ * an exec error cannot tell "refused" from "accepted, then the transport
+ * died" — a1 killed by the deadline AFTER the POST committed, a
+ * connection reset mid-response, an HTTP 5xx after the server wrote. The
+ * comment is then live on the MR while the count says it never landed,
+ * and a retry posts it twice. So an ambiguous failure is counted as
+ * LANDED for the do-not-re-run advisory — overcounting by one is a
+ * cosmetic lie; undercounting is a duplicate post.
  */
 export class AonePartialPostError extends Error {
   constructor(
@@ -654,6 +663,7 @@ export class AonePartialPostError extends Error {
     readonly postedInline: number,
     readonly inlineCommentIds: number[],
     readonly summaryPosted: boolean,
+    readonly ambiguous: boolean = false,
   ) {
     super(message);
     this.name = 'AonePartialPostError';
@@ -755,6 +765,40 @@ export function submitAoneReview(req: AoneSubmitRequest): AoneSubmitResult {
     );
   }
 
+  // a1 takes the whole comment body as ONE argv element, and Linux caps a
+  // single element at MAX_ARG_STRLEN = 131072 BYTES (not characters).
+  // compose-review's BODY_MAX_CHARS is 65536 *characters* — a limit written
+  // for GitHub and counted in chars — a CJK character is 3 bytes in UTF-8,
+  // and a bilingual body folds the full Chinese copy in again. A long
+  // Chinese review therefore sits comfortably inside the composer's cap and
+  // outside the OS argv limit: the summary create — deliberately LAST —
+  // would die with E2BIG only after every inline comment already landed,
+  // stranding the MR with blockers and no verdict. Guard every message up
+  // front so the batch refuses WHOLE, before anything posts. (The GitHub
+  // branch streams over stdin precisely to dodge this; a1 has no stdin or
+  // file input for `--message`, so a size gate is the honest substitute.)
+  const A1_ARG_MAX_BYTES = 131072;
+  const summaryMessage =
+    req.event === 'REQUEST_CHANGES'
+      ? `**Request changes**\n\n${req.body}`
+      : req.body;
+  const oversized = [
+    ...req.comments.map((c, i) => ({
+      what: `inline comment ${i + 1} (${c.path}:${c.line})`,
+      text: c.body,
+    })),
+    { what: 'the summary comment', text: summaryMessage },
+  ].find((m) => Buffer.byteLength(m.text, 'utf8') >= A1_ARG_MAX_BYTES);
+  if (oversized) {
+    throw new Error(
+      `refusing to post: ${oversized.what} is ` +
+        `${Buffer.byteLength(oversized.text, 'utf8')} bytes — over the ` +
+        `${A1_ARG_MAX_BYTES}-byte single-argument limit a1 must pass it ` +
+        `as. The findings are in the terminal output and the saved ` +
+        `report; post them manually.`,
+    );
+  }
+
   const postedIds: Array<number | undefined> = [];
   let summaryPosted = false;
   let summaryCommentId: number | undefined;
@@ -770,22 +814,24 @@ export function submitAoneReview(req: AoneSubmitRequest): AoneSubmitResult {
     // An empty body posts nothing: `-m ''` is refused by a1, and an
     // empty summary comment would be noise. (compose-review's body is
     // non-empty on every event this can ride; the guard keeps a
-    // future empty shape from failing the whole batch.)
+    // future empty shape from failing the whole batch.) The blocking
+    // header a Request changes prepends rides `summaryMessage`, computed
+    // once above where the size gate reads the same bytes.
     if (req.body.trim() !== '') {
       summaryCommentId = createMrComment(
         req.prNumber,
         req.ownerRepo,
-        // The blocking header: Aone renders no review verdict of its
-        // own, so a Request changes must SAY it is one — the merge gate
-        // blocks on the unresolved discussions, and this line is what a
-        // human reader sees first.
-        req.event === 'REQUEST_CHANGES'
-          ? `**Request changes**\n\n${req.body}`
-          : req.body,
+        summaryMessage,
       );
       summaryPosted = true;
     }
   } catch (err) {
+    // Every error that reaches here is a write's EXEC failure — parse
+    // misses are tolerated one layer down and never throw. An exec
+    // failure cannot distinguish "refused" from "accepted, then the
+    // transport died", so the failing write may ALREADY be live on the
+    // MR even though the count never saw it: mark the failure ambiguous
+    // so submit's do-not-re-run advisory fires regardless of the count.
     const ids = postedIds.filter((n): n is number => typeof n === 'number');
     throw new AonePartialPostError(
       `posting to MR ${req.prNumber} of ${req.ownerRepo} failed after ` +
@@ -795,6 +841,7 @@ export function submitAoneReview(req: AoneSubmitRequest): AoneSubmitResult {
       postedIds.length,
       ids,
       summaryPosted,
+      true,
     );
   }
 

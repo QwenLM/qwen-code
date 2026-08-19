@@ -67,7 +67,8 @@ import {
   recordedSeverityFloor,
   reviewWriteAuthorization,
 } from './lib/authorization.js';
-import { getPlatformReader, isAoneHost } from './lib/platform/registry.js';
+import { getPlatformReader } from './lib/platform/registry.js';
+import { isAoneCanonicalHost } from './lib/remote-match.js';
 import {
   AonePartialPostError,
   submitAoneReview,
@@ -545,29 +546,27 @@ export function runSubmit(
     return;
   }
 
-  // Which PLATFORM this write lands on. The decision is bound in BOTH
-  // directions, because the runtime-effective host alone fails both ways:
-  //  - Recorded Aone target + non-Aone effective host (an ambient GH_HOST
-  //    export beside a bare-MR-number Aone review) must still route to
-  //    Aone — otherwise the review POSTs to the wrong host's same-named
-  //    repo. So a recorded Aone host always selects the a1 path, whatever
-  //    the environment resolves.
-  //  - Recorded non-Aone target (pr-url host binding) must NOT be vetoed
-  //    by the cwd probe from an Aone-origin clone — the recorded binding
-  //    is the explicit signal the registry's precedence documents.
-  //  - RECORDED but hostless (a bare-MR-number recording with no `--host`
-  //    flag — the canonical Aone invocation shape carries no URL): the
-  //    recording proves a review exists but not WHERE it lives, and the
-  //    runtime environment cannot prove it either. For a public,
-  //    irreversible write that is fail-CLOSED: refuse and name the remedy
-  //    (`--host`), instead of guessing between two writable platforms and
-  //    posting the review at the wrong one's same-named repo.
-  //  - No recording at all: fall back to the flag, then GH_HOST (ghEnv
-  //    inherits the operator's export when no module host is set), then
-  //    the cwd clone.
-  // resolveGhHost trims, so a padded `--host` cannot slip past detection.
+  // Which PLATFORM this write lands on. Precedence mirrors the registry's
+  // documented detection order — an EXPLICIT host flag outranks the
+  // recorded binding outranks the cwd probe, in BOTH directions — with
+  // three write-specific disciplines:
+  //  - The predicate is the CANONICAL Aone pair, not the family wildcard:
+  //    `*.alibaba-inc.com` also names GitHub Enterprise instances (an
+  //    org's `ghe.alibaba-inc.com`), and an irreversible write must not
+  //    take the a1 path on a family resemblance.
+  //  - The ambient GH_HOST export is NEVER consulted here. It is a
+  //    GitHub-ROUTING variable; a read would never detect Aone from it
+  //    (detectPlatformKind does not read it), and a write that did could
+  //    READ from one platform and WRITE to another.
+  //  - RECORDED but hostless (a bare-MR-number recording with no
+  //    `--host` flag — the canonical Aone invocation shape carries no
+  //    URL): the recording proves a review exists but not WHERE it
+  //    lives. Fail CLOSED and name the remedy (`--host`) — which this
+  //    gate honours: an explicit flag on the re-run is platform proof,
+  //    so it lifts the refusal instead of meeting it again.
   const recordedHost = auth.recordedHost;
-  if (auth.recordedUnbound === true && !isAoneHost(recordedHost)) {
+  const explicitHost = args.host?.trim() || undefined;
+  if (auth.recordedUnbound === true && explicitHost === undefined) {
     // Same exit-3 shape as an unauthorised refusal — Step 7 treats it as
     // a complete, correct outcome; a throw would surface as a failed
     // command an agent might retry or route around.
@@ -589,11 +588,10 @@ export function runSubmit(
     return;
   }
   const aoneWrite =
-    isAoneHost(recordedHost) ||
-    (recordedHost === undefined &&
-      (isAoneHost(resolveGhHost(args.host)) ||
-        getPlatformReader({ host: args.host?.trim() || undefined }).kind ===
-          'aone'));
+    isAoneCanonicalHost(explicitHost ?? recordedHost) ||
+    (explicitHost === undefined &&
+      recordedHost === undefined &&
+      getPlatformReader().kind === 'aone');
 
   // What the caller may not bring, checked before anything is computed from it: a
   // verdict of its own, or no state to compute one from. "Your state does not
@@ -821,16 +819,22 @@ export function runSubmit(
       // an agent might re-run — a retry here DOUBLE-POSTS every comment
       // that already landed.
       const partial = err instanceof AonePartialPostError ? err : undefined;
+      // `ambiguous` counts as landed: the FAILED write may have reached
+      // the server (accepted, then the transport died), so the MR can
+      // carry a comment the count never saw. Undercounting by one would
+      // suppress this advisory and a re-run would double-post it.
       const landed =
         partial !== undefined &&
-        (partial.postedInline > 0 || partial.summaryPosted);
+        (partial.postedInline > 0 ||
+          partial.summaryPosted ||
+          partial.ambiguous);
       writeStderrLine(
         `FAILED to post the review to ${args.repo}#${args.pr} on Aone ` +
           `Code: ${(err as Error).message}` +
           (landed
-            ? ` The comments already posted stay on the MR — do NOT ` +
-              `re-run submit (they would post twice); inspect the MR ` +
-              `and post any remainder manually.`
+            ? ` Part of the review may already be on the MR — do NOT ` +
+              `re-run submit (it would post twice); inspect the MR, ` +
+              `then post any remainder manually.`
             : ''),
       );
       writeStdoutLine(
@@ -965,7 +969,7 @@ export function runSubmit(
 export const submitCommand: CommandModule = {
   command: 'submit',
   describe:
-    'Post the review to GitHub — the ONLY write in this skill. Refuses unless the run is authorised to publish.',
+    'Post the review to the pull request — GitHub via gh, Aone Code via a1 — the ONLY write in this skill. Refuses unless the run is authorised to publish.',
   builder: (yargs) =>
     yargs
       .option('pr', {
@@ -997,7 +1001,8 @@ export const submitCommand: CommandModule = {
       })
       .option('host', {
         type: 'string',
-        describe: 'GitHub Enterprise host (routes gh via GH_HOST)',
+        describe:
+          'The host the target lives on. SELECTS the platform the write lands on: a canonical Aone host (code./gitlab. alibaba-inc.com) routes the post at a1, anything else at gh (a GitHub Enterprise host routes gh via GH_HOST). It is also the remedy the target-platform-unbound refusal names.',
       })
       .option('dry-run', {
         type: 'boolean',

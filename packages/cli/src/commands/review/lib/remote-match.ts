@@ -42,6 +42,18 @@ export function hostsEquivalent(a: string, b: string): boolean {
   return AONE_HOSTS.has(a) && AONE_HOSTS.has(b);
 }
 
+/** The CANONICAL Aone hosts, normalized the way isAoneHostFamily does
+ *  (port, one trailing dot, case) — but strict: no `.alibaba-inc.com`
+ *  wildcard. Write routing keys on THIS, not the family: a bare
+ *  `*.alibaba-inc.com` suffix also names GitHub Enterprise instances
+ *  (an org's `ghe.alibaba-inc.com`), and an irreversible public write
+ *  must not select the a1 path on a family resemblance. */
+export function isAoneCanonicalHost(host: string | undefined): boolean {
+  if (!host) return false;
+  const h = host.toLowerCase().replace(/:\d+$/, '').replace(/\.$/, '');
+  return AONE_HOSTS.has(h);
+}
+
 /** Hosts that count as the Aone platform family — one canonical predicate,
  *  shared by every guard that asks "is this origin on Aone" (registry
  *  detection and aone.fetchDiff's origin guard both key on it). Normalizes

@@ -264,10 +264,8 @@ describe('submit posts an authorised Aone target through a1', () => {
     expect(ghWithInputMock).not.toHaveBeenCalled();
   });
 
-  it('a padded Aone --host still routes to a1', () => {
-    getPlatformReaderMock.mockImplementation(({ host }: { host?: string }) => ({
-      kind: host === 'gitlab.alibaba-inc.com' ? 'aone' : 'github',
-    }));
+  it('a padded Aone --host still routes to a1 (the flag is trimmed)', () => {
+    getPlatformReaderMock.mockReturnValue({ kind: 'github' });
     expect(() =>
       runSubmit(base({ host: ' gitlab.alibaba-inc.com ' }), 'unknown', {
         defaultComment: false,
@@ -277,14 +275,63 @@ describe('submit posts an authorised Aone target through a1', () => {
     expect(ghWithInputMock).not.toHaveBeenCalled();
   });
 
-  it('detects from GH_HOST too — an Aone-pointing env export posts via a1', () => {
+  it('the AMBIENT GH_HOST never selects Aone for a write — even pointing at the canonical Aone git host', () => {
+    // GH_HOST is a GitHub-ROUTING variable; read detection never consults
+    // it, and a write that did could read one platform and write another.
     getPlatformReaderMock.mockReturnValue({ kind: 'github' });
+    ghWithInputMock.mockReturnValue('{"id": 77}');
     process.env['GH_HOST'] = 'gitlab.alibaba-inc.com';
     expect(() =>
       runSubmit(base(), 'unknown', { defaultComment: false }),
     ).not.toThrow();
-    expect(submitAoneMock).toHaveBeenCalledTimes(1);
-    expect(ghWithInputMock).not.toHaveBeenCalled();
+    expect(submitAoneMock).not.toHaveBeenCalled();
+    expect(ghWithInputMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('a wildcard *.alibaba-inc.com GH_HOST (an org GHE, not Aone) never routes to a1', () => {
+    // The family suffix also names GitHub Enterprise instances; an
+    // irreversible write must not take the a1 path on a family
+    // resemblance.
+    getPlatformReaderMock.mockReturnValue({ kind: 'github' });
+    ghWithInputMock.mockReturnValue('{"id": 77}');
+    process.env['GH_HOST'] = 'ghe.alibaba-inc.com';
+    expect(() =>
+      runSubmit(base(), 'unknown', { defaultComment: false }),
+    ).not.toThrow();
+    expect(submitAoneMock).not.toHaveBeenCalled();
+    expect(ghWithInputMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('an explicit wildcard-family --host (a GHE host) routes to gh, not a1', () => {
+    getPlatformReaderMock.mockReturnValue({ kind: 'github' });
+    ghWithInputMock.mockReturnValue('{"id": 77}');
+    expect(() =>
+      runSubmit(base({ host: 'ghe.alibaba-inc.com' }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).not.toThrow();
+    expect(submitAoneMock).not.toHaveBeenCalled();
+    expect(ghWithInputMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('an explicit --host OUTRANKS a recorded Aone host, in BOTH directions', () => {
+    // The registry's documented precedence: the explicit flag wins over
+    // the recorded binding. A recorded codereview target submitted with
+    // an explicit github.com posts at GitHub, not Aone.
+    authMock.mockReturnValue({
+      ok: true,
+      why: '`--comment` was in the review arguments for #1',
+      recordedHost: 'code.alibaba-inc.com',
+    });
+    getPlatformReaderMock.mockReturnValue({ kind: 'aone' });
+    ghWithInputMock.mockReturnValue('{"id": 77}');
+    expect(() =>
+      runSubmit(base({ host: 'github.com' }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).not.toThrow();
+    expect(submitAoneMock).not.toHaveBeenCalled();
+    expect(ghWithInputMock).toHaveBeenCalledTimes(1);
   });
 
   it('a RECORDED Aone host routes to a1 even when the effective host is non-Aone', () => {
@@ -348,6 +395,37 @@ describe('submit posts an authorised Aone target through a1', () => {
     expect(ghWithInputMock).not.toHaveBeenCalled();
   });
 
+  it('the --host remedy the unbound refusal names actually WORKS — the re-run posts', () => {
+    // The refusal tells the agent to re-run with `--host`; the re-run must
+    // not meet the same refusal. An explicit flag is platform proof: an
+    // Aone host routes at a1, a non-Aone host at gh.
+    authMock.mockReturnValue({
+      ok: true,
+      why: 'the user asked for this review to be published',
+      recordedUnbound: true,
+    });
+    expect(() =>
+      runSubmit(base({ host: 'gitlab.alibaba-inc.com' }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).not.toThrow();
+    expect(process.exitCode).toBeUndefined();
+    expect(submitAoneMock).toHaveBeenCalledTimes(1);
+    expect(ghWithInputMock).not.toHaveBeenCalled();
+
+    submitAoneMock.mockClear();
+    ghWithInputMock.mockClear();
+    ghWithInputMock.mockReturnValue('{"id": 77}');
+    expect(() =>
+      runSubmit(base({ host: 'github.com' }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).not.toThrow();
+    expect(process.exitCode).toBeUndefined();
+    expect(submitAoneMock).not.toHaveBeenCalled();
+    expect(ghWithInputMock).toHaveBeenCalledTimes(1);
+  });
+
   it('dry-run validates and composes but never calls a1', () => {
     expect(() =>
       runSubmit(base({ dryRun: true }), 'unknown', { defaultComment: false }),
@@ -381,6 +459,30 @@ describe('submit posts an authorised Aone target through a1', () => {
       expect.stringContaining('do NOT re-run submit'),
     );
     expect(ghWithInputMock).not.toHaveBeenCalled();
+  });
+
+  it('an AMBIGUOUS failure warns against a re-run even when the count is zero', () => {
+    // The failed write may have reached the server before the transport
+    // died, so the MR can carry a comment the count never saw. Counting
+    // it as NOT landed would suppress the advisory and a re-run would
+    // double-post it — ambiguous counts as landed.
+    submitAoneMock.mockImplementation(() => {
+      throw new AonePartialPostError(
+        'first create died mid-flight',
+        0,
+        [],
+        false,
+        true,
+      );
+    });
+    expect(() =>
+      runSubmit(base(), 'unknown', { defaultComment: false }),
+    ).not.toThrow();
+    expect(process.exitCode).toBe(3);
+    expect(postedJson()).toEqual({ posted: false, reason: 'aone-post-failed' });
+    expect(stderrMock).toHaveBeenCalledWith(
+      expect.stringContaining('do NOT re-run submit'),
+    );
   });
 
   it('a pre-write failure (head drift) exits 3 without the partial-post warning', () => {

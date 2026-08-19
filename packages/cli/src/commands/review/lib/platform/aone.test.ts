@@ -917,9 +917,51 @@ describe('submitAoneReview (the a1 write path)', () => {
     expect(partial.inlineCommentIds).toEqual([101]);
     expect(partial.summaryPosted).toBe(false);
     expect(partial.message).toContain('1 of 2');
+    // An exec failure cannot tell "refused" from "accepted, then the
+    // transport died" — the failing write may be live on the MR though
+    // the count never saw it. Ambiguous, so submit's advisory fires.
+    expect(partial.ambiguous).toBe(true);
     // The summary and any approve never ran.
     expect(a1JsonOnceMock).toHaveBeenCalledTimes(2);
     expect(a1OnceMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses WHOLE, before any write, when a message overruns the a1 argv limit', () => {
+    // Linux caps one argv element at 131072 BYTES. compose-review's cap
+    // counts CHARACTERS (65536) — a CJK char is 3 bytes in UTF-8 — so a
+    // long Chinese summary is inside the composer's cap and outside the
+    // OS limit. Without this guard the summary create would die with
+    // E2BIG only after every inline already landed.
+    const huge = '中'.repeat(50000); // 150 000 bytes of UTF-8
+    let caught: unknown;
+    try {
+      submitAoneReview(req({ body: huge }));
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toContain(
+      'over the 131072-byte single-argument limit',
+    );
+    // Nothing posted — neither a comment create nor an approve ran, and
+    // the failure is NOT a partial post (nothing is ambiguous either).
+    expect(caught).not.toBeInstanceOf(AonePartialPostError);
+    expect(a1JsonOnceMock).not.toHaveBeenCalled();
+    expect(a1OnceMock).not.toHaveBeenCalled();
+  });
+
+  it('guards an oversized INLINE comment too, naming it', () => {
+    const huge = 'x'.repeat(140000);
+    let caught: unknown;
+    try {
+      submitAoneReview(
+        req({ comments: [{ path: 'big.ts', line: 1, body: huge }] }),
+      );
+    } catch (err) {
+      caught = err;
+    }
+    expect((caught as Error).message).toContain('inline comment 1');
+    expect(a1JsonOnceMock).not.toHaveBeenCalled();
   });
 
   it('an approve failure alone does not fail the post', () => {

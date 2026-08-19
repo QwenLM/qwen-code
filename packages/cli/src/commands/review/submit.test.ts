@@ -776,6 +776,97 @@ describe('the user-authorized fast path binds the recorded host cross-session', 
     expect(aoneSubmitMock).toHaveBeenCalledTimes(1);
   });
 
+  it('the --host remedy LIFTS the unbound refusal — the re-run posts', () => {
+    // The refusal names `--host` as the remedy; an explicit flag on the
+    // re-run is platform proof, so it must post, not refuse again (the
+    // futile retry loop the refusal wording exists to prevent).
+    writeFileSync(siblingFile, '42 --comment\n', 'utf8');
+    expect(() =>
+      runSubmit(
+        args({
+          userAuthorized: true,
+          pr: 42,
+          repo: 'maxcompute/odps_src',
+          host: 'gitlab.alibaba-inc.com',
+        }),
+        'unknown',
+        { defaultComment: false },
+      ),
+    ).not.toThrow();
+    expect(process.exitCode).toBeUndefined();
+    expect(aoneSubmitMock).toHaveBeenCalledTimes(1);
+    expect(ghMock).not.toHaveBeenCalled();
+
+    aoneSubmitMock.mockClear();
+    ghMock.mockClear();
+    writeStdoutSpy.mockClear();
+    expect(() =>
+      runSubmit(
+        args({
+          userAuthorized: true,
+          pr: 42,
+          repo: 'maxcompute/odps_src',
+          host: 'github.com',
+        }),
+        'unknown',
+        { defaultComment: false },
+      ),
+    ).not.toThrow();
+    expect(process.exitCode).toBeUndefined();
+    expect(aoneSubmitMock).not.toHaveBeenCalled();
+    expect(ghMock).toHaveBeenCalled();
+  });
+
+  it('a codereview-URL recording posts with the ALIASED git host (web vs git name of one platform)', () => {
+    // parse-args records the CR URL's WEB host (code.alibaba-inc.com);
+    // the skill's own --host rule for Aone targets carries the GIT host
+    // (gitlab.alibaba-inc.com). The SLOW path binds hosts through
+    // hostsEquivalent — raw equality refused this after the whole review
+    // already ran. (userAuthorized stays OFF: the fast path never runs
+    // the host binding this test pins.)
+    const rec = file(
+      'aone-url-slow.txt',
+      'https://code.alibaba-inc.com/maxcompute/odps_src/codereview/42 --comment',
+    );
+    expect(() =>
+      runSubmit(
+        args({
+          skillArgs: rec,
+          userAuthorized: false,
+          pr: 42,
+          repo: 'maxcompute/odps_src',
+          host: 'gitlab.alibaba-inc.com',
+        }),
+        'unknown',
+        { defaultComment: false },
+      ),
+    ).not.toThrow();
+    expect(process.exitCode).toBeUndefined();
+    expect(aoneSubmitMock).toHaveBeenCalledTimes(1);
+    expect(ghMock).not.toHaveBeenCalled();
+
+    // A genuinely DIFFERENT host still refuses — the alias is not a
+    // blanket exemption.
+    aoneSubmitMock.mockClear();
+    writeStdoutSpy.mockClear();
+    expect(() =>
+      runSubmit(
+        args({
+          skillArgs: rec,
+          userAuthorized: false,
+          pr: 42,
+          repo: 'maxcompute/odps_src',
+          host: 'github.com',
+        }),
+        'unknown',
+        { defaultComment: false },
+      ),
+    ).not.toThrow();
+    expect(process.exitCode).toBe(3);
+    expect(aoneSubmitMock).not.toHaveBeenCalled();
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
   it('never reads recordings planted OUTSIDE session dirs (worktree vector)', () => {
     // `.qwen/tmp/` also holds review worktrees checked out from the PR's
     // own tree — a malicious PR can plant a root-level args file that a

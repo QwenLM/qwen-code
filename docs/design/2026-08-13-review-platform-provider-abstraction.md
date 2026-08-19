@@ -292,6 +292,23 @@ Enterprise paragraph.
     must not brick posting), and the id read-back parses a set of
     tolerated shapes best-effort. Still open: `composeUrl`, cleanup
     audit, AI-comment marking (Q4), the render-adjudication carve-out.
+  - **Hardened (2026-08-19, review round 2):** five write-safety fixes
+    from the maintainer review of #9491. (1) The `target-platform-unbound`
+    refusal now HONOURS its own remedy — an explicit `--host` on the
+    re-run is platform proof and lifts it, instead of refusing again.
+    (2) The write gate binds hosts through `hostsEquivalent`, not raw
+    equality — Aone's web/git host pair is one platform. (3) Write
+    routing keys on the CANONICAL Aone pair (`isAoneCanonicalHost`),
+    never the family wildcard (a `*.alibaba-inc.com` GHE host is not
+    Aone), never the ambient GH_HOST (reads never detect from it), and
+    an explicit `--host` outranks the recorded binding in both
+    directions. (4) A size gate refuses any message over the
+    131072-byte single-argv-element limit a1 must pass it as, BEFORE
+    any write lands (a long CJK summary is inside compose-review's
+    char cap and outside the OS byte limit). (5) An exec failure counts
+    as possibly-landed (`ambiguous`), so submit's do-not-re-run advisory
+    fires even when the count is zero — an accepted-then-died write must
+    never read back as a clean total failure.
 - **Phase 4 — semantic gaps.** Incremental-cache ancestry fallback, build-test
   repo-config escape hatch, publish-assets gating polish, generic-GitLab
   (glab) evaluation.

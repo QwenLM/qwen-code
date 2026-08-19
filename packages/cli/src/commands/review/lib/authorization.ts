@@ -28,6 +28,7 @@ import {
 } from '../../../services/skill-args-file.js';
 import { parseReviewArgs } from '../parse-args.js';
 import { isOwnerRepo } from './gh.js';
+import { hostsEquivalent } from './remote-match.js';
 
 /**
  * Where the CLI records a skill's invocation arguments, verbatim, before the
@@ -341,8 +342,14 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
     // The host check stands on its own, NOT nested under the repo binding —
     // and it binds in BOTH directions: an absent req.host means the write
     // routes at github.com, which is a host like any other, not an exemption.
+    // Hosts compare through hostsEquivalent, not raw equality — Aone is one
+    // platform under TWO names (the CR URL records the web host
+    // `code.alibaba-inc.com`; the skill's own `--host` rule for Aone targets
+    // carries the git host `gitlab.alibaba-inc.com`). Raw equality refused
+    // every codereview-URL target that followed that rule — the whole review
+    // ran, and the write died at the gate.
     const writeHost = (req.host ?? 'github.com').toLowerCase();
-    if (t.host.toLowerCase() !== writeHost) {
+    if (!hostsEquivalent(t.host.toLowerCase(), writeHost)) {
       return {
         ok: false,
         why:
@@ -359,10 +366,15 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
       : `\`review.comment\` is enabled in settings, and the review arguments name #${authorisedPr}`,
     // Mirror of the fast-path binding: a bare-number recording supplies
     // the recorded `--host` flag (its only host evidence). The UNBOUND
-    // fail-closed does NOT ride the slow path: a same-session Aone review
-    // runs inside an Aone clone, so the write gate's cwd arm already
-    // refuses it — marking every bare-number slow-path recording unbound
-    // would refuse the canonical same-session github posting flow instead.
+    // fail-closed does NOT ride the slow path — the reason is not what it
+    // was when first written (the write gate's cwd arm REFUSED then; it
+    // SELECTS now). It survives because the slow path reads ONLY the
+    // current session's args file, so it is same-session by construction:
+    // the cwd probe the write gate falls back to names the clone the
+    // review itself ran in — sound evidence, not a guess — and it no
+    // longer reads the ambient GH_HOST (aligned with read detection).
+    // Cross-session publishes are the fast path's business, where the
+    // unbound refusal covers the same bare-number shape.
     recordedHost: t.type === 'pr-url' ? t.host : verdict.host,
   };
 }
