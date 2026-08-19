@@ -2764,6 +2764,49 @@ describe('DwsChannel', () => {
     );
   });
 
+  // R2-4: `notificationKey` is (document, comment) with NO sender in it, so a
+  // denied sender's mention used to consume the slot permanently -- every later
+  // mention of the same comment, including one from an allowed reviewer, was
+  // dropped silently and forever (the cursor persists across restarts). The
+  // test above cannot catch this: its denied and allowed notifications sit on
+  // DIFFERENT comments.
+  it('lets an allowed sender through after a denied one on the same comment', async () => {
+    const client = new FakeDwsClient();
+    const { bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({
+        groupPolicy: 'allowlist',
+        groups: {},
+        senderPolicy: 'allowlist',
+        allowedUsers: ['open-bob'],
+      }),
+    );
+
+    await client.emit(
+      1,
+      message(
+        'user_im_message_receive_o2o_all',
+        'denied-document',
+        documentMentionCard('doc-1', 'comment-1'),
+      ),
+    );
+    expect(bridge.prompt).not.toHaveBeenCalled();
+
+    // Bob IS allowlisted, and mentions the bot on the SAME comment thread --
+    // the ordinary multi-reviewer document flow.
+    await client.emit(
+      1,
+      message(
+        'user_im_message_receive_o2o_all',
+        'allowed-document',
+        documentMentionCard('doc-1', 'comment-1'),
+        { senderId: 'open-bob', senderName: 'Bob' },
+      ),
+    );
+
+    expect(bridge.prompt).toHaveBeenCalledOnce();
+  });
+
   it('deduplicates a successful message across restarts', async () => {
     const client = new FakeDwsClient();
     const first = await readyChannel(client, makeConfig(), 'persistent-dws');

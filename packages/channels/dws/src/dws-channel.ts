@@ -1409,8 +1409,16 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       await this.handleInbound(envelope);
       const outcome = this.syntheticInboundOutcomes.get(envelope);
       this.syntheticInboundOutcomes.delete(envelope);
+      // A DENIED sender must not consume the slot either. `notificationKey` is
+      // (document, comment) with no sender in it, so marking it processed here
+      // dropped every LATER mention of the same comment — including one from an
+      // allowed reviewer — silently and forever, across restarts. Park it like
+      // 'pairing' instead: replay already skips a pending entry whose sender
+      // fails `gate.isAllowed`, and an allowed sender reaching the same comment
+      // clears the entry on the way through.
       if (
         outcome === 'pairing' ||
+        outcome === 'denied' ||
         (!outcome && !this.gate.isAllowed(message.senderId))
       ) {
         this.rememberPendingDocumentNotification(message, notification);
