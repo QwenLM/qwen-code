@@ -320,15 +320,23 @@ export function createGoalRuntime(
   };
 
   /**
-   * The tokens the finishing turn billed, consuming the reading it opened with.
+   * The tokens the finishing turn has billed so far, WITHOUT consuming the
+   * reading it opened with.
+   *
+   * Non-destructive on purpose: `finishTurn` evaluates this before its journal
+   * write, and that write can throw (a transient writer-lease unavailability
+   * or a disk error) without mutating any state — the permit stays current so
+   * the same turn retries. Consuming here would leave the retry with no
+   * opening reading, persisting the turn at `tokensUsed: 0` and dropping its
+   * real spend from the Goal's usage figure with no breadcrumb. The reading is
+   * cleared instead on the post-write path, once the state is durable.
    *
    * Undefined at either end — no meter, an unreadable meter, or a turn whose
    * opening reading was never taken — yields zero rather than a guess, so an
    * unmetered session reports no spend instead of a wrong one.
    */
-  const takeTurnTokens = (): number => {
+  const peekTurnTokens = (): number => {
     const opened = currentTurnTokensAtStart;
-    currentTurnTokensAtStart = undefined;
     const closed = readSessionTokens();
     if (opened === undefined || closed === undefined) return 0;
     return Math.max(0, closed - opened);
@@ -1294,7 +1302,7 @@ export function createGoalRuntime(
           const recordUuid = randomUUID();
           const nextGoal = reduceGoalTurnFinished(snapshot.goal, {
             now: Date.now(),
-            tokensUsed: takeTurnTokens(),
+            tokensUsed: peekTurnTokens(),
           });
           const persistedSnapshot: GoalSnapshotV2 = {
             v: GOAL_STATE_VERSION,
@@ -1358,6 +1366,9 @@ export function createGoalRuntime(
             activity: verifying ? 'verifying' : 'idle',
           };
           currentPermit = undefined;
+          // Only now, past the journal write: `peekTurnTokens` deliberately
+          // left this in place so a write that throws can be retried on the
+          // same permit without losing the turn's opening reading.
           currentTurnTokensAtStart = undefined;
           currentPermitHost = undefined;
           currentTurnKey = undefined;

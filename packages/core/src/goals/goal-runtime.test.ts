@@ -3949,6 +3949,41 @@ describe('goal runtime', () => {
     });
   });
 
+  // The metered twin of the contract above. `finishTurn` evaluates the turn's
+  // token delta before its journal write, so consuming the opening reading
+  // there left the retry — which the sibling test exists to certify — with no
+  // reading at all, persisting the turn at `tokensUsed: 0` while `turnCount`
+  // still advanced. The TUI runs exactly this chain (finishTurn catch →
+  // failClosedGoalTurn → a second finishTurn on the same permit), so a
+  // transient fault that succeeds on retry silently dropped the turn's spend.
+  it('bills the retry after a failed turn write the tokens the turn spent', async () => {
+    const journal = fakeGoalJournal({
+      appendErrors: [undefined, new Error('turn write failed')],
+    });
+    const host = fakeGoalTurnHost();
+    let sessionTokens = 10_000;
+    const runtime = createGoalRuntime({
+      journal,
+      tokenMeter: { readSessionTokens: () => sessionTokens },
+    });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+    const permit = host.started[0]!;
+    sessionTokens = 12_000;
+    await expect(runtime.finishTurn(permit)).rejects.toThrow(
+      'turn write failed',
+    );
+
+    // The failed write mutated nothing, so the same permit retries — and the
+    // opening reading must still be there for it.
+    await runtime.finishTurn(permit);
+    expect(runtime.getSnapshot().goal).toMatchObject({
+      turnCount: 1,
+      tokensUsed: 2_000,
+    });
+  });
+
   it('restores active state once while stopped state remains display-only', async () => {
     const activeHost = fakeGoalTurnHost();
     const active = createGoalRuntime({ journal: fakeGoalJournal() });
