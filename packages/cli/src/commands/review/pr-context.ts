@@ -996,19 +996,9 @@ export function recoverLedger(
       // same pass and its counts are trustworthy. Restoring only `findings`
       // let any second bot or maintainer posting one parseable marker at a
       // round at-or-above this account's blind the trend for that round,
-      // with a good count in hand.
-      ...(bestOwn.ledger.posted === undefined
-        ? {}
-        : { posted: bestOwn.ledger.posted }),
-      ...(bestOwn.ledger.prevPosted === undefined
-        ? {}
-        : { prevPosted: bestOwn.ledger.prevPosted }),
-      ...(bestOwn.ledger.fresh === undefined
-        ? {}
-        : { fresh: bestOwn.ledger.fresh }),
-      ...(bestOwn.ledger.floor === undefined
-        ? {}
-        : { floor: bestOwn.ledger.floor }),
+      // with a good count in hand. Derived from the shared list, not
+      // re-enumerated — see `pickVolume`.
+      ...pickVolume(bestOwn.ledger as unknown as Record<string, unknown>),
     };
   }
   return {
@@ -1196,6 +1186,10 @@ export function persistRecoveredLedger(
         // exactly as a pre-telemetry predecessor does.
         const {
           sha: _droppedSha,
+          // The PAIR, as everywhere else: a `model` left behind says a round
+          // was certified by someone while the range it certified is gone.
+          // This was the one seam where they did not fall together.
+          model: _droppedModel,
           commitId: _droppedCommitId,
           ...rest
         } = existing;
@@ -1209,13 +1203,18 @@ export function persistRecoveredLedger(
               ...kept,
               round: recovered.ledger.round,
               reviewId: recovered.reviewId,
-              // Provenance is UNKNOWN on this path — the identity lookup is
-              // what failed, so every marker walked as foreign including
-              // this account's own. A stale flag from a previous run must
-              // not ride: absent reads as "not recorded", which withholds a
-              // caveat rather than publishing a false one in either
-              // direction.
-              foreign: false,
+              // Both provenance flags ride with `...kept`, deliberately
+              // unwritten here. This branch advances only the COUNTER; the
+              // work list it describes is kept verbatim, so the flags that
+              // describe that list are not stale — they were vouched under a
+              // known identity, and the ids they qualify are still in the
+              // file. Zeroing `foreign` here broke the sticky clause the
+              // recovered branch establishes: no later identity-known round
+              // could re-fire it, and the caveat vanished while the
+              // citations remained. (What this run genuinely cannot vouch —
+              // the anchor, the age reference, the volume group — is
+              // stripped above, because each is a fact about a specific
+              // round and this write advances past it.)
             },
             null,
             2,
@@ -1262,9 +1261,18 @@ export function persistRecoveredLedger(
             // dropped on the way to disk, the posted caveat could not, and
             // said a predominantly own work list "may not be this account's
             // own".
+            // The sticky term is conditioned on the winner NOT being foreign.
+            // A foreign marker winning while this account's own list is
+            // absent, deleted, or unparseable writes a PURE-foreign list —
+            // `mergedOverOwn` is false precisely because there was nothing to
+            // merge — and inheriting `merged` there makes the rendered
+            // caveat claim own-certified entries exist when every entry is a
+            // stranger's. The union guard one function up refuses to flag
+            // that same shape for the same reason.
             merged:
               (identityKnown && recovered.merged) ||
-              (existing?.['merged'] === true &&
+              (!recovered.foreign &&
+                existing?.['merged'] === true &&
                 recovered.ledger.findings.length > 0),
           },
           null,
@@ -1352,6 +1360,26 @@ export const VOLUME_FIELDS = [
 export function withoutVolume<T extends Record<string, unknown>>(record: T): T {
   const out = { ...record };
   for (const field of VOLUME_FIELDS) delete out[field];
+  return out;
+}
+
+/**
+ * The volume group PRESENT in a record — the restore half of the same list.
+ *
+ * The union that protects own findings from a foreign winner has to put the
+ * own volume back, and hand-enumerating it there was a third copy of the
+ * list `withoutVolume` exists to be the only one of. A field added to the
+ * group would otherwise be stripped from the foreign winner and never
+ * restored, losing the own data point on exactly the merged rounds the
+ * branch protects.
+ */
+export function pickVolume(
+  record: Record<string, unknown>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const field of VOLUME_FIELDS) {
+    if (record[field] !== undefined) out[field] = record[field];
+  }
   return out;
 }
 

@@ -362,13 +362,17 @@ export function serializeLedger(ledger: Ledger): string {
       title: f.title.slice(0, LEDGER_MAX_TITLE),
       file: f.file.slice(0, LEDGER_MAX_FILE),
     }))
-    // Re-validated AFTER the slice, because the slice can create what the
-    // parser refuses: an over-long id cut mid-token
-    // (`R123456789012345678901234-7` → `R12345678901234567890123`) is no
-    // longer the grammar, so the next round's filter drops the entry — the
-    // posted finding retires with no ruling, and the loss is invisible
-    // unless it is counted. Dropped here, where `dropped` still counts it.
-    .filter((f) => LEDGER_ID_SHAPE.test(f.id));
+    // Re-validated AFTER the slice, through the reader's OWN admission test,
+    // because the slice can create what the parser refuses: an over-long id
+    // cut mid-token (`R123456789012345678901234-7` →
+    // `R12345678901234567890123`) is no longer the grammar, and a carried id
+    // the model minted out of range (`R0-1`) never was. Either way the next
+    // round's filter drops the entry — the posted finding retires with no
+    // ruling — and the loss is invisible unless it is counted. Dropped here,
+    // where `dropped` still counts it.
+    .filter((f) =>
+      isLedgerFinding(f, Math.min(ledger.round, LEDGER_MAX_ROUND)),
+    );
   const render = (
     findings: LedgerFinding[],
     dropped: number,
@@ -503,6 +507,11 @@ export function isLedgerFinding(
   // untrimmed squat rule that exists to stop it and took full effect
   // everywhere else.
   if (!LEDGER_ID_SHAPE.test(c.id)) return false;
+  // The length cap belongs to the admission test, not only to the two
+  // slices: an over-long id admitted here is one the normalizer then CUTS,
+  // and a cut id is a different id — the entry silently changes identity
+  // between the round that posted it and the round that rules on it.
+  if (c.id.length > LEDGER_MAX_ID) return false;
   // An id claiming a FUTURE round is a squat, not a finding. The pipeline's
   // own ids obey `id round <= marker round` by construction — a round stamps
   // its new findings `R<round>-<n>` and carries older ids forward — so a
@@ -518,6 +527,13 @@ export function isLedgerFinding(
   // public body ("findings in round 100000000000000000000").
   const idRound = Number(c.id.slice(1).split('-')[0]);
   if (!Number.isSafeInteger(idRound)) return false;
+  // Both ends. Rounds start at 1, so `R0-*` is not an id this pipeline can
+  // mint — but it passes the shape, and every reader that turns an id into a
+  // round rejects round 0 and then treats the rejection as "no carried id",
+  // i.e. as FRESH. Admitted, a re-posted `R0-1` counts as first-time work
+  // every round, and the trend narrates divergence at a fully settled steady
+  // state forever.
+  if (idRound < 1) return false;
   if (idRound > Math.min(markerRound, LEDGER_MAX_ROUND)) return false;
   return (
     (c.sev === 'C' || c.sev === 'S') &&
@@ -581,10 +597,13 @@ export function parseLedger(body: string | undefined): Ledger | null {
     const findings = valid
       .slice(0, LEDGER_MAX_FINDINGS)
       .map(normalizeLedgerFinding);
-    const declared =
-      Number.isInteger(raw.dropped) && (raw.dropped as number) > 0
-        ? (raw.dropped as number)
-        : 0;
+    // Clamped through the shared reader like every other number here. It
+    // was the one field admitted unbounded, and it is no longer internal:
+    // it renders into the model-facing PARTIAL line and publishes the
+    // "may be an undercount" caveat, so a forged `1e308` instructs the model
+    // to hedge about findings that never existed — and unlike a forged
+    // finding, a forged count cannot be re-ruled.
+    const declared = volumeOf(raw.dropped) ?? 0;
     // The count cap binds on READ as it does on write: valid entries this
     // parser sliced off ARE dropped findings, and a hand-edited marker whose
     // list was truncated here must not read as complete — nor keep an anchor

@@ -2633,6 +2633,55 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
     expect(stderrHasOverride).toBe(false);
   });
 
+  it('prints the convergence paragraph the trim notice points at', async () => {
+    // `noteTrimmedRanks` tells the author the shed sections "still hold —
+    // read them in the terminal report", and rank 0 is the first thing the
+    // ladder sheds. Without this line that promise names nothing.
+    const dir = mkdtempSync(join(tmpdir(), 'compose-convergence-'));
+    const inputPath = join(dir, 'compose.json');
+    const commentsPath = join(dir, 'comments.json');
+    const planPath = join(dir, 'plan.json');
+    writeFileSync(planPath, JSON.stringify({ prNumber: 8255 }), 'utf8');
+    writeFileSync(
+      inputPath,
+      JSON.stringify({ modelId: MODEL, planPath }),
+      'utf8',
+    );
+    writeFileSync(
+      commentsPath,
+      JSON.stringify([
+        { path: 'src/a.ts', line: 3, body: '**[Suggestion]** again' },
+      ]),
+      'utf8',
+    );
+    writeFileSync(
+      join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+      JSON.stringify({
+        v: 1,
+        round: 4,
+        posted: 9,
+        fresh: 9,
+        findings: [{ id: 'R2-1', sev: 'S', file: 'src/a.ts', title: 'x' }],
+      }),
+      'utf8',
+    );
+    try {
+      (writeStderrLine as ReturnType<typeof vi.fn>).mockClear();
+      await runComposeReviewCommand({
+        input: inputPath,
+        comments: commentsPath,
+      });
+      const lines = (
+        writeStderrLine as ReturnType<typeof vi.fn>
+      ).mock.calls.map((c) => String(c[0]));
+      expect(lines.some((l) => l.startsWith('CONVERGENCE: Convergence:'))).toBe(
+        true,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('states the round volume on stderr, with and without a predecessor', async () => {
     // The line is the operator's only view of this round's contribution to
     // the PR's comment volume; both branches of its ternary are
@@ -2660,7 +2709,9 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
         String(c[0]),
       );
     try {
-      // No side file: no predecessor, so the line carries no parenthetical.
+      // No side file: no predecessor, so the line carries no PREVIOUS-round
+      // parenthetical. The fresh-count one rides on every line — it is a
+      // fact about this round, not about a comparison.
       (writeStderrLine as ReturnType<typeof vi.fn>).mockClear();
       await runComposeReviewCommand({
         input: inputPath,
@@ -5293,13 +5344,17 @@ describe('buildLedger', () => {
         title: 'arrived without a path',
       },
     ]);
-    // A REAL file of that name is flagged, so it is not mistaken for one.
-    const real = buildLedger(
-      2,
-      [{ path: '(unknown)', line: 3, body: '**[Suggestion]** a real file' }],
-      [],
-    );
-    expect(real.findings[0].k).toBe(1);
+    // A REAL file of either stand-in name is flagged, so it is not mistaken
+    // for one — and the flagged entry keeps the path it names.
+    for (const name of ['(unknown)', '(body)']) {
+      const real = buildLedger(
+        2,
+        [{ path: name, line: 3, body: '**[Suggestion]** a real file' }],
+        [],
+      );
+      expect(real.findings[0].k).toBe(1);
+      expect(real.findings[0].file).toBe(name);
+    }
   });
 
   it('classifies through `severityOf`, whitespace and all', () => {
@@ -9201,8 +9256,9 @@ describe('convergence diagnosis reaches the POSTED body', () => {
 
   it('reaches a REQUEST_CHANGES body — the verdict a diverging loop produces', () => {
     // The block is spliced into three separately-maintained clause lists,
-    // and every other test here composes a plan that trips a coverage cap
-    // and lands on COMMENT. REQUEST_CHANGES — unfixed Criticals, round after
+    // and every sibling here that reaches a body reaches it as COMMENT —
+    // several of them by a downgrade rather than by the coverage cap, but
+    // COMMENT either way. REQUEST_CHANGES — unfixed Criticals, round after
     // round — is the feature's primary audience, and its copy of the list
     // was unasserted: deleting the splice left the whole suite green.
     const planPath = coveredPlan(['verify', 'reverse-audit'], {
@@ -9239,12 +9295,13 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     // the ladder sheds. Untagged it ranked with the blockers and outlived
     // the not-reviewed disclosures, which do qualify what was read.
     //
-    // The blocker is sized so the ladder sheds rank 1 and stops. Shed
+    // The blocker is sized so the ladder sheds rank 0 — the convergence
+    // paragraph, which yields before every other rank — and stops. Shed
     // everything and the body is identical whichever order the ladder used,
-    // so the order would have no guard at all — which is why this constant
-    // is tuned rather than round. To retune after a body-copy change: raise
-    // it until `Convergence:` disappears, and stop before `Not reviewed:`
-    // does. The window is as wide as the paragraph itself.
+    // so the order would have no guard at all, which is why this constant is
+    // tuned rather than round. To retune after a body-copy change: raise it
+    // until `Convergence:` disappears, and stop before `Not reviewed:` does.
+    // The window is as wide as the paragraph itself.
     sideFile({
       round: 4,
       posted: 9,
@@ -9423,6 +9480,114 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     expect(r.body).toContain('The rate of new findings is not falling.');
     expect(r.body).toContain('already resolve to a critical posting floor');
     expect(r.body).not.toContain('dropping this PR');
+  });
+
+  it('states ONE fresh count — the paragraph and the marker cannot disagree', () => {
+    // The marker's count and the paragraph's are the same number about the
+    // same round. Computed against different carried-sets, a stray id that
+    // names no standing entry read fresh in the prose and carried in the
+    // marker — and the marker's undercount persists as the next round's
+    // `prev.fresh`, where the trend's own guard reads it.
+    sideFile({
+      round: 4,
+      posted: 9,
+      fresh: 9,
+      findings: [{ id: 'R2-1', sev: 'S', file: 'src/a.ts', title: 'x' }],
+    });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: [
+        {
+          path: 'src/a.ts',
+          line: 1,
+          body: '**[Suggestion]** R2-99: a new one',
+        },
+      ],
+    });
+    expect(r.postedFresh).toBe(1);
+    expect(parseLedger(r.body)?.fresh).toBe(1);
+    expect(r.body).toContain('1 of them reported for the first time');
+  });
+
+  it('keeps the terminal copy on the round that actually sheds the paragraph', () => {
+    // The promise the trim notice makes is about a body that DROPPED the
+    // paragraph. A test that asserts the body still contains it never
+    // reaches the case the copy exists for.
+    sideFile({
+      round: 4,
+      posted: 9,
+      fresh: 9,
+      findings: [{ id: 'R2-1', sev: 'S', file: 'src/a.ts', title: 'x' }],
+    });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      bodyCriticals: ['B'.repeat(55_850)],
+      unreviewedDimensions: ['security'],
+      draftedComments: [
+        { path: 'src/a.ts', line: 1, body: '**[Suggestion]** again' },
+      ],
+    });
+    expect(r.body).not.toContain('Convergence:');
+    expect(r.convergence?.en).toContain('Convergence:');
+  });
+
+  it('counts a shortened side-file list as an undercount, not as complete', () => {
+    // A file persisted by an older CLI carries ids the whole-shape test now
+    // refuses, and the persist paths keep that list across anonymous and
+    // recovery-threw runs. Rejected entries shrink the work list exactly as
+    // the marker's cap does.
+    sideFile({
+      round: 4,
+      posted: 9,
+      fresh: 9,
+      findings: [
+        { id: 'R2-1', sev: 'S', file: 'src/a.ts', title: 'x' },
+        { id: ' R3-1', sev: 'S', file: 'src/b.ts', title: 'pre-hardening' },
+      ],
+    });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: [
+        { path: 'src/a.ts', line: 1, body: '**[Suggestion]** again' },
+      ],
+    });
+    expect(r.body).toContain('may be an undercount');
+  });
+
+  it('resolves a duplicated carried id the way the ledger does', () => {
+    // `idFor` keeps the FIRST comment under a carried id and re-mints this
+    // round's id for a second one, so the second draft is a finding this
+    // round minted. Read as a re-post here, the marker's work list gained a
+    // round-N entry that entered no fresh count.
+    sideFile({
+      round: 3,
+      posted: 1,
+      fresh: 1,
+      findings: [{ id: 'R2-1', sev: 'C', file: 'src/p.ts', title: 'x' }],
+    });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 2,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/p.ts', line: 1, body: '**[Critical]** R2-1: still open' },
+        { path: 'src/p.ts', line: 9, body: '**[Critical]** R2-1: and again' },
+      ],
+    });
+    const marker = parseLedger(r.body)!;
+    expect(marker.findings.map((x) => x.id)).toEqual(['R2-1', 'R4-1']);
+    expect(marker.fresh).toBe(1);
+    expect(r.postedFresh).toBe(1);
   });
 
   it('names an auto-resolved floor the way the enforcement note does', () => {

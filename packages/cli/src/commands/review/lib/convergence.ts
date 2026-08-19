@@ -199,9 +199,14 @@ export function isFreshDraft(
 }
 
 /**
- * The default for callers with no work list to check against — the marker
- * that records this round's fresh count runs before any recovery is in
- * scope, and there the id's own round is all there is.
+ * The default for a caller with no work list to check against — the id's own
+ * round is then all there is.
+ *
+ * Every production caller HAS one and must pass it: the marker's fresh count
+ * and the posted paragraph's are the same number about the same round, and
+ * two different carried-sets made one body state two volumes — with the
+ * marker's undercount persisting as the next round's `prev.fresh`, where the
+ * trend's own guard reads it.
  */
 const EVERY_ID: ReadonlySet<string> = {
   has: () => true,
@@ -220,10 +225,12 @@ const EVERY_ID: ReadonlySet<string> = {
  *   cluster that keeps regenerating siblings usually means the fixes are
  *   treating instances of a shared root cause, and that sentence is the whole
  *   value here.
- * - **Volume not shrinking.** From round 3, this round posting at least as
- *   many comments as the previous one. Round 3 because two rounds give one
- *   step and a step is not a trend; and "not shrinking" rather than "growing"
- *   because a loop holding steady is not converging either.
+ * - **Volume not shrinking.** From round 3, this round producing at least as
+ *   many NEW findings as the previous one. Round 3 because two rounds give
+ *   one step and a step is not a trend; "not shrinking" rather than
+ *   "growing" because a loop holding steady is not converging either; and
+ *   NEW findings rather than the comment total because Step 6 re-posts every
+ *   unfixed entry, so the total only ever rises.
  *
  * Both signals read FRESH drafts only. A re-posted still-standing finding is
  * the loop holding its position, not the loop generating work, and counting
@@ -345,10 +352,20 @@ export function diagnoseConvergence(input: {
   // repository is under review, so a locale change between the CI bot's
   // round and a maintainer's round would otherwise reorder tied non-ASCII
   // paths and break the invariant this sort states.
+  //
+  // The depth key is DROPPED entirely when the work list came from another
+  // account's marker. Leading with this round's count takes the top slot
+  // back from a fabricated cluster, but depth still decides every tie — and
+  // ties are the ordinary shape, one fresh finding per file — so fifty
+  // planted ids on one file still evicted a genuine cluster from the
+  // rendered three. Provenance is disclosed for the ROUNDS; the ordering
+  // cannot disclose anything, so on a foreign list it simply does not use a
+  // number a stranger set.
+  const trustDepth = input.prev.foreign !== true;
   clusters.sort(
     (a, b) =>
       b.thisRound - a.thisRound ||
-      b.priorRounds.length - a.priorRounds.length ||
+      (trustDepth ? b.priorRounds.length - a.priorRounds.length : 0) ||
       (a.file < b.file ? -1 : a.file > b.file ? 1 : 0),
   );
 
@@ -359,7 +376,7 @@ export function diagnoseConvergence(input: {
   // zero-posting case — a round with no drafts has no fresh drafts either —
   // and additionally covers the round whose whole output is carried re-posts.
   //
-  // `prevPosted > 0` for the mirror reason on the other end: a trend measured
+  // `prev.fresh > 0` for the mirror reason on the other end: a trend measured
   // against a zero predecessor is `N >= 0`, true for every N, so restarting
   // from a settled round would fire on the healthiest shape there is (fix
   // everything, settle at zero, push again, get new findings).
@@ -502,11 +519,29 @@ export function renderConvergenceDiagnosis(d: ConvergenceDiagnosis): {
     d.prevPosted !== undefined || d.prevFresh !== undefined;
   const caveatsEn: string[] = [];
   const caveatsZh: string[] = [];
-  if (citesWorkList && d.truncatedEvidence) {
+  // Truncation qualifies BOTH readings, not only the recurrence one: the
+  // work list IS the carried-id set that defines freshness, so a re-post of
+  // a shed entry takes the stray-id branch and counts as first-time work.
+  // The gate that named it a work-list-only concern was mechanically false.
+  if ((citesWorkList || citesPrevVolume) && d.truncatedEvidence) {
+    const what = citesWorkList
+      ? citesPrevVolume
+        ? {
+            en: `the rounds named above may be an undercount, and re-posts of findings shed from that list read as first-time reports, so the new-finding count may be overstated`,
+            zh: `上述轮次可能少计；被舍弃条目的重发会被读作首次提出，首次提出的条数可能高估`,
+          }
+        : {
+            en: `the rounds named above may be an undercount`,
+            zh: `上述轮次可能少计`,
+          }
+      : {
+          en: `re-posts of findings shed from that list read as first-time reports, so the new-finding count may be overstated`,
+          zh: `被舍弃条目的重发会被读作首次提出，首次提出的条数可能高估`,
+        };
     caveatsEn.push(
-      `the previous round's work list was truncated to fit the marker, so the rounds named above may be an undercount`,
+      `the previous round's work list was truncated to fit the marker, so ${what.en}`,
     );
-    caveatsZh.push(`上一轮的工作清单为放进标记而被截断，上述轮次可能少计`);
+    caveatsZh.push(`上一轮的工作清单为放进标记而被截断，${what.zh}`);
   }
   if (d.foreignEvidence && (citesWorkList || citesPrevVolume)) {
     const what = citesWorkList

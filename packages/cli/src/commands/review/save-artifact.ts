@@ -293,6 +293,19 @@ function validateVerdict(value: unknown): PersistedVerdict {
     );
   }
   // The fresh count reads by the same rules as the total it is part of.
+  // The convergence paragraph is the ONE clause the overflow ladder sheds
+  // first, and the artifact is where a trimmed round's record lives. Dropped
+  // by this allow-list, the durable record of a round whose body shed it
+  // held neither copy.
+  const rawConvergence = verdict['convergence'];
+  let convergence: { en: string; zh: string } | undefined;
+  if (rawConvergence !== undefined && rawConvergence !== null) {
+    const c = object(rawConvergence, 'Composed verdict.convergence');
+    convergence = {
+      en: string(c['en'], 'Composed verdict.convergence.en'),
+      zh: string(c['zh'], 'Composed verdict.convergence.zh'),
+    };
+  }
   const rawFresh = verdict['postedFresh'];
   const freshAbsent = rawFresh === undefined || rawFresh === null;
   const postedFresh = freshAbsent ? undefined : volumeOf(rawFresh);
@@ -352,6 +365,7 @@ function validateVerdict(value: unknown): PersistedVerdict {
     floorEnforced: floorEnforced as number[],
     ...(postedInline === undefined ? {} : { postedInline }),
     ...(postedFresh === undefined ? {} : { postedFresh }),
+    ...(convergence === undefined ? {} : { convergence }),
     lowSignal:
       lowSignal === null
         ? null

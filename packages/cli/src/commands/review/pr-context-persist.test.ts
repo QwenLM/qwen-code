@@ -161,6 +161,100 @@ describe('persistRecoveredLedger', () => {
         { noOwnReview: false, identityKnown: true },
       );
       expect(JSON.parse(readFileSync(side, 'utf8')).merged).toBe(true);
+      // Sticky across the next OWN recovery, for the same reason `foreign`
+      // is: Step 6 re-posts the merged entries under their original ids.
+      persistRecoveredLedger(
+        side,
+        {
+          ledger: { ...ledger, round: 4 },
+          commitId: null,
+          reviewId: 10,
+          foreign: false,
+          merged: false,
+        },
+        { noOwnReview: false, identityKnown: true },
+      );
+      expect(JSON.parse(readFileSync(side, 'utf8')).merged).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('an ANONYMOUS advance keeps the provenance of the list it keeps', () => {
+    // This branch advances only the COUNTER; the work list is kept verbatim,
+    // so the flags describing that list are not stale — they were vouched
+    // under a known identity and the ids they qualify are still in the file.
+    // Zeroing `foreign` here broke the sticky clause: no later
+    // identity-known round could re-fire it, and the caveat vanished while
+    // the citations remained.
+    const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
+    const side = join(dir, 'side.json');
+    try {
+      writeFileSync(
+        side,
+        JSON.stringify({
+          ...ledger,
+          round: 5,
+          reviewId: 50,
+          model: 'qwen3.7-max@1a2b3c4d',
+          foreign: true,
+          merged: true,
+        }),
+      );
+      persistRecoveredLedger(
+        side,
+        {
+          ledger: { ...ledger, round: 6 },
+          commitId: null,
+          reviewId: 60,
+          foreign: true,
+          merged: false,
+        },
+        { noOwnReview: false, identityKnown: false },
+      );
+      const written = JSON.parse(readFileSync(side, 'utf8'));
+      expect(written.round).toBe(6);
+      expect(written.foreign).toBe(true);
+      expect(written.merged).toBe(true);
+      // The anchor PAIR goes together here as at every other seam: a model
+      // left behind names a certifier for a range that is gone.
+      expect(written.sha).toBeUndefined();
+      expect(written.model).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a pure-foreign recovery cannot inherit a merged claim', () => {
+    // `mergedOverOwn` is false when there was nothing to merge — an own
+    // marker deleted, unparseable, or absent from the walk. Inheriting the
+    // flag there makes the rendered caveat claim own-certified entries exist
+    // when every entry is a stranger's.
+    const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
+    const side = join(dir, 'side.json');
+    try {
+      writeFileSync(
+        side,
+        JSON.stringify({ ...ledger, round: 5, foreign: true, merged: true }),
+      );
+      persistRecoveredLedger(
+        side,
+        {
+          ledger: {
+            v: 1,
+            round: 6,
+            findings: [{ id: 'R6-1', sev: 'S', file: 'theirs.ts', title: 't' }],
+          },
+          commitId: null,
+          reviewId: 60,
+          foreign: true,
+          merged: false,
+        },
+        { noOwnReview: false, identityKnown: true },
+      );
+      const written = JSON.parse(readFileSync(side, 'utf8'));
+      expect(written.foreign).toBe(true);
+      expect(written.merged).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -393,11 +487,6 @@ describe('persistRecoveredLedger', () => {
         round: 8,
         findings: ledger.findings,
         reviewId: 200,
-        // Provenance is UNKNOWN on this path — the identity lookup is what
-        // failed, so every marker walked as foreign including this account's
-        // own. A stale `true` from a previous run must not ride into a
-        // posted caveat about a marker this account did post.
-        foreign: false,
       });
       expect(written.sha).toBeUndefined();
       expect(written.commitId).toBeUndefined();

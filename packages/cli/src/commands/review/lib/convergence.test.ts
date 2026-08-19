@@ -80,8 +80,9 @@ describe('diagnoseConvergence — the trigger table', () => {
     // wrong one; `(body)` is where unanchorable Criticals live and
     // `(unknown)` is a comment that arrived without a path — neither is a
     // file anyone can cluster on, and neither may be NAMED as one in a
-    // posted paragraph. Recognised by the ledger's structural flag, never by
-    // the sentinel text — see the real-file test below.
+    // posted paragraph. Separated by the ledger's flag, which marks the
+    // EXCEPTION: a real file spelled like a stand-in carries it, a stand-in
+    // carries none — see the real-file test below.
     expect(
       diagnoseConvergence({
         round: 4,
@@ -266,15 +267,22 @@ describe('diagnoseConvergence — the trigger table', () => {
 
   it('treats an id this round would mint as fresh, not as carried', () => {
     // "Carried" means minted in an EARLIER round; the comparison is strict
-    // so a same-round id cannot silently erase this round's own work.
+    // so a same-round id cannot silently erase this round's own work. The id
+    // is IN the work list, so the stray-id branch cannot be what decides it
+    // — the final `minted >= round` comparison is.
     const r = diagnoseConvergence({
       round: 3,
       posted: 1,
-      prev: { posted: 1, findings: [f('R2-1', 'a.ts')] },
+      prev: {
+        posted: 1,
+        fresh: 1,
+        findings: [f('R2-1', 'a.ts'), f('R3-1', 'a.ts')],
+      },
       drafts: [d('a.ts', 'R3-1')],
       floor: 'o',
     })!;
     expect(r.clusters[0].thisRound).toBe(1);
+    expect(r.fresh).toBe(1);
   });
 
   it('orders clusters by new work now, then by depth, then by path', () => {
@@ -323,7 +331,8 @@ describe('diagnoseConvergence — the trigger table', () => {
     // The stand-ins are legal filenames — git permits `(body)` — so a reader
     // that excluded them BY VALUE dropped exactly that file from clustering
     // while claiming to drop a stand-in. The ledger's flag is what separates
-    // them, and a real file carries none.
+    // them, and it marks the EXCEPTION — the real file carries it, the
+    // stand-in carries none.
     const r = diagnoseConvergence({
       round: 4,
       posted: 1,
@@ -516,6 +525,62 @@ describe('diagnoseConvergence — the trigger table', () => {
     expect(r.criticalFloorKind).toBe('explicit');
   });
 
+  it('carries the merged qualifier through, and drops the depth key with it', () => {
+    // Two things ride on a foreign work list: the caveat the renderer picks,
+    // and whether the ordering may consult a number a stranger set. Fifty
+    // planted ids on one file still decide every `thisRound` tie, and ties
+    // are the ordinary shape — one fresh finding per file.
+    const planted = Array.from({ length: 50 }, (_, i) =>
+      f(`R${i + 1}-1`, 'src/planted.ts'),
+    );
+    const r = diagnoseConvergence({
+      round: 6,
+      posted: 2,
+      prev: {
+        posted: 9,
+        fresh: 9,
+        foreign: true,
+        merged: true,
+        findings: [...planted, f('R5-1', 'src/genuine.ts')],
+      },
+      drafts: [d('src/planted.ts'), d('src/genuine.ts')],
+      floor: 'o',
+    })!;
+    expect(r.mergedEvidence).toBe(true);
+    // Tied on this round's count, the path decides — not the planted depth.
+    expect(r.clusters.map((c) => c.file)).toEqual([
+      'src/genuine.ts',
+      'src/planted.ts',
+    ]);
+    // An OWN list still ranks by depth after the count.
+    const own = diagnoseConvergence({
+      round: 6,
+      posted: 2,
+      prev: {
+        posted: 9,
+        fresh: 9,
+        findings: [...planted, f('R5-1', 'src/genuine.ts')],
+      },
+      drafts: [d('src/planted.ts'), d('src/genuine.ts')],
+      floor: 'o',
+    })!;
+    expect(own.clusters[0].file).toBe('src/planted.ts');
+  });
+
+  it('will not compare a recorded floor against one this round never named', () => {
+    // The asymmetric cell the guard exists for: a predecessor that recorded
+    // its posture against a round whose own posture is unknown. Unknown is
+    // not "matches" and not "differs" — it makes the comparison unavailable,
+    // which leaves the trend evaluated as it was before floors existed.
+    const r = diagnoseConvergence({
+      round: 8,
+      posted: 5,
+      prev: { posted: 1, fresh: 1, findings: [], floor: 'c' },
+      drafts: [d('a.ts'), d('b.ts')],
+    })!;
+    expect(r.volumeNotShrinking).toBe(true);
+  });
+
   it('defaults every qualifier to false rather than undefined', () => {
     const r = diagnoseConvergence({
       round: 4,
@@ -643,18 +708,21 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
   });
 
   it('qualifies each reading by the evidence that reading rests on', () => {
-    // Truncation affects the WORK LIST only, so it says nothing about a
-    // volume-only reading. Provenance is broader: the previous round's
-    // volume comes from the same marker, and the volume-only branch cites
-    // that number as this loop's own baseline — which is exactly the branch
-    // an attacker-supplied `posted` controls.
+    // Truncation qualifies BOTH readings: the work list IS the carried-id
+    // set that defines freshness, so a re-post of a shed entry reads as
+    // first-time work and can manufacture the very trend it goes
+    // undisclosed beside. Provenance is broader still: the previous round's
+    // counts come from the same marker, and the volume reading cites them
+    // as this loop's own baseline — the branch an attacker-supplied count
+    // controls.
     const volumeOnly = renderConvergenceDiagnosis({
       ...base,
       clusters: [],
       truncatedEvidence: true,
       foreignEvidence: true,
     });
-    expect(volumeOnly.en).not.toContain('undercount');
+    expect(volumeOnly.en).not.toContain('the rounds named above');
+    expect(volumeOnly.en).toContain('may be overstated');
     expect(volumeOnly.en).toContain('those counts');
     expect(volumeOnly.en).toContain('a marker this account did not post');
     expect(volumeOnly.zh).toContain('该计数');
@@ -713,6 +781,32 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
     expect(r.en).toContain("merged over this account's own entries");
     expect(r.en).toContain('so some of those rounds');
     expect(r.zh).toContain('并与本账号自己的条目合并');
+  });
+
+  it('states both previous-round numbers, not just the total', () => {
+    // The previous-round clause is the only rendering of the baseline the
+    // volume reading cites, and it has two numeric slots.
+    const r = renderConvergenceDiagnosis({
+      ...base,
+      prevPosted: 9,
+      prevFresh: 4,
+    });
+    expect(r.en).toContain('the previous round posted 9 (4 new)');
+    expect(r.zh).toContain('上一轮发布了 9 条（其中 4 条首次提出）');
+    // A predecessor with no fresh count renders the total alone.
+    const older = renderConvergenceDiagnosis({
+      ...base,
+      prevPosted: 9,
+      prevFresh: undefined,
+    });
+    expect(older.en).toContain('the previous round posted 9');
+    expect(older.en).not.toContain('new)');
+  });
+
+  it('names both citations when the reading rests on both', () => {
+    const r = renderConvergenceDiagnosis({ ...base, foreignEvidence: true });
+    expect(r.en).toContain('those rounds and its counts');
+    expect(r.zh).toContain('上述轮次与其计数');
   });
 
   it('summarises the tail instead of listing every cluster', () => {

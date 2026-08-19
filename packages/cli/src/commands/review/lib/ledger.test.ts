@@ -20,6 +20,8 @@ import {
   LEDGER_MAX_BYTES,
   LEDGER_MAX_MODEL,
   LEDGER_MAX_VOLUME,
+  LEDGER_MAX_ID,
+  LEDGER_MAX_ROUND,
   isLedgerFinding,
   type Ledger,
   type LedgerFinding,
@@ -438,8 +440,6 @@ describe('ledger marker', () => {
   });
 });
 
-// The prefix-anchored readback both ledger read sides share wholesale:
-// compose-review's ledger builder and presubmit's re-post extractor.
 describe('a shortened work list must never read as complete', () => {
   const f = (id: string): LedgerFinding => ({
     id,
@@ -503,6 +503,119 @@ describe('a shortened work list must never read as complete', () => {
     expect(marker).not.toContain('floor');
   });
 
+  it('refuses a round-0 id at both ends of the bound', () => {
+    // Rounds start at 1, so `R0-*` is not an id this pipeline can mint — but
+    // it passes the shape, and every reader that turns an id into a round
+    // rejects round 0 and then reads the rejection as "no carried id", i.e.
+    // as FRESH. Admitted, a re-posted `R0-1` counts as first-time work every
+    // round and the trend narrates divergence at a settled steady state.
+    expect(
+      isLedgerFinding({ id: 'R0-1', sev: 'C', file: 'x.ts', title: 't' }, 9),
+    ).toBe(false);
+    expect(
+      parseLedger(
+        '<!-- qwen-review-ledger {"v":1,"round":3,"findings":[' +
+          '{"id":"R0-1","sev":"C","file":"x.ts","title":"boom"}' +
+          ']} -->',
+      )?.findings,
+    ).toEqual([]);
+    // The write side applies the same test, so a stray id the model minted
+    // out of range never reaches a marker its own reader would refuse.
+    const marker = serializeLedger({
+      v: 1,
+      round: 3,
+      findings: [f('R3-1'), { ...f('R0-1'), file: 'b.ts' }],
+    });
+    expect(marker).not.toContain('R0-1');
+    expect(marker).toContain('"dropped":1');
+  });
+
+  it('round-trips the stand-in exception flag, and clamps a forged dropped', () => {
+    // [1] The flag has to survive serialize -> parse, not merely exist on
+    // the builder's output: it is the only thing separating a real file
+    // spelled like a stand-in from the stand-in itself, and it crosses the
+    // marker boundary on every round.
+    const marker = serializeLedger({
+      v: 1,
+      round: 3,
+      findings: [
+        { id: 'R3-1', sev: 'C', file: '(body)', title: 'a stand-in' },
+        { id: 'R3-2', sev: 'S', file: '(body)', title: 'a real file', k: 1 },
+      ],
+    });
+    const back = parseLedger(marker)!;
+    expect(back.findings[0].k).toBeUndefined();
+    expect(back.findings[1].k).toBe(1);
+    // The stand-in costs no marker bytes; only the exception is spelled.
+    expect(marker.match(/"k":1/g)).toHaveLength(1);
+  });
+
+  it('clamps a forged `dropped` instead of publishing it', () => {
+    // It renders into the model-facing PARTIAL line and publishes the
+    // undercount caveat, and unlike a forged finding it cannot be re-ruled.
+    const parsed = parseLedger(
+      '<!-- qwen-review-ledger {"v":1,"round":3,"findings":[],"dropped":1e308} -->',
+    )!;
+    // Clamped through the same reader the other counts use, so the PARTIAL
+    // line cannot render `1e+308 further finding(s)`.
+    expect(parsed.dropped).toBe(LEDGER_MAX_VOLUME);
+    // A non-count is still no count at all.
+    expect(
+      parseLedger(
+        '<!-- qwen-review-ledger {"v":1,"round":3,"findings":[],"dropped":-4} -->',
+      )?.dropped,
+    ).toBeUndefined();
+  });
+
+  it('refuses an over-long id rather than cutting it into a different one', () => {
+    // Admitted and then sliced, the entry silently changes identity between
+    // the round that posted it and the round that rules on it.
+    const long = `R2-${'9'.repeat(LEDGER_MAX_ID)}`;
+    expect(long.length).toBeGreaterThan(LEDGER_MAX_ID);
+    expect(
+      isLedgerFinding({ id: long, sev: 'S', file: 'a.ts', title: 't' }, 9),
+    ).toBe(false);
+  });
+
+  it('bounds an id round by the CAP, not only by the claimed round', () => {
+    // The side-file route's round is whatever was written to it, which the
+    // admission test's own comment says is not always clamped.
+    expect(
+      isLedgerFinding(
+        {
+          id: `R${LEDGER_MAX_ROUND + 1}-1`,
+          sev: 'S',
+          file: 'a.ts',
+          title: 't',
+        },
+        Number.MAX_SAFE_INTEGER,
+      ),
+    ).toBe(false);
+    expect(
+      isLedgerFinding(
+        { id: `R${LEDGER_MAX_ROUND}-1`, sev: 'S', file: 'a.ts', title: 't' },
+        Number.MAX_SAFE_INTEGER,
+      ),
+    ).toBe(true);
+  });
+
+  it('keeps the fresh count only beside a volume that bounds it', () => {
+    const ok = parseLedger(
+      '<!-- qwen-review-ledger {"v":1,"round":3,"findings":[],"posted":5,"fresh":2} -->',
+    )!;
+    expect(ok.fresh).toBe(2);
+    // Larger than the total it is part of: not a count of anything.
+    const over = parseLedger(
+      '<!-- qwen-review-ledger {"v":1,"round":3,"findings":[],"posted":2,"fresh":5} -->',
+    )!;
+    expect(over.fresh).toBeUndefined();
+    // No total: nothing for it to be a part of.
+    const bare = parseLedger(
+      '<!-- qwen-review-ledger {"v":1,"round":3,"findings":[],"fresh":5} -->',
+    )!;
+    expect(bare.fresh).toBeUndefined();
+  });
+
   it('normalises an unrecognised clustering hint instead of dropping the finding', () => {
     // `k` decides nothing. The marker is a cross-environment carrier by
     // design, so a later version adding a third kind — or a hand edit, or a
@@ -536,6 +649,8 @@ describe('a shortened work list must never read as complete', () => {
   });
 });
 
+// The prefix-anchored readback both ledger read sides share wholesale:
+// compose-review's ledger builder and presubmit's re-post extractor.
 describe('LEDGER_ID_READBACK', () => {
   // The shared regex's docstring claims the tolerated terminator set cannot
   // drift between the two ends — which only holds if the set ITSELF is

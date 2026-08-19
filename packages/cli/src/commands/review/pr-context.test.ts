@@ -1576,10 +1576,14 @@ describe('latestLedger — the split trust surface', () => {
       'x <!-- qwen-review-ledger {"v":1,"round":7,"findings":[' +
       '{"id":"R7-1","sev":"C","file":"a.ts","title":"certified"}' +
       '],"posted":6,"fresh":4,"floor":"c"} -->';
+    // The foreign counts are a SUPERSET of the own ones in every field, so
+    // a strip that silently failed would be indistinguishable from one that
+    // worked if the own values happened to win a comparison — they are
+    // restored wholesale, and these numbers make the difference visible.
     const foreign =
       'y <!-- qwen-review-ledger {"v":1,"round":8,"findings":[' +
       '{"id":"R8-1","sev":"S","file":"b.ts","title":"theirs"}' +
-      '],"posted":1,"fresh":1,"floor":"o"} -->';
+      '],"posted":99,"prevPosted":98,"fresh":97,"floor":"o"} -->';
     const found = latestLedger(
       [
         review('bot', '2026-01-01T00:00:00Z', own),
@@ -1591,6 +1595,8 @@ describe('latestLedger — the split trust surface', () => {
     expect(found?.ledger.posted).toBe(6);
     expect(found?.ledger.fresh).toBe(4);
     expect(found?.ledger.floor).toBe('c');
+    // The foreign numbers are gone, not merely outranked.
+    expect(found?.ledger.prevPosted).toBeUndefined();
   });
 
   it('merges a foreign winner OVER the own findings — displacement is dead', () => {

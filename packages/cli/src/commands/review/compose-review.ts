@@ -1484,11 +1484,17 @@ function prevLedgerFacts(planPath: string | undefined): {
     // verbatim in a body this account posts. Normalised for the same reason
     // — the caps are the serializer's contract and this file is not bound by
     // it, while the other side of the recurrence join IS capped.
-    const findings = Array.isArray(prev.findings)
-      ? prev.findings
-          .filter((f): f is LedgerFinding => isLedgerFinding(f, round))
-          .map(normalizeLedgerFinding)
-      : [];
+    const rawFindings = Array.isArray(prev.findings) ? prev.findings : [];
+    const findings = rawFindings
+      .filter((f): f is LedgerFinding => isLedgerFinding(f, round))
+      .map(normalizeLedgerFinding);
+    // Entries this read's own admission test rejected are findings the next
+    // round will never rule on, exactly like the ones the marker's cap shed.
+    // Reachable without any tampering: a side file persisted by an older CLI
+    // carries ids the whole-shape test now refuses, and
+    // `persistRecoveredLedger` keeps that list across anonymous and
+    // recovery-threw runs.
+    const rejected = rawFindings.length - findings.length;
     return {
       round,
       ...(posted === undefined || round === 0 ? {} : { posted }),
@@ -1505,7 +1511,9 @@ function prevLedgerFacts(planPath: string | undefined): {
       // cluster evidence is still the best there is, and the paragraph
       // discloses the undercount instead of presenting a partial list whole.
       truncated:
-        round !== 0 && typeof prev.dropped === 'number' && prev.dropped > 0,
+        round !== 0 &&
+        (rejected > 0 ||
+          (typeof prev.dropped === 'number' && prev.dropped > 0)),
       // Whoever posted the marker that won recovery. `pr-context` adopts the
       // highest-round marker on the PR — bounded, but not restricted to this
       // account — so a cited round may be one this account never ran. The
@@ -1826,9 +1834,19 @@ function composeReviewBody(
   // A fact about the round, not about the diagnosis: it rides in the marker
   // whether or not a signal fired, because the NEXT round's trend needs this
   // round's point either way.
-  const postedFresh = draftedFindingsOf(input.draftedComments).filter((d) =>
-    isFreshDraft(d, Math.min(prevRound + 1, LEDGER_MAX_ROUND)),
-  ).length;
+  const carriedIds = convergence
+    ? new Set(
+        convergence.prev.findings
+          .map((f) => f?.id)
+          .filter((id): id is string => typeof id === 'string'),
+      )
+    : undefined;
+  const postedFresh =
+    volumeOf(
+      draftedFindingsOf(input.draftedComments).filter((d) =>
+        isFreshDraft(d, Math.min(prevRound + 1, LEDGER_MAX_ROUND), carriedIds),
+      ).length,
+    ) ?? 0;
   const convergenceNote = diagnosis
     ? renderConvergenceDiagnosis(diagnosis)
     : undefined;
@@ -4729,12 +4747,21 @@ function ledgerClaimLine(body: unknown): string {
 function draftedFindingsOf(drafted: unknown): DraftedFinding[] {
   if (!Array.isArray(drafted)) return [];
   const out: DraftedFinding[] = [];
+  // Deduped exactly as `idFor` dedupes: the ledger keeps the FIRST comment
+  // under a carried id and re-mints this round's id for a second one, so a
+  // second draft carrying the same id is a finding this round minted. Passed
+  // through raw, it read as a re-post here while the marker's own work list
+  // gained a round-N entry — one end calling a comment carried while the
+  // other calls it new, which is the drift `readClaim` exists to prevent.
+  const seen = new Set<string>();
   for (const c of drafted as Array<{ path?: unknown; body?: unknown }>) {
     if (severityOf(c) === null) continue;
     const { id } = readClaim(ledgerClaimLine(c.body));
+    const carried = id !== undefined && !seen.has(id) ? id : undefined;
+    if (carried !== undefined) seen.add(carried);
     out.push({
       file: typeof c.path === 'string' ? c.path : '',
-      ...(id === undefined ? {} : { carriedId: id }),
+      ...(carried === undefined ? {} : { carriedId: carried }),
     });
   }
   return out;
