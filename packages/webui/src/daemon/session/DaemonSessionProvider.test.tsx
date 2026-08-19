@@ -3277,6 +3277,79 @@ describe('DaemonSessionProvider', () => {
     createStoreSpy.mockRestore();
   });
 
+  it('coalesces streamed chunks arriving within the dispatch window', async () => {
+    vi.useFakeTimers();
+    const sdk = await import('@qwen-code/sdk/daemon');
+    const realCreateStore = sdk.createDaemonTranscriptStore;
+    const dispatchBatchSizes: number[] = [];
+    const createStoreSpy = vi
+      .spyOn(sdk, 'createDaemonTranscriptStore')
+      .mockImplementation((seed) => {
+        const store = realCreateStore(seed);
+        const realDispatch = store.dispatch.bind(store);
+        store.dispatch = (event) => {
+          dispatchBatchSizes.push(Array.isArray(event) ? event.length : 1);
+          return realDispatch(event);
+        };
+        return store;
+      });
+    try {
+      const firstQueued = createDeferred<void>();
+      const secondQueued = createDeferred<void>();
+      const event = (id: number, text: string): DaemonEvent => ({
+        id,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text },
+          },
+        },
+      });
+      const session = createMockSession({
+        events: async function* spacedEvents(
+          opts: { signal?: AbortSignal } = {},
+        ) {
+          yield event(1, 'first ');
+          firstQueued.resolve();
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          yield event(2, 'second');
+          secondQueued.resolve();
+          await new Promise<void>((resolve) => {
+            if (opts.signal?.aborted) {
+              resolve();
+              return;
+            }
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            });
+          });
+        },
+      });
+      sdkMocks.sessions.push(session);
+
+      await renderWithProvider(null, { autoConnect: true });
+      await act(async () => {
+        await firstQueued.promise;
+        await flushPromises();
+        await vi.advanceTimersByTimeAsync(5);
+        await secondQueued.promise;
+        await flushPromises();
+      });
+      expect(dispatchBatchSizes).toEqual([]);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(11);
+        await flushPromises();
+      });
+      expect(dispatchBatchSizes).toEqual([2]);
+    } finally {
+      createStoreSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it('flushes buffered transcript events on unmount instead of dropping them', async () => {
     // The SSE client advances lastSeenEventId as each event is yielded, before
     // the batched dispatch runs. If teardown dropped the pending buffer, a
@@ -6775,9 +6848,9 @@ describe('DaemonSessionProvider', () => {
       await renderWithProvider(<Harness />, { autoConnect: true });
       await act(async () => {
         await flushPromises();
-        // Batched transcript dispatch rides a setTimeout; under fake timers
-        // advance it so the passive assistant chunk lands before asserting.
-        await vi.advanceTimersByTimeAsync(0);
+        // Advance through the transcript batching window so the passive
+        // assistant chunk lands before asserting.
+        await vi.advanceTimersByTimeAsync(20);
         await flushPromises();
       });
       expect(blocks).toMatchObject([
@@ -12785,14 +12858,14 @@ async function flushPromises(): Promise<void> {
   await Promise.resolve();
 }
 
-// Transcript dispatch is batched onto a macrotask (setTimeout 0) so a burst of
+// Transcript dispatch is batched onto a short timer so a burst of
 // SSE events coalesces into one reducer pass. Stay-alive mock generators never
 // end the consumer loop (which would flush synchronously), so tests that assert
 // transcript state mid-stream drain the batched dispatch here.
 // Two hops are required because the dispatch timer and the first timer can be
 // registered from concurrently draining microtask chains in either order.
 async function flushTranscriptDispatch(): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 20));
   await new Promise((resolve) => setTimeout(resolve, 0));
   await Promise.resolve();
   await Promise.resolve();
