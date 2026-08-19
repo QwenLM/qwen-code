@@ -26456,6 +26456,35 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('does not downgrade a manual title on a same-text auto re-rename (#8977)', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      // A user names the session (manual).
+      bridge.updateSessionMetadata(session.sessionId, {
+        displayName: '⏰ check the build',
+        titleSource: 'manual',
+      });
+      // The scheduled-task keepalive, after a daemon restart, re-names with
+      // the identical derived text but `auto`. That must not downgrade the
+      // manual source.
+      bridge.updateSessionMetadata(session.sessionId, {
+        displayName: '⏰ check the build',
+        titleSource: 'auto',
+      });
+
+      const attached = await bridge.loadSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+      });
+      expect(attached.displayName).toBe('⏰ check the build');
+      expect(attached.titleSource).toBe('manual');
+
+      await bridge.shutdown();
+    });
+
     it('seeds known and unknown title sources on cold restore (#8977)', async () => {
       const bridge = makeBridge({
         channelFactory: async () => makeChannel().channel,

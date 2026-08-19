@@ -10311,6 +10311,7 @@ describe('App session callbacks', () => {
       await vi.waitFor(() => {
         expect(mockSessionActions.renameSession).toHaveBeenCalledWith(
           'My manual name',
+          { silent: true },
         );
       });
     });
@@ -10328,6 +10329,107 @@ describe('App session callbacks', () => {
         );
       });
     });
+  });
+
+  it('keeps a manual session name across a repeated /clear (#8977)', async () => {
+    mockConnection.titleSource = 'manual';
+    mockConnection.displayName = 'My manual name';
+    mockSessionActions.createSession.mockImplementation(async () => {
+      mockConnection.sessionId = 'session-2';
+      return { sessionId: 'session-2' };
+    });
+    renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/clear');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+      });
+    });
+    mockConnection.sessionId = undefined;
+    mockConnection.displayName = undefined;
+    mockConnection.titleSource = undefined;
+
+    // A second /clear before any prompt must re-read the still-stashed name
+    // from the pending-carry ref, not drop it.
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/clear');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.clearSession).toHaveBeenCalledTimes(2);
+      });
+    });
+    mockConnection.sessionId = undefined;
+    mockConnection.displayName = undefined;
+    mockConnection.titleSource = undefined;
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('first prompt');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.renameSession).toHaveBeenCalledWith(
+          'My manual name',
+          { silent: true },
+        );
+      });
+    });
+  });
+
+  it('does not carry an auto-generated title over /clear (#8977)', async () => {
+    mockConnection.titleSource = 'auto';
+    mockConnection.displayName = 'Auto generated name';
+    mockSessionActions.createSession.mockImplementation(async () => {
+      mockConnection.sessionId = 'session-2';
+      return { sessionId: 'session-2' };
+    });
+    renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/clear');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+      });
+    });
+    mockConnection.sessionId = undefined;
+    mockConnection.displayName = undefined;
+    mockConnection.titleSource = undefined;
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('first prompt');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalledOnce();
+      });
+    });
+    expect(mockSessionActions.renameSession).not.toHaveBeenCalled();
+  });
+
+  it('does not carry a whitespace-only manual title over /clear (#8977)', async () => {
+    mockConnection.titleSource = 'manual';
+    mockConnection.displayName = '   ';
+    mockSessionActions.createSession.mockImplementation(async () => {
+      mockConnection.sessionId = 'session-2';
+      return { sessionId: 'session-2' };
+    });
+    renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/clear');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+      });
+    });
+    mockConnection.sessionId = undefined;
+    mockConnection.displayName = undefined;
+    mockConnection.titleSource = undefined;
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('first prompt');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalledOnce();
+      });
+    });
+    expect(mockSessionActions.renameSession).not.toHaveBeenCalled();
   });
 
   it('invalidates a carried title when /new arrives during deferred creation', async () => {

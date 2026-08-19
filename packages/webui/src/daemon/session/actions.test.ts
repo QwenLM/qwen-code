@@ -197,6 +197,36 @@ describe('createDaemonSessionActions', () => {
     });
   });
 
+  it('does not stamp a completed rename onto a different session connection', async () => {
+    // Rename session A, but the connection has already moved on to session
+    // B (switch or /clear) while the updateMetadata RPC was in flight: the
+    // optimistic stamp must not land on B's connection.
+    const session = createMockSession('session-a');
+    session.updateMetadata.mockResolvedValueOnce({
+      displayName: 'Manual title',
+    });
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-b',
+        displayName: 'Other session name',
+        titleSource: 'auto',
+      },
+      session,
+    });
+
+    await actions.renameSession('Manual title');
+
+    expect(session.updateMetadata).toHaveBeenCalledWith({
+      displayName: 'Manual title',
+    });
+    expect(getConnection()).toMatchObject({
+      sessionId: 'session-b',
+      displayName: 'Other session name',
+      titleSource: 'auto',
+    });
+  });
+
   it('rejects a concurrent source-bound branch request', async () => {
     const source = createMockSession('session-a', 'client-a');
     const first = createDeferred<{

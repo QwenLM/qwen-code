@@ -432,7 +432,10 @@ export interface DaemonSessionActions {
   getContextUsage(opts?: {
     detail?: boolean;
   }): Promise<DaemonSessionContextUsageStatus>;
-  renameSession(displayName: string): Promise<SessionMetadataResult>;
+  renameSession(
+    displayName: string,
+    opts?: { silent?: boolean },
+  ): Promise<SessionMetadataResult>;
   recapSession(): Promise<DaemonSessionRecapResult>;
   generateSessionContent(
     prompt: string,

@@ -9597,9 +9597,19 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         const nextTitleSource = nextDisplayName
           ? (metadata.titleSource ?? 'manual')
           : undefined;
+        // Same-text updates may still move the source, but only upward: a
+        // user adopting the derived name (auto → manual) must stick, while
+        // the scheduled-task keepalive's post-restart re-name with the
+        // identical derived text + `auto` must not silently downgrade a
+        // `manual` title (which would drop it at the next /clear).
+        const sameTextDowngrade =
+          entry.displayName === nextDisplayName &&
+          entry.titleSource === 'manual' &&
+          nextTitleSource === 'auto';
         if (
-          entry.displayName !== nextDisplayName ||
-          entry.titleSource !== nextTitleSource
+          (entry.displayName !== nextDisplayName ||
+            entry.titleSource !== nextTitleSource) &&
+          !sameTextDowngrade
         ) {
           entry.displayName = nextDisplayName;
           entry.titleSource = nextTitleSource;

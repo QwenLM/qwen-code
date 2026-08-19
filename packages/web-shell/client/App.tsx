@@ -4987,8 +4987,15 @@ export function App({
         // pane the single connection can't own) just leaves the empty chat.
         const firstPane = splitSessionIdsRef.current[0];
         if (firstPane && !currentSessionIdRef.current) {
-          pendingManualTitleRef.current = undefined;
-          void sessionActions.loadSession(firstPane).catch(() => undefined);
+          // Invalidate the carried name only once the landing actually
+          // succeeds: a failed load leaves the empty chat the carry exists
+          // for, and the first prompt there must still receive the name.
+          void sessionActions
+            .loadSession(firstPane)
+            .then(() => {
+              pendingManualTitleRef.current = undefined;
+            })
+            .catch(() => undefined);
         }
       }
     }
@@ -5476,8 +5483,15 @@ export function App({
               pendingManualTitle &&
               pendingManualTitleRef.current === pendingManualTitle
             ) {
+              // Best-effort internal rename the user never initiated: keep
+              // it silent so a failure (e.g. a still-warming runtime) tears
+              // down the creation without a confusing "Rename session
+              // failed" toast.
               await sessionActions.renameSession(
                 pendingManualTitle.displayName,
+                {
+                  silent: true,
+                },
               );
             }
             await onSessionCreatedRef.current?.(sessionId);
