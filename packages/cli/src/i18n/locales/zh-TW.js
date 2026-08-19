@@ -2418,4 +2418,6 @@ export default {
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     '只有受信任的工作區可以變更自動技能管理器。請透過 `/trust` 信任此資料夾後再試一次。',
   'Kept model as {{model}}': '模型保持為 {{model}}',
+  'join a shared agent board (or "off" to leave)':
+    '加入共享智慧代理工作板（或使用「off」離開）',
 };

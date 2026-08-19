@@ -80,15 +80,6 @@ const withInboxLock = createItemLock({
   },
 });
 
-/**
- * Drop cached mutexes for a team's inboxes. Called when the team is deleted:
- * the directory is gone, so the per-path mutexes keyed on it are dead weight.
- */
-export function disposeInboxLocks(teamName: string): number {
-  const dir = getInboxesDir(teamName);
-  return withInboxLock.dispose((key) => path.dirname(key) === dir);
-}
-
 // ─── Path helpers ───────────────────────────────────────────
 
 /**
@@ -212,7 +203,6 @@ export async function clearInbox(
 export async function clearAllInboxes(teamName: string): Promise<void> {
   const dir = getInboxesDir(teamName);
   await fs.rm(dir, { recursive: true, force: true });
-  disposeInboxLocks(teamName);
 }
 
 // ─── Convenience: send structured message ───────────────────

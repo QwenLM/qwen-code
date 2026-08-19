@@ -413,13 +413,12 @@ You are running outside of a sandbox container, directly on the user's system. F
   }
 })()}
 
-${getActionsSection()}
-${(function () {
-  // Only present when this session was started onto a shared board. Inert
-  // otherwise, so the section costs nothing for the common single-agent case.
-  const boardCtx = resolveBoardPromptContext();
-  return boardCtx ? getBoardSection(boardCtx) : '';
-})()}
+${getActionsSection()}${(function () {
+      // Only present when this session was started onto a shared board. Inert
+      // otherwise, so the section costs nothing for the common single-agent case.
+      const boardCtx = resolveBoardPromptContext();
+      return boardCtx ? `\n${getBoardSection(boardCtx)}` : '';
+    })()}
 
 ${(function () {
   if (isGitRepository(process.cwd())) {

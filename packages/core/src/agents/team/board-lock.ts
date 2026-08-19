@@ -153,23 +153,6 @@ export function createItemLock(options: {
       });
   };
 
-  /**
-   * Evict cached mutexes whose path satisfies `predicate`. Needed when a whole
-   * family of files goes away at once — deleting a team removes its inbox
-   * directory, and the mutexes keyed on those paths would otherwise outlive it.
-   * Returns how many were dropped.
-   */
-  withLock.dispose = (predicate: (filePath: string) => boolean): number => {
-    let evicted = 0;
-    for (const key of [...fileLocks.keys()]) {
-      if (predicate(key)) {
-        fileLocks.delete(key);
-        evicted++;
-      }
-    }
-    return evicted;
-  };
-
   return withLock;
 }
 

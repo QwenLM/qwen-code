@@ -31,8 +31,10 @@ type BootstrapRoute = 'serve' | 'mcp' | 'help' | 'version' | 'default';
 
 export const TOP_LEVEL_COMMANDS = [
   ['auth', 'Configure authentication (removed)'],
+  ['board <command>', 'Share work with other agents through a board'],
   ['channel <command>', 'Manage messaging channels (Telegram, Discord, etc.)'],
   ['extensions <command>', 'Manage Qwen Code extensions.'],
+  ['fleet <command>', 'Run several agents against one board'],
   ['hooks', 'Manage Qwen Code hooks (use /hooks in interactive mode).'],
   ['mcp', 'Manage MCP servers'],
   [

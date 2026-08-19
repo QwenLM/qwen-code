@@ -19,6 +19,7 @@
 import type { SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 import { MessageType } from '../types.js';
+import { t } from '../../i18n/index.js';
 import {
   setBoardPromptContext,
   resolveBoardPromptContext,
@@ -29,7 +30,7 @@ import {
 export const boardCommand: SlashCommand = {
   name: 'board',
   get description() {
-    return 'join a shared agent board (or "off" to leave)';
+    return t('join a shared agent board (or "off" to leave)');
   },
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
