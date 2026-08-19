@@ -31331,7 +31331,7 @@ describe('Live conversation runtime lifecycle', () => {
     }
   });
 
-  it('uses authoritative persisted spelling for internal restore and rejects case conflicts', async () => {
+  it('reads the authoritative persisted spelling for internal restore while keeping the private directory canonical, and rejects case conflicts', async () => {
     const setup = setupLiveRuntime();
     setup.registry.add(setup.liveRuntime);
     const canonicalSessionId = '550e8400-e29b-41d4-a716-446655440000';
@@ -31365,11 +31365,19 @@ describe('Live conversation runtime lifecycle', () => {
       );
       expect(
         setup.conversationWorkspace.materializeConversationDirectory,
-      ).toHaveBeenCalledWith(storageSessionId);
+      ).toHaveBeenCalledWith(canonicalSessionId);
+      expect(
+        setup.conversationWorkspace.materializeConversationDirectory,
+      ).not.toHaveBeenCalledWith(storageSessionId);
       expect(setup.liveBridge.changeSessionCwdCalls).toContainEqual({
         sessionId: canonicalSessionId,
-        path: `${setup.root.canonicalRoot}/conversation-${storageSessionId}`,
+        path: `${setup.root.canonicalRoot}/conversation-${canonicalSessionId}`,
       });
+      // Storage-facing reads still follow the persisted spelling.
+      expect(readCreationMetadataIfReadable).toHaveBeenCalledWith(
+        storageSessionId,
+        'active',
+      );
 
       findSessionId.mockRejectedValueOnce(
         new SessionIdCaseConflictError(canonicalSessionId),
