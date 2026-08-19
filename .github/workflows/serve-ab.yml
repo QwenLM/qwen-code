@@ -88,14 +88,58 @@ jobs:
           # strip trailing slashes, denylist the known roots, and require
           # the target to sit inside the runner workspace before any rm.
           WS="${GITHUB_WORKSPACE:?}"
+          # Strip trailing slashes on the RAW path, before anything reads it:
+          # `[ -L "$WS/" ]` and `[ ! -d "$WS/" ]` both resolve THROUGH a link
+          # and report its target, so one trailing slash hides the corruption
+          # the heal below exists to clear.
+          while [ "${WS%/}" != "$WS" ]; do WS="${WS%/}"; done
+          # The allowlist root is prepared BEFORE the heal, because it bounds
+          # what the heal may touch: canonical, slash-free and non-degenerate.
+          # An empty $RUNNER_WORKSPACE would turn every containment pattern
+          # below into the match-all "/*".
+          RWS="${RUNNER_WORKSPACE:?}"
+          RWS="$(realpath -m -- "$RWS" 2>/dev/null)" || { echo "::error::refusing to wipe: realpath unavailable, cannot canonicalize ${RUNNER_WORKSPACE}"; exit 1; }
+          while [ "${RWS%/}" != "$RWS" ]; do RWS="${RWS%/}"; done
+          if [ -z "$RWS" ]; then echo "::error::refusing to wipe: runner workspace resolved to /"; exit 1; fi
+          case "$RWS" in
+            ..|../*|*/..|*/../*) echo "::error::refusing runner workspace path containing '..': ${RWS}"; exit 1 ;;
+          esac
+          # Heal a workspace a previous job replaced with a symlink (or any
+          # non-directory) BEFORE canonicalizing it. Afterwards the path
+          # resolves to the link's target, the allowlist refuses that, and the
+          # refusal removes nothing — so every later job on this runner dies
+          # here, permanently, on corruption that is itself inside the runner
+          # workspace and safe to unlink.
+          if [ -L "$WS" ] || [ ! -d "$WS" ]; then
+            # Judge the PARENT, canonicalized. The heal necessarily acts on a
+            # raw path, and a raw containment match is not enough: the kernel
+            # resolves intermediate components too, so `$RWS/link/sub` matches
+            # "$RWS"/* as a string while naming a file outside it. Resolving
+            # the parent — never $WS itself, which would resolve through the
+            # very link being removed — is what makes the unlink containable.
+            HEAL_PARENT="$(realpath -m -- "$(dirname -- "$WS")" 2>/dev/null)" || { echo "::error::refusing to heal: realpath unavailable, cannot canonicalize the parent of ${WS}"; exit 1; }
+            case "$HEAL_PARENT" in
+              "$RWS"|"$RWS"/*) ;;
+              *) echo "::error::refusing to heal workspace outside the runner workspace: ${WS} (parent: ${HEAL_PARENT}, runner workspace: ${RWS})"; exit 1 ;;
+            esac
+            # The incident this heal exists for leaves no other trace: say what
+            # was found, and where it pointed, before it is gone.
+            if [ -L "$WS" ]; then
+              echo "::warning::healing workspace ${WS}: it was a symlink to $(readlink -- "$WS" 2>/dev/null || echo "<unreadable>")"
+            else
+              echo "::warning::healing workspace ${WS}: it was not a directory"
+            fi
+            # `rm -f` on the RAW path removes the link itself and never
+            # follows it. Both legs fail closed: under `-e` a failure that is
+            # not the last command of an && list is swallowed, and a swallowed
+            # one here would leave the wipe running against a corrupt path.
+            rm -f -- "$WS" || { echo "::error::refusing to continue: could not remove ${WS}"; exit 1; }
+            mkdir -- "$WS" || { echo "::error::refusing to continue: could not recreate ${WS}"; exit 1; }
+          fi
           # Canonicalize before matching: the kernel resolves non-canonical
           # spellings to the guarded roots (`/home/.` -> /home, `//usr` ->
           # /usr), so a raw string match lets them slip past the case arms.
           WS="$(realpath -m -- "$WS" 2>/dev/null)" || { echo "::error::refusing to wipe: realpath unavailable, cannot canonicalize ${GITHUB_WORKSPACE}"; exit 1; }
-          # Trailing slashes slip past the exact-match case arms below
-          # (`/home/` would pass the guard and reach the rm); realpath strips
-          # them too; keep the guard whole if the path reaches this point with
-          # trailing slashes.
           while [ "${WS%/}" != "$WS" ]; do WS="${WS%/}"; done
           case "$WS" in
             ..|../*|*/..|*/../*) echo "::error::refusing to wipe path containing '..': ${WS}"; exit 1 ;;
@@ -106,15 +150,6 @@ jobs:
           # A denylist can only enumerate known roots — the allowlist closes
           # every other one (/tmp, /opt, ...): only a directory inside the
           # runner workspace may be wiped.
-          RWS="${RUNNER_WORKSPACE:?}"
-          RWS="$(realpath -m -- "$RWS" 2>/dev/null)" || { echo "::error::refusing to wipe: realpath unavailable, cannot canonicalize ${RUNNER_WORKSPACE}"; exit 1; }
-          # Mirror the WS strip before building the allowlist pattern; "/"
-          # stripped empty would match every path instead.
-          while [ "${RWS%/}" != "$RWS" ]; do RWS="${RWS%/}"; done
-          if [ -z "$RWS" ]; then echo "::error::refusing to wipe: runner workspace resolved to /"; exit 1; fi
-          case "$RWS" in
-            ..|../*|*/..|*/../*) echo "::error::refusing runner workspace path containing '..': ${RWS}"; exit 1 ;;
-          esac
           case "$WS" in
             "$RWS"/*) ;;
             *) echo "::error::refusing to wipe workspace outside the runner workspace: ${WS} (runner workspace: ${RWS})"; exit 1 ;;
