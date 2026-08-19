@@ -1245,104 +1245,111 @@ export function ChatPane({
             />
           </div>
         )}
-        {/* Panes keep the composer status compact: spinner + elapsed time +
-            token count + cancel hint, but no rotating "witty" loading phrase. */}
-        <StreamingStatus startedAt={activeTurnStartedAt} showPhrase={false} />
-        {(queuedPrompts.length > 0 || liveGoalSnapshot?.goal) && (
-          <div
-            className={composerStatusStyles.root}
-            data-testid="composer-status-stack"
-          >
-            <QueuedPromptDisplay
-              prompts={queuedPrompts}
-              t={t}
-              canMutateMidTurn={canMutateMidTurn}
-              canInsertMidTurn={
-                streamingState !== 'idle' ||
-                connection.goalState?.goal?.status === 'active'
-              }
-              onDelete={removeQueuedPrompt}
-              onInsert={insertQueuedPrompt}
-              onEdit={editQueuedPrompt}
-              onImagePreview={handleImagePreview}
-            />
-            {liveGoalSnapshot?.goal && (
-              <GoalStatusStrip
-                snapshot={liveGoalSnapshot}
-                busy={goalControlBusy}
-                onEdit={() => {
-                  setGoalEditError(null);
-                  setGoalEditOpen(true);
-                }}
-                onPause={() => runGoalControl('pause')}
-                onResume={() => runGoalControl('resume')}
-                onClear={() => runGoalControl('clear')}
+        {/* A pending approval owns the pane footer: the status/queue/editor
+            area below the approval drops out of layout (kept mounted so the
+            draft survives) instead of leaving a live input under the
+            dialog. */}
+        <div className={approvalActive ? styles.composerHidden : undefined}>
+          {/* Panes keep the composer status compact: spinner + elapsed time +
+              token count + cancel hint, but no rotating "witty" loading
+              phrase. */}
+          <StreamingStatus startedAt={activeTurnStartedAt} showPhrase={false} />
+          {(queuedPrompts.length > 0 || liveGoalSnapshot?.goal) && (
+            <div
+              className={composerStatusStyles.root}
+              data-testid="composer-status-stack"
+            >
+              <QueuedPromptDisplay
+                prompts={queuedPrompts}
+                t={t}
+                canMutateMidTurn={canMutateMidTurn}
+                canInsertMidTurn={
+                  streamingState !== 'idle' ||
+                  connection.goalState?.goal?.status === 'active'
+                }
+                onDelete={removeQueuedPrompt}
+                onInsert={insertQueuedPrompt}
+                onEdit={editQueuedPrompt}
+                onImagePreview={handleImagePreview}
               />
-            )}
-          </div>
-        )}
-        {unknownPromptAdmission && (
-          <div
-            className={styles.admissionUnknown}
-            role="status"
-            data-testid="pane-prompt-admission-unknown"
-          >
-            <span>{t('queue.admissionUnknown')}</span>
-            {unknownPromptAdmission.payloadAvailable && (
-              <span className={styles.admissionUnknownActions}>
-                <button type="button" onClick={continueEditingUnknownPrompt}>
-                  {t('queue.continueEditing')}
-                </button>
-                <button type="button" onClick={discardUnknownPromptPayload}>
-                  {t('queue.discardUnknown')}
-                </button>
-              </span>
-            )}
-          </div>
-        )}
-        <ChatEditor
-          ref={editorRef}
-          onSubmit={handleSubmit}
-          onCancel={handleCancel}
-          isRunning={isResponding}
-          commands={commands}
-          queuedMessages={queuedTexts}
-          onPopQueuedMessages={editLastQueuedPrompt}
-          onClearQueuedMessages={clearQueuedPrompts}
-          visibleToolbarActions={paneToolbarActions}
-          workspaceName={showWorkspaceChip ? workspaceLabel : undefined}
-          workspaceTitle={paneWorkspaceCwd}
-          workspaceColor={workspaceAccent}
-          currentMode={connection.currentMode ?? 'default'}
-          sessionWorkflowEnabled={sessionWorkflowEnabled}
-          currentModel={connection.currentModel ?? ''}
-          availableModels={availableModels}
-          onSelectMode={handleSelectMode}
-          onSelectModel={handleSelectModel}
-          reasoning={connection.reasoning}
-          onSelectReasoningEffort={handleSelectReasoningEffort}
-          dialogOpen={approvalActive}
-          disabled={approvalActive || admissionPayloadLocked}
-          voiceTarget={hidden ? undefined : voiceTarget}
-          voiceStatusRevision={voiceStatusRevision}
-          followupState={followupState}
-          onAcceptFollowup={onAcceptFollowup}
-          onDismissFollowup={onDismissFollowup}
-          onImageIngestionNotice={onImageIngestionNotice}
-          sessionId={connection.sessionId}
-          onImagePreview={handleImagePreview}
-          atWorkspaceCwd={paneWorkspaceCwd}
-          placeholderText={t('splitView.composerPlaceholder')}
-        />
-        {CustomComposerFooter && (
-          <CustomComposerFooter
-            disabled={approvalActive || admissionPayloadLocked}
+              {liveGoalSnapshot?.goal && (
+                <GoalStatusStrip
+                  snapshot={liveGoalSnapshot}
+                  busy={goalControlBusy}
+                  onEdit={() => {
+                    setGoalEditError(null);
+                    setGoalEditOpen(true);
+                  }}
+                  onPause={() => runGoalControl('pause')}
+                  onResume={() => runGoalControl('resume')}
+                  onClear={() => runGoalControl('clear')}
+                />
+              )}
+            </div>
+          )}
+          {unknownPromptAdmission && (
+            <div
+              className={styles.admissionUnknown}
+              role="status"
+              data-testid="pane-prompt-admission-unknown"
+            >
+              <span>{t('queue.admissionUnknown')}</span>
+              {unknownPromptAdmission.payloadAvailable && (
+                <span className={styles.admissionUnknownActions}>
+                  <button type="button" onClick={continueEditingUnknownPrompt}>
+                    {t('queue.continueEditing')}
+                  </button>
+                  <button type="button" onClick={discardUnknownPromptPayload}>
+                    {t('queue.discardUnknown')}
+                  </button>
+                </span>
+              )}
+            </div>
+          )}
+          <ChatEditor
+            ref={editorRef}
+            onSubmit={handleSubmit}
+            onCancel={handleCancel}
             isRunning={isResponding}
+            commands={commands}
+            queuedMessages={queuedTexts}
+            onPopQueuedMessages={editLastQueuedPrompt}
+            onClearQueuedMessages={clearQueuedPrompts}
+            visibleToolbarActions={paneToolbarActions}
+            workspaceName={showWorkspaceChip ? workspaceLabel : undefined}
+            workspaceTitle={paneWorkspaceCwd}
+            workspaceColor={workspaceAccent}
             currentMode={connection.currentMode ?? 'default'}
+            sessionWorkflowEnabled={sessionWorkflowEnabled}
             currentModel={connection.currentModel ?? ''}
-            sessionName={connection.displayName}
+            availableModels={availableModels}
+            onSelectMode={handleSelectMode}
+            onSelectModel={handleSelectModel}
+            reasoning={connection.reasoning}
+            onSelectReasoningEffort={handleSelectReasoningEffort}
+            dialogOpen={approvalActive}
+            disabled={approvalActive || admissionPayloadLocked}
+            voiceTarget={hidden ? undefined : voiceTarget}
+            voiceStatusRevision={voiceStatusRevision}
+            followupState={followupState}
+            onAcceptFollowup={onAcceptFollowup}
+            onDismissFollowup={onDismissFollowup}
+            onImageIngestionNotice={onImageIngestionNotice}
+            sessionId={connection.sessionId}
+            onImagePreview={handleImagePreview}
+            atWorkspaceCwd={paneWorkspaceCwd}
+            placeholderText={t('splitView.composerPlaceholder')}
           />
-        )}
+          {CustomComposerFooter && (
+            <CustomComposerFooter
+              disabled={approvalActive || admissionPayloadLocked}
+              isRunning={isResponding}
+              currentMode={connection.currentMode ?? 'default'}
+              currentModel={connection.currentModel ?? ''}
+              sessionName={connection.displayName}
+            />
+          )}
+        </div>
       </div>
     </section>
   );
