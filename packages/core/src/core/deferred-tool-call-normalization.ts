@@ -194,6 +194,20 @@ export async function normalizeDeferredToolCallRequest(
       canonicalTarget,
     );
   }
+  // Issue #6721's fail-closed gate: route the wrapper to a real deferred
+  // tool only after the target schema has actually been shown in the active
+  // model context (delivered by tool_search this session) and its current
+  // schema fingerprint still matches. On absence or mismatch, reject and
+  // direct the model to re-search instead of routing guessed/stale
+  // arguments.
+  const liveFingerprint = toolRegistry.schemaFingerprint(targetTool);
+  if (!toolRegistry.hasPresentedProxySchema(canonicalTarget, liveFingerprint)) {
+    return fail(
+      `Deferred tool "${targetName}" has no presented schema in this session (or its schema changed since it was fetched). Use tool_search to fetch its current schema, then call tool_call again with the matching arguments.`,
+      ToolErrorType.EXECUTION_DENIED,
+      canonicalTarget,
+    );
+  }
   return {
     ok: true,
     resolvedTool: targetTool,

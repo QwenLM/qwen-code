@@ -834,11 +834,27 @@ describe('CoreToolScheduler', () => {
       promptId: string,
       fallbackOwner?: string,
     ) => string;
+    /**
+     * Whether registered deferred tools start with their schema presented
+     * (default true). Set to false to exercise the fail-closed `tool_call`
+     * gate on calls that never went through tool_search.
+     */
+    presentDeferredSchemas?: boolean;
   }) {
     const ensureTool = vi.fn(
       async (name: string) =>
         options.toolsByName.get(name) as AnyDeclarativeTool,
     );
+    const presentedSchemaFingerprints = new Map<string, string>();
+    const fingerprintOf = (tool: { schema?: unknown } | undefined) =>
+      JSON.stringify(tool?.schema ?? {});
+    if (options.presentDeferredSchemas !== false) {
+      for (const [name, tool] of options.toolsByName) {
+        if (tool.shouldDefer) {
+          presentedSchemaFingerprints.set(name, fingerprintOf(tool));
+        }
+      }
+    }
     const mockToolRegistry = {
       getTool: (name: string) => options.toolsByName.get(name),
       ensureTool,
@@ -858,6 +874,12 @@ describe('CoreToolScheduler', () => {
         const tool = options.toolsByName.get(name);
         return !!(tool && tool.shouldDefer && !tool.alwaysLoad);
       },
+      schemaFingerprint: (tool: AnyDeclarativeTool) => fingerprintOf(tool),
+      markProxySchemaPresented: (name: string, fingerprint: string) => {
+        presentedSchemaFingerprints.set(name, fingerprint);
+      },
+      hasPresentedProxySchema: (name: string, fingerprint: string) =>
+        presentedSchemaFingerprints.get(name) === fingerprint,
     } as unknown as ToolRegistry;
 
     const onAllToolCallsComplete = options.onAllToolCallsComplete ?? vi.fn();
@@ -952,6 +974,9 @@ describe('CoreToolScheduler', () => {
       ensureTool,
       onAllToolCallsComplete,
       onToolCallsUpdate,
+      markProxySchemaPresented: (name: string, tool: MockTool) => {
+        presentedSchemaFingerprints.set(name, fingerprintOf(tool));
+      },
     };
   }
 
@@ -2453,6 +2478,57 @@ describe('CoreToolScheduler', () => {
     }
   });
 
+  it('rejects a proxied call when the deny rule names the tool_call wrapper itself', async () => {
+    // Normalization rewrites the wrapper to its target before the target
+    // permission gates run, so a deny of the proxy itself must be checked
+    // against the wrapper identity per call (deny rules are mutable
+    // mid-session).
+    const execute = vi.fn();
+    const toolsByName = new Map<string, MockTool>([
+      [
+        ToolNames.CRON_CREATE,
+        new MockTool({
+          name: ToolNames.CRON_CREATE,
+          shouldDefer: true,
+          execute,
+        }),
+      ],
+    ]);
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        getPermissionsDeny: () => [ToolNames.DEFERRED_TOOL_CALL],
+      });
+
+    await scheduler.schedule(
+      {
+        callId: 'proxy-wrapper-denied',
+        name: ToolNames.DEFERRED_TOOL_CALL,
+        args: {
+          name: ToolNames.CRON_CREATE,
+          arguments: { schedule: '0 9 * * *' },
+        },
+        isClientInitiated: false,
+        prompt_id: 'prompt-proxy',
+      },
+      new AbortController().signal,
+    );
+
+    expect(execute).not.toHaveBeenCalled();
+    const completedCall = (
+      onAllToolCallsComplete.mock.calls[0][0] as ToolCall[]
+    )[0];
+    expect(completedCall.status).toBe('error');
+    if (completedCall.status === 'error') {
+      expect(completedCall.response.error?.message).toBe(
+        'Qwen Code requires permission to use "tool_call", but that permission was declined.',
+      );
+      expect(
+        completedCall.response.responseParts[0].functionResponse?.name,
+      ).toBe(ToolNames.DEFERRED_TOOL_CALL);
+    }
+  });
+
   it('shows the real target identity when a proxied call awaits confirmation', async () => {
     const getConfirmationDetails = vi.fn().mockResolvedValue({
       type: 'exec' as const,
@@ -2535,9 +2611,14 @@ describe('CoreToolScheduler', () => {
         }),
       ],
     ]);
-    const { scheduler, onAllToolCallsComplete } =
+    const cronTool = toolsByName.get(ToolNames.CRON_CREATE)!;
+    const { scheduler, onAllToolCallsComplete, markProxySchemaPresented } =
       createSchedulerForLegacyToolTests({
         toolsByName,
+        // Issue #6721's fail-closed gate: the same-batch call is emitted
+        // before any tool_search result delivered the schema, so it must be
+        // rejected instead of routed on guessed arguments.
+        presentDeferredSchemas: false,
       });
 
     await scheduler.schedule(
@@ -2563,18 +2644,24 @@ describe('CoreToolScheduler', () => {
       new AbortController().signal,
     );
 
-    expect(cronExecute).toHaveBeenCalledWith({ schedule: '0 9 * * *' });
+    expect(cronExecute).not.toHaveBeenCalled();
     const firstBatchCalls = onAllToolCallsComplete.mock
       .calls[0][0] as ToolCall[];
     const proxyCall = firstBatchCalls.find(
       (call) => call.request.callId === 'proxy-same-batch',
     );
-    expect(proxyCall?.status).toBe('success');
-    if (proxyCall?.status === 'success') {
+    expect(proxyCall?.status).toBe('error');
+    if (proxyCall?.status === 'error') {
+      expect(proxyCall.response.error?.message).toContain(
+        'no presented schema',
+      );
       expect(proxyCall.response.responseParts[0].functionResponse?.name).toBe(
         ToolNames.DEFERRED_TOOL_CALL,
       );
     }
+
+    // Once tool_search has delivered the schema, the call routes normally.
+    markProxySchemaPresented(ToolNames.CRON_CREATE, cronTool);
     await scheduler.schedule(
       {
         callId: 'proxy-next-turn',
@@ -2589,7 +2676,7 @@ describe('CoreToolScheduler', () => {
       new AbortController().signal,
     );
 
-    expect(cronExecute).toHaveBeenCalledTimes(2);
+    expect(cronExecute).toHaveBeenCalledTimes(1);
     expect(cronExecute).toHaveBeenLastCalledWith({ schedule: '0 9 * * *' });
   });
 
@@ -14744,6 +14831,9 @@ describe('CoreToolScheduler telemetry spans', () => {
       getToolsByServer: () => [],
       isDeferredProxyPairRegistered: () => true,
       isProxyEligibleDeferredTool: () => true,
+      schemaFingerprint: () => 'fp',
+      markProxySchemaPresented: () => {},
+      hasPresentedProxySchema: () => true,
     } as unknown as ToolRegistry;
     const mockConfig = {
       getSessionId: () => 'test-session-id',
@@ -17384,6 +17474,10 @@ describe('CoreToolScheduler validation retry loop detection', () => {
       isDeferredProxyPairRegistered: () => true,
       isProxyEligibleDeferredTool: (name: string) =>
         name === StrictStringTool.Name,
+      schemaFingerprint: (t: AnyDeclarativeTool) =>
+        JSON.stringify(t.schema ?? {}),
+      markProxySchemaPresented: () => {},
+      hasPresentedProxySchema: () => true,
     } as unknown as ToolRegistry;
 
     const mockConfig = {

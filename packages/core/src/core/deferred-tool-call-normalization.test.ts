@@ -81,6 +81,10 @@ describe('normalizeDeferredToolCallRequest', () => {
       shouldDefer: true,
     });
     registry.registerTool(target);
+    registry.markProxySchemaPresented(
+      ToolNames.CRON_CREATE,
+      registry.schemaFingerprint(target),
+    );
     const result = await normalizeDeferredToolCallRequest(
       request(ToolNames.DEFERRED_TOOL_CALL, {
         name: ToolNames.CRON_CREATE,
@@ -108,6 +112,10 @@ describe('normalizeDeferredToolCallRequest', () => {
       shouldDefer: true,
     });
     registry.registerTool(target);
+    registry.markProxySchemaPresented(
+      ToolNames.AGENT,
+      registry.schemaFingerprint(target),
+    );
     const result = await normalizeDeferredToolCallRequest(
       request(ToolNames.DEFERRED_TOOL_CALL, {
         name: 'task',
@@ -287,8 +295,14 @@ describe('normalizeDeferredToolCallRequest', () => {
 
   it('targets a live eligible deferred tool directly', async () => {
     const registry = createRegistry();
-    registry.registerTool(
-      new MockTool({ name: ToolNames.CRON_CREATE, shouldDefer: true }),
+    const target = new MockTool({
+      name: ToolNames.CRON_CREATE,
+      shouldDefer: true,
+    });
+    registry.registerTool(target);
+    registry.markProxySchemaPresented(
+      ToolNames.CRON_CREATE,
+      registry.schemaFingerprint(target),
     );
 
     const result = await normalizeDeferredToolCallRequest(
@@ -303,6 +317,61 @@ describe('normalizeDeferredToolCallRequest', () => {
     if (result.ok) {
       expect(result.request.name).toBe(ToolNames.CRON_CREATE);
       expect(result.request.providerName).toBe(ToolNames.DEFERRED_TOOL_CALL);
+    }
+  });
+
+  it('rejects a wrapper call whose target schema was never presented', async () => {
+    // Issue #6721's fail-closed gate: the catalog gives the model tool
+    // names, but a wrapper call must not route until tool_search has
+    // actually delivered the target schema this session.
+    const registry = createRegistry();
+    registry.registerTool(
+      new MockTool({ name: ToolNames.CRON_CREATE, shouldDefer: true }),
+    );
+
+    const result = await normalizeDeferredToolCallRequest(
+      request(ToolNames.DEFERRED_TOOL_CALL, {
+        name: ToolNames.CRON_CREATE,
+        arguments: { schedule: '0 9 * * *' },
+      }),
+      registry,
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errorType).toBe(ToolErrorType.EXECUTION_DENIED);
+      expect(result.error.message).toContain('no presented schema');
+      expect(result.error.message).toContain(ToolNames.TOOL_SEARCH);
+    }
+  });
+
+  it('rejects a wrapper call whose presented schema fingerprint no longer matches', async () => {
+    // The schema changed since presentation (e.g. an MCP server reconnected
+    // with a revised schema): fail closed and direct the model to re-search
+    // instead of routing stale arguments.
+    const registry = createRegistry();
+    const target = new MockTool({
+      name: ToolNames.CRON_CREATE,
+      shouldDefer: true,
+    });
+    registry.registerTool(target);
+    registry.markProxySchemaPresented(
+      ToolNames.CRON_CREATE,
+      'stale-fingerprint',
+    );
+
+    const result = await normalizeDeferredToolCallRequest(
+      request(ToolNames.DEFERRED_TOOL_CALL, {
+        name: ToolNames.CRON_CREATE,
+        arguments: { schedule: '0 9 * * *' },
+      }),
+      registry,
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errorType).toBe(ToolErrorType.EXECUTION_DENIED);
+      expect(result.error.message).toContain('no presented schema');
     }
   });
 

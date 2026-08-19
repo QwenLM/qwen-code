@@ -2478,6 +2478,46 @@ export class CoreToolScheduler {
           effectiveReqInfo = normalizedRequest.request;
           const canonicalName = canonicalToolName(effectiveReqInfo.name);
 
+          // The permission gates below only see the unwrapped target of a
+          // deferred proxy call (normalization rewrites the request first),
+          // so a deny rule naming the wrapper (`tool_call`) itself would
+          // never fire. Deny rules are mutable mid-session, so check the
+          // wrapper identity per call before the target checks.
+          if (
+            canonicalToolName(reqInfo.name) === ToolNames.DEFERRED_TOOL_CALL
+          ) {
+            const wrapperPm = this.config.getPermissionManager?.();
+            const wrapperDenied = wrapperPm
+              ? !(await wrapperPm.isToolEnabled(ToolNames.DEFERRED_TOOL_CALL))
+              : (this.config.getPermissionsDeny?.() ?? []).some(
+                  (excludedTool) =>
+                    excludedTool.toLowerCase().trim() ===
+                    ToolNames.DEFERRED_TOOL_CALL.toLowerCase(),
+                );
+            if (recordPrevalidationCancellation()) continue;
+            if (wrapperDenied) {
+              const matchingRule = wrapperPm?.findMatchingDenyRule({
+                toolName: ToolNames.DEFERRED_TOOL_CALL,
+              });
+              const ruleInfo = matchingRule
+                ? ` Matching deny rule: "${matchingRule}".`
+                : '';
+              const permissionErrorMessage = `Qwen Code requires permission to use "${ToolNames.DEFERRED_TOOL_CALL}", but that permission was declined.${ruleInfo}`;
+              newToolCalls.push({
+                status: 'error',
+                request: reqInfo,
+                response: createErrorResponse(
+                  reqInfo,
+                  new Error(permissionErrorMessage),
+                  ToolErrorType.EXECUTION_DENIED,
+                  'not_started',
+                ),
+                durationMs: 0,
+              });
+              continue;
+            }
+          }
+
           // Check if the tool is excluded due to permissions/environment restrictions
           // This check should happen before registry lookup to provide a clear permission error
           const pm = this.config.getPermissionManager?.();

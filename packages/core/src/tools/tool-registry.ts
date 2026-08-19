@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash } from 'node:crypto';
 import type { FunctionDeclaration } from '@google/genai';
 import type {
   AnyDeclarativeTool,
@@ -205,6 +206,13 @@ export class ToolRegistry {
   // revealed, a tool's schema is included in subsequent function-declaration
   // lists even though it would normally be hidden.
   private revealedDeferred: Set<string> = new Set();
+  // Schema fingerprints of deferred tools whose schema tool_search has
+  // delivered this session, keyed by canonical tool name. The `tool_call`
+  // proxy gates on this (fail closed): a wrapper call only routes once the
+  // model has been shown the target's current schema (issue #6721), so
+  // guessed arguments against an unseen or since-changed schema are
+  // rejected and re-presented instead of executed.
+  private proxySchemaPresentations: Map<string, string> = new Map();
   private config: Config;
   private mcpClientManager: McpClientManager;
 
@@ -859,6 +867,36 @@ export class ToolRegistry {
    */
   clearRevealedDeferredTools(): void {
     this.revealedDeferred.clear();
+    this.proxySchemaPresentations.clear();
+  }
+
+  /**
+   * Stable fingerprint of a tool's current schema. The `tool_call` proxy
+   * compares the fingerprint recorded when tool_search delivered the schema
+   * against the live schema at call time (issue #6721's fail-closed gate).
+   */
+  schemaFingerprint(tool: AnyDeclarativeTool): string {
+    return createHash('sha256')
+      .update(JSON.stringify(tool.schema ?? {}))
+      .digest('hex');
+  }
+
+  /**
+   * Record that tool_search delivered this tool's schema to the model,
+   * fingerprinting the schema version that was delivered.
+   */
+  markProxySchemaPresented(name: string, fingerprint: string): void {
+    this.proxySchemaPresentations.set(name, fingerprint);
+  }
+
+  /**
+   * Whether the tool's schema was presented to the model this session and
+   * still matches the live schema. `false` when never presented or when the
+   * schema changed since presentation (e.g. an MCP server reconnected with a
+   * revised schema).
+   */
+  hasPresentedProxySchema(name: string, fingerprint: string): boolean {
+    return this.proxySchemaPresentations.get(name) === fingerprint;
   }
 
   /**

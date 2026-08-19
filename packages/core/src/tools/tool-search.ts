@@ -149,12 +149,19 @@ function formatCatalogLine({ name, description }: DeferredToolSummary): string {
 export function buildToolSearchDescription(
   registry: Pick<
     ToolRegistry,
-    'getDeferredToolSummary' | 'isDeferredToolRevealed'
+    'getDeferredToolSummary' | 'isDeferredToolRevealed' | 'isDeferredAndHidden'
   >,
 ): string {
+  const subagentLike = isSubagentLikeExecutionContext();
   const deferredTools = registry
     .getDeferredToolSummary()
-    .filter((tool) => !registry.isDeferredToolRevealed(tool.name));
+    .filter((tool) => !registry.isDeferredToolRevealed(tool.name))
+    // Forks and explicit-tool-list subagents have no `tool_call` proxy and
+    // never declare hidden deferred tools, so advertising them would invite
+    // calls that the provider can only reject as unknown functions.
+    .filter(
+      (tool) => !subagentLike || !registry.isDeferredAndHidden(tool.name),
+    );
   if (deferredTools.length === 0) {
     return `${toolSearchDescription}\nNo deferred tools are currently available.`;
   }
@@ -302,9 +309,16 @@ class ToolSearchInvocation extends BaseToolInvocation<
 
   private collectCandidates(): AnyDeclarativeTool[] {
     const registry = this.config.getToolRegistry();
-    return registry
-      .getAllTools()
-      .filter((tool) => registry.isDeferredAndHidden(tool.name));
+    const subagentLike = isSubagentLikeExecutionContext();
+    return registry.getAllTools().filter((tool) => {
+      if (!tool.shouldDefer) return false;
+      // Hidden deferred tools are proxy-routed in the main session but are
+      // never declared (and have no proxy) in forks/subagents, so they are
+      // not searchable there.
+      return subagentLike
+        ? !registry.isDeferredAndHidden(tool.name)
+        : registry.isDeferredAndHidden(tool.name);
+    });
   }
 
   private async loadAndReturnSchemas(
@@ -347,6 +361,17 @@ class ToolSearchInvocation extends BaseToolInvocation<
         blocked.push(canonical);
         continue;
       }
+      // Hidden deferred tools are proxy-routed in the main session, but forks
+      // and explicit-tool-list subagents have no proxy and never declare
+      // them — returning the bare schema would invite an unknown-function
+      // call. Report them as unavailable instead.
+      if (
+        isSubagentLikeExecutionContext() &&
+        registry.isDeferredAndHidden(canonical)
+      ) {
+        blocked.push(canonical);
+        continue;
+      }
       // Treat ensureTool throws the same as a null return: log + report
       // missing. One failing lazy factory must not discard schemas that were
       // loaded successfully earlier in the same search batch.
@@ -381,6 +406,13 @@ class ToolSearchInvocation extends BaseToolInvocation<
         registry.isProxyEligibleDeferredTool(canonical)
       ) {
         deferredToolNames.push(canonical);
+        // Issue #6721's fail-closed gate: the `tool_call` proxy may only
+        // route to a target whose schema was actually delivered, and only
+        // while it still matches. Fingerprint the delivered version.
+        registry.markProxySchemaPresented(
+          canonical,
+          registry.schemaFingerprint(tool),
+        );
       } else {
         directlyDeclared.push(canonical);
       }
@@ -400,11 +432,15 @@ class ToolSearchInvocation extends BaseToolInvocation<
     }
     let blockedErrorMessage: string | undefined;
     if (blocked.length > 0) {
-      const blockedMessages = blocked.map((name) =>
-        isLeaderOnlyToolUnavailableInSubagent(name)
-          ? getLeaderOnlyToolUnavailableMessage(name)
-          : getSubagentPlanToolUnavailableMessage(name),
-      );
+      const blockedMessages = blocked.map((name) => {
+        if (isLeaderOnlyToolUnavailableInSubagent(name)) {
+          return getLeaderOnlyToolUnavailableMessage(name);
+        }
+        if (registry.isDeferredAndHidden(name)) {
+          return `${name} is not available in this subagent: it is a deferred tool that only the main session can route (via tool_call). Use the tools declared for this session instead.`;
+        }
+        return getSubagentPlanToolUnavailableMessage(name);
+      });
       blockedErrorMessage = blockedMessages.join('\n');
       const header = llmContent ? '\n\n' : '';
       llmContent += `${header}Unavailable: ${blockedErrorMessage}`;

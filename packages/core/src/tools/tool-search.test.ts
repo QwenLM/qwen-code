@@ -771,11 +771,13 @@ describe('ToolSearchTool', () => {
     },
   );
 
-  it('select: loads allowed tools while rejecting plan lifecycle tools inside subagent context', async () => {
+  it('select: loads declared tools while rejecting plan lifecycle tools inside subagent context', async () => {
+    // A declared (non-deferred) tool stays loadable for schema inspection;
+    // plan lifecycle tools remain blocked in subagent contexts.
     registry.registerTool(
       new MockTool({
         name: ToolNames.READ_FILE,
-        shouldDefer: true,
+        shouldDefer: false,
       }),
     );
     registry.registerTool(
@@ -806,6 +808,52 @@ describe('ToolSearchTool', () => {
     expect(result.error).toBeUndefined();
     expect(result.returnDisplay).toBe('Loaded 1 tool(s), 1 unavailable');
     expect(String(result.llmContent)).not.toContain('tool_call');
+  });
+
+  it('select: reports hidden deferred tools as unavailable inside subagent context', async () => {
+    // Forks and explicit-tool-list subagents have no tool_call proxy and
+    // never declare hidden deferred tools, so serving the bare schema would
+    // only invite an unknown-function call.
+    registry.registerTool(
+      new MockTool({
+        name: 'probeDeferredTool',
+        shouldDefer: true,
+      }),
+    );
+
+    const tool = new ToolSearchTool(config);
+    const result = await runWithAgentContext('agent-1', () =>
+      tool
+        .build({ query: 'select:probeDeferredTool' })
+        .execute(new AbortController().signal),
+    );
+
+    expect(String(result.llmContent)).not.toContain(
+      '"name":"probeDeferredTool"',
+    );
+    expect(String(result.llmContent)).toContain(
+      'probeDeferredTool is not available in this subagent',
+    );
+    expect(String(result.returnDisplay)).toContain('1 unavailable');
+  });
+
+  it('omits hidden deferred tools from the catalog in subagent context', async () => {
+    registry.registerTool(
+      new MockTool({
+        name: 'probeDeferredTool',
+        shouldDefer: true,
+        description: 'hidden from forks',
+      }),
+    );
+
+    const tool = new ToolSearchTool(config);
+    const description = await runWithAgentContext(
+      'agent-1',
+      async () => tool.schema.description,
+    );
+
+    expect(description).not.toContain('probeDeferredTool');
+    expect(description).toContain('No deferred tools are currently available.');
   });
 
   it('select: lets plan-required teammates inspect exit_plan_mode but not enter_plan_mode', async () => {
@@ -1093,15 +1141,18 @@ describe('ToolSearchTool', () => {
   });
 
   it('refuses oversized subagent batches instead of emitting unbounded inline schemas', async () => {
-    // Subagent/teammate contexts load every schema as directly declared, and
+    // Subagent/teammate contexts load declared schemas directly, and
     // tool_search is exempt from scheduler
     // truncation, so the budget guard must still cap the batch — otherwise a
     // disabled batch budget lets unbounded schema text enter context.
+    // alwaysLoad keeps the tools declared (not hidden) in the subagent
+    // registry so they stay loadable there.
     registry.registerTool(
       new MockTool({
         name: 'subagent_small',
         description: 'a'.repeat(200),
         shouldDefer: true,
+        alwaysLoad: true,
       }),
     );
     registry.registerTool(
@@ -1109,6 +1160,7 @@ describe('ToolSearchTool', () => {
         name: 'subagent_oversized',
         description: 'b'.repeat(2000),
         shouldDefer: true,
+        alwaysLoad: true,
       }),
     );
     registry.registerTool(
