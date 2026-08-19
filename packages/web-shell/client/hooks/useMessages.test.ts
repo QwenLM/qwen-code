@@ -829,6 +829,155 @@ describe('background agent task reconciliation', () => {
     vi.useRealTimers();
   });
 
+  it('ignores a permanent failure that settles after approval engages', async () => {
+    const probe = deferred<BackgroundAgentResolution>();
+    hookState.blocks = [backgroundAgentBlock('agent-call')];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockReturnValueOnce(probe.promise);
+    const { container, render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1);
+
+    hookState.blocks = [
+      baseBlock({
+        id: 'perm-agent',
+        kind: 'permission',
+        requestId: 'req-agent',
+        sessionId: 'session-1',
+        title: 'Launch agent',
+        options: [{ optionId: 'proceed_once', label: 'Allow', raw: {} }],
+        toolCall: {
+          toolCallId: 'agent-call',
+          kind: 'other',
+          status: 'pending',
+          title: 'Launch agent',
+          rawInput: { run_in_background: true },
+        },
+        preview: { kind: 'generic' as const },
+      }),
+      backgroundAgentBlock('agent-call'),
+    ];
+    await act(async () => render());
+    await act(async () => {
+      probe.reject(
+        new DaemonHttpError(
+          400,
+          { code: 'invalid_subagent_ref' },
+          'bad request',
+        ),
+      );
+    });
+
+    expect(container.textContent).toBe('pending');
+    await act(async () => unmount());
+  });
+
+  it('does not count a late 404 after approval engages', async () => {
+    vi.useFakeTimers();
+    const probe = deferred<BackgroundAgentResolution>();
+    const missing = new DaemonHttpError(
+      404,
+      { code: 'session_not_found', toolCallId: 'agent-call' },
+      'not found',
+    );
+    hookState.blocks = [backgroundAgentBlock('agent-call')];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession
+      .mockReturnValueOnce(probe.promise)
+      .mockRejectedValue(missing);
+    const { container, render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    hookState.blocks = [
+      baseBlock({
+        id: 'perm-agent',
+        kind: 'permission',
+        requestId: 'req-agent',
+        sessionId: 'session-1',
+        title: 'Launch agent',
+        options: [{ optionId: 'proceed_once', label: 'Allow', raw: {} }],
+        toolCall: {
+          toolCallId: 'agent-call',
+          kind: 'other',
+          status: 'pending',
+          title: 'Launch agent',
+          rawInput: { run_in_background: true },
+        },
+        preview: { kind: 'generic' as const },
+      }),
+      backgroundAgentBlock('agent-call'),
+    ];
+    await act(async () => render());
+    await act(async () => probe.reject(missing));
+    expect(container.textContent).toBe('pending');
+
+    hookState.blocks = [
+      { ...hookState.blocks[0], resolved: 'selected:proceed_once' },
+      hookState.blocks[1],
+    ];
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2),
+    );
+    expect(container.textContent).toBe('pending');
+
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+    await vi.waitFor(() => expect(container.textContent).toBe('failed'));
+
+    await act(async () => unmount());
+    vi.useRealTimers();
+  });
+
+  it('paces transient-error attempts across permission churn', async () => {
+    vi.useFakeTimers();
+    const agent = backgroundAgentBlock('agent-call');
+    const permission = baseBlock({
+      id: 'perm-file',
+      kind: 'permission',
+      requestId: 'req-file',
+      sessionId: 'session-1',
+      title: 'Write file',
+      options: [{ optionId: 'allow', label: 'Allow', raw: {} }],
+      toolCall: {
+        toolCallId: 'file-call',
+        kind: 'other',
+        status: 'pending',
+        title: 'Write file',
+        rawInput: {},
+      },
+      preview: { kind: 'generic' as const },
+    });
+    hookState.blocks = [agent];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockRejectedValue(
+      new DaemonHttpError(500, { code: 'internal_error' }, 'server error'),
+    );
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { container, render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    for (let index = 0; index < 8; index += 1) {
+      hookState.blocks = index % 2 === 0 ? [permission, agent] : [agent];
+      await act(async () => render());
+      await vi.waitFor(() =>
+        expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(
+          index + 2,
+        ),
+      );
+    }
+
+    expect(container.textContent).toBe('pending');
+    expect(warnSpy).not.toHaveBeenCalledWith(
+      '[web-shell] background agent reconciliation retry budget exhausted; marking agents failed',
+      expect.anything(),
+    );
+
+    await act(async () => unmount());
+    warnSpy.mockRestore();
+    vi.useRealTimers();
+  });
+
   it('keeps the missing-agent grace when an unrelated permission re-probes', async () => {
     vi.useFakeTimers();
     // Phase 1: a background agent probes and 404s once (miss 1).
@@ -1448,13 +1597,15 @@ describe('background agent task reconciliation', () => {
       );
       expect(container.textContent).toBe('pending');
 
-      // The double-count must not shorten the documented budget: failure
-      // still takes eight erroring rounds in total.
-      for (const delay of [6_000, 12_000, 24_000, 48_000, 60_000, 60_000]) {
+      // The immediate identity-triggered round is inside the pacing window,
+      // so only wall-clock-paced errors consume the documented budget.
+      for (const delay of [
+        6_000, 12_000, 24_000, 48_000, 60_000, 60_000, 60_000,
+      ]) {
         await act(async () => vi.advanceTimersByTimeAsync(delay));
       }
       await vi.waitFor(() => {
-        expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(8);
+        expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(9);
         expect(container.textContent).toBe('failed');
       });
     } finally {

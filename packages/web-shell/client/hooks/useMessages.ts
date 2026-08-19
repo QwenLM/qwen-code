@@ -277,6 +277,7 @@ export function useMessagesFromBlocks(
   // change (for example another permission appearing) cannot collapse the
   // retry ladder into two immediate misses.
   const missTimestampsRef = useRef(new Map<string, number>());
+  const errorTimestampsRef = useRef(new Map<string, number>());
   const lastConnectionKeyRef = useRef<string | undefined>(undefined);
 
   useEffect(() => {
@@ -289,6 +290,7 @@ export function useMessagesFromBlocks(
       lastConnectionKeyRef.current = connectionKey;
       missingAgentMissesRef.current.clear();
       missTimestampsRef.current.clear();
+      errorTimestampsRef.current.clear();
       retryBackoffRef.current = {
         key: '',
         attempts: 0,
@@ -333,6 +335,9 @@ export function useMessagesFromBlocks(
         missingAgentMissesRef.current.delete(callId);
         missTimestampsRef.current.delete(callId);
       }
+    }
+    for (const callId of [...errorTimestampsRef.current.keys()]) {
+      if (!callIds.includes(callId)) errorTimestampsRef.current.delete(callId);
     }
     const roundErrors: Array<{ callId: string; error: unknown }> = [];
     const roundNotFounds: string[] = [];
@@ -414,6 +419,10 @@ export function useMessagesFromBlocks(
         for (const callId of succeeded) {
           missingAgentMissesRef.current.delete(callId);
           missTimestampsRef.current.delete(callId);
+          errorTimestampsRef.current.delete(callId);
+        }
+        for (const callId of [...resolutions.keys()]) {
+          if (!callIds.includes(callId)) resolutions.delete(callId);
         }
         for (const callId of notFounds) {
           if (!callIds.includes(callId)) continue;
@@ -450,7 +459,17 @@ export function useMessagesFromBlocks(
           const errorAttempts = new Map<string, number>();
           for (const entry of errors) {
             if (!callIds.includes(entry.callId)) continue;
-            const count = (previous.errorAttempts.get(entry.callId) ?? 0) + 1;
+            const now = Date.now();
+            const lastError = errorTimestampsRef.current.get(entry.callId);
+            const previousCount = previous.errorAttempts.get(entry.callId) ?? 0;
+            const count =
+              lastError !== undefined &&
+              now - lastError < BACKGROUND_AGENT_RECONCILIATION_RETRY_BASE_MS
+                ? previousCount
+                : previousCount + 1;
+            if (count !== previousCount) {
+              errorTimestampsRef.current.set(entry.callId, now);
+            }
             errorAttempts.set(entry.callId, count);
             if (count >= BACKGROUND_AGENT_RECONCILIATION_MAX_ATTEMPTS) {
               failedCallIds.push(entry.callId);
