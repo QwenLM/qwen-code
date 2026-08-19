@@ -438,6 +438,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
   private connectionStartedAt = 0;
   private lastTodoPollAt = 0;
   private connected = false;
+  private notificationWatermarkPulledBack = false;
 
   constructor(
     name: string,
@@ -990,6 +991,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         endTime,
         cursor: '0',
       };
+      this.notificationWatermarkPulledBack = false;
       const page = await this.client.listDirectMessages(
         checkpoint.startTime,
         checkpoint.endTime,
@@ -1013,7 +1015,17 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         if (!notification) continue;
         await this.processDocumentNotification(message, key, notification);
       }
-      if (page.nextCursor) {
+      if (this.notificationWatermarkPulledBack) {
+        // R4-4: a stale document notification replayed while this window's
+        // fetch was in flight, and `handleImMessage` pulled the watermark back
+        // to cover it. That replay was left UNMARKED on purpose for history
+        // polling, so finishing this window normally would undo the rescue:
+        // `checkpoint.endTime` is always past the replay's `eventTime`, and
+        // `checkpoint` itself was derived from the pre-pullback watermark, so
+        // resuming it would skip the replay too. Both are dropped; the next
+        // poll re-derives a window from the pulled-back watermark.
+        this.cursor.notificationCheckpoint = undefined;
+      } else if (page.nextCursor) {
         this.cursor.notificationCheckpoint = {
           ...checkpoint,
           cursor: page.nextCursor,
@@ -1315,6 +1327,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         this.cursor.notificationWatermark ?? this.connectionStartedAt,
         message.eventTime,
       );
+      this.notificationWatermarkPulledBack = true;
       this.saveCursor();
       return;
     }

@@ -1011,6 +1011,49 @@ describe('DwsChannel', () => {
     ]);
   });
 
+  // R4-4: the pullback above only rescues the replay if the poll that was in
+  // flight when it happened does not finish by writing its own window's end
+  // back over it. `checkpoint.endTime` is always past the replay's `eventTime`,
+  // and the replay is left UNMARKED on purpose — so one clobber puts it outside
+  // every future window, forever, with no log and no error.
+  it('keeps the stale-replay pullback when a poll was already in flight', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    const replay = message(
+      'user_im_message_receive_o2o_all',
+      'replayed-in-flight',
+      documentMentionCard('doc-inflight', 'comment-inflight'),
+      { eventTime: Date.now() - 60_000 },
+    );
+    const windows: Array<[number, number]> = [];
+    const listDirectMessages =
+      client.listDirectMessages.getMockImplementation();
+    client.listDirectMessages.mockImplementation(
+      async (startTime, endTime, signal, cursor) => {
+        windows.push([startTime, endTime]);
+        // The replay lands while this window's fetch is awaiting — the exact
+        // race `runLoop` opens on connect, since the IM subscriptions start
+        // before the first poll.
+        if (windows.length === 1) await client.emit(1, replay);
+        return listDirectMessages!(startTime, endTime, signal, cursor);
+      },
+    );
+
+    await channel.poll();
+    client.directMessages = [replay];
+    await channel.poll();
+
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({
+        chatId: 'doc-inflight',
+        threadId: 'comment-inflight',
+      }),
+    ]);
+    // The second window has to actually reach back over the replay; asserting
+    // only on `inbound` would pass on a fake that ignored its window.
+    expect(windows[1][0]).toBeLessThanOrEqual(replay.eventTime!);
+  });
+
   it('accepts ordinary direct messages and replies to that user', async () => {
     const client = new FakeDwsClient();
     const channel = await readyChannel(client);
