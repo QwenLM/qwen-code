@@ -86,6 +86,18 @@ describe('collectRecordableWorkspaceFiles', () => {
     expect(collected.depthLimited).toBe(false);
   });
 
+  it('does not flag depth limits for an empty directory nested below a skipped-empty parent', async () => {
+    const root = await workspace();
+    await mkdir(path.join(root, 'a', 'b', 'c', 'd', 'e', 'f'), {
+      recursive: true,
+    });
+    await writeFile(path.join(root, 'shallow.xlsx'), 'xlsx');
+
+    const collected = await collectRecordableWorkspaceFiles(root, '', root);
+    expect(collected.files).toEqual(['shallow.xlsx']);
+    expect(collected.depthLimited).toBe(false);
+  });
+
   it('signals depth-limited truncation instead of silently dropping deep files', async () => {
     const root = await workspace();
     const deepParts = Array.from(

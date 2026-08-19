@@ -140,6 +140,31 @@ describe('turnOutputSelectors', () => {
     expect(getArtifactsByTurn(messages, artifacts).get('u1')).toBeUndefined();
   });
 
+  it('groups expanded directory children through the workspace cwd', () => {
+    const messages = [
+      userMessage('u1', 'export excel'),
+      toolGroup('tg1', [
+        {
+          callId: 'call-1',
+          toolName: 'record_artifact',
+          status: 'completed',
+          args: { workspacePath: '/workspace/project/reports' },
+        },
+      ]),
+    ];
+    const artifacts = [
+      {
+        id: 'artifact-1',
+        workspacePath: 'reports/day1.xlsx',
+        toolCallId: 'call-1',
+      },
+    ] as DaemonSessionArtifact[];
+
+    expect(
+      getArtifactsByTurn(messages, artifacts, '/workspace/project').get('u1'),
+    ).toEqual(artifacts);
+  });
+
   it('groups artifacts by the turn that recorded them', () => {
     const messages = [
       userMessage('u1', 'make report'),

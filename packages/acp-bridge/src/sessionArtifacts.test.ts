@@ -2065,6 +2065,43 @@ describe('SessionArtifactStore', () => {
     ).rejects.toMatchObject({ field: 'title' });
   });
 
+  it('expands an in-workspace directory symlink and rejects an escaping one', async () => {
+    await fs.mkdir(path.join(workspace, 'real-reports'));
+    await fs.writeFile(path.join(workspace, 'real-reports', 'a.xlsx'), 'xlsx');
+    await fs.symlink(
+      path.join(workspace, 'real-reports'),
+      path.join(workspace, 'reports-link'),
+    );
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-out-dir-'));
+    try {
+      await fs.mkdir(path.join(outside, 'secret'));
+      await fs.writeFile(path.join(outside, 'secret', 'x.xlsx'), 'x');
+      await fs.symlink(
+        path.join(outside, 'secret'),
+        path.join(workspace, 'escape-dir'),
+      );
+      const store = new SessionArtifactStore({
+        sessionId: 's-dir-symlink',
+        workspaceCwd: workspace,
+      });
+      const expanded = await store.upsertMany(
+        [{ title: 'Linked', workspacePath: 'reports-link' }],
+        { strict: true },
+      );
+      expect(
+        expanded.changes.map((change) => change.artifact?.workspacePath),
+      ).toEqual(['real-reports/a.xlsx']);
+
+      await expect(
+        store.upsertMany([{ title: 'Escape', workspacePath: 'escape-dir' }], {
+          strict: true,
+        }),
+      ).rejects.toMatchObject({ field: 'workspacePath' });
+    } finally {
+      await fs.rm(outside, { recursive: true, force: true });
+    }
+  });
+
   it('keeps a curated title when a later directory expansion covers the same file', async () => {
     await fs.mkdir(path.join(workspace, 'reports'));
     await fs.writeFile(path.join(workspace, 'reports', 'q3.xlsx'), 'xlsx');

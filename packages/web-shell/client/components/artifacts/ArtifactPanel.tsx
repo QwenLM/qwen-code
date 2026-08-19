@@ -2564,6 +2564,9 @@ function DownloadableWorkspaceArtifact({
           />
           <Field label="Size" value={formatArtifactSize(artifact.sizeBytes)} />
           {location ? <Field label="Location" value={location} /> : null}
+          {artifact.status !== 'available' && artifact.status !== 'changed' ? (
+            <Field label="Status" value={artifact.status ?? 'missing'} />
+          ) : null}
         </div>
         <div className={styles.downloadRow}>
           <button

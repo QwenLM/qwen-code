@@ -85,22 +85,9 @@ async function walkRecordableWorkspaceFiles(
   }
   if (depth > MAX_DIRECTORY_ARTIFACT_DEPTH) {
     try {
-      const peek = await fs.readdir(absoluteDir, { withFileTypes: true });
       return {
         truncated: false,
-        depthLimited: peek.some((entry) => {
-          if (entry.isSymbolicLink()) {
-            return false;
-          }
-          if (entry.isDirectory()) {
-            return !shouldSkipDirectoryArtifactName(entry.name);
-          }
-          return (
-            entry.isFile() &&
-            !entry.name.startsWith('.') &&
-            !entry.name.startsWith('~$')
-          );
-        }),
+        depthLimited: await hasRecordableDescendant(absoluteDir, 8),
         unreadable: false,
       };
     } catch {
@@ -168,6 +155,39 @@ async function walkRecordableWorkspaceFiles(
     }
   }
   return { truncated, depthLimited, unreadable };
+}
+
+async function hasRecordableDescendant(
+  absoluteDir: string,
+  remainingDepth: number,
+): Promise<boolean> {
+  if (remainingDepth < 0) {
+    return false;
+  }
+  const entries = await fs.readdir(absoluteDir, { withFileTypes: true });
+  for (const entry of entries) {
+    if (entry.isSymbolicLink()) {
+      continue;
+    }
+    if (
+      entry.isFile() &&
+      !entry.name.startsWith('.') &&
+      !entry.name.startsWith('~$')
+    ) {
+      return true;
+    }
+    if (
+      entry.isDirectory() &&
+      !shouldSkipDirectoryArtifactName(entry.name) &&
+      (await hasRecordableDescendant(
+        path.join(absoluteDir, entry.name),
+        remainingDepth - 1,
+      ))
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function isOutsidePath(relative: string): boolean {

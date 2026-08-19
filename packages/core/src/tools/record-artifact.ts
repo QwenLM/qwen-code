@@ -217,7 +217,7 @@ class RecordArtifactInvocation extends BaseToolInvocation<
     const parentDescription = trimOptional(this.params.description);
     const artifacts: ToolArtifact[] = [];
     for (const workspacePath of collected.files) {
-      const title = path.posix.basename(workspacePath);
+      const title = path.posix.basename(workspacePath).trim();
       const description =
         parentDescription ||
         (parentTitle && parentTitle !== title ? parentTitle : undefined);

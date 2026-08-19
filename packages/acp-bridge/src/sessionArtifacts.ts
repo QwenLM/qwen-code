@@ -343,7 +343,6 @@ export class SessionArtifactStore {
                   item,
                   ++this.receivedSeq,
                   options.trustedPublisher === true,
-                  item === input ? {} : { hashWorkspaceContent: false },
                 ),
               );
             } catch (error) {
@@ -1426,7 +1425,7 @@ export class SessionArtifactStore {
     }
     return {
       inputs: collected.files.map((filePath) => {
-        const title = path.posix.basename(filePath);
+        const title = path.posix.basename(filePath).trim();
         const description =
           parentDescription ||
           (parentTitle && parentTitle !== title ? parentTitle : undefined);

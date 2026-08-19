@@ -2351,6 +2351,39 @@ describe('ArtifactPanel download-only workspace artifacts', () => {
     expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
   });
 
+  it('shows status and disables download for a missing document artifact', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        artifactPanel({
+          id: 'review-artifact',
+          kind: 'document',
+          storage: 'workspace',
+          source: 'tool',
+          status: 'missing',
+          title: 'Q3 workbook',
+          workspacePath: 'reports/q3.xlsx',
+          retention: 'ephemeral',
+          clientRetained: false,
+          createdAt: '2026-08-18T00:00:00.000Z',
+          updatedAt: '2026-08-18T00:00:00.000Z',
+        }),
+      ),
+    );
+    await flush();
+
+    expect(container.textContent).toMatch(/missing/i);
+    const download = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('Download'),
+    );
+    expect(download).toBeTruthy();
+    expect(download).toHaveProperty('disabled', true);
+  });
+
   it('does not read workspace bytes when stat says the path is a directory', async () => {
     mockWorkspaceActions.stat.mockResolvedValue({
       type: 'directory',
