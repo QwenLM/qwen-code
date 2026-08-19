@@ -7,6 +7,7 @@
 import {
   emitDaemonLog,
   extractDaemonHttpTraceContext,
+  extractInboundTraceId,
   hashDaemonWorkspace,
   isTelemetrySdkInitialized,
   recordDaemonError,
@@ -385,6 +386,13 @@ interface ResolvedDaemonTelemetryRoute {
 
 interface DaemonTelemetryResponseContext {
   workspaceCwd?: string;
+  /**
+   * Caller trace id from a valid inbound `traceparent` header, captured with
+   * telemetry disabled (with telemetry on the request span already carries
+   * it into the log line's trace prefix). Consumed by the access log for the
+   * no-backend log-based join.
+   */
+  inboundTraceId?: string;
 }
 
 const daemonTelemetryResponseContext = Symbol('daemonTelemetryResponseContext');
@@ -472,6 +480,23 @@ export function setDaemonTelemetryWorkspace(
     }
   } catch {
     // Telemetry must not affect request handling.
+  }
+}
+
+/**
+ * The caller trace id captured from a valid inbound `traceparent` header when
+ * telemetry is disabled. The access log reads it so a request's log line
+ * still joins with the caller's logs (or trace backend) with no daemon-side
+ * telemetry at all.
+ */
+export function getDaemonTelemetryInboundTraceId(
+  res: Response,
+): string | undefined {
+  try {
+    return (res as TelemetryResponse)[daemonTelemetryResponseContext]
+      ?.inboundTraceId;
+  } catch {
+    return undefined;
   }
 }
 
@@ -745,9 +770,12 @@ export function daemonTelemetryMiddleware(
         : undefined;
     const deferredRuntime = getDeferredRuntimeRequestTiming(req);
     const startMs = deferredRuntime?.startedAt.getTime() ?? Date.now();
-    // Skip extraction entirely when telemetry is off — withDaemonSpan would
-    // short-circuit anyway, so the header parse would be wasted hot-path work.
+    // With telemetry on, extract the full W3C context (span parent + forced
+    // sampling). With telemetry off there is no span to parent, so only the
+    // trace id is parsed out for the access log — a single regex, no OTel
+    // machinery on the hot path.
     let parentContext: ReturnType<typeof extractDaemonHttpTraceContext>;
+    let inboundTraceId: string | undefined;
     if (isTelemetrySdkInitialized()) {
       try {
         parentContext = extractDaemonHttpTraceContext(req.headers);
@@ -779,11 +807,33 @@ export function daemonTelemetryMiddleware(
           },
         );
       }
+    } else {
+      // With telemetry off there is no request span, so the log line's trace
+      // prefix never fires. Still surface the caller's trace id to the access
+      // log — a plain header parse keeps the log-based join alive with no
+      // telemetry config and no trace backend.
+      try {
+        inboundTraceId = extractInboundTraceId(req.headers);
+      } catch {
+        // Telemetry must not affect request handling.
+      }
     }
     const telemetryRes = res as TelemetryResponse;
+    if (inboundTraceId !== undefined) {
+      try {
+        const context = telemetryRes[daemonTelemetryResponseContext];
+        if (context) {
+          context.inboundTraceId = inboundTraceId;
+        } else {
+          telemetryRes[daemonTelemetryResponseContext] = { inboundTraceId };
+        }
+      } catch {
+        // Telemetry must not affect request handling.
+      }
+    }
     if (route.attribution === 'handler_resolved') {
       try {
-        telemetryRes[daemonTelemetryResponseContext] = {};
+        telemetryRes[daemonTelemetryResponseContext] ??= {};
       } catch {
         // Telemetry must not affect request handling.
       }

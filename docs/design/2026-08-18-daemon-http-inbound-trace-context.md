@@ -32,16 +32,43 @@ the plumbing already exists: `withDaemonSpan` accepts an explicit
    `req.headers` per request (fail-closed to `undefined`, telemetry never
    affects handling) and passes the context only when extraction succeeded —
    requests without a valid header keep the exact current span shape.
-   Extraction is gated on `isTelemetrySdkInitialized()` so telemetry-off
-   deployments pay no hot-path parse cost, and a present-but-invalid header
-   emits a debug daemon log (`qwen-code.daemon.traceparent.invalid`) so a
-   rejected header is diagnosable from daemon logs alone.
+   Span-context extraction is gated on `isTelemetrySdkInitialized()`, so
+   telemetry-off deployments pay no OTel machinery on the hot path — only the
+   single-regex trace-id capture described under Log correlation — and a
+   present-but-invalid header emits a debug daemon log
+   (`qwen-code.daemon.traceparent.invalid`) so a rejected header is
+   diagnosable from daemon logs alone.
 
    Note the whole subtree relocates with the request span, not just
    `daemon.request` itself: session-subprocess spans reached via `_meta`
    (prompt / model / tool) also join the caller's trace, so anything
    aggregating or alerting by `traceId` sees session-side spans change
    ownership too.
+
+## Log correlation
+
+Daemon log lines already carry a `[trace_id=… span_id=…]` prefix when written
+inside an active recording span (`getActiveTraceContext`, #9084). Telemetry
+on, this PR closes the loop end to end: the request span parents to the
+caller's trace, so every daemon log line for that request — including the
+access log's `request completed` — is prefixed with the caller's trace id.
+(The access log's `finish` listener reads the active span through the same
+AsyncLocalStorage propagation as the logger, so ordering of the two `finish`
+listeners is irrelevant for the prefix.)
+
+Telemetry off — the default — there is no span, so the prefix never fires.
+A separate lightweight path keeps the log-based join alive with no telemetry
+config and no trace backend: the middleware parses the `traceparent` header
+with a plain regex (`extractInboundTraceId`, same shape/all-zero/`ff`
+rejections as the W3C propagator; future-version leniency and `tracestate`
+stay in the propagator path since a log line only needs a plausible trace
+id) and stores the trace id on the per-response telemetry context (the same
+symbol the workspace hash uses). The access log's `finish` callback reads it
+back and emits it as the camelCase `traceId` field of `request completed` —
+distinct from the logger's reserved snake_case `trace_id` prefix keys, so a
+caller cannot spoof the span-derived prefix. The field is omitted, not
+empty, when no valid header is present, and every step stays fail-closed
+(telemetry must not affect request handling).
 
 ## Sampling policy
 
@@ -93,6 +120,14 @@ policy at the HTTP edge.
   verbatim), middleware pass-through (present vs omitted key, telemetry-off
   skip, rejected-header debug log), and a type-level guard keeping
   `parentContext` on `DaemonRequestSpanOptions`.
+- Unit (telemetry-off log join): `extractInboundTraceId` (valid / absent /
+  malformed / all-zero ids / version `ff` / array value / future version,
+  plus no-propagator-needed in the fresh-module state), middleware capture
+  (telemetry off with and without a header, telemetry on skipping capture,
+  handler-resolved context initialization not clobbering the stored id), and
+  the access log emitting / omitting the `traceId` field.
 - Dry run: `serve` with `QWEN_TELEMETRY_OUTFILE`, one curl with a fixed
   `traceparent` — exported span must share the header's traceId and parent to
   its spanId; a control request without the header must stay on its own trace.
+  With telemetry disabled, the same curl must still log
+  `request completed` with `traceId` matching the header.

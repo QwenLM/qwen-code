@@ -11,6 +11,7 @@ import type { NextFunction, Request, Response } from 'express';
 const coreMocks = vi.hoisted(() => ({
   emitDaemonLog: vi.fn(),
   extractDaemonHttpTraceContext: vi.fn((): unknown => undefined),
+  extractInboundTraceId: vi.fn((): string | undefined => undefined),
   hashDaemonWorkspace: vi.fn((workspace: string) => `hash:${workspace}`),
   isTelemetrySdkInitialized: vi.fn(() => true),
   recordDaemonError: vi.fn(),
@@ -34,6 +35,7 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
 
 import {
   daemonTelemetryMiddleware,
+  getDaemonTelemetryInboundTraceId,
   legacySessionTelemetryRoutes,
   resolveDaemonTelemetryRoute,
   setDaemonTelemetryWorkspace,
@@ -181,8 +183,9 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
     expect(coreMocks.emitDaemonLog).not.toHaveBeenCalled();
   });
 
-  it('skips extraction entirely when the telemetry SDK is not initialized', () => {
+  it('skips span-context extraction when the telemetry SDK is not initialized', () => {
     coreMocks.isTelemetrySdkInitialized.mockReturnValueOnce(false);
+    coreMocks.extractInboundTraceId.mockReturnValueOnce('3'.repeat(32));
     const res = mockRes(200);
 
     daemonTelemetryMiddleware(() => '/ws')(
@@ -192,13 +195,73 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
       res,
       vi.fn() as unknown as NextFunction,
     );
+
+    // Telemetry off: no span parent, but the trace id is still parsed for
+    // the access log's log-based join.
+    expect(coreMocks.extractDaemonHttpTraceContext).not.toHaveBeenCalled();
+    expect(coreMocks.extractInboundTraceId).toHaveBeenCalledWith({
+      traceparent: `00-${'3'.repeat(32)}-${'4'.repeat(16)}-01`,
+    });
+    expect(getDaemonTelemetryInboundTraceId(res)).toBe('3'.repeat(32));
+
     res.emit('finish');
 
-    expect(coreMocks.extractDaemonHttpTraceContext).not.toHaveBeenCalled();
     const options = coreMocks.withDaemonRequestSpan.mock
       .calls[0]?.[0] as Record<string, unknown>;
     expect('parentContext' in options).toBe(false);
     expect(coreMocks.emitDaemonLog).not.toHaveBeenCalled();
+  });
+
+  it('leaves the response without an inbound trace id when telemetry is off and the header is absent', () => {
+    coreMocks.isTelemetrySdkInitialized.mockReturnValueOnce(false);
+    const res = mockRes(200);
+
+    daemonTelemetryMiddleware(() => '/ws')(
+      mockReq('GET', '/daemon/status', {}),
+      res,
+      vi.fn() as unknown as NextFunction,
+    );
+
+    expect(getDaemonTelemetryInboundTraceId(res)).toBeUndefined();
+
+    res.emit('finish');
+  });
+
+  it('does not capture the inbound trace id when telemetry is on (the request span already carries it)', () => {
+    const res = mockRes(200);
+
+    daemonTelemetryMiddleware(() => '/ws')(
+      mockReq('GET', '/daemon/status', {
+        traceparent: `00-${'3'.repeat(32)}-${'4'.repeat(16)}-01`,
+      }),
+      res,
+      vi.fn() as unknown as NextFunction,
+    );
+
+    expect(coreMocks.extractInboundTraceId).not.toHaveBeenCalled();
+    expect(getDaemonTelemetryInboundTraceId(res)).toBeUndefined();
+
+    res.emit('finish');
+  });
+
+  it('keeps the captured trace id when the handler-resolved branch initializes the response context', () => {
+    coreMocks.isTelemetrySdkInitialized.mockReturnValueOnce(false);
+    coreMocks.extractInboundTraceId.mockReturnValueOnce('3'.repeat(32));
+    const res = mockRes(200);
+
+    daemonTelemetryMiddleware(() => '/ws')(
+      mockReq('GET', '/session/abc/artifacts', {
+        traceparent: `00-${'3'.repeat(32)}-${'4'.repeat(16)}-01`,
+      }),
+      res,
+      vi.fn() as unknown as NextFunction,
+    );
+
+    // The handler_resolved branch must not clobber the context the trace id
+    // write already created.
+    expect(getDaemonTelemetryInboundTraceId(res)).toBe('3'.repeat(32));
+
+    res.emit('finish');
   });
 
   it('logs at debug severity when a present traceparent header is rejected', () => {

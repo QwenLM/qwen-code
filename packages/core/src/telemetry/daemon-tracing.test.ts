@@ -30,6 +30,7 @@ import {
   createDaemonBridgeTelemetry,
   extractDaemonHttpTraceContext,
   extractDaemonTraceContext,
+  extractInboundTraceId,
   hashDaemonWorkspace,
   injectDaemonTraceContext,
   runWithDaemonTelemetryContext,
@@ -227,6 +228,49 @@ describe('daemon-tracing', () => {
     ).toBeUndefined();
   });
 
+  it('extracts only the trace id for the telemetry-off log join', () => {
+    expect(
+      extractInboundTraceId({
+        traceparent: `00-${'3'.repeat(32)}-${'4'.repeat(16)}-01`,
+      }),
+    ).toBe('3'.repeat(32));
+    // future versions pass the plain shape check; version-specific leniency
+    // (extension fields, tracestate) stays in the propagator path
+    expect(
+      extractInboundTraceId({
+        traceparent: `01-${'3'.repeat(32)}-${'4'.repeat(16)}-01`,
+      }),
+    ).toBe('3'.repeat(32));
+  });
+
+  it('rejects invalid headers on the telemetry-off trace id path', () => {
+    expect(extractInboundTraceId(undefined)).toBeUndefined();
+    expect(extractInboundTraceId({})).toBeUndefined();
+    expect(
+      extractInboundTraceId({ traceparent: 'not-a-traceparent' }),
+    ).toBeUndefined();
+    expect(
+      extractInboundTraceId({
+        traceparent: `00-${'0'.repeat(32)}-${'4'.repeat(16)}-01`,
+      }),
+    ).toBeUndefined();
+    expect(
+      extractInboundTraceId({
+        traceparent: `00-${'3'.repeat(32)}-${'0'.repeat(16)}-01`,
+      }),
+    ).toBeUndefined();
+    expect(
+      extractInboundTraceId({
+        traceparent: `ff-${'3'.repeat(32)}-${'4'.repeat(16)}-01`,
+      }),
+    ).toBeUndefined();
+    expect(
+      extractInboundTraceId({
+        traceparent: [`00-${'3'.repeat(32)}-${'4'.repeat(16)}-01`],
+      }),
+    ).toBeUndefined();
+  });
+
   it('yields no parent context until the SDK chunk injects the fallback propagator', async () => {
     // Fresh module registry: daemon-tracing without the sdk-impl injection.
     // The global propagator stays a no-op in tests (nothing registers one),
@@ -240,6 +284,13 @@ describe('daemon-tracing', () => {
         traceparent: `00-${'3'.repeat(32)}-${'4'.repeat(16)}-01`,
       }),
     ).toBeUndefined();
+    // The telemetry-off trace id path needs no propagator — that is the
+    // whole point of the plain regex parse.
+    expect(
+      fresh.extractInboundTraceId({
+        traceparent: `00-${'3'.repeat(32)}-${'4'.repeat(16)}-01`,
+      }),
+    ).toBe('3'.repeat(32));
     expect(
       fresh.extractDaemonTraceContext({
         _meta: {

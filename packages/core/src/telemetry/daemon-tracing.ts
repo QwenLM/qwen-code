@@ -395,6 +395,38 @@ export function extractDaemonHttpTraceContext(
   );
 }
 
+const TRACEPARENT_RE =
+  /^([0-9a-f]{2})-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/;
+const ALL_ZERO_TRACE_ID = '0'.repeat(32);
+const ALL_ZERO_SPAN_ID = '0'.repeat(16);
+
+/**
+ * Extract the caller's trace id from an inbound `traceparent` header without
+ * any OpenTelemetry machinery. Unlike {@link extractDaemonHttpTraceContext}
+ * (which builds a span parent and needs the W3C propagator — only installed
+ * once the telemetry SDK starts), this is a plain format check so the daemon
+ * log can carry the caller's trace id even with telemetry disabled: the
+ * log-based join then works with no trace backend at all. Version-specific
+ * leniency beyond the shape check (future versions, tracestate) stays in the
+ * propagator path; a log line only needs a plausible, non-zero trace id.
+ */
+export function extractInboundTraceId(
+  headers: Record<string, unknown> | undefined,
+): string | undefined {
+  const traceparent = headers?.['traceparent'];
+  if (typeof traceparent !== 'string' || traceparent.length === 0) {
+    return undefined;
+  }
+  const match = TRACEPARENT_RE.exec(traceparent);
+  if (!match) return undefined;
+  const [, version, traceId, spanId] = match;
+  if (version === 'ff') return undefined;
+  if (traceId === ALL_ZERO_TRACE_ID || spanId === ALL_ZERO_SPAN_ID) {
+    return undefined;
+  }
+  return traceId;
+}
+
 export interface DaemonBridgeTelemetryMetrics {
   sessionLifecycle(action: 'spawn' | 'close' | 'die'): void;
   channelLifecycle(action: 'spawn' | 'exit', expected?: boolean): void;
