@@ -63,7 +63,9 @@ export function createPromptLedgerSink(
  * probe; see the design doc): the temporal evidence is measured on the same
  * projection the verdict uses, a compression checkpoint after the target's
  * admission voids the evidence chain, and under FIFO admission the visible
- * tail must postdate every other prompt's settled terminal.
+ * tail must be strictly newer than every other prompt's settled terminal
+ * (a same-millisecond tail, and any tail behind a `prompt_deadline_exceeded`
+ * terminal whose wedged turn may still be writing, cannot be attributed).
  *
  * Fail-closed invariant: when the outcome cannot be attributed with
  * confidence, nothing is appended and the prompt stays "unknown" — a
@@ -147,21 +149,28 @@ export async function reconcileDanglingPromptTerminals(
     if (Number.isFinite(writeMs)) lastVisibleWriteMs = writeMs;
   }
   // FIFO evidence: under FIFO admission the target's turn can only start
-  // after every other prompt settled, so any visible tail older than some
-  // other prompt's terminal belongs to that prompt's turn — a queued prompt
-  // that never dispatched and a stale dangling left by a restore path that
-  // skips reconciliation both fail here.
+  // after every other prompt settled, so any visible tail not strictly
+  // newer than some other prompt's terminal belongs to that prompt's turn
+  // — a queued prompt that never dispatched and a stale dangling left by a
+  // restore path that skips reconciliation both fail here. Equality is
+  // vetoed as well: both clocks are 1 ms-granularity `Date.now()` reads, so
+  // a same-millisecond tail cannot be attributed with confidence.
   let lastOtherTerminalAt = 0;
   for (const record of records) {
     if (isPromptLedgerTerminalRecord(record) && record.promptId !== target) {
+      // A `prompt_deadline_exceeded` terminal does not fence its turn's
+      // writes: the deadline path releases the FIFO while the wedged agent
+      // is explicitly allowed to keep streaming (DAEMON-003), so stale
+      // writes postdating the terminal could be attributed to the target.
+      if (record.code === 'prompt_deadline_exceeded') return;
       lastOtherTerminalAt = Math.max(lastOtherTerminalAt, record.at);
     }
   }
   if (
     compressedAfterAdmission ||
     !Number.isFinite(lastVisibleWriteMs) ||
-    lastVisibleWriteMs < targetAdmission.at ||
-    lastVisibleWriteMs < lastOtherTerminalAt
+    lastVisibleWriteMs <= targetAdmission.at ||
+    lastVisibleWriteMs <= lastOtherTerminalAt
   ) {
     return;
   }

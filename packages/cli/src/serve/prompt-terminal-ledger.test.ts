@@ -84,6 +84,19 @@ function record(
   };
 }
 
+function recordAt(
+  fixture: Fixture,
+  uuid: string,
+  parentUuid: string | null,
+  text: string,
+  atMs: number,
+): ChatRecord {
+  return {
+    ...record(fixture, uuid, parentUuid, text),
+    timestamp: new Date(atMs).toISOString(),
+  };
+}
+
 function toolCallRecord(
   fixture: Fixture,
   uuid: string,
@@ -419,6 +432,93 @@ describe('reconcileDanglingPromptTerminals', () => {
     writeTranscript(fixture, [
       record(fixture, 'u1', null, 'c1 question'),
       record(fixture, 'a1', 'u1', 'c1 answer'),
+    ]);
+
+    await reconcileDanglingPromptTerminals(
+      fixture.sessionService,
+      fixture.sessionId,
+    );
+
+    expect(readPromptLedgerRecords(fixture.ledgerPath)).toHaveLength(3);
+  });
+
+  it('stays fail-closed when the visible tail shares a millisecond with the FIFO clocks', async () => {
+    const fixture = makeFixture();
+    // Both compared clocks are 1 ms-granularity `Date.now()` reads: p1's
+    // final transcript write and p1's settled terminal can land in the same
+    // millisecond T. Equality must veto — a strict `<` never fires on
+    // `T < T`, and attributing p1's clean tail to the queued p2 would
+    // synthesize a terminal for a prompt that never executed.
+    const t = RECORD_BASE_MS + 60_000;
+    writeLedger(fixture, [
+      { v: 1, promptId: 'p1', state: 'in_flight', at: t - 3000 },
+      { v: 1, promptId: 'p2', state: 'in_flight', at: t - 2000 },
+      { v: 1, promptId: 'p1', terminal: 'completed', at: t },
+    ]);
+    writeTranscript(fixture, [
+      recordAt(fixture, 'u1', null, 'p1 question', t),
+      recordAt(fixture, 'a1', 'u1', 'p1 answer', t),
+    ]);
+
+    await reconcileDanglingPromptTerminals(
+      fixture.sessionService,
+      fixture.sessionId,
+    );
+
+    expect(readPromptLedgerRecords(fixture.ledgerPath)).toHaveLength(3);
+  });
+
+  it('stays fail-closed when the visible tail shares a millisecond with the admission', async () => {
+    const fixture = makeFixture();
+    // A transcript record persisted in the same millisecond the prompt was
+    // admitted cannot prove the admitted prompt's turn wrote it.
+    const t = RECORD_BASE_MS + 60_000;
+    writeLedger(fixture, [{ v: 1, promptId: 'p1', state: 'in_flight', at: t }]);
+    writeTranscript(fixture, [
+      recordAt(fixture, 'u1', null, 'earlier turn question', t),
+      recordAt(fixture, 'a1', 'u1', 'earlier turn answer', t),
+    ]);
+
+    await reconcileDanglingPromptTerminals(
+      fixture.sessionService,
+      fixture.sessionId,
+    );
+
+    expect(readPromptLedgerRecords(fixture.ledgerPath)).toHaveLength(1);
+  });
+
+  it('stays fail-closed behind a prompt_deadline_exceeded terminal', async () => {
+    const fixture = makeFixture();
+    // The deadline path releases the FIFO while the wedged agent is
+    // explicitly allowed to keep streaming (DAEMON-003): p1's stale writes
+    // postdate both its deadline terminal and p2's admission, so the
+    // temporal comparisons alone cannot veto them — the deadline code
+    // itself must.
+    const deadlineAt = RECORD_BASE_MS + 30_000;
+    writeLedger(fixture, [
+      {
+        v: 1,
+        promptId: 'p1',
+        state: 'in_flight',
+        at: RECORD_BASE_MS - 10_000,
+      },
+      {
+        v: 1,
+        promptId: 'p1',
+        terminal: 'error',
+        code: 'prompt_deadline_exceeded',
+        at: deadlineAt,
+      },
+      {
+        v: 1,
+        promptId: 'p2',
+        state: 'in_flight',
+        at: deadlineAt + 1000,
+      },
+    ]);
+    writeTranscript(fixture, [
+      recordAt(fixture, 'u1', null, 'p1 stale write', deadlineAt + 2000),
+      recordAt(fixture, 'a1', 'u1', 'p1 stale answer', deadlineAt + 3000),
     ]);
 
     await reconcileDanglingPromptTerminals(
