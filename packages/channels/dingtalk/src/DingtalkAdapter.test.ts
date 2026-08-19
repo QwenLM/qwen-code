@@ -159,9 +159,10 @@ vi.mock('@qwen-code/channel-base', async () => {
     // formatter's injection defence is this exact helper, and a stub would
     // let the DM path regress with the suite green.
     sanitizePromptText: real.sanitizePromptText,
-    // Real, same reasoning: the record line cap's code-point boundary rule is
-    // this helper, and a stub would let a mid-surrogate cut ship green.
-    truncateCodePoints: real.truncateCodePoints,
+    // Real, same reasoning: the record line and title caps are this helper, and
+    // a stub would let a mid-surrogate cut -- or a UTF-16 budget overshoot --
+    // ship green.
+    truncateUtf16Units: real.truncateUtf16Units,
     isTerminalTaskLifecycleType: real.isTerminalTaskLifecycleType,
   };
 });
@@ -2802,6 +2803,39 @@ describe('DingtalkChannel chat records', () => {
     expect(text).toContain(`${emoji.repeat(10)} [truncated]`);
   });
 
+  // R7-1 (same root, entry leg): the per-line cap counted CODE POINTS while the
+  // budget it feeds (`total`, the caller's `spent`) counts UTF-16 units, so an
+  // entry of 400 emoji -- comfortably under the 500-POINT cap -- passed through
+  // whole at 800+ UNITS, 1.6x the ceiling this cap documents, and unmarked. The
+  // R4-8 test above only reaches the cap from ABOVE its point count, where both
+  // measures agree that a cut is due; this one sits between the two measures,
+  // the only place they disagree.
+  //
+  // Behaviour flip: such a line is now CUT and marked `[truncated]` where it
+  // used to ship whole. That is the point -- the ceiling is a budget promise the
+  // header and entry sections both spend against, not a display preference.
+  it('caps an astral-character entry in UTF-16 units, not code points', () => {
+    const channel = createChannel();
+    const emoji = '\u{1f600}';
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(
+      chatRecordDownstream(
+        { chatRecord: [{ senderName: 'A', content: emoji.repeat(400) }] },
+        'chat-record-astral-units',
+      ),
+    );
+
+    const text = inboundText(channel);
+    const entry = text.split('\n').find((line) => line.startsWith('A: '))!;
+    expect(entry).toContain('[truncated]');
+    // The cap itself, in the unit every budget around it measures.
+    expect(entry.length - ' [truncated]'.length).toBeLessThanOrEqual(500);
+    // Still on code-point boundaries: no lone surrogate reaches the prompt.
+    expect(entry).not.toMatch(/[\ud800-\udbff](?![\udc00-\udfff])/);
+    expect(entry).not.toMatch(/(?<![\ud800-\udbff])[\udc00-\udfff]/);
+  });
+
   it('renders a string entry, opaque senders and alternate body fields', () => {
     const channel = createChannel();
     (
@@ -3412,6 +3446,69 @@ describe('DingtalkChannel chat records', () => {
     // quote, instead of being the first thing the transport throws away.
     expect(referenced).toMatch(/\[\d+ more message\(s\) not shown\]/);
     expect(referenced).toContain('U0: message 0');
+  });
+
+  // R7-1: the title cap was the one budget quantity in this function measured
+  // in CODE POINTS -- `headerBudget`, `headerLead.length`, `spent` and
+  // `chatRecordAnnouncementCost` are all UTF-16 `.length`. So an astral
+  // character bought two units for the price of one point, and a title sitting
+  // exactly on the 429-point cap overshot the header's reserved space. The
+  // entries budget then fell BELOW the announcement cost the header reserved
+  // for it, `capChatRecordLines` hit its `spendable < 0` floor and returned
+  // `[]`: every forwarded message gone, no `[N more ...]` line, and
+  // `entriesDropped` still false because `recordLines` was non-empty -- so not
+  // even the stderr warning fired. Silent, and emoji in a group record title
+  // are ordinary. The all-ASCII control at the same size is the R6-2 test
+  // above, which is why this shipped green.
+  it('keeps the entries announcement when the record title is astral-heavy', () => {
+    const channel = createChannel();
+    // 429 code points -- exactly the cap the header budget leaves for a title
+    // with no summary -- of which two are astral, i.e. 431 UTF-16 units.
+    const title = `\u{1f389}\u{1f389}${'R'.repeat(427)}`;
+    expect(Array.from(title)).toHaveLength(429);
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage({
+      data: JSON.stringify({
+        msgId: 'chat-record-astral-title',
+        conversationType: '2',
+        conversationId: 'cid-chat-record',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        chatbotUserId: 'bot-1',
+        isInAtList: true,
+        text: {
+          content: '@DingTalkTest what was that?',
+          isReplyMsg: true,
+          repliedMsg: {
+            msgId: 'forwarded-record-astral',
+            msgType: 'chatRecord',
+            senderId: 'sender-1',
+            content: {
+              title,
+              chatRecord: Array.from({ length: 5 }, (_, i) => ({
+                senderName: `U${i}`,
+                content: `message ${i}`,
+              })),
+            },
+          },
+        },
+      }),
+      headers: { messageId: 'chat-record-astral-title' },
+    } as unknown as DWClientDownStream);
+
+    const referenced = vi.mocked(channel.handleInbound).mock.calls[0]![0]
+      .referencedText!;
+    // The five forwarded messages are still ACCOUNTED FOR. Whether the budget
+    // leaves room to render any of them is the cap's business; dropping all
+    // five without a word is not.
+    expect(referenced).toMatch(/\[\d+ more message\(s\) not shown\]/);
+    // And the header no longer spends units it was never budgeted: the quote
+    // still fits the transport's cut, in the unit the transport measures.
+    expect(referenced.length).toBeLessThanOrEqual(500);
   });
 
   // R4-9: the reply path's own entriesDropped warning had zero coverage --

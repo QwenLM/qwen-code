@@ -16,7 +16,7 @@ import {
   sanitizeLogText,
   sanitizePromptText,
   sanitizeSenderName,
-  truncateCodePoints,
+  truncateUtf16Units,
 } from '@qwen-code/channel-base';
 import { normalizeDingTalkMarkdown, extractTitle } from './markdown.js';
 import { downloadMedia } from './media.js';
@@ -308,14 +308,13 @@ function capChatRecordLines(lines: string[], budget: number): string[] {
       dropped = lines.length - index;
       break;
     }
-    // Slice by CODE POINT: a cap landing mid-surrogate-pair would emit a lone
-    // surrogate into the prompt. UTF-16 length is an upper bound on code-point
-    // count, so a line within the cap in units cannot exceed it in points —
-    // that fast path skips the array for every line that cannot be truncated.
-    const boundedRaw =
-      line.length <= MAX_CHAT_RECORD_LINE_CHARS
-        ? line
-        : truncateCodePoints(line, MAX_CHAT_RECORD_LINE_CHARS);
+    // Slice in UTF-16 UNITS, on code-point boundaries: `total` below, the
+    // caller's `spent`, and `chatRecordAnnouncementCost` all measure `.length`,
+    // so a code-point cap would let an astral-heavy line claim up to 2x the
+    // units it was budgeted, while cutting mid-surrogate-pair would emit a lone
+    // surrogate into the prompt. `truncateUtf16Units` returns the input
+    // untouched when it already fits, so the length test is its own fast path.
+    const boundedRaw = truncateUtf16Units(line, MAX_CHAT_RECORD_LINE_CHARS);
     const bounded = boundedRaw === line ? line : `${boundedRaw} [truncated]`;
     // No first-line exemption: with the per-line cap at 500 the first line
     // always fits the 4000 budget anyway, so the exemption only ever fired on
@@ -499,8 +498,18 @@ function formatChatRecord(
   // so the per-line cap bounds it — and then the header budget bounds that,
   // leaving the summary room to announce its own cut. Uncapped, a 5,000-char
   // title ate the whole header budget on its own.
+  //
+  // Cut in UTF-16 UNITS, not code points: `headerBudget`, `headerLead.length`,
+  // `spent` and `chatRecordAnnouncementCost` are all `.length`, so a code-point
+  // cap let an astral-heavy title claim up to 2x its reserved units. A title of
+  // >=429 code points carrying >=2 astral characters then pushed the entries
+  // budget below the announcement cost this line reserves, `capChatRecordLines`
+  // hit its `spendable < 0` floor, and EVERY forwarded message vanished with no
+  // announcement and `entriesDropped` still false — the exact silent truncation
+  // the reservation exists to prevent. A fully-astral title also carried the
+  // result past the documented 500-unit ceiling.
   const safeTitle = title
-    ? truncateCodePoints(
+    ? truncateUtf16Units(
         bracketSafeChatRecordField(title),
         Math.max(
           Math.min(
