@@ -7,6 +7,7 @@
 import express, { type RequestHandler } from 'express';
 import { describe, expect, it, vi } from 'vitest';
 import { registerA2uiActionRoutes } from '../routes/a2ui-action.js';
+import { registerComputerUseFrameRoutes } from '../routes/computer-use-frame.js';
 import { registerPermissionRoutes } from '../routes/permission.js';
 import { registerSessionRoutes } from '../routes/session.js';
 import { registerSseEventsRoutes } from '../routes/sse-events.js';
@@ -84,6 +85,13 @@ describe('legacy session telemetry route drift guard', () => {
       >[1]['workspaceRegistry'],
       sendBridgeError: vi.fn(),
     });
+    registerComputerUseFrameRoutes(app, {
+      workspaceRegistry: {} as Parameters<
+        typeof registerComputerUseFrameRoutes
+      >[1]['workspaceRegistry'],
+      requireToken: pass,
+      sendBridgeError: vi.fn(),
+    });
     registerA2uiActionRoutes(app, {
       boundWorkspace: '/workspace/primary',
       mutate,
@@ -98,7 +106,7 @@ describe('legacy session telemetry route drift guard', () => {
       .map(({ method, path }) => `${method} ${path}`)
       .sort();
 
-    expect(registered).toHaveLength(54);
+    expect(registered).toHaveLength(55);
     expect(registered).toEqual(catalog);
   });
 });

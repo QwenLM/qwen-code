@@ -195,6 +195,7 @@ import { ENV_ACP_REPEATED_TOOL_FAILURE_GUARD } from '../../config/shared-env-key
 // so a rename can't desync caller and answerer into a silent -32601 latch.
 import {
   type ActiveWorkHoldV1,
+  type ComputerUseFramePayload,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   MID_TURN_QUEUE_DRAIN_METHOD,
@@ -936,6 +937,28 @@ function isAudioPart(part: Part): boolean {
 
 function hasAudioParts(parts: Part[]): boolean {
   return parts.some(isAudioPart);
+}
+
+function extractComputerUseFrame(
+  toolName: string,
+  content: unknown,
+): ComputerUseFramePayload | undefined {
+  if (!toolName.startsWith('computer_use__')) return undefined;
+  const parts = Array.isArray(content) ? content : [content];
+  for (const part of parts) {
+    if (!isRecord(part) || !isRecord(part['inlineData'])) continue;
+    const mimeType = part['inlineData']['mimeType'];
+    const data = part['inlineData']['data'];
+    if (
+      typeof mimeType === 'string' &&
+      mimeType.startsWith('image/') &&
+      typeof data === 'string' &&
+      data.length > 0
+    ) {
+      return { data, mimeType };
+    }
+  }
+  return undefined;
 }
 
 function buildVoiceTranscriptBlock(
@@ -10375,6 +10398,10 @@ export class Session implements SessionContext {
           }
 
           // Create response parts first (needed for emitResult and recordToolResult)
+          const computerUseFrame = extractComputerUseFrame(
+            toolName,
+            toolResult.llmContent,
+          );
           let responseParts = aborted
             ? convertToFunctionErrorResponse(
                 toolName,
@@ -10601,6 +10628,7 @@ export class Session implements SessionContext {
                 error: responseError,
                 success: succeeded,
                 artifacts: toolResult.artifacts,
+                ...(succeeded && computerUseFrame ? { computerUseFrame } : {}),
               });
             } catch (emitError) {
               debugLogger.debug(

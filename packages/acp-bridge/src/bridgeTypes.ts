@@ -49,6 +49,18 @@ import type {
   ServeSessionStatsStatus,
 } from './status.js';
 
+export const COMPUTER_USE_FRAME_META_KEY = 'qwenComputerUseFrame';
+export const MAX_COMPUTER_USE_FRAME_BYTES = 8 * 1024 * 1024;
+
+export interface ComputerUseFramePayload {
+  readonly data: string;
+  readonly mimeType: string;
+}
+
+export interface ComputerUseFrame extends ComputerUseFramePayload {
+  readonly version: number;
+}
+
 export interface RewindSnapshotInfo {
   promptId: string;
   turnIndex: number;
@@ -1252,6 +1264,9 @@ export interface AcpSessionBridge {
       snapshot?: boolean;
     },
   ): AsyncIterable<BridgeEvent>;
+
+  /** Return the latest live Computer Use frame kept in daemon memory. */
+  getComputerUseFrame(sessionId: string): ComputerUseFrame | undefined;
 
   /**
    * Return the most recent monotonic event id for this session's bus.

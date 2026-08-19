@@ -279,6 +279,46 @@ function reportingGrade(bridge: {
 }
 
 describe('createAcpSessionBridge', () => {
+  it('drops the previous Computer Use frame when a new prompt starts', async () => {
+    const prompt = deferred<PromptResponse>();
+    const handle = makeChannel({ promptImpl: () => prompt.promise });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    await handle.agentConnection.sessionUpdate({
+      sessionId: session.sessionId,
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'call-screen',
+        status: 'completed',
+        content: [],
+        _meta: {
+          toolName: 'computer_use__get_window_state',
+          qwenComputerUseFrame: {
+            mimeType: 'image/png',
+            data: 'aW1hZ2U=',
+          },
+        },
+      },
+    });
+    expect(bridge.getComputerUseFrame(session.sessionId)).toMatchObject({
+      data: 'aW1hZ2U=',
+    });
+
+    const running = bridge.sendPrompt(session.sessionId, {
+      sessionId: session.sessionId,
+      prompt: [{ type: 'text', text: 'start a new turn' }],
+    });
+    await vi.waitFor(() => {
+      expect(handle.agent.promptCalls).toHaveLength(1);
+      expect(bridge.getComputerUseFrame(session.sessionId)).toBeUndefined();
+    });
+
+    prompt.resolve({ stopReason: 'end_turn' });
+    await running;
+    await bridge.shutdown();
+  });
+
   describe('active work', () => {
     it('negotiates the capability and counts accepted prompts locally', async () => {
       const prompt = deferred<PromptResponse>();

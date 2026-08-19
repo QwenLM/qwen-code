@@ -348,6 +348,12 @@ export const legacySessionTelemetryRoutes = [
     route: 'GET /session/:id/events',
   },
   {
+    method: 'GET',
+    path: '/session/:id/computer-use/frame',
+    attribution: 'handler_resolved',
+    route: 'GET /session/:id/computer-use/frame',
+  },
+  {
     method: 'POST',
     path: '/session/:id/a2ui-action',
     attribution: 'pre_resolved',

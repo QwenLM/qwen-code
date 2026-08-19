@@ -96,6 +96,7 @@ describe('requireSessionRuntime telemetry attribution', () => {
   });
 
   it.each([
+    'GET /session/:id/computer-use/frame',
     'GET /session/:id/rewind/snapshots',
     'POST /session/:id/shell',
     'POST /session/:id/prompt',

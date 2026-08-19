@@ -1115,6 +1115,112 @@ describe('BridgeClient — A2UI session update publishing', () => {
   });
 });
 
+describe('BridgeClient — Computer Use frame isolation', () => {
+  const noPermissionFlow = () => {
+    throw new Error('test: permission flow should not run');
+  };
+
+  function setup() {
+    const publish = vi.fn().mockReturnValue(true);
+    const seedReplayEvents = vi.fn();
+    const entry: {
+      computerUseFrame?: {
+        data: string;
+        mimeType: string;
+        version: number;
+      };
+      events: {
+        publish: typeof publish;
+        seedReplayEvents: typeof seedReplayEvents;
+      };
+      sessionId: string;
+    } = {
+      sessionId: 'sess:computer-use',
+      events: { publish, seedReplayEvents },
+    };
+    const client = new BridgeClient(
+      ((sessionId: string) =>
+        sessionId === entry.sessionId ? entry : undefined) as never,
+      noPermissionFlow as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+    );
+    return { client, entry, publish, seedReplayEvents };
+  }
+
+  const update = {
+    sessionUpdate: 'tool_call_update',
+    toolCallId: 'call-screen',
+    status: 'completed',
+    content: [],
+    _meta: {
+      toolName: 'computer_use__get_window_state',
+      qwenComputerUseFrame: {
+        mimeType: 'image/png',
+        data: 'aW1hZ2U=',
+      },
+    },
+  };
+
+  it('stores the latest valid frame and strips its bytes before publication', async () => {
+    const { client, entry, publish } = setup();
+
+    await client.sessionUpdate({
+      sessionId: entry.sessionId,
+      update,
+    } as unknown as Parameters<BridgeClient['sessionUpdate']>[0]);
+
+    expect(entry.computerUseFrame).toEqual({
+      mimeType: 'image/png',
+      data: 'aW1hZ2U=',
+      version: 1,
+    });
+    expect(JSON.stringify(publish.mock.calls)).not.toContain('aW1hZ2U=');
+    expect(publish.mock.calls[0]?.[0]).toMatchObject({
+      data: {
+        update: {
+          _meta: { toolName: 'computer_use__get_window_state' },
+        },
+      },
+    });
+  });
+
+  it('strips malformed or foreign frame metadata without storing it', async () => {
+    const { client, entry, publish } = setup();
+
+    await client.sessionUpdate({
+      sessionId: entry.sessionId,
+      update: {
+        ...update,
+        _meta: {
+          toolName: 'read_file',
+          qwenComputerUseFrame: {
+            mimeType: 'image/svg+xml',
+            data: '<svg />',
+          },
+        },
+      },
+    } as unknown as Parameters<BridgeClient['sessionUpdate']>[0]);
+
+    expect(entry).not.toHaveProperty('computerUseFrame');
+    expect(JSON.stringify(publish.mock.calls)).not.toContain(
+      'qwenComputerUseFrame',
+    );
+  });
+
+  it('does not restore a historical frame while seeding replay', async () => {
+    const { client, entry, seedReplayEvents } = setup();
+
+    await client.seedSessionUpdates(entry as never, [update as never]);
+
+    expect(entry).not.toHaveProperty('computerUseFrame');
+    expect(JSON.stringify(seedReplayEvents.mock.calls)).not.toContain(
+      'qwenComputerUseFrame',
+    );
+  });
+});
+
 describe('BridgeClient — original timestamp preservation', () => {
   const noPermissionFlow = () => {
     throw new Error('test: permission flow should not run');

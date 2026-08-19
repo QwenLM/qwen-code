@@ -5,6 +5,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { Buffer } from 'node:buffer';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import type {
@@ -33,8 +34,12 @@ import {
   MID_TURN_RECONCILIATION_RING_SIZE,
   MID_TURN_QUEUE_DRAIN_METHOD,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
+  COMPUTER_USE_FRAME_META_KEY,
+  MAX_COMPUTER_USE_FRAME_BYTES,
   type ActiveWorkHoldV1,
   type ActiveWorkSnapshotV1,
+  type ComputerUseFrame,
+  type ComputerUseFramePayload,
 } from './bridgeTypes.js';
 import type {
   BridgeWorkspaceGenerationNotificationEvent,
@@ -447,6 +452,53 @@ function sanitizeSessionUpdateArtifacts(
   };
 }
 
+function extractComputerUseFrame(params: SessionNotification): {
+  frame?: ComputerUseFramePayload;
+  sanitizedParams: SessionNotification;
+} {
+  const update = params.update as Record<string, unknown>;
+  const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
+  if (!meta || !(COMPUTER_USE_FRAME_META_KEY in meta)) {
+    return { sanitizedParams: params };
+  }
+
+  const candidate = meta[COMPUTER_USE_FRAME_META_KEY];
+  const sanitizedMeta = { ...meta };
+  delete sanitizedMeta[COMPUTER_USE_FRAME_META_KEY];
+  const sanitizedParams = {
+    ...params,
+    update: {
+      ...update,
+      _meta: sanitizedMeta,
+    } as SessionNotification['update'],
+  };
+  const frame = isRecord(candidate) ? candidate : undefined;
+  const mimeType = frame?.['mimeType'];
+  const data = frame?.['data'];
+  const encodedLimit = Math.ceil((MAX_COMPUTER_USE_FRAME_BYTES * 4) / 3) + 4;
+  if (
+    update['sessionUpdate'] !== 'tool_call_update' ||
+    update['status'] !== 'completed' ||
+    typeof meta['toolName'] !== 'string' ||
+    !meta['toolName'].startsWith('computer_use__') ||
+    (mimeType !== 'image/png' &&
+      mimeType !== 'image/jpeg' &&
+      mimeType !== 'image/webp') ||
+    typeof data !== 'string' ||
+    data.length === 0 ||
+    data.length > encodedLimit ||
+    !/^[A-Za-z0-9+/]*={0,2}$/.test(data) ||
+    data.length % 4 === 1
+  ) {
+    return { sanitizedParams };
+  }
+  const decodedBytes = Buffer.byteLength(data, 'base64');
+  if (decodedBytes === 0 || decodedBytes > MAX_COMPUTER_USE_FRAME_BYTES) {
+    return { sanitizedParams };
+  }
+  return { frame: { data, mimeType }, sanitizedParams };
+}
+
 function isTrustedArtifactToolUpdate(
   params: SessionNotification,
   updateMeta: Record<string, unknown> | undefined,
@@ -594,7 +646,7 @@ function sliceLineRange(
  * is required.
  *
  * Only the fields declared on this narrowed interface cross the boundary:
- * `sessionId`, `events`,
+ * `sessionId`, `events`, `computerUseFrame`,
  * `pendingPermissionIds`, `pendingInteractions`, `activePromptId`,
  * `activePromptOriginatorClientId`. New fields
  * BridgeClient grows must be added here too (and the factory's
@@ -608,6 +660,7 @@ export interface BridgeClientSessionEntry {
   events: EventBus;
   artifacts: SessionArtifactStore;
   recordingDegraded: boolean;
+  computerUseFrame?: ComputerUseFrame;
   pendingPermissionIds: Set<string>;
   /** Pollable pending human interactions, keyed by permission request id. */
   pendingInteractions: Map<string, BridgePendingInteraction>;
@@ -648,6 +701,7 @@ export interface BridgeClientSessionEntry {
 interface PreparedSessionUpdateFrames {
   frames: Array<Omit<BridgeEvent, 'id' | 'v'>>;
   artifacts: SessionArtifactInput[];
+  computerUseFrame?: ComputerUseFramePayload;
   trustedPublisher: boolean;
   turn: Pick<BridgeEvent, 'promptId' | 'originatorClientId'>;
 }
@@ -933,6 +987,12 @@ export class BridgeClient implements Client {
       entry?.events ?? this.resolvePendingRestoreEvents(params.sessionId);
     if (!events) return;
     const prepared = this.prepareSessionUpdateFrames(params, entry);
+    if (entry && prepared.computerUseFrame) {
+      entry.computerUseFrame = {
+        ...prepared.computerUseFrame,
+        version: (entry.computerUseFrame?.version ?? 0) + 1,
+      };
+    }
     for (const frame of prepared.frames) {
       events.publish(frame);
     }
@@ -962,6 +1022,8 @@ export class BridgeClient implements Client {
     params: SessionNotification,
     entry?: BridgeClientSessionEntry,
   ): PreparedSessionUpdateFrames {
+    const extractedFrame = extractComputerUseFrame(params);
+    params = extractedFrame.sanitizedParams;
     const turn = {
       ...(entry?.activePromptId ? { promptId: entry.activePromptId } : {}),
       ...(entry?.activePromptOriginatorClientId
@@ -1033,6 +1095,9 @@ export class BridgeClient implements Client {
     return {
       frames,
       artifacts,
+      ...(extractedFrame.frame
+        ? { computerUseFrame: extractedFrame.frame }
+        : {}),
       trustedPublisher: isTrustedArtifactToolUpdate(params, updateMeta),
       turn,
     };

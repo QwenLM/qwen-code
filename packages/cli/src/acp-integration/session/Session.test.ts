@@ -23167,6 +23167,48 @@ describe('Session', () => {
       );
     });
 
+    it('copies the raw Computer Use image before vision postprocessing', async () => {
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: [
+          { text: 'captured screen' },
+          { inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' } },
+        ],
+        returnDisplay: 'captured screen',
+      });
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool('computer_use__get_window_state', execute),
+      );
+      bridgeToolResultImagesSpy.mockResolvedValueOnce([
+        { text: 'vision bridge transcript' },
+      ]);
+
+      await (session as unknown as ToolCallInternals).runToolCalls(
+        new AbortController().signal,
+        'prompt-computer-use-frame',
+        [
+          {
+            id: 'call-computer-use-frame',
+            name: 'computer_use__get_window_state',
+            args: {},
+          },
+        ],
+      );
+
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+        sessionId: 'test-session-id',
+        update: expect.objectContaining({
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'call-computer-use-frame',
+          _meta: expect.objectContaining({
+            qwenComputerUseFrame: {
+              mimeType: 'image/png',
+              data: 'aW1hZ2U=',
+            },
+          }),
+        }),
+      });
+    });
+
     it('keeps a full-turn model selected across parallel tool images', async () => {
       mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
       const execute = vi.fn().mockResolvedValue({

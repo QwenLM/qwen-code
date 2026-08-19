@@ -178,6 +178,7 @@ import type {
   BridgeSessionTranscriptPageRequest,
   BridgeGenerationStreamEvent,
   BridgeWorkspaceGenerationStreamEvent,
+  ComputerUseFrame,
   RuntimeMcpServerAddResult,
   RuntimeMcpServerRemoveResult,
 } from './bridgeTypes.js';
@@ -939,6 +940,8 @@ interface SessionEntry {
   artifacts: SessionArtifactStore;
   /** Sticky in-memory health state for the session's transcript recorder. */
   recordingDegraded: boolean;
+  /** Latest raw cua-driver screenshot; never persisted or published. */
+  computerUseFrame?: ComputerUseFrame;
   /** Set synchronously while agent-owned state and its writer lease close. */
   closing: boolean;
   /** Tail of cwd changes that direct shell commands must not overtake. */
@@ -7858,6 +7861,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 })();
                 entry.promptActive = true;
                 entry.activePromptId = pendingEntry.promptId;
+                delete entry.computerUseFrame;
                 delete entry.cancelBroadcastWithoutPrompt;
                 delete entry.turnError;
                 delete entry.turnErrorEvent;
@@ -8297,6 +8301,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         }
       }
       return withSnapshot();
+    },
+
+    getComputerUseFrame(sessionId) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      return entry.computerUseFrame;
     },
 
     getSessionLastEventId(sessionId) {

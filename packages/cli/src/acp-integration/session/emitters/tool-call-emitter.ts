@@ -25,6 +25,7 @@ import {
   ToolNames,
   Kind,
 } from '@qwen-code/qwen-code-core';
+import { COMPUTER_USE_FRAME_META_KEY } from '@qwen-code/acp-bridge/bridgeTypes';
 import {
   createTranscriptToolCallResultUpdate,
   createTranscriptToolCallStartUpdate,
@@ -202,6 +203,11 @@ export class ToolCallEmitter extends BaseEmitter {
           ...params.subagentMeta,
           provenance: provenance.provenance,
           ...(provenance.serverId ? { serverId: provenance.serverId } : {}),
+          ...(params.computerUseFrame
+            ? {
+                [COMPUTER_USE_FRAME_META_KEY]: params.computerUseFrame,
+              }
+            : {}),
         },
       }),
     );

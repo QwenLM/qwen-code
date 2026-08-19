@@ -6,6 +6,7 @@
 
 import type { Config, ToolArtifact } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
+import type { ComputerUseFramePayload } from '@qwen-code/acp-bridge/bridgeTypes';
 import type {
   SessionUpdate,
   ToolCallLocation,
@@ -123,6 +124,8 @@ export interface ToolCallResultParams {
   error?: Error;
   /** Structured artifacts produced by the tool result. */
   artifacts?: ToolArtifact[];
+  /** Latest raw driver frame for the daemon-owned desktop preview channel. */
+  computerUseFrame?: ComputerUseFramePayload;
   /** Original args (fallback for TodoWriteTool todos extraction) */
   args?: Record<string, unknown>;
   /** Optional subagent metadata */
