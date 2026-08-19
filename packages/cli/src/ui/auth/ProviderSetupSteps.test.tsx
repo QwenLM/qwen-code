@@ -13,6 +13,7 @@ import { useKeypress } from '../hooks/useKeypress.js';
 import {
   ProviderSetupSteps,
   remapCaretAcrossResplit,
+  resplitCustomModelIdsText,
 } from './ProviderSetupSteps.js';
 import type { ProviderSetupFlow } from './useProviderSetupFlow.js';
 
@@ -971,6 +972,40 @@ describe('ProviderSetupSteps', () => {
 
     expect(submitModelIds).toHaveBeenCalledTimes(1);
     unmount();
+  });
+});
+
+describe('resplitCustomModelIdsText', () => {
+  const BUILT_INS = new Set(['MiniMax-M3', 'MiniMax-M2.7', 'MiniMax-M2.5']);
+
+  it('empties a buffer whose only ids all moved out from in front of a trailing separator', () => {
+    // D7-7/D10-1: the user typed one id and the separator for the next when
+    // discovery answered with that id on it, so it moved to its checkbox and
+    // nothing is left for the separator to separate. Without the empty-body
+    // branch the trailing segment is still re-attached, and the step shows a
+    // lone `,` sitting in an otherwise empty input — an edit the user never
+    // made, on the field they are about to type the next id into.
+    expect(
+      resplitCustomModelIdsText(
+        'my-deploy,',
+        ['my-deploy'],
+        new Set(['my-deploy']),
+        BUILT_INS,
+      ),
+    ).toBe('');
+  });
+
+  it('keeps the trailing separator while any id still precedes it', () => {
+    // The counterpart: the branch above must not swallow a separator the user
+    // is still typing behind, which is what R5-1 restored in the first place.
+    expect(
+      resplitCustomModelIdsText(
+        'kept,my-deploy,',
+        ['my-deploy'],
+        new Set(['my-deploy']),
+        BUILT_INS,
+      ),
+    ).toBe('kept,');
   });
 });
 

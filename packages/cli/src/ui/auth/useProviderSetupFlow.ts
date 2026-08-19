@@ -302,9 +302,29 @@ export function useProviderSetupFlow(
       discoveryKeyRef.current !== null &&
       discoveryKeyRef.current !== discoveryKey
     ) {
-      discoveryAbortRef.current?.abort();
-      discoveryAbortRef.current = null;
-      discoveryKeyRef.current = null;
+      if (currentStep === 'models') {
+        // The run below claims the new pair in the same effect and installs
+        // its own list, notice and selection, so only the key is released
+        // here — replacing the display state twice would remount the step for
+        // nothing.
+        discoveryAbortRef.current?.abort();
+        discoveryAbortRef.current = null;
+        discoveryKeyRef.current = null;
+      } else {
+        // D4-1/D7-9: off-step there is no such run — this effect returns at
+        // the guard below and does not come back until the user does. So the
+        // list, the notice and the pruned selection would sit there still
+        // describing the pair the user left, and `ModelIdsStep` reads them as
+        // it mounts, one committed render before the re-entry can replace
+        // them. A base-url change after a successful lookup therefore
+        // re-entered the step showing the OLD endpoint's catalog under a
+        // "success" notice, and a checkbox ticked in that render submitted an
+        // id the new endpoint was never asked about. Release the display
+        // state with the key, and put the selection back to what the user
+        // authored — the previous pair's prune is not an answer for this one.
+        resetDiscovery();
+        setDisplayedModelIds(authoredModelIdsRef.current);
+      }
     }
 
     if (currentStep !== 'models') return;
@@ -374,6 +394,7 @@ export function useProviderSetupFlow(
     apiKey,
     applyDiscoveredModels,
     replaceRecommendations,
+    resetDiscovery,
     setDisplayedModelIds,
   ]);
 

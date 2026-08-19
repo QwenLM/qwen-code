@@ -541,7 +541,53 @@ describe('useProviderSetupFlow model discovery', () => {
 
     expect(result.current.state.modelIds).toContain(RETIRED_ID);
     expect(result.current.state.modelIds).not.toContain('first-key-only');
-    expect(result.current.state.discoveryStatus).toBe('loading');
+    // D4-1/D7-9: this used to read `loading`, carried over from the pair that
+    // was just abandoned. Nothing is loading — the new pair's lookup does not
+    // start until the user comes back to the step — so the notice said the
+    // wizard was fetching a list it had stopped waiting for.
+    expect(result.current.state.discoveryStatus).toBe('idle');
+  });
+
+  it("drops the previous pair's list and notice when it is released off-step", async () => {
+    // D4-1/D7-9: the release above only gave up the key. The list, the
+    // "success" notice and the pruned selection stayed, and `ModelIdsStep`
+    // reads all three as it mounts — so re-entering the step after a base-url
+    // change showed the OLD endpoint's catalog, under a notice claiming it
+    // had been fetched, for the committed render before this effect replaced
+    // it. Anything ticked in that render submitted an id the new endpoint was
+    // never asked about.
+    fetchProviderModelIdsMock.mockResolvedValue(
+      discovered([...SERVED_IDS, 'china-only']),
+    );
+
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+    await advanceToModelStep(result);
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('success'),
+    );
+    expect(result.current.state.recommendedModels.map((m) => m.id)).toContain(
+      'china-only',
+    );
+    expect(result.current.state.modelIds).not.toContain(RETIRED_ID);
+
+    // Esc off the step and point the wizard at the other region: a different
+    // endpoint, whose catalog nobody has fetched yet.
+    act(() => {
+      result.current.goBack();
+    });
+    act(() => {
+      result.current.goBack();
+    });
+    act(() => result.current.selectBaseUrl(CODING_PLAN_GLOBAL_BASE_URL));
+
+    // Nothing on screen may still describe the China endpoint.
+    expect(result.current.state.discoveryStatus).toBe('idle');
+    expect(
+      result.current.state.recommendedModels.map((m) => m.id),
+    ).not.toContain('china-only');
+    // The prune went with the list: the retired built-in is the wizard's
+    // default again until this pair says otherwise.
+    expect(result.current.state.modelIds).toContain(RETIRED_ID);
   });
 
   it('reuses the cached answer across a restart of the same provider', async () => {

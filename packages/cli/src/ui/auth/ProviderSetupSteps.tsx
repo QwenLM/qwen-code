@@ -286,8 +286,14 @@ function getCustomModelIdsText(
  * rule here: a built-in id the new list no longer offers goes, and only
  * segments outside the built-in list (private deployments, aliases) survive
  * verbatim — exactly the ids the prune deliberately leaves alone.
+ *
+ * Exported for the tests: the empty-body branch below is reachable only after
+ * a swap empties a buffer that still carries a trailing separator, and its
+ * only symptom is a stray comma left on screen — which no step-level assertion
+ * can see, because `mergeModelIds` drops that empty segment again before
+ * submit.
  */
-function resplitCustomModelIdsText(
+export function resplitCustomModelIdsText(
   customModelIdsText: string,
   selectedModelIds: string[],
   recommendedModelIds: Set<string>,
