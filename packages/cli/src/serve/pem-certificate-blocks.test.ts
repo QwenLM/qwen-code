@@ -150,6 +150,70 @@ describe('extractCertificateBlocks', () => {
     expect(extractCertificateBlocks(combined)).toEqual([ROOT_PEM.trim()]);
   });
 
+  it('walks past a block whose BEGIN marker is indented', () => {
+    // Oracle: authorized=false, with no `Ignoring extra certs` warning, and
+    // `openssl storeutl -certs` reports 0 — the loader anchors its marker
+    // match at column 0, so an indented BEGIN is prose it never opens a block
+    // on. Counting it as an anchor reported zero trust gaps at boot while
+    // every worker handshake failed UNABLE_TO_VERIFY_LEAF_SIGNATURE.
+    for (const pad of [' ', '  ', '\t']) {
+      expect(extractCertificateBlocks(`${pad}${ROOT_PEM}`)).toBeUndefined();
+    }
+  });
+
+  it('keeps the prefix when a later block has an indented BEGIN marker', () => {
+    // Same column-0 rule, reached through the prefix-loading path: the good
+    // root still anchors, the indented block does not.
+    expect(extractCertificateBlocks(`${ROOT_PEM}  ${LEAF_PEM}`)).toEqual([
+      ROOT_PEM.trim(),
+    ]);
+  });
+
+  it('rejects a block whose END marker is indented', () => {
+    // An indented END is not an end line, so the loader reads to EOF looking
+    // for one and stops on `bad end line`, the same as a block that never
+    // closes.
+    const indentedEnd = ROOT_PEM.replace(
+      '-----END CERTIFICATE-----',
+      '  -----END CERTIFICATE-----',
+    );
+    expect(extractCertificateBlocks(indentedEnd)).toBeUndefined();
+  });
+
+  it('stops at a NON-certificate block whose body does not decode', () => {
+    // Oracle: authorized=false for `bad key block + good root` while the same
+    // file without the key block is authorized=true. The loader decodes every
+    // block's body whatever its label, so a corrupt key block ahead of the
+    // chain takes the whole file down — skipping non-certificate blocks
+    // unvalidated counted an anchor the workers never received.
+    const file = `-----BEGIN PRIVATE KEY-----\n!!!!\n-----END PRIVATE KEY-----\n${ROOT_PEM}`;
+    expect(extractCertificateBlocks(file)).toBeUndefined();
+  });
+
+  it('stops at an empty block body under any label', () => {
+    // Oracle: authorized=false for both shapes — an empty body is a decode
+    // failure, not an empty-but-fine block.
+    expect(
+      extractCertificateBlocks(
+        `-----BEGIN FOO-----\n-----END FOO-----\n${ROOT_PEM}`,
+      ),
+    ).toBeUndefined();
+    expect(
+      extractCertificateBlocks(
+        `-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----\n${ROOT_PEM}`,
+      ),
+    ).toBeUndefined();
+  });
+
+  it('takes the certificate from a key-BEFORE-cert file', () => {
+    // Oracle: authorized=true, identical to the cert-only control — `cat
+    // key.pem chain.pem` is a real secret-manager export shape. The
+    // skip-and-continue path was only ever pinned cert-first, where a
+    // stop-at-first-non-certificate mutant still ships green.
+    const keyFirst = `-----BEGIN PRIVATE KEY-----\nQUJD\n-----END PRIVATE KEY-----\n${ROOT_PEM}`;
+    expect(extractCertificateBlocks(keyFirst)).toEqual([ROOT_PEM.trim()]);
+  });
+
   it('normalizes CRLF and marker/body padding to canonical PEM', () => {
     // Oracle: authorized=true for both. The bundle this feeds is written to
     // disk, so the output has to be canonical whatever the input looked like.

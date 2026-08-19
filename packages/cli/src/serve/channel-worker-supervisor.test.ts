@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ChannelWebhookTask } from '@qwen-code/channel-base';
 import {
   ChannelWorkerStartupError,
+  cleanupMintedWorkerCaBundleDirs,
   createChannelWorkerSupervisor,
   type ChannelWorkerChild,
 } from './channel-worker-supervisor.js';
@@ -915,6 +916,86 @@ describe('createChannelWorkerSupervisor', () => {
 
     fs.rmSync(path.dirname(firstPath), { recursive: true, force: true });
     fs.rmSync(path.dirname(rotatedPath), { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('keeps the daemon cert when the DAEMON cert holds no loadable block', async () => {
+    // R5-2: every other fallback test corrupts the OPERATOR CA, so the
+    // `no-daemon-blocks` arm had no test at all — returning `existing`
+    // instead of the daemon cert, dropping the warning, or filing it under
+    // the `no-operator-blocks` family key (which also silently merges the
+    // two families' dedup) all shipped green. The arm is reachable: a serving
+    // PEM whose first block lacks its END line and is followed by a complete
+    // block is accepted by `tls.createSecureContext` (measured on Node
+    // v22.23.0), so the daemon boots and serves, while Node's
+    // NODE_EXTRA_CA_CERTS loader takes nothing from it.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-ca-nodaemon-'));
+    const operatorCa = path.join(dir, 'operator.pem');
+    const daemonCa = path.join(dir, 'daemon.pem');
+    fs.writeFileSync(operatorCa, OPERATOR_CA_PEM);
+    fs.writeFileSync(
+      daemonCa,
+      `${DAEMON_CERT_PEM.replace('-----END CERTIFICATE-----\n', '')}${DAEMON_CERT_PEM}`,
+    );
+    const warnings: string[] = [];
+    const onWarning = (warning: Error) => warnings.push(warning.message);
+    process.on('warning', onWarning);
+
+    const { env } = await startWorkerWithCaPaths(daemonCa, operatorCa);
+
+    expect(env['NODE_EXTRA_CA_CERTS']).toBe(daemonCa);
+    await new Promise((resolve) => setImmediate(resolve));
+    process.off('warning', onWarning);
+    expect(
+      warnings.some((message) =>
+        message.includes('no PEM certificate block to merge into'),
+      ),
+    ).toBe(true);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('sweeps the minted registry from exactly one process exit hook', async () => {
+    // R5-27/R5-5/R5-6: nothing in this suite observed process exit, so
+    // deleting the whole `process.once('exit', …)` registration — a superset
+    // of deleting the `clear()` inside it — left all 103 tests green while
+    // every clean daemon exit orphaned a 0700 directory of cert material in
+    // the shared tmpdir. The listener-count guard nearby bounds the hook from
+    // ABOVE only, so it passes when the hook is gone entirely.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-ca-exit-'));
+    const operatorCa = path.join(dir, 'operator.pem');
+    const daemonCa = path.join(dir, 'daemon.pem');
+    fs.writeFileSync(operatorCa, OPERATOR_CA_PEM);
+    fs.writeFileSync(daemonCa, DAEMON_CERT_PEM);
+
+    const first = await startWorkerWithCaPaths(daemonCa, operatorCa);
+    const firstBundle = first.env['NODE_EXTRA_CA_CERTS']!;
+    expect(
+      process
+        .listeners('exit')
+        .filter((listener) => listener === cleanupMintedWorkerCaBundleDirs),
+    ).toHaveLength(1);
+
+    // Rotate the operator CA in place so the next spawn rebuilds and
+    // supersedes the first bundle. The registry must NOT grow: it held one
+    // entry per rotation for the daemon's lifetime before the supersede
+    // path deleted the old one.
+    fs.writeFileSync(operatorCa, DAEMON_CERT_PEM);
+    const second = await startWorkerWithCaPaths(daemonCa, operatorCa);
+    const secondBundle = second.env['NODE_EXTRA_CA_CERTS']!;
+    expect(secondBundle).not.toBe(firstBundle);
+
+    const swept = cleanupMintedWorkerCaBundleDirs();
+    expect(swept).toContain(path.dirname(secondBundle));
+    // The rebuild already dropped the superseded directory; leaving it here
+    // is the once-per-rotation growth the delete exists to prevent.
+    expect(swept).not.toContain(path.dirname(firstBundle));
+    expect(fs.existsSync(path.dirname(secondBundle))).toBe(false);
+    // The sweep resets the registry; without that, every later exit would
+    // rmSync paths it already removed and the set would never shrink.
+    expect(cleanupMintedWorkerCaBundleDirs()).not.toContain(
+      path.dirname(secondBundle),
+    );
+
     fs.rmSync(dir, { recursive: true, force: true });
   });
 

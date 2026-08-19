@@ -493,20 +493,38 @@ function writeMergedWorkerCaBundle(contents: string): string {
   // while receiving the cert — the private key too, for a combined PEM).
   // Same defence as standalone-update.ts's extract dir.
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-worker-ca-'));
-  const bundlePath = path.join(dir, 'ca-bundle.pem');
-  fs.writeFileSync(bundlePath, contents, { mode: 0o600 });
-  // Nothing else references this directory, so the daemon owns its lifetime.
+  // Nothing else references this directory, so the daemon owns its lifetime —
+  // and it owns it from the moment it exists, not from the moment the write
+  // succeeds. A throw at the write (ENOSPC/EDQUOT on a size-capped tmpfs
+  // /tmp: the directory entry fits, the ~2 KB body does not) lands in
+  // `resolveWorkerCaCertPath`'s read-error fallback, which returns the daemon
+  // cert and never unwinds this. Registering afterwards left every failing
+  // respawn one more untracked 0700 directory that the exit hook — which
+  // walks the registry and nothing else — could not see.
   mintedWorkerCaBundleDirs.add(dir);
   if (!workerCaBundleExitHookRegistered) {
     workerCaBundleExitHookRegistered = true;
-    process.once('exit', () => {
-      for (const minted of mintedWorkerCaBundleDirs) {
-        cleanupWorkerCaBundleDir(minted);
-      }
-      mintedWorkerCaBundleDirs.clear();
-    });
+    process.once('exit', cleanupMintedWorkerCaBundleDirs);
   }
+  const bundlePath = path.join(dir, 'ca-bundle.pem');
+  fs.writeFileSync(bundlePath, contents, { mode: 0o600 });
   return bundlePath;
+}
+
+/**
+ * Removes every merged-bundle directory this process minted and empties the
+ * registry, returning the directories it swept. This is the `exit` hook's
+ * whole body, named so a test can run it: nothing else observes process exit,
+ * so the registration, the sweep and the reset were all unpinned, and what it
+ * swept is what makes "a superseded bundle leaves the registry" observable.
+ */
+export function cleanupMintedWorkerCaBundleDirs(): string[] {
+  const swept = [...mintedWorkerCaBundleDirs];
+  for (const minted of swept) {
+    cleanupWorkerCaBundleDir(minted);
+  }
+  mintedWorkerCaBundleDirs.clear();
+  return swept;
 }
 
 function resolveWorkerCaCertPath(

@@ -42,14 +42,24 @@ function pemMarkerLabel(line: string, prefix: string): string | undefined {
  * UTF-8 BOM at the start of ANY line (Windows tooling writes one, and
  * concatenating operator files puts one mid-file, in front of a later block —
  * a file-start-anchored strip left that block unmatched and lost it), CRLF
- * terminators, and leading/trailing whitespace on marker and body lines
- * alike. Measured on Node 22 through real
+ * terminators, and trailing whitespace. Measured on Node 22 through real
  * `NODE_EXTRA_CA_CERTS` handshakes: every one of those shapes loads and
  * verifies, so rejecting any of them drops an operator CA the workers would
  * have trusted and blames a file that was never the problem.
+ *
+ * LEADING whitespace is deliberately NOT stripped. It is the one shape in this
+ * family the loader does not tolerate on a marker line: measured on Node
+ * v22.23.0 / OpenSSL 3.0.13, a CA file whose `-----BEGIN/END CERTIFICATE-----`
+ * markers carry a leading space or tab loads NOTHING — the handshake fails
+ * UNABLE_TO_VERIFY_LEAF_SIGNATURE with no `Ignoring extra certs` warning, and
+ * `openssl storeutl -certs` reports 0 — while the same file un-indented loads
+ * and verifies. Stripping it here made this module count such a block as an
+ * anchor the workers never got. Body lines are unaffected: their leading
+ * whitespace is dropped when the base64 is joined below, which is what the
+ * decoder does too.
  */
 function normalizePemLine(line: string): string {
-  return line.replace(/^\uFEFF/, '').replace(/^[ \t\r]+|[ \t\r]+$/g, '');
+  return line.replace(/^\uFEFF/, '').replace(/[ \t\r]+$/, '');
 }
 
 /**
@@ -108,12 +118,18 @@ export function extractCertificateBlocks(
     }
     // Ran off the end without an end line — same `bad end line` stop.
     if (cursor >= lines.length) break;
+    // Interior and leading whitespace in a body line is skipped by the
+    // decoder, not an error, so join first and judge the alphabet afterwards.
+    const encoded = body.join('').replace(/\s/g, '');
+    // The loader decodes EVERY block's body, whatever its label, and a body it
+    // cannot decode is `bad base64 decode` — another stop. Judging only
+    // CERTIFICATE bodies let a file whose leading PRIVATE KEY block is corrupt
+    // be counted as holding an anchor while the loader took nothing from it
+    // (measured on Node v22.23.0: handshake UNABLE_TO_VERIFY_LEAF_SIGNATURE
+    // for `bad-key-block + good root`, and for an empty body under any label,
+    // against `authorized: true` for the same file with the block removed).
+    if (encoded.length === 0 || /[^A-Za-z0-9+/=]/.test(encoded)) break;
     if (label === CERTIFICATE_LABEL) {
-      // Interior whitespace in a body line is skipped by the decoder, not an
-      // error, so join first and judge the alphabet afterwards.
-      const encoded = body.join('').replace(/\s/g, '');
-      // Outside the base64 alphabet is `bad base64 decode`, another stop.
-      if (encoded.length === 0 || /[^A-Za-z0-9+/=]/.test(encoded)) break;
       const block = renderCertificateBlock(encoded);
       try {
         // Shape is not loadability: a body made only of base64 *characters*

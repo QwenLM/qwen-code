@@ -1475,6 +1475,173 @@ E6mwm4nEjVj2B5cT62Pv
 -----END CERTIFICATE-----
 `;
 
+/**
+ * A leaf signed by a SELF-SIGNED v3 root that carries other extensions but NO
+ * `basicConstraints` and no `keyCertSign` — a minimal `openssl req -x509`
+ * config. `.ca` is false and the basicConstraints OID is absent, so reading
+ * the extension's presence alone called this anchored. Measured on Node
+ * v22.23.0 / OpenSSL 3.0.13 with this exact file as the served chain and the
+ * trust store: `authorized=false code=INVALID_PURPOSE`.
+ */
+const TEST_TLS_CERT_FULLCHAIN_V3_NO_CONSTRAINTS_ROOT = `-----BEGIN CERTIFICATE-----
+MIIDYjCCAkqgAwIBAgIUL+Czws2mkPECmIm4mHcilV9XdJQwDQYJKoZIhvcNAQEL
+BQAwKzEpMCcGA1UEAwwgcXdlbiB2MyBuby1jb25zdHJhaW50cyB0ZXN0IHJvb3Qw
+IBcNMjYwODE5MDgzMTM3WhgPMjEyNjA3MjYwODMxMzdaMBQxEjAQBgNVBAMMCWxv
+Y2FsaG9zdDCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBALfG3fzKWPFd
+wBpo2iK6tnEFehEsBIW0S6zrtGgceEZhRhk2SzKaOLvNOjGAbbFHfqF4G07jNC8Y
+saW9jc6wx2laTMD1nbKkBou5J30eAyY3ftsQC59Uz/QUT0MT4RUgaUfrC1HAfkmT
+JeMfAOVM1fgFVFVoAarzvBveFP3/cb4Uxi6aU861CDdzDFxE7gNnDNLUPNm1ebI0
+Sb7nTBFwlxIovjl1xLHy8+CRXpLHlUYvv1ymchU9bZ0fsQWa3XXLThR5pk8mFRCq
+fTX+/f+rNipRF21iakVTj4kgWHLnFD6BW96fOBHte5WlRHt6npYTlIdh6vor8ITy
+Y0+F9Sz46p0CAwEAAaOBkjCBjzAaBgNVHREEEzARgglsb2NhbGhvc3SHBH8AAAEw
+DAYDVR0TAQH/BAIwADAOBgNVHQ8BAf8EBAMCBaAwEwYDVR0lBAwwCgYIKwYBBQUH
+AwEwHQYDVR0OBBYEFDPwXdZ1QK0zSZhOHji0XB3eIL8EMB8GA1UdIwQYMBaAFH4p
+oiFHk2vPmA0ABIa0Ho3YCG+MMA0GCSqGSIb3DQEBCwUAA4IBAQBxFGLgmPg8ZmBw
+wFpTt9i/6TWQQvZPjCyhxGctlDpGfSc58sTUnI2wx2yNkKUWgN5KsMGG9wn4BH5D
+cT70/qXWLy4W28xT4fgDyrEXe2ATsJW3h0HG2aAgkRAcSkPaOB5E2eKRvMS+ZvR3
+FqH5XeC1RV6hnASOMUUODfXwZghoUuuDZft8Z1oz1gvMCB69RMJpOYWIOmp33NGK
+I3y/x0GVCHWpEXWTA9YSzfc0MqLK6COY670kUMSmld40oEEgvfLnd7VOjy/zhzj6
+sAxazcSeR4ryrgjNJa757inhMJKhZ5bf4dM47NPPwO72wsrqS1HrVFxJ5BjwDsmQ
+8V3Glu9E
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDBzCCAe+gAwIBAgIUJfbInAk7zaTBwG+qu3ibJYtKYKAwDQYJKoZIhvcNAQEL
+BQAwKzEpMCcGA1UEAwwgcXdlbiB2MyBuby1jb25zdHJhaW50cyB0ZXN0IHJvb3Qw
+IBcNMjYwODE5MDgzMTM2WhgPMjEyNjA3MjYwODMxMzZaMCsxKTAnBgNVBAMMIHF3
+ZW4gdjMgbm8tY29uc3RyYWludHMgdGVzdCByb290MIIBIjANBgkqhkiG9w0BAQEF
+AAOCAQ8AMIIBCgKCAQEAuIzZKOMbeKpu7j815yc9RHBbzRWJmDxRTrEmorrjZpUM
+NRh3BT3lLUY4Ur5zgOqpDNT5vj/rSY/ExBOBM4RfgInCipu3vv7jis94hXbTfr0P
+IC8nC+hKS+V8HO6xy1VGoXYLzpQm78r1obgd7PBZuQajZue+La46dbKJmnWx8NOC
+nZSDW5auOtDhniOn19FiCumn96OSVR+Nk9j/bWrE9AFzhj0GFcx6xQKqadD8AS0Z
+NP30bQkFE6wEnE05p1l6SS3AtX8L21JBeAAL0SVLgNgjlry4geIS7HzufxNUBI6L
+GASFissx1eOtuqJTf6aKM4TDVOzjJdw4l3ROsB5nJwIDAQABoyEwHzAdBgNVHQ4E
+FgQUfimiIUeTa8+YDQAEhrQejdgIb4wwDQYJKoZIhvcNAQELBQADggEBABpU1Vlo
+cO3G91gr6a3cwm4/wmL3EIWH6sl4cj/AmkEvG+eQl4ESxhLpq4pqwtIKEHFuFLmu
+3STHsLsqbKpnHBwLfqXwsAtJOccm+MixHfN6pTe236LaNAdfA9Ds8q6LWdJFL6v0
+cj8q1Y3++uZ0W3DwrKXwvc/VEam4k2/c0eEyaMllx/2pQofvTrYt3F7uh9j42UdF
+u3ygoQgmsOrLAc3RIipdSZbqvOA2yXkod3IiZ8cmnHK+juKocHzqChFAqrfD45qI
+nGT2/DL35St8Giv/BW9xCta5LRpMcvEWoGi+NVW4l6ysWkqMtFU2BKwCEYYn/+NL
+mptrWqez+gyVuWc=
+-----END CERTIFICATE-----
+`;
+
+/**
+ * The control for the shape above: the same geometry, but the root carries
+ * `keyUsage keyCertSign` instead of `basicConstraints`. OpenSSL accepts it
+ * (`X509_check_ca` returns 4) and the same measurement returns
+ * `authorized=true`, so warning on it would send an operator to reissue a CA
+ * that already works.
+ */
+const TEST_TLS_CERT_FULLCHAIN_KEY_CERT_SIGN_ROOT = `-----BEGIN CERTIFICATE-----
+MIIDYTCCAkmgAwIBAgIUA2xZ/OKAOVYnn87IuQxZFcpIQncwDQYJKoZIhvcNAQEL
+BQAwKjEoMCYGA1UEAwwfcXdlbiBrZXlDZXJ0U2lnbi1vbmx5IHRlc3Qgcm9vdDAg
+Fw0yNjA4MTkwODMxMzdaGA8yMTI2MDcyNjA4MzEzN1owFDESMBAGA1UEAwwJbG9j
+YWxob3N0MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnd71W3Um3fL7
+t/t92+aUI7XmGojNx55LY2xRVWgjdZ9Ay+sYPuyFmXZOghBIJiZwa1BEaLnekwFV
+XTlmcVJyyQCnBLfv/daRNK045MMYwvnDvWK8VqjlJ0m6dEwhiBwSxlywVfdJqRFf
+nFRuDVx8AD5Au9DxLPsGCF/uPc2igYZsX6aawOAFd13xy9Edqvh1e8abbur/R3V5
+hvPj9XwaXNZ9f57oCOIqYsZzj+HRcstB11osi2nUFBY3xqjrWfXf9a6lvAEgRiKg
+F38qKSFIPKtzugj+BSr2thcaaPfxrMdQNo/fD7x3NLCqqpATe7Q3/W071cfaMd5V
+mTEUzJRuowIDAQABo4GSMIGPMBoGA1UdEQQTMBGCCWxvY2FsaG9zdIcEfwAAATAM
+BgNVHRMBAf8EAjAAMA4GA1UdDwEB/wQEAwIFoDATBgNVHSUEDDAKBggrBgEFBQcD
+ATAdBgNVHQ4EFgQUUkOyIDrbksN2PTnBmpFoOE99GRIwHwYDVR0jBBgwFoAUOI7p
+nDt+WfQ5OYGwOrbxgX1MC5wwDQYJKoZIhvcNAQELBQADggEBAErDgA8Ur3CJXFGx
+Qr1tnWfkMxJTiLNH5aupSSNFP77l7C8mro/IJNfUcnVCvSWnEl51cS6YLxszsmIZ
+GTBqu64KhNVdt6WLhySFbBuHUpa9VBwrdJ8UIbMNcYcm0Ujl6lZyTrT3+edzWqw+
+yTGUJPaWo//V66BIpgCvJ3iu0Hv3sK4Rdf4LsXnIsmLdvSunKxlucQkyGJZzjEnh
+9pPNOhnP3X5+L2fZEFBwcXfHMaACXt6wf6GmVFr7X9HeU7Jh6ESTNwzSHyDHAe3g
+IgVFua1W4jSzQKNjBY/Atdfq4RivA6UcWYR3isa9xI0gnXxBeXl0+PmaFI8QfgER
+KKuNYiw=
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDFTCCAf2gAwIBAgIUGXmj0/4osqrN2l0rhucDv3hJda8wDQYJKoZIhvcNAQEL
+BQAwKjEoMCYGA1UEAwwfcXdlbiBrZXlDZXJ0U2lnbi1vbmx5IHRlc3Qgcm9vdDAg
+Fw0yNjA4MTkwODMxMzZaGA8yMTI2MDcyNjA4MzEzNlowKjEoMCYGA1UEAwwfcXdl
+biBrZXlDZXJ0U2lnbi1vbmx5IHRlc3Qgcm9vdDCCASIwDQYJKoZIhvcNAQEBBQAD
+ggEPADCCAQoCggEBAKiH7Sh0cuJGLD+Jm8I48v2EOBTaISptGXW+JrJtIHcJ6xS1
+Lz275QZXQvVm5n82ENut35Vr014yOpVl0nWjTXifcpgJlz3DXxXJZJunJ2SafZ/p
+lcOa2zy71DkD1CAE0YYXHcIXqKR5AQhi1YVEuLqAPyWwHzo2NY6pLLKL/f9e6kSP
+jEOdU3x2QZax//3wEBKCgut+Y4D/BWSXQZexRqxdiuIvaWomS6koAdvAfHZI/p46
+QZr8dTdHs0PHLhUKfBE6X/HNA2sOFdA+4N/KCohVSKtaX3xr7ixkvJ9E9+IBUSlx
+mh0yTr9Gc1mKU9/fGgtsgGo8D76VdF/o1WXY3n8CAwEAAaMxMC8wHQYDVR0OBBYE
+FDiO6Zw7fln0OTmBsDq28YF9TAucMA4GA1UdDwEB/wQEAwIBBjANBgkqhkiG9w0B
+AQsFAAOCAQEAoTlR5omIlNcaMz80KdFRf/JSQIfS3ROaaCcY8RiuO9GVGe4dsTXs
+iHn8RM1j+WH7bGPR5ycs7akWCruCGexcawu5xX26/e7iLIu4QQzqVOVwkGw/SxWU
+LgLXo4AvoewCQoBh0ooi+6DhTPaTwSeYf0FmtnQ4+1cBpXaPKcvD5frvb7mI8iop
+f8TBZEgy5uAaBvnhh5ljW/mGtzhVQJL2kNI56F89+jLNFayKOr/NAH+Wq6/y4XH/
+JW5ZVSTzUm/5lVinhjJlzI1qgTKKLnyPC9y/lwsV1pgg4QSqp5NcZe+tPGwVawcu
+lL9BpPKvalzsE/s0y64+00JmSW6oWzLfMg==
+-----END CERTIFICATE-----
+`;
+
+/**
+ * A leaf signed by an X.509 v1 INTERMEDIATE (`openssl x509 -req` with no
+ * `-extfile`, the legacy flow) under a real CA:TRUE root. The v1 exemption
+ * that keeps a v1 ROOT trusted does not reach an intermediate: OpenSSL
+ * refuses it. Measured on Node v22.23.0 / OpenSSL 3.0.13 with this file as
+ * the served chain and the trust store: `authorized=false
+ * code=INVALID_PURPOSE`.
+ */
+const TEST_TLS_CERT_FULLCHAIN_V1_INTERMEDIATE = `-----BEGIN CERTIFICATE-----
+MIIDijCCAnKgAwIBAgIUO1NXDZn7sUcLyXoOb6Zrn/5CuFEwDQYJKoZIhvcNAQEL
+BQAwJDEiMCAGA1UEAwwZcXdlbiB2MSB0ZXN0IGludGVybWVkaWF0ZTAgFw0yNjA4
+MTkwODMxMzdaGA8yMTI2MDcyNjA4MzEzN1owFDESMBAGA1UEAwwJbG9jYWxob3N0
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAxlNIMiQni4GBg2hccTRg
+EvxF1UGCVsfjljhGhT5CbSbRrZ9rtvKoGBIixR6e+2EPxHmd50jF2SdS5HzHCPQf
+n2+k59BbE0W7KJrpVHQspYE2OtpxR6Wu9y+C31q1Bs8ZxPWkXbQNBbeRTlgUlM18
+GTXw6wVuRH4PF5425ovrMlJZ1hT4k/PROSQbU3cvjbl2mFVOEWqVgDXt/+h9AOvY
+zqeiIEWJrjh3Rn8bZZm5ssBG2JzRzCS6PQUA/O8CFiFeWVnmJstYV+cXfYnFf4RJ
+5y9aOG7WO3oQANUg+5dfhEwKJR4AvE/1+kGFzxLdpQrRo8e7zZ9bDUs513oISk66
+tQIDAQABo4HBMIG+MBoGA1UdEQQTMBGCCWxvY2FsaG9zdIcEfwAAATAMBgNVHRMB
+Af8EAjAAMA4GA1UdDwEB/wQEAwIFoDATBgNVHSUEDDAKBggrBgEFBQcDATAdBgNV
+HQ4EFgQU5Eg1xUApem+UABc1aALOYRPsnqQwTgYDVR0jBEcwRaEtpCswKTEnMCUG
+A1UEAwwecXdlbiB2MS1pbnRlcm1lZGlhdGUgdGVzdCByb290ghRvrElfAutwhBeV
+dilnIiiZ0S/nRzANBgkqhkiG9w0BAQsFAAOCAQEAgQkUeanJNofoponB3Q7ekhl4
+nFI8yPWogFBQDBh+6Iz7i0FMUBMG6iJ0RjKMBjz7JhK9VnxCf9VB14wF634pfLE2
+dnWhsme8ZNOQFd3TACT76air+8RGm19RBVgxe3NTc1POtCZ68UE/8L4EMZtOIQNm
+eWadm3gw+w6qzJ+c8dnUmOLjBMD6J3k9Asma+uauYGdwiJPbgrOXSRqVa8HDyXj4
+9gVxremJRza+BdWtiATgKiO/jIc7aiBOIW2PhX8Idg97FirK5dRNQY0pxvAAWp6f
+gvmOMpY5YCDoZjjApzRLMQBeBsDqQU2XBIjnidcbGYrNh2F4A2AUfFEQHOPt6w==
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIC1jCCAb4CFG+sSV8C63CEF5V2KWciKJnRL+dHMA0GCSqGSIb3DQEBCwUAMCkx
+JzAlBgNVBAMMHnF3ZW4gdjEtaW50ZXJtZWRpYXRlIHRlc3Qgcm9vdDAgFw0yNjA4
+MTkwODMxMzdaGA8yMTI2MDcyNjA4MzEzN1owJDEiMCAGA1UEAwwZcXdlbiB2MSB0
+ZXN0IGludGVybWVkaWF0ZTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEB
+AJ5qNPjDicSDvYlPa9OLT0cXhxdwn4E/zWOcBCrqX2gjxKSjsY2zQJt2dqfCAM4W
+JOujxvSJdqOMDiAm5L1cT6Zgx1AJZMsG5834Kr8cDdxhxh67fb4xFe3xRUI6dKJd
+GgtNHRsGjK4z2pbTtkqcxIWrbd8Ndn9djzYzNezxvP3PGVaJnL6b6wLTHS2t97FO
+etATd34rekL1a5AmIMBA/7+LTxTRzh7CqJa5twQGwFlBzXUv8xVKqLfxTX5exigf
+SmseMGuDey/x67nlmxV2w8uw/bmRiSdeohaJIvhteoMjl2we9wJsNTb4EedPvD4X
+jhfsnAugn/XnR7KRI6OU7IMCAwEAATANBgkqhkiG9w0BAQsFAAOCAQEAeyzQQaOc
+3Q7qeQuk/7YTE6xfZzIH32Dt2px6+WyiK6/bKnYHtc8zdCB808IWI+rLUnX6EPTE
+uzReIBNV7AtmMZJ0tgrlR8E4qJ/+b555erOIJ/Eh4ZBVNIvIkuNEUpm1jQ3f620R
+BnWgvtD1X8eC62r8EH8Dp47ZbLr8EPOtb+cxFiM2XuNHptgweoA3ppwejxygZRhn
+cKowxl7QdSBmU3oGHA+j6QD9pEr5z+9GilQJkla6RnVwLLLjYI5I6/g+1bynMEoK
+3ertff8Ors1iSqoY7BE06S4ceR5fLgsRbUmDKu1oPCpTWcyoCgkXu5jvLVxqI7EF
+t1VyeqQyWL/vrA==
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDJDCCAgygAwIBAgIUZT8tp1esTrrlMkdlYKFtxGQsYS0wDQYJKoZIhvcNAQEL
+BQAwKTEnMCUGA1UEAwwecXdlbiB2MS1pbnRlcm1lZGlhdGUgdGVzdCByb290MCAX
+DTI2MDgxOTA4MzEzN1oYDzIxMjYwNzI2MDgzMTM3WjApMScwJQYDVQQDDB5xd2Vu
+IHYxLWludGVybWVkaWF0ZSB0ZXN0IHJvb3QwggEiMA0GCSqGSIb3DQEBAQUAA4IB
+DwAwggEKAoIBAQDdCK44mQgKprzHTRn8YrJzivRO0jGPr3+RM6iVlKorBK+dcL4b
+vHX+Pp8huIELMxqH07izfWVKjGZmJRWBpZQYOX8Ss+LXejKEtg7ssXoQw5gx37Io
+4atPQ5lI33E9PK4XN79h8oMZl3vhBByA5GduhIiwXJKlxvYFi6TYp9O5jnzqb/hh
+1fkcG1nX9Np6Hfr+Pi6MC0UsAFoCyTm7XPhXfEXs98EHdZkQSy8apIz1zm/nTDrq
+2lpcuvSh3HA8Gr2cSk5aBb2h39G9s2SFneKE/bQZU2ZzuhJmRvcWxiL4307DrW7d
+Glp443R0WEfRMy0J3PE61ukfkgDFViSdn2ohAgMBAAGjQjBAMB0GA1UdDgQWBBSq
+bE6kxv3+Oz9pjqZM8pxJ4GQ+sDAPBgNVHRMBAf8EBTADAQH/MA4GA1UdDwEB/wQE
+AwIBBjANBgkqhkiG9w0BAQsFAAOCAQEACM90IqAYKt7dA/Mkv5nzHFx8tebR7lla
++p08sSNYnht6/xd3n8s/zmO1twXRwibsnXjBdTIcWCBgTp8XSYGtuA3TZHldjDTj
+C3/ZpHBNxyKv8QXJvEfF6U9CH0dQpReZeknvd1oDOQm6Qf8lRbQ3VAFnrHKaBq3V
+78cN9L48r4XJXmiAolcd3n0OtOxUqr1d/t0Jw6cF2M8p0jeH5qlLIlWZy/P5d2sk
+mWMSI6CNSQ2o03oMXHbSXqNV8cnPq9U84Wg0y+Hm6YcNKdC6gxSUDUqMc3YvmRpS
+XfHP3tzFMIHT/tvv1dVrWFnYMgOQ30vUE0ddHXIpk0cFVAlQW4+BJw==
+-----END CERTIFICATE-----
+`;
+
 describe('describeWorkerTlsTrustGaps', () => {
   const daemonUrl = 'https://127.0.0.1:4170';
 
@@ -1737,6 +1904,57 @@ describe('describeWorkerTlsTrustGaps', () => {
     expect(gaps).toHaveLength(1);
     expect(gaps[0]).toContain('INVALID_PURPOSE');
     expect(gaps[0]).toContain('qwen non-CA test intermediate');
+  });
+
+  it('names a v3 chain terminator with no basicConstraints at all', () => {
+    // R5-1: the terminator check read basicConstraints' PRESENCE, so a v3 root
+    // carrying only a subjectKeyIdentifier — `.ca === false`, no
+    // basicConstraints OID, no keyCertSign — walked straight past it and boot
+    // reported zero gaps. OpenSSL refuses that root as an issuer. Measured on
+    // Node v22.23.0 / OpenSSL 3.0.13 with this exact file as the served chain
+    // and the trust store: authorized=false, code=INVALID_PURPOSE, while the
+    // daemon, /health and the boot log all stay green.
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_V3_NO_CONSTRAINTS_ROOT),
+      certPath: '/certs/fullchain.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('INVALID_PURPOSE');
+    expect(gaps[0]).toContain('qwen v3 no-constraints test root');
+  });
+
+  it('keeps trusting a root whose keyUsage alone allows certificate signing', () => {
+    // The control for R5-1, and what stops the widened check from crying wolf:
+    // the same geometry with `keyUsage keyCertSign` and still no
+    // basicConstraints. `X509_check_ca` returns 4 for it and the same
+    // measurement handshakes authorized=true.
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_KEY_CERT_SIGN_ROOT),
+        certPath: '/certs/fullchain.pem',
+        daemonUrl,
+      }),
+    ).toEqual([]);
+  });
+
+  it('names a chain that passes through a v1 intermediate', () => {
+    // R5-26: the intermediate check is the broad `!issuer.ca`, and the only
+    // fixture pinning it was an explicit CA:FALSE one — so narrowing it to the
+    // terminator's basicConstraints-presence test shipped green while a v1
+    // intermediate (an internal PKI signed without `-extfile`) climbed past it
+    // and reported anchored. The v1 exemption belongs to a self-signed ROOT
+    // only. Measured on Node v22.23.0 / OpenSSL 3.0.13 with this file as the
+    // served chain and the trust store: authorized=false,
+    // code=INVALID_PURPOSE.
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_V1_INTERMEDIATE),
+      certPath: '/certs/fullchain.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('INVALID_PURPOSE');
+    expect(gaps[0]).toContain('qwen v1 test intermediate');
   });
 
   it('reports the discarded operator CA when the serving file is unloadable', () => {
@@ -9733,9 +9951,22 @@ describe('runQwenServe channel worker supervisor', () => {
     // Workers are forked with `cwd: opts.workspace`, so a relative
     // --tls-cert would resolve against the worker's cwd, load nothing, and
     // fail every handshake with DEPTH_ZERO_SELF_SIGNED_CERT.
+    // `path.relative` returns the ABSOLUTE target across Windows drives, and
+    // the merge-queue `Test (windows-latest, Node 22.x)` job runs from
+    // `D:\a\qwen-code\qwen-code` while `os.tmpdir()` sits on C: — where the
+    // precondition below fails and takes a required gate red. `TMPDIR` cannot
+    // move it: win32 `os.tmpdir()` reads TMP/TEMP/USERPROFILE, never TMPDIR.
+    // So fall back to a directory under the vitest cwd, which is reachable
+    // relatively on every platform.
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-tls-')),
     );
+    if (path.isAbsolute(path.relative(process.cwd(), tmpDir))) {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+      tmpDir = fs.realpathSync(
+        fs.mkdtempSync(path.join(process.cwd(), 'qws-channel-tls-')),
+      );
+    }
     const certPath = path.join(tmpDir, 'cert.pem');
     const keyPath = path.join(tmpDir, 'key.pem');
     fs.writeFileSync(certPath, TEST_TLS_CERT);

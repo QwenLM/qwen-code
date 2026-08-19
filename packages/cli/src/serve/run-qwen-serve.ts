@@ -849,26 +849,158 @@ export function describeWorkerTlsTrustGaps(opts: {
   return gaps;
 }
 
-/** DER for the basicConstraints OBJECT IDENTIFIER, 2.5.29.19. */
-const BASIC_CONSTRAINTS_OID_DER = Buffer.from([0x06, 0x03, 0x55, 0x1d, 0x13]);
+/** basicConstraints, 2.5.29.19, as the contents of its OBJECT IDENTIFIER. */
+const BASIC_CONSTRAINTS_OID = Buffer.from([0x55, 0x1d, 0x13]);
+/** keyUsage, 2.5.29.15, likewise. */
+const KEY_USAGE_OID = Buffer.from([0x55, 0x1d, 0x0f]);
+/** `keyCertSign` is bit 5 of the keyUsage BIT STRING, counted from the MSB. */
+const KEY_CERT_SIGN_MASK = 0x04;
+/** `[0] EXPLICIT Version DEFAULT v1` — the first TBSCertificate member. */
+const VERSION_TAG = 0xa0;
+/** `[3] EXPLICIT Extensions OPTIONAL` — the last one. */
+const EXTENSIONS_TAG = 0xa3;
+const SEQUENCE_TAG = 0x30;
+const BOOLEAN_TAG = 0x01;
+
+/** The tag of the DER element at `at`, and the `[start, end)` of its contents. */
+function derElementAt(
+  der: Buffer,
+  at: number,
+): { tag: number; start: number; end: number } | undefined {
+  const tag = der[at];
+  const header = der[at + 1];
+  if (tag === undefined || header === undefined) return undefined;
+  let start = at + 2;
+  let length = header & 0x7f;
+  if ((header & 0x80) !== 0) {
+    // Long form: the low bits count the length's own bytes. Certificates use
+    // neither the indefinite form (zero bytes) nor more than four.
+    if (length === 0 || length > 4) return undefined;
+    let value = 0;
+    for (let index = 0; index < length; index += 1) {
+      const byte = der[start + index];
+      if (byte === undefined) return undefined;
+      value = value * 0x100 + byte;
+    }
+    start += length;
+    length = value;
+  }
+  const end = start + length;
+  return end <= der.length ? { tag, start, end } : undefined;
+}
+
+/** The TBSCertificate of `cert`: the first member of the outer SEQUENCE. */
+function tbsCertificateOf(
+  cert: X509Certificate,
+): { tag: number; start: number; end: number } | undefined {
+  const certificate = derElementAt(cert.raw, 0);
+  if (certificate?.tag !== SEQUENCE_TAG) return undefined;
+  const tbs = derElementAt(cert.raw, certificate.start);
+  return tbs?.tag === SEQUENCE_TAG ? tbs : undefined;
+}
 
 /**
- * Whether `cert` says, in the extension itself, that it is not a CA.
- *
- * `X509Certificate.ca` is `false` in two very different cases: an explicit
- * `basicConstraints CA:FALSE`, and an X.509 v1 / no-extension root (old
- * internal PKIs, `openssl x509 -req -signkey`). OpenSSL accepts the second as
- * an issuer — `X509_check_ca` returns 3 for a v1 cert and 2 only for an
- * explicit CA:FALSE. Measured on Node 22 / OpenSSL 3: a leaf anchored by a v1
- * root completes a real handshake `authorized: true`, while the explicit
- * CA:FALSE twin really does fail INVALID_PURPOSE. Warning on `.ca` alone
- * therefore sends operators to reissue a CA that already works.
- *
- * `toLegacyObject()` exposes no more than `.ca` does, so read the DER: the
- * extension's presence is what separates the two shapes.
+ * The value bytes of `cert`'s `oid` extension, or `undefined` when it carries
+ * none. Searching `cert.raw` for the OID bytes instead — what this file did
+ * for basicConstraints — also matches them inside a signature or a key.
  */
-function declaresNotACa(cert: X509Certificate): boolean {
-  return !cert.ca && cert.raw.includes(BASIC_CONSTRAINTS_OID_DER);
+function certificateExtension(
+  cert: X509Certificate,
+  oid: Buffer,
+): Buffer | undefined {
+  const der = cert.raw;
+  const tbs = tbsCertificateOf(cert);
+  if (!tbs) return undefined;
+  let at = tbs.start;
+  while (at < tbs.end) {
+    const member = derElementAt(der, at);
+    if (!member) return undefined;
+    if (member.tag !== EXTENSIONS_TAG) {
+      at = member.end;
+      continue;
+    }
+    const list = derElementAt(der, member.start);
+    if (list?.tag !== SEQUENCE_TAG) return undefined;
+    let entry = list.start;
+    while (entry < list.end) {
+      // Extension ::= SEQUENCE { extnID OID, critical BOOLEAN DEFAULT FALSE,
+      // extnValue OCTET STRING }.
+      const extension = derElementAt(der, entry);
+      if (extension?.tag !== SEQUENCE_TAG) return undefined;
+      const id = derElementAt(der, extension.start);
+      if (!id) return undefined;
+      let valueAt = id.end;
+      const critical = derElementAt(der, valueAt);
+      if (critical?.tag === BOOLEAN_TAG) valueAt = critical.end;
+      const value = derElementAt(der, valueAt);
+      if (!value) return undefined;
+      if (der.subarray(id.start, id.end).equals(oid)) {
+        return der.subarray(value.start, value.end);
+      }
+      entry = extension.end;
+    }
+    return undefined;
+  }
+  return undefined;
+}
+
+/**
+ * Whether a keyUsage extension whose value is `der` allows `keyCertSign`.
+ * The value wraps `BIT STRING { unusedBits, bits… }`; a certificate that
+ * encodes no bit at all cannot allow it.
+ */
+function keyUsageAllowsCertSign(der: Buffer): boolean {
+  const bits = derElementAt(der, 0);
+  if (!bits) return false;
+  const first = der[bits.start + 1];
+  return first !== undefined && (first & KEY_CERT_SIGN_MASK) !== 0;
+}
+
+/**
+ * Whether `cert` is an X.509 v1 certificate. `version` is `[0] EXPLICIT …
+ * DEFAULT v1`, and DER omits a member at its default, so a v1 certificate's
+ * TBSCertificate opens straight on the serial number.
+ */
+function isV1Certificate(cert: X509Certificate): boolean {
+  const tbs = tbsCertificateOf(cert);
+  return tbs !== undefined && cert.raw[tbs.start] !== VERSION_TAG;
+}
+
+/**
+ * Whether OpenSSL would refuse to let the SELF-SIGNED `cert` issue the
+ * certificate below it — `check_ca()` in `v3_purp.c`, in the same order.
+ *
+ * `X509Certificate.ca` alone is not that answer: it is `false` for an explicit
+ * `basicConstraints CA:FALSE`, for an X.509 v1 / no-extension root (old
+ * internal PKIs, `openssl x509 -req -signkey`) that OpenSSL accepts, and for a
+ * v3 root carrying only `keyUsage keyCertSign` that OpenSSL also accepts.
+ * Reading basicConstraints' presence alone is not it either: a v3 root with
+ * other extensions but no basicConstraints and no keyCertSign is one OpenSSL
+ * refuses, and this diagnostic reported it anchored.
+ *
+ * Every branch is measured on Node v22.23.0 / OpenSSL 3.0.13 as a real
+ * `tls.connect` against a server holding a leaf the root signed, with the
+ * fullchain as the trust store — the shape a channel worker gets:
+ *
+ * - v3, subjectKeyIdentifier only …………………… INVALID_PURPOSE  (refused)
+ * - v3, keyUsage keyCertSign, no basicConstraints … authorized (accepted)
+ * - v3, basicConstraints CA:TRUE + keyCertSign …… authorized (accepted)
+ * - v1, no extensions ……………………………………… authorized (accepted)
+ * - v3, CA:TRUE but keyUsage WITHOUT keyCertSign … refused (keyUsage first)
+ * - v3, CA:FALSE but keyUsage WITH keyCertSign …… INVALID_PURPOSE (refused)
+ */
+function cannotIssueCertificates(cert: X509Certificate): boolean {
+  const keyUsage = certificateExtension(cert, KEY_USAGE_OID);
+  // keyUsage, where present, must allow certificate signing whatever
+  // basicConstraints goes on to say.
+  if (keyUsage !== undefined && !keyUsageAllowsCertSign(keyUsage)) return true;
+  if (certificateExtension(cert, BASIC_CONSTRAINTS_OID) !== undefined) {
+    return !cert.ca;
+  }
+  // No basicConstraints: a self-signed v1 root is still a CA (`X509_check_ca`
+  // returns 3), and so is a certificate whose keyUsage allows certificate
+  // signing (4). Nothing else is.
+  return !isV1Certificate(cert) && keyUsage === undefined;
 }
 
 function isSelfSignedCert(x509: X509Certificate): boolean {
@@ -942,12 +1074,12 @@ function walkWorkerAnchorPath(chain: readonly X509Certificate[]): {
     const current: X509Certificate = next;
     path.push(current);
     if (isSelfSignedCert(current)) {
-      // OpenSSL applies `basicConstraints CA:TRUE` to certificates that sign
-      // OTHER certificates, not to a self-signed leaf trusted at depth 0.
-      // Measured on Node 22: a CA:FALSE self-signed leaf in its own trust
-      // store handshakes fine, while the same shape used as an issuer fails
+      // OpenSSL applies its CA test to certificates that sign OTHER
+      // certificates, not to a self-signed leaf trusted at depth 0. Measured
+      // on Node 22: a CA:FALSE self-signed leaf in its own trust store
+      // handshakes fine, while the same shape used as an issuer fails
       // INVALID_PURPOSE — so the constraint binds only past the leaf.
-      if (path.length > 1 && declaresNotACa(current)) {
+      if (path.length > 1 && cannotIssueCertificates(current)) {
         return { anchored: false, path, nonCaTerminator: current };
       }
       return { anchored: true, path };
