@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { Content } from '@google/genai';
 import {
   buildApiHistoryFromConversation,
   detectTurnInterruption,
@@ -74,22 +75,38 @@ export async function reconcileDanglingPromptTerminals(
   }
   const dangling = danglingInFlightPromptIds(records);
   if (dangling.length === 0) return;
-  // `detectTurnInterruption` judges the transcript's LAST turn, so only the
-  // most recent dangling prompt can be attributed; earlier queued prompts
-  // stay unknown by design
+  // Fail closed on multiple dangling prompts. Under FIFO admission the
+  // visible transcript tail belongs to the OLDEST running prompt, but with
+  // several prompts dangling the tail's owner cannot be verified (the
+  // queued ones never wrote a turn): synthesizing a terminal for any of
+  // them — including the newest — could attribute an earlier prompt's turn
+  // to the wrong id. They all stay `unknown`
   // (see docs/design/2026-08-19-prompt-terminal-ledger-design.md).
-  const target = dangling[dangling.length - 1];
+  if (dangling.length > 1) return;
+  const target = dangling[0];
   if (target === undefined) return;
-  // Attribution guard: the transcript tail reflects the most recently
-  // ADMITTED prompt, i.e. the prompt behind the ledger's last `in_flight`
-  // record (under FIFO admission/settle order this is `target` itself —
-  // the guard only fires on anomalous interleavings, where no verdict can
-  // be attributed).
-  let lastInFlight: PromptLedgerInFlightRecord | undefined;
+  // Attribution guard: skip the in_flight records of prompts that settled
+  // (a terminal record exists for them) and require the last remaining
+  // in_flight record to be target's own admission. In `[A if, B if,
+  // B cancelled]` (B queued then cancelled while A still ran) the tail
+  // belongs to A even though B's in_flight is the later record — the naive
+  // "last in_flight must match target" guard wrongly vetoed A with B's
+  // settled in_flight.
+  const settledPromptIds = new Set(
+    records.filter(isPromptLedgerTerminalRecord).map((r) => r.promptId),
+  );
+  let targetAdmission: PromptLedgerInFlightRecord | undefined;
   for (const record of records) {
-    if (!isPromptLedgerTerminalRecord(record)) lastInFlight = record;
+    if (
+      !isPromptLedgerTerminalRecord(record) &&
+      !settledPromptIds.has(record.promptId)
+    ) {
+      targetAdmission = record;
+    }
   }
-  if (lastInFlight === undefined || lastInFlight.promptId !== target) return;
+  if (targetAdmission === undefined || targetAdmission.promptId !== target) {
+    return;
+  }
   let resumed: ResumedSessionData | undefined;
   try {
     resumed = await sessionService.loadSession(sessionId);
@@ -97,31 +114,61 @@ export async function reconcileDanglingPromptTerminals(
     return; // Degraded transcript: fail-closed.
   }
   if (resumed === undefined) return;
+  // Temporal evidence: the transcript's last write must postdate target's
+  // admission (at or after the in_flight `at`). A dangling prompt that
+  // never produced a transcript write (still queued when the daemon died)
+  // leaves the tail owned by an earlier settled turn — fail closed instead
+  // of attributing that turn to the target. `ChatRecord.timestamp` is the
+  // record's creation time, so any record written under the target's turn
+  // satisfies the check.
+  const messages = resumed.conversation.messages;
+  const lastMessage = messages[messages.length - 1];
+  const lastWriteMs =
+    lastMessage === undefined ? NaN : Date.parse(lastMessage.timestamp);
+  if (!Number.isFinite(lastWriteMs) || lastWriteMs < targetAdmission.at) {
+    return;
+  }
   const apiHistory = buildApiHistoryFromConversation(resumed.conversation);
-  const verdict = detectTurnInterruption(
-    apiHistory.slice(-TURN_INTERRUPTION_HISTORY_TAIL_COUNT),
-  );
-  const record: PromptLedgerTerminalRecord =
-    verdict.kind === 'none'
-      ? {
-          v: 1,
-          promptId: target,
-          terminal: 'completed',
-          stopReason: 'reconstructed_from_transcript',
-          at: Date.now(),
-        }
-      : {
-          v: 1,
-          promptId: target,
-          terminal: 'interrupted',
-          code: 'daemon_lost',
-          at: Date.now(),
-        };
+  const historyTail = apiHistory.slice(-TURN_INTERRUPTION_HISTORY_TAIL_COUNT);
+  const verdict = detectTurnInterruption(historyTail);
+  // Id-less tool-call guard: `detectTurnInterruption` ignores functionCalls
+  // without an id (they cannot be paired on the wire), but reconciliation
+  // needs no wire pairing — a model tail holding ANY functionCall means the
+  // daemon died mid tool-run, so upgrade the verdict to interrupted
+  // (`interrupted_turn` semantics).
+  const interrupted =
+    verdict.kind !== 'none' || tailHoldsAnyFunctionCall(historyTail);
+  const record: PromptLedgerTerminalRecord = interrupted
+    ? {
+        v: 1,
+        promptId: target,
+        terminal: 'interrupted',
+        code: 'daemon_lost',
+        at: Date.now(),
+      }
+    : {
+        v: 1,
+        promptId: target,
+        terminal: 'completed',
+        stopReason: 'reconstructed_from_transcript',
+        at: Date.now(),
+      };
   try {
     appendPromptLedgerRecord(ledgerPath, record);
   } catch {
     // Best-effort: the dangling prompt stays unknown.
   }
+}
+
+/**
+ * Whether the history tail's last entry is a model turn holding at least
+ * one `functionCall` part (id or not). See the id-less tool-call guard in
+ * {@link reconcileDanglingPromptTerminals}.
+ */
+function tailHoldsAnyFunctionCall(history: Content[]): boolean {
+  const last = history[history.length - 1];
+  if (last?.role !== 'model') return false;
+  return (last.parts ?? []).some((part) => part.functionCall !== undefined);
 }
 
 /**

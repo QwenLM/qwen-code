@@ -118,6 +118,56 @@ describe('appendPromptLedgerRecord + readPromptLedgerRecords', () => {
     const records = readPromptLedgerRecords(filePath);
     expect(records.map((record) => record.promptId)).toEqual(['p1', 'p2']);
   });
+
+  it('seals a torn tail so the next appended record survives', () => {
+    const filePath = ledgerPath('torn-tail-seal');
+    // Production crash shape: a complete record, then an append torn
+    // mid-line (no trailing newline).
+    writeFileSync(
+      filePath,
+      `${JSON.stringify({ v: 1, promptId: 'p1', state: 'in_flight', at: 1 })}\n{"v":1,"promptId":"p2","state":"in_fli`,
+      'utf8',
+    );
+
+    appendPromptLedgerRecord(filePath, {
+      v: 1,
+      promptId: 'p2',
+      terminal: 'completed',
+      at: 2,
+    });
+
+    // Without the seal the new record would fuse with the torn fragment
+    // into one unparseable line and BOTH would be lost; with it the torn
+    // fragment stays droppable and p2's complete record survives.
+    const records = readPromptLedgerRecords(filePath);
+    expect(records).toEqual([
+      { v: 1, promptId: 'p1', state: 'in_flight', at: 1 },
+      { v: 1, promptId: 'p2', terminal: 'completed', at: 2 },
+    ]);
+  });
+
+  it('does not add a seal when the tail is already newline-terminated', () => {
+    const filePath = ledgerPath('torn-tail-clean');
+    appendPromptLedgerRecord(filePath, {
+      v: 1,
+      promptId: 'p1',
+      state: 'in_flight',
+      at: 1,
+    });
+
+    appendPromptLedgerRecord(filePath, {
+      v: 1,
+      promptId: 'p2',
+      terminal: 'completed',
+      at: 2,
+    });
+
+    // No stray blank lines: exactly two records, in order.
+    expect(readPromptLedgerRecords(filePath)).toEqual([
+      { v: 1, promptId: 'p1', state: 'in_flight', at: 1 },
+      { v: 1, promptId: 'p2', terminal: 'completed', at: 2 },
+    ]);
+  });
 });
 
 describe('danglingInFlightPromptIds', () => {

@@ -105,6 +105,61 @@ describe('bridge prompt terminal ledger writes', () => {
     ]);
   });
 
+  it('records in_flight for queued admissions and flushes both on shutdown', async () => {
+    const handle = makeChannel({
+      promptImpl: () => new Promise(() => {}),
+    });
+    const ledger = recordingLedger();
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      promptLedger: ledger.sink,
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const first = bridge.sendPrompt(
+      session.sessionId,
+      {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'never resolves' }],
+      },
+      undefined,
+      { promptId: 'p-queued-a' },
+    );
+    void first.catch(() => undefined);
+    const second = bridge.sendPrompt(
+      session.sessionId,
+      {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'queued behind' }],
+      },
+      undefined,
+      { promptId: 'p-queued-b' },
+    );
+    void second.catch(() => undefined);
+
+    // Admission is synchronous (write-ahead): both in_flight records are
+    // on the ledger before either prompt settles — the queued one included.
+    const inFlight = ledger.records.filter((record) => !('terminal' in record));
+    expect(inFlight).toHaveLength(2);
+    expect(inFlight.map((record) => record.promptId)).toEqual([
+      'p-queued-a',
+      'p-queued-b',
+    ]);
+
+    await bridge.shutdown();
+    await first.catch(() => undefined);
+    await second.catch(() => undefined);
+
+    const terminals = terminalRecords(ledger.records);
+    expect(terminals.map((record) => record.promptId).sort()).toEqual([
+      'p-queued-a',
+      'p-queued-b',
+    ]);
+    for (const terminal of terminals) {
+      expect(terminal.terminal).toBe('error');
+      expect(terminal.code).toBe('daemon_shutdown');
+    }
+  });
+
   it('maps a cancelled stopReason to a cancelled terminal record', async () => {
     const handle = makeChannel({
       promptImpl: () => ({ stopReason: 'cancelled' }),

@@ -4,7 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { appendFileSync, mkdirSync, readFileSync } from 'node:fs';
+import {
+  appendFileSync,
+  closeSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  statSync,
+  type Stats,
+} from 'node:fs';
 import * as path from 'node:path';
 
 /**
@@ -67,7 +76,36 @@ export function appendPromptLedgerRecord(
   record: PromptLedgerRecord,
 ): void {
   mkdirSync(path.dirname(filePath), { recursive: true });
+  sealTornTailSync(filePath);
   appendFileSync(filePath, `${JSON.stringify(record)}\n`, 'utf8');
+}
+
+/**
+ * Seal a torn tail left by a crash mid-append: when the file is non-empty
+ * and its last byte is not a newline, the next append would fuse with the
+ * truncated line and the reader would drop BOTH records (the fused line
+ * fails JSON parsing). A leading newline keeps the torn fragment droppable
+ * and the new record intact. Missing files need no seal.
+ */
+function sealTornTailSync(filePath: string): void {
+  let stats: Stats;
+  try {
+    stats = statSync(filePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw error;
+  }
+  if (stats.size === 0) return;
+  const fd = openSync(filePath, 'r');
+  try {
+    const lastByte = Buffer.alloc(1);
+    const bytesRead = readSync(fd, lastByte, 0, 1, stats.size - 1);
+    if (bytesRead === 1 && lastByte[0] !== 0x0a) {
+      appendFileSync(filePath, '\n', 'utf8');
+    }
+  } finally {
+    closeSync(fd);
+  }
 }
 
 function coercePromptLedgerRecord(

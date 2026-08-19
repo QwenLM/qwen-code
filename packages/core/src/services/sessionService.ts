@@ -609,11 +609,27 @@ export class SessionService {
 
   /**
    * Returns the absolute path to the per-session prompt terminal ledger
+   * (append-only sidecar JSONL next to the transcript), in the given
+   * archive state's chats directory. The file may not exist yet —
+   * consumers must treat ENOENT as "no ledger evidence".
+   */
+  private getPromptLedgerPathForState(
+    sessionId: string,
+    state: SessionArchiveState,
+  ): string {
+    return path.join(
+      this.getChatsDirForState(state),
+      `${sessionId}.ledger.jsonl`,
+    );
+  }
+
+  /**
+   * Returns the absolute path to the per-session prompt terminal ledger
    * (append-only sidecar JSONL next to the transcript). The file may not
    * exist yet — consumers must treat ENOENT as "no ledger evidence".
    */
   getPromptLedgerPath(sessionId: string): string {
-    return path.join(this.getChatsDir(), `${sessionId}.ledger.jsonl`);
+    return this.getPromptLedgerPathForState(sessionId, 'active');
   }
 
   getWorktreeSessionPathForArchiveState(
@@ -911,6 +927,15 @@ export class SessionService {
     }
   }
 
+  private removePromptLedgers(sessionId: string): void {
+    for (const state of ['active', 'archived'] as const) {
+      const ledger = this.getPromptLedgerPathForState(sessionId, state);
+      if (fs.existsSync(ledger)) {
+        this.removeFileIfExists(ledger);
+      }
+    }
+  }
+
   private removeFileHistoryBackups(sessionId: string): void {
     fs.rmSync(
       path.join(Storage.getGlobalQwenDir(), FILE_HISTORY_DIR, sessionId),
@@ -957,6 +982,38 @@ export class SessionService {
     fs.mkdirSync(path.dirname(targetPath), { recursive: true });
     fs.renameSync(sourcePath, targetPath);
     return true;
+  }
+
+  /**
+   * Move a prompt terminal ledger sidecar across archive states. Unlike a
+   * bare rename, an existing destination does not wedge the pair forever:
+   * the ledger is append-only JSONL, so the source records are concatenated
+   * onto the destination (preserving write order) and the source is
+   * unlinked. Throws propagate to the caller, which owns the warn-only
+   * policy — a ledger problem must never block the transcript move.
+   */
+  private moveLedgerSidecar(sourcePath: string, destinationPath: string): void {
+    if (!fs.existsSync(sourcePath)) {
+      return;
+    }
+    fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
+    if (!fs.existsSync(destinationPath)) {
+      fs.renameSync(sourcePath, destinationPath);
+      return;
+    }
+    // Destination already exists (e.g. a partially completed archive
+    // cycle): merge instead of wedging. Newline padding seals both
+    // boundaries so lines cannot fuse into one — the ledger reader skips
+    // blank lines, so a redundant newline is harmless while a fused line
+    // would drop both records.
+    const sourceContents = fs.readFileSync(sourcePath, 'utf8');
+    if (sourceContents.length > 0) {
+      const payload = sourceContents.endsWith('\n')
+        ? sourceContents
+        : `${sourceContents}\n`;
+      fs.appendFileSync(destinationPath, `\n${payload}`, 'utf8');
+    }
+    fs.unlinkSync(sourcePath);
   }
 
   private sessionFileMoveError(
@@ -1771,6 +1828,7 @@ export class SessionService {
           this.removeFileIfExists(archivedPath);
         }
         this.removeWorktreeSidecars(sessionId);
+        this.removePromptLedgers(sessionId);
         this.removeFileHistoryBackups(sessionId);
         return true;
       }
@@ -1785,6 +1843,7 @@ export class SessionService {
       await this.salvageUsageBestEffort(archivedPath);
       this.removeFileIfExists(archivedPath);
       this.removeWorktreeSidecars(sessionId);
+      this.removePromptLedgers(sessionId);
       this.removeFileHistoryBackups(sessionId);
       return true;
     } catch (error) {
@@ -1840,10 +1899,13 @@ export class SessionService {
           sessionId,
           'archived',
         );
-        const activeLedger = this.getPromptLedgerPath(sessionId);
-        const archivedLedger = path.join(
-          this.getArchiveChatsDir(),
-          `${sessionId}.ledger.jsonl`,
+        const activeLedger = this.getPromptLedgerPathForState(
+          sessionId,
+          'active',
+        );
+        const archivedLedger = this.getPromptLedgerPathForState(
+          sessionId,
+          'archived',
         );
         try {
           fs.renameSync(sourcePath, targetPath);
@@ -1858,7 +1920,7 @@ export class SessionService {
           );
         }
         try {
-          this.moveOptionalFile(activeLedger, archivedLedger);
+          this.moveLedgerSidecar(activeLedger, archivedLedger);
         } catch (ledgerError) {
           this.warn(
             `archiveSessions: failed to move prompt ledger for ${sessionId} from ${activeLedger} to ${archivedLedger}: ${ledgerError}`,
@@ -1929,14 +1991,19 @@ export class SessionService {
             `unarchiveSessions: failed to move worktree sidecar for ${sessionId} from ${archivedSidecar} to ${activeSidecar}: ${sidecarError}`,
           );
         }
+        const archivedLedger = this.getPromptLedgerPathForState(
+          sessionId,
+          'archived',
+        );
+        const activeLedger = this.getPromptLedgerPathForState(
+          sessionId,
+          'active',
+        );
         try {
-          this.moveOptionalFile(
-            path.join(this.getArchiveChatsDir(), `${sessionId}.ledger.jsonl`),
-            this.getPromptLedgerPath(sessionId),
-          );
+          this.moveLedgerSidecar(archivedLedger, activeLedger);
         } catch (ledgerError) {
           this.warn(
-            `unarchiveSessions: failed to move prompt ledger for ${sessionId}: ${ledgerError}`,
+            `unarchiveSessions: failed to move prompt ledger for ${sessionId} from ${archivedLedger} to ${activeLedger}: ${ledgerError}`,
           );
         }
         unarchived.push(sessionId);

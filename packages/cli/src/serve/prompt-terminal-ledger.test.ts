@@ -88,14 +88,20 @@ function toolCallRecord(
   fixture: Fixture,
   uuid: string,
   parentUuid: string,
-  callId: string,
+  callId: string | null,
 ): ChatRecord {
   return {
     ...record(fixture, uuid, parentUuid, ''),
     message: {
       role: 'model',
       parts: [
-        { functionCall: { name: 'run_shell_command', id: callId, args: {} } },
+        {
+          functionCall: {
+            name: 'run_shell_command',
+            ...(callId === null ? {} : { id: callId }),
+            args: {},
+          },
+        },
       ],
     },
   };
@@ -214,6 +220,42 @@ describe('reconcileDanglingPromptTerminals', () => {
     ]);
   });
 
+  it('stays fail-closed when the last transcript write predates the admission', async () => {
+    const fixture = makeFixture();
+    // The sole dangling prompt was admitted AFTER the transcript's last
+    // write: it never produced a transcript entry (still queued when the
+    // daemon died), so the visible tail belongs to an earlier settled turn
+    // and must not be attributed to it. `at` sits far in the future of the
+    // fixture's timestamps so the ordering cannot be accidental.
+    const admissionAt = Date.UTC(2030, 0, 1);
+    writeLedger(fixture, [
+      {
+        v: 1,
+        promptId: 'p1',
+        state: 'in_flight',
+        at: admissionAt,
+      },
+    ]);
+    writeTranscript(fixture, [
+      record(fixture, 'u1', null, 'question'),
+      record(fixture, 'a1', 'u1', 'answer'),
+    ]);
+
+    await reconcileDanglingPromptTerminals(
+      fixture.sessionService,
+      fixture.sessionId,
+    );
+
+    expect(readPromptLedgerRecords(fixture.ledgerPath)).toEqual([
+      {
+        v: 1,
+        promptId: 'p1',
+        state: 'in_flight',
+        at: admissionAt,
+      },
+    ]);
+  });
+
   it('appends nothing when there is no dangling prompt', async () => {
     const fixture = makeFixture();
     writeLedger(fixture, [
@@ -233,9 +275,12 @@ describe('reconcileDanglingPromptTerminals', () => {
     expect(readPromptLedgerRecords(fixture.ledgerPath)).toHaveLength(2);
   });
 
-  it('reconciles only the most recent of several dangling prompts', async () => {
+  it('appends nothing when several prompts are dangling', async () => {
     const fixture = makeFixture();
     // Queued scenario: p1 never ran, p2 was running when the daemon died.
+    // Under FIFO the visible tail belongs to the oldest running prompt,
+    // but with both dangling the tail's owner cannot be verified — fail
+    // closed and keep both unknown instead of guessing.
     writeLedger(fixture, [
       { v: 1, promptId: 'p1', state: 'in_flight', at: 1 },
       { v: 1, promptId: 'p2', state: 'in_flight', at: 2 },
@@ -250,14 +295,98 @@ describe('reconcileDanglingPromptTerminals', () => {
       fixture.sessionId,
     );
 
+    expect(readPromptLedgerRecords(fixture.ledgerPath)).toHaveLength(2);
+  });
+
+  it('attributes the tail to the sole dangling prompt behind a settled one', async () => {
+    const fixture = makeFixture();
+    // Valid interleave: p1 settled after p2 was admitted, so the tail is
+    // p2's turn and p2 gets the verdict even though a terminal record
+    // sits after its in_flight line.
+    writeLedger(fixture, [
+      { v: 1, promptId: 'p1', state: 'in_flight', at: 1 },
+      { v: 1, promptId: 'p2', state: 'in_flight', at: 2 },
+      { v: 1, promptId: 'p1', terminal: 'completed', at: 3 },
+    ]);
+    writeTranscript(fixture, [
+      record(fixture, 'u2', null, 'p2 question'),
+      record(fixture, 'a2', 'u2', 'p2 answer'),
+    ]);
+
+    await reconcileDanglingPromptTerminals(
+      fixture.sessionService,
+      fixture.sessionId,
+    );
+
     const records = readPromptLedgerRecords(fixture.ledgerPath);
-    expect(records).toHaveLength(3);
-    const reconciled = records[2];
-    expect(reconciled).toMatchObject({
+    expect(records).toHaveLength(4);
+    expect(records[3]).toMatchObject({
       promptId: 'p2',
       terminal: 'completed',
       stopReason: 'reconstructed_from_transcript',
     });
+  });
+
+  it('attributes the tail to the running prompt behind a cancelled queued one', async () => {
+    const fixture = makeFixture();
+    // S3 shape: A was running, B queued behind it, B was cancelled from
+    // the queue, then the daemon died while A still ran. A is the only
+    // dangling prompt and the interrupted tail belongs to it — B's
+    // settled in_flight must not veto A.
+    writeLedger(fixture, [
+      { v: 1, promptId: 'A', state: 'in_flight', at: 1 },
+      { v: 1, promptId: 'B', state: 'in_flight', at: 2 },
+      { v: 1, promptId: 'B', terminal: 'cancelled', at: 3 },
+    ]);
+    writeTranscript(fixture, [
+      record(fixture, 'u1', null, 'A question'),
+      record(fixture, 'a1', 'u1', 'partial answer'),
+      record(fixture, 'u2', 'a1', 'orphaned follow-up'),
+    ]);
+
+    await reconcileDanglingPromptTerminals(
+      fixture.sessionService,
+      fixture.sessionId,
+    );
+
+    const records = readPromptLedgerRecords(fixture.ledgerPath);
+    expect(records).toHaveLength(4);
+    expect(records[3]).toEqual({
+      v: 1,
+      promptId: 'A',
+      terminal: 'interrupted',
+      code: 'daemon_lost',
+      at: expect.any(Number),
+    });
+  });
+
+  it('marks a dangling prompt interrupted on an id-less functionCall tail', async () => {
+    const fixture = makeFixture();
+    // detectTurnInterruption ignores functionCalls without an id (no wire
+    // pairing), but a model tail holding ANY functionCall still means the
+    // daemon died mid tool-run — the reconcile-side guard must upgrade the
+    // verdict to interrupted.
+    writeLedger(fixture, [{ v: 1, promptId: 'p1', state: 'in_flight', at: 1 }]);
+    writeTranscript(fixture, [
+      record(fixture, 'u1', null, 'run something'),
+      toolCallRecord(fixture, 'a1', 'u1', null),
+    ]);
+
+    await reconcileDanglingPromptTerminals(
+      fixture.sessionService,
+      fixture.sessionId,
+    );
+
+    expect(readPromptLedgerRecords(fixture.ledgerPath)).toEqual([
+      { v: 1, promptId: 'p1', state: 'in_flight', at: 1 },
+      {
+        v: 1,
+        promptId: 'p1',
+        terminal: 'interrupted',
+        code: 'daemon_lost',
+        at: expect.any(Number),
+      },
+    ]);
   });
 
   it('is idempotent: a second reconcile appends nothing new', async () => {
@@ -280,15 +409,19 @@ describe('reconcileDanglingPromptTerminals', () => {
     expect(readPromptLedgerRecords(fixture.ledgerPath)).toHaveLength(2);
   });
 
-  it('skips attribution when an anomalous interleave breaks the tail mapping', async () => {
+  it('stays fail-closed when the dangling prompt was re-admitted after a settled turn', async () => {
     const fixture = makeFixture();
-    // p2 was admitted after p1 but p1's terminal landed later: under FIFO
-    // this is impossible, so the tail cannot be attributed to dangling p2
-    // and the guard must keep it unknown.
+    // Re-admission shape: p1 settled, then the same promptId was admitted
+    // again and dangled. The guard skips in_flight records of prompts with
+    // a terminal on disk (their settle state is ambiguous), so no verdict
+    // is attributed. The old "anomalous interleave" veto (last in_flight
+    // must match target) was superseded by this guard: it wrongly vetoed
+    // the running prompt behind a cancelled queued one (see the S3-shaped
+    // test above).
     writeLedger(fixture, [
-      { v: 1, promptId: 'p2', state: 'in_flight', at: 1 },
-      { v: 1, promptId: 'p1', state: 'in_flight', at: 2 },
-      { v: 1, promptId: 'p1', terminal: 'completed', at: 3 },
+      { v: 1, promptId: 'p1', state: 'in_flight', at: 1 },
+      { v: 1, promptId: 'p1', terminal: 'completed', at: 2 },
+      { v: 1, promptId: 'p1', state: 'in_flight', at: 3 },
     ]);
     writeTranscript(fixture, [
       record(fixture, 'u1', null, 'question'),

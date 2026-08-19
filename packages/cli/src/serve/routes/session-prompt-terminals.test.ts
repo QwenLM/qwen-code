@@ -118,13 +118,15 @@ function bridgeWithColdLoad(
   workspaceCwd: string,
   loadOverrides: { attached?: boolean; hasActivePrompt?: boolean },
 ): AcpSessionBridge {
+  const restored = {
+    sessionId,
+    attached: loadOverrides.attached ?? false,
+    hasActivePrompt: loadOverrides.hasActivePrompt ?? false,
+    currentCwd: workspaceCwd,
+  };
   return {
-    loadSession: vi.fn(async () => ({
-      sessionId,
-      attached: loadOverrides.attached ?? false,
-      hasActivePrompt: loadOverrides.hasActivePrompt ?? false,
-      currentCwd: workspaceCwd,
-    })),
+    loadSession: vi.fn(async () => restored),
+    resumeSession: vi.fn(async () => restored),
     getSessionSummary: vi.fn((requestedId: string) => {
       throw new SessionNotFoundError(requestedId);
     }),
@@ -232,6 +234,55 @@ describe('POST /session/:id/load prompt terminals', () => {
 
     expect(res.status).toBe(200);
     // Still dangling, no terminal to report, and no reconciliation ran.
+    expect(res.body.promptTerminals).toBeUndefined();
+    expect(readPromptLedgerRecords(fixture.ledgerPath)).toHaveLength(1);
+  });
+
+  it('does not reconcile a load while a prompt is active', async () => {
+    const fixture = makeFixture({ hasActivePrompt: true });
+    writeTranscript(fixture, [
+      chatRecord(fixture, 'u1', null, 'question'),
+      chatRecord(fixture, 'a1', 'u1', 'answer'),
+    ]);
+    appendPromptLedgerRecord(fixture.ledgerPath, {
+      v: 1,
+      promptId: 'p-active-1',
+      state: 'in_flight',
+      at: 1,
+    });
+    const app = makeApp(fixture);
+
+    const res = await request(app)
+      .post(`/session/${fixture.sessionId}/load`)
+      .send({});
+
+    expect(res.status).toBe(200);
+    // The live entry owns the prompt's terminal; the ledger stays untouched.
+    expect(res.body.promptTerminals).toBeUndefined();
+    expect(readPromptLedgerRecords(fixture.ledgerPath)).toHaveLength(1);
+  });
+
+  it('keeps the resume response free of promptTerminals and appends nothing', async () => {
+    const fixture = makeFixture();
+    writeTranscript(fixture, [
+      chatRecord(fixture, 'u1', null, 'question'),
+      chatRecord(fixture, 'a1', 'u1', 'answer'),
+    ]);
+    appendPromptLedgerRecord(fixture.ledgerPath, {
+      v: 1,
+      promptId: 'p-resume-1',
+      state: 'in_flight',
+      at: 1,
+    });
+    const app = makeApp(fixture);
+
+    const res = await request(app)
+      .post(`/session/${fixture.sessionId}/resume`)
+      .send({});
+
+    expect(res.status).toBe(200);
+    // Resume keeps its exact pre-existing response shape: no
+    // promptTerminals field and no reconciliation append.
     expect(res.body.promptTerminals).toBeUndefined();
     expect(readPromptLedgerRecords(fixture.ledgerPath)).toHaveLength(1);
   });
