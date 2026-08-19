@@ -146,6 +146,7 @@ vi.mock('../tools/tool-registry', () => {
   const ToolRegistryMock = vi.fn();
   ToolRegistryMock.prototype.registerTool = vi.fn();
   ToolRegistryMock.prototype.registerFactory = vi.fn();
+  ToolRegistryMock.prototype.unregisterTool = vi.fn();
   ToolRegistryMock.prototype.ensureTool = vi.fn();
   ToolRegistryMock.prototype.warmAll = vi.fn();
   ToolRegistryMock.prototype.discoverAllTools = vi.fn();
@@ -3968,6 +3969,125 @@ describe('Server Config (config.ts)', () => {
         ToolRegistry.prototype.registerFactory as Mock
       ).mock.calls.map((call) => call[0]);
       expect(registeredNames).toContain(ToolNames.READ_MCP_RESOURCE);
+    });
+
+    it('registers Advisor only when advisorModel is configured', async () => {
+      const config = new Config({
+        ...baseParams,
+        advisorModel: 'advisor-model',
+      });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).toContain(ToolNames.ADVISOR);
+    });
+
+    it('does not register Advisor when advisorModel is blank or off', async () => {
+      const blank = new Config({
+        ...baseParams,
+        advisorModel: '   ',
+      });
+      await blank.initialize();
+      let registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).not.toContain(ToolNames.ADVISOR);
+
+      vi.mocked(ToolRegistry.prototype.registerFactory).mockClear();
+      const off = new Config({
+        ...baseParams,
+        advisorModel: 'off',
+      });
+      await off.initialize();
+      registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).not.toContain(ToolNames.ADVISOR);
+    });
+
+    it('does not register Advisor in bare or subagent registries', async () => {
+      const bare = new Config({
+        ...baseParams,
+        advisorModel: 'advisor-model',
+        bareMode: true,
+      });
+      await bare.initialize();
+      let registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).not.toContain(ToolNames.ADVISOR);
+
+      vi.mocked(ToolRegistry.prototype.registerFactory).mockClear();
+      const config = new Config({
+        ...baseParams,
+        advisorModel: 'advisor-model',
+      });
+      await config.initialize();
+      vi.mocked(ToolRegistry.prototype.registerFactory).mockClear();
+      await config.createToolRegistry(undefined, {
+        skipDiscovery: true,
+        forSubAgent: true,
+      });
+      registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).not.toContain(ToolNames.ADVISOR);
+    });
+
+    it('setAdvisorConfig updates the live registry and model state', async () => {
+      const setTools = vi.fn().mockResolvedValue(undefined);
+      const refreshSystemInstruction = vi.fn().mockResolvedValue(undefined);
+      const config = new Config(baseParams);
+      await config.initialize();
+      (
+        config as unknown as {
+          geminiClient: {
+            setTools: typeof setTools;
+            refreshSystemInstruction: typeof refreshSystemInstruction;
+          };
+        }
+      ).geminiClient = { setTools, refreshSystemInstruction };
+
+      const registry = config.getToolRegistry();
+      const unregisterSpy = vi.spyOn(registry, 'unregisterTool');
+      const registerSpy = vi.spyOn(registry, 'registerFactory');
+
+      await config.setAdvisorConfig({
+        model: 'advisor-model',
+        maxUses: 2,
+        modelOverride: true,
+      });
+
+      expect(config.getAdvisorModel()).toBe('advisor-model');
+      expect(config.getAdvisorMaxUses()).toBe(2);
+      expect(config.hasAdvisorModelOverride()).toBe(true);
+      expect(unregisterSpy).toHaveBeenCalledWith(ToolNames.ADVISOR);
+      expect(registerSpy).toHaveBeenCalledWith(
+        ToolNames.ADVISOR,
+        expect.any(Function),
+      );
+      expect(setTools).toHaveBeenCalled();
+      expect(refreshSystemInstruction).toHaveBeenCalled();
+
+      registerSpy.mockClear();
+      setTools.mockClear();
+      refreshSystemInstruction.mockClear();
+      await config.setAdvisorConfig({
+        model: undefined,
+        maxUses: 2,
+        modelOverride: true,
+      });
+
+      expect(config.getAdvisorModel()).toBeUndefined();
+      expect(unregisterSpy).toHaveBeenCalledWith(ToolNames.ADVISOR);
+      expect(registerSpy).not.toHaveBeenCalledWith(
+        ToolNames.ADVISOR,
+        expect.any(Function),
+      );
+      expect(setTools).toHaveBeenCalled();
+      expect(refreshSystemInstruction).toHaveBeenCalled();
     });
 
     it.each([

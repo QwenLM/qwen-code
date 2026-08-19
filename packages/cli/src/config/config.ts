@@ -150,6 +150,7 @@ function parseApprovalModeValue(value: string): ApprovalMode {
 export interface CliArgs {
   query: string | undefined;
   model: string | undefined;
+  advisor?: string | undefined;
   fallbackModel: string[] | undefined;
   sandbox: boolean | string | undefined;
   sandboxImage: string | undefined;
@@ -664,6 +665,11 @@ export async function parseArguments(): Promise<CliArgs> {
           alias: 'm',
           type: 'string',
           description: `Model`,
+        })
+        .option('advisor', {
+          type: 'string',
+          description:
+            'Advisor model selector for this session. Use "off" to disable native Advisor for this run.',
         })
         .option('fallback-model', {
           type: 'array',
@@ -1371,6 +1377,16 @@ function resolveMaxSubagentDepth(
     return value;
   }
   return settings.model?.maxSubagentDepth;
+}
+
+function resolveAdvisorModel(
+  argv: CliArgs,
+  settings: Settings,
+): string | undefined {
+  const raw = argv.advisor !== undefined ? argv.advisor : settings.advisorModel;
+  const trimmed = raw?.trim();
+  if (!trimmed || trimmed.toLowerCase() === 'off') return undefined;
+  return trimmed;
 }
 
 export function isDebugMode(argv: CliArgs): boolean {
@@ -2404,6 +2420,9 @@ export async function loadCliConfig(
     memoryAgentTimeoutMinutes: settings.memory?.agentTimeoutMinutes,
     memoryAgentMaxTurns: settings.memory?.agentMaxTurns,
     fastModel: settings.fastModel || undefined,
+    advisorModel: resolveAdvisorModel(argv, settings),
+    advisorModelOverride: argv.advisor !== undefined,
+    advisorMaxUses: settings.advisorMaxUses,
     webSearch:
       bareMode || safeMode ? undefined : resolveWebSearchSettings(settings),
     visionModel: settings.visionModel || undefined,

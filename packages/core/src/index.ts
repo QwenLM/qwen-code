@@ -225,6 +225,8 @@ export type { CronCreateTool, CronCreateParams } from './tools/cron-create.js';
 export type { CronListTool, CronListParams } from './tools/cron-list.js';
 export type { CronDeleteTool, CronDeleteParams } from './tools/cron-delete.js';
 export type { ToolSearchTool, ToolSearchParams } from './tools/tool-search.js';
+export type { AdvisorTool, AdvisorToolParams } from './tools/advisor.js';
+export type { AdvisorErrorCode } from './tools/advisor-error.js';
 export type {
   TeamPlanApprovalTool,
   TeamPlanApprovalParams,

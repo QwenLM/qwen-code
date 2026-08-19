@@ -60,6 +60,7 @@ import { GeminiChat } from './geminiChat.js';
 import { getRecentGitStatus } from '../utils/gitUtils.js';
 import {
   assembleSystemPrompt,
+  ADVISOR_EXECUTOR_INSTRUCTION,
   getArenaSystemReminder,
   getCoreSystemPrompt,
   getCustomSystemPrompt,
@@ -1173,7 +1174,15 @@ export class GeminiClient {
     const stableLayers = {
       base,
       contextFiles: this.config.getUserMemory(),
-      appendPrompt: this.config.getAppendSystemPrompt(),
+      appendPrompt: [
+        this.config.getAppendSystemPrompt(),
+        this.config.getAdvisorModel?.() ? ADVISOR_EXECUTOR_INSTRUCTION : '',
+      ]
+        .filter(
+          (part): part is string =>
+            typeof part === 'string' && part.trim().length > 0,
+        )
+        .join('\n\n'),
     };
     // Record the stable → context layers (everything before the volatile
     // gitStatus/autoMemory tail) as the cross-session-stable system prefix.

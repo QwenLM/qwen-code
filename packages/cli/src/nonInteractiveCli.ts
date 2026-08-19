@@ -3154,6 +3154,9 @@ export async function runNonInteractive(
       if (recoverableCancellation) {
         return 130;
       }
+      if (abortController.signal.aborted) {
+        await handleCancellationError(config);
+      }
       await handleError(error, config);
     } finally {
       await failClosedActiveGoalTurn(

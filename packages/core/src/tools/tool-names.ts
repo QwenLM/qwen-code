@@ -56,6 +56,7 @@ export const ToolNames = {
   NOTEBOOK_EDIT: 'notebook_edit',
   TOOL_SEARCH: 'tool_search',
   READ_MCP_RESOURCE: 'read_mcp_resource',
+  ADVISOR: 'advisor',
   ENTER_WORKTREE: 'enter_worktree',
   EXIT_WORKTREE: 'exit_worktree',
   // Computer Use tools (computer_use__*) are intentionally NOT enumerated here.
@@ -116,6 +117,7 @@ export const ToolDisplayNames = {
   NOTEBOOK_EDIT: 'NotebookEdit',
   TOOL_SEARCH: 'ToolSearch',
   READ_MCP_RESOURCE: 'ReadMcpResource',
+  ADVISOR: 'Advisor',
   ENTER_WORKTREE: 'EnterWorktree',
   EXIT_WORKTREE: 'ExitWorktree',
   // computer_use__* display names are not enumerated here (see ToolNames).

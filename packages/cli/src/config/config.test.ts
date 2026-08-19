@@ -1261,6 +1261,44 @@ describe('loadCliConfig', () => {
     expect(config.getModelFallbacks()).toEqual(['cli-a', 'cli-b']);
   });
 
+  it('should use advisorModel from settings when --advisor is absent', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { advisorModel: ' advisor-model ', advisorMaxUses: 2 },
+      argv,
+    );
+
+    expect(config.getAdvisorModel()).toBe('advisor-model');
+    expect(config.hasAdvisorModelOverride()).toBe(false);
+    expect(config.getAdvisorMaxUses()).toBe(2);
+  });
+
+  it('should prefer --advisor over advisorModel settings for the session', async () => {
+    process.argv = ['node', 'script.js', '--advisor', 'cli-advisor'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { advisorModel: 'settings-advisor' },
+      argv,
+    );
+
+    expect(config.getAdvisorModel()).toBe('cli-advisor');
+    expect(config.hasAdvisorModelOverride()).toBe(true);
+  });
+
+  it('should disable Advisor for --advisor off without changing max uses', async () => {
+    process.argv = ['node', 'script.js', '--advisor', 'off'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { advisorModel: 'settings-advisor', advisorMaxUses: 1 },
+      argv,
+    );
+
+    expect(config.getAdvisorModel()).toBeUndefined();
+    expect(config.hasAdvisorModelOverride()).toBe(true);
+    expect(config.getAdvisorMaxUses()).toBe(1);
+  });
+
   it('should use settings fallback models when the CLI flag is absent', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();

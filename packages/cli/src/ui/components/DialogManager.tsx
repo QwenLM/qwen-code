@@ -60,6 +60,7 @@ import { BackgroundTasksDialog } from './background-view/BackgroundTasksDialog.j
 import { useBackgroundTaskViewState } from '../contexts/BackgroundTaskViewContext.js';
 import { t } from '../../i18n/index.js';
 import { getDialogMaxHeight } from '../utils/layoutUtils.js';
+import { SettingScope } from '../../config/settings.js';
 
 interface DialogManagerProps {
   addItem: UseHistoryManagerReturn['addItem'];
@@ -79,6 +80,8 @@ export const DialogManager = ({
   const { dialogOpen: bgTasksDialogOpen } = useBackgroundTaskViewState();
   const { constrainHeight, terminalHeight, staticExtraHeight, mainAreaWidth } =
     uiState;
+  const modelPersistScope = (scope: SettingScope): 'workspace' | 'user' =>
+    scope === SettingScope.Workspace ? 'workspace' : 'user';
   const dialogMaxHeight = getDialogMaxHeight(terminalHeight, staticExtraHeight);
   const constrainedDialogHeight = constrainHeight ? dialogMaxHeight : undefined;
   // Long list-style dialogs use this finite budget for their own internal
@@ -270,6 +273,7 @@ export const DialogManager = ({
       <ModelDialog
         onClose={uiActions.closeModelDialog}
         isFastModelMode={uiState.isFastModelMode}
+        isAdvisorModelMode={uiState.isAdvisorModelMode}
         isVoiceModelMode={uiState.isVoiceModelMode}
         isVisionModelMode={uiState.isVisionModelMode}
         isCompactionModelMode={uiState.isCompactionModelMode}
@@ -284,7 +288,7 @@ export const DialogManager = ({
       <Box flexDirection="column">
         <SettingsDialog
           settings={settings}
-          onSelect={(settingName) => {
+          onSelect={(settingName, selectedScope) => {
             if (settingName === 'ui.theme') {
               uiActions.openThemeDialog();
               return;
@@ -294,11 +298,24 @@ export const DialogManager = ({
               return;
             }
             if (settingName === 'fastModel') {
-              uiActions.openModelDialog({ fastModelMode: true });
+              uiActions.openModelDialog({
+                fastModelMode: true,
+                persistScope: modelPersistScope(selectedScope),
+              });
+              return;
+            }
+            if (settingName === 'advisorModel') {
+              uiActions.openModelDialog({
+                advisorModelMode: true,
+                persistScope: modelPersistScope(selectedScope),
+              });
               return;
             }
             if (settingName === 'visionModel') {
-              uiActions.openModelDialog({ visionModelMode: true });
+              uiActions.openModelDialog({
+                visionModelMode: true,
+                persistScope: modelPersistScope(selectedScope),
+              });
               return;
             }
             uiActions.closeSettingsDialog();
