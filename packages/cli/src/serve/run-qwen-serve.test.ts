@@ -491,25 +491,44 @@ function makeRuntimeBridge(): HttpAcpBridge {
 }
 
 it('restores the Conversations runtime for a persisted scheduled task', async () => {
-  const workspace = fs.realpathSync(
+  delete process.env['QWEN_RUNTIME_DIR'];
+  const tempRoot = fs.realpathSync(
     fs.mkdtempSync(path.join(os.tmpdir(), 'qws-live-task-keepalive-')),
   );
+  const workspace = path.join(tempRoot, 'workspace');
+  const physicalHome = path.join(tempRoot, 'home');
+  const linkedHome = path.join(tempRoot, 'home-link');
+  const runtimeDir = path.join(tempRoot, 'runtime');
+  fs.mkdirSync(workspace);
+  fs.mkdirSync(physicalHome);
+  fs.symlinkSync(
+    physicalHome,
+    linkedHome,
+    process.platform === 'win32' ? 'junction' : 'dir',
+  );
   const liveConversationWorkspace = new ConversationWorkspace({
-    homeDir: workspace,
+    homeDir: linkedHome,
   });
-  await liveConversationWorkspace.getRoot();
-  await qwenCore.updateCronTasks(liveConversationWorkspace.rootPath, () => [
-    {
-      id: 'live-task',
-      cron: '0 9 * * *',
-      prompt: 'p',
-      recurring: true,
-      createdAt: 1_700_000_000_000,
-      lastFiredAt: null,
-      sessionId: 'live-session',
-      sessionOwnedByTask: false,
-    },
-  ]);
+  const { canonicalRoot } = await liveConversationWorkspace.getRoot();
+  fs.mkdirSync(path.join(canonicalRoot, '.qwen'));
+  fs.writeFileSync(
+    path.join(canonicalRoot, '.qwen', 'settings.json'),
+    JSON.stringify({ advanced: { runtimeOutputDir: runtimeDir } }),
+  );
+  await qwenCore.Storage.runWithResolvedRuntimeBaseDir(runtimeDir, () =>
+    qwenCore.updateCronTasks(canonicalRoot, () => [
+      {
+        id: 'live-task',
+        cron: '0 9 * * *',
+        prompt: 'p',
+        recurring: true,
+        createdAt: 1_700_000_000_000,
+        lastFiredAt: null,
+        sessionId: 'live-session',
+        sessionOwnedByTask: false,
+      },
+    ]),
+  );
   const startKeepalive = vi
     .spyOn(scheduledTaskKeepalive, 'startScheduledTaskKeepalive')
     .mockReturnValue({
@@ -549,13 +568,13 @@ it('restores the Conversations runtime for a persisted scheduled task', async ()
     await vi.waitFor(() => {
       expect(startKeepalive).toHaveBeenCalledWith(
         expect.objectContaining({
-          boundWorkspace: liveConversationWorkspace.rootPath,
+          boundWorkspace: canonicalRoot,
         }),
       );
     });
   } finally {
     await handle?.close();
-    fs.rmSync(workspace, { recursive: true, force: true });
+    fs.rmSync(tempRoot, { recursive: true, force: true });
     vi.restoreAllMocks();
   }
 });

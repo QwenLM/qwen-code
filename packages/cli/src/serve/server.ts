@@ -608,6 +608,9 @@ export interface ServeAppDeps {
   liveHostInstaller?: LiveHostInstaller;
   liveSessionCoordinator?: LiveSessionCoordinator;
   liveConversationWorkspace?: ConversationWorkspace;
+  readLiveConversationScheduledTasks?: () => Promise<
+    readonly DurableCronTask[]
+  >;
   liveDiscoveryStableBaseDir?: string;
   conversationRuntimeOwnershipFactory?: (
     pid: number,
@@ -1473,7 +1476,10 @@ export function createServeApp(
     serveAppLifecycle.setBootStarter(startConversationRuntimeBoot);
   }
   if (deps.manageScheduledTaskSessions && deps.liveConversationWorkspace) {
-    void readCronTasks(deps.liveConversationWorkspace.rootPath)
+    const readTasks =
+      deps.readLiveConversationScheduledTasks ??
+      (() => readCronTasks(deps.liveConversationWorkspace!.rootPath));
+    void readTasks()
       .then((tasks) => {
         if (collectBoundSessionIds(tasks).length > 0) {
           return startConversationRuntimeBoot();
