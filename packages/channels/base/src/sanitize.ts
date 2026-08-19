@@ -68,7 +68,12 @@ export function sanitizeQuotedText(text: string, maxLen: number): string {
   return cp.length > maxLen ? cp.slice(0, maxLen - 1).join('') + '…' : cleaned;
 }
 
-const START_OF_LINE_TAG = /^([ \t]*)\[([^\]\r\n]{1,64})\](:?)/gm;
+// The leading class is every whitespace character EXCEPT CR/LF, not just
+// space/tab: `trim()` also strips VT, FF, NBSP, U+1680, U+2000-U+200A, U+202F,
+// U+205F and U+3000, so a `[ \t]*` window let any of them push the bracket off
+// start-of-line, block this match, and then be trimmed away by a caller —
+// reassembling the very tag the unwrap exists to peel.
+const START_OF_LINE_TAG = /^([^\S\r\n]*)\[([^\]\r\n]{1,64})\](:?)/gm;
 
 /**
  * Peel start-of-line `[tag]` wrappers until none is left, not just once.
@@ -94,13 +99,22 @@ function unwrapStartOfLineTags(text: string): string {
 }
 
 export function sanitizePromptText(text: string): string {
-  return (
-    unwrapStartOfLineTags(text.replace(PROMPT_UNSAFE_INVISIBLES, ' '))
-      // Fold ASCII C0/DEL, including CR/LF/TAB, so attacker-controlled group
-      // text cannot create prompt lines outside the adapter's sender attribution.
-      // eslint-disable-next-line no-control-regex
-      .replace(/[\u0000-\u001f\u007f]/g, ' ')
+  const unwrapped = unwrapStartOfLineTags(
+    text.replace(PROMPT_UNSAFE_INVISIBLES, ' '),
   );
+  // Fold ASCII C0/DEL, including CR/LF/TAB, so attacker-controlled group
+  // text cannot create prompt lines outside the adapter's sender attribution.
+  // eslint-disable-next-line no-control-regex
+  const folded = unwrapped.replace(/[\u0000-\u001f\u007f]/g, ' ');
+  // Unwrap AGAIN over the folded text: the fold itself ASSEMBLES tags the first
+  // pass could not see. A line-leading C0/DEL that `trim()` does not strip
+  // (x00-x08, x0E-x1F, x7F) blocks the match and then becomes a space, and an
+  // interior CR/LF splits a tag past the content class (`[SYS` + LF + `TEM]:`)
+  // and then becomes a space that joins the halves. Folding first instead would
+  // be wrong: it destroys the line structure the FIRST pass needs, and after it
+  // only the string start is still a start-of-line prompt position — which is
+  // exactly what this second pass covers.
+  return unwrapStartOfLineTags(folded);
 }
 
 /**

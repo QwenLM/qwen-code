@@ -180,6 +180,8 @@ Long records are **capped, and the cap is announced**: at most 50 messages, at m
 
 Because a forwarded record is written by people other than you, everything lifted out of it — titles, sender names, message bodies — is neutralized before it reaches the agent, so a forwarded message cannot pose as an instruction to the bot.
 
+The multi-line layout above is what the agent sees in a 1:1 chat. In a group the whole message is neutralized a second time before it reaches the agent, which folds it onto one line and drops the square brackets around the markers; the content and the cap announcements are the same either way.
+
 ## Key Differences from Telegram
 
 - **Authentication:** AppKey + AppSecret instead of a static bot token. The SDK manages access token refresh automatically.

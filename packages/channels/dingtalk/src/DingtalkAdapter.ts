@@ -146,8 +146,17 @@ function parseJsonArray(value: unknown): unknown[] | undefined {
  * `sanitizePromptText` only when `envelope.isGroup || sessionScope === 'single'`,
  * and DingTalk declares no `defaultSessionScope` so the registry falls back to
  * `'user'` — meaning in 1:1 DMs nothing downstream neutralizes this text. Doing
- * it per field here keeps DM and group renderings identical and matches how
+ * it per field here is what closes the DM path, and matches how
  * `referencedText` is sanitized unconditionally on the reply path.
+ *
+ * It does NOT make the two renderings identical. In groups (and `single`-scope
+ * sessions) `ChannelBase` runs `sanitizePromptText` again over the ASSEMBLED
+ * text, which folds every structural newline to a space and peels this file's
+ * own `[Chat record: ...]` / `[Chat record messages]` / `[N more message(s) not
+ * shown]` markers whenever their content fits the unwrap's 64-char window. The
+ * group prompt therefore carries the same content on one line with those
+ * markers reduced to bare text. That is a safe degradation, not a defect in
+ * this function — but the record's LAYOUT is a DM-only guarantee.
  */
 function sanitizeChatRecordField(value: string): string {
   return sanitizePromptText(value).trim();
@@ -167,6 +176,27 @@ function bracketSafeChatRecordField(value: string): string {
 }
 
 /**
+ * Neutralize a record field this file renders AT start-of-line but does not
+ * wrap. `sanitizePromptText` already peels a leading `[tag]` there, but only
+ * while the tag content fits its `{1,64}` window — an 87-char `[SYSTEM MESSAGE
+ * FROM ...]:` run never matches and survives verbatim. Peel the leading run at
+ * ANY length, to a fixpoint so a nested `[[...]]` cannot re-form one.
+ *
+ * Brackets elsewhere on the line are LEFT ALONE, unlike
+ * `bracketSafeChatRecordField`: nothing here wraps the value, and the rest of a
+ * summary line is DingTalk's own display copy — `Bob: [image]` — which cannot
+ * forge a prompt line from mid-line and should reach the model intact.
+ */
+function startOfLineSafeChatRecordField(value: string): string {
+  let current = sanitizeChatRecordField(value);
+  for (;;) {
+    const next = current.replace(/^\[([^\]]*)\](:?)/, '$1$2').trim();
+    if (next === current) return current;
+    current = next;
+  }
+}
+
+/**
  * Bounds on how much of a forwarded record is joined into the prompt. A merge
  * forward can carry an entire group's history, and unbounded it displaces the
  * user's actual request in the model's context window. Truncation is
@@ -180,13 +210,18 @@ function capChatRecordLines(lines: string[]): string[] {
   const kept: string[] = [];
   let dropped = 0;
   let total = 0;
-  for (const line of lines) {
-    // Decide the entry cap BEFORE measuring: past it every remaining line is
-    // discarded, and a merge-forward can carry an entire group's history, so
-    // measuring first would pay one code-point pass per thrown-away line.
+  // Both caps STOP at the first line they reject rather than skipping it and
+  // trying the next: the announcement below reads as a tail cut, so letting a
+  // later shorter line slip past the size cap would drop messages out of the
+  // MIDDLE of the record while telling the model the missing ones are the last
+  // ones — positional reasoning over the transcript then silently skips a
+  // message the model believes it has. Stopping also means no line past the cut
+  // is measured or truncated, the waste the entry cap was already ordered to
+  // avoid.
+  for (const [index, line] of lines.entries()) {
     if (kept.length >= MAX_CHAT_RECORD_ENTRIES) {
-      dropped++;
-      continue;
+      dropped = lines.length - index;
+      break;
     }
     // Slice by CODE POINT: a cap landing mid-surrogate-pair would emit a lone
     // surrogate into the prompt. UTF-16 length is an upper bound on code-point
@@ -198,8 +233,8 @@ function capChatRecordLines(lines: string[]): string[] {
         : truncateCodePoints(line, MAX_CHAT_RECORD_LINE_CHARS);
     const bounded = boundedRaw === line ? line : `${boundedRaw} [truncated]`;
     if (kept.length > 0 && total + bounded.length > MAX_CHAT_RECORD_CHARS) {
-      dropped++;
-      continue;
+      dropped = lines.length - index;
+      break;
     }
     kept.push(bounded);
     total += bounded.length + 1;
@@ -299,22 +334,22 @@ function formatChatRecord(
   // into `entries` for sender recovery below, so filtering here would shift
   // every later line onto the wrong entry — the exact misattribution the
   // length guard exists to prevent. `summary` is the display copy and filters
-  // them; the two variables look redundant but are not.
+  // them; the two variables look redundant but are not. Start-of-line-safe
+  // rather than merely sanitized because the lines are joined with `\n` and
+  // rendered after a header, so every line after the first sits at start-of-
+  // line — the privileged prompt position — and the unwrap alone cannot defend
+  // it: its `{1,64}` content window can never match a longer bracketed run, so
+  // an 87-char `[SYSTEM MESSAGE FROM ...]:` tag survives verbatim.
   const summaryLines: string[] = parsedSummary
     ? parsedSummary.map(
-        (item) => sanitizeChatRecordField(nonEmptyString(item) || '') || '',
+        (item) =>
+          startOfLineSafeChatRecordField(nonEmptyString(item) || '') || '',
       )
     : rawSummary
         ?.split('\n')
-        // `nonEmptyString` first, exactly as the JSON branch above gets it: a
-        // line beginning with a trim()-strippable char that `sanitizePromptText`
-        // does not fold before its unwrap step (VT, FF, NBSP, U+2000-U+200A,
-        // U+3000, ...) pushes the `[` off start-of-line, so the unwrap regex
-        // cannot match; the later C0 fold then turns that char into a space and
-        // the trailing .trim() removes it — reassembling the very `[SYSTEM]:`
-        // tag the unwrap just failed to peel.
-        .map((line) => sanitizeChatRecordField(nonEmptyString(line) || '')) ||
-      [];
+        .map((line) =>
+          startOfLineSafeChatRecordField(nonEmptyString(line) || ''),
+        ) || [];
   const summary = summaryLines.filter(Boolean).join('\n');
   const rawEntries =
     content?.chatRecord ?? content?.records ?? content?.messages;
