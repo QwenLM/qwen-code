@@ -3296,6 +3296,12 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
           '      [ "${SCENARIO:-}" = "state_fail" ] && exit 1',
           '      state=OPEN; [ "${SCENARIO:-}" = "pr_closed" ] && state=MERGED',
           '      printf "%s\\t%s\\n" "$state" "${PR_HEAD:-}"; exit 0 ;;',
+          // Live again: the fallback job reverted to a state-only query when
+          // the guard stopped keying on the head, so this branch has a caller
+          // once more (the in-job step keeps the combined shape above).
+          '    *state*)',
+          '      [ "${SCENARIO:-}" = "state_fail" ] && exit 1',
+          '      [ "${SCENARIO:-}" = "pr_closed" ] && echo "MERGED" || echo "OPEN"; exit 0 ;;',
           '    *headRefOid*)',
           '      [ "${SCENARIO:-}" = "prview_fail" ] && exit 1',
           '      echo "${PR_HEAD:-}"; exit 0 ;;',
@@ -3528,18 +3534,18 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
       });
       expect(r.status).toBe(0);
       expect(r.posted).toBe('');
-      expect(r.summary).toContain('a bot review already exists');
+      expect(r.summary).toContain('a bot review of this PR was submitted');
     });
 
     it(`${site} still posts when no review can be attributed to this run`, () => {
       // Each clause alone must keep the fallback speaking, or a stale or
       // foreign review buys silence on a genuinely dead pipeline: an earlier
-      // run's review at the same head, another account's, one of a different
-      // head, an unsubmitted (PENDING) one, and none at all.
+      // run's review (outside the window), another account's, an unsubmitted
+      // (PENDING) one, and none at all. The head is deliberately not a clause
+      // — see the attribute-by-TIME test below.
       const cases = {
         stale: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', BEFORE),
         foreign: reviewFixture('someone-else', 'HEADSHA1', AFTER),
-        otherHead: reviewFixture('qwen-code-ci-bot', 'OTHERSHA', AFTER),
         pending: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', null),
         none: '[]',
       };
@@ -3573,7 +3579,7 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
       });
       expect(r.status).toBe(0);
       expect(r.posted).toBe('');
-      expect(r.summary).toContain('a bot review already exists');
+      expect(r.summary).toContain('a bot review of this PR was submitted');
     });
 
     it(`${site} says so in the log when the guard cannot run`, () => {
@@ -3624,42 +3630,40 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     });
   }
 
-  it('the fallback job compares against the head it REVIEWED, not the fresh one', () => {
-    // The job sees only the PR's CURRENT head, and on every trigger but
-    // pull_request_target the head-moved guard above does not run — so a push
-    // landing between the post and this step leaves the fresh head pointing
-    // at bytes no review covered. Comparing against it matches nothing and
-    // the contradictory comment posts anyway: the #9342 shape, re-opened for
-    // the trigger + post + push + fail-after-post interleaving. The job now
-    // reads the head review-pr published as its output.
-    const r = runFallbackStep('default', {
-      prHead: 'NEWSHA',
-      reviewedHead: 'HEADSHA1',
-      runCreated: RUN_CREATED,
-      runStartedAttempt: RUN_RESTARTED,
-      reviews: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', AFTER),
-    });
-    expect(r.status).toBe(0);
-    expect(r.posted).toBe('');
-    expect(r.summary).toContain('a bot review already exists on HEADSHA1');
+  it("attributes by TIME, not by head — a moved head cannot hide this run's review", () => {
+    // The head is not a stable attribute of a run: a push moves the PR's head
+    // between the post and this step, and a re-run recomputes the reviewed
+    // head from a later attempt. Two revisions of this guard keyed on it and
+    // both re-opened the #9342 contradiction through one of those doors. What
+    // the guard proves now is narrower and stable — a bot review of this PR
+    // submitted while this run was alive — so a review on ANY head inside the
+    // window silences the comment.
+    for (const useInJobStep of [false, true]) {
+      const r = runFallbackStep('default', {
+        useInJobStep,
+        prHead: 'NEWSHA',
+        runCreated: RUN_CREATED,
+        runStartedAttempt: RUN_RESTARTED,
+        reviews: reviewFixture('qwen-code-ci-bot', 'OLDSHA', AFTER),
+      });
+      expect(r.status, String(useInJobStep)).toBe(0);
+      expect(r.posted, String(useInJobStep)).toBe('');
+      expect(r.summary, String(useInJobStep)).toContain(
+        'a bot review of this PR was submitted after this run was created',
+      );
+    }
   });
 
-  it('the in-job step is immune to the same interleaving, one guard earlier', () => {
-    // Its head-moved check runs unconditionally on the head the review step
-    // recorded, so a moved head exits before any body is composed. Pinned so
-    // the asymmetry between the two sites is deliberate and visible rather
-    // than an oversight in the twin that does need the output.
-    const r = runFallbackStep('default', {
-      useInJobStep: true,
-      prHead: 'NEWSHA',
-      expectedHead: 'HEADSHA1',
-      runCreated: RUN_CREATED,
-      runStartedAttempt: RUN_RESTARTED,
-      reviews: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', AFTER),
-    });
-    expect(r.status).toBe(0);
-    expect(r.posted).toBe('');
-    expect(r.summary).toContain('moved from');
+  it('carries no cross-job head wiring to drift', () => {
+    // An earlier revision published review-pr's reviewed head as a job output
+    // and read it here. The guard no longer keys on the head at all, so the
+    // wiring is gone rather than left as an untested chain whose silent
+    // breakage would restore the fresh-head comparison.
+    expect(doc.jobs['review-pr'].outputs).toBeUndefined();
+    expect(step.env.REVIEWED_HEAD_SHA).toBeUndefined();
+    expect(step.run).not.toContain('REVIEWED_HEAD_SHA');
+    expect(inJobStep.run).not.toContain('commit_id ==');
+    expect(step.run).not.toContain('commit_id ==');
   });
 
   it('in-job step dedupes on a fallback comment this run already has', () => {
