@@ -236,7 +236,13 @@ export const UserMessage = memo(function UserMessage({
 
   return (
     <div className={styles.chatMessageRow}>
-      <div className={styles.chatMessageColumn}>
+      <div
+        className={`${styles.chatMessageColumn}${
+          isLocateFlashing && content.trim().length === 0
+            ? ` ${flashStyles.flash}`
+            : ''
+        }`}
+      >
         {images && images.length > 0 && (
           <div className={styles.chatImages} data-web-shell-user-images>
             {images.map((img, index) => {

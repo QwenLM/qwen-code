@@ -1083,6 +1083,33 @@ describe('createDaemonSessionActions', () => {
     );
   });
 
+  it('does not upload attachments discarded by slash commands', async () => {
+    const session = createMockSession('session-a');
+    const { actions } = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        workspaceCwd: '/workspace',
+        capabilities: {
+          v: 1,
+          mode: 'http-bridge',
+          features: ['session_attachments'],
+          modelServices: [],
+        },
+      },
+    });
+
+    await actions.submitPrompt('/help', {
+      images: [{ data: 'AQID', mimeType: 'image/png' }],
+      files: [{ name: 'notes.txt', text: 'hello', media_type: 'text/plain' }],
+    });
+
+    expect(session.uploadAttachment).not.toHaveBeenCalled();
+    expect(session.submitPrompt).toHaveBeenCalledWith({
+      prompt: [{ type: 'text', text: '/help' }],
+    });
+  });
+
   it('uploads text attachments and submits attachment references', async () => {
     const session = createMockSession('session-a');
     const { actions, store } = createActionsHarness({

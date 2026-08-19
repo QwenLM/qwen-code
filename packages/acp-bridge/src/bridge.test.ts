@@ -13492,6 +13492,7 @@ describe('createAcpSessionBridge', () => {
           { clientId: session.clientId },
         );
 
+        await bridge.closeSession(session.sessionId);
         await bridge.deleteSessionAttachments(session.sessionId);
 
         const reopened = new SessionAttachmentStore(root, session.sessionId);
@@ -14711,43 +14712,45 @@ describe('createAcpSessionBridge', () => {
         maxSessions: 1,
         sessionAttachmentsRoot: attachmentRoot,
       });
-      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
-      const attachment = await bridge.storeSessionAttachment(
-        session.sessionId,
-        Uint8Array.of(1, 2, 3),
-        'application/json',
-        { clientId: session.clientId },
-        'notes.json',
-      );
+      try {
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const attachment = await bridge.storeSessionAttachment(
+          session.sessionId,
+          Uint8Array.of(1, 2, 3),
+          'application/json',
+          { clientId: session.clientId },
+          'notes.json',
+        );
 
-      const branch = await bridge.branchSession(session.sessionId, {
-        name: 'Branch 1',
-        atRecordId: '11111111-1111-4111-8111-111111111111',
-      });
+        const branch = await bridge.branchSession(session.sessionId, {
+          name: 'Branch 1',
+          atRecordId: '11111111-1111-4111-8111-111111111111',
+        });
 
-      expect(branch).toEqual({
-        sessionId: 'branch-1',
-        displayName: 'Branch 1',
-        forkedFrom: {
-          sessionId: session.sessionId,
-          displayName: session.sessionId.slice(0, 8),
-        },
-      });
-      expect(handle.agent.loadSessionCalls).toEqual([]);
+        expect(branch).toEqual({
+          sessionId: 'branch-1',
+          displayName: 'Branch 1',
+          forkedFrom: {
+            sessionId: session.sessionId,
+            displayName: session.sessionId.slice(0, 8),
+          },
+        });
+        expect(handle.agent.loadSessionCalls).toEqual([]);
 
-      const branchAttachments = new SessionAttachmentStore(
-        attachmentRoot,
-        branch.sessionId,
-      );
-      await expect(
-        branchAttachments.read(attachment.attachmentId),
-      ).resolves.toEqual({
-        data: Buffer.from([1, 2, 3]),
-        mimeType: 'application/json',
-      });
-
-      await bridge.shutdown();
-      await fsp.rm(attachmentRoot, { recursive: true, force: true });
+        const branchAttachments = new SessionAttachmentStore(
+          attachmentRoot,
+          branch.sessionId,
+        );
+        await expect(
+          branchAttachments.read(attachment.attachmentId),
+        ).resolves.toEqual({
+          data: Buffer.from([1, 2, 3]),
+          mimeType: 'application/json',
+        });
+      } finally {
+        await bridge.shutdown();
+        await fsp.rm(attachmentRoot, { recursive: true, force: true });
+      }
     });
 
     it('restores a latest-state branch for v1 callers', async () => {
@@ -14762,6 +14765,13 @@ describe('createAcpSessionBridge', () => {
         channelFactory: async () => handle.channel,
       });
       const source = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const attachment = await bridge.storeSessionAttachment(
+        source.sessionId,
+        Uint8Array.of(1, 2, 3),
+        'application/json',
+        { clientId: source.clientId },
+        'notes.json',
+      );
 
       const branch = await bridge.branchSession(source.sessionId, {
         name: 'Live branch',
@@ -14780,6 +14790,16 @@ describe('createAcpSessionBridge', () => {
       if (!('clientId' in branch)) {
         throw new Error('latest-state branch was not restored');
       }
+      await expect(
+        bridge.readSessionAttachment(
+          branch.sessionId,
+          attachment.attachmentId,
+          { clientId: branch.clientId },
+        ),
+      ).resolves.toEqual({
+        data: Buffer.from([1, 2, 3]),
+        mimeType: 'application/json',
+      });
       await expect(
         bridge.sendPrompt(
           branch.sessionId,
@@ -31404,7 +31424,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await bridge.shutdown();
   });
 
-  it('getPendingPrompts returns media blocks so a refresh keeps images', async () => {
+  it('getPendingPrompts returns attachment blocks for refresh', async () => {
     let release: (() => void) | undefined;
     const handle = makeChannel({
       promptImpl: async () => {
@@ -31422,6 +31442,13 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       data: 'aW1n',
       mimeType: 'image/png',
     } as const;
+    const resource = await bridge.storeSessionAttachment(
+      session.sessionId,
+      new TextEncoder().encode('notes'),
+      'text/plain',
+      { clientId: session.clientId },
+      'notes.txt',
+    );
 
     // Start first prompt that will hang
     bridge.sendPrompt(
@@ -31439,7 +31466,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       session.sessionId,
       {
         sessionId: session.sessionId,
-        prompt: [{ type: 'text', text: 'with media' }, image],
+        prompt: [{ type: 'text', text: 'with media' }, image, resource],
       },
       undefined,
       { clientId: session.clientId, promptId: 'media-prompt' },
@@ -31454,7 +31481,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     expect(mediaEntry).toMatchObject({
       promptId: 'media-prompt',
       text: 'with media',
-      content: [image],
+      content: [image, resource],
     });
 
     release?.();

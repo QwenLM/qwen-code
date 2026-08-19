@@ -166,6 +166,7 @@ export function parseSidechannelMidTurnInjected(
             !!block &&
             typeof block === 'object' &&
             ((block as Record<string, unknown>)['type'] === 'image' ||
+              (block as Record<string, unknown>)['type'] === 'resource' ||
               ((block as Record<string, unknown>)['type'] === 'text' &&
                 typeof (block as Record<string, unknown>)['text'] ===
                   'string' &&

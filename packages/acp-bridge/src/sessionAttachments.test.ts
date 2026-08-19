@@ -118,32 +118,33 @@ describe('SessionAttachmentStore', () => {
     }
   });
 
-  it.each(['app.py', 'deploy.sh'])(
-    'resolves UTF-8 source %s as text',
-    async (name) => {
-      const store = new SessionAttachmentStore();
-      try {
-        const reference = await store.putAttachment(
-          new TextEncoder().encode('echo hello\n'),
-          'application/octet-stream',
-          name,
-        );
+  it.each([
+    ['app.py', 'application/octet-stream'],
+    ['deploy.sh', 'application/octet-stream'],
+    ['config.cjs', 'application/node'],
+  ])('resolves UTF-8 source %s as text', async (name, mimeType) => {
+    const store = new SessionAttachmentStore();
+    try {
+      const reference = await store.putAttachment(
+        new TextEncoder().encode('echo hello\n'),
+        mimeType,
+        name,
+      );
 
-        expect(await store.resolveContent([reference])).toEqual([
-          {
-            type: 'resource',
-            resource: {
-              uri: `attachment:///${name}`,
-              mimeType: 'application/octet-stream',
-              text: 'echo hello\n',
-            },
+      expect(await store.resolveContent([reference])).toEqual([
+        {
+          type: 'resource',
+          resource: {
+            uri: `attachment:///${name}`,
+            mimeType,
+            text: 'echo hello\n',
           },
-        ]);
-      } finally {
-        await store.close();
-      }
-    },
-  );
+        },
+      ]);
+    } finally {
+      await store.close();
+    }
+  });
 
   it('keeps unknown binary files as blobs', async () => {
     const store = new SessionAttachmentStore();
@@ -362,6 +363,32 @@ describe('SessionAttachmentStore', () => {
     }
   });
 
+  it('keeps deduplicated long names readable', async () => {
+    const store = new SessionAttachmentStore();
+    const name = `a.${'x'.repeat(248)} y`;
+    try {
+      await store.putAttachment(
+        Uint8Array.of(1),
+        'application/octet-stream',
+        name,
+      );
+      const duplicate = await store.putAttachment(
+        Uint8Array.of(2),
+        'application/octet-stream',
+        name,
+      );
+
+      expect(Buffer.byteLength(duplicate.attachmentId)).toBeLessThanOrEqual(
+        255,
+      );
+      await expect(store.read(duplicate.attachmentId)).resolves.toMatchObject({
+        data: Buffer.from([2]),
+      });
+    } finally {
+      await store.close();
+    }
+  });
+
   it('retries directory creation after a transient failure', async () => {
     const mkdir = vi
       .spyOn(fs, 'mkdtemp')
@@ -559,6 +586,46 @@ describe('SessionAttachmentStore', () => {
 
       await expect(target.read(sourceReference.attachmentId)).resolves.toEqual({
         data: Buffer.from([1, 2, 3]),
+        mimeType: 'application/octet-stream',
+      });
+    } finally {
+      finishWrite?.();
+      write.mockRestore();
+      await source.close();
+      await target.close();
+    }
+  });
+
+  it('waits for source uploads before copying files', async () => {
+    const source = new SessionAttachmentStore();
+    const target = new SessionAttachmentStore();
+    const originalWriteFile = fs.writeFile.bind(fs);
+    let finishWrite: (() => void) | undefined;
+    const write = vi
+      .spyOn(fs, 'writeFile')
+      .mockImplementation(async (...args) => {
+        if (String(args[0]).endsWith('source.bin')) {
+          await originalWriteFile(...args);
+          await new Promise<void>((resolve) => {
+            finishWrite = resolve;
+          });
+          return;
+        }
+        return await originalWriteFile(...args);
+      });
+    try {
+      const pending = source.putAttachment(
+        new Uint8Array(8),
+        'application/octet-stream',
+        'source.bin',
+      );
+      await vi.waitFor(() => expect(finishWrite).toBeTypeOf('function'));
+      const copying = target.copyFrom(source);
+      finishWrite?.();
+      const [reference] = await Promise.all([pending, copying]);
+
+      await expect(target.read(reference.attachmentId)).resolves.toEqual({
+        data: Buffer.alloc(8),
         mimeType: 'application/octet-stream',
       });
     } finally {

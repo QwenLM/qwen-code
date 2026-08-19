@@ -2495,6 +2495,45 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     }
   });
 
+  it('keeps file summaries from pending-prompt content after a refresh', async () => {
+    sdkMock.actions.getPendingPrompts.mockResolvedValue({
+      pendingPrompts: [
+        {
+          promptId: 'p-file-refresh',
+          text: 'refreshed file prompt',
+          content: [
+            {
+              type: 'resource',
+              attachmentId: 'notes.txt',
+              mimeType: 'text/plain',
+              size: 5,
+            },
+          ],
+          queuedAt: Date.now(),
+          state: 'queued' as const,
+        },
+      ],
+    });
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'idle' });
+      for (let i = 0; i < 2; i++) {
+        await act(async () => {
+          await Promise.resolve();
+        });
+      }
+
+      expect(harness.result().queuedPrompts[0]).toMatchObject({
+        text: 'refreshed file prompt',
+        serverPromptId: 'p-file-refresh',
+        files: [{ name: 'notes.txt', media_type: 'text/plain', size: 5 }],
+        payloadCompleteness: 'summary-only',
+      });
+    } finally {
+      await harness.dispose();
+    }
+  });
+
   it('keeps images on the next turn when the daemon lacks the media capability', async () => {
     const harness = createHarness();
     try {

@@ -298,6 +298,20 @@ describe('text file ingestion', () => {
     expect(result.rejected).toEqual([]);
   });
 
+  it('avoids image extensions for files with non-image content types', async () => {
+    const file = new File(['not an image'], 'notes.png', {
+      type: 'text/plain',
+    });
+    const extracted = extractFileTransfer(
+      transfer({ files: [file], types: ['Files'] }),
+      'drop',
+    );
+
+    const result = await readFileTransfer(extracted.fileCandidates);
+
+    expect(result.accepted[0]?.name).toBe('notes.png.file');
+  });
+
   it('applies the size limit to each text file independently', async () => {
     const files = [
       new File(['one'], 'one.log', { type: 'text/plain' }),
@@ -354,9 +368,28 @@ describe('attachment naming', () => {
     expect(sanitizeAttachmentName('a\u2066b\u2069.log')).toBe('ab.log');
   });
 
+  it('normalizes names rejected by the daemon', () => {
+    expect(sanitizeAttachmentName('report?.txt. ')).toBe('report_.txt');
+    expect(sanitizeAttachmentName('CON.txt')).toBe('_CON.txt');
+    expect(
+      new TextEncoder().encode(sanitizeAttachmentName('一'.repeat(100)))
+        .byteLength,
+    ).toBeLessThanOrEqual(255);
+  });
+
   it('dedupes against taken names with a numeric suffix', () => {
     const taken = new Set(['app.log', 'app (1).log']);
     expect(dedupeAttachmentName('app.log', taken)).toBe('app (2).log');
     expect(dedupeAttachmentName('other.log', taken)).toBe('other.log');
+  });
+
+  it('keeps deduplicated names within the daemon byte limit', () => {
+    const name = `${'一'.repeat(83)}.txt`;
+    const candidate = dedupeAttachmentName(name, new Set([name]));
+
+    expect(candidate).toMatch(/ \(1\)\.txt$/);
+    expect(new TextEncoder().encode(candidate).byteLength).toBeLessThanOrEqual(
+      255,
+    );
   });
 });

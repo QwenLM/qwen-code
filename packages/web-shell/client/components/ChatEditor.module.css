@@ -2065,6 +2065,13 @@
   pointer-events: auto;
 }
 
+@media (hover: none) {
+  .fileChipRemove:not(:disabled) {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
 .searchPanel {
   display: flex;
   flex-direction: column;

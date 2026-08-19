@@ -163,6 +163,28 @@ describe('parseSidechannelMidTurnInjected', () => {
     ).toEqual({ sessionId: 's-1', messages: [''] });
   });
 
+  it('survives a resource-only frame exactly like the SDK normalizer', () => {
+    expect(
+      parseSidechannelMidTurnInjected({
+        type: 'mid_turn_message_injected',
+        data: {
+          sessionId: 's-1',
+          messages: [''],
+          items: [
+            {
+              content: [
+                {
+                  type: 'resource',
+                  resource: { uri: 'attachment:///notes.txt', text: 'notes' },
+                },
+              ],
+            },
+          ],
+        },
+      }),
+    ).toEqual({ sessionId: 's-1', messages: [''] });
+  });
+
   it('never carries hydrated items into the payload, even when aligned', () => {
     // No consumer reads `items` from a sidechannel batch (dedup settles by
     // messageIds and removes rows by messages); multi-MB hydrated base64

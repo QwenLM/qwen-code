@@ -306,6 +306,13 @@ export function createDaemonSessionActions({
     references: DaemonSessionAttachmentReference[];
     fileReferences: DaemonSessionAttachmentReference[];
   }> {
+    if (text.trimStart().startsWith('/')) {
+      return {
+        content: toDaemonPromptContent(text),
+        references: [],
+        fileReferences: [],
+      };
+    }
     const supportsAttachmentUpload =
       getConnection().capabilities?.features.includes('session_attachments') ===
       true;

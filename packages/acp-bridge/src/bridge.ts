@@ -2298,8 +2298,8 @@ function latestTerminalTurnStatus(
 }
 
 /**
- * Extract inline media content blocks from a prompt for storage in the
- * pending-prompt queue. Image references use the session attachment store; legacy
+ * Extract attachment content blocks from a prompt for storage in the
+ * pending-prompt queue. References use the session attachment store; legacy
  * audio blocks remain inline. This lets refreshed clients restore the payload.
  */
 function extractMediaBlocks(
@@ -2309,7 +2309,11 @@ function extractMediaBlocks(
   const media: BridgePromptContentBlock[] = [];
   for (const block of prompt) {
     if (!block || typeof block !== 'object') continue;
-    if (block.type === 'image' || block.type === 'audio') {
+    if (
+      block.type === 'image' ||
+      block.type === 'audio' ||
+      (block.type === 'resource' && 'attachmentId' in block)
+    ) {
       media.push(block);
     }
   }
@@ -9185,8 +9189,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               opts.sessionAttachmentsRoot,
               result.newSessionId,
             );
-            await branchAttachments.copyFrom(entry.attachments);
-            await branchAttachments.close();
+            try {
+              await branchAttachments.copyFrom(entry.attachments);
+            } catch (error) {
+              writeStderrLine(
+                `qwen serve: failed to copy attachments for branched session ${result.newSessionId}: ${error instanceof Error ? error.message : String(error)}`,
+              );
+            } finally {
+              await branchAttachments.close();
+            }
           }
           const rawBranchName = result.displayName ?? result.title;
           const branchDisplayName =
@@ -9264,7 +9275,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
           const newEntry = byId.get(result.newSessionId);
           if (newEntry && !opts.sessionAttachmentsRoot) {
-            await newEntry.attachments.copyFrom(entry.attachments);
+            try {
+              await newEntry.attachments.copyFrom(entry.attachments);
+            } catch (error) {
+              writeStderrLine(
+                `qwen serve: failed to copy attachments for branched session ${result.newSessionId}: ${error instanceof Error ? error.message : String(error)}`,
+              );
+            }
           }
           if (newEntry) newEntry.displayName = branchDisplayName;
           let sourcePersisted: boolean | undefined;

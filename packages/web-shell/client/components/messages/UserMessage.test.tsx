@@ -394,6 +394,21 @@ describe('UserMessage', () => {
     expect(container.querySelector('[data-web-shell-user-bubble]')).toBeNull();
   });
 
+  it('flashes the wrapper for a located file-only message', () => {
+    const container = render(
+      <UserMessage
+        content=""
+        files={[{ name: 'app.log', mimeType: 'text/plain' }]}
+        isLocateFlashing
+      />,
+    );
+
+    expect(
+      container.querySelector('[data-web-shell-user-files]')?.parentElement
+        ?.className,
+    ).toContain('flash');
+  });
+
   it('previews a sent text attachment when its chip is clicked', () => {
     const onAttachmentPreview = vi.fn();
     const container = render(

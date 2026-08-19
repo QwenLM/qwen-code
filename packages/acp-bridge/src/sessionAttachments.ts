@@ -108,7 +108,10 @@ function deduplicatedName(name: string, suffix: number): string {
   const stem = name.slice(0, -extension.length || undefined);
   const extensionBudget =
     SESSION_ATTACHMENT_MAX_NAME_BYTES - Buffer.byteLength(suffixText) - 1;
-  const safeExtension = truncateUtf8(extension, extensionBudget);
+  const safeExtension = truncateUtf8(extension, extensionBudget).replace(
+    /[. ]+$/u,
+    '',
+  );
   const stemBudget =
     SESSION_ATTACHMENT_MAX_NAME_BYTES -
     Buffer.byteLength(suffixText) -
@@ -151,7 +154,16 @@ function isTextMimeType(mimeType: string): boolean {
 
 function isTextAttachment(data: Buffer, mimeType: string): boolean {
   if (isTextMimeType(mimeType)) return true;
-  if (mimeType !== 'application/octet-stream' || data.includes(0)) return false;
+  if (
+    mimeType.startsWith('image/') ||
+    mimeType.startsWith('audio/') ||
+    mimeType.startsWith('video/') ||
+    mimeType.startsWith('font/') ||
+    mimeType === 'application/pdf' ||
+    data.includes(0)
+  ) {
+    return false;
+  }
   return Buffer.from(data.toString('utf8'), 'utf8').equals(data);
 }
 
@@ -238,6 +250,9 @@ export class SessionAttachmentStore {
       let suffix = 0;
       for (;;) {
         const candidateName = deduplicatedName(safeName, suffix);
+        if (safeAttachmentName(candidateName) !== candidateName) {
+          throw new TypeError('Session attachment name is invalid');
+        }
         filePath = path.join(directory, candidateName);
         this.pendingNames.set(
           candidateName,
@@ -417,13 +432,24 @@ export class SessionAttachmentStore {
   }
 
   async copyFrom(source: SessionAttachmentStore): Promise<void> {
+    if (source === this) return;
     if (this.closed) throw new Error('Session attachment store is closed');
     if (this.copying) throw new Error('Session attachments are being copied');
+    if (source.closed) throw new Error('Session attachment store is closed');
+    if (source.copying) {
+      throw new Error('Session attachments are being copied');
+    }
     this.copying = true;
+    source.copying = true;
     try {
       if (this.pendingItems > 0) {
         await new Promise<void>((resolve) =>
           this.pendingDrainWaiters.push(resolve),
+        );
+      }
+      if (source.pendingItems > 0) {
+        await new Promise<void>((resolve) =>
+          source.pendingDrainWaiters.push(resolve),
         );
       }
       if (this.closed) throw new Error('Session attachment store is closed');
@@ -467,6 +493,7 @@ export class SessionAttachmentStore {
           }),
       );
     } finally {
+      source.copying = false;
       this.copying = false;
     }
   }

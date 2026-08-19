@@ -232,9 +232,10 @@
 }
 
 .attachmentPreviewButton {
-  position: absolute;
+  position: sticky;
+  float: right;
   top: 8px;
-  right: 8px;
+  margin: -4px -4px -28px 8px;
   z-index: 2;
   display: inline-flex;
   align-items: center;

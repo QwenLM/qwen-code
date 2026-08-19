@@ -164,6 +164,32 @@ function contentToImages(
   return images.length > 0 ? images : undefined;
 }
 
+function contentToFiles(
+  content: readonly PromptContentBlock[] | undefined,
+): PromptFile[] | undefined {
+  if (!content || content.length === 0) return undefined;
+  const files: PromptFile[] = [];
+  for (const block of content) {
+    if (typeof block !== 'object' || block === null) continue;
+    const record = block as Record<string, unknown>;
+    if (
+      record['type'] !== 'resource' ||
+      typeof record['attachmentId'] !== 'string'
+    ) {
+      continue;
+    }
+    files.push({
+      name: record['attachmentId'],
+      media_type:
+        typeof record['mimeType'] === 'string'
+          ? record['mimeType']
+          : 'application/octet-stream',
+      ...(typeof record['size'] === 'number' ? { size: record['size'] } : {}),
+    });
+  }
+  return files.length > 0 ? files : undefined;
+}
+
 // The SDK substitutes this text block for a attachment reference it could not
 // hydrate (DaemonSessionClient.hydrateBlock); keep in sync with the SDK.
 const MEDIA_UNAVAILABLE_PLACEHOLDER = '[Attachment is no longer available]';
@@ -194,7 +220,11 @@ function contentHasUnhydratedMedia(
   return content.some((block) => {
     if (typeof block !== 'object' || block === null) return false;
     const record = block as Record<string, unknown>;
-    return record['type'] === 'image' && typeof record['data'] !== 'string';
+    return (
+      (record['type'] === 'image' && typeof record['data'] !== 'string') ||
+      (record['type'] === 'resource' &&
+        typeof record['attachmentId'] === 'string')
+    );
   });
 }
 
@@ -352,8 +382,9 @@ export function useQueuedPrompts({
         const hasDisplayedPrompt = displayedServerPromptIdsRef.current.has(
           serverPrompt.promptId,
         );
-        // Extract images from the server prompt's content field (if present)
+        // Extract attachment summaries from the server prompt's content field.
         const serverImages = contentToImages(serverPrompt.content);
+        const serverFiles = contentToFiles(serverPrompt.content);
         // A partially hydrated payload (a loss placeholder or a raw,
         // unhydrated reference) must not upgrade a row: editing it would
         // silently discard the attachments the daemon still holds. Only
@@ -377,6 +408,9 @@ export function useQueuedPrompts({
             contentFullyHydrated &&
             !next[existingIndex]!.images
               ? { images: serverImages, payloadCompleteness: undefined }
+              : {}),
+            ...(serverFiles && !next[existingIndex]!.files
+              ? { files: serverFiles, payloadCompleteness: 'summary-only' }
               : {}),
             midTurnState: undefined,
             midTurnMessageId: undefined,
@@ -425,6 +459,7 @@ export function useQueuedPrompts({
           ...(serverImages && contentFullyHydrated
             ? { images: serverImages }
             : {}),
+          ...(serverFiles ? { files: serverFiles } : {}),
           serverPromptId: serverPrompt.promptId,
           serverState: serverPrompt.state,
           // A row rebuilt with fully hydrated images is payload-complete;
@@ -434,7 +469,9 @@ export function useQueuedPrompts({
           // the attachments the daemon still holds — a later fully hydrated
           // refresh upgrades the row.
           payloadCompleteness:
-            serverImages && contentFullyHydrated ? undefined : 'summary-only',
+            serverImages && contentFullyHydrated && !serverFiles
+              ? undefined
+              : 'summary-only',
         });
       }
       if (areQueuedPromptsEqual(queuedPromptsRef.current, next)) return;
@@ -569,7 +606,7 @@ export function useQueuedPrompts({
           return prompt;
         }
         const hydrated = contentToImages(message.content);
-        if (!hydrated) return prompt;
+        if (!hydrated || contentToFiles(message.content)) return prompt;
         return { ...prompt, images: hydrated, payloadCompleteness: undefined };
       });
       if (next.length !== current.length) {
@@ -602,11 +639,13 @@ export function useQueuedPrompts({
         // snapshot's media blocks remain.
         const salvaged = salvagedImages.get(message.messageId);
         const images = salvaged ?? contentToImages(message.content);
+        const files = contentToFiles(message.content);
         restoredRows.push({
           id: nextQueuedPromptIdRef.current++,
           sessionId: targetSessionId,
           text: message.text,
           ...(images ? { images } : {}),
+          ...(files ? { files } : {}),
           // A hydration-failure placeholder in the snapshot means the row's
           // attachments are gone from the client; an unhydrated reference
           // means they are transiently unreachable. Degrade both like a

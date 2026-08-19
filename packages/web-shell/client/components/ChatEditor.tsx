@@ -121,6 +121,8 @@ import {
 } from './toolbarDropdown';
 import styles from './ChatEditor.module.css';
 
+const MAX_DROP_DIALOG_ROWS = 100;
+
 export type ComposerToolbarAction =
   | 'approvalMode'
   | 'contextUsage'
@@ -3532,17 +3534,27 @@ export const ChatEditor = memo(
               </DialogDescription>
             </DialogHeader>
             <div className="max-h-32 overflow-auto rounded-lg border bg-background/70 px-3 py-2 text-xs">
-              {pendingDropFiles?.map((file, index) => (
-                <div
-                  key={`${file.name}:${file.size}:${index}`}
-                  className="flex items-center justify-between gap-3"
-                >
-                  <span className="min-w-0 truncate">{file.name}</span>
-                  <span className="shrink-0 text-muted-foreground">
-                    {formatAttachmentSize(file.size)}
-                  </span>
+              {pendingDropFiles
+                ?.slice(0, MAX_DROP_DIALOG_ROWS)
+                .map((file, index) => (
+                  <div
+                    key={`${file.name}:${file.size}:${index}`}
+                    className="flex items-center justify-between gap-3"
+                  >
+                    <span className="min-w-0 truncate">{file.name}</span>
+                    <span className="shrink-0 text-muted-foreground">
+                      {formatAttachmentSize(file.size)}
+                    </span>
+                  </div>
+                ))}
+              {(pendingDropFiles?.length ?? 0) > MAX_DROP_DIALOG_ROWS && (
+                <div className="pt-1 text-muted-foreground">
+                  {t('composer.dropChoice.moreFiles', {
+                    count:
+                      (pendingDropFiles?.length ?? 0) - MAX_DROP_DIALOG_ROWS,
+                  })}
                 </div>
-              ))}
+              )}
             </div>
             <DialogFooter>
               <DialogClose asChild>

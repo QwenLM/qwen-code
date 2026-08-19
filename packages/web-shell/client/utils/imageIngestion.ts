@@ -140,6 +140,7 @@ const TEXT_FILE_EXTENSIONS: ReadonlySet<string> = new Set([
   'sql',
   'html',
   'htm',
+  'svg',
   'css',
   'scss',
   'less',
@@ -176,14 +177,41 @@ export function normalizeTextMediaType(
 
 /* eslint-disable no-control-regex -- intentionally strips C0/DEL controls and invisible bidi/zero-width format chars from dropped file names */
 const CONTROL_CHAR_RE =
-  /[\u0000-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g;
+  /[\u0000-\u001f\u007f\ud800-\udfff\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g;
 /* eslint-enable no-control-regex */
+const INVALID_ATTACHMENT_NAME_RE = /[<>:"|?*]/g;
+const WINDOWS_RESERVED_NAME_RE =
+  /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i;
+const MAX_ATTACHMENT_NAME_BYTES = 255;
+
+function utf8Length(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
+}
+
+function truncateUtf8(value: string, maxBytes: number): string {
+  let bytes = 0;
+  let result = '';
+  for (const character of value) {
+    const characterBytes = utf8Length(character);
+    if (bytes + characterBytes > maxBytes) break;
+    result += character;
+    bytes += characterBytes;
+  }
+  return result;
+}
 
 export function sanitizeAttachmentName(name: string): string {
-  const cleaned = name
+  let cleaned = name
     .replace(/^.*[\\/]/, '')
     .trim()
-    .replace(CONTROL_CHAR_RE, '');
+    .replace(CONTROL_CHAR_RE, '')
+    .replace(INVALID_ATTACHMENT_NAME_RE, '_')
+    .replace(/[. ]+$/u, '');
+  if (WINDOWS_RESERVED_NAME_RE.test(cleaned)) cleaned = `_${cleaned}`;
+  cleaned = truncateUtf8(cleaned, MAX_ATTACHMENT_NAME_BYTES).replace(
+    /[. ]+$/u,
+    '',
+  );
   return cleaned || 'attachment';
 }
 
@@ -196,7 +224,17 @@ export function dedupeAttachmentName(
   const stem = dot > 0 ? name.slice(0, dot) : name;
   const extension = dot > 0 ? name.slice(dot) : '';
   for (let i = 1; ; i += 1) {
-    const candidate = `${stem} (${i})${extension}`;
+    const suffix = ` (${i})`;
+    const extensionBudget = MAX_ATTACHMENT_NAME_BYTES - utf8Length(suffix) - 1;
+    const safeExtension = truncateUtf8(extension, extensionBudget).replace(
+      /[. ]+$/u,
+      '',
+    );
+    const stemBudget =
+      MAX_ATTACHMENT_NAME_BYTES -
+      utf8Length(suffix) -
+      utf8Length(safeExtension);
+    const candidate = `${truncateUtf8(stem, stemBudget)}${suffix}${safeExtension}`;
     if (!taken.has(candidate)) return candidate;
   }
 }
@@ -391,7 +429,11 @@ export function readFileTransfer(
       continue;
     }
     accepted.push({
-      name: candidate.file.name,
+      name:
+        normalizeImageMediaType('', candidate.file.name) &&
+        !candidate.mediaType.startsWith('image/')
+          ? `${candidate.file.name}.file`
+          : candidate.file.name,
       media_type: candidate.mediaType,
       data: candidate.file,
       size: candidate.file.size,

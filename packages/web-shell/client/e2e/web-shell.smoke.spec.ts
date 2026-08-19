@@ -1176,9 +1176,6 @@ test('drops ordered PNG and BMP images and submits them without text @smoke', as
   await dropComposerImages(surface);
   await expect(surface).not.toHaveAttribute('data-image-drag-active');
   await expect(surface).not.toHaveAttribute('aria-busy');
-  const dropDialog = page.locator('[data-web-shell-drop-choice-dialog]');
-  await expect(dropDialog).toBeVisible();
-  await dropDialog.locator('[data-drop-action="reference"]').click();
   const images = surface.locator(
     '[data-web-shell-composer-images] img[src^="data:image/"]',
   );
