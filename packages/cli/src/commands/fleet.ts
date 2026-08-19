@@ -189,6 +189,12 @@ async function buildLayout(a: FleetUpArgs): Promise<void> {
   );
 
   const specs: Array<{ name: string; command: string }> = [];
+  // yargs `type: 'number'` yields NaN for non-numeric input and the loop
+  // condition `i <= Math.max(0, NaN)` is always false — the fleet would
+  // silently spawn zero agents. Reject it instead.
+  if (!Number.isFinite(a.agents)) {
+    throw new Error('--agents must be a finite number');
+  }
   for (let i = 1; i <= Math.max(0, a.agents); i++) {
     const name = `agent-${i}`;
     specs.push({ name, command: paneCommand(board, name, 'qwen') });
