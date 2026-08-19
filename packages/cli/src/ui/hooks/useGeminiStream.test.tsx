@@ -11924,7 +11924,11 @@ describe('useGeminiStream', () => {
       );
     });
 
-    it('should commit thought to history when ToolCallRequest arrives', async () => {
+    it('should defer the thought commit until a following tool batch completes and merge a read/search batch into the thought line', async () => {
+      let capturedOnComplete:
+        | ((completedTools: TrackedToolCall[]) => Promise<void>)
+        | null = null;
+
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
@@ -11948,7 +11952,34 @@ describe('useGeminiStream', () => {
         })(),
       );
 
-      const { result } = renderTestHook();
+      mockUseReactToolScheduler.mockImplementation((onComplete) => {
+        capturedOnComplete = onComplete;
+        return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+      });
+
+      const { result } = renderHook(() =>
+        useGeminiStream(
+          new MockedGeminiClientClass(mockConfig),
+          [],
+          mockAddItem,
+          mockConfig,
+          true,
+          mockLoadedSettings,
+          mockOnDebugMessage,
+          mockHandleSlashCommand,
+          false,
+          () => 'vscode' as EditorType,
+          () => {},
+          () => Promise.resolve(),
+          false,
+          () => {},
+          () => {},
+          () => {},
+          () => {},
+          80,
+          24,
+        ),
+      );
 
       await act(async () => {
         void result.current.submitQuery('think then tool call');
@@ -11958,14 +11989,383 @@ describe('useGeminiStream', () => {
 
       await waitFor(() => expect(result.current.thought).toBeNull());
 
+      // The thought commit is deferred while the batch runs: the pending
+      // item stays visible (finalized) and nothing has been committed yet.
+      await waitFor(() => {
+        expect(result.current.pendingHistoryItems).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: 'gemini_thought',
+              finalized: true,
+            }),
+          ]),
+        );
+      });
+      expect(mockAddItem).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'gemini_thought' }),
+        expect.any(Number),
+      );
+
+      const completedToolCalls: TrackedToolCall[] = [
+        {
+          request: {
+            callId: 'tc1',
+            name: 'read_file',
+            args: { file_path: '/foo' },
+            isClientInitiated: false,
+            prompt_id: 'p1',
+          },
+          status: 'success',
+          responseSubmittedToGemini: false,
+          response: {
+            callId: 'tc1',
+            responseParts: [{ text: 'file contents' }],
+          },
+          tool: { displayName: 'ReadFile' },
+          invocation: {
+            getDescription: () => '/foo',
+          } as unknown as AnyToolInvocation,
+        } as TrackedCompletedToolCall,
+      ];
+
+      await act(async () => {
+        await capturedOnComplete?.(completedToolCalls);
+      });
+
       expect(mockAddItem).toHaveBeenCalledWith(
         expect.objectContaining({
           type: 'gemini_thought',
           text: expect.stringContaining('planning tool usage'),
           durationMs: expect.any(Number),
+          toolSummary: 'Read /foo',
         }),
         expect.any(Number),
       );
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'tool_group',
+          display: expect.objectContaining({ mergedIntoThought: true }),
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('should commit the deferred thought without merging when the batch contains a non-collapsible tool', async () => {
+      let capturedOnComplete:
+        | ((completedTools: TrackedToolCall[]) => Promise<void>)
+        | null = null;
+
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'planning an edit' },
+          };
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tc1',
+              name: 'edit',
+              args: { file_path: '/foo' },
+              isClientInitiated: false,
+              prompt_id: 'p1',
+            },
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      mockUseReactToolScheduler.mockImplementation((onComplete) => {
+        capturedOnComplete = onComplete;
+        return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+      });
+
+      const { result } = renderHook(() =>
+        useGeminiStream(
+          new MockedGeminiClientClass(mockConfig),
+          [],
+          mockAddItem,
+          mockConfig,
+          true,
+          mockLoadedSettings,
+          mockOnDebugMessage,
+          mockHandleSlashCommand,
+          false,
+          () => 'vscode' as EditorType,
+          () => {},
+          () => Promise.resolve(),
+          false,
+          () => {},
+          () => {},
+          () => {},
+          () => {},
+          80,
+          24,
+        ),
+      );
+
+      await act(async () => {
+        void result.current.submitQuery('think then edit');
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      await waitFor(() => expect(result.current.thought).toBeNull());
+
+      const completedToolCalls: TrackedToolCall[] = [
+        {
+          request: {
+            callId: 'tc1',
+            name: 'edit',
+            args: { file_path: '/foo' },
+            isClientInitiated: false,
+            prompt_id: 'p1',
+          },
+          status: 'success',
+          responseSubmittedToGemini: false,
+          response: {
+            callId: 'tc1',
+            responseParts: [{ text: 'edited' }],
+          },
+          tool: { displayName: 'Edit' },
+          invocation: {
+            getDescription: () => '/foo',
+          } as unknown as AnyToolInvocation,
+        } as TrackedCompletedToolCall,
+      ];
+
+      await act(async () => {
+        await capturedOnComplete?.(completedToolCalls);
+      });
+
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'gemini_thought',
+          text: expect.stringContaining('planning an edit'),
+          durationMs: expect.any(Number),
+        }),
+        expect.any(Number),
+      );
+      const thoughtCommit = mockAddItem.mock.calls.find(
+        ([item]) => item.type === 'gemini_thought',
+      );
+      expect(thoughtCommit?.[0].toolSummary).toBeUndefined();
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'tool_group' }),
+        expect.any(Number),
+      );
+      const groupCommit = mockAddItem.mock.calls.find(
+        ([item]) => item.type === 'tool_group',
+      );
+      expect(groupCommit?.[0].display?.mergedIntoThought).toBeUndefined();
+    });
+
+    it('should commit the deferred thought without merging when a tool in the batch was cancelled', async () => {
+      let capturedOnComplete:
+        | ((completedTools: TrackedToolCall[]) => Promise<void>)
+        | null = null;
+
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'planning a search' },
+          };
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tc1',
+              name: 'read_file',
+              args: { file_path: '/foo' },
+              isClientInitiated: false,
+              prompt_id: 'p1',
+            },
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      mockUseReactToolScheduler.mockImplementation((onComplete) => {
+        capturedOnComplete = onComplete;
+        return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+      });
+
+      const { result } = renderHook(() =>
+        useGeminiStream(
+          new MockedGeminiClientClass(mockConfig),
+          [],
+          mockAddItem,
+          mockConfig,
+          true,
+          mockLoadedSettings,
+          mockOnDebugMessage,
+          mockHandleSlashCommand,
+          false,
+          () => 'vscode' as EditorType,
+          () => {},
+          () => Promise.resolve(),
+          false,
+          () => {},
+          () => {},
+          () => {},
+          () => {},
+          80,
+          24,
+        ),
+      );
+
+      await act(async () => {
+        void result.current.submitQuery('think then cancelled read');
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      await waitFor(() => expect(result.current.thought).toBeNull());
+
+      const cancelledToolCalls: TrackedToolCall[] = [
+        {
+          request: {
+            callId: 'tc1',
+            name: 'read_file',
+            args: { file_path: '/foo' },
+            isClientInitiated: false,
+            prompt_id: 'p1',
+          },
+          status: 'cancelled',
+          responseSubmittedToGemini: false,
+          response: {
+            callId: 'tc1',
+            responseParts: [],
+          },
+        } as TrackedCancelledToolCall,
+      ];
+
+      await act(async () => {
+        await capturedOnComplete?.(cancelledToolCalls);
+      });
+
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'gemini_thought',
+          text: expect.stringContaining('planning a search'),
+        }),
+        expect.any(Number),
+      );
+      const thoughtCommit = mockAddItem.mock.calls.find(
+        ([item]) => item.type === 'gemini_thought',
+      );
+      expect(thoughtCommit?.[0].toolSummary).toBeUndefined();
+      const groupCommit = mockAddItem.mock.calls.find(
+        ([item]) => item.type === 'tool_group',
+      );
+      expect(groupCommit?.[0].display?.mergedIntoThought).toBeUndefined();
+    });
+
+    it('should commit the deferred thought on local cancel instead of stranding it', async () => {
+      mockUseReactToolScheduler.mockImplementation(() => [
+        [],
+        mockScheduleToolCalls,
+        mockMarkToolsAsSubmitted,
+      ]);
+
+      let releaseStream: (() => void) | undefined;
+      const holdStream = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'planning before cancel' },
+          };
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tc1',
+              name: 'read_file',
+              args: { file_path: '/foo' },
+              isClientInitiated: false,
+              prompt_id: 'p1',
+            },
+          };
+          // Keep the stream open so the deferral stays active while the
+          // user cancels locally (no UserCancelled event reaches the loop).
+          await holdStream;
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderHook(() =>
+        useGeminiStream(
+          new MockedGeminiClientClass(mockConfig),
+          [],
+          mockAddItem,
+          mockConfig,
+          true,
+          mockLoadedSettings,
+          mockOnDebugMessage,
+          mockHandleSlashCommand,
+          false,
+          () => 'vscode' as EditorType,
+          () => {},
+          () => Promise.resolve(),
+          false,
+          () => {},
+          () => {},
+          () => {},
+          () => {},
+          80,
+          24,
+        ),
+      );
+
+      await act(async () => {
+        void result.current.submitQuery('think then cancel');
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      // Deferral active: the finalized thought is still pending.
+      await waitFor(() => {
+        expect(result.current.pendingHistoryItems).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: 'gemini_thought',
+              finalized: true,
+            }),
+          ]),
+        );
+      });
+
+      await act(async () => {
+        result.current.cancelOngoingRequest();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      // The thought must be committed (not dropped) and must land above the
+      // "Request cancelled." info item.
+      const calls = mockAddItem.mock.calls;
+      const thoughtIdx = calls.findIndex(
+        ([item]) => item.type === 'gemini_thought',
+      );
+      const infoIdx = calls.findIndex(
+        ([item]) => item.type === 'info' && item.text === 'Request cancelled.',
+      );
+      expect(thoughtIdx).toBeGreaterThanOrEqual(0);
+      expect(infoIdx).toBeGreaterThan(thoughtIdx);
+      expect(calls[thoughtIdx][0].text).toContain('planning before cancel');
+
+      releaseStream?.();
     });
 
     it('should commit thought to history on non-continuation Retry', async () => {

@@ -114,6 +114,8 @@ const ClickableThinkMessage: React.FC<{
   availableTerminalHeight?: number;
   contentWidth: number;
   durationMs?: number;
+  toolSummary?: string;
+  finalized?: boolean;
   onToggle: () => void;
 }> = ({
   text,
@@ -122,6 +124,8 @@ const ClickableThinkMessage: React.FC<{
   availableTerminalHeight,
   contentWidth,
   durationMs,
+  toolSummary,
+  finalized,
   onToggle,
 }) => {
   const ref = useRef<DOMElement>(null);
@@ -186,7 +190,9 @@ const ClickableThinkMessage: React.FC<{
         availableTerminalHeight={availableTerminalHeight}
         contentWidth={contentWidth}
         durationMs={durationMs}
-        clickable={clickable}
+        toolSummary={toolSummary}
+        finalized={finalized}
+        clickable={clickable && isActive}
       />
     </Box>
   );
@@ -336,6 +342,8 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           }
           contentWidth={contentWidth}
           durationMs={itemForDisplay.durationMs}
+          toolSummary={itemForDisplay.toolSummary}
+          finalized={itemForDisplay.finalized}
           onToggle={() => toggleThought(thoughtGroupHeadId)}
         />
       )}
@@ -399,22 +407,26 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           width={boxWidth}
         />
       )}
-      {itemForDisplay.type === 'tool_group' && (
-        <ToolGroupMessage
-          toolCalls={itemForDisplay.tools}
-          groupId={itemForDisplay.id}
-          availableTerminalHeight={availableTerminalHeight}
-          contentWidth={contentWidth}
-          isFocused={isFocused}
-          isPending={isPending}
-          activeShellPtyId={activeShellPtyId}
-          embeddedShellFocused={embeddedShellFocused}
-          memoryWriteCount={itemForDisplay.memoryWriteCount}
-          memoryReadCount={itemForDisplay.memoryReadCount}
-          isUserInitiated={itemForDisplay.isUserInitiated}
-          fullDetail={fullDetail}
-        />
-      )}
+      {itemForDisplay.type === 'tool_group' &&
+        // A group folded into the preceding thought line renders nothing
+        // here; full detail (Ctrl+O) lifts the suppression so the transcript
+        // still shows every tool call.
+        (itemForDisplay.display?.mergedIntoThought ? fullDetail : true) && (
+          <ToolGroupMessage
+            toolCalls={itemForDisplay.tools}
+            groupId={itemForDisplay.id}
+            availableTerminalHeight={availableTerminalHeight}
+            contentWidth={contentWidth}
+            isFocused={isFocused}
+            isPending={isPending}
+            activeShellPtyId={activeShellPtyId}
+            embeddedShellFocused={embeddedShellFocused}
+            memoryWriteCount={itemForDisplay.memoryWriteCount}
+            memoryReadCount={itemForDisplay.memoryReadCount}
+            isUserInitiated={itemForDisplay.isUserInitiated}
+            fullDetail={fullDetail}
+          />
+        )}
       {itemForDisplay.type === 'tool_use_summary' && (
         <Box flexDirection="row">
           <Box width={2} flexShrink={0}>

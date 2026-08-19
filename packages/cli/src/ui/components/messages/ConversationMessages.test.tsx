@@ -279,6 +279,50 @@ describe('<ThinkMessage />', () => {
     expect(output).toContain('Line 1');
     expect(output).toContain('Line 5');
   });
+
+  it('should fold a tool summary into the collapsed line', () => {
+    const { lastFrame } = render(
+      <ThinkMessage
+        {...defaultProps}
+        isPending={false}
+        expanded={false}
+        durationMs={9000}
+        toolSummary="Searched 2 patterns"
+      />,
+    );
+    const output = lastFrame();
+    expect(output).toContain('Thought for 9s, searched 2 patterns');
+    expect(output).toContain(`${toggleKeyHint} to expand`);
+  });
+
+  it('should fold a tool summary into a brief thought', () => {
+    const { lastFrame } = render(
+      <ThinkMessage
+        {...defaultProps}
+        isPending={false}
+        expanded={false}
+        durationMs={500}
+        toolSummary="Read a.ts"
+      />,
+    );
+    const output = lastFrame();
+    expect(output).toContain('Thought briefly, read a.ts');
+  });
+
+  it('should render the completed style while pending but finalized', () => {
+    const { lastFrame } = render(
+      <ThinkMessage
+        {...defaultProps}
+        isPending={true}
+        expanded={false}
+        durationMs={5000}
+        finalized={true}
+      />,
+    );
+    const output = lastFrame();
+    expect(output).toContain('Thought for 5s');
+    expect(output).not.toContain('Thinking');
+  });
 });
 
 describe('<ThinkMessageContent />', () => {

@@ -136,6 +136,10 @@ import {
   getInlineImageData,
   MAX_INLINE_IMAGES_PER_ITEM,
 } from '../utils/inline-image-parts.js';
+import {
+  buildToolSummary,
+  isCollapsibleTool,
+} from '../components/messages/CompactToolGroupDisplay.js';
 
 const debugLogger = createDebugLogger('GEMINI_STREAM');
 
@@ -800,6 +804,12 @@ export const useGeminiStream = (
   const [pendingThoughtItem, pendingThoughtItemRef, setPendingThoughtItem] =
     useStateAndRef<HistoryItemWithoutId | null>(null);
   const thoughtStartTimeRef = useRef<number | null>(null);
+  // When a thought is immediately followed by a tool batch, its commit is
+  // deferred until the batch completes: if every call was a successful
+  // read/search/list tool, the two commit as one merged line ("Thought for
+  // 9s, searched 2 patterns"). Ink's <Static> renders committed items once,
+  // so the merge decision must be made before the thought lands in history.
+  const thoughtMergeDeferralRef = useRef(false);
   const [
     pendingRetryErrorItem,
     pendingRetryErrorItemRef,
@@ -897,7 +907,14 @@ export const useGeminiStream = (
               completedToolCallsFromScheduler as TrackedToolCall[],
               projectRoot,
             );
-            addItem(toolGroupDisplay, Date.now());
+            // Resolve a deferred thought commit: fold this batch's summary
+            // into the thought line when it qualifies (see
+            // mergeDeferredThoughtWithToolGroup), otherwise commit the
+            // thought as-is. Must run before addItem so the merged line
+            // precedes the (suppressed) group in history.
+            const groupToCommit =
+              mergeDeferredThoughtWithToolGroup(toolGroupDisplay);
+            addItem(groupToCommit, Date.now());
 
             // Handle tool response submission immediately when tools complete
             await handleCompletedTools(
@@ -1103,6 +1120,119 @@ export const useGeminiStream = (
     }
   }, [streamingState, config, history]);
 
+  // Commit the streamed reasoning to history as a collapsible block (or drop
+  // it). Called when the answer/tool/turn begins, or on cancel/error.
+  // Declared before cancelOngoingRequest so the local-cancel path can
+  // resolve an active merge deferral directly (the UserCancelled event
+  // handler never runs for a local cancel — see turnCancelledRef guard).
+  const commitPendingThought = useCallback(
+    (userMessageTimestamp: number) => {
+      // Deferral active: the thought commits with (or folded into) the tool
+      // batch that follows it — see mergeDeferredThoughtWithToolGroup and
+      // abortThoughtMergeDeferral.
+      if (thoughtMergeDeferralRef.current) {
+        return;
+      }
+      if (pendingThoughtItemRef.current) {
+        const item = { ...pendingThoughtItemRef.current };
+        if (item.type === 'gemini_thought' && thoughtStartTimeRef.current) {
+          item.durationMs = Date.now() - thoughtStartTimeRef.current;
+        }
+        addItem(item, userMessageTimestamp);
+      }
+      setPendingThoughtItem(null);
+      thoughtStartTimeRef.current = null;
+    },
+    [addItem, pendingThoughtItemRef, setPendingThoughtItem],
+  );
+
+  // Commit the pending thought as-is regardless of any active merge
+  // deferral. Used by every path that ends the deferral window without a
+  // mergeable batch: user cancel, stream error, retry, model fallback, and
+  // the "no tools were actually scheduled" fallbacks. Identical to
+  // commitPendingThought when no deferral is active.
+  const abortThoughtMergeDeferral = useCallback(
+    (userMessageTimestamp: number) => {
+      thoughtMergeDeferralRef.current = false;
+      commitPendingThought(userMessageTimestamp);
+    },
+    [commitPendingThought],
+  );
+
+  // Called at the ToolCallRequest boundary. A single pending
+  // `gemini_thought` head has its commit deferred (with its duration frozen)
+  // until the batch completes; anything else — no thought, or the
+  // `gemini_thought_content` tail of a split oversized thought — commits as
+  // today.
+  const deferThoughtCommitForToolMerge = useCallback(
+    (userMessageTimestamp: number) => {
+      const pending = pendingThoughtItemRef.current;
+      if (pending?.type !== 'gemini_thought') {
+        commitPendingThought(userMessageTimestamp);
+        return;
+      }
+      setPendingThoughtItem({
+        ...pending,
+        durationMs: thoughtStartTimeRef.current
+          ? Date.now() - thoughtStartTimeRef.current
+          : pending.durationMs,
+        finalized: true,
+      });
+      // Null the start time so later commits keep the frozen duration
+      // instead of charging tool-execution time to the thought.
+      thoughtStartTimeRef.current = null;
+      thoughtMergeDeferralRef.current = true;
+    },
+    [commitPendingThought, pendingThoughtItemRef, setPendingThoughtItem],
+  );
+
+  // Resolve the thought commit deferred at the ToolCallRequest boundary.
+  // When every call in the completed batch is a successful collapsible
+  // (read/search/list) tool without inline images or memory ops, commit the
+  // thought with the batch summary folded in and mark the group so the main
+  // view suppresses it (full detail still shows it). Otherwise commit the
+  // thought unchanged. Returns the group to commit.
+  const mergeDeferredThoughtWithToolGroup = useCallback(
+    (toolGroup: HistoryItemToolGroup): HistoryItemToolGroup => {
+      if (!thoughtMergeDeferralRef.current) {
+        return toolGroup;
+      }
+      thoughtMergeDeferralRef.current = false;
+      const thought = pendingThoughtItemRef.current;
+      const tools = toolGroup.tools;
+      const mergeable =
+        thought?.type === 'gemini_thought' &&
+        tools.length > 0 &&
+        tools.every(
+          (tool) =>
+            isCollapsibleTool(tool.name) &&
+            tool.status === ToolCallStatus.Success &&
+            !tool.images?.length &&
+            !tool.omittedImageCount &&
+            !tool.isMemoryOp,
+        );
+      if (mergeable && thought) {
+        addItem(
+          { ...thought, toolSummary: buildToolSummary(tools, false) },
+          Date.now(),
+        );
+        setPendingThoughtItem(null);
+        return {
+          ...toolGroup,
+          display: { ...toolGroup.display, mergedIntoThought: true },
+        };
+      }
+      commitPendingThought(Date.now());
+      return toolGroup;
+    },
+    [
+      addItem,
+      commitPendingThought,
+      pendingThoughtItemRef,
+      setPendingThoughtItem,
+    ],
+  );
+
   const cancelOngoingRequest = useCallback(() => {
     if (turnCancelledRef.current) {
       for (const controller of detachedToolContinuationAbortControllersRef.current) {
@@ -1188,6 +1318,14 @@ export const useGeminiStream = (
     );
     logApiCancel(config, cancellationEvent);
 
+    // Resolve a deferred thought commit before the cancellation items land:
+    // a local cancel never reaches handleUserCancelledEvent (its
+    // turnCancelledRef guard early-returns), so without this the deferral
+    // would strand the thought pending until the next prompt drops it.
+    // Committing here also keeps the baseline ordering (thought above the
+    // cancelled content / "Request cancelled." info) when a scheduled batch
+    // completes asynchronously afterwards.
+    abortThoughtMergeDeferral(Date.now());
     if (pendingHistoryItemRef.current) {
       commitItemInOrder(pendingHistoryItemRef.current, Date.now());
     }
@@ -1241,6 +1379,7 @@ export const useGeminiStream = (
     streamingState,
     addItem,
     commitItemInOrder,
+    abortThoughtMergeDeferral,
     setPendingHistoryItem,
     onCancelSubmit,
     pendingHistoryItemRef,
@@ -1960,23 +2099,6 @@ export const useGeminiStream = (
     [addItem, mergeThought, pendingThoughtItemRef, setPendingThoughtItem],
   );
 
-  // Commit the streamed reasoning to history as a collapsible block (or drop
-  // it). Called when the answer/tool/turn begins, or on cancel/error.
-  const commitPendingThought = useCallback(
-    (userMessageTimestamp: number) => {
-      if (pendingThoughtItemRef.current) {
-        const item = { ...pendingThoughtItemRef.current };
-        if (item.type === 'gemini_thought' && thoughtStartTimeRef.current) {
-          item.durationMs = Date.now() - thoughtStartTimeRef.current;
-        }
-        addItem(item, userMessageTimestamp);
-      }
-      setPendingThoughtItem(null);
-      thoughtStartTimeRef.current = null;
-    },
-    [addItem, pendingThoughtItemRef, setPendingThoughtItem],
-  );
-
   const handleUserCancelledEvent = useCallback(
     (userMessageTimestamp: number) => {
       if (turnCancelledRef.current) {
@@ -1985,7 +2107,7 @@ export const useGeminiStream = (
 
       lastPromptErroredRef.current = false;
       // Persist any streamed reasoning (collapsed) above the cancelled answer.
-      commitPendingThought(userMessageTimestamp);
+      abortThoughtMergeDeferral(userMessageTimestamp);
       if (pendingHistoryItemRef.current) {
         if (pendingHistoryItemRef.current.type === 'tool_group') {
           const updatedTools = pendingHistoryItemRef.current.tools.map(
@@ -2019,7 +2141,7 @@ export const useGeminiStream = (
     },
     [
       addItem,
-      commitPendingThought,
+      abortThoughtMergeDeferral,
       commitItemInOrder,
       pendingHistoryItemRef,
       setPendingHistoryItem,
@@ -2040,7 +2162,7 @@ export const useGeminiStream = (
         goalTerminalErrorRef.current = true;
       }
       // Persist any streamed reasoning (collapsed) above the error.
-      commitPendingThought(userMessageTimestamp);
+      abortThoughtMergeDeferral(userMessageTimestamp);
       if (pendingHistoryItemRef.current) {
         commitItemInOrder(pendingHistoryItemRef.current, userMessageTimestamp);
         setPendingHistoryItem(null);
@@ -2085,7 +2207,7 @@ export const useGeminiStream = (
         });
     },
     [
-      commitPendingThought,
+      abortThoughtMergeDeferral,
       commitItemInOrder,
       pendingHistoryItemRef,
       setPendingHistoryItem,
@@ -2534,7 +2656,11 @@ export const useGeminiStream = (
                 bufferedEvents.some((e) => e.kind === 'thought')
               ) {
                 flushBufferedStreamEvents();
-                commitPendingThought(userMessageTimestamp);
+                // Content never arrives mid-tool-batch (the continuation
+                // stream starts after onComplete resolved the deferral), so
+                // aborting here is either a no-op deferral clear or a safe
+                // recovery from a stranded deferral.
+                abortThoughtMergeDeferral(userMessageTimestamp);
                 thoughtBuffer = '';
               }
               setThought((prev) => (prev ? null : prev));
@@ -2558,10 +2684,11 @@ export const useGeminiStream = (
             }
             case ServerGeminiEventType.ToolCallRequest:
               // Thinking is done once a tool call is issued; flush buffered
-              // reasoning then commit it to history (collapsed) above the tool
-              // output.
+              // reasoning, then defer the thought's commit until the batch
+              // completes so a mergeable read/search batch can fold into its
+              // line (commits as-is when the thought doesn't qualify).
               flushBufferedStreamEvents();
-              commitPendingThought(userMessageTimestamp);
+              deferThoughtCommitForToolMerge(userMessageTimestamp);
               thoughtBuffer = '';
               setThought((prev) => (prev ? null : prev));
               if (event.value.goalContext && turnAdmission) {
@@ -2687,7 +2814,7 @@ export const useGeminiStream = (
                 if (pendingHistoryItemRef.current) {
                   setPendingHistoryItem(null);
                 }
-                commitPendingThought(userMessageTimestamp);
+                abortThoughtMergeDeferral(userMessageTimestamp);
                 thoughtBuffer = '';
                 setThought(null);
                 geminiMessageBuffer = '';
@@ -2720,7 +2847,7 @@ export const useGeminiStream = (
               if (pendingHistoryItemRef.current) {
                 setPendingHistoryItem(null);
               }
-              commitPendingThought(userMessageTimestamp);
+              abortThoughtMergeDeferral(userMessageTimestamp);
               thoughtBuffer = '';
               setThought(null);
               geminiMessageBuffer = '';
@@ -2872,6 +2999,8 @@ export const useGeminiStream = (
             `[processGeminiStreamEvents] Dropping batch after repeated duplicate provider tool-call id: ${repeatedDuplicateRequest.providerCallId} (tool: ${repeatedDuplicateRequest.name})`,
           );
           loopDetectedRef.current = true;
+          // No batch will run, so a deferred thought must commit as-is.
+          abortThoughtMergeDeferral(userMessageTimestamp);
           return {
             status: StreamProcessingStatus.Completed,
             scheduledToolContinuation: false,
@@ -2963,6 +3092,12 @@ export const useGeminiStream = (
           );
         }
       }
+      // No batch will run (nothing executable, aborted signal, or loop
+      // detected): a still-deferred thought must commit as-is instead of
+      // lingering in the pending area.
+      if (thoughtMergeDeferralRef.current && !scheduledToolContinuation) {
+        abortThoughtMergeDeferral(userMessageTimestamp);
+      }
       return {
         status: StreamProcessingStatus.Completed,
         scheduledToolContinuation,
@@ -2985,6 +3120,8 @@ export const useGeminiStream = (
       clearRetryCountdown,
       setThought,
       commitPendingThought,
+      abortThoughtMergeDeferral,
+      deferThoughtCommitForToolMerge,
       pendingHistoryItemRef,
       pendingAssistantItemsRef,
       pendingThoughtItemRef,
@@ -3689,9 +3826,15 @@ export const useGeminiStream = (
             );
           }
 
-          // Reset thought when starting a new prompt
+          // Reset thought when starting a new prompt. With a deferral active
+          // (concurrent `?btw` submitted mid tool batch), persist the
+          // deferred thought instead of silently dropping it.
           setThought(null);
-          setPendingThoughtItem(null);
+          if (thoughtMergeDeferralRef.current) {
+            abortThoughtMergeDeferral(Date.now());
+          } else {
+            setPendingThoughtItem(null);
+          }
         }
 
         if (submitType === SendMessageType.Retry) {
@@ -3954,6 +4097,10 @@ export const useGeminiStream = (
         } catch (error: unknown) {
           cleanupReviewLease = true;
           metadata?.onDeliveryFailed?.();
+          // An exception escaping processGeminiStreamEvents bypasses every
+          // in-loop deferral resolution point; settle a deferred thought here
+          // instead of stranding it pending.
+          abortThoughtMergeDeferral(userMessageTimestamp);
           if (error instanceof UnauthorizedError) {
             onAuthError('Session expired or is unauthorized.');
           } else if (!isNodeError(error) || error.name !== 'AbortError') {
@@ -4076,6 +4223,7 @@ export const useGeminiStream = (
       pendingRetryErrorItemRef,
       setPendingRetryErrorItem,
       setPendingThoughtItem,
+      abortThoughtMergeDeferral,
       dualOutput,
       drainSteerAtBoundary,
       midTurnDrainRef,

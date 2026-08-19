@@ -142,13 +142,25 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
     historyRemountKey,
   } = uiState;
 
-  // Filter out items whose display is suppressed (e.g. /history collapse).
+  // Filter out items whose display is suppressed (e.g. /history collapse)
+  // and tool groups folded into a preceding thought line ("Thought for 9s,
+  // searched 2 patterns"). The folded groups stay in history (turn mapping,
+  // export, SDK) but render only in full detail, where the Ctrl+O remount
+  // re-runs this filter with fullDetail on.
   const visibleHistory = useMemo(
-    () => uiState.history.filter(isHistoryItemVisibleAfterRestore),
-    [uiState.history],
+    () =>
+      uiState.history.filter(
+        (item) =>
+          isHistoryItemVisibleAfterRestore(item) &&
+          (fullDetail ||
+            item.type !== 'tool_group' ||
+            !item.display?.mergedIntoThought),
+      ),
+    [uiState.history, fullDetail],
   );
 
-  // History is rendered as-is (no cross-group merging).
+  // Merging happens at commit time (useGeminiStream folds a completed
+  // all-read/search batch into the thought item); rendering stays per-item.
 
   // Virtual viewport path short-circuits below before any of the
   // <Static>-only machinery is needed. The offsets / progressive-replay

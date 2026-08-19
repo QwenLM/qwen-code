@@ -133,6 +133,13 @@ export interface HistoryItemBase {
      * when history is collapsed.
      */
     kind?: 'collapse-summary';
+    /**
+     * Set on a completed tool_group whose summary was folded into the
+     * preceding thought line ("Thought for 9s, searched 2 patterns"). The
+     * group stays in history (turn mapping, export, SDK) but renders nothing
+     * outside full-detail mode.
+     */
+    mergedIntoThought?: boolean;
   };
 }
 
@@ -171,6 +178,17 @@ export type HistoryItemGeminiThought = HistoryItemBase & {
   type: 'gemini_thought';
   text: string;
   durationMs?: number;
+  /**
+   * Summary of a completed all-read/search tool batch folded into this
+   * thought's collapsed line ("Thought for 9s, searched 2 patterns").
+   */
+  toolSummary?: string;
+  /**
+   * Thought finished (tools started) but the item is still pending because
+   * its commit is deferred until the following tool batch completes. Renders
+   * the completed style instead of the live "Thinking…" tick.
+   */
+  finalized?: boolean;
 };
 
 export type HistoryItemGeminiThoughtContent = HistoryItemBase & {
