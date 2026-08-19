@@ -50,6 +50,7 @@ import type {
   CronTaskDelivery,
   InvocationContextV1,
   ChatRecordingService,
+  ChatRecordingRewindCheckpoint,
   TurnResultRecordPayload,
   WorkflowApproval,
   BranchPoint,
@@ -1774,6 +1775,13 @@ export class Session implements SessionContext {
    */
   private followupAbort: AbortController | null = null;
   private turn: number = 0;
+  private rewindCheckpoint:
+    | {
+        promptIds: Array<string | null>;
+        recording?: ChatRecordingRewindCheckpoint;
+        snapshots: FileHistorySnapshot[];
+      }
+    | undefined;
   private refreshContextFilesOnWrite = false;
   private activeTodoWorkChainPromptId: string | undefined;
   private readonly createdAt: number = Date.now();
@@ -3553,27 +3561,35 @@ export class Session implements SessionContext {
       | undefined;
     if (rewindFiles) {
       if (fileHistoryService.isEnabled()) {
-        const targetSnapshotIndex =
-          mode === 'identified'
-            ? effectivePromptId
-              ? this.#getSnapshotIndexesByPromptId(snapshots)?.get(
-                  effectivePromptId,
-                )
-              : undefined
-            : target.turnIndex < snapshots.length
-              ? target.turnIndex
-              : undefined;
-        if (targetSnapshotIndex === undefined) {
-          throw RequestError.invalidParams(
-            undefined,
-            'Cannot rewind to the requested prompt. Its file snapshot identity is missing or ambiguous.',
-          );
+        let targetSnapshotIndex: number | undefined;
+        if (mode === 'identified') {
+          const snapshotIndexes = this.#getSnapshotIndexesByPromptId(snapshots);
+          if (!snapshotIndexes) {
+            throw RequestError.invalidParams(
+              undefined,
+              'Cannot rewind to the requested prompt. Its file snapshot identity is ambiguous.',
+            );
+          }
+          targetSnapshotIndex = effectivePromptId
+            ? snapshotIndexes.get(effectivePromptId)
+            : undefined;
+        } else if (target.turnIndex < snapshots.length) {
+          targetSnapshotIndex = target.turnIndex;
         }
-        survivingSnapshots = snapshots.slice(0, targetSnapshotIndex + 1);
+        if (targetSnapshotIndex !== undefined) {
+          survivingSnapshots = snapshots.slice(0, targetSnapshotIndex + 1);
+        }
       } else {
         survivingSnapshots = [];
       }
     }
+
+    const recording = this.config.getChatRecordingService();
+    this.rewindCheckpoint = {
+      promptIds: this.captureHistoryPromptIds(apiHistory),
+      ...(recording ? { recording: recording.captureRewindCheckpoint() } : {}),
+      snapshots: [...snapshots],
+    };
 
     const chat = this.config.getGeminiClient()!.getChat();
     chat.truncateHistory(target.apiTruncateIndex);
@@ -3590,7 +3606,7 @@ export class Session implements SessionContext {
       fileHistoryService.restoreFromSnapshots(survivingSnapshots);
     }
 
-    this.config.getChatRecordingService()?.rewindRecording(
+    recording?.rewindRecording(
       target.recordingTurnIndex,
       {
         truncatedCount: Math.max(
@@ -3727,10 +3743,7 @@ export class Session implements SessionContext {
     );
   }
 
-  restoreHistory(
-    history: Content[],
-    promptIds: Array<string | null> = this.captureHistoryPromptIds(history),
-  ): void {
+  restoreHistory(history: Content[], promptIds?: Array<string | null>): void {
     if (this.closing || this.#hasActiveTurn()) {
       throw RequestError.invalidParams(
         undefined,
@@ -3738,7 +3751,7 @@ export class Session implements SessionContext {
       );
     }
 
-    if (promptIds.length !== history.length) {
+    if (promptIds !== undefined && promptIds.length !== history.length) {
       throw RequestError.invalidParams(
         undefined,
         'promptIds must have the same length as history',
@@ -3746,8 +3759,9 @@ export class Session implements SessionContext {
     }
     const seen = new Set<string>();
     const restoredHistory = structuredClone(history);
-    for (let index = 0; index < promptIds.length; index++) {
-      const promptId = promptIds[index];
+    const restoredPromptIds = promptIds ?? history.map(() => null);
+    for (let index = 0; index < restoredPromptIds.length; index++) {
+      const promptId = restoredPromptIds[index];
       if (promptId === null) continue;
       if (!promptId || seen.has(promptId)) {
         throw RequestError.invalidParams(
@@ -3759,7 +3773,38 @@ export class Session implements SessionContext {
       markApiHistoryPrompt(restoredHistory[index]!, promptId);
     }
 
+    const checkpoint = this.rewindCheckpoint;
+    if (
+      checkpoint &&
+      promptIds !== undefined &&
+      (promptIds.length !== checkpoint.promptIds.length ||
+        promptIds.some(
+          (promptId, index) => promptId !== checkpoint.promptIds[index],
+        ))
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        'promptIds do not match the latest rewind checkpoint',
+      );
+    }
+
     this.config.getGeminiClient()!.getChat().setHistory(restoredHistory);
+    const recording = this.config.getChatRecordingService();
+    if (checkpoint) {
+      this.config
+        .getFileHistoryService()
+        .restoreFromSnapshots(checkpoint.snapshots);
+      if (checkpoint.recording) {
+        recording?.restoreRewindCheckpoint(
+          checkpoint.recording,
+          checkpoint.snapshots,
+          promptIds === undefined,
+        );
+      }
+      this.rewindCheckpoint = undefined;
+    } else if (promptIds === undefined) {
+      recording?.useLegacyTurnPromptIds();
+    }
     this.activeTodoPlanRevision = undefined;
     this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
   }

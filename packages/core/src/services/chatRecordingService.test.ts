@@ -1312,6 +1312,80 @@ describe('ChatRecordingService', () => {
       expect(rewind?.parentUuid).toBe('assistant-2');
     });
 
+    it('restores the active recording branch after a failed rewind consumer', async () => {
+      chatRecordingService.rebuildTurnBoundaries([
+        {
+          uuid: 'user-1',
+          parentUuid: null,
+          sessionId: 'test-session-id',
+          timestamp: '2026-06-27T00:00:00.000Z',
+          type: 'user',
+          promptId: 'prompt-1',
+          cwd: '/test/project/root',
+          version: '1.0.0',
+          message: { role: 'user', parts: [{ text: 'first turn' }] },
+        },
+        {
+          uuid: 'assistant-1',
+          parentUuid: 'user-1',
+          sessionId: 'test-session-id',
+          timestamp: '2026-06-27T00:00:01.000Z',
+          type: 'assistant',
+          cwd: '/test/project/root',
+          version: '1.0.0',
+          message: { role: 'model', parts: [{ text: 'first reply' }] },
+          model: 'gemini-pro',
+        },
+        {
+          uuid: 'user-2',
+          parentUuid: 'assistant-1',
+          sessionId: 'test-session-id',
+          timestamp: '2026-06-27T00:00:02.000Z',
+          type: 'user',
+          promptId: 'prompt-2',
+          cwd: '/test/project/root',
+          version: '1.0.0',
+          message: { role: 'user', parts: [{ text: 'second turn' }] },
+        },
+        {
+          uuid: 'assistant-2',
+          parentUuid: 'user-2',
+          sessionId: 'test-session-id',
+          timestamp: '2026-06-27T00:00:03.000Z',
+          type: 'assistant',
+          cwd: '/test/project/root',
+          version: '1.0.0',
+          message: { role: 'model', parts: [{ text: 'second reply' }] },
+          model: 'gemini-pro',
+        },
+      ]);
+      const checkpoint = chatRecordingService.captureRewindCheckpoint();
+
+      chatRecordingService.rewindRecording(1, { truncatedCount: 2 });
+      chatRecordingService.restoreRewindCheckpoint(checkpoint);
+      chatRecordingService.recordUserMessage(
+        [{ text: 'replacement turn' }],
+        undefined,
+        undefined,
+        'prompt-3',
+      );
+
+      expect(chatRecordingService.getRewindableTurnPromptIds()).toEqual([
+        'prompt-1',
+        'prompt-2',
+        'prompt-3',
+      ]);
+      await chatRecordingService.flush();
+      const records = vi
+        .mocked(jsonl.writeLine)
+        .mock.calls.map((call) => call[1] as ChatRecord);
+      const rollback = records.filter(
+        (record) => record.subtype === 'rewind',
+      )[1];
+      expect(rollback?.parentUuid).toBe('assistant-2');
+      expect(records.at(-1)?.parentUuid).toBe(rollback?.uuid);
+    });
+
     it('restores a rebuilt persisted tail after a failed append', async () => {
       chatRecordingService.rebuildTurnBoundaries([
         {

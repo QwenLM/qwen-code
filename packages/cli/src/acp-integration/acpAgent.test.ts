@@ -13677,10 +13677,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(lastSessionMock?.rewindToTurn).toHaveBeenCalledWith(1, {
       rewindFiles: true,
     });
-    expect(innerConfig.getFileHistoryService().rewind).toHaveBeenCalledWith(
-      `${sessionId}########2`,
-      true,
-    );
+    expect(innerConfig.getFileHistoryService().rewind).not.toHaveBeenCalled();
     expect(lastSessionMock?.beginHistoryMutation).toHaveBeenCalledOnce();
     expect(releaseHistoryMutation).toHaveBeenCalledOnce();
     expect(SessionService).toHaveBeenCalledWith('/tmp');

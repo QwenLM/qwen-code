@@ -11561,17 +11561,16 @@ class QwenAgent implements Agent {
           try {
             let filesChanged: string[] = [];
             let filesFailed: string[] = [];
-            const effectivePromptId = rewindResult.promptId ?? promptId;
-            if (rewindFiles && effectivePromptId) {
+            if (rewindFiles && promptId) {
               const fhs = session.getConfig().getFileHistoryService();
               try {
-                const fileResult = await fhs.rewind(effectivePromptId, true);
+                const fileResult = await fhs.rewind(promptId, true);
                 filesChanged = fileResult.filesChanged;
                 filesFailed = fileResult.filesFailed;
               } catch (err) {
                 const reason = err instanceof Error ? err.message : String(err);
                 debugLogger.error(
-                  `[ACP] File-history rewind failed for session=${sessionId} promptId=${effectivePromptId}: ${reason}`,
+                  `[ACP] File-history rewind failed for session=${sessionId} promptId=${promptId}: ${reason}`,
                 );
                 filesFailed = [`file-history-rewind: ${reason}`];
               }

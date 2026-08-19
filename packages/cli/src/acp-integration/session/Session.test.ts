@@ -433,6 +433,9 @@ describe('Session', () => {
     recordRealtimeConversation: ReturnType<typeof vi.fn>;
     recordFileHistorySnapshot: ReturnType<typeof vi.fn>;
     rewindRecording: ReturnType<typeof vi.fn>;
+    captureRewindCheckpoint: ReturnType<typeof vi.fn>;
+    restoreRewindCheckpoint: ReturnType<typeof vi.fn>;
+    useLegacyTurnPromptIds: ReturnType<typeof vi.fn>;
     getRewindableTurnPromptIds: ReturnType<typeof vi.fn>;
     setTitleRecordedCallback: ReturnType<typeof vi.fn>;
     getBranchCheckpointCursor: ReturnType<typeof vi.fn>;
@@ -708,6 +711,9 @@ describe('Session', () => {
       recordRealtimeConversation: vi.fn().mockResolvedValue(undefined),
       recordFileHistorySnapshot: vi.fn(),
       rewindRecording: vi.fn(),
+      captureRewindCheckpoint: vi.fn().mockReturnValue({}),
+      restoreRewindCheckpoint: vi.fn(),
+      useLegacyTurnPromptIds: vi.fn(),
       getRewindableTurnPromptIds: vi.fn().mockReturnValue([]),
       setTitleRecordedCallback: vi.fn(),
       getBranchCheckpointCursor: vi.fn().mockReturnValue({
@@ -3344,6 +3350,34 @@ describe('Session', () => {
       expect(mockChat.truncateHistory).not.toHaveBeenCalled();
     });
 
+    it('rewinds conversation history when the matching file snapshot is missing', () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'first reply' }] },
+      ];
+      core.markApiHistoryPrompt(history[0]!, 'prompt-1');
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
+        'prompt-1',
+      ]);
+      mockFileHistoryService.isEnabled.mockReturnValue(true);
+      mockFileHistoryService.getSnapshots.mockReturnValue([]);
+
+      expect(session.rewindToPrompt('prompt-1')).toEqual({
+        targetTurnIndex: 0,
+        apiTruncateIndex: 0,
+        promptId: 'prompt-1',
+      });
+      expect(
+        mockFileHistoryService.restoreFromSnapshots,
+      ).not.toHaveBeenCalled();
+      expect(mockChatRecordingService.rewindRecording).toHaveBeenCalledWith(
+        0,
+        { truncatedCount: 2 },
+        undefined,
+      );
+    });
+
     it('resolves numeric identified rewinds by recording index without ordinal collision', () => {
       const history: Content[] = [
         { role: 'user', parts: [{ text: 'unjoined first' }] },
@@ -3488,6 +3522,46 @@ describe('Session', () => {
       expect(core.getApiHistoryPromptId(restored[0]!)).toBe('prompt-1');
       expect(core.getApiHistoryPromptId(restored[1]!)).toBeUndefined();
       expect(mockChat.getHistory).not.toHaveBeenCalled();
+    });
+
+    it('restores the recording and file snapshot checkpoint after a rewind', () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'first reply' }] },
+      ];
+      core.markApiHistoryPrompt(history[0]!, 'prompt-1');
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
+        'prompt-1',
+      ]);
+      const snapshots = [
+        {
+          promptId: 'prompt-1',
+          timestamp: new Date('2026-06-13T00:00:00.000Z'),
+          trackedFileBackups: {},
+        },
+      ];
+      mockFileHistoryService.getSnapshots.mockReturnValue(snapshots);
+
+      session.rewindToPrompt('prompt-1', { rewindFiles: false });
+      session.restoreHistory(history, ['prompt-1', null]);
+
+      expect(mockFileHistoryService.restoreFromSnapshots).toHaveBeenCalledWith(
+        snapshots,
+      );
+      expect(
+        mockChatRecordingService.restoreRewindCheckpoint,
+      ).toHaveBeenCalledWith({}, snapshots, false);
+    });
+
+    it('uses legacy recording identities when restored history omits prompt ids', () => {
+      session.restoreHistory([
+        { role: 'user', parts: [{ text: 'legacy prompt' }] },
+      ]);
+
+      expect(
+        mockChatRecordingService.useLegacyTurnPromptIds,
+      ).toHaveBeenCalled();
     });
 
     it('clears the active Todo plan revision when restoring history', async () => {

@@ -829,6 +829,16 @@ export interface ChatRecordingRestoreState {
   sourceId?: string;
 }
 
+export interface ChatRecordingRewindCheckpoint {
+  lastRecordUuid: string | null;
+  activeBranchRecords: ChatRecord[];
+  activeBranchBaseUuid: string | null;
+  pendingBranchToolCalls: BranchToolCallIdentity[];
+  turnParentUuids: Array<string | null>;
+  turnPromptIds: Array<string | undefined>;
+  userDisplayTextsForTitle: Array<string | undefined>;
+}
+
 /**
  * Service for recording the current chat session to disk.
  *
@@ -1783,6 +1793,53 @@ export class ChatRecordingService {
 
   getRewindableTurnPromptIds(): ReadonlyArray<string | undefined> {
     return [...this.turnPromptIds];
+  }
+
+  captureRewindCheckpoint(): ChatRecordingRewindCheckpoint {
+    return {
+      lastRecordUuid: this.lastRecordUuid,
+      activeBranchRecords: [...this.activeBranchRecords],
+      activeBranchBaseUuid: this.activeBranchBaseUuid,
+      pendingBranchToolCalls: [...this.pendingBranchToolCalls],
+      turnParentUuids: [...this.turnParentUuids],
+      turnPromptIds: [...this.turnPromptIds],
+      userDisplayTextsForTitle: [...this.userDisplayTextsForTitle],
+    };
+  }
+
+  restoreRewindCheckpoint(
+    checkpoint: ChatRecordingRewindCheckpoint,
+    survivingFileHistorySnapshots?: FileHistorySnapshot[],
+    legacyPromptIds = false,
+  ): void {
+    this.lastRecordUuid = checkpoint.lastRecordUuid;
+    this.activeBranchRecords = [...checkpoint.activeBranchRecords];
+    this.activeBranchBaseUuid = checkpoint.activeBranchBaseUuid;
+    this.pendingBranchToolCalls = [...checkpoint.pendingBranchToolCalls];
+    this.turnParentUuids = [...checkpoint.turnParentUuids];
+    this.turnPromptIds = legacyPromptIds
+      ? checkpoint.turnPromptIds.map(() => undefined)
+      : [...checkpoint.turnPromptIds];
+    this.userDisplayTextsForTitle.splice(
+      0,
+      this.userDisplayTextsForTitle.length,
+      ...checkpoint.userDisplayTextsForTitle,
+    );
+    this.lastAttributionSnapshotJson = undefined;
+    const record: ChatRecord = {
+      ...this.createBaseRecord('system'),
+      type: 'system',
+      subtype: 'rewind',
+      systemPayload: { truncatedCount: 0 },
+    };
+    this.appendRecord(record);
+    if (survivingFileHistorySnapshots?.length) {
+      this.recordFileHistorySnapshotBatch(survivingFileHistorySnapshots);
+    }
+  }
+
+  useLegacyTurnPromptIds(): void {
+    this.turnPromptIds = this.turnPromptIds.map(() => undefined);
   }
 
   recordGoalRuntimeMessage(
