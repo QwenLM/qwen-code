@@ -196,10 +196,31 @@ export function computeIncrementalScope(input: ScopeInput): ScopeRuling {
     scope: {
       anchor,
       deltaFiles: [...deltaLive].filter((p) => keptPaths.has(p)),
-      interaction: [...interaction.entries()].map(([path, importsChanged]) => ({
-        path,
-        importsChanged,
-      })),
+      // SECTIONLESS entries first, and the order is load-bearing.
+      //
+      // An interaction file that carries a section of the PR's diff is named
+      // twice: here, and in the chunk brief of whichever chunk holds that
+      // section, uncapped. One that carries NONE — a restored file pulled in
+      // by the second pass, whose own content is base content — belongs to no
+      // chunk, so this capped list is the ONLY surface that briefs its seam.
+      // Appended last, as insertion order had them, they were the first
+      // elided into `(+N more)` on any round with more than `SCOPE_LIST_CAP`
+      // entries: the seam went unbriefed while `scope.interaction` recorded
+      // it as covered, which is coverage claimed and not delivered.
+      //
+      // So the cap now bites the redundantly-named entries first. It still
+      // bites — a round with more sectionless entries than the cap elides
+      // some — but that is the honest degradation, not the silent one.
+      interaction: [...interaction.entries()]
+        .sort(
+          ([a], [b]) =>
+            Number(keptPaths.has(a)) - Number(keptPaths.has(b)) ||
+            a.localeCompare(b),
+        )
+        .map(([path, importsChanged]) => ({
+          path,
+          importsChanged,
+        })),
       contextFileCount: candidates.filter((p) => !interaction.has(p)).length,
       restoredFileCount: restoredDelta.size,
     },

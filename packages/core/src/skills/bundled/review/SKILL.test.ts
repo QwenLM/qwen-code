@@ -126,42 +126,92 @@ describe('bundled review skill', () => {
     expect(body).toContain(
       '**Whether a PLAN exists is a separate field: `diffPath`.**',
     );
-    // …and the re-run instruction, including the flag-replacement rule that
-    // keeps a second `--since` from reading as two anchors.
+    // …and the re-run instruction, carrying BOTH flags: a re-run with only
+    // `--since` can never pass the command's same-model gate — a missing
+    // certifier is a mismatch, not a pass (the gate refuses it as
+    // `cross-model-anchor`) — so the recovery this paragraph exists for is
+    // dead on every flow without the model beside the sha. Plus the
+    // flag-replacement rule that keeps a second `--since` from reading as
+    // two anchors.
     expect(body).toContain(
-      'REPLACING any `--since` it already carries, never appending a second one',
+      're-run the `fetch-pr` command from above with `--since <sha> --since-model <model>`',
+    );
+    expect(body).toContain(
+      'REPLACING any `--since` and any `--since-model` the command already carries',
     );
   });
 
   it('pins which refusal reasons the recovery flow may retry', () => {
-    // The orchestrator's recovery loop acts on this prose alone, and the
-    // producer deliberately manufactures both planless shapes. Deleting the
-    // retry exception strands the one shape a re-run fixes; widening the
-    // retryable set re-refuses a dead anchor every round forever.
+    // The orchestrator's recovery loop acts on this prose alone. The
+    // retryable class is the infrastructure reasons — a base fetch, a
+    // merge-base probe, a capture — whose components a re-run repeats;
+    // widening it re-refuses a dead anchor every round forever.
     const body = skillBody();
     expect(body).toContain(
       'Every other reason is deterministic for the same sha and must NOT be retried',
     );
-    expect(body).toContain('Retry that one, once.');
-    // …and the exception's OTHER condition: a null merge base has two causes
-    // and only the fetch-failure one is retryable.
-    expect(body).toContain('`baseFetchFailed: true`');
-    expect(body).toContain('found no common ancestor at all');
+    expect(body).toContain(
+      'the component that failed — a base fetch, a merge-base probe, a capture — is re-run by the re-run',
+    );
+    // The retryable set's MEMBERSHIP, not just the clause's existence:
+    // widening the parenthetical (say, with `partition-failed`) makes an
+    // orchestrator retry a deterministic refusal every round forever — the
+    // exact loop this test's own comment warns about.
+    expect(body).toContain(
+      '(`base-untrusted`, `capture-failed`: the anchor was never ruled invalid',
+    );
+    // The rules-load exception the deleted `baseFetchFailed: true` pin used
+    // to cover — still live: on a failed base fetch the unresolvable ref
+    // makes load-rules report "no rules found", indistinguishable from a
+    // repo with none, silently enforcing none.
+    expect(body).toContain(
+      'except when the fetch report recorded `baseFetchFailed: true`',
+    );
+    // The ONE-exception paragraph this test used to pin named a shape the
+    // CLI can no longer produce — `partition-failed` implies a base
+    // resolved, because every publish site needs one — and the transient
+    // shape it carved out now arrives as `base-untrusted`, already
+    // retryable under the infrastructure clause above.
+    expect(body).not.toContain('Retry that one, once.');
+  });
+
+  it('pins the per-reason descriptions the retry split rests on', () => {
+    // The FETCH-vs-containment distinction is load-bearing on retry: a
+    // flappy base fetch must stay retryable (`base-untrusted`) and a
+    // base-free cross-fork history deterministic (`containment-unverified`)
+    // — swapping the two sentences reclassifies one into the other, and the
+    // orchestrator stops retrying what it should retry. And
+    // `lineage-unfollowable` is a reason the CLI emits (the fetch-pr refuse
+    // tree), so it owes a recovery bullet like every other reason.
+    const body = skillBody();
+    expect(body).toContain('`lineage-unfollowable`');
+    expect(body).toContain(
+      'A base FETCH that failed is the other shape and reports `base-untrusted` instead',
+    );
   });
 
   it('records the range the round actually reviewed in provenance', () => {
-    // A saved report is read by someone who cannot re-derive its scope, so
-    // recording the merge base for a round that reviewed `diffBase..head`
-    // hands that reader a range the run never had.
-    // The whole rule, not its opening clause. The discriminating CONDITION
-    // and the fallback half were each pinned by nothing: deleting the
-    // condition, flipping it to `and upToDate`, or swapping the fallback for
-    // `fetchedSha` all shipped this file green, and each one records a scope
-    // the run never had.
+    // A saved report is read by someone who cannot re-derive its scope.
+    // Slicing made every delta-scoped round publish sections of
+    // `merge-base..head`, so the merge base IS the range the round used;
+    // the field that named a delta range's left side left new reports, and
+    // the instruction that pointed the writer at it named a field that is
+    // never there — inviting an improvisation that records the anchor, a
+    // scope the run never had.
     expect(skillBody()).toContain(
-      '`incremental.diffBase` on a delta-scoped round (`incremental.effective` and no `upToDate`)',
+      '`mergeBaseSha` in every case — a delta-scoped round publishes sections of `merge-base..head`',
     );
-    expect(skillBody()).toContain('`mergeBaseSha` on every other');
+    // …and the legacy carve-out: an older report's `diffBase` still names
+    // the range that CLI published, so it stays authoritative there.
+    expect(skillBody()).toContain(
+      'honour the field when an older report still carries it',
+    );
+    // …and the discriminator that tells a writer the field is GONE on new
+    // reports — without it a provenance step improvises an anchor-scoped
+    // range the run never had.
+    expect(skillBody()).toContain(
+      'new reports carry no `incremental.diffBase`',
+    );
   });
 
   it('pins the same-model gate on both incremental-anchor paths', () => {
@@ -423,6 +473,68 @@ describe('bundled review skill', () => {
     );
     expect(body).toContain(
       'Findings the convergence posture deferred stay out the same way',
+    );
+  });
+
+  it('pins the composed body budget and its trim order', () => {
+    // A body over GitHub's limit is rejected whole — blockers included — so
+    // the trim ORDER is the policy: a later "simplify the prose" edit that
+    // drops it would leave the model free to shorten findings itself, which
+    // is the one thing this must never license.
+    const body = skillBody();
+    expect(body).toContain('rejected by the API **whole**');
+    expect(body).toContain('**the Chinese fold first**');
+    expect(body).toContain(
+      'then the deferral display, then the not-reviewed disclosures',
+    );
+    // The other half of the policy. A "simplify the prose" edit turning
+    // `never` into `last` would leave every prefix pin matching while the
+    // skill started licensing the one trim this budget exists to refuse.
+    expect(body).toContain(
+      '**the blockers, the undecided-blocker list and the sentences that qualify the verdict never**',
+    );
+    // The last-resort cut has its own order, and it is the opposite of the
+    // rung order above: there, the undecided list never yields; here, it is
+    // the first thing spent, because the author already has it.
+    expect(body).toContain(
+      "it spends the sentences the author already received in an earlier round — the undecided-blocker list — before this round's body Criticals",
+    );
+    // The placement rule is what keeps the last resort bounded: a notice
+    // below the cut has to survive whatever the cut left open, and three
+    // hand models of that shipped three classes of divergence.
+    expect(body).toContain(
+      '**that notice rides above the cut, with the others**',
+    );
+    expect(body).toContain('You do not shorten anything yourself to help it');
+    // Where a trimmed section can still be read is not uniform, and the
+    // generalized promise ("stays whole in the artifact") is false for the
+    // disclosures: the artifact persists findings, counts and the trimmed
+    // body. Pin the split, and the terminal-summary duty it creates.
+    expect(body).toContain(
+      '**a finding it trims stays whole in the findings artifact**',
+    );
+    expect(body).toContain(
+      '**A trimmed disclosure section is not a finding and has no other durable copy**',
+    );
+    expect(body).toContain(
+      '**say in your Step 6 terminal summary what was trimmed and what it said.**',
+    );
+    // Step 8 makes the same promise about the deferral list from the other
+    // end. It drifted once already — the budget can drop the whole list, not
+    // just the entries past its 20-line cap — so pin the qualification here
+    // rather than let the two paragraphs disagree about the same channel.
+    expect(body).toContain(
+      'Their durable record on the PR is the POSTED deferral list',
+    );
+    expect(body).toContain(
+      'it is **not guaranteed**: the list is the first section the body budget trims',
+    );
+    // The tails carry the load: without them the paragraph reads as a
+    // durability promise again, which is the drift this pin exists for.
+    expect(body).toContain('so an overflowing body can carry none of it');
+    expect(body).toContain('has no cross-round record on the PR at all');
+    expect(body).toContain(
+      "when the budget trims it, the terminal summary is where the author's copy comes from",
     );
   });
 

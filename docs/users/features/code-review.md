@@ -184,7 +184,7 @@ Or, after running `/review 123`, type `post comments` to publish findings withou
 - Where the fix is a single localized edit, a ` ```suggestion ` block you can apply in one click
 - For Approve/Request changes verdicts: a review summary with the verdict
 - For Comment verdict with all inline comments posted: no separate summary (inline comments are sufficient)
-- Model and CLI version attribution footer on each comment (e.g., _— qwen3-coder via Qwen Code /review (v0.21.2)_); set `review.attribution` to `false` in your user or system `settings.json` (the workspace `.qwen/settings.json` is ignored for `review.*` settings) to post without it — note this also withholds the model from the review's machine-ledger marker, so in fresh environments (no review cache) the recovered incremental anchor fails the same-model check and the re-review falls back to full-range
+- Model and CLI version attribution footer on each comment (e.g., _— qwen3-coder via Qwen Code /review (v0.21.2)_); set `review.attribution` to `false` in your user or system `settings.json` (the workspace `.qwen/settings.json` is ignored for `review.*` settings) to post without it — comments and body lists then also lose the `**[Critical]**`/`**[Suggestion]**` severity markers, and the model is withheld from the review's machine-ledger marker, so in fresh environments (no review cache) the recovered incremental anchor fails the same-model check and the re-review falls back to full-range
 
 **What stays terminal-only:**
 

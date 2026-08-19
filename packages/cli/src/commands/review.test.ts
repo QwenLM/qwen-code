@@ -69,6 +69,7 @@ describe('reviewCommand', () => {
       'test-efficacy',
       'test-plan',
       'findings',
+      'recover-findings',
       'publish-assets',
       'compose-review',
       'save-artifact',

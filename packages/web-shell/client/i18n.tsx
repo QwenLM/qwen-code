@@ -1403,14 +1403,11 @@ const EN: Messages = {
     'This restored queue summary cannot recover its original attachments.',
   'queue.admissionUnknown':
     'Delivery is uncertain. Check the session before trying again.',
-  'queue.mayCorrespond':
-    'The uncertain local copy and server queue entry may be the same prompt.',
   'queue.restoreUnknown': 'Restore local copy',
   'queue.discardUnknown': 'Discard local copy',
   'queue.continueEditing': 'Continue editing',
   'queue.continueEditingConfirm':
     'The prompt may already be running. Continue editing only if you accept the risk of sending it twice.',
-  'queue.localCopyDiscarded': 'Local copy discarded',
   'queue.commandBlocked':
     "Slash commands can't be queued while a turn is running.",
   'queue.shellQueued':
@@ -4354,14 +4351,11 @@ const ZH: Messages = {
   'queue.submittingDisabled': '排队消息正在提交中...',
   'queue.summaryEditDisabled': '恢复的队列摘要无法还原原始附件。',
   'queue.admissionUnknown': '消息是否送达尚不确定，请先检查会话再重试。',
-  'queue.mayCorrespond':
-    '送达不确定的本地副本与服务器队列项可能对应同一条消息。',
   'queue.restoreUnknown': '恢复本地副本',
   'queue.discardUnknown': '丢弃本地副本',
   'queue.continueEditing': '继续编辑',
   'queue.continueEditingConfirm':
     '这条消息可能已经在执行。只有在接受重复发送风险时才继续编辑。',
-  'queue.localCopyDiscarded': '本地副本已丢弃',
   'queue.commandBlocked': '当前回合运行时，Slash 命令不能进入排队。',
   'queue.shellQueued': 'Shell 命令已排队，将在当前回合结束后执行。',
   'queue.shellDropped': (v) =>

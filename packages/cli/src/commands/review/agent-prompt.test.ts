@@ -2773,8 +2773,18 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     // The command runs install + builds + tests in one process; the agent's default
     // 120s shell timeout would kill it — the very failure this command prevents, one
     // level up. So the block tells the agent to pass the tool's max, 600000ms.
+    //
+    // Pinned PER SITE, not per prompt: three sites supply the directive (the
+    // first call, the resume paragraph's "Same …", the efficacy probe's
+    // "… too"), so a whole-prompt `toContain` stayed green with any one of
+    // them deleted — and the deleted first-call directive is exactly the
+    // 120s mid-install kill this assertion's own comment names.
     const p = buildRoleBrief(PR_PLAN, '7', { planPath: '/abs/tmp/plan.json' });
-    expect(p).toContain(`timeout: ${SHELL_TOOL_MAX_TIMEOUT_MS}`);
+    expect(p).toContain(
+      `Invoke it with \`timeout: ${SHELL_TOOL_MAX_TIMEOUT_MS}\`:`,
+    );
+    expect(p).toContain(`Same \`timeout: ${SHELL_TOOL_MAX_TIMEOUT_MS}\``);
+    expect(p).toContain(`\`timeout: ${SHELL_TOOL_MAX_TIMEOUT_MS}\` too`);
   });
 
   it('tells Agent 7 how to CONTINUE a run one call could not finish', () => {
@@ -2784,8 +2794,14 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     // call teaches the agent to report a truncated dimension as a finished
     // one — which is what three live reviews did.
     const p = buildRoleBrief(PR_PLAN, '7', { planPath: '/abs/tmp/plan.json' });
-    expect(p).toContain('testScope.notRun');
-    expect(p).toContain('"clamped": true');
+    // Anchored to the continuation PARAGRAPH's own sentence: the bare
+    // literals are also supplied verbatim by the role-7 base brief
+    // (agent-briefs), so `toContain('testScope.notRun')` stayed green with
+    // the whole paragraph deleted.
+    expect(p).toContain(
+      'Work is left when `testScope.notRun` is non-empty, or when any ' +
+        '`test[]` entry has `"clamped": true`',
+    );
 
     // Asserted on the CONTINUATION BLOCK ALONE, which is the whole point. The
     // first cut of this test searched the entire prompt: `--resume` matched the
@@ -2802,11 +2818,45 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     // `resolve` — not spelled as POSIX literals: on Windows the prompt carries
     // `C:\\abs\\tmp\\plan.json`, and a hardcoded expectation fails there for a
     // reason that has nothing to do with the continuation block.
-    expect(resumeBlock[0]).toContain('review build-test');
+    // The FULL wrapper, on THIS block: the whole-prompt pins are satisfied
+    // by the first invocation block and vice versa, so a wrapper deleted
+    // from either one shipped green — and a resume block without it execs
+    // bare PATH `qwen`, an old global that lacks `build-test` entirely.
+    expect(resumeBlock[0]).toContain(
+      '"${QWEN_CODE_CLI:-qwen}" review build-test',
+    );
     expect(resumeBlock[0]).toContain(`--plan ${resolve('/abs/tmp/plan.json')}`);
+    // The tree too: a continuation against a different tree measures a
+    // different run. Never asserted before — a dropped `--worktree` line
+    // shipped green.
+    expect(resumeBlock[0]).toContain(
+      `--worktree ${resolve('.qwen/tmp/review-pr-6766')}`,
+    );
     expect(resumeBlock[0]).toContain(
       `--out ${join(resolve('/abs/tmp'), 'qwen-review-pr-6766-build-test.json')}`,
     );
+    expect(resumeBlock[0]).toContain('--resume');
+
+    // And the FIRST invocation block carries its own wrapper and tree — the
+    // same two elements, scoped to the block that must supply them.
+    const firstBlock = fences.find(
+      (f) => f.includes('review build-test') && !f.includes('--resume'),
+    );
+    expect(firstBlock).toBeDefined();
+    expect(firstBlock).toContain('"${QWEN_CODE_CLI:-qwen}" review build-test');
+    expect(firstBlock).toContain(
+      `--worktree ${resolve('.qwen/tmp/review-pr-6766')}`,
+    );
+
+    // The third-shape sentence, at BOTH prose sites — the role-7 base brief
+    // and the welded resume paragraph each carry it, so a single toContain
+    // is satisfied by either and a one-site deletion ships green. Counted,
+    // not just matched: deleting the sentence anywhere drops the count, and
+    // an agent missing it treats the endedBeforeTests shape as continuable,
+    // spending a MAX_RESUME_CALLS slot on a --resume that can only answer
+    // "ended before its test phase".
+    expect(p.split('"endedBeforeTests": true').length - 1).toBe(2);
+    expect(p.split('do not spend a continuation on it').length - 1).toBe(2);
   });
 
   it('welds the PR into Agent 0 — an unqualified number judges the wrong issue', () => {
@@ -3946,6 +3996,10 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
   beforeEach(() => {
     (writeStdoutLine as unknown as Mock).mockClear();
     (writeStderrLine as unknown as Mock).mockClear();
+    // Cleared beside its throwing siblings (#9259): uncleared, every
+    // assertion below read the ACCUMULATED output of earlier tests — an
+    // order-dependent oracle that passed on residue alone.
+    (writeStderrLineSafe as unknown as Mock).mockClear();
     dir = mkdtempSync(join(tmpdir(), 'ap-retire-'));
     dirs.push(dir);
     plan = join(dir, 'plan.json');
@@ -3956,11 +4010,25 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     utimesSync(plan, old, old);
     findings = join(dir, 'findings.md');
     writeFileSync(findings, '');
-    for (const k of ['QWEN_CODE_PROJECT_DIR', 'QWEN_CODE_SESSION_ID']) {
+    for (const k of [
+      'QWEN_CODE_PROJECT_DIR',
+      'QWEN_CODE_SESSION_ID',
+      // The budget gate reads these three straight from process.env on
+      // every admission the tests below drive (#9272): an ambient value
+      // inherited from a concurrent review makes admission
+      // environment-dependent — the same isolation the repro harness
+      // carries (#9259), on the describe that actually needs it.
+      DEADLINE_ENV,
+      RESERVE_ENV,
+      TOOL_CONCURRENCY_ENV,
+    ]) {
       SAVED[k] = process.env[k];
     }
     process.env['QWEN_CODE_PROJECT_DIR'] = dir;
     process.env['QWEN_CODE_SESSION_ID'] = 'S1';
+    delete process.env[DEADLINE_ENV];
+    delete process.env[RESERVE_ENV];
+    delete process.env[TOOL_CONCURRENCY_ENV];
     mkdirSync(join(dir, 'subagents', 'S1'), { recursive: true });
   });
   afterEach(() => {
@@ -5036,6 +5104,12 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     expect(err).toContain(
       'chunk 13 \u2014 round 1: no matching transcript; round 2: no matching transcript',
     );
+    // The narrowing's absence half (#9259): chunk 14's failures exist in
+    // the same schedule but must NOT ride chunk 13's build — an
+    // unfiltered `schedule.diagnostics` here prints every chunk's note on
+    // every build, and the count lies about the coverage.
+    expect(err).not.toContain('chunk 14 \u2014');
+    expect(err).toContain('1 twice-audited chunk(s)');
     // The first build admitted the round — its stamp is what used to gate
     // the second build's diagnostic out.
     expect(readRoundStamps(plan).some((s) => s.round === 3)).toBe(true);
@@ -5167,6 +5241,150 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     } finally {
       (writeStderrLine as unknown as Mock).mockReset();
     }
+  });
+
+  it('a refused round prints no audit NOTE — the round builder defers the catch note past the gate (#9259)', () => {
+    // Cap-3 plan, rounds 1-3 non-converging, transcripts unreadable: the
+    // schedule read dies AND round 4 is refused. The stderr must carry
+    // the ROUND CAP refusal only — a `auditing every chunk.` NOTE here
+    // promises an audit that never happens.
+    writeFileSync(
+      plan,
+      JSON.stringify({ ...PLAN, budget: { reverseAuditRounds: 3 } }),
+    );
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+    answerRound(1, { 13: YIELD, 14: YIELD, 15: YIELD });
+    answerRound(2, { 13: YIELD, 14: YIELD, 15: YIELD });
+    answerRound(3, { 13: YIELD, 14: YIELD, 15: YIELD });
+    delete process.env['QWEN_CODE_SESSION_ID'];
+    (writeStderrLineSafe as unknown as Mock).mockClear();
+
+    const out = runRound(4);
+
+    expect(process.exitCode).toBe(4);
+    expect(out).toBe('');
+    expect(keysOf(4)).toHaveLength(0);
+    const msg = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(msg).toContain('ROUND CAP');
+    const safe = (writeStderrLineSafe as unknown as Mock).mock.calls
+      .map((c) => String(c[0]))
+      .join('\n');
+    expect(safe).not.toContain('reverse-audit retirement unavailable');
+  });
+
+  it('a refused per-chunk build prints no audit NOTE either (#9259)', () => {
+    // The --chunk twin of the gate-side truthfulness: an unadmitted round
+    // 4 at cap 3 with an unreadable history is refused, and the refusal
+    // is the only thing stderr says about the round.
+    writeFileSync(
+      plan,
+      JSON.stringify({ ...PLAN, budget: { reverseAuditRounds: 3 } }),
+    );
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+    answerRound(1, { 13: YIELD, 14: YIELD, 15: YIELD });
+    answerRound(2, { 13: YIELD, 14: YIELD, 15: YIELD });
+    answerRound(3, { 13: YIELD, 14: YIELD, 15: YIELD });
+    delete process.env['QWEN_CODE_SESSION_ID'];
+    (writeStderrLineSafe as unknown as Mock).mockClear();
+
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'reverse-audit',
+      findings,
+      chunk: 13,
+      round: 4,
+    });
+
+    expect(process.exitCode).toBe(4);
+    const msg = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(msg).toContain('ROUND CAP');
+    const safe = (writeStderrLineSafe as unknown as Mock).mock.calls
+      .map((c) => String(c[0]))
+      .join('\n');
+    expect(safe).not.toContain('reverse-audit retirement unavailable');
+  });
+
+  it('a repair build whose schedule begins to throw still names the degradation — once per round (#9259)', () => {
+    // Round 3's admission build (chunk 13) reads cleanly: stamp lands,
+    // nothing said. Then the history dies, and chunk 14's repair build
+    // must still print the NOTE — the stamp-keyed suppression this
+    // replaces silenced exactly this shape. Chunk 15's build repeats the
+    // failure and stays silent: the note earns its place once per round
+    // per process.
+    answerRound(1, { 13: DRY, 14: DRY, 15: YIELD });
+    answerRound(2, { 13: DRY, 14: DRY, 15: YIELD });
+    (writeStderrLineSafe as unknown as Mock).mockClear();
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'reverse-audit',
+      findings,
+      chunk: 13,
+      round: 3,
+    });
+    expect(readRoundStamps(plan).some((s) => s.round === 3)).toBe(true);
+    expect(
+      (writeStderrLineSafe as unknown as Mock).mock.calls
+        .map((c) => String(c[0]))
+        .join('\n'),
+    ).not.toContain('reverse-audit retirement unavailable');
+
+    delete process.env['QWEN_CODE_SESSION_ID'];
+    (writeStderrLineSafe as unknown as Mock).mockClear();
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'reverse-audit',
+      findings,
+      chunk: 14,
+      round: 3,
+    });
+    let safe = (writeStderrLineSafe as unknown as Mock).mock.calls
+      .map((c) => String(c[0]))
+      .join('\n');
+    expect(safe).toContain('reverse-audit retirement unavailable');
+    expect(safe).toContain('auditing the chunk');
+    // The NOTE's middle carries the WHY — the underlying failure's own
+    // message, not an empty dash (#9272): the constant prefix and suffix
+    // alone would print `unavailable this round — — auditing the chunk.`
+    // and name nothing.
+    expect(safe).toMatch(/unavailable this round — .+ — auditing the chunk\./);
+
+    (writeStderrLineSafe as unknown as Mock).mockClear();
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'reverse-audit',
+      findings,
+      chunk: 15,
+      round: 3,
+    });
+    safe = (writeStderrLineSafe as unknown as Mock).mock.calls
+      .map((c) => String(c[0]))
+      .join('\n');
+    expect(safe).not.toContain('reverse-audit retirement unavailable');
+    // Every repair still builds its chunk — the safe direction stands.
+    expect(keysOf(3)).toHaveLength(3);
+
+    // The claim is per ROUND (#9272): the same failure beginning in a
+    // LATER round of the same run earns its own NOTE — a plan-only key
+    // would silence it forever. Round 4 is under the default cap, and
+    // the history is still unreadable.
+    (writeStderrLineSafe as unknown as Mock).mockClear();
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'reverse-audit',
+      findings,
+      chunk: 13,
+      round: 4,
+    });
+    safe = (writeStderrLineSafe as unknown as Mock).mock.calls
+      .map((c) => String(c[0]))
+      .join('\n');
+    expect(safe).toContain('reverse-audit retirement unavailable');
   });
 
   it('the #9242 note stays below the convergence gate — a converged round notes nothing', () => {
@@ -5929,6 +6147,18 @@ describe('incremental-scope briefs', () => {
         deltaFiles: [],
         interaction: [{ path: 'src/caller.ts', importsChanged: [42] }],
       },
+      // A PARTIALLY corrupt delta list — one valid entry beside junk —
+      // degrades wholesale, aligned with the roster's guard: the roster
+      // invalidates the block on any non-string entry ("no trustworthy
+      // delta list"), so the brief renderer must not keep narrowing briefs
+      // on a list the roster declared untrustworthy while it widens.
+      {
+        anchor: 'abc1234def567890',
+        deltaFiles: ['src/changed.ts', 42],
+        interaction: [
+          { path: 'src/caller.ts', importsChanged: ['src/changed.ts'] },
+        ],
+      },
     ]) {
       // Under `scope`, which is where the validator looks. Replacing
       // `incremental` wholesale made every case exit at `!raw` before a
@@ -6004,7 +6234,7 @@ describe('incremental-scope briefs', () => {
     expect(seam.split('(+12 more)')[0]).not.toContain('src/d8.ts');
   });
 
-  it('a chunk-scoped role brief lists its own files UNCAPPED', () => {
+  it('past the cap, the chunk briefs AND the role brief stay uncapped', () => {
     // The namesake property of the sibling test, which its one-file-per-chunk
     // fixture could never reach: no count came near the cap, so adding
     // `.slice(0, 30)` to `chunkScopeBullets` left the whole suite green. A
@@ -6050,6 +6280,18 @@ describe('incremental-scope briefs', () => {
       expect(brief).toContain(path);
     }
     expect(brief).not.toContain('more)');
+    // The role-brief path too — the ONLY call site of `chunkScopeBullets`.
+    // The chunk-AGENT prompt renders its own bullets inline, so the
+    // assertions above never touched it, and the mutant this test exists to
+    // catch (`.slice(0, 30)` inside `chunkScopeBullets`) shipped green
+    // against them. `src/d30.ts` appears in no capped list — the global one
+    // shows d0..d29 and counts the rest — so its bullet can only come from
+    // the uncapped path.
+    const roleBrief = buildRoleBrief(wide, 'reverse-audit', { chunk: 1 });
+    expect(roleBrief).toContain('src/d30.ts');
+    expect(roleBrief).toContain(
+      'src/d39.ts — **changed since the last round**',
+    );
   });
 
   it('an interaction entry whose edges are all EMPTY strings degrades away', () => {

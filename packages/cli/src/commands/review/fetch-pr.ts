@@ -41,6 +41,7 @@ import {
 } from '../../services/review-worktree-lease.js';
 import { setGhHost } from './lib/gh.js';
 import { getPlatformReader } from './lib/platform/registry.js';
+import type { ReviewPlatformReader } from './lib/platform/types.js';
 import type { ReviewEffort } from './parse-args.js';
 import {
   fileLineCount,
@@ -78,10 +79,27 @@ import {
 } from './lib/report.js';
 import { resolveMergeBase, type GitProbe } from './lib/merge-base.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
-import { hasReviewDeadline } from './lib/deadline.js';
-import { appendRunSession } from './lib/run-ledger.js';
 import { SHA_RE } from './lib/ledger.js';
 import { blobPairs } from './lib/file-verdicts.js';
+import {
+  appendRunSession,
+  ledgerResumeCount,
+  readResumeMarker,
+  recordResume,
+  recordRestart,
+  RESUME_MAX,
+} from './lib/run-ledger.js';
+import {
+  assessResume,
+  type PreviousReport,
+  type ResumeRefusal,
+} from './lib/resume.js';
+import {
+  hasReviewDeadline,
+  readBudgetStop,
+  clearBudgetStop,
+  clearRoundStamps,
+} from './lib/deadline.js';
 import { certifierMatchesRound, roundModelIdFrom } from './lib/round-model.js';
 import {
   computeIncrementalScope,
@@ -115,6 +133,15 @@ interface FetchPrArgs {
    * array and the recovery flow can produce one; `runFetchPr` normalizes.
    */
   since?: string | string[];
+  /**
+   * Continue the interrupted run at this plan path when its state still
+   * matches (worktree at `fetchedSha`, diff bytes unhashed-unchanged, live
+   * head unmoved): keep the worktree, do NOT rewrite the plan — its mtime is
+   * the run epoch every fence keys on — and re-announce the existing report.
+   * When the state does not match, fall through to a fresh fetch; the flag
+   * never fails a run that could start over.
+   */
+  resume?: boolean;
   /**
    * WHO certified the `--since` anchor: the `lastModelId` beside it in the
    * cache, or the `model` beside the marker's `sha`. Copied through verbatim
@@ -262,8 +289,9 @@ type FetchPrResult = PlanReport & {
    * anchor), nothing to slice FROM and no re-run that would change it
    * (`containment-unverified` — an unreadable delta, or a successful
    * merge-base with no common ancestor), a base whose fetch or whose
-   * merge-base PROBE could not answer (`base-untrusted` — infrastructure,
-   * and retryable for that reason), a capture that threw
+   * probes could not answer (`base-untrusted` — the merge-base probe or a
+   * restoration probe; infrastructure, and retryable for that reason), a
+   * capture that threw
    * (`capture-failed`), or a partitioner that refused to tile
    * (`partition-failed`).
    *
@@ -296,22 +324,25 @@ export interface IncrementalDecision {
     | 'capture-failed'
     | 'partition-failed';
   /**
-   * The scoped range's left side as a FULL sha, present exactly when the
-   * report's diff is the delta (`effective` and not `upToDate`). Downstream
-   * consumers that recompute their own ranges read it instead of
-   * `mergeBaseSha` — Agent 7's test-efficacy probe welds `--base` into its
-   * brief, and probing the full range on a delta-scoped round would spend
-   * the probe budget on already-reviewed hunks and report survivors from
-   * outside this round's scope.
+   * LEGACY — the scoped range's left side as a FULL sha, written only by
+   * plans an older CLI produced, when the published diff was a capture of
+   * `since..head` and a consumer recomputing its own range (Agent 7's
+   * test-efficacy probe welds `--base` into its brief) needed the anchor.
+   * This CLI never writes it: a sliced round publishes sections of
+   * `merge-base..head`, so the published range's left side IS
+   * `mergeBaseSha`, and the weld falls back to exactly that. Honoured when
+   * an older report still carries it; deliberately absent on new rounds.
    */
   diffBase?: string;
   /**
-   * WHICH files this round reviews and why, present with `diffBase`. The
-   * scoped diff is a slice of the PR's own, so a file can be in scope with no
-   * change of its own: `interaction` names the still-clean importers the
-   * one-hop widening pulled in, with the changed files each of them imports,
-   * and a brief built for one points its agent at that seam instead of a
-   * from-scratch re-review.
+   * WHICH files this round reviews and why, present exactly when `diffBase`
+   * is absent: this CLI writes it on the sliced rounds where it no longer
+   * writes `diffBase`, and an older report carrying `diffBase` never carried
+   * this. The scoped diff is a slice of the PR's own, so a file can be in
+   * scope with no change of its own: `interaction` names the still-clean
+   * importers the one-hop widening pulled in, with the changed files each of
+   * them imports, and a brief built for one points its agent at that seam
+   * instead of a from-scratch re-review.
    */
   scope?: IncrementalScope;
   /**
@@ -504,9 +535,17 @@ const gitProbe: GitProbe = {
   // `gitExit`, not `gitOpt`: the exit code is what tells "no common ancestor"
   // (1) apart from "the probe could not answer" (128, or a kill — the 120s
   // timeout a large long-lived PR under CI load reaches), and the two lead to
-  // opposite recovery flows.
+  // opposite recovery flows. `core.commitGraph=false` is main's pin and stays
+  // — a stale commit-graph answers merge-base from a cache the refs have
+  // moved past.
   mergeBase: (a, b) => {
-    const { out, status } = gitExit('merge-base', a, b);
+    const { out, status } = gitExit(
+      '-c',
+      'core.commitGraph=false',
+      'merge-base',
+      a,
+      b,
+    );
     return { sha: out, status };
   },
 };
@@ -544,22 +583,179 @@ function cleanStale(prNumber: string): void {
  * now, whose unreviewed deletion hunks sit in the PR diff under its pre-rename
  * name (dropping it loses them). Refusing costs a full review on the first
  * shape; dropping loses scope on the second, so the refusal wins.
+ *
+ * NULL is a third answer: git could not answer — an exit above 0, or a kill.
+ * The surface failing is not a verdict about the entry, and the caller demotes
+ * the round under a retryable reason rather than read it as "changed":
+ * folded together, one transient failure over a genuinely restored file
+ * became a deterministic lineage refusal — the exact conflation the
+ * {out, status} split in lib/git.ts was written to forbid.
  */
 function treeEntryUnchanged(
   baseSha: string,
   headSha: string,
   path: string,
-): boolean {
-  const at = (ref: string): string | null => {
-    const line = gitOpt(LITERAL_PATHSPECS, 'ls-tree', ref, '--', path);
-    if (line === null || line === '') return null;
+): boolean | null {
+  const at = (ref: string): { entry: string | null } | null => {
+    // `gitExit`, not `gitOpt`: exit 0 IS the answer — possibly empty, which
+    // means "no such entry in that tree". Any other status, a kill included,
+    // is the probe failing to answer.
+    const { out, status } = gitExit(
+      LITERAL_PATHSPECS,
+      'ls-tree',
+      ref,
+      '--',
+      path,
+    );
+    if (status !== 0) return null;
+    const line = out ?? '';
+    if (line === '') return { entry: null };
     const tab = line.indexOf('\t');
     const meta = (tab < 0 ? line : line.slice(0, tab)).split(' ');
-    return meta.length >= 3 ? `${meta[0]} ${meta[2]}` : null;
+    return { entry: meta.length >= 3 ? `${meta[0]} ${meta[2]}` : null };
   };
   const b = at(baseSha);
   const h = at(headSha);
-  return b !== null && h !== null && b === h;
+  if (b === null || h === null) return null;
+  return b.entry !== null && h.entry !== null && b.entry === h.entry;
+}
+
+/** sha256 of a file's raw bytes, or null when it cannot be read. */
+function sha256OfFile(path: string): string | null {
+  try {
+    return createHash('sha256').update(readFileSync(path)).digest('hex');
+  } catch {
+    return null;
+  }
+}
+
+type ResumeOutcome =
+  | { resumed: true }
+  | { resumed: false; reason: ResumeRefusal; priorFetchedSha: string | null };
+
+/**
+ * The `--resume` fast path: rule on the interrupted attempt's state and, when
+ * it holds, continue it — every probe is a fact this command gathers itself
+ * (git, gh, file hashes, the CLI-written marker), never the orchestrator's
+ * account. On a continuation the plan file is NOT touched: its mtime is the
+ * run epoch that keeps the first attempt's records, stamps and transcripts
+ * inside every reader's fence.
+ */
+function tryResume(
+  args: FetchPrArgs,
+  wt: string,
+  platform: ReviewPlatformReader,
+): ResumeOutcome {
+  const { pr_number: prNumber, owner_repo: ownerRepo, out } = args;
+  let prev: PreviousReport | null = null;
+  try {
+    prev = JSON.parse(readFileSync(out, 'utf8')) as PreviousReport;
+  } catch {
+    prev = null;
+  }
+  // An unreachable forge reads as "unmoved": the worktree and diff hashes
+  // pin the content, and presubmit's headDrift re-checks before anything
+  // posts. Only the live head OID is needed — a moved head is the one
+  // upstream change resume refuses. The read goes through the same platform
+  // reader the fresh path uses, so an Aone clone resolves the same way.
+  let liveHeadSha: string | null = null;
+  try {
+    const oid = platform.getFetchMeta(Number(prNumber), ownerRepo).headRefOid;
+    liveHeadSha = typeof oid === 'string' && oid !== '' ? oid : null;
+  } catch {
+    liveHeadSha = null;
+  }
+  // The resume cap: how many times this review has already been resumed.
+  // Both counters are the CLI's own record; the marker is primary and the
+  // session ledger cross-caps it, minus the original run's own first entry.
+  const marker = readResumeMarker(out);
+  const currentSessionId = process.env['QWEN_CODE_SESSION_ID']?.trim();
+  const ledgerResumes = ledgerResumeCount(out, {
+    excludeSessionId: currentSessionId,
+  });
+  const currentKey = currentSessionId?.toLowerCase();
+  const markerResumes = marker.resumes.filter(
+    (r) => r.sessionId.toLowerCase() !== currentKey,
+  ).length;
+  // `--porcelain` prints nothing on a clean tree; a null (the command could
+  // not run) is treated as dirty. `--untracked-files=normal` explicitly, so
+  // a `status.showUntrackedFiles=no` tuning cannot hide residue that is not
+  // in the PR.
+  const status = gitOpt(
+    '-C',
+    wt,
+    'status',
+    '--porcelain',
+    '--untracked-files=normal',
+  );
+  const ruling = assessResume(prev, {
+    prNumber,
+    worktreeHeadSha: gitOpt('-C', wt, 'rev-parse', 'HEAD'),
+    worktreeClean: status === null ? null : status.trim() === '',
+    diffSha256OnDisk: sha256OfFile(tmpFile(`pr-${prNumber}`, 'diff.txt')),
+    liveHeadSha,
+    resumeCount: Math.max(markerResumes, ledgerResumes),
+    requestedEffort: args.effort ?? null,
+  });
+  if (!ruling.ok) {
+    return {
+      resumed: false,
+      reason: ruling.reason,
+      priorFetchedSha:
+        prev !== null && typeof prev.fetchedSha === 'string'
+          ? prev.fetchedSha
+          : null,
+    };
+  }
+
+  // Budget hygiene: the continuation runs under a fresh deadline, so a
+  // time-budget stop is the dead attempt's, not this run's, and is cleared.
+  // A round-cap stop is about rounds, not time — it is the trusted CLI's own
+  // record that the audit reached its round cap, so it stands, and the round
+  // stamps stay with it. Any other stop is cleared with the stamps: the span
+  // from the dead attempt's last stamp to the continuation's first admission
+  // spans the death gap and would price a round at hours; without the stamps
+  // the gate falls back to its conservative constant.
+  const stop = readBudgetStop(out);
+  const roundCapStands = stop !== null && stop.cause === 'round-cap';
+  if (stop !== null && !roundCapStands) {
+    clearBudgetStop(out);
+  }
+  if (!roundCapStands) {
+    clearRoundStamps(out);
+  }
+  appendRunSession(out);
+  recordResume(out);
+  // Read the marker back: `recordResume` deduplicates by session, so a
+  // second `--resume` in the SAME session is the same resume, and deriving
+  // the number from the pre-write count would announce attempt 2 for it.
+  const attempt = Math.max(1, readResumeMarker(out).resumes.length);
+  // `restartsSpent` is the resume marker's ONE consumer beyond idempotency:
+  // the resumed session initialises Step 7's once-per-review restart bound
+  // from it — without a reader here, the recorded restart would silently
+  // reset on every resume. `effort` names the level the continuation is
+  // pinned to (the plan's, deliberately untouched), so a continuation never
+  // silently runs at a level the caller did not expect.
+  const pinnedEffort =
+    prev !== null && typeof prev.effort === 'string' && prev.effort !== ''
+      ? prev.effort
+      : 'high';
+  writeStdoutLine(
+    JSON.stringify({
+      resumed: true,
+      resumeAttempt: attempt,
+      restartsSpent: marker.restarts.length,
+      effort: pinnedEffort,
+      out,
+    }),
+  );
+  writeStderrLine(
+    `Resumed PR #${prNumber} review (resume ${attempt} of ${RESUME_MAX}): ` +
+      `worktree, plan and the interrupted attempt's agent evidence are reused; ` +
+      `the report at ${out} is unchanged, and the run continues at its ` +
+      `recorded effort (${pinnedEffort}).`,
+  );
+  return { resumed: true };
 }
 
 async function runFetchPr(args: FetchPrArgs): Promise<void> {
@@ -668,6 +864,31 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     }
     const platform = getPlatformReader({ remoteUrl, host: args.host?.trim() });
     platform.ensureAuthenticated();
+
+    // A `--resume` rules before any destructive step: a continuation must
+    // reach neither the cleanup below (the worktree is the state being
+    // resumed) nor the plan write (its mtime is the run epoch). Platform
+    // detection above is non-destructive and gives the resume probe's forge
+    // read its auth. The lease already covers the resumed run — a
+    // continuation keeps working in this worktree after this command
+    // returns, and cleanup releases the lease with the rest. A refused
+    // resume falls through to the fresh path and announces why; head
+    // movement is recorded AFTER the fresh plan lands, so the marker entry
+    // postdates the new epoch.
+    let resumeRefusal: ResumeRefusal | null = null;
+    let priorFetchedSha: string | null = null;
+    if (args.resume) {
+      const outcome = tryResume(args, wt, platform);
+      if (outcome.resumed) return;
+      resumeRefusal = outcome.reason;
+      priorFetchedSha = outcome.priorFetchedSha;
+      writeStdoutLine(
+        JSON.stringify({ resumed: false, resumeRefused: outcome.reason }),
+      );
+      writeStderrLine(
+        `Cannot resume PR #${prNumber} (${outcome.reason}); starting a fresh review.`,
+      );
+    }
 
     // 1. Clean any stale worktree / branch from an earlier run.
     cleanStale(prNumber);
@@ -1060,6 +1281,16 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
               ? 'containment-unverified'
               : 'capture-failed',
         );
+      } else if (delta.includes('\uFFFD') || fullText.includes('\uFFFD')) {
+        // A capture that does not decode cleanly names its files with
+        // collision-prone U+FFFD strings: two paths differing only in an
+        // invalid byte decode to the SAME name, and scope membership decided
+        // on the collided strings would republish a sibling's
+        // already-certified hunks (or widen over a file the anchor cleared).
+        // The containment battery this slicing retired refused the exact
+        // shape; the slice path fails closed the same way. The full-range
+        // BYTES stay raw, so the fallback loses nothing.
+        demote('containment-unverified');
       } else if (parseDiff(delta).files.length === 0) {
         // Non-empty bytes that name no file: the capture returned something
         // this parser cannot read (an error stream on stdout, a shape it does
@@ -1070,69 +1301,119 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         // is exactly `containment-unverified`.
         demote('containment-unverified');
       } else {
-        const ruling = computeIncrementalScope({
-          anchor: anchor.diffBase,
-          fullDiff: fullBytes,
-          deltaFiles: parseDiff(delta).files.map((f) => f.path),
-          restored: (path) =>
-            treeEntryUnchanged(mergeBaseSha, fetchedSha, path),
-          readWorktree: (rel) => {
-            try {
-              return readFileSync(join(wt, rel), 'utf8');
-            } catch {
-              return null;
-            }
-          },
-        });
-        if (ruling.kind === 'refuse') {
-          writeStderrLine(
-            `Incremental scope refused: ${ruling.detail} Reviewing the full range.`,
-          );
-          demote(ruling.reason);
-        } else if (ruling.kind === 'nothing-new') {
-          // Every changed file was undone and nothing imports them. That is
-          // the same state as an empty delta, and it takes the same exit.
-          writeStderrLine(`Nothing new since the anchor: ${ruling.detail}`);
-          anchor.incremental.upToDate = true;
-        } else if (publish(ruling.diff)) {
-          scopedDelta = true;
-          // `diffBase` is deliberately NOT written here. It exists so a
-          // consumer that recomputes its own diff uses the range the round
-          // published (Agent 7's test-efficacy probe welds it into `--base`),
-          // and under slicing that range is the MERGE BASE, not the anchor:
-          // the published bytes are sections of `merge-base..head`. Writing
-          // the anchor would send the probe over `anchor..HEAD` — hunks the
-          // round did not review, and missing the ones it did — which is the
-          // very error the field was added to prevent, inverted. The reader
-          // falls back to `report.mergeBaseSha`, which is the correct answer
-          // for a sliced round, and it keeps honouring the field on a plan an
-          // older CLI wrote, where a delta-range publish made it true.
-          anchor.incremental.scope = ruling.scope;
-          // The superseded full diff stays on disk beside the scoped one.
-          // ABSOLUTE, like `diffPathAbsolute` and for the same reason: agents
-          // read through `read_file`, which rejects a relative path, and they
-          // run inside `worktreePath` where a `.qwen/tmp/…` relative path
-          // resolves to nothing. Nothing reads it at this commit — say so
-          // rather than name a consumer, which is how the last round's docs
-          // came to certify a transfer that never happened.
-          try {
-            const fullPath = resolve(
-              tmpFile(`pr-${prNumber}`, 'diff-full.txt'),
-            );
-            writeFileSync(fullPath, fullBytes);
-            anchor.incremental.fullDiffPath = fullPath;
-          } catch (err) {
-            // A convenience artefact must never take the round with it.
-            writeStderrLine(
-              `Could not keep the full-range diff beside the scoped one ` +
-                `(${(err as Error).message}); steps that want the whole PR ` +
-                `will have to re-capture it.`,
-            );
+        const deltaSections = parseDiff(delta).files;
+        // Restoration, probed ONCE per file with the probe's exit status
+        // kept: `treeEntryUnchanged` answers null when git could not answer,
+        // and that third state is ruled on below — folded into "changed" it
+        // converted one transient ls-tree failure into a deterministic
+        // lineage refusal.
+        const restoredAt = new Map<string, boolean | null>();
+        const restored = (path: string): boolean | null => {
+          let v = restoredAt.get(path);
+          if (v === undefined) {
+            v = treeEntryUnchanged(mergeBaseSha, fetchedSha, path);
+            restoredAt.set(path, v);
           }
+          return v;
+        };
+        // A rename section names only its NEW side; when the target is
+        // RESTORED to the merge-base state it drops out of the live set, and
+        // the source's net-deletion hunks sit in the PR's own diff under no
+        // other name. The deleted source rides along so the lineage check
+        // below can see it. A LIVE target owes nothing extra — the rename's
+        // net hunks already sit under the new-side section, and adding the
+        // source would demand a section the full diff labels with the new
+        // name.
+        const deltaFiles: string[] = [];
+        for (const f of deltaSections) {
+          deltaFiles.push(f.path);
+          if (
+            f.renamedFrom &&
+            f.renamedFrom !== f.path &&
+            restored(f.path) === true
+          ) {
+            deltaFiles.push(f.renamedFrom);
+          }
+        }
+        const unanswerable = deltaFiles.filter((p) => restored(p) === null);
+        if (unanswerable.length > 0) {
+          // The surface failing, not the anchor: a probe against the base
+          // tree that could not answer is infrastructure, and the re-run
+          // repeats it — retryable like its merge-base sibling.
+          writeStderrLine(
+            `Incremental scope refused: a restoration probe could not ` +
+              `answer for ${unanswerable.length} file(s) ` +
+              `(${unanswerable.slice(0, 3).join(', ')}` +
+              `${unanswerable.length > 3 ? ', …' : ''}) — base-untrusted. ` +
+              `Reviewing the full range.`,
+          );
+          demote('base-untrusted');
         } else {
-          // The slice captured but could not be written: degrade like any
-          // other capture failure rather than scoping to a file nobody has.
-          demote('capture-failed');
+          const ruling = computeIncrementalScope({
+            anchor: anchor.diffBase,
+            fullDiff: fullBytes,
+            deltaFiles,
+            restored: (path) => restored(path) === true,
+            readWorktree: (rel) => {
+              try {
+                return readFileSync(join(wt, rel), 'utf8');
+              } catch {
+                return null;
+              }
+            },
+          });
+          if (ruling.kind === 'refuse') {
+            writeStderrLine(
+              `Incremental scope refused: ${ruling.detail} Reviewing the full range.`,
+            );
+            demote(ruling.reason);
+          } else if (ruling.kind === 'nothing-new') {
+            // Every changed file was undone and nothing imports them. That is
+            // the same state as an empty delta, and it takes the same exit.
+            writeStderrLine(`Nothing new since the anchor: ${ruling.detail}`);
+            anchor.incremental.upToDate = true;
+          } else if (publish(ruling.diff)) {
+            scopedDelta = true;
+            // `diffBase` is deliberately NOT written here. It exists so a
+            // consumer that recomputes its own diff uses the range the round
+            // published (Agent 7's test-efficacy probe welds it into
+            // `--base`), and under slicing that range is the MERGE BASE, not
+            // the anchor: the published bytes are sections of
+            // `merge-base..head`. Writing the anchor would send the probe
+            // over `anchor..HEAD` — hunks the round did not review, and
+            // missing the ones it did — which is the very error the field
+            // was added to prevent, inverted. The reader falls back to
+            // `report.mergeBaseSha`, which is the correct answer for a
+            // sliced round, and it keeps honouring the field on a plan an
+            // older CLI wrote, where a delta-range publish made it true.
+            anchor.incremental.scope = ruling.scope;
+            // The superseded full diff stays on disk beside the scoped one.
+            // ABSOLUTE, like `diffPathAbsolute` and for the same reason:
+            // agents read through `read_file`, which rejects a relative
+            // path, and they run inside `worktreePath` where a
+            // `.qwen/tmp/…` relative path resolves to nothing. Nothing reads
+            // it at this commit — say so rather than name a consumer, which
+            // is how the last round's docs came to certify a transfer that
+            // never happened.
+            try {
+              const fullPath = resolve(
+                tmpFile(`pr-${prNumber}`, 'diff-full.txt'),
+              );
+              writeFileSync(fullPath, fullBytes);
+              anchor.incremental.fullDiffPath = fullPath;
+            } catch (err) {
+              // A convenience artefact must never take the round with it.
+              writeStderrLine(
+                `Could not keep the full-range diff beside the scoped one ` +
+                  `(${(err as Error).message}); steps that want the whole ` +
+                  `PR will have to re-capture it.`,
+              );
+            }
+          } else {
+            // The slice captured but could not be written: degrade like any
+            // other capture failure rather than scoping to a file nobody has.
+            demote('capture-failed');
+          }
         }
       }
     }
@@ -1317,8 +1598,12 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
           // attempt, never forward. A corrupted far-future `auditSince`
           // (`"2099-…"`) is therefore rejected here — it would push the window
           // ahead of every real comment and silently report a clean audit.
-          // (ISO-8601 strings from `toISOString()` compare chronologically.)
-          prevSince < auditSince
+          // Compared NUMERICALLY: `toISOString()` output happens to sort
+          // chronologically, but a forged extended-year form
+          // (`"+275760-…"`) parses to the far future while sorting
+          // lexicographically BEFORE any `"2026-…"` string — a string
+          // comparison inherits exactly the forgery this bound rejects.
+          Date.parse(prevSince) < Date.parse(auditSince)
         ) {
           auditSince = prevSince;
         }
@@ -1503,6 +1788,14 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     // reads the ledger to find this attempt's transcripts. After the plan
     // write, so the entry sits inside the run-epoch fence it is read through.
     appendRunSession(out);
+    if (resumeRefusal === 'head-moved') {
+      // The once-per-review restart bound, now a fact on disk. Recorded after
+      // the plan write for the same fence reason as the session entry.
+      recordRestart(
+        out,
+        `head-moved ${priorFetchedSha?.slice(0, 7) ?? 'unknown'}->${fetchedSha.slice(0, 7)}`,
+      );
+    }
     writeStdoutLine(`Wrote fetch-pr report to ${out}`);
     if (diffPath) writeStdoutLine(`Wrote review diff to ${diffPath}`);
     // Surface diff stats to stderr so a human running the command interactively
@@ -1696,6 +1989,12 @@ export const fetchPrCommand: CommandModule = {
         default: DEFAULT_MAX_CHUNK_LINES,
         describe:
           'Target size, in diff lines, of each review chunk. A chunk boundary falls on a hunk boundary; a hunk larger than this is split only at a top-level declaration, never inside a function.',
+      })
+      .option('resume', {
+        type: 'boolean',
+        default: false,
+        describe:
+          'Continue an interrupted run of this PR when its on-disk state still matches (worktree at the fetched SHA, diff bytes unchanged, PR head unmoved): keep the worktree, leave the plan untouched, and print {"resumed":true}. Falls through to a normal fresh fetch — printing {"resumed":false,"resumeRefused":"<reason>"} — whenever the state does not match.',
       })
       .option('effort', {
         type: 'string',
