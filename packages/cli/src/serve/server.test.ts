@@ -644,6 +644,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_display_name',
   'workspace_qualified_rest_core',
   'extension_management_v2',
+  'extension_git_credentials',
   'workspace_persisted_transcript',
   'workspace_session_export',
   'workspace_archived_session_export',
@@ -705,6 +706,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_display_name' &&
       f !== 'workspace_qualified_rest_core' &&
       f !== 'extension_management_v2' &&
+      f !== 'extension_git_credentials' &&
       f !== 'workspace_persisted_transcript' &&
       f !== 'workspace_session_export' &&
       f !== 'workspace_archived_session_export' &&
@@ -762,6 +764,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_qualified_voice',
   'workspace_qualified_memory',
   'extension_management_v2',
+  'extension_git_credentials',
   'workspace_persisted_transcript',
   'workspace_session_export',
   'workspace_archived_session_export',
@@ -5226,6 +5229,42 @@ describe('createServeApp', () => {
       }
     });
 
+    it('omits source and updates for one-time snapshot status', async () => {
+      const restore = mockExtensionManagerMethods({
+        getLoadedExtensions: () => [
+          {
+            ...testExtension('snapshot-ext'),
+            installMetadata: {
+              source: 'snapshot',
+              type: 'snapshot',
+              installId: 'a'.repeat(64),
+            },
+          },
+        ],
+      });
+      try {
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge: fakeBridge() },
+        );
+
+        const res = await request(app)
+          .get('/workspace/extensions')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+        expect(res.status).toBe(200);
+        expect(res.body.extensions[0]).toMatchObject({
+          installType: 'snapshot',
+          credentialPersistence: 'one_time',
+          updateState: 'not updatable',
+        });
+        expect(res.body.extensions[0]).not.toHaveProperty('source');
+      } finally {
+        restore();
+      }
+    });
+
     const testExtension = (name = 'test-ext'): Extension =>
       ({
         name,
@@ -7588,7 +7627,75 @@ describe('createServeApp', () => {
       expect(res.body.error).toBe('`ref` must not start with "-"');
     });
 
-    it('rejects extension source URLs with credentials', async () => {
+    it.each([
+      { persistence: undefined, expected: 'one_time' as const },
+      { persistence: 'stored' as const, expected: 'stored' as const },
+    ])(
+      'accepts extension source credentials with $expected persistence',
+      async ({ persistence, expected }) => {
+        let captured: PrepareExtensionInstallOptions | undefined;
+        const restore = mockExtensionManagerMethods({
+          async prepareExtensionInstall(options) {
+            captured = options;
+            return testExtension('credentialed-extension');
+          },
+        });
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        try {
+          const res = await request(app)
+            .post('/workspace/extensions/install')
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret')
+            .set('X-Qwen-Client-Id', 'client-1')
+            .send({
+              source:
+                'https://user:fine-grained-token@example.com/repository.git',
+              consent: true,
+              ...(persistence ? { credentialPersistence: persistence } : {}),
+            });
+
+          expect(res.status).toBe(202);
+          await vi.waitFor(() => expect(captured).toBeDefined());
+          expect(captured).toMatchObject({
+            installMetadata: {
+              source: 'https://example.com/repository.git',
+              type: 'git',
+            },
+            gitCredential: {
+              username: 'user',
+              password: 'fine-grained-token',
+              persistence: expected,
+            },
+          });
+          await vi.waitFor(() =>
+            expect(bridge.extensionEvents.at(-1)).toMatchObject({
+              status: 'installed',
+              credentialPersistence: expected,
+              ...(expected === 'one_time'
+                ? {}
+                : { source: 'https://example.com/repository.git' }),
+            }),
+          );
+          expect(JSON.stringify(bridge.extensionEvents)).not.toContain(
+            'fine-grained-token',
+          );
+          if (expected === 'one_time') {
+            expect(bridge.extensionEvents.at(-1)).not.toHaveProperty('source');
+          }
+        } finally {
+          restore();
+        }
+      },
+    );
+
+    it('rejects credential persistence without URL credentials', async () => {
       const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
       const bridge = fakeBridge({ knownClientIds: ['client-1'] });
       const app = createServeApp(
@@ -7603,13 +7710,68 @@ describe('createServeApp', () => {
         .set('Authorization', 'Bearer secret')
         .set('X-Qwen-Client-Id', 'client-1')
         .send({
-          source: 'https://user:pass@example.com/repo',
+          source: 'https://example.com/repository.git',
+          credentialPersistence: 'stored',
           consent: true,
         });
 
       expect(res.status).toBe(400);
-      expect(res.body.error).toBe('`source` must not include credentials');
+      expect(res.body.error).toContain('requires source URL credentials');
     });
+
+    it.each([
+      {
+        body: {
+          source: 'https://user:token@example.com/repository.git',
+          credentialPersistence: 'forever',
+        },
+        error: '`credentialPersistence` must be "stored" or "one_time"',
+      },
+      {
+        body: { source: 'https://@example.com/repository.git' },
+        error: '`source` credentials are invalid',
+      },
+      {
+        body: { source: 'https://user:token%0D@example.com/repository.git' },
+        error: '`source` credentials are invalid',
+      },
+      {
+        body: { source: 'https://user:token%C2%85@example.com/repository.git' },
+        error: '`source` credentials are invalid',
+      },
+      {
+        body: { source: 'https://user:token@example.com/extension.zip' },
+        error: 'Git credentials require an HTTPS Git install source.',
+      },
+      {
+        body: {
+          source: 'https://user:token@example.com/repository.git',
+          autoUpdate: true,
+        },
+        error: '`autoUpdate` is not supported with one-time credentials',
+      },
+    ])(
+      'rejects invalid credentialed install input',
+      async ({ body, error }) => {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const res = await request(app)
+          .post('/workspace/extensions/install')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ ...body, consent: true });
+
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe(error);
+      },
+    );
 
     it('rejects an npm extension install with ref before queuing', async () => {
       const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };

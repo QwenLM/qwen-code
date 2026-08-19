@@ -1543,8 +1543,14 @@ function composeReviewBody(
 ): ComposeReviewResult {
   // The posting set this body describes — `input` here is already the
   // post-enforcement one, so the count needs no second derivation and
-  // cannot disagree with the marker's.
-  const postedInline = (input.draftedComments ?? []).length;
+  // cannot disagree with the marker's. Clamped AT THE ORIGIN through the
+  // shared reader: every other site that reads a volume applies it, and the
+  // one that did not was this count on its way to the terminal line, which
+  // in the defensive over-cap case would have printed the raw number beside
+  // a marker recording the capped one — the two-outputs-disagree failure
+  // the shared reader's own docstring exists to prevent. `?? 0` is
+  // unreachable for an array length; it keeps the type honest.
+  const postedInline = volumeOf((input.draftedComments ?? []).length) ?? 0;
   const criticalsInline = toCount(input.criticalsInline, 'criticalsInline');
   const suggestionsInline = toCount(
     input.suggestionsInline,

@@ -172,7 +172,10 @@ import {
   promptIdContext,
   todoWorkChainContext,
   dedupeToolCallsById,
+  getFunctionCallFingerprint,
   getProviderToolCallId,
+  isReplayOfHandledToolCall,
+  recordHandledToolCall,
   parsePositiveIntegerEnv,
   DEFAULT_TOKEN_LIMIT,
   hasImageParts,
@@ -9018,13 +9021,26 @@ export class Session implements SessionContext {
     };
     type Batch = ExecutableBatch | DuplicateBatch;
     const batches: Batch[] = [];
-    const handledProviderToolCallIds = new Set(
-      this.#getCurrentChat().getHistoryFunctionResponseIds(),
+    // The accessor returns a fresh map per call; copy anyway so a future
+    // cached accessor cannot turn per-batch recording into shared-state
+    // mutation.
+    const handledToolCallFingerprints = new Map(
+      this.#getCurrentChat().getHistoryToolCallFingerprints(),
     );
+    const isReplayOfHandledCall = (fc: FunctionCall): boolean => {
+      const providerCallId = getProviderToolCallId(fc) ?? fc.id;
+      return providerCallId
+        ? isReplayOfHandledToolCall(
+            handledToolCallFingerprints,
+            providerCallId,
+            getFunctionCallFingerprint(fc),
+          )
+        : false;
+    };
     const repeatedDuplicateCall = findRepeatedDuplicateProviderToolCall(
       dedupedFunctionCalls,
       (fc) => getProviderToolCallId(fc) ?? fc.id,
-      handledProviderToolCallIds,
+      isReplayOfHandledCall,
       this.duplicateProviderToolCallResponseIds,
     );
     if (repeatedDuplicateCall) {
@@ -9138,7 +9154,7 @@ export class Session implements SessionContext {
     for (const fc of dedupedFunctionCalls) {
       const providerCallId = getProviderToolCallId(fc) ?? fc.id;
       if (providerCallId) {
-        if (handledProviderToolCallIds.has(providerCallId)) {
+        if (isReplayOfHandledCall(fc)) {
           const callId = executionCallIds.get(fc)!;
           pushDuplicateBatch(fc, {
             callId,
@@ -9150,7 +9166,11 @@ export class Session implements SessionContext {
           });
           continue;
         }
-        handledProviderToolCallIds.add(providerCallId);
+        recordHandledToolCall(
+          handledToolCallFingerprints,
+          providerCallId,
+          getFunctionCallFingerprint(fc),
+        );
       }
 
       // Canonical names match core's isToolCallConcurrencySafe predicate,
