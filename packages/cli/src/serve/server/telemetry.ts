@@ -15,6 +15,7 @@ import {
   recordDaemonHttpResponse,
   withDaemonRequestSpan,
 } from '@qwen-code/qwen-code-core';
+import { sanitizeLogText } from '@qwen-code/channel-base';
 import type { NextFunction, Request, Response } from 'express';
 import {
   CLIENT_ID_HEADER,
@@ -793,13 +794,17 @@ export function daemonTelemetryMiddleware(
         // so a broken cross-service join is diagnosable from daemon logs
         // alone instead of requiring a request replay. Traceparent carries
         // only trace-id/span-id/flags — no user content — so recording the
-        // rejected value (truncated) is privacy-safe and shows *why* the
-        // join failed.
+        // rejected value is privacy-safe and shows *why* the join failed.
+        // sanitizeLogText truncates and also neutralizes control characters
+        // so a crafted header cannot forge log structure.
         emitDaemonLog(
           'Rejected invalid inbound traceparent header.',
           {
             'http.route': route.route,
-            'http.request.header.traceparent': inboundTraceparent.slice(0, 128),
+            'http.request.header.traceparent': sanitizeLogText(
+              inboundTraceparent,
+              128,
+            ),
           },
           {
             eventName: 'qwen-code.daemon.traceparent.invalid',

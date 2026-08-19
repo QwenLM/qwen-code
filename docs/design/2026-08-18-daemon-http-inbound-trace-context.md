@@ -82,9 +82,11 @@ caller's head-based ratio sampling, so inbound HTTP parents force
 as the synthetic session root: `parentbased_*` defaults and `always_on` force
 sampling; `parentbased_always_off` honors the operator's opt-out;
 non-parentbased samplers (e.g. `traceidratio`) keep the caller's flags and
-decide per span. The `_meta` path (daemon → subprocess) keeps flags
-verbatim — that parent is our own span, whose sampling already followed this
-policy at the HTTP edge.
+decide per span. The `_meta` path applies the same forcing: for the
+in-process bridge (daemon → subprocess) it is a no-op — that parent is our
+own span, already SAMPLED under this policy — while direct ACP clients can
+also attach `_meta` with a caller-controlled `sampled=0`, which is external
+input exactly like the HTTP header and gets the same protection.
 
 ## Non-goals
 
@@ -116,8 +118,9 @@ policy at the HTTP edge.
   value / version `ff` / version `00` with extension field / future version
   `01` / inbound `tracestate`), request-span parenting through
   `withDaemonRequestSpan`, the sampled-flag decision matrix (default forced,
-  `parentbased_always_off` and `traceidratio` verbatim, `_meta` path
-  verbatim), middleware pass-through (present vs omitted key, telemetry-off
+  `parentbased_always_off` and `traceidratio` verbatim, `_meta` path forced
+  under the default sampler and verbatim on opt-out), middleware pass-through
+  (present vs omitted key, telemetry-off
   skip, rejected-header debug log), and a type-level guard keeping
   `parentContext` on `DaemonRequestSpanOptions`.
 - Unit (telemetry-off log join): `extractInboundTraceId` (valid / absent /

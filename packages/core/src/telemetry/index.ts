@@ -205,6 +205,7 @@ export {
   emitDaemonLog,
   extractDaemonHttpTraceContext,
   extractDaemonTraceContext,
+  extractInboundTraceId,
   hashDaemonWorkspace,
   injectDaemonTraceContext,
   recordDaemonError,

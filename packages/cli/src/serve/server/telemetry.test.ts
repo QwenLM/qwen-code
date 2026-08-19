@@ -315,6 +315,30 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
     );
   });
 
+  it('neutralizes control characters in the rejected traceparent breadcrumb', () => {
+    const forgedHeader = 'junk\u0000\u001bheader\nvalue';
+    const res = mockRes(200);
+
+    daemonTelemetryMiddleware(() => '/ws')(
+      mockReq('GET', '/daemon/status', { traceparent: forgedHeader }),
+      res,
+      vi.fn() as unknown as NextFunction,
+    );
+    res.emit('finish');
+
+    // NUL and ESC collapse to spaces and the newline renders visibly, so a
+    // crafted header cannot forge log line structure or inject ANSI codes.
+    expect(coreMocks.emitDaemonLog).toHaveBeenCalledWith(
+      'Rejected invalid inbound traceparent header.',
+      expect.objectContaining({
+        'http.request.header.traceparent': 'junk  header\\nvalue',
+      }),
+      expect.objectContaining({
+        eventName: 'qwen-code.daemon.traceparent.invalid',
+      }),
+    );
+  });
+
   it('fails closed and settles the request when header extraction throws', () => {
     coreMocks.extractDaemonHttpTraceContext.mockImplementationOnce(() => {
       throw new Error('extract failed');

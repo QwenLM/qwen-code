@@ -342,6 +342,29 @@ function contextFromTraceparentValues(
   return trace.getSpanContext(fallback) ? fallback : undefined;
 }
 
+// A remote caller's `sampled=0` is head-based ratio sampling on their
+// side, not a request to drop daemon telemetry. Under the default
+// parentbased_always_on sampler a remote unsampled parent delegates to
+// AlwaysOff, silently deleting the request span, everything under it, and —
+// via _meta forwarding — the session subprocess spans. Reuse the
+// session-root decision matrix: parentbased defaults and always_on force
+// SAMPLED; parentbased_always_off honors the operator's opt-out;
+// non-parentbased samplers decide per span.
+function forceSampledUnderSampler(
+  extracted: Context | undefined,
+): Context | undefined {
+  if (!extracted || !shouldForceSampled()) return extracted;
+  const spanContext = trace.getSpanContext(extracted);
+  if (!spanContext) return extracted;
+  return trace.setSpan(
+    extracted,
+    trace.wrapSpanContext({
+      ...spanContext,
+      traceFlags: spanContext.traceFlags | TraceFlags.SAMPLED,
+    }),
+  );
+}
+
 export function extractDaemonTraceContext(
   source: unknown,
 ): Context | undefined {
@@ -354,13 +377,15 @@ export function extractDaemonTraceContext(
   if (typeof traceparent !== 'string' || traceparent.length === 0) {
     return undefined;
   }
-  // Unlike the HTTP edge below, the _meta path deliberately skips
-  // shouldForceSampled: these values were injected by our own in-process
-  // bridge (injectDaemonTraceContext), a trusted source, whereas the HTTP
-  // header is external caller input. Keep this asymmetry when refactoring.
-  return contextFromTraceparentValues(
-    traceparent,
-    record[DAEMON_TRACESTATE_META_KEY],
+  // The _meta path is reachable from two kinds of callers: the in-process
+  // bridge (injectDaemonTraceContext, values already SAMPLED so forcing is a
+  // no-op) and direct ACP clients whose request _meta is external input just
+  // like the HTTP header — so both edges get the same sampled protection.
+  return forceSampledUnderSampler(
+    contextFromTraceparentValues(
+      traceparent,
+      record[DAEMON_TRACESTATE_META_KEY],
+    ),
   );
 }
 
@@ -375,24 +400,7 @@ export function extractDaemonHttpTraceContext(
     traceparent,
     headers?.['tracestate'],
   );
-  if (!extracted) return undefined;
-  const spanContext = trace.getSpanContext(extracted);
-  if (!spanContext) return undefined;
-  if (!shouldForceSampled()) return extracted;
-  // `sampled=0` is the caller's head-based ratio sampling, not a request to
-  // drop daemon telemetry. Under the default parentbased_always_on sampler a
-  // remote unsampled parent delegates to AlwaysOff, silently deleting this
-  // request span, everything under next(), and — via _meta forwarding — the
-  // session subprocess spans. Reuse the session-root decision matrix:
-  // parentbased defaults and always_on force SAMPLED; parentbased_always_off
-  // honors the operator's opt-out; non-parentbased samplers decide per span.
-  return trace.setSpan(
-    extracted,
-    trace.wrapSpanContext({
-      ...spanContext,
-      traceFlags: spanContext.traceFlags | TraceFlags.SAMPLED,
-    }),
-  );
+  return forceSampledUnderSampler(extracted);
 }
 
 const TRACEPARENT_RE =

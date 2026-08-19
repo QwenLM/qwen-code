@@ -356,7 +356,20 @@ describe('daemon-tracing', () => {
     expect(trace.getSpanContext(ratio!)?.traceFlags).toBe(0);
   });
 
-  it('keeps caller flags verbatim on the _meta extraction path', () => {
+  it('forces the sampled flag on _meta parents under the default sampler', () => {
+    vi.stubEnv('OTEL_TRACES_SAMPLER', '');
+    const extracted = extractDaemonTraceContext({
+      _meta: {
+        [DAEMON_TRACEPARENT_META_KEY]: `00-${'1'.repeat(32)}-${'2'.repeat(16)}-00`,
+      },
+    });
+    expect(
+      (trace.getSpanContext(extracted!)?.traceFlags ?? 0) & TraceFlags.SAMPLED,
+    ).toBe(TraceFlags.SAMPLED);
+  });
+
+  it('keeps the caller flags on the _meta path when the sampler opts out', () => {
+    vi.stubEnv('OTEL_TRACES_SAMPLER', 'parentbased_always_off');
     const extracted = extractDaemonTraceContext({
       _meta: {
         [DAEMON_TRACEPARENT_META_KEY]: `00-${'1'.repeat(32)}-${'2'.repeat(16)}-00`,
