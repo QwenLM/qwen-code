@@ -69,13 +69,31 @@ log(AGENTS.length + ' agents required by the plan');
 // sets subagent_type: workflow dispatch otherwise substitutes its own terse
 // subagent persona, and the two paths would then be running different agents
 // over identical prompts.
+//
+// WORKING_DIR is the review's worktree, or null for a review that has none.
+// It is the workflow equivalent of the \`working_dir\` the hand-launched path
+// sets on every Agent call: without it a dispatched agent reads the user's
+// main checkout and describes the wrong tree. Passed only when there is one,
+// because \`agent({workingDir})\` refuses an empty string rather than treating
+// it as absent. Never together with \`isolation\` — the worktree already
+// exists, and the two options are mutually exclusive.
 const returns = await parallel(
   AGENTS.map((a) => () =>
-    agent(a.prompt, {
-      label: a.key,
-      phase: 'Review',
-      agentType: 'general-purpose',
-    }),
+    agent(
+      a.prompt,
+      WORKING_DIR
+        ? {
+            label: a.key,
+            phase: 'Review',
+            agentType: 'general-purpose',
+            workingDir: WORKING_DIR,
+          }
+        : {
+            label: a.key,
+            phase: 'Review',
+            agentType: 'general-purpose',
+          },
+    ),
   ),
 );
 
@@ -118,17 +136,29 @@ return {
 `;
 
 /**
- * The full script for one review: `meta`, the roster literal, and the body.
+ * The full script for one review: `meta`, the roster literal, the worktree
+ * pin, and the body.
  *
  * `meta.phases` mirrors the skill's step names so the run's progress display
  * reads like the step it is executing.
+ *
+ * `worktreePath` is the review's worktree (`plan.worktreePath`), or omitted
+ * for a review that has none. Baked in as a literal for the same reason the
+ * roster is: the sandbox has no filesystem and the model's call carries one
+ * path and no payload, so anything the script needs has to be in the script.
  */
 export function buildReviewWorkflowScript(
   agents: readonly WorkflowAgentSpec[],
+  worktreePath?: string,
 ): string {
   // Only the two fields the script reads are serialized. A field written here
   // and read nowhere would be a claim the file does not keep.
   const roster = agents.map((a) => ({ key: a.key, prompt: a.prompt }));
+  // `null`, not `undefined`: the script branches on truthiness, and a plan
+  // that carried an empty string must reach the script as "no worktree"
+  // rather than as a pin `agent()` would then refuse.
+  const pin =
+    typeof worktreePath === 'string' && worktreePath ? worktreePath : null;
   return (
     `export const meta = {\n` +
     `  name: 'review-step-3a',\n` +
@@ -138,6 +168,8 @@ export function buildReviewWorkflowScript(
     `// Written by \`qwen review emit-workflow\`. The roster below is the one\n` +
     `// \`check-coverage\` holds this run to; editing it makes the two disagree.\n` +
     `const AGENTS = ${JSON.stringify(roster, null, 2)};\n` +
+    `// The worktree every agent is pinned to, or null when the review has none.\n` +
+    `const WORKING_DIR = ${JSON.stringify(pin)};\n` +
     FAN_OUT_BODY
   );
 }

@@ -135,6 +135,39 @@ describe('the generated Step 3A fan-out script', () => {
     ]);
   });
 
+  // The pin is the whole reason a worktree review may take this path at all.
+  // Without it every dispatched agent reads the user's main checkout and
+  // reports findings that describe the wrong tree — plausibly, and at length.
+  it('pins every agent to the review worktree when the plan has one', async () => {
+    const { dispatched } = await runScript(
+      buildReviewWorkflowScript(AGENTS, '/tmp/review-pr-42'),
+      async (prompt) => `said:${prompt}`,
+    );
+    expect(dispatched).toHaveLength(3);
+    for (const d of dispatched) {
+      expect((d.opts as { workingDir?: string }).workingDir).toBe(
+        '/tmp/review-pr-42',
+      );
+      // Mutually exclusive with the pin; passing both fails every dispatch.
+      expect((d.opts as { isolation?: unknown }).isolation).toBeUndefined();
+    }
+  });
+
+  // `agent({workingDir})` refuses an empty string rather than reading it as
+  // "no pin", so a review with no worktree must omit the key entirely — not
+  // pass null, '' or undefined under it.
+  it('omits the pin entirely for a review with no worktree', async () => {
+    for (const absent of [undefined, '']) {
+      const { dispatched } = await runScript(
+        buildReviewWorkflowScript(AGENTS, absent),
+        async (prompt) => `said:${prompt}`,
+      );
+      for (const d of dispatched) {
+        expect('workingDir' in (d.opts as object)).toBe(false);
+      }
+    }
+  });
+
   it('names the agents that returned nothing instead of dropping them', async () => {
     // parallel() reports a dead dispatch as a null element rather than
     // throwing. A script that ignored that would return a short findings list

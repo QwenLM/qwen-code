@@ -19,7 +19,7 @@
 // shrinks as the runtime gains capability, and each entry names the specific
 // missing piece rather than saying "unsupported".
 
-import { isTerritoryFanOut, reviewMode, type RosterPlan } from './roster.js';
+import { isTerritoryFanOut, type RosterPlan } from './roster.js';
 
 /** How Step 3 should dispatch, and why. */
 export interface OrchestrationVerdict {
@@ -77,28 +77,31 @@ export function reviewWorkflowEnabled(
  * construction, not by two lists kept in step.
  */
 export function structuralBlocker(plan: RosterPlan): string | null {
-  // 3B is not a bigger 3A. Its chunk agents carry a per-territory contract —
-  // paging rules, the uncoverable rule, a `Covered:` receipt — and its
-  // retirement ledger reads transcripts per chunk. Emitting a 3A-shaped
-  // fan-out for one would launch the wrong agents over the right diff.
+  // The one thing the workflow path cannot do yet, stated as the delivery
+  // fact it is rather than as an expressibility claim about the roster.
+  //
+  // Both paths build the same chunk prompts through `buildLaunch`, and the
+  // emitter is topology-agnostic — a 3B roster serializes exactly like a 3A
+  // one. What differs is DELIVERY: the hand-launched path returns one Agent
+  // tool result per agent, each with its own 32 000-char budget
+  // (`AgentTool.maxOutputChars`), while a workflow returns every agent's text
+  // inside ONE Workflow tool result, which declares no override and so falls
+  // back to the scheduler's global threshold. Fourteen agents already sit at
+  // that ceiling (measured: a combined payload of ~25 kB truncates, and the
+  // middle agents are the ones cut). A 3A roster is bounded — at most 14
+  // dimensions, and the A/B is scoped to it while the ceiling stands. A 3B
+  // roster is one agent per chunk plus the whole-diff agents, so it grows
+  // with the diff and the loss grows with it, without bound.
+  //
+  // This blocks on the roster's growth, not on the topology name, so it
+  // shrinks the moment the workflow result carries a fan-out-sized budget.
   if (isTerritoryFanOut(plan)) {
     return (
-      'this plan is a territory fan-out (Step 3B), and the generated fan-out ' +
-      'expresses the Step 3A roster only — a chunk agent carries a ' +
-      'per-territory contract (paging, the uncoverable rule, a `Covered:` ' +
-      'receipt) this script does not express.'
-    );
-  }
-
-  // Every review agent is pinned to the PR worktree today (`working_dir` on
-  // the Agent tool). A workflow dispatch has no equivalent, so the agents
-  // would run in the user's main checkout and review whatever is there —
-  // findings that look plausible and describe the wrong tree.
-  if (reviewMode(plan) === 'pr-worktree') {
-    return (
-      'this review has a PR worktree, and a workflow dispatch cannot yet be ' +
-      'pinned to it (`agent()` takes no working directory), so its agents ' +
-      'would read the main checkout and describe the wrong tree.'
+      'this plan is a territory fan-out (Step 3B), whose roster grows one ' +
+      'agent per chunk, and a workflow returns every agent through one tool ' +
+      'result under the scheduler-wide output budget — so the larger the ' +
+      'fan-out, the more of it is silently truncated away. The generated ' +
+      'fan-out builds a 3B roster correctly; only its delivery is bounded.'
     );
   }
 

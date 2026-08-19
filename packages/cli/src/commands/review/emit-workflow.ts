@@ -20,13 +20,20 @@
 // the same agents reading the same briefs. That is what makes an A/B against
 // the hand-launched path readable.
 //
-// It is NOT a one-variable change, and the difference that remains is worth
-// naming: workflow dispatch substitutes its own terse subagent persona unless
+// It is NOT a one-variable change, and the differences that remain are worth
+// naming. Workflow dispatch substitutes its own terse subagent persona unless
 // an `agentType` is given, so the generated script passes
 // `agentType: 'general-purpose'` — the same subagent type SKILL.md requires of
-// the hand-launched path. Everything else about the dispatch (turn ceiling,
-// wall clock) is the workflow runtime's, not the Agent tool's; see the
-// limitations in the PR description rather than assuming parity.
+// the hand-launched path — and it passes `workingDir` for the same reason the
+// hand-launched path sets `working_dir`: an unpinned agent reads the user's
+// main checkout. Everything else about the dispatch (turn ceiling, wall clock)
+// is the workflow runtime's, not the Agent tool's.
+//
+// The one difference no option closes yet is delivery: every agent's text
+// comes back inside ONE Workflow tool result, under the scheduler's global
+// output budget, where the hand-launched path gets one 32 000-char Agent
+// result each. That is why `structuralBlocker` still refuses a territory
+// fan-out, whose roster grows with the diff — see orchestration.ts.
 
 import type { CommandModule } from 'yargs';
 import {
@@ -194,10 +201,21 @@ function runEmitWorkflow(args: EmitWorkflowArgs): void {
   // rename would leave that half-written shape in the saved-workflow dir
   // forever — cleanup removes only the exact script paths.
   try {
-    writeFileSync(temporaryPath, buildReviewWorkflowScript(agents), {
-      encoding: 'utf8',
-      flag: 'wx',
-    });
+    // The worktree pin travels with the roster. `plan.worktreePath` is the
+    // same value `agent-prompt --roster` tells the orchestrator to put in
+    // `working_dir` on every Agent call, so both paths pin the same tree by
+    // construction rather than by two conventions kept in step.
+    const planWorktree = (report as RosterPlan).worktreePath;
+    const worktreePath =
+      typeof planWorktree === 'string' ? planWorktree : undefined;
+    writeFileSync(
+      temporaryPath,
+      buildReviewWorkflowScript(agents, worktreePath),
+      {
+        encoding: 'utf8',
+        flag: 'wx',
+      },
+    );
     renameSync(temporaryPath, scriptPath);
   } finally {
     rmSync(temporaryPath, { force: true });

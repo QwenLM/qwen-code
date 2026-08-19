@@ -175,27 +175,34 @@ describe('emit-workflow — what it refuses', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  // A territory fan-out's chunk agents carry a per-chunk contract this script
-  // does not express. Emitting a 3A-shaped fan-out for one would launch the
-  // wrong agents over the right diff and look complete doing it.
-  it('refuses a territory fan-out rather than emitting a 3A roster for it', () => {
+  // A 3B roster grows one agent per chunk and a workflow returns every one of
+  // them through a single tool result, so the bigger the fan-out the more of
+  // it the scheduler truncates away. The refusal must name that bound — the
+  // builder below can express the roster perfectly well.
+  it('refuses a territory fan-out, naming the delivery bound', () => {
     expect(() =>
       buildFanOutRoster(
         localPlan({ srcDiffLines: 2000, diffLines: 6000 }),
         planPath,
       ),
     ).toThrow(/territory fan-out \(Step 3B\)/);
-  });
-
-  // Every review agent is pinned to the PR worktree today. A workflow dispatch
-  // has no equivalent yet, so its agents would read the user's main checkout.
-  it('refuses a worktree review, naming the missing capability', () => {
     expect(() =>
       buildFanOutRoster(
-        localPlan({ worktreePath: '.qwen/tmp/review-pr-42' }),
+        localPlan({ srcDiffLines: 2000, diffLines: 6000 }),
         planPath,
       ),
-    ).toThrow(/cannot yet be pinned to it/);
+    ).toThrow(/one tool result/);
+  });
+
+  // A worktree is not a refusal: `agent({workingDir})` exists and the
+  // generated script passes it. This used to throw, pinning a capability
+  // claim the runtime disproves.
+  it('emits a worktree review rather than refusing it', () => {
+    const agents = buildFanOutRoster(
+      localPlan({ worktreePath: '.qwen/tmp/review-pr-42' }),
+      planPath,
+    );
+    expect(agents.length).toBeGreaterThan(1);
   });
 });
 

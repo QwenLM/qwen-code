@@ -93,13 +93,17 @@ describe('resolveOrchestration — the gates', () => {
     );
     expect(territory.mode).toBe('legacy');
     expect(territory.reason).toMatch(/territory fan-out \(Step 3B\)/);
+  });
 
+  // The flagship case: every same-repo PR review has a worktree. It is NOT a
+  // structural blocker — the runtime takes `agent({workingDir})` and the
+  // generated script passes it — so the gates opening must actually route it.
+  it('routes a PR-worktree review to the workflow path, pin and all', () => {
     const worktree = resolveOrchestration(
       localPlan({ worktreePath: '.qwen/tmp/review-pr-42', prNumber: 42 }),
       ON,
     );
-    expect(worktree.mode).toBe('legacy');
-    expect(worktree.reason).toMatch(/takes no working directory/);
+    expect(worktree.mode).toBe('workflow');
   });
 });
 
@@ -108,31 +112,43 @@ describe('structuralBlocker — what a plan itself forecloses', () => {
     expect(structuralBlocker(localPlan())).toBeNull();
   });
 
-  // A 3B chunk agent carries a per-territory contract the generated script
-  // does not express, so emitting a 3A-shaped fan-out for one would launch
-  // the wrong agents over the right diff and look complete doing it.
-  it('blocks a territory fan-out', () => {
+  // A 3B roster grows one agent per chunk, and a workflow returns all of them
+  // through ONE tool result under the scheduler's output budget — so the loss
+  // grows with the diff. The reason must name that delivery bound, not an
+  // expressibility claim about the roster, which this PR's own builder
+  // disproves: `buildFanOutRoster` serializes chunk agents like any other.
+  it('blocks a territory fan-out, naming the delivery bound', () => {
     const reason = structuralBlocker(
       localPlan({ srcDiffLines: 2000, diffLines: 6000 }),
     );
     expect(reason).toMatch(/territory fan-out \(Step 3B\)/);
+    expect(reason).toMatch(/one tool result/);
+    // The claim the runtime disproves must not come back: the roster IS
+    // expressible, and saying otherwise sends a maintainer looking for a
+    // script limitation that does not exist.
+    expect(reason).not.toMatch(/does not express|expresses the Step 3A roster/);
   });
 
-  // Until `agent()` can be pinned to a directory, a dispatched agent reads the
-  // user's main checkout — findings that look plausible and describe the wrong
-  // tree.
-  it('blocks a PR-worktree review, naming the missing capability', () => {
-    const reason = structuralBlocker(
-      localPlan({ worktreePath: '.qwen/tmp/review-pr-42', prNumber: 42 }),
-    );
-    expect(reason).toMatch(/takes no working directory/);
+  // `agent({workingDir})` exists — `KNOWN_AGENT_OPTS` carries it, the
+  // orchestrator rebinds the subagent cwd through `worktree-pin.ts`, and the
+  // generated script passes it. A worktree is therefore not a structural
+  // blocker, and must not be reported as one.
+  it('passes a PR-worktree review — the pin the script passes is real', () => {
+    expect(
+      structuralBlocker(
+        localPlan({ worktreePath: '.qwen/tmp/review-pr-42', prNumber: 42 }),
+      ),
+    ).toBeNull();
   });
 
   // Structural means structural: this half must not consult the environment,
   // so the roster builder that asserts against it stays a pure function.
   it('is independent of the environment', () => {
-    const plan = localPlan({ worktreePath: '.qwen/tmp/review-pr-42' });
+    // A plan that IS blocked, so the assertion discriminates: a vacuous
+    // `null === null` would hold even if this function started reading env.
+    const plan = localPlan({ srcDiffLines: 2000, diffLines: 6000 });
     const before = structuralBlocker(plan);
+    expect(before).not.toBeNull();
     process.env[REVIEW_WORKFLOW_ENV] = '1';
     try {
       expect(structuralBlocker(plan)).toBe(before);
