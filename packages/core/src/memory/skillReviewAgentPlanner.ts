@@ -439,12 +439,7 @@ export async function runSkillReviewByAgent(params: {
         ? params.timeoutMs / 60_000
         : (params.config.getMemoryAgentTimeoutMinutes() ??
           DEFAULT_AUTO_SKILL_TIMEOUT_MS / 60_000),
-    tools: [
-      ToolNames.READ_FILE,
-      ToolNames.LS,
-      ToolNames.WRITE_FILE,
-      ToolNames.EDIT,
-    ],
+    tools: [ToolNames.READ_FILE, ToolNames.WRITE_FILE, ToolNames.EDIT],
     extraHistory: buildAgentHistory(params.history),
   });
 

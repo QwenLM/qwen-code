@@ -181,8 +181,10 @@ describe('list_directory', () => {
       const toolResultContent = JSON.stringify(
         messages?.find((message) => message.role === 'tool')?.content ?? '',
       );
-      // The unregistered tool surfaces a not-found error instead of a listing.
-      expect(toolResultContent).toContain('not found in registry');
+      // The unregistered tool surfaces an error explaining how to enable it,
+      // instead of a listing.
+      expect(toolResultContent).toContain('disabled by default');
+      expect(toolResultContent).toContain('tools.listDirectory.enabled');
       expect(toolResultContent).not.toContain('file1.txt');
     } finally {
       await fakeServer.close();

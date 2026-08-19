@@ -7649,22 +7649,29 @@ describe('Server Config (config.ts)', () => {
       ).toContain(ToolNames.LS);
     });
 
-    it('registers list_directory when explicitly listed in coreTools', async () => {
-      const config = new Config({
-        ...baseParams,
-        coreTools: [ToolNames.READ_FILE, ToolNames.LS],
-      });
-      await config.initialize();
+    it.each([
+      { label: 'the canonical name', entry: ToolNames.LS },
+      { label: 'an alias', entry: 'ListFiles' },
+      { label: 'a path specifier', entry: `${ToolNames.LS}(/src)` },
+    ])(
+      'registers list_directory when listed in coreTools via $label',
+      async ({ entry }) => {
+        const config = new Config({
+          ...baseParams,
+          coreTools: [ToolNames.READ_FILE, entry],
+        });
+        await config.initialize();
 
-      const registerToolMock = (
-        (await vi.importMock('../tools/tool-registry')) as {
-          ToolRegistry: { prototype: { registerFactory: Mock } };
-        }
-      ).ToolRegistry.prototype.registerFactory;
-      expect(
-        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
-      ).toContain(ToolNames.LS);
-    });
+        const registerToolMock = (
+          (await vi.importMock('../tools/tool-registry')) as {
+            ToolRegistry: { prototype: { registerFactory: Mock } };
+          }
+        ).ToolRegistry.prototype.registerFactory;
+        expect(
+          (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+        ).toContain(ToolNames.LS);
+      },
+    );
 
     it('should ignore coreTools overrides in bare mode', async () => {
       const config = new Config({

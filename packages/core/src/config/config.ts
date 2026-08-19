@@ -111,7 +111,7 @@ import {
   createDenialState,
   resetDenialState,
 } from '../permissions/denialTracking.js';
-import { resolveToolName } from '../permissions/rule-parser.js';
+import { parseRule } from '../permissions/rule-parser.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
@@ -6940,13 +6940,15 @@ export class Config {
    * Whether the built-in `list_directory` tool is enabled. Opt-in: the tool
    * is disabled by default and turns on either through the
    * `tools.listDirectory.enabled` setting or by being explicitly listed in
-   * the `coreTools` allowlist (alias forms like `ListFiles` accepted).
+   * the `coreTools` allowlist. Entries are normalised with `parseRule` — the
+   * same parser `PermissionManager` uses to build its allowlist — so alias
+   * forms (`ListFiles`) and specifier forms (`list_directory(/src)`) match.
    */
   isLsToolEnabled(): boolean {
     if (this.lsToolEnabled) return true;
     return (
       this.getCoreTools()?.some(
-        (name) => resolveToolName(name) === ToolNames.LS,
+        (name) => parseRule(name).toolName === ToolNames.LS,
       ) ?? false
     );
   }

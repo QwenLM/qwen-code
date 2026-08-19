@@ -2109,6 +2109,13 @@ export class CoreToolScheduler {
       return mcpMessage;
     }
 
+    // `list_directory` is an opt-in built-in: absent here means it was never
+    // registered, so say how to turn it on instead of suggesting unrelated
+    // tools by edit distance.
+    if (unknownToolName === ToolNames.LS) {
+      return `Tool "${unknownToolName}" is a built-in tool that is disabled by default because glob covers directory listing in most cases. Enable it with the tools.listDirectory.enabled setting, or by adding it to the coreTools allowlist. Use glob instead.`;
+    }
+
     // Standard "not found" message with Levenshtein suggestions
     const suggestion = this.getToolSuggestion(unknownToolName, topN);
     return `Tool "${unknownToolName}" not found in registry. Tools must use the exact names that are registered.${suggestion}`;
@@ -3147,7 +3154,7 @@ export class CoreToolScheduler {
                 !this.config.getSdkMode();
               const planModeError = new Error(
                 `Tool blocked by plan mode: "${reqInfo.name}" is not a read-only tool. ` +
-                  `Only read-only tools (read_file, grep_search, glob, list_directory, ` +
+                  `Only read-only tools (read_file, grep_search, glob, ` +
                   `web_fetch, etc.) are allowed in plan mode.` +
                   ` Do NOT retry this tool. ` +
                   (isPlanRequiredTeammate

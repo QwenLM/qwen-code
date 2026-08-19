@@ -6362,6 +6362,39 @@ describe('CoreToolScheduler', () => {
       expect(nonSkillMessage).toContain('Did you mean');
       expect(nonSkillMessage).not.toContain('is a skill name');
     });
+
+    it('should explain how to enable list_directory when it is not registered', async () => {
+      const mockToolRegistry = {
+        getAllToolNames: () => ['glob', 'read_file'],
+        getTool: () => undefined,
+        ensureTool: async () => undefined,
+      } as unknown as ToolRegistry;
+
+      const mockConfig = {
+        getToolRegistry: () => mockToolRegistry,
+        getUseModelRouter: () => false,
+        getGeminiClient: () => null,
+        getPermissionsDeny: () => undefined,
+        isInteractive: () => true,
+        getMessageBus: vi.fn().mockReturnValue(undefined),
+        getDisableAllHooks: vi.fn().mockReturnValue(true),
+      } as unknown as Config;
+
+      const scheduler = new CoreToolScheduler({
+        config: mockConfig,
+        getPreferredEditor: () => 'vscode',
+        onEditorClose: vi.fn(),
+      });
+
+      const message =
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await (scheduler as any).getToolNotFoundMessage('list_directory');
+      expect(message).toContain('disabled by default');
+      expect(message).toContain('tools.listDirectory.enabled');
+      expect(message).toContain('coreTools');
+      // The generic Levenshtein path would suggest unrelated tools instead.
+      expect(message).not.toContain('Did you mean');
+    });
   });
 
   describe('excluded tools handling', () => {
@@ -9276,6 +9309,9 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
       expect(responseJson).toContain('"error"');
       expect(responseJson).toContain('Tool blocked by plan mode');
       expect(responseJson).toContain('write_file');
+      // list_directory is opt-in (off by default) — the block error must not
+      // steer the model toward a tool that is not registered.
+      expect(responseJson).not.toContain('list_directory');
       // Plan-required teammates get pivot-to-read-only then exit_plan_mode hint
       expect(responseJson).toContain('Do NOT retry');
       expect(responseJson).toContain('Pivot to read-only');
