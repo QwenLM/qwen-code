@@ -27,6 +27,7 @@ import {
   writeRoundCapStop,
 } from './lib/deadline.js';
 import { getGhHost, setGhHost } from './lib/gh.js';
+import { BRIEFS } from './lib/agent-briefs.js';
 import { LEDGER_MAX_ROUND, parseLedger } from './lib/ledger.js';
 import { countInlineFindings } from './lib/inline-counts.js';
 import {
@@ -1223,8 +1224,9 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
 
     // Still once when the relay was RESHAPED — an orchestrator prefix ahead
     // of the subject. The coverage prefix filter cannot see this one (it no
-    // longer starts with `reverse audit — `); only the marker-phrase splice
-    // dedups it, so this is the assertion that fails when the splice goes.
+    // longer starts with `reverse audit — `); only the canonical-entry
+    // splice dedups it, so this is the assertion that fails when the splice
+    // goes.
     const r3 = composeReview(
       base({
         planPath: plan,
@@ -1234,6 +1236,57 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
       }),
     );
     expect(r3.body.split('review time budget').length - 1).toBe(1);
+  });
+
+  it('a free-form disclosure that mentions the budget still reaches the body', () => {
+    // The splice dedups relays of the CANONICAL entry (verbatim or
+    // prefix-reshaped — both contain its full text); it must not retire a
+    // genuine line-coverage disclosure whose free-form reason merely mentions
+    // the phrase. A substring-of-phrase splice dropped exactly that entry
+    // from the posted body: the review capped and withheld the anchor for a
+    // security scope the rendered body never named — the module's contract
+    // is that a disclosed gap reaches the author. A PR plan, so a marker can
+    // actually be minted: without prNumber the anchor decision never runs
+    // (`!isPr` returns null first), and the withholding assertion below
+    // passed whatever the decision — vacuous.
+    const plan = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      fetchedSha: 'deadbeef00112233',
+    });
+    writeBudgetStop(
+      plan,
+      {
+        remainingSeconds: 900,
+        reserveSeconds: 3600,
+        expectedRoundSeconds: 1800,
+      },
+      4,
+    );
+    const freeForm =
+      'security — the review time budget ended the round before the security relaunch returned evidence';
+    // Built directly, not through base(): its default `planPath:
+    // coveredPlan()` rewrites the shared plan.json fixture, dropping this
+    // test's prNumber/fetchedSha before the override takes effect.
+    const r = composeReview({
+      planPath: plan,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      unreviewedDimensions: [freeForm],
+    });
+    // Rendered: the author sees the security scope by name…
+    expect(r.body).toContain(`Not reviewed: ${freeForm}.`);
+    // …beside the structural stop line, not instead of it…
+    expect(r.body).toContain(
+      'reverse audit — stopped before round 4 by the review time budget',
+    );
+    // …and the entry still counts against the anchor (not a relay, not
+    // depth-only): the minted marker's sha is withheld, exactly as when it
+    // was spliced — asserted on the parsed ledger, so a reclassification
+    // that LET the anchor ride fails here.
+    expect(parseLedger(r.body)?.round).toBe(1);
+    expect(parseLedger(r.body)?.sha).toBeUndefined();
   });
 
   it('the marker does not shadow other reverse-audit scopes the caller disclosed', () => {
@@ -5967,7 +6020,7 @@ describe('the ledger marker reaches the POSTED body', () => {
 
   it("sees a debt the deterministic gates push in AFTER the caller's entries", () => {
     // `unreviewed` has three writers, at three different points: the caller's
-    // own entries, the budget-phrase splice that removes some of them, and the
+    // own entries, the canonical-relay splice that removes some of them, and the
     // script-lint / layer-audit gates that push machine-owed debts later. A
     // decision that reads any single snapshot misses one of them — an earlier
     // fix read too late and missed the splice, its replacement read too early
@@ -5986,13 +6039,50 @@ describe('the ledger marker reaches the POSTED body', () => {
     ).toBe(true);
   });
 
-  it('sees a lens gap the budget-phrase splice removes from the rendered list', () => {
-    // The splice keeps the body from saying one gap twice, and it matches on a
-    // PHRASE — so an entry that merely mentions the review time budget in its
-    // free-form reason leaves `unreviewedDimensions` before anything else reads
-    // it. Harmless while every cap withheld the anchor; not harmless once one
-    // cap does not, because the spliced entry is the line-coverage claim the
-    // anchor decision exists to respect.
+  it('stays tied to the briefs: every readsDiff flag round-trips the exemption', () => {
+    // The exempt heads are DERIVED from BRIEFS (`readsDiff: false` roles by
+    // their publicLabel), and this pins the tie in both directions: a label
+    // rename or a new non-diff role that broke the derivation would fail
+    // here loudly instead of silently re-opening the full-diff re-review
+    // loop (exemption lost) or widening the anchor past a whiffed lens
+    // (exemption over-granted).
+    expect(
+      Object.fromEntries(
+        Object.values(BRIEFS).map((b) => [
+          b.publicLabel,
+          isNonDiffDimensionGap(`${b.publicLabel} — some reason`),
+        ]),
+      ),
+    ).toEqual(
+      Object.fromEntries(
+        Object.values(BRIEFS).map((b) => [b.publicLabel, !b.readsDiff]),
+      ),
+    );
+
+    // The prose spellings the replaced regex accepted — tight ampersand and
+    // separator-less — must not silently lose the exemption: refusing them
+    // withholds the anchor and re-opens the full-diff re-review cost on a
+    // spelling variant.
+    const variants = [
+      'build&test — the integration suite never ran',
+      'the build&test check — skipped',
+      'buildandtest — skipped',
+      'build andtest — skipped',
+    ];
+    expect(
+      Object.fromEntries(variants.map((v) => [v, isNonDiffDimensionGap(v)])),
+    ).toEqual(Object.fromEntries(variants.map((v) => [v, true])));
+    // …while a squashed OTHER dimension stays out.
+    expect(isNonDiffDimensionGap('securityaudit — skipped')).toBe(false);
+  });
+
+  it('sees a lens gap that merely mentions the budget in its reason', () => {
+    // A free-form entry whose reason mentions the review time budget is a
+    // line-coverage claim, not a relay of the machine's stop entry — the
+    // splice (now matching the full canonical text) leaves it alone, and the
+    // anchor decision must read it as the whiffed lens it names. This pins
+    // the marker-less shape; the marker-present sibling lives beside the
+    // splice tests ('a free-form disclosure … still reaches the body').
     const r = composeReview({
       planPath: coveredPlan(['verify', 'reverse-audit'], {
         prNumber: 8255,
@@ -6136,6 +6226,39 @@ describe('composeReview — convergence-posture deferrals (typed channel; disclo
     // buildLedger re-opens next round exactly what the posture recorded so
     // nobody would re-rule it.
     expect(parseLedger(r.body)?.findings).toEqual([]);
+  });
+
+  it('names the round AT the ledger cap — the clause and the marker agree', () => {
+    // `deferredRound` clamps exactly as the marker stamp does: `prevRound`
+    // can BE the cap (parseLedger accepts round == LEDGER_MAX_ROUND), and an
+    // unclamped +1 named round 10001 in the deferral clause beside a
+    // round-10000 marker — the two halves of one compose disagreeing about
+    // which round this is. The sibling test above pins the marker's
+    // round-trip at the cap; without THIS pin the Math.min mutation on the
+    // clause side ships green.
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      fetchedSha: 'deadbeef00112233',
+    });
+    writeFileSync(
+      join(dirname(planPath), 'qwen-review-pr-8255-prev-ledger.json'),
+      JSON.stringify({ v: 1, round: LEDGER_MAX_ROUND, findings: [] }),
+    );
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+      deferredSuggestions: [nit({ file: 'src/a.ts', line: 42 })],
+    });
+    expect(r.body).toContain(
+      `convergence posture (round ${LEDGER_MAX_ROUND}, not a blocker)`,
+    );
+    expect(r.body).not.toContain(`round ${LEDGER_MAX_ROUND + 1}`);
+    // The clause and the marker must name the SAME round — at the cap too.
+    expect(parseLedger(r.body)?.round).toBe(LEDGER_MAX_ROUND);
   });
 
   it('renders the list on COMMENT and REQUEST_CHANGES alike — no event squeezes it out', () => {
