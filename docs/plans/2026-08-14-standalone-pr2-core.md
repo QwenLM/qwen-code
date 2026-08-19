@@ -451,6 +451,7 @@ ACP child guard再次检查所有真正开始的turn，覆盖HTTP route之外的
 - Modify: `packages/cli/src/acp-integration/acpAgent.ts`及load/resume tests，移除exact-lowercase `sessionExists()` fast path；ACP child必须直接调用唯一case-insensitive resolver，才能在exact与case-only twin并存时于Config/filesystem初始化前fail closed。
 - Modify: `packages/cli/src/serve/live/live-task-service.ts`及现有caller tests，只把旧source adapter调用改为传入existence-aware SessionService store；不在PR2A迁移Live task的创建或restore语义。
 - Modify: `packages/cli/src/serve/session-id-admission.ts`及test，让case-only duplicate resolver结果按persisted UUID conflict处理，而不是被外层catch误映射为临时`session_id_admission_unavailable`；该适配只改变重复持久化ID的fail-closed分类，不改变I/O失败的retryable unavailable语义。
+- Modify: `packages/cli/src/config/config.ts`及test，让caller-supplied `--session-id`/ACP requestedSessionId的create admission从exact `sessionExistsInAnyState`改走唯一case-insensitive resolver，resolver冲突即占用（R5-2）；不改变正常创建路径。
 - Modify: `packages/cli/src/serve/server/session-archive.ts`及test，把coordinator锁key（`exclusive`/`shared` map与`assertNotTransitioning`）经`normalizeSessionIdForLookup`归一化，使caller id的任意大小写变体竞争同一把锁，关闭大小写不敏感文件系统上跨拼写batch delete/archive/unarchive在restore mid-section去链transcript的窗口；batch helper的raw-spelling去重保持原样（归一化去重会让Linux上case-distinct legacy twin的exact-path lookup失配）。
 - Modify: `packages/core/src/services/sessionService.ts`及test，让case-insensitive persisted-ID resolver无论exact lowercase文件是否存在都扫描active/archived候选；单一candidate返回authoritative spelling，仅大小写不同的多个candidate抛typed conflict。同一文件新增`readCreationMetadataIfReadable()`，把creation metadata读取与existence state绑定，corrupt metadata fail closed。
 - Modify: `packages/core/src/utils/jsonl-utils.ts`及test，新增`readLinesWithIntegrity()` fail-closed reader，供`readCreationMetadataIfReadable()`区分missing与corrupt transcript；不新增其他core util。
@@ -478,7 +479,7 @@ PR2A跨到`packages/core`的生产改动只允许`SessionService`既有case-inse
 
 若实现需要修改清单外production文件，先说明对应不变量；无法对应则视为scope leakage。特别是SDK/WebShell/capabilities/scheduled-task routes和archive/delete helpers不属于PR2。
 
-`SessionService.findSessionIdIgnoringCase()`当前生产consumer只有ACP child `loadSession`、ACP child `resumeSession`和`RequestedSessionIdAdmission`，其中三个入口目前都存在exact lookup bypass。PR2A还会让REST internal restore与ACP HTTP internal restore调用它。修改冲突语义时必须回归这五个consumer：单一mixed-case transcript仍返回authoritative spelling并用同一spelling做SessionService filename/directory-hash/ACP-child操作（daemon bridge entry lookup保持canonical ID）；case-only duplicate在四个restore入口都fail closed；global create/restore admission显式识别resolver的duplicate结果并把它视为persisted占用，不能让现有通用catch把它降成retryable unavailable，且错误不泄露路径。所有consumer都必须直接调用唯一resolver，不能先用exact lowercase fast path绕过duplicate检测。若实现新增返回类型而不是typed exception，同一轮必须更新全部consumer，不保留旧的“任选第一个”入口。
+`SessionService.findSessionIdIgnoringCase()`当前生产consumer只有ACP child `loadSession`、ACP child `resumeSession`和`RequestedSessionIdAdmission`，其中三个入口目前都存在exact lookup bypass。PR2A还会让REST internal restore与ACP HTTP internal restore调用它，并让`loadCliConfig`的caller-supplied `--session-id`/ACP requestedSessionId create admission从exact `sessionExistsInAnyState`改走该resolver（R5-2：stdio ACP路径无daemon reserveCreate，exact检查会漏掉legacy mixed-case占用而物化case-only twin）。修改冲突语义时必须回归这六个consumer：单一mixed-case transcript仍返回authoritative spelling并用同一spelling做SessionService filename/directory-hash/ACP-child操作（daemon bridge entry lookup保持canonical ID）；case-only duplicate在四个restore入口都fail closed；global create/restore admission显式识别resolver的duplicate结果并把它视为persisted占用，不能让现有通用catch把它降成retryable unavailable，且错误不泄露路径。所有consumer都必须直接调用唯一resolver，不能先用exact lowercase fast path绕过duplicate检测。若实现新增返回类型而不是typed exception，同一轮必须更新全部consumer，不保留旧的“任选第一个”入口。
 
 ## Structured errors
 
@@ -570,6 +571,7 @@ npx vitest run \
   src/serve/server/session-archive.test.ts \
   src/serve/acp-http/transport.test.ts \
   src/serve/acp-http/dispatch-error.test.ts \
+  src/config/config.test.ts \
   src/serve/multi-workspace-sessions.test.ts \
   src/serve/server/error-response.test.ts \
   src/serve/live/live-task-service.test.ts \
