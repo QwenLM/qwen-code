@@ -2914,12 +2914,13 @@ jobs:
               # the base. Write the NUL-delimited list under RUNNER_TEMP, which
               # the re-exec forwards; the clean child copies it into the gate
               # home below.
-              BASE_OID="$(cat "${RUNNER_TEMP:?}/verify-base-oid")"
+              BASE_OID="$(/usr/bin/cat "${RUNNER_TEMP:?}/verify-base-oid")"
               case "$BASE_OID" in
                 [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
-                *) echo "::error::No trusted base OID recorded; refusing to record the flakiness-gate file list."; exit 1 ;;
+                *) /usr/bin/printf '::error::No trusted base OID recorded; refusing to record the flakiness-gate file list.\n'; exit 1 ;;
               esac
-              git -c core.quotePath=false diff -z --name-only --diff-filter=ACMRT "$BASE_OID" HEAD \
+              rm -f -- "${RUNNER_TEMP:?}/flake-record-files-all"
+              /usr/bin/git -c core.quotePath=false diff -z --name-only --diff-filter=ACMRT "$BASE_OID" HEAD \
                 > "${RUNNER_TEMP:?}/flake-record-files-all"
               LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= exec /usr/bin/env -i \
                 PATH="$PATH" RUNNER_TEMP="${RUNNER_TEMP:-}" \
