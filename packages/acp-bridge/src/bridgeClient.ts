@@ -9,6 +9,7 @@ import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import type {
   Client,
+  ContentBlock,
   ReadTextFileRequest,
   ReadTextFileResponse,
   RequestPermissionRequest,
@@ -83,6 +84,13 @@ import type {
   SessionArtifactInput,
   SessionArtifactStore,
 } from './sessionArtifacts.js';
+import {
+  isSessionMediaReference,
+  SessionMediaReferenceError,
+  withMediaDegradationMarker,
+  type SessionMediaReference,
+  type SessionMediaStore,
+} from './sessionMedia.js';
 
 /**
  * Validate a channel-wide active-work snapshot off the wire.
@@ -607,6 +615,7 @@ export interface BridgeClientSessionEntry {
   effectiveCwd: string;
   events: EventBus;
   artifacts: SessionArtifactStore;
+  media: SessionMediaStore;
   recordingDegraded: boolean;
   pendingPermissionIds: Set<string>;
   /** Pollable pending human interactions, keyed by permission request id. */
@@ -643,13 +652,8 @@ export interface BridgeClientSessionEntry {
   modelRoundtripInFlight?: boolean;
   /** A2: mirrors `modelRoundtripInFlight` for approval-mode roundtrips. */
   approvalModeRoundtripInFlight?: boolean;
-  /**
-   * Session name cached on the full `SessionEntry` in `bridge.ts`. The
-   * child-side title demux keeps it in sync so attach/status responses
-   * stay authoritative for in-CLI renames and auto-titles (#8977).
-   */
+  /** Current session name and its provenance, mirrored from child updates. */
   displayName?: string;
-  /** Source of `displayName`; see `SessionEntry.titleSource` (#8977). */
   titleSource?: 'manual' | 'auto';
 }
 
@@ -821,6 +825,13 @@ export class BridgeClient implements Client {
      */
     private readonly externalToolGuard?: ExternalToolGuardHandler,
     private readonly onActiveWork?: (snapshot: ActiveWorkSnapshotV1) => void,
+    /**
+     * Catalog-clock mark forwarded from the bridge factory. Invoked when a
+     * child-side notification changes persisted catalog metadata the bridge
+     * never sees directly (currently: automatic title updates). Trailing and
+     * optional so existing direct constructors stay source-compatible.
+     */
+    private readonly onSessionCatalogChanged?: () => void,
   ) {}
 
   async requestPermission(
@@ -1187,8 +1198,8 @@ export class BridgeClient implements Client {
    * between tool batches to pull any messages the browser queued mid-turn. We splice the per-session
    * queue, return them to the child as the response, and — when non-empty —
    * publish a `mid_turn_message_injected` SSE frame so the browser can move
-   * those messages out of its pending queue (a dedupe signal, not a transcript
-   * render). Unknown methods reject with ACP `methodNotFound` (-32601), matching
+   * those messages out of its pending queue and render the immediate echo.
+   * Unknown methods reject with ACP `methodNotFound` (-32601), matching
    * the SDK's
    * default for an unimplemented client surface; the child's drain caller
    * treats that as "drain unsupported" and stops asking.
@@ -1237,15 +1248,16 @@ export class BridgeClient implements Client {
     // The drain always carries a sessionId; without one we can't route it on a
     // multi-session channel (and `resolveEntry(undefined)` would throw there),
     // so answer with an empty drain rather than poisoning the turn.
-    if (!sessionId) return { messages: [], hasQueuedPrompt: false };
+    if (!sessionId) return { messages: [], items: [], hasQueuedPrompt: false };
+    if (!this.ownsSession(sessionId)) {
+      return { messages: [], items: [], hasQueuedPrompt: false };
+    }
     const entry = this.resolveEntry(sessionId);
-    if (!entry) return { messages: [], hasQueuedPrompt: false };
+    if (!entry) return { messages: [], items: [], hasQueuedPrompt: false };
     const drained = entry.midTurnMessageQueue.splice(0);
     if (drained.length > 0) {
-      // Record the handoff so clients that lost their bookkeeping (page
-      // refresh) or missed the echo frame below can reconcile via
-      // `getMidTurnMessages` instead of resending an already-injected
-      // message as the next turn. Ring is bounded; oldest ids evicted.
+      // Claim the ids before media I/O yields so retries and removals cannot
+      // observe a drained message as neither queued nor settled.
       for (const item of drained) {
         entry.settledMidTurnMessageIds.push(item.messageId);
       }
@@ -1260,9 +1272,89 @@ export class BridgeClient implements Client {
         );
       }
     }
+    // Shared across every message in this drain: one stored mediaId that
+    // several queued messages reference is read and base64-encoded once
+    // instead of once per message.
+    const mediaMemo = new Map<string, Promise<ContentBlock>>();
+    const serializedMediaIds = new Set<string>();
+    const items: Array<{
+      messageId: string;
+      displayText: string;
+      content: ContentBlock[];
+      mediaReferences?: SessionMediaReference[];
+    }> = [];
+    try {
+      for (const item of drained) {
+        let degraded = 0;
+        const planned = (item.content ?? []).filter((block) => {
+          if (!isSessionMediaReference(block)) return true;
+          if (serializedMediaIds.has(block.mediaId)) {
+            degraded += 1;
+            return false;
+          }
+          serializedMediaIds.add(block.mediaId);
+          return true;
+        });
+        let resolvedBlocks: ContentBlock[];
+        let mediaReferences: SessionMediaReference[];
+        try {
+          resolvedBlocks = await entry.media.resolveContent(planned, mediaMemo);
+          mediaReferences = planned.filter(isSessionMediaReference);
+        } catch (error) {
+          // Only a gone/invalid reference degrades — per block, so one dead
+          // reference drops itself and keeps its siblings. Any other error
+          // (fd exhaustion, I/O failure) propagates instead of silently
+          // destroying the media of every message sharing the mediaId.
+          if (!(error instanceof SessionMediaReferenceError)) throw error;
+          writeStderrLine(
+            `[mid-turn] session=${JSON.stringify(entry.sessionId)} degraded media for message ${JSON.stringify(item.messageId)}: ${JSON.stringify(error instanceof Error ? error.message : String(error))}`,
+          );
+          const perBlock = await entry.media.resolveContentDegrading(
+            planned,
+            mediaMemo,
+          );
+          resolvedBlocks = perBlock.resolvedBlocks;
+          mediaReferences = perBlock.retainedBlocks.filter(
+            isSessionMediaReference,
+          );
+          degraded += perBlock.degraded;
+        }
+        let content: ContentBlock[] = [
+          ...(item.text ? [{ type: 'text' as const, text: item.text }] : []),
+          ...resolvedBlocks,
+        ];
+        if (degraded > 0) content = withMediaDegradationMarker(content);
+        items.push({
+          messageId: item.messageId,
+          displayText: item.text,
+          content,
+          ...(mediaReferences.length > 0 ? { mediaReferences } : {}),
+        });
+      }
+    } catch (error) {
+      // Non-media resolution failure after the splice + settle above: the
+      // store still holds the bytes, so hand the messages back to the queue
+      // for the next drain instead of losing them, and take their ids back
+      // out of the settled ring so a same-id retry is not acked as already
+      // delivered.
+      const requeued = new Set(drained.map((queued) => queued.messageId));
+      const ring = entry.settledMidTurnMessageIds;
+      const kept = ring.filter((id) => !requeued.has(id));
+      ring.splice(0, ring.length, ...kept);
+      entry.midTurnMessageQueue.unshift(...drained);
+      writeStderrLine(
+        `[mid-turn] session=${JSON.stringify(entry.sessionId)} drain failed, requeued ${drained.length} message(s): ${JSON.stringify(error instanceof Error ? error.message : String(error))}`,
+      );
+      throw error;
+    }
     // Queue-only entries are private coordinator steering, not UI transcript.
     const echoed = drained.filter((item) => !item.queueOnly);
     const messages = drained.map((item) => item.text);
+    // Structured twin of `messages` carrying any queued media blocks. The ACP
+    // child prefers `items` when present and falls back to `messages`, so
+    // text-only entries surface as a single text block and old children keep
+    // working unchanged. References travel beside the resolved content so the
+    // child can persist replay-safe metadata rather than inline bytes.
     const hasQueuedPrompt = entry.pendingPromptList.some(
       (prompt) =>
         prompt.state === 'queued' && !prompt.abortController.signal.aborted,
@@ -1280,6 +1372,15 @@ export class BridgeClient implements Client {
           sessionId: entry.sessionId,
           messages: echoed.map((item) => item.text),
           messageIds: echoed.map((item) => item.messageId),
+          // Carry the structured `items` twin (content blocks per message) so
+          // the browser-side echo renderer can show attached images alongside
+          // the message text. Older consumers that don't read this field keep
+          // working unchanged.
+          items: echoed.map((item) => ({
+            ...(item.content && item.content.length > 0
+              ? { content: item.content }
+              : {}),
+          })),
         },
       });
       writeStderrLine(
@@ -1288,7 +1389,7 @@ export class BridgeClient implements Client {
           : `[mid-turn] session=${entry.sessionId} drained=${messages.length} echoed=${echoed.length} echo frame dropped (bus closed); reconciliation required`,
       );
     }
-    return { messages, hasQueuedPrompt };
+    return { messages, items, hasQueuedPrompt };
   }
 
   private async handleExternalToolGuardPrepare(
@@ -2018,26 +2119,28 @@ export class BridgeClient implements Client {
         return;
       const entry = this.resolveEntry(sessionId);
       if (!entry) return;
-      // Keep the entry's cached name in sync with child-side renames
-      // (in-CLI `/rename`, auto-titles) so attach/status responses stay
-      // authoritative; the HTTP rename path updates the entry directly
-      // (#8977).
+      const rawTitleSource = params['titleSource'];
+      const titleSource =
+        rawTitleSource === 'manual' || rawTitleSource === 'auto'
+          ? rawTitleSource
+          : undefined;
       entry.displayName = title;
-      if (
-        params['titleSource'] === 'auto' ||
-        params['titleSource'] === 'manual'
-      ) {
-        entry.titleSource = params['titleSource'];
-      }
+      entry.titleSource = titleSource;
+      // The child appends the automatic title as a `custom_title` record to
+      // the session's JSONL — the same file the persisted catalog scan reads
+      // — before notifying, so this is a daemon-observed catalog change. The
+      // live-state route invalidates the catalog cache when it first exposes
+      // the bumped revision, so the next full-catalog reload serves this
+      // title. Mark before the SSE publish so the revision never trails the
+      // client-visible event.
+      this.onSessionCatalogChanged?.();
       try {
         entry.events.publish({
           type: 'session_metadata_updated',
           data: {
             sessionId,
             displayName: title,
-            ...(typeof params['titleSource'] === 'string'
-              ? { titleSource: params['titleSource'] }
-              : {}),
+            ...(titleSource !== undefined ? { titleSource } : {}),
           },
         });
       } catch {

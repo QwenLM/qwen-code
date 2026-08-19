@@ -12,7 +12,6 @@ import type {
 import {
   getReplayTokenCount,
   getReplayTokenUsage,
-  getRestoredSessionTitle,
   mapWorkspaceSkills,
   updateConnectionFromDaemonEvent,
 } from './mappers.js';
@@ -366,85 +365,27 @@ describe('updateConnectionFromDaemonEvent', () => {
     expect(next.skills).toEqual([]);
   });
 
-  it('keeps titleSource from session_metadata_updated so /clear can tell manual names (#8977)', () => {
-    const base = { status: 'connected' as const, workspaceCwd: '/workspace' };
-
-    const manual = applyEvent(base, {
-      v: 1,
-      type: 'session_metadata_updated',
-      data: {
-        sessionId: 's1',
-        displayName: 'My session',
-        titleSource: 'manual',
+  it('replaces the title source with every metadata name update (#8977)', () => {
+    const manual = applyEvent(
+      { status: 'connected' as const, workspaceCwd: '/workspace' },
+      {
+        v: 1,
+        type: 'session_metadata_updated',
+        data: {
+          sessionId: 's1',
+          displayName: 'Manual name',
+          titleSource: 'manual',
+        },
       },
-    });
-    expect(manual.displayName).toBe('My session');
+    );
     expect(manual.titleSource).toBe('manual');
 
-    // An auto-title publication overwrites the source — a later /clear must
-    // NOT carry a generated name forward.
-    const auto = applyEvent(manual, {
-      v: 1,
-      type: 'session_metadata_updated',
-      data: {
-        sessionId: 's1',
-        displayName: 'Fix login bug',
-        titleSource: 'auto',
-      },
-    });
-    expect(auto.displayName).toBe('Fix login bug');
-    expect(auto.titleSource).toBe('auto');
-
-    // Older daemons publish no titleSource: keep the previous knowledge
-    // rather than guessing.
     const unknown = applyEvent(manual, {
       v: 1,
       type: 'session_metadata_updated',
-      data: { sessionId: 's1', displayName: 'Renamed again' },
+      data: { sessionId: 's1', displayName: 'Legacy update' },
     });
-    expect(unknown.displayName).toBe('Renamed again');
-    expect(unknown.titleSource).toBe('manual');
-  });
-});
-
-describe('getRestoredSessionTitle', () => {
-  it('normalizes the title fields carried by a daemon load/attach response (#8977)', () => {
-    expect(
-      getRestoredSessionTitle({
-        sessionId: 's1',
-        displayName: 'Payments bug',
-        titleSource: 'manual',
-      }),
-    ).toEqual({ displayName: 'Payments bug', titleSource: 'manual' });
-
-    expect(
-      getRestoredSessionTitle({
-        sessionId: 's1',
-        displayName: 'Fix login bug',
-        titleSource: 'auto',
-      }),
-    ).toEqual({ displayName: 'Fix login bug', titleSource: 'auto' });
-  });
-
-  it('drops unknown sources and blank names instead of guessing (#8977)', () => {
-    // A source the client does not recognize must never pass the manual
-    // carry-over gate.
-    expect(
-      getRestoredSessionTitle({
-        sessionId: 's1',
-        displayName: 'Named',
-        titleSource: 'something-new',
-      }),
-    ).toEqual({ displayName: 'Named' });
-
-    expect(
-      getRestoredSessionTitle({ sessionId: 's1', displayName: '   ' }),
-    ).toEqual({});
-  });
-
-  it('returns nothing for older daemons and malformed payloads (#8977)', () => {
-    expect(getRestoredSessionTitle({ sessionId: 's1' })).toEqual({});
-    expect(getRestoredSessionTitle(undefined)).toEqual({});
-    expect(getRestoredSessionTitle('not-a-record')).toEqual({});
+    expect(unknown.displayName).toBe('Legacy update');
+    expect(unknown.titleSource).toBeUndefined();
   });
 });

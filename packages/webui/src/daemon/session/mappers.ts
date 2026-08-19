@@ -322,17 +322,15 @@ export function updateConnectionFromDaemonEvent(
     case 'session_metadata_updated': {
       const data = getRecord(event.data);
       if (Object.prototype.hasOwnProperty.call(data ?? {}, 'displayName')) {
-        // The daemon stamps `titleSource` on both rename (manual) and
-        // auto-title (auto) publications; keep it so `/clear` can tell a
-        // user-chosen name from a generated one (#8977). Unknown values are
-        // dropped rather than guessed.
+        const displayName = getString(data, 'displayName');
         const titleSource = getString(data, 'titleSource');
         setConnection((current) => ({
           ...current,
-          displayName: getString(data, 'displayName'),
-          ...(titleSource === 'manual' || titleSource === 'auto'
-            ? { titleSource }
-            : {}),
+          displayName,
+          titleSource:
+            displayName && (titleSource === 'manual' || titleSource === 'auto')
+              ? titleSource
+              : undefined,
         }));
       }
       break;
@@ -369,22 +367,18 @@ export function getSessionDisplayName(
   return displayName?.trim() ? displayName : undefined;
 }
 
-/**
- * Normalizes the title fields a daemon create/load/resume response carries
- * about the session it returned (#8977). Older daemons omit both; unknown
- * `titleSource` values are dropped rather than guessed, so a name whose
- * source cannot be verified never passes the `manual` carry-over gate.
- */
 export function getRestoredSessionTitle(session: unknown): {
   displayName?: string;
   titleSource?: 'manual' | 'auto';
 } {
   const record = getRecord(session);
-  const displayName = getSessionDisplayName(record);
+  const displayName = getString(record, 'displayName');
   const titleSource = getString(record, 'titleSource');
+  const normalizedDisplayName = displayName?.trim() ? displayName : undefined;
   return {
-    ...(displayName !== undefined ? { displayName } : {}),
-    ...(titleSource === 'manual' || titleSource === 'auto'
+    ...(normalizedDisplayName ? { displayName: normalizedDisplayName } : {}),
+    ...(normalizedDisplayName &&
+    (titleSource === 'manual' || titleSource === 'auto')
       ? { titleSource }
       : {}),
   };

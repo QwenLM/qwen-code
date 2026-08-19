@@ -53,6 +53,7 @@ import type {
   CreateSubSessionResult,
 } from '@qwen-code/acp-bridge/bridgeOptions';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
+import { restoreSessionTitleFields } from './session-restore-title.js';
 
 const log = createDebugLogger('SUB_SESSION');
 
@@ -129,6 +130,7 @@ export interface SubSessionLauncher {
 export interface CreateSubSessionLauncherOptions {
   getBridge: () => AcpSessionBridge | undefined;
   boundWorkspace: string;
+  sessionRuntimeBaseDir?: string;
   /** Return sent-mode completions to the parent as automatic follow-up turns.
    * Enabled only for the Live conversation runtime. */
   notifySentCompletion?: boolean;
@@ -397,6 +399,7 @@ async function awaitSentCompletionAcceptance(
 async function deliverSentCompletion(
   bridge: AcpSessionBridge,
   boundWorkspace: string,
+  sessionRuntimeBaseDir: string | undefined,
   parentSessionId: string,
   notification: BridgeBackgroundNotification,
   stopSignal: AbortSignal,
@@ -421,9 +424,15 @@ async function deliverSentCompletion(
     : undefined;
   let materializedDirectoryUnused = isolatedCwd !== undefined;
   try {
+    const titleInfo = new SessionService(boundWorkspace, {
+      ...(sessionRuntimeBaseDir !== undefined
+        ? { runtimeBaseDir: sessionRuntimeBaseDir }
+        : {}),
+    }).getSessionTitleInfo(parentSessionId);
     restoredParent = await bridge.resumeSession({
       sessionId: parentSessionId,
       workspaceCwd: boundWorkspace,
+      ...restoreSessionTitleFields(titleInfo.title, titleInfo.source),
     });
     if (isolatedCwd !== undefined) {
       if (
@@ -657,6 +666,7 @@ export function createSubSessionLauncher(
   const {
     getBridge,
     boundWorkspace,
+    sessionRuntimeBaseDir,
     notifySentCompletion = false,
     isolatedWorkspace,
   } = opts;
@@ -905,6 +915,7 @@ export function createSubSessionLauncher(
               await deliverSentCompletion(
                 bridge,
                 boundWorkspace,
+                sessionRuntimeBaseDir,
                 info.callerSessionId,
                 notification,
                 stopAc.signal,
@@ -1003,9 +1014,10 @@ export function createSubSessionLauncher(
         if (sessionClosed) {
           if (!promptDispatched) {
             try {
-              await new SessionService(boundWorkspace).removeSession(
-                spawnedSession.sessionId,
-              );
+              const transcriptRemoved = await new SessionService(
+                boundWorkspace,
+              ).removeSession(spawnedSession.sessionId);
+              if (transcriptRemoved) bridge.markSessionCatalogChanged();
             } catch (cleanupError) {
               log.debug(
                 'sub-session: isolated transcript cleanup failed',

@@ -24,16 +24,29 @@ import type {
   DaemonSessionArtifactsEnvelope,
   DaemonTranscriptStore,
   DaemonCapabilities,
+  DaemonBranchSessionResult,
+  DaemonBranchedSession,
+  DaemonSessionMediaReference,
   PermissionResponse,
+  PromptContentBlock,
 } from '@qwen-code/sdk/daemon';
-import { isDaemonTurnError, type PromptResult } from '@qwen-code/sdk/daemon';
-import { extractHttpStatus } from './httpErrors.js';
+import {
+  DaemonHttpError,
+  DaemonPendingPromptLimitError,
+  isDaemonTurnError,
+  isStaleBranchPointError,
+  type PromptResult,
+} from '@qwen-code/sdk/daemon';
+import { extractHttpStatus, isInvalidClientIdError } from './httpErrors.js';
 import {
   mapReasoningControls,
   mapSessionContextReasoning,
   mapSupportedCommands,
 } from './mappers.js';
-import { toDaemonPromptContent } from './promptContent.js';
+import {
+  daemonPromptImageToBlob,
+  toDaemonPromptContent,
+} from './promptContent.js';
 import {
   clearPassiveAssistantDoneTimer,
   withActionTimeout,
@@ -149,9 +162,6 @@ export function getConnectionAfterSessionClear(
     delete next.sessionId;
     delete next.clientId;
     delete next.displayName;
-    // Session-scoped like the name itself: the successor session starts
-    // untitled (a /clear carry-over, when it applies, re-establishes both
-    // fields via a rename on the new session — #8977).
     delete next.titleSource;
     delete next.tokenUsage;
     delete next.tokenCount;
@@ -211,6 +221,9 @@ export function createDaemonSessionActions({
   clearLiveJournalRepair = () => undefined,
 }: CreateDaemonSessionActionsArgs): DaemonSessionActions {
   const silentHardFailureNoticeKeys = new Set<string>();
+  let mediaClient = sessionRef.current?.client;
+  let mediaClientId = sessionRef.current?.clientId;
+  let mediaClientSessionId = sessionRef.current?.sessionId;
   let noticeOwner = sessionRef.current;
   let reasoningActionToken = 0;
   let appliedReasoningActionToken = 0;
@@ -238,6 +251,78 @@ export function createDaemonSessionActions({
       (sessionConfigGeneration.get(session) ?? 0) + 1,
     );
   }
+
+  async function promptContentWithUploadedMedia(
+    session: DaemonSessionClient,
+    text: string,
+    images: ReadonlyArray<{ data: string; mimeType: string }>,
+    files: readonly DaemonPromptFile[],
+    signal?: AbortSignal,
+  ): Promise<{
+    content: PromptContentBlock[];
+    references: DaemonSessionMediaReference[];
+  }> {
+    const supportsMediaUpload =
+      getConnection().capabilities?.features.includes('session_media') === true;
+    // The media route matches concrete image types only; a literal image/*
+    // Content-Type 400s, so untyped images stay inline as before the upload
+    // path existed.
+    if (
+      images.length === 0 ||
+      !supportsMediaUpload ||
+      images.some((image) => image.mimeType === 'image/*') ||
+      typeof session.uploadMedia !== 'function'
+    ) {
+      return {
+        content: toDaemonPromptContent(text, images, files),
+        references: [],
+      };
+    }
+    const results = await Promise.allSettled(
+      images.map(
+        async (image) =>
+          await session.uploadMedia(
+            daemonPromptImageToBlob(image),
+            image.mimeType,
+            signal,
+          ),
+      ),
+    );
+    const references = results.flatMap((result) =>
+      result.status === 'fulfilled' ? [result.value] : [],
+    );
+    const failure = results.find(
+      (result): result is PromiseRejectedResult => result.status === 'rejected',
+    );
+    if (!failure) {
+      const content = toDaemonPromptContent(text, [], files);
+      content.splice(1, 0, ...references);
+      return { content, references };
+    }
+    await removeUploadedMedia(session, references);
+    if (extractHttpStatus(failure.reason) === 404) {
+      return {
+        content: toDaemonPromptContent(text, images, files),
+        references: [],
+      };
+    }
+    throw failure.reason;
+  }
+
+  async function removeUploadedMedia(
+    session: DaemonSessionClient,
+    references: readonly DaemonSessionMediaReference[],
+  ): Promise<void> {
+    await Promise.allSettled(
+      references.map(
+        async (reference) => await session.removeMedia(reference.mediaId),
+      ),
+    );
+  }
+
+  const isDefinitePromptAdmissionRejection = (error: unknown) =>
+    error instanceof DaemonHttpError ||
+    error instanceof DaemonPendingPromptLimitError;
 
   const ignoreStaleNotice: AddDaemonSessionNotice = (notice) => ({
     ...notice,
@@ -431,9 +516,6 @@ export function createDaemonSessionActions({
         workspaceCwd: targetWorkspaceCwd,
         clientId: undefined,
         displayName: undefined,
-        // The name source is session-scoped like the name itself: a switch
-        // must not leak the previous session's `manual` stamp onto the next
-        // session's auto-generated title (#8977).
         titleSource: undefined,
         error: undefined,
         errorStatus: undefined,
@@ -517,24 +599,39 @@ export function createDaemonSessionActions({
             normalizedFiles,
           );
         }
+        const uploaded = await promptContentWithUploadedMedia(
+          session,
+          text,
+          normalizedImages,
+          normalizedFiles,
+          ctrl.signal,
+        );
+        if (ctrl.signal.aborted) {
+          await removeUploadedMedia(session, uploaded.references);
+          ctrl.signal.throwIfAborted();
+        }
         const promptRequest: Record<string, unknown> = {
-          prompt: toDaemonPromptContent(
-            text,
-            normalizedImages,
-            normalizedFiles,
-          ),
+          prompt: uploaded.content,
         };
+        options?.onAdmissionStarted?.();
         if (inputAnnotations) {
           promptRequest['_meta'] = { inputAnnotations };
         }
         if (options?.retry) {
           promptRequest['retry'] = true;
         }
-        options?.onAdmissionStarted?.();
-        const accepted = await session.submitPrompt(
-          promptRequest as Parameters<typeof session.submitPrompt>[0],
-          ctrl.signal,
-        );
+        let accepted: Awaited<ReturnType<typeof session.submitPrompt>>;
+        try {
+          accepted = await session.submitPrompt(
+            promptRequest as Parameters<typeof session.submitPrompt>[0],
+            ctrl.signal,
+          );
+        } catch (error) {
+          if (isDefinitePromptAdmissionRejection(error)) {
+            await removeUploadedMedia(session, uploaded.references);
+          }
+          throw error;
+        }
         if (activePromptsRef.current.get(sessionId)?.controller === ctrl) {
           restartEventStream(sessionId);
         }
@@ -610,8 +707,15 @@ export function createDaemonSessionActions({
           normalizedFiles,
         );
       }
+      const uploaded = await promptContentWithUploadedMedia(
+        session,
+        text,
+        normalizedImages,
+        normalizedFiles,
+        options?.signal,
+      );
       const promptRequest: Record<string, unknown> = {
-        prompt: toDaemonPromptContent(text, normalizedImages, normalizedFiles),
+        prompt: uploaded.content,
       };
       if (inputAnnotations) {
         promptRequest['_meta'] = { inputAnnotations };
@@ -619,13 +723,23 @@ export function createDaemonSessionActions({
       if (options?.retry) {
         promptRequest['retry'] = true;
       }
-      const accepted = await session.submitPrompt(
-        promptRequest as Parameters<typeof session.submitPrompt>[0],
-      );
+      let accepted: Awaited<ReturnType<typeof session.submitPrompt>>;
+      try {
+        options?.onAdmissionStarted?.();
+        accepted = await session.submitPrompt(
+          promptRequest as Parameters<typeof session.submitPrompt>[0],
+        );
+      } catch (error) {
+        if (isDefinitePromptAdmissionRejection(error)) {
+          await removeUploadedMedia(session, uploaded.references);
+        }
+        throw error;
+      }
       if (options?.signal?.aborted) {
         try {
           const removal = await session.removePendingPrompt(accepted.promptId);
           if (removal.removed) {
+            await removeUploadedMedia(session, uploaded.references);
             return { promptId: accepted.promptId, removedAfterAbort: true };
           }
         } catch (err) {
@@ -1264,26 +1378,29 @@ export function createDaemonSessionActions({
       }
     },
 
-    async renameSession(displayName, opts) {
-      const session = sessionRef.current;
-      if (!session) {
-        const error = new Error('Daemon session is not connected');
-        throw opts?.silent
-          ? error
-          : dispatchActionError(
-              addNotice,
-              'Rename session failed',
-              error,
-              'rename_session',
-            );
-      }
+    async renameSession(displayName) {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Rename session failed',
+        'rename_session',
+      );
       try {
-        return await withActionTimeout(
+        const result = await withActionTimeout(
           session.updateMetadata({ displayName }),
           'Rename session timed out',
         );
+        setConnection((current) =>
+          current.sessionId === session.sessionId
+            ? {
+                ...current,
+                displayName: result.displayName ?? displayName,
+                titleSource: 'manual',
+              }
+            : current,
+        );
+        return result;
       } catch (error) {
-        if (opts?.silent) throw error;
         throw dispatchActionError(
           addNotice,
           'Rename session failed',
@@ -1405,9 +1522,63 @@ export function createDaemonSessionActions({
       }
     },
 
+    async uploadMedia(image, opts) {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Media upload failed',
+        'send_prompt',
+      );
+      const mimeType =
+        image.mimeType ?? image.mediaType ?? image.media_type ?? 'image/*';
+      mediaClient = session.client;
+      mediaClientId = session.clientId;
+      mediaClientSessionId = session.sessionId;
+      return await session.uploadMedia(
+        daemonPromptImageToBlob(image),
+        mimeType,
+        opts?.signal,
+      );
+    },
+
+    async removeMedia(mediaId, opts) {
+      const session = sessionRef.current;
+      if (opts?.sessionId && session?.sessionId !== opts.sessionId) {
+        const client = session?.client ?? mediaClient;
+        if (!client) return false;
+        const targetClientId =
+          getPersistedClientId(opts.sessionId) ??
+          (mediaClientSessionId === opts.sessionId ? mediaClientId : undefined);
+        if (!targetClientId) {
+          return await client.removeSessionMedia(opts.sessionId, mediaId);
+        }
+        try {
+          return await client.removeSessionMedia(opts.sessionId, mediaId, {
+            clientId: targetClientId,
+          });
+        } catch (error) {
+          // Detach unregisters the persisted client id on the daemon, so a
+          // session switch can stale it before this cleanup lands. The daemon
+          // accepts an absent id — retry without it instead of orphaning the
+          // media behind a swallowed 400.
+          if (isInvalidClientIdError(error)) {
+            return await client.removeSessionMedia(opts.sessionId, mediaId);
+          }
+          throw error;
+        }
+      }
+      if (!session) return false;
+      return await session.removeMedia(mediaId);
+    },
+
     async enqueueMidTurnMessage(
       message: string,
-      opts?: { signal?: AbortSignal; messageId?: string },
+      opts?: {
+        signal?: AbortSignal;
+        messageId?: string;
+        content?: PromptContentBlock[];
+        onAdmissionStarted?: () => void;
+      },
     ): Promise<DaemonMidTurnMessageResult> {
       // Calls without an id are the old-daemon compatibility path and fall back
       // locally. With a stable id, transport failure is ambiguous (the POST may
@@ -1416,7 +1587,12 @@ export function createDaemonSessionActions({
       const session = sessionRef.current;
       if (!session) return { accepted: false };
       try {
-        return await session.enqueueMidTurnMessage(message, opts);
+        const { onAdmissionStarted, ...requestOptions } = opts ?? {};
+        onAdmissionStarted?.();
+        return await session.enqueueMidTurnMessage(
+          message,
+          opts ? requestOptions : undefined,
+        );
       } catch (err) {
         if (opts?.messageId) throw err;
         // An abort is the designed settle-time cancel (the message stays in the
@@ -1657,7 +1833,7 @@ export function createDaemonSessionActions({
       }
     },
 
-    async branchSession(name?: string) {
+    async branchSession(name?: string, atRecordId?: string) {
       if (branchInFlight) {
         throw new DOMException(
           'A branch request is already in progress',
@@ -1670,36 +1846,64 @@ export function createDaemonSessionActions({
         'Branch session failed',
         'branch_session',
       );
+      const sourceSessionId = session.sessionId;
+      const loadGeneration = pendingSessionLoadIdRef.current;
       branchInFlight = true;
       try {
-        const result = await withActionTimeout(
-          session.client.branchSession(
-            session.sessionId,
-            { name },
-            session.clientId,
-          ),
-          'Branch session timed out',
-        );
-        persistStableClientId(result.clientId, result.sessionId);
-        void startSessionSwitch(result.sessionId, 'load').catch(
-          (switchError: unknown) => {
-            if (isAbortError(switchError)) return;
-            void session.client
-              .detachSession(result.sessionId, result.clientId)
-              .catch(() => undefined);
-            dispatchActionError(
-              addNotice,
-              'Branch session failed',
-              switchError,
-              'branch_session',
-            );
-          },
-        );
+        const branchRequest: Promise<DaemonBranchSessionResult> =
+          atRecordId === undefined
+            ? session.client.branchSession(
+                sourceSessionId,
+                { name },
+                session.clientId,
+              )
+            : session.client.branchSession(
+                sourceSessionId,
+                { name, atRecordId },
+                session.clientId,
+              );
+        const result = await branchRequest;
+        const switchStarted =
+          sessionRef.current === session &&
+          pendingSessionLoadIdRef.current === loadGeneration;
+        const restored =
+          atRecordId === undefined
+            ? (result as DaemonBranchedSession)
+            : undefined;
+        if (switchStarted) {
+          if (restored?.clientId) {
+            persistStableClientId(restored.clientId, restored.sessionId);
+          }
+          void startSessionSwitch(result.sessionId, 'load').catch(
+            (switchError: unknown) => {
+              if (restored?.clientId) {
+                void session.client
+                  .detachSession(restored.sessionId, restored.clientId)
+                  .catch(() => undefined);
+              }
+              if (isAbortError(switchError)) return;
+              dispatchActionError(
+                addNotice,
+                'Branch session failed',
+                switchError,
+                'branch_session',
+              );
+            },
+          );
+        } else if (restored?.clientId) {
+          void session.client
+            .detachSession(restored.sessionId, restored.clientId)
+            .catch(() => undefined);
+        }
         return {
           sessionId: result.sessionId,
           displayName: result.displayName,
+          switchStarted,
         };
       } catch (error) {
+        if (isStaleBranchPointError(error)) {
+          throw markNoticeDispatched(error);
+        }
         throw dispatchActionError(
           addNotice,
           'Branch session failed',

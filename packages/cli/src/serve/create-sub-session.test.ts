@@ -7,6 +7,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
+import { SessionService } from '@qwen-code/qwen-code-core';
 
 /** Captures the launcher's operator-facing stderr output. */
 const { stderrLines } = vi.hoisted(() => ({ stderrLines: [] as string[] }));
@@ -76,7 +77,11 @@ function makeFakeBridge(opts?: {
   }> = [];
   const prompts: Array<{ sessionId: string; promptId?: string; text: string }> =
     [];
-  const names: Array<{ sessionId: string; displayName?: string }> = [];
+  const names: Array<{
+    sessionId: string;
+    displayName?: string;
+    titleSource?: 'manual' | 'auto';
+  }> = [];
   const closes: string[] = [];
   const relocations: Array<{
     sessionId: string;
@@ -86,7 +91,12 @@ function makeFakeBridge(opts?: {
   }> = [];
   const kills: string[] = [];
   const detaches: Array<{ sessionId: string; clientId?: string }> = [];
-  const resumes: Array<{ sessionId: string; workspaceCwd: string }> = [];
+  const resumes: Array<{
+    sessionId: string;
+    workspaceCwd: string;
+    displayName?: string;
+    titleSource?: 'manual' | 'auto';
+  }> = [];
   const operations: string[] = [];
   const notifications: Array<{
     sessionId: string;
@@ -121,14 +131,22 @@ function makeFakeBridge(opts?: {
     },
     updateSessionMetadata: (
       sessionId: string,
-      metadata: { displayName?: string },
+      metadata: {
+        displayName?: string;
+        titleSource?: 'manual' | 'auto';
+      },
     ) => {
-      names.push({ sessionId, displayName: metadata.displayName });
+      names.push({ sessionId, ...metadata });
       return metadata;
     },
     getSessionLastEventId: () => 0,
     getSessionEventEpoch: () => 'fake-epoch',
-    resumeSession: async (req: { sessionId: string; workspaceCwd: string }) => {
+    resumeSession: async (req: {
+      sessionId: string;
+      workspaceCwd: string;
+      displayName?: string;
+      titleSource?: 'manual' | 'auto';
+    }) => {
       operations.push(`resume:${req.sessionId}`);
       resumes.push(req);
       if (req.sessionId !== opts?.reapedParentSessionId) {
@@ -178,6 +196,9 @@ function makeFakeBridge(opts?: {
       kills.push(sessionId);
       return opts?.killSessionResult ?? true;
     },
+    // Present so a rollback mark cannot fail silently inside its swallowing
+    // catch — the production bridge always implements it.
+    markSessionCatalogChanged: vi.fn(),
     detachClient: async (sessionId: string, clientId?: string) => {
       operations.push(`detach:${sessionId}`);
       detaches.push({ sessionId, ...(clientId ? { clientId } : {}) });
@@ -317,6 +338,7 @@ describe('sub-session launcher', () => {
     ]);
     expect(fake.prompts[0]!.text).toBe('do the thing');
     expect(fake.names[0]!.displayName).toContain('my task');
+    expect(fake.names[0]!.titleSource).toBe('auto');
     // 'sent' returns immediately but starts a background subscription to hold
     // the concurrency slot until the sub-session's turn finishes (so the cap
     // stays meaningful). The subscription is fire-and-forget — the launch
@@ -728,6 +750,18 @@ describe('sub-session launcher', () => {
   });
 
   it('sent mode: restores a reaped parent and keeps it alive through the automatic continuation', async () => {
+    const sessionRuntimeBaseDir = '/runtime/parent';
+    const readTitle = vi
+      .spyOn(SessionService.prototype, 'getSessionTitleInfo')
+      .mockImplementation(function (this: SessionService) {
+        const storage = (
+          this as unknown as {
+            storage: { getRuntimeBaseDir(): string };
+          }
+        ).storage;
+        expect(storage.getRuntimeBaseDir()).toBe(sessionRuntimeBaseDir);
+        return { title: 'Manual parent', source: 'manual' };
+      });
     const fake = makeFakeBridge({
       events: (pid) => [chunk('durable result'), turnComplete(pid)],
       reapedParentSessionId: 'parent-reaped',
@@ -735,6 +769,7 @@ describe('sub-session launcher', () => {
     const launcher = createSubSessionLauncher({
       getBridge: () => fake.bridge,
       boundWorkspace: WS,
+      sessionRuntimeBaseDir,
       notifySentCompletion: true,
     });
 
@@ -748,7 +783,12 @@ describe('sub-session launcher', () => {
       expect(fake.parentObserverClosures).toEqual([launched.sessionId]),
     );
     expect(fake.resumes).toEqual([
-      { sessionId: 'parent-reaped', workspaceCwd: WS },
+      {
+        sessionId: 'parent-reaped',
+        workspaceCwd: WS,
+        displayName: 'Manual parent',
+        titleSource: 'manual',
+      },
     ]);
     expect(fake.notifications).toHaveLength(1);
     expect(fake.notifications[0]).toMatchObject({
@@ -762,6 +802,7 @@ describe('sub-session launcher', () => {
     expect(fake.subscribeCalls()).toBe(2);
     expect(stderrLines).toEqual([]);
     expect(fake.relocations).toEqual([]);
+    readTitle.mockRestore();
     launcher.stop();
   });
 
@@ -1073,6 +1114,44 @@ describe('sub-session launcher', () => {
       'provider unavailable',
     );
     launcher.stop();
+  });
+
+  it('sent mode: rollback marks the catalog revision after removing the undispatched transcript', async () => {
+    // Spawn succeeded but materializing the isolated workspace fails before any
+    // prompt is dispatched → the rollback kills the fresh session, removes its
+    // transcript, and that persisted removal must advance the catalog clock.
+    const fake = makeFakeBridge();
+    const discarded: string[] = [];
+    const removeSpy = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+      notifySentCompletion: true,
+      isolatedWorkspace: {
+        materializeDirectory: () => Promise.reject(new Error('disk full')),
+        discardEmptyDirectory: async (sessionId) => {
+          discarded.push(sessionId);
+        },
+      },
+    });
+    try {
+      await expect(
+        launcher.launch({
+          prompt: 'research it',
+          completion: 'sent',
+          callerSessionId: 'parent-1',
+        }),
+      ).rejects.toThrow('disk full');
+      expect(fake.kills).toHaveLength(1);
+      expect(removeSpy).toHaveBeenCalledWith(fake.kills[0]);
+      expect(discarded).toEqual(fake.kills);
+      expect(fake.bridge.markSessionCatalogChanged).toHaveBeenCalledTimes(1);
+    } finally {
+      removeSpy.mockRestore();
+      launcher.stop();
+    }
   });
 
   it('first-turn: reports "incomplete" when the stream ends before the turn does', async () => {
