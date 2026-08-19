@@ -42,11 +42,11 @@ only need `QWEN_BOARD` set to the same value.
 The order is deliberate: **what needs you**, then **what is blocked on someone
 else**, then **work in flight**. Anything already settled disappears.
 
-| Prefix | Meaning                                              |
-| ------ | ---------------------------------------------------- |
+| Prefix  | Meaning                                              |
+| ------- | ---------------------------------------------------- |
 | `⚠ d-` | A decision waiting on you — nothing else unblocks it |
-| `? a-` | An open question from one participant to another     |
-| `· t-` | A task someone is working on                         |
+| `? a-`  | An open question from one participant to another     |
+| `· t-`  | A task someone is working on                         |
 
 ## Working on a board
 
@@ -172,6 +172,18 @@ directory, which is what makes this possible.
 `QWEN_BOARD` and `QWEN_BOARD_AS` set the first two for a whole shell, which is
 how each pane inherits them.
 
+## Housekeeping
+
+Settled items stay on the board until you remove them:
+
+```bash
+qwen board prune --older-than 7
+```
+
+Only answered, declined, resolved or completed items older than the cutoff go.
+It is manual on purpose — deleting a record another participant may be reading
+is a problem worth not having, so you decide when the board is quiet.
+
 ## Limits
 
 - **Same machine, same user.** The board is a directory owned by your account;
@@ -184,6 +196,9 @@ how each pane inherits them.
   next time it reads the board.
 - **A named owner is a proposal.** Naming someone on a task records who is
   expected to take it; only claiming it makes it theirs.
+- **`decision` is by agreement, not enforcement.** The prompt tells agents not
+  to resolve one, but `qwen board resolve` is on the same command line they use
+  for everything else, so nothing stops one that ignores the instruction.
 - **There is no chat.** Everything is a task, a question, or a decision. Text
   that fits none of those belongs in a note on the task it concerns.
 

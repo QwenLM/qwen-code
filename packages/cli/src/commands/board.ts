@@ -35,6 +35,7 @@ import {
   listDecisions,
   resolveDecision,
   getBoardSection,
+  pruneCollection,
   type DecisionKind,
 } from '@qwen-code/qwen-code-core';
 import { resolveBoardName, resolveParticipantName } from './board/context.js';
@@ -113,6 +114,56 @@ export const boardCommand: CommandModule = {
         describe: 'Participant name to act as',
       })
       .option('json', { type: 'boolean', describe: 'Emit JSON' })
+
+      .command({
+        command: 'prune',
+        describe: 'Remove settled items older than a cutoff',
+        builder: (y: Argv) =>
+          y.option('older-than', {
+            type: 'number',
+            default: 7,
+            describe:
+              'Days. Only answered, declined, resolved or completed items',
+          }),
+        handler: (argv) =>
+          run(async () => {
+            const a = argv as CommonArgs & { olderThan: number };
+            const name = board(a);
+            const cutoff = Math.max(0, a.olderThan) * 86_400_000;
+            // Manual by design: nothing here runs on a timer, because deleting
+            // a record another participant may be mid-read on is a concurrency
+            // problem worth not having.
+            const [asks, decisions, tasks] = await Promise.all([
+              pruneCollection(
+                name,
+                'asks',
+                /^a-\d+\.json$/,
+                (r) => (r as { state?: string }).state !== 'open',
+                cutoff,
+              ),
+              pruneCollection(
+                name,
+                'decisions',
+                /^d-\d+\.json$/,
+                (r) => (r as { state?: string }).state !== 'open',
+                cutoff,
+              ),
+              pruneCollection(
+                name,
+                'tasks',
+                /^t-\d+\.json$/,
+                (r) => (r as { status?: string }).status === 'completed',
+                cutoff,
+              ),
+            ]);
+            const total = asks.length + decisions.length + tasks.length;
+            emit(
+              a,
+              { asks, decisions, tasks },
+              `Removed ${total} settled item${total === 1 ? '' : 's'}.`,
+            );
+          }),
+      })
 
       .command({
         command: 'protocol',

@@ -21,6 +21,7 @@
  */
 
 import * as path from 'node:path';
+import * as fsp from 'node:fs/promises';
 import lockfile from 'proper-lockfile';
 import { Mutex } from 'async-mutex';
 import { Storage } from '../../config/storage.js';
@@ -113,12 +114,85 @@ export async function withItemLock<T>(
     }
     try {
       return await fn();
+    } catch (err) {
+      // A file removed between taking the lock and reading it — a concurrent
+      // prune — must surface as the caller's "not found", the same as one that
+      // vanished before the lock. Otherwise callers see a raw ENOENT the
+      // onMissing contract said they would not.
+      if (isNodeError(err) && err.code === 'ENOENT') return onMissing();
+      throw err;
     } finally {
       try {
         await release?.();
       } catch (err) {
         debug.warn('failed to release board item lock:', err);
       }
+      // Drop the mutex once nobody is queued on it. Keeping one per path for
+      // the process lifetime is unbounded growth for a long-lived
+      // `board watch`, and re-creating an uncontended mutex costs nothing.
+      const held = fileLocks.get(filePath);
+      if (held && !held.isLocked()) fileLocks.delete(filePath);
     }
   });
+}
+
+/**
+ * Remove settled items older than `olderThanMs`.
+ *
+ * Deliberately manual rather than automatic: deleting a record another
+ * participant may be mid-read on is a concurrency problem worth not having,
+ * and a fetch-based system has no daemon that could be trusted to run a sweep.
+ * The caller decides when the board is quiet.
+ *
+ * `isSettled` decides what counts as finished for a collection, so each item
+ * type keeps its own definition rather than this module knowing all three.
+ */
+export async function pruneCollection(
+  board: string,
+  collection: string,
+  filenamePattern: RegExp,
+  isSettled: (record: unknown) => boolean,
+  olderThanMs: number,
+  now: number = Date.now(),
+): Promise<string[]> {
+  assertSafeName('board name', board);
+  const dir = getCollectionDir(board, collection);
+  let files: string[];
+  try {
+    files = await fsp.readdir(dir);
+  } catch (err) {
+    if (isNodeError(err) && err.code === 'ENOENT') return [];
+    throw err;
+  }
+
+  const removed: string[] = [];
+  for (const file of files) {
+    if (!filenamePattern.test(file)) continue;
+    const full = path.join(dir, file);
+    try {
+      const raw = await fsp.readFile(full, 'utf8');
+      if (!raw.trim()) continue;
+      const record = JSON.parse(raw) as {
+        settledAt?: number | null;
+        resolvedAt?: number | null;
+        updatedAt?: number;
+      };
+      if (!isSettled(record)) continue;
+      const at = record.settledAt ?? record.resolvedAt ?? record.updatedAt ?? 0;
+      if (!at || now - at < olderThanMs) continue;
+      // Take the lock so a concurrent settle cannot be lost between the read
+      // above and the unlink.
+      await withItemLock(
+        full,
+        async () => {
+          await fsp.unlink(full);
+          removed.push(file);
+        },
+        () => {},
+      );
+    } catch (err) {
+      debug.warn(`skipping unprunable ${file}:`, err);
+    }
+  }
+  return removed;
 }

@@ -17,8 +17,11 @@
  *
  * Two rules distinguish this from an `ask`:
  *
- * - **No agent resolves one.** `resolveDecision` is reached from a human-facing
- *   surface. An agent raises; it does not settle.
+ * - **No agent is supposed to resolve one.** This is a convention the prompt
+ *   states, not an invariant the runtime enforces: `qwen board resolve` sits on
+ *   the same CLI an agent uses for everything else, so anything with a shell
+ *   could settle its own decision. Enforcing it would need a surface the agent
+ *   panes do not carry; until then the honest description is "by agreement".
  * - **No expiry.** A decision that expires silently converts "nobody has looked
  *   yet" into "the system decided for them", which is the exact authority
  *   nothing but a human may hold. Decisions stall visibly instead — the cost
@@ -208,8 +211,9 @@ export class DecisionSettledError extends Error {
 }
 
 /**
- * Resolve a decision. Reached from a human-facing surface — no agent-visible
- * tool routes here, which is the mechanism behind "no agent resolves one".
+ * Resolve a decision. Intended for the human, and the prompt tells agents not
+ * to call it — but nothing here checks, so treat "no agent resolves one" as a
+ * convention rather than a guarantee (see the module header).
  */
 export async function resolveDecision(
   board: string,

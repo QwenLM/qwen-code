@@ -217,6 +217,7 @@ async function buildLayout(a: FleetUpArgs): Promise<void> {
     await tmuxSelectLayout(target, 'main-vertical');
   }
 
+  await tmuxSelectPaneTitle(boardPane, 'board');
   await tmuxSelectPane(boardPane);
 
   if (a.with.length > 0) {
