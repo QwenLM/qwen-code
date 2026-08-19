@@ -13,6 +13,8 @@ import {
   getBoardTask,
   listBoardTasks,
   claimBoardTask,
+  blockBoardTask,
+  blockedTasks,
   updateBoardTask,
   releaseBoardTask,
   TaskClaimedError,
@@ -168,5 +170,53 @@ describe('board tasks', () => {
     await expect(
       createBoardTask({ board: '../escape', subject: 's' }),
     ).rejects.toThrow(/Invalid board name/);
+  });
+
+  describe('dependencies', () => {
+    it('writes both halves of an edge', async () => {
+      const a = await createBoardTask({ board: BOARD, subject: 'a' });
+      const b = await createBoardTask({ board: BOARD, subject: 'b' });
+      await blockBoardTask(BOARD, b.id, a.id);
+
+      expect((await getBoardTask(BOARD, b.id))?.blockedBy).toEqual([a.id]);
+      expect((await getBoardTask(BOARD, a.id))?.blocks).toEqual([b.id]);
+    });
+
+    it('is idempotent and refuses self-blocking', async () => {
+      const a = await createBoardTask({ board: BOARD, subject: 'a' });
+      const b = await createBoardTask({ board: BOARD, subject: 'b' });
+      await blockBoardTask(BOARD, b.id, a.id);
+      await blockBoardTask(BOARD, b.id, a.id);
+      expect((await getBoardTask(BOARD, b.id))?.blockedBy).toEqual([a.id]);
+
+      await expect(blockBoardTask(BOARD, a.id, a.id)).rejects.toThrow(
+        /cannot block itself/,
+      );
+    });
+
+    it('clears the block when the blocker completes', async () => {
+      const a = await createBoardTask({ board: BOARD, subject: 'a' });
+      const b = await createBoardTask({ board: BOARD, subject: 'b' });
+      await blockBoardTask(BOARD, b.id, a.id);
+
+      expect(
+        blockedTasks(await listBoardTasks(BOARD)).map((t) => t.id),
+      ).toEqual([b.id]);
+
+      await claimBoardTask(BOARD, a.id, 'api');
+      await updateBoardTask(BOARD, a.id, { status: 'completed', by: 'api' });
+      expect(blockedTasks(await listBoardTasks(BOARD))).toEqual([]);
+    });
+
+    // A blocker that was pruned should not wedge the board forever.
+    it('treats a missing blocker as satisfied', async () => {
+      const b = await createBoardTask({ board: BOARD, subject: 'b' });
+      await updateBoardTask(BOARD, b.id, { note: 'x' });
+      const withGhost = (await listBoardTasks(BOARD)).map((t) => ({
+        ...t,
+        blockedBy: ['t-999'],
+      }));
+      expect(blockedTasks(withGhost)).toEqual([]);
+    });
   });
 });

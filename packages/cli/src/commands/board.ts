@@ -25,6 +25,7 @@ import {
   createBoardTask,
   listBoardTasks,
   claimBoardTask,
+  blockBoardTask,
   updateBoardTask,
   createAsk,
   listAsks,
@@ -336,6 +337,21 @@ export const boardCommand: CommandModule = {
             const a = argv as CommonArgs & { id: string };
             const task = await claimBoardTask(board(a), a.id, participant(a));
             emit(a, task, `${task.id} claimed by ${task.owner}`);
+          }),
+      })
+
+      .command({
+        command: 'block <id> --on <blocker>',
+        describe: 'Record that <id> cannot start until <blocker> completes',
+        builder: (y: Argv) =>
+          y
+            .positional('id', { type: 'string', demandOption: true })
+            .option('on', { type: 'string', demandOption: true }),
+        handler: (argv) =>
+          run(async () => {
+            const a = argv as CommonArgs & { id: string; on: string };
+            await blockBoardTask(board(a), a.id, a.on);
+            emit(a, { id: a.id, blockedBy: a.on }, `${a.id} waits on ${a.on}`);
           }),
       })
 

@@ -6,7 +6,12 @@
 
 import { describe, it, expect } from 'vitest';
 import { resolveBoardName, resolveParticipantName } from './context.js';
-import { renderBoard, age, type BoardSnapshot } from './render.js';
+import {
+  renderBoard,
+  findDeadlocks,
+  age,
+  type BoardSnapshot,
+} from './render.js';
 import type {
   BoardTaskRecord,
   AskRecord,
@@ -23,6 +28,8 @@ function task(over: Partial<BoardTaskRecord> = {}): BoardTaskRecord {
     createdAt: 0,
     updatedAt: 0,
     notes: [],
+    blocks: [],
+    blockedBy: [],
     ...over,
   };
 }
@@ -143,5 +150,49 @@ describe('board rendering', () => {
     expect(age(0, 4 * 60_000)).toBe('4m');
     expect(age(0, 3 * 3_600_000)).toBe('3h');
     expect(age(0, 2 * 86_400_000)).toBe('2d');
+  });
+
+  // The one thing a cross-session view sees that no participant sees about
+  // itself: from inside, each is simply waiting.
+  describe('deadlock detection', () => {
+    it('finds a mutual wait once, not twice', () => {
+      const pairs = findDeadlocks([
+        ask({ id: 'a-1', from: 'api', to: 'web' }),
+        ask({ id: 'a-2', from: 'web', to: 'api' }),
+      ]);
+      expect(pairs).toHaveLength(1);
+      expect(pairs[0].sort()).toEqual(['api', 'web']);
+    });
+
+    it('ignores one-way waits and settled asks', () => {
+      expect(
+        findDeadlocks([ask({ id: 'a-1', from: 'api', to: 'web' })]),
+      ).toEqual([]);
+      expect(
+        findDeadlocks([
+          ask({ id: 'a-1', from: 'api', to: 'web' }),
+          ask({ id: 'a-2', from: 'web', to: 'api', state: 'answered' }),
+        ]),
+      ).toEqual([]);
+    });
+
+    it('surfaces the cycle above the asks it is made of', () => {
+      const out = renderBoard(
+        {
+          board: 'demo',
+          tasks: [],
+          decisions: [],
+          asks: [
+            ask({ id: 'a-1', from: 'api', to: 'web' }),
+            ask({ id: 'a-2', from: 'web', to: 'api' }),
+          ],
+        },
+        now,
+      );
+      const lines = out.split('\n');
+      expect(lines.findIndex((l) => l.includes('each waiting'))).toBeLessThan(
+        lines.findIndex((l) => l.includes('a-1')),
+      );
+    });
   });
 });

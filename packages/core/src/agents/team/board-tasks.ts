@@ -56,6 +56,10 @@ export interface BoardTaskRecord {
   updatedAt: number;
   /** Free text attached to the work, not to a participant. */
   notes: string[];
+  /** Task ids this one blocks — they cannot start until it completes. */
+  blocks: string[];
+  /** Task ids blocking this one. */
+  blockedBy: string[];
 }
 
 function tasksDir(board: string): string {
@@ -116,6 +120,8 @@ export async function createBoardTask(
       createdAt: now,
       updatedAt: now,
       notes: [],
+      blocks: [],
+      blockedBy: [],
     };
     try {
       await fs.writeFile(
@@ -147,6 +153,54 @@ export async function getBoardTask(
     debug.warn(`unreadable task ${id}:`, err);
     return null;
   }
+}
+
+/**
+ * Record that `blockerId` must finish before `taskId` can start, writing both
+ * halves.
+ *
+ * Both sides are stored rather than derived because a reader holds one task at
+ * a time: answering "what is this waiting on" from a one-sided edge would mean
+ * scanning every other task. The cost is that the two can drift if a write
+ * fails between them, which is why each side is written under its own lock and
+ * a missing counterpart is tolerated on read.
+ */
+export async function blockBoardTask(
+  board: string,
+  taskId: string,
+  blockerId: string,
+): Promise<void> {
+  if (taskId === blockerId) {
+    throw new Error(`Task "${taskId}" cannot block itself.`);
+  }
+  await mutate(board, taskId, (task) => ({
+    ...task,
+    blockedBy: task.blockedBy?.includes(blockerId)
+      ? task.blockedBy
+      : [...(task.blockedBy ?? []), blockerId],
+  }));
+  await mutate(board, blockerId, (task) => ({
+    ...task,
+    blocks: task.blocks?.includes(taskId)
+      ? task.blocks
+      : [...(task.blocks ?? []), taskId],
+  }));
+}
+
+/**
+ * Tasks that cannot start yet: something they are blocked by has not
+ * completed. A blocker that no longer exists is treated as satisfied — a
+ * pruned or deleted task should not wedge the board forever.
+ */
+export function blockedTasks(tasks: BoardTaskRecord[]): BoardTaskRecord[] {
+  const byId = new Map(tasks.map((t) => [t.id, t]));
+  return tasks.filter(
+    (t) =>
+      t.status !== 'completed' &&
+      (t.blockedBy ?? []).some(
+        (id) => byId.get(id) && byId.get(id)!.status !== 'completed',
+      ),
+  );
 }
 
 export interface ListBoardTasksFilter {

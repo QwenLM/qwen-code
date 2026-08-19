@@ -59,6 +59,7 @@ qwen board watch                      # the same, refreshed until you stop it
 
 qwen board task "investigate the api contract"
 qwen board claim t-1                  # take it before starting
+qwen board block t-3 --on t-1         # t-3 waits for t-1
 qwen board done t-1 --note "status is an int, not a string"
 ```
 
