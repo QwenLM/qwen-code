@@ -4383,6 +4383,15 @@ export class CoreToolScheduler {
       );
     }
 
+    // Structured tools resolve normally even after an abort (their
+    // getConfirmationDetails implementations do not read the signal), so
+    // re-check here before bouncing: a cancelled call must not fire the
+    // permission notification hook, open a leaking blocked_on_user span, or
+    // open the IDE diff.
+    if (signal.aborted) {
+      return false;
+    }
+
     this.bouncedAwaitingApproval.add(callId);
 
     let confirmationDetails: ToolCallConfirmationDetails;
@@ -4391,7 +4400,9 @@ export class CoreToolScheduler {
       confirmationDetails = {
         ...toolDetails,
         hideAlwaysAllow: true,
-        hookAskReason: reason,
+        hookAskReason:
+          reason ??
+          `A PreToolUse hook requested confirmation before running ${toolName}.`,
         onConfirm: (outcome, payload) =>
           this.handleConfirmationResponse(
             callId,
@@ -4626,7 +4637,21 @@ export class CoreToolScheduler {
             return;
           }
           // The signal aborted while the confirmation view was being
-          // prepared — fall through to the deny path below.
+          // prepared — cancel rather than report a hook denial, so a
+          // user-initiated cancellation is not misattributed to the hook.
+          if (signal.aborted) {
+            const cancelledResponse = createCancelledResponse(
+              scheduledCall.request,
+              'Tool call cancelled before execution.',
+              'not_started',
+            );
+            observeSyntheticProducer(cancelledResponse);
+            this.setStatusInternal(callId, 'cancelled', cancelledResponse);
+            if (this.toolSpans.has(callId)) {
+              setToolSpanCancelled(span);
+            }
+            return;
+          }
         }
 
         // Hook blocked the execution.

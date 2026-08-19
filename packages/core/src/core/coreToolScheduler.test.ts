@@ -12502,6 +12502,87 @@ describe('CoreToolScheduler telemetry spans', () => {
     );
   });
 
+  it('bounces a PreToolUse ask on an exec tool to its command confirmation with the hook reason attached', async () => {
+    // Mirrors the edit case above for the exec half of the branch (#9434).
+    const toolOnConfirm = vi.fn();
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'ok',
+      returnDisplay: 'ok',
+    });
+    const execTool = new MockTool({
+      name: 'mockTool',
+      execute,
+      getConfirmationDetails: async () => ({
+        type: 'exec',
+        title: 'Confirm command',
+        command: 'git status',
+        rootCommand: 'git',
+        onConfirm: toolOnConfirm,
+      }),
+    });
+    const messageBus = askMessageBus('path requires human review');
+    const { onToolCallsUpdate, onAllToolCallsComplete } = await scheduleWithAsk(
+      { messageBus, tools: [execTool] },
+    );
+
+    const waiting = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+
+    const details =
+      waiting.confirmationDetails as ToolCallConfirmationDetails & {
+        command?: string;
+        hideAlwaysAllow?: boolean;
+      };
+    expect(details.type).toBe('exec');
+    expect(details.command).toBe('git status');
+    expect(details.hookAskReason).toBe('path requires human review');
+    expect(details.hideAlwaysAllow).toBe(true);
+
+    await details.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+    const completed = onAllToolCallsComplete.mock.calls.at(
+      -1,
+    )?.[0] as ToolCall[];
+    expect(completed[0].status).toBe('success');
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(toolOnConfirm).toHaveBeenCalledWith(
+      ToolConfirmationOutcome.ProceedOnce,
+      undefined,
+    );
+  });
+
+  it('cancels rather than denies when the signal aborts while the confirmation view is prepared', async () => {
+    // A user-initiated cancellation during getConfirmationDetails must land
+    // 'cancelled', not a hook denial carrying the hook's reason (#9434).
+    const execute = vi.fn();
+    const abortController = new AbortController();
+    const abortingTool = new MockTool({
+      name: 'mockTool',
+      execute,
+      getConfirmationDetails: async () => {
+        abortController.abort();
+        throw new Error('aborted during view preparation');
+      },
+    });
+    const messageBus = askMessageBus('path requires human review');
+    const { onAllToolCallsComplete } = await scheduleWithAsk({
+      messageBus,
+      tools: [abortingTool],
+      abortController,
+    });
+
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+    const completed = onAllToolCallsComplete.mock.calls.at(
+      -1,
+    )?.[0] as ToolCall[];
+    expect(completed[0].status).toBe('cancelled');
+    expect(execute).not.toHaveBeenCalled();
+  });
+
   it('keeps the synthetic reason prompt when a PreToolUse ask bounces a non-structured tool', async () => {
     // Tools whose confirmation view is a plain 'info' description keep the
     // hook-reason prompt (the description adds nothing over it).

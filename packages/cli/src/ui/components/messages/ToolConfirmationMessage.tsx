@@ -66,6 +66,15 @@ export const ToolConfirmationMessage: React.FC<
   // interactive confirmation while the tool's own view (e.g. edit diff)
   // is being shown (#9434). Undefined for ordinary confirmations.
   const hookAskReason = confirmationDetails.hookAskReason;
+  // Cap the hook reason to a few lines so a verbose hook cannot push the
+  // question/options off a short terminal (#9434 follow-up).
+  const HOOK_ASK_REASON_MAX_LINES = 5;
+  const cappedHookAskReason = hookAskReason
+    ? hookAskReason.split('\n').slice(0, HOOK_ASK_REASON_MAX_LINES).join('\n') +
+      (hookAskReason.split('\n').length > HOOK_ASK_REASON_MAX_LINES
+        ? '\n…'
+        : '')
+    : undefined;
 
   const settings = useSettings();
   const preferredEditor = settings.merged.general?.preferredEditor as
@@ -196,14 +205,12 @@ export const ToolConfirmationMessage: React.FC<
           hard: true,
         }).split('\n').length + 1
       : 0;
-    const HOOK_ASK_REASON_HEIGHT = hookAskReason
-      ? wrapAnsi(
-          `⚠ ${t('Hook requested confirmation: {{reason}}', {
-            reason: hookAskReason,
-          })}`,
-          warningContentWidth,
-          { trim: false, hard: true },
-        ).split('\n').length + 1
+    const HOOK_ASK_REASON_HEIGHT = cappedHookAskReason
+      ? warningsHeight([
+          t('Hook requested confirmation: {{reason}}', {
+            reason: cappedHookAskReason,
+          }),
+        ])
       : 0;
 
     const surroundingElementsHeight =
@@ -713,14 +720,14 @@ export const ToolConfirmationMessage: React.FC<
   // A PreToolUse hook escalated this call while the tool's own view (e.g.
   // the edit diff) is shown — surface the hook's reason above the body so
   // the user knows why the prompt appeared (#9434).
-  if (hookAskReason) {
+  if (cappedHookAskReason) {
     bodyContent = (
       <Box flexDirection="column">
         <Box paddingX={1} marginLeft={1} marginBottom={1}>
           <Text color={theme.status.warning}>
             ⚠{' '}
             {t('Hook requested confirmation: {{reason}}', {
-              reason: hookAskReason,
+              reason: cappedHookAskReason,
             })}
           </Text>
         </Box>
