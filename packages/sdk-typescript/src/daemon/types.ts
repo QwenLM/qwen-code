@@ -1700,6 +1700,67 @@ export interface DaemonMcpBudgetStatusCell extends DaemonStatusCell {
   refusedCount: number;
 }
 
+/** Where the daemon found a usable OSS credential, if anywhere. */
+export type DaemonArtifactCredentialSource =
+  | 'request'
+  | 'memory'
+  | 'settings'
+  | 'env'
+  | 'none';
+
+/**
+ * The share destination the daemon would use right now. Credentials are
+ * never echoed — only where one was found.
+ */
+export interface DaemonArtifactPublishConfig {
+  v: 1;
+  workspaceCwd: string;
+  publisher: string;
+  endpoint: string;
+  bucket: string;
+  keyPrefix: string;
+  publicBaseUrl: string;
+  credentialsSource: DaemonArtifactCredentialSource;
+}
+
+export interface DaemonArtifactPublishRequest {
+  /** Workspace-relative (or absolute in-workspace) path of the HTML file. */
+  path: string;
+  title?: string;
+  /**
+   * Destination overrides for this call. Fields left empty fall back to the
+   * remembered target, then to settings.
+   */
+  config?: {
+    endpoint?: string;
+    bucket?: string;
+    keyPrefix?: string;
+    publicBaseUrl?: string;
+    accessKeyId?: string;
+    accessKeySecret?: string;
+  };
+  /**
+   * `'memory'` keeps this call's destination and credentials in the daemon
+   * process only, until it exits. Persisting instead is the caller's job, via
+   * the settings API.
+   */
+  remember?: 'memory';
+}
+
+export interface DaemonArtifactPublishResult {
+  v: 1;
+  workspaceCwd: string;
+  id: string;
+  url: string;
+  /**
+   * Whether a HEAD on the returned URL succeeded. `null` when the probe could
+   * not complete, which says nothing either way. A `false` here with a
+   * successful upload usually means the bucket blocks public access.
+   */
+  reachable?: boolean | null;
+  reachableStatus?: number;
+}
+
 export interface DaemonWorkspaceMcpStatus {
   v: 1;
   workspaceCwd: string;

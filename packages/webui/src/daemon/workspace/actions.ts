@@ -615,6 +615,19 @@ export function createDaemonWorkspaceActions({
         'Read file bytes timed out',
       );
     },
+    async artifactPublishConfig() {
+      const client = requireClient(getClient, 'Share configuration failed');
+      return withActionTimeout(
+        client.artifactPublishConfig(),
+        'Share configuration timed out',
+      );
+    },
+    async publishArtifact(req) {
+      const client = requireClient(getClient, 'Share failed');
+      // No withActionTimeout: an upload plus the reachability probe can
+      // outlast the default action budget on a large page or a slow link.
+      return client.publishArtifact(req);
+    },
 
     async writeFile(req) {
       const client = requireClient(getClient, 'Write file failed');

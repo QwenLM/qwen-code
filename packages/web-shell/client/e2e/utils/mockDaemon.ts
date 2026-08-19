@@ -68,6 +68,10 @@ export interface WebShellDaemonScenario {
   sessionCatalogVersion: DaemonSessionCatalogVersion;
   events: DaemonEvent[];
   state: DaemonSessionState;
+  /** Share destination reported by `GET /workspace/artifact/publish-config`. */
+  artifactPublishConfig: Record<string, unknown>;
+  /** Result returned by `POST /workspace/artifact/publish`. */
+  artifactPublishResult: Record<string, unknown>;
   /** Artifact list returned by `GET /session/:id/artifacts`. */
   artifacts: DaemonSessionArtifact[];
   /** File contents served by `GET /file?path=...`, keyed by requested path. */
@@ -373,6 +377,24 @@ export function createWebShellDaemonScenario(
     events: overrides.events ?? [],
     state,
     artifacts: overrides.artifacts ?? [],
+    artifactPublishConfig: overrides.artifactPublishConfig ?? {
+      v: 1,
+      workspaceCwd,
+      publisher: 'local',
+      endpoint: '',
+      bucket: '',
+      keyPrefix: 'artifacts',
+      publicBaseUrl: '',
+      credentialsSource: 'none',
+    },
+    artifactPublishResult: overrides.artifactPublishResult ?? {
+      v: 1,
+      workspaceCwd,
+      id: 'mock-artifact',
+      url: 'https://example.com/artifacts/mock-artifact/index.html',
+      reachable: true,
+      reachableStatus: 200,
+    },
     workspaceFiles: overrides.workspaceFiles ?? {},
     gitStatus: overrides.gitStatus,
     gitHubPrs: overrides.gitHubPrs,
@@ -613,6 +635,9 @@ function isDaemonPath(path: string): boolean {
     path === '/workspace/extensions/check-updates' ||
     path === '/workspace/mcp' ||
     path === '/workspace/voice' ||
+    /^(?:\/workspaces\/[^/]+)?\/(?:workspace\/)?artifact\/publish(?:-config)?\/?$/.test(
+      path,
+    ) ||
     /^\/workspaces\/[^/]+\/(voice|providers|settings)\/?$/.test(path) ||
     /^\/workspace\/mcp\/[^/]+\/tools\/?$/.test(path) ||
     /^\/workspace\/mcp\/[^/]+\/resources\/?$/.test(path) ||
@@ -775,6 +800,22 @@ function isDaemonRoute(method: string, path: string): boolean {
     return true;
   if (method === 'POST' && /^\/session\/[^/]+\/btw\/?$/.test(path)) return true;
   if (method === 'GET' && /^\/file\/?$/.test(path)) return true;
+  if (
+    method === 'GET' &&
+    /^(?:\/workspaces\/[^/]+)?\/artifact\/publish-config\/?$/.test(path)
+  ) {
+    return true;
+  }
+  if (
+    method === 'POST' &&
+    /^(?:\/workspaces\/[^/]+)?\/artifact\/publish\/?$/.test(path)
+  ) {
+    return true;
+  }
+  if (method === 'GET' && path === '/workspace/artifact/publish-config') {
+    return true;
+  }
+  if (method === 'POST' && path === '/workspace/artifact/publish') return true;
   if (method === 'GET' && /^\/session\/[^/]+\/artifacts\/?$/.test(path)) {
     return true;
   }
@@ -869,6 +910,24 @@ async function handleDaemonRoute(
     // The manager kicks off an update check on mount. Defaults to "no updates
     // available", overridable via the scenario's `extensionUpdateCheck`.
     await json(route, scenario.extensionUpdateCheck);
+    return;
+  }
+  if (
+    method === 'GET' &&
+    /^(?:\/workspaces\/[^/]+)?\/(?:workspace\/)?artifact\/publish-config\/?$/.test(
+      path,
+    )
+  ) {
+    await json(route, scenario.artifactPublishConfig);
+    return;
+  }
+  if (
+    method === 'POST' &&
+    /^(?:\/workspaces\/[^/]+)?\/(?:workspace\/)?artifact\/publish\/?$/.test(
+      path,
+    )
+  ) {
+    await json(route, scenario.artifactPublishResult);
     return;
   }
   if (method === 'GET' && path === '/workspace/mcp') {

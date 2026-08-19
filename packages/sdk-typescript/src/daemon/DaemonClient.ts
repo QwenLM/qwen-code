@@ -98,6 +98,9 @@ import type {
   DaemonGitHubPullRequestList,
   DaemonGitHubPullRequestCreateResult,
   DaemonWorkspaceMcpStatus,
+  DaemonArtifactPublishConfig,
+  DaemonArtifactPublishRequest,
+  DaemonArtifactPublishResult,
   DaemonWorkspaceMcpInitializeResult,
   DaemonWorkspaceMcpReloadOptions,
   DaemonWorkspaceMcpToolsStatus,
@@ -3706,6 +3709,32 @@ export class DaemonClient {
     );
   }
 
+  /**
+   * The share destination the daemon would use for the primary workspace.
+   * Never returns credentials, only where one was found.
+   */
+  async artifactPublishConfig(
+    clientId?: string,
+  ): Promise<DaemonArtifactPublishConfig> {
+    return await this.jsonRequest<DaemonArtifactPublishConfig>(
+      '/workspace/artifact/publish-config',
+      'GET /workspace/artifact/publish-config',
+      { clientId, mode: 'rest' },
+    );
+  }
+
+  /** Publishes a workspace HTML file through the configured OSS destination. */
+  async publishArtifact(
+    req: DaemonArtifactPublishRequest,
+    clientId?: string,
+  ): Promise<DaemonArtifactPublishResult> {
+    return await this.jsonRequest<DaemonArtifactPublishResult>(
+      '/workspace/artifact/publish',
+      'POST /workspace/artifact/publish',
+      { method: 'POST', body: req, clientId, mode: 'rest' },
+    );
+  }
+
   async setWorkspaceSetting(
     scope: 'workspace' | 'user',
     key: string,
@@ -5352,6 +5381,24 @@ export class WorkspaceDaemonClient {
 
   workspaceMcp(): Promise<DaemonWorkspaceMcpStatus> {
     return this.get('/mcp', 'GET /workspaces/:workspace/mcp');
+  }
+
+  artifactPublishConfig(): Promise<DaemonArtifactPublishConfig> {
+    return this.get(
+      '/artifact/publish-config',
+      'GET /workspaces/:workspace/artifact/publish-config',
+    );
+  }
+
+  publishArtifact(
+    req: DaemonArtifactPublishRequest,
+  ): Promise<DaemonArtifactPublishResult> {
+    return this.client.workspaceJsonRequest<DaemonArtifactPublishResult>(
+      this.workspaceSelector,
+      '/artifact/publish',
+      'POST /workspaces/:workspace/artifact/publish',
+      { method: 'POST', body: req, mode: 'rest' },
+    );
   }
 
   /**

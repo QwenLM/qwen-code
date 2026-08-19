@@ -243,6 +243,10 @@ import {
   registerWorkspaceQualifiedGitLogRoutes,
 } from './routes/workspace-git-log.js';
 import {
+  registerWorkspaceArtifactPublishRoutes,
+  registerWorkspaceQualifiedArtifactPublishRoutes,
+} from './routes/workspace-artifact-publish.js';
+import {
   registerWorkspaceGitBranchRoutes,
   registerWorkspaceQualifiedGitBranchRoutes,
 } from './routes/workspace-git-branches.js';
@@ -2030,6 +2034,14 @@ export function createServeApp(
     sendBridgeError,
   });
   registerWorkspaceQualifiedGitLogRoutes(app, {
+    workspaceRegistry,
+    sendBridgeError,
+  });
+  registerWorkspaceArtifactPublishRoutes(app, {
+    boundWorkspace: primaryBoundWorkspace,
+    sendBridgeError,
+  });
+  registerWorkspaceQualifiedArtifactPublishRoutes(app, {
     workspaceRegistry,
     sendBridgeError,
   });
