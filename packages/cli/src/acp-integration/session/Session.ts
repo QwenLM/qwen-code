@@ -2887,7 +2887,10 @@ export class Session implements SessionContext {
     });
     // Register the tool exactly where the spawner is wired: the registry is
     // session-scoped, so every daemon session that can spawn sub-sessions
-    // declares the tool, and no non-daemon session ever does.
+    // declares the tool, and no non-daemon session ever does. This registry was
+    // already built by `config.initialize()`, before the spawner above existed;
+    // registries built later (sub-agent / override rebuilds) instead pick the
+    // tool up from `createToolRegistry`, which gates on the wired spawner.
     this.config
       .getToolRegistry()
       .registerTool(new CreateSubSessionTool(this.config));

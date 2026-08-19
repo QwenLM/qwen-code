@@ -8720,11 +8720,25 @@ export class Config {
       });
     }
 
-    // create_sub_session is daemon-only: it is registered by the ACP Session
-    // when it wires the sub-session spawner (see acp-integration's Session),
-    // NOT here. Registering it unconditionally used to advertise a tool that
-    // can never work in interactive TUI / headless runs, polluting the
-    // model's action space (and ToolSearch results) with a dead entry.
+    // create_sub_session is daemon-only: it needs the bridge, wired onto the
+    // Config as a sub-session spawner by the ACP session. Registering it
+    // unconditionally advertised a tool that can never work in interactive TUI
+    // / headless runs, so gate on the spawner actually being present.
+    //
+    // The ACP session's own registry is built before its constructor wires the
+    // spawner, so that one is registered by the Session itself. Every registry
+    // built afterwards reaches the spawner from here: sub-agent and override
+    // configs are `Object.create(base)`, and `copyDiscoveredToolsFrom` carries
+    // discovered tools only, so without this a daemon sub-agent would silently
+    // lose the tool.
+    if (this.getSubSessionSpawner()) {
+      await registerLazy(ToolNames.CREATE_SUB_SESSION, async () => {
+        const { CreateSubSessionTool } = await import(
+          '../tools/create-sub-session.js'
+        );
+        return new CreateSubSessionTool(this);
+      });
+    }
 
     // Register team collaboration tools (experimental). The team-specific
     // tools (team_create/team_delete/task_create/task_update/task_list)
