@@ -253,20 +253,26 @@ For **local-diff and file-path reviews**, capture and plan in one command:
 # for a file-path review:
 "${QWEN_CODE_CLI:-qwen}" review capture-local --file <file> --effort <effort> \
   --out .qwen/tmp/qwen-review-<target>-plan.json
-# The target is the file's repo-relative path FLATTENED by the CLI's own
-# `safeTarget` rule (lib/paths.ts) in full: every character outside
-# [A-Za-z0-9._-] becomes `_`, every run of 2+ dots becomes `_`, leading
-# dots/underscores are stripped — e.g. `src/index.ts` → `src_index.ts`,
-# `../x.ts` → `x.ts`. Pass that exact token everywhere the target appears,
-# so the token you name and the filename the CLI derives cannot diverge.
-# Never the basename: the target keys the tmp stems AND the
-# review cache, and `src/index.ts` and `test/index.ts` reviewed under the
-# shared target `index.ts` would overwrite each other's cache — the second
-# review erasing the first file's still-open findings. Flattened, not raw:
-# the CLI flattens separators when it derives filenames anyway, and a raw
-# slashed target would nest the plan/cache under directories that Step 9's
-# `cleanup <target>` sweep and Step 8's cache write never look in. Pass the
-# SAME flattened token everywhere the target appears.
+# The plan's own `--out` is the ONE name you may choose: you write it and you
+# read it back, so it cannot diverge from anything. Pick
+# `.qwen/tmp/qwen-review-file-plan.json` and move on.
+#
+# Every OTHER artifact of this round — the roster, coverage, the reverse-audit
+# transcripts, compose-review's `--out`, Step 8's cache name, Step 9's
+# `cleanup <target>` — must carry the token the CLI derived, and the report
+# hands it to you as **`target`**. READ IT; do not recompute it. `qwen review
+# run` pins the artifact name it waits for from the same canonicalisation, and
+# a stem flattened by hand agrees with it only where the two happen to: put a
+# symlink below the repo root (`ln -s src srclink`, then review
+# `srclink/foo.ts`) and every artifact you name misses the poll, so a review
+# that has already run — and with --comment, already posted — reports that no
+# verdict was produced.
+#
+# Never the basename either: the target keys the tmp stems AND the review
+# cache, and `src/index.ts` and `test/index.ts` sharing the target
+# `index.ts` would overwrite each other's cache, the second review erasing
+# the first file's still-open findings. The CLI's token never collides that
+# way; a hand-picked one can.
 # <effort> is the resolved level (local defaults to medium). It is recorded in
 # the plan so the roster, check-coverage and compose-review all read one value.
 ```

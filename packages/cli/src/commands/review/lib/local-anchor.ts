@@ -228,17 +228,44 @@ function renderingAttributes(
     return out; // every path falls back to `'unknown'`
   }
   // Records are `<path> NUL <attr> NUL <value> NUL`, repeated.
+  const drivers = new Set<string>();
   const f = raw.split('\0');
   for (let i = 0; i + 2 < f.length; i += 3) {
     const [path, attr, value] = [f[i], f[i + 1], f[i + 2]];
     if (path === undefined || attr === undefined || value === undefined) break;
+    if (attr === 'diff' && !ATTR_STATES.has(value)) drivers.add(value);
     out[path] =
       out[path] === undefined
         ? `${attr}=${value}`
         : `${out[path]},${attr}=${value}`;
   }
+  // `diff=<driver>` names a driver whose behaviour lives in git CONFIG, not
+  // in any attributes file — and `diff.<driver>.binary` flips a section
+  // between readable hunks and "Binary files … differ" with the attribute
+  // value, the mode and the blob all standing still. `check-attr` reports the
+  // NAME; the config is a second question, and only for the paths that name
+  // one. (`textconv` is the driver's other rendering knob and is neutralised
+  // by the pinned `--no-textconv`; unpinning that flag means adding it here.)
+  for (const driver of drivers) {
+    const binary = gitOpt(
+      '-C',
+      repoRoot === '' ? '.' : repoRoot,
+      'config',
+      '--get',
+      `diff.${driver}.binary`,
+    );
+    if (binary === null) continue;
+    for (const [path, attrs] of Object.entries(out)) {
+      if (attrs.includes(`diff=${driver}`)) {
+        out[path] = `${attrs},${driver}.binary=${binary}`;
+      }
+    }
+  }
   return out;
 }
+
+/** `check-attr` answers for a set attribute, not a driver name. */
+const ATTR_STATES = new Set(['unspecified', 'set', 'unset']);
 
 /** One id for the whole state: order-independent, HEAD included. */
 export function stateIdOf(

@@ -70,6 +70,13 @@ interface CaptureLocalArgs {
 }
 
 type CaptureLocalResult = PlanReport & {
+  /**
+   * The review's target token, as the CLI derived it — the stem every other
+   * artifact of this round must carry. Read it; do not recompute it. The
+   * plan's own `--out` is the one name the caller may choose freely, because
+   * the caller both writes and reads that one.
+   */
+  target: string;
   /** The review's effort, recorded so the roster reads one value everywhere. */
   effort?: ReviewEffort;
   diffPath: string;
@@ -242,20 +249,37 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   // TOCTOU guard: the diff was snapshotted before the hashes were computed,
   // and an editor save landing in that window makes the candidate certify
   // bytes THIS round never reviewed — the one uncertainty in this module
-  // that failed OPEN. Re-capture and compare: differing bytes withhold the
-  // candidate (the plan still reviews the FIRST capture) AND refuse this
-  // round's own incremental scoping, which reads the very same hashes —
-  // see `anchorRefusalReason`'s first clause. The cost is a full-range
-  // review now and no anchor for the next round. Endpoint comparison, so a
-  // write-then-revert entirely inside the window is invisible to it — that
-  // shape leaves the reviewed bytes and the hashed bytes equal anyway, so
-  // the certificate stays true; what it cannot catch is a revert that
-  // restores DIFFERENT bytes, a shape no editor produces by accident.
+  // that failed OPEN. Differing bytes withhold the candidate (the plan still
+  // reviews the FIRST capture) AND refuse this round's own incremental
+  // scoping, which reads the very same hashes — see `anchorRefusalReason`'s
+  // first clause. The cost is a full-range review now and no anchor next
+  // round.
+  //
+  // BOTH endpoints are re-read, the diff and the hashes, because the hash
+  // pass sits BETWEEN the two diff snapshots and a write that straddles it
+  // is invisible to the diffs alone. Capture B0 → autosave writes B1 → the
+  // hashes read B1 → undo restores B0 → the re-capture reads B0: the two
+  // diffs agree, and the candidate certifies B1's identity for a round that
+  // reviewed B0. The earlier note here had this backwards — it called a
+  // same-bytes revert harmless and a different-bytes revert the uncatchable
+  // one, when a different-bytes revert moves the endpoints and IS caught,
+  // and the same-bytes straddle is what poisons the hashes. "No editor does
+  // that by accident" is no answer to an autosave racing an undo.
+  //
+  // Re-hashing is one extra pass over the plan's paths, on the same batched
+  // `hash-object` the first pass uses.
   const recapture = captureLocalDiff({
     file,
     includeUntracked: args.untracked,
   });
-  const treeHeldStill = capture.diff.equals(recapture.diff);
+  const rehashes = hashWorktreeFiles(capture.repoRoot, planPaths);
+  const treeHeldStill =
+    capture.diff.equals(recapture.diff) &&
+    // `movedSince`, not `changedSince`: a path unhashable on both reads did
+    // not move between them, and treating it as a move would withhold the
+    // candidate on every round holding a pending deletion — the same
+    // conflation that made the convergence stop unreachable.
+    movedSince(hashes, rehashes).length === 0;
   const candidate: LocalCacheCandidate = {
     v: 1,
     target,
@@ -411,12 +435,24 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
         // The stop condition is the SYMMETRIC set: a deleted-since-cache
         // path with no diff section left is still a change, and "no
         // changes" must not be claimed over it.
-        stateMoved.length === 0
+        stateMoved.length === 0 && stateChanged.length === 0
           ? `No changes since the last local review round (same model, same ` +
               `HEAD, same content) — nothing to re-review.`
-          : `Incremental scope since state ${display(
-              cache!.stateId.slice(0, 12),
-            )}: ` +
+          : stateMoved.length === 0
+            ? // Nothing MOVED, but the scope is not empty: a path unhashable
+              // on both sides stays in it, because "could not capture it
+              // twice" is not "unchanged". Saying "nothing to re-review"
+              // here would be false twice over — the plan carries chunks,
+              // and SKILL.md stops the orchestrator on that exact sentence,
+              // so it would stop over live scope.
+              `No content changes since the last local review round, but ` +
+              `${stateChanged.length} path(s) could not be hashed on either ` +
+              `side (a pending deletion, or a name this layer cannot read) ` +
+              `— they are re-reviewed every round and never certified. ` +
+              `Their sections are in scope.`
+            : `Incremental scope since state ${display(
+                cache!.stateId.slice(0, 12),
+              )}: ` +
               `${changed.length} changed file(s), ${interaction.size} ` +
               `interaction file(s) (one import hop), ` +
               (stateChanged.length > stateMoved.length
@@ -439,6 +475,12 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   writeFileSync(diffPath, diffBytes);
 
   const result: CaptureLocalResult = {
+    // The token the CLI derived, so nothing downstream has to re-derive it.
+    // `qwen review run` pins the artifact name it waits for from the same
+    // canonicalisation; an orchestrator that recomputes the stem by hand gets
+    // a different answer wherever a symlink sits below the repo root, and
+    // every artifact it names then misses the poll.
+    target,
     diffPath,
     diffPathAbsolute: resolve(diffPath),
     // No ref to `git show` a pre-change file out of, so per-file line counts and
