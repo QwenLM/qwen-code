@@ -3305,7 +3305,9 @@ export class GeminiChat {
 
             if (
               error instanceof InvalidStreamError &&
-              error.type === 'NO_TOOL_RESULT_PROGRESS_MAX_TOKENS' &&
+              (error.type === 'NO_TOOL_RESULT_PROGRESS_MAX_TOKENS' ||
+                (error.type === 'NO_RESPONSE_TEXT' &&
+                  lastFinishReason === FinishReason.MAX_TOKENS)) &&
               !maxTokensEscalated &&
               !hasUserMaxTokensOverride &&
               shouldEscalateMaxOutputTokens

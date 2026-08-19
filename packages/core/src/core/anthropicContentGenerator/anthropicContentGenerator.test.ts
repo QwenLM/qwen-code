@@ -3499,7 +3499,6 @@ describe('AnthropicContentGenerator', () => {
     );
 
     it('defers parallel tool calls after empty arguments until the stop reason confirms them', async () => {
-      const { AnthropicContentGenerator } = await importGenerator();
       anthropicState.createImpl.mockResolvedValue(
         (async function* parallelToolUseStream() {
           yield {
@@ -3545,25 +3544,9 @@ describe('AnthropicContentGenerator', () => {
         })(),
       );
 
-      const generator = new AnthropicContentGenerator(
-        {
-          model: 'claude-test',
-          apiKey: 'test-key',
-          timeout: 10_000,
-          maxRetries: 2,
-          samplingParams: { max_tokens: 100 },
-          schemaCompliance: 'auto',
-        },
-        mockConfig,
-      );
+      const { chunks, error } = await collectGeneratedStream();
 
-      const stream = await generator.generateContentStream({
-        model: 'models/ignored',
-        contents: 'Hello',
-      } as unknown as GenerateContentParameters);
-      const chunks: GenerateContentResponse[] = [];
-      for await (const chunk of stream) chunks.push(chunk);
-
+      expect(error).toBeUndefined();
       expect(chunks.flatMap((chunk) => chunk.functionCalls ?? [])).toEqual([
         {
           id: 'call-empty',
@@ -3725,8 +3708,68 @@ describe('AnthropicContentGenerator', () => {
       expect(error).toBe(networkError);
     });
 
+    it.each([
+      { case: 'empty arguments', partialJson: '' },
+      { case: 'malformed arguments', partialJson: '{"command":' },
+      { case: 'a non-object argument root', partialJson: '[]' },
+    ])(
+      'does not release a closed call before an upstream error when a sibling closes with $case',
+      async ({ partialJson }) => {
+        const networkError = Object.assign(
+          new Error('SSE connection reset by peer'),
+          { code: 'ECONNRESET' },
+        );
+        anthropicState.createImpl.mockResolvedValue(
+          (async function* interruptedParallelToolUseStream() {
+            yield {
+              type: 'content_block_start',
+              index: 0,
+              content_block: {
+                type: 'tool_use',
+                id: 'call-complete',
+                name: 'run_shell_command',
+                input: {},
+              },
+            };
+            yield {
+              type: 'content_block_delta',
+              index: 0,
+              delta: {
+                type: 'input_json_delta',
+                partial_json: '{"command":"pwd"}',
+              },
+            };
+            yield { type: 'content_block_stop', index: 0 };
+            yield {
+              type: 'content_block_start',
+              index: 1,
+              content_block: {
+                type: 'tool_use',
+                id: 'call-invalid',
+                name: 'run_shell_command',
+                input: {},
+              },
+            };
+            yield {
+              type: 'content_block_delta',
+              index: 1,
+              delta: { type: 'input_json_delta', partial_json: partialJson },
+            };
+            yield { type: 'content_block_stop', index: 1 };
+            throw networkError;
+          })(),
+        );
+
+        const { chunks, error } = await collectGeneratedStream();
+
+        expect(chunks.flatMap((chunk) => chunk.functionCalls ?? [])).toEqual(
+          [],
+        );
+        expect(error).toBe(networkError);
+      },
+    );
+
     it('routes an unterminated tool call through max-token recovery without emitting the batch', async () => {
-      const { AnthropicContentGenerator } = await importGenerator();
       anthropicState.createImpl.mockResolvedValue(
         (async function* parallelToolUseStream() {
           yield {
@@ -3785,25 +3828,9 @@ describe('AnthropicContentGenerator', () => {
         })(),
       );
 
-      const generator = new AnthropicContentGenerator(
-        {
-          model: 'claude-test',
-          apiKey: 'test-key',
-          timeout: 10_000,
-          maxRetries: 2,
-          samplingParams: { max_tokens: 100 },
-          schemaCompliance: 'auto',
-        },
-        mockConfig,
-      );
+      const { chunks, error } = await collectGeneratedStream();
 
-      const stream = await generator.generateContentStream({
-        model: 'models/ignored',
-        contents: 'Hello',
-      } as unknown as GenerateContentParameters);
-      const chunks: GenerateContentResponse[] = [];
-      for await (const chunk of stream) chunks.push(chunk);
-
+      expect(error).toBeUndefined();
       expect(
         chunks
           .flatMap((chunk) => chunk.candidates ?? [])
@@ -3829,7 +3856,6 @@ describe('AnthropicContentGenerator', () => {
     ])(
       'routes $case through max-token recovery without emitting a call',
       async ({ partialJson }) => {
-        const { AnthropicContentGenerator } = await importGenerator();
         anthropicState.createImpl.mockResolvedValue(
           (async function* truncatedToolUseStream() {
             yield {
@@ -3856,25 +3882,9 @@ describe('AnthropicContentGenerator', () => {
           })(),
         );
 
-        const generator = new AnthropicContentGenerator(
-          {
-            model: 'claude-test',
-            apiKey: 'test-key',
-            timeout: 10_000,
-            maxRetries: 2,
-            samplingParams: { max_tokens: 100 },
-            schemaCompliance: 'auto',
-          },
-          mockConfig,
-        );
+        const { chunks, error } = await collectGeneratedStream();
 
-        const stream = await generator.generateContentStream({
-          model: 'models/ignored',
-          contents: 'Hello',
-        } as unknown as GenerateContentParameters);
-        const chunks: GenerateContentResponse[] = [];
-        for await (const chunk of stream) chunks.push(chunk);
-
+        expect(error).toBeUndefined();
         expect(chunks.flatMap((chunk) => chunk.functionCalls ?? [])).toEqual(
           [],
         );
@@ -3888,7 +3898,6 @@ describe('AnthropicContentGenerator', () => {
     it.each(['[]', 'null', '42'])(
       'rejects a non-object argument root under max_tokens: %s',
       async (partialJson) => {
-        const { AnthropicContentGenerator } = await importGenerator();
         anthropicState.createImpl.mockResolvedValue(
           (async function* nonObjectToolUseStream() {
             yield {
@@ -3915,31 +3924,9 @@ describe('AnthropicContentGenerator', () => {
           })(),
         );
 
-        const generator = new AnthropicContentGenerator(
-          {
-            model: 'claude-test',
-            apiKey: 'test-key',
-            timeout: 10_000,
-            maxRetries: 2,
-            samplingParams: { max_tokens: 100 },
-            schemaCompliance: 'auto',
-          },
-          mockConfig,
-        );
+        const { chunks, error } = await collectGeneratedStream();
 
-        const stream = await generator.generateContentStream({
-          model: 'models/ignored',
-          contents: 'Hello',
-        } as unknown as GenerateContentParameters);
-        const chunks: GenerateContentResponse[] = [];
-        let streamError: unknown;
-        try {
-          for await (const chunk of stream) chunks.push(chunk);
-        } catch (error) {
-          streamError = error;
-        }
-
-        expect(streamError).toMatchObject({
+        expect(error).toMatchObject({
           name: 'InvalidStreamError',
           type: 'MALFORMED_TOOL_CALL',
         });
@@ -3957,7 +3944,6 @@ describe('AnthropicContentGenerator', () => {
     );
 
     it('emits a complete non-empty tool call even when the stop reason is max_tokens', async () => {
-      const { AnthropicContentGenerator } = await importGenerator();
       anthropicState.createImpl.mockResolvedValue(
         (async function* completeToolUseStream() {
           yield {
@@ -3987,25 +3973,9 @@ describe('AnthropicContentGenerator', () => {
         })(),
       );
 
-      const generator = new AnthropicContentGenerator(
-        {
-          model: 'claude-test',
-          apiKey: 'test-key',
-          timeout: 10_000,
-          maxRetries: 2,
-          samplingParams: { max_tokens: 100 },
-          schemaCompliance: 'auto',
-        },
-        mockConfig,
-      );
+      const { chunks, error } = await collectGeneratedStream();
 
-      const stream = await generator.generateContentStream({
-        model: 'models/ignored',
-        contents: 'Hello',
-      } as unknown as GenerateContentParameters);
-      const chunks: GenerateContentResponse[] = [];
-      for await (const chunk of stream) chunks.push(chunk);
-
+      expect(error).toBeUndefined();
       expect(chunks.flatMap((chunk) => chunk.functionCalls ?? [])).toEqual([
         {
           id: 'call-complete',
@@ -4019,7 +3989,6 @@ describe('AnthropicContentGenerator', () => {
     });
 
     it('releases a complete tool call when a non-tool block remains open at the stop reason', async () => {
-      const { AnthropicContentGenerator } = await importGenerator();
       anthropicState.createImpl.mockResolvedValue(
         (async function* completeToolUseWithOpenTextStream() {
           yield {
@@ -4059,25 +4028,9 @@ describe('AnthropicContentGenerator', () => {
         })(),
       );
 
-      const generator = new AnthropicContentGenerator(
-        {
-          model: 'claude-test',
-          apiKey: 'test-key',
-          timeout: 10_000,
-          maxRetries: 2,
-          samplingParams: { max_tokens: 100 },
-          schemaCompliance: 'auto',
-        },
-        mockConfig,
-      );
+      const { chunks, error } = await collectGeneratedStream();
 
-      const stream = await generator.generateContentStream({
-        model: 'models/ignored',
-        contents: 'Hello',
-      } as unknown as GenerateContentParameters);
-      const chunks: GenerateContentResponse[] = [];
-      for await (const chunk of stream) chunks.push(chunk);
-
+      expect(error).toBeUndefined();
       expect(chunks.flatMap((chunk) => chunk.functionCalls ?? [])).toEqual([
         {
           id: 'call-complete',
@@ -4088,7 +4041,6 @@ describe('AnthropicContentGenerator', () => {
     });
 
     it('accepts a stop reason when no tool calls are pending', async () => {
-      const { AnthropicContentGenerator } = await importGenerator();
       anthropicState.createImpl.mockResolvedValue(
         (async function* textStream() {
           yield {
@@ -4110,25 +4062,9 @@ describe('AnthropicContentGenerator', () => {
         })(),
       );
 
-      const generator = new AnthropicContentGenerator(
-        {
-          model: 'claude-test',
-          apiKey: 'test-key',
-          timeout: 10_000,
-          maxRetries: 2,
-          samplingParams: { max_tokens: 100 },
-          schemaCompliance: 'auto',
-        },
-        mockConfig,
-      );
+      const { chunks, error } = await collectGeneratedStream();
 
-      const stream = await generator.generateContentStream({
-        model: 'models/ignored',
-        contents: 'Hello',
-      } as unknown as GenerateContentParameters);
-      const chunks: GenerateContentResponse[] = [];
-      for await (const chunk of stream) chunks.push(chunk);
-
+      expect(error).toBeUndefined();
       expect(chunks.flatMap((chunk) => chunk.functionCalls ?? [])).toEqual([]);
       expect(
         chunks.flatMap((chunk) => chunk.candidates ?? []).at(-1)?.finishReason,
@@ -4136,7 +4072,6 @@ describe('AnthropicContentGenerator', () => {
     });
 
     it('rejects an open tool-use block after assistant payload at end of stream', async () => {
-      const { AnthropicContentGenerator } = await importGenerator();
       anthropicState.createImpl.mockResolvedValue(
         (async function* openToolUseStream() {
           yield {
@@ -4171,31 +4106,9 @@ describe('AnthropicContentGenerator', () => {
         })(),
       );
 
-      const generator = new AnthropicContentGenerator(
-        {
-          model: 'claude-test',
-          apiKey: 'test-key',
-          timeout: 10_000,
-          maxRetries: 2,
-          samplingParams: { max_tokens: 100 },
-          schemaCompliance: 'auto',
-        },
-        mockConfig,
-      );
+      const { chunks, error } = await collectGeneratedStream();
 
-      const stream = await generator.generateContentStream({
-        model: 'models/ignored',
-        contents: 'Hello',
-      } as unknown as GenerateContentParameters);
-      const chunks: GenerateContentResponse[] = [];
-      let streamError: unknown;
-      try {
-        for await (const chunk of stream) chunks.push(chunk);
-      } catch (error) {
-        streamError = error;
-      }
-
-      expect(streamError).toMatchObject({
+      expect(error).toMatchObject({
         name: 'InvalidStreamError',
         type: 'MALFORMED_TOOL_CALL',
       });
@@ -4317,7 +4230,6 @@ describe('AnthropicContentGenerator', () => {
     ])(
       'rejects tool arguments with $case without emitting a function call',
       async ({ partialJson, stopReason }) => {
-        const { AnthropicContentGenerator } = await importGenerator();
         anthropicState.createImpl.mockResolvedValue(
           (async function* invalidToolUseStream() {
             yield {
@@ -4350,33 +4262,9 @@ describe('AnthropicContentGenerator', () => {
           })(),
         );
 
-        const generator = new AnthropicContentGenerator(
-          {
-            model: 'claude-test',
-            apiKey: 'test-key',
-            timeout: 10_000,
-            maxRetries: 2,
-            samplingParams: { max_tokens: 100 },
-            schemaCompliance: 'auto',
-          },
-          mockConfig,
-        );
+        const { chunks, error } = await collectGeneratedStream();
 
-        const stream = await generator.generateContentStream({
-          model: 'models/ignored',
-          contents: 'Hello',
-        } as unknown as GenerateContentParameters);
-        const chunks: GenerateContentResponse[] = [];
-        let streamError: unknown;
-        try {
-          for await (const chunk of stream) {
-            chunks.push(chunk);
-          }
-        } catch (error) {
-          streamError = error;
-        }
-
-        expect(streamError).toMatchObject({
+        expect(error).toMatchObject({
           name: 'InvalidStreamError',
           type: 'MALFORMED_TOOL_CALL',
         });
