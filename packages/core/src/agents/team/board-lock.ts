@@ -64,89 +64,117 @@ export function assertSafeName(kind: string, name: string): void {
   }
 }
 
-const LOCK_OPTIONS: lockfile.LockOptions = {
-  retries: {
-    retries: 30,
-    minTimeout: 5,
-    maxTimeout: 100,
-    factor: 2,
-    // Jitter so in-process and cross-process contenders don't retry in
-    // lockstep and starve each other out of the retry budget.
-    randomize: true,
-  },
-  stale: 5000,
-  onCompromised: (err) => {
-    debug.warn('board item lock compromised:', err);
-  },
-};
-
-const fileLocks = new Map<string, Mutex>();
-
-function getFileLock(filePath: string): Mutex {
-  let lock = fileLocks.get(filePath);
-  if (!lock) {
-    lock = new Mutex();
-    fileLocks.set(filePath, lock);
-  }
-  return lock;
-}
-
 /**
- * Run `fn` holding both the in-process mutex and the cross-process file lock
- * for `filePath`. Release of both is automatic.
+ * Build a two-tier lock over a family of files.
  *
- * A file that vanishes before the lock is taken surfaces as `onMissing()`
- * rather than a raw ENOENT — callers treat a vanished item as "not found",
- * which is the same outcome a concurrent prune produces.
+ * The discipline is the same everywhere it is used — an in-process `Mutex` per
+ * path so local writers do not stampede the OS lock (the cause of Windows
+ * `ELOCKED` flakiness), wrapping a `proper-lockfile` cross-process lock — but
+ * the tuning is not. `mailbox.ts` deliberately retries 10 times where the task
+ * board retries 30, and logs a compromised lock at a quieter level. A factory
+ * keeps one implementation without flattening those choices into it.
+ *
+ * `retries` is the cross-process retry budget; `onCompromised` receives a lock
+ * that went stale under us.
  */
-export async function withItemLock<T>(
-  filePath: string,
-  fn: () => Promise<T>,
-  onMissing: () => T,
-): Promise<T> {
-  return getFileLock(filePath).runExclusive(async () => {
-    let release: (() => Promise<void>) | undefined;
-    try {
-      release = await lockfile.lock(filePath, LOCK_OPTIONS);
-    } catch (err) {
-      if (isNodeError(err) && err.code === 'ENOENT') return onMissing();
-      throw err;
+export function createItemLock(options: {
+  retries: number;
+  onCompromised: (err: Error) => void;
+}) {
+  const lockOptions: lockfile.LockOptions = {
+    retries: {
+      retries: options.retries,
+      minTimeout: 5,
+      maxTimeout: 100,
+      factor: 2,
+      // Jitter the backoff so in-process and cross-process contenders don't
+      // retry in lockstep (thundering herd) and starve each other out of the
+      // retry budget.
+      randomize: true,
+    },
+    stale: 5000,
+    onCompromised: options.onCompromised,
+  };
+
+  const fileLocks = new Map<string, Mutex>();
+
+  /**
+   * Run `fn` holding both the in-process mutex and the cross-process file lock
+   * for `filePath`. Release of both is automatic.
+   *
+   * A file that vanishes — before the lock is taken, or between taking it and
+   * reading — surfaces as `onMissing()` when one is given, and otherwise
+   * rethrows. Callers that treat a vanished record as "not found" pass one;
+   * callers that consider it a real error do not.
+   */
+  const withLock = async function <T>(
+    filePath: string,
+    fn: () => Promise<T>,
+    onMissing?: () => T,
+  ): Promise<T> {
+    let lock = fileLocks.get(filePath);
+    if (!lock) {
+      lock = new Mutex();
+      fileLocks.set(filePath, lock);
     }
-    try {
-      return await fn();
-    } catch (err) {
-      // A file removed between taking the lock and reading it — a concurrent
-      // prune — must surface as the caller's "not found", the same as one that
-      // vanished before the lock. Otherwise callers see a raw ENOENT the
-      // onMissing contract said they would not.
-      if (isNodeError(err) && err.code === 'ENOENT') return onMissing();
-      throw err;
-    } finally {
+    return lock.runExclusive(async () => {
+      let release: (() => Promise<void>) | undefined;
       try {
-        await release?.();
+        release = await lockfile.lock(filePath, lockOptions);
       } catch (err) {
-        debug.warn('failed to release board item lock:', err);
+        if (isNodeError(err) && err.code === 'ENOENT' && onMissing) {
+          return onMissing();
+        }
+        throw err;
       }
-      // Drop the mutex once nobody is queued on it. Keeping one per path for
-      // the process lifetime is unbounded growth for a long-lived
-      // `board watch`, and re-creating an uncontended mutex costs nothing.
-      const held = fileLocks.get(filePath);
-      if (held && !held.isLocked()) fileLocks.delete(filePath);
+      try {
+        return await fn();
+      } catch (err) {
+        if (isNodeError(err) && err.code === 'ENOENT' && onMissing) {
+          return onMissing();
+        }
+        throw err;
+      } finally {
+        try {
+          await release?.();
+        } catch (err) {
+          debug.warn('failed to release lock:', err);
+        }
+        // Drop the mutex once nobody is queued on it. Keeping one per path for
+        // the process lifetime is unbounded growth for a long-lived reader,
+        // and re-creating an uncontended mutex costs nothing.
+        const held = fileLocks.get(filePath);
+        if (held && !held.isLocked()) fileLocks.delete(filePath);
+      }
+    });
+  };
+
+  /**
+   * Evict cached mutexes whose path satisfies `predicate`. Needed when a whole
+   * family of files goes away at once — deleting a team removes its inbox
+   * directory, and the mutexes keyed on those paths would otherwise outlive it.
+   * Returns how many were dropped.
+   */
+  withLock.dispose = (predicate: (filePath: string) => boolean): number => {
+    let evicted = 0;
+    for (const key of [...fileLocks.keys()]) {
+      if (predicate(key)) {
+        fileLocks.delete(key);
+        evicted++;
+      }
     }
-  });
+    return evicted;
+  };
+
+  return withLock;
 }
 
-/**
- * Remove settled items older than `olderThanMs`.
- *
- * Deliberately manual rather than automatic: deleting a record another
- * participant may be mid-read on is a concurrency problem worth not having,
- * and a fetch-based system has no daemon that could be trusted to run a sweep.
- * The caller decides when the board is quiet.
- *
- * `isSettled` decides what counts as finished for a collection, so each item
- * type keeps its own definition rather than this module knowing all three.
- */
+/** The board's own lock: the same budget the task board uses. */
+export const withItemLock = createItemLock({
+  retries: 30,
+  onCompromised: (err) => debug.warn('board item lock compromised:', err),
+});
+
 export async function pruneCollection(
   board: string,
   collection: string,

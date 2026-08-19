@@ -21,11 +21,11 @@
 import * as fs from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
 import * as path from 'node:path';
-import lockfile from 'proper-lockfile';
-import { Mutex } from 'async-mutex';
 import { isNodeError } from '../../utils/errors.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { atomicWriteJSON } from '../../utils/atomicFileWrite.js';
+import { Mutex } from 'async-mutex';
+import { createItemLock } from './board-lock.js';
 import { getTasksDir, sanitizeName } from './teamHelpers.js';
 import type { SwarmTask, SwarmTaskStatus } from './types.js';
 
@@ -62,94 +62,26 @@ function assertMetadataWithinLimit(
   }
 }
 
-// ─── Lock options ───────────────────────────────────────────
+// ─── Locking ────────────────────────────────────────────────
+//
+// Shared with the board items via `createItemLock`, which carries the
+// two-tier discipline this module used to implement itself: an in-process
+// mutex serializing local writers so they don't stampede the OS lock (the
+// cause of Windows `ELOCKED` flakiness), wrapping a `proper-lockfile`
+// cross-process lock that still guards writers in other agent processes.
+//
+// The retry budget is 30 with jittered backoff. The jitter matters most where
+// `scanIdleAgentsForTasks` races up to MAX_TEAMMATES claimants at the same
+// first-pending task file — without it they retry in lockstep and starve each
+// other out of the budget.
 
-const LOCK_OPTIONS: lockfile.LockOptions = {
-  retries: {
-    retries: 30,
-    minTimeout: 5,
-    maxTimeout: 100,
-    factor: 2,
-    // Jitter the backoff so in-process and cross-process contenders
-    // don't retry in lockstep (thundering herd) and starve each other
-    // out of the retry budget — mirrors mailbox.ts. The most acute case
-    // is scanIdleAgentsForTasks racing up to MAX_TEAMMATES claimants at
-    // the same first-pending task file.
-    randomize: true,
-  },
-  stale: 5000,
+const withTaskFileLock = createItemLock({
+  retries: 30,
   onCompromised: (err) => {
     debug.warn('task lock compromised:', err);
   },
-};
+});
 
-// ─── In-process serialization ───────────────────────────────
-//
-// One `Mutex` per task-file path. Same-process writers to the same
-// file queue in memory so only one reaches for the `proper-lockfile`
-// file lock at a time (the file lock still guards other agent
-// processes). Mirrors mailbox.ts's `withInboxLock`. Entries are never
-// evicted, but the key space is bounded by the task board size.
-
-const taskFileLocks = new Map<string, Mutex>();
-
-function getTaskFileLock(taskPath: string): Mutex {
-  let lock = taskFileLocks.get(taskPath);
-  if (!lock) {
-    lock = new Mutex();
-    taskFileLocks.set(taskPath, lock);
-  }
-  return lock;
-}
-
-/**
- * Run `fn` while holding both the in-process mutex and the
- * cross-process file lock for `taskPath`. The mutex serializes writers
- * in this process so they don't stampede the file lock (the cause of
- * Windows `ELOCKED` flakiness); the file lock runs inside it to still
- * guard writers in other agent processes.
- *
- * `fn` receives nothing and runs with the locks held; release of both
- * is automatic. A missing file at lock time surfaces as the caller's
- * `onMissing` result rather than a raw ENOENT (callers treat a vanished
- * task as "not found").
- */
-async function withTaskFileLock<T>(
-  taskPath: string,
-  fn: () => Promise<T>,
-  onMissing: () => T,
-): Promise<T> {
-  return getTaskFileLock(taskPath).runExclusive(async () => {
-    let release: (() => Promise<void>) | undefined;
-    try {
-      release = await lockfile.lock(taskPath, LOCK_OPTIONS);
-    } catch (err) {
-      // The file can vanish before we lock it (resetTaskList /
-      // quarantine rename run without the lock).
-      if (isNodeError(err) && err.code === 'ENOENT') return onMissing();
-      throw err;
-    }
-    try {
-      return await fn();
-    } finally {
-      try {
-        await release();
-      } catch (error) {
-        debug.warn('Failed to release task lock:', error);
-      }
-    }
-  });
-}
-
-/**
- * Sentinel `callerName` for internal reciprocal edge-mirror writes
- * (task-update.ts mirrors `A.blocks=[B]` into `B.blockedBy=[A]`). These
- * must bypass the ownership guard to keep the dependency graph
- * consistent; passing this sentinel instead of an empty `callerName`
- * makes the intentional bypass greppable in logs. It can never collide
- * with a real teammate identity — agent names are sanitized to
- * `[a-z0-9-]`, so the underscores can't appear in one.
- */
 export const RECIPROCAL_CALLER = '__reciprocal__';
 
 // ─── Per-agent claim serialization ──────────────────────────
