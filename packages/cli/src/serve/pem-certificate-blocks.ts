@@ -11,6 +11,17 @@ const BEGIN_PREFIX = '-----BEGIN ';
 const END_PREFIX = '-----END ';
 const MARKER_SUFFIX = '-----';
 const CERTIFICATE_LABEL = 'CERTIFICATE';
+/**
+ * Every label the loader reads a certificate from. `X509 CERTIFICATE` is the
+ * legacy alias OpenSSL still accepts (`PEM_STRING_X509_OLD`); measured on Node
+ * v22.23.0, a root under that label loads through `NODE_EXTRA_CA_CERTS` and
+ * authorizes the handshake, while recognising only the modern spelling here
+ * returned `undefined` for the file and handed workers the daemon cert alone.
+ */
+const CERTIFICATE_LABELS: ReadonlySet<string> = new Set([
+  CERTIFICATE_LABEL,
+  'X509 CERTIFICATE',
+]);
 /** Canonical PEM wraps the body at 64 columns; so does every producer. */
 const PEM_BODY_COLUMNS = 64;
 
@@ -38,14 +49,11 @@ function pemMarkerLabel(line: string, prefix: string): string | undefined {
 }
 
 /**
- * Everything OpenSSL's line reader tolerates that a verbatim match does not: a
- * UTF-8 BOM at the start of ANY line (Windows tooling writes one, and
- * concatenating operator files puts one mid-file, in front of a later block —
- * a file-start-anchored strip left that block unmatched and lost it), CRLF
- * terminators, and trailing whitespace. Measured on Node 22 through real
- * `NODE_EXTRA_CA_CERTS` handshakes: every one of those shapes loads and
- * verifies, so rejecting any of them drops an operator CA the workers would
- * have trusted and blames a file that was never the problem.
+ * Everything OpenSSL's line reader tolerates that a verbatim match does not:
+ * CRLF terminators and trailing whitespace. Measured on Node 22 through real
+ * `NODE_EXTRA_CA_CERTS` handshakes: both shapes load and verify, so rejecting
+ * either drops an operator CA the workers would have trusted and blames a file
+ * that was never the problem.
  *
  * LEADING whitespace is deliberately NOT stripped. It is the one shape in this
  * family the loader does not tolerate on a marker line: measured on Node
@@ -57,9 +65,53 @@ function pemMarkerLabel(line: string, prefix: string): string | undefined {
  * anchor the workers never got. Body lines are unaffected: their leading
  * whitespace is dropped when the base64 is joined below, which is what the
  * decoder does too.
+ *
+ * A leading BOM is NOT stripped here either — see `beginMarkerLabel`, which is
+ * the only position the loader tolerates one in.
  */
 function normalizePemLine(line: string): string {
-  return line.replace(/^\uFEFF/, '').replace(/[ \t\r]+$/, '');
+  return line.replace(/[ \t\r]+$/, '');
+}
+
+/**
+ * The label of a BEGIN marker line, tolerating a single leading BOM.
+ *
+ * The BOM's tolerance is positional, and stripping it from every line is how
+ * this module counted a block the loader takes nothing from. Measured on Node
+ * v22.23.0: a BOM in front of a `-----BEGIN` line loads and authorizes
+ * (Windows tooling writes one, and concatenating operator files puts one
+ * mid-file in front of a later block), while a BOM in front of the matching
+ * `-----END` line fails `bad end line` and the loader takes NOTHING — the
+ * blanket strip made this module return that block as an anchor.
+ */
+function beginMarkerLabel(line: string): string | undefined {
+  return pemMarkerLabel(line.replace(/^\uFEFF/, ''), BEGIN_PREFIX);
+}
+
+/**
+ * Whether `line` is the blank line that ends a block's header section.
+ *
+ * A BOM-only line counts: measured on Node v22.23.0, one immediately after
+ * `-----BEGIN` loads exactly like an empty line (`authorized: true`), and one
+ * further down the body fails `not proc type` exactly like an empty line
+ * there — the loader is splitting on it, not decoding it.
+ */
+function isHeaderSeparatorLine(line: string): boolean {
+  return line.replace(/^\uFEFF/, '') === '';
+}
+
+/**
+ * Whether the decoder behind `NODE_EXTRA_CA_CERTS` would decode `encoded`.
+ *
+ * Testing the base64 ALPHABET alone is not that question: `====` and `AAAAA`
+ * are alphabet-valid and both fail `bad base64 decode` on the real loader,
+ * which takes NOTHING from the file — while this module read past them and
+ * reported the certificates behind them as anchors the workers never got.
+ * Line wrapping is not part of the judgment: a body rewrapped at 63 columns
+ * loads and authorizes, so the joined length is what has to line up.
+ */
+function decodesAsBase64(encoded: string): boolean {
+  return encoded.length % 4 === 0 && /^[A-Za-z0-9+/]+={0,2}$/.test(encoded);
 }
 
 /**
@@ -99,7 +151,7 @@ export function extractCertificateBlocks(
   const blocks: string[] = [];
   let index = 0;
   scan: while (index < lines.length) {
-    const label = pemMarkerLabel(lines[index]!, BEGIN_PREFIX);
+    const label = beginMarkerLabel(lines[index]!);
     if (label === undefined) {
       index += 1;
       continue;
@@ -118,9 +170,34 @@ export function extractCertificateBlocks(
     }
     // Ran off the end without an end line — same `bad end line` stop.
     if (cursor >= lines.length) break;
+    // Everything between the markers is `header CRLF CRLF data`, not data
+    // alone: the loader splits a block on its FIRST blank line and reads what
+    // precedes it as RFC 1421 headers. Folding the header lines into the
+    // base64 judgment is how a legacy encrypted key (`Proc-Type:` /
+    // `DEK-Info:`) aborted this scan while the loader consumed it as headers,
+    // skipped the block and loaded every certificate after it.
+    const separator = body.findIndex(isHeaderSeparatorLine);
+    if (separator > 0) {
+      // Headers present. `PEM_get_EVP_CIPHER_INFO` demands `Proc-Type` first
+      // and fails the whole load with `not proc type` otherwise — measured for
+      // a `Comment:`-headed CERTIFICATE block, and for the blank line a
+      // hand-edited body picks up mid-base64, both of which take NOTHING.
+      if (!body[0]!.startsWith('Proc-Type:')) break;
+      // A well-formed encrypted block: no certificate comes out of it, and the
+      // loader reads straight on past it.
+      index = cursor + 1;
+      continue;
+    }
+    // A header section with no blank line after it needs no separate stop: its
+    // `Name: value` line carries a colon, which the base64 judgment below
+    // already refuses — measured `authorized: false` for that shape too.
+    const data = separator === 0 ? body.slice(1) : body;
     // Interior and leading whitespace in a body line is skipped by the
-    // decoder, not an error, so join first and judge the alphabet afterwards.
-    const encoded = body.join('').replace(/\s/g, '');
+    // decoder, not an error, so join first and judge the base64 afterwards.
+    // A BOM is NOT whitespace to the decoder: one inside a base64 line is
+    // `bad base64 decode` (measured), which is why the join names the
+    // characters it drops instead of leaning on `\s`.
+    const encoded = data.join('').replace(/[ \t\r\n]/g, '');
     // The loader decodes EVERY block's body, whatever its label, and a body it
     // cannot decode is `bad base64 decode` — another stop. Judging only
     // CERTIFICATE bodies let a file whose leading PRIVATE KEY block is corrupt
@@ -128,8 +205,8 @@ export function extractCertificateBlocks(
     // (measured on Node v22.23.0: handshake UNABLE_TO_VERIFY_LEAF_SIGNATURE
     // for `bad-key-block + good root`, and for an empty body under any label,
     // against `authorized: true` for the same file with the block removed).
-    if (encoded.length === 0 || /[^A-Za-z0-9+/=]/.test(encoded)) break;
-    if (label === CERTIFICATE_LABEL) {
+    if (encoded.length === 0 || !decodesAsBase64(encoded)) break;
+    if (CERTIFICATE_LABELS.has(label)) {
       const block = renderCertificateBlock(encoded);
       try {
         // Shape is not loadability: a body made only of base64 *characters*

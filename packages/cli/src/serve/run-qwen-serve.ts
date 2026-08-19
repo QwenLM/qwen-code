@@ -707,13 +707,29 @@ export function describeWorkerTlsTrustGaps(opts: {
    * coverage is what silenced the warning in the cases it was written for.
    */
   operatorCaCert?: Buffer;
+  /**
+   * The error code from reading `operatorCaCertPath`, when the read failed.
+   * Passing the path through as if its contents had been inspected is how the
+   * gap below came to assert an unknowable content fact ("does not carry a
+   * certificate that anchors it") and prescribe an action the operator had
+   * already taken, when the file holds exactly the issuing CA and only its
+   * permissions are wrong.
+   */
+  operatorCaCertReadError?: string;
 }): string[] {
   // A serving file is routinely a fullchain (leaf + issuing CA in one PEM),
   // and the supervisor injects the whole file as the workers'
   // NODE_EXTRA_CA_CERTS — so the trust question is about the file, not about
   // its first block alone.
   const chain = parseCertChain(opts.cert);
-  const x509 = chain[0];
+  // The leaf is whatever BOOT parsed, not whatever the loose split matched
+  // first. `parseCertChain`'s regex is unanchored, so an indented leading
+  // block — prose to the column-0 readers, i.e. to `new X509Certificate` here
+  // and to the workers' loader — still matched it, and every leaf-dependent
+  // check below (SAN gap, expiry skip, issuer message) then judged a
+  // certificate the daemon never serves: measured `gaps: []` at boot against
+  // ERR_TLS_CERT_ALTNAME_INVALID on every worker handshake.
+  const x509 = bootParsedLeaf(opts.cert);
   if (!x509) {
     // Boot validation already rejected unparseable certs with a better message.
     return [];
@@ -732,7 +748,17 @@ export function describeWorkerTlsTrustGaps(opts: {
   const operatorChain = opts.operatorCaCert
     ? loadableCertificates(opts.operatorCaCert.toString('utf8'))
     : undefined;
-  if (opts.operatorCaCert && !operatorChain) {
+  if (opts.operatorCaCertReadError !== undefined) {
+    gaps.push(
+      `NODE_EXTRA_CA_CERTS "${opts.operatorCaCertPath}" could not be read by ` +
+        `the daemon (${opts.operatorCaCertReadError}), so channel workers ` +
+        `receive no CA from it — a root-owned or mode-600 file is the usual ` +
+        `cause, and its contents are not the problem. Every worker handshake ` +
+        `to the daemon will fail UNABLE_TO_VERIFY_LEAF_SIGNATURE unless the ` +
+        `issuing CA is already in the workers' default trust store. Fix that ` +
+        `file's permissions or path and restart.`,
+    );
+  } else if (opts.operatorCaCert && !operatorChain) {
     gaps.push(
       `NODE_EXTRA_CA_CERTS "${opts.operatorCaCertPath}" holds no PEM ` +
         `certificate block Node's loader can read — every ` +
@@ -751,20 +777,36 @@ export function describeWorkerTlsTrustGaps(opts: {
   // "it would have thrown at boot" premise this fallback used to carry was
   // false.)
   const servingBlocks = loadableCertificates(opts.cert.toString('utf8'));
-  if (!servingBlocks && operatorChain) {
+  // An unreadable serving file is a gap on its own terms: the workers receive
+  // it as their whole bundle and their loader takes NOTHING from it, whether
+  // or not an operator CA was set. Gating this on `operatorChain` reported
+  // zero gaps on the no-operator path while every worker restart-looped —
+  // the same hole that was closed, and tested, only for the with-operator case.
+  const operatorDiscarded = !servingBlocks && operatorChain !== undefined;
+  if (!servingBlocks) {
     gaps.push(
       `--tls-cert "${opts.certPath}" holds no PEM certificate block Node's ` +
-        `loader can read, so the channel workers' bundle cannot be merged: ` +
-        `they receive that file alone and NODE_EXTRA_CA_CERTS ` +
-        `"${opts.operatorCaCertPath}" is discarded. Every worker handshake ` +
-        `to the daemon will fail UNABLE_TO_VERIFY_LEAF_SIGNATURE. Re-export ` +
-        `--tls-cert as PEM with every -----BEGIN/END CERTIFICATE----- marker ` +
-        `alone on its own line and restart.`,
+        `loader can read, so ` +
+        (operatorDiscarded
+          ? `the channel workers' bundle cannot be merged: they receive that ` +
+            `file alone and NODE_EXTRA_CA_CERTS "${opts.operatorCaCertPath}" ` +
+            `is discarded. `
+          : `the channel workers receive a bundle their loader takes nothing ` +
+            `from. `) +
+        `Every worker handshake to the daemon will fail ` +
+        `UNABLE_TO_VERIFY_LEAF_SIGNATURE. Re-export --tls-cert as PEM with ` +
+        `every -----BEGIN/END CERTIFICATE----- marker alone on its own line ` +
+        `and restart.`,
     );
   }
   // The fallback keeps a leaf to reason about rather than reporting phantom
-  // gaps, but it must not pretend the operator CA reached the workers.
-  const servingChain = servingBlocks ?? chain;
+  // gaps, but it must not pretend the operator CA reached the workers — and it
+  // must reason from the SAME leaf boot parsed, so the loose split only ever
+  // supplies the rest of the chain.
+  const servingChain = servingBlocks ?? [
+    x509,
+    ...chain.filter((member) => member.fingerprint256 !== x509.fingerprint256),
+  ];
   const workerTrustStore =
     operatorChain && servingBlocks
       ? [...servingChain, ...operatorChain]
@@ -787,31 +829,68 @@ export function describeWorkerTlsTrustGaps(opts: {
         `chain, and restart.`,
     );
   } else if (anchorPath.incapableIssuer) {
+    const keyUsageIsTheCause = issuerRefusedForKeyUsage(
+      anchorPath.incapableIssuer,
+    );
     gaps.push(
       `--tls-cert "${opts.certPath}" chains through ` +
         `"${anchorPath.incapableIssuer.subject.replace(/\r?\n/g, ', ')}", ` +
-        `which is not a CA — it carries basicConstraints CA:FALSE or, as an ` +
-        `X.509 v3 certificate, no basicConstraints at all, and OpenSSL ` +
-        `refuses to let it issue the certificate below it. Every worker ` +
-        `handshake to the daemon will fail INVALID_PURPOSE or INVALID_CA ` +
-        `even though the chain looks complete. Reissue that intermediate ` +
-        `with CA:TRUE, or point NODE_EXTRA_CA_CERTS at a chain whose ` +
-        `intermediates are real CAs, and restart.`,
+        (keyUsageIsTheCause
+          ? `whose keyUsage does not include keyCertSign, so OpenSSL refuses ` +
+            `to let it issue the certificate below it however its ` +
+            `basicConstraints reads. Every worker handshake to the daemon ` +
+            `will fail with an invalid-CA error even though the chain looks ` +
+            `complete, and the issuing CA IS in their bundle. Reissue that ` +
+            `intermediate with keyCertSign in its keyUsage and restart — ` +
+            `pointing NODE_EXTRA_CA_CERTS elsewhere cannot fix it.`
+          : `which is not a CA — it carries basicConstraints CA:FALSE or, as ` +
+            `an X.509 v3 certificate, no basicConstraints at all, and ` +
+            `OpenSSL refuses to let it issue the certificate below it. Every ` +
+            `worker handshake to the daemon will fail INVALID_PURPOSE or ` +
+            `INVALID_CA even though the chain looks complete. Reissue that ` +
+            `intermediate with CA:TRUE, or point NODE_EXTRA_CA_CERTS at a ` +
+            `chain whose intermediates are real CAs, and restart.`),
+    );
+  } else if (anchorPath.pathLengthViolation) {
+    const { cert, constraint } = anchorPath.pathLengthViolation;
+    gaps.push(
+      `--tls-cert "${opts.certPath}" chains through ` +
+        `"${cert.subject.replace(/\r?\n/g, ', ')}", whose basicConstraints ` +
+        `carries pathlen:${constraint} — it permits at most ${constraint} ` +
+        `intermediate CA${constraint === 1 ? '' : 's'} below it, and this ` +
+        `chain has more. Every worker handshake to the daemon will fail ` +
+        `PATH_LENGTH_EXCEEDED even though every certificate in the bundle ` +
+        `verifies. Reissue that CA with a pathlen that covers the chain, or ` +
+        `shorten the chain, and restart.`,
     );
   } else if (!anchorPath.anchored) {
     gaps.push(
       `--tls-cert "${opts.certPath}" is issued by another CA ` +
         `(${x509.issuer.replace(/\r?\n/g, ', ')}), not self-signed, and ` +
         `${
-          opts.operatorCaCertPath
-            ? `NODE_EXTRA_CA_CERTS "${opts.operatorCaCertPath}" does not ` +
-              `carry a certificate that anchors it`
-            : `no NODE_EXTRA_CA_CERTS is set`
+          !opts.operatorCaCertPath
+            ? `no NODE_EXTRA_CA_CERTS is set`
+            : opts.operatorCaCertReadError !== undefined
+              ? `NODE_EXTRA_CA_CERTS "${opts.operatorCaCertPath}" could not ` +
+                `be read, so whatever it carries reached nobody`
+              : operatorDiscarded
+                ? `NODE_EXTRA_CA_CERTS "${opts.operatorCaCertPath}" was ` +
+                  `discarded together with the unloadable serving file ` +
+                  `above, whatever it carries`
+                : `NODE_EXTRA_CA_CERTS "${opts.operatorCaCertPath}" does not ` +
+                  `carry a certificate that anchors it`
         }, so nothing in the channel workers' bundle anchors their trust — ` +
         `every worker handshake to the daemon will fail ` +
         `UNABLE_TO_VERIFY_LEAF_SIGNATURE unless the issuing CA is already in ` +
-        `the workers' default trust store. Point NODE_EXTRA_CA_CERTS at the ` +
-        `issuing CA (for mkcert: "$(mkcert -CAROOT)/rootCA.pem") and restart.`,
+        `the workers' default trust store. ` +
+        (operatorDiscarded
+          ? `Re-export --tls-cert as described above and restart; ` +
+            `NODE_EXTRA_CA_CERTS is not the file to change.`
+          : opts.operatorCaCertReadError !== undefined
+            ? `Make NODE_EXTRA_CA_CERTS readable by the daemon as described ` +
+              `above and restart.`
+            : `Point NODE_EXTRA_CA_CERTS at the issuing CA (for mkcert: ` +
+              `"$(mkcert -CAROOT)/rootCA.pem") and restart.`),
     );
   }
   // `X509Certificate.verify` checks signatures only and never consults dates,
@@ -861,6 +940,7 @@ const VERSION_TAG = 0xa0;
 const EXTENSIONS_TAG = 0xa3;
 const SEQUENCE_TAG = 0x30;
 const BOOLEAN_TAG = 0x01;
+const INTEGER_TAG = 0x02;
 
 /** The tag of the DER element at `at`, and the `[start, end)` of its contents. */
 function derElementAt(
@@ -1043,12 +1123,80 @@ function parseCertChain(cert: Buffer): X509Certificate[] {
   return chain;
 }
 
+/**
+ * The leaf boot validation and the workers' loader both read out of a serving
+ * file: `X509Certificate` takes the FIRST column-0 block and nothing else.
+ * `parseCertChain` deliberately reads more loosely so the rest of the chain can
+ * be reasoned about; only this is the certificate the daemon actually serves.
+ */
+function bootParsedLeaf(cert: Buffer): X509Certificate | undefined {
+  try {
+    return new X509Certificate(cert);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Whether `issuer` signed `cert` — name match plus signature, the two questions
+ * OpenSSL asks before it asks whether the issuer is ALLOWED to issue.
+ *
+ * `X509Certificate.checkIssued` folds the third question in: it enforces the
+ * issuer's keyUsage and returns false for an issuer whose keyUsage lacks
+ * `keyCertSign`. Using it as the search predicate meant such an issuer was
+ * never FOUND, so the walk fell through to the generic unanchored gap, whose
+ * cause, predicted error code and remedy are all wrong for that shape (the
+ * issuing chain IS in the bundle, the handshake fails `key usage does not
+ * include certificate signing`, and no NODE_EXTRA_CA_CERTS change can fix it).
+ * Splitting the questions lets `cannotIssueAsIntermediate` name it instead.
+ */
 function certIssuedBy(cert: X509Certificate, issuer: X509Certificate): boolean {
   try {
-    return cert.checkIssued(issuer) && cert.verify(issuer.publicKey);
+    return cert.issuer === issuer.subject && cert.verify(issuer.publicKey);
   } catch {
     return false;
   }
+}
+
+/**
+ * Why OpenSSL refuses to let `cert` issue the certificate below it — the two
+ * causes `X509Certificate.ca === false` folds together, which the gap message
+ * has to tell apart because they take different fixes.
+ *
+ * Measured on Node v22.23.0 / OpenSSL 3.0.13 as real worker-shape handshakes:
+ * a CA:TRUE intermediate whose keyUsage omits `keyCertSign` reports
+ * `ca === false` and fails `invalid CA certificate` — reissuing it "with
+ * CA:TRUE", what this message used to advise, changes nothing.
+ */
+function issuerRefusedForKeyUsage(cert: X509Certificate): boolean {
+  const keyUsage = certificateExtension(cert, KEY_USAGE_OID);
+  return keyUsage !== undefined && !keyUsageAllowsCertSign(keyUsage);
+}
+
+/**
+ * The `pathLenConstraint` of `cert`'s basicConstraints, or `undefined` when it
+ * carries none. `BasicConstraints ::= SEQUENCE { cA BOOLEAN DEFAULT FALSE,
+ * pathLenConstraint INTEGER (0..MAX) OPTIONAL }`, and DER omits `cA` at its
+ * default — so the INTEGER is either the first member or the second.
+ */
+function pathLengthConstraint(cert: X509Certificate): number | undefined {
+  const value = certificateExtension(cert, BASIC_CONSTRAINTS_OID);
+  if (!value) return undefined;
+  const sequence = derElementAt(value, 0);
+  if (sequence?.tag !== SEQUENCE_TAG) return undefined;
+  let at = sequence.start;
+  const first = derElementAt(value, at);
+  if (!first) return undefined;
+  if (first.tag === BOOLEAN_TAG) at = first.end;
+  const integer = derElementAt(value, at);
+  if (integer?.tag !== INTEGER_TAG) return undefined;
+  let length = 0;
+  for (let index = integer.start; index < integer.end; index += 1) {
+    const byte = value[index];
+    if (byte === undefined) return undefined;
+    length = length * 0x100 + byte;
+  }
+  return length;
 }
 
 /**
@@ -1066,13 +1214,30 @@ function walkWorkerAnchorPath(chain: readonly X509Certificate[]): {
   nonCaTerminator?: X509Certificate;
   /** Set when the walk reached an issuer OpenSSL will not let issue. */
   incapableIssuer?: X509Certificate;
+  /** Set when a CA's basicConstraints pathLenConstraint is exceeded. */
+  pathLengthViolation?: { cert: X509Certificate; constraint: number };
 } {
   let next: X509Certificate | undefined = chain[0];
   const walked = new Set<string>();
   const path: X509Certificate[] = [];
+  let pathLengthViolation:
+    | { cert: X509Certificate; constraint: number }
+    | undefined;
   while (next) {
     const current: X509Certificate = next;
     path.push(current);
+    // `pathLenConstraint` caps how many intermediates may sit BELOW this CA.
+    // It rides inside the same basicConstraints value the capability checks
+    // already read, and went unread: a `pathlen:0` root over one intermediate
+    // walked to `anchored: true` with zero gaps while every worker handshake
+    // failed PATH_LENGTH_EXCEEDED (measured, exact worker shape).
+    if (path.length > 1 && pathLengthViolation === undefined) {
+      const constraint = pathLengthConstraint(current);
+      const intermediatesBelow = path.length - 2;
+      if (constraint !== undefined && intermediatesBelow > constraint) {
+        pathLengthViolation = { cert: current, constraint };
+      }
+    }
     if (isSelfSignedCert(current)) {
       // OpenSSL applies its CA test to certificates that sign OTHER
       // certificates, not to a self-signed leaf trusted at depth 0. Measured
@@ -1082,7 +1247,9 @@ function walkWorkerAnchorPath(chain: readonly X509Certificate[]): {
       if (path.length > 1 && cannotIssueCertificates(current)) {
         return { anchored: false, path, nonCaTerminator: current };
       }
-      return { anchored: true, path };
+      return pathLengthViolation
+        ? { anchored: false, path, pathLengthViolation }
+        : { anchored: true, path };
     }
     walked.add(current.fingerprint256);
     const issuer: X509Certificate | undefined = chain.find(
@@ -1103,7 +1270,9 @@ function walkWorkerAnchorPath(chain: readonly X509Certificate[]): {
     }
     next = issuer;
   }
-  return { anchored: false, path };
+  return pathLengthViolation
+    ? { anchored: false, path, pathLengthViolation }
+    : { anchored: false, path };
 }
 
 /**
@@ -7575,12 +7744,18 @@ async function runQwenServeImpl(
           if (tlsOptions && tlsCertPath) {
             const operatorCaCertPath = process.env['NODE_EXTRA_CA_CERTS'];
             let operatorCaCert: Buffer | undefined;
+            let operatorCaCertReadError: string | undefined;
             if (operatorCaCertPath) {
               try {
                 operatorCaCert = fs.readFileSync(operatorCaCertPath);
-              } catch {
-                // Unreadable: it anchors nothing, which is what the gap check
-                // concludes from the missing contents.
+              } catch (error) {
+                // Unreadable anchors nothing — but WHY it anchors nothing is
+                // not something the contents can say. Swallowing the error
+                // sent the operator after a file that already holds exactly
+                // the issuing CA and is only unreadable (root-owned, mode
+                // 600), with a remedy they had already applied.
+                operatorCaCertReadError =
+                  (error as NodeJS.ErrnoException)?.code ?? 'read failed';
               }
             }
             for (const gap of describeWorkerTlsTrustGaps({
@@ -7589,6 +7764,7 @@ async function runQwenServeImpl(
               daemonUrl: workerDaemonUrl,
               ...(operatorCaCertPath ? { operatorCaCertPath } : {}),
               ...(operatorCaCert ? { operatorCaCert } : {}),
+              ...(operatorCaCertReadError ? { operatorCaCertReadError } : {}),
             })) {
               daemonLog.warn(gap);
             }

@@ -214,6 +214,144 @@ describe('extractCertificateBlocks', () => {
     expect(extractCertificateBlocks(keyFirst)).toEqual([ROOT_PEM.trim()]);
   });
 
+  it('takes a block under the legacy X509 CERTIFICATE label', () => {
+    // Oracle: authorized=true. `X509 CERTIFICATE` is OpenSSL's legacy alias
+    // and the loader reads a certificate from it; recognising only the modern
+    // spelling returned `undefined` for the whole file, so
+    // `resolveWorkerCaCertPath` took the no-operator-blocks fallback and handed
+    // workers the daemon cert alone.
+    const aliased = ROOT_PEM.replace(
+      /(BEGIN|END) CERTIFICATE/g,
+      '$1 X509 CERTIFICATE',
+    );
+    expect(extractCertificateBlocks(aliased)).toEqual([ROOT_PEM.trim()]);
+  });
+
+  it('stops at a body that is alphabet-valid but does not decode', () => {
+    // Oracle: authorized=false, `bad base64 decode`, for both shapes — the
+    // loader takes NOTHING, including the root behind them. The alphabet test
+    // this replaces passed both and read straight on, counting an anchor the
+    // workers never received.
+    for (const body of ['====', 'AAAAA']) {
+      expect(
+        extractCertificateBlocks(
+          `-----BEGIN PRIVATE KEY-----\n${body}\n-----END PRIVATE KEY-----\n${ROOT_PEM}`,
+        ),
+      ).toBeUndefined();
+    }
+  });
+
+  it('rejects a BOM in front of an END marker', () => {
+    // Oracle: authorized=false — the BOM's tolerance is positional. Stripping
+    // it from every line made this an ordinary end line and returned the block
+    // as an anchor, while the loader takes nothing from the file.
+    expect(
+      extractCertificateBlocks(
+        ROOT_PEM.replace(
+          '-----END CERTIFICATE-----',
+          '\uFEFF-----END CERTIFICATE-----',
+        ),
+      ),
+    ).toBeUndefined();
+  });
+
+  it('rejects a BOM inside a base64 body line', () => {
+    // Oracle: authorized=false, `bad base64 decode`. A BOM is not whitespace
+    // to the decoder, so a `\s`-based strip silently repaired a file the
+    // loader refuses.
+    const lines = bodyLines(ROOT_PEM);
+    const withBom = [...lines];
+    withBom[0] = `${withBom[0]!.slice(0, 10)}\uFEFF${withBom[0]!.slice(10)}`;
+    expect(
+      extractCertificateBlocks(
+        `-----BEGIN CERTIFICATE-----\n${withBom.join('\n')}\n-----END CERTIFICATE-----\n`,
+      ),
+    ).toBeUndefined();
+  });
+
+  it('takes a block whose header section is empty', () => {
+    // Oracle: authorized=true for both an empty line and a BOM-only line
+    // directly after BEGIN — the loader splits the block there and reads the
+    // rest as data. The BOM-only line is the loader's own separator, not a
+    // body line, which is why it must not be judged as base64.
+    for (const separator of ['', '\uFEFF']) {
+      expect(
+        extractCertificateBlocks(
+          `-----BEGIN CERTIFICATE-----\n${separator}\n${bodyLines(ROOT_PEM).join('\n')}\n-----END CERTIFICATE-----\n`,
+        ),
+      ).toEqual([ROOT_PEM.trim()]);
+    }
+  });
+
+  it('stops at a blank line that splits a body into a header section', () => {
+    // Oracle: authorized=false, `not proc type` — the loader reads everything
+    // before the first blank line as RFC 1421 headers, and headers without
+    // `Proc-Type` fail the whole load. A hand-edited body picks this up. The
+    // trailing leaf makes the stop observable: a mutant that merely SKIPS the
+    // block the way it skips a well-formed encrypted key would return it.
+    const lines = bodyLines(ROOT_PEM);
+    for (const separator of ['', '\uFEFF']) {
+      expect(
+        extractCertificateBlocks(
+          `-----BEGIN CERTIFICATE-----\n${lines[0]}\n${separator}\n${lines.slice(1).join('\n')}\n-----END CERTIFICATE-----\n${LEAF_PEM}`,
+        ),
+      ).toBeUndefined();
+    }
+  });
+
+  it('stops at a header section that carries no Proc-Type', () => {
+    // Oracle: authorized=false, `not proc type`. The trailing leaf separates
+    // stopping from skipping.
+    expect(
+      extractCertificateBlocks(
+        `-----BEGIN CERTIFICATE-----\nComment: exported by hand\n\n${bodyLines(ROOT_PEM).join('\n')}\n-----END CERTIFICATE-----\n${LEAF_PEM}`,
+      ),
+    ).toBeUndefined();
+  });
+
+  it('stops at a header line the block never terminates', () => {
+    // Oracle: authorized=false. A header with no blank line after it leaves
+    // the loader's header state unresolved and it takes nothing — not even the
+    // leaf behind it.
+    expect(
+      extractCertificateBlocks(
+        `-----BEGIN CERTIFICATE-----\nComment: exported by hand\n${bodyLines(ROOT_PEM).join('\n')}\n-----END CERTIFICATE-----\n${LEAF_PEM}`,
+      ),
+    ).toBeUndefined();
+  });
+
+  it('reads past a legacy encrypted key block to the certificates behind it', () => {
+    // Oracle: authorized=true. `Proc-Type:` / `DEK-Info:` are headers the
+    // loader consumes as headers — it skips the key and loads every
+    // certificate after it. Folding those lines into the base64 judgment
+    // aborted the scan and lost the operator's CA.
+    const encryptedKey =
+      '-----BEGIN RSA PRIVATE KEY-----\n' +
+      'Proc-Type: 4,ENCRYPTED\n' +
+      'DEK-Info: DES-EDE3-CBC,0123456789ABCDEF\n' +
+      '\n' +
+      'AAAA\n' +
+      '-----END RSA PRIVATE KEY-----\n';
+    expect(extractCertificateBlocks(`${encryptedKey}${ROOT_PEM}`)).toEqual([
+      ROOT_PEM.trim(),
+    ]);
+  });
+
+  it('takes a body wrapped at a non-canonical column', () => {
+    // Oracle: authorized=true. The decoder judges the joined body, not each
+    // line, so a 63-column rewrap (some exporters do this) still loads.
+    const encoded = bodyLines(ROOT_PEM).join('');
+    const rewrapped: string[] = [];
+    for (let at = 0; at < encoded.length; at += 63) {
+      rewrapped.push(encoded.slice(at, at + 63));
+    }
+    expect(
+      extractCertificateBlocks(
+        `-----BEGIN CERTIFICATE-----\n${rewrapped.join('\n')}\n-----END CERTIFICATE-----\n`,
+      ),
+    ).toEqual([ROOT_PEM.trim()]);
+  });
+
   it('normalizes CRLF and marker/body padding to canonical PEM', () => {
     // Oracle: authorized=true for both. The bundle this feeds is written to
     // disk, so the output has to be canonical whatever the input looked like.
