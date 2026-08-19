@@ -380,4 +380,16 @@ describe('buildReattachParts', () => {
 
     expect(buildReattachParts([], 1, referencedContents, store)).toEqual([]);
   });
+
+  it('does not reattach an image already inline in a tool response', () => {
+    const store = new InMemoryImagePayloadStore();
+    const markerContents = [toolImageTurn('same')];
+    replaceImagePayloadsInPlace(markerContents, store);
+    const referencedContents: Content[] = [
+      markerContents[0]!,
+      toolImageTurn('same'),
+    ];
+
+    expect(buildReattachParts([], 1, referencedContents, store)).toEqual([]);
+  });
 });

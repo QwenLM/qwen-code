@@ -5728,19 +5728,29 @@ describe('GeminiChat', async () => {
   });
 
   describe('getHistoryShallow', () => {
-    it('copies containers without structured-cloning large part payloads', () => {
+    it('copies Part containers without cloning large leaf payloads', () => {
       const payload = { output: 'x'.repeat(128 * 1024) };
+      const topLevelInlineData = {
+        mimeType: 'image/png',
+        data: 'top-level-image',
+      };
+      const nestedInlineData = {
+        mimeType: 'image/png',
+        data: 'nested-image',
+      };
+      const topLevelPart: Part = { inlineData: topLevelInlineData };
+      const nestedPart: Part = { inlineData: nestedInlineData };
+      const functionResponsePart: Part = {
+        functionResponse: {
+          id: 'call-1',
+          name: 'read_file',
+          response: payload,
+          parts: [nestedPart],
+        },
+      };
       const content: Content = {
         role: 'user',
-        parts: [
-          {
-            functionResponse: {
-              id: 'call-1',
-              name: 'read_file',
-              response: payload,
-            },
-          },
-        ],
+        parts: [topLevelPart, functionResponsePart],
       };
       chat.addHistory(content);
       const structuredCloneSpy = vi
@@ -5755,7 +5765,25 @@ describe('GeminiChat', async () => {
       expect(history).toEqual([content]);
       expect(history[0]).not.toBe(content);
       expect(history[0]!.parts).not.toBe(content.parts);
-      const response = history[0]!.parts![0] as {
+      expect(history[0]!.parts![0]).not.toBe(topLevelPart);
+      expect(history[0]!.parts![0]!.inlineData).toBe(topLevelInlineData);
+      const copiedFunctionResponsePart = history[0]!.parts![1]!;
+      expect(copiedFunctionResponsePart).not.toBe(functionResponsePart);
+      expect(copiedFunctionResponsePart.functionResponse).not.toBe(
+        functionResponsePart.functionResponse,
+      );
+      const copiedNested = copiedFunctionResponsePart.functionResponse
+        ?.parts as Part[];
+      expect(copiedNested).not.toBe(
+        functionResponsePart.functionResponse?.parts,
+      );
+      expect(copiedNested[0]).not.toBe(nestedPart);
+      expect(copiedNested[0]!.inlineData).toBe(nestedInlineData);
+      delete history[0]!.parts![0]!.inlineData;
+      delete copiedNested[0]!.inlineData;
+      expect(topLevelPart.inlineData).toBe(topLevelInlineData);
+      expect(nestedPart.inlineData).toBe(nestedInlineData);
+      const response = copiedFunctionResponsePart as {
         functionResponse: { response: typeof payload };
       };
       expect(response.functionResponse.response).toBe(payload);

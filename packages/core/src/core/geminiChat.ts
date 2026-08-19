@@ -77,6 +77,7 @@ import {
 } from '../services/chatCompressionService.js';
 import { acquireSleepInhibitor } from '../services/sleepInhibitor.js';
 import {
+  getFunctionResponseParts,
   resolveCompactionTuning,
   resolveSlimmingConfig,
   slimCompactionInput,
@@ -1233,7 +1234,19 @@ function appendCuratedContent(
 function copyContentContainer(content: Content): Content {
   return {
     ...content,
-    ...(content.parts ? { parts: [...content.parts] } : {}),
+    ...(content.parts ? { parts: content.parts.map(copyPartContainer) } : {}),
+  };
+}
+
+function copyPartContainer(part: Part): Part {
+  const nested = getFunctionResponseParts(part);
+  if (!nested) return { ...part };
+  return {
+    ...part,
+    functionResponse: {
+      ...part.functionResponse,
+      parts: nested.map((inner) => ({ ...inner })),
+    },
   };
 }
 
@@ -4052,9 +4065,9 @@ export class GeminiChat {
   }
 
   /**
-   * Returns a shallow copy of the history and each entry's parts array without
-   * cloning large part payloads. Use only for read-only consumers or consumers
-   * that replace touched entries before mutating them.
+   * Copies history containers, Part objects, and nested functionResponse parts
+   * without cloning large leaf payloads. Consumers must not mutate leaf
+   * payload objects.
    */
   getHistoryShallow(curated: boolean = false): Content[] {
     const history = curated

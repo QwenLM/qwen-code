@@ -49,16 +49,7 @@ export class InMemoryImagePayloadStore implements ImagePayloadStore {
 
 export function countAllInlineImages(contents: Content[]): number {
   let count = 0;
-  for (const content of contents) {
-    for (const part of content.parts ?? []) {
-      if (part.inlineData?.mimeType?.startsWith('image/')) count++;
-      const nested = getFunctionResponseParts(part);
-      if (!nested) continue;
-      for (const inner of nested) {
-        if (inner.inlineData?.mimeType?.startsWith('image/')) count++;
-      }
-    }
-  }
+  for (const _part of inlineImageParts(contents)) count++;
   return count;
 }
 
@@ -76,44 +67,19 @@ export function replaceImagePayloadsInPlace(
   skipContent?: Content,
 ): StoredImagePayload[] {
   const replaced: StoredImagePayload[] = [];
-  for (const content of contents) {
-    if (content === skipContent) continue;
-    if (!content.parts) continue;
-    for (let i = 0; i < content.parts.length; i++) {
-      const part = content.parts[i]!;
-      if (
-        part.inlineData?.mimeType?.startsWith('image/') &&
-        part.inlineData.data
-      ) {
-        const stored = store.put(part);
-        replaced.push(stored);
-        part.text = imageReferenceText(stored);
-        part.inlineData = undefined;
-        continue;
-      }
-      const nested = getFunctionResponseParts(part);
-      if (!nested) continue;
-      for (let j = 0; j < nested.length; j++) {
-        const inner = nested[j]!;
-        if (
-          inner.inlineData?.mimeType?.startsWith('image/') &&
-          inner.inlineData.data
-        ) {
-          const stored = store.put(inner);
-          replaced.push(stored);
-          inner.text = imageReferenceText(stored);
-          inner.inlineData = undefined;
-        }
-      }
-    }
+  for (const part of inlineImageParts(contents, skipContent)) {
+    const stored = store.put(part);
+    replaced.push(stored);
+    part.text = imageReferenceText(stored);
+    delete part.inlineData;
   }
   return replaced;
 }
 
 /**
- * Build the reattach parts for the most recent unique images from a
- * replacement pass. Used after `replaceImagePayloadsInPlace` to append
- * recent image bytes to the outgoing request.
+ * Build reattach parts from images replaced in the current pass and stored
+ * payloads referenced by markers in `referencedContents`, even when the
+ * current pass replaced nothing.
  */
 export function buildReattachParts(
   replaced: StoredImagePayload[],
@@ -121,6 +87,8 @@ export function buildReattachParts(
   referencedContents: Content[] = [],
   store?: ImagePayloadStore,
 ): Part[] {
+  const referencedIds = collectReferencedImageIds(referencedContents);
+  if (replaced.length === 0 && (!store || referencedIds.size === 0)) return [];
   const inlineIds = collectInlineImageIds(referencedContents);
   const last = referencedContents.at(-1);
   const lastReferencedIds = collectReferencedImageIds(
@@ -133,7 +101,7 @@ export function buildReattachParts(
     .map((stored) => ({ stored }));
 
   if (store) {
-    for (const id of collectReferencedImageIds(referencedContents)) {
+    for (const id of referencedIds) {
       if (inlineIds.has(id) || lastReferencedIds.has(id)) continue;
       const stored = store.get(id);
       if (stored) candidates.push({ stored });
@@ -272,25 +240,35 @@ function transformPart(
 
 function collectInlineImageIds(contents: Content[]): Set<string> {
   const ids = new Set<string>();
+  for (const part of inlineImageParts(contents)) {
+    ids.add(imagePartToStoredPayload(part).id);
+  }
+  return ids;
+}
+
+function* inlineImageParts(
+  contents: Content[],
+  skipContent?: Content,
+): Generator<Part> {
   for (const content of contents) {
+    if (content === skipContent) continue;
     for (const part of content.parts ?? []) {
       if (
         part.inlineData?.mimeType?.startsWith('image/') &&
         part.inlineData.data
       ) {
-        ids.add(imagePartToStoredPayload(part).id);
+        yield part;
       }
       for (const inner of getFunctionResponseParts(part) ?? []) {
         if (
           inner.inlineData?.mimeType?.startsWith('image/') &&
           inner.inlineData.data
         ) {
-          ids.add(imagePartToStoredPayload(inner).id);
+          yield inner;
         }
       }
     }
   }
-  return ids;
 }
 
 function collectReferencedImageIds(contents: Content[]): Set<string> {

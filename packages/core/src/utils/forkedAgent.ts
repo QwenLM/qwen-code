@@ -62,6 +62,7 @@ import {
   type ResolvedModelId,
 } from './modelId.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { getFunctionResponseParts } from '../services/compactionInputSlimming.js';
 import { runWithChatRecordingSuppressed } from './chat-recording-suppression-context.js';
 
 const debugLogger = createDebugLogger('FORKED_AGENT');
@@ -80,7 +81,8 @@ export interface CacheSafeParams {
   generationConfig: GenerateContentConfig;
   /**
    * Curated conversation history with copied Content, parts arrays, and Part
-   * objects. Nested functionResponse parts are copied too.
+   * objects. Nested functionResponse parts are copied too; leaf payloads remain
+   * shared and must not be mutated.
    */
   history: Content[];
   /** Model identifier */
@@ -102,13 +104,13 @@ let currentCacheSafeParams: CacheSafeParams | null = null;
 let currentVersion = 0;
 
 function clonePart(part: Part): Part {
-  const nested = part.functionResponse as { parts?: unknown } | undefined;
-  if (!Array.isArray(nested?.parts)) return { ...part };
+  const nested = getFunctionResponseParts(part);
+  if (!nested) return { ...part };
   return {
     ...part,
     functionResponse: {
       ...part.functionResponse,
-      parts: (nested.parts as Part[]).map((inner) => ({ ...inner })),
+      parts: nested.map((inner) => ({ ...inner })),
     },
   };
 }
