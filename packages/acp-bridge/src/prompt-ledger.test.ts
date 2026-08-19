@@ -162,7 +162,18 @@ describe('appendPromptLedgerRecord + readPromptLedgerRecords', () => {
       at: 2,
     });
 
-    // No stray blank lines: exactly two records, in order.
+    // No stray blank lines: exactly two records, in order. Assert the raw
+    // layout too — the reader skips blank lines, so it cannot see a stray
+    // seal newline; a regression that always appends one would keep every
+    // read-based assertion green.
+    expect(statSync(filePath).size).toBe(
+      JSON.stringify({ v: 1, promptId: 'p1', state: 'in_flight', at: 1 })
+        .length +
+        1 +
+        JSON.stringify({ v: 1, promptId: 'p2', terminal: 'completed', at: 2 })
+          .length +
+        1,
+    );
     expect(readPromptLedgerRecords(filePath)).toEqual([
       { v: 1, promptId: 'p1', state: 'in_flight', at: 1 },
       { v: 1, promptId: 'p2', terminal: 'completed', at: 2 },

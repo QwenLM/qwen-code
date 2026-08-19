@@ -107,6 +107,21 @@ function toolCallRecord(
   };
 }
 
+function systemRecord(
+  fixture: Fixture,
+  uuid: string,
+  parentUuid: string,
+  subtype: NonNullable<ChatRecord['subtype']>,
+  systemPayload: ChatRecord['systemPayload'],
+): ChatRecord {
+  return {
+    ...record(fixture, uuid, parentUuid, ''),
+    type: 'system',
+    subtype,
+    systemPayload,
+  };
+}
+
 function writeTranscript(
   fixture: Fixture,
   records: readonly ChatRecord[],
@@ -300,13 +315,31 @@ describe('reconcileDanglingPromptTerminals', () => {
 
   it('attributes the tail to the sole dangling prompt behind a settled one', async () => {
     const fixture = makeFixture();
-    // Valid interleave: p1 settled after p2 was admitted, so the tail is
-    // p2's turn and p2 gets the verdict even though a terminal record
-    // sits after its in_flight line.
+    // Valid interleave on a real time axis: p2 was admitted (queued) while
+    // p1 still ran, p1 settled, then p2 dispatched and produced the visible
+    // tail before the daemon died. p1's terminal postdates p1's own turn
+    // but predates p2's writes (transcript timestamps start at
+    // RECORD_BASE_MS), so the FIFO evidence attributes the tail to p2 even
+    // though a terminal record sits after its in_flight line.
     writeLedger(fixture, [
-      { v: 1, promptId: 'p1', state: 'in_flight', at: 1 },
-      { v: 1, promptId: 'p2', state: 'in_flight', at: 2 },
-      { v: 1, promptId: 'p1', terminal: 'completed', at: 3 },
+      {
+        v: 1,
+        promptId: 'p1',
+        state: 'in_flight',
+        at: RECORD_BASE_MS - 3000,
+      },
+      {
+        v: 1,
+        promptId: 'p2',
+        state: 'in_flight',
+        at: RECORD_BASE_MS - 2000,
+      },
+      {
+        v: 1,
+        promptId: 'p1',
+        terminal: 'completed',
+        at: RECORD_BASE_MS - 1000,
+      },
     ]);
     writeTranscript(fixture, [
       record(fixture, 'u2', null, 'p2 question'),
@@ -325,6 +358,141 @@ describe('reconcileDanglingPromptTerminals', () => {
       terminal: 'completed',
       stopReason: 'reconstructed_from_transcript',
     });
+  });
+
+  it('stays fail-closed for a queued prompt that never dispatched', async () => {
+    const fixture = makeFixture();
+    // B was admitted (its in_flight written at admission) and queued while
+    // A still ran; A settled and the daemon died before B dispatched. The
+    // visible tail is A's turn — it predates A's own settled terminal, so
+    // the FIFO evidence cannot attribute it to B.
+    writeLedger(fixture, [
+      {
+        v: 1,
+        promptId: 'A',
+        state: 'in_flight',
+        at: RECORD_BASE_MS - 3000,
+      },
+      {
+        v: 1,
+        promptId: 'B',
+        state: 'in_flight',
+        at: RECORD_BASE_MS - 2000,
+      },
+      // A's settle postdates its turn's writes (the real ordering).
+      { v: 1, promptId: 'A', terminal: 'completed', at: Date.now() },
+    ]);
+    writeTranscript(fixture, [
+      record(fixture, 'u1', null, 'A question'),
+      record(fixture, 'a1', 'u1', 'A answer'),
+    ]);
+
+    await reconcileDanglingPromptTerminals(
+      fixture.sessionService,
+      fixture.sessionId,
+    );
+
+    expect(readPromptLedgerRecords(fixture.ledgerPath)).toHaveLength(3);
+  });
+
+  it('stays fail-closed for a stale dangling behind a later settled prompt', async () => {
+    const fixture = makeFixture();
+    // A restore path that skips reconciliation left p1's in_flight
+    // dangling; prompt c1 later ran to completion. c1's clean tail
+    // predates c1's own settled terminal, so it must not be attributed to
+    // the stale p1.
+    writeLedger(fixture, [
+      {
+        v: 1,
+        promptId: 'p1',
+        state: 'in_flight',
+        at: RECORD_BASE_MS - 5000,
+      },
+      {
+        v: 1,
+        promptId: 'c1',
+        state: 'in_flight',
+        at: RECORD_BASE_MS - 4000,
+      },
+      { v: 1, promptId: 'c1', terminal: 'completed', at: Date.now() },
+    ]);
+    writeTranscript(fixture, [
+      record(fixture, 'u1', null, 'c1 question'),
+      record(fixture, 'a1', 'u1', 'c1 answer'),
+    ]);
+
+    await reconcileDanglingPromptTerminals(
+      fixture.sessionService,
+      fixture.sessionId,
+    );
+
+    expect(readPromptLedgerRecords(fixture.ledgerPath)).toHaveLength(3);
+  });
+
+  it('stays fail-closed when a compression checkpoint postdates the admission', async () => {
+    const fixture = makeFixture();
+    // A chat_compression record written after p1's admission replaces the
+    // api history wholesale; the verdict's projection no longer carries
+    // p1's turn, so nothing may be attributed.
+    writeLedger(fixture, [
+      {
+        v: 1,
+        promptId: 'p1',
+        state: 'in_flight',
+        at: RECORD_BASE_MS - 1000,
+      },
+    ]);
+    writeTranscript(fixture, [
+      record(fixture, 'u1', null, 'question'),
+      record(fixture, 'a1', 'u1', 'answer'),
+      systemRecord(fixture, 'c1', 'a1', 'chat_compression', {
+        info: {
+          originalTokenCount: 100,
+          newTokenCount: 50,
+          // CompressionStatus.COMPRESSED is not exported from the core
+          // barrel; reconcile only reads compressedHistory.
+          compressionStatus: 1,
+        },
+        compressedHistory: [{ role: 'user', parts: [{ text: 'summary' }] }],
+      } as ChatRecord['systemPayload']),
+    ]);
+
+    await reconcileDanglingPromptTerminals(
+      fixture.sessionService,
+      fixture.sessionId,
+    );
+
+    expect(readPromptLedgerRecords(fixture.ledgerPath)).toHaveLength(1);
+  });
+
+  it('stays fail-closed when only post-admission system records follow', async () => {
+    const fixture = makeFixture();
+    // After p1's admission the transcript gains only a system record
+    // (custom_title here) that stays outside the api history; the raw tail
+    // postdates the admission but the projection the verdict runs on holds
+    // no evidence of p1's turn.
+    writeLedger(fixture, [
+      {
+        v: 1,
+        promptId: 'p1',
+        state: 'in_flight',
+        at: RECORD_BASE_MS + 3_600_000,
+      },
+    ]);
+    writeTranscript(fixture, [
+      record(fixture, 'u1', null, 'earlier question'),
+      record(fixture, 'a1', 'u1', 'earlier answer'),
+      systemRecord(fixture, 's1', 'a1', 'custom_title', {
+        customTitle: 'Later title',
+      }),
+    ]);
+
+    await reconcileDanglingPromptTerminals(
+      fixture.sessionService,
+      fixture.sessionId,
+    );
+
+    expect(readPromptLedgerRecords(fixture.ledgerPath)).toHaveLength(1);
   });
 
   it('attributes the tail to the running prompt behind a cancelled queued one', async () => {
@@ -481,19 +649,38 @@ describe('readRecentPromptTerminals + withPromptTerminals', () => {
     ]);
   });
 
-  it('reads the trailing terminals from a ledger larger than the tail window', () => {
+  it('reads only the trailing window, not the whole ledger', () => {
     const fixture = makeFixture();
-    // ~290 KiB of fixed-length terminal records — beyond the 256 KiB read
-    // window — written in one shot (the per-record append path is not what
-    // this test exercises).
-    const lines: string[] = [];
+    // A distinctive sentinel terminal, then >256 KiB of in_flight filler,
+    // then <64 trailing terminals. A full read would return the sentinel
+    // too (every terminal fits under the 64-record response cap); the
+    // windowed call-site read cannot see it — dropping tailBytes from
+    // readRecentPromptTerminals flips this assertion.
+    const lines: string[] = [
+      `${JSON.stringify({
+        v: 1,
+        promptId: 'sentinel',
+        terminal: 'completed',
+        at: 0,
+      })}\n`,
+    ];
     for (let i = 0; i < 5000; i += 1) {
       lines.push(
         `${JSON.stringify({
           v: 1,
-          promptId: `p${String(i).padStart(6, '0')}`,
+          promptId: `filler${String(i).padStart(6, '0')}`,
+          state: 'in_flight',
+          at: i + 1,
+        })}\n`,
+      );
+    }
+    for (let i = 0; i < 10; i += 1) {
+      lines.push(
+        `${JSON.stringify({
+          v: 1,
+          promptId: `tail${String(i).padStart(2, '0')}`,
           terminal: 'completed',
-          at: i,
+          at: 5001 + i,
         })}\n`,
       );
     }
@@ -504,14 +691,8 @@ describe('readRecentPromptTerminals + withPromptTerminals', () => {
       fixture.sessionService,
       fixture.sessionId,
     );
-    expect(terminals).toHaveLength(64);
-    expect(terminals[63]).toMatchObject({
-      promptId: 'p004999',
-      terminal: 'completed',
-    });
-    // The window can only hold the tail, so even the oldest returned
-    // terminal must come from near the end of the file.
-    expect(terminals[0]?.at).toBeGreaterThan(4900);
+    expect(terminals).toHaveLength(10);
+    expect(terminals!.map((t) => t.promptId)).not.toContain('sentinel');
   });
 
   it('leaves the response untouched without terminals', () => {

@@ -5,7 +5,7 @@
  */
 
 import type { Content } from '@google/genai';
-import {
+import type { ChatRecord ,
   buildApiHistoryFromConversation,
   detectTurnInterruption,
   SessionService,
@@ -57,6 +57,12 @@ export function createPromptLedgerSink(
  * - `detectTurnInterruption` on the transcript tail decides the outcome;
  * - the verdict is appended back to the ledger so the response (and every
  *   later load) sees it.
+ *
+ * Attribution is guarded three ways (each mirrors a concrete wrong-terminal
+ * probe; see the design doc): the temporal evidence is measured on the same
+ * projection the verdict uses, a compression checkpoint after the target's
+ * admission voids the evidence chain, and under FIFO admission the visible
+ * tail must postdate every other prompt's settled terminal.
  *
  * Fail-closed invariant: when the outcome cannot be attributed with
  * confidence, nothing is appended and the prompt stays "unknown" — a
@@ -114,18 +120,48 @@ export async function reconcileDanglingPromptTerminals(
     return; // Degraded transcript: fail-closed.
   }
   if (resumed === undefined) return;
-  // Temporal evidence: the transcript's last write must postdate target's
-  // admission (at or after the in_flight `at`). A dangling prompt that
-  // never produced a transcript write (still queued when the daemon died)
-  // leaves the tail owned by an earlier settled turn — fail closed instead
-  // of attributing that turn to the target. `ChatRecord.timestamp` is the
-  // record's creation time, so any record written under the target's turn
-  // satisfies the check.
   const messages = resumed.conversation.messages;
-  const lastMessage = messages[messages.length - 1];
-  const lastWriteMs =
-    lastMessage === undefined ? NaN : Date.parse(lastMessage.timestamp);
-  if (!Number.isFinite(lastWriteMs) || lastWriteMs < targetAdmission.at) {
+  // Projection-consistent temporal evidence: only records that actually
+  // enter the api history the verdict runs on can prove the target's turn
+  // wrote anything. System records (ui_telemetry, custom_title, ...) stay
+  // outside the projection, and a compression candidate replaces it wholesale
+  // (mirrors SessionApiHistoryAccumulator, packages/core). Measuring the
+  // last write on the raw stream instead would let evidence that the
+  // verdict never sees pass the guard.
+  let lastVisibleWriteMs = NaN;
+  let compressedAfterAdmission = false;
+  for (const record of messages) {
+    const writeMs = Date.parse(record.timestamp);
+    if (record.type === 'system') {
+      if (
+        isCompressionResetRecord(record) &&
+        Number.isFinite(writeMs) &&
+        writeMs >= targetAdmission.at
+      ) {
+        compressedAfterAdmission = true;
+      }
+      continue;
+    }
+    if (!record.message || record.subtype === 'realtime_message') continue;
+    if (Number.isFinite(writeMs)) lastVisibleWriteMs = writeMs;
+  }
+  // FIFO evidence: under FIFO admission the target's turn can only start
+  // after every other prompt settled, so any visible tail older than some
+  // other prompt's terminal belongs to that prompt's turn — a queued prompt
+  // that never dispatched and a stale dangling left by a restore path that
+  // skips reconciliation both fail here.
+  let lastOtherTerminalAt = 0;
+  for (const record of records) {
+    if (isPromptLedgerTerminalRecord(record) && record.promptId !== target) {
+      lastOtherTerminalAt = Math.max(lastOtherTerminalAt, record.at);
+    }
+  }
+  if (
+    compressedAfterAdmission ||
+    !Number.isFinite(lastVisibleWriteMs) ||
+    lastVisibleWriteMs < targetAdmission.at ||
+    lastVisibleWriteMs < lastOtherTerminalAt
+  ) {
     return;
   }
   const apiHistory = buildApiHistoryFromConversation(resumed.conversation);
@@ -158,6 +194,23 @@ export async function reconcileDanglingPromptTerminals(
   } catch {
     // Best-effort: the dangling prompt stays unknown.
   }
+}
+
+/**
+ * Whether a system record resets the api history projection: a
+ * `chat_compression` record carrying a `compressedHistory` payload (the
+ * accumulator swaps the whole history for it). Kept inline instead of
+ * importing `isApiHistoryCompressionCandidate` so this module stays inside
+ * the cli package; the predicate mirrors that helper.
+ */
+function isCompressionResetRecord(record: ChatRecord): boolean {
+  if (record.type !== 'system' || record.subtype !== 'chat_compression') {
+    return false;
+  }
+  return Boolean(
+    (record.systemPayload as { compressedHistory?: unknown } | undefined)
+      ?.compressedHistory,
+  );
 }
 
 /**
