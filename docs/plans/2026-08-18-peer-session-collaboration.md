@@ -79,9 +79,10 @@ Three of its findings survive and are reused here: the semantic/terminal channel
 multiple processes. Its conclusion does not survive, for three reasons found since:
 
 1. **The infrastructure it proposed to build already exists twice.** The daemon spawns
-   independent sub-sessions with correlation today, and a 9,595-line process supervisor
-   ships for channel workers (§1.4). The plan budgeted ~2,480 new production LOC for
-   capabilities the repository already has in production.
+   independent sub-sessions with correlation today, and a process supervisor
+   ships for channel workers — 3,482 production lines (9,714 incl. tests) (§1.4). The plan
+   budgeted ~2,480 new production LOC for capabilities the repository already has in
+   production.
 2. **Its topology is the wrong one anyway.** Fleet is keyed one-fleet-per-project with a
    single-leader lock, and explicitly demotes "a second Qwen in the same repo" to a
    read-only roster viewer — precisely the participant this design is about.
@@ -140,7 +141,7 @@ carries no inbound channel. That gap, not discovery itself, is what remains open
 | Component                                             | Provides                                                                                                                                                                                                                |
 | ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `serve/create-sub-session.ts`                         | Daemon spawns a **fresh top-level sub-session**, runs a prompt, returns a result. `promptId` correlation on the event stream, concurrency slots, idle reaping, transcript persistence, abort via composed `AbortSignal` |
-| `serve/channel-worker-*.ts` (9,595 LOC)               | `fork()`, heartbeats, startup timeout, kill/stop grace, token + workspace env isolation, external tool guard, delivery/webhook IPC, diagnostics, worker groups                                                          |
+| `serve/channel-worker-*.ts` (3,482 prod LOC; 9,714 incl. tests)               | `fork()`, heartbeats, startup timeout, kill/stop grace, token + workspace env isolation, external tool guard, delivery/webhook IPC, diagnostics, worker groups                                                          |
 | `acp-bridge/spawnChannel.ts` + `child-heap-policy.ts` | Per-child `--max-old-space-size` derived from system memory (50 %, capped 16 GB), `ProcessRegistry`, stderr forwarding with credential redaction                                                                        |
 
 The per-child heap budget also disposes of the "N teammates share one 4 GB heap" concern
@@ -172,7 +173,8 @@ Neither closure was a design rejection:
   those fixes added rather than in the original change. Patching further is not
   converging."_ The author stated it would return rebased at roughly its original size.
 
-The branch `feat/cross-session-inbox` still exists. The registry half of #8728 is now in
+The author's fork branch `feat/cross-session-inbox` is reported to still exist (not in this
+repository; it lives at #8730's head SHA). The registry half of #8728 is now in
 the tree via #8969 (`session-registry.ts`, `sessions ps`, `utils/process-liveness.ts`);
 the messaging half is not — `packages/core/src/ipc/` and `packages/cli/src/peerMessaging/`
 remain absent.
@@ -181,7 +183,7 @@ remain absent.
 
 `packages/cli/src/agent-view/` — `supervisor-server.ts`, `supervisor-client.ts`,
 `supervisor-store.ts`, `supervisor-process.ts`, `supervisor-runner.ts`,
-`terminal-bridge.ts`, `protocol.ts` — 6,186 lines, with **zero references elsewhere in
+`terminal-bridge.ts`, `protocol.ts` — 3,033 production lines (6,186 incl. tests), with **zero references elsewhere in
 `main`**. That reads as dead code and is not. It landed in
 [#7799](https://github.com/QwenLM/qwen-code/pull/7799) (2026-08-01) as the base of a
 five-PR series whose remaining four are open, non-draft, and actively maintained:
@@ -231,8 +233,9 @@ systems precisely because it was one.
 
 herdr holds stdin, which is why it can drive unmodified agents at all: it launched them into
 its panes and writes bytes as though a user were typing. The integration in
-[#9047](https://github.com/QwenLM/qwen-code/pull/9047) shows the mechanism from the other
-side — `HERDR_ENV`, `HERDR_PANE_ID`, `HERDR_BIN_PATH`, and `spawn(binary, args)`. No SDK, no
+[#9047](https://github.com/QwenLM/qwen-code/pull/9047) — an open, unmerged PR — shows the
+mechanism from the other side as a **proposal**, not a trace of shipped code —
+`HERDR_ENV`, `HERDR_PANE_ID`, `HERDR_BIN_PATH`, and `spawn(binary, args)`. No SDK, no
 protocol library, and no requirement on the hosted agent.
 
 That gives a 2×2 with one impossible cell:
@@ -873,7 +876,7 @@ right shape of integration and is compatible with everything here.
 | #8730                                                                           | Revive. Stage 4. Re-engage the author first                                                                                                                                                                                            |
 | #8718 (closed not-planned)                                                      | Leave closed. Post a correction: the recorded rationale rebuts a position the fleet plan never held (it ruled heterogeneous CLIs permanently out of scope), and the real reasons were sequencing, review capacity, and no measured win |
 | #8869 (Stage 1B draft)                                                          | Close. Superseded                                                                                                                                                                                                                      |
-| `agent-view/` (6,186 LOC)                                                       | **Leave in place.** Base of the open #7800–#7803 series, which this design does not touch                                                                                                                                              |
+| `agent-view/` (3,033 prod LOC; 6,186 incl. tests)                                                       | **Leave in place.** Base of the open #7800–#7803 series, which this design does not touch                                                                                                                                              |
 | #9276                                                                           | Fix in Stage 0. Blocks the only supported path today                                                                                                                                                                                   |
 | #9287 / #9288                                                                   | Close as superseded by #9284 / #9289                                                                                                                                                                                                   |
 | Fleet architecture doc ([#8719](https://github.com/QwenLM/qwen-code/pull/8719)) | Stays closed. Superseded by this document; it never landed in the repository                                                                                                                                                           |
