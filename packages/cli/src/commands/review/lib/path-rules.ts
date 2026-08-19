@@ -194,13 +194,33 @@ A finding that a method "can no longer be inlined" needs the **dynamic** tier �
  * exclusion enforced for the directory form of proposals and the filename form
  * of changelogs and for neither of the other two, which let a changelog
  * directory and a flat-layout RFC through.
+ *
+ * `releases?` is here for the same reason `changelogs?` is: per-version history,
+ * not a contract. This repository ships one (`packages/sdk-java/qwencode/RELEASE.md`)
+ * inside a governed location, so the member has a live trigger, not a
+ * hypothetical one.
  */
-const NON_CONTRACT_GENRE = 'designs?|plans?|rfcs?|proposals?|adrs?|changelogs?';
+const NON_CONTRACT_GENRE =
+  'designs?|plans?|rfcs?|proposals?|adrs?|changelogs?|releases?';
 const NON_CONTRACT_DIR = new RegExp(`(?:^|/)(?:${NON_CONTRACT_GENRE})/`, 'i');
+/**
+ * Separator-anchored rather than start-anchored: a genre is a whole token
+ * wherever it sits, so `0003-adr` and `2026-changelog` are the genre their name
+ * says they are, while `designer-notes` and `planning-board` — where the genre
+ * letters merely begin a longer word — are not.
+ */
 const NON_CONTRACT_STEM = new RegExp(
-  `^(?:${NON_CONTRACT_GENRE})(?:[-_. ]|$)`,
+  `(?:^|[-_. ])(?:${NON_CONTRACT_GENRE})(?:[-_. ]|$)`,
   'i',
 );
+/**
+ * Repository-meta and agent-context documents, matched whole. Unlike a genre
+ * this is a CLOSED set of conventional filenames — the reason it can be
+ * enumerated at all, and the reason it is exact-match: `qwen` excludes an
+ * agent-context file without touching `qwen-serve-protocol`.
+ */
+const NON_CONTRACT_FILE =
+  /^(?:contributing|roadmap|code[-_]of[-_]conduct|license|licence|authors|governance|support|qwen|agents|claude)$/i;
 
 const CONTRACT_DOCS: PathRule = {
   title: 'Consumer-facing contract documentation',
@@ -220,14 +240,31 @@ const CONTRACT_DOCS: PathRule = {
   // root, `spec/wire.md`) is not governed. That is the precision side of the
   // trade this file already takes everywhere else, and a project that wants the
   // checklist anyway has `.qwen/review-rules.md`.
+  //
+  // The reverse cost — non-contract prose inside a governed section — is
+  // answered only where it can be answered by a closed set (the genres above,
+  // the meta filenames above). Beyond that it is accepted rather than
+  // enumerated: measured on this repository, 44 of the 55 tracked documents
+  // under `docs/developers/` are integrator references (the daemon and tool
+  // references, the SDK guides, the wire protocol), and deciding document KIND
+  // inside a reference tree is the same non-converging shape that took the
+  // keyword branch out. An agent handed a contributing guide finds nothing —
+  // the checklist is diff-scoped and its exclusions are explicit — so the
+  // residue is tokens, not false findings.
   matches: (p) => {
-    if (!/\.mdx?$/i.test(p)) return false;
+    if (!/\.(?:mdx?|markdown|mdown)$/i.test(p)) return false;
     if (NON_CONTRACT_DIR.test(p)) return false;
-    const stem = p.slice(p.lastIndexOf('/') + 1).replace(/\.mdx?$/i, '');
+    // Extension-stripped: `NON_CONTRACT_FILE` matches a whole stem, so the
+    // strip is what decides `docs/api/CONTRIBUTING.md`.
+    const stem = p.slice(p.lastIndexOf('/') + 1).replace(/\.[a-z]+$/i, '');
+    if (NON_CONTRACT_FILE.test(stem)) return false;
     if (NON_CONTRACT_STEM.test(stem)) return false;
     return (
-      /(?:^|\/)docs\/(?:developers?|api|reference|protocols?)\//i.test(p) ||
-      /(?:^|\/)sdks?(?:-[a-z0-9]+)*\//i.test(p)
+      /(?:^|\/)docs\/(?:developers?|apis?|references?|protocols?)\//i.test(p) ||
+      // Anchored to a package root: an `sdk*` segment at any depth also matched
+      // `docs/users/sdk/quickstart.md` and `examples/sdk/README.md`, which is
+      // the tree-wide entrance the keyword branch was withdrawn for.
+      /^(?:packages\/|libs?\/)?sdks?(?:-[a-z0-9]+)*\//i.test(p)
     );
   },
   checklist: `The reader of this document cannot read your code. It is a wire protocol, an API reference or an SDK guide — someone writes a client against it, ships that client, and never sees the implementation that was supposed to back the sentence they built on. Every other lens in this review reads the code and asks whether it is right. This one reads the **prose the diff added** and asks whether the code makes it true.

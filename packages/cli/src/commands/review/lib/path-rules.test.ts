@@ -183,6 +183,55 @@ describe('pathRulesFor — scoped, or it is noise', () => {
     // A stem that merely STARTS with the letters of a genre is not that genre.
     ['docs/api/designer-notes.md', true],
     ['docs/api/planning-board.md', true],
+    // …but a genre as a whole trailing token IS that genre: the exclusion is
+    // separator-anchored, not start-anchored, so a numbered or dated genre
+    // filename inside a governed section stays out.
+    ['docs/api/0003-adr.md', false],
+    ['docs/api/2026-changelog.md', false],
+    ['docs/api/the-plan.md', false],
+    ['docs/api/plan_b.md', false],
+    ['docs/api/rfc.0001.md', false],
+    ['docs/api/designs.md', false],
+    // Per-version history is the same genre as a changelog, and this repository
+    // ships one inside a governed location.
+    ['packages/sdk-java/qwencode/RELEASE.md', false],
+    ['docs/api/RELEASE-NOTES.md', false],
+    ['docs/api/release/2026-08.md', false],
+    // Repository-meta and agent-context files, matched whole — the exact match
+    // is what lets `qwen` exclude an agent-context file without touching
+    // `qwen-serve-protocol.md` two rows up.
+    ['docs/developers/contributing.md', false],
+    ['docs/developers/roadmap.md', false],
+    ['packages/sdk-java/client/QWEN.md', false],
+    ['docs/api/AGENTS.md', false],
+    // Accepted residue, pinned so the decision is visible rather than assumed:
+    // non-contract prose inside a reference tree that no closed set describes.
+    ['docs/developers/architecture.md', true],
+    // Both section names are plural-tolerant, like every genre member.
+    ['docs/references/routes.md', true],
+    ['docs/apis/routes.md', true],
+    // The markdown extension family, all spellings — governance is by location,
+    // so which spelling the file uses cannot decide it.
+    ['docs/api/routes.markdown', true],
+    ['docs/developers/protocol.mdown', true],
+    ['docs/api/ROUTES.MD', true],
+    ['docs/API/routes.md', true],
+    ['docs/api/Design/overview.md', false],
+    // A reference section nested inside a package is still a reference section.
+    ['packages/foo/docs/api/routes.md', true],
+    // The SDK branch is anchored to a package root. Digits and multiple
+    // hyphenated suffixes are part of real package names; an `sdk*` segment
+    // deeper in the tree is the tree-wide entrance the keyword branch was
+    // withdrawn for.
+    ['packages/sdk-core-v2/README.md', true],
+    ['packages/sdk-v2/README.md', true],
+    ['sdks/go/README.md', true],
+    ['lib/sdk-go/README.md', true],
+    ['docs/users/features/sdk-notes/overview.md', false],
+    ['docs/users/sdk/quickstart.md', false],
+    ['examples/sdk/README.md', false],
+    ['test/fixtures/sdk-python/README.md', false],
+    ['vendor/sdk-go/notes.md', false],
   ])('%s → governed by a rule: %s', (path, governed) => {
     expect(PATH_RULES.some((r) => r.matches(path))).toBe(governed);
   });
@@ -492,6 +541,14 @@ describe('pathRulesFor — matcher cost stays linear on attacker-shaped paths', 
   // path git accepts, synchronously inside every agent-brief build. These arms
   // end in `.md` so the gate lets them through to the matcher underneath.
 
+  // A timing arm only measures what it makes FAIL. An input that matches its
+  // target regex at the first anchor never reaches the scan the arm is named
+  // for: two language-identical quadratic mutants — one in the genre exclusion,
+  // one in the location branch — shipped with the whole suite green because
+  // both arms below used to match at anchor 0. Every arm here is a NEAR MISS:
+  // it matches the regex's prefix at every anchor and fails on the last
+  // character, so the full failing scan is what gets timed.
+
   it('the contract-doc rule pays no per-keyword cost on a repeated-keyword path', () => {
     // The withdrawn branch's exact hostile shape. Governance is location-only
     // now, so this input is silent — and it must be silent CHEAPLY, or a future
@@ -500,11 +557,11 @@ describe('pathRulesFor — matcher cost stays linear on attacker-shaped paths', 
     expect(msOf(() => pathRulesFor([path]))).toBeLessThan(BOUND_MS);
   }, 60_000);
 
-  it('the contract-doc rule pays no per-anchor cost inside a governed section', () => {
-    // A governed prefix so the location branch cannot fail fast, then a deep
-    // path: an anchor repeated at every level must not pay its suffix once per
-    // anchor. Ends in `.md`, so the extension gate does not rescue it.
-    const path = `docs/api/${'docs/api/'.repeat(40_000)}x.md`;
+  it('the location branch pays no per-anchor cost on a near-miss section', () => {
+    // `docs/apix/` matches `docs/api` at every anchor and then fails on `x`, so
+    // the branch pays its whole failing scan once per anchor. The earlier form
+    // (`docs/api/` repeated) matched immediately and measured nothing.
+    const path = `docs/apix/${'docs/apix/'.repeat(40_000)}notes.md`;
     expect(msOf(() => pathRulesFor([path]))).toBeLessThan(BOUND_MS);
   }, 60_000);
 
@@ -517,11 +574,10 @@ describe('pathRulesFor — matcher cost stays linear on attacker-shaped paths', 
     expect(msOf(() => pathRulesFor([path]))).toBeLessThan(BOUND_MS);
   }, 60_000);
 
-  it('the genre exclusion pays no per-anchor cost either', () => {
-    // The exclusion runs before the location branches on every documentation
-    // path, so it is on the same attacker-reachable path and owes the same
-    // bound.
-    const path = `${'design/'.repeat(40_000)}x.md`;
+  it('the genre exclusion pays no per-anchor cost on a near-miss genre', () => {
+    // `design-x/` matches `design` at every anchor and fails on `-`, which is
+    // the failing scan; `design/` repeated matched at once and measured nothing.
+    const path = `${'design-x/'.repeat(40_000)}notes.md`;
     expect(msOf(() => pathRulesFor([path]))).toBeLessThan(BOUND_MS);
   }, 60_000);
 });
@@ -848,6 +904,13 @@ describe('pathRulesFor — the consumer-facing contract documentation rule', () 
     // not have yet — that is the genre, not a defect — and a user guide belongs
     // to the sibling-parity lens, not to this one.
     for (const quiet of [
+      // Inside a governed section, so ONLY the genre exclusion keeps them out —
+      // without these the test passed by location alone and stayed green with
+      // the whole exclusion deleted.
+      'docs/api/design/overview.md',
+      'docs/api/CHANGELOG.md',
+      'docs/api/rfc-0001.md',
+      // Outside one, silent for the simpler reason.
       'docs/design/2026-08-18-live-state-protocol.md',
       'docs/plans/rollout-protocol.md',
       'docs/rfcs/0001-protocol.md',
@@ -959,6 +1022,25 @@ describe('pathRulesFor — the consumer-facing contract documentation rule', () 
     // And says which side of a mismatch is usually wrong — a finding that only
     // reports "these two disagree" is not actionable.
     expect(out).toContain('is right and the sentence is what has to change');
+  });
+
+  it('strips the extension before matching a whole-stem meta filename', () => {
+    // `NON_CONTRACT_FILE` matches a stem exactly, which is what lets `qwen`
+    // exclude an agent-context file without touching `qwen-serve-protocol`.
+    // Exact matching only works on a stripped stem, so the strip decides these
+    // — a review found the clause decision-dead before this exclusion existed,
+    // and it is load-bearing now, so it gets a pin rather than a comment.
+    const governed = 'Consumer-facing contract documentation';
+    expect(pathRulesFor(['docs/api/CONTRIBUTING.md'])).not.toContain(governed);
+    expect(pathRulesFor(['packages/sdk-java/client/QWEN.md'])).not.toContain(
+      governed,
+    );
+    // The control that makes the exactness meaningful: a longer name that
+    // merely begins with a meta word is still governed.
+    expect(pathRulesFor(['docs/developers/qwen-serve-protocol.md'])).toContain(
+      governed,
+    );
+    expect(pathRulesFor(['docs/api/supported-frames.md'])).toContain(governed);
   });
 
   it('caps the path list like every other rule', () => {
