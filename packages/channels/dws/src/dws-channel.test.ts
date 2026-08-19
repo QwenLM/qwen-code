@@ -72,6 +72,10 @@ function message(
     content,
     senderId: 'open-alice',
     senderName: 'Alice',
+    // Real DWS messages always carry an event time, and history queries are
+    // windowed on it. Defaulting to `undefined` made every fixture read as
+    // epoch 0, which only ever worked because the fake ignored its window.
+    eventTime: Date.now(),
     ...overrides,
   };
 }
@@ -175,13 +179,31 @@ class FakeDwsClient implements DwsClientLike {
     .mockResolvedValue(undefined);
   addImReaction = vi.fn().mockResolvedValue(undefined);
   removeImReaction = vi.fn().mockResolvedValue(undefined);
+  // R2-1: the real client is queried as `--start <windowStart> --end <now>`
+  // and returns only what falls inside. A fake that ignores its window can
+  // certify recoveries the production arithmetic cannot perform, which is
+  // exactly what happened: a fixture pinned "polling recovers this" for a
+  // message strictly outside every window the watermark will ever produce.
+  private inWindow(message: DwsImMessage, start: number, end: number): boolean {
+    const time = message.eventTime ?? 0;
+    return time >= start && time <= end;
+  }
+
   listDirectMessages = vi.fn(
-    async (_startTime: number, _endTime: number, _signal?: AbortSignal) =>
-      Promise.resolve({ messages: this.directMessages }),
+    async (startTime: number, endTime: number, _signal?: AbortSignal) =>
+      Promise.resolve({
+        messages: this.directMessages.filter((item) =>
+          this.inWindow(item, startTime, endTime),
+        ),
+      }),
   );
   listMentionedMessages = vi.fn(
-    async (_startTime: number, _endTime: number, _signal?: AbortSignal) =>
-      Promise.resolve({ messages: this.mentionedMessages }),
+    async (startTime: number, endTime: number, _signal?: AbortSignal) =>
+      Promise.resolve({
+        messages: this.mentionedMessages.filter((item) =>
+          this.inWindow(item, startTime, endTime),
+        ),
+      }),
   );
   readDocument = vi.fn(async (_documentId: string, _signal?: AbortSignal) =>
     Promise.resolve('# Plan\nUse DWS.'),
@@ -230,7 +252,10 @@ class TestableDwsChannel extends DwsChannel {
     return 0;
   }
 
+  inboundAttempts = 0;
+
   override async handleInbound(envelope: Envelope): Promise<void> {
+    this.inboundAttempts += 1;
     if (this.inboundError) throw this.inboundError;
     if (this.inboundHandler) return this.inboundHandler(envelope);
     this.inbound.push(envelope);
@@ -318,6 +343,29 @@ class PolicyDwsChannel extends DwsChannel {
 
   async poll(): Promise<void> {
     await this.pollOnce();
+  }
+
+  pendingDocumentNotifications(): unknown[] {
+    return this.cursor.pendingDocumentNotifications ?? [];
+  }
+
+  seedPendingDocumentNotifications(count: number): void {
+    this.cursor.pendingDocumentNotifications = Array.from(
+      { length: count },
+      (_unused, index) => ({
+        documentId: `parked-doc-${index}`,
+        commentKey: `parked-comment-${index}`,
+        messageId: `parked-message-${index}`,
+        conversationId: 'cid-parked',
+        senderId: 'open-unpaired',
+        senderName: 'Unpaired Member',
+      }),
+    ) as never;
+    this.saveCursor();
+  }
+
+  notificationWatermark(): number | undefined {
+    return this.cursor.notificationWatermark;
   }
 }
 
@@ -1925,6 +1973,47 @@ describe('DwsChannel', () => {
     );
   });
 
+  // The pending queue's only drain is an ALLOWED sender later processing the
+  // same comment, so notifications parked for unapproved senders persist for
+  // good — and the list persists in the cursor across restarts. Throwing at
+  // the cap aborted `pollOnce`'s direct-message loop before the checkpoint,
+  // the watermark and `markProcessedMessage`, so every 5s poll re-scanned a
+  // growing window and re-threw on the same never-marked message: document
+  // history polling stayed broken until manual cursor surgery. One unpaired
+  // member @-mentioning the bot in 5,000 distinct comments was enough.
+  it('keeps polling when the pending document queue is at its cap', async () => {
+    const client = new FakeDwsClient();
+    const { channel } = await readyPolicyChannel(
+      client,
+      makeConfig({ senderPolicy: 'pairing' }),
+    );
+    channel.seedPendingDocumentNotifications(5_000);
+    client.directMessages = [
+      message(
+        'user_im_message_receive_o2o_all',
+        'document-at-cap',
+        documentMentionCard('doc-at-cap', 'comment-at-cap'),
+        { eventTime: Date.now() },
+      ),
+    ];
+
+    await expect(channel.poll()).resolves.toBeUndefined();
+
+    // The queue stayed bounded, the newest notification is parked, and the
+    // oldest was evicted rather than the poll aborting.
+    const pending = channel.pendingDocumentNotifications();
+    expect(pending).toHaveLength(5_000);
+    expect(pending).toContainEqual(
+      expect.objectContaining({ documentId: 'doc-at-cap' }),
+    );
+    expect(pending).not.toContainEqual(
+      expect.objectContaining({ documentId: 'parked-doc-0' }),
+    );
+    // And the poll actually finished: the watermark advanced, so the next one
+    // does not re-scan this message forever.
+    expect(channel.notificationWatermark()).toBeGreaterThan(0);
+  });
+
   it('replays a pairing-pending document mention after approval', async () => {
     const client = new FakeDwsClient();
     const config = makeConfig({ senderPolicy: 'pairing' });
@@ -2902,6 +2991,35 @@ describe('DwsChannel', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  // R2-2: a message whose turn throws was never marked processed and never
+  // advanced the watermark, so history polling re-ran it as a FULL agent turn
+  // every poll — one model call per iteration, forever, with no cap and no
+  // backoff — while the pinned watermark grew the query window without bound
+  // and the throw starved every newer message behind it. Pending-document
+  // replay already had this accounting; this path had none.
+  it('drops a message whose turn keeps failing, and moves the watermark on', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    channel.inboundError = new DwsCommandError('comment rejected', 'not_sent');
+    client.mentionedMessages = [
+      message('user_im_message_receive_at', 'poison', '@QwenBot hi', {
+        eventTime: Date.now(),
+      }),
+    ];
+
+    // The poll swallows a failed turn into a log line, so the observable is
+    // the re-run count: unbounded before (one full agent turn per poll, for
+    // the life of the channel), capped at the budget now.
+    for (let round = 0; round < 8; round += 1) {
+      await expect(channel.poll()).resolves.toBeUndefined();
+    }
+
+    expect(channel.inboundAttempts).toBe(5);
+    // And the watermark is free to move again, so the query window stops
+    // growing and newer mentions are no longer starved behind this one.
+    expect(channel.mentionWatermark()).toBeGreaterThan(0);
   });
 
   it('uses the originating message for an idempotent final reply', async () => {

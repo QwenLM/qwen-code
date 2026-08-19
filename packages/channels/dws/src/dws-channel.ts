@@ -36,6 +36,14 @@ const MAX_DOCUMENT_CONTEXT_CHARS = 12_000;
 const MAX_TODO_CONTEXT_CHARS = 12_000;
 const MAX_COMMENT_CHARS = 4_000;
 const MAX_PROCESSED_ITEMS = 5_000;
+/**
+ * How many times one inbound message may fail its turn before it is dropped.
+ *
+ * Bounded because the alternative is unbounded: nothing else stops a message
+ * whose delivery is definitively rejected from re-running a full agent turn
+ * on every poll for the life of the channel.
+ */
+const MAX_INBOUND_ATTEMPTS = 5;
 const MAX_IM_TARGETS = 1_000;
 const MAX_TODO_STATES = 1_000;
 const MAX_SELF_SENDER_IDS = 20;
@@ -97,6 +105,23 @@ interface DwsCursor {
   imTargets: PersistedImTarget[];
   todosInitialized?: boolean;
   todoTasks?: PersistedTodoState[];
+  inboundFailures?: PersistedInboundFailure[];
+}
+
+/**
+ * Per-message failure accounting for the inbound turn path.
+ *
+ * A message whose turn throws is never marked processed and never advances
+ * the watermark, so history polling re-fetched and re-ran it as a FULL agent
+ * turn every poll, forever — one model call per iteration, with no cap and no
+ * backoff, while the pinned watermark made the query window grow without
+ * bound and the throw starved every newer message behind it. Pending-document
+ * replay already had exactly this accounting; the failure-retry path had
+ * none.
+ */
+interface PersistedInboundFailure {
+  key: string;
+  attempts: number;
 }
 
 interface DwsDocumentMentionNotification {
@@ -1249,7 +1274,21 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       if (!parseDocumentMentionNotification(message.content)) {
         this.markProcessedMessage(messageKey(message));
         this.saveCursor();
+        return;
       }
+      // A replayed document notification is left UNMARKED on purpose, for
+      // history polling to pick up. That only works if polling will ever look
+      // that far back: on a fresh cursor `notificationWatermark` starts at
+      // `connectionStartedAt` and the query window opens at `watermark − 5s`
+      // — exactly this branch's drop boundary — so every message this branch
+      // parks was strictly outside every window the watermark would ever
+      // produce, now and forever, since the window only moves forward. Pull
+      // the watermark back to cover what we just declined to handle.
+      this.cursor.notificationWatermark = Math.min(
+        this.cursor.notificationWatermark ?? this.connectionStartedAt,
+        message.eventTime,
+      );
+      this.saveCursor();
       return;
     }
     if (
@@ -1341,9 +1380,75 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       message.conversationId,
       message.messageId,
     );
-    await this.handleInbound(envelope);
+    try {
+      await this.handleInbound(envelope);
+    } catch (error) {
+      // Under budget the throw propagates exactly as before, so redelivery
+      // and concurrent-duplicate retry keep their contracts. Once the budget
+      // is spent the message is marked processed and the error is swallowed,
+      // which is the only thing that lets the watermark move past it.
+      if (this.recordInboundFailure(key, error)) throw error;
+      return;
+    }
+    this.clearInboundFailure(key);
     this.markProcessedMessage(key);
     this.saveCursor();
+  }
+
+  /**
+   * Account one failed inbound turn, and drop the message once its budget is
+   * spent.
+   *
+   * Returns whether the caller should rethrow. Under budget it should — the
+   * throw is what drives redelivery retry, and existing contracts depend on
+   * it. Once the budget is spent the message is marked processed and the
+   * error is swallowed: the throw used to abort the caller's sorted loop, so
+   * one poison message starved every newer message behind it and never
+   * cleared, because nothing ever marked it processed.
+   */
+  private recordInboundFailure(key: string, error: unknown): boolean {
+    const failures = (this.cursor.inboundFailures ?? []).filter(
+      (failure) => failure.key !== key,
+    );
+    const attempts =
+      ((this.cursor.inboundFailures ?? []).find(
+        (failure) => failure.key === key,
+      )?.attempts ?? 0) + 1;
+    const reason = sanitizeLogText(
+      error instanceof Error ? error.message : String(error),
+      300,
+    );
+    if (attempts >= MAX_INBOUND_ATTEMPTS) {
+      // Budget spent: mark it processed so the checkpoint and the watermark
+      // can move past it. Dropping one message is strictly better than
+      // re-running it — and starving everything newer — forever.
+      this.markProcessedMessage(key);
+      this.cursor.inboundFailures = failures.slice(-MAX_PROCESSED_ITEMS);
+      process.stderr.write(
+        `[Channel:${this.name}] dropping a DWS message after ` +
+          `${attempts} failed turns: ${reason}\n`,
+      );
+      this.saveCursor();
+      return false;
+    } else {
+      this.cursor.inboundFailures = [...failures, { key, attempts }].slice(
+        -MAX_PROCESSED_ITEMS,
+      );
+      process.stderr.write(
+        `[Channel:${this.name}] DWS message turn failed ` +
+          `(attempt ${attempts}/${MAX_INBOUND_ATTEMPTS}): ${reason}\n`,
+      );
+    }
+    this.saveCursor();
+    return true;
+  }
+
+  private clearInboundFailure(key: string): void {
+    const failures = this.cursor.inboundFailures;
+    if (!failures?.some((failure) => failure.key === key)) return;
+    this.cursor.inboundFailures = failures.filter(
+      (failure) => failure.key !== key,
+    );
   }
 
   private async processDocumentNotification(
@@ -1498,8 +1603,18 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     const key = documentNotificationKey(notification);
     if (this.hasPendingDocumentNotification(key)) return;
     const pending = this.cursor.pendingDocumentNotifications ?? [];
-    if (pending.length >= MAX_PROCESSED_ITEMS) {
-      throw new Error('DWS pending document notification queue is full.');
+    // Evict, never throw. The only drain is an ALLOWED sender later
+    // processing the same comment, so entries parked for unapproved senders
+    // persist forever and survive restarts in the cursor. Throwing at the cap
+    // aborted `pollOnce`'s direct-message loop before the checkpoint, the
+    // watermark and `markProcessedMessage` — so every later poll re-scanned a
+    // growing window and re-threw on the same never-marked message, stalling
+    // document-mention history polling permanently. One unpaired member
+    // @-mentioning the bot in MAX_PROCESSED_ITEMS distinct comments was
+    // enough. Dropping the oldest parked notification loses at most a
+    // pairing prompt for a mention nobody approved.
+    while (pending.length >= MAX_PROCESSED_ITEMS) {
+      pending.shift();
     }
     pending.push({
       ...notification,
