@@ -5,8 +5,9 @@
  */
 
 import {
-  patchAgentViewSessionState,
+  patchAgentViewSessionStateIf,
   readAgentViewSessionState,
+  sanitizeSessionId,
 } from '../agent-view/supervisor-store.js';
 import { readAgentViewWorkerSidebandEnv } from '../agent-view/worker-sideband.js';
 
@@ -27,7 +28,11 @@ export const MANAGED_AGENT_VIEW_DELETE_MESSAGE =
 // both production spawn paths build env via createAgentViewWorkerSidebandEnv,
 // while a pasted/stray marker+id pair must not defeat the guard.
 function isSessionWorker(sessionId: string, env: NodeJS.ProcessEnv): boolean {
-  return readAgentViewWorkerSidebandEnv(env)?.sessionId === sessionId;
+  const workerSessionId = readAgentViewWorkerSidebandEnv(env)?.sessionId;
+  return (
+    workerSessionId !== undefined &&
+    sanitizeSessionId(workerSessionId) === sanitizeSessionId(sessionId)
+  );
 }
 
 export async function isManagedAgentViewResumeBlocked(
@@ -84,21 +89,27 @@ export async function isManagedAgentViewDeleteBlocked(
 export async function releaseExitedManagedSessionForContinue(
   sessionId: string,
   env: NodeJS.ProcessEnv = process.env,
-): Promise<void> {
+): Promise<boolean> {
   // Same strict predicate as the /resume block: a lone marker must not
   // suppress the release in an ordinary foreground session.
-  if (isSessionWorker(sessionId, env)) return;
+  if (isSessionWorker(sessionId, env)) return true;
   const state = await readAgentViewSessionState(sessionId);
-  if (
-    state?.ownership !== 'managed' ||
-    (state.processState !== 'exited' && state.processState !== 'hibernated')
-  ) {
-    return;
+  if (state?.ownership === 'adopting') return false;
+  if (state?.ownership !== 'managed') {
+    return true;
   }
-  await patchAgentViewSessionState(sessionId, {
-    ownership: 'unmanaged',
-    updatedAt: new Date().toISOString(),
-  });
+  if (state.processState !== 'exited' && state.processState !== 'hibernated') {
+    return false;
+  }
+  return patchAgentViewSessionStateIf(sessionId, (current) =>
+    current.ownership === 'managed' &&
+    (current.processState === 'exited' || current.processState === 'hibernated')
+      ? {
+          ownership: 'unmanaged',
+          updatedAt: new Date().toISOString(),
+        }
+      : undefined,
+  );
 }
 
 export function isAgentViewWorkerResumeCommandBlocked(

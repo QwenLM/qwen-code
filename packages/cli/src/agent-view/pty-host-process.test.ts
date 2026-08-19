@@ -383,10 +383,12 @@ describe('Agent View PTY host process server', () => {
           'Unauthorized PTY host request.',
         );
       } finally {
-        // A non-zero worker exit must surface verbatim: gemini.tsx calls
-        // process.exit(exit.exitCode) on this resolved value.
+        // A non-zero worker exit must surface verbatim to the CLI entrypoint.
         exitCallback?.({ exitCode: 3 });
-        await expect(runPromise).resolves.toEqual({ exitCode: 3 });
+        await expect(runPromise).resolves.toEqual({
+          kind: 'exited',
+          exitCode: 3,
+        });
       }
     } finally {
       if (previousToken === undefined) {
@@ -642,7 +644,7 @@ describe('Agent View PTY host process server', () => {
     });
   });
 
-  it('resolves connected host exit when killed', async () => {
+  it('waits for the remote endpoint to close after SIGKILL', async () => {
     const host = fakeHost();
     const socketPath = shortSocketPath();
     const server = createAgentViewPtyHostServer(host, socketPath);

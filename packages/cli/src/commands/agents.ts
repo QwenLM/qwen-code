@@ -35,7 +35,7 @@ import {
   cleanSingleLineText,
   stripUnsafeCharacters,
 } from '../ui/utils/textUtils.js';
-import { writeStdoutLine } from '../utils/stdioHelpers.js';
+import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
 import { getCliVersion } from '../utils/version.js';
 import {
   attachCommand,
@@ -50,6 +50,7 @@ import { agentDaemonCommand } from './agent-daemon.js';
 interface AgentsArgs {
   cwd?: string;
   json?: boolean;
+  all?: boolean;
 }
 
 type AgentsInteractiveSupervisor = Pick<
@@ -391,6 +392,17 @@ export const agentsListCommand: CommandModule<unknown, AgentsArgs> = {
         default: false,
         description: 'Print machine-readable JSON',
       })
+      .option('all', {
+        type: 'boolean',
+        default: false,
+        description: 'Include completed and stopped agents',
+      })
+      .check((argv) => {
+        if (argv.all === true && argv.json !== true) {
+          return 'qwen agents --all requires --json.';
+        }
+        return true;
+      })
       .version(false),
   handler: async (argv) => {
     const cwd = path.resolve(argv.cwd ?? process.cwd());
@@ -398,7 +410,7 @@ export const agentsListCommand: CommandModule<unknown, AgentsArgs> = {
     const supervisor = await ensureAgentViewSupervisor();
     if (argv.json) {
       const snapshots = toSnapshots(await supervisor.list(listCwd));
-      writeStdoutLine(JSON.stringify(formatAgentsJson(snapshots)));
+      writeStdoutLine(JSON.stringify(formatAgentsJson(snapshots, argv.all)));
       return;
     }
 
@@ -491,6 +503,18 @@ export const agentsCommand: CommandModule = {
   describe: 'Manage Agent View background agents',
   builder: (yargs: Argv) =>
     yargs
+      .check(() => {
+        const assignedBoolean = process.argv
+          .slice(2)
+          .find((token) => /^--(?:json|all)=/.test(token));
+        if (assignedBoolean) {
+          writeStderrLine(
+            `${assignedBoolean.split('=')[0]} is a boolean flag and does not accept an assigned value.`,
+          );
+          process.exit(1);
+        }
+        return true;
+      })
       // Hoisted from the list subcommand so the space form
       // `agents --cwd <dir>` is consumed at this level instead of failing
       // strict mode (the $0 builder only applies once yargs descends).
@@ -520,34 +544,46 @@ export const agentsCommand: CommandModule = {
 
 function formatAgentsJson(
   snapshots: AgentViewSessionSnapshot[],
+  includeAll = false,
 ): Array<Record<string, unknown>> {
-  // The roster manages every owned session, so list output includes
-  // completed/stopped/failed entries; consumers filter on `state` if needed.
-  return snapshots.map((snapshot) => {
-    const attached = snapshot.state.attachState === 'attached';
-    const name = snapshot.rosterEntry?.displayName;
-    return {
-      sessionId: snapshot.sessionId,
-      ...(name ? { name } : {}),
-      state: snapshot.state.sessionState,
-      processState: snapshot.state.processState,
-      projectCwd: snapshot.state.projectCwd,
-      activeCwd: snapshot.state.activeCwd,
-      attached,
-      pinned: Boolean(snapshot.rosterEntry?.pinned),
-      createdAt: snapshot.state.createdAt,
-      updatedAt: snapshot.state.updatedAt,
-      ...(snapshot.activity?.summary
-        ? { summary: snapshot.activity.summary }
-        : {}),
-      ...(snapshot.activity?.waitingFor
-        ? { waitingFor: snapshot.activity.waitingFor }
-        : {}),
-      ...(snapshot.activity?.queuedPromptCount
-        ? { queuedPromptCount: snapshot.activity.queuedPromptCount }
-        : {}),
-    };
-  });
+  return snapshots
+    .filter((snapshot) => includeAll || isActiveAgentSnapshot(snapshot))
+    .map((snapshot) => {
+      const attached = snapshot.state.attachState === 'attached';
+      const name = snapshot.rosterEntry?.displayName;
+      return {
+        sessionId: snapshot.sessionId,
+        ...(name ? { name } : {}),
+        state: snapshot.state.sessionState,
+        processState: snapshot.state.processState,
+        projectCwd: snapshot.state.projectCwd,
+        activeCwd: snapshot.state.activeCwd,
+        attached,
+        pinned: Boolean(snapshot.rosterEntry?.pinned),
+        createdAt: snapshot.state.createdAt,
+        updatedAt: snapshot.state.updatedAt,
+        ...(snapshot.activity?.summary
+          ? { summary: snapshot.activity.summary }
+          : {}),
+        ...(snapshot.activity?.waitingFor
+          ? { waitingFor: snapshot.activity.waitingFor }
+          : {}),
+        ...(snapshot.activity?.queuedPromptCount
+          ? { queuedPromptCount: snapshot.activity.queuedPromptCount }
+          : {}),
+      };
+    });
+}
+
+function isActiveAgentSnapshot(snapshot: AgentViewSessionSnapshot): boolean {
+  if (
+    snapshot.state.sessionState === 'completed' ||
+    snapshot.state.sessionState === 'stopped' ||
+    snapshot.state.sessionState === 'failed'
+  ) {
+    return false;
+  }
+  return snapshot.state.processState !== 'exited';
 }
 
 function toSnapshots(value: unknown): AgentViewSessionSnapshot[] {

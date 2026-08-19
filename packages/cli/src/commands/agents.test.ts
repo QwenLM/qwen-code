@@ -199,6 +199,7 @@ vi.mock('../ui/components/StandaloneSessionPicker.js', () => ({
 interface AgentsArgs {
   cwd?: string;
   json?: boolean;
+  all?: boolean;
 }
 
 function buildParser(): Argv<AgentsArgs> {
@@ -252,7 +253,7 @@ describe('agents command', () => {
     expect(mockWriteStdoutLine).toHaveBeenCalled();
   });
 
-  it('registers --cwd and --json options', () => {
+  it('registers --cwd, --json, and --all options', () => {
     const options = (
       buildParser() as Argv & {
         getOptions(): { key: Record<string, boolean> };
@@ -261,6 +262,7 @@ describe('agents command', () => {
 
     expect(options.key['cwd']).toBe(true);
     expect(options.key['json']).toBe(true);
+    expect(options.key['all']).toBe(true);
   });
 
   it('prints all managed agents as a JSON array without entering interactive helper', async () => {
@@ -269,9 +271,9 @@ describe('agents command', () => {
     if (!handler) throw new Error('agents list command handler missing');
 
     await handler(
-      buildParser().parseSync('--cwd /tmp/workspace --json') as Parameters<
-        typeof handler
-      >[0],
+      buildParser().parseSync(
+        '--cwd /tmp/workspace --json --all',
+      ) as Parameters<typeof handler>[0],
     );
 
     const payload = JSON.parse(
@@ -314,6 +316,23 @@ describe('agents command', () => {
       path.resolve('/tmp/workspace'),
     );
     expect(runSpy).not.toHaveBeenCalled();
+  });
+
+  it('omits completed agents from JSON unless --all is set', async () => {
+    const handler = agentsListCommand.handler;
+    if (!handler) throw new Error('agents list command handler missing');
+
+    await handler(
+      buildParser().parseSync('--json') as Parameters<typeof handler>[0],
+    );
+
+    const payload = JSON.parse(
+      String(mockWriteStdoutLine.mock.calls[0]?.[0]),
+    ) as Array<{ sessionId: string }>;
+    expect(payload.map((session) => session.sessionId)).toEqual([
+      'session-1',
+      'session-attached',
+    ]);
   });
 
   it('lists all projects by default for JSON output', async () => {
