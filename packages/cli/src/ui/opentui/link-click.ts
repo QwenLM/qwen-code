@@ -38,6 +38,11 @@ export interface CellGrid {
   buffers: { char: Uint32Array };
   width: number;
   height: number;
+  /**
+   * Native buffers carry flag bits (not code points) in `char` and resolve
+   * cell text through this API; plain-code-point stubs omit it.
+   */
+  getRealCharBytes?(addLineBreaks?: boolean): Uint8Array;
 }
 
 /** A buffer row as text, with the source cell column of each character. */
@@ -56,21 +61,66 @@ const URL_PATTERN =
   /(?:[a-zA-Z][a-zA-Z0-9+.-]*:\/\/|www\.)[^\s<>"'`\u0000-\u001f\u007f]+/g;
 
 /**
- * Extract a buffer row into text. Code point 0 cells (wide-character
- * continuation cells and untouched cells) are skipped; the mapping back to
+ * High bits of native cell values are flags, not code points: 0xC0000000
+ * marks a wide-character continuation (spacer) cell. Mirrors the flag
+ * handling in @opentui/core's `OptimizedBuffer.getSpanLines`.
+ */
+const CHAR_FLAG_CONTINUATION = 0xc0000000;
+
+function isContinuationCell(codePoint: number): boolean {
+  // `&` yields a signed int32 (0xC0000000 reads as negative there), so
+  // coerce back to unsigned before comparing with the hex literal —
+  // the signed comparison is always false and lets continuation cells
+  // leak through as real characters.
+  return (codePoint & CHAR_FLAG_CONTINUATION) >>> 0 === CHAR_FLAG_CONTINUATION;
+}
+
+/**
+ * Decoded character of every cell on a row, left to right; spacer and
+ * untouched cells read as `''` on stub grids, `' '` on native grids (the
+ * resolved text has no holes, so untouched cells fall back to a space).
+ */
+export function decodeRowCells(grid: CellGrid, y: number): string[] | null {
+  if (y < 0 || y >= grid.height) return null;
+  const chars = grid.buffers.char;
+  const base = y * grid.width;
+  const cells: string[] = new Array(grid.width).fill('');
+  if (typeof grid.getRealCharBytes === 'function') {
+    const realLines = new TextDecoder()
+      .decode(grid.getRealCharBytes(true))
+      .split('\n');
+    const lineChars = Array.from(realLines[y] ?? '');
+    let ci = 0;
+    for (let x = 0; x < grid.width; x++) {
+      const codePoint = chars[base + x];
+      cells[x] = isContinuationCell(codePoint) ? '' : (lineChars[ci++] ?? ' ');
+    }
+    return cells;
+  }
+  for (let x = 0; x < grid.width; x++) {
+    const codePoint = chars[base + x];
+    cells[x] =
+      codePoint > 0 && codePoint <= 0x10ffff && !isContinuationCell(codePoint)
+        ? String.fromCodePoint(codePoint)
+        : '';
+  }
+  return cells;
+}
+
+/**
+ * Extract a buffer row into text. Spacer cells (wide-character
+ * continuation and untouched cells) are skipped; the mapping back to
  * cell columns is preserved so a click column can be matched exactly even
  * when CJK characters precede the URL.
  */
 export function readBufferRow(grid: CellGrid, y: number): BufferRow {
-  if (y < 0 || y >= grid.height) return { text: '', cellColumns: [] };
-  const chars = grid.buffers.char;
+  const cells = decodeRowCells(grid, y);
+  if (!cells) return { text: '', cellColumns: [] };
   let text = '';
   const cellColumns: number[] = [];
-  const base = y * grid.width;
-  for (let x = 0; x < grid.width; x++) {
-    const codePoint = chars[base + x];
-    if (!codePoint) continue;
-    text += String.fromCodePoint(codePoint);
+  for (let x = 0; x < cells.length; x++) {
+    if (cells[x] === '') continue;
+    text += cells[x];
     cellColumns.push(x);
   }
   return { text: text.replace(/\s+$/, ''), cellColumns };

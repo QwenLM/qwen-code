@@ -2368,8 +2368,12 @@ function App({
         stickyScroll={true}
         stickyStart="bottom"
         verticalScrollbarOptions={{ visible: false }}
-        onMouseUp={handleLinkClick}
-        onMouseDown={(e) => multiClickSelection.handleMouseDown(e)}
+        onMouseUp={(e) => {
+          handleLinkClick(e);
+        }}
+        onMouseDown={(e) => {
+          multiClickSelection.handleMouseDown(e);
+        }}
       >
         {banner}
         <box paddingLeft={1} paddingRight={1}>

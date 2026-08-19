@@ -28,7 +28,7 @@
  */
 
 import { MouseButton } from '@opentui/core';
-import type { CellGrid } from './link-click.js';
+import { decodeRowCells, type CellGrid } from './link-click.js';
 import {
   lineSpanAt,
   wordSpanAt,
@@ -66,29 +66,26 @@ export interface MultiClickPointer {
 }
 
 /**
- * One rendered buffer row as a `MouseGridRow`: code point 0 cells are
- * wide-character spacers (or untouched background) and read back as spacer
- * cells, matching the grid model `wordSpanAt`/`lineSpanAt` expect.
+ * One rendered buffer row as a `MouseGridRow`: spacer cells (wide-character
+ * continuation and untouched background) read back as empty cells, matching
+ * the grid model `wordSpanAt`/`lineSpanAt` expect. Native cell values carry
+ * flag bits rather than code points, so decoding goes through
+ * `decodeRowCells` (see `link-click.ts`).
  */
 export function bufferRowToMouseGridRow(
   grid: CellGrid,
   y: number,
 ): MouseGridRow | null {
-  if (y < 0 || y >= grid.height) return null;
-  const chars = grid.buffers.char;
-  const base = y * grid.width;
-  const row: Array<{ value: string }> = [];
-  for (let x = 0; x < grid.width; x++) {
-    const codePoint = chars[base + x];
-    row.push({ value: codePoint ? String.fromCodePoint(codePoint) : '' });
-  }
-  return row;
+  const cells = decodeRowCells(grid, y);
+  if (!cells) return null;
+  return cells.map((value) => ({ value }));
 }
 
 /**
  * Snap a press off a wide-character spacer cell onto its base cell. A spacer
  * is the only empty cell whose left neighbor is non-empty; untouched
- * background cells come in runs, so they never snap.
+ * background cells come in runs (or decode as spaces on native grids), so
+ * they never snap.
  */
 function snapOffSpacer(row: MouseGridRow, x: number): number {
   if (x > 0 && row[x]?.value === '' && row[x - 1]?.value !== '') {

@@ -24,6 +24,44 @@ function gridFromRows(rows: string[]): CellGrid {
   return { buffers: { char }, width, height: rows.length };
 }
 
+/**
+ * Native-buffer simulation (zig-backed OptimizedBuffer): `char` holds
+ * flag-tagged sentinels (not code points) and text resolves through
+ * `getRealCharBytes`. Regression: decoding sentinels directly crashed with
+ * a code-point RangeError, silently killing double-click selection.
+ */
+function nativeGridFromLines(lines: string[]): CellGrid {
+  const isWide = (cp: number) =>
+    (cp >= 0x2e80 && cp <= 0xa4cf) ||
+    (cp >= 0xff00 && cp <= 0xff60) ||
+    cp > 0xffff;
+  const width = Math.max(
+    ...lines.map((l) =>
+      [...l].reduce((w, ch) => w + (isWide(ch.codePointAt(0)!) ? 2 : 1), 0),
+    ),
+    1,
+  );
+  const char = new Uint32Array(width * lines.length).fill(0x800100ff);
+  lines.forEach((line, y) => {
+    let x = 0;
+    for (const ch of line) {
+      if (isWide(ch.codePointAt(0)!)) {
+        char[y * width + x + 1] = 0xc0000001; // wide-char continuation
+      }
+      x += isWide(ch.codePointAt(0)!) ? 2 : 1;
+    }
+  });
+  return {
+    buffers: { char },
+    width,
+    height: lines.length,
+    getRealCharBytes: (addLineBreaks = true) =>
+      new TextEncoder().encode(
+        addLineBreaks ? lines.join('\n') : lines.join(''),
+      ),
+  };
+}
+
 function down(
   x: number,
   y: number,
@@ -92,6 +130,15 @@ describe('bufferRowToMouseGridRow', () => {
     expect(bufferRowToMouseGridRow(grid, -1)).toBeNull();
     expect(bufferRowToMouseGridRow(grid, 1)).toBeNull();
   });
+
+  it('decodes native flag-tagged cells through getRealCharBytes', () => {
+    // Row 0 '文 h' inside a 5-wide grid (row 1 is wider): '文' occupies
+    // columns 0-1 (the continuation is a spacer cell), and the untouched
+    // tail column decodes as a space on native grids.
+    const grid = nativeGridFromLines(['文 h', 'abcde']);
+    const row = bufferRowToMouseGridRow(grid, 0)!;
+    expect(row.map((c) => c.value)).toEqual(['文', '', ' ', 'h', ' ']);
+  });
 });
 
 describe('MultiClickSelectionController', () => {
@@ -116,6 +163,20 @@ describe('MultiClickSelectionController', () => {
     // 'bar' occupies columns 4-6; the press at column 5 is mid-word.
     expect(bounds()).toEqual({ sx: 4, ex: 6, sy: 0, ey: 0 });
     expect(calls).toEqual(['start:4,0', 'update:6,0']);
+  });
+
+  it('rewrites the word span on a native (flag-tagged) buffer', () => {
+    const { host, bounds } = makeHost({ isDragging: true });
+    const c = new MultiClickSelectionController(
+      () => nativeGridFromLines(['文 bar baz']),
+      host,
+    );
+    // Double-click the trailing 'r' of 'bar' (the wide '文' shifts it to
+    // columns 3-5); before the decode fix this threw a RangeError inside
+    // the handler and the selection never changed.
+    c.handleMouseDown(down(5, 0), 0);
+    c.handleMouseDown(down(5, 0), 100);
+    expect(bounds()).toEqual({ sx: 3, ex: 5, sy: 0, ey: 0 });
   });
 
   it('selects the whole word when the press is on the word end', () => {

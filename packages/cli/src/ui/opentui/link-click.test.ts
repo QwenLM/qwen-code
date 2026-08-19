@@ -6,6 +6,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  decodeRowCells,
   extractUrlHits,
   findUrlAtRow,
   readBufferRow,
@@ -21,6 +22,56 @@ function gridFromRows(rows: string[]): CellGrid {
     }
   });
   return { buffers: { char }, width, height: rows.length };
+}
+
+/**
+ * Minimal east-asian-wide check — enough for the test fixtures ('文' is
+ * U+6587: BMP, but two columns wide).
+ */
+function isWideChar(cp: number): boolean {
+  return (
+    (cp >= 0x1100 && cp <= 0x115f) ||
+    (cp >= 0x2e80 && cp <= 0xa4cf) ||
+    (cp >= 0xac00 && cp <= 0xd7a3) ||
+    (cp >= 0xf900 && cp <= 0xfaff) ||
+    (cp >= 0xfe30 && cp <= 0xfe4f) ||
+    (cp >= 0xff00 && cp <= 0xff60) ||
+    (cp >= 0xffe0 && cp <= 0xffe6) ||
+    cp > 0xffff
+  );
+}
+
+/**
+ * Native-buffer simulation: `char` holds flag-tagged sentinel values (not
+ * code points) and text resolves through `getRealCharBytes`, mirroring the
+ * zig-backed OptimizedBuffer encoding.
+ */
+function nativeGridFromLines(lines: string[]): CellGrid {
+  const displayWidth = (line: string) =>
+    [...line].reduce(
+      (w, ch) => w + (isWideChar(ch.codePointAt(0)!) ? 2 : 1),
+      0,
+    );
+  const width = Math.max(...lines.map(displayWidth), 1);
+  const char = new Uint32Array(width * lines.length).fill(0x800100ff);
+  lines.forEach((line, y) => {
+    let x = 0;
+    for (const ch of line) {
+      if (isWideChar(ch.codePointAt(0)!)) {
+        char[y * width + x + 1] = 0xc0000001; // wide-char continuation
+      }
+      x += isWideChar(ch.codePointAt(0)!) ? 2 : 1;
+    }
+  });
+  return {
+    buffers: { char },
+    width,
+    height: lines.length,
+    getRealCharBytes: (addLineBreaks = true) =>
+      new TextEncoder().encode(
+        addLineBreaks ? lines.join('\n') : lines.join(''),
+      ),
+  };
 }
 
 describe('readBufferRow', () => {
@@ -49,6 +100,24 @@ describe('readBufferRow', () => {
     expect(readBufferRow(grid, 0).text).toBe('abc');
     expect(readBufferRow(grid, 5).text).toBe('');
     expect(readBufferRow(grid, -1).text).toBe('');
+  });
+
+  it('decodes native flag-tagged cells through getRealCharBytes', () => {
+    // Regression: native char cells hold flag bits (e.g. 0x800100FF
+    // sentinels, 0xC0000000 continuation marks), not code points — decoding
+    // them directly crashed with a code-point RangeError.
+    const grid = nativeGridFromLines(['hi 文 there']);
+    const row = readBufferRow(grid, 0);
+    expect(row.text).toBe('hi 文 there');
+    // '文' occupies columns 3-4; the continuation cell is skipped.
+    expect(row.cellColumns).toEqual([0, 1, 2, 3, 5, 6, 7, 8, 9, 10]);
+  });
+
+  it('decodeRowCells marks continuation cells and spaces on native grids', () => {
+    const grid = nativeGridFromLines(['a文b']);
+    expect(decodeRowCells(grid, 0)).toEqual(['a', '文', '', 'b']);
+    expect(decodeRowCells(grid, -1)).toBeNull();
+    expect(decodeRowCells(grid, 1)).toBeNull();
   });
 });
 
