@@ -75,9 +75,14 @@ import {
   severityOf,
 } from './lib/inline-counts.js';
 import {
+  commentMarker,
   footerVersion,
+  rendersAsNothing,
   reviewFooter,
+  stripForgedFooterLines,
+  stripForUnattributedPost,
   stripReviewFooter,
+  swallowsAppendedMarker,
 } from './lib/review-footer.js';
 
 /** The only events GitHub's Create Review API accepts. */
@@ -161,10 +166,13 @@ function normalizeInlineComments(
       ? {
           ...comment,
           // Forged footers are stripped even with attribution off: a comment
-          // authored by the model must not carry one the operator turned off.
+          // authored by the model must not carry one the operator turned
+          // off. The off leg also strips footer-shaped lines mid-body — the
+          // trailing strip leaves those, and here they would be the only
+          // attribution the post carries.
           body:
             footer === undefined
-              ? stripReviewFooter(comment.body)
+              ? stripForgedFooterLines(stripReviewFooter(comment.body))
               : `${stripReviewFooter(comment.body)}\n\n${footer}`,
         }
       : comment,
@@ -347,7 +355,11 @@ function structuralProblems(payload: ReviewPayload): string[] {
   return problems;
 }
 
-function inconsistencies(payload: ReviewPayload, event: string): string[] {
+function inconsistencies(
+  payload: ReviewPayload,
+  event: string,
+  attribution: boolean,
+): string[] {
   const problems: string[] = [];
   const comments = payload.comments ?? [];
 
@@ -381,6 +393,36 @@ function inconsistencies(payload: ReviewPayload, event: string): string[] {
           `${SUGGESTION_PREFIX} — the verdict counts comments by their ` +
           `severity marker, and an unmarked one weighs nothing in it`,
       );
+    }
+
+    // A body that renders as nothing is the empty case wearing scaffolding.
+    // The check runs the FULL post-transform chain (plus the canonical
+    // footer that normalize may have appended) and projects through
+    // rendersAsNothing: whitespace-only, Cf-only, HTML-comment-only, and
+    // hollowed-fence residue all render as nothing on GitHub, and a
+    // scaffolded-but-invisible comment that posts counts toward the verdict
+    // and re-promotes as an unanswerable blocker.
+    if (c.body && severityOf(c) !== null) {
+      const stripped = stripReviewFooter(stripForUnattributedPost(c.body));
+      if (rendersAsNothing(stripped)) {
+        problems.push(
+          `${at} renders as nothing (marker-only, empty comment, or ` +
+            `otherwise invisible) — redraft it with the finding's description`,
+        );
+      } else if (!attribution && swallowsAppendedMarker(stripped)) {
+        // The prefix strip can move a fence delimiter to line-leading
+        // position on a draft whose delimiter sat mid-line; the unclosed
+        // fence then swallows the appended invisible marker as visible
+        // code and the claim into its info string. The exposure is
+        // created by the strip, so the check runs on the post-strip
+        // shape, mirroring the fence refusal the body lists apply.
+        problems.push(
+          `${at} leaves a code fence open in its posted shape — the ` +
+            `invisible marker this mode appends would post inside it as ` +
+            `visible code. Redraft it quoting the code inline or ` +
+            `indented instead`,
+        );
+      }
     }
 
     if (!isDiffLine(c.line)) {
@@ -685,7 +727,7 @@ export function runSubmit(
     );
   }
 
-  const problems = inconsistencies(payload, event);
+  const problems = inconsistencies(payload, event, attribution);
   if (problems.length > 0) {
     throw new Error(
       `The review payload contradicts itself; refusing to post it:\n` +
@@ -699,7 +741,33 @@ export function runSubmit(
     commit_id: payload.commit_id,
     event,
     body,
-    comments: payload.comments ?? [],
+    // Attribution-off strips the severity markers from the POSTED bodies —
+    // the one place the bracket-prefix template is visible. Everything above
+    // (counting, the unmarked gate, the ledger) already ran on the marked
+    // payload, so the verdict this post carries is unchanged. The invisible
+    // comment marker goes on in the markers' place, carrying the severity
+    // the visible prefix carried: presubmit dedups on it, and pr-context
+    // re-promotes an unresolved Critical to the re-check section off it.
+    // Pre-existing marker strings are stripped first — the shape is public,
+    // and a reviewed file can quote it into a comment body; only the
+    // canonical trailing marker may survive.
+    comments: attribution
+      ? (payload.comments ?? [])
+      : (payload.comments ?? []).map((c) => {
+          if (typeof c.body !== 'string') return c;
+          // The gate above refuses unmarked bodies, so the severity is
+          // always known here.
+          const sev = severityOf(c);
+          if (sev === null) return c;
+          return {
+            ...c,
+            // Exactly the body the gate above validated: a forged footer
+            // the fixpoint chain exposes at the tail survives the
+            // anywhere-strips' caps, and only the trailing strip removes
+            // it — posting the gate's view is how the two cannot drift.
+            body: `${stripReviewFooter(stripForUnattributedPost(c.body))}\n\n${commentMarker(sev)}`,
+          };
+        }),
   };
 
   const target = `repos/${args.repo}/pulls/${args.pr}/reviews`;
