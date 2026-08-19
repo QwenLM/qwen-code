@@ -738,6 +738,20 @@ function tryResume(
   return { resumed: true };
 }
 
+/**
+ * Did decoding these bytes as UTF-8 LOSE information?
+ *
+ * Re-encode the decode and compare byte lengths: a substitution replaces an
+ * invalid sequence with U+FFFD, whose UTF-8 form is three bytes, so any
+ * substitution changes the length. A buffer that legitimately CONTAINS
+ * U+FFFD round-trips unchanged, which is the whole distinction — the code
+ * point is ordinary content, and the collision hazard comes from invalid
+ * bytes collapsing onto one name, never from the character itself.
+ */
+export function decodeWasLossy(bytes: Buffer): boolean {
+  return Buffer.byteLength(bytes.toString('utf8'), 'utf8') !== bytes.length;
+}
+
 async function runFetchPr(args: FetchPrArgs): Promise<void> {
   // Sampled HERE, at the start of the round: see `reviewModelId`.
   const roundModelId = roundModelIdFrom(process.env);
@@ -1261,7 +1275,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
               ? 'containment-unverified'
               : 'capture-failed',
         );
-      } else if (delta.includes('\uFFFD') || fullText.includes('\uFFFD')) {
+      } else if (decodeWasLossy(deltaBytes) || decodeWasLossy(fullBytes)) {
         // A capture that does not decode cleanly names its files with
         // collision-prone U+FFFD strings: two paths differing only in an
         // invalid byte decode to the SAME name, and scope membership decided
@@ -1270,6 +1284,16 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         // The containment battery this slicing retired refused the exact
         // shape; the slice path fails closed the same way. The full-range
         // BYTES stay raw, so the fallback loses nothing.
+        //
+        // Measured on the DECODE, not on the decoded text. Scanning the text
+        // for U+FFFD cannot tell a substitution from the code point itself,
+        // and the code point is ordinary content — this repository holds four
+        // literal ones in source. A delta touching any of them, even as
+        // context, demoted the round to a reason filed under "deterministic
+        // for the same sha and must NOT be retried", so that PR paid a full
+        // review every round from then on, under a cause that had not
+        // happened. Only INVALID bytes produce a substitution, and only
+        // substitution creates the collision this guards.
         demote('containment-unverified');
       } else if (parseDiff(delta).files.length === 0) {
         // Non-empty bytes that name no file: the capture returned something
@@ -1296,21 +1320,38 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
           }
           return v;
         };
-        // A rename section names only its NEW side; when the target is
-        // RESTORED to the merge-base state it drops out of the live set, and
-        // the source's net-deletion hunks sit in the PR's own diff under no
-        // other name. The deleted source rides along so the lineage check
-        // below can see it. A LIVE target owes nothing extra — the rename's
-        // net hunks already sit under the new-side section, and adding the
-        // source would demand a section the full diff labels with the new
-        // name.
+        // A rename section names only its NEW side, so the source can own
+        // hunks in the PR's diff that nothing in the delta names. Whether it
+        // does is a question about the FULL range, and only the full range
+        // can answer it: rename detection is a similarity threshold, and the
+        // two ranges compare different pairs of blobs, so one can pair a
+        // rename while the other renders a plain deletion beside a plain
+        // addition.
+        //
+        // The rule is therefore the direct one — does the full diff carry a
+        // section under the SOURCE name? If it does, that section is
+        // unreviewed content the slice would drop, so the source rides along
+        // and the lineage check keeps it. If it does not, the full range
+        // paired the rename too, the net hunks already sit under the new-side
+        // section, and riding the source along would demand a section that
+        // does not exist and refuse the round.
+        //
+        // Keying on `restored(target)` instead covered only the case where
+        // the target dropped out of the live set. A LIVE target whose ranges
+        // straddle the similarity threshold — round 1 rewrites `a.ts` past
+        // it, round 2 moves it to `b.ts` — left the source's net-deletion
+        // hunks out of the slice with the anchor advancing past them, and
+        // content no round had seen retired for good.
+        const fullSectionPaths = new Set(
+          parseDiff(fullText).files.map((f) => f.path),
+        );
         const deltaFiles: string[] = [];
         for (const f of deltaSections) {
           deltaFiles.push(f.path);
           if (
             f.renamedFrom &&
             f.renamedFrom !== f.path &&
-            restored(f.path) === true
+            fullSectionPaths.has(f.renamedFrom)
           ) {
             deltaFiles.push(f.renamedFrom);
           }
