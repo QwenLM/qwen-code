@@ -74,6 +74,7 @@ import {
   LEDGER_MAX_BYTES,
   LEDGER_MAX_ROUND,
   serializeLedger,
+  volumeOf,
   type Ledger,
   type LedgerFinding,
 } from './lib/ledger.js';
@@ -713,6 +714,21 @@ export interface ComposeReviewResult {
    */
   floorEnforced: number[];
   /**
+   * How many inline comments this round will post — the posting set after
+   * floor enforcement, i.e. what `submit` sends. Convergence telemetry: it
+   * rides the ledger marker for the next round to read, and the terminal
+   * report states it so the operator sees this round's contribution to the
+   * PR's comment volume without counting threads by hand. Decides nothing.
+   */
+  postedInline: number;
+  /**
+   * The previous round's `postedInline`, recovered from the side file when
+   * it recorded one. Absent on round 1, on a recovery miss, and on any
+   * predecessor that predates the field — none of which is "posted
+   * nothing", which is why absence is distinct from zero here.
+   */
+  prevPostedInline?: number;
+  /**
    * What the body budget had to give up to fit GitHub's limit, when it did.
    * On the result because `verdictLine` — printed to stderr, persisted in
    * the composed JSON, copied into the archived report — otherwise keeps
@@ -1136,8 +1152,11 @@ export function composeReview(
   // One read, one round: the deferred-suggestions clause and the ledger
   // marker both name this round, and each reading the side file for itself
   // would let a mid-compose update publish two different round numbers in
-  // one review.
-  const prevRound = prevRoundFor(input.planPath);
+  // one review. The previous volume rides out of the same read for the
+  // same reason — a marker pairing one round's number with another's count
+  // is a trend nobody can read back.
+  const prevFacts = prevLedgerFacts(input.planPath);
+  const prevRound = prevFacts.round;
   // The floor, enforced before anything is composed or counted: everything
   // downstream — the counts, the body, the ledger marker — must describe
   // the set that actually posts. `contextUnavailable` is read leniently
@@ -1200,6 +1219,13 @@ export function composeReview(
   // Absent means "not recorded", never "proven" — fail closed, as the field's
   // own contract says. This module always sets it, so the fallback is for a
   // result assembled elsewhere.
+  // The volume this round puts on the PR: the posting set AFTER floor
+  // enforcement removed what it moved, because that is what `submit` sends
+  // and therefore what the next round will see on the pull request. Taken
+  // from the body composer's own result rather than re-derived here — one
+  // count, one origin, so the marker and the reported number cannot drift
+  // apart under a later edit to either.
+  const postedInline = result.postedInline;
   const marker = ledgerMarkerFor(
     effective,
     result.cappedBy,
@@ -1208,37 +1234,76 @@ export function composeReview(
     attribution,
     runtimeModelId,
     prevRound,
+    postedInline,
+    prevFacts.posted,
   );
-  return marker ? { ...result, body: `${result.body}\n\n${marker}` } : result;
+  // `postedInline` came out of the body composer on the same input, so only
+  // the predecessor's volume — which only this scope read — is added here.
+  const withVolume: ComposeReviewResult = {
+    ...result,
+    ...(prevFacts.posted === undefined
+      ? {}
+      : { prevPostedInline: prevFacts.posted }),
+  };
+  return marker
+    ? { ...withVolume, body: `${withVolume.body}\n\n${marker}` }
+    : withVolume;
 }
 
 /**
- * The previous posted round's number, recovered from the side file
- * `pr-context` wrote — never from the model. 0 when the plan names no PR or
- * no previous round was recovered: this is round 1. Shared by the marker
- * (which stamps `Math.min(prevRound + 1, LEDGER_MAX_ROUND)`) and the
- * deferred-suggestions clause (which names the round the posture engaged on,
- * clamped identically), so the two cannot disagree about which round this
- * is — at the cap included, where an unclamped `prevRound + 1` on either
- * side would name round 10001 beside a round-10000 marker.
+ * The previous posted round's number AND its posting volume, recovered from
+ * the side file `pr-context` wrote — never from the model.
+ *
+ * The round is 0 when the plan names no PR or no previous round was
+ * recovered: this is round 1. It is shared by the marker (which stamps
+ * `Math.min(prevRound + 1, LEDGER_MAX_ROUND)`) and the deferred-suggestions
+ * clause (which names the round the posture engaged on, clamped
+ * identically), so the two cannot disagree about which round this is — at
+ * the cap included, where an unclamped `prevRound + 1` on either side would
+ * name round 10001 beside a round-10000 marker.
+ *
+ * Two facts, one read, on purpose: reading the file twice would let a
+ * mid-compose rewrite pair round N's number with round N+1's volume in a
+ * single marker. They degrade independently — the side file is a
+ * best-effort recovery, and a round with no volume recorded (every round
+ * before the field shipped) is not a round that posted nothing.
  */
-function prevRoundFor(planPath: string | undefined): number {
+function prevLedgerFacts(planPath: string | undefined): {
+  round: number;
+  posted?: number;
+} {
   try {
-    if (!planPath) return 0;
+    if (!planPath) return { round: 0 };
     const plan = JSON.parse(readFileSync(planPath, 'utf8')) as {
       prNumber?: unknown;
     };
     const pr = plan?.prNumber;
-    if (!isPositivePrNumber(pr)) return 0;
+    if (!isPositivePrNumber(pr)) return { round: 0 };
     const prev = JSON.parse(
       readFileSync(
         join(dirname(planPath), `qwen-review-pr-${pr}-prev-ledger.json`),
         'utf8',
       ),
     ) as Ledger;
-    return Number.isInteger(prev.round) && prev.round > 0 ? prev.round : 0;
+    const round =
+      Number.isInteger(prev.round) && prev.round > 0 ? prev.round : 0;
+    // Read through the ledger's own volume reader rather than a local
+    // restatement: the side file is a JSON `pr-context` wrote, not a marker
+    // `parseLedger` already normalised, and a boundary that checked the
+    // shape without applying the cap let this round's terminal line and its
+    // own marker disagree about the same number.
+    const posted = volumeOf(prev.posted);
+    // The volume travels WITH its round or not at all. A side file carrying
+    // a volume but no usable round (partially written, hand-edited) would
+    // otherwise attribute it to round 0 — and a round-1 marker would ship
+    // `prevPosted` for a round that never existed, against this field's own
+    // "absent on round 1" contract.
+    return {
+      round,
+      ...(posted === undefined || round === 0 ? {} : { posted }),
+    };
   } catch {
-    return 0;
+    return { round: 0 };
   }
 }
 
@@ -1255,6 +1320,8 @@ function ledgerMarkerFor(
   attribution: boolean,
   runtimeModelId: string | undefined,
   prevRound: number,
+  postedInline: number,
+  prevPostedInline: number | undefined,
 ): string | null {
   try {
     if (!input.planPath) return null;
@@ -1380,6 +1447,15 @@ function ledgerMarkerFor(
       // round as a pre-field marker rather than as "nobody certified this".
       ...(shaCandidate && !identityDrifted ? { sha: shaCandidate } : {}),
       ...(model ? { model } : {}),
+      // Volume telemetry: unconditional, unlike everything above it. The
+      // anchor pair is withheld whenever the round could not certify its
+      // scope, but "how many comments did this round post" stays true on a
+      // fail-closed round — and a trend that goes blank exactly when a PR
+      // starts capping would be blind on the rounds it exists to describe.
+      posted: postedInline,
+      ...(prevPostedInline === undefined
+        ? {}
+        : { prevPosted: prevPostedInline }),
     });
   } catch {
     // A carry-forward convenience, never worth failing the verdict over.
@@ -1465,6 +1541,16 @@ function composeReviewBody(
     entries: [],
   },
 ): ComposeReviewResult {
+  // The posting set this body describes — `input` here is already the
+  // post-enforcement one, so the count needs no second derivation and
+  // cannot disagree with the marker's. Clamped AT THE ORIGIN through the
+  // shared reader: every other site that reads a volume applies it, and the
+  // one that did not was this count on its way to the terminal line, which
+  // in the defensive over-cap case would have printed the raw number beside
+  // a marker recording the capped one — the two-outputs-disagree failure
+  // the shared reader's own docstring exists to prevent. `?? 0` is
+  // unreachable for an array length; it keeps the type honest.
+  const postedInline = volumeOf((input.draftedComments ?? []).length) ?? 0;
   const criticalsInline = toCount(input.criticalsInline, 'criticalsInline');
   const suggestionsInline = toCount(
     input.suggestionsInline,
@@ -3257,6 +3343,7 @@ function composeReviewBody(
       remediation,
       deferredCount: deferredSuggestions.length,
       floorEnforced: reroute.indices,
+      postedInline,
       bodyTrim,
       lowSignal,
       scopeUnproven,
@@ -3314,6 +3401,7 @@ function composeReviewBody(
       remediation,
       deferredCount: deferredSuggestions.length,
       floorEnforced: reroute.indices,
+      postedInline,
       bodyTrim,
       lowSignal,
       scopeUnproven,
@@ -3527,6 +3615,7 @@ function composeReviewBody(
     remediation,
     deferredCount: deferredSuggestions.length,
     floorEnforced: reroute.indices,
+    postedInline,
     bodyTrim,
     lowSignal,
     scopeUnproven,
@@ -4236,6 +4325,20 @@ export const composeReviewCommand: CommandModule = {
     for (const fix of result.remediation) {
       writeStderrLine(`FIX: ${fix}`);
     }
+    // The volume this round adds to the pull request, stated rather than
+    // left to be counted by hand — and beside the previous round's when the
+    // marker recorded one, because a single number says nothing about a
+    // trend. Facts only: no threshold, no advice, no judgement about
+    // whether the number is too large. The operator owns that reading; this
+    // line only makes it available. (Printed on every compose, not only on
+    // posting runs: a report-only round's volume is what the NEXT round's
+    // trend is measured against.)
+    writeStderrLine(
+      `VOLUME: ${result.postedInline} inline comment(s) this round` +
+        (result.prevPostedInline === undefined
+          ? ''
+          : ` (previous round: ${result.prevPostedInline})`),
+    );
     writeStderrLine(verdictLine(result));
   },
 };
