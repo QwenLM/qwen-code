@@ -423,6 +423,26 @@ export function sessionEntryCount(
 }
 
 /**
+ * How many RESUMES this run's ledger records — the entries PAST the first.
+ * The ledger's first entry is the original run's own session, which is not
+ * a resume. `excludeSessionId` removes the resuming session's own entry
+ * from that remainder — and when the resuming session IS the original, the
+ * exclusion has already removed the first entry, so the original must not
+ * be subtracted AGAIN: the double subtraction undercounted the cap by one
+ * and admitted a resume past the cap through the exact backstop path
+ * (deleted marker, original session resuming) this term exists to hold.
+ */
+export function ledgerResumeCount(
+  planPath: string,
+  opts: { excludeSessionId?: string } = {},
+): number {
+  const past = readSessions(planPath).slice(1);
+  if (opts.excludeSessionId === undefined) return past.length;
+  const key = sessionPathKey(opts.excludeSessionId);
+  return past.filter((e) => sessionPathKey(e.sessionId) !== key).length;
+}
+
+/**
  * Session ids of EARLIER attempts of this same run — the current session
  * excluded, order preserved, deduplicated by the ledger's own append guard.
  * These are addresses for `subagents/<id>` lookups, nothing more.
